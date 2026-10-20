@@ -46,7 +46,7 @@ describe('SearchResults', () => {
     expect(container.textContent).toContain('the falcon migration timeline');
     expect(container.textContent).toContain('falcon is my project codename');
     // One card per result.
-    expect(container.querySelectorAll('.card').length).toBe(2);
+    expect(container.querySelectorAll('.result-card').length).toBe(2);
   });
 
   it('shows a jump button only for conversation results with a task_id', () => {
@@ -90,7 +90,7 @@ describe('SearchResults', () => {
       data: data([memory({ source_type: 'skill_overlay', summary: 'never run the full suite' })]),
       onJump: vi.fn(),
     });
-    expect(container.querySelector('.card.memory')).not.toBeNull();
+    expect(container.querySelector('.result-card.memory')).not.toBeNull();
     expect(container.querySelector('.source')?.textContent?.trim()).toBe('Skill overlay');
     expect(container.querySelector('.jump-btn')).toBeNull();
   });
@@ -98,6 +98,6 @@ describe('SearchResults', () => {
   it('renders an empty state for no results', () => {
     const { container, getByText } = render(SearchResults, { data: data([]), onJump: vi.fn() });
     expect(getByText(/No results for/)).toBeTruthy();
-    expect(container.querySelectorAll('.card').length).toBe(0);
+    expect(container.querySelectorAll('.result-card').length).toBe(0);
   });
 });

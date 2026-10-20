@@ -17,16 +17,18 @@
     Badge,
     ConfirmDialog,
     EmptyState,
-    Modal,
+    FormModal,
+    FormStack,
     KebabMenu,
-    NoticeBanner,
+    Disclosure,
     type KebabItem,
-    PageLoading,
+    LoadState,
+    Card,
+    Timestamp,
   } from '$lib/components/ui';
-  import { SettingsCard } from '$lib/components/settings';
-  import { formatRelative } from '$lib/dateFormat';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { signInStateLabel } from '$lib/admin/signInState';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import AdminUserModal from './AdminUserModal.svelte';
 
   let view = $state<AdminUsers | null>(null);
@@ -39,10 +41,8 @@
   /* The user whose settings editor is open, or null. */
   let editing = $state<string | null>(null);
   let formOpen = $state(false);
-  let formError = $state('');
-  let aboutCollapsed = $state(true);
-  let confirmOpen = $state(false);
-  let pending = $state<{ user: AdminUser; action: AdminUserAction } | null>(null);
+  const confirmation = createConfirm<{ user: AdminUser; action: AdminUserAction }>();
+  const pending = $derived(confirmation.target);
   const disableCopy =
     'Disable blocks email and Nextcloud sign-in and ends existing web sessions. It does not stop scheduled work.';
   const removeCopy =
@@ -62,14 +62,11 @@
   }
   onMount(load);
 
-  async function submit(event: SubmitEvent) {
-    event.preventDefault();
-    if (busy) return;
-    formError = '';
+  async function submit() {
     if (!/^[a-z0-9][a-z0-9._-]{0,31}$/.test(userId)) {
-      formError =
-        'Use 1–32 lowercase letters, digits, dots, underscores or hyphens, starting with a letter or digit.';
-      return;
+      throw new Error(
+        'Use 1–32 lowercase letters, digits, dots, underscores or hyphens, starting with a letter or digit.',
+      );
     }
     busy = true;
     try {
@@ -81,8 +78,8 @@
       // The editor holds everything the create form does not ask for.
       editing = created;
     } catch (e) {
-      if (e instanceof AuthError) failed(e);
-      else formError = e instanceof Error ? e.message : 'The user operation failed.';
+      if (!(e instanceof AuthError)) throw e;
+      failed(e);
     } finally {
       await load();
       busy = false;
@@ -96,7 +93,7 @@
 
   function add() {
     userId = email = displayName = '';
-    error = notice = formError = '';
+    error = notice = '';
     formOpen = true;
   }
 
@@ -133,7 +130,6 @@
     if (busy) return;
     busy = true;
     error = notice = '';
-    confirmOpen = false;
     try {
       await adminUserAction(user.user_id, action);
       notice = ['invite', 'reset'].includes(action) ? 'Link sent.' : 'Identity updated.';
@@ -146,8 +142,7 @@
   }
 
   function requestConfirmation(user: AdminUser, action: AdminUserAction) {
-    pending = { user, action };
-    confirmOpen = true;
+    confirmation.ask({ user, action });
   }
 
   const confirmationTitle = $derived(
@@ -167,143 +162,139 @@
 </script>
 
 <div class="settings admin-page card-pane">
-  {#if !view && !error}
-    <PageLoading label="Loading users…" />
-  {:else if !view}
-    <div class="center-msg error">{error}</div>
-  {:else}
-    {#if error}<p class="banner error" role="alert">{error}</p>{/if}
-    {#if notice}<p class="banner success" role="status">{notice}</p>{/if}
-    {#if !view.email_enabled}
-      <p class="banner warn">
-        Email sign-in is not enabled. Sending links and attaching email are unavailable.
-      </p>
-    {/if}
-    <NoticeBanner title="About web access" bind:collapsed={aboutCollapsed}>
-      <p>{disableCopy}</p>
-      <p>{removeCopy}</p>
-      <p>
-        Sign out everywhere ends email and Nextcloud web sessions. These controls do not revoke
-        Nextcloud service credentials.
-      </p>
-    </NoticeBanner>
-    <SettingsCard title="Users">
-      {#snippet actions()}
-        <Button variant="primary" size="sm" onclick={add} disabled={busy || !view?.email_enabled}
-          >Add user</Button
-        >
-      {/snippet}
-      {#if view.users.length === 0}
-        <EmptyState>No users yet. Add a user to send their first invitation.</EmptyState>
-      {:else}
-        <div class="table-scroll">
-          <table
-            class="table table--fixed table--interactive table--on-card users-grid"
-            aria-label="Users"
-          >
-            <thead
-              ><tr
-                ><th scope="col" class="col-user">User</th>
-                <th scope="col" class="col-email">Email</th><th scope="col" class="col-access"
-                  >Sign-in</th
-                ><th scope="col" class="col-last-login">Last login</th><th
-                  scope="col"
-                  class="col-actions"
-                  aria-label="Actions"
-                ></th></tr
-              ></thead
-            >
-            <tbody>
-              {#each view.users as user (user.user_id)}
-                <!-- The row is a shortcut; the kebab's "Edit settings" is the
-                     keyboard route to the same editor. -->
-                <tr class="row-clickable" onclick={() => edit(user)}>
-                  <td>
-                    <UserCell
-                      userId={user.user_id}
-                      displayName={user.display_name}
-                      isAdmin={user.is_admin}
-                    />
-                  </td>
-                  <td class="col-email truncate" title={user.identity?.email}
-                    >{user.identity?.email ?? '—'}</td
-                  >
-                  <td class="col-access">
-                    <Badge size="sm" variant={user.identity?.disabled ? 'partial' : 'neutral'}
-                      >{signInStateLabel(user.identity, user.state)}</Badge
-                    >
-                  </td>
-                  <td class="col-last-login truncate"
-                    >{user.identity
-                      ? user.identity.last_login_at
-                        ? formatRelative(user.identity.last_login_at)
-                        : 'Never'
-                      : '—'}</td
-                  >
-                  <td class="col-actions">
-                    <KebabMenu
-                      items={userActions(user)}
-                      ariaLabel="Actions for {user.display_name || user.user_id}"
-                    />
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
+  <LoadState loading={!view && !error} error={view ? null : error} loadingLabel="Loading users…">
+    {#if view}
+      {#if error}<p class="banner error" role="alert">{error}</p>{/if}
+      {#if notice}<p class="banner success" role="status">{notice}</p>{/if}
+      {#if !view.email_enabled}
+        <p class="banner warn">
+          Email sign-in is not enabled. Sending links and attaching email are unavailable.
+        </p>
       {/if}
-    </SettingsCard>
-    {#if view.orphans.length}
-      <SettingsCard
-        title="Identities without profiles"
-        description="These accounts cannot sign in. Restore their profiles with the operator CLI or remove their email login."
-      >
-        {#each view.orphans as user (user.user_id)}
-          <div class="orphan-row">
-            <div>
-              <div class="user-name">{user.user_id}</div>
-              <div class="user-detail caption">{user.identity?.email}</div>
-            </div>
-            <Button
-              variant="danger"
-              size="sm"
-              disabled={busy}
-              onclick={() => requestConfirmation(user, 'remove')}>Remove email login</Button
+      <Disclosure variant="card" summary="About web access">
+        <p>{disableCopy}</p>
+        <p>{removeCopy}</p>
+        <p>
+          Sign out everywhere ends email and Nextcloud web sessions. These controls do not revoke
+          Nextcloud service credentials.
+        </p>
+      </Disclosure>
+      <Card title="Users">
+        {#snippet actions()}
+          <Button variant="primary" size="sm" onclick={add} disabled={busy || !view?.email_enabled}
+            >Add user</Button
+          >
+        {/snippet}
+        {#if view.users.length === 0}
+          <EmptyState>No users yet. Add a user to send their first invitation.</EmptyState>
+        {:else}
+          <div class="table-scroll">
+            <table
+              class="table table--fixed table--interactive table--on-card users-grid"
+              aria-label="Users"
             >
+              <thead
+                ><tr
+                  ><th scope="col" class="col-user">User</th>
+                  <th scope="col" class="col-email">Email</th><th scope="col" class="col-access"
+                    >Sign-in</th
+                  ><th scope="col" class="col-last-login">Last login</th><th
+                    scope="col"
+                    class="col-actions"
+                    aria-label="Actions"
+                  ></th></tr
+                ></thead
+              >
+              <tbody>
+                {#each view.users as user (user.user_id)}
+                  <!-- The row is a shortcut; the kebab's "Edit settings" is the
+                       keyboard route to the same editor. -->
+                  <tr class="row-clickable" onclick={() => edit(user)}>
+                    <td>
+                      <UserCell
+                        userId={user.user_id}
+                        displayName={user.display_name}
+                        isAdmin={user.is_admin}
+                      />
+                    </td>
+                    <td class="col-email truncate" title={user.identity?.email}
+                      >{user.identity?.email ?? '—'}</td
+                    >
+                    <td class="col-access">
+                      <Badge size="sm" variant={user.identity?.disabled ? 'partial' : 'neutral'}
+                        >{signInStateLabel(user.identity, user.state)}</Badge
+                      >
+                    </td>
+                    <td class="col-last-login truncate"
+                      >{#if user.identity}<Timestamp
+                          value={user.identity.last_login_at}
+                          format="relative"
+                          empty="Never"
+                        />{:else}—{/if}</td
+                    >
+                    <td class="col-actions">
+                      <KebabMenu
+                        items={userActions(user)}
+                        ariaLabel="Actions for {user.display_name || user.user_id}"
+                      />
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
           </div>
-        {/each}
-      </SettingsCard>
+        {/if}
+      </Card>
+      {#if view.orphans.length}
+        <Card
+          title="Identities without profiles"
+          description="These accounts cannot sign in. Restore their profiles with the operator CLI or remove their email login."
+        >
+          {#each view.orphans as user (user.user_id)}
+            <div class="orphan-row">
+              <div>
+                <div class="user-name">{user.user_id}</div>
+                <div class="user-detail caption">{user.identity?.email}</div>
+              </div>
+              <Button
+                variant="danger"
+                size="sm"
+                disabled={busy}
+                onclick={() => requestConfirmation(user, 'remove')}>Remove email login</Button
+              >
+            </div>
+          {/each}
+        </Card>
+      {/if}
     {/if}
-  {/if}
+  </LoadState>
 </div>
 
-<Modal bind:open={formOpen} title="Add user" description="Send an invitation to set up web access.">
-  <form aria-label="Add user" onsubmit={submit} class="user-form">
-    {#if formError}<p class="banner error" role="alert">{formError}</p>{/if}
+<FormModal
+  bind:open={formOpen}
+  title="Add user"
+  description="Send an invitation to set up web access."
+  submitLabel="Add and invite"
+  busyLabel="Sending…"
+  {busy}
+  canSubmit={!!view?.email_enabled && !!userId.trim() && !!email.trim()}
+  onSubmit={submit}
+  onCancel={() => (formOpen = false)}
+>
+  <FormStack gap={4} disabled={busy}>
     <Field
       label="User ID"
       warning="This becomes a directory name: 1–32 lowercase letters, digits, dots, underscores or hyphens; start with a letter or digit."
     >
-      <Input aria-label="User ID" bind:value={userId} required disabled={busy} />
+      <Input aria-label="User ID" bind:value={userId} required />
     </Field>
-    <Field label="Email"><Input type="email" bind:value={email} required disabled={busy} /></Field>
-    <Field label="Display name (optional)"><Input bind:value={displayName} disabled={busy} /></Field
-    >
+    <Field label="Email"><Input type="email" bind:value={email} required /></Field>
+    <Field label="Display name" optional><Input bind:value={displayName} /></Field>
     <p class="form-note description">
       New users can sign in immediately. Their background work starts after the next daemon reload.
     </p>
-    <div class="form-actions dialog-actions">
-      <Button variant="secondary" onclick={() => (formOpen = false)} disabled={busy}>Cancel</Button>
-      <Button
-        type="submit"
-        variant="primary"
-        loading={busy}
-        loadingLabel="Sending…"
-        disabled={!view?.email_enabled}>Add and invite</Button
-      >
-    </div>
-  </form>
-</Modal>
+  </FormStack>
+</FormModal>
 
 {#if editing}
   <AdminUserModal
@@ -315,7 +306,7 @@
 {/if}
 
 <ConfirmDialog
-  bind:open={confirmOpen}
+  bind:open={confirmation.open}
   title={confirmationTitle}
   message={`${pending?.user.display_name || pending?.user.user_id || ''}: ${confirmationCopy}`}
   confirmLabel={pending?.action === 'remove'
@@ -323,22 +314,15 @@
     : pending?.action === 'logout-all'
       ? 'Sign out'
       : 'Disable'}
-  confirmDisabled={busy}
-  onConfirm={() => {
-    if (pending) act(pending.user, pending.action);
-  }}
+  busyLabel={pending?.action === 'remove'
+    ? 'Removing…'
+    : pending?.action === 'logout-all'
+      ? 'Signing out…'
+      : 'Disabling…'}
+  onConfirm={() => pending && act(pending.user, pending.action)}
 />
 
 <style>
-  .user-form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-4);
-  }
-  .dialog-actions {
-    padding-top: var(--space-3);
-    border-top: 1px solid var(--border-subtle);
-  }
   .form-note {
     margin: 0;
   }

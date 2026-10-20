@@ -69,7 +69,14 @@
   different edits. The server parses it; a snippet that does not parse comes
   back from the review as a refusal with the parser's message.
 -->
-<Field label={field.name} hint={fullHint} {badge} {labelMark} inline error={emptyError || problem}>
+<Field
+  label={field.name}
+  hint={fullHint}
+  {badge}
+  {labelMark}
+  layout="inline"
+  error={emptyError || problem}
+>
   <TextArea
     monospace
     rows={Math.min(Math.max(text.split('\n').length + 1, 4), 16)}

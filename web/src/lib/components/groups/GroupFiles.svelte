@@ -2,12 +2,10 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { Folder } from '@lucide/svelte';
-  import { Button, EmptyState } from '$lib/components/ui';
-  import { SettingsCard } from '$lib/components/settings';
+  import { Icon, Button, EmptyState, Card, Timestamp } from '$lib/components/ui';
   import { getWorkspaceListing, getWorkspacePlaces, type WorkspaceEntry } from '$lib/api';
   import { viewer } from '$lib/fileViewer/store.svelte';
   import { fileIcon } from '$lib/components/workspace/filePresentation';
-  import { formatDateTime, formatRelative } from '$lib/dateFormat';
 
   const RECENT = 6;
   let { groupId }: { groupId: string } = $props();
@@ -51,7 +49,7 @@
   });
 </script>
 
-<SettingsCard title="Shared files" description="Recently changed in the group folder.">
+<Card title="Shared files" description="Recently changed in the group folder.">
   {#snippet actions()}<Button size="sm" href={filesHref}>Open in Files</Button>{/snippet}
   {#if loading}<p class="caption">Loading files…</p>
   {:else if error}<p class="banner error">{error}</p>
@@ -62,7 +60,10 @@
         {@const EntryIcon = fileIcon(entry.name)}
         <li>
           <span class="entry-icon" aria-hidden="true"
-            >{#if entry.kind === 'dir'}<Folder size={16} />{:else}<EntryIcon size={16} />{/if}</span
+            >{#if entry.kind === 'dir'}<Icon icon={Folder} size="md" />{:else}<Icon
+                icon={EntryIcon}
+                size="md"
+              />{/if}</span
           >
           {#if entry.kind === 'dir'}<a
               class="name link-quiet"
@@ -76,14 +77,12 @@
               onclick={() => viewer.openFile(target)}>{entry.name}</button
             >
           {:else}<span class="name" title={entry.name}>{entry.name}</span>{/if}
-          <span class="caption" title={formatDateTime(iso(entry))}
-            >{formatRelative(iso(entry))}</span
-          >
+          <Timestamp class="caption" value={iso(entry)} format="relative" />
         </li>
       {/each}
     </ul>
   {:else}<EmptyState size="sm">The group folder is empty.</EmptyState>{/if}
-</SettingsCard>
+</Card>
 
 <style>
   .files li {

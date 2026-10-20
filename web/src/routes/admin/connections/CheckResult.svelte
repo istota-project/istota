@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Icon } from '$lib/components/ui';
   import type { AdminNextcloudCheck } from '$lib/api';
   import { CircleCheck } from '@lucide/svelte';
 
@@ -36,7 +37,7 @@
 {:else}
   <p class="check-line">
     {#if check.status === 'ok'}
-      <span class="check-ok" aria-hidden="true"><CircleCheck size={14} /></span>
+      <span class="check-ok" aria-hidden="true"><Icon icon={CircleCheck} size="sm" /></span>
     {/if}
     <span>{check.detail}</span>
   </p>

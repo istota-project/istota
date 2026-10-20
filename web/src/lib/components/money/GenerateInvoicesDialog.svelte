@@ -99,7 +99,7 @@
     return a.every((total, i) => Math.abs(total - b[i]) < 0.005);
   }
 
-  async function confirm() {
+  async function issue() {
     if (!previewed || !previewRequest || previewed.invoice_count === 0) return;
     busy = true;
     error = '';
@@ -125,8 +125,12 @@
     }
   }
 
-  function handleOpenChange(next: boolean) {
-    if (!next) onClose();
+  // Enter in the period field moves the step on, as the primary button does.
+  function submitStep() {
+    if (busy) return;
+    if (step === 'filters') void runPreview();
+    else if (step === 'preview') void issue();
+    else onClose();
   }
 
   const shown: GeneratedInvoice[] = $derived((issued ?? previewed)?.invoices ?? []);
@@ -137,15 +141,19 @@
 <Modal
   bind:open
   title={fixed ? 'Generate invoice' : 'Generate invoices'}
-  onOpenChange={handleOpenChange}
+  onOpenChange={(next) => {
+    if (!next) onClose();
+  }}
+  onsubmit={submitStep}
+  {busy}
   width="640px"
 >
   {#if step === 'filters'}
     <div class="vstack">
-      <Field label="Client" labelled={false}>
+      <Field label="Client">
         <Select bind:value={client} options={clientOptions} fullWidth ariaLabel="Client" />
       </Field>
-      <Field label="Entity" labelled={false}>
+      <Field label="Entity">
         <Select bind:value={entity} options={entityOptions} fullWidth ariaLabel="Entity" />
       </Field>
       <Field
@@ -196,11 +204,11 @@
 
   {#snippet footer()}
     {#if step === 'issued'}
-      <Button variant="primary" onclick={onClose}>Close</Button>
+      <Button type="submit" variant="primary">Close</Button>
     {:else}
-      <Button variant="secondary" onclick={onClose}>Cancel</Button>
+      <Button variant="secondary" onclick={onClose} disabled={busy}>Cancel</Button>
       {#if step === 'filters'}
-        <Button variant="primary" onclick={runPreview} loading={busy} loadingLabel="Previewing…"
+        <Button type="submit" variant="primary" loading={busy} loadingLabel="Previewing…"
           >Preview</Button
         >
       {:else}
@@ -210,8 +218,8 @@
           >
         {/if}
         <Button
+          type="submit"
           variant="primary"
-          onclick={confirm}
           disabled={busy || count === 0}
           loading={busy && !!previewed}
           loadingLabel="Issuing…">{issueLabel}</Button

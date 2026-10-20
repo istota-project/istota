@@ -7,7 +7,7 @@
     type AdminConfigView,
     type ConfigRequest,
   } from '$lib/api';
-  import { Button } from '$lib/components/ui';
+  import { Button, Card, Spinner } from '$lib/components/ui';
   import {
     NOT_PICKED_UP_MS,
     POLL_MS,
@@ -105,9 +105,7 @@
   });
 </script>
 
-<section class="card request-progress" aria-live="polite">
-  <header class="section-header"><h2 class="title-section">Change #{requestId}</h2></header>
-
+<Card title="Change #{requestId}" class="request-progress" aria-live="polite">
   {#if phase === 'lost'}
     <p class="banner danger">
       Istota has not come back three minutes after applying the change. On the host, run
@@ -116,9 +114,9 @@
       <code>istota-stack up</code>. The change's history is kept for when the web returns.
     </p>
   {:else if phase === 'restarting'}
-    <p><span class="spinner"></span> Applied. Waiting for Istota to restart…</p>
+    <p><Spinner /> Applied. Waiting for Istota to restart…</p>
   {:else if !request || request.status === 'pending'}
-    <p><span class="spinner"></span> Waiting for the host…</p>
+    <p><Spinner /> Waiting for the host…</p>
     {#if notPickedUp}
       <p class="banner warn">
         The host has not picked this up after two minutes. The config applier may not be running on
@@ -134,9 +132,9 @@
     {/if}
     {#if cancelError}<p class="form-error">{cancelError}</p>{/if}
   {:else if request.status === 'taken'}
-    <p><span class="spinner"></span> Applying…</p>
+    <p><Spinner /> Applying…</p>
   {:else if request.status === 'building'}
-    <p><span class="spinner"></span> Building the image this change needs…</p>
+    <p><Spinner /> Building the image this change needs…</p>
   {:else if request.status === 'applied'}
     <p class="banner success">Applied. Istota restarted with the new configuration.</p>
   {:else if request.status === 'unchanged'}
@@ -164,10 +162,10 @@
       <Button variant="secondary" onclick={onDismiss}>Dismiss</Button>
     </div>
   {/if}
-</section>
+</Card>
 
 <style>
-  .request-progress p {
+  :global(.request-progress) p {
     margin: 0 0 var(--space-2);
   }
 

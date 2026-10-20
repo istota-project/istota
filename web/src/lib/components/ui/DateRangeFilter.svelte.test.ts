@@ -171,16 +171,25 @@ describe('the styles it carries', () => {
     // of the two filters this replaces shipped exactly that bug.
     // dateInputs.test.ts is the tree-wide net; this is the local one.
     //
-    // Asserted against the input rule specifically, not the whole <style>:
-    // `.date-range` itself carries `min-width: 0`, which is the opposite
-    // thing — it lets the wrapping row shrink inside a flex parent.
-    // Comments stripped first: the rule explains in prose why it sets no
-    // min-width, and a naive scan finds the words in the sentence saying so.
-    const rule = source
-      .match(/\.date-range input\[type='date'\] \{([^}]*)\}/)?.[1]
-      ?.replace(/\/\*[\s\S]*?\*\//g, '');
-    expect(rule, 'the input rule should exist').toBeDefined();
-    expect(rule).not.toMatch(/min-width/);
+    // The inputs are `Input`s now, so the rule to hold is Input's: its
+    // `min-width: 0` must leave a date input out. Comments stripped first, as
+    // the rules explain in prose why they set no min-width.
+    const input = readFileSync(join(process.cwd(), 'src/lib/components/ui/Input.svelte'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('<style>')[1];
+    const floors = [...input.matchAll(/([^{}]+)\{([^}]*)\}/g)].filter((m) =>
+      /min-width:/.test(m[2]),
+    );
+    expect(floors.length, 'Input should still let a text input shrink').toBeGreaterThan(0);
+    for (const [, selector] of floors) {
+      for (const part of selector.split(/,(?![^(]*\))/)) {
+        if (!/\.ui-input(?![\w-])/.test(part)) continue;
+        expect(part, 'a min-width on .ui-input must skip date inputs').toContain(
+          ":not([type='date']",
+        );
+      }
+    }
+    expect(source.replace(/\/\*[\s\S]*?\*\//g, '')).not.toMatch(/input[^{]*\{[^}]*min-width/);
   });
 
   it('filters the picker glyph through the token, not a theme rule', () => {

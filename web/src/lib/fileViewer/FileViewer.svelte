@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Modal, Button, IconButton } from '$lib/components/ui';
+  import { Modal, Button, IconButton, Timestamp } from '$lib/components/ui';
   import { Code, Download, ExternalLink, Eye } from '@lucide/svelte';
   import MediaPreview from '$lib/components/viewer/MediaPreview.svelte';
   import TextPreview from '$lib/components/viewer/TextPreview.svelte';
@@ -12,7 +12,7 @@
     type FilePreview,
   } from '$lib/api';
   import { formatBytes } from '$lib/format';
-  import { formatDateTime } from '$lib/dateFormat';
+  import type { DateFormatOptions } from '$lib/dateFormat';
   import { viewer, type FileSource } from './store.svelte';
   import PdfPreview from './PdfPreview.svelte';
   import { presentationFor } from './presentation';
@@ -36,15 +36,15 @@
   let name = $derived(direct?.name ?? preview?.name ?? path.split('/').pop() ?? 'File');
   let markdown = $derived(preview?.kind === 'text' && presentationFor(name).kind === 'markdown');
   // The year only when it is not this one (at every width), so a phone keeps size and time on one line.
-  function shortModified(iso: string): string {
+  function shortModified(iso: string): DateFormatOptions {
     const sameYear = new Date(iso).getFullYear() === new Date().getFullYear();
-    return formatDateTime(iso, {
+    return {
       month: 'short',
       day: 'numeric',
       year: sameYear ? undefined : 'numeric',
       hour: 'numeric',
       minute: '2-digit',
-    });
+    };
   }
   $effect(() => {
     const requested = path;
@@ -92,11 +92,11 @@
 >
   {#snippet metadata()}
     {#if preview}
-      {formatBytes(preview.size)} · <span class="metadata-verb">modified</span>{' '}<time
-        datetime={preview.modified}
-        title={formatDateTime(preview.modified, { dateStyle: 'medium', timeStyle: 'short' })}
-        >{shortModified(preview.modified)}</time
-      >
+      {formatBytes(preview.size)} · <span class="metadata-verb">modified</span>{' '}<Timestamp
+        value={preview.modified}
+        format="datetime"
+        options={shortModified(preview.modified)}
+      />
     {/if}
   {/snippet}
   {#snippet actions()}
@@ -106,15 +106,19 @@
           title="Rendered"
           active={!source}
           pressed={!source}
-          onclick={() => (source = false)}><Eye size={18} /></IconButton
-        >
+          onclick={() => (source = false)}
+          icon={Eye}
+          iconSize="lg"
+        />
         <IconButton
           label="Source"
           title="Source"
           active={source}
           pressed={source}
-          onclick={() => (source = true)}><Code size={18} /></IconButton
-        >
+          onclick={() => (source = true)}
+          icon={Code}
+          iconSize="lg"
+        />
       </div>{/if}
     {#if reconnect}<Button size="sm" variant="secondary" href={`${base}/settings/connections`}
         >Reconnect</Button
@@ -124,18 +128,27 @@
         title="Open in Nextcloud"
         href={webUrl}
         target="_blank"
-        rel="noopener noreferrer"><ExternalLink size={18} /></IconButton
-      >{/if}
+        rel="noopener noreferrer"
+        icon={ExternalLink}
+        iconSize="lg"
+      />{/if}
     {#if direct}
-      {#if !missing}<IconButton label="Download" title="Download" href={direct.url} download=""
-          ><Download size={18} /></IconButton
-        >{/if}
+      {#if !missing}<IconButton
+          label="Download"
+          title="Download"
+          href={direct.url}
+          download=""
+          icon={Download}
+          iconSize="lg"
+        />{/if}
     {:else if canDownload}<IconButton
         label="Download"
         title="Download"
         href={fileUrl(path)}
-        download={name}><Download size={18} /></IconButton
-      >{/if}
+        download={name}
+        icon={Download}
+        iconSize="lg"
+      />{/if}
   {/snippet}
   <div class="file-content">
     {#if direct}
@@ -152,7 +165,7 @@
     {:else if error}
       <p role="alert">{error}</p>
     {:else if !preview}
-      <p class="muted">Loading…</p>
+      <p class="caption">Loading…</p>
     {:else}
       {#if preview.truncated}<p class="muted">
           Showing the first 1 MiB. Download for the full file.

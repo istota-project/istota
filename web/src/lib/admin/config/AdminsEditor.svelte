@@ -58,8 +58,7 @@
 <div class="admins-editor">
   <Field
     label="admins"
-    inline
-    labelled={false}
+    layout="inline"
     hint="Each admin needs a sign-in identity; add one on the Users page first."
   >
     <MultiSelect

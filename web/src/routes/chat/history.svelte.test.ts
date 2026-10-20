@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, cleanup, waitFor, fireEvent, screen } from '@testing-library/svelte';
+import { render, cleanup, waitFor, fireEvent, screen, within } from '@testing-library/svelte';
 import { get, type Writable } from 'svelte/store';
 import { __history } from '../../../vitest-stubs/app-navigation';
 
@@ -37,6 +37,11 @@ import Page from './+page.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 import type { ChatRoom, ChatView, User } from '$lib/api';
 import type { ChatMessage } from '$lib/stores/segments';
+
+const viewLink = (name: string) =>
+  within(screen.getByRole('navigation', { name: 'Views' })).getByRole('link', {
+    name: new RegExp(`^${name}`),
+  });
 
 const person = {
   username: 'alice',
@@ -130,8 +135,9 @@ describe('chat selection history', () => {
       },
     ]);
     const { container } = renderPage();
-    const unread = container.querySelector('.views button:nth-child(2)')!;
-    const starred = container.querySelector('.views button:nth-child(3)')!;
+    const views = container.querySelector('nav[aria-label="Views"]')!;
+    const unread = views.querySelectorAll('a')[1];
+    const starred = views.querySelectorAll('a')[2];
     await waitFor(() => expect(starred.querySelector('.count-pill')).toHaveTextContent('99+'));
     expect(starred.querySelector('.count-pill')).toHaveClass('muted');
     expect(starred.querySelector('.count-pill')).toHaveAttribute('title', '124 starred');
@@ -166,7 +172,7 @@ describe('chat selection history', () => {
   it('pushes a view and then a room with mutually exclusive params', async () => {
     renderPage();
     await waitFor(() => expect(currentUrl()).toContain('room=room-a'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Unread' }));
+    await fireEvent.click(viewLink('Unread'));
     expect(currentUrl()).toBe('/istota/chat/?view=unread');
     expect(get(session.view)).toBe('unread');
     await fireEvent.click(screen.getByRole('button', { name: 'Room B' }));

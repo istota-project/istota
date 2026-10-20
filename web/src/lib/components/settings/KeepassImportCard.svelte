@@ -6,8 +6,7 @@
     type KeepassImportPreview,
     type KeepassImportItem,
   } from '$lib/api';
-  import { Button, Field, Input } from '$lib/components/ui';
-  import SettingsCard from './SettingsCard.svelte';
+  import { Button, Field, FormStack, Input, Card, Checkbox } from '$lib/components/ui';
 
   let { onImported }: { onImported?: () => void } = $props();
   let file: File | null = $state(null);
@@ -82,7 +81,7 @@
   }
 </script>
 
-<SettingsCard
+<Card
   title="Import from KeePass"
   description="Choose entries from a KeePass file to copy into your credentials."
 >
@@ -91,9 +90,11 @@
       label="KeePass file"
       hint="Choose a .kdbx file. Preview lets you select entries before anything is imported."
     >
+      <!-- A file input is not a primitive, so it names itself. -->
       <input
         type="file"
         accept=".kdbx"
+        aria-label="KeePass file"
         disabled={busy || !!preview}
         onchange={(event) => {
           file = event.currentTarget.files?.[0] ?? null;
@@ -106,6 +107,7 @@
     >
       <input
         type="file"
+        aria-label="Source key file (optional)"
         disabled={busy || !!preview}
         onchange={(event) => {
           keyfile = event.currentTarget.files?.[0] ?? null;
@@ -134,16 +136,16 @@
     {#each groups as group}
       {@const items = preview.items.filter((item) => item.status === group.status)}
       {#if items.length}
-        <fieldset>
-          <legend class="muted">{group.label}</legend>
+        <FormStack legend={group.label} gap={2}>
           {#each items as item}
-            <div>
+            <div class="item">
               <Field label={item.name} checkbox>
-                <input
-                  type="checkbox"
-                  value={item.name}
-                  bind:group={selected}
-                  aria-label={item.name}
+                <Checkbox
+                  checked={selected.includes(item.name)}
+                  onchange={(on) =>
+                    (selected = on
+                      ? [...selected, item.name]
+                      : selected.filter((name) => name !== item.name))}
                   disabled={busy || !['new', 'changed'].includes(item.status)}
                 />
               </Field>
@@ -154,7 +156,7 @@
               {#if item.reason}<p class="caption">{item.reason}</p>{/if}
             </div>
           {/each}
-        </fieldset>
+        </FormStack>
       {/if}
     {/each}
   {/if}
@@ -180,22 +182,10 @@
       }}>Cancel</Button
     >
   </div>
-</SettingsCard>
+</Card>
 
 <style>
-  fieldset {
-    min-width: 0;
-    margin: 0;
-    padding: 0;
-    border: 0;
-    display: grid;
-    gap: var(--space-2);
+  .item {
     overflow-wrap: anywhere;
-  }
-
-  legend {
-    padding: 0;
-    margin-bottom: var(--space-2);
-    font-size: var(--text-sm);
   }
 </style>

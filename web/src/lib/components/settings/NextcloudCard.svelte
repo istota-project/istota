@@ -12,11 +12,17 @@
     type NextcloudSharing,
     type NextcloudTokenStatus,
   } from '$lib/api';
-  import { Button, Modal, Select, type SelectOption } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    ConfirmDialog,
+    Select,
+    type SelectOption,
+    Card,
+    Field,
+  } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { offSiteRoutesOpenInBrowser } from '$lib/platform/nativeConnection';
-  import SettingsCard from './SettingsCard.svelte';
-  import SettingsField from './SettingsField.svelte';
 
   interface Props {
     token: NextcloudTokenStatus;
@@ -186,7 +192,8 @@
     else confirmingDisconnect = true;
   }
 
-  async function disconnect(unshare: boolean) {
+  /** False on a refusal, which the dialog shows and stays open for. */
+  async function disconnect(unshare: boolean): Promise<boolean> {
     busy = true;
     error = '';
     info = '';
@@ -199,6 +206,7 @@
       failed = {};
       info = 'Nextcloud connection removed.';
       onDisconnected?.();
+      return true;
     } catch (e) {
       const body = (e as { body?: { still_shared?: unknown } | null }).body;
       const still = Array.isArray(body?.still_shared) ? (body.still_shared as string[]) : null;
@@ -211,6 +219,7 @@
       } else {
         disconnectError = e instanceof Error ? e.message : 'Disconnect failed';
       }
+      return false;
     } finally {
       busy = false;
     }
@@ -226,19 +235,19 @@
 {/snippet}
 
 {#snippet statusPill()}
-  <span class="status-pill status-{token.connected ? 'configured' : 'missing'}">
+  <Badge tone="subtle" uppercase={false} variant={token.connected ? 'success' : 'neutral'}>
     {token.connected ? 'Connected' : 'Not connected'}
-  </span>
+  </Badge>
 {/snippet}
 
-<SettingsCard
+<Card
   title="Nextcloud"
   description="When connected, messages you send from web chat appear in Nextcloud Talk under your own name, and read state syncs between web and Talk."
   status={statusPill}
 >
   {#if token.connected}
     {#if loading && !sharing}
-      <p class="muted">Loading…</p>
+      <p class="caption">Loading…</p>
     {:else if loadError}
       <div class="banner error">{loadError}</div>
     {:else if isBotAccount}
@@ -263,9 +272,8 @@
             <p class="caption note">{group.empty}</p>
           {/if}
           {#each rows as c (c.id)}
-            <SettingsField
+            <Field
               label={c.name}
-              labelled={false}
               warning={aboveLimit(state, c) ? "Above this instance's limit." : undefined}
               error={failed[c.id]}
             >
@@ -277,7 +285,7 @@
                 onValueChange={(v) => setLevel(c.id, v)}
                 fullWidth
               />
-            </SettingsField>
+            </Field>
           {/each}
         </div>
       {/each}
@@ -291,8 +299,14 @@
 
     <div class="card-actions">
       <Button variant="secondary" size="sm" {...reconnectLink}>Reconnect</Button>
-      <Button variant="secondary" size="sm" onclick={startDisconnect} disabled={busy}>
-        {busy ? 'Disconnecting…' : 'Disconnect'}
+      <Button
+        variant="secondary"
+        size="sm"
+        onclick={startDisconnect}
+        loading={busy}
+        loadingLabel="Disconnecting…"
+      >
+        Disconnect
       </Button>
     </div>
     {#if inBrowser}{@render browserNote()}{/if}
@@ -317,42 +331,36 @@
   {#if info}
     <div class="banner success">{info}</div>
   {/if}
-</SettingsCard>
+</Card>
 
-<Modal
-  open={confirmingDisconnect}
+<ConfirmDialog
+  bind:open={confirmingDisconnect}
   title="Disconnect Nextcloud"
-  onOpenChange={(open) => {
-    if (!open) confirmingDisconnect = false;
-  }}
+  width="420px"
+  error={disconnectError}
+  secondaryLabel="Disconnect, keep sharing"
+  secondaryBusyLabel="Disconnecting…"
+  onSecondary={() => disconnect(false)}
+  confirmLabel="Disconnect and stop sharing"
+  busyLabel="Disconnecting…"
+  confirmVariant="primary"
+  onConfirm={() => disconnect(true)}
 >
-  <p class="modal-text">
-    {#if sharing}
-      Some of your calendars or address books are shared with Istota.
-    {:else}
-      Istota could not check which of your calendars and address books are shared with it.
-    {/if}
-    Stop sharing them as well?
-  </p>
-  <p class="modal-text">
-    If you keep sharing, Istota keeps access to them. You can unshare them later in the Nextcloud
-    Calendar and Contacts apps.
-  </p>
-  {#if disconnectError}
-    <div class="banner error">{disconnectError}</div>
-  {/if}
-  {#snippet footer()}
-    <Button variant="secondary" onclick={() => (confirmingDisconnect = false)} disabled={busy}>
-      Cancel
-    </Button>
-    <Button variant="secondary" onclick={() => disconnect(false)} disabled={busy}>
-      Disconnect, keep sharing
-    </Button>
-    <Button variant="primary" onclick={() => disconnect(true)} disabled={busy}>
-      Disconnect and stop sharing
-    </Button>
+  {#snippet body()}
+    <p class="modal-text">
+      {#if sharing}
+        Some of your calendars or address books are shared with Istota.
+      {:else}
+        Istota could not check which of your calendars and address books are shared with it.
+      {/if}
+      Stop sharing them as well?
+    </p>
+    <p class="modal-text">
+      If you keep sharing, Istota keeps access to them. You can unshare them later in the Nextcloud
+      Calendar and Contacts apps.
+    </p>
   {/snippet}
-</Modal>
+</ConfirmDialog>
 
 <style>
   .group h3 {

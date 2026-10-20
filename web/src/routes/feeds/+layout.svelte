@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { onMount, untrack } from 'svelte';
   import { base } from '$app/paths';
@@ -20,18 +21,22 @@
     refreshFeedCounts,
   } from '$lib/stores/feeds';
   import {
+    Icon,
     AppShell,
     ShellHeader,
     Sidebar,
     SidebarToggle,
     CategoryGroup,
+    ListRow,
     Chip,
+    ToggleGroup,
     Select,
     ConfirmDialog,
     CountPill,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
-  import { LayoutGrid, List, Cog, Star, CheckCheck, Circle } from '@lucide/svelte';
+  import { LayoutGrid, List, Cog, CheckCheck } from '@lucide/svelte';
+  import ViewFilters from '$lib/components/ViewFilters.svelte';
   import { notifyError } from '$lib/stores/notices';
   import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
 
@@ -163,33 +168,23 @@
     pickSelection({ ...all, category: $selectedCategoryId === categoryId ? 0 : categoryId });
   }
 
-  function handleAllClick() {
-    pickSelection(all);
-  }
-
-  function handleUnreadClick() {
-    pickSelection({ ...all, view: 'unread' });
-  }
-
-  function handleStarredClick() {
-    pickSelection({ ...all, view: 'starred' });
-  }
-
-  let markAllTargetTitle = $state<string | null>(null);
+  const markAllTargetTitle = createConfirm<string>();
 
   function handleMarkAllRead() {
-    markAllTargetTitle = $selectedFeedId
-      ? feeds.find((f) => f.id === $selectedFeedId)?.title || 'this feed'
-      : $selectedCategoryId
-        ? feeds.find((f) => f.category.id === $selectedCategoryId)?.category.title ||
-          'this category'
-        : 'every feed';
+    markAllTargetTitle.ask(
+      $selectedFeedId
+        ? feeds.find((f) => f.id === $selectedFeedId)?.title || 'this feed'
+        : $selectedCategoryId
+          ? feeds.find((f) => f.category.id === $selectedCategoryId)?.category.title ||
+            'this category'
+          : 'every feed',
+    );
   }
 
   async function performMarkAllRead() {
     const scope = $selectedFeedId ? 'feed' : $selectedCategoryId ? 'category' : 'all';
     const scopeId = $selectedFeedId || $selectedCategoryId || 0;
-    markAllTargetTitle = null;
+    markAllTargetTitle.cancel();
     try {
       await markAsRead(scope, scopeId ? { id: scopeId } : undefined);
       invalidateNavUnreadCounts();
@@ -267,28 +262,22 @@
       {/snippet}
       {#snippet tools()}
         {#if !onSettings}
-          <Chip
-            icon
-            checked={$viewMode === 'grid'}
-            onclick={() => viewMode.set('grid')}
-            title="Grid view"
-          >
-            <LayoutGrid size={14} />
-          </Chip>
-          <Chip
-            icon
-            checked={$viewMode === 'list'}
-            onclick={() => viewMode.set('list')}
-            title="List view"
-          >
-            <List size={14} />
-          </Chip>
+          <ToggleGroup
+            label="Layout"
+            iconOnly
+            value={$viewMode}
+            onValueChange={(mode) => viewMode.set(mode as 'grid' | 'list')}
+            options={[
+              { value: 'grid', label: 'Grid view', icon: LayoutGrid },
+              { value: 'list', label: 'List view', icon: List },
+            ]}
+          />
           <Chip
             icon
             onclick={handleMarkAllRead}
             title={$selectedFeedId ? 'Mark this feed as read' : 'Mark every feed as read'}
           >
-            <CheckCheck size={14} />
+            <Icon icon={CheckCheck} size="sm" />
           </Chip>
         {/if}
         <!-- Ahead of the cog, so the cog keeps the bar's right edge and stays
@@ -296,7 +285,7 @@
 			     unless one is registered. -->
         <HeaderSave />
         <Chip icon checked={onSettings} onclick={toggleSettings} title="Feed settings">
-          <Cog size={14} />
+          <Icon icon={Cog} size="sm" />
         </Chip>
       {/snippet}
     </ShellHeader>
@@ -312,40 +301,19 @@
       >
         <!-- Cross-feed views, above the feed list. Mirrors the chat sidebar's
 			     All / Unread / Starred entries so the two read the same. -->
-        <div class="views">
-          <button
-            class="view-btn"
-            class:active={!$selectedFeedId && !$selectedCategoryId && !$showStarred && !$showUnseen}
-            onclick={handleAllClick}
-            type="button"
-          >
-            <span class="view-name">All</span>
-          </button>
-          <button
-            class="view-btn"
-            class:active={$showUnseen && !$showStarred && !$selectedFeedId}
-            onclick={handleUnreadClick}
-            type="button"
-          >
-            <Circle size={12} />
-            <span class="view-name">Unread</span>
-            <CountPill count={$feedCounts.unread} title={`${$feedCounts.unread} unread`} />
-          </button>
-          <button
-            class="view-btn"
-            class:active={$showStarred}
-            onclick={handleStarredClick}
-            type="button"
-          >
-            <Star size={12} />
-            <span class="view-name">Starred</span>
-            <CountPill
-              count={$feedCounts.starred}
-              tone="muted"
-              title={`${$feedCounts.starred} starred`}
-            />
-          </button>
-        </div>
+        <ViewFilters
+          current={!$selectedFeedId && !$selectedCategoryId && !$showStarred && !$showUnseen
+            ? 'all'
+            : $showStarred
+              ? 'starred'
+              : $showUnseen && !$selectedFeedId
+                ? 'unread'
+                : null}
+          href={(v) => readerUrl({ ...all, view: v === 'all' ? '' : v })}
+          onselect={(v) => pickSelection({ ...all, view: v === 'all' ? '' : v })}
+          unread={$feedCounts.unread}
+          starred={$feedCounts.starred}
+        />
         {#each groupedFeeds as [category, catFeeds] (category)}
           {@const catId = catFeeds[0]?.category.id ?? 0}
           <CategoryGroup
@@ -356,23 +324,20 @@
             onSelect={catId !== 0 ? () => handleCategoryClick(catId) : undefined}
           >
             {#each catFeeds as feed (feed.id)}
-              <button
-                class="feed-btn"
-                class:active={$selectedFeedId === feed.id}
-                class:has-unread={($feedCounts.unread_by_feed[feed.id] ?? 0) > 0}
+              {@const unread = $feedCounts.unread_by_feed[feed.id] ?? 0}
+              {#snippet unreadMark()}
+                <CountPill count={unread} title="Unread" shape="inline-mark" /><span
+                  class="visually-hidden">, unread</span
+                >
+              {/snippet}
+              <ListRow
+                density="sm"
+                active={$selectedFeedId === feed.id}
                 onclick={() => handleFeedClick(feed.id)}
-                type="button"
+                mark={unread > 0 ? unreadMark : undefined}
               >
-                <span class="feed-name">{feed.title}</span>
-                <CountPill
-                  count={$feedCounts.unread_by_feed[feed.id] ?? 0}
-                  title="Unread"
-                  shape="inline-mark"
-                />
-                {#if ($feedCounts.unread_by_feed[feed.id] ?? 0) > 0}<span class="visually-hidden"
-                    >, unread</span
-                  >{/if}
-              </button>
+                <span class:unread={unread > 0}>{feed.title}</span>
+              </ListRow>
             {/each}
           </CategoryGroup>
         {/each}
@@ -384,13 +349,12 @@
 </AppShell>
 
 <ConfirmDialog
-  open={markAllTargetTitle != null}
+  bind:open={markAllTargetTitle.open}
   title="Mark all as read"
-  message={`Are you sure you want to mark all unread entries in ${markAllTargetTitle} as read? This can't be undone.`}
+  message={`Are you sure you want to mark all unread entries in ${markAllTargetTitle.target} as read? This can't be undone.`}
   confirmLabel="Mark all read"
   confirmVariant="primary"
   onConfirm={performMarkAllRead}
-  onCancel={() => (markAllTargetTitle = null)}
 />
 
 <style>
@@ -413,44 +377,9 @@
     }
   }
 
-  .feed-btn {
-    display: flex;
-    align-items: center;
-    /* The row holds the name and its unread mark only; the mark sits against
-       the name, as the nav's does. */
-    gap: 2px;
-    width: 100%;
-    background: none;
-    border: none;
-    color: inherit;
-    font: inherit;
-    cursor: pointer;
-    padding: var(--space-1) var(--space-3);
-    border-radius: var(--radius-sm);
-    transition: background var(--transition-fast);
-    text-align: left;
-  }
-
-  /* .views / .view-btn / .view-name (the All / Unread / Starred block) come
-	   from web/src/lib/styles/sidebar.css, shared with the chat sidebar. */
-  .feed-btn:hover {
-    background: var(--hover-bg);
-  }
-
-  .feed-btn.has-unread {
+  /* A source with unread entries reads bolder, as a chat room does. */
+  .unread {
     font-weight: var(--weight-semibold);
     color: var(--text-primary);
-  }
-
-  .feed-btn.active {
-    background: var(--selected-bg);
-    color: var(--text-primary);
-  }
-
-  .feed-name {
-    font-size: var(--text-sm);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 </style>

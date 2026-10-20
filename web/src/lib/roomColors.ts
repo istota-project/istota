@@ -3,7 +3,7 @@
  *
  * Deliberately *not* the shape of `location-constants.ts`, which holds hex.
  * That file has to, because MapLibre paints in WebGL and cannot resolve
- * `var(--token)`; nothing here has that problem, so `styles/tokens.css` stays
+ * `var(--token)`; nothing here has that problem, so `styles/app-tokens.css` stays
  * the single source of the colour values and this file carries the names that
  * index into it. A hex here would be a second definition of every colour, and
  * the one that could not be themed.

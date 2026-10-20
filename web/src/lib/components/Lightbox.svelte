@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { Dialog } from 'bits-ui';
-  import { Button } from '$lib/components/ui';
+  import { Icon, Button } from '$lib/components/ui';
   import { ChevronLeft, ChevronRight } from '@lucide/svelte';
   import {
     FIT,
@@ -500,11 +500,11 @@
           {#if images.length > 1}
             <div class="controls">
               <button class="nav" onclick={prev} aria-label="Previous image">
-                <ChevronLeft size={24} />
+                <Icon icon={ChevronLeft} size="xl" />
               </button>
               <div class="counter">{(current ?? 0) + 1} / {images.length}</div>
               <button class="nav" onclick={next} aria-label="Next image">
-                <ChevronRight size={24} />
+                <Icon icon={ChevronRight} size="xl" />
               </button>
             </div>
           {/if}

@@ -141,27 +141,6 @@ export function formatValue(value: unknown): string {
   return String(value);
 }
 
-export function parseNumber(text: string, kind: 'int' | 'float'): number | null {
-  const trimmed = text.trim();
-  if (!trimmed) return null;
-  const n = Number(trimmed);
-  if (!Number.isFinite(n)) return null;
-  if (kind === 'int' && !Number.isInteger(n)) return null;
-  return n;
-}
-
-/** A list typed one item per line; blank lines are dropped. Null when the
- *  list holds numbers and a line is not one. */
-export function parseList(text: string, numeric: boolean): unknown[] | null {
-  const items = text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line !== '');
-  if (!numeric) return items;
-  const numbers = items.map(Number);
-  return numbers.every(Number.isFinite) ? numbers : null;
-}
-
 const EDITABLE: ReadonlySet<ConfigEditorKind> = new Set([
   'bool',
   'int',

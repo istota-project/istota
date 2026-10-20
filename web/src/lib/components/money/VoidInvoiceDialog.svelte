@@ -7,7 +7,7 @@
     type InvoiceDetailItem,
     type VoidInvoiceResponse,
   } from '$lib/money/api';
-  import { Button, Field, Input, Modal } from '$lib/components/ui';
+  import { Field, FormModal, Input, Checkbox } from '$lib/components/ui';
   import { formatDecimal as formatAmount } from '$lib/format';
 
   interface Props {
@@ -30,8 +30,6 @@
   // The server's answer wins over the row: a payment recorded since the page
   // loaded comes back as a 409 with code `paid`.
   let needsForce = $state(untrack(() => paid));
-  let submitting = $state(false);
-  let error = $state('');
 
   let lines: InvoiceDetailItem[] = $state([]);
   let linesState: 'loading' | 'ready' | 'failed' = $state('loading');
@@ -54,34 +52,35 @@
       .filter((part) => part.length > 0);
   }
 
-  const canVoid = $derived(!submitting && (!needsForce || force));
+  const canVoid = $derived(!needsForce || force);
 
   async function submit() {
-    if (!canVoid) return;
-    submitting = true;
-    error = '';
+    let result: VoidInvoiceResponse;
     try {
-      const result = await voidInvoice(number, {
+      result = await voidInvoice(number, {
         reason: reason.trim(),
         replaced_by: replacementNumbers(),
         force: needsForce && force,
       });
-      open = false;
-      onVoided(result);
     } catch (e) {
       if (e instanceof ApiError && e.payload?.code === 'paid') needsForce = true;
-      error = e instanceof Error ? e.message : 'Failed to void the invoice';
-    } finally {
-      submitting = false;
+      throw e;
     }
-  }
-
-  function handleOpenChange(next: boolean) {
-    if (!next) onCancel();
+    onVoided(result);
   }
 </script>
 
-<Modal bind:open title="Void {number}" onOpenChange={handleOpenChange} width="440px">
+<FormModal
+  bind:open
+  title="Void {number}"
+  width="440px"
+  submitLabel="Void invoice"
+  busyLabel="Voiding…"
+  submitVariant="danger"
+  canSubmit={canVoid}
+  onSubmit={submit}
+  {onCancel}
+>
   <p class="intro">
     {number} stays on record as voided and its number is not reused. The work it billed goes back to unbilled.
   </p>
@@ -115,24 +114,11 @@
     </Field>
     {#if needsForce}
       <Field label="This invoice was paid. Void anyway" checkbox>
-        <input type="checkbox" bind:checked={force} />
+        <Checkbox bind:checked={force} />
       </Field>
     {/if}
   </div>
-
-  {#if error}<p class="form-error" role="alert">{error}</p>{/if}
-
-  {#snippet footer()}
-    <Button variant="secondary" onclick={onCancel}>Cancel</Button>
-    <Button
-      variant="danger"
-      onclick={submit}
-      disabled={!canVoid}
-      loading={submitting}
-      loadingLabel="Voiding…">Void invoice</Button
-    >
-  {/snippet}
-</Modal>
+</FormModal>
 
 <style>
   .intro {
@@ -165,9 +151,5 @@
   .amount {
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
-  }
-
-  .form-error {
-    margin: var(--space-3) 0 0;
   }
 </style>

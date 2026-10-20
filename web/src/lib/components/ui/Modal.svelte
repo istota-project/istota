@@ -11,10 +11,13 @@
 </script>
 
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import { untrack, type Snippet } from 'svelte';
   import { ChevronLeft, ChevronRight, LoaderCircle, X } from '@lucide/svelte';
   import IconButton from './IconButton.svelte';
   import { Dialog } from 'bits-ui';
+  import { setFieldContext } from './fieldContext';
+  import { isEditableTarget } from '$lib/ui/editableTarget';
 
   interface Props {
     variant?: 'default' | 'viewer' | 'palette';
@@ -40,6 +43,16 @@
      * it to the safe box.
      */
     height?: string;
+    /**
+     * Form mode. The body and the footer render inside one `<form novalidate>`,
+     * so a footer `Button type="submit"` is the form's submit button and Enter
+     * in a single-line input submits it natively; Enter on a `Select` trigger,
+     * a checkbox, a button or a textarea does not. The default is prevented
+     * before the handler runs.
+     */
+    onsubmit?: (e: SubmitEvent) => void;
+    /** In flight: Escape and an outside click do not dismiss, and the dialog is `aria-busy`. */
+    busy?: boolean;
   }
 
   let {
@@ -59,7 +72,19 @@
     bodyKey,
     bodyPadding,
     height,
+    onsubmit,
+    busy = false,
   }: Props = $props();
+
+  const dismissNow = $derived<'close' | 'ignore'>(dismissible && !busy ? 'close' : 'ignore');
+
+  function handleSubmit(event: SubmitEvent) {
+    event.preventDefault();
+    onsubmit?.(event);
+  }
+
+  // A dialog opened from inside a Field is not that field's control.
+  setFieldContext(null);
 
   let bodyEl: HTMLDivElement | undefined = $state();
   const viewer = $derived(variant === 'viewer');
@@ -99,9 +124,8 @@
     if (
       !(target instanceof Element) ||
       target.closest('[role="dialog"]') !== event.currentTarget ||
-      target.closest(
-        'input, textarea, select, [contenteditable]:not([contenteditable="false"]), audio, video',
-      )
+      isEditableTarget(target) ||
+      target.closest('audio, video')
     )
       return;
     if (event.key === 'ArrowLeft' && navigation.canPrevious) {
@@ -120,9 +144,9 @@
       label={navigation.previousLabel}
       disabled={!navigation.canPrevious}
       onclick={navigation.onPrevious}
-    >
-      <ChevronLeft size={20} />
-    </IconButton>
+      icon={ChevronLeft}
+      iconSize="lg"
+    />
   {/if}
 {/snippet}
 
@@ -136,17 +160,27 @@
       }}
     >
       {#if navigation.busy}
-        <span role="status" aria-label="Loading"><LoaderCircle size={20} /></span>
-      {:else}<ChevronRight size={20} />{/if}
+        <span role="status" aria-label="Loading"><Icon icon={LoaderCircle} size="lg" /></span>
+      {:else}<Icon icon={ChevronRight} size="lg" />{/if}
     </IconButton>
   {/if}
 {/snippet}
 
-{#snippet body()}
+{#snippet bodyAndFooter()}
   <div class="ui-modal-body" style:padding={bodyPadding} bind:this={bodyEl}>
     {@render children()}
   </div>
   {#if footer}<div class="ui-modal-footer">{@render footer()}</div>{/if}
+{/snippet}
+
+{#snippet body()}
+  {#if onsubmit}
+    <form class="ui-modal-form" novalidate onsubmit={handleSubmit}>
+      {@render bodyAndFooter()}
+    </form>
+  {:else}
+    {@render bodyAndFooter()}
+  {/if}
 {/snippet}
 
 <Dialog.Root bind:open {onOpenChange}>
@@ -168,8 +202,9 @@
         (viewer ? '100dvh' : 'auto')}"
       onkeydown={handleKeydown}
       {onOpenAutoFocus}
-      escapeKeydownBehavior={dismissible ? 'close' : 'ignore'}
-      interactOutsideBehavior={dismissible ? 'close' : 'ignore'}
+      escapeKeydownBehavior={dismissNow}
+      interactOutsideBehavior={dismissNow}
+      aria-busy={busy || undefined}
     >
       {#if viewer}
         {#if navigation}<div class="ui-viewer-previous">{@render previous()}</div>{/if}
@@ -187,8 +222,10 @@
                 onclick={() => {
                   open = false;
                   onOpenChange?.(false);
-                }}><X size={20} /></IconButton
-              >
+                }}
+                icon={X}
+                iconSize="lg"
+              />
             </div>
             {#if navigation}
               <div class="ui-viewer-mobile-navigation">{@render previous()}{@render next()}</div>
@@ -210,8 +247,10 @@
                 onclick={() => {
                   open = false;
                   onOpenChange?.(false);
-                }}><X size={20} /></IconButton
-              >
+                }}
+                icon={X}
+                iconSize="lg"
+              />
             {/if}
           </header>
         {:else}
@@ -227,6 +266,10 @@
 </Dialog.Root>
 
 <style>
+  /* The form adds no box: body and footer stay the panel's flex items. */
+  .ui-modal-form {
+    display: contents;
+  }
   :global(.ui-modal-overlay) {
     position: fixed;
     inset: 0;

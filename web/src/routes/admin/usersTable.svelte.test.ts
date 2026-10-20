@@ -210,7 +210,7 @@ describe('the status page lays its cards out in rows of three', () => {
     expect(grid.classList.contains('masonry')).toBe(false);
     // Each card is a grid item; a wrapper would collapse a row into one track.
     const cards = Array.from(grid.children);
-    expect(cards.every((c) => c.classList.contains('card'))).toBe(true);
+    expect(cards.every((c) => c.classList.contains('ui-card'))).toBe(true);
     const title = (c: Element) => c.querySelector('h2')?.textContent?.trim();
     // This fixture carries no `models` section, so its card is absent.
     // The installation card is headed by the bot's name.

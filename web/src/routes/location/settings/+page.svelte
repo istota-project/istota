@@ -8,8 +8,8 @@
     type ServiceCard as ServiceCardData,
     type LocationSettingsInfo,
   } from '$lib/api';
-  import { ServiceCard, SettingsLayout, SettingsCard } from '$lib/components/settings';
-  import { Button } from '$lib/components/ui';
+  import { ServiceCard, SettingsLayout } from '$lib/components/settings';
+  import { Button, Card, CopyField } from '$lib/components/ui';
   import QrCode from '$lib/components/location/QrCode.svelte';
   import DeviceTrackerCard from '$lib/components/location/DeviceTrackerCard.svelte';
   import LocationDevicesCard from '$lib/components/location/LocationDevicesCard.svelte';
@@ -115,7 +115,7 @@
     <LocationDevicesCard bind:this={devicesCard} />
 
     {#if info}
-      <SettingsCard
+      <Card
         title="Provision a device"
         description="Create a code to scan from the Istota app on a phone, or to paste into Overland. Each code is a device of its own in the list above."
       >
@@ -145,7 +145,7 @@
                 For the third-party Overland app, which cannot scan, paste this URL instead. It
                 carries the same token and is shown only now, for the same reason.
               </p>
-              <code class="webhook-url">{minted.webhookUrl}</code>
+              <CopyField label="Webhook URL" value={minted.webhookUrl} monospace />
             </div>
           </div>
         {:else}
@@ -154,21 +154,18 @@
             again. Creating one does not affect any other device. On a phone with the Istota app,
             open this page in the app and turn tracking on there instead.
           </p>
-          <code class="webhook-url">{info.webhook_url}</code>
+          <CopyField label="Webhook URL" value={info.webhook_url} monospace />
         {/if}
-      </SettingsCard>
+      </Card>
 
-      <SettingsCard
-        title="Place detection"
-        description="Read-only — these knobs are tuned instance-wide."
-      >
+      <Card title="Place detection" description="Read-only — these knobs are tuned instance-wide.">
         <dl class="kv">
           <dt>Accuracy threshold (m)</dt>
           <dd>{info.place_detection.accuracy_threshold_m}</dd>
           <dt>Visit exit (min)</dt>
           <dd>{info.place_detection.visit_exit_minutes}</dd>
         </dl>
-      </SettingsCard>
+      </Card>
     {/if}
   {/if}
 </SettingsLayout>
@@ -196,13 +193,6 @@
     margin: 0;
     font-size: var(--text-sm);
     color: var(--status-danger-fg);
-  }
-
-  .webhook-url {
-    display: block;
-    padding: var(--space-2) var(--space-2);
-    font-family: var(--font-mono);
-    word-break: break-all;
   }
 
   .kv dd {

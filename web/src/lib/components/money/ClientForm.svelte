@@ -8,8 +8,16 @@
     type ClientInput,
     type EntityRow,
   } from '$lib/money/api';
-  import { Modal, Button, Select, type SelectOption } from '$lib/components/ui';
-  import { SettingsField } from '$lib/components/settings';
+  import {
+    FormModal,
+    Select,
+    type SelectOption,
+    Field,
+    Checkbox,
+    Input,
+    TextArea,
+    Disclosure,
+  } from '$lib/components/ui';
 
   /**
    * Create/edit form for an invoicing client.
@@ -32,21 +40,11 @@
     entities?: EntityRow[];
     /** Named in the "use the default" entity option. */
     defaultEntity?: string;
-    onSave: (key: string, data: ClientInput) => void;
+    onSave: (key: string, data: ClientInput) => void | Promise<void>;
     onCancel: () => void;
-    error?: string;
-    saving?: boolean;
   }
 
-  let {
-    client = null,
-    entities = [],
-    defaultEntity = '',
-    onSave,
-    onCancel,
-    error = '',
-    saving = false,
-  }: Props = $props();
+  let { client = null, entities = [], defaultEntity = '', onSave, onCancel }: Props = $props();
 
   // Mounted fresh each time it opens, so the initial props are the whole
   // story — the local fields deliberately don't track them.
@@ -114,9 +112,7 @@
     const asNumber = Number(trimmed);
     return Number.isInteger(asNumber) && asNumber < 0 ? 'Expected 0 days or more' : '';
   });
-  const canSave = $derived(
-    !!name.trim() && (isEdit || (!!key && !keyError)) && !termsError && !saving,
-  );
+  const canSave = $derived(!!name.trim() && (isEdit || (!!key && !keyError)) && !termsError);
 
   /** A blank numeric field means "leave it alone", not zero. */
   function intOrOmit(raw: string): number | undefined {
@@ -127,8 +123,6 @@
   }
 
   function handleSave() {
-    if (!canSave) return;
-
     const data: ClientInput = {
       name: name.trim(),
       // Empty string, not undefined: these are the fields a user clears.
@@ -161,156 +155,98 @@
     const overdue = intOrOmit(daysUntilOverdue);
     if (overdue !== undefined) data.days_until_overdue = overdue;
 
-    onSave(isEdit ? (client as ClientConfigRow).key : key.trim(), data);
-  }
-
-  function handleOpenChange(next: boolean) {
-    if (!next) onCancel();
-  }
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key !== 'Enter') return;
-    const target = e.target as HTMLElement | null;
-    // Only a single-line text input commits. Enter anywhere else is that
-    // control's own business — notably confirming a dropdown option, which
-    // would otherwise select *and* save in one keystroke.
-    if (!(target instanceof HTMLInputElement)) return;
-    if (target.type === 'checkbox') return;
-    handleSave();
+    return onSave(isEdit ? (client as ClientConfigRow).key : key.trim(), data);
   }
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
-
-<Modal
+<FormModal
   bind:open
   title={isEdit ? `Edit ${client?.name || client?.key}` : 'Add client'}
-  onOpenChange={handleOpenChange}
   width="420px"
+  canSubmit={canSave}
+  onSubmit={handleSave}
+  {onCancel}
 >
   <div class="vstack" style:--vstack-gap="var(--space-2)">
     {#if isEdit}
-      <div class="static-key">
-        <span>Key</span>
-        <code>{client?.key}</code>
-        <small class="caption">The key is the identity — work entries reference it by name.</small>
-      </div>
+      <Field label="Key" description="The key is the identity — work entries reference it by name.">
+        <code class="key-value">{client?.key}</code>
+      </Field>
     {:else}
-      <SettingsField
-        label="Key"
-        hint="Short identifier used by work entries. Lowercase."
-        error={keyError}
-      >
-        <input
+      <Field label="Key" hint="Short identifier used by work entries. Lowercase." error={keyError}>
+        <Input
           type="text"
           value={key}
           oninput={(e) => (key = normalizeClientKey(e.currentTarget.value))}
           placeholder="acme"
           autocomplete="off"
         />
-      </SettingsField>
+      </Field>
     {/if}
 
-    <SettingsField label="Name">
-      <input type="text" bind:value={name} placeholder="Acme Corp" />
-    </SettingsField>
+    <Field label="Name">
+      <Input type="text" bind:value={name} placeholder="Acme Corp" />
+    </Field>
 
-    <SettingsField label="Email">
-      <input type="text" bind:value={email} placeholder="ap@acme.example" />
-    </SettingsField>
+    <Field label="Email">
+      <Input type="text" bind:value={email} placeholder="ap@acme.example" />
+    </Field>
 
-    <SettingsField label="Address">
-      <textarea rows="3" bind:value={address}></textarea>
-    </SettingsField>
+    <Field label="Address">
+      <TextArea rows={3} bind:value={address} />
+    </Field>
 
-    <SettingsField
-      label="Terms"
-      hint="A number of days, or a label like NET 15."
-      error={termsError}
-    >
-      <input type="text" bind:value={terms} placeholder="30" />
-    </SettingsField>
+    <Field label="Terms" hint="A number of days, or a label like NET 15." error={termsError}>
+      <Input type="text" bind:value={terms} placeholder="30" />
+    </Field>
 
-    <SettingsField label="Entity" hint="Which of your entities bills this client.">
+    <Field label="Entity" hint="Which of your entities bills this client.">
       <Select bind:value={entity} options={entityOptions} fullWidth ariaLabel="Entity" />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="A/R account" hint="Blank falls back to the business default.">
-      <input type="text" bind:value={arAccount} placeholder="Assets:Accounts-Receivable" />
-    </SettingsField>
+    <Field label="A/R account" hint="Blank falls back to the business default.">
+      <Input type="text" bind:value={arAccount} placeholder="Assets:Accounts-Receivable" />
+    </Field>
 
-    <SettingsField label="Schedule" warning={scheduleWarning}>
+    <Field label="Schedule" warning={scheduleWarning}>
       <Select bind:value={schedule} options={scheduleOptions} fullWidth ariaLabel="Schedule" />
-    </SettingsField>
+    </Field>
 
     {#if schedule === 'monthly'}
-      <SettingsField label="Schedule day" hint="Clamped to the last day of shorter months.">
-        <input type="text" inputmode="numeric" bind:value={scheduleDay} placeholder="1" />
-      </SettingsField>
+      <Field label="Schedule day" hint="Clamped to the last day of shorter months.">
+        <Input type="text" inputmode="numeric" bind:value={scheduleDay} placeholder="1" />
+      </Field>
     {/if}
 
-    <SettingsField label="Post income to ledger on payment" checkbox>
-      <input type="checkbox" bind:checked={ledgerPosting} />
-    </SettingsField>
+    <Field label="Post income to ledger on payment" checkbox>
+      <Checkbox bind:checked={ledgerPosting} />
+    </Field>
 
-    <details bind:open={advancedOpen}>
-      <summary>Advanced</summary>
-      <div class="vstack" style:--vstack-gap="var(--space-2)">
-        <SettingsField label="Reminder days">
-          <input type="text" inputmode="numeric" bind:value={reminderDays} placeholder="3" />
-        </SettingsField>
-        <SettingsField label="Notifications" hint="Where overdue notices go.">
-          <input type="text" bind:value={notifications} />
-        </SettingsField>
-        <SettingsField label="Days until overdue">
-          <input type="text" inputmode="numeric" bind:value={daysUntilOverdue} placeholder="0" />
-        </SettingsField>
-      </div>
-    </details>
+    <div class="advanced">
+      <Disclosure summary="Advanced" bind:open={advancedOpen}>
+        <div class="vstack" style:--vstack-gap="var(--space-2)">
+          <Field label="Reminder days">
+            <Input type="text" inputmode="numeric" bind:value={reminderDays} placeholder="3" />
+          </Field>
+          <Field label="Notifications" hint="Where overdue notices go.">
+            <Input type="text" bind:value={notifications} />
+          </Field>
+          <Field label="Days until overdue">
+            <Input type="text" inputmode="numeric" bind:value={daysUntilOverdue} placeholder="0" />
+          </Field>
+        </div>
+      </Disclosure>
+    </div>
   </div>
-
-  {#if error}
-    <div class="form-error">{error}</div>
-  {/if}
-
-  {#snippet footer()}
-    <Button variant="secondary" onclick={onCancel}>Cancel</Button>
-    <Button variant="primary" onclick={handleSave} disabled={!canSave}>
-      {saving ? 'Saving…' : 'Save'}
-    </Button>
-  {/snippet}
-</Modal>
+</FormModal>
 
 <style>
-  .static-key {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    font-size: var(--text-sm);
-  }
-
-  .static-key > span {
-    color: var(--text-muted);
-  }
-
-  .static-key code {
+  .key-value {
     color: var(--text-secondary);
   }
 
-  details {
+  .advanced {
     border-top: 1px solid var(--border-subtle);
     padding-top: var(--space-2);
-  }
-
-  summary {
-    cursor: pointer;
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-    margin-bottom: var(--space-2);
-  }
-
-  /* Type is the global .form-error; only the space above it is this form's. */
-  .form-error {
-    margin-top: var(--space-2);
   }
 </style>

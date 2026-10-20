@@ -81,8 +81,8 @@ async function type(textarea: HTMLTextAreaElement, value: string) {
 }
 
 const sendBtn = (c: HTMLElement) =>
-  c.querySelector('.icon-btn.send:not([aria-label="Finish recording"])') as HTMLButtonElement;
-const stopBtn = (c: HTMLElement) => c.querySelector('.icon-btn.stop') as HTMLButtonElement | null;
+  c.querySelector('.mode-btn.send:not([aria-label="Finish recording"])') as HTMLButtonElement;
+const stopBtn = (c: HTMLElement) => c.querySelector('.mode-btn.stop') as HTMLButtonElement | null;
 
 describe('Composer — a !command while a turn is in flight', () => {
   it('offers Send for a command, with Stop beside it rather than in its place', async () => {

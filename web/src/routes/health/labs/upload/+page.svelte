@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { X } from '@lucide/svelte';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import {
@@ -12,7 +13,18 @@
     type Biomarker,
     type Specimen,
   } from '$lib/api';
-  import { Button, EmptyState, Field, FileDropZone, Select } from '$lib/components/ui';
+  import {
+    IconButton,
+    Button,
+    Card,
+    EmptyState,
+    Field,
+    FileDropZone,
+    Select,
+    Input,
+    PageHeader,
+    Spinner,
+  } from '$lib/components/ui';
   import { localDateISO } from '$lib/dateFormat';
 
   const flagOptions = [
@@ -169,11 +181,10 @@
 </script>
 
 <div class="page">
-  <a class="back link-muted" href="{base}/health/labs">← Labs</a>
-  <h1 class="title-page">Upload lab results</h1>
+  <PageHeader title="Upload lab results" back={{ href: `${base}/health/labs`, label: 'Labs' }} />
 
   {#if panelId == null}
-    <div class="card vstack">
+    <Card as="div">
       <FileDropZone bind:file>
         <p>Drop or paste a PDF or image of the lab report here, or use the file picker.</p>
         <p class="caption">
@@ -194,7 +205,7 @@
           loadingLabel="Uploading…">Upload + extract</Button
         >
       </div>
-    </div>
+    </Card>
   {:else}
     {#if collision}
       <div class="banner warn">
@@ -210,13 +221,13 @@
         {#if !extracting}
           <div class="metadata">
             <Field label="Collected">
-              <input type="date" bind:value={drawnAt} required />
+              <Input type="date" bind:value={drawnAt} required />
             </Field>
             <Field label="Lab">
-              <input type="text" bind:value={labName} placeholder="Quest, Kaiser, …" />
+              <Input type="text" bind:value={labName} placeholder="Quest, Kaiser, …" />
             </Field>
             <Field label="Panel type">
-              <input type="text" bind:value={panelType} placeholder="CBC, CMP, Lipid, …" />
+              <Input type="text" bind:value={panelType} placeholder="CBC, CMP, Lipid, …" />
             </Field>
             <Field label="Specimen">
               <Select
@@ -234,7 +245,7 @@
 
         {#if extracting}
           <div class="loading extracting">
-            <span class="spinner" aria-hidden="true"></span>
+            <Spinner />
             Extracting biomarkers and panel metadata from the source file…
           </div>
         {:else}
@@ -264,19 +275,50 @@
                 <tbody>
                   {#each extracted as b, i (b.id)}
                     <tr>
-                      <td><input bind:value={b.name} placeholder="Hemoglobin" /></td>
-                      <td><input type="number" step="any" bind:value={b.value} /></td>
-                      <td><input bind:value={b.unit} placeholder="g/dL" /></td>
-                      <td class="range-pair">
-                        <input
+                      <td
+                        ><Input
+                          dense
+                          class="cell-input"
+                          aria-label="Marker {i + 1} name"
+                          bind:value={b.name}
+                          placeholder="Hemoglobin"
+                        /></td
+                      >
+                      <td
+                        ><Input
                           type="number"
                           step="any"
+                          dense
+                          class="cell-input"
+                          aria-label="Marker {i + 1} value"
+                          bind:value={b.value}
+                        /></td
+                      >
+                      <td
+                        ><Input
+                          dense
+                          class="cell-input"
+                          aria-label="Marker {i + 1} unit"
+                          bind:value={b.unit}
+                          placeholder="g/dL"
+                        /></td
+                      >
+                      <td class="range-pair">
+                        <Input
+                          type="number"
+                          step="any"
+                          dense
+                          class="cell-input"
+                          aria-label="Marker {i + 1} range low"
                           bind:value={b.ref_range_low}
                           placeholder="low"
                         />
-                        <input
+                        <Input
                           type="number"
                           step="any"
+                          dense
+                          class="cell-input"
+                          aria-label="Marker {i + 1} range high"
                           bind:value={b.ref_range_high}
                           placeholder="high"
                         />
@@ -290,8 +332,14 @@
                         />
                       </td>
                       <td
-                        ><button class="del" type="button" onclick={() => removeRow(i)}>×</button
-                        ></td
+                        ><IconButton
+                          size="sm"
+                          danger
+                          label="Remove row {i + 1}"
+                          title="Remove row"
+                          onclick={() => removeRow(i)}
+                          icon={X}
+                        /></td
                       >
                     </tr>
                   {/each}
@@ -334,9 +382,6 @@
     flex-direction: column;
     gap: var(--space-4);
   }
-  .back {
-    font-size: var(--text-xs);
-  }
   h2 {
     margin: 0 0 var(--space-2);
   }
@@ -347,15 +392,6 @@
     margin-bottom: var(--space-3);
     padding-bottom: var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
-  }
-  input {
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    padding: var(--space-1) var(--space-2);
   }
   .actions {
     display: flex;
@@ -386,22 +422,12 @@
     display: flex;
     gap: var(--space-1);
   }
-  .range-pair input {
-    max-width: 5rem;
-  }
-  .review-table input {
+  /* Placement only: the cell editors are `Input dense`. */
+  .review-table :global(.cell-input) {
     max-width: 9rem;
-    font-size: var(--text-xs);
-    padding: 0.15rem var(--space-1);
   }
-  .del {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .del:hover {
-    color: var(--status-danger-fg);
+  .range-pair :global(.cell-input) {
+    max-width: 5rem;
   }
   .source {
     background: var(--surface-card);

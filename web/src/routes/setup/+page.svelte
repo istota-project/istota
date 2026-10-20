@@ -13,7 +13,7 @@
     type SetupFinished,
     type SetupState,
   } from '$lib/api';
-  import { Button, NoticeBanner, PageLoading } from '$lib/components/ui';
+  import { Button, Alert, PageLoading } from '$lib/components/ui';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import SetupFrame from '$lib/components/setup/SetupFrame.svelte';
   import StepUnlock from '$lib/components/setup/StepUnlock.svelte';
@@ -278,9 +278,9 @@
   <PageLoading />
 {:else if view === 'unreachable'}
   <SetupFrame {botName} title="Setup">
-    <NoticeBanner variant="danger" title="Can't reach the setup service" collapsed={false}>
+    <Alert variant="danger" title="Can't reach the setup service" collapsed={false}>
       {#snippet children()}<p>{unreachable}</p>{/snippet}
-    </NoticeBanner>
+    </Alert>
     <div class="form-actions">
       <Button variant="secondary" onclick={() => start('')}>Retry</Button>
     </div>
@@ -336,7 +336,7 @@
       {/if}
     {/snippet}
     {#if formError}
-      <NoticeBanner variant="danger" title={formError} />
+      <Alert variant="danger" title={formError} />
     {/if}
     {#if step === 'welcome'}
       <StepWelcome

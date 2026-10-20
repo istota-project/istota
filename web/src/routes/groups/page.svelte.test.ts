@@ -393,7 +393,10 @@ it('selects a remaining group after leaving the group named in the URL', async (
   });
   await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Leave' }));
   await waitFor(() =>
-    expect(screen.getByRole('link', { name: 'Other team' })).toHaveClass('active'),
+    expect(screen.getByRole('link', { name: 'Other team' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    ),
   );
   expect(api.getGroup).toHaveBeenLastCalledWith('other');
 });

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
-  import { CardGrid, EmptyState, PageLoading } from '$lib/components/ui';
+  import { CardGrid, EmptyState, LoadMore, LoadState } from '$lib/components/ui';
   import { onMount, onDestroy, tick } from 'svelte';
   import {
     getFeeds,
@@ -27,6 +27,7 @@
   import Lightbox from '$lib/components/Lightbox.svelte';
   import { getShellScrollRoot } from '$lib/components/ui/AppShell.svelte';
   import { notifyError } from '$lib/stores/notices';
+  import { isEditableTarget } from '$lib/ui/editableTarget';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
 
   const getScrollRoot = getShellScrollRoot();
@@ -290,23 +291,12 @@
     } catch {
       if (generation !== loadGeneration) return;
       notifyError('Failed to load more feeds.');
-      // Keep Next retryable, but do not immediately re-observe a failed page.
-      return;
+      // Keep Next retryable, but do not immediately ask again for a failed page.
+      return false;
     } finally {
       if (generation === loadGeneration) loadingMore = false;
     }
-    // Re-observe sentinel so the observer fires again if it's still visible —
-    // a short page (or one whose cards are compact because the Images chip is
-    // off) can leave it in view across the whole load.
-    if (hasMore && sentinel && scrollObserver) {
-      scrollObserver.unobserve(sentinel);
-      scrollObserver.observe(sentinel);
-    }
   }
-
-  // Infinite scroll sentinel
-  let sentinel: HTMLDivElement | undefined = $state();
-  let scrollObserver: IntersectionObserver | null = null;
 
   // Reload when the selected scope (feed or category) changes. Tracked
   // together so switching straight from a feed to a category — which clears
@@ -327,19 +317,6 @@
     entryReady = true;
     const target = entrySel.current();
     if (target) void applyEntry(target);
-  });
-
-  $effect(() => {
-    if (!sentinel) return;
-    scrollObserver?.disconnect();
-    scrollObserver = new IntersectionObserver(
-      (observed) => {
-        if (observed[0].isIntersecting) loadMore();
-      },
-      { root: getScrollRoot?.() ?? null, rootMargin: '600px' },
-    );
-    scrollObserver.observe(sentinel);
-    return () => scrollObserver?.disconnect();
   });
 
   onDestroy(() => {
@@ -379,16 +356,8 @@
   // Keyboard shortcut: A marks every visible entry read (scope-aware).
   // f toggles star on the focused entry — left to Tranche B's full
   // shortcut layer; for now A is the highest-leverage one.
-  function isEditableTarget(t: EventTarget | null): boolean {
-    const el = t as HTMLElement | null;
-    if (!el) return false;
-    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true;
-    if ((el as HTMLElement).isContentEditable) return true;
-    return false;
-  }
-
   async function handleKeydown(e: KeyboardEvent) {
-    if (isEditableTarget(e.target)) return;
+    if (isEditableTarget(e)) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === 'A' && e.shiftKey) {
       e.preventDefault();
@@ -433,13 +402,10 @@
 </script>
 
 <div class="feed-page card-pane">
-  {#if loading}
-    <PageLoading />
-  {:else if error}
-    <div class="center-msg error">{error}</div>
-  {:else if entries.length === 0}
-    <EmptyState>{emptyMessage}</EmptyState>
-  {:else}
+  <LoadState {loading} {error} empty={entries.length === 0}>
+    {#snippet emptyState()}
+      <EmptyState>{emptyMessage}</EmptyState>
+    {/snippet}
     <div
       class="feed-grid"
       class:list-view={$viewMode === 'list'}
@@ -473,12 +439,8 @@
       </CardGrid>
     </div>
 
-    <div bind:this={sentinel} class="sentinel">
-      {#if loadingMore}
-        <span class="loading-more">Loading more...</span>
-      {/if}
-    </div>
-  {/if}
+    <LoadMore auto onload={loadMore} {hasMore} loading={loadingMore} />
+  </LoadState>
 </div>
 
 {#if !loading && !error && entries.length > 0}
@@ -492,7 +454,9 @@
   onClose={() => entrySel.push({ id: null })}
   onView={handleViewed}
   onStarToggle={handleStarConfirmed}
-  onNeedMore={loadMore}
+  onNeedMore={async () => {
+    await loadMore();
+  }}
   onImageClick={(imgs, idx) => {
     lightboxImages = imgs;
     lightboxIndex = idx;
@@ -957,18 +921,6 @@
 
   .feed-grid :global(.meta-link:hover) {
     color: var(--text-secondary);
-  }
-
-  /* Sentinel / loading */
-  .sentinel {
-    height: 1px;
-    text-align: center;
-    padding: var(--space-4) 0;
-  }
-
-  .loading-more {
-    font-size: var(--text-sm);
-    color: var(--text-dim);
   }
 
   /* Status badge */

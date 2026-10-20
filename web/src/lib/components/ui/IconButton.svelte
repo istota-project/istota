@@ -1,5 +1,8 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import type { Component, Snippet } from 'svelte';
+  import Icon, { type IconSize } from './Icon.svelte';
+  import Spinner from './Spinner.svelte';
+  import { linkOrButton } from './internal/linkOrButton';
 
   type Size = 'sm' | 'md' | 'round';
 
@@ -14,24 +17,45 @@
     class?: string;
     /** Hover turns the glyph red rather than raising it. For a delete action. */
     danger?: boolean;
+    /**
+     * `muted` rests at `--text-muted` and hovers to `--accent-hover` on
+     * `--surface-badge`, only where the pointer can hover: the chat
+     * composer's tools, which sit over the transcript rather than on a card.
+     */
+    tone?: 'default' | 'muted';
     /** Pressed/open state, for a menu trigger. */
     active?: boolean;
     pressed?: boolean;
+    /** In flight: disabled, `aria-busy`, and a spinner in place of the glyph. */
+    loading?: boolean;
+    /** Adds the shared `.touch-target` overlay, for a glyph below the touch floor. */
+    touchTarget?: boolean;
     type?: 'button' | 'submit';
     title?: string;
     disabled?: boolean;
     /**
      * Renders a real `<a>` with the same look, for an action that is a link
      * (a download, an external page) — a button calling `window.open` loses
-     * the native `download` attribute and middle-click. A disabled one renders
-     * as a disabled button, since a link has no disabled state.
+     * the native `download` attribute and middle-click. A disabled or loading
+     * one renders as a disabled button, since a link has no disabled state.
      */
     href?: string;
     download?: string;
     target?: string;
     rel?: string;
     onclick?: (e: MouseEvent) => void;
-    children: Snippet;
+    /** The rendered element, for a caller that measures or focuses it. */
+    ref?: HTMLElement;
+    /**
+     * The glyph, drawn through `Icon` at the button's own step (`sm` and
+     * `md` alike); `iconSize` for a toolbar or dialog glyph a step up.
+     * Children instead, for anything that is not one lucide glyph.
+     */
+    icon?: Component;
+    iconSize?: IconSize;
+    children?: Snippet;
+    /** Other attributes and handlers go to the element (a menu trigger's props). */
+    [attr: string]: unknown;
   }
 
   let {
@@ -39,8 +63,11 @@
     size = 'md',
     class: className = '',
     danger = false,
+    tone = 'default',
     active = false,
     pressed,
+    loading = false,
+    touchTarget = false,
     type = 'button',
     title,
     disabled,
@@ -49,40 +76,37 @@
     target,
     rel,
     onclick,
+    ref = $bindable(),
+    icon,
+    iconSize,
     children,
+    ...rest
   }: Props = $props();
+
+  const glyphSize = $derived(iconSize ?? (size === 'sm' ? 'sm' : 'md'));
+  const el = $derived(linkOrButton({ href, download, target, rel, type, disabled, loading }));
 </script>
 
-{#if href && !disabled}
-  <a
-    class="icon-btn icon-btn-{size} {className}"
-    class:danger
-    class:active
-    {href}
-    {download}
-    {target}
-    {rel}
-    {title}
-    {onclick}
-    aria-label={label}
-  >
-    {@render children()}
-  </a>
-{:else}
-  <button
-    class="icon-btn icon-btn-{size} {className}"
-    class:danger
-    class:active
-    {type}
-    {title}
-    {disabled}
-    {onclick}
-    aria-label={label}
-    aria-pressed={pressed}
-  >
-    {@render children()}
-  </button>
-{/if}
+<svelte:element
+  this={el.tag}
+  bind:this={ref}
+  {...rest}
+  class="icon-btn icon-btn-{size} {className}"
+  class:danger
+  class:muted={tone === 'muted'}
+  class:active
+  class:touch-target={touchTarget}
+  {...el.attrs}
+  {title}
+  {onclick}
+  aria-label={label}
+  aria-pressed={el.tag === 'button' ? pressed : undefined}
+>
+  {#if loading}<Spinner size="sm" />{:else if icon}<Icon
+      {icon}
+      size={glyphSize}
+    />{:else if children}{@render children()}{/if}
+</svelte:element>
 
 <style>
   .icon-btn {
@@ -121,6 +145,22 @@
     color: var(--status-danger-fg);
   }
 
+  .icon-btn.muted {
+    color: var(--text-muted);
+  }
+  /* iOS synthesizes :hover on a tap and leaves it applied, so a muted button
+     keeps no hover fill on a touch screen; the fill is for a pointer. */
+  .icon-btn.muted:hover:not(:disabled) {
+    background: transparent;
+    color: var(--text-muted);
+  }
+  @media (hover: hover) {
+    .icon-btn.muted:hover:not(:disabled) {
+      background: var(--surface-badge);
+      color: var(--accent-hover);
+    }
+  }
+
   .icon-btn:disabled {
     opacity: 0.3;
     cursor: not-allowed;
@@ -152,6 +192,7 @@
     border-radius: var(--radius-round);
   }
 
+  .icon-btn-round :global(.ui-icon),
   .icon-btn-round :global(svg) {
     width: 1.25em;
     height: 1.25em;

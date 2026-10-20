@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import { loadSetting, saveSetting } from './persisted';
+import { loadSetting, saveSetting } from '$lib/ui/persisted';
 
 export type FontSize = 'small' | 'medium' | 'large';
 

@@ -90,7 +90,7 @@ describe('migrated touch targets', () => {
   it.each([
     ['lib/components/ui/SidebarToggle.svelte', '.sidebar-toggle', '2.5rem', '2.75rem'],
     [
-      'lib/components/ui/NoticeDrawer.svelte',
+      'lib/components/ui/internal/NoticeDrawer.svelte',
       '.notice-dismiss',
       'var(--touch-comfort)',
       'var(--touch-comfort)',
@@ -128,9 +128,9 @@ describe('migrated touch targets', () => {
 
   it.each([
     ['lib/components/ui/SidebarToggle.svelte', 'sidebar-toggle'],
-    ['lib/components/ui/NoticeDrawer.svelte', 'notice-dismiss'],
+    ['lib/components/ui/internal/NoticeDrawer.svelte', 'notice-dismiss'],
     ['lib/components/chat/Message.svelte', 'turn-action'],
-    ['lib/components/ui/NotificationBell.svelte', 'nav-icon-btn'],
+    ['lib/components/notifications/NotificationBell.svelte', 'nav-icon-btn'],
     ['lib/components/LogoutButton.svelte', 'nav-icon-btn'],
     ['routes/+layout.svelte', 'nav-icon-btn'],
   ])('opts every %s %s call site into the primitive', (file, control) => {
@@ -161,7 +161,7 @@ describe('reported touch controls', () => {
       ':global(.ui-kebab-trigger)',
       'min-width: var(--touch-min);',
     ],
-    ['lib/styles/sidebar.css', '.sidebar .list-row', 'gap: var(--space-2);'],
+    ['lib/components/ui/ListRow.svelte', '.ui-list-row', 'gap: var(--space-2);'],
     [
       'routes/feeds/+page.svelte',
       '.feed-grid :global(.star-btn)',
@@ -190,10 +190,14 @@ describe('compact control touch targets', () => {
     ['lib/components/ui/HintPopover.svelte', 'ui-hint-trigger'],
     ['lib/components/chat/Composer.svelte', 'attach-x'],
     ['routes/health/documents/+page.svelte', 'detach'],
-    ['routes/health/labs/panel/+page.svelte', 'del'],
   ])('uses the shared target for %s %s', (file, control) => {
     const source = readFileSync(resolve(SRC, file), 'utf8');
     expect(source).toContain(`class="${control} touch-target"`);
+  });
+
+  it('asks IconButton for the shared target on the lab panel delete', () => {
+    const source = readFileSync(resolve(SRC, 'routes/health/labs/panel/+page.svelte'), 'utf8');
+    expect(source).toMatch(/class="del"\s+touchTarget/);
   });
 
   it('keeps the category caret within its own column on touch', () => {

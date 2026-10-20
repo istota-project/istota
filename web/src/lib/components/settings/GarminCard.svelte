@@ -9,10 +9,7 @@
     importGarminTracks,
     type GarminStatus,
   } from '$lib/api';
-  import { Button } from '$lib/components/ui';
-  import SettingsCard from './SettingsCard.svelte';
-  import SettingsField from './SettingsField.svelte';
-  import { formatDateTime } from '$lib/dateFormat';
+  import { Button, Card, Field, Input, Timestamp } from '$lib/components/ui';
 
   let loading = $state(true);
   let busy = $state(false);
@@ -148,17 +145,15 @@
     }
   }
 
-  const formatTimestamp = (iso: string | null) => formatDateTime(iso, { empty: 'never' });
-
   onMount(refresh);
 </script>
 
-<SettingsCard
+<Card
   title="Garmin Connect"
   description="Connect once for both Health and Location. Sync daily summaries (sleep, stress, body battery, steps, SpO₂, HRV, VO₂ max, resting HR, body composition) into your stats, and import GPS tracks from watch-recorded runs, hikes, and walks into your location history."
 >
   {#if loading}
-    <p class="muted">Loading…</p>
+    <p class="caption">Loading…</p>
   {:else if status.connected}
     <div class="status-row">
       <div>
@@ -167,7 +162,9 @@
       </div>
       <div>
         <div class="label muted">Last sync</div>
-        <div class="value">{formatTimestamp(status.last_sync)}</div>
+        <div class="value">
+          <Timestamp value={status.last_sync} format="datetime" empty="never" />
+        </div>
       </div>
     </div>
     {#if status.error}
@@ -176,47 +173,55 @@
       </div>
     {/if}
     <div class="actions">
-      <Button variant="primary" onclick={syncNow} disabled={busy}>
-        {busy ? 'Working…' : 'Sync health data'}
+      <Button variant="primary" onclick={syncNow} loading={busy} loadingLabel="Working…">
+        Sync health data
       </Button>
-      <Button variant="secondary" onclick={importTracks} disabled={busy}>
-        {busy ? 'Working…' : 'Import GPS tracks'}
+      <Button variant="secondary" onclick={importTracks} loading={busy} loadingLabel="Working…">
+        Import GPS tracks
       </Button>
       <Button variant="secondary" onclick={doDisconnect} disabled={busy}>Disconnect</Button>
     </div>
   {:else if mode === 'mfa'}
-    <SettingsField label="MFA code" hint="6-digit code from your Garmin authenticator app">
-      <input
+    <Field label="MFA code" hint="6-digit code from your Garmin authenticator app">
+      <Input
         type="text"
         inputmode="numeric"
         autocomplete="one-time-code"
         bind:value={mfaCodeInput}
         placeholder="000000"
       />
-    </SettingsField>
+    </Field>
     <div class="actions">
-      <Button variant="primary" onclick={submitMfa} disabled={busy || !mfaCodeInput}>
-        {busy ? 'Verifying…' : 'Verify'}
+      <Button
+        variant="primary"
+        onclick={submitMfa}
+        disabled={!mfaCodeInput}
+        loading={busy}
+        loadingLabel="Verifying…"
+      >
+        Verify
       </Button>
       <Button variant="secondary" onclick={() => (mode = 'idle')} disabled={busy}>Cancel</Button>
     </div>
   {:else}
-    <SettingsField label="Email">
-      <input type="email" bind:value={emailInput} autocomplete="username" />
-    </SettingsField>
-    <SettingsField
+    <Field label="Email">
+      <Input type="email" bind:value={emailInput} autocomplete="username" />
+    </Field>
+    <Field
       label="Password"
       hint="Credentials are used only during the OAuth exchange and are not stored."
     >
-      <input type="password" bind:value={passwordInput} autocomplete="current-password" />
-    </SettingsField>
+      <Input type="password" bind:value={passwordInput} autocomplete="current-password" />
+    </Field>
     <div class="actions">
       <Button
         variant="primary"
         onclick={startConnect}
-        disabled={busy || !emailInput || !passwordInput}
+        disabled={!emailInput || !passwordInput}
+        loading={busy}
+        loadingLabel="Connecting…"
       >
-        {busy ? 'Connecting…' : 'Connect'}
+        Connect
       </Button>
     </div>
   {/if}
@@ -227,7 +232,7 @@
   {#if info}
     <div class="banner success">{info}</div>
   {/if}
-</SettingsCard>
+</Card>
 
 <style>
   .status-row {

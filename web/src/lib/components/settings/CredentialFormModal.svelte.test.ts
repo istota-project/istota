@@ -77,7 +77,7 @@ describe('adding', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Add credential' }));
 
     const name = await screen.findByText('a credential named openrouter_key already exists');
-    expect(name.closest('label')?.textContent).toContain('Name');
+    expect(name.closest('.field')?.textContent).toContain('Name');
     expect(input(/^Name/).getAttribute('aria-invalid')).toBe('true');
     expect(input(/^Secret/).value).toBe(SECRET);
     expect(screen.getByRole('dialog')).toBeTruthy();

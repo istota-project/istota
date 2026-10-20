@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { Mail } from '@lucide/svelte';
+  import { Mail, Paperclip } from '@lucide/svelte';
   import { base } from '$app/paths';
   import { chatFileUrl } from '$lib/api';
   import { copyText } from '$lib/clipboard';
-  import { KebabMenu, type KebabItem } from '$lib/components/ui';
+  import { Icon, KebabMenu, type KebabItem } from '$lib/components/ui';
   import { renderUntrustedMarkdown } from '$lib/markdown';
   import {
     addressLabel,
@@ -126,7 +126,7 @@
       aria-expanded="false"
       onclick={() => (folded = false)}
     >
-      <span class="mail-mark" aria-hidden="true"><Mail size={13} /></span>
+      <span class="mail-mark" aria-hidden="true"><Icon icon={Mail} size="sm" /></span>
       <span>{directionLabel}</span>
       {#if counterpart}<span>· {counterpart}</span>{/if}
       {#if card.subject}<span class="mail-subject-inline">· {card.subject}</span>{/if}
@@ -134,7 +134,7 @@
     </button>
   {:else}
     <div class="mail-head">
-      <span class="mail-mark" aria-hidden="true"><Mail size={13} /></span>
+      <span class="mail-mark" aria-hidden="true"><Icon icon={Mail} size="sm" /></span>
       <span>{directionLabel}</span>
       {#if date}<span class="mail-date">{date}</span>{/if}
       <span class="mail-menu">
@@ -151,7 +151,7 @@
           <span class="mail-address">&lt;{card.from.address}&gt;</span>
         {/if}
         {#each marks as mark (mark)}
-          {@const { label, icon: Icon, warn } = SENDER_CHECKS[mark]}
+          {@const { label, icon: CheckGlyph, warn } = SENDER_CHECKS[mark]}
           <span
             class="mail-check"
             class:mail-check-warn={warn}
@@ -159,7 +159,7 @@
             title={label}
             aria-label={label}
             data-testid="sender-check"
-            data-check={mark}><Icon size={13} aria-hidden="true" /></span
+            data-check={mark}><Icon icon={CheckGlyph} size="sm" /></span
           >
         {/each}
       </div>
@@ -205,11 +205,13 @@
           {@const size = formatSize(item.size)}
           {#if item.path}
             <a class="mail-attachment" href={chatFileUrl(item.path)} download={item.filename}
-              >📎 {item.filename}{#if size}<span class="mail-size"> {size}</span>{/if}</a
+              ><Icon icon={Paperclip} size="xs" />
+              {item.filename}{#if size}<span class="mail-size"> {size}</span>{/if}</a
             >
           {:else}
             <span class="mail-attachment"
-              >📎 {item.filename}{#if size}<span class="mail-size"> {size}</span>{/if}</span
+              ><Icon icon={Paperclip} size="xs" />
+              {item.filename}{#if size}<span class="mail-size"> {size}</span>{/if}</span
             >
           {/if}
         {/each}
@@ -353,6 +355,9 @@
   .mail-attachment {
     font-size: var(--text-xs);
     color: var(--text-secondary);
+  }
+  .mail-attachment :global(.ui-icon) {
+    vertical-align: text-bottom;
   }
   a.mail-attachment {
     color: var(--link);

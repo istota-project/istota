@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { SettingsCard } from '$lib/components/settings';
-  import { EmptyState, Input } from '$lib/components/ui';
+  import { EmptyState, Field, Input, Card, Checkbox, LoadState } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
   import {
@@ -109,12 +108,13 @@
   );
 </script>
 
-<SettingsCard title="Portfolio accounts ({rows.length})">
-  {#if loadError}
-    <div class="banner error">{loadError}</div>
-  {:else if loaded && rows.length === 0}
-    <EmptyState>No portfolio accounts yet. They appear with the first positions import.</EmptyState>
-  {:else}
+<Card title="Portfolio accounts ({rows.length})">
+  <LoadState scope="card" loading={!loaded} error={loadError} empty={rows.length === 0}>
+    {#snippet emptyState()}
+      <EmptyState
+        >No portfolio accounts yet. They appear with the first positions import.</EmptyState
+      >
+    {/snippet}
     <p class="card-hint caption">
       Excluded accounts stay imported but are hidden from every chart and total. Group and type
       drive the Portfolio filters — a group is any label worth filtering by (an owner, a purpose).
@@ -136,38 +136,35 @@
             {/if}
           </div>
           <div class="account-controls control-row">
-            <label class="ctl">
-              <span class="micro-label">Group</span>
+            <Field label="Group" layout="compact">
               <Input
                 bind:value={row.group}
                 placeholder="Group"
                 list="portfolio-account-groups"
                 aria-label="Group of {row.account.account_name}"
               />
-            </label>
-            <label class="ctl">
-              <span class="micro-label">Type</span>
+            </Field>
+            <Field label="Type" layout="compact">
               <Input
                 bind:value={row.account_type}
                 placeholder="taxable"
                 list="portfolio-account-types"
                 aria-label="Type of {row.account.account_name}"
               />
-            </label>
-            <label class="excluded-toggle">
-              <input
-                type="checkbox"
-                bind:checked={row.excluded}
-                aria-label="Exclude {row.account.account_name} from summaries"
-              />
-              <span>Excluded</span>
-            </label>
+            </Field>
+            <Checkbox
+              class="excluded-toggle"
+              label="Excluded"
+              tone="muted"
+              bind:checked={row.excluded}
+              ariaLabel="Exclude {row.account.account_name} from summaries"
+            />
           </div>
         </li>
       {/each}
     </ul>
-  {/if}
-</SettingsCard>
+  </LoadState>
+</Card>
 
 <style>
   .card-hint {
@@ -202,20 +199,8 @@
     gap: var(--space-2) var(--space-3);
   }
 
-  .ctl {
-    display: grid;
-    gap: var(--space-1);
-    flex: 1 1 9rem;
-    min-width: 0;
-  }
-
-  .excluded-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
+  .account-controls :global(.excluded-toggle) {
     min-height: var(--control-height-md);
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
     white-space: nowrap;
   }
 </style>

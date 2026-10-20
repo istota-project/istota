@@ -96,7 +96,11 @@ describe('the servarr card', () => {
     expect(radarr.getByText('OK')).toBeTruthy();
     expect(radarr.getByText('radarr 5.9.1.9070 at http://10.0.0.5:7878')).toBeTruthy();
     expect(radarr.getByText('Set')).toBeTruthy();
-    expect(radarr.getByText(/checked 12m ago/)).toBeTruthy();
+    expect(
+      radarr.getByText(
+        (_, el) => el?.tagName === 'P' && /checked 12m ago/.test(el.textContent ?? ''),
+      ),
+    ).toBeTruthy();
     const link = radarr.getByRole('link', { name: 'http://10.0.0.5:7878' });
     expect(link.getAttribute('target')).toBe('_blank');
     const sonarr = within(q.getByTestId('servarr-app-sonarr'));

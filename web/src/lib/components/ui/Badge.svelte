@@ -1,17 +1,43 @@
+<script lang="ts" module>
+  export type BadgeVariant = 'neutral' | 'danger' | 'warn' | 'success' | 'info' | 'partial';
+</script>
+
 <script lang="ts">
   import type { Snippet } from 'svelte';
 
-  type Variant = 'neutral' | 'danger' | 'warn' | 'success' | 'info' | 'partial';
+  type Variant = BadgeVariant;
 
   interface Props {
     variant?: Variant;
-    /** `sm` is the admin dashboard's compact chip (`.effort-chip`,
-     *  `.admin-badge`), for a badge sitting beside dense row text. */
+    /** `sm` is the admin dashboard's compact chip, for a badge sitting
+     *  beside dense row text. */
     size?: 'md' | 'sm';
+    /**
+     * `solid` fills with the variant's `-bg`. `subtle` is the quiet pill on
+     * `--surface-raised` with only the text in the variant's colour: a
+     * service's state, a feed's type, a file's kind.
+     */
+    tone?: 'solid' | 'subtle';
+    /** A status label is caps; a name or a kind (a mime type, a count) is not. */
+    uppercase?: boolean;
+    /** A glyph before the text. */
+    icon?: Snippet;
+    /** Placement only. */
+    class?: string;
+    title?: string;
     children: Snippet;
   }
 
-  let { variant = 'neutral', size = 'md', children }: Props = $props();
+  let {
+    variant = 'neutral',
+    size = 'md',
+    tone = 'solid',
+    uppercase = true,
+    icon,
+    class: className = '',
+    title,
+    children,
+  }: Props = $props();
 </script>
 
 <!--
@@ -26,12 +52,19 @@
   Custom properties rather than a class, because a page's scoped CSS cannot
   reach inside a child component to restyle it.
 -->
-<span class="badge badge-{variant}" class:badge-sm={size === 'sm'}>{@render children()}</span>
+<span
+  class="badge badge-{variant} {className}"
+  class:badge-sm={size === 'sm'}
+  class:badge-subtle={tone === 'subtle'}
+  class:badge-lower={!uppercase}
+  {title}>{@render icon?.()}{@render children()}</span
+>
 
 <style>
   .badge {
     display: inline-flex;
     align-items: center;
+    gap: var(--space-1);
     font-size: var(--text-xs);
     text-transform: uppercase;
     letter-spacing: var(--tracking-caps);
@@ -80,5 +113,36 @@
     background: var(--badge-bg, var(--status-partial-bg));
     color: var(--badge-fg, var(--status-partial-fg));
     /* design-lint-allow-end */
+  }
+
+  /* After the variants, so it outranks their fills: the variant colours only
+     the text. The quiet pill .settings .status-pill, feeds' type column and
+     the health tags each wrote by hand. */
+  .badge-subtle {
+    /* design-lint-allow: the quiet pill's hairline padding, below --space-1. */
+    padding: 0.05rem var(--space-2);
+    background: var(--surface-raised);
+    color: var(--text-muted);
+    font-weight: var(--weight-regular);
+  }
+  .badge-subtle.badge-danger {
+    color: var(--status-danger-fg);
+  }
+  .badge-subtle.badge-warn {
+    color: var(--status-warn-fg);
+  }
+  .badge-subtle.badge-success {
+    color: var(--status-success-fg);
+  }
+  .badge-subtle.badge-info {
+    color: var(--status-info-fg);
+  }
+  .badge-subtle.badge-partial {
+    color: var(--status-partial-fg);
+  }
+
+  .badge-lower {
+    text-transform: none;
+    letter-spacing: normal;
   }
 </style>

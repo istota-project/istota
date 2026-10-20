@@ -15,6 +15,7 @@
 export const STYLE_LAYERS = [
   'src/app.css',
   'src/lib/styles/tokens.css',
+  'src/lib/styles/app-tokens.css',
   'src/lib/styles/primitives.css',
   'src/lib/styles/app-shell.css',
   'src/lib/styles/markdown.css',
@@ -63,7 +64,15 @@ const NATIVE_DIALOG_DECL = /\bfunction\s+(?:confirm|alert|prompt)\b/;
 const SNIPPET_NAME = /\{(?:#snippet|@render)\s+[\w$]+/g;
 // Default-import only. A *named* import from a component file (getShellScrollRoot
 // from AppShell.svelte) is by definition something the barrel does not re-export.
-const DEEP_IMPORT = /^\s*import\s+[A-Za-z]\w*\s+from '\$lib\/components\/ui\/[A-Za-z]+\.svelte'/;
+// Three folders keep a barrel: the primitives, and the inbox and search, which
+// left `ui/` as product code and kept one each.
+const DEEP_IMPORT =
+  /^\s*import\s+[A-Za-z]\w*\s+from '(\$lib\/components\/(?:ui|notifications|search))\/[A-Za-z]+\.svelte'/;
+
+function deepImport(line) {
+  const found = DEEP_IMPORT.exec(line);
+  return found ? [`'${found[1]}'`] : null;
+}
 const MONEY_GLOBAL = /:global\(\.money-/;
 const ALLOW_LINE = /design-lint-allow\b/;
 const ALLOW_FILE = /design-lint-allow-file\b/;
@@ -172,9 +181,44 @@ function offScaleBreakpoints(line) {
 // family joined them: `.table`, `.table-scroll` and `.divided-list` are
 // table.css's, after three copies of one table shell, two scroll wrappers and
 // eight divided lists. A page places them under its own container
-// (`.card .table-scroll`), which the anchor at the line start lets through.
-const REDEFINED_PRIMITIVE =
-  /^\s*(?::global\()?\.(?:btn|badge|icon-btn|field|chip|table|table-scroll|divided-list)\b(?![\w-])[^{]*\{\s*$/;
+// (`.panel .table-scroll`), which the anchor at the line start lets through.
+//
+// The shared blocks of primitives.css joined last (`.card-head`, `.kv`, the
+// text roles, `.banner`, `.spinner`, `.toolbar`, the title steps,
+// `.code-chip`), with `Card`'s and `ListRow`'s names (`.card`, `.ui-card`,
+// `.view-btn`, `.list-row`, `.ui-list-row`). primitives.css is a style layer
+// and so already exempt; the components are listed below.
+const PRIMITIVE_CLASSES = [
+  'btn',
+  'badge',
+  'icon-btn',
+  'field',
+  'chip',
+  'table',
+  'table-scroll',
+  'divided-list',
+  'card',
+  'ui-card',
+  'card-head',
+  'kv',
+  'micro-label',
+  'caption',
+  'muted',
+  'description',
+  'banner',
+  'spinner',
+  'view-btn',
+  'list-row',
+  'ui-list-row',
+  'toolbar',
+  'title-page',
+  'title-section',
+  'title-card',
+  'code-chip',
+];
+const REDEFINED_PRIMITIVE = new RegExp(
+  `^\\s*(?::global\\()?\\.(?:${PRIMITIVE_CLASSES.join('|')})\\b(?![\\w-])[^{]*\\{\\s*$`,
+);
 
 // An empty state is the `EmptyState` component and nothing else. Before it
 // there were seven spellings — a global `.empty`, `.money-table-empty`,
@@ -207,8 +251,8 @@ export const RULES = [
   },
   {
     id: 'deep-import',
-    test: DEEP_IMPORT,
-    hint: "import from the barrel: '$lib/components/ui'",
+    match: (line) => deepImport(line),
+    hint: 'import from this barrel, not the component file',
   },
   {
     id: 'stray-money-global',
@@ -225,6 +269,8 @@ export const RULES = [
       'src/lib/components/ui/IconButton.svelte',
       'src/lib/components/ui/Field.svelte',
       'src/lib/components/ui/Chip.svelte',
+      'src/lib/components/ui/Card.svelte',
+      'src/lib/components/ui/ListRow.svelte',
       'src/lib/styles/table.css',
     ],
     hint: 'this class belongs to a ui/ primitive or table.css — use it rather than restyling it',

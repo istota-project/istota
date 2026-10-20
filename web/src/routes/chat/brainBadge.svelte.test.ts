@@ -222,19 +222,12 @@ describe('the room brain badge', () => {
       resolve(dirname(fileURLToPath(import.meta.url)), '+page.svelte'),
       'utf8',
     );
-    const ruleFor = (sel: string) => {
-      const m = source.match(new RegExp(`\\n {2}\\${sel} \\{([\\s\\S]*?)\\n {2}\\}`));
-      expect(m, `${sel} rule not found in +page.svelte`).not.toBeNull();
-      return m![1];
-    };
-    const modelColor = ruleFor('.model-badge')
-      .match(/\n\s*color:\s*([^;]+);/)![1]
-      .trim();
-    const brainColor = ruleFor('.brain-badge')
-      .match(/\n\s*color:\s*([^;]+);/)![1]
-      .trim();
-    expect(modelColor).toBe('var(--text-muted)');
-    expect(brainColor).not.toBe(modelColor);
+    // The model badge is Chip's xs at rest, on --text-muted; the brain pin
+    // recolours it from the page.
+    const rule = source.match(/\n {2}\.room-badges :global\(\.brain-badge\) \{([\s\S]*?)\n {2}\}/);
+    expect(rule, 'brain-badge rule not found in +page.svelte').not.toBeNull();
+    const brainColor = rule![1].match(/\n\s*color:\s*([^;]+);/)![1].trim();
+    expect(brainColor).not.toBe('var(--text-muted)');
     // A token, not a literal — the badge has to work in both themes, and both
     // themes define this one.
     expect(brainColor).toMatch(/^var\(--[a-z-]+\)$/);

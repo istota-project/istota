@@ -6,8 +6,8 @@ const source = readFileSync(join(__dirname, '+page.svelte'), 'utf8');
 
 function ruleBody(selector: string): string {
   const style = source.slice(source.indexOf('<style>'));
-  const match = style.match(new RegExp(`\\n\\s*${selector.replace('.', '\\.')}\\s*\\{([^}]*)\\}`));
-  return match ? match[1] : '';
+  const start = style.indexOf(`\n  ${selector} {`);
+  return start < 0 ? '' : style.slice(start, style.indexOf('}', start));
 }
 
 // ISSUE-788: every config field is mounted at once, and the section cards are
@@ -16,12 +16,12 @@ describe('admin config section cards', () => {
   it('mark each section card in the sections loop', () => {
     const loop = source.slice(source.indexOf('{#each sections as section'));
     expect(loop).toMatch(
-      /^\{#each sections as section[^}]*\}\s*<section class="card config-section">/,
+      /^\{#each sections as section[^}]*\}\s*<Card title=\{section\.label\} class="config-section">/,
     );
   });
 
   it('skip off-screen rendering and remember their height', () => {
-    const body = ruleBody('.config-section');
+    const body = ruleBody('.config-page :global(.config-section)');
     expect(body).toMatch(/content-visibility:\s*auto;/);
     expect(body).toMatch(/contain-intrinsic-size:\s*auto\s+\d+(\.\d+)?rem;/);
   });

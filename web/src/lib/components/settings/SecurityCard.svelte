@@ -1,9 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { AuthError, changePassword, type UserAuth } from '$lib/api';
-  import { Button, Input } from '$lib/components/ui';
-  import SettingsCard from './SettingsCard.svelte';
-  import SettingsField from './SettingsField.svelte';
+  import { Button, Input, Card, Field, FormStack } from '$lib/components/ui';
 
   let { auth, onSignedOut }: { auth?: UserAuth; onSignedOut: () => void } = $props();
   let currentPassword = $state('');
@@ -35,44 +33,36 @@
 </script>
 
 {#if auth?.method === 'email'}
-  <SettingsCard
+  <Card
     title="Security"
     description={auth.can_change_password
       ? 'Changing your password signs you out of every session, including this tab.'
       : 'You sign in with an email link. To set a password, request a reset link using your login email below.'}
   >
-    <SettingsField label="Login email">
+    <Field label="Login email">
       <Input type="email" value={auth.email ?? ''} autocomplete="username" readonly />
-    </SettingsField>
+    </Field>
     {#if auth.can_change_password}
-      <form onsubmit={submit} class="vstack">
-        <SettingsField label="Current password">
+      <FormStack as="form" onsubmit={submit} disabled={busy}>
+        <Field label="Current password">
           <Input
             type="password"
             autocomplete="current-password"
             bind:value={currentPassword}
             required
-            disabled={busy}
           />
-        </SettingsField>
-        <SettingsField label="New password">
-          <Input
-            type="password"
-            autocomplete="new-password"
-            bind:value={newPassword}
-            required
-            disabled={busy}
-          />
-        </SettingsField>
-        <SettingsField label="Confirm new password">
+        </Field>
+        <Field label="New password">
+          <Input type="password" autocomplete="new-password" bind:value={newPassword} required />
+        </Field>
+        <Field label="Confirm new password">
           <Input
             type="password"
             autocomplete="new-password"
             bind:value={confirmPassword}
             required
-            disabled={busy}
           />
-        </SettingsField>
+        </Field>
         {#if error}<p class="banner error" role="alert">{error}</p>{/if}
         <div class="actions hstack wrap">
           <Button
@@ -83,11 +73,11 @@
             loadingLabel="Changing password…">Change password</Button
           >
         </div>
-      </form>
+      </FormStack>
     {:else}
       <div class="actions hstack wrap">
         <Button href="{base}/auth/reset" variant="secondary" size="sm">Set a password</Button>
       </div>
     {/if}
-  </SettingsCard>
+  </Card>
 {/if}

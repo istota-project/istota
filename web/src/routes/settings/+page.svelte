@@ -1,15 +1,10 @@
 <script lang="ts">
   import { uploadAvatar, deleteAvatar, AVATAR_ACCEPT, AuthError } from '$lib/api';
-  import { Avatar, AvatarPicker, Select } from '$lib/components/ui';
+  import { Avatar, AvatarPicker, Select, Card, Field, Checkbox, Input } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
-  import {
-    SecurityCard,
-    SettingsLayout,
-    SettingsCard,
-    SettingsField,
-  } from '$lib/components/settings';
+  import { SecurityCard, SettingsLayout } from '$lib/components/settings';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
-  import { parseListInput, profileListString } from '$lib/settings/listInput';
+  import { formatList, parseList } from '$lib/ui/parse';
   import { isManaged, managedBadge } from '$lib/settings/managed';
   import { timezoneOptions } from '$lib/settings/timezones';
 
@@ -115,18 +110,12 @@
   info={settings.info}
 >
   {#if profile}
-    <SettingsCard title="Identity">
+    <Card title="Identity">
       <p class="description">
         How Istota addresses you. User ID: <code>{profile.user_id}</code>
       </p>
 
-      <SettingsField
-        label="Profile picture"
-        labelled={false}
-        wide
-        error={avatarError}
-        warning={avatarNote}
-      >
+      <Field label="Profile picture" wide error={avatarError} warning={avatarNote}>
         <AvatarPicker
           pickLabel="Choose a profile picture"
           prompt="Click the picture to choose a file, or drop or paste one here."
@@ -154,29 +143,29 @@
           Removing an uploaded picture falls back to the one imported from Nextcloud, if there is
           one. Changing it here does not change the picture Nextcloud shows.
         </p>
-      </SettingsField>
-      <SettingsField label="Display name" badge={managedBadge(profile, 'display_name')}>
-        <input
+      </Field>
+      <Field label="Display name" badge={managedBadge(profile, 'display_name')}>
+        <Input
           type="text"
           bind:value={profile.display_name}
           disabled={isManaged(profile, 'display_name')}
         />
-      </SettingsField>
-      <SettingsField
+      </Field>
+      <Field
         label="Email addresses (comma-separated)"
         badge={managedBadge(profile, 'email_addresses')}
       >
-        <input
+        <Input
           type="text"
           disabled={isManaged(profile, 'email_addresses')}
-          value={profileListString(profile.email_addresses)}
+          value={formatList(profile.email_addresses)}
           oninput={(e) => {
             if (profile)
-              profile.email_addresses = parseListInput((e.currentTarget as HTMLInputElement).value);
+              profile.email_addresses = parseList((e.currentTarget as HTMLInputElement).value);
           }}
         />
-      </SettingsField>
-      <SettingsField
+      </Field>
+      <Field
         label="Timezone (IANA)"
         badge={managedBadge(profile, 'timezone')}
         hint="Setting a timezone here overrides your Nextcloud timezone and is kept across restarts."
@@ -191,20 +180,19 @@
             if (profile) profile.timezone = v;
           }}
         />
-      </SettingsField>
-      <SettingsField
+      </Field>
+      <Field
         label="Update timezone when I travel"
         checkbox
         badge={managedBadge(profile, 'timezone_follow_location')}
         hint="Needs the location module. Once you have settled in a new timezone for about an hour, the field above is set to it and you get a message saying so. Off by default, because it overwrites the timezone you chose. A journey in progress does not count — it waits until you have stayed somewhere."
       >
-        <input
-          type="checkbox"
+        <Checkbox
           bind:checked={profile.timezone_follow_location}
           disabled={isManaged(profile, 'timezone_follow_location')}
         />
-      </SettingsField>
-    </SettingsCard>
+      </Field>
+    </Card>
   {/if}
 
   <SecurityCard auth={identity.user.auth} onSignedOut={identity.expireSession} />

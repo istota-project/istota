@@ -364,16 +364,14 @@ select:focus-visible {
 }
 
 /* A text field's focus state: its border in --focus-field-border. The Input
-   and TextArea primitives, the full-width Select trigger that sits among them,
-   and the raw controls a Field still styles. Element-qualified so it outranks
-   a component's resting border (one class plus the scope hash) and stays
-   under `.invalid`, so a rejected value keeps its red border while focused. */
+   and TextArea primitives and the full-width Select trigger that sits among
+   them (an adorned Input draws it on its box, by :focus-within). Element-
+   qualified so it outranks a component's resting border (one class plus the
+   scope hash) and stays under `.invalid`, so a rejected value keeps its red
+   border while focused. */
 input.ui-input:focus-visible,
 textarea.ui-textarea:focus-visible,
-button.ui-select-trigger--full:focus-visible,
-.field input:where(:not([type='checkbox'], [type='radio'], .ui-input)):focus-visible,
-.field select:focus-visible,
-.field textarea:where(:not(.ui-textarea)):focus-visible {
+button.ui-select-trigger--full:focus-visible {
   border-color: var(--focus-field-border);
 }
 
@@ -543,6 +541,40 @@ input[type='week']::-webkit-date-and-time-value {
   --control-height-sm: var(--control-height-lg);
   --control-height-md: var(--control-height-lg);
   --control-radius: var(--radius-sm);
+}
+
+/* A row of controls over a list or a pane: filters, a search, a selection's
+   actions, a result count. Layout only, so it composes with `.control-row`,
+   which a toolbar mixing a text input with buttons carries as well for the
+   field tier. A class rather than a component, because no two toolbars hold
+   the same things.
+
+   min-height reserves the field tier's height whether or not the bar holds a
+   control: a bar with only a count sits as tall as one with filters, so the
+   list under it starts at one height on every tab. `.toolbar--bar` is the
+   strip form, inset and ruled off from what it sits above; its min-height
+   counts its padding (border-box). A count in a toolbar is `.caption .num`,
+   and takes the tier height too, centred in it, so it lands at the same
+   height whether the bar fits one line or wraps to two. */
+.toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-height: var(--control-height-lg);
+}
+
+.toolbar--bar {
+  min-height: calc(var(--control-height-lg) + var(--space-4));
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.toolbar > .caption {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-height-lg);
 }
 
 /* The wide-dashboard content column. A module whose pages are grids, charts

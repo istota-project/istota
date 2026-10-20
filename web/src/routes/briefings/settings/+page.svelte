@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
@@ -26,8 +27,16 @@
     type EmailAccount,
     type UserBriefingRow,
   } from '$lib/api';
-  import { ConfirmDialog, EmptyState, KebabMenu, type KebabItem } from '$lib/components/ui';
-  import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
+  import {
+    ConfirmDialog,
+    EmptyState,
+    KebabMenu,
+    type KebabItem,
+    Card,
+    Field,
+    Checkbox,
+  } from '$lib/components/ui';
+  import { SettingsLayout } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import { notifyError } from '$lib/stores/notices';
@@ -215,8 +224,8 @@
   // --- Header actions ---
   let groupEditor = $state<GroupBriefingEditor | null>(null);
   let duplicating = $state<{ from: DuplicateSource; exclude: string } | null>(null);
-  let confirmDelete = $state<UserBriefingRow | null>(null);
-  let confirmGroupDelete = $state<{ revision: number; title: string } | null>(null);
+  const confirmDelete = createConfirm<UserBriefingRow>();
+  const confirmGroupDelete = createConfirm<{ revision: number; title: string }>();
   let busy = $state(false);
 
   function personalDuplicateSource(row: UserBriefingRow): DuplicateSource {
@@ -287,8 +296,8 @@
   }
 
   async function performDelete() {
-    const row = confirmDelete;
-    confirmDelete = null;
+    const row = confirmDelete.target;
+    confirmDelete.cancel();
     if (!row?.id || busy) return;
     busy = true;
     try {
@@ -304,8 +313,8 @@
   }
 
   async function performGroupDelete() {
-    const target = confirmGroupDelete;
-    confirmGroupDelete = null;
+    const target = confirmGroupDelete.target;
+    confirmGroupDelete.cancel();
     if (!target || busy) return;
     busy = true;
     try {
@@ -337,7 +346,7 @@
           label: target.enabled ? 'Delete (turn off first)' : 'Delete',
           danger: true,
           disabled: busy || target.enabled,
-          onSelect: () => (confirmGroupDelete = target),
+          onSelect: () => confirmGroupDelete.ask(target),
         });
       return items;
     }
@@ -349,7 +358,7 @@
           label: 'Duplicate to a group',
           onSelect: () => (duplicating = { from: personalDuplicateSource(row), exclude: '' }),
         },
-        { label: 'Delete', danger: true, onSelect: () => (confirmDelete = row) },
+        { label: 'Delete', danger: true, onSelect: () => confirmDelete.ask(row) },
       ];
     }
     return [];
@@ -395,16 +404,16 @@
       <a href="{base}/settings">Settings → Preferences</a> to manage schedules and content.
     </div>
   {:else if view === 'delivery'}
-    <SettingsCard title="Email" description="For every briefing delivered to you by email.">
-      <SettingsField
+    <Card title="Email" description="For every briefing delivered to you by email.">
+      <Field
         label="Send as HTML"
         checkbox
         badge={emailHtmlManaged ? MANAGED_BADGE : undefined}
         hint="Formatted mail, so an article link stays clickable. A plain-text copy is always sent alongside it."
       >
-        <input type="checkbox" bind:checked={emailHtml} disabled={emailHtmlManaged} />
-      </SettingsField>
-    </SettingsCard>
+        <Checkbox bind:checked={emailHtml} disabled={emailHtmlManaged} />
+      </Field>
+    </Card>
     <GroupDeliveryPreferences />
   {:else if view === 'shared'}
     {#if isAdmin}<SharedBlocksSettings {browseOptions} />{/if}
@@ -474,25 +483,23 @@
   />
 {/if}
 
-{#if confirmDelete}
+{#if confirmDelete.target}
   <ConfirmDialog
-    open={true}
+    bind:open={confirmDelete.open}
     title="Delete briefing"
-    message={`Are you sure you want to delete ${confirmDelete.title || derivedTitle(confirmDelete.name)}? Its schedule and content blocks are removed. Past editions stay in your archive.`}
+    message={`Are you sure you want to delete ${confirmDelete.target.title || derivedTitle(confirmDelete.target.name)}? Its schedule and content blocks are removed. Past editions stay in your archive.`}
     confirmLabel="Delete"
     onConfirm={performDelete}
-    onCancel={() => (confirmDelete = null)}
   />
 {/if}
 
-{#if confirmGroupDelete}
+{#if confirmGroupDelete.target}
   <ConfirmDialog
-    open={true}
+    bind:open={confirmGroupDelete.open}
     title="Delete briefing"
-    message={`Are you sure you want to delete ${confirmGroupDelete.title}? It stops for every member of ${groupTarget?.label ?? 'the group'}, and any unsaved changes are lost. Editions already published stay readable.`}
+    message={`Are you sure you want to delete ${confirmGroupDelete.target.title}? It stops for every member of ${groupTarget?.label ?? 'the group'}, and any unsaved changes are lost. Editions already published stay readable.`}
     confirmLabel="Delete"
     confirmVariant="danger"
     onConfirm={performGroupDelete}
-    onCancel={() => (confirmGroupDelete = null)}
   />
 {/if}

@@ -1,6 +1,8 @@
 <script lang="ts">
   import { untrack, type Snippet } from 'svelte';
-  import { loadSetting, saveSetting } from '$lib/stores/persisted';
+  import { ChevronRight } from '@lucide/svelte';
+  import Icon from './Icon.svelte';
+  import { loadSetting, saveSetting } from '$lib/ui/persisted';
 
   interface Props {
     label: string;
@@ -51,9 +53,10 @@
         class="caret-btn touch-target"
         onclick={toggle}
         type="button"
-        aria-label={open ? 'Collapse' : 'Expand'}
+        aria-label="Show {label}"
+        aria-expanded={open}
       >
-        <span class="caret" class:open>&#9654;</span>
+        <span class="caret" class:open><Icon icon={ChevronRight} size="xs" /></span>
       </button>
       <button class="cat-select micro-label" onclick={onSelect} type="button">
         <span class="cat-label-text">{label}</span>
@@ -64,8 +67,13 @@
       {@render children()}
     {/if}
   {:else if collapsible}
-    <button class="cat-label cat-label-button micro-label" onclick={toggle} type="button">
-      <span class="caret" class:open>&#9654;</span>
+    <button
+      class="cat-label cat-label-button micro-label"
+      onclick={toggle}
+      type="button"
+      aria-expanded={open}
+    >
+      <span class="caret" class:open><Icon icon={ChevronRight} size="xs" /></span>
       <span class="cat-label-text">{label}</span>
       {#if count !== undefined}<span class="cat-count caption num">{count}</span>{/if}
     </button>
@@ -165,9 +173,11 @@
     color: var(--text-primary);
   }
 
+  /* Disclosure's marker: a ChevronRight at --icon-xs, turned down when open. */
   .caret {
-    font-size: 0.45rem;
-    display: inline-block;
+    display: inline-flex;
+    flex: none;
+    align-self: center;
     color: var(--text-dim);
     transition: transform var(--transition-fast);
   }

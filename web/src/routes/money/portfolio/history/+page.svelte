@@ -1,6 +1,6 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { page } from '$app/state';
-  import { goto } from '$app/navigation';
   import { onDestroy, untrack } from 'svelte';
   import {
     Chart,
@@ -29,13 +29,15 @@
   import { theme } from '$lib/stores/theme';
   import { base } from '$app/paths';
   import {
+    BackLink,
     Badge,
     Button,
+    Card,
     ConfirmDialog,
     EmptyState,
     KebabMenu,
     Modal,
-    PageLoading,
+    LoadState,
   } from '$lib/components/ui';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
   import { portfolioGroupBy, type PortfolioGroupBy } from '$lib/money/stores/portfolio';
@@ -69,7 +71,7 @@
   let chartCanvas: HTMLCanvasElement | undefined = $state();
   let chart: Chart | undefined;
 
-  let confirmDeleteId: number | null = $state(null);
+  const confirmDeleteId = createConfirm<number>();
   let diff: PortfolioDiff | null = $state(null);
   let diffOpen = $state(false);
 
@@ -268,8 +270,8 @@
   });
 
   async function handleDelete() {
-    const id = confirmDeleteId;
-    confirmDeleteId = null;
+    const id = confirmDeleteId.target;
+    confirmDeleteId.cancel();
     if (id == null) return;
     try {
       await deletePortfolioSnapshot(id);
@@ -307,13 +309,13 @@
       {
         label: 'Delete',
         danger: true,
-        onSelect: () => (confirmDeleteId = snapshot.id),
+        onSelect: () => confirmDeleteId.ask(snapshot.id),
       },
     ];
   }
 
   const confirmMessage = $derived.by(() => {
-    const snap = snapshots.find((s) => s.id === confirmDeleteId);
+    const snap = snapshots.find((s) => s.id === confirmDeleteId.target);
     if (!snap) return '';
     return `Are you sure you want to delete the snapshot from ${snap.exported_at.slice(0, 10)} (${snap.position_count} positions)? This permanently removes it and its positions.`;
   });
@@ -335,37 +337,28 @@
   });
 </script>
 
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else if snapshots.length === 0}
-  <EmptyState actionLabel="Import a snapshot" actionHref="{base}/money/portfolio/import">
-    No snapshots yet. Import a positions CSV to start the history.
-  </EmptyState>
-{:else}
-  <div class="money-toolbar">
+<LoadState {loading} {error} empty={snapshots.length === 0}>
+  {#snippet emptyState()}
+    <EmptyState actionLabel="Import a snapshot" actionHref="{base}/money/portfolio/import">
+      No snapshots yet. Import a positions CSV to start the history.
+    </EmptyState>
+  {/snippet}
+  <div class="money-toolbar toolbar toolbar--bar">
     <div class="toolbar-left control-row">
       {#if symbol}
         <span class="symbol-title">{symbol}</span>
-        <button
-          type="button"
-          class="clear-symbol button-reset"
-          onclick={() => goto(`${base}/money/portfolio/history`)}
-        >
-          ← All holdings
-        </button>
+        <BackLink href="{base}/money/portfolio/history" label="All holdings" />
       {/if}
     </div>
-    <span class="money-result-count">
+    <span class="caption num">
       {snapshots.length} snapshot{snapshots.length === 1 ? '' : 's'}
     </span>
   </div>
 
   <div class="history-body">
-    <div class="chart-container">
+    <Card as="div" variant="flat" padding="sm" class="chart-container">
       <div class="chart-canvas"><canvas bind:this={chartCanvas}></canvas></div>
-    </div>
+    </Card>
 
     <div class="micro-label snapshots-label">Snapshots</div>
     <!-- Header inside the .record-list scroller (the work/invoices shape), so
@@ -397,16 +390,15 @@
       {/each}
     </div>
   </div>
-{/if}
+</LoadState>
 
 <ConfirmDialog
-  open={confirmDeleteId !== null}
+  bind:open={confirmDeleteId.open}
   title="Delete snapshot"
   message={confirmMessage}
   confirmLabel="Delete"
   confirmVariant="danger"
   onConfirm={handleDelete}
-  onCancel={() => (confirmDeleteId = null)}
 />
 
 <!-- A diff is a list, and it borrows the record rows (table.css) so its rows
@@ -528,22 +520,16 @@
     font-weight: var(--weight-semibold);
   }
 
-  .clear-symbol {
-    color: var(--accent-blue);
-    font-size: var(--text-sm);
-  }
-
   .history-body {
     padding: 0 0 var(--space-4);
   }
 
-  .chart-container {
+  /* Block rather than the card's flex column: Chart.js sizes the canvas
+     from this box, and the canvas wrapper below carries the height. */
+  .history-body :global(.chart-container) {
+    display: block;
     height: 280px;
-    padding: var(--space-3);
-    background: var(--surface-card);
-    border-radius: var(--radius-card);
     margin: 0 var(--space-3) var(--space-4);
-    min-width: 0;
   }
 
   /* Chart.js sizes the canvas from its parent, and needs that parent
@@ -664,7 +650,7 @@
       display: none;
     }
 
-    .chart-container {
+    .history-body :global(.chart-container) {
       height: 200px;
     }
 

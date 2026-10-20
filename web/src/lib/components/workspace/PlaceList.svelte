@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { CategoryGroup } from '$lib/components/ui';
+  import { Icon, CategoryGroup, ListRow } from '$lib/components/ui';
   import { Folder, Cloud, Paperclip } from '@lucide/svelte';
   import type { WorkspacePlace } from '$lib/api';
   import TaskReachIcon from './TaskReachIcon.svelte';
@@ -34,30 +34,36 @@
       storageKey={`workspace:section:${group.kinds[0]}`}
     >
       {#each items as place (place.id)}
-        <a
-          class="view-btn"
-          class:active={selected === place.id}
+        <ListRow
           href={href(place.id)}
-          aria-current={selected === place.id ? 'page' : undefined}
+          active={selected === place.id}
+          title={place.label}
           aria-describedby={reachesTasks(place.reach.private)
             ? `task-reach-${place.id}`
             : undefined}
           onclick={(event) => onNavigate(event, place.id)}
         >
-          {#if place.kind === 'talk'}<Paperclip size={14} />{:else}<group.icon size={14} />{/if}
-          <span class="view-name" title={place.label}>{place.label}</span>
-          <TaskReachIcon access={place.reach.private} {botName} id={`task-reach-${place.id}`} />
-        </a>
+          {#snippet icon()}
+            <span class="place-icon"
+              >{#if place.kind === 'talk'}<Icon icon={Paperclip} size="sm" />{:else}<Icon
+                  icon={group.icon}
+                  size="sm"
+                />{/if}</span
+            >
+          {/snippet}
+          {place.label}
+          {#snippet badge()}
+            <TaskReachIcon access={place.reach.private} {botName} id={`task-reach-${place.id}`} />
+          {/snippet}
+        </ListRow>
       {/each}
     </CategoryGroup>
   {/if}
 {/each}
 
 <style>
-  .view-btn :global(svg) {
-    flex-shrink: 0;
-  }
-  .view-btn > :global(svg) {
+  .place-icon {
+    display: inline-flex;
     color: var(--accent-amber);
   }
 </style>

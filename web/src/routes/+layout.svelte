@@ -5,20 +5,24 @@
   import { page, updated } from '$app/state';
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
-  import { Menu, Sun, Moon } from '@lucide/svelte';
-  import { DropdownMenu } from 'bits-ui';
+  import { Menu as MenuIcon, Sun, Moon } from '@lucide/svelte';
   import { getMe, AuthError, type User } from '$lib/api';
   import LogoutButton from '$lib/components/LogoutButton.svelte';
   import {
+    Button,
+    Icon,
     CountPill,
-    NotificationBell,
-    SearchButton,
-    SearchDialog,
-    PageLoading,
+    Menu,
+    LoadState,
     PageLoader,
+    type MenuItem,
   } from '$lib/components/ui';
+  import { NotificationBell } from '$lib/components/notifications';
+  import { SearchButton, SearchDialog } from '$lib/components/search';
   import { theme, toggleTheme } from '$lib/stores/theme';
   import { clearNotices } from '$lib/stores/notices';
+  import { isEditableTarget } from '$lib/ui/editableTarget';
+  import { onDocumentVisible } from '$lib/ui/visibility';
   import { navUnreadCounts, startNavUnreadPoll, stopNavUnreadPoll } from '$lib/stores/navUnread';
   import { startNotificationPoll, stopNotificationPoll } from '$lib/stores/notifications';
   import { online, startConnectivity } from '$lib/stores/connectivity';
@@ -92,10 +96,7 @@
     function searchShortcut(event: KeyboardEvent) {
       if (!user || error || event.isComposing) return;
       const command = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k';
-      const target = event.target;
-      const editable =
-        target instanceof Element &&
-        target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])');
+      const editable = isEditableTarget(event);
       const slash =
         event.key === '/' &&
         !editable &&
@@ -204,11 +205,7 @@
     // The poll timer is throttled in a background tab and stopped outright in a
     // suspended PWA, so returning to the app is the moment a check is actually
     // worth something — it is also the moment a stale bundle does its damage.
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') void updated.check();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
+    return onDocumentVisible(() => void updated.check());
   });
 
   /**
@@ -418,13 +415,12 @@
     // server that *answered* leaves the store online, so no further edge is
     // coming and without this the app would hold a stale identity, silently,
     // for the life of the page.
-    const onReturn = () => {
-      if (document.visibilityState === 'visible' && !live) void loadUser();
-    };
-    document.addEventListener('visibilitychange', onReturn);
+    const offReturn = onDocumentVisible(() => {
+      if (!live) void loadUser();
+    });
     return () => {
       unwatch();
-      document.removeEventListener('visibilitychange', onReturn);
+      offReturn();
     };
   });
 
@@ -446,6 +442,44 @@
     return current.startsWith(`${base}${path}`);
   }
 
+  // The overflow menu: every section the inline links show, then Settings.
+  const navMenuItems = $derived.by((): MenuItem[] => {
+    if (!user) return [];
+    const link = (label: string, path: string): MenuItem => ({
+      label,
+      href: `${base}${path}`,
+      active: isActive(path),
+    });
+    const items: MenuItem[] = [
+      { ...link('Chat', '/chat'), ariaLabel: chatLabel, title: chatLabel, trailing: chatPill },
+    ];
+    if (user.features.workspace) items.push(link('Files', '/files'));
+    if (user.features.groups)
+      items.push({ ...link('Groups', '/groups/'), active: isActive('/groups') });
+    if (user.features.briefings) {
+      items.push({
+        ...link('Briefings', '/briefings'),
+        ariaLabel: briefingsLabel,
+        title: briefingsLabel,
+        trailing: briefingsPill,
+      });
+    }
+    if (user.features.feeds) {
+      items.push({
+        ...link('Feeds', '/feeds'),
+        ariaLabel: feedsLabel,
+        title: feedsLabel,
+        trailing: feedsPill,
+      });
+    }
+    if (user.features.location) items.push(link('Location', '/location'));
+    if (user.features.money) items.push(link('Money', '/money'));
+    if (user.features.health) items.push(link('Health', '/health'));
+    if (user.features.admin) items.push(link('Admin', '/admin'));
+    items.push(link('Settings', '/settings'));
+    return items;
+  });
+
   const pageTitle = $derived.by(() => {
     const path = page.url.pathname.replace(base, '').replace(/^\/+/, '');
     if (!path) return 'Istota';
@@ -458,258 +492,133 @@
   <title>{pageTitle}</title>
 </svelte:head>
 
+<!-- The overflow menu keeps the numeric pill; the inline links show a mark. -->
+{#snippet chatPill()}<CountPill count={chatCount ?? 0} title={chatLabel} />{/snippet}
+{#snippet briefingsPill()}<CountPill count={briefingsCount ?? 0} title={briefingsLabel} />{/snippet}
+{#snippet feedsPill()}<CountPill count={feedsCount ?? 0} title={feedsLabel} />{/snippet}
+
 <PageLoader />
 
 {#if setupRoute}
   {@render children()}
-{:else if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else if user}
-  <SearchDialog bind:open={searchOpen} features={user.features} />
-  <nav class="app-nav">
-    <a href="{base}/" class="app-name">
-      <img class="sigil" src="{base}/octopus-sigil.webp" alt="" width="19" height="20" />
-      Istota
-    </a>
-    <div class="nav-links">
-      <a
-        href="{base}/chat"
-        class:active={isActive('/chat')}
-        aria-label={chatLabel}
-        title={chatLabel}
-      >
-        Chat<CountPill count={chatCount ?? 0} title={chatLabel} shape="mark" />
-      </a>
-      {#if user.features.workspace}
-        <a href="{base}/files" class:active={isActive('/files')}>Files</a>
-      {/if}
-      {#if user.features.groups}
-        <a href="{base}/groups/" class:active={isActive('/groups')}>Groups</a>
-      {/if}
-      {#if user.features.briefings}
-        <a
-          href="{base}/briefings"
-          class:active={isActive('/briefings')}
-          aria-label={briefingsLabel}
-          title={briefingsLabel}
-        >
-          Briefings<CountPill count={briefingsCount ?? 0} title={briefingsLabel} shape="mark" />
+{:else}
+  <LoadState {loading} {error}>
+    {#if user}
+      <SearchDialog bind:open={searchOpen} features={user.features} />
+      <nav class="app-nav">
+        <a href="{base}/" class="app-name">
+          <img class="sigil" src="{base}/octopus-sigil.webp" alt="" width="19" height="20" />
+          Istota
         </a>
-      {/if}
-      {#if user.features.feeds}
-        <a
-          href="{base}/feeds"
-          class:active={isActive('/feeds')}
-          aria-label={feedsLabel}
-          title={feedsLabel}
-        >
-          Feeds<CountPill count={feedsCount ?? 0} title={feedsLabel} shape="mark" />
-        </a>
-      {/if}
-      {#if user.features.location}
-        <a href="{base}/location" class:active={isActive('/location')}>Location</a>
-      {/if}
-      {#if user.features.money}
-        <a href="{base}/money" class:active={isActive('/money')}>Money</a>
-      {/if}
-      {#if user.features.health}
-        <a href="{base}/health" class:active={isActive('/health')}>Health</a>
-      {/if}
-      {#if user.features.admin}
-        <a href="{base}/admin" class:active={isActive('/admin')}>Admin</a>
-      {/if}
-    </div>
-    <div class="nav-right">
-      <a
-        href="{base}/settings"
-        class="nav-user"
-        class:active={isActive('/settings')}
-        title="Settings"
-      >
-        {user.display_name}
-      </a>
-      <SearchButton
-        onclick={() => {
-          searchOpen = true;
-        }}
-      />
-      <NotificationBell />
-      <button
-        type="button"
-        class="nav-icon-btn touch-target theme-btn"
-        onclick={toggleTheme}
-        title={$theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-        aria-label="Toggle color theme"
-      >
-        {#if $theme === 'dark'}
-          <Sun size={15} />
-        {:else}
-          <Moon size={15} />
-        {/if}
-      </button>
-      <LogoutButton />
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger>
-          {#snippet child({ props })}
-            <button
-              class="nav-icon-btn touch-target hamburger-btn"
-              aria-label="Open menu"
-              {...props}
+        <div class="nav-links">
+          <a
+            href="{base}/chat"
+            class:active={isActive('/chat')}
+            aria-label={chatLabel}
+            title={chatLabel}
+          >
+            Chat<CountPill count={chatCount ?? 0} title={chatLabel} shape="mark" />
+          </a>
+          {#if user.features.workspace}
+            <a href="{base}/files" class:active={isActive('/files')}>Files</a>
+          {/if}
+          {#if user.features.groups}
+            <a href="{base}/groups/" class:active={isActive('/groups')}>Groups</a>
+          {/if}
+          {#if user.features.briefings}
+            <a
+              href="{base}/briefings"
+              class:active={isActive('/briefings')}
+              aria-label={briefingsLabel}
+              title={briefingsLabel}
             >
-              <Menu size={18} />
-            </button>
-          {/snippet}
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Portal>
-          <DropdownMenu.Content class="app-nav-menu" align="end" sideOffset={6}>
-            <DropdownMenu.Item>
-              {#snippet child({ props })}
-                <a
-                  href="{base}/chat"
-                  class="app-nav-menu-link"
-                  class:active={isActive('/chat')}
-                  {...props}
-                  aria-label={chatLabel}
-                  title={chatLabel}>Chat<CountPill count={chatCount ?? 0} title={chatLabel} /></a
-                >
-              {/snippet}
-            </DropdownMenu.Item>
-            {#if user.features.workspace}
-              <DropdownMenu.Item>
-                {#snippet child({ props })}
-                  <a
-                    href="{base}/files"
-                    class="app-nav-menu-link"
-                    class:active={isActive('/files')}
-                    {...props}>Files</a
-                  >
-                {/snippet}
-              </DropdownMenu.Item>
+              Briefings<CountPill count={briefingsCount ?? 0} title={briefingsLabel} shape="mark" />
+            </a>
+          {/if}
+          {#if user.features.feeds}
+            <a
+              href="{base}/feeds"
+              class:active={isActive('/feeds')}
+              aria-label={feedsLabel}
+              title={feedsLabel}
+            >
+              Feeds<CountPill count={feedsCount ?? 0} title={feedsLabel} shape="mark" />
+            </a>
+          {/if}
+          {#if user.features.location}
+            <a href="{base}/location" class:active={isActive('/location')}>Location</a>
+          {/if}
+          {#if user.features.money}
+            <a href="{base}/money" class:active={isActive('/money')}>Money</a>
+          {/if}
+          {#if user.features.health}
+            <a href="{base}/health" class:active={isActive('/health')}>Health</a>
+          {/if}
+          {#if user.features.admin}
+            <a href="{base}/admin" class:active={isActive('/admin')}>Admin</a>
+          {/if}
+        </div>
+        <div class="nav-right">
+          <a
+            href="{base}/settings"
+            class="nav-user"
+            class:active={isActive('/settings')}
+            title="Settings"
+          >
+            {user.display_name}
+          </a>
+          <SearchButton
+            onclick={() => {
+              searchOpen = true;
+            }}
+          />
+          <NotificationBell />
+          <button
+            type="button"
+            class="nav-icon-btn touch-target theme-btn"
+            onclick={toggleTheme}
+            title={$theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            aria-label="Toggle color theme"
+          >
+            {#if $theme === 'dark'}
+              <Icon icon={Sun} size="md" />
+            {:else}
+              <Icon icon={Moon} size="md" />
             {/if}
-            {#if user.features.groups}
-              <DropdownMenu.Item>
-                {#snippet child({ props })}
-                  <a
-                    href="{base}/groups/"
-                    class="app-nav-menu-link"
-                    class:active={isActive('/groups')}
-                    {...props}>Groups</a
-                  >
-                {/snippet}
-              </DropdownMenu.Item>
-            {/if}
-            {#if user.features.briefings}
-              <DropdownMenu.Item>
-                {#snippet child({ props })}
-                  <a
-                    href="{base}/briefings"
-                    class="app-nav-menu-link"
-                    class:active={isActive('/briefings')}
-                    {...props}
-                    aria-label={briefingsLabel}
-                    title={briefingsLabel}
-                    >Briefings<CountPill count={briefingsCount ?? 0} title={briefingsLabel} /></a
-                  >
-                {/snippet}
-              </DropdownMenu.Item>
-            {/if}
-            {#if user.features.feeds}
-              <DropdownMenu.Item>
-                {#snippet child({ props })}
-                  <a
-                    href="{base}/feeds"
-                    class="app-nav-menu-link"
-                    class:active={isActive('/feeds')}
-                    {...props}
-                    aria-label={feedsLabel}
-                    title={feedsLabel}
-                    >Feeds<CountPill count={feedsCount ?? 0} title={feedsLabel} /></a
-                  >
-                {/snippet}
-              </DropdownMenu.Item>
-            {/if}
-            {#if user.features.location}
-              <DropdownMenu.Item>
-                {#snippet child({ props })}
-                  <a
-                    href="{base}/location"
-                    class="app-nav-menu-link"
-                    class:active={isActive('/location')}
-                    {...props}>Location</a
-                  >
-                {/snippet}
-              </DropdownMenu.Item>
-            {/if}
-            {#if user.features.money}
-              <DropdownMenu.Item>
-                {#snippet child({ props })}
-                  <a
-                    href="{base}/money"
-                    class="app-nav-menu-link"
-                    class:active={isActive('/money')}
-                    {...props}>Money</a
-                  >
-                {/snippet}
-              </DropdownMenu.Item>
-            {/if}
-            {#if user.features.health}
-              <DropdownMenu.Item>
-                {#snippet child({ props })}
-                  <a
-                    href="{base}/health"
-                    class="app-nav-menu-link"
-                    class:active={isActive('/health')}
-                    {...props}>Health</a
-                  >
-                {/snippet}
-              </DropdownMenu.Item>
-            {/if}
-            {#if user.features.admin}
-              <DropdownMenu.Item>
-                {#snippet child({ props })}
-                  <a
-                    href="{base}/admin"
-                    class="app-nav-menu-link"
-                    class:active={isActive('/admin')}
-                    {...props}>Admin</a
-                  >
-                {/snippet}
-              </DropdownMenu.Item>
-            {/if}
-            <DropdownMenu.Item>
-              {#snippet child({ props })}
-                <a
-                  href="{base}/settings"
-                  class="app-nav-menu-link"
-                  class:active={isActive('/settings')}
-                  {...props}>Settings</a
-                >
-              {/snippet}
-            </DropdownMenu.Item>
-          </DropdownMenu.Content>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Root>
-    </div>
-  </nav>
-  <main
-    class="app-content"
-    class:app-content-fill={isActive('/') ||
-      isActive('/chat') ||
-      isActive('/files') ||
-      isActive('/groups') ||
-      isActive('/location') ||
-      isActive('/feeds') ||
-      isActive('/money') ||
-      isActive('/health') ||
-      isActive('/briefings') ||
-      isActive('/admin') ||
-      isActive('/settings')}
-  >
-    {@render children()}
-    <FileViewerHost />
-  </main>
+          </button>
+          <LogoutButton />
+          <Menu items={navMenuItems} label="Sections">
+            {#snippet trigger(props)}
+              <button
+                class="nav-icon-btn touch-target hamburger-btn"
+                aria-label="Open menu"
+                {...props}
+              >
+                <Icon icon={MenuIcon} size="lg" />
+              </button>
+            {/snippet}
+          </Menu>
+        </div>
+      </nav>
+      <main
+        class="app-content"
+        class:app-content-fill={isActive('/') ||
+          isActive('/chat') ||
+          isActive('/files') ||
+          isActive('/groups') ||
+          isActive('/location') ||
+          isActive('/feeds') ||
+          isActive('/money') ||
+          isActive('/health') ||
+          isActive('/briefings') ||
+          isActive('/admin') ||
+          isActive('/settings')}
+      >
+        {@render children()}
+        <FileViewerHost />
+      </main>
+    {/if}
+  </LoadState>
 {/if}
 
 {#if updated.current}
@@ -717,7 +626,9 @@
        ways a fresh one would not, and that is exactly when the prompt matters. -->
   <div class="update-toast" role="status">
     <span>A new version is available.</span>
-    <button type="button" onclick={() => location.reload()}>Reload</button>
+    <Button variant="primary" size="sm" class="toast-reload" onclick={() => location.reload()}
+      >Reload</Button
+    >
   </div>
 {/if}
 
@@ -754,14 +665,7 @@
   .update-toast span {
     text-wrap: balance;
   }
-  .update-toast button {
-    font: inherit;
-    border: none;
-    border-radius: var(--radius-pill);
-    padding: var(--space-1) var(--space-3);
-    background: var(--accent-blue);
-    color: var(--on-accent-fg);
-    cursor: pointer;
+  .update-toast :global(.toast-reload) {
     white-space: nowrap;
   }
 

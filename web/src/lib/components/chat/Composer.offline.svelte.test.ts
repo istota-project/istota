@@ -89,7 +89,11 @@ const btn = (c: HTMLElement, label: string) =>
 async function pick(container: HTMLElement, files: unknown[]) {
   photos.mockResolvedValue(files);
   await fireEvent.click(btn(container, 'Attach file')!);
-  await fireEvent.click(btn(container, 'Photo Library')!);
+  // The menu portals to <body>; its row is found there by its label.
+  const row = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+    (el) => el.textContent?.trim() === 'Photo Library',
+  );
+  await fireEvent.click(row!);
   // Until the in-flight marker clears: holding a file is several awaits deep
   // (the headroom question, the read, the write) and a fixed number of ticks
   // would silently start asserting against a half-finished batch.

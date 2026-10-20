@@ -1,11 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Button, EmptyState, NoticeBanner } from '$lib/components/ui';
+  import { Button, EmptyState, Alert, Card, LoadMore, Timestamp } from '$lib/components/ui';
   import TextFileEditor from '$lib/components/TextFileEditor.svelte';
   import TextPreview from '$lib/components/viewer/TextPreview.svelte';
-  import { SettingsCard } from '$lib/components/settings';
   import { formatBytes } from '$lib/format';
-  import { formatDateTime, formatRelative } from '$lib/dateFormat';
   import {
     getGroupMemory,
     saveGroupMemory,
@@ -126,11 +124,11 @@
 </script>
 
 <div class="notebook">
-  {#if notebook?.large}<NoticeBanner variant="warn" title="Large notebook" collapsed={false}
-      >Keep the notebook concise so shared facts remain easy to find.</NoticeBanner
+  {#if notebook?.large}<Alert variant="warn" title="Large notebook" collapsed={false}
+      >Keep the notebook concise so shared facts remain easy to find.</Alert
     >{/if}
-  {#if auditWarning}<NoticeBanner variant="warn" title={auditWarning} />{/if}
-  <SettingsCard title="Notebook" description={charter}>
+  {#if auditWarning}<Alert variant="warn" title={auditWarning} />{/if}
+  <Card title="Notebook" description={charter}>
     {#snippet status()}{#if notebook}<span class="caption">{formatBytes(notebook.bytes)}</span
         >{/if}{/snippet}
     {#snippet actions()}{#if notebook}
@@ -158,14 +156,12 @@
       {#if notebook.last_change}<p class="caption last-change">
           Last changed by {notebook.last_change.user_id ||
             'an unknown actor'}{#if notebook.last_change.ts}
-            <span title={formatDateTime(notebook.last_change.ts)}
-              >{formatRelative(notebook.last_change.ts)}</span
-            >{/if}
+            <Timestamp value={notebook.last_change.ts} format="relative" />{/if}
         </p>{/if}
     {/if}
-  </SettingsCard>
+  </Card>
   {#if activityOpen}
-    <SettingsCard
+    <Card
       title="Recorded changes"
       description="Direct file edits may not appear here. These records are not restorable versions."
     >
@@ -175,8 +171,12 @@
             <li class="change">
               <div class="change-head">
                 <span class="change-actor">{entry.user_id || 'Unknown actor'}</span>
-                <span class="caption" title={formatDateTime(entry.ts)}
-                  >{entry.ts ? formatRelative(entry.ts) : 'Unknown time'}{#if entry.source}
+                <span class="caption"
+                  ><Timestamp
+                    value={entry.ts}
+                    format="relative"
+                    empty="Unknown time"
+                  />{#if entry.source}
                     · {entry.source}{/if}</span
                 >
               </div>
@@ -201,11 +201,14 @@
       {:else if !entries.length && !activityBusy}<EmptyState size="sm"
           >No recorded changes yet.</EmptyState
         >{/if}
-      {#if activityBusy}<p class="caption">Loading recorded changes…</p>
-      {:else if cursor}<div class="actions">
-          <Button size="sm" onclick={() => loadActivity(true)}>Load older changes</Button>
-        </div>{/if}
-    </SettingsCard>
+      {#if activityBusy && !entries.length}<p class="caption">Loading recorded changes…</p>
+      {:else}<LoadMore
+          onload={() => loadActivity(true)}
+          hasMore={!!cursor}
+          loading={activityBusy}
+          label="Load older changes"
+        />{/if}
+    </Card>
   {/if}
 </div>
 <TextFileEditor
@@ -231,7 +234,7 @@
   }
   /* Takes only spare height, so on the overview the card fills a grid row a
      taller neighbour set, and anywhere else it keeps its natural size. */
-  .notebook > :global(.card) {
+  .notebook > :global(.ui-card) {
     flex-grow: 1;
   }
   .actions {

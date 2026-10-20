@@ -14,7 +14,7 @@
 
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import NoticeDrawer from './NoticeDrawer.svelte';
+  import NoticeDrawer from './internal/NoticeDrawer.svelte';
 
   interface Props {
     header: Snippet;

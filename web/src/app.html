@@ -37,7 +37,7 @@
     <script>
       // Apply the saved theme and text scale before first paint to avoid a flash
       // of the wrong theme / a reflow once the size lands. Mirrors
-      // lib/stores/persisted.ts (values are JSON-encoded).
+      // lib/ui/persisted.ts (values are JSON-encoded).
       (function () {
         var root = document.documentElement;
         function read(key, fallback) {

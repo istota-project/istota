@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { ConfigRequest, ConfigRequestStatus } from '$lib/api';
-  import { Badge, Button } from '$lib/components/ui';
+  import { Badge, Button, Card, Disclosure } from '$lib/components/ui';
   import { formatDateTime } from '$lib/dateFormat';
   import DiffBlock from './DiffBlock.svelte';
 
@@ -45,8 +45,7 @@
   change brings back its config.toml through the same review as any other
   change; credentials and the admin list stay as they are now.
 -->
-<section class="card">
-  <header class="section-header"><h2 class="title-section">History</h2></header>
+<Card title="History">
   {#if error}
     <p class="form-error">{error}</p>
   {:else if requests === null}
@@ -83,8 +82,7 @@
             {request.admin_id} · {formatDateTime(request.finished_at ?? request.created_at)}
           </p>
           {#if request.diff_text || request.output_text}
-            <details class="history-details">
-              <summary class="caption">Details</summary>
+            <Disclosure summary="Details">
               <div class="history-body">
                 {#if request.diff_text}<DiffBlock lines={request.diff_text.split('\n')} />{/if}
                 {#if request.output_text}
@@ -94,13 +92,13 @@
                   </div>
                 {/if}
               </div>
-            </details>
+            </Disclosure>
           {/if}
         </li>
       {/each}
     </ul>
   {/if}
-</section>
+</Card>
 
 <style>
   .history-row {
@@ -140,11 +138,6 @@
   .history-summary {
     color: var(--text-secondary);
     overflow-wrap: anywhere;
-  }
-
-  .history-details summary {
-    cursor: pointer;
-    width: fit-content;
   }
 
   .history-body {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { KebabMenu, type KebabItem } from '$lib/components/ui';
+  import { Badge, Card, KebabMenu, type KebabItem } from '$lib/components/ui';
   import type { DocumentEntity, HealthDocument } from '$lib/api';
   import { documentName, openDocumentImage, formatBytes, mimeLabel } from '$lib/health/documents';
   import { formatDate } from '$lib/dateFormat';
@@ -33,38 +33,41 @@
 </script>
 
 <li class="doc-card">
-  <div class="card-head">
-    <!-- The whole card is not a link: the kebab lives inside it, and a
+  <Card as="article">
+    <div class="card-head">
+      <!-- The whole card is not a link: the kebab lives inside it, and a
          nested interactive element inside an anchor is not addressable. -->
-    <a
-      class="name title-card"
-      href={doc.url}
-      onclick={(event) => openDocumentImage(event, doc)}
-      title={name}>{name}</a
-    >
-    <KebabMenu items={menu} ariaLabel="Document actions" />
-  </div>
-  <div class="tags">
-    <span class="tag">{mimeLabel(doc.mime)}</span>
-    <span class="tag source-{doc.source}">{doc.source}</span>
-  </div>
-  <div class="doc-meta caption">
-    <span>{formatBytes(doc.byte_size)}</span>
-    <span>{formatDate(doc.created_at)}</span>
-  </div>
-  {#if doc.notes}
-    <p class="notes caption">{doc.notes}</p>
-  {/if}
+      <a
+        class="name title-card"
+        href={doc.url}
+        onclick={(event) => openDocumentImage(event, doc)}
+        title={name}>{name}</a
+      >
+      <KebabMenu items={menu} ariaLabel="Document actions" />
+    </div>
+    <div class="tags">
+      <Badge tone="subtle" uppercase={false}>{mimeLabel(doc.mime)}</Badge>
+      <Badge tone="subtle" uppercase={false}>{doc.source}</Badge>
+    </div>
+    <div class="doc-meta caption">
+      <span>{formatBytes(doc.byte_size)}</span>
+      <span>{formatDate(doc.created_at)}</span>
+    </div>
+    {#if doc.notes}
+      <p class="notes caption">{doc.notes}</p>
+    {/if}
+  </Card>
 </li>
 
 <style>
+  /* The list item is the grid cell; the card fills it. */
   .doc-card {
-    padding: var(--space-3) var(--space-4);
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
     display: flex;
-    flex-direction: column;
+    min-width: 0;
+  }
+
+  .doc-card > :global(.ui-card) {
+    flex: 1;
     gap: var(--space-2);
     min-width: 0;
   }
@@ -93,14 +96,6 @@
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-1);
-  }
-
-  .tag {
-    font-size: var(--text-2xs);
-    color: var(--text-muted);
-    background: var(--surface-raised);
-    border-radius: var(--radius-pill);
-    padding: 0.05rem var(--space-2);
   }
 
   .doc-meta {

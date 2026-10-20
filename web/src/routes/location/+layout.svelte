@@ -3,6 +3,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { onMount } from 'svelte';
+  import { onDocumentVisible } from '$lib/ui/visibility';
   import {
     createPlace,
     deletePlace,
@@ -25,19 +26,22 @@
   } from '$lib/stores/location';
   import PlaceForm from '$lib/components/location/PlaceForm.svelte';
   import {
+    Icon,
     AppShell,
     ShellHeader,
     Sidebar,
     SidebarToggle,
     CategoryGroup,
+    ListRow,
     HeaderNav,
     IconButton,
     Chip,
     EmptyState,
+    Timestamp,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { Cog, Pencil, X } from '@lucide/svelte';
-  import { formatDate as formatIsoDate, formatMinutes } from '$lib/dateFormat';
+  import { formatMinutes } from '$lib/dateFormat';
 
   let { children } = $props();
 
@@ -104,14 +108,10 @@
     category: string;
     notes: string;
   }) {
-    try {
-      await createPlace(data);
-      closeCreate();
-      await reloadPlaces();
-      bumpDiscoverDirty();
-    } catch (e) {
-      createError = e instanceof Error ? e.message : 'Failed to save place';
-    }
+    await createPlace(data);
+    closeCreate();
+    await reloadPlaces();
+    bumpDiscoverDirty();
   }
 
   async function handleDismissCluster(data: { lat: number; lon: number; radius_meters: number }) {
@@ -159,15 +159,11 @@
     notes: string;
   }) {
     if (!editingPlace) return;
-    try {
-      await updatePlace(editingPlace.id, data);
-      editingPlace = null;
-      selectedPlace = null;
-      placeStats = null;
-      await reloadPlaces();
-    } catch {
-      // ignore
-    }
+    await updatePlace(editingPlace.id, data);
+    editingPlace = null;
+    selectedPlace = null;
+    placeStats = null;
+    await reloadPlaces();
   }
 
   async function handleDeletePlace(place: Place) {
@@ -198,8 +194,6 @@
 
   const formatDuration = (minutes: number | null) => formatMinutes(minutes, '—');
 
-  const formatDate = (iso: string | null) => formatIsoDate(iso, { empty: '—' });
-
   async function handlePlaceMove(placeId: number, lat: number, lon: number) {
     try {
       await updatePlace(placeId, { lat, lon });
@@ -229,16 +223,9 @@
     return () => onPlaceMoveStore.set(undefined);
   });
 
-  function handleVisibility() {
-    if (document.visibilityState === 'visible') {
-      reloadPlaces().catch(() => {});
-    }
-  }
-
   onMount(() => {
     reloadPlaces().catch(() => {});
-    document.addEventListener('visibilitychange', handleVisibility);
-    return () => document.removeEventListener('visibilitychange', handleVisibility);
+    return onDocumentVisible(() => reloadPlaces().catch(() => {}));
   });
 </script>
 
@@ -268,7 +255,7 @@
 			     unless one is registered. -->
         <HeaderSave />
         <Chip icon checked={onSettings} onclick={toggleSettings} title="Location settings">
-          <Cog size={14} />
+          <Icon icon={Cog} size="sm" />
         </Chip>
       {/snippet}
     </ShellHeader>
@@ -304,25 +291,25 @@
                 <span class="stats-name title-card">{selectedPlace.name}</span>
                 <div class="stats-actions">
                   <IconButton
-                    class="stats-edit touch-target"
+                    class="stats-edit"
+                    touchTarget
                     size="sm"
                     label="Edit place"
                     onclick={() => handleEditPlace(selectedPlace!)}
                     title="Edit place"
-                  >
-                    <Pencil size={13} />
-                  </IconButton>
+                    icon={Pencil}
+                  />
                   <IconButton
-                    class="stats-close touch-target"
+                    class="stats-close"
+                    touchTarget
                     size="sm"
                     label="Close place stats"
                     onclick={() => {
                       selectedPlace = null;
                       placeStats = null;
                     }}
-                  >
-                    <X size={13} />
-                  </IconButton>
+                    icon={X}
+                  />
                 </div>
               </div>
               {#if selectedPlace.notes}
@@ -357,8 +344,8 @@
                   </div>
                 </div>
                 <div class="stats-dates caption">
-                  <span>First: {formatDate(placeStats.first_visit)}</span>
-                  <span>Last: {formatDate(placeStats.last_visit)}</span>
+                  <span>First: <Timestamp value={placeStats.first_visit} empty="—" /></span>
+                  <span>Last: <Timestamp value={placeStats.last_visit} empty="—" /></span>
                 </div>
               {:else}
                 <EmptyState size="sm">No visits recorded</EmptyState>
@@ -370,14 +357,13 @@
         {#each groupedPlaces as [category, catPlaces] (category)}
           <CategoryGroup label={category} count={catPlaces.length} collapsible>
             {#each catPlaces as place (place.id)}
-              <button
-                class="place-btn"
-                class:selected={selectedPlace?.id === place.id}
+              <ListRow
+                density="sm"
+                active={selectedPlace?.id === place.id}
                 onclick={() => handlePlaceClick(place)}
-                type="button"
               >
-                <span class="place-name">{place.name}</span>
-              </button>
+                {place.name}
+              </ListRow>
             {/each}
           </CategoryGroup>
         {/each}
@@ -503,42 +489,5 @@
     white-space: pre-wrap;
     padding: var(--space-1) 0;
     border-top: 1px solid var(--border-subtle);
-  }
-
-  .place-btn {
-    display: block;
-    width: 100%;
-    min-width: 0;
-    max-width: 100%;
-    background: none;
-    border: none;
-    color: inherit;
-    font: inherit;
-    font-size: var(--text-sm);
-    line-height: var(--leading-normal);
-    cursor: pointer;
-    padding: 0.2rem var(--space-3);
-    border-radius: var(--radius-sm);
-    transition: background var(--transition-fast);
-    text-align: left;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .place-btn:hover {
-    background: var(--hover-bg);
-  }
-
-  .place-btn.selected {
-    background: var(--selected-bg);
-    color: var(--text-primary);
-  }
-
-  .place-name {
-    display: block;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 </style>

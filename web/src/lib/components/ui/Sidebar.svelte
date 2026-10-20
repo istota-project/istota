@@ -21,7 +21,7 @@
 
 <aside class="sidebar" class:open style="--sidebar-width: {width}">
   <div class="sidebar-header">
-    <span class="sidebar-title">{title}</span>
+    <span class="sidebar-title micro-label">{title}</span>
     {#if count !== undefined}<span class="sidebar-count caption num">{count}</span>{/if}
   </div>
   {#if extras}{@render extras()}{/if}
@@ -44,14 +44,6 @@
     gap: var(--space-2);
     padding: var(--space-3);
     flex-shrink: 0;
-  }
-
-  .sidebar-title {
-    font-size: var(--text-sm);
-    font-weight: var(--weight-medium);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
   }
 
   .sidebar-list {

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { X } from '@lucide/svelte';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   /**
    * Every uploaded health document, and what it is attached to (ISSUE-423).
    *
@@ -37,19 +39,21 @@
     type Immunization,
   } from '$lib/api';
   import {
+    Icon,
     Badge,
-    Button,
-    NoticeBanner,
+    Alert,
     Chip,
     ConfirmDialog,
     EmptyState,
     Field,
     KebabMenu,
-    Modal,
+    FormModal,
     Select,
     type KebabItem,
     type SelectOption,
-    PageLoading,
+    LoadState,
+    PageHeader,
+    Timestamp,
   } from '$lib/components/ui';
   import {
     attachOptions,
@@ -162,15 +166,14 @@
   let attachForId = $state<number | null>(null);
   let attachType = $state<DocumentEntity>('encounter');
   let attachId = $state('');
-  let attachError = $state('');
-  let deleteTargetId = $state<number | null>(null);
+  const deleteTargetId = createConfirm<number>();
 
   const pool = $derived({ encounters, diagnoses, immunizations });
 
   const byId = $derived(new Map(documents.map((d) => [d.id, d])));
   const attachFor = $derived(attachForId === null ? null : (byId.get(attachForId) ?? null));
   const deleteTarget = $derived(
-    deleteTargetId === null ? null : (byId.get(deleteTargetId) ?? null),
+    deleteTargetId.target === null ? null : (byId.get(deleteTargetId.target) ?? null),
   );
 
   const rows = $derived(
@@ -294,7 +297,6 @@
     attachForId = doc.id;
     attachType = 'encounter';
     attachId = '';
-    attachError = '';
   }
 
   function pickType(v: string) {
@@ -307,9 +309,8 @@
   async function attach() {
     const doc = attachFor;
     const id = Number(attachId);
-    if (!doc || !Number.isFinite(id) || id <= 0) return;
+    if (!doc || !Number.isFinite(id) || id <= 0) return false;
     const target = { type: attachType, id };
-    attachError = '';
     busy.add(doc.id);
     try {
       const out = await linkDocument(doc.id, target);
@@ -322,8 +323,6 @@
       if (!out.created) {
         notifyWarning('That document was already attached to this record.');
       }
-    } catch (e) {
-      attachError = e instanceof Error ? e.message : 'Failed to attach';
     } finally {
       busy.delete(doc.id);
     }
@@ -331,7 +330,7 @@
 
   async function confirmDelete() {
     const doc = deleteTarget;
-    deleteTargetId = null;
+    deleteTargetId.cancel();
     if (!doc) return;
     await mutate(doc.id, () => deleteDocument(doc.id).then(() => {}), 'Failed to delete');
   }
@@ -364,7 +363,7 @@
         : []),
       { label: 'Download', href: doc.url, download: documentName(doc) },
       { label: 'Attach to a record', onSelect: () => openAttach(doc) },
-      { label: 'Delete', danger: true, onSelect: () => (deleteTargetId = doc.id) },
+      { label: 'Delete', danger: true, onSelect: () => deleteTargetId.ask(doc.id) },
     ];
   }
 
@@ -374,15 +373,28 @@
   });
 </script>
 
-{#if !loading && !loadError}
-  <!-- Held back while loading so the pane centres its message rather than
-       centring it in the space left under this header. -->
-  <div class="header">
-    <div>
-      <h1 class="title-page">Documents</h1>
+{#snippet unattachedFilter()}
+  <!-- Rendered while the filter is on even at zero, so turning it off is
+             always reachable. `aria-pressed` because `checked` only draws the
+             state; see the Chip component's own note. -->
+  <Chip
+    checked={unattachedOnly}
+    aria-pressed={unattachedOnly}
+    onclick={() => (unattachedOnly = !unattachedOnly)}
+  >
+    {unattachedCount} unattached
+  </Chip>
+{/snippet}
+
+<LoadState {loading} error={loadError} empty={rows.length === 0}>
+  {#snippet header()}
+    <PageHeader
+      title="Documents"
+      actions={unattachedCount > 0 || unattachedOnly ? unattachedFilter : undefined}
+    >
       <p class="sub caption">
         <!-- Never "N on file" once the walk stopped early: the count would be
-             a claim about the store rather than about what is loaded. -->
+               a claim about the store rather than about what is loaded. -->
         {#if truncated.documents}
           showing the {documents.length} most recent
         {:else}
@@ -390,45 +402,25 @@
           {documents.length === 1 ? 'document' : 'documents'} on file
         {/if}
       </p>
-    </div>
-    {#if unattachedCount > 0 || unattachedOnly}
-      <!-- Rendered while the filter is on even at zero, so turning it off is
-           always reachable. `aria-pressed` because `checked` only draws the
-           state; see the Chip component's own note. -->
-      <Chip
-        checked={unattachedOnly}
-        aria-pressed={unattachedOnly}
-        onclick={() => (unattachedOnly = !unattachedOnly)}
-      >
-        {unattachedCount} unattached
-      </Chip>
+    </PageHeader>
+    {#if pageNotice}
+      <div class="page-notice">
+        <Alert title="Some records are not shown" variant="warn" collapsed={false}
+          >{pageNotice}</Alert
+        >
+      </div>
     {/if}
-  </div>
-{/if}
-
-<!-- Held back on a load failure alongside the header above it: that branch
-     replaces the pane, so there is no table and no picker for this to be
-     about, and the flags are whatever the last successful load left. -->
-{#if pageNotice && !loadError}
-  <div class="page-notice">
-    <NoticeBanner title="Some records are not shown" variant="warn" collapsed={false}
-      >{pageNotice}</NoticeBanner
-    >
-  </div>
-{/if}
-
-{#if loading}
-  <PageLoading />
-{:else if loadError}
-  <div class="center-msg error">{loadError}</div>
-{:else if documents.length === 0}
-  <EmptyState>
-    Nothing uploaded yet. Documents attach to a visit, a condition or a vaccination from those
-    pages, and every one of them shows up here.
-  </EmptyState>
-{:else if rows.length === 0}
-  <EmptyState>Every document is attached to a record.</EmptyState>
-{:else}
+  {/snippet}
+  {#snippet emptyState()}
+    {#if documents.length === 0}
+      <EmptyState>
+        Nothing uploaded yet. Documents attach to a visit, a condition or a vaccination from those
+        pages, and every one of them shows up here.
+      </EmptyState>
+    {:else}
+      <EmptyState>Every document is attached to a record.</EmptyState>
+    {/if}
+  {/snippet}
   <div class="table-scroll table--cards" class:refreshing bind:this={documentList}>
     <!-- svelte-ignore a11y_no_redundant_roles (Explicit roles preserve table semantics when Safari lays out rows as grids.) -->
     <table class="table table--flush documents-grid" aria-label="Health documents" role="table">
@@ -459,17 +451,15 @@
                 >
                 <Badge size="sm">{sourceLabel(doc.source)}</Badge>
                 <span class="mobile-meta card-only caption"
-                  >{formatBytes(doc.byte_size)}<span aria-hidden="true"> · </span><time
-                    datetime={doc.created_at}>{formatDate(doc.created_at)}</time
-                  ></span
+                  >{formatBytes(doc.byte_size)}<span aria-hidden="true"> · </span><Timestamp
+                    value={doc.created_at}
+                  /></span
                 >
               </div>
               {#if doc.notes}<p class="notes caption" title={doc.notes}>{doc.notes}</p>{/if}
             </td>
             <td class="size-column num card-hidden">{formatBytes(doc.byte_size)}</td>
-            <td class="added-column card-hidden"
-              ><time datetime={doc.created_at}>{formatDate(doc.created_at)}</time></td
-            >
+            <td class="added-column card-hidden"><Timestamp value={doc.created_at} /></td>
             <td class="links-column">
               <div class="links">
                 {#each links(doc) as link (`${link.entity_type}:${link.entity_id}`)}
@@ -485,7 +475,7 @@
                       class="detach touch-target"
                       disabled={busy.has(doc.id)}
                       onclick={() => detach(doc, link)}
-                      aria-label="Detach from {link.label}">×</button
+                      aria-label="Detach from {link.label}"><Icon icon={X} size="xs" /></button
                     >
                   </span>
                 {/each}
@@ -509,23 +499,23 @@
       </tbody>
     </table>
   </div>
-{/if}
+</LoadState>
 
 {#if attachFor}
-  <Modal
+  <FormModal
     open={true}
     title="Attach {documentName(attachFor)}"
     description="Pick the record this document is evidence for. To move it, attach the new record and detach the old one."
     width="30rem"
-    onOpenChange={(open) => {
-      if (!open) attachForId = null;
-    }}
+    submitLabel="Attach"
+    busyLabel="Attaching…"
+    canSubmit={!!attachId}
+    busy={attachFor !== null && busy.has(attachFor.id)}
+    onSubmit={attach}
+    onCancel={() => (attachForId = null)}
   >
     <div class="vstack">
-      <!-- `labelled={false}` on both: a Select's trigger is a <button>, so
-           inside a <label> it becomes that label's implicit control and
-           clicking the caption opens the dropdown. See web/AGENTS.md. -->
-      <Field label="Record type" labelled={false}>
+      <Field label="Record type">
         <Select
           value={attachType}
           options={entityTypes}
@@ -537,7 +527,7 @@
       <!-- `warning` rather than `hint`: a hover popover is discoverable, not
            seen, and a short pool is the reason the record you are looking for
            is not in the list. -->
-      <Field label="Record" warning={poolNotice} labelled={false}>
+      <Field label="Record" warning={poolNotice}>
         <Select
           value={attachId}
           options={attachChoices}
@@ -548,21 +538,8 @@
           fullWidth
         />
       </Field>
-      {#if attachError}
-        <p class="form-error" role="alert">{attachError}</p>
-      {/if}
     </div>
-    {#snippet footer()}
-      <Button onclick={() => (attachForId = null)}>Cancel</Button>
-      <Button
-        variant="primary"
-        onclick={attach}
-        disabled={!attachId || (attachFor !== null && busy.has(attachFor.id))}
-      >
-        Attach
-      </Button>
-    {/snippet}
-  </Modal>
+  </FormModal>
 {/if}
 
 <ConfirmDialog
@@ -575,7 +552,7 @@
   confirmLabel="Delete"
   confirmVariant="danger"
   onConfirm={confirmDelete}
-  onCancel={() => (deleteTargetId = null)}
+  onCancel={deleteTargetId.cancel}
 />
 
 <style>
@@ -583,17 +560,8 @@
     background: var(--status-info-bg);
   }
 
-  .header {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    gap: var(--space-3);
-    margin-bottom: var(--space-4);
-  }
-
   .sub {
-    margin: var(--space-1) 0 0;
+    margin: 0;
   }
 
   .name {
@@ -717,6 +685,7 @@
   }
 
   .detach {
+    display: inline-flex;
     color: inherit;
   }
 
@@ -767,12 +736,6 @@
     }
     .link-chip {
       border-radius: var(--radius-sm);
-    }
-  }
-
-  @media (max-width: 768px) {
-    .header {
-      margin-bottom: var(--space-2);
     }
   }
 </style>

@@ -2,7 +2,7 @@
 
 ISSUE-433. A room carries a colour so the chat sidebar can be scanned by
 recognition rather than read. The value stored is a **name** from this fixed
-list, never a colour — `web/src/lib/styles/tokens.css` resolves each name to a
+list, never a colour — `web/src/lib/styles/app-tokens.css` resolves each name to a
 token pair, one value per theme.
 
 **A fixed palette rather than a picker, and that is the design decision rather
@@ -20,7 +20,7 @@ than a severity".
 **Names only, deliberately.** `location-constants.ts` is the other categorical
 palette in the tree and it holds hex, because MapLibre paints in WebGL and
 cannot resolve `var(--token)`. Nothing here has that problem, so the colour
-values live in `tokens.css` alone and both this module and `roomColors.ts`
+values live in `app-tokens.css` alone and both this module and `roomColors.ts`
 carry names. `tests/test_room_colors.py` is what holds the three in step.
 
 Order is the order the picker renders, so it is part of the interface rather

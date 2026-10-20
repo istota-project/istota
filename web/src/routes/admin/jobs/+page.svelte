@@ -3,7 +3,6 @@
   import { base } from '$app/paths';
   import {
     AuthError,
-    GroupApiError,
     deleteAdminScheduledJob,
     getAdminScheduledJobs,
     setAdminScheduledJobEnabled,
@@ -16,11 +15,14 @@
     EmptyState,
     Input,
     KebabMenu,
-    PageLoading,
+    LoadState,
     type KebabItem,
+    Card,
+    Timestamp,
+    Disclosure,
   } from '$lib/components/ui';
-  import { SettingsCard, StepUpDialog } from '$lib/components/settings';
-  import { formatRelative } from '$lib/dateFormat';
+  import { ConfirmStepUpDialog } from '$lib/components/settings';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { notifyError, notifySuccess, notifyWarning } from '$lib/stores/notices';
 
   type JobState = 'running' | 'disabled' | 'suspended';
@@ -29,9 +31,8 @@
   let loadError = $state('');
   let filter = $state('');
   let busy = $state(false);
-  let disabling = $state<AdminStatsJob | null>(null);
-  let deleting = $state<AdminStatsJob | null>(null);
-  let deleteStage = $state<'confirm' | 'step-up' | null>(null);
+  const disabling = createConfirm<AdminStatsJob>();
+  const deleting = createConfirm<AdminStatsJob>();
 
   function isModuleJob(job: AdminStatsJob): boolean {
     return job.name.startsWith('_module.');
@@ -87,7 +88,6 @@
   }
 
   async function setEnabled(job: AdminStatsJob, enabled: boolean) {
-    disabling = null;
     if (busy) return;
     busy = true;
     try {
@@ -105,35 +105,15 @@
     }
   }
 
-  function startDelete(job: AdminStatsJob) {
-    deleting = job;
-    deleteStage = 'confirm';
-  }
-
-  function stopDelete() {
-    deleting = null;
-    deleteStage = null;
-  }
-
-  async function submitDelete(proof: StepUpProof) {
-    const job = deleting;
-    if (!job) return;
-    try {
-      await deleteAdminScheduledJob(job.id, job.name, proof);
-      notifySuccess(`${job.name} deleted.`);
-    } catch (e) {
-      // A refused code or password stays in the step-up dialog, which reads `reason`.
-      if (e instanceof GroupApiError && e.status === 403 && e.reason) throw e;
-      failed(e, 'The job could not be deleted.');
-    }
-    stopDelete();
-    await load();
+  async function deleteJob(job: AdminStatsJob, proof: StepUpProof) {
+    await deleteAdminScheduledJob(job.id, job.name, proof);
+    notifySuccess(`${job.name} deleted.`);
   }
 
   function rowActions(job: AdminStatsJob): KebabItem[] {
     const items: KebabItem[] = [
       stateOf(job) === 'running'
-        ? { label: 'Disable', disabled: busy, onSelect: () => (disabling = job) }
+        ? { label: 'Disable', disabled: busy, onSelect: () => disabling.ask(job) }
         : { label: 'Enable', disabled: busy, onSelect: () => setEnabled(job, true) },
     ];
     if (!isModuleJob(job))
@@ -141,157 +121,150 @@
         label: 'Delete',
         danger: true,
         disabled: busy,
-        onSelect: () => startDelete(job),
+        onSelect: () => deleting.ask(job),
       });
     return items;
   }
 </script>
 
 <div class="settings admin-page card-pane">
-  {#if jobs === null && !loadError}
-    <PageLoading label="Loading scheduled jobs…" />
-  {:else if jobs === null}
-    <div class="center-msg error">{loadError}</div>
-  {:else}
-    <div class="filter-row">
-      <Input
-        type="search"
-        aria-label="Filter scheduled jobs"
-        placeholder="Filter by user or job"
-        bind:value={filter}
-      />
-      <span class="caption">{runningCount} running · {jobs.length - runningCount} stopped</span>
-    </div>
-
-    {#snippet table(rows: AdminStatsJob[], label: string)}
-      <div class="table-scroll">
-        <table class="table table--fixed jobs-grid" aria-label={label}>
-          <thead
-            ><tr
-              ><th scope="col" class="col-user">User</th>
-              <th scope="col" class="col-job">Job</th>
-              <th scope="col" class="col-schedule">Schedule</th>
-              <th scope="col" class="col-state">State</th>
-              <th scope="col" class="col-last">Last run</th>
-              <th scope="col" class="num col-failures">Failures</th>
-              <th scope="col" class="col-actions" aria-label="Actions"></th></tr
-            ></thead
-          >
-          <tbody>
-            {#each rows as job (job.id)}
-              {@const state = stateOf(job)}
-              <tr>
-                <td class="col-user">{job.user_id}</td>
-                <td class="col-job">
-                  <div class="cell-main">{job.name}</div>
-                  {#if job.last_error}
-                    <details class="last-error">
-                      <summary class="caption">Last error</summary>
-                      <pre>{job.last_error}</pre>
-                    </details>
-                  {/if}
-                </td>
-                <td class="col-schedule"><code>{job.cron}</code></td>
-                <td class="col-state">
-                  <Badge size="sm" variant={STATE_VARIANT[state]}>{STATE_LABEL[state]}</Badge>
-                </td>
-                <td class="col-last truncate"
-                  >{job.last_run_at ? formatRelative(job.last_run_at) : 'Never'}</td
-                >
-                <td class="num col-failures" class:failing={job.consecutive_failures > 0}
-                  >{job.consecutive_failures}</td
-                >
-                <td class="col-actions">
-                  <KebabMenu
-                    items={rowActions(job)}
-                    ariaLabel="Actions for {job.user_id}/{job.name}"
-                  />
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+  <LoadState
+    loading={jobs === null && !loadError}
+    error={loadError}
+    loadingLabel="Loading scheduled jobs…"
+  >
+    {#if jobs}
+      <div class="filter-row toolbar control-row">
+        <Input
+          type="search"
+          size="toolbar"
+          class="filter-input"
+          aria-label="Filter scheduled jobs"
+          placeholder="Filter by user or job"
+          bind:value={filter}
+        />
+        <span class="caption">{runningCount} running · {jobs.length - runningCount} stopped</span>
       </div>
-    {/snippet}
 
-    <SettingsCard
-      title="User jobs"
-      description="Jobs from each user's CRON.md. Disabling writes the change to that file, so the user can turn the job back on with !cron enable. Deleting removes it from the file."
-    >
-      {#if userJobs.length}
-        {@render table(userJobs, 'User jobs')}
-      {:else if needle}
-        <EmptyState size="sm">No user jobs match the filter.</EmptyState>
-      {:else}
-        <EmptyState size="sm">No user jobs yet.</EmptyState>
-      {/if}
-    </SettingsCard>
+      {#snippet table(rows: AdminStatsJob[], label: string)}
+        <div class="table-scroll">
+          <table class="table table--fixed jobs-grid" aria-label={label}>
+            <thead
+              ><tr
+                ><th scope="col" class="col-user">User</th>
+                <th scope="col" class="col-job">Job</th>
+                <th scope="col" class="col-schedule">Schedule</th>
+                <th scope="col" class="col-state">State</th>
+                <th scope="col" class="col-last">Last run</th>
+                <th scope="col" class="num col-failures">Failures</th>
+                <th scope="col" class="col-actions" aria-label="Actions"></th></tr
+              ></thead
+            >
+            <tbody>
+              {#each rows as job (job.id)}
+                {@const state = stateOf(job)}
+                <tr>
+                  <td class="col-user">{job.user_id}</td>
+                  <td class="col-job">
+                    <div class="cell-main">{job.name}</div>
+                    {#if job.last_error}
+                      <Disclosure summary="Last error">
+                        <pre class="last-error">{job.last_error}</pre>
+                      </Disclosure>
+                    {/if}
+                  </td>
+                  <td class="col-schedule"><code>{job.cron}</code></td>
+                  <td class="col-state">
+                    <Badge size="sm" variant={STATE_VARIANT[state]}>{STATE_LABEL[state]}</Badge>
+                  </td>
+                  <td class="col-last truncate"
+                    ><Timestamp value={job.last_run_at} format="relative" empty="Never" /></td
+                  >
+                  <td class="num col-failures" class:failing={job.consecutive_failures > 0}
+                    >{job.consecutive_failures}</td
+                  >
+                  <td class="col-actions">
+                    <KebabMenu
+                      items={rowActions(job)}
+                      ariaLabel="Actions for {job.user_id}/{job.name}"
+                    />
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/snippet}
 
-    <SettingsCard
-      title="Module pollers"
-      description="Jobs a module keeps for each user who has it on. They can be disabled but not deleted, since the module would create them again."
-    >
-      {#if moduleJobs.length}
-        {@render table(moduleJobs, 'Module pollers')}
-      {:else if needle}
-        <EmptyState size="sm">No module pollers match the filter.</EmptyState>
-      {:else}
-        <EmptyState size="sm">No module pollers.</EmptyState>
-      {/if}
-    </SettingsCard>
-  {/if}
+      <Card
+        title="User jobs"
+        description="Jobs from each user's CRON.md. Disabling writes the change to that file, so the user can turn the job back on with !cron enable. Deleting removes it from the file."
+      >
+        {#if userJobs.length}
+          {@render table(userJobs, 'User jobs')}
+        {:else if needle}
+          <EmptyState size="sm">No user jobs match the filter.</EmptyState>
+        {:else}
+          <EmptyState size="sm">No user jobs yet.</EmptyState>
+        {/if}
+      </Card>
+
+      <Card
+        title="Module pollers"
+        description="Jobs a module keeps for each user who has it on. They can be disabled but not deleted, since the module would create them again."
+      >
+        {#if moduleJobs.length}
+          {@render table(moduleJobs, 'Module pollers')}
+        {:else if needle}
+          <EmptyState size="sm">No module pollers match the filter.</EmptyState>
+        {:else}
+          <EmptyState size="sm">No module pollers.</EmptyState>
+        {/if}
+      </Card>
+    {/if}
+  </LoadState>
 </div>
 
 <ConfirmDialog
-  open={disabling !== null}
+  bind:open={disabling.open}
   title="Disable job"
-  message={disabling
-    ? `Disable ${disabling.name} for ${disabling.user_id}? It stops running until it is enabled again.`
+  message={disabling.target
+    ? `Disable ${disabling.target.name} for ${disabling.target.user_id}? It stops running until it is enabled again.`
     : ''}
   confirmLabel="Disable"
+  busyLabel="Disabling…"
   confirmVariant="primary"
-  onConfirm={() => {
-    if (disabling) void setEnabled(disabling, false);
-  }}
-  onCancel={() => (disabling = null)}
+  onConfirm={() => disabling.target && setEnabled(disabling.target, false)}
 />
 
-{#if deleting}
-  <ConfirmDialog
-    open={deleteStage === 'confirm'}
+{#if deleting.target}
+  {@const job = deleting.target}
+  <ConfirmStepUpDialog
+    bind:open={deleting.open}
     title="Delete job"
-    message={`Delete ${deleting.name} for ${deleting.user_id}? It is removed from their CRON.md and stops running. This cannot be undone.`}
-    confirmLabel="Delete"
-    confirmVariant="danger"
-    challenge={deleting.name}
-    onConfirm={() => (deleteStage = 'step-up')}
-    onCancel={stopDelete}
+    message={`Delete ${job.name} for ${job.user_id}? It is removed from their CRON.md and stops running. This cannot be undone.`}
+    challenge={job.name}
+    action="admin_cron_delete"
+    onConfirm={(proof) => deleteJob(job, proof)}
+    onFailed={(e) => failed(e, 'The job could not be deleted.')}
+    onSettled={load}
   />
-{/if}
-
-{#if deleteStage === 'step-up'}
-  <StepUpDialog action="admin_cron_delete" onConfirm={submitDelete} onCancel={stopDelete} />
 {/if}
 
 <style>
   .filter-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
+    flex-wrap: nowrap;
     margin-bottom: var(--space-4);
     max-width: 36rem;
   }
-  .filter-row :global(.ui-input) {
+  .filter-row :global(.filter-input) {
     flex: 1;
   }
   .cell-main {
     overflow-wrap: anywhere;
   }
-  .last-error summary {
-    cursor: pointer;
-  }
-  .last-error pre {
-    margin: var(--space-1) 0 0;
+  .last-error {
+    margin: 0;
     font-size: var(--text-xs);
     color: var(--status-danger-fg);
     white-space: pre-wrap;

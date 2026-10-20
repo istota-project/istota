@@ -21,7 +21,7 @@ await fillApiDouble(api, {
   listPendingConfirmations: vi.fn(),
 });
 
-vi.mock('$lib/stores/persisted', () => ({
+vi.mock('$lib/ui/persisted', () => ({
   loadSetting: vi.fn(() => null),
   saveSetting: vi.fn(),
 }));

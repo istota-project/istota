@@ -7,7 +7,7 @@
     type CredentialHistory,
     type StepUpProof,
   } from '$lib/api';
-  import { Button, Modal } from '$lib/components/ui';
+  import { Button, Modal, Timestamp } from '$lib/components/ui';
   import StepUpDialog from './StepUpDialog.svelte';
   let {
     name,
@@ -46,14 +46,14 @@
   }}
 >
   {#if error}<p class="form-error" role="alert">{error}</p>{/if}
-  {#if loading}<p>Loading history…</p>
+  {#if loading}<p class="caption">Loading history…</p>
   {:else if !rows.length}<p>No saved versions.</p>
   {:else}
     <p>Restoring replaces the current fields. Their current values are kept in history.</p>
     <ul>
       {#each rows as row (row.id)}
         <li>
-          <p>{row.op} · {row.at} · {row.actor}</p>
+          <p>{row.op} · <Timestamp value={row.at} format="datetime" /> · {row.actor}</p>
           <p class="caption">{row.fields.join(', ')}</p>
           <Button
             variant="secondary"

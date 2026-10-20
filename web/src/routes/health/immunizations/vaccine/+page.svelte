@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { latest } from '$lib/ui/latest';
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import {
@@ -12,9 +13,18 @@
     type ImmunizationRef,
     type ImmunizationStatus,
   } from '$lib/api';
-  import { Badge, Button, EmptyState, KebabMenu, PageLoading } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    Card,
+    EmptyState,
+    KebabMenu,
+    LoadState,
+    PageHeader,
+    Timestamp,
+    Disclosure,
+  } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
-  import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
   let name = $derived(page.url.searchParams.get('name') || '');
   let loading = $state(true);
@@ -25,11 +35,11 @@
   let explainer: ImmunizationExplainer | null = $state(null);
   let explainerLoading = $state(false);
 
-  let loadToken = 0;
+  const loads = latest();
 
   async function load() {
     if (!name) return;
-    const token = ++loadToken;
+    const current = loads.next();
     loading = true;
     error = '';
     explainer = null;
@@ -39,272 +49,210 @@
         getImmunizationCoverage(),
         listImmunizations({ name, limit: 200 }),
       ]);
-      if (token !== loadToken) return;
+      if (!current()) return;
       ref = refResp.refs.find((r) => r.name === name) ?? null;
       entry = cov.coverage.find((c) => c.name === name) ?? null;
       history = hist.immunizations;
     } catch (e) {
-      if (token !== loadToken) return;
+      if (!current()) return;
       error = e instanceof Error ? e.message : 'Failed to load';
     } finally {
-      if (token === loadToken) loading = false;
+      if (current()) loading = false;
     }
 
-    if (entry && token === loadToken) {
+    if (entry && current()) {
       explainerLoading = true;
       try {
         const next = await getImmunizationExplainer(name);
-        if (token === loadToken) explainer = next;
+        if (current()) explainer = next;
       } catch {
         // Leave whatever was last successfully loaded in place.
       } finally {
-        if (token === loadToken) explainerLoading = false;
+        if (current()) explainerLoading = false;
       }
     }
   }
-
-  const formatDate = (iso: string | null) => formatIsoDate(iso, { empty: '—' });
 
   $effect(() => {
     if (name) load();
   });
 </script>
 
-{#if !loading && !error}
-  <!-- Held back while loading so the pane shows nothing but the centered
-       loading message, rather than centering it in the space left under
-       this header. -->
-  <div class="header">
-    <h1 class="title-page">{ref?.display_name || name}</h1>
-    <Button href="{base}/health/immunizations">Back</Button>
-  </div>
-{/if}
+<LoadState {loading} {error} empty={!ref}>
+  {#snippet header()}
+    <PageHeader
+      title={ref?.display_name || name}
+      back={{ href: `${base}/health/immunizations`, label: 'Immunizations' }}
+    />
+  {/snippet}
+  {#snippet emptyState()}
+    <EmptyState>Unknown vaccine "{name}". It may not be in the canonical reference list.</EmptyState
+    >
+  {/snippet}
+  {#if ref}
+    <div class="vaccine">
+      <Card class="coverage-card">
+        {#if entry}
+          <div class="status-row">
+            <Badge variant={immunizationStatusVariant(entry.status)}
+              >{immunizationStatusLabel(entry.status)}</Badge
+            >
+            <span class="caption">{ref.category} · {ref.schedule}</span>
+          </div>
+          <dl class="kv-stacked">
+            <div>
+              <dt>Last given</dt>
+              <dd><Timestamp value={entry.last_given} empty="—" /></dd>
+            </div>
+            <div>
+              <dt>Doses recorded</dt>
+              <dd>{entry.dose_count}</dd>
+            </div>
+            <div>
+              <dt>Next due</dt>
+              <dd><Timestamp value={entry.next_due} empty="—" /></dd>
+            </div>
+            {#if entry.days_until_due !== null}
+              <div>
+                <dt>
+                  {entry.days_until_due < 0 ? 'Days overdue' : 'Days until due'}
+                </dt>
+                <dd>{Math.abs(entry.days_until_due)}</dd>
+              </div>
+            {/if}
+          </dl>
+        {/if}
+        {#if ref.description}
+          <p class="ref-description">{ref.description}</p>
+        {/if}
+        {#if ref.typical_age_range}
+          <p class="caption">Typical age range: {ref.typical_age_range}</p>
+        {/if}
+      </Card>
 
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else if !ref}
-  <EmptyState>Unknown vaccine "{name}". It may not be in the canonical reference list.</EmptyState>
-{:else}
-  <section class="card coverage-card">
-    {#if entry}
-      <div class="status-row">
-        <Badge variant={immunizationStatusVariant(entry.status)}
-          >{immunizationStatusLabel(entry.status)}</Badge
-        >
-        <span class="caption">{ref.category} · {ref.schedule}</span>
-      </div>
-      <dl class="kv-stacked">
-        <div>
-          <dt>Last given</dt>
-          <dd>{formatDate(entry.last_given)}</dd>
-        </div>
-        <div>
-          <dt>Doses recorded</dt>
-          <dd>{entry.dose_count}</dd>
-        </div>
-        <div>
-          <dt>Next due</dt>
-          <dd>{formatDate(entry.next_due)}</dd>
-        </div>
-        {#if entry.days_until_due !== null}
-          <div>
-            <dt>
-              {entry.days_until_due < 0 ? 'Days overdue' : 'Days until due'}
-            </dt>
-            <dd>{Math.abs(entry.days_until_due)}</dd>
+      {#if explainerLoading}
+        <Card class="coverage-card explainer-placeholder">
+          <h2 class="micro-label">About this vaccine</h2>
+          <p class="caption">Loading…</p>
+        </Card>
+      {:else if explainer && explainer.summary}
+        <Disclosure variant="card" class="explainer">
+          {#snippet summary()}<span class="micro-label">About this vaccine</span>{/snippet}
+          <div class="content">
+            <p class="summary">{explainer.summary}</p>
+            {#if explainer.why_it_matters.length > 0}
+              <h3 class="micro-label">Why it matters</h3>
+              <ul>
+                {#each explainer.why_it_matters as item (item)}
+                  <li>{item}</li>
+                {/each}
+              </ul>
+            {/if}
+            {#if explainer.disclaimer}
+              <p class="disclaimer">{explainer.disclaimer}</p>
+            {/if}
+          </div>
+        </Disclosure>
+      {/if}
+
+      <section class="history">
+        <h2 class="micro-label">Dose history</h2>
+        {#if history.length === 0}
+          <EmptyState size="sm">No doses recorded yet.</EmptyState>
+        {:else}
+          <div class="table-scroll">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Product</th>
+                  <th>Dose label</th>
+                  <th>Facility</th>
+                  <th>Notes</th>
+                  <th class="col-actions"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each history as i (i.id)}
+                  <tr>
+                    <td><Timestamp value={i.date_given} empty="—" /></td>
+                    <td>{i.product_name || '—'}</td>
+                    <td>{i.dose_label || '—'}</td>
+                    <td>{i.facility || '—'}</td>
+                    <td class="notes cell-truncate">{i.notes || '—'}</td>
+                    <td class="col-actions">
+                      <KebabMenu
+                        ariaLabel="Immunization actions"
+                        items={[
+                          { label: 'Edit', href: `${base}/health/immunizations/detail?id=${i.id}` },
+                        ]}
+                      />
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
           </div>
         {/if}
-      </dl>
-    {/if}
-    {#if ref.description}
-      <p class="ref-description">{ref.description}</p>
-    {/if}
-    {#if ref.typical_age_range}
-      <p class="caption">Typical age range: {ref.typical_age_range}</p>
-    {/if}
-  </section>
-
-  {#if explainerLoading}
-    <section class="card explainer placeholder">
-      <h2 class="micro-label">About this vaccine</h2>
-      <p class="muted">Loading…</p>
-    </section>
-  {:else if explainer && explainer.summary}
-    <details class="card explainer">
-      <summary>
-        <span class="label micro-label">About this vaccine</span>
-        <span class="chev" aria-hidden="true">›</span>
-      </summary>
-      <div class="content">
-        <p class="summary">{explainer.summary}</p>
-        {#if explainer.why_it_matters.length > 0}
-          <h3 class="micro-label">Why it matters</h3>
-          <ul>
-            {#each explainer.why_it_matters as item (item)}
-              <li>{item}</li>
-            {/each}
-          </ul>
-        {/if}
-        {#if explainer.disclaimer}
-          <p class="disclaimer">{explainer.disclaimer}</p>
-        {/if}
-      </div>
-    </details>
+      </section>
+    </div>
   {/if}
-
-  <section class="history">
-    <h2 class="micro-label">Dose history</h2>
-    {#if history.length === 0}
-      <EmptyState size="sm">No doses recorded yet.</EmptyState>
-    {:else}
-      <div class="table-scroll">
-        <table class="table">
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Product</th>
-              <th>Dose label</th>
-              <th>Facility</th>
-              <th>Notes</th>
-              <th class="col-actions"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each history as i (i.id)}
-              <tr>
-                <td>{formatDate(i.date_given)}</td>
-                <td>{i.product_name || '—'}</td>
-                <td>{i.dose_label || '—'}</td>
-                <td>{i.facility || '—'}</td>
-                <td class="notes cell-truncate">{i.notes || '—'}</td>
-                <td class="col-actions">
-                  <KebabMenu
-                    ariaLabel="Immunization actions"
-                    items={[
-                      { label: 'Edit', href: `${base}/health/immunizations/detail?id=${i.id}` },
-                    ]}
-                  />
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
-    {/if}
-  </section>
-{/if}
+</LoadState>
 
 <style>
-  .header {
+  .vaccine :global(.coverage-card) {
+    margin-bottom: var(--space-4);
+  }
+  .status-row {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: var(--space-4);
-  }
-
-  .card {
-    /* The layout owns .card's box and reads its padding from this hook. A
-		   plain `padding` here is dead: `.health-frame :global(.card)` scopes to
-		   (0,3,0) and beats a page-local `.card` at (0,2,0), so the declaration
-		   never applied and every card sat at the layout default. */
-    --card-padding: 0.85rem 1rem;
-    margin-bottom: var(--space-4);
-  }
-  .coverage-card .status-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: var(--space-2);
   }
   dd {
     color: var(--text-primary);
   }
   .ref-description {
-    margin: var(--space-3) 0 0;
+    margin: 0;
     font-size: var(--text-sm);
     color: var(--text-secondary);
     line-height: var(--leading-relaxed);
     max-width: 75ch;
   }
 
-  .explainer h2 {
-    margin: 0 0 var(--space-2);
+  .vaccine :global(.explainer) {
+    margin-bottom: var(--space-4);
   }
-  details.explainer {
-    /* Zero the panel's own padding — via the hook, for the same specificity
-		   reason — so the summary and the content can each carry the full card
-		   padding themselves. Without this the two stacked and the panel was
-		   inset roughly twice as far as the coverage card above it. */
-    --card-padding: 0;
-  }
-  details.explainer > summary {
-    list-style: none;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-2);
-    /* Matches .card's padding so the collapsed panel is the same box as the
-		   coverage card above it. The padding lives on the summary and the
-		   content rather than on the <details>, or the click target would stop
-		   short of the panel's edges. */
-    padding: var(--space-3) var(--space-4);
-    user-select: none;
-  }
-  details.explainer > summary::-webkit-details-marker {
-    display: none;
-  }
-  details.explainer > summary .chev {
-    color: var(--text-dim);
-    font-size: var(--text-lg);
-    line-height: var(--leading-none);
-    transition: transform var(--transition-fast);
-  }
-  details.explainer[open] > summary .chev {
-    transform: rotate(90deg);
-  }
-  details.explainer:hover > summary .label,
-  details.explainer:hover > summary .chev {
-    color: var(--text-muted);
-  }
-  details.explainer > .content {
-    /* No top padding: the summary's own bottom padding already separates the
-		   label from the body, so adding more would double it once open. */
-    padding: 0 var(--space-4) var(--space-3);
-  }
-  .explainer h3 {
+  .content h3 {
     margin: var(--space-3) 0 var(--space-2);
   }
-  .explainer .summary {
+  .content .summary {
     margin: 0;
     font-size: var(--text-base);
     color: var(--text-secondary);
     line-height: var(--leading-relaxed);
     max-width: 75ch;
   }
-  .explainer ul {
+  .content ul {
     margin: 0;
     padding-left: 1.1rem;
     font-size: var(--text-base);
     color: var(--text-secondary);
     line-height: var(--leading-relaxed);
   }
-  .explainer li {
+  .content li {
     margin: 0.2rem 0;
     /* Same measure as .summary above, applied to the item rather than the
 		   list: the <ul>'s marker indent would otherwise eat into the width and
 		   wrap each bullet a little earlier than the paragraph. */
     max-width: 75ch;
   }
-  .explainer .disclaimer {
+  .content .disclaimer {
     margin: var(--space-3) 0 0;
     font-size: var(--text-xs);
     color: var(--text-dim);
     font-style: italic;
   }
-  .explainer.placeholder {
+  .vaccine :global(.explainer-placeholder) {
     opacity: 0.7;
   }
 

@@ -13,9 +13,7 @@
     deleteLegacyIngestToken,
     type LocationDevice,
   } from '$lib/api';
-  import { formatDate, formatRelative } from '$lib/dateFormat';
-  import { SettingsCard } from '$lib/components/settings';
-  import { Badge, Button, ConfirmDialog, EmptyState } from '$lib/components/ui';
+  import { Badge, Button, Card, ConfirmDialog, EmptyState, Timestamp } from '$lib/components/ui';
   import { trackerAvailable, trackerStatus } from '$lib/platform/nativeLocation';
   import { notifyError } from '$lib/stores/notices';
 
@@ -60,8 +58,6 @@
   }
 
   async function remove() {
-    // ConfirmDialog does not close on confirm, so its button stays live for
-    // the round trip; this guard keeps a double tap to one request.
     if (!target || removing) return;
     removing = true;
     try {
@@ -94,7 +90,7 @@
   });
 </script>
 
-<SettingsCard
+<Card
   title="Devices"
   description="Each device has its own token. Removing one stops only that device, on its next send."
 >
@@ -119,10 +115,8 @@
               {/if}
             </span>
             <span class="caption">
-              Added {formatDate(device.created_at)} · last sent {formatRelative(
-                device.last_used_at,
-                { empty: 'never' },
-              )}
+              Added <Timestamp value={device.created_at} /> · last sent
+              <Timestamp value={device.last_used_at} format="relative" empty="never" />
             </span>
           </div>
           <Button
@@ -158,15 +152,15 @@
       {/if}
     </ul>
   {/if}
-</SettingsCard>
+</Card>
 
 <ConfirmDialog
   bind:open={confirmOpen}
   title={confirmTitle}
   message={confirmMessage}
   confirmLabel="Remove"
+  busyLabel="Removing…"
   confirmVariant="danger"
-  confirmDisabled={removing}
   onConfirm={remove}
 />
 

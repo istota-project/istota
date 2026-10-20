@@ -216,7 +216,9 @@ describe('TransactionRulesCard', () => {
     // silent overwrite of anything the CLI or the agent changed meanwhile.
     await mount([rule()]);
     await openKebab('Actions for rule 31', 'Edit');
-    await fireEvent.input(screen.getByLabelText('Priority'), { target: { value: '10' } });
+    await fireEvent.input(screen.getByRole('spinbutton', { name: 'Priority' }), {
+      target: { value: '10' },
+    });
     mockedUpdate.mockResolvedValue({ status: 'ok', rule: rule({ priority: 10 }) });
 
     await fireEvent.click(screen.getByRole('button', { name: 'Save' }));

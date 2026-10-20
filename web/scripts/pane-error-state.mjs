@@ -171,6 +171,21 @@ export function findPaneErrorViolations(source) {
   return found;
 }
 
+/**
+ * `<LoadState>` at pane scope (the default) renders the whole chain itself, the
+ * failure as `.center-msg error`, so a page using it has a whole-pane failure
+ * the same as one writing the chain out. Its `header` snippet holds chrome back
+ * behind both states; a gate on `!loading` beside it would not.
+ */
+const LOAD_STATE_TAG = /<LoadState\b([^>]*)>/g;
+
+export function usesPaneLoadState(source) {
+  for (const match of source.matchAll(LOAD_STATE_TAG)) {
+    if (!/\bscope="card"/.test(match[1])) return true;
+  }
+  return false;
+}
+
 /** A chrome gate that holds back for the loading state and nothing else. */
 const HELD_FOR_LOADING_ONLY = /^!\s*loading$/;
 
@@ -193,11 +208,13 @@ const HELD_FOR_LOADING_ONLY = /^!\s*loading$/;
  */
 export function findHeldChromeViolations(source) {
   const chains = ifChains(source);
-  const hasWholePaneFailure = chains.some(
-    (chain) =>
-      chain.branches.some((b) => rendersPaneState(b.content)) &&
-      chain.branches.some((b) => isErrorBranch(b.cond)),
-  );
+  const hasWholePaneFailure =
+    usesPaneLoadState(source) ||
+    chains.some(
+      (chain) =>
+        chain.branches.some((b) => rendersPaneState(b.content)) &&
+        chain.branches.some((b) => isErrorBranch(b.cond)),
+    );
   if (!hasWholePaneFailure) return [];
 
   const found = [];

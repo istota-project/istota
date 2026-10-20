@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
@@ -18,14 +19,20 @@
   import {
     Badge,
     Button,
+    Card,
     ConfirmDialog,
     EmptyState,
     Field,
+    FormGrid,
+    FormStack,
     KebabMenu,
     Select,
     type KebabItem,
     type SelectOption,
-    PageLoading,
+    Input,
+    TextArea,
+    LoadState,
+    PageHeader,
   } from '$lib/components/ui';
   import { diagnosisStatusVariant } from '$lib/health/status';
   import { linkableConditionOptions } from '$lib/health/conditions';
@@ -50,8 +57,7 @@
   let linkPick = $state('');
   let linking = $state(false);
   let linkError = $state('');
-  let unlinkTarget: Diagnosis | null = $state(null);
-  let confirmUnlink = $state(false);
+  const unlinkTarget = createConfirm<Diagnosis>();
 
   const CANONICAL_TYPES = [
     'visit',
@@ -173,8 +179,7 @@
       linkError = e instanceof Error ? e.message : 'Failed to unlink condition';
     } finally {
       linking = false;
-      unlinkTarget = null;
-      confirmUnlink = false;
+      unlinkTarget.cancel();
     }
   }
 
@@ -184,8 +189,7 @@
       {
         label: 'Unlink from this encounter',
         onSelect: () => {
-          unlinkTarget = d;
-          confirmUnlink = true;
+          unlinkTarget.ask(d);
         },
       },
     ];
@@ -231,195 +235,192 @@
   });
 </script>
 
-{#if !loading && !error}
-  <!-- Held back while loading so the pane shows nothing but the centered
-       loading message, rather than centering it in the space left under
-       this header. -->
-  <div class="header">
-    <div>
-      <a class="back link-muted" href="{base}/health/history">← Medical history</a>
-      <h1 class="title-page">Encounter</h1>
-    </div>
-    {#if encounter && !editing}
-      <div class="actions">
-        <Button onclick={startEdit}>Edit</Button>
-        <Button variant="danger" onclick={() => (confirmDelete = true)}>Delete</Button>
-      </div>
-    {/if}
-  </div>
-{/if}
+{#snippet encounterActions()}
+  <Button onclick={startEdit}>Edit</Button>
+  <Button variant="danger" onclick={() => (confirmDelete = true)}>Delete</Button>
+{/snippet}
 
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else if encounter}
-  {#if editing}
-    <form class="form" onsubmit={save}>
-      <div class="row">
-        <Field label="Date">
-          <input type="date" bind:value={form.encounter_date} required />
-        </Field>
-        <Field label="Type">
-          <Select
-            value={form.encounter_type ?? ''}
-            options={editTypeSelectOptions}
-            onValueChange={(v) => (form.encounter_type = v)}
-            ariaLabel="Type"
-            fullWidth
-          />
-        </Field>
-        <Field label="Provider">
-          <input type="text" bind:value={form.provider} />
-        </Field>
-        <Field label="Facility">
-          <input type="text" bind:value={form.facility} />
-        </Field>
-        <Field label="Specialty">
-          <input type="text" bind:value={form.specialty} />
-        </Field>
+<LoadState {loading} {error}>
+  {#snippet header()}
+    <PageHeader
+      title="Encounter"
+      back={{ href: `${base}/health/history`, label: 'Medical history' }}
+      align="start"
+      actions={encounter && !editing ? encounterActions : undefined}
+    />
+  {/snippet}
+  {#if encounter}
+    {#if editing}
+      <div class="entry-form">
+        <Card>
+          <FormStack as="form" onsubmit={save}>
+            <FormGrid>
+              <Field label="Date">
+                <Input type="date" bind:value={form.encounter_date} required />
+              </Field>
+              <Field label="Type">
+                <Select
+                  value={form.encounter_type ?? ''}
+                  options={editTypeSelectOptions}
+                  onValueChange={(v) => (form.encounter_type = v)}
+                  ariaLabel="Type"
+                  fullWidth
+                />
+              </Field>
+              <Field label="Provider">
+                <Input type="text" bind:value={form.provider} />
+              </Field>
+              <Field label="Facility">
+                <Input type="text" bind:value={form.facility} />
+              </Field>
+              <Field label="Specialty">
+                <Input type="text" bind:value={form.specialty} />
+              </Field>
+            </FormGrid>
+            <Field label="Reason">
+              <Input type="text" bind:value={form.reason} />
+            </Field>
+            <Field label="Notes">
+              <TextArea bind:value={form.notes} rows={5} />
+            </Field>
+            <div class="form-actions">
+              <Button onclick={() => (editing = false)}>Cancel</Button>
+              <Button variant="primary" type="submit" loading={saving}>Save</Button>
+            </div>
+          </FormStack>
+        </Card>
       </div>
-      <Field label="Reason" class="full">
-        <input type="text" bind:value={form.reason} />
-      </Field>
-      <Field label="Notes" class="full">
-        <textarea bind:value={form.notes} rows="5"></textarea>
-      </Field>
-      <div class="form-actions">
-        <Button onclick={() => (editing = false)}>Cancel</Button>
-        <Button variant="primary" type="submit" loading={saving}>Save</Button>
-      </div>
-    </form>
-  {:else}
-    <section class="meta">
-      <dl class="kv-stacked">
-        <div>
-          <dt>Date</dt>
-          <dd>{formatDate(encounter.encounter_date)}</dd>
-        </div>
-        <div>
-          <dt>Type</dt>
-          <dd>{typeLabel(encounter.encounter_type)}</dd>
-        </div>
-        {#if encounter.provider}
+    {:else}
+      <section class="meta">
+        <dl class="kv-stacked">
           <div>
-            <dt>Provider</dt>
-            <dd>{encounter.provider}</dd>
+            <dt>Date</dt>
+            <dd>{formatDate(encounter.encounter_date)}</dd>
           </div>
-        {/if}
-        {#if encounter.facility}
           <div>
-            <dt>Facility</dt>
-            <dd>{encounter.facility}</dd>
+            <dt>Type</dt>
+            <dd>{typeLabel(encounter.encounter_type)}</dd>
           </div>
-        {/if}
-        {#if encounter.specialty}
-          <div>
-            <dt>Specialty</dt>
-            <dd>{encounter.specialty}</dd>
-          </div>
-        {/if}
-        {#if encounter.reason}
-          <div>
-            <dt>Reason</dt>
-            <dd>{encounter.reason}</dd>
-          </div>
-        {/if}
-      </dl>
-    </section>
-
-    {#if encounter.notes}
-      <section class="notes">
-        <h2 class="micro-label">Notes</h2>
-        <p>{encounter.notes}</p>
+          {#if encounter.provider}
+            <div>
+              <dt>Provider</dt>
+              <dd>{encounter.provider}</dd>
+            </div>
+          {/if}
+          {#if encounter.facility}
+            <div>
+              <dt>Facility</dt>
+              <dd>{encounter.facility}</dd>
+            </div>
+          {/if}
+          {#if encounter.specialty}
+            <div>
+              <dt>Specialty</dt>
+              <dd>{encounter.specialty}</dd>
+            </div>
+          {/if}
+          {#if encounter.reason}
+            <div>
+              <dt>Reason</dt>
+              <dd>{encounter.reason}</dd>
+            </div>
+          {/if}
+        </dl>
       </section>
-    {/if}
-  {/if}
 
-  <section class="related">
-    <h2 class="micro-label">Linked diagnoses</h2>
-    {#if diagnoses.length === 0}
-      <EmptyState size="sm">None.</EmptyState>
-    {:else}
-      <!-- Same card shape as the conditions list: name, then tags on their own
-           line, then the date line. Unlike the panels grid below, the card is
-           not itself a link — the kebab lives inside it, and a nested
-           interactive element inside an anchor is not addressable. -->
-      <ul class="card-grid dx-grid">
-        {#each diagnoses as d (d.id)}
-          <li class="dx-card">
-            <div class="card-head">
-              <a class="name title-card link-quiet" href="{base}/health/history/diagnoses"
-                >{d.name}</a
-              >
-              <KebabMenu items={conditionMenu(d)} ariaLabel="Condition actions" />
-            </div>
-            <div class="hstack wrap">
-              {#if d.icd10}<span class="icd code-chip">{d.icd10}</span>{/if}
-              <Badge variant={diagnosisStatusVariant(d.status)}>{d.status}</Badge>
-            </div>
-            <div class="card-meta caption">
-              {#if d.date_diagnosed}<span>Dx {formatDate(d.date_diagnosed)}</span>{/if}
-            </div>
-          </li>
-        {/each}
-      </ul>
+      {#if encounter.notes}
+        <section class="notes">
+          <h2 class="micro-label">Notes</h2>
+          <p>{encounter.notes}</p>
+        </section>
+      {/if}
     {/if}
 
-    <div class="link-row">
-      <Select
-        value={linkPick}
-        options={linkOptions}
-        onValueChange={(v) => (linkPick = v)}
-        placeholder={linkOptions.length ? 'Link an existing condition…' : 'No conditions to link'}
-        disabled={linking || linkOptions.length === 0}
-        ariaLabel="Link an existing condition"
-        size="md"
-      />
-      <Button
-        onclick={linkCondition}
-        disabled={!linkPick || linking}
-        loading={linking}
-        loadingLabel="Linking…">Link</Button
-      >
-    </div>
-    {#if linkError}
-      <div class="banner error">{linkError}</div>
-    {/if}
-  </section>
-
-  <section class="related">
-    <h2 class="micro-label">Linked panels</h2>
-    {#if panels.length === 0}
-      <EmptyState size="sm">None.</EmptyState>
-    {:else}
-      <ul class="card-grid">
-        {#each panels as p (p.id)}
-          <li>
-            <a href="{base}/health/labs/panel?id={p.id}">
-              <h3 class="name title-card">{formatDate(p.drawn_at)}</h3>
+    <section class="related">
+      <h2 class="micro-label">Linked diagnoses</h2>
+      {#if diagnoses.length === 0}
+        <EmptyState size="sm">None.</EmptyState>
+      {:else}
+        <!-- Same card shape as the conditions list: name, then tags on their own
+             line, then the date line. Unlike the panels grid below, the card is
+             not itself a link — the kebab lives inside it, and a nested
+             interactive element inside an anchor is not addressable. -->
+        <ul class="card-grid dx-grid">
+          {#each diagnoses as d (d.id)}
+            <li class="dx-card">
+              <div class="card-head">
+                <a class="name title-card link-quiet" href="{base}/health/history/diagnoses"
+                  >{d.name}</a
+                >
+                <KebabMenu items={conditionMenu(d)} ariaLabel="Condition actions" />
+              </div>
               <div class="hstack wrap">
-                <span class="count-tag">
-                  {p.biomarker_count} marker{p.biomarker_count === 1 ? '' : 's'}
-                </span>
+                {#if d.icd10}<span class="icd code-chip">{d.icd10}</span>{/if}
+                <Badge variant={diagnosisStatusVariant(d.status)}>{d.status}</Badge>
               </div>
               <div class="card-meta caption">
-                {#if p.lab_name}<span>{p.lab_name}</span>{/if}
+                {#if d.date_diagnosed}<span>Dx {formatDate(d.date_diagnosed)}</span>{/if}
               </div>
-            </a>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  </section>
+            </li>
+          {/each}
+        </ul>
+      {/if}
 
-  <section class="related">
-    <h2 class="micro-label">Documents</h2>
-    {#if encounter}
-      <DocumentList entityType="encounter" entityId={encounter.id} {documents} />
-    {/if}
-  </section>
-{/if}
+      <div class="link-row">
+        <Select
+          value={linkPick}
+          options={linkOptions}
+          onValueChange={(v) => (linkPick = v)}
+          placeholder={linkOptions.length ? 'Link an existing condition…' : 'No conditions to link'}
+          disabled={linking || linkOptions.length === 0}
+          ariaLabel="Link an existing condition"
+          size="md"
+        />
+        <Button
+          onclick={linkCondition}
+          disabled={!linkPick || linking}
+          loading={linking}
+          loadingLabel="Linking…">Link</Button
+        >
+      </div>
+      {#if linkError}
+        <div class="banner error">{linkError}</div>
+      {/if}
+    </section>
+
+    <section class="related">
+      <h2 class="micro-label">Linked panels</h2>
+      {#if panels.length === 0}
+        <EmptyState size="sm">None.</EmptyState>
+      {:else}
+        <ul class="card-grid">
+          {#each panels as p (p.id)}
+            <li>
+              <a href="{base}/health/labs/panel?id={p.id}">
+                <h3 class="name title-card">{formatDate(p.drawn_at)}</h3>
+                <div class="hstack wrap">
+                  <Badge tone="subtle" uppercase={false}>
+                    {p.biomarker_count} marker{p.biomarker_count === 1 ? '' : 's'}
+                  </Badge>
+                </div>
+                <div class="card-meta caption">
+                  {#if p.lab_name}<span>{p.lab_name}</span>{/if}
+                </div>
+              </a>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </section>
+
+    <section class="related">
+      <h2 class="micro-label">Documents</h2>
+      {#if encounter}
+        <DocumentList entityType="encounter" entityId={encounter.id} {documents} />
+      {/if}
+    </section>
+  {/if}
+</LoadState>
 
 <ConfirmDialog
   bind:open={confirmDelete}
@@ -433,35 +434,17 @@
      than the red one: it is the "did you mean that" gate a document detach
      gets, not a destructive action. -->
 <ConfirmDialog
-  bind:open={confirmUnlink}
+  bind:open={unlinkTarget.open}
   title="Unlink condition"
-  message={`Are you sure you want to unlink ${unlinkTarget?.name ?? 'this condition'} from this encounter? The condition is kept, along with its links to any other encounters.`}
+  message={`Are you sure you want to unlink ${unlinkTarget.target?.name ?? 'this condition'} from this encounter? The condition is kept, along with its links to any other encounters.`}
   confirmLabel="Unlink"
   confirmVariant="primary"
-  onConfirm={() => unlinkTarget && unlinkCondition(unlinkTarget)}
-  onCancel={() => (unlinkTarget = null)}
+  onConfirm={() => unlinkTarget.target && unlinkCondition(unlinkTarget.target)}
 />
 
 <style>
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: var(--space-4);
-    margin-bottom: var(--space-4);
-  }
-  .back {
-    display: inline-block;
-    font-size: var(--text-xs);
-    margin-bottom: var(--space-1);
-  }
   h2 {
     margin: 1.25rem 0 var(--space-2);
-  }
-
-  .actions {
-    display: flex;
-    gap: var(--space-2);
   }
 
   .meta {
@@ -553,31 +536,9 @@
   .icd {
     color: var(--text-muted);
   }
-  .count-tag {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-    background: var(--surface-raised);
-    padding: 0.05rem var(--space-2);
-    border-radius: var(--radius-sm);
-  }
 
-  .form {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    padding: var(--space-3) var(--space-4);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
+  .entry-form {
     margin-bottom: var(--space-4);
-  }
-  .form .row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
-    gap: var(--space-3);
-  }
-  .form :global(.field.full) {
-    grid-column: 1 / -1;
   }
   /* The diagnoses grid keeps the shared grid geometry but moves the card
      chrome from the anchor onto the <li>, since the card holds a kebab

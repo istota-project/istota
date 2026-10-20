@@ -1,8 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { KEY_RE, KEY_HINT, type ServiceRow, type ServiceInput } from '$lib/money/api';
-  import { Modal, Button, Select, type SelectOption } from '$lib/components/ui';
-  import { SettingsField } from '$lib/components/settings';
+  import { FormModal, Select, type SelectOption, Field, Input } from '$lib/components/ui';
 
   /**
    * Create/edit form for a billable service.
@@ -15,13 +14,11 @@
    */
   interface Props {
     service?: ServiceRow | null;
-    onSave: (key: string, data: ServiceInput) => void;
+    onSave: (key: string, data: ServiceInput) => void | Promise<void>;
     onCancel: () => void;
-    error?: string;
-    saving?: boolean;
   }
 
-  let { service = null, onSave, onCancel, error = '', saving = false }: Props = $props();
+  let { service = null, onSave, onCancel }: Props = $props();
 
   const isEdit = untrack(() => !!service);
 
@@ -66,12 +63,9 @@
       ? `"${legacyType}" is not a billing type — it bills as hours. Pick one to fix it.`
       : '',
   );
-  const canSave = $derived(
-    !!displayName.trim() && (isEdit || (!!key && !keyError)) && !rateError && !saving,
-  );
+  const canSave = $derived(!!displayName.trim() && (isEdit || (!!key && !keyError)) && !rateError);
 
   function handleSave() {
-    if (!canSave) return;
     const data: ServiceInput = {
       display_name: displayName.trim(),
       type,
@@ -83,96 +77,57 @@
     // totals from live config, silently reprices every past invoice carrying
     // this service to nothing.
     if (type !== 'other' && rate.trim()) data.rate = Number(rate.trim());
-    onSave(isEdit ? (service as ServiceRow).key : key.trim(), data);
-  }
-
-  function handleOpenChange(next: boolean) {
-    if (!next) onCancel();
-  }
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key !== 'Enter') return;
-    if (!(e.target instanceof HTMLInputElement)) return;
-    handleSave();
+    return onSave(isEdit ? (service as ServiceRow).key : key.trim(), data);
   }
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
-
-<Modal
+<FormModal
   bind:open
   title={isEdit ? `Edit ${service?.display_name || service?.key}` : 'Add service'}
-  onOpenChange={handleOpenChange}
   width="400px"
+  canSubmit={canSave}
+  onSubmit={handleSave}
+  {onCancel}
 >
   <div class="vstack" style:--vstack-gap="var(--space-2)">
     {#if isEdit}
-      <div class="static-key">
-        <span>Key</span>
-        <code>{service?.key}</code>
-        <small class="caption">The key is the identity — work entries reference it by name.</small>
-      </div>
+      <Field label="Key" description="The key is the identity — work entries reference it by name.">
+        <code class="key-value">{service?.key}</code>
+      </Field>
     {:else}
-      <SettingsField label="Key" hint="Short identifier used by work entries." error={keyError}>
-        <input type="text" bind:value={key} placeholder="consulting" autocomplete="off" />
-      </SettingsField>
+      <Field label="Key" hint="Short identifier used by work entries." error={keyError}>
+        <Input type="text" bind:value={key} placeholder="consulting" autocomplete="off" />
+      </Field>
     {/if}
 
-    <SettingsField label="Display name" hint="Printed on the invoice line.">
-      <input type="text" bind:value={displayName} placeholder="Consulting" />
-    </SettingsField>
+    <Field label="Display name" hint="Printed on the invoice line.">
+      <Input type="text" bind:value={displayName} placeholder="Consulting" />
+    </Field>
 
-    <SettingsField label="Type" warning={typeWarning}>
+    <Field label="Type" warning={typeWarning}>
       <Select bind:value={type} options={typeOptions} fullWidth ariaLabel="Service type" />
-    </SettingsField>
+    </Field>
 
     {#if type === 'other'}
       <p class="field-note caption">Rate is not used — the amount comes from each work entry.</p>
     {:else}
-      <SettingsField label={rateLabel} error={rateError}>
-        <input type="text" inputmode="decimal" bind:value={rate} placeholder="150" />
-      </SettingsField>
+      <Field label={rateLabel} error={rateError}>
+        <Input type="text" inputmode="decimal" bind:value={rate} placeholder="150" />
+      </Field>
     {/if}
 
-    <SettingsField label="Income account">
-      <input type="text" bind:value={incomeAccount} placeholder="Income:Consulting" />
-    </SettingsField>
+    <Field label="Income account">
+      <Input type="text" bind:value={incomeAccount} placeholder="Income:Consulting" />
+    </Field>
   </div>
-
-  {#if error}
-    <div class="form-error">{error}</div>
-  {/if}
-
-  {#snippet footer()}
-    <Button variant="secondary" onclick={onCancel}>Cancel</Button>
-    <Button variant="primary" onclick={handleSave} disabled={!canSave}>
-      {saving ? 'Saving…' : 'Save'}
-    </Button>
-  {/snippet}
-</Modal>
+</FormModal>
 
 <style>
-  .static-key {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    font-size: var(--text-sm);
-  }
-
-  .static-key > span {
-    color: var(--text-muted);
-  }
-
-  .static-key code {
+  .key-value {
     color: var(--text-secondary);
   }
 
   .field-note {
     margin: 0;
-  }
-
-  /* Type is the global .form-error; only the space above it is this form's. */
-  .form-error {
-    margin-top: var(--space-2);
   }
 </style>

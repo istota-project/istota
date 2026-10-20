@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import { Button } from '$lib/components/ui';
+  import { Button, Card } from '$lib/components/ui';
 
   interface Props {
     title: string;
@@ -19,47 +19,17 @@
   One optional connection on the Email and calendar screen: a title and a line
   until it is added, then its fields and its Test.
 -->
-<section class="connection" aria-label={title}>
-  <div class="connection-head">
-    <div>
-      <h3 class="title-section">{title}</h3>
-      <p class="caption">{description}</p>
-    </div>
+<Card {title} {description} level={3} variant="outline" padding="sm" ariaLabel={title}>
+  {#snippet actions()}
     {#if added}
       <Button variant="secondary" size="sm" onclick={onRemove}>Remove</Button>
     {:else}
       <Button variant="secondary" size="sm" onclick={onAdd}>Add</Button>
     {/if}
-  </div>
+  {/snippet}
   {#if added}
     <div class="vstack">
       {@render children()}
     </div>
   {/if}
-</section>
-
-<style>
-  .connection {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    padding: var(--space-3);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-md);
-  }
-
-  .connection-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: var(--space-3);
-  }
-
-  h3 {
-    color: var(--text-primary);
-  }
-
-  p {
-    margin: 0;
-  }
-</style>
+</Card>

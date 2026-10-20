@@ -1,14 +1,17 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { onMount } from 'svelte';
-  import { SettingsCard } from '$lib/components/settings';
   import {
     Badge,
     Button,
     ConfirmDialog,
     EmptyState,
+    Field,
     Input,
     KebabMenu,
     Select,
+    Card,
+    LoadState,
   } from '$lib/components/ui';
   import { notifyError, notifyInfo, notifySuccess } from '$lib/stores/notices';
   import {
@@ -50,7 +53,7 @@
   let editGeo = $state('');
   let editBusy = $state(false);
 
-  let confirmDelete: string | null = $state(null);
+  const confirmDelete = createConfirm<string>();
   let autoBusy = $state(false);
 
   const classOptions = $derived(
@@ -149,8 +152,8 @@
   }
 
   async function handleDelete() {
-    const symbol = confirmDelete;
-    confirmDelete = null;
+    const symbol = confirmDelete.target;
+    confirmDelete.cancel();
     if (!symbol) return;
     try {
       await deletePortfolioClassification(symbol);
@@ -217,12 +220,12 @@
   function menu(cls: PortfolioClassification) {
     return [
       { label: 'Edit', onSelect: () => startEdit(cls) },
-      { label: 'Delete', danger: true, onSelect: () => (confirmDelete = cls.symbol) },
+      { label: 'Delete', danger: true, onSelect: () => confirmDelete.ask(cls.symbol) },
     ];
   }
 </script>
 
-<SettingsCard title="Symbol classifications ({classifications.length})">
+<Card title="Symbol classifications ({classifications.length})">
   {#snippet actions()}
     <Button
       variant="pill"
@@ -235,9 +238,7 @@
       Auto-classify
     </Button>
   {/snippet}
-  {#if loadError}
-    <div class="banner error">{loadError}</div>
-  {:else}
+  <LoadState scope="card" loading={!loaded} error={loadError}>
     <p class="card-hint caption">
       New symbols classify themselves on import (ticker lookup, marked <em>auto</em>); edit a row to
       override — your edit always wins, and an automatic guess never replaces one. Auto-classify
@@ -245,12 +246,10 @@
     </p>
 
     <div class="cls-form add-form control-row">
-      <label class="ctl ctl-symbol">
-        <span class="micro-label">Symbol</span>
+      <Field label="Symbol" layout="compact" class="ctl-symbol">
         <Input bind:value={addSymbol} placeholder="VTI" monospace aria-label="Symbol" />
-      </label>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Asset class</span>
+      </Field>
+      <Field label="Asset class" layout="compact">
         <Select
           bind:value={addClass}
           options={classOptions}
@@ -259,9 +258,8 @@
           ariaLabel="Asset class"
           onValueChange={(v) => onClassPicked(v, 'add')}
         />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Sub-class</span>
+      </Field>
+      <Field label="Sub-class" layout="compact">
         <Select
           bind:value={addSub}
           options={addSubOptions}
@@ -270,9 +268,8 @@
           ariaLabel="Sub-class"
           disabled={!addClass}
         />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Geography</span>
+      </Field>
+      <Field label="Geography" layout="compact">
         <Select
           bind:value={addGeo}
           options={geoOptions}
@@ -280,7 +277,7 @@
           fullWidth
           ariaLabel="Geography"
         />
-      </div>
+      </Field>
       <div class="ctl-action">
         <Button
           variant="primary"
@@ -295,7 +292,7 @@
       </div>
     </div>
 
-    {#if loaded && classifications.length === 0}
+    {#if classifications.length === 0}
       <EmptyState>No classifications yet.</EmptyState>
     {:else}
       <ul class="divided-list">
@@ -303,12 +300,10 @@
           <li class="cls-row">
             {#if editingSymbol === cls.symbol}
               <div class="cls-form control-row">
-                <div class="ctl ctl-symbol">
-                  <span class="micro-label">Symbol</span>
+                <Field label="Symbol" layout="compact" class="ctl-symbol">
                   <code class="cls-symbol code-chip">{cls.symbol}</code>
-                </div>
-                <div class="ctl">
-                  <span class="micro-label" aria-hidden="true">Asset class</span>
+                </Field>
+                <Field label="Asset class" layout="compact">
                   <Select
                     bind:value={editClass}
                     options={classOptions}
@@ -317,9 +312,8 @@
                     ariaLabel="Asset class"
                     onValueChange={(v) => onClassPicked(v, 'edit')}
                   />
-                </div>
-                <div class="ctl">
-                  <span class="micro-label" aria-hidden="true">Sub-class</span>
+                </Field>
+                <Field label="Sub-class" layout="compact">
                   <Select
                     bind:value={editSub}
                     options={editSubOptions}
@@ -328,9 +322,8 @@
                     ariaLabel="Sub-class"
                     disabled={!editClass}
                   />
-                </div>
-                <div class="ctl">
-                  <span class="micro-label" aria-hidden="true">Geography</span>
+                </Field>
+                <Field label="Geography" layout="compact">
                   <Select
                     bind:value={editGeo}
                     options={geoOptions}
@@ -338,7 +331,7 @@
                     fullWidth
                     ariaLabel="Geography"
                   />
-                </div>
+                </Field>
                 <div class="ctl-action">
                   <Button
                     variant="primary"
@@ -374,17 +367,16 @@
         {/each}
       </ul>
     {/if}
-  {/if}
-</SettingsCard>
+  </LoadState>
+</Card>
 
 <ConfirmDialog
-  open={confirmDelete !== null}
+  bind:open={confirmDelete.open}
   title="Delete classification"
-  message="Are you sure you want to remove the classification for {confirmDelete}? Its holdings fall back to the built-in rules (usually Unclassified) across all history."
+  message="Are you sure you want to remove the classification for {confirmDelete.target}? Its holdings fall back to the built-in rules (usually Unclassified) across all history."
   confirmLabel="Delete"
   confirmVariant="danger"
   onConfirm={handleDelete}
-  onCancel={() => (confirmDelete = null)}
 />
 
 <style>
@@ -403,14 +395,7 @@
     margin-bottom: var(--space-3);
   }
 
-  .ctl {
-    display: grid;
-    gap: var(--space-1);
-    flex: 1 1 9rem;
-    min-width: 0;
-  }
-
-  .ctl-symbol {
+  .cls-form :global(.ctl-symbol) {
     flex: 0 1 7rem;
   }
 

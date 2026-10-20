@@ -1,8 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import type { AdminNextcloudConnection } from '$lib/api';
-  import { Button } from '$lib/components/ui';
-  import { formatRelative } from '$lib/dateFormat';
+  import { Button, Timestamp } from '$lib/components/ui';
   import { waitForDoctorRun } from '$lib/doctorRun';
   import { Cloud } from '@lucide/svelte';
   import CheckResult from './CheckResult.svelte';
@@ -101,7 +100,7 @@
         remedyTestid="nextcloud-remedy"
       />
       {#if check?.at}
-        <p class="caption stamp">checked {formatRelative(check.at)}</p>
+        <p class="caption stamp">checked <Timestamp value={check.at} format="relative" /></p>
       {/if}
       {#if check?.stale}
         <p class="stale">the daemon's last report is old</p>

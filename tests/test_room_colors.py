@@ -10,8 +10,10 @@ that renders as nothing; a name the picker offers that Python rejects is a
 
 The CSS values themselves are deliberately *not* mirrored into either language.
 `location-constants.ts` holds hex because MapLibre paints in WebGL and cannot
-resolve `var(--token)`; nothing here has that problem, so `tokens.css` stays
-the single source of the colour values and the other two carry names only.
+resolve `var(--token)`; nothing here has that problem, so `app-tokens.css`
+stays the single source of the colour values and the other two carry names
+only. The Talk amber they are compared with is a design-system token, in
+`tokens.css`.
 """
 
 import re
@@ -23,6 +25,7 @@ from istota.rooms.colors import ROOM_COLORS
 
 _WEB = Path(__file__).resolve().parent.parent / "web" / "src" / "lib"
 _TOKENS = _WEB / "styles" / "tokens.css"
+_APP_TOKENS = _WEB / "styles" / "app-tokens.css"
 _TS = _WEB / "roomColors.ts"
 
 
@@ -45,13 +48,13 @@ class TestPaletteParity:
 
     @pytest.mark.parametrize("selector", [":root", ":root[data-theme='light']"])
     def test_every_palette_name_has_a_token_in_both_themes(self, selector):
-        block = _css_block(_TOKENS.read_text(), selector)
+        block = _css_block(_APP_TOKENS.read_text(), selector)
         assert _room_tokens(block) == set(ROOM_COLORS)
 
     def test_no_orphan_token(self):
         """A token with no palette name behind it is unreachable, and reads to
         the next person as a colour the picker forgot to offer."""
-        dark = _room_tokens(_css_block(_TOKENS.read_text(), ":root"))
+        dark = _room_tokens(_css_block(_APP_TOKENS.read_text(), ":root"))
         assert dark - set(ROOM_COLORS) == set()
 
     def test_the_palette_is_not_empty_and_the_names_are_plain(self):
@@ -69,14 +72,16 @@ class TestPaletteParity:
         "mirrored to Nextcloud Talk". A room colour that reads as that glyph's
         colour would make a user-chosen tint look like a surface binding.
 
-        Both themes, and the amber is **read out of the same block** rather
-        than pinned as a literal: `--accent-amber` differs per theme, so a
+        Both themes, and the amber is **read out of the same theme's block**
+        rather than pinned as a literal: `--accent-amber` differs per theme, so a
         one-theme literal leaves the other unguarded and silently stops
         matching anything the day that token is retuned — passing while its
         whole point is defeated, which is the drift this file exists to catch.
         """
-        block = _css_block(_TOKENS.read_text(), selector)
-        amber = re.search(r"--accent-amber\s*:\s*([^;]+);", block)
+        block = _css_block(_APP_TOKENS.read_text(), selector)
+        amber = re.search(
+            r"--accent-amber\s*:\s*([^;]+);", _css_block(_TOKENS.read_text(), selector)
+        )
         assert amber, f"no --accent-amber in {selector} to compare against"
         for name in ROOM_COLORS:
             value = re.search(rf"--room-color-{name}\s*:\s*([^;]+);", block).group(1)

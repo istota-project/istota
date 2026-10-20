@@ -84,7 +84,7 @@ const TIER_CONTROLS = [
   // section header it shares a row with the filters, and a section whose header
   // holds only a nav must come out the same height as one that also has a
   // Select — otherwise the bar grows and shrinks as you move between them.
-  'NavLink.svelte',
+  'internal/NavLink.svelte',
 ];
 
 describe('controls resolve the tier channel', () => {
@@ -97,7 +97,7 @@ describe('controls resolve the tier channel', () => {
   it.each([
     ['Button.svelte', '.btn'],
     ['Chip.svelte', '.chip'],
-    ['NavLink.svelte', '.nav-link'],
+    ['internal/NavLink.svelte', '.nav-link'],
   ])('%s takes its corner from --control-radius', (file) => {
     const radii = radiiOf(read(file));
     expect(radii).toContain('var(--control-radius)');
@@ -116,7 +116,7 @@ describe('controls resolve the tier channel', () => {
     ['Chip.svelte', /min-height:\s*var\(--control-height-(sm|md)\)/],
     ['Input.svelte', /min-height:\s*var\(--control-height-md\)/],
     ['IconButton.svelte', /min-height:\s*var\(--control-height-md\)/],
-    ['NavLink.svelte', /min-height:\s*var\(--control-height-sm\)/],
+    ['internal/NavLink.svelte', /min-height:\s*var\(--control-height-sm\)/],
   ])('%s reserves a height through the channel', (file, pattern) => {
     expect(read(file)).toMatch(pattern);
   });
@@ -127,23 +127,26 @@ describe('controls resolve the tier channel', () => {
     // adopting the channel is inert in `ShellHeader` and only bites where a
     // container raises the tier. Naming `md` here would silently grow the app
     // bar on every page.
-    expect(read('NavLink.svelte')).not.toMatch(/min-height:\s*var\(--control-height-md\)/);
+    expect(read('internal/NavLink.svelte')).not.toMatch(/min-height:\s*var\(--control-height-md\)/);
   });
 
-  it.each([['Input.svelte'], ['Field.svelte']])(
-    '%s pins leading wherever it declares the font shorthand',
-    (file) => {
-      // `font: inherit` also sets line-height, pulling in the body's 1.5 — and
-      // at a specificity no weightless rule outside the component can correct.
-      // Left alone, a 16px-floored input computes taller than the tier around
-      // it and stands proud of every control beside it on touch, which is the
-      // whole defect. Anything declaring the shorthand has to pin the leading
-      // too, in the same file.
-      const css = read(file);
-      expect(css).toMatch(/font:\s*inherit/);
-      expect(css).toMatch(/line-height:\s*var\(--leading-tight\)/);
-    },
-  );
+  it('Input pins leading wherever it declares the font shorthand', () => {
+    // `font: inherit` also sets line-height, pulling in the body's 1.5 — and
+    // at a specificity no weightless rule outside the component can correct.
+    // Left alone, a 16px-floored input computes taller than the tier around
+    // it and stands proud of every control beside it on touch, which is the
+    // whole defect. Anything declaring the shorthand has to pin the leading
+    // too, in the same file.
+    const css = read('Input.svelte');
+    expect(css).toMatch(/font:\s*inherit/);
+    expect(css).toMatch(/line-height:\s*var\(--leading-tight\)/);
+  });
+
+  it('leaves the type of the control in a Field to the control', () => {
+    // Field used to draw raw controls and so carried the shorthand and its
+    // pin; with every control a primitive it sets no font at all.
+    expect(read('Field.svelte')).not.toMatch(/font:\s*inherit/);
+  });
 
   it('leaves the full-width Select trigger on the shared leading', () => {
     // It used to pin 1.5 to chase the input's inherited leading. Both now sit

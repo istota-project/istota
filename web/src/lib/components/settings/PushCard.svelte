@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { onDocumentVisible } from '$lib/ui/visibility';
   import {
     AuthError,
     listPushDevices,
@@ -8,8 +9,7 @@
     listPushCategories,
     type PushCategory,
   } from '$lib/api';
-  import { Button, EmptyState, Select } from '$lib/components/ui';
-  import { SettingsCard, SettingsField } from '$lib/components/settings';
+  import { Button, EmptyState, Select, Card, Field, Checkbox } from '$lib/components/ui';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
   import { isManaged, managedBadge } from '$lib/settings/managed';
   import { getCurrentUser } from '$lib/userContext';
@@ -138,49 +138,40 @@
     void loadCategories();
     if (!native) return;
     void readPermission();
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') void readPermission();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
+    return onDocumentVisible(() => void readPermission());
   });
 </script>
 
-<SettingsCard
+<Card
   title="Inbox notifications"
   description="Enabled categories send alerts and count toward the app badge. These choices do not change your inbox, its bell count or delivery to email and Talk."
 >
   {#if categoriesLoading}
-    <p class="description">Loading categories…</p>
+    <p class="caption">Loading categories…</p>
   {:else if categoriesError}
     <p class="banner error" role="alert">{categoriesError}</p>
     <Button variant="secondary" size="sm" onclick={loadCategories}>Retry categories</Button>
   {:else if profile}
     {#each categories as category (category.id)}
-      <SettingsField
-        label={category.label}
-        checkbox
-        badge={managedBadge(profile, 'push_inbox_categories')}
-      >
-        <input
-          type="checkbox"
+      <Field label={category.label} checkbox badge={managedBadge(profile, 'push_inbox_categories')}>
+        <Checkbox
           checked={profile.push_inbox_categories?.[category.id] ?? true}
           disabled={isManaged(profile, 'push_inbox_categories')}
-          onchange={(event) => {
+          onchange={(on) => {
             if (profile) {
               profile.push_inbox_categories = {
                 ...profile.push_inbox_categories,
-                [category.id]: event.currentTarget.checked,
+                [category.id]: on,
               };
             }
           }}
         />
-      </SettingsField>
+      </Field>
     {/each}
   {/if}
-</SettingsCard>
+</Card>
 
-<SettingsCard title="Push notifications">
+<Card title="Push notifications">
   {#if native}
     {#if permission === 'denied'}
       <p class="description">
@@ -207,7 +198,7 @@
   <p class="description">iOS notification settings control whether alerts appear on each device.</p>
   {#if error}<p class="banner error" role="alert">{error}</p>{/if}
   {#if loading}
-    <p class="description">Loading devices…</p>
+    <p class="caption">Loading devices…</p>
   {:else if devices.length}
     <ul class="devices">
       {#each devices as device (device.id)}
@@ -220,10 +211,12 @@
             variant="secondary"
             size="sm"
             disabled={removing !== null}
+            loading={removing === device.id}
+            loadingLabel="Removing…"
             onclick={() => removeDevice(device.id)}
             ariaLabel={`Remove device ending ${device.token_tail}`}
           >
-            {removing === device.id ? 'Removing…' : 'Remove'}
+            Remove
           </Button>
         </li>
       {/each}
@@ -232,9 +225,8 @@
     <EmptyState size="sm">No devices registered.</EmptyState>
   {/if}
   {#if profile}
-    <SettingsField
+    <Field
       label="Chat notifications"
-      labelled={false}
       badge={managedBadge(profile, 'push_chat_alerts')}
       hint="The account default for rooms without their own notification setting. Badge only counts unread messages without alerts; Off excludes them from alerts and the app badge."
     >
@@ -248,24 +240,16 @@
           if (profile) profile.push_chat_alerts = value as 'alerts' | 'badge' | 'off';
         }}
       />
-    </SettingsField>
-    <SettingsField
-      label="Show message previews"
-      checkbox
-      badge={managedBadge(profile, 'push_preview')}
-    >
-      <input
-        type="checkbox"
-        bind:checked={profile.push_preview}
-        disabled={isManaged(profile, 'push_preview')}
-      />
-    </SettingsField>
+    </Field>
+    <Field label="Show message previews" checkbox badge={managedBadge(profile, 'push_preview')}>
+      <Checkbox bind:checked={profile.push_preview} disabled={isManaged(profile, 'push_preview')} />
+    </Field>
     <p class="description">
       Previews send message text to Apple for display on your lock screen. Turn them off to send
       only a generic title, badge and link.
     </p>
   {/if}
-</SettingsCard>
+</Card>
 
 <style>
   .devices {

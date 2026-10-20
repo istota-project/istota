@@ -1,25 +1,13 @@
-<script lang="ts">
-  import { DropdownMenu } from 'bits-ui';
-  import { MoreVertical } from '@lucide/svelte';
+<script lang="ts" module>
+  import type { MenuItem } from './Menu.svelte';
 
-  export interface KebabItem {
-    label: string;
-    // Omit when the item is a link (`href`). One of the two must be set.
-    onSelect?: () => void;
-    // Renders the item as a real anchor so navigation keeps middle-click,
-    // open-in-new-tab and the status-bar URL preview. A menu item that only
-    // navigates should use this rather than an onSelect + goto().
-    href?: string;
-    target?: '_blank';
-    download?: string;
-    // Optional interception of a link; its normal menu selection still closes.
-    onClick?: (event: MouseEvent) => void;
-    // An href the server answers rather than a page (a `/chat/r/...` deep
-    // link), so the client does a full navigation instead of routing it.
-    reload?: boolean;
-    danger?: boolean;
-    disabled?: boolean;
-  }
+  export type KebabItem = MenuItem;
+</script>
+
+<script lang="ts">
+  import Icon from './Icon.svelte';
+  import { MoreVertical } from '@lucide/svelte';
+  import Menu from './Menu.svelte';
 
   interface Props {
     items: KebabItem[];
@@ -29,55 +17,31 @@
     icon?: typeof MoreVertical;
   }
 
-  let { items, ariaLabel = 'Actions', icon: Icon = MoreVertical }: Props = $props();
-  let trigger: HTMLButtonElement | null = $state(null);
+  let { items, ariaLabel = 'Actions', icon: Glyph = MoreVertical }: Props = $props();
 </script>
 
-<DropdownMenu.Root>
-  <DropdownMenu.Trigger
-    bind:ref={trigger}
-    class="ui-kebab-trigger touch-target"
-    aria-label={ariaLabel}
-    onclick={(e) => e.stopPropagation()}
-  >
-    <Icon size={15} />
-  </DropdownMenu.Trigger>
-  <DropdownMenu.Portal>
-    <DropdownMenu.Content class="ui-kebab-content" sideOffset={4} align="end">
-      {#each items as item (item.label)}
-        {@const cls = item.danger ? 'ui-kebab-item ui-kebab-item--danger' : 'ui-kebab-item'}
-        {#if item.href}
-          <DropdownMenu.Item class={cls} disabled={item.disabled}>
-            {#snippet child({ props })}
-              <a
-                {...props}
-                href={item.href}
-                target={item.target}
-                rel={item.target === '_blank' ? 'noopener noreferrer' : undefined}
-                download={item.download}
-                data-sveltekit-reload={item.reload ? '' : undefined}
-                onclick={(event) => {
-                  if (typeof props.onclick === 'function') props.onclick(event);
-                  if (!item.disabled && item.onClick) {
-                    // A viewer opened here must return to the surviving trigger.
-                    trigger?.focus();
-                    item.onClick(event);
-                  }
-                }}>{item.label}</a
-              >
-            {/snippet}
-          </DropdownMenu.Item>
-        {:else}
-          <DropdownMenu.Item class={cls} disabled={item.disabled} onSelect={item.onSelect}>
-            {item.label}
-          </DropdownMenu.Item>
-        {/if}
-      {/each}
-    </DropdownMenu.Content>
-  </DropdownMenu.Portal>
-</DropdownMenu.Root>
+<!-- `Menu` with the kebab trigger: the row and card actions preset. -->
+<Menu {items} label={ariaLabel}>
+  {#snippet trigger(props)}
+    <button
+      type="button"
+      {...props}
+      class="ui-kebab-trigger touch-target"
+      aria-label={ariaLabel}
+      onclick={(e) => {
+        // A row that opens on click must not also open under its own kebab.
+        e.stopPropagation();
+        if (typeof props.onclick === 'function') props.onclick(e);
+      }}
+    >
+      <Icon icon={Glyph} size="md" />
+    </button>
+  {/snippet}
+</Menu>
 
 <style>
+  /* Global, as before the move onto Menu: table.css and CredentialsCard place
+     the trigger from outside at one class's weight. */
   :global(.ui-kebab-trigger) {
     display: inline-flex;
     align-items: center;
@@ -95,48 +59,6 @@
   :global(.ui-kebab-trigger:hover),
   :global(.ui-kebab-trigger[data-state='open']) {
     color: var(--text-primary);
-  }
-
-  :global(.ui-kebab-content) {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    padding: var(--space-1);
-    z-index: var(--z-popover);
-    box-shadow: var(--shadow-md);
-    min-width: 9rem;
-    /* Focused on open by bits-ui; the roving highlight is the affordance. */
-    outline: none;
-  }
-
-  :global(.ui-kebab-item) {
-    padding: var(--space-2) var(--space-2);
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    outline: none;
-    user-select: none;
-    white-space: nowrap;
-  }
-  /* An href item renders as an anchor; strip link chrome and let it fill the
-	   row so the hit area matches a button item exactly. */
-  :global(a.ui-kebab-item) {
-    display: block;
-    text-decoration: none;
-    color: inherit;
-  }
-
-  :global(.ui-kebab-item[data-highlighted]) {
-    background: var(--hover-bg);
-    color: var(--hover-fg);
-  }
-  :global(.ui-kebab-item[data-disabled]) {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-  :global(.ui-kebab-item--danger[data-highlighted]) {
-    color: var(--status-danger-fg);
   }
   @media (pointer: coarse) {
     :global(.ui-kebab-trigger) {

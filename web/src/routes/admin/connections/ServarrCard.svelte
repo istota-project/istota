@@ -1,8 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import type { AdminServarrApp, AdminServarrConnection } from '$lib/api';
-  import { Badge, Button, EmptyState, NoticeBanner } from '$lib/components/ui';
-  import { formatRelative } from '$lib/dateFormat';
+  import { Badge, Button, Card, EmptyState, Alert, Timestamp } from '$lib/components/ui';
   import { waitForDoctorRun } from '$lib/doctorRun';
   import { notifyError } from '$lib/stores/notices';
   import { Clapperboard } from '@lucide/svelte';
@@ -104,7 +103,7 @@
   {:else}
     {#if noneAnswered}
       <div class="wide">
-        <NoticeBanner title="None of the apps passed the last check" variant="warn" />
+        <Alert title="None of the apps passed the last check" variant="warn" />
       </div>
     {/if}
 
@@ -112,48 +111,54 @@
          in its place rather than a name in a list further down. -->
     <ul class="apps wide">
       {#each connection.apps as app (app.app)}
-        <li class="app" data-testid={`servarr-app-${app.app}`}>
-          <div class="app-head">
-            <h3 class="app-name title-card">{app.app}</h3>
-            {#if !app.incomplete}
-              <Badge variant={checkBadge(app).variant} size="sm">{checkBadge(app).label}</Badge>
-            {/if}
-          </div>
-          {#if app.incomplete}
-            <p class="banner warn app-problem">{app.problem}</p>
-          {:else}
-            <dl class="kv">
-              <dt>URL</dt>
-              <dd>
-                {#if linkable(app.url)}
-                  <a href={app.url} target="_blank" rel="noopener noreferrer">{app.url}</a>
-                {:else}
-                  {app.url}
-                {/if}
-              </dd>
-              <dt>API key</dt>
-              <dd>{keyLabel(app)}</dd>
-            </dl>
-            {#if app.problem}
+        <li data-testid={`servarr-app-${app.app}`}>
+          <Card as="div" variant="raised" padding="sm" class="app">
+            <div class="app-head">
+              <h3 class="app-name title-card">{app.app}</h3>
+              {#if !app.incomplete}
+                <Badge variant={checkBadge(app).variant} size="sm">{checkBadge(app).label}</Badge>
+              {/if}
+            </div>
+            {#if app.incomplete}
               <p class="banner warn app-problem">{app.problem}</p>
+            {:else}
+              <dl class="kv">
+                <dt>URL</dt>
+                <dd>
+                  {#if linkable(app.url)}
+                    <a href={app.url} target="_blank" rel="noopener noreferrer">{app.url}</a>
+                  {:else}
+                    {app.url}
+                  {/if}
+                </dd>
+                <dt>API key</dt>
+                <dd>{keyLabel(app)}</dd>
+              </dl>
+              {#if app.problem}
+                <p class="banner warn app-problem">{app.problem}</p>
+              {/if}
+              {#if app.check || !app.problem}
+                <CheckResult
+                  check={app.check}
+                  empty="The daemon has not recorded a check of this app yet."
+                  remedyTestid={`servarr-remedy-${app.app}`}
+                />
+              {/if}
+              {#if app.check?.at}
+                <p class="caption app-foot">
+                  checked <Timestamp value={app.check.at} format="relative" />
+                </p>
+              {/if}
             {/if}
-            {#if app.check || !app.problem}
-              <CheckResult
-                check={app.check}
-                empty="The daemon has not recorded a check of this app yet."
-                remedyTestid={`servarr-remedy-${app.app}`}
-              />
-            {/if}
-            {#if app.check?.at}
-              <p class="caption app-foot">checked {formatRelative(app.check.at)}</p>
-            {/if}
-          {/if}
+          </Card>
         </li>
       {/each}
       {#each connection.missing as app (app)}
-        <li class="app app-missing" data-testid={`servarr-missing-${app}`}>
-          <h3 class="app-name title-card">{app}</h3>
-          <p class="caption">Not configured</p>
+        <li data-testid={`servarr-missing-${app}`}>
+          <Card as="div" variant="outline" padding="sm" class="app app-missing">
+            <h3 class="app-name title-card">{app}</h3>
+            <p class="caption">Not configured</p>
+          </Card>
         </li>
       {/each}
     </ul>
@@ -233,15 +238,15 @@
     gap: var(--space-3);
   }
 
-  .app {
+  /* The list item is the grid cell; the tile fills it. */
+  .apps > li {
     display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
     min-width: 0;
-    padding: var(--space-3);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md);
-    background: var(--surface-raised);
+  }
+
+  .apps :global(.app) {
+    flex: 1;
+    gap: var(--space-2);
   }
 
   /* The stamp sits on each tile's bottom edge, so a row of tiles reads level
@@ -250,15 +255,14 @@
     margin-top: auto;
   }
 
-  .app-missing {
+  .apps :global(.app-missing) {
     justify-content: center;
     align-items: center;
     text-align: center;
-    background: none;
     border-style: dashed;
   }
 
-  .app-missing .app-name {
+  .apps :global(.app-missing .app-name) {
     color: var(--text-muted);
   }
 
@@ -269,7 +273,7 @@
   }
 
   /* An app tile is narrower than a panel, so its labels take their own width. */
-  .app :global(.kv) {
+  .apps :global(.app .kv) {
     grid-template-columns: max-content minmax(0, 1fr);
   }
 

@@ -78,10 +78,10 @@ describe('RoomSettings — room token', () => {
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
     try {
       mount(room());
-      await fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+      expect(screen.getByLabelText('Room token')).toHaveValue('web-alice-abc');
+      await fireEvent.click(screen.getByRole('button', { name: 'Copy Room token' }));
       expect(copyText).toHaveBeenCalledWith('web-alice-abc');
       expect(writeText).not.toHaveBeenCalled();
-      expect(await screen.findByRole('button', { name: 'Copied!' })).toBeTruthy();
     } finally {
       vi.unstubAllGlobals();
     }

@@ -38,7 +38,7 @@ const adminLayout = readFileSync(join(process.cwd(), 'src/routes/admin/+layout.s
 
 /**
  * The three admin pages. Each wears the settings shell (`class="settings
- * admin-page"`) for its .card / .section-header primitives, and used
+ * admin-page"`) as its page frame, and used
  * to widen that shell's 980px form column by hand — all three landing on the
  * same 1100px with nothing saying they had to agree. Each is a `.card-pane`
  * now, and takes that class's one cap.

@@ -1,7 +1,7 @@
 <script lang="ts">
+  import { latest } from '$lib/ui/latest';
   import { onMount } from 'svelte';
-  import { SettingsCard } from '$lib/components/settings';
-  import { Badge, EmptyState, Select } from '$lib/components/ui';
+  import { Badge, EmptyState, Select, Card, LoadState } from '$lib/components/ui';
   import { getTransactionRuleCoverage, type RuleCoverageValue } from '$lib/money/api';
 
   // What recent imports actually carried, and where each value went. The list
@@ -34,7 +34,7 @@
   // slow `category` response landing after a quick `account` one would restore
   // a stale `untraced` count under account values — the cross-contamination
   // the field switch exists to prevent.
-  let loadSeq = 0;
+  const loads = latest();
 
   function isFallthrough(row: RuleCoverageValue): boolean {
     const account = row.posted_account ?? '';
@@ -49,10 +49,10 @@
   ]);
 
   async function load() {
-    const mine = ++loadSeq;
+    const current = loads.next();
     try {
       const body = await getTransactionRuleCoverage({ field: field as 'category' | 'account' });
-      if (mine !== loadSeq) return;
+      if (!current()) return;
       values = body.values;
       // Only the category read carries it: it counts rows with no source
       // category, which says nothing about the account column, since a row
@@ -60,17 +60,17 @@
       untraced = body.untraced ?? 0;
       loadError = '';
     } catch (e) {
-      if (mine !== loadSeq) return;
+      if (!current()) return;
       loadError = e instanceof Error ? e.message : 'Failed to load import coverage';
     } finally {
-      if (mine === loadSeq) loaded = true;
+      if (current()) loaded = true;
     }
   }
 
   onMount(load);
 </script>
 
-<SettingsCard title="Recent imports">
+<Card title="Recent imports">
   {#snippet actions()}
     <Select
       bind:value={field}
@@ -79,9 +79,7 @@
       onValueChange={load}
     />
   {/snippet}
-  {#if loadError}
-    <div class="banner error">{loadError}</div>
-  {:else}
+  <LoadState scope="card" loading={!loaded} error={loadError}>
     <p class="card-hint caption">
       The distinct values recent imports carried, and the account each one posted to when it was
       last seen. Values falling through to <code>Expenses:Uncategorized</code> come first — that is the
@@ -89,7 +87,7 @@
       the test above instead.
     </p>
 
-    {#if loaded && ordered.length === 0}
+    {#if ordered.length === 0}
       <EmptyState>No imports yet.</EmptyState>
     {:else}
       <ul class="divided-list">
@@ -113,8 +111,8 @@
         there is nothing to list — only the count.
       </p>
     {/if}
-  {/if}
-</SettingsCard>
+  </LoadState>
+</Card>
 
 <style>
   .card-hint {

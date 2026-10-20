@@ -19,12 +19,14 @@
     EmptyState,
     Input,
     KebabMenu,
-    PageLoading,
+    LoadState,
     type KebabItem,
+    Card,
+    Timestamp,
   } from '$lib/components/ui';
-  import { SettingsCard, StepUpDialog } from '$lib/components/settings';
+  import { ConfirmStepUpDialog } from '$lib/components/settings';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { channelLabel, derivedTitle } from '$lib/components/briefings/settings/briefingSettings';
-  import { formatRelative } from '$lib/dateFormat';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
 
   /** One row of either list, in the shape the table draws. */
@@ -48,9 +50,8 @@
   let loadError = $state('');
   let filter = $state('');
   let busy = $state(false);
-  let pausing = $state<Row | null>(null);
-  let deleting = $state<Row | null>(null);
-  let deleteStage = $state<'confirm' | 'step-up' | null>(null);
+  const pausing = createConfirm<Row>();
+  const deleting = createConfirm<Row>();
 
   function stateOf(enabled: boolean, held: unknown): Row['state'] {
     if (held) return 'held';
@@ -140,7 +141,6 @@
   }
 
   async function pause(row: Row) {
-    pausing = null;
     if (busy) return;
     busy = true;
     try {
@@ -166,181 +166,156 @@
     }
   }
 
-  function startDelete(row: Row) {
-    deleting = row;
-    deleteStage = 'confirm';
-  }
-
-  function stopDelete() {
-    deleting = null;
-    deleteStage = null;
-  }
-
-  async function submitDelete(proof: StepUpProof) {
-    const row = deleting;
-    if (!row) return;
-    try {
-      await deleteAdminBriefing(row.kind, row.id, row.name, proof);
-      notifySuccess(`${row.title} deleted.`);
-    } catch (e) {
-      // A refused code or password stays in the step-up dialog, which reads `reason`.
-      if (e instanceof GroupApiError && e.status === 403 && e.reason) throw e;
-      failed(e, 'The briefing could not be deleted.');
-    }
-    stopDelete();
-    await load();
+  async function deleteBriefing(row: Row, proof: StepUpProof) {
+    await deleteAdminBriefing(row.kind, row.id, row.name, proof);
+    notifySuccess(`${row.title} deleted.`);
   }
 
   function rowActions(row: Row): KebabItem[] {
     return [
       row.state === 'held'
         ? { label: 'Resume', disabled: busy, onSelect: () => resume(row) }
-        : { label: 'Pause', disabled: busy, onSelect: () => (pausing = row) },
-      { label: 'Delete', danger: true, disabled: busy, onSelect: () => startDelete(row) },
+        : { label: 'Pause', disabled: busy, onSelect: () => pausing.ask(row) },
+      { label: 'Delete', danger: true, disabled: busy, onSelect: () => deleting.ask(row) },
     ];
   }
 
-  const deleteMessage = $derived(
-    !deleting
-      ? ''
-      : deleting.kind === 'personal'
-        ? `Delete ${deleting.title} for ${deleting.owner}? Its schedule and blocks are removed. ` +
+  function deleteMessage(row: Row): string {
+    return row.kind === 'personal'
+      ? `Delete ${row.title} for ${row.owner}? Its schedule and blocks are removed. ` +
           "Past editions stay in the owner's archive."
-        : `Delete ${deleting.title} from ${deleting.owner}? It stops running and leaves the ` +
-          "group's settings. Members keep its published editions.",
-  );
+      : `Delete ${row.title} from ${row.owner}? It stops running and leaves the ` +
+          "group's settings. Members keep its published editions.";
+  }
 </script>
 
 <div class="settings admin-page card-pane">
-  {#if personal === null && !loadError}
-    <PageLoading label="Loading briefings…" />
-  {:else if personal === null}
-    <div class="center-msg error">{loadError}</div>
-  {:else}
-    <div class="filter-row">
-      <Input
-        type="search"
-        aria-label="Filter briefings"
-        placeholder="Filter by owner, group or title"
-        bind:value={filter}
-      />
-    </div>
-    {#snippet table(rows: Row[], label: string, ownerHeading: string)}
-      <div class="table-scroll">
-        <table class="table table--fixed briefings-grid" aria-label={label}>
-          <thead
-            ><tr
-              ><th scope="col" class="col-owner">{ownerHeading}</th>
-              <th scope="col" class="col-briefing">Briefing</th>
-              <th scope="col" class="col-schedule">Schedule</th>
-              <th scope="col" class="col-delivery">Delivery</th>
-              <th scope="col" class="col-state">State</th>
-              <th scope="col" class="col-last">Last run</th>
-              <th scope="col" class="col-actions" aria-label="Actions"></th></tr
-            ></thead
-          >
-          <tbody>
-            {#each rows as row (row.id)}
-              <tr>
-                <td class="col-owner">
-                  <div class="cell-main">{row.owner}</div>
-                  {#if row.owners}<div class="caption">{row.owners}</div>{/if}
-                </td>
-                <td class="col-briefing">
-                  <div class="cell-main">{row.title}</div>
-                  <div class="caption">{row.name}</div>
-                </td>
-                <td class="col-schedule">
-                  <code>{row.cron}</code>
-                  {#if row.timezone}<div class="caption">{row.timezone}</div>{/if}
-                </td>
-                <td class="col-delivery">{row.delivery}</td>
-                <td class="col-state">
-                  <Badge size="sm" variant={STATE_VARIANT[row.state]}
-                    >{STATE_LABEL[row.state]}</Badge
-                  >
-                </td>
-                <td class="col-last truncate"
-                  >{row.lastRun ? formatRelative(row.lastRun) : 'Never'}</td
-                >
-                <td class="col-actions">
-                  <KebabMenu items={rowActions(row)} ariaLabel="Actions for {row.title}" />
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+  <LoadState
+    loading={personal === null && !loadError}
+    error={loadError}
+    loadingLabel="Loading briefings…"
+  >
+    {#if personal}
+      <div class="filter-row toolbar control-row">
+        <Input
+          type="search"
+          size="toolbar"
+          class="filter-input"
+          aria-label="Filter briefings"
+          placeholder="Filter by owner, group or title"
+          bind:value={filter}
+        />
       </div>
-    {/snippet}
+      {#snippet table(rows: Row[], label: string, ownerHeading: string)}
+        <div class="table-scroll">
+          <table class="table table--fixed briefings-grid" aria-label={label}>
+            <thead
+              ><tr
+                ><th scope="col" class="col-owner">{ownerHeading}</th>
+                <th scope="col" class="col-briefing">Briefing</th>
+                <th scope="col" class="col-schedule">Schedule</th>
+                <th scope="col" class="col-delivery">Delivery</th>
+                <th scope="col" class="col-state">State</th>
+                <th scope="col" class="col-last">Last run</th>
+                <th scope="col" class="col-actions" aria-label="Actions"></th></tr
+              ></thead
+            >
+            <tbody>
+              {#each rows as row (row.id)}
+                <tr>
+                  <td class="col-owner">
+                    <div class="cell-main">{row.owner}</div>
+                    {#if row.owners}<div class="caption">{row.owners}</div>{/if}
+                  </td>
+                  <td class="col-briefing">
+                    <div class="cell-main">{row.title}</div>
+                    <div class="caption">{row.name}</div>
+                  </td>
+                  <td class="col-schedule">
+                    <code>{row.cron}</code>
+                    {#if row.timezone}<div class="caption">{row.timezone}</div>{/if}
+                  </td>
+                  <td class="col-delivery">{row.delivery}</td>
+                  <td class="col-state">
+                    <Badge size="sm" variant={STATE_VARIANT[row.state]}
+                      >{STATE_LABEL[row.state]}</Badge
+                    >
+                  </td>
+                  <td class="col-last truncate"
+                    ><Timestamp value={row.lastRun} format="relative" empty="Never" /></td
+                  >
+                  <td class="col-actions">
+                    <KebabMenu items={rowActions(row)} ariaLabel="Actions for {row.title}" />
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/snippet}
 
-    <SettingsCard
-      title="Personal briefings"
-      description="A paused briefing does not run, and its owner cannot turn it back on until an administrator resumes it."
-    >
-      {#if personalRows.length}
-        {@render table(personalRows, 'Personal briefings', 'Owner')}
-      {:else if needle}
-        <EmptyState size="sm">No personal briefings match the filter.</EmptyState>
-      {:else}
-        <EmptyState size="sm">No personal briefings yet.</EmptyState>
-      {/if}
-    </SettingsCard>
+      <Card
+        title="Personal briefings"
+        description="A paused briefing does not run, and its owner cannot turn it back on until an administrator resumes it."
+      >
+        {#if personalRows.length}
+          {@render table(personalRows, 'Personal briefings', 'Owner')}
+        {:else if needle}
+          <EmptyState size="sm">No personal briefings match the filter.</EmptyState>
+        {:else}
+          <EmptyState size="sm">No personal briefings yet.</EmptyState>
+        {/if}
+      </Card>
 
-    <SettingsCard
-      title="Group briefings"
-      description="Deleting a group briefing removes it from the group's settings. Members keep its published editions."
-    >
-      {#if groupRows.length}
-        {@render table(groupRows, 'Group briefings', 'Group')}
-      {:else if needle}
-        <EmptyState size="sm">No group briefings match the filter.</EmptyState>
-      {:else}
-        <EmptyState size="sm">No group briefings yet.</EmptyState>
-      {/if}
-    </SettingsCard>
-  {/if}
+      <Card
+        title="Group briefings"
+        description="Deleting a group briefing removes it from the group's settings. Members keep its published editions."
+      >
+        {#if groupRows.length}
+          {@render table(groupRows, 'Group briefings', 'Group')}
+        {:else if needle}
+          <EmptyState size="sm">No group briefings match the filter.</EmptyState>
+        {:else}
+          <EmptyState size="sm">No group briefings yet.</EmptyState>
+        {/if}
+      </Card>
+    {/if}
+  </LoadState>
 </div>
 
 <ConfirmDialog
-  open={pausing !== null}
+  bind:open={pausing.open}
   title="Pause briefing"
-  message={pausing
-    ? `Pause ${pausing.title} for ${pausing.owner}? It will not run until an administrator resumes it.`
+  message={pausing.target
+    ? `Pause ${pausing.target.title} for ${pausing.target.owner}? It will not run until an administrator resumes it.`
     : ''}
   confirmLabel="Pause"
+  busyLabel="Pausing…"
   confirmVariant="primary"
-  onConfirm={() => {
-    if (pausing) void pause(pausing);
-  }}
-  onCancel={() => (pausing = null)}
+  onConfirm={() => pausing.target && pause(pausing.target)}
 />
 
-{#if deleting}
-  <ConfirmDialog
-    open={deleteStage === 'confirm'}
+{#if deleting.target}
+  {@const row = deleting.target}
+  <ConfirmStepUpDialog
+    bind:open={deleting.open}
     title="Delete briefing"
-    message={deleteMessage}
-    confirmLabel="Delete"
-    confirmVariant="danger"
-    challenge={deleting.name}
-    onConfirm={() => (deleteStage = 'step-up')}
-    onCancel={stopDelete}
+    message={deleteMessage(row)}
+    challenge={row.name}
+    action="admin_briefing_delete"
+    onConfirm={(proof) => deleteBriefing(row, proof)}
+    onFailed={(e) => failed(e, 'The briefing could not be deleted.')}
+    onSettled={load}
   />
-{/if}
-
-{#if deleteStage === 'step-up'}
-  <StepUpDialog action="admin_briefing_delete" onConfirm={submitDelete} onCancel={stopDelete} />
 {/if}
 
 <style>
   .filter-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
+    flex-wrap: nowrap;
     margin-bottom: var(--space-4);
     max-width: 36rem;
   }
-  .filter-row :global(.ui-input) {
+  .filter-row :global(.filter-input) {
     flex: 1;
   }
   .cell-main {

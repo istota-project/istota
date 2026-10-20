@@ -1,6 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { EmptyState, PageLoading } from '$lib/components/ui';
+  import { ChevronRight } from '@lucide/svelte';
+  import { EmptyState, Icon, LoadState } from '$lib/components/ui';
   import { getAccounts, type AccountRow } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { selectedYear, transactionsUrl } from '$lib/money/stores/transactions';
@@ -76,13 +77,10 @@
   });
 </script>
 
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else if visibleNodes.length === 0}
-  <EmptyState>No accounts found.</EmptyState>
-{:else}
+<LoadState {loading} {error} empty={visibleNodes.length === 0}>
+  {#snippet emptyState()}
+    <EmptyState>No accounts found.</EmptyState>
+  {/snippet}
   <div class="account-list">
     {#each visibleNodes as node (node.fullName)}
       <div class="record-row record-row--tree" style="padding-left: {0.75 + node.depth * 1.25}rem">
@@ -94,7 +92,8 @@
           {#if node.children.length > 0}
             <span
               class="record-caret"
-              class:is-open={expandedSet.has(node.fullName) || !!$accountFilter}>&#9654;</span
+              class:is-open={expandedSet.has(node.fullName) || !!$accountFilter}
+              ><Icon icon={ChevronRight} size="xs" /></span
             >
           {:else}
             <span class="caret-spacer"></span>
@@ -116,7 +115,7 @@
       </div>
     {/each}
   </div>
-{/if}
+</LoadState>
 
 <style>
   .account-list {
@@ -133,7 +132,7 @@
   }
 
   .caret-spacer {
-    width: 0.5rem;
+    width: var(--icon-xs);
     display: inline-block;
   }
 

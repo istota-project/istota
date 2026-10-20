@@ -1,4 +1,4 @@
-import { SearchDialog } from '$lib/components/ui';
+import { SearchDialog } from '$lib/components/search';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { get } from 'svelte/store';

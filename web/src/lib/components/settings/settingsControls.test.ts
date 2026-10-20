@@ -151,7 +151,7 @@ describe('settings controls go through the primitives', () => {
 });
 
 describe('SecretField composes rather than forks', () => {
-  const source = read(join(SRC, 'lib/components/settings/SecretField.svelte'));
+  const source = read(join(SRC, 'lib/components/ui/SecretField.svelte'));
 
   it('builds on Field, Input and Button', () => {
     // It used to restate Field's descendant rule declaration-for-declaration
@@ -184,7 +184,9 @@ describe('settings card defaults', () => {
   });
 
   it('keeps direct card buttons compact and action rows able to wrap', () => {
-    expect(rule('.settings .card > .btn')).toContain('align-self: flex-start');
+    const cardSource = read(join(SRC, 'lib/components/ui/Card.svelte'));
+    const btn = cardSource.slice(cardSource.indexOf('.ui-card > :global(:where(button, a)) {'));
+    expect(btn.slice(0, btn.indexOf('}'))).toContain('align-self: flex-start');
     // The wrapping action row is the global `hstack wrap` now; a second
     // `.settings .row` would give one name two meanings again.
     expect(rule('.settings .row')).toBe('');

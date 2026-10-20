@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { X } from '@lucide/svelte';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import {
     getSharedBlocks,
     putSharedBlock,
@@ -16,9 +18,14 @@
     Select,
     type KebabItem,
     type SelectOption,
+    Card,
+    Field,
+    Checkbox,
+    Input,
+    TextArea,
+    Badge,
+    Timestamp,
   } from '$lib/components/ui';
-  import { SettingsCard, SettingsField } from '$lib/components/settings';
-  import { formatDateTime } from '$lib/dateFormat';
   import SourceConfigFields from '../SourceConfigFields.svelte';
   import { sourceKindLabel, uniqueName } from './briefingSettings';
 
@@ -56,7 +63,7 @@
   let sharedError = $state('');
   let sharedSaving = $state(false);
   let sharedRunning = $state<Set<string>>(new Set());
-  let confirmSharedDelete = $state<string | null>(null);
+  const confirmSharedDelete = createConfirm<string>();
 
   const sharedKindOptions: SelectOption[] = $derived(
     sharedAllowedKinds.map((k) => ({ value: k, label: sourceKindLabel(k) })),
@@ -69,16 +76,8 @@
     if (resp.shared_block_timezone) sharedBlockTimezone = resp.shared_block_timezone;
   }
 
-  // Compact "last run" — the raw ISO string is wide and ugly; show a short
-  // local "Mon D, HH:MM".
-  const fmtLastRun = (iso: string | null) =>
-    formatDateTime(iso, {
-      empty: '—',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
+  // Compact "last run": a short local "Mon D, HH:MM".
+  const LAST_RUN = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' } as const;
 
   function startNewShared() {
     sharedEditingName = null;
@@ -128,7 +127,7 @@
       },
       { label: 'Edit', onSelect: () => editShared(b) },
       { label: 'Duplicate', onSelect: () => cloneShared(b) },
-      { label: 'Delete', danger: true, onSelect: () => (confirmSharedDelete = b.name) },
+      { label: 'Delete', danger: true, onSelect: () => confirmSharedDelete.ask(b.name) },
     ];
   }
 
@@ -251,7 +250,7 @@
     } catch (e) {
       sharedError = (e as Error).message || 'Delete failed';
     } finally {
-      confirmSharedDelete = null;
+      confirmSharedDelete.cancel();
     }
   }
 
@@ -265,7 +264,7 @@
   });
 </script>
 
-<SettingsCard
+<Card
   title="Shared blocks ({sharedBlocks.length})"
   description="Structured blocks are stored verbatim with no model call. Only user-agnostic sources are allowed."
 >
@@ -304,9 +303,18 @@
                 {/if}
               </td>
               <td class="nowrap"><code>{b.cron}</code></td>
-              <td class="col-render"><span class="status-pill">{b.render_mode}</span></td>
+              <td class="col-render"
+                ><Badge tone="subtle" uppercase={false}>{b.render_mode}</Badge></td
+              >
               <td>{b.trusted ? 'trusted' : 'untrusted'}</td>
-              <td class="nowrap">{fmtLastRun(b.status.last_run_at)}</td>
+              <td class="nowrap"
+                ><Timestamp
+                  value={b.status.last_run_at}
+                  format="datetime"
+                  options={LAST_RUN}
+                  empty="—"
+                /></td
+              >
               <td class="col-actions">
                 <KebabMenu items={sharedMenu(b)} ariaLabel="Shared block actions" />
               </td>
@@ -316,7 +324,7 @@
       </table>
     </div>
   {/if}
-</SettingsCard>
+</Card>
 
 {#if sharedDraft}
   <Modal
@@ -330,22 +338,22 @@
     <div class="vstack">
       {#if sharedError}<div class="banner error">{sharedError}</div>{/if}
       <div class="sb-grid">
-        <SettingsField label="Name" hint="Slug: lowercase, digits, - and _">
-          <input
+        <Field label="Name" hint="Slug: lowercase, digits, - and _">
+          <Input
             type="text"
             placeholder="world-headlines"
             bind:value={sharedDraft.name}
             disabled={!!sharedEditingName}
           />
-        </SettingsField>
-        <SettingsField label={`Cron (${sharedBlockTimezone})`}>
-          <input type="text" placeholder="0 6 * * *" bind:value={sharedDraft.cron} />
-        </SettingsField>
+        </Field>
+        <Field label={`Cron (${sharedBlockTimezone})`}>
+          <Input type="text" placeholder="0 6 * * *" bind:value={sharedDraft.cron} />
+        </Field>
       </div>
-      <SettingsField label="Title">
-        <input type="text" placeholder="🌍 World headlines" bind:value={sharedDraft.title} />
-      </SettingsField>
-      <SettingsField label="Render mode">
+      <Field label="Title">
+        <Input type="text" placeholder="🌍 World headlines" bind:value={sharedDraft.title} />
+      </Field>
+      <Field label="Render mode">
         <Select
           value={sharedDraft.render_mode}
           options={RENDER_OPTIONS}
@@ -353,19 +361,19 @@
           ariaLabel="Render mode"
           fullWidth
         />
-      </SettingsField>
+      </Field>
       {#if sharedDraft.render_mode === 'synthesis'}
-        <SettingsField label="Directive" hint="How to synthesize the sources.">
-          <textarea rows="2" bind:value={sharedDraft.directive}></textarea>
-        </SettingsField>
+        <Field label="Directive" hint="How to synthesize the sources.">
+          <TextArea rows={2} bind:value={sharedDraft.directive} />
+        </Field>
       {/if}
       <div class="sb-grid">
-        <SettingsField label="Trusted" checkbox hint="Only for injection-safe content.">
-          <input type="checkbox" bind:checked={sharedDraft.trusted} />
-        </SettingsField>
-        <SettingsField label="Enabled" checkbox>
-          <input type="checkbox" bind:checked={sharedDraft.enabled} />
-        </SettingsField>
+        <Field label="Trusted" checkbox hint="Only for injection-safe content.">
+          <Checkbox bind:checked={sharedDraft.trusted} />
+        </Field>
+        <Field label="Enabled" checkbox>
+          <Checkbox bind:checked={sharedDraft.enabled} />
+        </Field>
       </div>
 
       <div class="vstack" style:--vstack-gap="var(--space-2)">
@@ -384,10 +392,11 @@
                 title="Remove source"
                 size="sm"
                 danger
-                onclick={() => removeSharedSource(i)}>×</IconButton
-              >
+                onclick={() => removeSharedSource(i)}
+                icon={X}
+              />
             </span>
-            <SettingsField label="Type">
+            <Field label="Type">
               <Select
                 value={src.kind}
                 options={sharedKindOptions}
@@ -395,7 +404,7 @@
                 ariaLabel="Source kind"
                 fullWidth
               />
-            </SettingsField>
+            </Field>
             <SourceConfigFields
               kind={src.kind}
               config={src.config}
@@ -415,19 +424,19 @@
   </Modal>
 {/if}
 
-{#if confirmSharedDelete}
+{#if confirmSharedDelete.target}
   <ConfirmDialog
-    open={true}
+    bind:open={confirmSharedDelete.open}
     title="Delete shared block"
     confirmLabel="Delete"
-    onConfirm={() => confirmSharedDelete && doDeleteShared(confirmSharedDelete)}
-    onCancel={() => (confirmSharedDelete = null)}
+    onConfirm={() => confirmSharedDelete.target && doDeleteShared(confirmSharedDelete.target)}
   >
     {#snippet body()}
       <p>
-        Are you sure you want to delete the shared block <strong>{confirmSharedDelete}</strong>? The
-        last generated value stays until it goes stale. Users referencing it lose the section once
-        it expires.
+        Are you sure you want to delete the shared block <strong
+          >{confirmSharedDelete.target}</strong
+        >? The last generated value stays until it goes stale. Users referencing it lose the section
+        once it expires.
       </p>
     {/snippet}
   </ConfirmDialog>

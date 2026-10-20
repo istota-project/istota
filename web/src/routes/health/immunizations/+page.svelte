@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import {
@@ -15,16 +16,24 @@
   import {
     Badge,
     Button,
+    Card,
     ConfirmDialog,
     EmptyState,
     Field,
+    FormGrid,
+    FormStack,
     KebabMenu,
     Select,
     type SelectOption,
-    PageLoading,
+    Input,
+    TextArea,
+    LoadState,
+    PageHeader,
+    Timestamp,
+    Disclosure,
   } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
-  import { formatDate as formatIsoDate, localDateISO } from '$lib/dateFormat';
+  import { localDateISO } from '$lib/dateFormat';
 
   let loading = $state(true);
   let error = $state('');
@@ -107,12 +116,12 @@
     }
   }
 
-  let deleteTargetId: number | null = $state(null);
+  const deleteTargetId = createConfirm<number>();
 
   async function performDeleteRow() {
-    if (deleteTargetId == null) return;
-    const id = deleteTargetId;
-    deleteTargetId = null;
+    if (deleteTargetId.target == null) return;
+    const id = deleteTargetId.target;
+    deleteTargetId.cancel();
     try {
       await deleteImmunization(id);
       await load();
@@ -120,8 +129,6 @@
       error = e instanceof Error ? e.message : 'Failed to delete';
     }
   }
-
-  const formatDate = (iso: string | null) => formatIsoDate(iso, { empty: '—' });
 
   const statusOrder: Record<ImmunizationStatus, number> = {
     overdue: 0,
@@ -155,83 +162,83 @@
   <!-- Held back while loading so the pane shows nothing but the centered
        loading message, rather than centering it in the space left under
        this header. -->
-  <div class="header">
-    <h1 class="title-page">Immunizations</h1>
-    <div class="actions hstack">
+  <PageHeader title="Immunizations">
+    {#snippet actions()}
       <Button onclick={() => (formOpen = !formOpen)}>
         {formOpen ? 'Cancel' : '+ Log dose'}
       </Button>
       <Button href="{base}/health/immunizations/import">Import</Button>
-    </div>
-  </div>
+    {/snippet}
+  </PageHeader>
 {/if}
 
 {#if formOpen}
-  <form class="quick-form" onsubmit={submit}>
-    <div class="row">
-      <Field label="Vaccine">
-        <Select
-          value={formName}
-          options={vaccineOptions}
-          onValueChange={(v) => (formName = v)}
-          ariaLabel="Vaccine"
-          fullWidth
-        />
-      </Field>
-      <Field label="Date">
-        <input type="date" bind:value={formDate} required />
-      </Field>
-      <Field label="Product">
-        <input type="text" bind:value={formProduct} placeholder="Fluzone Quadrivalent" />
-      </Field>
-      <Field label="Facility">
-        <input type="text" bind:value={formFacility} placeholder="CVS Pharmacy" />
-      </Field>
-    </div>
-    <details class="advanced">
-      <summary>More fields</summary>
-      <div class="row">
-        <Field label="Lot number">
-          <input type="text" bind:value={formLot} />
-        </Field>
-        <Field label="Route">
-          <Select
-            value={formRoute}
-            options={routeOptions}
-            onValueChange={(v) => (formRoute = v)}
-            ariaLabel="Route"
-            fullWidth
-          />
-        </Field>
-        <Field label="Site">
-          <input type="text" bind:value={formSite} placeholder="left deltoid" />
-        </Field>
-      </div>
-      <Field label="Notes" class="full">
-        <textarea bind:value={formNotes} rows="2"></textarea>
-      </Field>
-    </details>
-    {#if formError}
-      <div class="banner error">{formError}</div>
-    {/if}
-    <div class="form-actions">
-      <Button variant="primary" type="submit" loading={saving}>Save</Button>
-    </div>
-  </form>
+  <div class="entry-form">
+    <Card>
+      <FormStack as="form" onsubmit={submit}>
+        <FormGrid>
+          <Field label="Vaccine">
+            <Select
+              value={formName}
+              options={vaccineOptions}
+              onValueChange={(v) => (formName = v)}
+              ariaLabel="Vaccine"
+              fullWidth
+            />
+          </Field>
+          <Field label="Date">
+            <Input type="date" bind:value={formDate} required />
+          </Field>
+          <Field label="Product">
+            <Input type="text" bind:value={formProduct} placeholder="Fluzone Quadrivalent" />
+          </Field>
+          <Field label="Facility">
+            <Input type="text" bind:value={formFacility} placeholder="CVS Pharmacy" />
+          </Field>
+        </FormGrid>
+        <div class="advanced">
+          <Disclosure summary="More fields">
+            <FormGrid>
+              <Field label="Lot number">
+                <Input type="text" bind:value={formLot} />
+              </Field>
+              <Field label="Route">
+                <Select
+                  value={formRoute}
+                  options={routeOptions}
+                  onValueChange={(v) => (formRoute = v)}
+                  ariaLabel="Route"
+                  fullWidth
+                />
+              </Field>
+              <Field label="Site">
+                <Input type="text" bind:value={formSite} placeholder="left deltoid" />
+              </Field>
+            </FormGrid>
+            <Field label="Notes" class="notes">
+              <TextArea bind:value={formNotes} rows={2} />
+            </Field>
+          </Disclosure>
+        </div>
+        {#if formError}
+          <div class="banner error">{formError}</div>
+        {/if}
+        <div class="form-actions">
+          <Button variant="primary" type="submit" loading={saving}>Save</Button>
+        </div>
+      </FormStack>
+    </Card>
+  </div>
 {/if}
 
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else}
+<LoadState {loading} {error}>
   <section class="coverage">
     <h2 class="micro-label">Coverage</h2>
     <ul class="cards card-grid">
       {#each visibleCoverage as c (c.name)}
         <li>
-          <a
-            class="card interactive"
+          <Card
+            class="coverage-tile"
             href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}"
           >
             <span class="name title-card">{c.display_name}</span>
@@ -241,7 +248,7 @@
             <div class="card-body">
               <div class="caption">
                 {#if c.last_given}
-                  Last: {formatDate(c.last_given)}{#if c.dose_count > 1}
+                  Last: <Timestamp value={c.last_given} empty="—" />{#if c.dose_count > 1}
                     · {c.dose_count} doses{/if}
                 {:else}
                   No record
@@ -249,7 +256,7 @@
               </div>
               {#if c.next_due}
                 <div class="caption">
-                  Next due: {formatDate(c.next_due)}
+                  Next due: <Timestamp value={c.next_due} empty="—" />
                   {#if c.days_until_due !== null}
                     {#if c.days_until_due < 0}
                       ({-c.days_until_due}d overdue)
@@ -260,39 +267,40 @@
                 </div>
               {/if}
             </div>
-          </a>
+          </Card>
         </li>
       {/each}
     </ul>
 
     {#if riskBased.length > 0}
-      <details class="risk-based" bind:open={riskOpen}>
-        <summary>Risk-based vaccines ({riskBased.length})</summary>
-        <ul class="cards card-grid">
-          {#each riskBased as c (c.name)}
-            <li>
-              <a
-                class="card interactive"
-                href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}"
-              >
-                <span class="name title-card">{c.display_name}</span>
-                <Badge variant={immunizationStatusVariant(c.status)}
-                  >{immunizationStatusLabel(c.status)}</Badge
+      <div class="risk-based">
+        <Disclosure summary="Risk-based vaccines ({riskBased.length})" bind:open={riskOpen}>
+          <ul class="cards card-grid">
+            {#each riskBased as c (c.name)}
+              <li>
+                <Card
+                  class="coverage-tile"
+                  href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}"
                 >
-                <div class="card-body">
-                  <div class="caption">
-                    {#if c.last_given}
-                      Last: {formatDate(c.last_given)}
-                    {:else}
-                      Not recorded
-                    {/if}
+                  <span class="name title-card">{c.display_name}</span>
+                  <Badge variant={immunizationStatusVariant(c.status)}
+                    >{immunizationStatusLabel(c.status)}</Badge
+                  >
+                  <div class="card-body">
+                    <div class="caption">
+                      {#if c.last_given}
+                        Last: <Timestamp value={c.last_given} empty="—" />
+                      {:else}
+                        Not recorded
+                      {/if}
+                    </div>
                   </div>
-                </div>
-              </a>
-            </li>
-          {/each}
-        </ul>
-      </details>
+                </Card>
+              </li>
+            {/each}
+          </ul>
+        </Disclosure>
+      </div>
     {/if}
 
     {#if other.length > 0}
@@ -300,15 +308,15 @@
       <ul class="cards card-grid">
         {#each other as c (c.name)}
           <li>
-            <div class="card">
+            <Card as="div" class="coverage-tile">
               <span class="name title-card">{c.display_name}</span>
               <Badge variant="neutral">
                 {c.dose_count} dose{c.dose_count > 1 ? 's' : ''}
               </Badge>
               <div class="card-body">
-                <div class="caption">Last: {formatDate(c.last_given)}</div>
+                <div class="caption">Last: <Timestamp value={c.last_given} empty="—" /></div>
               </div>
-            </div>
+            </Card>
           </li>
         {/each}
       </ul>
@@ -318,8 +326,9 @@
   <section class="history">
     <div class="history-head">
       <h2 class="micro-label">History</h2>
-      <input
+      <Input
         type="text"
+        size="toolbar"
         class="filter-input"
         aria-label="Filter by vaccine name"
         placeholder="Filter by vaccine name"
@@ -350,8 +359,8 @@
                 .join(' · ')}
               <tr>
                 <td class="date">
-                  <time datetime={i.date_given}>{formatDate(i.date_given)}</time>{#if details}<span
-                      class="card-only">{` · ${details}`}</span
+                  <Timestamp value={i.date_given} />{#if details}<span class="card-only"
+                      >{` · ${details}`}</span
                     >{/if}
                 </td>
                 <td class="vaccine cell-primary">
@@ -375,7 +384,7 @@
                         {
                           label: 'Delete',
                           danger: true,
-                          onSelect: () => (deleteTargetId = i.id),
+                          onSelect: () => deleteTargetId.ask(i.id),
                         },
                       ]}
                     />
@@ -388,49 +397,23 @@
       </div>
     {/if}
   </section>
-{/if}
+</LoadState>
 
 <ConfirmDialog
-  open={deleteTargetId != null}
+  bind:open={deleteTargetId.open}
   title="Delete immunization"
   message="Are you sure you want to delete this immunization? This cannot be undone."
   confirmLabel="Delete"
   onConfirm={performDeleteRow}
-  onCancel={() => (deleteTargetId = null)}
 />
 
 <style>
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+  .entry-form {
     margin-bottom: var(--space-4);
   }
-
-  .quick-form {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    padding: var(--space-3) var(--space-4);
-    margin-bottom: var(--space-4);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-  .quick-form .row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
-    gap: var(--space-3);
-  }
-  .quick-form :global(.field.full) {
-    grid-column: 1 / -1;
+  /* The notes sit under the grid inside the disclosure, where no gap reaches. */
+  .advanced :global(.notes) {
     margin-top: var(--space-1);
-  }
-  .quick-form details.advanced > summary {
-    color: var(--text-muted);
-    font-size: var(--text-sm);
-    cursor: pointer;
-    user-select: none;
   }
   .coverage {
     margin-bottom: 1.25rem;
@@ -453,15 +436,12 @@
   .cards > li {
     display: flex;
   }
-  .card {
-    display: flex;
-    flex-direction: column;
+  .coverage :global(.coverage-tile) {
     align-items: flex-start;
     gap: var(--space-2);
     width: 100%;
-    color: var(--text-primary);
   }
-  .card .name {
+  .name {
     line-height: var(--leading-snug);
   }
   .card-body {
@@ -473,16 +453,6 @@
   .risk-based {
     margin-top: var(--space-3);
   }
-  .risk-based > summary {
-    cursor: pointer;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-    padding: var(--space-2) 0;
-    user-select: none;
-  }
-  .risk-based[open] > summary {
-    margin-bottom: var(--space-2);
-  }
 
   .history-head {
     display: flex;
@@ -491,16 +461,9 @@
     gap: var(--space-3);
     margin-bottom: var(--space-2);
   }
-  .filter-input {
-    padding: var(--space-1) var(--space-2);
-    background: var(--surface-raised);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    line-height: var(--leading-snug);
-    font-size: var(--text-sm);
-    max-width: 240px;
+  /* Placement only: the paint is Input's toolbar size. */
+  .history-head :global(.filter-input) {
+    max-width: 15rem;
   }
 
   td.notes {
@@ -523,23 +486,13 @@
   }
 
   @media (max-width: 768px) {
-    .header,
     .history-head {
       flex-direction: column;
       align-items: stretch;
       gap: var(--space-2);
     }
-    .header {
-      margin-bottom: var(--space-3);
-    }
-    .actions {
-      flex-wrap: wrap;
-    }
-    .filter-input {
-      width: 100%;
+    .history-head :global(.filter-input) {
       max-width: none;
-      min-width: 0;
-      box-sizing: border-box;
     }
   }
 

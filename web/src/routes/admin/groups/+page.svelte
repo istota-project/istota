@@ -5,16 +5,18 @@
     Button,
     Input,
     Field,
-    Modal,
+    FormModal,
+    FormStack,
     ConfirmDialog,
     EmptyState,
     Badge,
-    NoticeBanner,
-    PageLoading,
+    Disclosure,
+    LoadState,
+    Card,
+    Checkbox,
+    Timestamp,
   } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
-  import { formatDate, formatDateTime, formatRelative } from '$lib/dateFormat';
-  import { SettingsCard } from '$lib/components/settings';
   import GroupMembers from '$lib/components/groups/GroupMembers.svelte';
   import {
     getAdminGroups,
@@ -49,7 +51,6 @@
   let users = $state<{ user_id: string; display_name: string }[]>([]);
   let storageNotes = $state<Record<string, string>>({});
   let storageErrors = $state<Record<string, string>>({});
-  let aboutCollapsed = $state(true);
   let active = true;
   let request = 0;
   const selection = createUrlSelection<string>({
@@ -158,7 +159,7 @@
     }
   }
   async function create() {
-    if (busy || !owners.length || !groupId.trim() || !displayName.trim()) return;
+    if (busy || !owners.length || !groupId.trim() || !displayName.trim()) return false;
     busy = true;
     formError = '';
     try {
@@ -181,22 +182,25 @@
         detailError = message(e);
       }
     } catch (e) {
-      formError = message(e);
+      throw new Error(message(e));
     } finally {
       busy = false;
     }
   }
-  async function archive() {
-    if (busy || !group) return;
+  // A refusal is reported in the dialog, which stays open (resolves false).
+  async function archive(): Promise<boolean> {
+    if (busy || !group) return false;
     busy = true;
     formError = '';
     try {
       await archiveAdminGroup(group.group_id, { revision: group.revision, confirm: true });
       archiveOpen = false;
       await refresh();
+      return true;
     } catch (e) {
       formError = message(e);
       if (!archiveOpen) detailError = formError;
+      return false;
     } finally {
       busy = false;
     }
@@ -231,13 +235,8 @@
 </script>
 
 <div class="settings admin-page card-pane">
-  {#if loading}<PageLoading label="Loading groups…" />
-  {:else if error}<div class="center-msg error">
-      <p>{error}</p>
-      <Button onclick={load}>Retry</Button>
-    </div>
-  {:else}
-    <NoticeBanner title="About group administration" bind:collapsed={aboutCollapsed}>
+  <LoadState {loading} {error} loadingLabel="Loading groups…" onRetry={load}>
+    <Disclosure variant="card" summary="About group administration">
       <p>
         Create groups and manage their owners and membership. Administration does not add you as a
         member and does not open the group's notebook.
@@ -246,8 +245,8 @@
         Removing a member ends future access. Messages and downloads already received remain with
         their recipients. Archiving keeps the data and history, and the group ID cannot be reused.
       </p>
-    </NoticeBanner>
-    <SettingsCard title="Groups">
+    </Disclosure>
+    <Card title="Groups">
       {#snippet actions()}<Button variant="primary" size="sm" onclick={openCreate} disabled={busy}
           >Create group</Button
         >{/snippet}
@@ -291,9 +290,7 @@
                     <div class="caption mono">{item.group_id}</div>
                   </td>
                   <td class="col-kind muted">{item.kind}</td>
-                  <td class="col-created muted" title={formatDateTime(item.created_at)}
-                    >{formatDate(item.created_at)}</td
-                  >
+                  <td class="col-created muted"><Timestamp value={item.created_at} /></td>
                   <td class="col-status"
                     >{#if item.archived_at}<Badge size="sm">Archived</Badge
                       >{:else if item.needs_owner}<Badge size="sm" variant="warn">Needs owner</Badge
@@ -304,157 +301,166 @@
             </tbody>
           </table>
         </div>{/if}
-    </SettingsCard>
-    {#if detailLoading}<PageLoading label="Loading group…" />
-    {:else if detailError}<div class="center-msg error">
-        <p>{detailError}</p>
-        <Button onclick={() => selected && select(selected)}>Reload group details</Button>
-      </div>
-    {:else if group}
-      <SettingsCard title={group.display_name}>
-        {#snippet status()}
-          {#if group?.archived_at}<Badge size="sm">Archived</Badge
-            >{:else if group?.needs_owner}<Badge size="sm" variant="warn">Needs owner</Badge>{/if}
-        {/snippet}
-        {#snippet actions()}
-          {#if group?.capabilities.read_memory}<Button
-              size="sm"
-              href="{base}/groups/?group={encodeURIComponent(group.group_id)}"
-              >Open group notebook</Button
-            >{/if}
-          {#if group && !group.archived_at && group.capabilities.archive}<Button
-              variant="danger"
-              size="sm"
-              disabled={busy}
-              onclick={() => {
-                formError = '';
-                archiveOpen = true;
-              }}>Archive group</Button
-            >{/if}
-        {/snippet}
-        <dl class="kv group-facts">
-          <dt>Group ID</dt>
-          <dd class="mono">{group.group_id}</dd>
-          <dt>Kind</dt>
-          <dd>{group.kind}</dd>
-          <dt>Created</dt>
-          <dd>
-            <span title={formatDateTime(group.created_at)}>{formatDate(group.created_at)}</span>
-            <span class="muted">by {group.created_by}</span>
-          </dd>
-          {#if group.archived_at}
-            <dt>Archived</dt>
+    </Card>
+    <LoadState
+      loading={detailLoading}
+      error={detailError}
+      loadingLabel="Loading group…"
+      onRetry={() => selected && select(selected)}
+      retryLabel="Reload group details"
+    >
+      {#if group}
+        <Card title={group.display_name}>
+          {#snippet status()}
+            {#if group?.archived_at}<Badge size="sm">Archived</Badge
+              >{:else if group?.needs_owner}<Badge size="sm" variant="warn">Needs owner</Badge>{/if}
+          {/snippet}
+          {#snippet actions()}
+            {#if group?.capabilities.read_memory}<Button
+                size="sm"
+                href="{base}/groups/?group={encodeURIComponent(group.group_id)}"
+                >Open group notebook</Button
+              >{/if}
+            {#if group && !group.archived_at && group.capabilities.archive}<Button
+                variant="danger"
+                size="sm"
+                disabled={busy}
+                onclick={() => {
+                  formError = '';
+                  archiveOpen = true;
+                }}>Archive group</Button
+              >{/if}
+          {/snippet}
+          <dl class="kv group-facts">
+            <dt>Group ID</dt>
+            <dd class="mono">{group.group_id}</dd>
+            <dt>Kind</dt>
+            <dd>{group.kind}</dd>
+            <dt>Created</dt>
             <dd>
-              <span title={formatDateTime(group.archived_at)}>{formatDate(group.archived_at)}</span>
-              <span class="muted">· data and membership history are kept</span>
+              <Timestamp value={group.created_at} />
+              <span class="muted">by {group.created_by}</span>
             </dd>
-          {/if}
-        </dl>
-        {#if !group.archived_at && group.needs_owner}<p class="banner warn">
-            This group has no owner. Members can still use it, but nobody can manage its membership
-            until you assign one.
-          </p>{/if}
-      </SettingsCard>
-      {#if !group.archived_at}
-        <SettingsCard title="Members">
-          {#key group.group_id}<GroupMembers {group} administration onChanged={refresh} />{/key}
-        </SettingsCard>
-        <SettingsCard
-          title="Storage"
-          description="Retry setup if the group's workspace was unavailable. Existing files are kept."
-        >
-          {#snippet actions()}<Button
-              size="sm"
-              onclick={retryStorage}
-              loading={busy}
-              loadingLabel="Working…">Retry storage setup</Button
-            >{/snippet}
-          {#if storageNotes[group.group_id]}<p class="banner info" role="status">
-              {storageNotes[group.group_id]}
+            {#if group.archived_at}
+              <dt>Archived</dt>
+              <dd>
+                <Timestamp value={group.archived_at} />
+                <span class="muted">· data and membership history are kept</span>
+              </dd>
+            {/if}
+          </dl>
+          {#if !group.archived_at && group.needs_owner}<p class="banner warn">
+              This group has no owner. Members can still use it, but nobody can manage its
+              membership until you assign one.
             </p>{/if}
-          {#if storageErrors[group.group_id]}<p class="banner error" role="alert">
-              {storageErrors[group.group_id]}
-            </p>{/if}
-        </SettingsCard>
-      {/if}
-      {#if group.system_key === 'all_users'}
-        <p class="caption">
-          Its notebook, files and retained briefing history are shared with all current and future
-          installation users.
-        </p>
-      {/if}
-      <SettingsCard title="Membership history">
-        {#if !group.history.length}<EmptyState size="sm">No membership history.</EmptyState>{:else}
-          <div class="table-scroll">
-            <table class="table table--fixed" aria-label="Membership history">
-              <thead
-                ><tr
-                  ><th scope="col">Member</th><th scope="col" class="col-role">Role</th><th
-                    scope="col">Joined</th
-                  ><th scope="col">Left</th></tr
-                ></thead
-              >
-              <tbody
-                >{#each group.history as membership}<tr
-                    ><td
-                      ><UserCell
-                        userId={membership.user_id}
-                        displayName={membership.display_name}
-                      /></td
-                    ><td class="col-role"
-                      ><Badge size="sm" variant={membership.role === 'owner' ? 'info' : 'neutral'}
-                        >{membership.role === 'owner' ? 'Owner' : 'Member'}</Badge
-                      ></td
-                    ><td
-                      ><span title={formatDateTime(membership.added_at)}
-                        >{formatDate(membership.added_at)}</span
-                      >
-                      <div class="caption">by {membership.added_by}</div></td
-                    ><td
-                      >{#if membership.ended_at}<span title={formatDateTime(membership.ended_at)}
-                          >{formatDate(membership.ended_at)}</span
-                        >{#if membership.ended_by}<div class="caption">
-                            by {membership.ended_by}
-                          </div>{/if}{:else}<span class="muted">Current member</span>{/if}</td
-                    ></tr
-                  >{/each}</tbody
-              >
-            </table>
-          </div>
-        {/if}
-      </SettingsCard>
-      <SettingsCard
-        title="Management events"
-        description="Role changes keep the membership period intact. Each change is recorded here."
-      >
-        {#if !group.events.length}<EmptyState size="sm">No management events.</EmptyState>{:else}<ol
-            class="list-reset"
+        </Card>
+        {#if !group.archived_at}
+          <Card title="Members">
+            {#key group.group_id}<GroupMembers {group} administration onChanged={refresh} />{/key}
+          </Card>
+          <Card
+            title="Storage"
+            description="Retry setup if the group's workspace was unavailable. Existing files are kept."
           >
-            {#each group.events as event (event.id)}
-              {@const lines = eventDetails(event)}
-              <li class="event">
-                <div class="event-head">
-                  <span class="event-title">{eventTitle(event.event_type)}</span>
-                  <span class="caption" title={formatDateTime(event.created_at)}
-                    >{formatRelative(event.created_at)}</span
-                  >
-                </div>
-                <div class="caption">
-                  by {event.actor_id}{#if event.subject_user_id}
-                    · {event.subject_user_id}{/if}
-                </div>
-                {#if lines.length}<ul class="event-details muted">
-                    {#each lines as line}<li>{line}</li>{/each}
-                  </ul>{/if}
-              </li>
-            {/each}
-          </ol>{/if}
-      </SettingsCard>
-    {/if}
-  {/if}
+            {#snippet actions()}<Button
+                size="sm"
+                onclick={retryStorage}
+                loading={busy}
+                loadingLabel="Working…">Retry storage setup</Button
+              >{/snippet}
+            {#if storageNotes[group.group_id]}<p class="banner info" role="status">
+                {storageNotes[group.group_id]}
+              </p>{/if}
+            {#if storageErrors[group.group_id]}<p class="banner error" role="alert">
+                {storageErrors[group.group_id]}
+              </p>{/if}
+          </Card>
+        {/if}
+        {#if group.system_key === 'all_users'}
+          <p class="caption">
+            Its notebook, files and retained briefing history are shared with all current and future
+            installation users.
+          </p>
+        {/if}
+        <Card title="Membership history">
+          {#if !group.history.length}<EmptyState size="sm">No membership history.</EmptyState
+            >{:else}
+            <div class="table-scroll">
+              <table class="table table--fixed" aria-label="Membership history">
+                <thead
+                  ><tr
+                    ><th scope="col">Member</th><th scope="col" class="col-role">Role</th><th
+                      scope="col">Joined</th
+                    ><th scope="col">Left</th></tr
+                  ></thead
+                >
+                <tbody
+                  >{#each group.history as membership}<tr
+                      ><td
+                        ><UserCell
+                          userId={membership.user_id}
+                          displayName={membership.display_name}
+                        /></td
+                      ><td class="col-role"
+                        ><Badge size="sm" variant={membership.role === 'owner' ? 'info' : 'neutral'}
+                          >{membership.role === 'owner' ? 'Owner' : 'Member'}</Badge
+                        ></td
+                      ><td
+                        ><Timestamp value={membership.added_at} />
+                        <div class="caption">by {membership.added_by}</div></td
+                      ><td
+                        >{#if membership.ended_at}<Timestamp
+                            value={membership.ended_at}
+                          />{#if membership.ended_by}<div class="caption">
+                              by {membership.ended_by}
+                            </div>{/if}{:else}<span class="muted">Current member</span>{/if}</td
+                      ></tr
+                    >{/each}</tbody
+                >
+              </table>
+            </div>
+          {/if}
+        </Card>
+        <Card
+          title="Management events"
+          description="Role changes keep the membership period intact. Each change is recorded here."
+        >
+          {#if !group.events.length}<EmptyState size="sm">No management events.</EmptyState
+            >{:else}<ol class="list-reset">
+              {#each group.events as event (event.id)}
+                {@const lines = eventDetails(event)}
+                <li class="event">
+                  <div class="event-head">
+                    <span class="event-title">{eventTitle(event.event_type)}</span>
+                    <Timestamp class="caption" value={event.created_at} format="relative" />
+                  </div>
+                  <div class="caption">
+                    by {event.actor_id}{#if event.subject_user_id}
+                      · {event.subject_user_id}{/if}
+                  </div>
+                  {#if lines.length}<ul class="event-details muted">
+                      {#each lines as line}<li>{line}</li>{/each}
+                    </ul>{/if}
+                </li>
+              {/each}
+            </ol>{/if}
+        </Card>
+      {/if}
+    </LoadState>
+  </LoadState>
 </div>
 
-<Modal bind:open={createOpen} title="Create group">
+<FormModal
+  bind:open={createOpen}
+  title="Create group"
+  submitLabel="Create group"
+  busyLabel="Creating…"
+  error={formError}
+  {busy}
+  canSubmit={!!groupId.trim() && !!displayName.trim() && owners.length > 0}
+  onSubmit={create}
+  onCancel={() => (createOpen = false)}
+>
   <div class="create-fields vstack">
     <Field label="Group ID" warning="This identifier cannot be changed or reused after archiving."
       ><Input aria-label="Group ID" bind:value={groupId} disabled={busy} /></Field
@@ -463,36 +469,30 @@
     <Field label="Kind" hint="A display label, such as family or team."
       ><Input bind:value={kind} disabled={busy} /></Field
     >
-    <fieldset disabled={busy}>
-      <legend>Initial owners</legend>
+    <FormStack legend="Initial owners" gap={2} disabled={busy}>
       <p>
         Choose at least one existing, enabled user. Owners can manage membership and read and edit
         the shared notebook.
       </p>
       {#each users as user (user.user_id)}<Field label={user.display_name} checkbox
-          ><input type="checkbox" bind:group={owners} value={user.user_id} /></Field
+          ><Checkbox
+            checked={owners.includes(user.user_id)}
+            onchange={(on) =>
+              (owners = on
+                ? [...owners, user.user_id]
+                : owners.filter((id) => id !== user.user_id))}
+          /></Field
         >{/each}
       {#if !busy && !users.length}<EmptyState size="sm">No enabled users are available.</EmptyState
         >{/if}
-    </fieldset>
-    {#if formError}<p class="banner error" role="alert">{formError}</p>{/if}
+    </FormStack>
   </div>
-  {#snippet footer()}<Button
-      variant="secondary"
-      onclick={() => (createOpen = false)}
-      disabled={busy}>Cancel</Button
-    ><Button
-      variant="primary"
-      onclick={create}
-      loading={busy}
-      disabled={!groupId.trim() || !displayName.trim() || !owners.length}>Create group</Button
-    >{/snippet}
-</Modal>
+</FormModal>
 <ConfirmDialog
   bind:open={archiveOpen}
   title="Archive group"
   confirmLabel="Archive"
-  confirmDisabled={busy}
+  busyLabel="Archiving…"
   onConfirm={archive}
 >
   {#snippet body()}<p>
@@ -507,19 +507,6 @@
 <style>
   .create-fields p {
     margin: 0;
-  }
-  fieldset {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    margin: 0;
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md);
-    padding: var(--space-3);
-  }
-  legend {
-    padding-inline: var(--space-1);
-    font-weight: var(--weight-medium);
   }
   .row-clickable {
     cursor: pointer;

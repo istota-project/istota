@@ -2,6 +2,7 @@
   import type { Snippet } from 'svelte';
   import Badge from './Badge.svelte';
   import HintPopover from './HintPopover.svelte';
+  import { joinIds, setFieldContext, type FieldControlKind } from './fieldContext';
 
   interface Props {
     label: string;
@@ -12,38 +13,35 @@
      *  the config editor's lock on a key that needs confirmation. */
     labelMark?: Snippet;
     /** Guidance shown in a popover behind a "?" beside the label. Optional
-     *  reading — anything the user must see belongs in `warning` or `error`. */
+     *  reading — anything the user must see belongs in `description`,
+     *  `warning` or `error`. */
     hint?: string;
+    /** Visible help under the control, in the `.caption` role. */
+    description?: string | Snippet;
     /** A condition the user needs to notice but which doesn't block saving —
      *  a stored value that no longer means what it says, say. Rendered inline
      *  precisely because a hover popover is discoverable, not seen. */
     warning?: string;
     error?: string;
+    /**
+     * `stacked` puts the label above the control. `inline` puts it in a
+     * `--field-label-width` column beside the control from 641px up, and stacks
+     * below that (the config editor). `compact` is the dense toolbar form: an
+     * uppercase `.micro-label` caption, and the field grows from 9rem in a
+     * wrapping row (the money rule and portfolio cards).
+     */
+    layout?: 'stacked' | 'inline' | 'compact';
+    /** Sets `aria-required` on the control. No visible marker: most fields in
+     *  the app are required, so the marker would be noise. */
+    required?: boolean;
+    /** Appends "(optional)" to the label. */
+    optional?: boolean;
     /** Widen the control's cap from 24rem to 36rem. */
     wide?: boolean;
     /** Label beside the control rather than above it. */
     checkbox?: boolean;
-    /** Label in a column of its own beside the control, from 640px up; a
-     *  stacked field below that. The column is `--field-label-width` wide
-     *  , so a form of these fields lines its controls up. */
-    inline?: boolean;
-    /**
-     * Render a `<div>` rather than a `<label>`.
-     *
-     * Required whenever the slot holds a **button**. A `<button>` is a
-     * labelable element, so inside a `<label>` it becomes the label's implicit
-     * control and clicking the field's caption activates it — which for a
-     * Stop button means the caption stops the thing. `HintPopover` dodges the
-     * same hazard by rendering its trigger as `<span role="button">`, but that
-     * only protects the "?" and not whatever the caller passes in.
-     *
-     * Also required for a row of several controls (a set of module
-     * checkboxes), where one implicit label claims the first of them and
-     * leaves the rest unlabelled.
-     *
-     * A `<label>` is still right, and still the default, for the ordinary case
-     * of one input: clicking the caption should focus it.
-     */
+    /** @deprecated No effect. The field is a `<div>` whatever it holds, and a
+     *  control takes the label through the field context; goes next release. */
     labelled?: boolean;
     /**
      * Extra classes on the field element, for placement only — a grid span, a
@@ -60,48 +58,98 @@
     badge,
     labelMark,
     hint,
+    description,
     warning,
     error,
+    layout = 'stacked',
+    required = false,
+    optional = false,
     wide = false,
     checkbox = false,
-    inline = false,
-    labelled = true,
     class: className = '',
     children,
   }: Props = $props();
+
+  const uid = $props.id();
+  const controlId = `${uid}-control`;
+  const labelId = `${uid}-label`;
+  const descriptionId = `${uid}-description`;
+  const warningId = `${uid}-warning`;
+  const errorId = `${uid}-error`;
+
+  const describedBy = $derived(
+    joinIds(description ? descriptionId : null, warning ? warningId : null, error ? errorId : null),
+  );
+
+  let claimed = $state<{ kind: FieldControlKind; id?: () => string | null | undefined } | null>(
+    null,
+  );
+
+  setFieldContext({
+    controlId,
+    labelId,
+    get describedBy() {
+      return describedBy;
+    },
+    get invalid() {
+      return !!error;
+    },
+    get required() {
+      return required;
+    },
+    claim(kind, id) {
+      if (claimed) return false;
+      claimed = { kind, id };
+      return true;
+    },
+  });
+
+  const native = $derived(claimed?.kind === 'native');
+  const forId = $derived(claimed?.id?.() || controlId);
 </script>
 
+{#snippet labelText()}{label}{#if optional}{' '}<span class="field-optional">(optional)</span
+    >{/if}<HintPopover text={hint} label="About {label}" />{#if badge}<Badge size="sm"
+      >{badge}</Badge
+    >{/if}{@render labelMark?.()}{/snippet}
+
 {#snippet fieldLabel()}
-  <span class="field-label"
-    >{label}<HintPopover text={hint} label="About {label}" />{#if badge}<Badge size="sm"
-        >{badge}</Badge
-      >{/if}{@render labelMark?.()}</span
-  >
+  {#if native}
+    <label class="field-label" class:micro-label={layout === 'compact'} id={labelId} for={forId}
+      >{@render labelText()}</label
+    >
+  {:else}
+    <span class="field-label" class:micro-label={layout === 'compact'} id={labelId}
+      >{@render labelText()}</span
+    >
+  {/if}
 {/snippet}
 
 <!--
-  Label + control + supplementary text, extracted from SettingsField so it is
-  usable outside a settings page. SettingsField keeps its name and API and
-  delegates here; this is also what deleted the byte-identical second copy of
-  these rules that lived in lib/styles/settings.css.
+  Label + control + supplementary text.
 
-  The descendant :global() rules below are what style an arbitrary control the
-  caller passes in — a bare <input>, a Select, a SecretField. Input/TextArea
-  bring their own identical appearance so they also work on their own.
--->
-<!--
-  `control-row` is the field tier's global scope (app.css). Composed here
+  A <div>, never a <label> around the control. A <label> makes its first
+  labelable descendant its control, so a Select trigger, a chip's remove button
+  or a Stop button inside one became a second way to press it from the caption
+  (it shipped as a "Tracking" caption that stopped tracking, and a "Sender
+  filters" caption that deleted a sender). The control instead reads the field
+  context: a text input, textarea or checkbox takes the id the caption's `for`
+  names, so clicking the caption focuses it; anything else takes the caption by
+  `aria-labelledby` and the caption is a plain <span>. A field holding no single
+  control (a row of checkboxes, a chip list) is a group named by its caption.
+
+  `control-row` is the field tier's global scope (app.css), composed here
   rather than restated, so a form row and a body toolbar are sized by one
-  definition — including the touch floor, which is what keeps this field level
-  with a `fullWidth` Select under it once iOS floors the input's text at 16px.
-  It sets tokens and no layout, so it cannot disturb the arrangement below.
+  definition. It sets tokens and no layout.
 -->
-<svelte:element
-  this={labelled ? 'label' : 'div'}
-  class="field control-row"
+<div
+  class="field control-row {className}"
   class:field-wide={wide}
   class:checkbox
-  class:inline
+  class:inline={layout === 'inline'}
+  class:field-compact={layout === 'compact'}
+  role={claimed ? undefined : 'group'}
+  aria-labelledby={claimed ? undefined : labelId}
 >
   {#if checkbox}
     {@render children()}
@@ -110,9 +158,12 @@
     {@render fieldLabel()}
     {@render children()}
   {/if}
-  {#if warning}<small class="field-warning">{warning}</small>{/if}
-  {#if error}<small class="field-error">{error}</small>{/if}
-</svelte:element>
+  {#if description}<small class="caption field-description" id={descriptionId}
+      >{#if typeof description === 'string'}{description}{:else}{@render description()}{/if}</small
+    >{/if}
+  {#if warning}<small class="field-warning" id={warningId}>{warning}</small>{/if}
+  {#if error}<small class="field-error" id={errorId}>{error}</small>{/if}
+</div>
 
 <style>
   .field {
@@ -129,55 +180,46 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
+  }
+
+  .field-label:not(.micro-label) {
     color: var(--text-muted);
   }
 
-  /* The descendant rules below are inside :where(), so they weigh no more than
-     the field's own class: any class on the control outranks them, which is
-     how Input's `monospace` and `invalid` stay visible inside a field. They
-     exist for the raw controls still written inside a Field; the width cap is
-     the only part that reaches the Input and TextArea primitives too. */
-  .field :global(:where(input:not([type='checkbox']), select, textarea)) {
-    width: 100%;
+  .field-optional {
+    color: var(--text-dim);
+  }
+
+  /* A form input reads at a line's length rather than the card's width. The
+     cap is the field's, so it reaches the primitives by their own classes;
+     inside :where() it weighs no more than the field's class, and a
+     placement class on the control outranks it. Field styles nothing else
+     about a control: every control in a field is a primitive that draws
+     itself (fieldCascade.test.ts). */
+  .field :global(:where(.ui-input, .ui-input-box, .ui-textarea)) {
     max-width: 24rem;
-    min-width: 0;
-    box-sizing: border-box;
   }
 
-  .field
-    :global(:where(input:not([type='checkbox'], .ui-input), select, textarea:not(.ui-textarea))) {
-    background: var(--surface-base);
-    color: var(--text-primary);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    padding: var(--space-1) var(--space-2);
-    font: inherit;
-    font-size: var(--text-sm);
-  }
-
-  /* `font: inherit` above is a shorthand and carries the body's 1.5 leading
-     with it, so an input here grew past the field tier it sits in the moment
-     iOS floored its text at 16px. Pinned beside the shorthand rather than
-     centrally for that reason. Textareas keep the inherited leading: they are
-     sized by their rows and read as prose, and they stay in the sans face
-     unless they are a TextArea with `monospace`. */
-  .field :global(:where(input:not([type='checkbox'], .ui-input), select)) {
-    line-height: var(--leading-tight);
-  }
-
-  .field :global(:where(textarea:not(.ui-textarea))) {
-    resize: vertical;
-  }
-
-  .field-wide :global(:where(textarea, input)) {
+  .field-wide :global(:where(.ui-input, .ui-input-box, .ui-textarea)) {
     max-width: 36rem;
   }
 
+  /* Control in the first column, caption and everything under it in the
+     second, so a description or an error sits under the caption it explains. */
   .field.checkbox {
-    flex-direction: row;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
     align-items: center;
-    gap: var(--space-2);
+    column-gap: var(--space-2);
     color: var(--text-primary);
+  }
+
+  .field.checkbox > :global(*) {
+    grid-column: 2;
+  }
+
+  .field.checkbox > :global(:first-child) {
+    grid-column: 1;
   }
 
   .field.checkbox .field-label {
@@ -188,6 +230,21 @@
     width: auto;
   }
 
+  /* The money `.ctl`: a dense field that grows from 9rem in a wrapping row. */
+  .field-compact {
+    gap: var(--space-1);
+    flex: 1 1 9rem;
+  }
+
+  /* The row sizes a compact field, so its control fills it uncapped. */
+  .field-compact :global(:where(.ui-input, .ui-input-box, .ui-textarea)) {
+    max-width: none;
+  }
+
+  .field-description {
+    max-width: 24rem;
+  }
+
   .field-warning {
     font-size: var(--text-xs);
     color: var(--status-warn-fg);
@@ -196,7 +253,7 @@
     max-width: 24rem;
   }
 
-  .field-wide .field-warning {
+  .field-wide :is(.field-warning, .field-description) {
     max-width: 36rem;
   }
 
@@ -216,7 +273,8 @@
       align-items: start;
     }
 
-    .field.inline > :global(*) {
+    .field.inline > :global(*),
+    .field.inline.checkbox > :global(:first-child) {
       grid-column: 2;
     }
 

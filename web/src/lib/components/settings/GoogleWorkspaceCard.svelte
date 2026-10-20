@@ -8,11 +8,18 @@
     type GoogleStatus,
     type GoogleScopeLevel,
   } from '$lib/api';
-  import { Button, ConfirmDialog, EmptyState, Select, type SelectOption } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    ConfirmDialog,
+    EmptyState,
+    Select,
+    type SelectOption,
+    Card,
+    Field,
+  } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { offSiteRoutesOpenInBrowser } from '$lib/platform/nativeConnection';
-  import SettingsCard from './SettingsCard.svelte';
-  import SettingsField from './SettingsField.svelte';
 
   interface Props {
     /** Called after a change the services list should re-read. */
@@ -170,22 +177,22 @@
 -->
 {#snippet statusPill()}
   {#if status?.enabled}
-    <span class="status-pill status-{status.connected ? 'configured' : 'missing'}">
+    <Badge tone="subtle" uppercase={false} variant={status.connected ? 'success' : 'neutral'}>
       {status.connected ? 'Connected' : 'Not connected'}
-    </span>
+    </Badge>
     {#if status.connected && status.missing_scopes.length > 0}
-      <span class="status-pill status-partial">Reconnect needed</span>
+      <Badge tone="subtle" uppercase={false} variant="warn">Reconnect needed</Badge>
     {/if}
   {/if}
 {/snippet}
 
-<SettingsCard
+<Card
   title="Google Workspace"
   description="Choose which Google services the bot may use, and at what level. A change takes effect the next time you connect: Google has to ask you again."
   status={statusPill}
 >
   {#if loading}
-    <p class="muted">Loading…</p>
+    <p class="caption">Loading…</p>
   {:else if !status}
     <EmptyState>Google status is unavailable.</EmptyState>
   {:else if !status.enabled}
@@ -211,9 +218,8 @@
          reader matching names across them. -->
     {#each status.offered as svc (svc.service)}
       {@const held = grantedByService.get(svc.service)}
-      <SettingsField
+      <Field
         label={svc.label}
-        labelled={false}
         warning={svc.max_level === 'off' ? 'This instance does not offer this service.' : undefined}
       >
         <div class="hstack wrap">
@@ -244,7 +250,7 @@
               {/if}<code>{s}</code>{/each}
           </p>
         {/if}
-      </SettingsField>
+      </Field>
     {/each}
 
     {#if status.connected && status.unrecognized_scopes.length > 0}
@@ -277,8 +283,14 @@
           Disconnect
         </Button>
       {:else}
-        <Button variant="primary" {...browserLink} disabled={busy || nothingRequested}>
-          {busy ? 'Connecting…' : 'Connect'}
+        <Button
+          variant="primary"
+          {...browserLink}
+          disabled={nothingRequested}
+          loading={busy}
+          loadingLabel="Connecting…"
+        >
+          Connect
         </Button>
       {/if}
     </div>
@@ -299,7 +311,7 @@
   {#if info}
     <div class="banner success">{info}</div>
   {/if}
-</SettingsCard>
+</Card>
 
 <ConfirmDialog
   open={confirmingDisconnect}

@@ -80,8 +80,8 @@ it('explains directory validation and prevents invalid new IDs', async () => {
   expect(screen.getByText(/background work.*daemon reload/)).toBeTruthy();
   await fireEvent.input(id, { target: { value: '../escape' } });
   await fireEvent.input(screen.getByLabelText('Email'), { target: { value: 'new@example.com' } });
-  await fireEvent.submit(screen.getByRole('form', { name: 'Add user' }));
-  expect(screen.getByRole('alert').textContent).toContain('lowercase');
+  await fireEvent.click(screen.getByRole('button', { name: 'Add and invite' }));
+  expect((await screen.findByRole('alert')).textContent).toContain('lowercase');
   expect(api.createAdminUser).not.toHaveBeenCalled();
 });
 
@@ -124,7 +124,7 @@ it('opens the editor on a user it has just created', async () => {
   await fireEvent.input(within(dialog).getByLabelText('Email'), {
     target: { value: 'carol@example.com' },
   });
-  await fireEvent.submit(within(dialog).getByRole('form', { name: 'Add user' }));
+  await fireEvent.click(within(dialog).getByRole('button', { name: 'Add and invite' }));
   await waitFor(() =>
     expect(api.createAdminUser).toHaveBeenCalledWith({
       user_id: 'carol',
@@ -158,7 +158,7 @@ it('keeps a create error and the entered email in the dialog', async () => {
   await fireEvent.input(within(dialog).getByLabelText('Email'), {
     target: { value: 'dave@example.com' },
   });
-  await fireEvent.submit(within(dialog).getByRole('form'));
+  await fireEvent.click(within(dialog).getByRole('button', { name: 'Add and invite' }));
   expect(await within(dialog).findByRole('alert')).toHaveTextContent('could not be sent');
   expect(within(dialog).getByLabelText('Email')).toHaveValue('dave@example.com');
   await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalledTimes(2));

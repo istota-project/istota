@@ -167,9 +167,15 @@ describe('EntityForm', () => {
     expect(screen.getByText('main')).toBeTruthy();
   });
 
-  it('renders a server error', () => {
-    mount({ entity: row(), error: "entity 'main' is the default entity" });
-    expect(screen.getByText("entity 'main' is the default entity")).toBeTruthy();
+  it('renders a server error and stays open', async () => {
+    const onSave = vi.fn(async () => {
+      throw new Error("entity 'main' is the default entity");
+    });
+    mount({ entity: row(), onSave });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      "entity 'main' is the default entity",
+    );
   });
 });
 
@@ -206,7 +212,10 @@ describe('EntityForm payment detection', () => {
   });
 
   it('clears the account on ledger changes and selects a sole declared income account without postings', async () => {
-    const onSave = vi.fn();
+    // A refused save keeps the dialog open for the second half of the test.
+    const onSave = vi.fn(async () => {
+      throw new Error('refused');
+    });
     mount({
       entity: row({
         payment_detection_enabled: true,

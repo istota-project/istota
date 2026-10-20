@@ -13,6 +13,7 @@
 // `build-render/<name>.html`.
 
 import '$lib/styles/tokens.css';
+import '$lib/styles/app-tokens.css';
 import './host.css';
 import { applyTheme } from '$lib/stores/theme';
 

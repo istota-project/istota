@@ -188,13 +188,19 @@ describe('ClientForm', () => {
     expect(onSave).not.toHaveBeenCalled();
   });
 
-  it('renders a server error', () => {
-    mount({ client: row(), error: "client 'acme' already exists" });
-    expect(screen.getByText("client 'acme' already exists")).toBeTruthy();
+  it('renders a server error and stays open', async () => {
+    const onSave = vi.fn(async () => {
+      throw new Error("client 'acme' already exists");
+    });
+    mount({ client: row(), onSave });
+    await fireEvent.click(screen.getByText('Save'));
+    expect(await screen.findByRole('alert')).toHaveTextContent("client 'acme' already exists");
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 
-  it('disables save while in flight', () => {
-    mount({ client: row(), saving: true });
+  it('disables save while in flight', async () => {
+    mount({ client: row(), onSave: vi.fn(() => new Promise(() => {})) });
+    await fireEvent.click(screen.getByText('Save'));
     expect((screen.getByText('Saving…') as HTMLButtonElement).disabled).toBe(true);
   });
 

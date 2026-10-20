@@ -52,7 +52,9 @@ it('says when the scheduler read the pool', async () => {
     as_of: asOf,
   });
   render(Page);
-  expect(await screen.findByText(`As of ${new Date(asOf).toLocaleTimeString()}`)).toBeTruthy();
+  const time = await screen.findByText(new Date(asOf).toLocaleTimeString());
+  expect(time.tagName).toBe('TIME');
+  expect(time.parentElement?.textContent?.trim()).toMatch(/^As of /);
 });
 
 it('explains missing console configuration without a viewer link', async () => {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
@@ -36,9 +37,9 @@
     DateRangeFilter,
     EmptyState,
     Select,
-    PageLoading,
+    LoadState,
   } from '$lib/components/ui';
-  import { loadSetting, saveSetting } from '$lib/stores/persisted';
+  import { loadSetting, saveSetting } from '$lib/ui/persisted';
 
   let pings: LocationPing[] = $state([]);
   let summary: DaySummary | null = $state(null);
@@ -90,16 +91,16 @@
     $requestNewPlace?.({ lat: cluster.lat, lon: cluster.lon, cluster });
   }
 
-  let restoreTarget: DismissedCluster | null = $state(null);
+  const restoreTarget = createConfirm<DismissedCluster>();
 
   function handleDismissedClick(d: DismissedCluster) {
-    restoreTarget = d;
+    restoreTarget.ask(d);
   }
 
   async function performRestore() {
-    if (!restoreTarget) return;
-    const id = restoreTarget.id;
-    restoreTarget = null;
+    if (!restoreTarget.target) return;
+    const id = restoreTarget.target.id;
+    restoreTarget.cancel();
     try {
       await restoreDismissedCluster(id);
       await loadDiscover();
@@ -304,13 +305,10 @@
     </Chip>
   </div>
 
-  {#if loading}
-    <PageLoading />
-  {:else if error}
-    <div class="center-msg error">{error}</div>
-  {:else if pings.length === 0 && !showDiscover}
-    <EmptyState>No location data for this period</EmptyState>
-  {:else}
+  <LoadState {loading} {error} empty={pings.length === 0 && !showDiscover}>
+    {#snippet emptyState()}
+      <EmptyState>No location data for this period</EmptyState>
+    {/snippet}
     <div class="map-area">
       <LocationMap
         bind:this={mapComponent}
@@ -388,17 +386,16 @@
       {/if}
       <ElevationProfile summary={elevation} />
     {/if}
-  {/if}
+  </LoadState>
 </div>
 
 <ConfirmDialog
-  open={restoreTarget != null}
+  bind:open={restoreTarget.open}
   title="Restore dismissed area"
   message="Are you sure you want to restore this dismissed area? Future pings here may form a cluster again."
   confirmLabel="Restore"
   confirmVariant="primary"
   onConfirm={performRestore}
-  onCancel={() => (restoreTarget = null)}
 />
 
 <style>

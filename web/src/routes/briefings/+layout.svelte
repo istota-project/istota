@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { onMount, untrack } from 'svelte';
   import { base } from '$app/paths';
@@ -30,9 +31,12 @@
     briefingReadAck,
   } from '$lib/stores/briefings';
   import {
+    Icon,
     AppShell,
     ShellHeader,
+    ListRow,
     Sidebar,
+    SidebarNav,
     SidebarToggle,
     CategoryGroup,
     Chip,
@@ -41,6 +45,8 @@
     ConfirmDialog,
     EmptyState,
     PageLoading,
+    LoadMore,
+    Timestamp,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import {
@@ -55,7 +61,7 @@
   } from '@lucide/svelte';
   import { getCurrentUser } from '$lib/userContext';
   import { notifyError } from '$lib/stores/notices';
-  import { formatDateTime, formatRelative } from '$lib/dateFormat';
+  import { formatDateTime } from '$lib/dateFormat';
   import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
 
   let { children } = $props();
@@ -101,11 +107,11 @@
   let loadingMore = $state(false);
 
   // The archived briefing pending a delete confirmation (null = no dialog).
-  let deleteTarget = $state<BriefingArchiveItem | null>(null);
+  const deleteTarget = createConfirm<BriefingArchiveItem>();
   $effect(() => {
     const request = $briefingDeleteRequest;
     if (!request) return;
-    deleteTarget = request;
+    deleteTarget.ask(request);
     briefingDeleteRequest.set(null);
   });
   $effect(() => {
@@ -122,7 +128,7 @@
     );
   }
   let deleteError = $state('');
-  let markAllTarget = $state<{ name: string; username: string } | null>(null);
+  const markAllTarget = createConfirm<{ name: string; username: string }>();
   let markingAllRead = $state(false);
   let mounted = false;
 
@@ -137,6 +143,7 @@
   // The settings sidebar: every briefing the caller can open, under its audience,
   // then the two settings sections that are not one briefing.
   let settingsSidebarOpen = $state(false);
+  const closeSettingsSidebar = () => (settingsSidebarOpen = false);
   let personalBriefings = $state<UserBriefingRow[]>([]);
   let groupBriefings = $state<Record<string, GroupBriefingDefinition[]>>({});
   const settingsParams = $derived(onSettings ? page.url.searchParams : new URLSearchParams());
@@ -169,19 +176,22 @@
   );
 
   $effect(() => {
-    if (markAllTarget && (!onReader || identity.user.username !== markAllTarget.username)) {
-      markAllTarget = null;
+    if (
+      markAllTarget.target &&
+      (!onReader || identity.user.username !== markAllTarget.target.username)
+    ) {
+      markAllTarget.cancel();
     }
   });
 
   function handleMarkAllRead() {
     if (markingAllRead || !onReader) return;
-    markAllTarget = { name: $briefingFilterName, username: identity.user.username };
+    markAllTarget.ask({ name: $briefingFilterName, username: identity.user.username });
   }
 
   async function performMarkAllRead() {
-    const target = markAllTarget;
-    markAllTarget = null;
+    const target = markAllTarget.target;
+    markAllTarget.cancel();
     if (!target || markingAllRead || !onReader || identity.user.username !== target.username)
       return;
     markingAllRead = true;
@@ -414,9 +424,9 @@
   }
 
   async function performDelete() {
-    const target = deleteTarget;
+    const target = deleteTarget.target;
     if (!target) return;
-    deleteTarget = null;
+    deleteTarget.cancel();
     deleteError = '';
     try {
       await deleteBriefingArchiveItem(target.id);
@@ -547,7 +557,7 @@
       {#snippet tools()}
         {#if !onSettings}
           <Chip icon onclick={() => goto(`${base}/briefings/settings/?new=1`)} title="New briefing">
-            <Plus size={14} />
+            <Icon icon={Plus} size="sm" />
           </Chip>
         {/if}
         {#if onReader}
@@ -559,7 +569,7 @@
               ? "Mark this briefing's archive as read"
               : 'Mark all briefings as read'}
           >
-            <CheckCheck size={14} />
+            <Icon icon={CheckCheck} size="sm" />
           </Chip>
         {/if}
         <!-- Ahead of the cog, so the cog keeps the bar's right edge and stays
@@ -567,13 +577,24 @@
 			     unless one is registered. -->
         <HeaderSave />
         <Chip icon checked={onSettings} onclick={toggleSettings} title="Briefing settings">
-          <Cog size={14} />
+          <Icon icon={Cog} size="sm" />
         </Chip>
       {/snippet}
     </ShellHeader>
   {/snippet}
 
   {#snippet sidebar()}
+    {#snippet heldMark()}<span class="view-state" title="Paused by an administrator"
+        ><Icon icon={CirclePause} size="sm" /><span class="visually-hidden"
+          >, paused by an administrator</span
+        ></span
+      >{/snippet}
+    {#snippet offMark()}<span class="view-state" title="Off"
+        ><Icon icon={CirclePause} size="sm" /><span class="visually-hidden">, off</span></span
+      >{/snippet}
+    {#snippet draftMark()}<span class="view-state" title="Draft"
+        ><Icon icon={PencilLine} size="sm" /><span class="visually-hidden">, draft</span></span
+      >{/snippet}
     {#if onSettings}
       <Sidebar
         title="Settings"
@@ -581,92 +602,75 @@
         onClose={() => (settingsSidebarOpen = false)}
       >
         <div class="settings-index">
-          <div class="views">
-            <a
-              class="view-btn"
-              class:active={settingsActive({ new: '1' })}
-              href={settingsUrl({ new: '1' })}
-              onclick={() => (settingsSidebarOpen = false)}
-            >
-              <Plus size={14} />
-              <span class="view-name">New briefing</span>
-            </a>
-          </div>
+          <SidebarNav
+            items={[
+              {
+                href: settingsUrl({ new: '1' }),
+                label: 'New briefing',
+                icon: Plus,
+                active: settingsActive({ new: '1' }),
+              },
+            ]}
+            label="New briefing"
+            divider
+            onnavigate={closeSettingsSidebar}
+          />
           <CategoryGroup label="Just me" count={personalBriefings.length}>
-            <div class="views">
-              {#each personalBriefings as item (item.name)}
-                {@const query = { name: item.name }}
-                <a
-                  class="view-btn"
-                  class:active={settingsActive(query)}
-                  href={settingsUrl(query)}
-                  onclick={() => (settingsSidebarOpen = false)}
-                >
-                  <span class="view-name">{item.title || item.name}</span>
-                  {#if item.held}<span class="view-state" title="Paused by an administrator"
-                      ><CirclePause size={13} aria-hidden="true" /><span class="visually-hidden"
-                        >, paused by an administrator</span
-                      ></span
-                    >{:else if !item.enabled}<span class="view-state" title="Off"
-                      ><CirclePause size={13} aria-hidden="true" /><span class="visually-hidden"
-                        >, off</span
-                      ></span
-                    >{/if}
-                </a>
-              {/each}
-            </div>
+            <SidebarNav
+              items={personalBriefings.map((item) => ({
+                href: settingsUrl({ name: item.name }),
+                label: item.title || item.name,
+                active: settingsActive({ name: item.name }),
+                mark: item.held ? heldMark : !item.enabled ? offMark : undefined,
+              }))}
+              label="Just me"
+              divider
+              onnavigate={closeSettingsSidebar}
+            />
           </CategoryGroup>
           {#each targets as target (target.group_id)}
             {@const items = groupBriefings[target.group_id!] ?? []}
             {#if items.length || target.capabilities.author_briefings}
               <CategoryGroup label={target.label} count={items.length}>
-                <div class="views">
-                  {#each items as item (item.id)}
-                    {@const query = { group: target.group_id!, briefing: item.name }}
-                    <a
-                      class="view-btn"
-                      class:active={settingsActive(query)}
-                      href={settingsUrl(query)}
-                      onclick={() => (settingsSidebarOpen = false)}
-                    >
-                      <span class="view-name">{item.title || item.name}</span>
-                      {#if item.held}<span class="view-state" title="Paused by an administrator"
-                          ><CirclePause size={13} aria-hidden="true" /><span class="visually-hidden"
-                            >, paused by an administrator</span
-                          ></span
-                        >{:else if !item.enabled}<span class="view-state" title="Draft"
-                          ><PencilLine size={13} aria-hidden="true" /><span class="visually-hidden"
-                            >, draft</span
-                          ></span
-                        >{/if}
-                    </a>
-                  {/each}
-                </div>
+                <SidebarNav
+                  items={items.map((item) => {
+                    const query = { group: target.group_id!, briefing: item.name };
+                    return {
+                      href: settingsUrl(query),
+                      label: item.title || item.name,
+                      active: settingsActive(query),
+                      mark: item.held ? heldMark : !item.enabled ? draftMark : undefined,
+                    };
+                  })}
+                  label={target.label}
+                  divider
+                  onnavigate={closeSettingsSidebar}
+                />
               </CategoryGroup>
             {/if}
           {/each}
-          <div class="views settings-sections">
-            <a
-              class="view-btn"
-              class:active={settingsView === 'delivery'}
-              href={settingsUrl({ view: 'delivery' })}
-              onclick={() => (settingsSidebarOpen = false)}
-            >
-              <Send size={14} />
-              <span class="view-name">Delivery</span>
-            </a>
-            {#if identity.user.features?.admin}
-              <a
-                class="view-btn"
-                class:active={settingsView === 'shared'}
-                href={settingsUrl({ view: 'shared' })}
-                onclick={() => (settingsSidebarOpen = false)}
-              >
-                <Layers size={14} />
-                <span class="view-name">Shared blocks</span>
-              </a>
-            {/if}
-          </div>
+          <SidebarNav
+            items={[
+              {
+                href: settingsUrl({ view: 'delivery' }),
+                label: 'Delivery',
+                icon: Send,
+                active: settingsView === 'delivery',
+              },
+              ...(identity.user.features?.admin
+                ? [
+                    {
+                      href: settingsUrl({ view: 'shared' }),
+                      label: 'Shared blocks',
+                      icon: Layers,
+                      active: settingsView === 'shared',
+                    },
+                  ]
+                : []),
+            ]}
+            label="Briefing settings"
+            onnavigate={closeSettingsSidebar}
+          />
         </div>
       </Sidebar>
     {:else}
@@ -688,34 +692,35 @@
         {:else}
           {#each entries as entry (entry.kind === 'user' ? `u${entry.item.id}` : `g${entry.item.run_id}`)}
             {@const row = rowView(entry)}
-            <div class="list-row archive-row" class:active={row.active}>
-              <button
-                class="archive-btn"
-                type="button"
-                onclick={() =>
-                  entry.kind === 'user' ? pickItem(entry.item.id) : pickGroupEdition(entry.item)}
-              >
-                <span class="archive-line">
-                  <span class="archive-subject title-card">{row.title}</span>
-                  <time class="archive-date caption" datetime={entry.at} title={fmtDate(entry.at)}
-                    >{formatRelative(entry.at)}</time
-                  >
-                </span>
+            <ListRow
+              class="archive-row"
+              active={row.active}
+              density="sm"
+              onclick={() =>
+                entry.kind === 'user' ? pickItem(entry.item.id) : pickGroupEdition(entry.item)}
+            >
+              <span class="title-card">{row.title}</span>
+              {#snippet badge()}
+                <Timestamp class="caption num" value={entry.at} format="relative" />
+              {/snippet}
+              {#snippet meta()}
                 <span class="archive-audience caption">
-                  {#if entry.kind === 'group'}<Users size={12} aria-hidden="true" />{/if}
+                  {#if entry.kind === 'group'}<Icon icon={Users} size="xs" />{/if}
                   <span class="truncate">{row.audience}</span>
                   <CountPill count={row.unread ? 1 : 0} title="Unread" shape="inline-mark" />
                   {#if row.unread}<span class="visually-hidden">, unread</span>{/if}
                 </span>
                 {#if row.preview}<span class="archive-preview">{row.preview}</span>{/if}
-              </button>
-            </div>
+              {/snippet}
+            </ListRow>
           {/each}
-          {#if hasMore}
-            <button class="load-more" type="button" onclick={loadMore} disabled={loadingMore}>
-              {loadingMore ? 'Loading…' : 'Load older'}
-            </button>
-          {/if}
+          <LoadMore
+            onload={loadMore}
+            {hasMore}
+            loading={loadingMore}
+            label="Load older"
+            fullWidth
+          />
         {/if}
       </Sidebar>
     {/if}
@@ -724,74 +729,30 @@
   {@render children()}
 </AppShell>
 
-{#if markAllTarget}
+{#if markAllTarget.target}
   <ConfirmDialog
-    open={true}
+    bind:open={markAllTarget.open}
     title="Mark all as read"
-    message={markAllTarget.name
-      ? `Are you sure you want to mark all unread editions of ${markAllTarget.name} as read? This can't be undone.`
+    message={markAllTarget.target.name
+      ? `Are you sure you want to mark all unread editions of ${markAllTarget.target.name} as read? This can't be undone.`
       : "Are you sure you want to mark all unread briefings as read? This can't be undone."}
     confirmLabel="Mark all read"
     confirmVariant="primary"
     onConfirm={performMarkAllRead}
-    onCancel={() => (markAllTarget = null)}
   />
 {/if}
 
-{#if deleteTarget}
+{#if deleteTarget.target}
   <ConfirmDialog
-    open={true}
+    bind:open={deleteTarget.open}
     title="Delete briefing"
-    message={`Permanently remove the archived briefing "${deleteTarget.subject || deleteTarget.briefing_name}" from ${fmtDate(deleteTarget.generated_at)}? This cannot be undone.`}
+    message={`Permanently remove the archived briefing "${deleteTarget.target.subject || deleteTarget.target.briefing_name}" from ${fmtDate(deleteTarget.target.generated_at)}? This cannot be undone.`}
     confirmLabel="Delete"
     onConfirm={performDelete}
-    onCancel={() => (deleteTarget = null)}
   />
 {/if}
 
 <style>
-  /* The row's layout and hover come from `.sidebar .list-row` in
-     lib/styles/sidebar.css, shared with the chat sidebar. */
-  .archive-btn {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-    flex: 1;
-    min-width: 0;
-    text-align: left;
-    background: none;
-    border: none;
-    color: inherit;
-    font: inherit;
-    cursor: pointer;
-    padding: var(--space-2) var(--space-2);
-    border-radius: var(--radius-sm);
-  }
-
-  .archive-row.active .archive-btn {
-    color: var(--text-primary);
-  }
-
-  .archive-line {
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-2);
-    min-width: 0;
-  }
-
-  .archive-subject {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .archive-date {
-    flex-shrink: 0;
-    font-variant-numeric: tabular-nums;
-  }
-
   .archive-audience {
     display: flex;
     align-items: center;
@@ -827,32 +788,6 @@
   .settings-index :global(.cat-label) {
     padding-left: var(--space-2);
     padding-right: var(--space-2);
-  }
-
-  /* Every block above already ends in the `.views` rule, so this one draws
-     none of its own, above or below. */
-  .settings-index .settings-sections {
-    margin-bottom: 0;
-    padding-bottom: 0;
-    border-bottom: none;
-  }
-
-  .load-more {
-    width: 100%;
-    margin-top: var(--space-2);
-    padding: var(--space-2);
-    background: none;
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-sm);
-    color: var(--text-muted);
-    font: inherit;
-    font-size: var(--text-xs);
-    cursor: pointer;
-  }
-
-  .load-more:hover:not(:disabled) {
-    background: var(--hover-bg);
-    color: var(--hover-fg);
   }
 
   .sidebar-error {

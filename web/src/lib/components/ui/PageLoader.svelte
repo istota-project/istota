@@ -5,7 +5,7 @@
   pane's own `PageLoading` label instead.
 -->
 <script lang="ts">
-  import { pageLoading } from '$lib/stores/pageLoading';
+  import { pageLoading } from '$lib/ui/pageLoading';
 </script>
 
 {#if $pageLoading}

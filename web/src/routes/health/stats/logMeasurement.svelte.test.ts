@@ -155,7 +155,15 @@ describe('logging a measurement', () => {
     // which is the other half of what the string guard broke.
     await mountPage();
     const dialog = await openModal('+ Log measurement');
-    await fireEvent.change(screen.getByLabelText('Unit'), { target: { value: 'lb' } });
+    // The unit is a Select in the value's box: open it and pick.
+    const mouse = { pointerType: 'mouse', button: 0 };
+    const unit = screen.getByRole('button', { name: 'Unit' });
+    await fireEvent.pointerDown(unit, mouse);
+    await fireEvent.pointerUp(unit, mouse);
+    const lb = await screen.findByRole('option', { name: 'lb' });
+    await fireEvent.pointerMove(lb, { pointerType: 'mouse' });
+    await fireEvent.pointerDown(lb, mouse);
+    await fireEvent.pointerUp(lb, mouse);
     await typeValue(dialog, '160');
     await save(dialog);
 

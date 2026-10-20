@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { updateWalletCard, removeWalletCard, type WalletCard } from '$lib/api';
+  import { AuthError, updateWalletCard, removeWalletCard, type WalletCard } from '$lib/api';
   import {
     Badge,
     Button,
@@ -7,8 +7,9 @@
     EmptyState,
     KebabMenu,
     type KebabItem,
+    Card,
   } from '$lib/components/ui';
-  import SettingsCard from './SettingsCard.svelte';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import CardFormModal from './CardFormModal.svelte';
   let {
     cards,
@@ -22,7 +23,7 @@
     onError: (e: unknown) => void;
   } = $props();
   let form: { card: WalletCard | null } | null = $state(null);
-  let removing: WalletCard | null = $state(null);
+  const removing = createConfirm<WalletCard>();
   let busy = $state(false);
   function cardState(card: WalletCard) {
     const now = new Date();
@@ -41,6 +42,24 @@
       onSaved();
     } catch (e) {
       onError(e);
+    } finally {
+      busy = false;
+    }
+  }
+  // A refusal rejects into the dialog, which stays open to say so; an expired
+  // session goes to onError, the one place that ends it.
+  async function remove(card: WalletCard) {
+    if (busy || !writable) return;
+    busy = true;
+    try {
+      await removeWalletCard(card.id);
+      onSaved();
+    } catch (e) {
+      if (e instanceof AuthError) {
+        onError(e);
+        return;
+      }
+      throw e;
     } finally {
       busy = false;
     }
@@ -66,15 +85,13 @@
         label: 'Remove',
         danger: true,
         disabled: busy || !writable,
-        onSelect: () => {
-          removing = card;
-        },
+        onSelect: () => removing.ask(card),
       },
     ];
   }
 </script>
 
-<SettingsCard title="Cards">
+<Card title="Cards">
   {#snippet actions()}<Button
       variant="primary"
       size="sm"
@@ -106,7 +123,7 @@
     These limits control what Istota will fill, not what a merchant charges. Use a card with its own
     issuer-side spending limit.
   </p>
-</SettingsCard>
+</Card>
 {#if form}<CardFormModal
     card={form.card}
     onClose={() => {
@@ -116,19 +133,12 @@
     {onError}
   />{/if}
 <ConfirmDialog
-  open={removing !== null}
+  bind:open={removing.open}
   title="Remove card"
-  message="Remove {removing?.label}? Open purchases on this card will be cancelled."
+  message="Remove {removing.target?.label}? Open purchases on this card will be cancelled."
   confirmLabel="Remove"
-  confirmDisabled={busy}
-  onCancel={() => {
-    removing = null;
-  }}
-  onConfirm={() => {
-    const card = removing;
-    removing = null;
-    if (card) void mutate(() => removeWalletCard(card.id));
-  }}
+  busyLabel="Removing…"
+  onConfirm={() => removing.target && remove(removing.target)}
 />
 
 <style>

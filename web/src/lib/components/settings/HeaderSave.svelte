@@ -39,9 +39,10 @@
       variant="primary"
       size="sm"
       onclick={save.save}
-      disabled={!save.dirty || save.saving || save.disabled}
+      disabled={!save.dirty || save.disabled}
+      loading={save.saving}
     >
-      {save.saving ? 'Saving…' : (save.label ?? 'Save changes')}
+      {save.label ?? 'Save changes'}
     </Button>
   </span>
 {/if}

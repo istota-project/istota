@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { PageLoading } from '$lib/components/ui';
+  import { LoadState } from '$lib/components/ui';
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { getModuleServices, type ServiceCard as ServiceCardData } from '$lib/api';
@@ -40,17 +40,15 @@
   });
 </script>
 
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else if !moduleEnabled}
-  <div class="settings">
-    <div class="banner info">
-      Money module is disabled. Enable it in
-      <a href="{base}/settings">Settings → Preferences</a> to manage Monarch credentials and invoicing.
+<LoadState {loading} {error}>
+  {#if !moduleEnabled}
+    <div class="settings">
+      <div class="banner info">
+        Money module is disabled. Enable it in
+        <a href="{base}/settings">Settings → Preferences</a> to manage Monarch credentials and invoicing.
+      </div>
     </div>
-  </div>
-{:else}
-  {@render children()}
-{/if}
+  {:else}
+    {@render children()}
+  {/if}
+</LoadState>

@@ -80,8 +80,8 @@
   /* The report page's own inset, which all three declared identically as
      `.cashflow-page` / `.report-content` — the same rule under two names, so
      retuning it meant finding three copies and the top edge could drift a step
-     on one page without anything saying so. It belongs to the shell for the
-     same reason `.section-header` below does.
+     on one page without anything saying so. It belongs to the shell; the
+     section headers inside it are `Disclosure variant="section"`.
 
      The block padding is a step up from the `--space-2` those copies carried:
      at that value the first section header sat almost against the section
@@ -95,33 +95,5 @@
   /* An empty state measures its own distance from the bar above it. */
   .report-frame:has(> :global(.empty-state)) {
     padding-top: 0;
-  }
-
-  /* The three report pages each declared these — .section-toggle three times
-     byte-for-byte as a :global() rule, which leaks app-wide, so whichever
-     stylesheet loaded last was the one in effect. Defined once here, where the
-     pages that use them live, scoped under a frame class this layout owns.
-     Mirrors .health-frame; deliberately not named .money-*, which is the
-     page chrome imported by routes/money/+layout.svelte. */
-  :global(.report-frame .section-header) {
-    display: flex;
-    align-items: baseline;
-    padding: var(--space-3) var(--space-3) var(--space-2);
-    border-bottom: 1px solid var(--border-subtle);
-    margin-top: var(--space-2);
-  }
-
-  :global(.report-frame .section-header:first-child) {
-    margin-top: 0;
-  }
-
-  /* The trigger carries .button-reset; this is its type and layout. */
-  :global(.report-frame .section-toggle) {
-    color: var(--text-primary);
-    font-size: var(--text-base);
-    font-weight: var(--weight-semibold);
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
   }
 </style>

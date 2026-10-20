@@ -1,8 +1,15 @@
 <script lang="ts">
-  import { ConfirmDialog, EmptyState } from '$lib/components/ui';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import {
+    Badge,
+    Card,
+    ConfirmDialog,
+    EmptyState,
+    SecretField,
+    type BadgeVariant,
+  } from '$lib/components/ui';
   import { setSecret, deleteSecret, type ServiceCard as ServiceCardData } from '$lib/api';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
-  import SecretField from './SecretField.svelte';
 
   interface Props {
     service: ServiceCardData;
@@ -10,6 +17,13 @@
   }
 
   let { service, onChanged }: Props = $props();
+
+  const STATUS_VARIANT: Record<ServiceCardData['status'], BadgeVariant> = {
+    configured: 'success',
+    partial: 'warn',
+    missing: 'neutral',
+    unavailable: 'neutral',
+  };
 
   function statusLabel(s: ServiceCardData['status']): string {
     switch (s) {
@@ -28,12 +42,12 @@
   let saving = $state(false);
   let savedFlash = $state(false);
   let saveError = $state('');
-  let confirmingClearKey: string | null = $state(null);
+  const confirmingClearKey = createConfirm<string>();
 
   let dirty = $derived(Object.values(pending).some((v) => v && v.length > 0));
 
   let clearMessage = $derived.by(() => {
-    const field = service.fields.find((f) => f.key === confirmingClearKey);
+    const field = service.fields.find((f) => f.key === confirmingClearKey.target);
     return (
       `Are you sure you want to clear the stored ${field?.label ?? 'value'} ` +
       `for ${service.label}? The credential is deleted from the server and ` +
@@ -68,7 +82,7 @@
   }
 
   async function performClear(key: string) {
-    confirmingClearKey = null;
+    confirmingClearKey.cancel();
     saving = true;
     saveError = '';
     try {
@@ -94,30 +108,23 @@
   useSettingsSave(() => (service.fields.length > 0 ? { dirty, saving, save: saveAll } : null));
 </script>
 
-<section class="card" data-status={service.status}>
-  <header class="section-header">
-    <div class="hstack">
-      <h2 class="title-section">{service.label}</h2>
-      <span class="status-pill status-{service.status}">
-        {statusLabel(service.status)}
-      </span>
-    </div>
-    <div class="hstack">
-      {#if service.last_updated}
-        <span class="caption">Updated {service.last_updated}</span>
-      {/if}
-      <!-- No Save button: the app bar owns it (see useSettingsSave above). The
-			     flash stays, because with one shared button it is the only thing that
-			     says *this* card is what got written. -->
-      {#if savedFlash}
-        <span class="saved-flash">Saved.</span>
-      {/if}
-    </div>
-  </header>
-
-  {#if service.hint}
-    <p class="description">{service.hint}</p>
-  {/if}
+<Card title={service.label} description={service.hint || undefined} data-status={service.status}>
+  {#snippet status()}
+    <Badge tone="subtle" uppercase={false} variant={STATUS_VARIANT[service.status]}>
+      {statusLabel(service.status)}
+    </Badge>
+  {/snippet}
+  {#snippet actions()}
+    {#if service.last_updated}
+      <span class="caption">Updated {service.last_updated}</span>
+    {/if}
+    <!-- No Save button: the app bar owns it (see useSettingsSave above). The
+		     flash stays, because with one shared button it is the only thing that
+		     says *this* card is what got written. -->
+    {#if savedFlash}
+      <span class="saved-flash">Saved.</span>
+    {/if}
+  {/snippet}
 
   {#if service.used_by && service.used_by.length > 0}
     <p class="used-by caption">
@@ -154,35 +161,31 @@
         value={pending[f.key] ?? ''}
         disabled={saving}
         onValueChange={(v) => setFieldValue(f.key, v)}
-        onRequestClear={() => (confirmingClearKey = f.key)}
+        onRequestClear={() => confirmingClearKey.ask(f.key)}
       />
     {/each}
     {#if saveError}
       <div class="banner error">{saveError}</div>
     {/if}
   {/if}
-</section>
+</Card>
 
 <!--
   Clearing a stored credential is destructive and irreversible, so it goes
   through the shared dialog like every other such action — it used to be a
   hand-rolled inline row whose confirm button was `primary`, i.e. the same
   affordance as Save. One dialog outside the loop rather than one per field:
-  `confirmingClearKey` already names the single field being cleared.
+  `confirmingClearKey.target` already names the single field being cleared.
 -->
 <ConfirmDialog
-  open={confirmingClearKey !== null}
+  bind:open={confirmingClearKey.open}
   title="Clear stored value"
   message={clearMessage}
   confirmLabel="Clear"
-  onConfirm={() => confirmingClearKey && performClear(confirmingClearKey)}
-  onCancel={() => (confirmingClearKey = null)}
+  onConfirm={() => confirmingClearKey.target && performClear(confirmingClearKey.target)}
 />
 
 <style>
-  /* Inherit shared .settings .card / .section-header / .status-pill /
-	   .meta styling — this component is meant to be used inside
-	   <div class="settings"> wrappers that already pull in settings.css. */
   .used-by {
     margin: 0;
   }

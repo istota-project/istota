@@ -3,6 +3,7 @@ import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import { createRawSnippet } from 'svelte';
 import Badge from './Badge.svelte';
 import IconButton from './IconButton.svelte';
+import { X } from '@lucide/svelte';
 
 afterEach(cleanup);
 
@@ -41,6 +42,37 @@ describe('Badge', () => {
     const { container } = render(Badge, { variant: 'partial', children: text('x') });
     expect(container.querySelector('.badge-danger')).toBeNull();
     expect(container.querySelector('.badge-warn')).toBeNull();
+  });
+
+  it('is solid and uppercase unless asked otherwise', () => {
+    const { container } = render(Badge, { children: text('x') });
+    const badge = container.querySelector('.badge')!;
+    expect(badge).not.toHaveClass('badge-subtle');
+    expect(badge).not.toHaveClass('badge-lower');
+  });
+
+  it('draws the lowercase neutral pill as tone="subtle" uppercase={false}', () => {
+    const { container } = render(Badge, {
+      tone: 'subtle',
+      uppercase: false,
+      variant: 'success',
+      children: text('Configured'),
+    });
+    const badge = container.querySelector('.badge')!;
+    expect(badge).toHaveClass('badge-subtle', 'badge-lower', 'badge-success');
+    expect(badge).toHaveTextContent('Configured');
+  });
+
+  it('puts an icon before the text and passes a placement class', () => {
+    const icon = createRawSnippet(() => ({ render: () => '<svg data-testid="glyph"></svg>' }));
+    const { container } = render(Badge, {
+      icon,
+      class: 'reach',
+      children: text('Tasks can read'),
+    });
+    const badge = container.querySelector('.badge.reach')!;
+    expect(badge.firstElementChild).toBe(screen.getByTestId('glyph'));
+    expect(badge).toHaveTextContent('Tasks can read');
   });
 });
 
@@ -81,5 +113,21 @@ describe('IconButton', () => {
       children: text('×'),
     });
     expect(container.querySelector('.icon-btn.danger')).toBeTruthy();
+  });
+
+  it('draws an icon prop through Icon at its own step', () => {
+    const { container } = render(IconButton, { label: 'Close', size: 'sm', icon: X });
+    const glyph = container.querySelector('.icon-btn .ui-icon');
+    expect(glyph?.classList.contains('ui-icon-sm')).toBe(true);
+    expect(glyph?.getAttribute('aria-hidden')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument();
+  });
+
+  it('defaults an md button to the md glyph and takes iconSize over it', () => {
+    const md = render(IconButton, { label: 'a', icon: X });
+    expect(md.container.querySelector('.ui-icon-md')).toBeTruthy();
+    cleanup();
+    const lg = render(IconButton, { label: 'b', icon: X, iconSize: 'lg' });
+    expect(lg.container.querySelector('.ui-icon-lg')).toBeTruthy();
   });
 });

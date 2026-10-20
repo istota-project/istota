@@ -2,7 +2,7 @@
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
-  import { AppShell, ShellHeader, HeaderNav, Chip } from '$lib/components/ui';
+  import { Icon, AppShell, ShellHeader, HeaderNav, Chip } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { Cog } from '@lucide/svelte';
 
@@ -57,7 +57,7 @@
 			     unless one is registered. -->
         <HeaderSave />
         <Chip icon checked={onSettings} onclick={toggleSettings} title="Health settings">
-          <Cog size={14} />
+          <Icon icon={Cog} size="sm" />
         </Chip>
       {/snippet}
     </ShellHeader>
@@ -79,39 +79,12 @@
     padding: var(--space-4);
   }
 
-  /* Shared card surface for every health page — the module's counterpart to
-	   the global .card-grid layout primitive (app.css). Scoped to .health-frame
-	   (not global) because `.card` means other things elsewhere in the app;
-	   this mirrors how settings.css scopes `.settings .card`. Pages set their
-	   own padding/layout on `.card`; this owns surface + border + radius. Add
-	   `class="card interactive"` for a clickable card (cursor + hover border). */
   /* The .msg boxes this replaced each carried their own margin-bottom —
      0.75rem on six pages, 0.5rem on one. Restored once for the module rather
      than as twelve page rules re-forking the primitive; the majority value
      wins, so the labs toolbar's notice gains 0.25rem. */
   .health-frame :global(.banner) {
     margin-bottom: var(--space-3);
-  }
-
-  .health-frame :global(.card) {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    /* design-lint-allow: --card-padding is the documented hook a consuming page
-       sets to override this padding without raising specificity; it is defined
-       by the caller, so it is deliberately absent from the token roster. */
-    padding: var(--card-padding, 0.75rem 0.9rem);
-    box-sizing: border-box;
-    min-width: 0;
-    text-decoration: none;
-  }
-  .health-frame :global(.card.interactive) {
-    cursor: pointer;
-    color: var(--text-primary);
-    transition: border-color var(--transition-fast);
-  }
-  .health-frame :global(.card.interactive:hover) {
-    border-color: var(--border-hover);
   }
 
   @media (max-width: 768px) {

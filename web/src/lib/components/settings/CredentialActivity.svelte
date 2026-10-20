@@ -1,8 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getCredentialActivity, type CredentialActivityRow } from '$lib/api';
-  import { Button } from '$lib/components/ui';
-  import SettingsCard from './SettingsCard.svelte';
+  import { Button, Card, Timestamp } from '$lib/components/ui';
   let rows: CredentialActivityRow[] = $state([]);
   let error = $state('');
   let busy = $state(false);
@@ -22,24 +21,26 @@
   });
 </script>
 
-<SettingsCard title="Activity" description="Recent credential actions.">
+<Card title="Activity" description="Recent credential actions.">
   {#snippet actions()}<Button variant="secondary" size="sm" disabled={busy} onclick={load}
       >Refresh</Button
     >{/snippet}
   {#if error}<p class="form-error" role="alert">{error}</p>{/if}
-  {#if busy && !rows.length}<p>Loading activity…</p>
+  {#if busy && !rows.length}<p class="caption">Loading activity…</p>
   {:else if !rows.length}<p>No credential activity yet.</p>
   {:else}
     <ul>
       {#each rows as row (row.id)}
         <li>
           <p>{row.action}{row.name ? ` · ${row.name}` : ''}</p>
-          <p class="caption">{row.at} · {row.actor}</p>
+          <p class="caption">
+            <Timestamp value={row.at} format="datetime" /> · {row.actor}
+          </p>
         </li>
       {/each}
     </ul>
   {/if}
-</SettingsCard>
+</Card>
 
 <style>
   ul {

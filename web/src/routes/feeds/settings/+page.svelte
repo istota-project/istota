@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { ArrowDown, ArrowUp } from '@lucide/svelte';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
@@ -10,6 +12,7 @@
     refreshFeeds,
     getModuleServices,
     type FeedsConfigPayload,
+    type FeedsConfigSettings,
     type FeedsConfigFeed,
     type FeedsConfigCategory,
     type FeedsDiagnostics,
@@ -21,20 +24,23 @@
     ConfirmDialog,
     EmptyState,
     IconButton,
+    FormModal,
     KebabMenu,
-    Modal,
-    Select,
     type KebabItem,
     type SelectOption,
+    Card,
+    Field,
+    Input,
+    Badge,
+    Timestamp,
   } from '$lib/components/ui';
-  import {
-    ServiceCard,
-    SettingsLayout,
-    SettingsCard,
-    SettingsField,
-  } from '$lib/components/settings';
+  import { ServiceCard, SettingsLayout } from '$lib/components/settings';
+  import FeedSubscriptionModal, {
+    type FeedDraft,
+  } from '$lib/components/FeedSubscriptionModal.svelte';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
-  import { formatDateTime } from '$lib/dateFormat';
+  import { createDraft } from '$lib/ui/draft.svelte';
+  import { parseOptionalInt } from '$lib/ui/parse';
 
   let loading = $state(true);
   let saving = $state(false);
@@ -43,35 +49,21 @@
   let error = $state('');
   let info = $state('');
 
-  let config: FeedsConfigPayload = $state({
-    settings: {},
-    categories: [],
-    feeds: [],
-  });
+  // The loaded config is the draft the page edits, and the one save sends.
+  const draft = createDraft<FeedsConfigPayload>({ settings: {}, categories: [], feeds: [] });
+  const config = $derived(draft.value);
   let diagnostics: FeedsDiagnostics | null = $state(null);
   let feedStateByUrl: Record<string, FeedsFeedState> = $state({});
   let moduleServices: ServiceCardData[] = $state([]);
   let moduleEnabled = $state(true);
 
-  // Track whether the loaded config has been mutated (dirty flag).
-  let initialJson = $state('');
-  let dirty = $derived(JSON.stringify(config) !== initialJson);
-
-  type FeedDraft = {
-    url: string;
-    title: string;
-    category: string;
-    poll_interval_minutes: string; // raw input — empty = inherit default
-  };
   let editing: { idx: number; draft: FeedDraft } | null = $state(null);
   let adding: FeedDraft | null = $state(null);
   // A category is two fields, so it gets a modal like a subscription rather
   // than the browser prompt it used to open — which could ask one question,
   // and reported a duplicate slug only after closing and dropping the draft.
   let addingCategory: { slug: string; title: string } | null = $state(null);
-  let modalError = $state('');
-  let confirmDelete: { kind: 'feed' | 'category'; idx: number; label: string } | null =
-    $state(null);
+  const confirmDelete = createConfirm<{ kind: 'feed' | 'category'; idx: number; label: string }>();
 
   let fileInput: HTMLInputElement | undefined = $state();
 
@@ -93,10 +85,9 @@
         return;
       }
       const data = await getFeedsConfig();
-      config = data.config;
+      draft.reset(data.config);
       diagnostics = data.diagnostics;
       feedStateByUrl = Object.fromEntries(data.feed_state.map((s) => [s.url, s]));
-      initialJson = JSON.stringify(config);
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load settings';
     } finally {
@@ -124,7 +115,7 @@
       const result = await putFeedsConfig(config);
       invalidateNavUnreadCounts();
       info = `Saved (${result.sync.feeds_added} added, ${result.sync.feeds_updated} updated, ${result.sync.categories_added} new categories).`;
-      initialJson = JSON.stringify(config);
+      draft.reset();
       // Pull diagnostics back so last_poll_at etc. update
       const data = await getFeedsConfig();
       diagnostics = data.diagnostics;
@@ -136,7 +127,7 @@
     }
   }
 
-  useSettingsSave(() => (moduleEnabled ? { dirty, saving, save } : null));
+  useSettingsSave(() => (moduleEnabled ? { dirty: draft.dirty, saving, save } : null));
 
   function detectSourceType(url: string | undefined | null): string {
     if (!url) return '?';
@@ -166,23 +157,28 @@
     const out: FeedsConfigFeed = { url };
     if (draft.title.trim()) out.title = draft.title.trim();
     if (draft.category.trim()) out.category = draft.category.trim();
-    if (draft.poll_interval_minutes.trim()) {
-      const n = Number(draft.poll_interval_minutes);
-      if (!Number.isInteger(n) || n <= 0) {
-        return 'Poll interval must be a positive integer';
-      }
-      out.poll_interval_minutes = n;
-    }
+    const interval = parseOptionalInt(draft.poll_interval_minutes, { min: 1 });
+    if (interval === undefined) return 'Poll interval must be a positive integer';
+    if (interval !== null) out.poll_interval_minutes = interval;
     return out;
   }
 
+  // A blank field unsets the setting; text that is not a whole number at or
+  // above `min` leaves it as it was.
+  function setOptionalSetting(key: keyof FeedsConfigSettings, text: string, min: number) {
+    const value = parseOptionalInt(text, { min });
+    if (value === undefined) return;
+    const next = { ...config.settings };
+    if (value === null) delete next[key];
+    else next[key] = value;
+    config.settings = next;
+  }
+
   function startAdd() {
-    modalError = '';
     adding = { url: '', title: '', category: '', poll_interval_minutes: '' };
   }
 
   function startEdit(idx: number) {
-    modalError = '';
     editing = { idx, draft: feedToDraft(config.feeds[idx]) };
   }
 
@@ -190,57 +186,45 @@
     editing = null;
     adding = null;
     addingCategory = null;
-    modalError = '';
   }
 
-  function saveAdd() {
-    if (!adding) return;
-    const result = draftToFeed(adding);
-    if (typeof result === 'string') {
-      modalError = result;
-      return;
+  // Applies the subscription modal's draft to the page's config, or throws
+  // the reason it cannot, which the modal shows.
+  function saveFeed(draft: FeedDraft) {
+    const result = draftToFeed(draft);
+    if (typeof result === 'string') throw new Error(result);
+    if (editing) {
+      const idx = editing.idx;
+      if (config.feeds.some((f, i) => i !== idx && f.url === result.url)) {
+        throw new Error('A different subscription already uses that URL.');
+      }
+      config.feeds = config.feeds.map((f, i) => (i === idx ? result : f));
+      editing = null;
+    } else {
+      if (config.feeds.some((f) => f.url === result.url)) {
+        throw new Error('A subscription with that URL already exists.');
+      }
+      config.feeds = [...config.feeds, result];
+      adding = null;
     }
-    // Reject duplicate URLs.
-    if (config.feeds.some((f) => f.url === result.url)) {
-      modalError = 'A subscription with that URL already exists.';
-      return;
-    }
-    config.feeds = [...config.feeds, result];
-    adding = null;
-  }
-
-  function saveEdit() {
-    if (!editing) return;
-    const result = draftToFeed(editing.draft);
-    if (typeof result === 'string') {
-      modalError = result;
-      return;
-    }
-    const dup = config.feeds.findIndex((f, i) => i !== editing!.idx && f.url === result.url);
-    if (dup >= 0) {
-      modalError = 'A different subscription already uses that URL.';
-      return;
-    }
-    config.feeds = config.feeds.map((f, i) => (i === editing!.idx ? result : f));
-    editing = null;
   }
 
   function deleteFeed(idx: number) {
     const feed = config.feeds[idx];
-    confirmDelete = {
+    confirmDelete.ask({
       kind: 'feed',
       idx,
       label: feed.title || feed.url,
-    };
+    });
   }
 
   function deleteCategory(idx: number) {
     const cat = config.categories[idx];
-    confirmDelete = {
+    confirmDelete.ask({
       kind: 'category',
       idx,
       label: cat.title || cat.slug,
-    };
+    });
   }
 
   // No Duplicate here, unlike briefings: a feed is identified by its URL and a
@@ -258,12 +242,13 @@
   }
 
   function performDelete() {
-    if (!confirmDelete) return;
-    if (confirmDelete.kind === 'feed') {
-      config.feeds = config.feeds.filter((_, i) => i !== confirmDelete!.idx);
+    const target = confirmDelete.target;
+    if (!target) return;
+    if (target.kind === 'feed') {
+      config.feeds = config.feeds.filter((_, i) => i !== target.idx);
     } else {
-      const slug = config.categories[confirmDelete.idx]?.slug;
-      config.categories = config.categories.filter((_, i) => i !== confirmDelete!.idx);
+      const slug = config.categories[target.idx]?.slug;
+      config.categories = config.categories.filter((_, i) => i !== target.idx);
       // Detach feeds from the deleted category (don't drop the feeds).
       if (slug) {
         config.feeds = config.feeds.map((f) =>
@@ -271,24 +256,19 @@
         );
       }
     }
-    confirmDelete = null;
+    confirmDelete.cancel();
   }
 
   function startAddCategory() {
-    modalError = '';
     addingCategory = { slug: '', title: '' };
   }
 
   function saveAddCategory() {
     if (!addingCategory) return;
     const slug = addingCategory.slug.trim();
-    if (!slug) {
-      modalError = 'Slug is required';
-      return;
-    }
+    if (!slug) throw new Error('Slug is required');
     if (config.categories.some((c) => c.slug === slug)) {
-      modalError = `Category "${slug}" already exists.`;
-      return;
+      throw new Error(`Category "${slug}" already exists.`);
     }
     // A blank title still mirrors the slug, and that is the server's rule
     // rather than a leftover from the prompt: `feed_categories.title` is NOT
@@ -349,8 +329,6 @@
   function categoryOptions(): string[] {
     return config.categories.map((c) => c.slug);
   }
-
-  const formatDate = (iso: string | null) => formatDateTime(iso, { empty: '—' });
 </script>
 
 <SettingsLayout
@@ -367,10 +345,16 @@
     </div>
   {:else}
     {#if diagnostics}
-      <SettingsCard title="Diagnostics">
+      <Card title="Diagnostics">
         {#snippet actions()}
-          <Button variant="pill" size="sm" onclick={refreshNow} disabled={refreshing}>
-            {refreshing ? 'Queueing…' : 'Refresh all now'}
+          <Button
+            variant="pill"
+            size="sm"
+            onclick={refreshNow}
+            loading={refreshing}
+            loadingLabel="Queueing…"
+          >
+            Refresh all now
           </Button>
         {/snippet}
         <div class="diag-grid card-grid">
@@ -391,112 +375,89 @@
             <span class="diag-label caption">in error</span>
           </div>
           <div class="diag wide">
-            <span class="diag-value">{formatDate(diagnostics.last_poll_at)}</span>
+            <Timestamp
+              class="diag-value"
+              value={diagnostics.last_poll_at}
+              format="datetime"
+              empty="—"
+            />
             <span class="diag-label caption">last poll</span>
           </div>
         </div>
-      </SettingsCard>
+      </Card>
     {/if}
 
-    <SettingsCard title="Settings">
-      <SettingsField label="Default poll interval (minutes)">
-        <input
+    <Card title="Settings">
+      <Field label="Default poll interval (minutes)">
+        <Input
           type="number"
           min="1"
           value={config.settings.default_poll_interval_minutes ?? ''}
           placeholder="30"
-          oninput={(e) => {
-            const v = (e.currentTarget as HTMLInputElement).value;
-            const next = { ...config.settings };
-            if (v === '') {
-              delete next.default_poll_interval_minutes;
-            } else {
-              const n = Number(v);
-              if (Number.isInteger(n) && n > 0) {
-                next.default_poll_interval_minutes = n;
-              }
-            }
-            config.settings = next;
-          }}
+          oninput={(e) =>
+            setOptionalSetting(
+              'default_poll_interval_minutes',
+              (e.currentTarget as HTMLInputElement).value,
+              1,
+            )}
         />
-      </SettingsField>
-      <SettingsField
+      </Field>
+      <Field
         label="Hide repeated images seen in the last (days)"
         hint="A reblog of a picture you scrolled past recently shows the post but not the image again. 0 turns it off; blank uses the default (14)."
       >
-        <input
+        <Input
           type="number"
           min="0"
           value={config.settings.image_dedupe_window_days ?? ''}
           placeholder="14"
-          oninput={(e) => {
-            const v = (e.currentTarget as HTMLInputElement).value;
-            const next = { ...config.settings };
-            if (v === '') {
-              delete next.image_dedupe_window_days;
-            } else {
-              const n = Number(v);
-              if (Number.isInteger(n) && n >= 0) {
-                next.image_dedupe_window_days = n;
-              }
-            }
-            config.settings = next;
-          }}
+          oninput={(e) =>
+            setOptionalSetting(
+              'image_dedupe_window_days',
+              (e.currentTarget as HTMLInputElement).value,
+              0,
+            )}
         />
-      </SettingsField>
-      <SettingsField
+      </Field>
+      <Field
         label="Keep read entries for (days)"
         hint="Counted from when an entry was added to your reader, not from when it was published. Unread and starred entries are always kept, and so is anything the feed still returns. At least 50 entries per feed are kept whatever their age, or the maximum below if you set it lower. 0 turns age pruning off; blank uses the default (90). Older entries disappear from the reader."
       >
-        <input
+        <Input
           type="number"
           min="0"
           max="365000"
           value={config.settings.entry_retention_days ?? ''}
           placeholder="90"
-          oninput={(e) => {
-            const v = (e.currentTarget as HTMLInputElement).value;
-            const next = { ...config.settings };
-            if (v === '') {
-              delete next.entry_retention_days;
-            } else {
-              const n = Number(v);
-              if (Number.isInteger(n) && n >= 0) {
-                next.entry_retention_days = n;
-              }
-            }
-            config.settings = next;
-          }}
+          oninput={(e) =>
+            setOptionalSetting(
+              'entry_retention_days',
+              (e.currentTarget as HTMLInputElement).value,
+              0,
+            )}
         />
-      </SettingsField>
-      <SettingsField
+      </Field>
+      <Field
         label="Maximum stored entries per feed"
         hint="The most recently added entries are kept. Starred entries are always kept and can put a feed above this limit. 0 turns the limit off; blank uses the default (5000). Raising it lets the next full fetch store more."
       >
-        <input
+        <Input
           type="number"
           min="0"
           max="365000"
           value={config.settings.max_entries_per_feed ?? ''}
           placeholder="5000"
-          oninput={(e) => {
-            const v = (e.currentTarget as HTMLInputElement).value;
-            const next = { ...config.settings };
-            if (v === '') {
-              delete next.max_entries_per_feed;
-            } else {
-              const n = Number(v);
-              if (Number.isInteger(n) && n >= 0) {
-                next.max_entries_per_feed = n;
-              }
-            }
-            config.settings = next;
-          }}
+          oninput={(e) =>
+            setOptionalSetting(
+              'max_entries_per_feed',
+              (e.currentTarget as HTMLInputElement).value,
+              0,
+            )}
         />
-      </SettingsField>
-    </SettingsCard>
+      </Field>
+    </Card>
 
-    <SettingsCard title="Categories ({config.categories.length})">
+    <Card title="Categories ({config.categories.length})">
       {#snippet actions()}
         <Button variant="pill" size="sm" onclick={startAddCategory}>+ Add category</Button>
       {/snippet}
@@ -520,8 +481,10 @@
                 <tr>
                   <td class="col-slug"><code>{cat.slug}</code></td>
                   <td class="col-title">
-                    <input
+                    <Input
                       type="text"
+                      variant="ghost"
+                      aria-label="Title for {cat.slug}"
                       value={cat.title ?? ''}
                       placeholder={cat.slug}
                       oninput={(e) => {
@@ -540,15 +503,17 @@
                       label="Move up"
                       title="Move up"
                       onclick={() => moveCategory(idx, -1)}
-                      disabled={idx === 0}>↑</IconButton
-                    >
+                      disabled={idx === 0}
+                      icon={ArrowUp}
+                    />
                     <IconButton
                       size="sm"
                       label="Move down"
                       title="Move down"
                       onclick={() => moveCategory(idx, 1)}
-                      disabled={idx === config.categories.length - 1}>↓</IconButton
-                    >
+                      disabled={idx === config.categories.length - 1}
+                      icon={ArrowDown}
+                    />
                   </td>
                   <td class="col-actions">
                     <KebabMenu items={categoryMenu(idx)} ariaLabel="Category actions" />
@@ -559,9 +524,9 @@
           </table>
         </div>
       {/if}
-    </SettingsCard>
+    </Card>
 
-    <SettingsCard title="Subscriptions ({config.feeds.length})">
+    <Card title="Subscriptions ({config.feeds.length})">
       {#snippet actions()}
         <Button variant="pill" size="sm" onclick={startAdd}>+ Add subscription</Button>
       {/snippet}
@@ -584,7 +549,8 @@
               {#each config.feeds as feed, idx (feed.url + idx)}
                 {@const state = feedStateByUrl[feed.url]}
                 <tr class:is-danger={state && state.error_count > 0}>
-                  <td class="type"><span class="status-pill">{detectSourceType(feed.url)}</span></td
+                  <td class="type"
+                    ><Badge tone="subtle" uppercase={false}>{detectSourceType(feed.url)}</Badge></td
                   >
                   <td class="col-title">
                     <div class="title-cell">
@@ -601,7 +567,12 @@
                   <td class="col-state">
                     {#if state}
                       <div class="state">
-                        <span class="truncate">{formatDate(state.last_fetched_at)}</span>
+                        <Timestamp
+                          class="truncate"
+                          value={state.last_fetched_at}
+                          format="datetime"
+                          empty="—"
+                        />
                         {#if state.last_error}
                           <span class="state-error" title={state.last_error}>
                             {state.error_count}× err: {state.last_error.slice(0, 60)}
@@ -621,9 +592,9 @@
           </table>
         </div>
       {/if}
-    </SettingsCard>
+    </Card>
 
-    <SettingsCard title="OPML">
+    <Card title="OPML">
       <p class="description">
         Import subscriptions from an OPML export, or download the current list as OPML. Legacy
         bridger URLs (<code>localhost:8900/tumblr/…</code>,
@@ -631,8 +602,8 @@
         / <code>arena:</code> on import.
       </p>
       <div class="hstack wrap">
-        <Button onclick={() => fileInput?.click()} disabled={importing}>
-          {importing ? 'Importing…' : 'Import OPML…'}
+        <Button onclick={() => fileInput?.click()} loading={importing} loadingLabel="Importing…">
+          Import OPML…
         </Button>
         <a class="opml-link link-muted" href={exportOpmlUrl()} download="feeds.opml">
           Download OPML
@@ -645,7 +616,7 @@
         onchange={onImport}
         hidden
       />
-    </SettingsCard>
+    </Card>
 
     {#each moduleServices as svc (svc.service)}
       <ServiceCard service={svc} onChanged={reloadServices} />
@@ -653,139 +624,48 @@
   {/if}
 </SettingsLayout>
 
-{#if adding}
-  <Modal
-    open={true}
-    title="Add subscription"
-    onOpenChange={(o) => {
-      if (!o) cancelModal();
-    }}
-  >
-    <div class="vstack" style:--vstack-gap="var(--space-2)">
-      <SettingsField label="URL">
-        <input
-          type="text"
-          placeholder="https://example.com/feed.xml | tumblr:user | arena:slug"
-          bind:value={adding.url}
-        />
-      </SettingsField>
-      <SettingsField label="Title (optional)">
-        <input type="text" bind:value={adding.title} />
-      </SettingsField>
-      <SettingsField label="Category">
-        <Select
-          value={adding.category}
-          options={categorySelectOptions}
-          onValueChange={(v) => {
-            if (adding) adding.category = v;
-          }}
-          ariaLabel="Category"
-          fullWidth
-        />
-      </SettingsField>
-      <SettingsField label="Poll interval (minutes, optional)">
-        <input
-          type="number"
-          min="1"
-          placeholder={String(defaultInterval())}
-          bind:value={adding.poll_interval_minutes}
-        />
-      </SettingsField>
-      {#if modalError}
-        <div class="banner error">{modalError}</div>
-      {/if}
-    </div>
-    {#snippet footer()}
-      <Button variant="secondary" onclick={cancelModal}>Cancel</Button>
-      <Button variant="primary" onclick={saveAdd}>Add</Button>
-    {/snippet}
-  </Modal>
+{#if adding || editing}
+  <FeedSubscriptionModal
+    mode={editing ? 'edit' : 'add'}
+    initial={editing ? editing.draft : adding!}
+    categoryOptions={categorySelectOptions}
+    defaultInterval={defaultInterval()}
+    onSubmit={saveFeed}
+    onCancel={cancelModal}
+  />
 {/if}
 
 {#if addingCategory}
-  <Modal
+  <FormModal
     open={true}
     title="Add category"
-    onOpenChange={(o) => {
-      if (!o) cancelModal();
-    }}
+    submitLabel="Add"
+    onSubmit={saveAddCategory}
+    onCancel={cancelModal}
   >
     <div class="vstack" style:--vstack-gap="var(--space-2)">
-      <SettingsField label="Slug">
-        <input type="text" placeholder="blogs" bind:value={addingCategory.slug} />
-      </SettingsField>
-      <SettingsField label="Title (optional)">
-        <input type="text" placeholder={addingCategory.slug} bind:value={addingCategory.title} />
-      </SettingsField>
-      {#if modalError}
-        <div class="banner error">{modalError}</div>
-      {/if}
+      <Field label="Slug">
+        <Input type="text" placeholder="blogs" bind:value={addingCategory.slug} />
+      </Field>
+      <Field label="Title (optional)">
+        <Input type="text" placeholder={addingCategory.slug} bind:value={addingCategory.title} />
+      </Field>
     </div>
-    {#snippet footer()}
-      <Button variant="secondary" onclick={cancelModal}>Cancel</Button>
-      <Button variant="primary" onclick={saveAddCategory}>Add</Button>
-    {/snippet}
-  </Modal>
+  </FormModal>
 {/if}
 
-{#if editing}
-  <Modal
-    open={true}
-    title="Edit subscription"
-    onOpenChange={(o) => {
-      if (!o) cancelModal();
-    }}
-  >
-    <div class="vstack" style:--vstack-gap="var(--space-2)">
-      <SettingsField label="URL">
-        <input type="text" bind:value={editing.draft.url} />
-      </SettingsField>
-      <SettingsField label="Title">
-        <input type="text" bind:value={editing.draft.title} />
-      </SettingsField>
-      <SettingsField label="Category">
-        <Select
-          value={editing.draft.category}
-          options={categorySelectOptions}
-          onValueChange={(v) => {
-            if (editing) editing.draft.category = v;
-          }}
-          ariaLabel="Category"
-          fullWidth
-        />
-      </SettingsField>
-      <SettingsField label="Poll interval (minutes)">
-        <input
-          type="number"
-          min="1"
-          placeholder={String(defaultInterval())}
-          bind:value={editing.draft.poll_interval_minutes}
-        />
-      </SettingsField>
-      {#if modalError}
-        <div class="banner error">{modalError}</div>
-      {/if}
-    </div>
-    {#snippet footer()}
-      <Button variant="secondary" onclick={cancelModal}>Cancel</Button>
-      <Button variant="primary" onclick={saveEdit}>Save</Button>
-    {/snippet}
-  </Modal>
-{/if}
-
-{#if confirmDelete}
+{#if confirmDelete.target}
   <ConfirmDialog
-    open={true}
-    title={confirmDelete.kind === 'category' ? 'Delete category' : 'Delete feed'}
+    bind:open={confirmDelete.open}
+    title={confirmDelete.target.kind === 'category' ? 'Delete category' : 'Delete feed'}
     confirmLabel="Delete"
     onConfirm={performDelete}
-    onCancel={() => (confirmDelete = null)}
   >
     {#snippet body()}
       <p>
-        Are you sure you want to remove the {confirmDelete?.kind}
-        <strong>{confirmDelete?.label}</strong>?
-        {#if confirmDelete?.kind === 'category'}
+        Are you sure you want to remove the {confirmDelete.target?.kind}
+        <strong>{confirmDelete.target?.label}</strong>?
+        {#if confirmDelete.target?.kind === 'category'}
           Subscriptions in this category will keep their entries but become uncategorised.
         {/if}
         Changes apply when you save.
@@ -821,7 +701,7 @@
     color: var(--status-danger-fg);
   }
 
-  .diag-value {
+  .diag :global(.diag-value) {
     font-size: var(--text-base);
     font-weight: var(--weight-semibold);
     color: var(--text-primary);
@@ -894,34 +774,6 @@
 	   column holds a pair of icon buttons, so it asks for more. */
   .col-order {
     --table-actions-width: 4.5rem;
-  }
-
-  /* A borderless cell editor, not a field: the box appears on hover/focus so a
-     row of titles reads as text until you reach for one. `Input` cannot express
-     that, so this stays hand-rolled — but it takes the tier height and the
-     leading pin, or the row's own height is set by this cell's 1.5 leading and
-     it sits taller than the IconButtons in the cells beside it. The transparent
-     border is what keeps the box from shifting when it appears. */
-  .col-title input[type='text'] {
-    width: 100%;
-    background: transparent;
-    color: var(--text-primary);
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    padding: 0.2rem var(--space-1);
-    font: inherit;
-    font-size: var(--text-sm);
-    line-height: var(--leading-tight);
-    min-height: var(--control-height-md);
-  }
-
-  .col-title input[type='text']:focus,
-  .col-title input[type='text']:hover {
-    background: var(--surface-base);
-  }
-
-  .col-title input[type='text']:focus-visible {
-    border-color: var(--focus-field-border);
   }
 
   .state {

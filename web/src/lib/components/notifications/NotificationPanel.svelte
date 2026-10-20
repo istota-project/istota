@@ -1,0 +1,288 @@
+<script lang="ts">
+  /**
+   * The notification inbox, hung off whatever control the caller passes as its
+   * `trigger`.
+   *
+   * A bits-ui `Popover` with a `Portal`, `align="end"` and `sideOffset={4}`,
+   * following `HintPopover` for the trigger-as-`child` shape and `KebabMenu` for
+   * the anchoring. Below 768px it widens to the viewport less a gutter each
+   * side, centred between them — at panel width a phone would get a column
+   * narrower than the titles it holds. It stays an anchored popover throughout;
+   * see the phone rule in the stylesheet for why that is the only thing that
+   * works here.
+   *
+   * **It defaults to "All", and that is load-bearing rather than a default.** A
+   * fire-and-forget row — a task failed, an alert the model raised — has no
+   * object whose state change would ever close it, so what closes it is being
+   * seen. If the landing tab were "Needs action" those rows would never render,
+   * never be seen, never resolve, and the badge would climb forever for anyone
+   * who lived in that filter. "Needs action" is a filter the user selects.
+   *
+   * **Tab counts come from the list response, never from the badge.**
+   * `total_open` is the post-sweep total and the rows are what rendered, so a
+   * label reading "Needs action (3)" cannot sit above a visibly shorter list.
+   * The badge is allowed to be briefly stale precisely because nothing is next
+   * to it to contradict it; a label is.
+   *
+   * No `{@html}` here or in the three components below it.
+   */
+  import type { Snippet } from 'svelte';
+  import { Popover } from 'bits-ui';
+  import type { NotificationAction, ResolvedNotification } from '$lib/api';
+  import {
+    actionableCount,
+    dismissNotification,
+    markPanelSeen,
+    notificationItems,
+    notificationTotalOpen,
+    notificationsError,
+    notificationsLoading,
+    refreshItems,
+    runAction,
+    seenPairs,
+    type NotificationFilter,
+  } from '$lib/stores/notifications';
+  import { EmptyState, ToggleGroup } from '$lib/components/ui';
+  import NotificationDetail from './NotificationDetail.svelte';
+  import NotificationItem from './NotificationItem.svelte';
+
+  interface Props {
+    /** The control the panel hangs off. Receives the props bits-ui needs
+     *  spread onto a real element — see `NotificationBell`. */
+    trigger: Snippet<[Record<string, unknown>]>;
+  }
+
+  let { trigger }: Props = $props();
+
+  /**
+   * The gap the panel keeps from both viewport edges, in px.
+   *
+   * It is a number rather than a `--space-*` token because it has to be the
+   * same value in two places that cannot share one: floating-ui's
+   * `collisionPadding` is a px number, and the phone width below is derived
+   * from it. It is passed as `collisionPadding` and comes back out as
+   * `--bits-popover-content-available-width`, which is what the phone rule
+   * uses, so the two cannot drift.
+   *
+   * 12px is `--space-3` at the unscaled root size — the gutter `ShellHeader`
+   * and `.app-shell` already use on a phone, so the sheet lines up with the
+   * bar it hangs off. Not scaled by the text-size preference on purpose: this
+   * is a distance to the edge of the screen, not to a piece of text.
+   */
+  const VIEWPORT_GUTTER = 12;
+
+  let open = $state(false);
+  let filter = $state<NotificationFilter>('all');
+  let detailItem = $state<ResolvedNotification | null>(null);
+
+  async function load(next: NotificationFilter) {
+    filter = next;
+    // Seen is reported from the rows this call *returned*, never from the store.
+    // `refreshItems` deliberately leaves the previous list on screen when it
+    // fails, and returns null then and when a newer request has superseded it —
+    // so reading the store here would stamp `seen_at` on rows the user is not
+    // being shown, behind an error banner, and on a failed open would report a
+    // list nothing had just fetched.
+    const items = await refreshItems(next);
+    if (!items) return;
+    // `(id, updated_at)` pairs, not bare ids: the version is what stops a row
+    // bumped between the fetch and this call being closed by a user who never
+    // saw the new occurrence.
+    void markPanelSeen(seenPairs(items));
+  }
+
+  function onOpenChange(next: boolean) {
+    open = next;
+    // **Every** open lands on "All", not just the first. The component stays
+    // mounted for the life of the tab, so a filter that persisted would make
+    // "Needs action" sticky — and the spec's reason for the default is that
+    // opening the bell renders both classes, so a fire-and-forget row is seen
+    // on any ordinary use of the feature. Sticky, a user who picked "Needs
+    // action" once would never render that class again, so it would never be
+    // seen, never resolve, and climb until the 14-day sweep caught it: exactly
+    // the unbounded case the "All" default exists to close.
+    if (next) void load('all');
+  }
+
+  function openDetail(item: ResolvedNotification) {
+    detailItem = item;
+    // Close the panel behind it. Two reasons, and the second is the hard one:
+    // a list and a detail of one of its rows are the same thing twice, and on
+    // a phone the panel spans nearly the whole viewport, so the modal would
+    // have to sit on top of it -- but `--z-popover` (100) is deliberately *above*
+    // `--z-modal` (50), because a Select opened inside a dialog has to clear
+    // the dialog. So the modal renders under the panel, and no z-index on the
+    // modal can fix it without breaking that rule for every other dialog.
+    // Closing the panel removes the overlap instead of re-ordering it.
+    open = false;
+  }
+
+  function onAction(item: ResolvedNotification, action: NotificationAction) {
+    detailItem = null;
+    void runAction(item.id, action);
+  }
+
+  function onDismiss(item: ResolvedNotification) {
+    detailItem = null;
+    void dismissNotification(item.id);
+  }
+</script>
+
+<Popover.Root bind:open {onOpenChange}>
+  <Popover.Trigger>
+    {#snippet child({ props })}
+      {@render trigger(props)}
+    {/snippet}
+  </Popover.Trigger>
+  <Popover.Portal>
+    <Popover.Content
+      class="ui-notification-panel"
+      align="end"
+      sideOffset={4}
+      collisionPadding={VIEWPORT_GUTTER}
+    >
+      <div class="panel-head">
+        <span class="micro-label">Notifications</span>
+        <ToggleGroup
+          label="Show"
+          value={filter}
+          onValueChange={(next) => load(next as NotificationFilter)}
+          options={[
+            { value: 'all', label: `All (${$notificationTotalOpen})` },
+            { value: 'action', label: `Needs action (${actionableCount($notificationItems)})` },
+          ]}
+        />
+      </div>
+
+      {#if $notificationsError}
+        <p class="banner danger panel-msg">{$notificationsError}</p>
+      {/if}
+
+      <div class="panel-list">
+        {#if $notificationItems.length}
+          {#each $notificationItems as item (item.id)}
+            <NotificationItem {item} onOpen={openDetail} {onAction} />
+          {/each}
+        {:else if $notificationsLoading}
+          <p class="panel-loading">Loading…</p>
+        {:else if filter === 'action'}
+          <EmptyState size="sm">Nothing needs your attention.</EmptyState>
+        {:else}
+          <EmptyState size="sm">Nothing waiting on you.</EmptyState>
+        {/if}
+      </div>
+
+      <!-- Not gated on the filter. `total_open` is the whole open set either
+           way, so on "Needs action" this reads "Showing 4 of 60 open" — which is
+           what that tab means. Gated on `all`, the one tab that can hide rows
+           without saying so was the filtered one. -->
+      {#if $notificationTotalOpen > $notificationItems.length}
+        <p class="panel-foot caption">
+          Showing {$notificationItems.length} of {$notificationTotalOpen} open.
+        </p>
+      {/if}
+    </Popover.Content>
+  </Popover.Portal>
+</Popover.Root>
+
+<NotificationDetail
+  item={detailItem}
+  open={detailItem !== null}
+  onOpenChange={(next) => {
+    if (!next) detailItem = null;
+  }}
+  {onAction}
+  {onDismiss}
+/>
+
+<style>
+  /* Portalled to <body>, so the class arrives as a prop string Svelte cannot
+     hash — global, like HintPopover's own content class. */
+  :global(.ui-notification-panel) {
+    z-index: var(--z-popover);
+    width: 24rem;
+    max-width: calc(100vw - var(--space-4));
+    max-height: 70dvh;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    /* Named for exactly this case: chrome floating over content. */
+    background: var(--surface-overlay);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-card);
+    box-shadow: var(--shadow-lg);
+    outline: none;
+  }
+
+  /* On a phone the panel spans the viewport less one `VIEWPORT_GUTTER` each
+     side, centred between them.
+
+     The centring is done by the shift, not by a rule. Do not reach for
+     `position: fixed` with left/right insets to force it -- that was here
+     once and never worked, because bits-ui positions `Popover.Content`
+     through floating-ui, which writes `position`, `left` and `transform` as
+     *inline* styles, and an inline style beats a stylesheet rule. The insets
+     were ignored, the width collapsed, and the panel rendered as a ~40px
+     vertical sliver under the bell on every screen below 768px.
+
+     What works instead is to leave the panel anchored and make the only
+     position that fits the centred one. `collisionPadding` bounds the shift
+     to `[gutter, 100vw - gutter]`, and this width is the whole of that span,
+     so the clamp has exactly one solution however far off-centre the bell
+     sits -- and it sits well off-centre, since the header collapses to an icon
+     row on a phone and the bell is not the last thing in it. `align="end"`
+     alone left the panel flush against the left edge with the gutter stranded
+     on the right, which is the bug this rule fixes.
+
+     The width is read back from floating-ui rather than restated as
+     `calc(100vw - 24px)`: `--bits-popover-content-available-width` *is*
+     viewport-minus-collision-padding, measured by the same middleware that
+     does the clamping, so it cannot disagree with the bound. It also excludes
+     a classic scrollbar, which `100vw` counts and floating-ui does not -- two
+     different widths that would put the panel a scrollbar off-centre on a
+     narrow desktop window. The fallback is only for the frame before
+     floating-ui has measured. */
+  @media (max-width: 768px) {
+    :global(.ui-notification-panel) {
+      /* design-lint-allow: a bits-ui runtime measurement, not a design token —
+         floating-ui writes it onto this element on every reposition. */
+      width: var(--bits-popover-content-available-width, 100vw);
+      max-height: 60dvh;
+    }
+  }
+
+  .panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    padding: 0 var(--space-2);
+  }
+
+  .panel-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .panel-msg {
+    margin: 0;
+  }
+
+  .panel-loading {
+    margin: 0;
+    padding: var(--space-3) 0;
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+    text-align: center;
+  }
+
+  .panel-foot {
+    margin: 0;
+    padding: 0 var(--space-2);
+    border-top: 1px solid var(--border-subtle);
+    padding-top: var(--space-2);
+  }
+</style>

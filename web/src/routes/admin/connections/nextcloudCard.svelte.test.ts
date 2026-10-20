@@ -75,7 +75,9 @@ describe('the Nextcloud card', () => {
     expect(q.getByText('On, as istota')).toBeTruthy();
     expect(q.getByText('Nextcloud files, through the mount')).toBeTruthy();
     expect(q.getByText('signed in as istota (Istota) on Nextcloud 31.0.5')).toBeTruthy();
-    expect(q.getByText(/checked 12m ago/)).toBeTruthy();
+    expect(
+      q.getByText((_, el) => el?.tagName === 'P' && /checked 12m ago/.test(el.textContent ?? '')),
+    ).toBeTruthy();
     expect(q.queryByTestId('nextcloud-remedy')).toBeNull();
     expect(q.queryByText(/last report is old/)).toBeNull();
     const edit = q.getByRole('link', { name: 'Configure' });

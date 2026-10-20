@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { SetupCheckResult } from '$lib/api';
-  import { Button, Field, Input, NoticeBanner, OptionCards, Select } from '$lib/components/ui';
+  import { Button, Field, Input, Alert, OptionCards, Select } from '$lib/components/ui';
   import SetupCheckResultLine from './SetupCheckResult.svelte';
   import { runSetupCheck, type SetupDraftStore } from './setupDraft.svelte';
 
@@ -146,7 +146,7 @@
       <div class="vstack">
         {#if value === 'local'}
           {#if !openedHere}
-            <NoticeBanner
+            <Alert
               variant="warn"
               title="You opened this page from another computer. With this choice you won't be able to reach Istota the same way after setup."
             />
@@ -178,7 +178,7 @@
             />
           </Field>
           {#if value === 'direct'}
-            <NoticeBanner
+            <Alert
               variant="info"
               title="Point this name at this server's address, {browserHost}, with your domain provider before you finish."
             />
@@ -230,11 +230,7 @@
                 }}
               />
             </Field>
-            <Field
-              label="Certificate between the proxy and Istota"
-              error={shown.tls_cert_source}
-              labelled={false}
-            >
+            <Field label="Certificate between the proxy and Istota" error={shown.tls_cert_source}>
               <Select
                 value={draft.text('tls_cert_source') || 'self-signed'}
                 options={PROXY_CERTIFICATES}

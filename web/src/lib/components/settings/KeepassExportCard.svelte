@@ -1,11 +1,9 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { exportKeepass, type StepUpProof } from '$lib/api';
-  import { copyText } from '$lib/clipboard';
   import { downloadBlob, generateKeyfile } from '$lib/keepass';
   import { formatDate } from '$lib/dateFormat';
-  import { Button, Field, Modal } from '$lib/components/ui';
-  import SettingsCard from './SettingsCard.svelte';
+  import { Button, Field, Modal, Card, Checkbox, CopyButton } from '$lib/components/ui';
   import StepUpDialog from './StepUpDialog.svelte';
 
   let { onExported }: { onExported?: () => void } = $props();
@@ -15,7 +13,6 @@
   let password = $state('');
   let busy = $state(false);
   let error = $state('');
-  let copied = $state(false);
   let active = true;
   let pending: AbortController | null = null;
 
@@ -24,7 +21,6 @@
     pending = null;
     keyfile = null;
     password = '';
-    copied = false;
     confirming = false;
     busy = false;
   }
@@ -78,14 +74,9 @@
     result.file = '';
     downloadBlob(new Blob([bytes], { type: 'application/octet-stream' }), result.filename);
   }
-
-  async function copy() {
-    // A refusal is reported by copyText; the password stays on screen to copy by hand.
-    copied = await copyText(password, { label: 'Password copied' });
-  }
 </script>
 
-<SettingsCard
+<Card
   title="Export credentials"
   description="Download a fresh KeePass file containing your credentials, OTP seeds and recovery codes."
 >
@@ -94,7 +85,7 @@
     checkbox
     hint="Adds a separate file that must be present to unlock the export, along with its password."
   >
-    <input type="checkbox" bind:checked={useKeyfile} disabled={busy || confirming || !!password} />
+    <Checkbox bind:checked={useKeyfile} disabled={busy || confirming || !!password} />
   </Field>
   {#if useKeyfile}<p class="description">
       Save the key file when it downloads. You will need both it and the export password to open the
@@ -110,7 +101,7 @@
       onclick={start}>Export credentials</Button
     >
   </div>
-</SettingsCard>
+</Card>
 
 {#if confirming}
   <StepUpDialog
@@ -130,7 +121,14 @@
     </p>
     <p class="export-password">{password}</p>
     {#snippet footer()}
-      <Button variant="secondary" onclick={copy}>{copied ? 'Copied' : 'Copy password'}</Button>
+      <!-- A refusal is reported by copyText; the password stays on screen to copy by hand. -->
+      <CopyButton
+        variant="button"
+        size="md"
+        label="Copy password"
+        copiedLabel="Password copied"
+        text={password}
+      />
       <Button variant="primary" onclick={clear}>I saved it</Button>
     {/snippet}
   </Modal>

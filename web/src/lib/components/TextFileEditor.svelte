@@ -219,9 +219,10 @@
     <Button
       variant="primary"
       onclick={handleSave}
-      disabled={saveDisabled || !dirty || saving || loading}
+      disabled={saveDisabled || !dirty || loading}
+      loading={saving}
     >
-      {saving ? 'Saving…' : 'Save'}
+      Save
     </Button>
   {/snippet}
 </Modal>

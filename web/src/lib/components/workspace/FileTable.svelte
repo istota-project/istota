@@ -8,6 +8,7 @@
     WorkspacePinInput,
   } from '$lib/api';
   import {
+    Icon,
     Button,
     Input,
     Select,
@@ -18,12 +19,13 @@
     SortHeader,
     sortAria,
     type KebabItem,
+    Checkbox,
+    Timestamp,
   } from '$lib/components/ui';
   import { chatFileUrl, nextcloudFileUrl } from '$lib/api';
   import { formatBytes } from '$lib/format';
-  import { formatDate, formatDateTime } from '$lib/dateFormat';
   import { fileIcon } from './filePresentation';
-  import { loadSetting, saveSetting } from '$lib/stores/persisted';
+  import { loadSetting, saveSetting } from '$lib/ui/persisted';
   import { createTableSort } from '$lib/ui/tableSort.svelte';
   import { viewer } from '$lib/fileViewer/store.svelte';
   let {
@@ -204,7 +206,7 @@
   }
 </script>
 
-<div class="file-controls control-row">
+<div class="file-controls toolbar control-row">
   <div class="file-filter">
     <Input
       aria-label="Filter files"
@@ -213,13 +215,13 @@
       disabled={deleting}
     />
   </div>
-  <label class="folders-toggle"
-    ><input
-      type="checkbox"
-      bind:checked={foldersFirst}
-      onchange={() => saveSetting('workspace.foldersFirst', foldersFirst)}
-    />Folders first</label
-  >
+  <Checkbox
+    class="folders-toggle"
+    label="Folders first"
+    tone="muted"
+    bind:checked={foldersFirst}
+    onchange={() => saveSetting('workspace.foldersFirst', foldersFirst)}
+  />
   <div class="mobile-sort">
     <Select
       ariaLabel="Sort files"
@@ -233,17 +235,21 @@
     /><IconButton
       label={sort.descending ? 'Sort ascending' : 'Sort descending'}
       onclick={() => sort.toggle(sort.key)}
-      >{#if sort.descending}<ArrowDown size={16} />{:else}<ArrowUp size={16} />{/if}</IconButton
+      >{#if sort.descending}<Icon icon={ArrowDown} size="md" />{:else}<Icon
+          icon={ArrowUp}
+          size="md"
+        />{/if}</IconButton
     >
   </div>
   {#if onRefresh}<IconButton
       label="Refresh files"
       title="Refresh files"
       disabled={deleting}
-      onclick={onRefresh}><RefreshCw size={16} /></IconButton
-    >{/if}
+      onclick={onRefresh}
+      icon={RefreshCw}
+    />{/if}
 </div>
-<div class="selection-toolbar">
+<div class="selection-toolbar toolbar">
   <span class="muted" role="status"
     >{selectedEntries.length
       ? `${selectedEntries.length} selected`
@@ -278,16 +284,12 @@
     <thead
       ><tr>
         <th scope="col" class="col-select"
-          ><input
-            type="checkbox"
-            aria-label="Select all visible items"
+          ><Checkbox
+            ariaLabel="Select all visible items"
             disabled={deleting || !selectable.length}
             checked={!!selectable.length && selectedEntries.length === selectable.length}
             indeterminate={selectedEntries.length > 0 && selectedEntries.length < selectable.length}
-            onchange={(event) =>
-              (selectedKeys = event.currentTarget.checked
-                ? selectable.map((entry) => entry.key)
-                : [])}
+            onchange={(on) => (selectedKeys = on ? selectable.map((entry) => entry.key) : [])}
           /></th
         >
         {#each COLUMNS as column (column.key)}
@@ -310,9 +312,8 @@
         {@const EntryIcon = fileIcon(entry.name, entry.mime_type)}
         <tr class:is-selected={selectedKeys.includes(entry.key)}>
           <td class="col-select"
-            ><input
-              type="checkbox"
-              aria-label={`Select ${entry.name}`}
+            ><Checkbox
+              ariaLabel={`Select ${entry.name}`}
               disabled={deleting || (entry.kind !== 'file' && entry.kind !== 'dir')}
               checked={selectedKeys.includes(entry.key)}
               onchange={() => toggle(entry.key)}
@@ -321,10 +322,15 @@
           <td>
             <div class="entry-name">
               <span class="entry-icon" aria-hidden="true">
-                {#if entry.kind === 'dir'}<Folder size={16} />{:else if entry.kind === 'link'}<Link
-                    size={16}
-                  />{:else if entry.kind === 'file'}<EntryIcon size={16} />{:else}<Minus
-                    size={16}
+                {#if entry.kind === 'dir'}<Icon
+                    icon={Folder}
+                    size="md"
+                  />{:else if entry.kind === 'link'}<Icon
+                    icon={Link}
+                    size="md"
+                  />{:else if entry.kind === 'file'}<Icon icon={EntryIcon} size="md" />{:else}<Icon
+                    icon={Minus}
+                    size="md"
                   />{/if}
               </span>
               <div class="entry-label" title={entry.name}>
@@ -361,7 +367,7 @@
                     aria-label={`Shared · ${entry.share.count} ${entry.share.kind} shares`}
                     title={`Nextcloud ${entry.share.kind} shares`}
                   >
-                    <Users size={14} aria-hidden="true" /><span class="marker-label"
+                    <Icon icon={Users} size="sm" /><span class="marker-label"
                       >Shared{entry.share.count > 1 ? ` · ${entry.share.count}` : ''}</span
                     >
                   </span>
@@ -375,10 +381,7 @@
             </div>
           </td>
           <td class="size num muted">{entry.size === null ? '—' : formatBytes(entry.size)}</td>
-          <td class="modified muted"
-            >{#if iso}<time datetime={iso} title={formatDateTime(iso)}>{formatDate(iso)}</time
-              >{:else}—{/if}</td
-          >
+          <td class="modified muted"><Timestamp value={iso} empty="—" /></td>
           <td class="col-actions">
             {#if actions.length}
               <KebabMenu items={actions} ariaLabel={`Actions for ${entry.name}`} />
@@ -409,24 +412,20 @@
 {/if}
 
 <style>
-  .file-controls,
-  .selection-toolbar,
-  .folders-toggle,
   .mobile-sort {
     display: flex;
     align-items: center;
     gap: var(--space-3);
   }
+  /* Inset like a bar but not ruled: the folder bar above draws the rule. */
   .file-controls,
   .selection-toolbar {
     padding: var(--space-2) var(--space-3);
-    flex-wrap: wrap;
     font-size: var(--text-sm);
   }
   .selection-toolbar {
     min-height: calc(var(--control-height-md) + 2 * var(--space-2));
     flex-wrap: nowrap;
-    gap: var(--space-2);
   }
   .selection-toolbar [role='status'] {
     flex: 1;
@@ -443,10 +442,8 @@
     min-width: 10rem;
     max-width: 24rem;
   }
-  .folders-toggle {
+  .file-controls :global(.folders-toggle) {
     white-space: nowrap;
-    gap: var(--space-2);
-    color: var(--text-muted);
   }
   .mobile-sort {
     display: none;
@@ -455,10 +452,9 @@
   .col-select + td {
     padding-inline-start: 0;
   }
-  input[type='checkbox'] {
+  .file-controls :global(.ui-checkbox-input),
+  .col-select :global(.ui-checkbox-input) {
     margin: 0;
-    accent-color: var(--accent);
-    cursor: pointer;
   }
   .delete-errors {
     padding: var(--space-2) var(--space-3);

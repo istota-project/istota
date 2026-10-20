@@ -1,6 +1,8 @@
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import { Select as BitsSelect } from 'bits-ui';
   import { ChevronDown } from '@lucide/svelte';
+  import { getFieldContext } from './fieldContext';
 
   export interface SelectOption {
     value: string;
@@ -75,6 +77,11 @@
     widthChars,
   }: Props = $props();
 
+  // Inside a Field the caption names the trigger by id, never as its <label>:
+  // a label would make the caption a second way to open it.
+  const field = getFieldContext();
+  const owned = field?.claim('labelledby') ?? false;
+
   const selectedLabel = $derived(options.find((o) => o.value === value)?.label ?? placeholder);
 
   const labelStyle = $derived(
@@ -115,9 +122,13 @@
       ? ' ui-select-trigger--full'
       : ''}"
     aria-label={ariaLabel}
+    aria-labelledby={owned && !ariaLabel ? field?.labelId : undefined}
+    aria-describedby={owned ? field?.describedBy : undefined}
+    aria-invalid={(owned && field?.invalid) || undefined}
+    aria-required={(owned && field?.required) || undefined}
   >
     <span class="ui-select-label" style={labelStyle}>{selectedLabel}</span>
-    <ChevronDown size={12} />
+    <Icon icon={ChevronDown} size="xs" />
   </BitsSelect.Trigger>
   <BitsSelect.Portal>
     <!-- collisionPadding matches the tightest page gutter in the app (the

@@ -31,7 +31,17 @@
     metricLabel,
     toCanonical,
   } from '$lib/health/units';
-  import { Button, EmptyState, Field, Input, Modal, Select, PageLoading } from '$lib/components/ui';
+  import {
+    Button,
+    Card,
+    EmptyState,
+    Field,
+    Input,
+    FormModal,
+    Select,
+    ToggleGroup,
+    LoadState,
+  } from '$lib/components/ui';
   import { formatDate } from '$lib/dateFormat';
 
   Chart.register(
@@ -50,6 +60,7 @@
   type Range = '30d' | '90d' | '1y' | 'all';
 
   let range = $state<Range>('90d');
+  const RANGE_OPTIONS = (['30d', '90d', '1y', 'all'] as const).map((r) => ({ value: r, label: r }));
   let selectionReady = $state(false);
   const rangeSel = createUrlSelection<{ range: Range }>({
     key: 'healthStats',
@@ -105,8 +116,6 @@
   let formUnit = $state('');
   let formDate = $state('');
   let formNotes = $state('');
-  let saving = $state(false);
-  let formError = $state('');
 
   function defaultUnitFor(metric: string): string {
     const choices = LOG_UNIT_CHOICES[metric];
@@ -313,37 +322,28 @@
     });
   });
 
-  async function submitEntry(e: Event) {
-    e.preventDefault();
+  async function submitEntry() {
     // Not `formValue.trim()`: the binding above has made this a number by the
     // time anyone can press Save, so a string guard threw here — outside the
     // try, so the modal reported nothing at all. NaN is unreachable through
     // the input itself, which sanitizes a bad entry to '', but the field is
     // also written by `openEntry` and by the reset below.
     const entered = Number(formValue);
-    if (formValue === null || formValue === '' || Number.isNaN(entered)) return;
-    saving = true;
-    formError = '';
-    try {
-      const canonical = toCanonical(formMetric, entered, formUnit);
-      await createHealthStat({
-        metric: formMetric,
-        value: canonical.value,
-        unit: canonical.unit,
-        measured_at: formDate || undefined,
-        notes: formNotes.trim() || undefined,
-      });
-      modalOpen = false;
-      formValue = '';
-      formNotes = '';
-      formDate = '';
-      formUnit = defaultUnitFor(formMetric);
-      await load();
-    } catch (e) {
-      formError = e instanceof Error ? e.message : 'Failed to save';
-    } finally {
-      saving = false;
-    }
+    if (formValue === null || formValue === '' || Number.isNaN(entered)) return false;
+    const canonical = toCanonical(formMetric, entered, formUnit);
+    await createHealthStat({
+      metric: formMetric,
+      value: canonical.value,
+      unit: canonical.unit,
+      measured_at: formDate || undefined,
+      notes: formNotes.trim() || undefined,
+    });
+    modalOpen = false;
+    formValue = '';
+    formNotes = '';
+    formDate = '';
+    formUnit = defaultUnitFor(formMetric);
+    await load();
   }
 
   function openEntry(metric?: string) {
@@ -412,35 +412,27 @@
   });
 </script>
 
-{#if !loading && !error}
-  <!-- Held back behind both whole-pane states, so the pane shows nothing but
-       the centered message rather than centering it in the space left under
-       this header. -->
-  <div class="bar">
-    <div class="ranges">
-      {#each ['30d', '90d', '1y', 'all'] as r}
-        <button class:active={range === r} onclick={() => (range = r as Range)} type="button"
-          >{r}</button
-        >
-      {/each}
+<LoadState {loading} {error} empty={metricsToShow().length === 0 && !hasBp()}>
+  {#snippet header()}
+    <div class="bar">
+      <ToggleGroup
+        label="Range"
+        options={RANGE_OPTIONS}
+        value={range}
+        onValueChange={(r) => (range = r as Range)}
+      />
+      <button class="log-btn" onclick={() => openEntry()} type="button">+ Log measurement</button>
     </div>
-    <button class="log-btn" onclick={() => openEntry()} type="button">+ Log measurement</button>
-  </div>
-{/if}
-
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else if metricsToShow().length === 0 && !hasBp()}
-  <EmptyState actionLabel="Log your first measurement" onaction={() => openEntry()}>
-    No measurements yet.
-  </EmptyState>
-{:else}
+  {/snippet}
+  {#snippet emptyState()}
+    <EmptyState actionLabel="Log your first measurement" onaction={() => openEntry()}>
+      No measurements yet.
+    </EmptyState>
+  {/snippet}
   <div class="grid card-grid" style="--card-min: 380px;">
     {#each metricsToShow() as metric (metric)}
       {@const v = formatLatestValue(metric)}
-      <button class="card interactive" onclick={() => openEntry(metric)} type="button">
+      <Card interactive class="metric-tile" onclick={() => openEntry(metric)}>
         <header>
           <span class="label micro-label">{metricLabel(metric)}</span>
           <span class="count caption num">{(seriesByMetric[metric] || []).length} pts</span>
@@ -462,14 +454,10 @@
             {formatDate(latestByMetric[metric].measured_at)}
           </div>
         {/if}
-      </button>
+      </Card>
     {/each}
     {#if hasBp()}
-      <button
-        class="card interactive"
-        onclick={() => openEntry('blood_pressure_systolic')}
-        type="button"
-      >
+      <Card interactive class="metric-tile" onclick={() => openEntry('blood_pressure_systolic')}>
         <header>
           <span class="label micro-label">Blood Pressure</span>
           <span class="count caption num">
@@ -486,16 +474,33 @@
           <canvas bind:this={canvases['blood_pressure']}></canvas>
         </div>
         {#if bpLatestDate()}<div class="caption">{bpLatestDate()}</div>{/if}
-      </button>
+      </Card>
     {/if}
   </div>
-{/if}
+</LoadState>
 
-<Modal bind:open={modalOpen} title="Log measurement" width="26rem">
-  <form onsubmit={submitEntry}>
-    <!-- labelled={false}: the row holds a number input and a unit select, so
-         one implicit label would claim the first and leave the other unnamed. -->
-    <Field label="Metric" labelled={false}>
+<!-- The unit picker inside the value's box, for a metric logged in more than
+     one unit. Top level, since a snippet written inside a component's tag
+     becomes that component's prop. -->
+{#snippet unitPicker()}
+  <Select
+    value={formUnit}
+    options={(LOG_UNIT_CHOICES[formMetric] ?? []).map((u) => ({ value: u, label: u }))}
+    onValueChange={(v) => (formUnit = v)}
+    ariaLabel="Unit"
+  />
+{/snippet}
+
+<FormModal
+  bind:open={modalOpen}
+  title="Log measurement"
+  width="26rem"
+  onSubmit={submitEntry}
+  canSubmit={formValue !== null && formValue !== ''}
+  onCancel={() => (modalOpen = false)}
+>
+  <div class="vstack">
+    <Field label="Metric">
       <Select
         value={formMetric}
         options={metricOptions}
@@ -504,19 +509,15 @@
         fullWidth
       />
     </Field>
-    <Field label="Value" labelled={false}>
-      <div class="value-row hstack">
-        <Input type="number" step="any" bind:value={formValue} required aria-label="Value" />
-        {#if LOG_UNIT_CHOICES[formMetric]}
-          <select class="unit-select" bind:value={formUnit} aria-label="Unit">
-            {#each LOG_UNIT_CHOICES[formMetric] as u}
-              <option value={u}>{u}</option>
-            {/each}
-          </select>
-        {:else}
-          <span class="unit-static muted">{METRIC_UNITS[formMetric]}</span>
-        {/if}
-      </div>
+    <Field label="Value">
+      <Input
+        type="number"
+        step="any"
+        bind:value={formValue}
+        required
+        aria-label="Value"
+        suffix={LOG_UNIT_CHOICES[formMetric] ? unitPicker : METRIC_UNITS[formMetric]}
+      />
     </Field>
     <Field label="When">
       <Input type="datetime-local" bind:value={formDate} />
@@ -524,13 +525,8 @@
     <Field label="Notes">
       <Input bind:value={formNotes} placeholder="optional" />
     </Field>
-    {#if formError}<div class="banner error">{formError}</div>{/if}
-    <div class="modal-actions">
-      <Button onclick={() => (modalOpen = false)} disabled={saving}>Cancel</Button>
-      <Button variant="primary" type="submit" loading={saving}>Save</Button>
-    </div>
-  </form>
-</Modal>
+  </div>
+</FormModal>
 
 <style>
   .bar {
@@ -538,24 +534,6 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: var(--space-4);
-  }
-  .ranges {
-    display: flex;
-    gap: var(--space-1);
-  }
-  .ranges button {
-    background: none;
-    border: 1px solid var(--border-default);
-    color: var(--text-muted);
-    font: inherit;
-    font-size: var(--text-xs);
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-pill);
-    cursor: pointer;
-  }
-  .ranges button.active {
-    color: var(--text-primary);
-    border-color: var(--text-primary);
   }
   .log-btn {
     padding: var(--space-2) var(--space-3);
@@ -570,11 +548,9 @@
   .log-btn:hover {
     background: var(--hover-bg);
   }
-  .card {
-    font: inherit;
-    text-align: left;
-    display: flex;
-    flex-direction: column;
+  /* The tile spaces its rows with their own margins, not the card's gap. */
+  .grid :global(.metric-tile) {
+    gap: 0;
     min-height: 170px;
   }
   header {
@@ -600,32 +576,6 @@
   /* Typography is the global .caption; the spacing stays at the call site. */
   .caption {
     margin-top: var(--space-1);
-  }
-
-  /* :global because the value input is an <Input> now — Svelte prunes a rule
-     whose subject sits inside a component. */
-  .value-row :global(input) {
-    flex: 1;
-    min-width: 0;
-  }
-  /* The element selector takes this to (0,2,1), which beats Field's
-     `.field :global(select) { width: 100% }` deterministically rather than by
-     stylesheet order — without it the fixed-width unit picker takes the whole
-     row and collapses the value input to near-zero. */
-  .value-row select.unit-select {
-    width: auto;
-    min-width: 4.5rem;
-    flex: 0 0 auto;
-  }
-  .unit-static {
-    font-size: var(--text-sm);
-    padding: var(--space-1) 0.2rem;
-  }
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: var(--space-2);
-    margin-top: var(--space-2);
   }
 
   /* Light theme overrides — dark rules above untouched. */

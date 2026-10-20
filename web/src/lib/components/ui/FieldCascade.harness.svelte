@@ -5,11 +5,11 @@
 </script>
 
 <!--
-  Field around one raw control and the two primitives, as a form writes them,
-  so fieldCascade.test.ts can ask which of Field's rules reach which element.
+  Field around each shape of the two primitives, as a form writes them, so
+  fieldCascade.test.ts can ask which of Field's rules reach which element.
 -->
-<Field label="Raw">
-  <input aria-label="Raw" />
+<Field label="Adorned">
+  <Input aria-label="Adorned" prefix="$" />
 </Field>
 <Field label="Primitive">
   <Input aria-label="Primitive" monospace invalid />

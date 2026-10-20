@@ -12,16 +12,16 @@
     type TransactionSelection,
   } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
-  import { Sidebar, SidebarToggle, Select } from '$lib/components/ui';
+  import { Icon, Chip, ListRow, Sidebar, SidebarToggle, Select, Input } from '$lib/components/ui';
+  import { ChevronRight, Search } from '@lucide/svelte';
+  import { debounce } from '$lib/ui/debounce';
 
   let { children } = $props();
 
   let accounts: AccountRow[] = $state([]);
   let sidebarOpen = $state(false);
-  let filterTimeout: ReturnType<typeof setTimeout> | null = null;
-  onDestroy(() => {
-    if (filterTimeout) clearTimeout(filterTimeout);
-  });
+  const handleFilterInput = debounce((value: string) => filterText.set(value), 300);
+  onDestroy(() => handleFilterInput.cancel());
 
   const currentYear = new Date().getFullYear();
   const years = Array.from({ length: 11 }, (_, i) => currentYear - i);
@@ -126,11 +126,6 @@
     navigateToAccount($selectedAccount === fullName ? '' : fullName);
   }
 
-  function handleFilterInput(value: string) {
-    if (filterTimeout) clearTimeout(filterTimeout);
-    filterTimeout = setTimeout(() => filterText.set(value), 300);
-  }
-
   async function loadAccounts(ledger: string) {
     expandedSet = new Set<string>();
     try {
@@ -168,9 +163,13 @@
 
 <div class="money-section-header">
   {#if $selectedAccount}
-    <button class="active-filter" onclick={() => selectAccount($selectedAccount)} type="button">
-      {$selectedAccount} <span class="clear">&times;</span>
-    </button>
+    <Chip
+      size="xs"
+      removable
+      class="active-filter"
+      removeLabel="Clear the account filter"
+      onremove={() => selectAccount($selectedAccount)}>{$selectedAccount}</Chip
+    >
   {/if}
   <div class="money-section-tools control-row">
     <!-- The one placement that isn't a ShellHeader leading slot: the accounts
@@ -191,9 +190,14 @@
       ariaLabel="Year"
       minChars={4}
     />
-    <input
-      type="text"
+    {#snippet searchIcon()}<Icon icon={Search} size="sm" />{/snippet}
+    <Input
+      type="search"
+      size="toolbar"
+      clearable
+      prefix={searchIcon}
       class="money-control-input"
+      aria-label="Filter transactions"
       placeholder="Filter by tag, payee..."
       value={$filterText}
       oninput={(e) => handleFilterInput(e.currentTarget.value)}
@@ -222,19 +226,21 @@
   <div class="acct-row" style="padding-left: {0.5 + depth * 0.75}rem">
     {#if node.children.length > 0}
       <button class="acct-caret" onclick={(e) => toggleExpand(e, node.fullName)} type="button">
-        <span class="caret" class:open={expandedSet.has(node.fullName)}>&#9654;</span>
+        <span class="caret" class:open={expandedSet.has(node.fullName)}
+          ><Icon icon={ChevronRight} size="xs" /></span
+        >
       </button>
     {:else}
       <span class="caret-spacer"></span>
     {/if}
-    <button
-      class="acct-btn"
-      class:selected={$selectedAccount === node.fullName}
+    <ListRow
+      class="acct-list-row"
+      density="sm"
+      active={$selectedAccount === node.fullName}
       onclick={() => selectAccount(node.fullName)}
-      type="button"
     >
       {node.name}
-    </button>
+    </ListRow>
   </div>
   {#if node.children.length > 0 && expandedSet.has(node.fullName)}
     {#each node.children as child (child.fullName)}
@@ -244,31 +250,6 @@
 {/snippet}
 
 <style>
-  .active-filter {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-    background: var(--surface-raised);
-    border: none;
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-xs);
-    padding: 0.2rem 0.55rem;
-    border-radius: var(--radius-pill);
-    cursor: pointer;
-    transition: background var(--transition-fast);
-  }
-
-  .active-filter:hover {
-    background: var(--border-default);
-  }
-
-  .active-filter .clear {
-    color: var(--text-dim);
-    font-size: var(--text-sm);
-    line-height: var(--leading-none);
-  }
-
   /* The chip precedes the toolbar in the DOM because on a wide screen it sits
      at the section's leading edge, with the tools pushed right by their own
      auto margin — one row, reading left to right. Below 768px the header wraps
@@ -279,7 +260,7 @@
      section nav — and hangs the chip beneath it. `order` rather than moving
      the markup, so the wide layout and the tab order are both untouched. */
   @media (max-width: 768px) {
-    .active-filter {
+    .money-section-header :global(.active-filter) {
       order: 1;
     }
   }
@@ -308,8 +289,7 @@
   }
 
   .caret {
-    font-size: 0.45rem;
-    display: inline-block;
+    display: inline-flex;
     transition: transform var(--transition-fast);
   }
 
@@ -317,38 +297,18 @@
     transform: rotate(90deg);
   }
 
+  /* The caret button's width: the marker and its inline padding. */
   .caret-spacer {
-    width: 1.15rem;
+    width: calc(var(--icon-xs) + 2 * var(--space-1));
     display: inline-block;
     flex-shrink: 0;
   }
 
-  .acct-btn {
-    display: block;
+  /* The caret is a button of its own, so it sits beside the row rather than
+     in it; the row takes the rest of the line. */
+  .acct-row :global(.acct-list-row) {
     flex: 1;
     min-width: 0;
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    font: inherit;
-    font-size: var(--text-sm);
-    cursor: pointer;
-    padding: 0.2rem var(--space-2);
-    border-radius: var(--radius-sm);
-    text-align: left;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    transition: background var(--transition-fast);
-  }
-
-  .acct-btn:hover {
-    background: var(--hover-bg);
-  }
-
-  .acct-btn.selected {
-    background: var(--selected-bg);
-    color: var(--text-primary);
   }
 
   .txn-main {

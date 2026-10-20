@@ -1,6 +1,17 @@
 <script lang="ts">
   import { fileLinks } from '$lib/fileViewer/links';
-  import { Copy, Star, Trash2, Reply, Mail, Info, Pencil, X, RotateCcw } from '@lucide/svelte';
+  import {
+    Copy,
+    Info,
+    Mail,
+    Paperclip,
+    Pencil,
+    Reply,
+    RotateCcw,
+    Star,
+    Trash2,
+    X,
+  } from '@lucide/svelte';
   import PhoneSurfaceIcon from './PhoneSurfaceIcon.svelte';
   import { chatFileUrl, type ExternalTurnDisplay } from '$lib/api';
   import { copyText } from '$lib/clipboard';
@@ -15,7 +26,7 @@
     renderGroups,
   } from '$lib/stores/segments';
   import { online } from '$lib/stores/connectivity';
-  import { Avatar, Button, IconButton } from '$lib/components/ui';
+  import { Icon, Avatar, Badge, Button, Chip, IconButton } from '$lib/components/ui';
   import ActivityTrace from './ActivityTrace.svelte';
   import ConfirmationCard from './ConfirmationCard.svelte';
   import DraftCard from './DraftCard.svelte';
@@ -630,7 +641,7 @@
         title="Copy"
         type="button"
       >
-        <Copy size={15} />
+        <Icon icon={Copy} size="md" />
       </button>
     {/if}
     {#if showRowStar}
@@ -649,7 +660,7 @@
         title={message.starred ? 'Unstar' : 'Star'}
         type="button"
       >
-        <Star size={15} fill={message.starred ? 'currentColor' : 'none'} />
+        <Icon icon={Star} size="md" fill={message.starred ? 'currentColor' : 'none'} />
       </button>
     {/if}
     {#if showReply}
@@ -667,7 +678,7 @@
         title="Reply"
         type="button"
       >
-        <Reply size={15} />
+        <Icon icon={Reply} size="md" />
       </button>
     {/if}
     {#if showDelete}
@@ -681,7 +692,7 @@
         title="Delete"
         type="button"
       >
-        <Trash2 size={15} />
+        <Icon icon={Trash2} size="md" />
       </button>
     {/if}
     <!-- Task id / model / duration / tool count, right-aligned on the same
@@ -741,18 +752,17 @@
 {#snippet aboutChip()}
   {#if message.aboutRoom}
     {#if message.aboutRoom.name !== null && onOpenRoom}
-      <button
+      <Chip
+        size="xs"
         class="room-chip about-chip"
-        type="button"
         title="Open the room"
         onclick={() => onOpenRoom?.(message.aboutRoom!.token)}
+        ><span class="truncate">re: {message.aboutRoom.name}</span></Chip
       >
-        re: {message.aboutRoom.name}
-      </button>
     {:else}
-      <span class="room-chip about-chip">
-        re: {message.aboutRoom.name ?? 'a room you left'}
-      </span>
+      <Badge tone="subtle" uppercase={false} class="room-chip about-chip"
+        ><span class="truncate">re: {message.aboutRoom.name ?? 'a room you left'}</span></Badge
+      >
     {/if}
   {/if}
 {/snippet}
@@ -816,9 +826,9 @@
       {#if botVoice}<span class="author bot">{botName}</span>{/if}
       {#if time}<time class="stamp">{time}</time>{/if}
       {#if showRoomChip}
-        <button class="room-chip" onclick={() => onRoomClick?.(message.roomToken!)} type="button">
-          {message.roomName}
-        </button>
+        <Chip size="xs" class="room-chip" onclick={() => onRoomClick?.(message.roomToken!)}
+          ><span class="truncate">{message.roomName}</span></Chip
+        >
       {/if}
       {@render aboutChip()}
       <!-- Only a notice gets the panel. A bot-voice row (a private reply, a
@@ -933,14 +943,12 @@
           <span class="author" class:bot={!isUser}>{author}</span>
           {#if time}<time class="stamp">{time}</time>{/if}
           {#if showRoomChip}
-            <button
+            <Chip
+              size="xs"
               class="room-chip"
               onclick={() => onRoomClick?.(message.roomToken!)}
-              type="button"
-              title="Go to room"
+              title="Go to room"><span class="truncate">{message.roomName}</span></Chip
             >
-              {message.roomName}
-            </button>
           {/if}
           {@render aboutChip()}
         </div>
@@ -960,7 +968,7 @@
                above is sanitized at write time. -->
           <div class="external">
             <div class="external-head">
-              <span class="external-mark" aria-hidden="true"><Mail size={13} /></span>
+              <span class="external-mark" aria-hidden="true"><Icon icon={Mail} size="sm" /></span>
               <span class="external-label">{externalLabel}</span>
               {#if message.subject}
                 <span class="external-subject">{message.subject}</span>
@@ -1027,10 +1035,11 @@
 							     label it was, rather than becoming a link that 403s. -->
               {#if href}
                 <a class="attachment attachment-link" href={chatFileUrl(href)} download={name}>
-                  📎 {name}
+                  <Icon icon={Paperclip} size="xs" />
+                  {name}
                 </a>
               {:else}
-                <span class="attachment">📎 {name}</span>
+                <span class="attachment"><Icon icon={Paperclip} size="xs" /> {name}</span>
               {/if}
             {/each}
           </div>
@@ -1080,13 +1089,13 @@
             {#if onQueueEdit}
               <IconButton
                 size="sm"
-                class="touch-target"
+                touchTarget
                 label="Edit queued message"
                 title="Edit"
                 onclick={() => onQueueEdit?.(message.cid)}
-              >
-                <Pencil size={15} />
-              </IconButton>
+                icon={Pencil}
+                iconSize="md"
+              />
             {/if}
             {#if onQueueRemove}
               <!-- `danger`, and an X rather than the turn row's Trash2: the two
@@ -1095,13 +1104,13 @@
               <IconButton
                 size="sm"
                 danger
-                class="touch-target"
+                touchTarget
                 label="Remove queued message"
                 title="Remove"
                 onclick={() => onQueueRemove?.(message.cid)}
-              >
-                <X size={15} />
-              </IconButton>
+                icon={X}
+                iconSize="md"
+              />
             {/if}
           </div>
         {/if}
@@ -1203,7 +1212,7 @@
               title={retryBusy ? 'Wait for the current turn to finish' : 'Run this again'}
               onclick={() => onRetryTask?.(message.cid, 'retry')}
             >
-              <RotateCcw size={14} />
+              <Icon icon={RotateCcw} size="sm" />
               Retry
             </Button>
             {#if showContinue}
@@ -1499,28 +1508,10 @@
   }
 
   /* Room label chip (aggregate views): a small clickable room tag in the
-	   author header that jumps into the room. */
-  .room-chip {
-    background: var(--surface-raised);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-pill);
-    color: var(--text-muted);
-    font: inherit;
-    font-size: var(--text-xs);
-    line-height: var(--leading-tight);
-    padding: 0.05rem var(--space-2);
-    cursor: pointer;
+	   author header that jumps into the room. The look is Chip's xs; a long
+	   room name is cut here. */
+  .content :global(.room-chip) {
     max-width: 12rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    transition:
-      color var(--transition-fast),
-      border-color var(--transition-fast);
-  }
-  .room-chip:hover {
-    color: var(--text-primary);
-    border-color: var(--text-dim);
   }
 
   .gutter {
@@ -1879,10 +1870,6 @@
 	   around it. A system row is always its own group (there is no continuation
 	   case for a notice), so it takes the fresh-group top padding unconditionally
 	   rather than through a class. */
-  /* A span when the room cannot be opened: no pointer, no hover. */
-  span.about-chip {
-    cursor: default;
-  }
   .cmd-row {
     display: flex;
     gap: var(--chat-avatar-gap);
@@ -1890,7 +1877,7 @@
     padding: var(--space-2) var(--chat-row-inline);
     position: relative;
   }
-  .cmd-row .room-chip {
+  .cmd-row .content :global(.room-chip) {
     margin-bottom: var(--space-1);
   }
   /* Both are inline, so they share the header line; `inline-block` is what
@@ -1957,6 +1944,9 @@
     min-width: 0;
     gap: var(--space-1);
     margin-top: var(--space-1);
+  }
+  .attachment :global(.ui-icon) {
+    vertical-align: text-bottom;
   }
   .attachment {
     max-width: 100%;

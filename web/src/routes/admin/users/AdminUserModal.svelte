@@ -13,18 +13,20 @@
   import {
     Badge,
     Button,
-    Chip,
+    ToggleGroup,
     ConfirmDialog,
     Field,
+    FormStack,
     Input,
     Modal,
     MultiSelect,
     Select,
     type SelectOption,
+    Checkbox,
+    Timestamp,
   } from '$lib/components/ui';
-  import { formatRelative } from '$lib/dateFormat';
-  import { changedProfileFields } from '$lib/profilePatch';
-  import { parseListInput, profileListString } from '$lib/settings/listInput';
+  import { changedProfileFields } from '$lib/ui/profilePatch';
+  import { formatList, parseList } from '$lib/ui/parse';
   import { ADMIN_MANAGED_BADGE, adminManagedHint } from '$lib/settings/managed';
   import { timezoneOptions } from '$lib/settings/timezones';
   import { signInStateLabel } from '$lib/admin/signInState';
@@ -204,10 +206,6 @@
     return !!form && field in form;
   }
 
-  function toggle(list: string[], name: string): string[] {
-    return list.includes(name) ? list.filter((n) => n !== name) : [...list, name];
-  }
-
   function requestClose() {
     if (busy || loginBusy) {
       open = true;
@@ -325,7 +323,7 @@
     <div class="editor">
       {#if banner}<p class="banner error" role="alert">{banner}</p>{/if}
 
-      <fieldset class="editor-fields" disabled={busy}>
+      <FormStack gap={4} disabled={busy}>
         <section class="editor-section vstack" aria-labelledby="admin-user-identity">
           <h3 id="admin-user-identity" class="micro-label">Identity</h3>
           <Field label="User ID">
@@ -350,7 +348,6 @@
           </Field>
           <Field
             label="Timezone (IANA)"
-            labelled={false}
             badge={badge('timezone')}
             hint={hint(
               'timezone',
@@ -381,10 +378,11 @@
             {#if detail.identity}
               <span>{detail.identity.email}</span>
               <span class="caption"
-                >{signInStateLabel(detail.identity, detail.identity.state)} · last login {detail
-                  .identity.last_login_at
-                  ? formatRelative(detail.identity.last_login_at)
-                  : 'never'}</span
+                >{signInStateLabel(detail.identity, detail.identity.state)} · last login <Timestamp
+                  value={detail.identity.last_login_at}
+                  format="relative"
+                  empty="never"
+                /></span
               >
             {:else}
               <span class="caption">{signInStateLabel(null, undefined)}: no login email.</span>
@@ -406,15 +404,14 @@
               />
             </Field>
             <Field label="Also add to email addresses" checkbox>
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={addToAddresses}
                 disabled={alreadyListed}
-                onchange={(e) => (addOverride = (e.currentTarget as HTMLInputElement).checked)}
+                onchange={(on) => (addOverride = on)}
               />
             </Field>
             <Field label="Send invitation" checkbox>
-              <input type="checkbox" bind:checked={loginInvite} />
+              <Checkbox bind:checked={loginInvite} />
             </Field>
             {#if loginNote}<p class="banner success" role="status">{loginNote}</p>{/if}
             <div class="form-actions">
@@ -445,14 +442,12 @@
             error={errors.email_addresses}
           >
             <Input
-              value={profileListString(form.email_addresses)}
+              value={formatList(form.email_addresses)}
               disabled={locked('email_addresses')}
               invalid={!!errors.email_addresses}
               oninput={(e) => {
                 if (form)
-                  form.email_addresses = parseListInput(
-                    (e.currentTarget as HTMLInputElement).value,
-                  );
+                  form.email_addresses = parseList((e.currentTarget as HTMLInputElement).value);
               }}
             />
           </Field>
@@ -463,12 +458,12 @@
             error={errors.trusted_email_senders}
           >
             <Input
-              value={profileListString(form.trusted_email_senders)}
+              value={formatList(form.trusted_email_senders)}
               disabled={locked('trusted_email_senders')}
               invalid={!!errors.trusted_email_senders}
               oninput={(e) => {
                 if (form)
-                  form.trusted_email_senders = parseListInput(
+                  form.trusted_email_senders = parseList(
                     (e.currentTarget as HTMLInputElement).value,
                   );
               }}
@@ -481,20 +476,17 @@
             error={errors.quiet_email_senders}
           >
             <Input
-              value={profileListString(form.quiet_email_senders)}
+              value={formatList(form.quiet_email_senders)}
               disabled={locked('quiet_email_senders')}
               invalid={!!errors.quiet_email_senders}
               oninput={(e) => {
                 if (form)
-                  form.quiet_email_senders = parseListInput(
-                    (e.currentTarget as HTMLInputElement).value,
-                  );
+                  form.quiet_email_senders = parseList((e.currentTarget as HTMLInputElement).value);
               }}
             />
           </Field>
           <Field
             label="Outbound approval"
-            labelled={false}
             badge={badge('outbound_approval')}
             hint={hint(
               'outbound_approval',
@@ -545,7 +537,6 @@
             {#if showWhatsApp}
               <Field
                 label="WhatsApp number"
-                labelled={false}
                 badge={badge('whatsapp_number')}
                 hint={hint('whatsapp_number', 'Full international form, for example +48123456789.')}
                 warning={whatsappHasIdentity && form.whatsapp_number !== detail.whatsapp.number
@@ -585,7 +576,10 @@
                 {/if}
                 {#if detail.whatsapp.last_seen_at}
                   <span class="caption"
-                    >Last seen {formatRelative(detail.whatsapp.last_seen_at)}</span
+                    >Last seen <Timestamp
+                      value={detail.whatsapp.last_seen_at}
+                      format="relative"
+                    /></span
                   >
                 {/if}
                 {#if whatsappHasIdentity}
@@ -603,30 +597,25 @@
           {#if detail.options.modules.length}
             <Field
               label="Disabled modules"
-              labelled={false}
               badge={badge('disabled_modules')}
               hint={hint('disabled_modules', 'Modules are on by default. Pick one to turn it off.')}
               error={errors.disabled_modules}
             >
-              <div class="hstack wrap">
-                {#each detail.options.modules as name (name)}
-                  {@const on = form.disabled_modules.includes(name)}
-                  <Chip
-                    checked={on}
-                    aria-pressed={on}
-                    disabled={locked('disabled_modules')}
-                    onclick={() => {
-                      if (form) form.disabled_modules = toggle(form.disabled_modules, name);
-                    }}>{name}</Chip
-                  >
-                {/each}
-              </div>
+              <ToggleGroup
+                type="multiple"
+                label="Disabled modules"
+                value={form.disabled_modules}
+                disabled={locked('disabled_modules')}
+                options={detail.options.modules.map((name) => ({ value: name, label: name }))}
+                onValueChange={(next) => {
+                  if (form) form.disabled_modules = next as string[];
+                }}
+              />
             </Field>
           {/if}
           {#if detail.options.skills.length}
             <Field
               label="Disabled skills"
-              labelled={false}
               badge={badge('disabled_skills')}
               hint={hint('disabled_skills', 'Pick a skill to turn it off for this user.')}
               error={errors.disabled_skills}
@@ -685,7 +674,7 @@
             </dd>
           </dl>
         </section>
-      </fieldset>
+      </FormStack>
     </div>
   {/if}
 
@@ -718,7 +707,6 @@
 
 <style>
   .editor,
-  .editor-fields,
   .login-fields {
     display: flex;
     flex-direction: column;

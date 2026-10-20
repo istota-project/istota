@@ -7,10 +7,17 @@
     updateLocalCredential,
     type CredentialSummary,
   } from '$lib/api';
-  import { Button, Field, Input, Modal } from '$lib/components/ui';
+  import {
+    Field,
+    FormModal,
+    FormStack,
+    Input,
+    Checkbox,
+    SecretField,
+    Disclosure,
+  } from '$lib/components/ui';
   import { notifySuccess } from '$lib/stores/notices';
   import CredentialAccessFields from './CredentialAccessFields.svelte';
-  import SecretField from './SecretField.svelte';
 
   /**
    * Add a credential, or edit one added in Istota.
@@ -51,7 +58,6 @@
 
   let open = $state(true);
   let busy = $state(false);
-  let banner = $state('');
   let errors: Record<string, string> = $state({});
 
   let name = $state(editing ? (start?.name ?? '') : '');
@@ -90,21 +96,12 @@
   onDestroy(clearSecret);
 
   function cancel() {
-    // Escape and the overlay bypass the disabled fieldset; while a save runs,
-    // its result decides whether the dialog closes.
-    if (busy) {
-      open = true;
-      return;
-    }
     clearSecret();
-    open = false;
     onClose();
   }
 
   async function save() {
-    if (busy) return;
     busy = true;
-    banner = '';
     errors = {};
     try {
       if (editing) {
@@ -141,7 +138,6 @@
       }
       const saved = name;
       clearSecret();
-      open = false;
       notifySuccess(editing ? `Saved ${saved}` : `Added ${saved}`);
       onSaved(saved);
       onClose();
@@ -149,29 +145,29 @@
       if (e instanceof AuthError) {
         clearSecret();
         onSignedOut();
-        return;
+        return false;
       }
       if (e instanceof CredentialWriteError && e.field && shownFields.has(e.field)) {
         errors = { [e.field]: e.message };
         if (e.field === 'extra_hosts' || e.field === 'headers') moreOpen = true;
-      } else {
-        banner = (e as Error).message || 'The credential could not be saved.';
+        return false;
       }
+      throw new Error((e as Error).message || 'The credential could not be saved.');
     } finally {
       busy = false;
     }
   }
 </script>
 
-<Modal
+<FormModal
   bind:open
   title={editing ? `Edit ${name}` : 'Add credential'}
   width="480px"
-  onOpenChange={(next) => {
-    if (!next) cancel();
-  }}
+  submitLabel={editing ? 'Save' : 'Add credential'}
+  onSubmit={save}
+  onCancel={cancel}
 >
-  <fieldset class="cred-form" disabled={busy}>
+  <FormStack disabled={busy}>
     <div class="cred-field">
       <Field label="Name" error={errors.name}>
         <Input
@@ -211,7 +207,7 @@
       {#if usernameSet}
         <p class="caption">Leave empty to keep it.</p>
         <Field label="Remove username" checkbox>
-          <input type="checkbox" bind:checked={removeUsername} />
+          <Checkbox bind:checked={removeUsername} />
         </Field>
       {/if}
     </div>
@@ -230,7 +226,7 @@
       {#if editing && start?.otp_set}
         <p class="caption">Leave empty to keep two-factor.</p>
         <Field label="Remove two-factor" checkbox>
-          <input type="checkbox" bind:checked={removeOtp} />
+          <Checkbox bind:checked={removeOtp} />
         </Field>
       {/if}
     </div>
@@ -263,8 +259,7 @@
         {/if}
       </div>
     {/if}
-    <details class="cred-more" bind:open={moreOpen}>
-      <summary>More options</summary>
+    <Disclosure summary="More options" bind:open={moreOpen}>
       <div class="cred-more-fields">
         <div class="cred-field">
           <Field label="Also used on" error={errors.extra_hosts}>
@@ -294,33 +289,16 @@
         </div>
         <div class="cred-field">
           <Field label="Tasks may read the secret" checkbox>
-            <input type="checkbox" bind:checked={revealable} />
+            <Checkbox bind:checked={revealable} />
           </Field>
           <p class="caption">Otherwise a task can only have Istota send it.</p>
         </div>
       </div>
-    </details>
-    {#if banner}<p class="banner error" role="alert">{banner}</p>{/if}
-  </fieldset>
-  {#snippet footer()}
-    <Button variant="secondary" onclick={cancel} disabled={busy}>Cancel</Button>
-    <Button variant="primary" onclick={save} loading={busy}>
-      {editing ? 'Save' : 'Add credential'}
-    </Button>
-  {/snippet}
-</Modal>
+    </Disclosure>
+  </FormStack>
+</FormModal>
 
 <style>
-  .cred-form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    min-width: 0;
-    margin: 0;
-    padding: 0;
-    border: 0;
-  }
-
   .cred-field {
     display: flex;
     flex-direction: column;
@@ -332,20 +310,9 @@
     margin: 0;
   }
 
-  .cred-more summary {
-    cursor: pointer;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-  }
-
   .cred-more-fields {
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
-    margin-top: var(--space-3);
-  }
-
-  .cred-form .banner {
-    margin: 0;
   }
 </style>

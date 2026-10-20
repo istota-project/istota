@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { latest } from '$lib/ui/latest';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import {
@@ -22,13 +24,13 @@
     ConfirmDialog,
     EmptyState,
     KebabMenu,
-    NoticeBanner,
+    Alert,
     Select,
     type KebabItem,
     type SelectOption,
-    PageLoading,
     SortHeader,
     Badge,
+    LoadState,
   } from '$lib/components/ui';
   import WorkEntryForm from '$lib/components/money/WorkEntryForm.svelte';
   import VoidInvoiceDialog from '$lib/components/money/VoidInvoiceDialog.svelte';
@@ -70,11 +72,8 @@
 
   let formOpen = $state(false);
   let editing: WorkEntryRow | null = $state(null);
-  let formError = $state('');
-  let saving = $state(false);
 
-  let confirmOpen = $state(false);
-  let pendingDelete: WorkEntryRow | null = $state(null);
+  const pendingDelete = createConfirm<WorkEntryRow>();
 
   // The entry being invoiced on its own, and the invoiced entry whose invoice is being voided.
   let generating: WorkEntryRow | null = $state(null);
@@ -113,10 +112,10 @@
   // Four filters change independently and each fires a load; without a
   // sequence guard a slow earlier response lands after a newer one and shows
   // rows for a filter you already left.
-  let loadSeq = 0;
+  const loads = latest();
 
   async function load() {
-    const seq = ++loadSeq;
+    const current = loads.next();
     loading = true;
     error = '';
     try {
@@ -125,15 +124,15 @@
         period: periodFilter || undefined,
         status: statusFilter,
       });
-      if (seq !== loadSeq) return;
+      if (!current()) return;
       entries = resp.entries;
       totals = resp.totals;
       rememberYears(resp.entries);
     } catch (e) {
-      if (seq !== loadSeq) return;
+      if (!current()) return;
       error = e instanceof Error ? e.message : 'Failed to load work entries';
     } finally {
-      if (seq === loadSeq) loading = false;
+      if (current()) loading = false;
     }
   }
 
@@ -167,20 +166,17 @@
 
   function openAdd() {
     editing = null;
-    formError = '';
     formOpen = true;
   }
 
   function openEdit(entry: WorkEntryRow) {
     editing = entry;
-    formError = '';
     formOpen = true;
   }
 
   function closeForm() {
     formOpen = false;
     editing = null;
-    formError = '';
   }
 
   function errorCode(e: unknown): string {
@@ -198,8 +194,6 @@
   }
 
   async function handleSave(data: WorkEntrySavePayload) {
-    saving = true;
-    formError = '';
     const target = editing;
     try {
       if (target) {
@@ -207,29 +201,23 @@
       } else {
         await createWorkEntry(data);
       }
-      closeForm();
-      await load();
     } catch (e) {
-      if (isConflict(e)) {
-        closeForm();
-        conflict = 'This entry was changed elsewhere — your edit was not saved.';
-      } else {
-        formError = e instanceof Error ? e.message : 'Failed to save work entry';
-      }
-    } finally {
-      saving = false;
+      if (!isConflict(e)) throw e;
+      closeForm();
+      conflict = 'This entry was changed elsewhere — your edit was not saved.';
+      return;
     }
+    closeForm();
+    await load();
   }
 
   function askDelete(entry: WorkEntryRow) {
-    pendingDelete = entry;
-    confirmOpen = true;
+    pendingDelete.ask(entry);
   }
 
   async function handleDelete() {
-    const entry = pendingDelete;
-    confirmOpen = false;
-    pendingDelete = null;
+    const entry = pendingDelete.target;
+    pendingDelete.cancel();
     if (!entry) return;
 
     busyUid = entry.uid;
@@ -345,8 +333,11 @@
 <div class="work-content">
   {#if conflict}
     <div class="money-notice-bar">
-      <NoticeBanner title={conflict} variant="warn" />
-      <Button variant="secondary" onclick={reloadFromConflict}>Reload</Button>
+      <Alert title={conflict} variant="warn">
+        {#snippet actions()}
+          <Button variant="secondary" size="sm" onclick={reloadFromConflict}>Reload</Button>
+        {/snippet}
+      </Alert>
     </div>
   {/if}
 
@@ -354,65 +345,61 @@
        centered message rather than centering it in the space left below. On
        error the count is also a lie: it reports 0 of something that failed to
        load. -->
-  {#if !loading && !error}
-    <div class="money-toolbar control-row">
-      <span class="money-result-count">
-        {totals.uninvoiced_count} uninvoiced &middot; ${formatAmount(totals.uninvoiced_amount)}
-      </span>
-      <!-- Every width here is pinned, because the row does not wrap: a trigger
-           sized to its own selection re-flows the whole row each time you use
-           it, and on a phone that meant Add entry dropping to a line of its
-           own. Status and period take the longest label they can ever hold
-           ("Uninvoiced", a four-digit year). Client cannot be sized that way —
-           its labels are user data of no bounded length — so it takes a width
-           that reads most names rather than one that fits them all; raise it if
-           yours are longer, at the cost of the widths below.
+  <LoadState {loading} {error} empty={entries.length === 0}>
+    {#snippet header()}
+      <div class="money-toolbar toolbar toolbar--bar control-row">
+        <span class="caption num">
+          {totals.uninvoiced_count} uninvoiced &middot; ${formatAmount(totals.uninvoiced_amount)}
+        </span>
+        <!-- Every width here is pinned, because the row does not wrap: a trigger
+             sized to its own selection re-flows the whole row each time you use
+             it, and on a phone that meant Add entry dropping to a line of its
+             own. Status and period take the longest label they can ever hold
+             ("Uninvoiced", a four-digit year). Client cannot be sized that way —
+             its labels are user data of no bounded length — so it takes a width
+             that reads most names rather than one that fits them all; raise it if
+             yours are longer, at the cost of the widths below.
 
-           Below ~400px the row runs out of room and the labels give ground
-           instead of it breaking. Which one gives way is not the order you
-           might expect: flex-shrink takes pixels in proportion to width, so
-           Client loses the most, but Status is the first to ellipsis because
-           it is the one carrying a label that nearly fills it. That is the
-           right way round anyway — a half-read client name still says which
-           client, where a clipped "Invoiced" and "Uninvoiced" are the same
-           word. -->
-      <div class="filters">
-        <Select
-          value={statusFilter}
-          options={statusOptions}
-          ariaLabel="Status filter"
-          widthChars={9}
-          onValueChange={(v) => (statusFilter = v as WorkStatusFilter)}
-        />
-        <Select
-          bind:value={clientFilter}
-          options={clientFilterOptions}
-          ariaLabel="Client filter"
-          widthChars={10}
-        />
-        <Select
-          bind:value={periodFilter}
-          options={periodOptions}
-          ariaLabel="Period filter"
-          widthChars={4}
-        />
-        <Button variant="primary" onclick={openAdd}>Add entry</Button>
-        <KebabMenu
-          items={workExportItems(periodFilter || undefined)}
-          icon={Download}
-          ariaLabel="Download work log"
-        />
+             Below ~400px the row runs out of room and the labels give ground
+             instead of it breaking. Which one gives way is not the order you
+             might expect: flex-shrink takes pixels in proportion to width, so
+             Client loses the most, but Status is the first to ellipsis because
+             it is the one carrying a label that nearly fills it. That is the
+             right way round anyway — a half-read client name still says which
+             client, where a clipped "Invoiced" and "Uninvoiced" are the same
+             word. -->
+        <div class="filters toolbar">
+          <Select
+            value={statusFilter}
+            options={statusOptions}
+            ariaLabel="Status filter"
+            widthChars={9}
+            onValueChange={(v) => (statusFilter = v as WorkStatusFilter)}
+          />
+          <Select
+            bind:value={clientFilter}
+            options={clientFilterOptions}
+            ariaLabel="Client filter"
+            widthChars={10}
+          />
+          <Select
+            bind:value={periodFilter}
+            options={periodOptions}
+            ariaLabel="Period filter"
+            widthChars={4}
+          />
+          <Button variant="primary" class="add-entry" onclick={openAdd}>Add entry</Button>
+          <KebabMenu
+            items={workExportItems(periodFilter || undefined)}
+            icon={Download}
+            ariaLabel="Download work log"
+          />
+        </div>
       </div>
-    </div>
-  {/if}
-
-  {#if loading}
-    <PageLoading />
-  {:else if error}
-    <div class="center-msg error">{error}</div>
-  {:else if entries.length === 0}
-    <EmptyState>No work entries found.</EmptyState>
-  {:else}
+    {/snippet}
+    {#snippet emptyState()}
+      <EmptyState>No work entries found.</EmptyState>
+    {/snippet}
     <div class="record-list">
       <div class="record-header micro-label">
         <span class="work-index">#</span>
@@ -472,19 +459,11 @@
         {/if}
       {/each}
     </div>
-  {/if}
+  </LoadState>
 </div>
 
 {#if formOpen}
-  <WorkEntryForm
-    entry={editing}
-    {clients}
-    {services}
-    onSave={handleSave}
-    onCancel={closeForm}
-    error={formError}
-    {saving}
-  />
+  <WorkEntryForm entry={editing} {clients} {services} onSave={handleSave} onCancel={closeForm} />
 {/if}
 
 {#if generating}
@@ -505,14 +484,13 @@
 {/if}
 
 <ConfirmDialog
-  bind:open={confirmOpen}
+  bind:open={pendingDelete.open}
   title="Delete work entry"
-  message={pendingDelete
-    ? `Are you sure you want to delete the ${pendingDelete.service_name} entry for ${pendingDelete.client_name} on ${formatDate(pendingDelete.date)}? This cannot be undone.`
+  message={pendingDelete.target
+    ? `Are you sure you want to delete the ${pendingDelete.target.service_name} entry for ${pendingDelete.target.client_name} on ${formatDate(pendingDelete.target.date)}? This cannot be undone.`
     : ''}
   confirmLabel="Delete"
   onConfirm={handleDelete}
-  onCancel={() => (pendingDelete = null)}
 />
 
 <style>
@@ -529,16 +507,13 @@
      below its own content as a toolbar item, or the truncation never gets a
      chance to happen. */
   .filters {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
     flex-wrap: nowrap;
     min-width: 0;
   }
 
   /* The one thing that does not give ground: a button truncated to "Add e…" is
      not a button, and it is the row's only action. */
-  .filters :global(.btn) {
+  .filters :global(.add-entry) {
     flex-shrink: 0;
   }
 

@@ -40,7 +40,7 @@
    * thread. Rendering any of it as markup is the injection this whole feature
    * exists to make harder, not easier.
    */
-  import { Button } from '$lib/components/ui';
+  import { Icon, Button } from '$lib/components/ui';
   import { Mail } from '@lucide/svelte';
   import type { OutboundDraft } from '$lib/api';
 
@@ -208,7 +208,7 @@
          nothing is withheld from what gets sent: `Send` and `Edit` read the
          full stored body, exactly as they do on the expanded card. -->
     <div class="draft-head">
-      <span class="micro-label"><Mail size={12} /> Held for approval</span>
+      <span class="micro-label"><Icon icon={Mail} size="xs" /> Held for approval</span>
       <span class="caption">{reasonLabel}</span>
     </div>
     <p class="draft-summary">{summaryLine}</p>
@@ -235,7 +235,7 @@
     </div>
   {:else}
     <div class="draft-head">
-      <span class="micro-label"><Mail size={12} /> Held for approval</span>
+      <span class="micro-label"><Icon icon={Mail} size="xs" /> Held for approval</span>
       <span class="caption">{reasonLabel}</span>
       {#if placement === 'banner'}
         <button class="draft-more link-action" type="button" onclick={() => (expanded = false)}>

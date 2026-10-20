@@ -68,7 +68,7 @@ import { fileURLToPath } from 'node:url';
 
 describe('the notice band is out of flow', () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const source = readFileSync(resolve(here, 'NoticeDrawer.svelte'), 'utf8');
+  const source = readFileSync(resolve(here, 'internal/NoticeDrawer.svelte'), 'utf8');
 
   it('positions its region absolutely, so content beneath it does not move', () => {
     const rule = source.match(/\.notice-region\s*\{([^}]*)\}/)?.[1] ?? '';

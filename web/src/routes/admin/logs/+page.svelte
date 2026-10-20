@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { X } from '@lucide/svelte';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { page } from '$app/state';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
@@ -10,9 +11,18 @@
     type AdminLogRecord,
     type AdminLogSource,
   } from '$lib/api';
-  import { Button, Chip, EmptyState, Input, Select, PageLoading } from '$lib/components/ui';
+  import {
+    Icon,
+    Button,
+    Chip,
+    EmptyState,
+    Input,
+    Select,
+    LoadState,
+    CopyButton,
+    LoadMore,
+  } from '$lib/components/ui';
   import { mergeRecords, trimBuffer } from '$lib/admin/logRecords';
-  import { copyText } from '$lib/clipboard';
   import { notifyError } from '$lib/stores/notices';
 
   const PAGE = 200;
@@ -329,8 +339,8 @@
     return ts.replace('T', ' ').replace(/\.\d+$/, '');
   }
 
-  function copyAll() {
-    const text = records
+  function logText(): string {
+    return records
       .map((r) =>
         [
           shortTime(r.timestamp),
@@ -342,7 +352,6 @@
           .join(' '),
       )
       .join('\n');
-    void copyText(text, { label: `Copied ${records.length} lines` });
   }
 
   onMount(async () => {
@@ -357,7 +366,7 @@
   <!-- A field tier row: two Selects, two text inputs, a Chip and a Button in
        one bar. Without the scope the inputs are the only members iOS floors at
        16px, so on a phone they stand a head above everything beside them. -->
-  <div class="log-toolbar control-row">
+  <div class="log-toolbar toolbar control-row">
     <Select
       value={sourceId}
       options={sourceOptions}
@@ -377,9 +386,22 @@
          against the logger name as well as the message, so typing a namespace
          narrows to it (a substring rather than a prefix, which is the more
          forgiving of the two when you are guessing at a name). -->
-    <Input bind:value={query} placeholder="Search…" aria-label="Search log text" />
+    <Input
+      bind:value={query}
+      size="toolbar"
+      class="log-filter"
+      placeholder="Search…"
+      aria-label="Search log text"
+    />
     {#if isTaskSource}
-      <Input bind:value={userFilter} placeholder="User" aria-label="Filter by user" monospace />
+      <Input
+        bind:value={userFilter}
+        size="toolbar"
+        class="log-filter"
+        placeholder="User"
+        aria-label="Filter by user"
+        monospace
+      />
     {/if}
     <!-- Grouped so the actions can be broken onto a row of their own under
          768px. `display: contents` above that breakpoint, so on a wide screen
@@ -396,7 +418,8 @@
              picking a task off a row you are already reading is the way you
              actually arrive at one. -->
         <Chip checked onclick={clearTaskFilter} title="Clear the task filter">
-          task {taskFilter} ×
+          task {taskFilter}
+          <Icon icon={X} size="sm" />
         </Chip>
       {/if}
     </div>
@@ -423,31 +446,24 @@
   {/if}
 
   <div class="log-pane" bind:this={logEl} onscroll={onScroll}>
-    {#if loading && records.length === 0}
-      <PageLoading />
-    {:else if records.length === 0 && !error}
-      <EmptyState>
-        {applied.q || applied.level || applied.user_id
-          ? 'No entries match these filters.'
-          : 'No entries yet.'}
-      </EmptyState>
-    {:else}
-      {#if nextBefore}
-        <div class="older-row">
-          <Button
-            variant="secondary"
-            size="sm"
-            onclick={loadOlder}
-            loading={loadingOlder}
-            loadingLabel="Loading…">Load older</Button
-          >
-        </div>
-      {:else if truncated}
-        <p class="older-note">
-          Stopped after scanning the size limit without a match. Narrow the search or pick a higher
-          level.
-        </p>
-      {/if}
+    <!-- A failed load is the banner above, beside the filters that caused it. -->
+    <LoadState loading={loading && records.length === 0} empty={records.length === 0 && !error}>
+      {#snippet emptyState()}
+        <EmptyState>
+          {applied.q || applied.level || applied.user_id
+            ? 'No entries match these filters.'
+            : 'No entries yet.'}
+        </EmptyState>
+      {/snippet}
+      <LoadMore
+        onload={loadOlder}
+        hasMore={!!nextBefore}
+        loading={loadingOlder}
+        label="Load older"
+        note={truncated
+          ? 'Stopped after scanning the size limit without a match. Narrow the search or pick a higher level.'
+          : undefined}
+      />
 
       {#each records as record (record.cursor)}
         <div class="log-row {levelClass(record.level)}">
@@ -471,13 +487,13 @@
           <span class="log-message">{record.message}</span>
         </div>
       {/each}
-    {/if}
+    </LoadState>
   </div>
 
   <div class="log-footer">
     <span class="log-count caption num">{records.length} shown</span>
     {#if records.length > 0}
-      <Button variant="secondary" size="sm" onclick={copyAll}>Copy</Button>
+      <CopyButton variant="button" text={logText} copiedLabel="Copied {records.length} lines" />
     {/if}
     {#if !atBottom && records.length > 0}
       <Button variant="secondary" size="sm" onclick={scrollToBottom}>Jump to latest</Button>
@@ -494,10 +510,6 @@
   }
 
   .log-toolbar {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-2);
     margin-bottom: var(--space-3);
   }
 
@@ -506,7 +518,7 @@
      here rather than in the component: full-width is right in a settings form.
      :global() because the subject is inside a component — scoped to the
      toolbar, so it is placement, not a leak. */
-  .log-toolbar :global(input) {
+  .log-toolbar :global(.log-filter) {
     min-width: 9rem;
     max-width: 16rem;
   }
@@ -639,18 +651,6 @@
     color: var(--text-primary);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-  }
-
-  .older-row {
-    display: flex;
-    justify-content: center;
-    padding-bottom: var(--space-2);
-  }
-
-  .older-note {
-    margin: 0 0 var(--space-2);
-    text-align: center;
-    color: var(--text-dim);
   }
 
   .log-footer {

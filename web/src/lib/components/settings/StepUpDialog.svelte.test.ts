@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import StepUpDialog from './StepUpDialog.svelte';
+import { pressEnter } from '$lib/test/implicitSubmit';
 vi.mock('$app/paths', () => ({ base: '/istota' }));
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
@@ -213,4 +214,21 @@ it('drops an expired code when no new one can be sent', async () => {
   await screen.findByText('Too many confirmation codes requested. Try again in 5 minutes.');
   expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled();
   expect(submit).toHaveBeenCalledTimes(1);
+});
+
+it('confirms on Enter in the code field', async () => {
+  vi.mocked(startStepUp).mockResolvedValue({
+    request_id: 'request-3',
+    method: 'email' as const,
+    email_hint: 'a•••@example.com',
+    expires_at: 'later',
+  });
+  const submit = vi.fn().mockResolvedValue(undefined);
+  render(StepUpDialog, { action: 'export', onConfirm: submit, onCancel: vi.fn() });
+  const code = await screen.findByLabelText('Confirmation code');
+  await fireEvent.input(code, { target: { value: '123456' } });
+  await pressEnter(code);
+  await waitFor(() =>
+    expect(submit).toHaveBeenCalledWith({ request_id: 'request-3', code: '123456' }),
+  );
 });

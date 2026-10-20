@@ -15,9 +15,8 @@
   } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { displayBalance } from '$lib/money/utils/accounts';
-  import { EmptyState, KebabMenu, PageLoading } from '$lib/components/ui';
+  import { EmptyState, KebabMenu, LoadState, Pagination, Timestamp } from '$lib/components/ui';
   import TransactionForm from '$lib/components/money/TransactionForm.svelte';
-  import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
   const navigateToAccount = getTransactionNavigation();
 
@@ -33,11 +32,8 @@
 
   // Edit-transaction modal state.
   let editingTxn: TransactionRow | null = $state(null);
-  let editError = $state('');
-  let editSaving = $state(false);
 
   function openEdit(txn: TransactionRow) {
-    editError = '';
     editingTxn = txn;
   }
 
@@ -51,30 +47,21 @@
     if (!editingTxn) return;
     const original = editingTxn;
     if (!original.id) {
-      editError = 'This transaction has no stable id yet — run the id backfill first.';
-      return;
+      throw new Error('This transaction has no stable id yet — run the id backfill first.');
     }
-    editSaving = true;
-    editError = '';
-    try {
-      await updateTransaction({
-        ledger: $selectedLedger || undefined,
-        id: original.id,
-        old_account: original.account,
-        old_position: original.position,
-        new_payee: data.payee,
-        new_narration: data.narration,
-        new_date: data.date,
-        new_account: data.account,
-        new_position: data.position,
-      });
-      editingTxn = null;
-      await load(currentOpts(currentPage));
-    } catch (e) {
-      editError = e instanceof Error ? e.message : 'Failed to save transaction';
-    } finally {
-      editSaving = false;
-    }
+    await updateTransaction({
+      ledger: $selectedLedger || undefined,
+      id: original.id,
+      old_account: original.account,
+      old_position: original.position,
+      new_payee: data.payee,
+      new_narration: data.narration,
+      new_date: data.date,
+      new_account: data.account,
+      new_position: data.position,
+    });
+    editingTxn = null;
+    await load(currentOpts(currentPage));
   }
 
   // Track expanded transactions and their postings
@@ -186,18 +173,10 @@
       });
   });
 
-  function prevPage() {
-    if (currentPage > 1) {
-      currentPage--;
-      load(currentOpts(currentPage));
-    }
-  }
-
-  function nextPage() {
-    if (currentPage * perPage < total) {
-      currentPage++;
-      load(currentOpts(currentPage));
-    }
+  function goToPage(page: number) {
+    if (page < 1 || (page - 1) * perPage >= total) return;
+    currentPage = page;
+    load(currentOpts(currentPage));
   }
 
   interface TxnGroup {
@@ -220,8 +199,7 @@
 
   let totalPages = $derived(Math.max(1, Math.ceil(total / perPage)));
 
-  const formatDate = (iso: string) =>
-    formatIsoDate(iso, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+  const GROUP_DATE = { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' } as const;
 
   function shortAccount(account: string): string {
     const parts = account.split(':');
@@ -231,22 +209,25 @@
 </script>
 
 <div class="txn-content">
-  {#if !loading && !error}
-    <div class="money-toolbar control-row">
-      <span class="money-result-count">{total.toLocaleString()} entries</span>
-    </div>
-  {/if}
-
-  {#if loading && transactions.length === 0}
-    <PageLoading />
-  {:else if error}
-    <div class="center-msg error">{error}</div>
-  {:else if transactions.length === 0}
-    <EmptyState>No transactions found.</EmptyState>
-  {:else}
+  <!-- A page change keeps the rows on screen, faded, under the bar. -->
+  <LoadState
+    loading={loading && transactions.length === 0}
+    {error}
+    empty={transactions.length === 0}
+  >
+    {#snippet header()}
+      <div class="money-toolbar toolbar toolbar--bar control-row">
+        <span class="caption num">{total.toLocaleString()} entries</span>
+      </div>
+    {/snippet}
+    {#snippet emptyState()}
+      <EmptyState>No transactions found.</EmptyState>
+    {/snippet}
     <div class="record-list txn-scroll" class:faded={loading}>
       {#each grouped as group (group.date)}
-        <div class="record-group micro-label">{formatDate(group.date)}</div>
+        <div class="record-group micro-label">
+          <Timestamp value={group.date} options={GROUP_DATE} title={false} />
+        </div>
         {#each group.rows as txn, i (group.date + '-' + i)}
           {@const key = txnKey(txn)}
           {@const isExpanded = expandedKeys.has(key)}
@@ -313,23 +294,17 @@
     </div>
 
     {#if totalPages > 1}
-      <div class="pagination">
-        <button onclick={prevPage} disabled={currentPage <= 1} type="button">&laquo; Prev</button>
-        <span class="page-info caption">{currentPage} / {totalPages}</span>
-        <button onclick={nextPage} disabled={currentPage >= totalPages} type="button"
-          >Next &raquo;</button
-        >
+      <div class="txn-pages">
+        <Pagination page={currentPage} pages={totalPages} onchange={goToPage} />
       </div>
     {/if}
-  {/if}
+  </LoadState>
 </div>
 
 {#if editingTxn}
   <TransactionForm
     txn={editingTxn}
     accounts={accountNames}
-    error={editError}
-    saving={editSaving}
     onSave={handleEditSave}
     onCancel={() => (editingTxn = null)}
   />
@@ -414,36 +389,10 @@
     color: var(--text-secondary);
   }
 
-  .pagination {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: var(--space-4);
-    padding: var(--space-3);
+  /* Pinned under the scrolling rows, ruled off from them. */
+  .txn-pages {
     flex-shrink: 0;
     border-top: 1px solid var(--border-subtle);
-  }
-
-  .pagination button {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    color: var(--text-secondary);
-    font: inherit;
-    font-size: var(--text-sm);
-    padding: var(--space-1) var(--space-3);
-    cursor: pointer;
-    transition: all var(--transition-fast);
-  }
-
-  .pagination button:hover:not(:disabled) {
-    background: var(--hover-bg);
-    color: var(--hover-fg);
-  }
-
-  .pagination button:disabled {
-    opacity: 0.3;
-    cursor: default;
   }
 
   @media (max-width: 640px) {

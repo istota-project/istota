@@ -68,25 +68,11 @@
   gap: var(--space-2);
 }
 
-/* The section filter box. Sits in a `.control-row`, so its corner and height
-   come from the tier the container sets rather than from here — that is what
-   keeps it level with the Select beside it once iOS floors its text at 16px.
-   Everything left is what makes it this control rather than a bare Input:
-   the card fill it needs against the section header, and a width floor so a
-   placeholder that long has somewhere to go. */
-.money-control-input {
-  background: var(--surface-card);
-  color: var(--text-primary);
-  border: 1px solid var(--border-default);
-  border-radius: var(--control-radius);
-  padding: 0.2rem var(--space-2);
-  font-size: var(--text-sm);
-  font-family: inherit;
+/* The toolbar's text filter is `Input size="toolbar"`; this is its share of
+   the bar, under the tools row so it outranks the primitive's own width. */
+.money-section-tools .money-control-input {
+  width: auto;
   min-width: 12rem;
-}
-
-.money-control-input::placeholder {
-  color: var(--text-dim);
 }
 
 /* The section scroller, so it owns the bottom safe area (the shell hands it
@@ -109,21 +95,12 @@
    1rem while its own rows sat at 1.25rem, so no two left edges on the page
    lined up. */
 
-/* min-height reserves the height of a control row whether or not this
-   toolbar has filters in it. Without it a bar holding only the result count
-   sits shorter than one with controls, so the count and the table under it
-   land at a different height on each tab. Derived from the tier rather than
-   written out, so it still holds once the field height is floored on touch —
-   a literal would have left the count-only bars behind on a phone. */
+/* The bar is the shared `.toolbar.toolbar--bar` (primitives.css), which
+   reserves the field tier's height so a count-only bar sits as tall as one
+   with filters. What is money's own is the push: the count at one end, the
+   filters and actions at the other. */
 .money-toolbar {
-  display: flex;
-  align-items: center;
   justify-content: space-between;
-  gap: var(--space-3);
-  min-height: calc(var(--control-height-lg) + var(--space-4));
-  padding: var(--space-2) var(--space-3);
-  flex-shrink: 0;
-  flex-wrap: wrap;
 }
 
 /* Dismissible banner strip above a toolbar (a stale-read conflict, a delete
@@ -134,24 +111,6 @@
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-2) var(--space-3) 0;
-}
-
-/* Reserves the tier height rather than sitting at its own line-box height.
-   The count is shorter than a control, so left to itself its vertical
-   position is decided by whatever else is in the bar: on a toolbar that fits
-   on one line the min-height's leftover is split above and below it, and on
-   one that wraps to two lines there is no leftover left to split and it sits
-   flush on the top padding — the same count landing ~6px higher on Work than
-   on Invoices, for no reason visible on either page. Occupying the tier makes
-   it land identically in both regimes; inline-flex is what centres the text
-   in the taller box instead of leaving it at the top of it. */
-.money-result-count {
-  display: inline-flex;
-  align-items: center;
-  min-height: var(--control-height-lg);
-  font-size: var(--text-xs);
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
 }
 
 @media (max-width: 768px) {

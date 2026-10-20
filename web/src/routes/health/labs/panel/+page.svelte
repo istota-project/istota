@@ -25,7 +25,9 @@
     IconButton,
     Select,
     type SelectOption,
-    PageLoading,
+    LoadState,
+    Input,
+    BackLink,
   } from '$lib/components/ui';
   import { X } from '@lucide/svelte';
   import { formatDate } from '$lib/dateFormat';
@@ -217,192 +219,214 @@
 </script>
 
 <div class="page">
-  {#if loading}
-    <PageLoading />
-  {:else if error && !panel}
-    <div class="center-msg error">{error}</div>
-  {:else if panel}
-    <div class="header">
-      <div class="header-meta">
-        <a href="{base}/health/labs" class="back link-muted">← Labs</a>
-        {#if editing}
-          <div class="header-edit">
-            <Field label="Collected">
-              <input type="date" bind:value={editDrawnAt} />
-            </Field>
-            <Field label="Lab">
-              <input type="text" bind:value={editLabName} placeholder="Quest, Kaiser, …" />
-            </Field>
-            <Field label="Panel type">
-              <input type="text" bind:value={editPanelType} placeholder="CBC, CMP, Lipid, …" />
-            </Field>
-            <label class="full-row">
-              <span>Specimen</span>
-              <Select
-                value={editSpecimen}
-                options={specimenOptions}
-                onValueChange={(v) => (editSpecimen = v as Specimen | '')}
-                ariaLabel="Specimen"
-                fullWidth
-              />
-            </label>
-            <label class="full-row">
-              <span>Linked encounter</span>
-              <Select
-                value={editEncounterId}
-                options={encounterOptions}
-                onValueChange={(v) => (editEncounterId = v)}
-                ariaLabel="Linked encounter"
-                fullWidth
-              />
-            </label>
-          </div>
-        {:else}
-          <h1 class="title-page">
-            {formatDate(panel.drawn_at)}
-            <span class="lab">· {panel.lab_name || 'Unknown lab'}</span>
-            {#if panel.panel_type}<span class="type">· {panel.panel_type}</span>{/if}
-            {#if panel.specimen}<span class="type">· {specimenLabel(panel.specimen)}</span>{/if}
-          </h1>
-          {#if panel.encounter_id != null}
-            <div class="encounter-link muted">
-              <span class="encounter-label">Linked to encounter:</span>
-              <a href="{base}/health/history/encounter?id={panel.encounter_id}">
-                {linkedEncounter ? encounterLabel(linkedEncounter) : `#${panel.encounter_id}`}
-              </a>
+  <!-- A failed save or delete keeps the panel; its banner sits under the header. -->
+  <LoadState {loading} error={panel ? null : error}>
+    {#if panel}
+      <div class="header">
+        <div class="header-meta">
+          <BackLink href="{base}/health/labs" label="Labs" />
+          {#if editing}
+            <div class="header-edit">
+              <Field label="Collected">
+                <Input type="date" bind:value={editDrawnAt} />
+              </Field>
+              <Field label="Lab">
+                <Input type="text" bind:value={editLabName} placeholder="Quest, Kaiser, …" />
+              </Field>
+              <Field label="Panel type">
+                <Input type="text" bind:value={editPanelType} placeholder="CBC, CMP, Lipid, …" />
+              </Field>
+              <Field label="Specimen" class="full-row">
+                <Select
+                  value={editSpecimen}
+                  options={specimenOptions}
+                  onValueChange={(v) => (editSpecimen = v as Specimen | '')}
+                  ariaLabel="Specimen"
+                  fullWidth
+                />
+              </Field>
+              <Field label="Linked encounter" class="full-row">
+                <Select
+                  value={editEncounterId}
+                  options={encounterOptions}
+                  onValueChange={(v) => (editEncounterId = v)}
+                  ariaLabel="Linked encounter"
+                  fullWidth
+                />
+              </Field>
             </div>
-          {/if}
-        {/if}
-        {#if panel.draft}<Badge variant="warn">Draft — review and confirm</Badge>{/if}
-      </div>
-      <div class="actions">
-        {#if !editing}
-          <Button onclick={startEditing}>Edit panel</Button>
-          {#if panel.draft}
-            <Button variant="primary" onclick={confirmDraftOnly}>Confirm</Button>
-          {/if}
-        {:else}
-          <Button onclick={() => (editing = false)} disabled={saving}>Cancel</Button>
-          <Button variant="primary" onclick={() => save(true)} disabled={saving}>
-            {saving ? 'Saving…' : 'Save + confirm'}
-          </Button>
-        {/if}
-        <Button variant="danger" onclick={() => (confirmDelete = true)}>Delete</Button>
-      </div>
-    </div>
-
-    {#if info}<div class="banner info">{info}</div>{/if}
-    {#if error && panel}<div class="banner error">{error}</div>{/if}
-
-    <div class="split">
-      <div class="biomarker-table">
-        <div class="table-scroll">
-          <table class="table table--dense">
-            <thead>
-              <tr>
-                <th>Marker</th>
-                <th>Value</th>
-                <th>Unit</th>
-                <th>Lab range</th>
-                <th>Flag</th>
-                {#if editing}<th></th>{/if}
-              </tr>
-            </thead>
-            <tbody>
-              {#each biomarkers as b, i (b.id)}
-                <tr class:is-danger={b.flag}>
-                  <td>
-                    {#if editing}
-                      <input bind:value={b.name} placeholder="Hemoglobin" />
-                    {:else}
-                      <a
-                        class="marker-link link-quiet"
-                        href="{base}/health/labs/marker?name={encodeURIComponent(b.name)}"
-                      >
-                        {b.display_name || b.name}
-                      </a>
-                    {/if}
-                  </td>
-                  <td>
-                    {#if editing}
-                      <input type="number" step="any" bind:value={b.value} />
-                    {:else}
-                      {b.value}
-                    {/if}
-                  </td>
-                  <td>
-                    {#if editing}
-                      <input bind:value={b.unit} placeholder="g/dL" />
-                    {:else}
-                      {b.unit}
-                    {/if}
-                  </td>
-                  <td>
-                    {#if editing}
-                      <input
-                        type="number"
-                        step="any"
-                        bind:value={b.ref_range_low}
-                        placeholder="low"
-                      />
-                      <input
-                        type="number"
-                        step="any"
-                        bind:value={b.ref_range_high}
-                        placeholder="high"
-                      />
-                    {:else if b.ref_range_low != null || b.ref_range_high != null}
-                      {b.ref_range_low ?? '—'} – {b.ref_range_high ?? '—'}
-                    {:else}
-                      —
-                    {/if}
-                  </td>
-                  <td>
-                    {#if b.flag}<span class="flag flag-{b.flag}">{b.flag}</span>{/if}
-                  </td>
-                  {#if editing}
-                    <td>
-                      <IconButton
-                        class="del touch-target"
-                        size="sm"
-                        danger
-                        label="Remove biomarker"
-                        onclick={() => removeRow(i)}
-                      >
-                        <X size={13} />
-                      </IconButton>
-                    </td>
-                  {/if}
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-        {#if editing}
-          <Button onclick={addRow}>+ Add biomarker</Button>
-        {/if}
-      </div>
-
-      {#if source.available}
-        <div class="source">
-          <div class="source-header muted">Source document</div>
-          {#if source.mime?.startsWith('image/')}
-            <img src={healthPanelSourceUrl(id)} alt="Lab report" />
           {:else}
-            <embed src={healthPanelSourceUrl(id)} type={source.mime || 'application/pdf'} />
+            <h1 class="title-page">
+              {formatDate(panel.drawn_at)}
+              <span class="lab">· {panel.lab_name || 'Unknown lab'}</span>
+              {#if panel.panel_type}<span class="type">· {panel.panel_type}</span>{/if}
+              {#if panel.specimen}<span class="type">· {specimenLabel(panel.specimen)}</span>{/if}
+            </h1>
+            {#if panel.encounter_id != null}
+              <div class="encounter-link muted">
+                <span class="encounter-label">Linked to encounter:</span>
+                <a href="{base}/health/history/encounter?id={panel.encounter_id}">
+                  {linkedEncounter ? encounterLabel(linkedEncounter) : `#${panel.encounter_id}`}
+                </a>
+              </div>
+            {/if}
           {/if}
-          <a
-            class="source-link caption"
-            href={healthPanelSourceUrl(id)}
-            target="_blank"
-            rel="noopener"
-          >
-            Open in new tab
-          </a>
+          {#if panel.draft}<Badge variant="warn">Draft — review and confirm</Badge>{/if}
         </div>
-      {/if}
-    </div>
-  {/if}
+        <div class="actions">
+          {#if !editing}
+            <Button onclick={startEditing}>Edit panel</Button>
+            {#if panel.draft}
+              <Button variant="primary" onclick={confirmDraftOnly}>Confirm</Button>
+            {/if}
+          {:else}
+            <Button onclick={() => (editing = false)} disabled={saving}>Cancel</Button>
+            <Button variant="primary" onclick={() => save(true)} loading={saving}>
+              Save + confirm
+            </Button>
+          {/if}
+          <Button variant="danger" onclick={() => (confirmDelete = true)}>Delete</Button>
+        </div>
+      </div>
+
+      {#if info}<div class="banner info">{info}</div>{/if}
+      {#if error && panel}<div class="banner error">{error}</div>{/if}
+
+      <div class="split">
+        <div class="biomarker-table">
+          <div class="table-scroll">
+            <table class="table table--dense">
+              <thead>
+                <tr>
+                  <th>Marker</th>
+                  <th>Value</th>
+                  <th>Unit</th>
+                  <th>Lab range</th>
+                  <th>Flag</th>
+                  {#if editing}<th></th>{/if}
+                </tr>
+              </thead>
+              <tbody>
+                {#each biomarkers as b, i (b.id)}
+                  <tr class:is-danger={b.flag}>
+                    <td>
+                      {#if editing}
+                        <Input
+                          dense
+                          class="cell-input"
+                          aria-label="Marker {i + 1} name"
+                          bind:value={b.name}
+                          placeholder="Hemoglobin"
+                        />
+                      {:else}
+                        <a
+                          class="marker-link link-quiet"
+                          href="{base}/health/labs/marker?name={encodeURIComponent(b.name)}"
+                        >
+                          {b.display_name || b.name}
+                        </a>
+                      {/if}
+                    </td>
+                    <td>
+                      {#if editing}
+                        <Input
+                          type="number"
+                          step="any"
+                          dense
+                          class="cell-input"
+                          aria-label="Marker {i + 1} value"
+                          bind:value={b.value}
+                        />
+                      {:else}
+                        {b.value}
+                      {/if}
+                    </td>
+                    <td>
+                      {#if editing}
+                        <Input
+                          dense
+                          class="cell-input"
+                          aria-label="Marker {i + 1} unit"
+                          bind:value={b.unit}
+                          placeholder="g/dL"
+                        />
+                      {:else}
+                        {b.unit}
+                      {/if}
+                    </td>
+                    <td>
+                      {#if editing}
+                        <Input
+                          type="number"
+                          step="any"
+                          dense
+                          class="cell-input"
+                          aria-label="Marker {i + 1} range low"
+                          bind:value={b.ref_range_low}
+                          placeholder="low"
+                        />
+                        <Input
+                          type="number"
+                          step="any"
+                          dense
+                          class="cell-input"
+                          aria-label="Marker {i + 1} range high"
+                          bind:value={b.ref_range_high}
+                          placeholder="high"
+                        />
+                      {:else if b.ref_range_low != null || b.ref_range_high != null}
+                        {b.ref_range_low ?? '—'} – {b.ref_range_high ?? '—'}
+                      {:else}
+                        —
+                      {/if}
+                    </td>
+                    <td>
+                      {#if b.flag}<span class="flag flag-{b.flag}">{b.flag}</span>{/if}
+                    </td>
+                    {#if editing}
+                      <td>
+                        <IconButton
+                          class="del"
+                          touchTarget
+                          size="sm"
+                          danger
+                          label="Remove biomarker"
+                          onclick={() => removeRow(i)}
+                          icon={X}
+                        />
+                      </td>
+                    {/if}
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+          {#if editing}
+            <Button onclick={addRow}>+ Add biomarker</Button>
+          {/if}
+        </div>
+
+        {#if source.available}
+          <div class="source">
+            <div class="source-header muted">Source document</div>
+            {#if source.mime?.startsWith('image/')}
+              <img src={healthPanelSourceUrl(id)} alt="Lab report" />
+            {:else}
+              <embed src={healthPanelSourceUrl(id)} type={source.mime || 'application/pdf'} />
+            {/if}
+            <a
+              class="source-link caption"
+              href={healthPanelSourceUrl(id)}
+              target="_blank"
+              rel="noopener"
+            >
+              Open in new tab
+            </a>
+          </div>
+        {/if}
+      </div>
+    {/if}
+  </LoadState>
 
   <ConfirmDialog
     bind:open={confirmDelete}
@@ -428,9 +452,6 @@
     align-items: stretch;
     gap: var(--space-2);
   }
-  .back {
-    font-size: var(--text-xs);
-  }
   h1 {
     margin: var(--space-1) 0;
   }
@@ -451,7 +472,7 @@
     gap: var(--space-2) var(--space-3);
     max-width: 32rem;
   }
-  .header-edit .full-row {
+  .header-edit :global(.full-row) {
     grid-column: 1 / -1;
   }
   .encounter-link {
@@ -484,16 +505,9 @@
       grid-template-columns: 1fr;
     }
   }
-  .biomarker-table input {
-    width: 100%;
+  /* Placement only: the cell editors are `Input dense`. */
+  .biomarker-table :global(.cell-input) {
     max-width: 9rem;
-    background: var(--surface-raised);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-xs);
-    padding: 0.15rem var(--space-1);
   }
   .flag {
     display: inline-flex;

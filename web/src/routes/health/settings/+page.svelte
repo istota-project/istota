@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getHealthSettings, putHealthSettings, type HealthSettings } from '$lib/api';
-  import { Select } from '$lib/components/ui';
-  import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
+  import { Select, Card, Field, Input } from '$lib/components/ui';
+  import { SettingsLayout } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { cmToFtIn, ftInToCm } from '$lib/health/units';
+  import { trackChanges } from '$lib/ui/draft.svelte';
 
   let loading = $state(true);
   let saving = $state(false);
@@ -55,26 +56,15 @@
     return Number.isFinite(n) ? n : null;
   }
 
-  // Dirty tracking: compare a snapshot of the loaded form state to the
-  // current values so the Save button only lights up when there's
-  // something to save.
-  let initialJson = $state('');
-  let currentJson = $derived(
-    JSON.stringify({
-      dob: dobInput,
-      height_cm:
-        settings.display_units.height === 'ft_in'
-          ? `${heightFtInput}|${heightInInput}`
-          : heightInput,
-      sex: settings.sex,
-      units: settings.display_units,
-    }),
-  );
-  let dirty = $derived(initialJson !== '' && currentJson !== initialJson);
-
-  function snapshot(): void {
-    initialJson = currentJson;
-  }
+  // What Save would change, compared on the visible height input only: the
+  // other one is filled in on a unit toggle, and toggling back is no edit.
+  const changes = trackChanges(() => ({
+    dob: dobInput,
+    height_cm:
+      settings.display_units.height === 'ft_in' ? `${heightFtInput}|${heightInInput}` : heightInput,
+    sex: settings.sex,
+    units: settings.display_units,
+  }));
 
   async function load() {
     loading = true;
@@ -84,7 +74,7 @@
       settings = resp.settings;
       dobInput = settings.dob || '';
       syncHeightInputs(settings.height_cm);
-      snapshot();
+      changes.mark();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load settings';
     } finally {
@@ -144,7 +134,7 @@
       settings = resp.settings;
       syncHeightInputs(settings.height_cm);
       info = 'Saved.';
-      snapshot();
+      changes.mark();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to save';
     } finally {
@@ -166,7 +156,7 @@
 
   onMount(load);
 
-  useSettingsSave(() => ({ dirty, saving, save }));
+  useSettingsSave(() => ({ dirty: changes.dirty, saving, save }));
 </script>
 
 <SettingsLayout
@@ -176,45 +166,39 @@
   {error}
   {info}
 >
-  <SettingsCard title="Profile">
-    <SettingsField label="Date of birth" hint={ageYears != null ? `Age: ${ageYears}` : undefined}>
-      <input type="date" bind:value={dobInput} />
-    </SettingsField>
+  <Card title="Profile">
+    <Field label="Date of birth" hint={ageYears != null ? `Age: ${ageYears}` : undefined}>
+      <Input type="date" bind:value={dobInput} />
+    </Field>
 
-    <SettingsField label="Height">
+    <Field label="Height">
       {#if settings.display_units.height === 'ft_in'}
-        <div class="ft-in-row hstack">
-          <input
+        <div class="hstack">
+          <Input
             type="number"
             step="1"
             min="0"
             bind:value={heightFtInput}
             placeholder="5"
-            aria-label="Feet"
+            suffix="ft"
+            aria-label="Height in feet"
           />
-          <span class="suffix muted">ft</span>
-          <input
+          <Input
             type="number"
             step="0.1"
             min="0"
             bind:value={heightInInput}
             placeholder="10"
-            aria-label="Inches"
+            suffix="in"
+            aria-label="Height in inches"
           />
-          <span class="suffix muted">in</span>
         </div>
       {:else}
-        <div class="cm-row hstack">
-          <input type="number" step="0.1" bind:value={heightInput} placeholder="178" />
-          <span class="suffix muted">cm</span>
-        </div>
+        <Input type="number" step="0.1" bind:value={heightInput} placeholder="178" suffix="cm" />
       {/if}
-    </SettingsField>
+    </Field>
 
-    <SettingsField
-      label="Biological sex"
-      hint="Used for sex-specific reference ranges on biomarkers."
-    >
+    <Field label="Biological sex" hint="Used for sex-specific reference ranges on biomarkers.">
       <Select
         value={settings.sex ?? ''}
         options={sexOptions}
@@ -222,14 +206,14 @@
         ariaLabel="Biological sex"
         fullWidth
       />
-    </SettingsField>
-  </SettingsCard>
+    </Field>
+  </Card>
 
-  <SettingsCard
+  <Card
     title="Display preferences"
     description="All values are stored in metric. Choose how they're shown."
   >
-    <SettingsField label="Weight">
+    <Field label="Weight">
       <Select
         value={settings.display_units.weight}
         options={weightUnitOptions}
@@ -237,9 +221,9 @@
         ariaLabel="Weight unit"
         fullWidth
       />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="Height">
+    <Field label="Height">
       <Select
         value={settings.display_units.height}
         options={heightUnitOptions}
@@ -247,9 +231,9 @@
         ariaLabel="Height unit"
         fullWidth
       />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="Temperature">
+    <Field label="Temperature">
       <Select
         value={settings.display_units.temp}
         options={tempUnitOptions}
@@ -257,17 +241,6 @@
         ariaLabel="Temperature unit"
         fullWidth
       />
-    </SettingsField>
-  </SettingsCard>
+    </Field>
+  </Card>
 </SettingsLayout>
-
-<style>
-  .ft-in-row input,
-  .cm-row input {
-    flex: 1;
-    min-width: 0;
-  }
-  .suffix {
-    font-size: var(--text-sm);
-  }
-</style>

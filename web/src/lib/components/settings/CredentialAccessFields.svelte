@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Field, Select } from '$lib/components/ui';
+  import { Field, FormStack, Select, Checkbox } from '$lib/components/ui';
 
   /**
    * Who may use a credential: the room scope, scheduled tasks and the HTTP
@@ -31,7 +31,6 @@
 <div class="access-fields vstack">
   <Field
     label="Room scope"
-    labelled={false}
     hint="Choose which rooms may use this credential. Scheduled tasks are controlled separately below."
   >
     <Select
@@ -48,27 +47,32 @@
       Unavailable rooms have been removed from this selection.
     </p>{/if}
   {#if scope === 'rooms'}
-    <fieldset class="access-rooms">
-      <legend class="muted">Rooms</legend>
+    <FormStack legend="Rooms" gap={2}>
       <div class="room-options">
         {#each rooms as room (room.token)}
           <Field label={room.name} checkbox>
-            <input type="checkbox" bind:group={selected} value={room.token} />
+            <Checkbox
+              checked={selected.includes(room.token)}
+              onchange={(on) =>
+                (selected = on
+                  ? [...selected, room.token]
+                  : selected.filter((token) => token !== room.token))}
+            />
           </Field>
         {/each}
       </div>
       {#if !rooms.length}<p class="caption">No rooms available, so no task can use it.</p>{/if}
-    </fieldset>
+    </FormStack>
   {/if}
   <Field
     label="Allow scheduled tasks"
     checkbox
     hint="Allow background jobs to use this credential without a message from you in a room."
   >
-    <input type="checkbox" bind:checked={scheduled} />
+    <Checkbox bind:checked={scheduled} />
   </Field>
   <Field label="Allow HTTP (override HTTPS requirement)" checkbox>
-    <input type="checkbox" bind:checked={allowHttp} />
+    <Checkbox bind:checked={allowHttp} />
   </Field>
   <p class="caption">
     HTTP sends credentials without encryption. Turn it on only for a service you trust on a trusted
@@ -81,19 +85,6 @@
   .access-fields .caption,
   .access-fields .form-error {
     margin: 0;
-  }
-
-  .access-rooms {
-    min-width: 0;
-    margin: 0;
-    padding: 0;
-    border: 0;
-  }
-
-  .access-rooms legend {
-    padding: 0;
-    margin-bottom: var(--space-2);
-    font-size: var(--text-sm);
   }
 
   .room-options {

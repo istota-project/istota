@@ -3,6 +3,8 @@
 </script>
 
 <script lang="ts">
+  import { getFieldContext } from './fieldContext';
+
   // A text input with a suggestion dropdown. The menu is position:fixed,
   // anchored to the input's live rect, so it matches the input's width, drops
   // directly from its bottom, and escapes any ancestor overflow:hidden
@@ -52,6 +54,10 @@
   }: Props = $props();
 
   const menuId = `ac-menu-${(_acUid += 1)}`;
+
+  // Inside a Field the caption's `for` names this input.
+  const field = getFieldContext();
+  const owned = field?.claim('native', () => id) ?? false;
 
   let inputEl = $state<HTMLInputElement | null>(null);
   let open = $state(false);
@@ -141,7 +147,7 @@
 <div class="ac-field">
   <input
     bind:this={inputEl}
-    {id}
+    id={id ?? (owned ? field?.controlId : undefined)}
     {placeholder}
     {disabled}
     {value}
@@ -153,7 +159,9 @@
     aria-controls={menuId}
     aria-autocomplete="list"
     aria-label={ariaLabel}
-    aria-invalid={invalid ? 'true' : undefined}
+    aria-invalid={invalid || (owned && field?.invalid) ? 'true' : undefined}
+    aria-describedby={owned ? field?.describedBy : undefined}
+    aria-required={(owned && field?.required) || undefined}
     oninput={onInput}
     onfocus={openMenu}
     onblur={onBlur}

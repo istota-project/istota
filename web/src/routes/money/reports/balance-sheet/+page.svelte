@@ -1,7 +1,6 @@
 <script lang="ts">
-  import { PageLoading } from '$lib/components/ui';
+  import { LoadState, Disclosure } from '$lib/components/ui';
   import { goto } from '$app/navigation';
-  import { Collapsible } from 'bits-ui';
   import { getReport, type AccountRow } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { selectedYear, transactionsUrl } from '$lib/money/stores/transactions';
@@ -96,11 +95,7 @@
   });
 </script>
 
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else}
+<LoadState {loading} {error}>
   <div class="report-content">
     <div class="net-worth-banner">
       <span class="nw-label">Net worth</span>
@@ -113,58 +108,40 @@
       </span>
     </div>
 
-    <Collapsible.Root bind:open={assetsOpen}>
-      <div class="section-header">
-        <Collapsible.Trigger class="section-toggle button-reset">
-          <span class="record-caret" class:is-open={assetsOpen}>&#9654;</span>
-          Assets
-        </Collapsible.Trigger>
-        <span class="section-total">{formatAmount(totals.assets, totals.currency)}</span>
+    <Disclosure variant="section" summary="Assets" bind:open={assetsOpen}>
+      {#snippet trailing()}<span class="section-total"
+          >{formatAmount(totals.assets, totals.currency)}</span
+        >{/snippet}
+      <div class="tree-section">
+        {#each assetTree as node (node.fullName)}
+          {@render treeNode(node)}
+        {/each}
       </div>
-      <Collapsible.Content>
-        <div class="tree-section">
-          {#each assetTree as node (node.fullName)}
-            {@render treeNode(node)}
-          {/each}
-        </div>
-      </Collapsible.Content>
-    </Collapsible.Root>
+    </Disclosure>
 
-    <Collapsible.Root bind:open={liabilitiesOpen}>
-      <div class="section-header">
-        <Collapsible.Trigger class="section-toggle button-reset">
-          <span class="record-caret" class:is-open={liabilitiesOpen}>&#9654;</span>
-          Liabilities
-        </Collapsible.Trigger>
-        <span class="section-total">{formatAmount(totals.liabilities, totals.currency)}</span>
+    <Disclosure variant="section" summary="Liabilities" bind:open={liabilitiesOpen}>
+      {#snippet trailing()}<span class="section-total"
+          >{formatAmount(totals.liabilities, totals.currency)}</span
+        >{/snippet}
+      <div class="tree-section">
+        {#each liabilityTree as node (node.fullName)}
+          {@render treeNode(node)}
+        {/each}
       </div>
-      <Collapsible.Content>
-        <div class="tree-section">
-          {#each liabilityTree as node (node.fullName)}
-            {@render treeNode(node)}
-          {/each}
-        </div>
-      </Collapsible.Content>
-    </Collapsible.Root>
+    </Disclosure>
 
-    <Collapsible.Root bind:open={equityOpen}>
-      <div class="section-header">
-        <Collapsible.Trigger class="section-toggle button-reset">
-          <span class="record-caret" class:is-open={equityOpen}>&#9654;</span>
-          Equity
-        </Collapsible.Trigger>
-        <span class="section-total">{formatAmount(totals.equity, totals.currency)}</span>
+    <Disclosure variant="section" summary="Equity" bind:open={equityOpen}>
+      {#snippet trailing()}<span class="section-total"
+          >{formatAmount(totals.equity, totals.currency)}</span
+        >{/snippet}
+      <div class="tree-section">
+        {#each equityTree as node (node.fullName)}
+          {@render treeNode(node)}
+        {/each}
       </div>
-      <Collapsible.Content>
-        <div class="tree-section">
-          {#each equityTree as node (node.fullName)}
-            {@render treeNode(node)}
-          {/each}
-        </div>
-      </Collapsible.Content>
-    </Collapsible.Root>
+    </Disclosure>
   </div>
-{/if}
+</LoadState>
 
 {#snippet treeNode(node: AccountNode)}
   <div class="record-row record-row--tree" style="padding-left: {0.75 + node.depth * 1.25}rem">

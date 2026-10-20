@@ -14,9 +14,7 @@
    * tell whether that is by design.
    */
   import { onDestroy, onMount } from 'svelte';
-  import { formatDateTime, formatRelative } from '$lib/dateFormat';
-  import { SettingsCard, SettingsField } from '$lib/components/settings';
-  import { Button, Select, type SelectOption } from '$lib/components/ui';
+  import { Button, Select, type SelectOption, Card, Field, Timestamp } from '$lib/components/ui';
   import {
     trackerAvailable,
     scannerAvailable,
@@ -312,8 +310,6 @@
     return status.lastError.includes('token rejected');
   });
 
-  const formatSent = (iso: string | null) => formatRelative(iso, { empty: 'never' });
-
   /**
    * One line under the Tracking row, and only one.
    *
@@ -434,14 +430,14 @@
 </script>
 
 {#if !available}
-  <SettingsCard title="This device">
+  <Card title="This device">
     <p class="description">
       Background tracking is set up per device, in the Istota app. Open the app on the phone you
       want to track and come back to this page there.
     </p>
-  </SettingsCard>
+  </Card>
 {:else}
-  <SettingsCard title="This device" description="Background tracking on this phone.">
+  <Card title="This device" description="Background tracking on this phone.">
     {#snippet actions()}
       <Button variant="secondary" size="sm" onclick={refresh} disabled={busy}>Refresh</Button>
     {/snippet}
@@ -476,10 +472,7 @@
         </div>
       {/if}
 
-      <!-- labelled={false} because this slot holds buttons: inside a <label>
-           a <button> becomes the label's implicit control, and clicking the
-           caption "Tracking" would stop the tracker. -->
-      <SettingsField label="Tracking" warning={trackingWarning} labelled={false}>
+      <Field label="Tracking" warning={trackingWarning}>
         <div class="hstack">
           <!-- "Paused" rather than "On", because On beside an hours-old
                last-sent time is the reading that sends someone looking for a
@@ -532,13 +525,12 @@
             {/if}
           {/if}
         </div>
-      </SettingsField>
+      </Field>
 
-      <SettingsField
+      <Field
         label="Profile"
         hint={PROFILE_HINT[profileChoice]}
         warning={status.tracking ? '' : 'Applies when you start tracking.'}
-        labelled={false}
       >
         <Select
           value={profileChoice}
@@ -548,19 +540,16 @@
           ariaLabel="Tracking profile"
           onValueChange={(v) => chooseProfile(v as TrackingProfile)}
         />
-      </SettingsField>
+      </Field>
 
       {#if canPinWifi}
-        <!-- labelled={false} for the same reason as Tracking above: the slot
-             holds a Select, whose bits-ui trigger is a <button>. -->
-        <SettingsField
+        <Field
           label="Wifi zone"
           hint={'While joined to this phone’s current network, report a fixed place instead of ' +
             'a measured position. Indoors a fix wanders tens of metres between readings, which ' +
             'can walk you across a place boundary and back all evening; being on the network is ' +
             'better proof of being there than any one fix.'}
           warning={zoneWarning}
-          labelled={false}
         >
           <Select
             value={zoneChoice}
@@ -570,7 +559,7 @@
             ariaLabel="Wifi zone place"
             onValueChange={chooseZone}
           />
-        </SettingsField>
+        </Field>
       {/if}
 
       <dl class="kv">
@@ -588,9 +577,14 @@
              `web/AGENTS.md` — "do not put anything the user needs to act on
              behind hover". -->
         <dd>
-          {formatSent(status.lastSentAt)}
+          <Timestamp value={status.lastSentAt} format="relative" empty="never" title={false} />
           {#if status.lastSentAt}
-            <span class="caption sent-exact">{formatDateTime(status.lastSentAt)}</span>
+            <Timestamp
+              class="caption sent-exact"
+              value={status.lastSentAt}
+              format="datetime"
+              title={false}
+            />
           {/if}
         </dd>
         {#if status.droppedPoints > 0}
@@ -614,7 +608,7 @@
         {/if}
       </div>
     {/if}
-  </SettingsCard>
+  </Card>
 {/if}
 
 <style>
@@ -672,7 +666,7 @@
 
   /* Placement only. The colour and the size are `.caption`'s, per
 	   `web/AGENTS.md` — restating either here is what `captions.test.ts` fails. */
-  .sent-exact {
+  dd :global(.sent-exact) {
     display: block;
   }
 </style>

@@ -8,6 +8,7 @@
     ConfirmDialog,
     KebabMenu,
     Badge,
+    Checkbox,
   } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import {
@@ -119,8 +120,9 @@
     error = '';
     removeOpen = true;
   }
-  async function removeMember() {
-    if (busy) return;
+  // A refusal is reported in the dialog, which stays open (resolves false).
+  async function removeMember(): Promise<boolean> {
+    if (busy) return false;
     busy = true;
     error = '';
     try {
@@ -133,8 +135,10 @@
       else await deleteGroupMember(group.group_id, userId, payload);
       removeOpen = false;
       await onChanged(!administration && userId === user.username);
+      return true;
     } catch (e) {
       report(e);
+      return false;
     } finally {
       busy = false;
     }
@@ -221,14 +225,14 @@
 <Modal bind:open={memberOpen} title={target ? 'Change member role' : 'Add member'}>
   <div class="form-fields vstack">
     {#if target}<p>{target.display_name}</p>{:else}
-      <Field label="User" labelled={false}
+      <Field label="User"
         ><Select bind:value={userId} {options} ariaLabel="User" fullWidth disabled={busy} /></Field
       >
       {#if !busy && !options.length}<p class="caption">
           Every available user is already a member.
         </p>{/if}
     {/if}
-    <Field label="Role" labelled={false}
+    <Field label="Role"
       ><Select
         bind:value={role}
         options={[
@@ -242,7 +246,6 @@
     {#if target}
       <Field
         label="Replacement owner"
-        labelled={false}
         warning="If this would leave other members without an owner, choose a replacement in the same change."
         ><Select
           bind:value={replacement}
@@ -261,7 +264,7 @@
         </ul>
       </div>
       <Field label="I acknowledge access to this existing history" checkbox
-        ><input type="checkbox" bind:checked={acknowledged} /></Field
+        ><Checkbox bind:checked={acknowledged} /></Field
       >
     {/if}
     {#if error}<p class="banner error">{error}</p>
@@ -300,7 +303,7 @@
   bind:open={removeOpen}
   title={!administration && userId === user.username ? 'Leave group' : 'Remove member'}
   confirmLabel={!administration && userId === user.username ? 'Leave' : 'Remove'}
-  confirmDisabled={busy}
+  busyLabel={!administration && userId === user.username ? 'Leaving…' : 'Removing…'}
   onConfirm={removeMember}
 >
   {#snippet body()}
@@ -312,7 +315,6 @@
     </p>
     <Field
       label="Replacement owner"
-      labelled={false}
       warning="Choose a replacement if this would leave other members without an owner."
       ><Select
         bind:value={replacement}

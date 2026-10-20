@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Icon } from '$lib/components/ui';
   import { Bot } from '@lucide/svelte';
 
   let { caption, reachNote = null }: { caption: string; reachNote?: string | null } = $props();
@@ -7,7 +8,7 @@
 <div class="index-caption">
   <p>{caption}</p>
   {#if reachNote}
-    <p class="banner info reach-note hstack"><Bot size={14} aria-hidden="true" />{reachNote}</p>
+    <p class="banner info reach-note hstack"><Icon icon={Bot} size="sm" />{reachNote}</p>
   {/if}
 </div>
 
@@ -22,8 +23,5 @@
   }
   .index-caption p {
     margin: 0;
-  }
-  .reach-note :global(svg) {
-    flex-shrink: 0;
   }
 </style>

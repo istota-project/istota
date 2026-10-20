@@ -11,15 +11,19 @@
     Button,
     ConfirmDialog,
     EmptyState,
+    FormModal,
     IconButton,
     Input,
-    Modal,
     OptionCards,
     Select,
     TextArea,
     type SelectOption,
+    Field,
+    FormStack,
+    Checkbox,
+    Disclosure,
   } from '$lib/components/ui';
-  import { SettingsField } from '$lib/components/settings';
+  import { createDraft } from '$lib/ui/draft.svelte';
   import SourceConfigFields from './SourceConfigFields.svelte';
   import BriefingPreview from './BriefingPreview.svelte';
   import { sourceKindLabel } from './settings/briefingSettings';
@@ -60,7 +64,7 @@
   }: Props = $props();
 
   const original = untrack(() => JSON.parse(JSON.stringify(initial)) as BriefingBlockSave);
-  let draft = $state({
+  const form = createDraft({
     ...original,
     title: original.title ?? '',
     directive: original.directive ?? '',
@@ -68,16 +72,13 @@
     options: original.options ?? {},
     sources: original.sources ?? [],
   });
-  const baseline = untrack(() => JSON.stringify(draft));
-  const dirty = $derived(JSON.stringify(draft) !== baseline);
   let saving = $state(false);
   let previewing = $state(false);
-  let error = $state('');
   let titleError = $state('');
   let discard = $state(false);
   let open = $state(true);
   const width = $derived.by(() => {
-    const value = (draft.options.presentation as { width?: string } | null)?.width;
+    const value = (form.value.options.presentation as { width?: string } | null)?.width;
     return value === 'wide' || value === 'full' ? value : 'auto';
   });
   const kindOptions: SelectOption[] = $derived(
@@ -98,20 +99,16 @@
   ];
 
   function close() {
-    if (saving) {
-      open = true;
-      return;
-    }
-    if (dirty) {
+    if (form.dirty) {
       open = true;
       discard = true;
     } else onCancel();
   }
 
   function setWidth(value: string) {
-    const presentation = draft.options.presentation;
-    draft.options = {
-      ...draft.options,
+    const presentation = form.value.options.presentation;
+    form.value.options = {
+      ...form.value.options,
       presentation: {
         ...(presentation && typeof presentation === 'object' && !Array.isArray(presentation)
           ? presentation
@@ -122,25 +119,25 @@
   }
 
   function patchSource(index: number, patch: Record<string, unknown>) {
-    const config = { ...draft.sources[index].config, ...patch };
+    const config = { ...form.value.sources[index].config, ...patch };
     for (const [key, value] of Object.entries(patch)) {
       if (value === undefined || value === null) delete config[key];
     }
-    draft.sources[index] = { ...draft.sources[index], config };
+    form.value.sources[index] = { ...form.value.sources[index], config };
   }
 
   function addSource(kind: string) {
-    draft.sources = [
-      ...draft.sources,
+    form.value.sources = [
+      ...form.value.sources,
       { kind, config: kind.startsWith('personal_') ? { owner_id: userId } : {}, enabled: true },
     ];
   }
 
   function setOption(key: string, value: unknown) {
-    const options = { ...draft.options };
+    const options = { ...form.value.options };
     if (value === '' || value === undefined) delete options[key];
     else options[key] = value;
-    draft.options = options;
+    form.value.options = options;
   }
 
   function sourceError(source: BriefingSourceDraft): string {
@@ -156,33 +153,22 @@
   }
 
   async function save() {
-    if (saving) return;
-    error = '';
-    titleError = draft.title.trim() ? '' : 'Title is required.';
-    if (titleError) {
-      error = titleError;
-      return;
+    titleError = form.value.title.trim() ? '' : 'Title is required.';
+    if (titleError) throw new Error(titleError);
+    if (!form.value.id && form.value.sources.length === 0)
+      throw new Error('Add at least one source.');
+    for (let index = 0; index < form.value.sources.length; index++) {
+      const message = sourceError(form.value.sources[index]);
+      if (message) throw new Error(`Source ${index + 1}: ${message}`);
     }
-    if (!draft.id && draft.sources.length === 0) {
-      error = 'Add at least one source.';
-      return;
-    }
-    for (let index = 0; index < draft.sources.length; index++) {
-      const message = sourceError(draft.sources[index]);
-      if (message) {
-        error = `Source ${index + 1}: ${message}`;
-        return;
-      }
-    }
-    const count = draft.options.story_count;
+    const count = form.value.options.story_count;
     if (count !== undefined && (!Number.isInteger(count) || Number(count) < 1)) {
-      error = 'Story count must be a positive whole number.';
-      return;
+      throw new Error('Story count must be a positive whole number.');
     }
     saving = true;
     try {
-      const payload = JSON.parse(JSON.stringify(draft)) as BriefingBlockSave;
-      payload.title = draft.title.trim();
+      const payload = JSON.parse(JSON.stringify(form.value)) as BriefingBlockSave;
+      payload.title = form.value.title.trim();
       // Reading old malformed presentation defaults to auto; new writes are valid.
       const presentation = payload.options?.presentation;
       payload.options = {
@@ -195,33 +181,30 @@
         },
       };
       await onSave(payload);
-    } catch (e) {
-      error = e instanceof Error ? e.message : 'Could not save block.';
     } finally {
       saving = false;
     }
   }
 </script>
 
-<Modal
+<FormModal
   bind:open
-  title={draft.id ? 'Edit block' : 'New block'}
+  title={form.value.id ? 'Edit block' : 'New block'}
   width="680px"
-  dismissible={!saving}
-  onOpenChange={(next) => {
-    if (!next) close();
-  }}
+  submitLabel="Save block"
+  onSubmit={save}
+  onCancel={close}
 >
-  <fieldset disabled={saving} class="draft-fields">
-    <SettingsField label="Title" error={titleError}>
-      <Input bind:value={draft.title} />
-    </SettingsField>
+  <FormStack disabled={saving} gap={6}>
+    <Field label="Title" error={titleError}>
+      <Input bind:value={form.value.title} />
+    </Field>
     <section aria-label="Block sources" class="sources">
       <div class="section-head">
         <h3 class="micro-label">Sources</h3>
         <!-- Remounted after each add: the trigger is an action, so it must go
              back to its placeholder rather than show the kind just picked. -->
-        {#key draft.sources.length}
+        {#key form.value.sources.length}
           <Select
             value=""
             options={kindOptions}
@@ -232,24 +215,22 @@
           />
         {/key}
       </div>
-      {#if draft.sources.length === 0}
+      {#if form.value.sources.length === 0}
         <EmptyState size="sm">No sources yet. Add one to fill this block.</EmptyState>
       {/if}
-      {#each draft.sources as source, index}
+      {#each form.value.sources as source, index}
         <div class="source-entry" class:off={source.enabled === false}>
           <div class="source-head">
             <span class="source-kind">{sourceKindLabel(source.kind)}</span>
             {#if allowSourceDisable || source.enabled === false}
-              <label class="source-toggle">
-                <input
-                  type="checkbox"
-                  checked={source.enabled !== false}
-                  onchange={(event) => {
-                    draft.sources[index] = { ...source, enabled: event.currentTarget.checked };
-                  }}
-                />
-                Enabled
-              </label>
+              <Checkbox
+                label="Enabled"
+                tone="muted"
+                checked={source.enabled !== false}
+                onchange={(on) => {
+                  form.value.sources[index] = { ...source, enabled: on };
+                }}
+              />
             {/if}
             <IconButton
               size="sm"
@@ -257,9 +238,10 @@
               label={`Remove source ${index + 1}`}
               title="Remove source"
               onclick={() => {
-                draft.sources = draft.sources.filter((_, i) => i !== index);
-              }}><Trash2 size={14} /></IconButton
-            >
+                form.value.sources = form.value.sources.filter((_, i) => i !== index);
+              }}
+              icon={Trash2}
+            />
           </div>
           <div class="source-body">
             <SourceConfigFields
@@ -290,47 +272,47 @@
       <OptionCards options={widths} value={width} label="Width" onchange={setWidth} />
       <p class="caption">Applies to future editions.</p>
     </section>
-    <details class="advanced">
-      <summary>Advanced</summary>
-      <div class="advanced-fields">
-        <SettingsField label="Directive" hint="How to treat this block's sources.">
-          <TextArea bind:value={draft.directive} rows={3} />
-        </SettingsField>
-        <SettingsField label="Render mode" labelled={false}>
-          <Select
-            value={draft.render_mode}
-            options={renderOptions}
-            fullWidth
-            ariaLabel="Render mode"
-            onValueChange={(value) => {
-              draft.render_mode = value;
-            }}
-          />
-        </SettingsField>
-        <SettingsField label="Story count">
-          <Input
-            type="number"
-            min="1"
-            step="1"
-            value={(draft.options.story_count as number) ?? ''}
-            oninput={(event) =>
-              setOption(
-                'story_count',
-                event.currentTarget.value === '' ? undefined : Number(event.currentTarget.value),
-              )}
-          />
-        </SettingsField>
-        <SettingsField label="Tone">
-          <Input
-            value={(draft.options.tone as string) ?? ''}
-            oninput={(event) => setOption('tone', event.currentTarget.value)}
-          />
-        </SettingsField>
-      </div>
-    </details>
-  </fieldset>
-  {#if error}<div role="alert" class="banner error">{error}</div>{/if}
-  {#snippet footer()}
+    <div class="advanced">
+      <Disclosure summary="Advanced">
+        <div class="advanced-fields">
+          <Field label="Directive" hint="How to treat this block's sources.">
+            <TextArea bind:value={form.value.directive} rows={3} />
+          </Field>
+          <Field label="Render mode">
+            <Select
+              value={form.value.render_mode}
+              options={renderOptions}
+              fullWidth
+              ariaLabel="Render mode"
+              onValueChange={(value) => {
+                form.value.render_mode = value;
+              }}
+            />
+          </Field>
+          <Field label="Story count">
+            <Input
+              type="number"
+              min="1"
+              step="1"
+              value={(form.value.options.story_count as number) ?? ''}
+              oninput={(event) =>
+                setOption(
+                  'story_count',
+                  event.currentTarget.value === '' ? undefined : Number(event.currentTarget.value),
+                )}
+            />
+          </Field>
+          <Field label="Tone">
+            <Input
+              value={(form.value.options.tone as string) ?? ''}
+              oninput={(event) => setOption('tone', event.currentTarget.value)}
+            />
+          </Field>
+        </div>
+      </Disclosure>
+    </div>
+  </FormStack>
+  {#snippet extraActions()}
     {#if allowPreview}
       <Button
         variant="secondary"
@@ -340,18 +322,14 @@
         disabled={saving}>Preview</Button
       >
     {/if}
-    <Button variant="secondary" onclick={close} disabled={saving}>Cancel</Button>
-    <Button variant="primary" onclick={save} loading={saving} loadingLabel="Saving…"
-      >Save block</Button
-    >
   {/snippet}
-</Modal>
+</FormModal>
 
 {#if previewing}
   <BriefingPreview
-    briefingName={draft.briefing_name ?? ''}
+    briefingName={form.value.briefing_name ?? ''}
     blocks={savedBlocks}
-    {draft}
+    draft={form.value}
     onClose={() => {
       previewing = false;
     }}
@@ -374,19 +352,12 @@
 {/if}
 
 <style>
-  .draft-fields,
   .sources,
   .advanced-fields {
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
     min-width: 0;
-  }
-  .draft-fields {
-    gap: var(--space-6);
-    border: 0;
-    padding: 0;
-    margin: 0;
   }
   h3,
   p {
@@ -421,14 +392,6 @@
     font-size: var(--text-sm);
     font-weight: var(--weight-semibold);
   }
-  .source-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-    cursor: pointer;
-  }
   .source-body {
     display: flex;
     flex-direction: column;
@@ -455,13 +418,5 @@
   .advanced {
     border-top: 1px solid var(--border-subtle);
     padding-top: var(--space-4);
-  }
-  summary {
-    cursor: pointer;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-  }
-  .advanced-fields {
-    margin-top: var(--space-3);
   }
 </style>

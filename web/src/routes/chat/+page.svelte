@@ -8,27 +8,32 @@
     MessageSquare,
     Cloud,
     ChevronDown,
-    Circle,
     Star,
     CheckCheck,
     Users,
     PowerOff,
   } from '@lucide/svelte';
   import PhoneSurfaceIcon from '$lib/components/chat/PhoneSurfaceIcon.svelte';
+  import ViewFilters from '$lib/components/ViewFilters.svelte';
+  import { base } from '$app/paths';
   import {
+    Icon,
     AppShell,
     ShellHeader,
     Sidebar,
     SidebarToggle,
     KebabMenu,
+    Badge,
     Chip,
     ConfirmDialog,
     CountPill,
-    NoticeBanner,
+    ListRow,
+    Alert,
     Button,
     CategoryGroup,
-    LoadingOctopus,
+    Input,
   } from '$lib/components/ui';
+  import LoadingOctopus from '$lib/components/chat/LoadingOctopus.svelte';
   import { isHiddenRoom } from '$lib/stores/roomOrder';
   import { viewer } from '$lib/fileViewer/store.svelte';
   import { roomColorVar } from '$lib/roomColors';
@@ -1207,7 +1212,7 @@
        what follows the last message. Rendered from the listing, not stored,
        since who has agreed changes without a new message. -->
   <div class="room-off-row" role="status">
-    <span class="room-off-title"><PowerOff size={14} /> This room is switched off</span>
+    <span class="room-off-title"><Icon icon={PowerOff} size="sm" /> This room is switched off</span>
     <p>
       {describeRoomOff(off)} Nothing said here is recorded or answered.
       {#each codeSpans(off.way_back) as part, i (i)}{#if part.code}<code>{part.text}</code
@@ -1236,7 +1241,6 @@
             <PhoneSurfaceIcon
               surface={activeRoom.phone_surface}
               group={isWhatsAppGroup(activeRoom)}
-              size={14}
             />
           </span>
         {/if}
@@ -1250,7 +1254,7 @@
             title={sharedRoomTitle(activeRoom)}
             aria-label={sharedRoomTitle(activeRoom)}
           >
-            <Users size={14} />
+            <Icon icon={Users} size="sm" />
           </span>
         {/if}
       {/snippet}
@@ -1263,36 +1267,39 @@
         />
       {/snippet}
       {#snippet nav()}
-        {#if brainBadge}
-          {#if canEditBrain}
-            <button
-              class="model-badge brain-badge"
-              type="button"
-              title="Room brain — click to change"
-              onclick={() => activeRoom && (settingsRoom = activeRoom)}
-            >
-              {brainBadge}
-            </button>
-          {:else}
-            <span class="model-badge brain-badge brain-badge-static" title="Room brain">
-              {brainBadge}
-            </span>
-          {/if}
-        {/if}
-        {#if modelBadge}
-          <button
-            class="model-badge"
-            type="button"
-            title="Room model default — click to change"
-            onclick={() => activeRoom && (settingsRoom = activeRoom)}
-          >
-            {modelBadge}
-          </button>
+        {#if brainBadge || modelBadge}
+          <span class="room-badges">
+            {#if brainBadge}
+              {#if canEditBrain}
+                <Chip
+                  size="xs"
+                  class="model-badge brain-badge"
+                  title="Room brain — click to change"
+                  onclick={() => activeRoom && (settingsRoom = activeRoom)}>{brainBadge}</Chip
+                >
+              {:else}
+                <Badge
+                  tone="subtle"
+                  uppercase={false}
+                  class="model-badge brain-badge brain-badge-static"
+                  title="Room brain">{brainBadge}</Badge
+                >
+              {/if}
+            {/if}
+            {#if modelBadge}
+              <Chip
+                size="xs"
+                class="model-badge"
+                title="Room model default — click to change"
+                onclick={() => activeRoom && (settingsRoom = activeRoom)}>{modelBadge}</Chip
+              >
+            {/if}
+          </span>
         {/if}
       {/snippet}
       {#snippet tools()}
         <Chip icon onclick={() => (confirmMarkAllRead = true)} title="Mark all rooms as read">
-          <CheckCheck size={14} />
+          <Icon icon={CheckCheck} size="sm" />
         </Chip>
       {/snippet}
     </ShellHeader>
@@ -1305,62 +1312,51 @@
       {@const unread = unreadCount > 0 && room.id !== $activeRoomId}
       {@const waiting = room.id === $activeRoomId ? 0 : ($queuedCounts[room.token] ?? 0)}
       {@const tint = roomColorVar(room.color)}
-      <!-- The tint goes on the row box, not on `.room-btn`, so it covers the
-			     kebab too. It layers over `.sidebar .list-row`'s shared hover/active
-			     background rather than editing it — that rule is shared with the
-			     briefings archive row (ISSUE-433). -->
-      <div
-        class="list-row room-row"
-        class:active={room.id === $activeRoomId}
-        class:tinted={!!tint}
-        style:--room-tint={tint}
-      >
-        <button class="room-btn" onclick={() => selectRoom(room.id)} type="button">
-          {#if room.shared && room.phone_surface !== 'whatsapp'}
-            <!-- More than one human reads this room, so it outranks the
+      {#snippet roomIcon()}
+        {#if room.shared && room.phone_surface !== 'whatsapp'}
+          <!-- More than one human reads this room, so it outranks the
 							     origin glyph: who will see a message matters more than which
 							     surface mirrors it. The Talk fact moves into the title. -->
-            <span
-              class="room-origin shared"
-              role="img"
-              title={sharedRoomTitle(room)}
-              aria-label={sharedRoomTitle(room)}
-            >
-              <Users size={13} />
-            </span>
-          {:else if room.phone_surface}
-            <!-- A room bound to a phone thread: an SMS conversation, or a
+          <span
+            class="room-origin shared"
+            role="img"
+            title={sharedRoomTitle(room)}
+            aria-label={sharedRoomTitle(room)}
+          >
+            <Icon icon={Users} size="sm" />
+          </span>
+        {:else if room.phone_surface}
+          <!-- A room bound to a phone thread: an SMS conversation, or a
 							     WhatsApp chat or group. A WhatsApp group keeps its surface
 							     glyph over the shared one, in outline where the private chat's
 							     is filled, and says it is shared in the title (ISSUE-584). -->
-            <span
-              class="room-origin phone"
-              role="img"
-              title={phoneRoomTitle(room)}
-              aria-label={phoneRoomTitle(room)}
-            >
-              <PhoneSurfaceIcon surface={room.phone_surface} group={isWhatsAppGroup(room)} />
-            </span>
-          {:else if isTalk}
-            <!-- Leading origin glyph: a tinted cloud marks a room mirrored
+          <span
+            class="room-origin phone"
+            role="img"
+            title={phoneRoomTitle(room)}
+            aria-label={phoneRoomTitle(room)}
+          >
+            <PhoneSurfaceIcon surface={room.phone_surface} group={isWhatsAppGroup(room)} />
+          </span>
+        {:else if isTalk}
+          <!-- Leading origin glyph: a tinted cloud marks a room mirrored
 							     to Nextcloud Talk. Sits in its own flex slot before the
 							     title so it never eats name width or gets clipped by the
 							     title's ellipsis (ISSUE-129). -->
-            <span class="room-origin talk" title="Also on Nextcloud Talk">
-              <Cloud size={13} />
-            </span>
-          {:else}
-            <span class="room-origin" title="Web room">
-              <MessageSquare size={13} />
-            </span>
-          {/if}
-          <span class="room-text">
-            <span class="room-line">
-              <span class="room-name" class:unread>{room.name}</span>
-              {#if unread}
-                <CountPill count={unreadCount} title={`${unreadCount} unread`} />
-              {/if}
-              <!-- What has not gone out of this room yet (ISSUE-202). The
+          <span class="room-origin talk" title="Also on Nextcloud Talk">
+            <Icon icon={Cloud} size="sm" />
+          </span>
+        {:else}
+          <span class="room-origin" title="Web room">
+            <Icon icon={MessageSquare} size="sm" />
+          </span>
+        {/if}
+      {/snippet}
+      {#snippet roomCounts()}
+        {#if unread}
+          <CountPill count={unreadCount} title={`${unreadCount} unread`} />
+        {/if}
+        <!-- What has not gone out of this room yet (ISSUE-202). The
 								     drain runs for the room on screen only, so for every other
 								     room this badge is the whole of the affordance: it says
 								     which one to open for what is in it to go. Not drawn for
@@ -1370,14 +1366,25 @@
 								     says "not sent yet" rather than promising they will send
 								     on their own. Muted, because nothing has arrived and
 								     nothing has gone wrong: it is a state the user put there. -->
-              {#if waiting > 0}
-                <CountPill count={waiting} tone="muted" title={`${waiting} not sent yet`} />
-              {/if}
-            </span>
-          </span>
-        </button>
-        <KebabMenu ariaLabel="Room actions" items={roomMenu(room)} />
-      </div>
+        {#if waiting > 0}
+          <CountPill count={waiting} tone="muted" title={`${waiting} not sent yet`} />
+        {/if}
+      {/snippet}
+      <!-- The tint washes the whole row, kebab included, and mixes into the
+           row's hover and active fills (ISSUE-433). -->
+      <ListRow
+        class="room-row"
+        active={room.id === $activeRoomId}
+        tint={tint ?? undefined}
+        onclick={() => selectRoom(room.id)}
+        icon={roomIcon}
+        badge={unread || waiting > 0 ? roomCounts : undefined}
+      >
+        <span class="room-name" class:unread>{room.name}</span>
+        {#snippet trailing()}
+          <KebabMenu ariaLabel="Room actions" items={roomMenu(room)} />
+        {/snippet}
+      </ListRow>
     {/snippet}
 
     <Sidebar
@@ -1388,44 +1395,21 @@
     >
       <!-- Cross-room views, above the rooms list (mirrors the feeds sidebar's
 			     All / Unread / Starred entries). Selecting one deselects the room. -->
-      <div class="views">
-        <button
-          class="view-btn"
-          class:active={$view === 'all'}
-          onclick={() => selectView('all')}
-          type="button"
-        >
-          <span class="view-name">All</span>
-        </button>
-        <button
-          class="view-btn"
-          class:active={$view === 'unread'}
-          onclick={() => selectView('unread')}
-          type="button"
-        >
-          <Circle size={12} />
-          <span class="view-name">Unread</span>
-          <CountPill count={unreadTotal} title={`${unreadTotal} unread`} />
-        </button>
-        <button
-          class="view-btn"
-          class:active={$view === 'starred'}
-          onclick={() => selectView('starred')}
-          type="button"
-        >
-          <Star size={12} />
-          <span class="view-name">Starred</span>
-          <CountPill count={starredTotal} tone="muted" title={`${starredTotal} starred`} />
-        </button>
-      </div>
+      <ViewFilters
+        current={$view === 'room' ? null : $view}
+        href={(v) => `${base}/chat/?view=${v}`}
+        onselect={selectView}
+        unread={unreadTotal}
+        starred={starredTotal}
+      />
 
       <!-- Sits with the rooms list it adds to, below the cross-room views. -->
       <div class="room-new">
         {#if creatingRoom}
           <!-- svelte-ignore a11y_autofocus -->
-          <input
-            class="room-input"
+          <Input
             bind:value={newRoomName}
+            aria-label="New room name"
             placeholder="Room name…"
             autofocus
             onkeydown={(e) => {
@@ -1444,7 +1428,7 @@
           />
         {:else}
           <button class="room-add" onclick={() => (creatingRoom = true)} type="button">
-            <Plus size={14} /> New room
+            <Icon icon={Plus} size="sm" /> New room
           </button>
         {/if}
       </div>
@@ -1478,7 +1462,7 @@
   <div class="chat-pane" style:--composer-h="{composerH}px">
     {#if hostLost && !inViewMode}
       <div class="room-notice">
-        <NoticeBanner title="This room has no host" variant="warn" collapsed={false}>
+        <Alert title="This room has no host" variant="warn" collapsed={false}>
           <p>
             Its host left, so nobody is answered here and its settings cannot change until a member
             claims it. Whoever claims it is who guests' turns run on behalf of.
@@ -1486,7 +1470,7 @@
           <Button size="sm" loading={claiming} loadingLabel="Claiming…" onclick={claimHost}>
             Claim this room
           </Button>
-        </NoticeBanner>
+        </Alert>
       </div>
     {/if}
     <div class="messages-wrap">
@@ -1505,14 +1489,14 @@
         {:else if $messages.length === 0}
           <div class="chat-placeholder">
             {#if $view === 'unread'}
-              <CheckCheck size={28} />
+              <Icon icon={CheckCheck} size="xl" />
               <p>All caught up</p>
             {:else if $view === 'starred'}
-              <Star size={28} />
+              <Icon icon={Star} size="xl" />
               <p>Nothing starred yet.</p>
               <span class="hint">Hover a message and hit the star.</span>
             {:else if $view === 'all'}
-              <MessageSquare size={28} />
+              <Icon icon={MessageSquare} size="xl" />
               <p>No messages yet</p>
             {:else if $offlineTranscript}
               <!-- An empty room offline is two different facts, and the prompt
@@ -1522,7 +1506,7 @@
                    between a room that is empty and a room that cannot be read
                    from here. The composer below still queues, which is why the
                    second line says so rather than leaving it to be found. -->
-              <MessageSquare size={28} />
+              <Icon icon={MessageSquare} size="xl" />
               <p>Nothing from this room is saved on this device.</p>
               <span class="hint">
                 Its messages are here again when you’re back online. You can still write one — it
@@ -1531,7 +1515,7 @@
             {:else if roomOff}
               {@render roomOffNotice(roomOff)}
             {:else}
-              <MessageSquare size={28} />
+              <Icon icon={MessageSquare} size="xl" />
               <p>
                 {activeRoom
                   ? `Ask anything in #${activeRoom.name.replace(/^#+/, '')}.`
@@ -1641,7 +1625,7 @@
           aria-label="Scroll to latest message"
           title="Scroll to latest"
         >
-          <ChevronDown size={20} />
+          <Icon icon={ChevronDown} size="lg" />
         </button>
       {/if}
     </div>
@@ -1778,51 +1762,24 @@
 </AppShell>
 
 <style>
-  /* Room model-default badge beside the header title. Clickable → opens the
-	   room-settings modal. Only shown when the room has a standing default. */
-  .model-badge {
+  /* The room's brain pin and model default beside the header title, Chip's
+	   xs look; either opens the room-settings modal. */
+  .room-badges {
     display: inline-flex;
     align-items: center;
-    font: inherit;
-    font-size: var(--text-xs);
-    line-height: var(--leading-none);
-    color: var(--text-muted);
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    padding: 0.2rem var(--space-2);
-    cursor: pointer;
-    white-space: nowrap;
-    transition:
-      color var(--transition-fast),
-      border-color var(--transition-fast);
-  }
-  .model-badge:hover {
-    color: var(--text-primary);
-    border-color: var(--border-hover);
+    gap: var(--chip-gap);
   }
 
   /* The brain pin, in the interactive blue rather than the model badge's
 	   muted gray — two overrides sitting side by side have to be tellable
 	   apart at a glance, and they are set in the same modal, so shape is not
 	   available to separate them. Blue rather than a status color on purpose:
-	   a pinned brain is a choice someone made, not a severity. */
-  .brain-badge {
+	   a pinned brain is a choice someone made, not a severity. Read-only
+	   where the user cannot change the pin: same colour, minus the
+	   affordance. */
+  .room-badges :global(.brain-badge) {
     color: var(--accent-blue);
-    border-color: var(--accent-blue);
-  }
-  .brain-badge:hover {
-    color: var(--accent-blue);
-    border-color: var(--accent-blue);
-    background: var(--hover-bg);
-  }
-  /* Read-only where the user cannot change the pin: same colour, because it
-	   still says which brain the room is on, minus the affordance. */
-  .brain-badge-static {
-    cursor: default;
-  }
-  .brain-badge-static:hover {
-    background: var(--surface-base);
+    box-shadow: inset 0 0 0 1px var(--accent-blue);
   }
 
   .chat-pane {
@@ -2025,11 +1982,6 @@
     text-transform: uppercase;
   }
 
-  /* Cross-room view entries above the rooms list — styled like the feeds
-	   sidebar's All / Unread / Starred buttons (.feed-btn.special). */
-  /* .views / .view-btn / .view-name (the All / Unread / Starred block) come
-	   from web/src/lib/styles/sidebar.css, shared with the feeds sidebar. */
-
   /* No horizontal padding: this sits inside .sidebar-list, which already
 	   insets its children, so the button lines up with the rows around it. */
   .room-new {
@@ -2052,61 +2004,6 @@
   .room-add:hover {
     color: var(--text-primary);
     border-color: var(--text-dim);
-  }
-  .room-input {
-    width: 100%;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    padding: var(--space-2) var(--space-2);
-    border-radius: var(--radius-sm);
-  }
-
-  .room-btn {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex: 1;
-    min-width: 0;
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    font: inherit;
-    font-size: var(--text-base);
-    cursor: pointer;
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-sm);
-    text-align: left;
-    transition: color var(--transition-fast);
-  }
-  .room-row:hover .room-btn {
-    color: var(--text-secondary);
-  }
-  .room-row.active .room-btn {
-    color: var(--text-primary);
-  }
-  /* Title + badge on one line. The origin glyph stays a sibling of this column
-	   so it keeps its own fixed slot. */
-  .room-text {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    min-width: 0;
-  }
-  .room-line {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    min-width: 0;
-  }
-  .room-name {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   /* A room with unseen bot/system messages reads bolder; the active room never
 	   bolds (looking at it is reading it). */
@@ -2140,11 +2037,6 @@
     color: var(--accent-blue);
   }
 
-  /* Room colour (ISSUE-433). The wash is deliberately weak — it has to be
-	   scannable at a glance without competing with the unread bold and its count
-	   pill, which are the two things in this row that mean something has changed.
-	   `color-mix` over transparent is the idiom this file already uses for a
-	   subtle wash (see @keyframes jump-pulse below). */
   .room-notice {
     padding: var(--space-2) var(--space-3) 0;
   }
@@ -2170,22 +2062,6 @@
   }
   .room-off-row p {
     margin: var(--space-1) 0 0;
-  }
-  .room-row.tinted {
-    background: color-mix(in srgb, var(--room-tint) 14%, transparent);
-  }
-  /* Layered rather than a replacement: `.sidebar .list-row:hover` (sidebar.css)
-	   sets an opaque --surface-raised, so the tint is mixed *into* that colour
-	   instead of being painted over by it.
-	   `.sidebar` is deliberately NOT in this selector. It lives in the Sidebar
-	   component, so Svelte cannot see the subject in this file and prunes the
-	   whole rule — the silent-stop-applying trap web/AGENTS.md names, which here
-	   would leave a tinted row losing its tint on hover with nothing failing.
-	   Scoped, this is (0,4,0) against the shared rule's (0,3,0), so it wins
-	   without needing the ancestor. */
-  .room-row.tinted:hover,
-  .room-row.tinted.active {
-    background: color-mix(in srgb, var(--room-tint) 26%, var(--surface-raised));
   }
 
   /* Jump-to-response: a brief pulse on the row a search result jumps to. The

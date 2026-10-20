@@ -2,10 +2,8 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { MessageSquare } from '@lucide/svelte';
-  import { CountPill, EmptyState } from '$lib/components/ui';
-  import { SettingsCard } from '$lib/components/settings';
+  import { Icon, CountPill, EmptyState, Card, Timestamp } from '$lib/components/ui';
   import { getChatRooms, type ChatRoom, type GroupDetail } from '$lib/api';
-  import { formatDateTime, formatRelative } from '$lib/dateFormat';
 
   let { rooms }: { rooms: GroupDetail['rooms'] } = $props();
   let chatRooms = $state<Map<string, ChatRoom>>(new Map());
@@ -32,26 +30,22 @@
   });
 </script>
 
-<SettingsCard title="Rooms" description="Linked chat rooms you can open, most recent first.">
+<Card title="Rooms" description="Linked chat rooms you can open, most recent first.">
   {#if ordered.length}
     <ul class="rooms list-reset">
       {#each ordered as room (room.token)}
         <li>
-          <span class="entry-icon" aria-hidden="true"><MessageSquare size={16} /></span>
+          <span class="entry-icon" aria-hidden="true"><Icon icon={MessageSquare} size="md" /></span>
           <a class="name" href="{base}/chat?room={encodeURIComponent(room.token)}" title={room.name}
             >{room.name}</a
           >
-          {#if room.chat?.last_activity}<span
-              class="caption"
-              title={formatDateTime(room.chat.last_activity)}
-              >{formatRelative(room.chat.last_activity)}</span
-            >{/if}
+          <Timestamp class="caption" value={room.chat?.last_activity} format="relative" />
           <CountPill count={room.chat?.unread_count ?? 0} />
         </li>
       {/each}
     </ul>
   {:else}<EmptyState size="sm">No linked rooms you can access.</EmptyState>{/if}
-</SettingsCard>
+</Card>
 
 <style>
   .rooms li {

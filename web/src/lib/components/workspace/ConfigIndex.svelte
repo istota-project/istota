@@ -1,6 +1,6 @@
 <script lang="ts">
   import IndexCaption from './IndexCaption.svelte';
-  import { Button, EmptyState, KebabMenu, type KebabItem, PageLoading } from '$lib/components/ui';
+  import { EmptyState, KebabMenu, type KebabItem, LoadState } from '$lib/components/ui';
   import type { WorkspaceConfigFile } from '$lib/api';
   import { configFileDescription, configFileDetail, configFileLabel } from './configFiles';
 
@@ -35,14 +35,10 @@
 </script>
 
 <section class="index" aria-label={label}>
-  {#if error}
-    <div class="center-msg error">
-      <p>{error}</p>
-      <Button variant="secondary" onclick={onRetry}>Retry</Button>
-    </div>
-  {:else if loading}
-    <PageLoading />
-  {:else if files.length}
+  <LoadState {loading} {error} {onRetry} empty={!files.length}>
+    {#snippet emptyState()}
+      <EmptyState>{empty}</EmptyState>
+    {/snippet}
     <IndexCaption {caption} {reachNote} />
     <ul class="list-reset">
       {#each files as file (file.name)}
@@ -68,9 +64,7 @@
         </li>
       {/each}
     </ul>
-  {:else}
-    <EmptyState>{empty}</EmptyState>
-  {/if}
+  </LoadState>
 </section>
 
 <style>

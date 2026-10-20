@@ -8,9 +8,19 @@
     type EmailAccount,
     type UserBriefingRow,
   } from '$lib/api';
-  import { Input, NoticeBanner, Select, type SelectOption } from '$lib/components/ui';
+  import {
+    Input,
+    Alert,
+    Select,
+    type SelectOption,
+    Card,
+    Field,
+    FormGrid,
+    FormStack,
+    Checkbox,
+  } from '$lib/components/ui';
+  import { createDraft } from '$lib/ui/draft.svelte';
   import { notifyError } from '$lib/stores/notices';
-  import { SettingsCard, SettingsField } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import BlockBuilder from '../BlockBuilder.svelte';
@@ -64,31 +74,34 @@
     conversation_token: row?.conversation_token ?? '',
     enabled: row?.enabled ?? false,
   });
-  let draft = $state<Draft>(fromSchedule(undefined));
-  let saved = $state('');
+  const form = createDraft<Draft>(fromSchedule(undefined));
   let saving = $state(false);
-  // Reseed when the server copy changes, never under an edit in progress. Only
-  // `schedule` is tracked: the draft is both read and written here.
+  // Reseed when the server copy changes, never under an edit in progress: an
+  // edit survives as the value over the new saved copy. Only `schedule` is
+  // tracked: the draft is both read and written here.
   $effect(() => {
     const next = fromSchedule(schedule);
     untrack(() => {
-      if (!saved || JSON.stringify(draft) === saved) draft = next;
-      saved = JSON.stringify(next);
+      const edits = form.dirty ? form.value : null;
+      form.reset(next);
+      if (edits) form.value = edits;
     });
   });
 
   const held = $derived(!!schedule?.held);
-  const dirty = $derived(!!saved && JSON.stringify(draft) !== saved);
   const outputOptions = $derived(
-    [...new Set([...outputs, draft.output])].map((o) => ({ value: o, label: channelLabel(o) })),
+    [...new Set([...outputs, form.value.output])].map((o) => ({
+      value: o,
+      label: channelLabel(o),
+    })),
   );
 
   async function save() {
-    if (!draft.cron.trim()) {
+    if (!form.value.cron.trim()) {
       notifyError('Choose a schedule.');
       return;
     }
-    if (draft.output === 'talk' && !draft.conversation_token) {
+    if (form.value.output === 'talk' && !form.value.conversation_token) {
       notifyError('Choose a Talk room.');
       return;
     }
@@ -96,13 +109,14 @@
     try {
       await upsertBriefing({
         name,
-        title: draft.title.trim(),
-        cron: draft.cron.trim(),
-        output: draft.output,
-        conversation_token: draft.output === 'talk' ? draft.conversation_token : undefined,
-        enabled: draft.enabled,
+        title: form.value.title.trim(),
+        cron: form.value.cron.trim(),
+        output: form.value.output,
+        conversation_token:
+          form.value.output === 'talk' ? form.value.conversation_token : undefined,
+        enabled: form.value.enabled,
       });
-      saved = JSON.stringify(draft);
+      form.reset();
       briefingsRefreshNonce.update((n) => n + 1);
       await onSaved();
     } catch (e) {
@@ -112,68 +126,68 @@
     }
   }
 
-  useSettingsSave(() => ({ dirty, saving, save }));
+  useSettingsSave(() => ({ dirty: form.dirty, saving, save }));
 </script>
 
-<SettingsCard title="Schedule and delivery">
+<Card title="Schedule and delivery">
   {#if held}
-    <NoticeBanner title="Paused by an administrator" variant="warn" collapsed={false}>
+    <Alert title="Paused by an administrator" variant="warn" collapsed={false}>
       This briefing will not run until an administrator resumes it.
-    </NoticeBanner>
+    </Alert>
   {/if}
-  <fieldset class="fields">
-    <SettingsField
+  <FormStack>
+    <Field
       label="Title"
       hint="Shown on every edition, followed by its date. Leave blank to use the name."
     >
-      <Input bind:value={draft.title} placeholder={derivedTitle(name)} />
-    </SettingsField>
-    <div class="field-row">
-      <SettingsField
+      <Input bind:value={form.value.title} placeholder={derivedTitle(name)} />
+    </Field>
+    <FormGrid min="12rem">
+      <Field
         label="Schedule"
         hint="A cron expression in your timezone, for example 0 7 * * 1-5 for weekdays at 07:00."
       >
-        <Input bind:value={draft.cron} monospace />
-      </SettingsField>
-      <SettingsField label="Delivery" labelled={false}>
+        <Input bind:value={form.value.cron} monospace />
+      </Field>
+      <Field label="Delivery">
         <Select
-          value={draft.output}
+          value={form.value.output}
           options={outputOptions}
-          onValueChange={(v) => (draft.output = v)}
+          onValueChange={(v) => (form.value.output = v)}
           ariaLabel="Delivery"
           fullWidth
         />
-      </SettingsField>
-      {#if draft.output === 'talk'}
-        <SettingsField label="Talk room" labelled={false}>
+      </Field>
+      {#if form.value.output === 'talk'}
+        <Field label="Talk room">
           <Select
-            value={draft.conversation_token}
+            value={form.value.conversation_token}
             options={[
               ...rooms.map((r) => ({ value: r.token, label: r.name })),
-              ...(draft.conversation_token &&
-              !rooms.some((r) => r.token === draft.conversation_token)
-                ? [{ value: draft.conversation_token, label: draft.conversation_token }]
+              ...(form.value.conversation_token &&
+              !rooms.some((r) => r.token === form.value.conversation_token)
+                ? [{ value: form.value.conversation_token, label: form.value.conversation_token }]
                 : []),
             ]}
-            onValueChange={(v) => (draft.conversation_token = v)}
+            onValueChange={(v) => (form.value.conversation_token = v)}
             placeholder="Choose a room"
             ariaLabel="Talk room"
             fullWidth
           />
-        </SettingsField>
+        </Field>
       {/if}
-    </div>
-    <SettingsField
+    </FormGrid>
+    <Field
       label="Enabled"
       checkbox
       hint="When off, the briefing keeps its content but does not run."
     >
-      <input type="checkbox" bind:checked={draft.enabled} disabled={held} />
-    </SettingsField>
-  </fieldset>
-</SettingsCard>
+      <Checkbox bind:checked={form.value.enabled} disabled={held} />
+    </Field>
+  </FormStack>
+</Card>
 
-<SettingsCard
+<Card
   title="Content"
   description="Ordered blocks, each gathered from its sources and summarized or shown as is. Changes save as you make them."
 >
@@ -192,22 +206,4 @@
       onChange={onBlocksChange}
     />
   {/key}
-</SettingsCard>
-
-<style>
-  .fields {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    border: 0;
-    padding: 0;
-    margin: 0;
-    min-width: 0;
-  }
-  .field-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(12rem, 100%), 1fr));
-    gap: var(--space-3);
-    align-items: start;
-  }
-</style>
+</Card>

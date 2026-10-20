@@ -1,11 +1,22 @@
 <script lang="ts">
   import { CircleDashed, Lock } from '@lucide/svelte';
   import type { AdminConfigField, ConfigOp, ConfigSecretSource } from '$lib/api';
-  import { Badge, Button, Chip, Field, Input, Select, TextArea } from '$lib/components/ui';
+  import {
+    Icon,
+    Badge,
+    Button,
+    ToggleGroup,
+    Field,
+    Input,
+    Select,
+    TextArea,
+    Checkbox,
+  } from '$lib/components/ui';
   import ConfigSecretField from './SecretField.svelte';
   import FieldRow from './FieldRow.svelte';
   import TableEditor from './TableEditor.svelte';
-  import { displayValue, formatValue, opFor, parseList, parseNumber } from './changeSet';
+  import { displayValue, formatValue, opFor } from './changeSet';
+  import { parseList, parseNumber } from '$lib/ui/parse';
   import { credentialStatus } from './credentialStatus';
 
   interface Props {
@@ -121,7 +132,7 @@
       return;
     }
     draftText = text;
-    const parsed = parseList(text, numericList);
+    const parsed = parseList(text, { separator: '\n', numeric: numericList });
     if (parsed === null) {
       inputError = 'Every line has to be a number.';
       onOp(null, field.path);
@@ -131,12 +142,9 @@
     emit(parsed);
   }
 
-  function toggleChoice(choice: string) {
-    const current = Array.isArray(shown) ? (shown as string[]) : [];
-    const next = current.includes(choice)
-      ? current.filter((c) => c !== choice)
-      : (field.multi_choices ?? []).filter((c) => c === choice || current.includes(c));
-    emit(next);
+  // In vocabulary order, whatever order the chips were pressed in.
+  function emitChoices(picked: string[]) {
+    emit((field.multi_choices ?? []).filter((c) => picked.includes(c)));
   }
 
   function undo() {
@@ -158,14 +166,14 @@
 
 {#snippet lockMark()}
   <span class="lock-mark" role="img" aria-label="Needs confirmation" title="Needs confirmation"
-    ><Lock size={13} aria-hidden="true" /></span
+    ><Icon icon={Lock} size="sm" /></span
   >
 {/snippet}
 
 {#snippet defaultMark()}
   {#if notInFile}
     <span class="default-mark" role="img" aria-label={markLabel} title={markLabel}
-      ><CircleDashed size={14} /></span
+      ><Icon icon={CircleDashed} size="sm" /></span
     >
   {/if}
 {/snippet}
@@ -183,45 +191,50 @@
         onChange={(value) => onSecret(field.credential!.name, value)}
       />
     {:else if kind === 'bool'}
-      <Field label={field.name} {hint} {badge} {labelMark} inline checkbox error={problem}>
+      <Field label={field.name} {hint} {badge} {labelMark} layout="inline" checkbox error={problem}>
         <span class="adorned beside">
-          <input
-            type="checkbox"
-            checked={shown === true}
-            onchange={(e) => emit((e.currentTarget as HTMLInputElement).checked)}
-          />
+          <Checkbox checked={shown === true} onchange={(on) => emit(on)} />
           {@render defaultMark()}
         </span>
       </Field>
     {:else if kind === 'int' || kind === 'float'}
-      <Field label={field.name} {hint} {badge} {labelMark} inline error={inputError || problem}>
-        <span class="adorned number" class:marked={notInFile}>
-          <Input
-            type="number"
-            step={kind === 'float' ? 'any' : '1'}
-            value={draftText ??
-              (blank || shown === null || shown === undefined ? '' : String(shown))}
-            {placeholder}
-            invalid={!!inputError}
-            oninput={(e: Event) => onNumber((e.currentTarget as HTMLInputElement).value)}
-          />
-          {@render defaultMark()}
-        </span>
+      <Field
+        label={field.name}
+        {hint}
+        {badge}
+        {labelMark}
+        layout="inline"
+        error={inputError || problem}
+      >
+        <Input
+          type="number"
+          step={kind === 'float' ? 'any' : '1'}
+          value={draftText ?? (blank || shown === null || shown === undefined ? '' : String(shown))}
+          {placeholder}
+          invalid={!!inputError}
+          suffix={notInFile ? defaultMark : undefined}
+          oninput={(e: Event) => onNumber((e.currentTarget as HTMLInputElement).value)}
+        />
       </Field>
     {:else if kind === 'str' || kind === 'path'}
-      <Field label={field.name} {hint} {badge} {labelMark} inline error={problem}>
-        <span class="adorned" class:marked={notInFile}>
-          <Input
-            value={blank || shown === null || shown === undefined ? '' : String(shown)}
-            {placeholder}
-            monospace={kind === 'path'}
-            oninput={(e: Event) => onText((e.currentTarget as HTMLInputElement).value)}
-          />
-          {@render defaultMark()}
-        </span>
+      <Field label={field.name} {hint} {badge} {labelMark} layout="inline" error={problem}>
+        <Input
+          value={blank || shown === null || shown === undefined ? '' : String(shown)}
+          {placeholder}
+          monospace={kind === 'path'}
+          suffix={notInFile ? defaultMark : undefined}
+          oninput={(e: Event) => onText((e.currentTarget as HTMLInputElement).value)}
+        />
       </Field>
     {:else if kind === 'list'}
-      <Field label={field.name} {hint} {badge} {labelMark} inline error={inputError || problem}>
+      <Field
+        label={field.name}
+        {hint}
+        {badge}
+        {labelMark}
+        layout="inline"
+        error={inputError || problem}
+      >
         <span class="adorned area" class:marked={notInFile}>
           <TextArea
             monospace
@@ -236,7 +249,7 @@
         </span>
       </Field>
     {:else if kind === 'choice'}
-      <Field label={field.name} {hint} {badge} {labelMark} inline error={problem} labelled={false}>
+      <Field label={field.name} {hint} {badge} {labelMark} layout="inline" error={problem}>
         <span class="adorned select">
           <Select
             value={String(shown ?? '')}
@@ -249,15 +262,19 @@
         </span>
       </Field>
     {:else if kind === 'multi_choice'}
-      <Field label={field.name} {hint} {badge} {labelMark} inline error={problem} labelled={false}>
+      <Field label={field.name} {hint} {badge} {labelMark} layout="inline" error={problem}>
         <span class="adorned beside">
           <span class="choices">
-            {#each field.multi_choices ?? [] as choice (choice)}
-              {@const on = Array.isArray(shown) && (shown as string[]).includes(choice)}
-              <Chip checked={on} aria-pressed={on} onclick={() => toggleChoice(choice)}
-                >{choice}</Chip
-              >
-            {/each}
+            <ToggleGroup
+              type="multiple"
+              label={field.name}
+              value={Array.isArray(shown) ? (shown as string[]) : []}
+              options={(field.multi_choices ?? []).map((choice) => ({
+                value: choice,
+                label: choice,
+              }))}
+              onValueChange={(next) => emitChoices(next as string[])}
+            />
           </span>
           {@render defaultMark()}
         </span>
@@ -265,7 +282,7 @@
     {:else if kind === 'table' && !pendingUnset}
       <TableEditor {field} {op} {hint} {badge} {labelMark} {problem} {onOp} />
     {:else if kind === 'table'}
-      <Field label={field.name} {hint} {badge} {labelMark} inline error={problem} labelled={false}>
+      <Field label={field.name} {hint} {badge} {labelMark} layout="inline" error={problem}>
         <span class="config-value dim">Removed from config.toml.</span>
       </Field>
     {:else if shownSecret}
@@ -276,14 +293,13 @@
         {hint}
         {badge}
         labelMark={statusMark}
-        inline
+        layout="inline"
         error={problem}
-        labelled={false}
       >
         <span class="config-value dim">{field.read_only_reason || '—'}</span>
       </Field>
     {:else}
-      <Field label={field.name} {hint} {badge} {labelMark} inline error={problem} labelled={false}>
+      <Field label={field.name} {hint} {badge} {labelMark} layout="inline" error={problem}>
         <span class="config-value" class:dim={formatValue(field.value) === '—'}
           >{formatValue(field.value)}</span
         >
@@ -378,15 +394,10 @@
     }
   }
 
-  .choices {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-1);
-  }
-
-  /* The control and its "not in config.toml" mark. Inside the box for a text
-     control or a select, after it for a checkbox or chips. Carries the
-     control's own cap so the mark sits at the box's right edge. */
+  /* The control and its "not in config.toml" mark, for the controls that are
+     not an Input (a text or number Input takes the mark as its suffix). Inside
+     the box for a textarea or a select, after it for a checkbox or chips.
+     Carries the control's own cap so the mark sits at the box's right edge. */
   .adorned {
     position: relative;
     display: block;
@@ -400,12 +411,15 @@
   }
 
   .default-mark {
+    display: flex;
+    color: var(--text-dim);
+  }
+
+  .adorned .default-mark {
     position: absolute;
     top: 50%;
     right: var(--space-2);
-    display: flex;
     transform: translateY(-50%);
-    color: var(--text-dim);
   }
 
   .adorned.area .default-mark {
@@ -418,21 +432,7 @@
     right: calc(var(--space-2) + var(--space-4) + var(--space-1));
   }
 
-  /* No stepper on a number: it is typed, and arrow keys still step it. The
-     stepper took the right edge the mark sits at on every other text box. */
-  .adorned.number :global(input[type='number']) {
-    appearance: textfield;
-    -moz-appearance: textfield;
-  }
-
-  .adorned.number :global(input[type='number']::-webkit-inner-spin-button),
-  .adorned.number :global(input[type='number']::-webkit-outer-spin-button) {
-    margin: 0;
-    -webkit-appearance: none;
-  }
-
   /* Text stops short of the mark. */
-  .config-field .adorned.marked :global(input),
   .config-field .adorned.marked :global(textarea) {
     padding-right: calc(var(--space-2) + var(--space-4) + var(--space-1));
   }

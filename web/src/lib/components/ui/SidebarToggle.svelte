@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import { PanelLeft, PanelLeftClose } from '@lucide/svelte';
 
   interface Props {
@@ -32,7 +33,7 @@
 >
   <!-- A panel glyph reads "toggle the side panel"; a kebab would collide with
 	     the overflow-menu meaning the room and feed rows already use. -->
-  {#if open}<PanelLeftClose size={18} />{:else}<PanelLeft size={18} />{/if}
+  {#if open}<Icon icon={PanelLeftClose} size="lg" />{:else}<Icon icon={PanelLeft} size="lg" />{/if}
 </button>
 
 <style>

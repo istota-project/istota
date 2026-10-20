@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { SettingsCard, SettingsField } from '$lib/components/settings';
-  import { Button, Input } from '$lib/components/ui';
+  import { Button, Input, Card, Field } from '$lib/components/ui';
   import BracketEditor from './BracketEditor.svelte';
   import RateProvenanceLine from './RateProvenanceLine.svelte';
   import type { RateProvenance, ResolvedField } from '$lib/money/api';
@@ -48,14 +47,14 @@
   let deductionValue = $derived(standardDeduction.value ?? '');
 </script>
 
-<SettingsCard {title} {description}>
+<Card {title} {description}>
   {#if unavailableNotice}
     <p class="unavailable">{unavailableNotice}</p>
   {/if}
 
   <RateProvenanceLine {provenance} {taxYear} {available} />
 
-  <SettingsField
+  <Field
     label="Standard deduction"
     hint="Leave as shipped unless you have a figure from the authority that differs."
   >
@@ -77,9 +76,9 @@
     {#if standardDeduction.overridden}
       <p class="overridden">Your value, not the shipped one.</p>
     {/if}
-  </SettingsField>
+  </Field>
 
-  <SettingsField label="Brackets" labelled={false} wide>
+  <Field label="Brackets" wide>
     <BracketEditor
       value={brackets.value ?? []}
       onchange={(next) => onEdit({ brackets: next })}
@@ -91,8 +90,8 @@
         <Button variant="secondary" size="sm" onclick={() => revert('brackets')}>Revert</Button>
       </div>
     {/if}
-  </SettingsField>
-</SettingsCard>
+  </Field>
+</Card>
 
 <style>
   .overridden {

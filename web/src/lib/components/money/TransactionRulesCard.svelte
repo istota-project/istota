@@ -1,14 +1,17 @@
 <script lang="ts">
+  import { latest } from '$lib/ui/latest';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { onMount } from 'svelte';
-  import { SettingsCard } from '$lib/components/settings';
   import {
     Badge,
     Button,
     ConfirmDialog,
     EmptyState,
+    Field,
     Input,
     KebabMenu,
     Select,
+    Card,
   } from '$lib/components/ui';
   import { notifyError, notifyInfo, notifySuccess } from '$lib/stores/notices';
   import {
@@ -87,7 +90,7 @@
   // the *later* pick routinely resolves first and the earlier one then lands
   // on top of it, leaving the list scoped to a filter the pickers no longer
   // show.
-  let loadSeq = 0;
+  const loads = latest();
 
   let filterLedger = $state(ALL_SCOPES);
   let filterSource = $state(ALL_SCOPES);
@@ -115,7 +118,7 @@
   let editEnabled = $state('true');
   let editBusy = $state(false);
 
-  let confirmDelete: TransactionRule | null = $state(null);
+  const confirmDelete = createConfirm<TransactionRule>();
 
   const filterLedgerOptions = $derived(ledgerScopeOptions(ledgers, allRules, { all: true }));
   const filterSourceOptions = $derived(sourceScopeOptions(allRules, { all: true }));
@@ -171,7 +174,7 @@
   }
 
   async function load() {
-    const mine = ++loadSeq;
+    const current = loads.next();
     try {
       // The unscoped read first: it is the vocabulary, and the filtered read
       // below cannot supply it.
@@ -179,17 +182,17 @@
       const query = scopeQuery(filterLedger, filterSource);
       const scoped =
         Object.keys(query).length > 0 ? (await getTransactionRules(query)).rules : all.rules;
-      if (mine !== loadSeq) return;
+      if (!current()) return;
       allRules = all.rules;
       rules = scoped;
       loadError = '';
       everLoaded = true;
       dropVanishedFilters();
     } catch (e) {
-      if (mine !== loadSeq) return;
+      if (!current()) return;
       loadError = e instanceof Error ? e.message : 'Failed to load transaction rules';
     } finally {
-      if (mine === loadSeq) loaded = true;
+      if (current()) loaded = true;
     }
   }
 
@@ -359,8 +362,8 @@
   }
 
   async function handleDelete() {
-    const rule = confirmDelete;
-    confirmDelete = null;
+    const rule = confirmDelete.target;
+    confirmDelete.cancel();
     if (!rule) return;
     try {
       await deleteTransactionRule(rule.id);
@@ -377,7 +380,7 @@
     return [
       { label: 'Edit', onSelect: () => startEdit(rule) },
       { label: 'Duplicate', onSelect: () => duplicate(rule) },
-      { label: 'Delete', danger: true, onSelect: () => (confirmDelete = rule) },
+      { label: 'Delete', danger: true, onSelect: () => confirmDelete.ask(rule) },
     ];
   }
 
@@ -390,7 +393,7 @@
   }
 </script>
 
-<SettingsCard title="Rules ({rules.length})">
+<Card title="Rules ({rules.length})">
   <!-- The banner sits above the controls rather than replacing them. A failed
        *reload* used to wipe the card to a banner, taking the scope pickers
        with it, so nothing on screen could trigger another load and only a page
@@ -406,8 +409,7 @@
     </p>
 
     <div class="scope-row control-row">
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Ledger</span>
+      <Field label="Ledger" layout="compact">
         <Select
           bind:value={filterLedger}
           options={filterLedgerOptions}
@@ -415,9 +417,8 @@
           ariaLabel="Filter by ledger"
           onValueChange={onFilterLedger}
         />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Source</span>
+      </Field>
+      <Field label="Source" layout="compact">
         <Select
           bind:value={filterSource}
           options={filterSourceOptions}
@@ -425,12 +426,11 @@
           ariaLabel="Filter by source"
           onValueChange={onFilterSource}
         />
-      </div>
+      </Field>
     </div>
 
     <div class="rule-form add-form control-row">
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Ledger</span>
+      <Field label="Ledger" layout="compact">
         <Select
           bind:value={addLedger}
           options={addLedgerOptions}
@@ -438,9 +438,8 @@
           fullWidth
           ariaLabel="Rule ledger"
         />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Source</span>
+      </Field>
+      <Field label="Source" layout="compact">
         <Select
           bind:value={addSource}
           options={addSourceOptions}
@@ -448,25 +447,20 @@
           fullWidth
           ariaLabel="Rule source"
         />
-      </div>
-      <div class="ctl ctl-narrow">
-        <span class="micro-label" aria-hidden="true">Field</span>
+      </Field>
+      <Field label="Field" layout="compact" class="ctl-narrow">
         <Select bind:value={addField} options={fieldOptions} fullWidth ariaLabel="Rule field" />
-      </div>
-      <div class="ctl ctl-narrow">
-        <span class="micro-label" aria-hidden="true">Match</span>
+      </Field>
+      <Field label="Match" layout="compact" class="ctl-narrow">
         <Select bind:value={addKind} options={kindOptions} fullWidth ariaLabel="Rule match kind" />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Value</span>
+      </Field>
+      <Field label="Value" layout="compact">
         <Input bind:value={addValue} placeholder="Software" aria-label="Match value" />
-      </div>
-      <div class="ctl ctl-narrow">
-        <span class="micro-label" aria-hidden="true">Action</span>
+      </Field>
+      <Field label="Action" layout="compact" class="ctl-narrow">
         <Select bind:value={addAction} options={actionOptions} fullWidth ariaLabel="Rule action" />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Target</span>
+      </Field>
+      <Field label="Target" layout="compact">
         <Input
           bind:value={addTarget}
           placeholder="Expenses:Business:Software"
@@ -474,9 +468,8 @@
           disabled={addAction === 'skip'}
           aria-label="Target account"
         />
-      </div>
-      <div class="ctl ctl-tiny">
-        <span class="micro-label" aria-hidden="true">Priority</span>
+      </Field>
+      <Field label="Priority" layout="compact" class="ctl-tiny">
         <Input
           bind:value={addPriority}
           type="number"
@@ -486,7 +479,7 @@
           invalid={!isIntegerPriority(addPriority)}
           aria-label="Rule priority"
         />
-      </div>
+      </Field>
       <div class="ctl-action">
         <Button
           variant="primary"
@@ -526,61 +519,54 @@
           <li class="rule-row" class:off={!rule.enabled}>
             {#if editingId === rule.id}
               <div class="rule-form control-row">
-                <div class="ctl">
-                  <span class="micro-label" aria-hidden="true">Ledger</span>
+                <Field label="Ledger" layout="compact">
                   <Select
                     bind:value={editLedger}
                     options={editLedgerOptions}
                     fullWidth
                     ariaLabel="Edit ledger"
                   />
-                </div>
-                <div class="ctl">
-                  <span class="micro-label" aria-hidden="true">Source</span>
+                </Field>
+                <Field label="Source" layout="compact">
                   <Select
                     bind:value={editSource}
                     options={editSourceOptions}
                     fullWidth
                     ariaLabel="Edit source"
                   />
-                </div>
-                <div class="ctl ctl-narrow">
-                  <span class="micro-label" aria-hidden="true">Field</span>
+                </Field>
+                <Field label="Field" layout="compact" class="ctl-narrow">
                   <Select
                     bind:value={editField}
                     options={fieldOptions}
                     fullWidth
                     ariaLabel="Edit field"
                   />
-                </div>
-                <div class="ctl ctl-narrow">
-                  <span class="micro-label" aria-hidden="true">Match</span>
+                </Field>
+                <Field label="Match" layout="compact" class="ctl-narrow">
                   <Select
                     bind:value={editKind}
                     options={kindOptions}
                     fullWidth
                     ariaLabel="Edit match kind"
                   />
-                </div>
-                <div class="ctl">
-                  <span class="micro-label" aria-hidden="true">Value</span>
+                </Field>
+                <Field label="Value" layout="compact">
                   <Input
                     bind:value={editValue}
                     invalid={editValue.trim() === ''}
                     aria-label="Edit match value"
                   />
-                </div>
-                <div class="ctl ctl-narrow">
-                  <span class="micro-label" aria-hidden="true">Action</span>
+                </Field>
+                <Field label="Action" layout="compact" class="ctl-narrow">
                   <Select
                     bind:value={editAction}
                     options={actionOptions}
                     fullWidth
                     ariaLabel="Edit action"
                   />
-                </div>
-                <div class="ctl">
-                  <span class="micro-label" aria-hidden="true">Target</span>
+                </Field>
+                <Field label="Target" layout="compact">
                   <Input
                     bind:value={editTarget}
                     monospace
@@ -588,9 +574,8 @@
                     invalid={editAction !== 'skip' && editTarget.trim() === ''}
                     aria-label="Edit target account"
                   />
-                </div>
-                <div class="ctl ctl-tiny">
-                  <span class="micro-label" aria-hidden="true">Priority</span>
+                </Field>
+                <Field label="Priority" layout="compact" class="ctl-tiny">
                   <Input
                     bind:value={editPriority}
                     type="number"
@@ -600,16 +585,15 @@
                     invalid={!isIntegerPriority(editPriority)}
                     aria-label="Priority"
                   />
-                </div>
-                <div class="ctl ctl-narrow">
-                  <span class="micro-label" aria-hidden="true">State</span>
+                </Field>
+                <Field label="State" layout="compact" class="ctl-narrow">
                   <Select
                     bind:value={editEnabled}
                     options={enabledOptions}
                     fullWidth
                     ariaLabel="Enabled"
                   />
-                </div>
+                </Field>
                 <div class="ctl-action">
                   <Button
                     variant="primary"
@@ -649,16 +633,16 @@
       </ul>
     {/if}
   {/if}
-</SettingsCard>
+</Card>
 
 <ConfirmDialog
-  open={confirmDelete !== null}
+  bind:open={confirmDelete.open}
   title="Delete rule"
-  message="Are you sure you want to delete rule {confirmDelete?.id}? Transactions it matched will resolve from whatever rule is next in the pass, or fall back to Expenses:Uncategorized."
+  message="Are you sure you want to delete rule {confirmDelete.target
+    ?.id}? Transactions it matched will resolve from whatever rule is next in the pass, or fall back to Expenses:Uncategorized."
   confirmLabel="Delete"
   confirmVariant="danger"
   onConfirm={handleDelete}
-  onCancel={() => (confirmDelete = null)}
 />
 
 <style>
@@ -690,18 +674,11 @@
     margin: 0 0 var(--space-3);
   }
 
-  .ctl {
-    display: grid;
-    gap: var(--space-1);
-    flex: 1 1 9rem;
-    min-width: 0;
-  }
-
-  .ctl-narrow {
+  .rule-form :global(.ctl-narrow) {
     flex: 0 1 7rem;
   }
 
-  .ctl-tiny {
+  .rule-form :global(.ctl-tiny) {
     flex: 0 1 5rem;
   }
 
