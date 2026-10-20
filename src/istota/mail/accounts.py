@@ -190,7 +190,7 @@ def _choice(value: object, allowed: tuple[str, ...], name: str) -> str:
 
 
 def _text(value: object, name: str, *, required: bool = False) -> str:
-    if not isinstance(value, str) or len(value) > _MAX_TEXT_CHARS or _has_control(value):
+    if not isinstance(value, str) or len(value) > _MAX_TEXT_CHARS or has_control(value):
         raise MailAccountError(
             "invalid", f"Use text of at most {_MAX_TEXT_CHARS} characters on one line",
             field=name,
@@ -200,9 +200,14 @@ def _text(value: object, name: str, *, required: bool = False) -> str:
     return value.strip()
 
 
-def _folder(value: object, name: str, *, allow_empty: bool) -> str:
+def validate_folder(value: object, name: str = "folder", *, allow_empty: bool = False) -> str:
+    """A folder name as stored or sent to the server, or `MailAccountError`.
+
+    The one folder-name rule, for an account's saved folders and for the
+    email skill's ``--folder``.
+    """
     if (not isinstance(value, str) or len(value) > _MAX_FOLDER_CHARS
-            or _has_control(value) or (not allow_empty and not value.strip())):
+            or has_control(value) or (not allow_empty and not value.strip())):
         raise MailAccountError(
             "invalid",
             f"Use a folder name under {_MAX_FOLDER_CHARS + 1} characters with no control characters",
@@ -211,7 +216,12 @@ def _folder(value: object, name: str, *, allow_empty: bool) -> str:
     return value.strip()
 
 
-def _has_control(value: str) -> bool:
+def has_control(value: str) -> bool:
+    """Whether ``value`` holds a C0 control character or DEL.
+
+    imaplib writes an argument onto the command line as given, so a CR or LF
+    in one would end the command and start another.
+    """
     return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
 
 
@@ -249,7 +259,7 @@ def validate_fields(values: dict) -> dict:
         "imap_port": _port(values.get("imap_port"), "imap_port"),
         "imap_security": _choice(values.get("imap_security"), SECURITY_MODES, "imap_security"),
         "imap_username": _text(values.get("imap_username"), "imap_username", required=True),
-        "default_folder": _folder(values.get("default_folder"), "default_folder", allow_empty=False),
+        "default_folder": validate_folder(values.get("default_folder"), "default_folder", allow_empty=False),
         "smtp_host": None,
         "smtp_port": _port(values.get("smtp_port"), "smtp_port"),
         "smtp_security": _choice(values.get("smtp_security"), SECURITY_MODES, "smtp_security"),
@@ -257,7 +267,7 @@ def validate_fields(values: dict) -> dict:
         "smtp_username": _text(values.get("smtp_username", ""), "smtp_username"),
         "from_address": _from_address(values.get("from_address")),
         "from_name": _text(values.get("from_name", ""), "from_name"),
-        "sent_folder": _folder(values.get("sent_folder", ""), "sent_folder", allow_empty=True),
+        "sent_folder": validate_folder(values.get("sent_folder", ""), "sent_folder", allow_empty=True),
         "enabled": _flag(values.get("enabled"), "enabled"),
     }
     smtp_host = values.get("smtp_host")

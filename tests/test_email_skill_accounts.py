@@ -336,6 +336,102 @@ class TestScope:
         assert out["scope"] == "all"
 
 
+class TestTheBotBoxFolder:
+    """The bot box is shared, and only its INBOX has an ownership rule.
+
+    Its sent copies go to "Sent Items", where a message another user sent
+    through the bot resolves to no owner, so it reads as shared.
+    """
+
+    @pytest.fixture
+    def bobs_sent_copy(self, store, imap):
+        with db.get_db(store["path"]) as conn:
+            db.create_task(conn, user_id="bob", prompt="mail dana", source_type="talk")
+            conn.commit()
+        imap["mailbox"].fetch.return_value = [
+            _message(uid="3", subject="Bob's private note", sender="bot@bot.example"),
+        ]
+
+    @pytest.mark.parametrize("argv", [
+        ["list"],
+        ["read", "3"],
+        ["search", "ALL"],
+        ["thread", "3"],
+        ["from-senders", "--senders", "bot@bot.example"],
+        ["newsletters", "--sources", "bot.example"],
+        ["mark", "3", "read", "--confirmed"],
+        ["reply", "3", "--body", "Yes."],
+    ])
+    def test_another_folder_is_refused_before_any_read(
+        self, store, bot_box, imap, bobs_sent_copy, capsys, argv,
+    ):
+        code, out = run(capsys, *argv, "--folder", "Sent Items")
+        assert code == 1, out
+        assert out["reason"] == "folder_not_supported"
+        assert out["account"] == "bot"
+        assert imap["calls"] == []
+        assert "Bob's private note" not in json.dumps(out)
+
+    def test_attachments_with_another_folder_is_refused(
+        self, store, bot_box, imap, bobs_sent_copy, capsys, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setattr("istota.skills._cli.resolve_parsed", lambda parser, args: None)
+        code, out = run(capsys, "attachments", "3", "--dest", str(tmp_path / "a"),
+                        "--folder", "Sent Items")
+        assert out["reason"] == "folder_not_supported"
+        assert imap["calls"] == []
+
+    def test_account_bot_is_refused_too(self, store, bot_box, imap, capsys):
+        code, out = run(capsys, "list", "--account", "bot", "--folder", "Sent Items")
+        assert out["reason"] == "folder_not_supported"
+        assert imap["calls"] == []
+
+    def test_its_own_folder_is_accepted(self, store, bot_box, imap, capsys):
+        code, out = run(capsys, "list", "--folder", "INBOX")
+        assert code == 0, out
+        imap["mailbox"].folder.set.assert_called_once_with("INBOX")
+
+    def test_folders_names_only_what_it_reads(self, store, bot_box, imap, capsys):
+        code, out = run(capsys, "folders")
+        assert code == 0, out
+        assert out == {"status": "ok", "account": "bot", "folders": ["INBOX"]}
+        assert imap["calls"] == []
+
+
+class TestControlCharactersInImapArguments:
+    """Text that reaches an IMAP command line may not end the line.
+
+    imaplib writes an argument as given, so a CR/LF in it starts a command of
+    the model's own: a SELECT past the EXAMINE, a STORE past `mark`'s gate.
+    """
+
+    INJECTED = "ALL\r\nZ1 SELECT INBOX\r\nZ2 UID STORE 1:* +FLAGS (\\Deleted)"
+
+    @pytest.mark.parametrize("argv", [
+        ["search", INJECTED],
+        ["list", "--from", "dana@example.org\r\nZ1 SELECT INBOX"],
+        ["from-senders", "--senders", "dana@example.org\nZ1 SELECT INBOX"],
+        ["newsletters", "--sources", "example.org\rZ1 SELECT INBOX"],
+        ["list", "--folder", "Archive\r\nZ1 SELECT INBOX"],
+        ["search", "ALL\x00"],
+        ["search", "ALL\x7f"],
+    ])
+    @pytest.mark.parametrize("account", [None, "work"])
+    def test_refused_before_any_connection(
+        self, store, bot_box, channel, imap, capsys, argv, account,
+    ):
+        extra = ["--account", account] if account else []
+        code, out = run(capsys, *argv, *extra)
+        assert code == 1, out
+        assert out["status"] == "error"
+        assert imap["calls"] == []
+
+    def test_a_plain_query_still_reaches_the_server(self, store, bot_box, imap, capsys):
+        code, out = run(capsys, "search", 'FROM "dana@example.org" UNSEEN')
+        assert code == 0, out
+        assert imap["calls"]
+
+
 class TestBotOnlyVerbs:
     @pytest.mark.parametrize("argv", [
         ["delete", "7", "--confirmed"],

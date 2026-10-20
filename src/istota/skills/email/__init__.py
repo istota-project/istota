@@ -1621,7 +1621,7 @@ ACCOUNT_REASONS = (
     "unknown_account", "account_disabled", "bot_mailbox_unavailable",
     "scope_not_applicable", "permission_denied", "not_supported_for_account",
     "password_missing", "account_channel_unavailable", "not_owner_turn",
-    "mail_accounts_disabled", "folder_not_found",
+    "mail_accounts_disabled", "folder_not_found", "folder_not_supported",
 )
 
 # The channel's refusals that are the channel's own business rather than the
@@ -1630,9 +1630,6 @@ ACCOUNT_REASONS = (
 _CHANNEL_FAULTS = frozenset({
     "skill_not_permitted", "invalid_credential_request", "mail_account_error",
 })
-
-_MAX_FOLDER_CHARS = 254
-
 
 @dataclass
 class Account:
@@ -1851,13 +1848,59 @@ def _account_arg(args) -> str | None:
     return getattr(args, "account", None)
 
 
+def _checked_folder(folder: str) -> str:
+    from ...mail.accounts import MailAccountError, validate_folder
+    try:
+        return validate_folder(folder)
+    except MailAccountError:
+        raise ValueError("invalid --folder: give a folder name on one line") from None
+
+
+# The arguments a verb puts on an IMAP command line, by `args` attribute.
+_IMAP_TEXT_ARGS = (
+    ("query", "search query"), ("from_addr", "--from"),
+    ("senders", "--senders"), ("sources", "--sources"),
+)
+
+
+def _check_imap_text(args) -> None:
+    """Refuse a control character in anything bound for an IMAP command line.
+
+    imaplib sends an argument as given, and imap-tools' quoting escapes only
+    a backslash and a double quote, so a CR/LF would end the command and the
+    rest would run as one of the model's own: a SELECT past the EXAMINE, a
+    STORE past `mark`'s gate. Checked before any account is resolved.
+    """
+    from ...mail.accounts import has_control
+    for name, shown in _IMAP_TEXT_ARGS:
+        value = getattr(args, name, None)
+        if isinstance(value, str) and has_control(value):
+            raise ValueError(f"invalid {shown}: control characters are not allowed")
+    folder = getattr(args, "folder", None)
+    if folder is not None:
+        _checked_folder(folder)
+
+
 def _folder_arg(args, account: Account) -> str:
+    """The folder a verb reads: the account's default, or ``--folder``.
+
+    The bot box is read from its INBOX only. Ownership is resolved for its
+    inbound mail; its sent copies go to `BOT_SENT_FOLDER`, where a message
+    another user sent resolves to no owner and would read as shared.
+    """
     folder = getattr(args, "folder", None)
     if folder is None:
         return account.default_folder
-    if (not folder.strip() or len(folder) > _MAX_FOLDER_CHARS
-            or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in folder)):
-        raise ValueError("invalid --folder: give a folder name on one line")
+    folder = _checked_folder(folder)
+    if account.is_bot:
+        if folder.upper() != _DEFAULT_FOLDER:
+            raise AccountError(
+                "folder_not_supported",
+                f"The bot mailbox is read from {_DEFAULT_FOLDER} only; "
+                "--folder works with --account.",
+                BOT_SLUG,
+            )
+        return _DEFAULT_FOLDER
     return folder
 
 
@@ -1870,6 +1913,7 @@ def _reading(args, *, purpose: str = "read", changes: bool = False) -> tuple[Acc
     ``purpose`` and ``changes`` are `resolve_account`'s: the reply verbs read
     the original and then send, and ``mark`` changes the mailbox.
     """
+    _check_imap_text(args)
     slug = _account_arg(args)
     if slug not in (None, BOT_SLUG) and getattr(args, "scope", None) is not None:
         raise AccountError(
@@ -2571,6 +2615,8 @@ def cmd_folders(args):
     """The folders a mailbox has, for ``--folder``."""
     account = resolve_account(_account_arg(args), purpose="read")
     args.resolved_account = account
+    if account.is_bot:
+        return {"status": "ok", "account": account.slug, "folders": [_DEFAULT_FOLDER]}
     with imap_session(account.config) as mailbox:
         names = [info.name for info in mailbox.folder.list()]
     return {"status": "ok", "account": account.slug, "folders": names}
