@@ -925,6 +925,56 @@ class TestRoomBindingUpgrade:
             assert after['refused'], 'upgraded artifact accepted a duplicate binding reference'
 
 
+class TestGroupOwnedRoomsUpgrade:
+    def test_linked_rooms_keep_their_roster_and_the_schema_matches_a_fresh_one(
+        self, volume_upgrade, istota_image, tmp_path,
+    ):
+        """ISSUE-816. The last release before group-owned rooms, migrated twice.
+
+        A linked room stays a room-roster room: converting it would hand its
+        history to the group. The migrated shape is compared with what a fresh
+        `istota init` creates, not with literals, so the two paths cannot drift.
+        """
+        anchor = upgrade.resolve_anchor(REPO, ref="v0.46.0")
+        db_dir = tmp_path / "db"
+        path = upgrade.build_anchor_db(REPO, anchor.commit, db_dir / "istota.db")
+        with sqlite3.connect(path) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(rooms)")}
+            assert "group_id" in columns and "membership_source" not in columns
+            conn.execute("INSERT INTO groups(group_id,created_by) VALUES ('upgradegroup','upgradeuser')")
+            conn.execute("INSERT INTO group_members(group_id,user_id,added_by) VALUES ('upgradegroup','upgradeuser','upgradeuser')")
+            conn.execute("INSERT INTO rooms(token,user_id,origin,name,group_id) VALUES ('linkedroom','upgradeuser','web','Linked','upgradegroup')")
+            conn.execute("INSERT INTO rooms(token,user_id,origin,name) VALUES ('plainroom','upgradeuser','web','Plain')")
+        conn.close()
+
+        def witness(directory):
+            read = _docker_run(istota_image, volume_upgrade.config_dir, directory,
+                               ["-c", "python /seed/group_room_state.py"], mounts=[(SEED_DIR, "/seed")])
+            assert read.returncode == 0, read.stdout + read.stderr
+            return json.loads(read.stdout)
+
+        observed = []
+        for _ in range(2):
+            migrated = _docker_run(istota_image, volume_upgrade.config_dir, db_dir, ["-c", _istota("init")])
+            assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+            observed.append(witness(db_dir))
+        assert observed[0] == observed[1], "a second init changed the migrated state"
+        assert observed[0]["marker"]
+        assert observed[0]["rooms"] == {
+            "linkedroom": ["upgradegroup", "room"],
+            "plainroom": [None, "room"],
+        }
+
+        fresh_dir = tmp_path / "fresh"
+        fresh_dir.mkdir()
+        created = _docker_run(istota_image, volume_upgrade.config_dir, fresh_dir, ["-c", _istota("init")])
+        assert created.returncode == 0, created.stdout + created.stderr
+        fresh = witness(fresh_dir)
+        assert fresh["schema"]["membership_source"] is not None
+        assert fresh["schema"]["group_source_index"] == ["group_id", "membership_source"]
+        assert observed[0]["schema"] == fresh["schema"]
+
+
 #: The shipped run contract, as `docker run` flags. The compose file is the
 #: authority (tests/test_container_security_profiles.py holds the lean file to
 #: it); this is the same set for a single container, since the case below boots
