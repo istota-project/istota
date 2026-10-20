@@ -159,7 +159,7 @@ Each poller runs on its same-named interval key: `_talk_poll_loop()`, `poll_emai
 5. IMAP cleanup. 6. Temp files. 7a. Talk media retention (`maintenance/talk_media.py`), local workspace only.
 
 ## Memory Search Integration
-After completion with `auto_index_conversations`: index under `user_id`, and `channel:{token}` in a channel.
+After completion with `auto_index_conversations`: index under `user_id`, and `channel:{token}` in a channel. Buffered and run after the completion transaction closes, on its own connection: `index_conversation` commits, which inside the transaction ended the snapshot the group-room delivery check holds (ISSUE-813).
 
 ## Config Intervals (SchedulerConfig defaults)
 

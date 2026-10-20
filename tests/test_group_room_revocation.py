@@ -584,6 +584,54 @@ class TestDeliveryRefusal:
         assert "the group's private plan" not in json.dumps([e["payload"] for e in events])
         assert "result" not in [e["kind"] for e in events]
 
+    def test_a_removal_after_the_first_check_still_stores_nothing(self, config, room):
+        # The removal commits after the post-run check has passed and before
+        # the completion transaction stores the answer (ISSUE-813).
+        from istota import scheduler
+
+        task_id = _task(config, room, "bob")
+        real_plan = scheduler.resolve_delivery_plan
+
+        def plan_after_removal(*args, **kwargs):
+            _remove(config)
+            return real_plan(*args, **kwargs)
+
+        with patch("istota.scheduler.resolve_delivery_plan", side_effect=plan_after_removal):
+            (ran, success), brain = _run(config, _brain("the group's private plan"))
+        assert ran == task_id and not success
+        assert brain.called
+        assert _task_row(config, task_id)["status"] == "cancelled"
+        with db.get_db(config.db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE task_id = ? AND role = 'assistant'",
+                (task_id,),
+            ).fetchone()[0] == 0
+            events = db.get_task_events(conn, task_id, 0)
+        assert "the group's private plan" not in json.dumps([e["payload"] for e in events])
+
+    def test_memory_indexing_runs_after_the_completion_transaction(self, config, room):
+        # `index_conversation` commits its connection. Run inside the
+        # completion transaction, it ended the transaction the delivery check
+        # holds, and a removal could commit before the rows stored after it.
+        from istota.memory import search
+
+        task_id = _task(config, room, "alice")
+        real_index = search.index_conversation
+        seen = []
+
+        def index_after_store(conn, *args, **kwargs):
+            with db.get_db(config.db_path) as other:
+                seen.append(other.execute(
+                    "SELECT COUNT(*) FROM messages WHERE task_id = ? AND role = 'assistant'",
+                    (task_id,),
+                ).fetchone()[0])
+            return real_index(conn, *args, **kwargs)
+
+        with patch("istota.memory.search.index_conversation", side_effect=index_after_store):
+            (ran, success), _ = _run(config, _brain("noted"))
+        assert ran == task_id and success
+        assert seen and all(count == 1 for count in seen)
+
     def test_a_task_whose_author_left_does_not_run(self, config, room):
         task_id = _task(config, room, "bob")
         with db.get_db(config.db_path) as conn:

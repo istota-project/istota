@@ -3942,8 +3942,32 @@ def process_one_task(
     # as `(row attachments, transcribed paths)` (ISSUE-611). Filled only on the
     # completed branch: a parked or failed task re-runs from the file.
     voice_notes_to_remove: list[tuple[int, str, str]] | None = None
+    # Memory indexing for the completed answer, as `(namespace, body, speaker)`,
+    # run once the transaction below has closed: `index_conversation` commits
+    # its own connection, which would end the transaction mid-way and reopen
+    # the window the delivery check at its head closes (ISSUE-813). It also
+    # runs embedding inference, which has no business under the write lock.
+    conversations_to_index: list[tuple[str, str, str]] = []
 
     with db.get_db(config.db_path) as conn:
+        if not dry_run and success:
+            # The post-run check above ran on its own connection, so a group
+            # removal committing since then would still let the answer in.
+            # Taking the write lock before asking again makes the answer and
+            # every row stored below one snapshot (ISSUE-813).
+            from .groups.rooms import task_delivery_refused
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            _current = db.get_task(conn, task_id)
+            if _current is not None and task_delivery_refused(conn, _current):
+                logger.info("Task %d: its group room stopped admitting its author "
+                            "before the answer was stored; withholding the result",
+                            task_id)
+                success, result = False, "Cancelled by user"
+                is_confirmation_request = False
+                # A relay or authorization question held on this answer goes too.
+                from istota.relay.relays import close_task_questions
+                close_task_questions(conn, task_id, reason="attempt_failed")
         if not dry_run and authorization_question and authorization_question["kind"] == "location_share":
             from istota.relay.requests import write_transaction
             # Keep this lock through parking so stop cannot race the state check.
@@ -4273,7 +4297,6 @@ def process_one_task(
                     and not is_no_final_answer(result)
                 ):
                     try:
-                        from .memory.search import index_conversation as _index_conv
                         from .memory.sleep_cycle import speaker_labels
                         # An indexed chunk is recalled back into a later prompt,
                         # so it must not label an external contact's mail as the
@@ -4284,17 +4307,16 @@ def process_one_task(
                         # A guest's turn is the host's by authority only,
                         # never by memory (multiplayer D2): nothing a guest
                         # wrote is recalled back into the host's own tasks.
+                        _indexed_body = normalized["body"] if briefing_document else result
                         if task.guest_participant_id is None:
-                            _index_conv(conn, task.user_id, task_id, task.prompt,
-                                        normalized["body"] if briefing_document else result,
-                                        speaker=_speaker)
+                            conversations_to_index.append(
+                                (task.user_id, _indexed_body, _speaker))
                         # Also index under channel namespace if in a channel.
                         if (task.conversation_token
                                 and task.guest_participant_id is None):
                             channel_uid = f"channel:{task.conversation_token}"
-                            _index_conv(conn, channel_uid, task_id, task.prompt,
-                                        normalized["body"] if briefing_document else result,
-                                        speaker=_speaker)
+                            conversations_to_index.append(
+                                (channel_uid, _indexed_body, _speaker))
                     except Exception as e:
                         logger.debug("Memory search indexing failed for task %s: %s", task_id, e)
 
@@ -4696,6 +4718,16 @@ def process_one_task(
     # opens further connections of its own, and a buffer that outlives them is a
     # buffer somebody eventually forgets to flush.
     deliver_pending(config, notification_results)
+
+    if conversations_to_index:
+        try:
+            from .memory.search import index_conversation
+            with db.get_db(config.db_path) as conn:
+                for namespace, indexed_body, speaker in conversations_to_index:
+                    index_conversation(conn, namespace, task_id, task.prompt,
+                                       indexed_body, speaker=speaker)
+        except Exception as e:
+            logger.debug("Memory search indexing failed for task %s: %s", task_id, e)
 
     # Likewise the once-job's CRON.md removal, buffered above so the mount
     # write happens with no lock held. It goes after `deliver_pending` rather
