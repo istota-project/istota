@@ -121,6 +121,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- When Money → Settings → Invoicing cannot load its business settings, a screen reader now hears the error once rather than three times. The Business defaults, Entities and Services cards still each show the failure with a Retry.
 - When briefings settings cannot load your schedules or briefing content, it now shows that with a Retry button instead of an editor filled with defaults that Save could have written over your stored schedule. A failed picker list (groups, presets, feeds, shared blocks, email accounts) or email format setting now says so with Retry rather than blanking the page or showing a guess. In Settings → Connections, a failed service list shows Retry where the list goes and no longer claims no services are available.
 - Leaving the shared blocks view while a shared block's Run now is still waiting for the daemon now ends the wait. Before, it kept polling for up to five minutes and then showed the outcome as a notice on whatever page you had moved to. The run itself still finishes in the daemon.
 - Leaving the admin Health page, or Admin → Connections, while a doctor run or a Check now is still waiting for the daemon now ends the wait. Before, it kept polling for up to two minutes and a failure showed as a notice on whatever page you had moved to. The run itself still finishes in the daemon.

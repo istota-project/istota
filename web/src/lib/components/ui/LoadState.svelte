@@ -37,6 +37,11 @@
      */
     header?: Snippet;
     scope?: 'pane' | 'card';
+    /**
+     * A card failure is a `role="alert"` live region. Pass `false` on every card
+     * but one when several show the failure of one request, so it is read once.
+     */
+    announce?: boolean;
     children: Snippet;
   }
 
@@ -51,6 +56,7 @@
     emptyState,
     header,
     scope = 'pane',
+    announce = true,
     children,
   }: Props = $props();
 
@@ -79,7 +85,7 @@
     <Alert
       appearance="inline"
       variant="danger"
-      role="alert"
+      role={announce ? 'alert' : undefined}
       actions={onRetry ? retryAction : undefined}
     >
       {error}
