@@ -1637,6 +1637,10 @@ class Account:
     account_id: int | None = None  # the `mail_accounts` id; None for the bot box
 
 
+class ArgumentError(ValueError):
+    """An argument refused before any server is asked; the message is ours."""
+
+
 class AccountError(Exception):
     """A verb refused before or while reaching an account; no server text."""
 
@@ -1844,7 +1848,7 @@ def _checked_folder(folder: str) -> str:
     try:
         return validate_folder(folder)
     except MailAccountError:
-        raise ValueError("invalid --folder: give a folder name on one line") from None
+        raise ArgumentError("invalid --folder: give a folder name on one line") from None
 
 
 # The arguments a verb puts on an IMAP command line, by `args` attribute.
@@ -1866,7 +1870,7 @@ def _check_imap_text(args) -> None:
     for name, shown in _IMAP_TEXT_ARGS:
         value = getattr(args, name, None)
         if isinstance(value, str) and has_control(value):
-            raise ValueError(f"invalid {shown}: control characters are not allowed")
+            raise ArgumentError(f"invalid {shown}: control characters are not allowed")
     folder = getattr(args, "folder", None)
     if folder is not None:
         _checked_folder(folder)
@@ -1927,19 +1931,6 @@ def _refuse_account(args, verb: str) -> None:
         )
 
 
-def _is_mail_error(exc: BaseException) -> bool:
-    import imaplib
-    import smtplib
-    if isinstance(exc, (mail_connect.ConnectRefused, imaplib.IMAP4.error,
-                        smtplib.SMTPException, OSError)):
-        return True
-    try:
-        from imap_tools.errors import ImapToolsError
-    except ImportError:
-        return False
-    return isinstance(exc, ImapToolsError)
-
-
 _CONNECT_MESSAGES = {
     "dns_failed": "Could not resolve the {slug} account's server.",
     "connect_failed": "Could not reach the {slug} account's server.",
@@ -1958,14 +1949,19 @@ _CONNECT_MESSAGES = {
 def _exception_envelope(exc: BaseException, args) -> dict:
     """The error envelope for whatever a verb raised.
 
-    A connected account's server errors are reclassified and never quoted:
-    the text of a refused sign-in can carry the username, or worse. The bot
-    box keeps the message it always had.
+    On a connected account nothing raised is quoted: a refused sign-in's text
+    can carry the username, and a password the server could not take raises
+    a `UnicodeEncodeError` naming the character and its position. Every
+    exception there is classified, `connect_failed` when nothing narrower
+    fits. Only our own refusals (`AccountError`, `ArgumentError`) keep their
+    text. The bot box keeps the message it always had.
     """
     if isinstance(exc, AccountError):
         return error_envelope(str(exc), reason=exc.reason, account=exc.account)
+    if isinstance(exc, ArgumentError):
+        return error_envelope(str(exc))
     account = getattr(args, "resolved_account", None)
-    if isinstance(account, Account) and not account.is_bot and _is_mail_error(exc):
+    if isinstance(account, Account) and not account.is_bot:
         folder_error = None
         try:
             from imap_tools.errors import MailboxFolderSelectError
@@ -2041,7 +2037,7 @@ def _parse_since(value: str | None) -> "_date | None":
     try:
         return _date.fromisoformat(value)
     except ValueError:
-        raise ValueError(f"invalid --since '{value}' (expected YYYY-MM-DD or Nd)")
+        raise ArgumentError(f"invalid --since '{value}' (expected YYYY-MM-DD or Nd)")
 
 
 def _split_csv(value: str | None) -> list[str]:
@@ -2375,6 +2371,8 @@ def cmd_signup_inbox(args):
 
 def cmd_search(args):
     """Run a raw IMAP SEARCH string, scoped. Malformed criteria errors out."""
+    if not (args.query or "").strip():
+        raise ArgumentError("search query is required")
     account, scope, folder = _reading(args)
     envelopes = search_emails(
         args.query, folder=folder, limit=args.limit, config=account.config,
@@ -2632,7 +2630,7 @@ def cmd_output(args):
     else:
         body = args.body
     if not body:
-        raise ValueError("Either --body or --body-file is required")
+        raise ArgumentError("Either --body or --body-file is required")
 
     fmt = "html" if args.html else "plain"
     data = {
@@ -2798,7 +2796,7 @@ def _read_body(args) -> str:
     else:
         body = getattr(args, "body", None)
     if not body:
-        raise ValueError("Either --body or --body-file is required")
+        raise ArgumentError("Either --body or --body-file is required")
     return body
 
 

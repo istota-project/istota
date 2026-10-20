@@ -473,6 +473,51 @@ class TestErrors:
         assert "alice@work.example" not in json.dumps(out)
         _secrets_absent(json.dumps(out))
 
+    def test_a_non_ascii_imap_password_is_not_quoted(self, store, channel, imap, capsys):
+        with db.get_db(store["path"]) as conn:
+            accounts.set_password(conn, "alice", store["work"], "imap", "pässwort-5e1f")
+            conn.commit()
+        # What imaplib does with a LOGIN argument: `bytes(arg, 'ascii')`.
+        imap["mailbox"].login.side_effect = lambda user, password: bytes(password, "ascii")
+        code, out = run(capsys, "list", "--account", "work")
+        assert code == 1, out
+        assert out["reason"] == "connect_failed"
+        assert out["account"] == "work"
+        text = json.dumps(out, ensure_ascii=False)
+        assert "ä" not in text and "\\xe4" not in text and "position" not in text
+
+    def test_a_non_ascii_smtp_password_is_not_quoted(
+        self, store, channel, imap, smtp, task_env, capsys,
+    ):
+        _policy(store, "off")
+        with db.get_db(store["path"]) as conn:
+            accounts.set_password(conn, "alice", store["home"], "smtp", "pässwort-a04c")
+            accounts.update_account(conn, "alice", store["home"], smtp_same_login=False,
+                                    smtp_username="alice-smtp")
+            conn.commit()
+        # What smtplib does before AUTH: `password.encode('ascii')`.
+        smtp["server"].login.side_effect = lambda user, password: password.encode("ascii")
+        code, out = run(capsys, "send", "--to", "dana@example.org", "--subject", "Hi",
+                        "--body", "Yes.", "--account", "home")
+        assert code == 1, out
+        assert out["reason"] == "connect_failed"
+        text = json.dumps(out, ensure_ascii=False)
+        assert "ä" not in text and "\\xe4" not in text and "position" not in text
+
+    def test_an_argument_error_still_names_the_argument(self, store, channel, imap, capsys):
+        code, out = run(capsys, "list", "--account", "work", "--since", "2026")
+        assert code == 1
+        assert "--since" in out["error"]
+        assert imap["calls"] == []
+
+    def test_any_other_failure_on_an_account_is_classified(
+        self, store, channel, imap, capsys,
+    ):
+        imap["mailbox"].fetch.side_effect = KeyError("server said: alice@work.example")
+        code, out = run(capsys, "list", "--account", "work")
+        assert out["reason"] == "connect_failed"
+        assert "alice@work.example" not in json.dumps(out)
+
     def test_a_private_address_names_the_host(self, store, channel, monkeypatch, capsys):
         from istota.mail import connect
         monkeypatch.setattr(connect.socket, "getaddrinfo", lambda *a, **k: [
