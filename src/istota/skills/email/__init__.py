@@ -19,7 +19,7 @@ from datetime import date as _date
 from datetime import datetime, timedelta
 from email.header import decode_header, make_header
 from email.message import EmailMessage
-from email.utils import formatdate, getaddresses, parsedate_to_datetime
+from email.utils import formataddr, formatdate, getaddresses, parsedate_to_datetime
 from pathlib import Path
 
 from istota.mail import connect as mail_connect
@@ -41,6 +41,8 @@ from istota.lib.untrusted import frame_untrusted
 logger = logging.getLogger("istota.skills.email")
 
 _DEFAULT_FOLDER = "INBOX"
+# Where the bot box keeps a copy of what it sent. A connected account names its own.
+BOT_SENT_FOLDER = "Sent Items"
 _SCOPES = ("mine", "shared", "all")
 
 # Most messages one retention sweep will remove. `run_cleanup_checks` calls the
@@ -868,6 +870,9 @@ def send_email(
     references: str | None = None,
     html_body: str | None = None,
     message_id: str | None = None,
+    from_name: str = "",
+    sent_folder: str = BOT_SENT_FOLDER,
+    outcome: dict | None = None,
 ) -> str:
     """Send an email. Returns the generated Message-ID.
 
@@ -881,6 +886,12 @@ def send_email(
     ``body`` becomes the ``text/plain`` fallback and ``html_body`` the
     ``text/html`` part (``content_type`` is then unused). Omitted or empty, the
     single-part behaviour is unchanged.
+
+    ``from_name`` goes on the From line beside the address. ``sent_folder`` is
+    where a copy is appended, ``""`` for none. ``outcome``, when given, gets
+    ``sent_copy`` set to ``saved``, ``failed`` or ``none``: a failed copy does
+    not fail a delivered send, and a dict rather than a second return value
+    because every caller reads the return as the Message-ID.
     """
     if config is None:
         raise ValueError("config is required")
@@ -894,7 +905,7 @@ def send_email(
     if cc:
         msg["Cc"] = ", ".join(cc) if isinstance(cc, (list, tuple)) else cc
     msg["Subject"] = _sanitize_header(subject)
-    msg["From"] = from_address
+    msg["From"] = _from_header(from_address, from_name)
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = message_id
     if reply_to:
@@ -910,8 +921,16 @@ def send_email(
         _attach_files(msg, attachments)
 
     recipients = _recipients(to, cc, bcc)
-    _send_smtp(msg, config, recipients=recipients)
+    sent_copy = _send_smtp(msg, config, recipients=recipients, sent_folder=sent_folder)
+    if outcome is not None:
+        outcome["sent_copy"] = sent_copy
     return message_id
+
+
+def _from_header(address: str, name: str = "") -> str:
+    """The From line: the address, with the display name when there is one."""
+    name = _sanitize_header(name or "")
+    return formataddr((name, address)) if name else address
 
 
 def mark_email(
@@ -951,6 +970,8 @@ def reply_to_email(
     content_type: str = "plain",
     html_body: str | None = None,
     cc: list[str] | None = None,
+    from_name: str = "",
+    sent_folder: str = BOT_SENT_FOLDER,
 ) -> str:
     """Send a reply email with proper threading headers.
 
@@ -980,7 +1001,7 @@ def reply_to_email(
     if cc:
         msg["Cc"] = ", ".join(cc)
     msg["Subject"] = reply_subject
-    msg["From"] = from_address
+    msg["From"] = _from_header(from_address, from_name)
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = message_id
 
@@ -995,7 +1016,7 @@ def reply_to_email(
 
     _set_body(msg, body, content_type=content_type, html_body=html_body)
 
-    _send_smtp(msg, config)
+    _send_smtp(msg, config, sent_folder=sent_folder)
     return message_id
 
 
@@ -1042,13 +1063,21 @@ def _close_smtp_after_delivery(server) -> None:
 
 def _open_smtp(config: EmailConfig, *, timeout: float = _SMTP_TIMEOUT_SECONDS):
     """A logged-out but connected SMTP session, TLS already established."""
+    if config.check_public:
+        return mail_connect.open_smtp(
+            config, timeout=timeout, check_public=True,
+            private_hosts=config.private_hosts,
+        )
     return mail_connect.open_smtp(config, timeout=timeout)
 
 
 def _send_smtp(
     msg: EmailMessage, config: EmailConfig, recipients: list[str] | None = None,
-) -> None:
-    """Send an email message via SMTP and save to Sent folder.
+    sent_folder: str = BOT_SENT_FOLDER,
+) -> str:
+    """Send an email message via SMTP and save a copy to ``sent_folder``.
+
+    Returns what happened to the copy: ``saved``, ``failed`` or ``none``.
 
     ``recipients`` is the explicit envelope recipient list (To + Cc + Bcc). The
     Bcc header is stripped before serialization so it is never transmitted while
@@ -1078,19 +1107,27 @@ def _send_smtp(
 
     # The message is delivered from here down. Nothing below may raise.
     _close_smtp_after_delivery(server)
-    # Save a copy to Sent Items folder via IMAP (swallows its own failures).
-    _save_to_sent(msg, config)
+    if not sent_folder:
+        return "none"
+    # Swallows its own failures.
+    return "saved" if _save_to_sent(msg, config, folder=sent_folder) else "failed"
 
 
-def _save_to_sent(msg: EmailMessage, config: EmailConfig) -> None:
-    """Save a sent email to the Sent Items folder via IMAP."""
+def _save_to_sent(
+    msg: EmailMessage, config: EmailConfig, folder: str = BOT_SENT_FOLDER,
+) -> bool:
+    """Append a sent email to ``folder``, marked read. False if that failed.
+
+    Never raises: the message is already delivered, and a missing copy must not
+    read as a failed send.
+    """
     try:
         with imap_session(config) as mailbox:
-            # Append the message to Sent Items folder
-            mailbox.append(msg.as_bytes(), "Sent Items", dt=None, flag_set=["\\Seen"])
-    except Exception:
-        # Don't fail the send if saving to Sent fails
-        pass
+            mailbox.append(msg.as_bytes(), folder, dt=None, flag_set=["\\Seen"])
+    except Exception as e:  # noqa: BLE001 — the send already happened
+        logger.warning("email: saving the sent copy failed (%s)", type(e).__name__)
+        return False
+    return True
 
 
 def search_emails(
@@ -1609,6 +1646,7 @@ class Account:
     from_address: str
     from_name: str
     config: EmailConfig
+    account_id: int | None = None  # the `mail_accounts` id; None for the bot box
 
 
 class AccountError(Exception):
@@ -1662,12 +1700,14 @@ def _shown_slug(slug: str) -> str:
         return "that account"
 
 
-def resolve_account(slug: str | None, *, purpose: str) -> Account:
+def resolve_account(slug: str | None, *, purpose: str, changes: bool = False) -> Account:
     """The mailbox ``--account slug`` names, or `AccountError`.
 
     ``None`` and ``"bot"`` are the bot box. Anything else is one of the
     user's own connected accounts, its password fetched over the private
-    channel for ``purpose`` (``read`` or ``send``).
+    channel for ``purpose`` (``read`` or ``send``). ``changes`` is a verb that
+    alters the mailbox without sending (``mark``): it needs the sending
+    permission too, and is refused before the channel is asked.
     """
     if slug is None or slug == BOT_SLUG:
         if not _bot_box_configured():
@@ -1686,7 +1726,7 @@ def resolve_account(slug: str | None, *, purpose: str) -> Account:
         bot = _config_from_env()
         return Account(
             slug=BOT_SLUG, label="Bot mailbox", is_bot=True, permission="read_send",
-            default_folder=_DEFAULT_FOLDER, sent_folder="Sent Items",
+            default_folder=_DEFAULT_FOLDER, sent_folder=BOT_SENT_FOLDER,
             from_address=bot.bot_email, from_name="", config=bot,
         )
 
@@ -1715,7 +1755,7 @@ def resolve_account(slug: str | None, *, purpose: str) -> Account:
             "under Settings > Connections.", slug,
         )
     permission = _effective_permission(row, app_config)
-    if purpose == "send" and permission != "read_send":
+    if (purpose == "send" or changes) and permission != "read_send":
         raise AccountError(
             "permission_denied", f"The {slug} account is read-only.", slug,
         )
@@ -1726,30 +1766,44 @@ def resolve_account(slug: str | None, *, purpose: str) -> Account:
             "under Settings > Connections.", slug,
         )
     login = _fetch_login(row.id, slug, purpose)
-
-    imap = login["imap"]
-    smtp = login["smtp"] or {}
-    config = EmailConfig(
-        imap_host=imap["host"],
-        imap_port=imap["port"],
-        imap_user=imap["username"],
-        imap_password=SecretValue(f"mail account {slug} (IMAP)", imap["password"]),
-        smtp_host=smtp.get("host", ""),
-        smtp_port=smtp.get("port", row.smtp_port),
-        smtp_user=smtp.get("username") or None,
-        smtp_password=(SecretValue(f"mail account {slug} (SMTP)", smtp["password"])
-                       if smtp else None),
-        bot_email=row.from_address,
-        imap_security=imap["security"],
-        smtp_security=smtp.get("security", row.smtp_security),
-        check_public=True,
-        private_hosts=tuple(app_config.mail_accounts.private_hosts),
+    config = account_email_config(
+        row, login, private_hosts=app_config.mail_accounts.private_hosts,
         readonly=permission == "read",
     )
     return Account(
         slug=slug, label=row.label, is_bot=False, permission=permission,
         default_folder=row.default_folder, sent_folder=row.sent_folder,
         from_address=row.from_address, from_name=row.from_name, config=config,
+        account_id=row.id,
+    )
+
+
+def account_email_config(row, login: dict, *, private_hosts, readonly: bool) -> EmailConfig:
+    """A connected account's `EmailConfig`, passwords boxed in `SecretValue`.
+
+    ``row`` is the account's `MailAccount`; ``login`` is the private channel's
+    answer, or `mail.accounts.login_blocks` in the daemon, which builds it.
+    ``smtp`` in it is ``None`` unless the purpose was ``send``. Every host is
+    one a user typed, so the connection checks it is public.
+    """
+    imap = login["imap"]
+    smtp = login["smtp"] or {}
+    return EmailConfig(
+        imap_host=imap["host"],
+        imap_port=imap["port"],
+        imap_user=imap["username"],
+        imap_password=SecretValue(f"mail account {row.slug} (IMAP)", imap["password"]),
+        smtp_host=smtp.get("host", ""),
+        smtp_port=smtp.get("port", row.smtp_port),
+        smtp_user=smtp.get("username") or None,
+        smtp_password=(SecretValue(f"mail account {row.slug} (SMTP)", smtp["password"])
+                       if smtp else None),
+        bot_email=row.from_address,
+        imap_security=imap["security"],
+        smtp_security=smtp.get("security", row.smtp_security),
+        check_public=True,
+        private_hosts=tuple(private_hosts),
+        readonly=readonly,
     )
 
 
@@ -1807,12 +1861,14 @@ def _folder_arg(args, account: Account) -> str:
     return folder
 
 
-def _reading(args) -> tuple[Account, str, str]:
-    """``(account, scope, folder)`` for a read verb.
+def _reading(args, *, purpose: str = "read", changes: bool = False) -> tuple[Account, str, str]:
+    """``(account, scope, folder)`` for a verb that reads a mailbox first.
 
     The scope belongs to the bot box, where it decides whose share of the
     shared mailbox is shown. On a connected account every message is the
     user's, so an explicit ``--scope`` there is refused rather than ignored.
+    ``purpose`` and ``changes`` are `resolve_account`'s: the reply verbs read
+    the original and then send, and ``mark`` changes the mailbox.
     """
     slug = _account_arg(args)
     if slug not in (None, BOT_SLUG) and getattr(args, "scope", None) is not None:
@@ -1821,7 +1877,7 @@ def _reading(args) -> tuple[Account, str, str]:
             "--scope applies to the bot mailbox only; every message in a "
             "connected account is yours. Drop --scope.", _shown_slug(slug),
         )
-    account = resolve_account(slug, purpose="read")
+    account = resolve_account(slug, purpose=purpose, changes=changes)
     args.resolved_account = account
     return account, getattr(args, "scope", None) or "all", _folder_arg(args, account)
 
@@ -2883,8 +2939,13 @@ def _outbound_gate(
     reply_to: str | None = None,
     in_reply_to: str | None = None,
     references: str | None = None,
+    account_id: int | None = None,
 ) -> tuple[dict | None, list[str]]:
     """``(None, attachment_paths)`` to send, else ``(envelope, [])``.
+
+    ``account_id`` is the connected account a held draft goes out through on
+    release, ``None`` for the bot box. The policy is the same either way: it
+    looks at the recipients, not at the From address.
 
     A hold is a **successful** outcome (`status: "held"`, exit 0) — the verb did
     what it was asked, and a non-zero exit invites the model to retry with
@@ -2992,6 +3053,7 @@ def _outbound_gate(
                 attachments=paths,
                 origin_target=origin_target,
                 hold_reason=reason,
+                account_id=account_id,
             )
             # Written and **not** delivered. This runs in the skill proxy's
             # short-lived child process, and `deliver_pending` fans out through
@@ -3029,9 +3091,49 @@ def _outbound_gate(
     }, []
 
 
+def _sender_options(account: Account, outcome: dict) -> dict:
+    """`send_email`'s From and sent-copy options for a connected account.
+
+    Empty for the bot box, whose From and sent folder are `send_email`'s
+    defaults. ``outcome`` collects what happened to the sent copy.
+    """
+    if account.is_bot:
+        return {}
+    return {
+        "from_addr": account.from_address, "from_name": account.from_name,
+        "sent_folder": account.sent_folder, "outcome": outcome,
+    }
+
+
+def _sent_fields(account: Account, outcome: dict) -> dict:
+    """What a send from a connected account adds to its envelope.
+
+    A sent-copy failure is a warning beside a delivered message, not an error.
+    The bot box's envelope keeps the shape it always had.
+    """
+    if account.is_bot:
+        return {}
+    sent_copy = outcome.get("sent_copy", "none")
+    if sent_copy == "failed":
+        logger.warning("email: account %s sent copy failed", account.slug)
+    return {"account": account.slug, "sent_copy": sent_copy}
+
+
+def _record_sent(account: Account, *args, **kwargs) -> None:
+    """Record a bot-box send for reply threading; a connected account's is not.
+
+    Nothing polls a connected account, so a `sent_emails` row and a thread room
+    for its mail would wait for a reply that never arrives through istota.
+    """
+    if account.is_bot:
+        _write_deferred_sent_email(*args, **kwargs)
+
+
 def cmd_send(args):
     """Send an email via CLI (with optional cc/bcc/attachments/reply-to)."""
-    config = _config_from_env()
+    account = resolve_account(_account_arg(args), purpose="send")
+    args.resolved_account = account
+    config = account.config
     body = _read_body(args)
     content_type = "html" if args.html else "plain"
     cc = _split_csv(getattr(args, "cc", None))
@@ -3047,15 +3149,18 @@ def cmd_send(args):
         html=bool(args.html),
         attachments=attachments,
         reply_to=getattr(args, "reply_to", None),
+        account_id=account.account_id,
     )
     if held is not None:
         return held
 
+    outcome: dict = {}
     message_id = send_email(
         to=args.to,
         subject=args.subject,
         body=body,
         config=config,
+        **_sender_options(account, outcome),
         content_type=content_type,
         cc=cc or None,
         bcc=bcc or None,
@@ -3067,8 +3172,8 @@ def cmd_send(args):
         reply_to=getattr(args, "reply_to", None),
     )
 
-    _write_deferred_sent_email(
-        message_id, args.to, args.subject, cc=cc,
+    _record_sent(
+        account, message_id, args.to, args.subject, cc=cc,
         body=plain_part(body, content_type=content_type),
     )
 
@@ -3079,6 +3184,7 @@ def cmd_send(args):
         "cc": cc,
         "subject": args.subject,
         "attachments": [Path(a).name for a in attachments],
+        **_sent_fields(account, outcome),
     }
 
 
@@ -3100,11 +3206,14 @@ def _is_bot_address(addr: str, bot_email: str) -> bool:
 
 
 def cmd_reply(args):
-    """Reply (or reply-all) to a fetched message, threaded. Scoped."""
-    app_config, user_id = _scope_context()
-    email_config = _config_from_env()
-    scope = getattr(args, "scope", None) or "all"
-    orig, err = _read_scoped(app_config, user_id, scope, email_config, args.id)
+    """Reply (or reply-all) to a fetched message, threaded.
+
+    Scoped on the bot box. From a connected account the original is read from
+    that account and the reply goes out through it.
+    """
+    account, scope, folder = _reading(args, purpose="send")
+    email_config = account.config
+    orig, err = _read_one(account, scope, folder, args.id)
     if err is not None:
         return err
 
@@ -3143,24 +3252,27 @@ def cmd_reply(args):
         attachments=attachments,
         in_reply_to=orig.message_id,
         references=references or None,
+        account_id=account.account_id,
     )
     if held is not None:
         return held
 
     content_type = "html" if getattr(args, "html", False) else "plain"
+    outcome: dict = {}
     message_id = send_email(
         to=to_addr,
         subject=subject,
         body=body,
         config=email_config,
+        **_sender_options(account, outcome),
         content_type=content_type,
         cc=cc or None,
         attachments=send_paths or None,
         in_reply_to=orig.message_id,
         references=references or None,
     )
-    _write_deferred_sent_email(
-        message_id, to_addr, subject, cc=cc, in_reply_to=orig.message_id,
+    _record_sent(
+        account, message_id, to_addr, subject, cc=cc, in_reply_to=orig.message_id,
         references=references or None,
         body=plain_part(body, content_type=content_type),
     )
@@ -3171,6 +3283,7 @@ def cmd_reply(args):
         "cc": cc,
         "subject": subject,
         "in_reply_to": orig.message_id,
+        **_sent_fields(account, outcome),
     }
 
 
@@ -3208,14 +3321,19 @@ def cmd_mark(args):
         return err
     if not getattr(args, "confirmed", False):
         return _confirmation_required("mark", args.id, f"marking it {args.action}")
-    app_config, user_id = _scope_context()
-    email_config = _config_from_env()
-    # Only act on mail you can read (yours or shared) — never another user's.
-    _, err = _read_scoped(app_config, user_id, "all", email_config, args.id)
-    if err is not None:
-        return err
-    mark_email(args.id, args.action, folder=_DEFAULT_FOLDER, config=email_config)
-    return {"status": "ok", "id": args.id, "action": args.action}
+    account, _, folder = _reading(args, changes=True)
+    if account.is_bot:
+        app_config, user_id = _scope_context()
+        # Only act on mail you can read (yours or shared) — never another user's.
+        _, err = _read_scoped(app_config, user_id, "all", account.config, args.id,
+                              folder=folder)
+        if err is not None:
+            return err
+        mark_email(args.id, args.action, folder=folder, config=account.config)
+        return {"status": "ok", "id": args.id, "action": args.action}
+    mark_email(args.id, args.action, folder=folder, config=account.config)
+    return {"status": "ok", "id": args.id, "action": args.action,
+            "account": account.slug, "folder": folder}
 
 
 def cmd_delete(args):
@@ -3338,6 +3456,7 @@ def build_parser():
         help="Attach a file from your own workspace (repeatable)",
     )
     p_send.add_argument("--reply-to", dest="reply_to", help="Reply-To header address")
+    _add_account(p_send)
 
     # reply / reply-all
     for verb in ("reply", "reply-all"):
@@ -3355,7 +3474,7 @@ def build_parser():
         )
         if verb == "reply":
             p_reply.add_argument("--all", action="store_true", help="Reply to all recipients")
-        _add_scope(p_reply)
+        _add_reading(p_reply)
 
     sub.add_parser("accounts", help="The mailboxes --account can name")
 
@@ -3367,6 +3486,8 @@ def build_parser():
     p_mark.add_argument("id", help="Email UID")
     p_mark.add_argument("action", choices=["read", "unread", "flagged"])
     p_mark.add_argument("--confirmed", action="store_true", help="Confirm this destructive action")
+    _add_account(p_mark)
+    _add_folder(p_mark)
 
     # delete (gated)
     p_del = sub.add_parser("delete", help="Delete an email (requires --confirmed)")

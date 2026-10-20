@@ -211,7 +211,7 @@ class TestSend:
         attachment = skill_env._test_attachment
         args = MagicMock(to="a@out.com", subject="S", body="hi", body_file=None,
                          html=False, cc="c@out.com", bcc="d@out.com",
-                         attach=[attachment], reply_to="r@x.com")
+                         attach=[attachment], reply_to="r@x.com", account=None)
         with patch("istota.skills.email.send_email", return_value="<mid@x>") as se, \
              patch("istota.skills.email._write_deferred_sent_email"):
             res = cmd_send(args)
@@ -280,7 +280,8 @@ class TestSend:
         """The ok envelope carries the sent Message-ID so 'sent' is backed by
         a concrete identifier the agent can quote (ISSUE-175)."""
         args = MagicMock(to="a@out.com", subject="S", body="hi", body_file=None,
-                         html=False, cc=None, bcc=None, attach=None, reply_to=None)
+                         html=False, cc=None, bcc=None, attach=None, reply_to=None,
+                         account=None)
         with patch("istota.skills.email.send_email", return_value="<mid@x>"), \
              patch("istota.skills.email._write_deferred_sent_email"):
             res = cmd_send(args)
@@ -295,7 +296,8 @@ class TestReply:
         orig = _mail("5", "client@out.com", to=[BOT], message_id="<orig@x>",
                      references="<older@x>", subject="Project")
         args = MagicMock(id="5", body="thanks", body_file=None, html=False,
-                         attach=None, all=False, scope="all", command="reply")
+                         attach=None, all=False, scope="all", command="reply",
+                         account=None, folder=None)
         with patch("istota.skills.email.read_email", return_value=orig), \
              patch("istota.skills.email.send_email", return_value="<new@x>") as se, \
              patch("istota.skills.email._write_deferred_sent_email"):
@@ -315,7 +317,8 @@ class TestReply:
             cc=["cc1@out.com", "client@out.com"], message_id="<orig@x>",
         )
         args = MagicMock(id="5", body="ok", body_file=None, html=False,
-                         attach=None, all=True, scope="all", command="reply")
+                         attach=None, all=True, scope="all", command="reply",
+                         account=None, folder=None)
         with patch("istota.skills.email.read_email", return_value=orig), \
              patch("istota.skills.email.send_email", return_value="<new@x>"), \
              patch("istota.skills.email._write_deferred_sent_email"):
@@ -330,7 +333,8 @@ class TestReply:
     def test_reply_to_other_users_mail_is_not_found(self, skill_env):
         orig = _mail("5", "x@out.com", to=["bot+dana@example.com"], message_id="<o@x>")
         args = MagicMock(id="5", body="ok", body_file=None, html=False,
-                         attach=None, all=False, scope="all", command="reply")
+                         attach=None, all=False, scope="all", command="reply",
+                         account=None, folder=None)
         with patch("istota.skills.email.read_email", return_value=orig):
             res = cmd_reply(args)
         assert res["status"] == "not_found"
@@ -359,7 +363,8 @@ class TestGatedOps:
 
     def test_mark_confirmed_on_own_mail(self, skill_env):
         orig = _mail("5", "x@out.com", to=["bot+alice@example.com"], message_id="<o@x>")
-        args = MagicMock(id="5", action="read", confirmed=True, scope="all")
+        args = MagicMock(id="5", action="read", confirmed=True, scope="all",
+                         account=None, folder=None)
         with patch("istota.skills.email.read_email", return_value=orig), \
              patch("istota.skills.email.mark_email", return_value=True) as me:
             res = cmd_mark(args)

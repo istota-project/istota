@@ -447,3 +447,276 @@ class TestFoldersVerb:
         assert code == 0, out
         assert out == {"status": "ok", "account": "work", "folders": ["INBOX", "Archive"]}
         assert imap["calls"][0][0].imap_host == "imap.work.example"
+
+
+# ---------------------------------------------------------------------------
+# Sending from an account
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def smtp(monkeypatch):
+    """Every `open_smtp` call recorded, each answered by one fake server."""
+    calls = []
+    server = MagicMock()
+    sent = []
+    server.send_message.side_effect = lambda msg, to_addrs=None: sent.append((msg, to_addrs))
+
+    def open_smtp(config, **kwargs):
+        calls.append((config, kwargs))
+        return server
+
+    monkeypatch.setattr("istota.mail.connect.open_smtp", open_smtp)
+    return {"calls": calls, "server": server, "sent": sent}
+
+
+@pytest.fixture
+def task_env(store, tmp_path, monkeypatch):
+    """The env a task's skill call carries, with a deferred dir to watch."""
+    deferred = tmp_path / "deferred"
+    deferred.mkdir()
+    monkeypatch.setenv("ISTOTA_TASK_ID", str(store["task_id"]))
+    monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(deferred))
+    return deferred
+
+
+def _policy(store, floor):
+    store["config"].email.outbound_approval_floor = floor
+
+
+def _sent_rows(store):
+    with db.get_db(store["path"]) as conn:
+        return conn.execute("SELECT * FROM sent_emails").fetchall()
+
+
+def _drafts(store):
+    with db.get_db(store["path"]) as conn:
+        return conn.execute("SELECT * FROM outbound_drafts").fetchall()
+
+
+class TestSendingNeedsPermission:
+    """Refused before any connection, and before the gate writes a draft."""
+
+    @pytest.mark.parametrize("argv", [
+        ["send", "--to", "dana@example.org", "--subject", "Hi", "--body", "Yes."],
+        ["reply", "7", "--body", "Yes."],
+        ["reply-all", "7", "--body", "Yes."],
+        ["mark", "7", "read", "--confirmed"],
+    ])
+    def test_a_read_account_refuses(self, store, channel, imap, smtp, capsys, argv):
+        _policy(store, "all")
+        code, out = run(capsys, *argv, "--account", "work")
+        assert code == 1, out
+        assert out["reason"] == "permission_denied"
+        assert out["account"] == "work"
+        assert imap["calls"] == [] and smtp["calls"] == []
+        assert _drafts(store) == []
+
+    def test_sending_off_refuses_every_account(self, store, channel, imap, smtp, capsys):
+        store["config"].mail_accounts = MailAccountsConfig(allow_send=False)
+        code, out = run(capsys, "send", "--to", "dana@example.org", "--subject", "Hi",
+                        "--body", "Yes.", "--account", "home")
+        assert out["reason"] == "permission_denied"
+        assert smtp["calls"] == []
+
+    def test_mark_with_sending_off_refuses(self, store, channel, imap, capsys):
+        store["config"].mail_accounts = MailAccountsConfig(allow_send=False)
+        code, out = run(capsys, "mark", "7", "read", "--confirmed", "--account", "home")
+        assert out["reason"] == "permission_denied"
+        assert imap["calls"] == []
+
+
+class TestDirectSend:
+    def _send(self, capsys, *extra):
+        return run(capsys, "send", "--to", "dana@example.org", "--subject", "Lunch",
+                   "--body", "Tuesday works.", "--account", "home", *extra)
+
+    def test_it_goes_out_through_the_accounts_smtp_with_its_from(
+        self, store, bot_box, channel, imap, smtp, task_env, capsys,
+    ):
+        _policy(store, "off")
+        code, out = self._send(capsys)
+        assert code == 0, out
+        config, kwargs = smtp["calls"][0]
+        assert config.smtp_host == "smtp.home.example"
+        assert kwargs["check_public"] is True
+        smtp["server"].login.assert_called_once_with("alice@home.example", HOME_SECRET)
+        msg, to_addrs = smtp["sent"][0]
+        assert msg["From"] == "alice@home.example"
+        assert to_addrs == ["dana@example.org"]
+        assert out["status"] == "ok" and out["account"] == "home"
+        _secrets_absent(json.dumps(out))
+
+    def test_from_name_is_on_the_from_line(
+        self, store, channel, imap, smtp, task_env, capsys,
+    ):
+        _policy(store, "off")
+        with db.get_db(store["path"]) as conn:
+            accounts.update_account(conn, "alice", store["home"], from_name="Alice Example")
+            conn.commit()
+        self._send(capsys)
+        msg, _ = smtp["sent"][0]
+        assert msg["From"] == "Alice Example <alice@home.example>"
+        assert msg["Message-ID"].endswith("@home.example>")
+
+    def test_no_sent_emails_file_and_no_row(
+        self, store, channel, imap, smtp, task_env, capsys,
+    ):
+        _policy(store, "off")
+        code, out = self._send(capsys)
+        assert code == 0, out
+        assert list(task_env.iterdir()) == []
+        assert _sent_rows(store) == []
+
+    def test_the_bot_box_still_writes_its_sent_emails_file(
+        self, store, bot_box, smtp, imap, task_env, capsys,
+    ):
+        # The control: the same send from the bot box does write the file.
+        _policy(store, "off")
+        code, out = run(capsys, "send", "--to", "dana@example.org", "--subject", "Lunch",
+                        "--body", "Tuesday works.")
+        assert code == 0, out
+        assert [p.name for p in task_env.iterdir()] == [
+            f"task_{store['task_id']}_sent_emails.json",
+        ]
+        assert smtp["calls"][0][0].smtp_host == "smtp.bot.example"
+
+    def test_no_sent_folder_means_no_copy(
+        self, store, channel, imap, smtp, task_env, capsys,
+    ):
+        _policy(store, "off")
+        code, out = self._send(capsys)
+        assert out["sent_copy"] == "none"
+        imap["mailbox"].append.assert_not_called()
+
+    def test_a_sent_folder_gets_a_seen_copy(
+        self, store, channel, imap, smtp, task_env, capsys,
+    ):
+        _policy(store, "off")
+        with db.get_db(store["path"]) as conn:
+            accounts.update_account(conn, "alice", store["home"], sent_folder="Sent")
+            conn.commit()
+        code, out = self._send(capsys)
+        assert out["sent_copy"] == "saved"
+        args, kwargs = imap["mailbox"].append.call_args
+        assert args[1] == "Sent"
+        assert kwargs["flag_set"] == ["\\Seen"]
+        assert imap["calls"][0][0].imap_host == "imap.home.example"
+
+    def test_a_failed_copy_does_not_fail_the_send(
+        self, store, channel, imap, smtp, task_env, capsys,
+    ):
+        _policy(store, "off")
+        with db.get_db(store["path"]) as conn:
+            accounts.update_account(conn, "alice", store["home"], sent_folder="Sent")
+            conn.commit()
+        imap["mailbox"].append.side_effect = OSError("quota")
+        code, out = self._send(capsys)
+        assert code == 0, out
+        assert out["status"] == "ok"
+        assert out["sent_copy"] == "failed"
+
+    def test_a_refused_sign_in_is_classified(
+        self, store, channel, imap, smtp, task_env, capsys,
+    ):
+        import smtplib
+        _policy(store, "off")
+        smtp["server"].login.side_effect = smtplib.SMTPAuthenticationError(
+            535, ("bad password for alice@home.example " + HOME_SECRET).encode(),
+        )
+        code, out = self._send(capsys)
+        assert code == 1
+        assert out["reason"] == "auth_failed"
+        assert "alice@home.example" not in json.dumps(out)
+        _secrets_absent(json.dumps(out))
+
+
+class TestHeldSend:
+    def test_the_draft_records_the_account(
+        self, store, channel, imap, smtp, task_env, capsys,
+    ):
+        _policy(store, "all")
+        code, out = run(capsys, "send", "--to", "dana@example.org", "--subject", "Lunch",
+                        "--body", "Tuesday works.", "--account", "home")
+        assert code == 0, out
+        assert out["status"] == "held"
+        [draft] = _drafts(store)
+        assert draft["account_id"] == store["home"]
+        assert smtp["calls"] == []
+
+    def test_a_bot_box_draft_has_no_account(
+        self, store, bot_box, imap, smtp, task_env, capsys,
+    ):
+        _policy(store, "all")
+        code, out = run(capsys, "send", "--to", "dana@example.org", "--subject", "Lunch",
+                        "--body", "Tuesday works.")
+        assert out["status"] == "held"
+        [draft] = _drafts(store)
+        assert draft["account_id"] is None
+
+
+class TestReplyFromAnAccount:
+    def test_reply_reads_and_sends_through_the_account(
+        self, store, channel, imap, smtp, task_env, capsys,
+    ):
+        _policy(store, "off")
+        code, out = run(capsys, "reply", "7", "--body", "Yes.", "--account", "home")
+        assert code == 0, out
+        assert all(c[0].imap_host == "imap.home.example" for c in imap["calls"])
+        imap["mailbox"].folder.set.assert_called_with("Inbox/Main")
+        msg, _ = smtp["sent"][0]
+        assert msg["From"] == "alice@home.example"
+        assert msg["To"] == "dana@example.org"
+        assert out["account"] == "home"
+        assert list(task_env.iterdir()) == []
+
+    def test_reply_all_leaves_out_the_accounts_own_address(
+        self, store, channel, imap, smtp, task_env, capsys,
+    ):
+        _policy(store, "off")
+        original = _message()
+        original.to = ("alice@home.example", "lee@example.org")
+        imap["mailbox"].fetch.return_value = [original]
+        code, out = run(capsys, "reply-all", "7", "--body", "Yes.", "--account", "home")
+        assert code == 0, out
+        assert out["cc"] == ["lee@example.org"]
+
+    def test_reply_with_a_folder(self, store, channel, imap, smtp, task_env, capsys):
+        _policy(store, "off")
+        code, out = run(capsys, "reply", "7", "--body", "Yes.", "--account", "home",
+                        "--folder", "Archive")
+        assert code == 0, out
+        imap["mailbox"].folder.set.assert_called_with("Archive")
+
+    def test_scope_with_an_account_is_refused(self, store, channel, imap, smtp, capsys):
+        code, out = run(capsys, "reply", "7", "--body", "Yes.", "--account", "home",
+                        "--scope", "mine")
+        assert out["reason"] == "scope_not_applicable"
+        assert imap["calls"] == [] and smtp["calls"] == []
+
+    def test_a_missing_original_is_not_found(self, store, channel, imap, smtp, capsys):
+        _policy(store, "off")
+        imap["mailbox"].fetch.return_value = []
+        code, out = run(capsys, "reply", "8", "--body", "Yes.", "--account", "home")
+        assert out == {"status": "not_found", "id": "8", "account": "home"}
+        assert smtp["calls"] == []
+
+
+class TestMarkOnAnAccount:
+    def test_mark_stores_the_flag_in_the_accounts_folder(
+        self, store, channel, imap, capsys,
+    ):
+        imap["mailbox"].client.uid.return_value = ("OK", [b""])
+        code, out = run(capsys, "mark", "7", "read", "--confirmed", "--account", "home")
+        assert code == 0, out
+        assert imap["calls"][0][0].imap_host == "imap.home.example"
+        imap["mailbox"].folder.set.assert_called_once_with("Inbox/Main")
+        imap["mailbox"].client.uid.assert_called_once_with("STORE", "7", "+FLAGS", "(\\Seen)")
+        assert out["account"] == "home"
+
+    def test_mark_with_a_folder(self, store, channel, imap, capsys):
+        imap["mailbox"].client.uid.return_value = ("OK", [b""])
+        code, out = run(capsys, "mark", "7", "flagged", "--confirmed", "--account", "home",
+                        "--folder", "Archive")
+        assert code == 0, out
+        imap["mailbox"].folder.set.assert_called_once_with("Archive")

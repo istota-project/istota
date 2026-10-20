@@ -622,6 +622,30 @@ def resolve_for_daemon(
     )
 
 
+def login_blocks(resolved: ResolvedAccount) -> dict:
+    """``{"imap": {...}, "smtp": {...} | None}``: what an account signs in with.
+
+    The private channel's answer and `drafts.release`'s input, one shape built
+    in one place. ``smtp`` is set only for purpose ``send``.
+    """
+    account = resolved.account
+    smtp = None
+    if resolved.purpose == "send":
+        smtp = {
+            "host": account.smtp_host, "port": account.smtp_port,
+            "security": account.smtp_security, "username": account.smtp_login,
+            "password": resolved.smtp_password,
+        }
+    return {
+        "imap": {
+            "host": account.imap_host, "port": account.imap_port,
+            "security": account.imap_security, "username": account.imap_username,
+            "password": resolved.imap_password,
+        },
+        "smtp": smtp,
+    }
+
+
 def _refuse(user_id: str, account_id: int, purpose: str, reason: str) -> Unresolved:
     logger.info(
         "mail account not resolved user=%s account_id=%s purpose=%s reason=%s",

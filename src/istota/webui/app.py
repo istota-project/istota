@@ -12247,6 +12247,9 @@ def _draft_dict(draft, actions: list[str]) -> dict:
         "html": draft.html,
         "attachments": [PurePath(p).name for p in draft.attachments],
         "hold_reason": draft.hold_reason,
+        # "Label (address)" for a draft held from a connected mail account,
+        # None for the bot box.
+        "from_line": draft.from_line,
         "created_at": _iso_utc(draft.created_at),
         "actions_taken": actions,
     }

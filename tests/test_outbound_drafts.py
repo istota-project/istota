@@ -753,7 +753,7 @@ class TestTheRealSendPath:
     def _sent(self, config, draft_id):
         captured = {}
 
-        def capture(msg, cfg, recipients=None):
+        def capture(msg, cfg, recipients=None, **kwargs):
             captured["msg"] = msg
             captured["recipients"] = recipients
 
@@ -1079,3 +1079,161 @@ class TestSweepArgumentValidation:
         draft_id = _hold(conn)
         _age(conn, draft_id, 200)
         assert drafts.stale_unnagged(conn, older_than_hours=hours) == []
+
+
+# ---------------------------------------------------------------------------
+# Drafts held from a connected mail account
+# ---------------------------------------------------------------------------
+
+
+class TestAccountDrafts:
+    """A held send from a connected account goes out through that account.
+
+    Release re-checks the account in the daemon, so an account turned off,
+    downgraded or emptied of its password since the hold refuses and leaves
+    the draft pending. Nothing polls the account, so no thread is recorded.
+    """
+
+    SECRET = "home-pass-3c9a"
+
+    @pytest.fixture
+    def account(self, conn, config, monkeypatch):
+        from istota.mail import accounts
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+        row, _ = accounts.ensure_account(
+            conn, "alice", slug="home", label="Home", imap_host="imap.home.example",
+            imap_username="alice@home.example", permission="read_send",
+            smtp_host="smtp.home.example", from_address="alice@home.example",
+            from_name="Alice Example", sent_folder="Sent",
+        )
+        conn.commit()
+        accounts.set_password(conn, "alice", row.id, "imap", self.SECRET)
+        conn.commit()
+        return row
+
+    def _release(self, config, draft_id, **send_kwargs):
+        with patch("istota.skills.email.send_email",
+                   return_value="<acct@home.example>", **send_kwargs) as send, \
+             patch("istota.transport.email.threads.register_sent_thread") as thread:
+            message_id = drafts.release(config, draft_id)
+        return message_id, send, thread
+
+    def test_hold_records_the_account(self, conn, account):
+        draft_id = _hold(conn, account_id=account.id)
+        assert drafts.get(conn, draft_id).account_id == account.id
+        assert drafts.get(conn, _hold(conn)).account_id is None
+
+    def test_the_listings_carry_the_from_line(self, conn, account):
+        held = _hold(conn, account_id=account.id)
+        bot = _hold(conn)
+        by_id = {d.id: d for d in drafts.open_for_user(conn, "alice").drafts}
+        assert by_id[held].from_line == "Home (alice@home.example)"
+        assert by_id[bot].from_line is None
+        [listed, _] = drafts.pending_for_user(conn, "alice")
+        assert listed.from_line == "Home (alice@home.example)"
+
+    def test_the_drafts_command_names_the_account(self, conn, account):
+        from istota.commands import _draft_line
+        held = drafts.get(conn, _hold(conn, account_id=account.id))
+        bot = drafts.get(conn, _hold(conn))
+        assert _draft_line(held).endswith("(from Home (alice@home.example))")
+        assert "(from " not in _draft_line(bot)
+
+    def test_the_listing_never_joins_another_users_account(self, conn, account):
+        held = _hold(conn, user_id="bob", room_token="room2", account_id=account.id)
+        [listed] = drafts.open_for_user(conn, "bob").drafts
+        assert listed.id == held
+        assert "alice@home.example" not in (listed.from_line or "")
+
+    def test_release_sends_through_the_account(self, conn, config, account):
+        draft_id = _hold(conn, account_id=account.id)
+        message_id, send, thread = self._release(config, draft_id)
+
+        assert message_id == "<acct@home.example>"
+        kwargs = send.call_args.kwargs
+        assert kwargs["config"].smtp_host == "smtp.home.example"
+        assert kwargs["config"].check_public is True
+        assert kwargs["config"].effective_smtp_password.reveal() == self.SECRET
+        assert self.SECRET not in repr(kwargs["config"])
+        assert kwargs["from_addr"] == "alice@home.example"
+        assert kwargs["from_name"] == "Alice Example"
+        assert kwargs["sent_folder"] == "Sent"
+        thread.assert_not_called()
+        assert conn.execute("SELECT count(*) FROM sent_emails").fetchone()[0] == 0
+        assert drafts.get(conn, draft_id).status == "sent"
+
+    def test_release_needs_no_bot_box(self, conn, config, account):
+        config.email.enabled = False
+        draft_id = _hold(conn, account_id=account.id)
+        message_id, _, _ = self._release(config, draft_id)
+        assert message_id == "<acct@home.example>"
+
+    @pytest.mark.parametrize("change, said", [
+        ({"permission": "read"}, "no longer allows sending"),
+        ({"enabled": False}, "no longer exists or is turned off"),
+    ])
+    def test_a_changed_account_refuses_and_stays_pending(
+        self, conn, config, account, change, said,
+    ):
+        from istota.mail import accounts
+        draft_id = _hold(conn, account_id=account.id)
+        accounts.update_account(conn, "alice", account.id, **change)
+        conn.commit()
+        with patch("istota.skills.email.send_email") as send:
+            with pytest.raises(DraftError, match=said):
+                drafts.release(config, draft_id)
+        send.assert_not_called()
+        assert drafts.get(conn, draft_id).status == "pending"
+
+    def test_sending_off_refuses(self, conn, config, account):
+        from istota.config import MailAccountsConfig
+        config.mail_accounts = MailAccountsConfig(allow_send=False)
+        draft_id = _hold(conn, account_id=account.id)
+        with patch("istota.skills.email.send_email") as send:
+            with pytest.raises(DraftError, match="no longer allows sending"):
+                drafts.release(config, draft_id)
+        send.assert_not_called()
+        assert drafts.get(conn, draft_id).status == "pending"
+
+    def test_the_feature_off_refuses(self, conn, config, account):
+        from istota.config import MailAccountsConfig
+        config.mail_accounts = MailAccountsConfig(enabled=False)
+        draft_id = _hold(conn, account_id=account.id)
+        with pytest.raises(DraftError, match="turned off on this instance"):
+            drafts.release(config, draft_id)
+        assert drafts.get(conn, draft_id).status == "pending"
+
+    def test_a_missing_smtp_password_refuses(self, conn, config, account):
+        from istota.mail import accounts
+        accounts.update_account(conn, "alice", account.id, smtp_same_login=False,
+                                smtp_username="alice-smtp")
+        conn.commit()
+        draft_id = _hold(conn, account_id=account.id)
+        with pytest.raises(DraftError, match="no password set for sending"):
+            drafts.release(config, draft_id)
+        assert drafts.get(conn, draft_id).status == "pending"
+
+    def test_a_deleted_account_refuses(self, conn, config, account):
+        # Deleting through the store discards the drafts; a row removed some
+        # other way must still not send.
+        draft_id = _hold(conn, account_id=account.id)
+        conn.execute("DELETE FROM mail_accounts WHERE id = ?", (account.id,))
+        conn.commit()
+        with pytest.raises(DraftError, match="no longer exists"):
+            drafts.release(config, draft_id)
+        assert drafts.get(conn, draft_id).status == "pending"
+
+    def test_delete_account_discards_its_pending_drafts(self, conn, config, account):
+        from istota.mail import accounts
+        draft_id = _hold(conn, account_id=account.id)
+        accounts.delete_account(conn, "alice", account.id)
+        conn.commit()
+        assert drafts.get(conn, draft_id).status == "discarded"
+
+    def test_a_bot_box_draft_still_records_its_thread(self, conn, config, account):
+        draft_id = _hold(conn)
+        _, send, thread = self._release(config, draft_id)
+        assert send.call_args.kwargs["from_addr"] == "bot@test.invalid"
+        assert "sent_folder" not in send.call_args.kwargs
+        thread.assert_called_once()
+        assert conn.execute("SELECT count(*) FROM sent_emails").fetchone()[0] == 1

@@ -301,8 +301,13 @@ class TestConfigFromEnv:
 
 class TestCmdSend:
     @pytest.fixture(autouse=True)
-    def _gate_off(self, outbound_gate_off):
-        """Send mechanics, not approval policy — see the fixture's docstring."""
+    def _gate_off(self, outbound_gate_off, monkeypatch):
+        """Send mechanics, not approval policy — see the fixture's docstring.
+
+        `SMTP_HOST` is what says the bot box is configured; the proxy exports
+        it only when `[email]` is enabled.
+        """
+        monkeypatch.setenv("SMTP_HOST", "smtp.test.com")
 
     @patch("istota.skills.email._config_from_env")
     @patch("istota.skills.email.send_email")
@@ -312,7 +317,7 @@ class TestCmdSend:
             imap_host="", imap_port=993, imap_user="", imap_password="",
             smtp_host="smtp.test.com", smtp_port=587, bot_email="bot@test.com",
         )
-        args = MagicMock()
+        args = MagicMock(account=None)
         args.to = "alice@example.com"
         args.subject = "Hello"
         args.body = "Test body"
@@ -350,7 +355,7 @@ class TestCmdSend:
             imap_host="", imap_port=993, imap_user="", imap_password="",
             smtp_host="smtp.test.com", smtp_port=587,
         )
-        args = MagicMock()
+        args = MagicMock(account=None)
         args.to = "bob@example.com"
         args.subject = "Report"
         args.body = "<h1>Report</h1>"
@@ -373,7 +378,7 @@ class TestCmdSend:
         body_file = tmp_path / "body.html"
         body_file.write_text("<p>Hello from file</p>")
 
-        args = MagicMock()
+        args = MagicMock(account=None)
         args.to = "bob@example.com"
         args.subject = "File body"
         args.body = None
@@ -391,7 +396,7 @@ class TestCmdSend:
             imap_host="", imap_port=993, imap_user="", imap_password="",
             smtp_host="smtp.test.com", smtp_port=587,
         )
-        args = MagicMock()
+        args = MagicMock(account=None)
         args.to = "bob@example.com"
         args.subject = "Empty"
         args.body = None
@@ -404,8 +409,13 @@ class TestCmdSend:
 
 class TestEmailCLIMain:
     @pytest.fixture(autouse=True)
-    def _gate_off(self, outbound_gate_off):
-        """Send mechanics, not approval policy — see the fixture's docstring."""
+    def _gate_off(self, outbound_gate_off, monkeypatch):
+        """Send mechanics, not approval policy — see the fixture's docstring.
+
+        `SMTP_HOST` is what says the bot box is configured; the proxy exports
+        it only when `[email]` is enabled.
+        """
+        monkeypatch.setenv("SMTP_HOST", "smtp.test.com")
 
     @patch("istota.skills.email._config_from_env")
     @patch("istota.skills.email.send_email")

@@ -975,26 +975,11 @@ class SkillProxy:
         if isinstance(resolved, accounts.Unresolved):
             refuse(resolved.reason)
             return
-        account = resolved.account
-        smtp = None
-        if purpose == "send":
-            smtp = {
-                "host": account.smtp_host, "port": account.smtp_port,
-                "security": account.smtp_security, "username": account.smtp_login,
-                "password": resolved.smtp_password,
-            }
         logger.info(
             "mail_account served task_id=%s account_id=%s purpose=%s",
             self.task_id, account_id, purpose,
         )
-        self._send_response(conn, {
-            "imap": {
-                "host": account.imap_host, "port": account.imap_port,
-                "security": account.imap_security, "username": account.imap_username,
-                "password": resolved.imap_password,
-            },
-            "smtp": smtp,
-        })
+        self._send_response(conn, accounts.login_blocks(resolved))
 
     def _spend_vault_fetch(
         self, private: bool, request_type: str, name: str,
