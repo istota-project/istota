@@ -12,9 +12,11 @@ import {
  *
  * Runs after a live `getMe` and again whenever `quick_notes_folder` changes.
  * The web mints, the shell keeps: a token reaches the shell once and is never
- * read back, so "the token is fine" is judged from the scopes the shell reports
- * and whether its last send was refused. A failure is logged and swallowed; the
- * next page load tries again.
+ * read back, so "the token is fine" is judged from the scopes the shell reports,
+ * whether its last send was refused, and whether this account has a row for the
+ * shell's device. That last check cannot tell two accounts' rows for one device
+ * apart: when both have minted on this phone, the shell may hold the other's
+ * token. A failure is logged and swallowed; the next page load tries again.
  */
 
 // The shell's status does not report the folder label it holds, so this page
@@ -30,6 +32,12 @@ export function syncDeviceActions(): Promise<void> {
   });
   chain = run;
   return run;
+}
+
+async function ownsDeviceRow(deviceId: string): Promise<boolean> {
+  const { devices } = await listDevices();
+  const wanted = deviceId.toUpperCase();
+  return devices.some((device) => device.device_id.toUpperCase() === wanted);
 }
 
 function sameScopes(a: string[], b: string[]): boolean {
@@ -67,9 +75,13 @@ async function sync(): Promise<void> {
       provisionedFolder.deviceId === status.deviceId &&
       provisionedFolder.folder === folder;
     if (known) return;
-    await provisionActions(null, wanted, folder);
-    provisionedFolder = { deviceId: status.deviceId, folder };
-    return;
+    // The shell keeps one token per connection, and the account signed in now
+    // may not be the one that minted it. Without a row of ours it is not ours.
+    if (await ownsDeviceRow(status.deviceId)) {
+      await provisionActions(null, wanted, folder);
+      provisionedFolder = { deviceId: status.deviceId, folder };
+      return;
+    }
   }
 
   const minted = await createDevice({

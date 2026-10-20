@@ -25,6 +25,7 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   }
   if (url === '/istota/api/devices' && method === 'POST') {
     const body = JSON.parse(init!.body as string);
+    devices = [{ id: 7, device_id: body.device_id.toUpperCase(), scopes: body.scopes }];
     return new Response(JSON.stringify({ id: 7, token: 'minted-token', scopes: body.scopes }), {
       status: 201,
     });
@@ -77,6 +78,7 @@ it('mints a notes token and provisions it when the folder is set and the shell h
 
 it('does not mint when the shell already holds the wanted scopes', async () => {
   status.scopes = ['notes'];
+  devices = [{ id: 3, device_id: PHONE.toUpperCase(), scopes: ['notes'] }];
   await syncDeviceActions();
   await syncDeviceActions();
   expect(calls('POST', '/istota/api/devices')).toHaveLength(0);
@@ -84,6 +86,20 @@ it('does not mint when the shell already holds the wanted scopes', async () => {
   expect(plugin.provision).toHaveBeenCalledTimes(1);
   expect(plugin.provision).toHaveBeenCalledWith({
     token: null,
+    scopes: ['notes'],
+    notesFolder: 'Notes/Inbox',
+  });
+});
+
+it("mints again when the shell's token is not this account's", async () => {
+  // Another account signed in under this shell connection and minted the token it holds.
+  status.scopes = ['notes'];
+  devices = [{ id: 4, device_id: 'OTHER-PHONE', scopes: ['notes'] }];
+  await syncDeviceActions();
+  expect(calls('POST', '/istota/api/devices')).toHaveLength(1);
+  expect(plugin.provision).toHaveBeenCalledTimes(1);
+  expect(plugin.provision).toHaveBeenCalledWith({
+    token: 'minted-token',
     scopes: ['notes'],
     notesFolder: 'Notes/Inbox',
   });
