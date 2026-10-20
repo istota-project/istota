@@ -118,6 +118,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The ntfy push card in Settings → Connections shows the stored server URL and default topic, and you can edit them in place. They were masked like passwords, so there was no way to check what was set. The access token and password stay hidden.
 - iOS chat notification previews show a reply as plain text rather than raw Markdown, so bold markers, code backticks, link URLs, list bullets and table pipes no longer appear or use up the preview's length. Plain-text briefing email also keeps the underscores in names like `snake_case_name`.
 - Opening a menu on an iPhone no longer draws a blue outline around it.
 - A dropdown stretched to fill its row keeps its arrow at the right edge, rather than right after the selected text.
