@@ -17,6 +17,7 @@
   import IconButton from './IconButton.svelte';
   import { Dialog } from 'bits-ui';
   import { setFieldContext } from './fieldContext';
+  import { isEditableTarget } from '$lib/ui/editableTarget';
 
   interface Props {
     variant?: 'default' | 'viewer' | 'palette';
@@ -123,9 +124,8 @@
     if (
       !(target instanceof Element) ||
       target.closest('[role="dialog"]') !== event.currentTarget ||
-      target.closest(
-        'input, textarea, select, [contenteditable]:not([contenteditable="false"]), audio, video',
-      )
+      isEditableTarget(target) ||
+      target.closest('audio, video')
     )
       return;
     if (event.key === 'ArrowLeft' && navigation.canPrevious) {

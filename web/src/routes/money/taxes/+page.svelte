@@ -20,6 +20,7 @@
   import RateProvenanceLine from '$lib/components/money/RateProvenanceLine.svelte';
   import TaxDisclaimer from '$lib/components/money/TaxDisclaimer.svelte';
   import { formatDecimal } from '$lib/format';
+  import { debounce } from '$lib/ui/debounce';
 
   let data = $state<TaxEstimateResponse | null>(null);
   let loading = $state(true);
@@ -34,8 +35,8 @@
   let stateEstimatedPaid = $state(0);
   let w2Months = $state(12);
 
-  let debounceTimer: ReturnType<typeof setTimeout> | undefined;
-  onDestroy(() => clearTimeout(debounceTimer));
+  const scheduleRecalc = debounce(() => void recalc(), 400);
+  onDestroy(() => scheduleRecalc.cancel());
 
   async function loadInitial() {
     loading = true;
@@ -72,11 +73,6 @@
     } finally {
       loading = false;
     }
-  }
-
-  function scheduleRecalc() {
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(recalc, 400);
   }
 
   async function recalc() {

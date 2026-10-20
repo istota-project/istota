@@ -8,7 +8,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { holdPageLoading } from '$lib/stores/pageLoading';
+  import { holdPageLoading } from '$lib/ui/pageLoading';
 
   let { label = 'Loading…' }: { label?: string } = $props();
 

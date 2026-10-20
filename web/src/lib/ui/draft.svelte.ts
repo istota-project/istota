@@ -1,4 +1,4 @@
-import { changedProfileFields } from '$lib/profilePatch';
+import { changedProfileFields } from './profilePatch';
 
 /**
  * Whether a form holds unsaved edits, by comparing what it holds now with a

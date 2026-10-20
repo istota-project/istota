@@ -17,7 +17,7 @@ await fillApiDouble(api);
 const invalidateNavUnreadCounts = vi.hoisted(() => vi.fn());
 vi.mock('./navUnread', () => ({ invalidateNavUnreadCounts }));
 
-vi.mock('$lib/stores/persisted', () => ({
+vi.mock('$lib/ui/persisted', () => ({
   loadSetting: vi.fn(() => null),
   saveSetting: vi.fn(),
 }));

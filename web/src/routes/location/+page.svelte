@@ -21,7 +21,8 @@
     pickingPlace,
     requestNewPlace,
   } from '$lib/stores/location';
-  import { loadSetting, saveSetting } from '$lib/stores/persisted';
+  import { loadSetting, saveSetting } from '$lib/ui/persisted';
+  import { usePolling } from '$lib/ui/polling.svelte';
   import ElevationProfile from '$lib/components/location/ElevationProfile.svelte';
   import LocationMap from '$lib/components/location/LocationMap.svelte';
   import StopsPanel from '$lib/components/location/StopsPanel.svelte';
@@ -63,7 +64,7 @@
   let elevation = $derived(elevationSummary(pings));
   let loading = $state(true);
   let error = $state('');
-  let pollInterval: ReturnType<typeof setInterval> | undefined;
+  usePolling(loadData, 60000);
   let loadInFlight = false;
   let destroyed = false;
   let mapComponent: LocationMap | undefined = $state();
@@ -172,12 +173,10 @@
   onMount(() => {
     requestedPlaceId = urlSelection.current()?.place ?? null;
     loadData();
-    pollInterval = setInterval(loadData, 60000);
   });
 
   onDestroy(() => {
     destroyed = true;
-    if (pollInterval) clearInterval(pollInterval);
     mapFlyTo.set(undefined);
   });
 

@@ -35,7 +35,7 @@ await fillApiDouble(api, {
 /** The rooms reconciler's own interval, restated from `chat.ts`. */
 const ROOMS_REFRESH_MS = 30000;
 
-vi.mock('$lib/stores/persisted', () => ({
+vi.mock('$lib/ui/persisted', () => ({
   loadSetting: vi.fn(() => null),
   saveSetting: vi.fn(),
 }));

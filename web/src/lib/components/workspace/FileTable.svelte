@@ -25,7 +25,7 @@
   import { chatFileUrl, nextcloudFileUrl } from '$lib/api';
   import { formatBytes } from '$lib/format';
   import { fileIcon } from './filePresentation';
-  import { loadSetting, saveSetting } from '$lib/stores/persisted';
+  import { loadSetting, saveSetting } from '$lib/ui/persisted';
   import { createTableSort } from '$lib/ui/tableSort.svelte';
   import { viewer } from '$lib/fileViewer/store.svelte';
   let {

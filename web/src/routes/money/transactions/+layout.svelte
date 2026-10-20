@@ -14,15 +14,14 @@
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { Icon, Chip, ListRow, Sidebar, SidebarToggle, Select, Input } from '$lib/components/ui';
   import { ChevronRight, Search } from '@lucide/svelte';
+  import { debounce } from '$lib/ui/debounce';
 
   let { children } = $props();
 
   let accounts: AccountRow[] = $state([]);
   let sidebarOpen = $state(false);
-  let filterTimeout: ReturnType<typeof setTimeout> | null = null;
-  onDestroy(() => {
-    if (filterTimeout) clearTimeout(filterTimeout);
-  });
+  const handleFilterInput = debounce((value: string) => filterText.set(value), 300);
+  onDestroy(() => handleFilterInput.cancel());
 
   const currentYear = new Date().getFullYear();
   const years = Array.from({ length: 11 }, (_, i) => currentYear - i);
@@ -125,11 +124,6 @@
 
   function selectAccount(fullName: string) {
     navigateToAccount($selectedAccount === fullName ? '' : fullName);
-  }
-
-  function handleFilterInput(value: string) {
-    if (filterTimeout) clearTimeout(filterTimeout);
-    filterTimeout = setTimeout(() => filterText.set(value), 300);
   }
 
   async function loadAccounts(ledger: string) {

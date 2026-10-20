@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { latest } from '$lib/ui/latest';
   import { createConfirm } from '$lib/ui/confirm.svelte';
   import { onMount } from 'svelte';
   import {
@@ -89,7 +90,7 @@
   // the *later* pick routinely resolves first and the earlier one then lands
   // on top of it, leaving the list scoped to a filter the pickers no longer
   // show.
-  let loadSeq = 0;
+  const loads = latest();
 
   let filterLedger = $state(ALL_SCOPES);
   let filterSource = $state(ALL_SCOPES);
@@ -173,7 +174,7 @@
   }
 
   async function load() {
-    const mine = ++loadSeq;
+    const current = loads.next();
     try {
       // The unscoped read first: it is the vocabulary, and the filtered read
       // below cannot supply it.
@@ -181,17 +182,17 @@
       const query = scopeQuery(filterLedger, filterSource);
       const scoped =
         Object.keys(query).length > 0 ? (await getTransactionRules(query)).rules : all.rules;
-      if (mine !== loadSeq) return;
+      if (!current()) return;
       allRules = all.rules;
       rules = scoped;
       loadError = '';
       everLoaded = true;
       dropVanishedFilters();
     } catch (e) {
-      if (mine !== loadSeq) return;
+      if (!current()) return;
       loadError = e instanceof Error ? e.message : 'Failed to load transaction rules';
     } finally {
-      if (mine === loadSeq) loaded = true;
+      if (current()) loaded = true;
     }
   }
 

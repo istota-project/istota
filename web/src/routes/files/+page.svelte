@@ -62,7 +62,7 @@
   } from '$lib/components/workspace/indexViews';
   import { getCurrentUser } from '$lib/userContext';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
-  import { loadSetting, saveSetting } from '$lib/stores/persisted';
+  import { loadSetting, saveSetting } from '$lib/ui/persisted';
   import PlaceList from '$lib/components/workspace/PlaceList.svelte';
   import ReachPanel from '$lib/components/workspace/ReachPanel.svelte';
   import ReachBadge from '$lib/components/workspace/ReachBadge.svelte';

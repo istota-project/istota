@@ -13,6 +13,8 @@
   import { SearchButton, SearchDialog } from '$lib/components/search';
   import { theme, toggleTheme } from '$lib/stores/theme';
   import { clearNotices } from '$lib/stores/notices';
+  import { isEditableTarget } from '$lib/ui/editableTarget';
+  import { onDocumentVisible } from '$lib/ui/visibility';
   import { navUnreadCounts, startNavUnreadPoll, stopNavUnreadPoll } from '$lib/stores/navUnread';
   import { startNotificationPoll, stopNotificationPoll } from '$lib/stores/notifications';
   import { online, startConnectivity } from '$lib/stores/connectivity';
@@ -85,10 +87,7 @@
     function searchShortcut(event: KeyboardEvent) {
       if (!user || error || event.isComposing) return;
       const command = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k';
-      const target = event.target;
-      const editable =
-        target instanceof Element &&
-        target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])');
+      const editable = isEditableTarget(event);
       const slash =
         event.key === '/' &&
         !editable &&
@@ -197,11 +196,7 @@
     // The poll timer is throttled in a background tab and stopped outright in a
     // suspended PWA, so returning to the app is the moment a check is actually
     // worth something — it is also the moment a stale bundle does its damage.
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') void updated.check();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
+    return onDocumentVisible(() => void updated.check());
   });
 
   /**
@@ -406,13 +401,12 @@
     // server that *answered* leaves the store online, so no further edge is
     // coming and without this the app would hold a stale identity, silently,
     // for the life of the page.
-    const onReturn = () => {
-      if (document.visibilityState === 'visible' && !live) void loadUser();
-    };
-    document.addEventListener('visibilitychange', onReturn);
+    const offReturn = onDocumentVisible(() => {
+      if (!live) void loadUser();
+    });
     return () => {
       unwatch();
-      document.removeEventListener('visibilitychange', onReturn);
+      offReturn();
     };
   });
 

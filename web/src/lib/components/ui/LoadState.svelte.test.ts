@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { get } from 'svelte/store';
-import { pageLoading } from '$lib/stores/pageLoading';
+import { pageLoading } from '$lib/ui/pageLoading';
 import { clearNotices, notices } from '$lib/stores/notices';
 import Harness from './LoadState.harness.svelte';
 

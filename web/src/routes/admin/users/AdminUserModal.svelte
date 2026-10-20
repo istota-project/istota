@@ -25,7 +25,7 @@
     Checkbox,
     Timestamp,
   } from '$lib/components/ui';
-  import { changedProfileFields } from '$lib/profilePatch';
+  import { changedProfileFields } from '$lib/ui/profilePatch';
   import { formatList, parseList } from '$lib/ui/parse';
   import { ADMIN_MANAGED_BADGE, adminManagedHint } from '$lib/settings/managed';
   import { timezoneOptions } from '$lib/settings/timezones';

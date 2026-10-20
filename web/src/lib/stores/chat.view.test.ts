@@ -20,7 +20,7 @@ await fillApiDouble(api);
 // In-memory stand-in for localStorage so the selection round-trip (save on
 // select, read back on the next init) is exercised for real.
 const persisted = vi.hoisted(() => ({ map: new Map<string, unknown>() }));
-vi.mock('$lib/stores/persisted', () => ({
+vi.mock('$lib/ui/persisted', () => ({
   loadSetting: vi.fn((key: string, fallback: unknown) =>
     persisted.map.has(key) ? persisted.map.get(key) : fallback,
   ),

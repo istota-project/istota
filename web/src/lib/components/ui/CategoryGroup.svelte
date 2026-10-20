@@ -2,7 +2,7 @@
   import { untrack, type Snippet } from 'svelte';
   import { ChevronRight } from '@lucide/svelte';
   import Icon from './Icon.svelte';
-  import { loadSetting, saveSetting } from '$lib/stores/persisted';
+  import { loadSetting, saveSetting } from '$lib/ui/persisted';
 
   interface Props {
     label: string;

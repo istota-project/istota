@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import {
     AVATAR_ACCEPT,
@@ -38,13 +38,14 @@
   } from '$lib/usageFormat';
   import { formatBytes } from '$lib/format';
   import { formatDuration as formatIsoDuration } from '$lib/dateFormat';
+  import { usePolling } from '$lib/ui/polling.svelte';
 
   let stats: AdminStats | null = $state(null);
   let loading = $state(true);
   let error = $state('');
 
   const REFRESH_MS = 60_000;
-  let timer: ReturnType<typeof setInterval> | null = null;
+  usePolling(refresh, REFRESH_MS);
 
   /* The bot icon. The identity the layout resolved carries the current hash,
      and `reload()` is what publishes a new one to the nav and the chat gutter
@@ -103,11 +104,6 @@
 
   onMount(() => {
     void refresh();
-    timer = setInterval(refresh, REFRESH_MS);
-  });
-
-  onDestroy(() => {
-    if (timer) clearInterval(timer);
   });
 
   // `—` rather than `0s` for an absent uptime: the figure is missing, not zero.

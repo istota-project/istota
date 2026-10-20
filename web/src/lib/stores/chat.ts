@@ -55,7 +55,7 @@ import {
   uploadChatAttachment,
   UploadUnreachableError,
 } from '$lib/api';
-import { loadSetting, saveSetting } from '$lib/stores/persisted';
+import { loadSetting, saveSetting } from '$lib/ui/persisted';
 import {
   dropQueue as dropStoredQueue,
   readAllQueues,

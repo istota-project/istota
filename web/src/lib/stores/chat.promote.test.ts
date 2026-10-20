@@ -17,7 +17,7 @@ const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
 
-vi.mock('$lib/stores/persisted', () => ({
+vi.mock('$lib/ui/persisted', () => ({
   loadSetting: vi.fn((_key: string, fallback: unknown) => fallback),
   saveSetting: vi.fn(),
 }));

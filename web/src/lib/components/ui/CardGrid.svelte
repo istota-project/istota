@@ -4,8 +4,8 @@
 
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import { masonry as masonryLayout } from '$lib/masonry';
-  import { cardFill } from '$lib/cardFill';
+  import { masonry as masonryLayout } from '$lib/ui/masonry';
+  import { cardFill } from '$lib/ui/cardFill';
 
   interface Props {
     /** The most columns the grid grows to; it steps down to one as its container narrows. */

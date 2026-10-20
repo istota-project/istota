@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { latest } from '$lib/ui/latest';
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import {
@@ -34,11 +35,11 @@
   let explainer: ImmunizationExplainer | null = $state(null);
   let explainerLoading = $state(false);
 
-  let loadToken = 0;
+  const loads = latest();
 
   async function load() {
     if (!name) return;
-    const token = ++loadToken;
+    const current = loads.next();
     loading = true;
     error = '';
     explainer = null;
@@ -48,26 +49,26 @@
         getImmunizationCoverage(),
         listImmunizations({ name, limit: 200 }),
       ]);
-      if (token !== loadToken) return;
+      if (!current()) return;
       ref = refResp.refs.find((r) => r.name === name) ?? null;
       entry = cov.coverage.find((c) => c.name === name) ?? null;
       history = hist.immunizations;
     } catch (e) {
-      if (token !== loadToken) return;
+      if (!current()) return;
       error = e instanceof Error ? e.message : 'Failed to load';
     } finally {
-      if (token === loadToken) loading = false;
+      if (current()) loading = false;
     }
 
-    if (entry && token === loadToken) {
+    if (entry && current()) {
       explainerLoading = true;
       try {
         const next = await getImmunizationExplainer(name);
-        if (token === loadToken) explainer = next;
+        if (current()) explainer = next;
       } catch {
         // Leave whatever was last successfully loaded in place.
       } finally {
-        if (token === loadToken) explainerLoading = false;
+        if (current()) explainerLoading = false;
       }
     }
   }

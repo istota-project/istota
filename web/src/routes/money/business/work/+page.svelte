@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { latest } from '$lib/ui/latest';
   import { createConfirm } from '$lib/ui/confirm.svelte';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
@@ -111,10 +112,10 @@
   // Four filters change independently and each fires a load; without a
   // sequence guard a slow earlier response lands after a newer one and shows
   // rows for a filter you already left.
-  let loadSeq = 0;
+  const loads = latest();
 
   async function load() {
-    const seq = ++loadSeq;
+    const current = loads.next();
     loading = true;
     error = '';
     try {
@@ -123,15 +124,15 @@
         period: periodFilter || undefined,
         status: statusFilter,
       });
-      if (seq !== loadSeq) return;
+      if (!current()) return;
       entries = resp.entries;
       totals = resp.totals;
       rememberYears(resp.entries);
     } catch (e) {
-      if (seq !== loadSeq) return;
+      if (!current()) return;
       error = e instanceof Error ? e.message : 'Failed to load work entries';
     } finally {
-      if (seq === loadSeq) loading = false;
+      if (current()) loading = false;
     }
   }
 

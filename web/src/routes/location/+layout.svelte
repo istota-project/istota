@@ -3,6 +3,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { onMount } from 'svelte';
+  import { onDocumentVisible } from '$lib/ui/visibility';
   import {
     createPlace,
     deletePlace,
@@ -222,16 +223,9 @@
     return () => onPlaceMoveStore.set(undefined);
   });
 
-  function handleVisibility() {
-    if (document.visibilityState === 'visible') {
-      reloadPlaces().catch(() => {});
-    }
-  }
-
   onMount(() => {
     reloadPlaces().catch(() => {});
-    document.addEventListener('visibilitychange', handleVisibility);
-    return () => document.removeEventListener('visibilitychange', handleVisibility);
+    return onDocumentVisible(() => reloadPlaces().catch(() => {}));
   });
 </script>
 

@@ -1,4 +1,4 @@
-import { loadSetting, saveSetting } from '$lib/stores/persisted';
+import { loadSetting, saveSetting } from '$lib/ui/persisted';
 
 export type SortDirection = 'ascending' | 'descending';
 

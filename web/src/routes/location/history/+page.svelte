@@ -39,7 +39,7 @@
     Select,
     LoadState,
   } from '$lib/components/ui';
-  import { loadSetting, saveSetting } from '$lib/stores/persisted';
+  import { loadSetting, saveSetting } from '$lib/ui/persisted';
 
   let pings: LocationPing[] = $state([]);
   let summary: DaySummary | null = $state(null);

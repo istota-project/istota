@@ -95,7 +95,7 @@ const notices = vi.hoisted(() => ({
 vi.mock('$lib/offline/db', () => db);
 vi.mock('$lib/stores/connectivity', () => conn);
 vi.mock('$lib/platform/native', () => native);
-vi.mock('$lib/stores/persisted', () => persisted);
+vi.mock('$lib/ui/persisted', () => persisted);
 vi.mock('$lib/stores/notices', () => notices);
 
 function room(id: number, name = `Room ${id}`): ChatRoom {

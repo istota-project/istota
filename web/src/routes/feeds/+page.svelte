@@ -27,6 +27,7 @@
   import Lightbox from '$lib/components/Lightbox.svelte';
   import { getShellScrollRoot } from '$lib/components/ui/AppShell.svelte';
   import { notifyError } from '$lib/stores/notices';
+  import { isEditableTarget } from '$lib/ui/editableTarget';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
 
   const getScrollRoot = getShellScrollRoot();
@@ -355,16 +356,8 @@
   // Keyboard shortcut: A marks every visible entry read (scope-aware).
   // f toggles star on the focused entry — left to Tranche B's full
   // shortcut layer; for now A is the highest-leverage one.
-  function isEditableTarget(t: EventTarget | null): boolean {
-    const el = t as HTMLElement | null;
-    if (!el) return false;
-    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true;
-    if ((el as HTMLElement).isContentEditable) return true;
-    return false;
-  }
-
   async function handleKeydown(e: KeyboardEvent) {
-    if (isEditableTarget(e.target)) return;
+    if (isEditableTarget(e)) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === 'A' && e.shiftKey) {
       e.preventDefault();

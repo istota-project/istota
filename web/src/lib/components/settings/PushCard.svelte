@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { onDocumentVisible } from '$lib/ui/visibility';
   import {
     AuthError,
     listPushDevices,
@@ -150,11 +151,7 @@
     void loadCategories();
     if (!native) return;
     void readPermission();
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') void readPermission();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
+    return onDocumentVisible(() => void readPermission());
   });
 </script>
 

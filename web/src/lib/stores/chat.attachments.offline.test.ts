@@ -80,7 +80,7 @@ const persisted = vi.hoisted(() => {
     }),
   };
 });
-vi.mock('$lib/stores/persisted', () => persisted);
+vi.mock('$lib/ui/persisted', () => persisted);
 
 const notices = vi.hoisted(() => ({
   notify: vi.fn(),
