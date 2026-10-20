@@ -1077,3 +1077,30 @@ describe('RoomSettings — personal notifications', () => {
     }
   });
 });
+
+describe('RoomSettings — a group-owned room', () => {
+  it('offers no delete and no Talk, and leaves settings to the owners', async () => {
+    mount(
+      room({
+        shared: true,
+        managed_by: {
+          group_id: 'team',
+          display_name: 'Team',
+          manage_url: '/istota/groups/?group=team',
+          is_owner: false,
+        },
+        policy: {
+          host: 'alice',
+          is_host: true,
+          guest_reply: 'direct',
+          settings_refusal: 'Only an owner of group team can change this room’s settings.',
+        } as ChatRoom['policy'],
+      }),
+    );
+    expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Hide' })).toBeNull();
+    expect(screen.queryByText('Also open in Talk')).toBeNull();
+    expect(screen.getByText(/Only an owner of group team/)).toBeTruthy();
+    expect(screen.getByText(/Leaving this room means leaving Team/)).toBeTruthy();
+  });
+});

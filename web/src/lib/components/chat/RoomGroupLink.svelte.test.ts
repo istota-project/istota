@@ -95,3 +95,24 @@ describe('RoomGroupLink', () => {
     expect(screen.getByText(/Link a group/)).toBeTruthy();
   });
 });
+
+describe('RoomGroupLink in a group-owned room', () => {
+  it('shows the group the room belongs to, fixed, with a link to Groups', async () => {
+    getRoomGroup.mockResolvedValue(
+      link({
+        group_id: 'team',
+        group_name: 'Team',
+        can_set: false,
+        refusal: 'This room’s membership follows group team.',
+        choices: [],
+        managed: true,
+        manage_url: '/istota/groups/?group=team',
+      }),
+    );
+    render(RoomGroupLink, { roomId: 4 });
+    await screen.findByText(/Membership follows Team/);
+    expect(screen.queryByRole('button', { name: LABEL })).toBeNull();
+    const to = screen.getByRole('link', { name: 'Open Team in Groups' });
+    expect(to.getAttribute('href')).toBe('/istota/groups/?group=team');
+  });
+});

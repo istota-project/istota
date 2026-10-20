@@ -1738,6 +1738,7 @@ function createSession(): ChatSession {
           shared: fresh.shared,
           policy: fresh.policy ?? null,
           off: fresh.off ?? null,
+          managed_by: fresh.managed_by ?? null,
           unread_count: unreadFor(fresh),
           starred_count: fresh.starred_count ?? 0,
           // Whichever stamp is newer. This response was built before it was
