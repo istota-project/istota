@@ -1490,9 +1490,6 @@
     font: inherit;
     color: var(--text-muted);
     cursor: pointer;
-    /* Opts out of double-tap-to-zoom on this target, which is what makes iOS
-	     hold a tap open and then deliver it as a delayed synthesized click. */
-    touch-action: manipulation;
     transition:
       background var(--transition-fast),
       color var(--transition-fast);

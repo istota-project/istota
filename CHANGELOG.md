@@ -125,6 +125,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- In the iOS app, once signed in, a quick double tap no longer zooms the page wherever it lands, and neither pinching nor focusing a field zooms it. In a mobile browser a double tap is also just a tap, and pinch-zoom still works.
 - When Money → Settings → Invoicing cannot load its business settings, a screen reader now hears the error once rather than three times. The Business defaults, Entities and Services cards still each show the failure with a Retry.
 - On a phone, the sidebar drawer now slides out when it closes instead of vanishing, and closing it no longer flashes the page. Tapping a room, a section or a list entry starts the slide before the new content draws, and tapping beside the drawer no longer greys the whole screen for a moment.
 - When briefings settings cannot load your schedules or briefing content, it now shows that with a Retry button instead of an editor filled with defaults that Save could have written over your stored schedule. A failed picker list (groups, presets, feeds, shared blocks, email accounts) or email format setting now says so with Retry rather than blanking the page or showing a guess. In Settings → Connections, a failed service list shows Retry where the list goes and no longer claims no services are available.

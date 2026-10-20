@@ -429,8 +429,9 @@ input[type='week']::-webkit-date-and-time-value {
    depending on the text-scale preference), so this fired on every form in the
    app rather than on any one of them.
 
-   The floor is the fix rather than a locked viewport: `maximum-scale=1` would
-   end the zoom by ending pinch-zoom, and only inside the installed app at that.
+   In a browser the floor is the fix rather than a locked viewport:
+   `maximum-scale=1` would end the zoom by ending pinch-zoom. The iOS app does
+   lock its viewport (ISSUE-818, app.html), and keeps the floor anyway.
 
    Two rules, because a control's size arrives two ways. The type tokens are
    redefined *on the control itself* — custom properties inherit, so whichever
@@ -668,6 +669,17 @@ input[type='week']::-webkit-date-and-time-value {
    inside its panes, so that turns into a strip beside every list. Hiding a
    scrollbar outright (`display: none`) is a different thing and is fine where a
    control has no room for one — the composer textarea does that. */
+
+/* A double tap is a tap, never a zoom (ISSUE-818). Double-tap zoom is also
+   what makes iOS hold a tap open and deliver it as a delayed synthesized
+   click. On every element rather than on `html`: touch-action is not
+   inherited, and the ancestor intersection stops at each scroll container.
+   `manipulation` keeps pan and pinch, so a browser can still pinch-zoom
+   (ISSUE-219); the app locks its viewport in app.html. Zero specificity, so a
+   component asking for less (the lightbox's `none`) wins. */
+* {
+  touch-action: manipulation;
+}
 
 html,
 body {
