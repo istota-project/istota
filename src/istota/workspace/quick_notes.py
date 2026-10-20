@@ -173,7 +173,8 @@ def normalize_folder(config: "Config", user_id: str, value: object) -> str | Non
     return "/".join(parts)
 
 
-def _configured_folder(conn: sqlite3.Connection, user_id: str) -> tuple[str, ...] | None:
+def configured_folder(conn: sqlite3.Connection, user_id: str) -> tuple[str, ...] | None:
+    """The user's quick notes folder as parts, or None when unset. Also what a `notes` grant checks."""
     profile = user_profiles.get_profile(Path(), user_id, conn=conn)
     if profile is None or not profile.quick_notes_folder:
         return None
@@ -271,7 +272,7 @@ def create(
     data = content.encode("utf-8")
     if len(data) > QUICK_NOTE_MAX_BYTES:
         raise QuickNoteError(413, "too_large", "The note is too large.")
-    parts = _configured_folder(conn, user_id)
+    parts = configured_folder(conn, user_id)
     if parts is None:
         raise QuickNoteError(409, "notes_folder_unset", "Choose a quick notes folder first.")
     root = _workspace_root(config, user_id)
@@ -337,7 +338,7 @@ def save(
 ) -> text_files.SaveOutcome:
     """Replace the note at `path`, which must still be in the current folder."""
     with db.get_db(config.db_path) as conn:
-        folder = _configured_folder(conn, user_id)
+        folder = configured_folder(conn, user_id)
     if folder is None:
         raise QuickNoteError(403, "outside_folder", "This note is not in your quick notes folder.")
     parts = _note_parts(path, folder)

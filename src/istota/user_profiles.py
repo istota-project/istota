@@ -945,7 +945,7 @@ def refused_managed_fields(
 
 
 def delete_profile(db_path: Path, user_id: str) -> bool:
-    """Remove a profile row and the user's avatars. True if a profile row went.
+    """Remove a profile row, the user's avatars and their device tokens. True if a profile row went.
 
     The avatar delete rides this function's own connection, inside the same
     transaction. A *second* connection opened here would wait out the 30s busy
@@ -970,6 +970,11 @@ def delete_profile(db_path: Path, user_id: str) -> bool:
         conn.execute(
             "DELETE FROM whatsapp_user_bindings WHERE user_id = ?", (user_id,),
         )
+        # A device token authenticates as its user with no session, so one
+        # left behind would still create notes for a removed account. The
+        # quick note idempotency keys name that user's files.
+        conn.execute("DELETE FROM device_tokens WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM quick_note_keys WHERE user_id = ?", (user_id,))
         # A re-created user starts unlocked: the next `--managed` converge
         # records what it asserts again.
         set_managed_fields(conn, user_id, ())

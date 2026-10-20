@@ -23,7 +23,7 @@ from istota.nextcloud import OcsError, shares
 from istota.webui.chat_files import servable_roots
 from istota.workspace.pins import validate_pin, workspace_pin_kind
 from istota.webui.request_guards import BodyError, read_bounded_body
-from istota.webui.router_stubs import require_auth, verify_origin
+from istota.webui.router_stubs import require_auth, require_session_or_device, verify_origin
 from istota.workspace.listing import ListingError, list_dir, list_file
 from istota.workspace.places import list_places, place_anchor
 from istota.workspace.reach import deployment_notes, place_reach
@@ -458,11 +458,15 @@ async def _note_body(request: Request):
 
 @router.post("/notes")
 async def api_workspace_note_create(
-    request: Request, user: dict = Depends(require_auth), _csrf: None = Depends(verify_origin),
+    request: Request, user: dict = Depends(require_session_or_device("notes")),
 ):
     """Create a quick note in the user's quick notes folder.
 
-    201 for a new file, 200 when `client_note_id` replays one already written.
+    The session with the origin check, or a device token with the `notes`
+    scope, which is how the shell's native sheet sends. Create is the only
+    note route a token reaches: it can add files to one folder, never read or
+    overwrite one. 201 for a new file, 200 when `client_note_id` replays one
+    already written.
     """
     config = getattr(request.app.state, "istota_config", None)
     refusal = _no_workspace(config)

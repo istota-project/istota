@@ -1318,6 +1318,7 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     _migrate_push_tables(conn)
     _migrate_location_ingest_tokens(conn)
     _migrate_quick_note_keys(conn)
+    _migrate_device_tokens(conn)
     _migrate_mobile_auth_requests(conn)
     _migrate_notifications_push_pending(conn)
     # Same shape: pure DDL, no marker, no transaction of its own.
@@ -9572,6 +9573,24 @@ def _migrate_quick_note_keys(conn: sqlite3.Connection) -> None:
             path TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (user_id, client_note_id)
+        )
+    """)
+
+
+def _migrate_device_tokens(conn: sqlite3.Connection) -> None:
+    """Create the native-action device token table. Pure DDL, kept in step with `schema.sql`."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS device_tokens (
+            id INTEGER PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            token_tail TEXT NOT NULL,
+            scopes TEXT NOT NULL,
+            label TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_used_at TEXT,
+            UNIQUE (user_id, device_id)
         )
     """)
 

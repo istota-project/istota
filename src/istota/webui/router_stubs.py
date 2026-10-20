@@ -36,6 +36,14 @@ one module's context per app and must not reach the other two.
 ``garmin_routes.py`` has no per-user resolver at all, so neither takes the
 factory. Both take the two stubs.
 
+``session_or_device`` and ``require_session_or_device(scope)`` are the one
+seam through which an ``/istota/api`` route accepts a device token
+(``istota.webui.device_tokens``) in place of the session. The factory returns a
+distinct closure per call, so the overridable key is ``session_or_device``
+itself, which every closure depends on: ``webui/app.py`` overrides that one
+callable, and ``tests/test_device_tokens.py`` enumerates the routes that reach
+it. Only ``POST /workspace/notes`` and ``DELETE /devices/self`` may.
+
 FastAPI only, no config and no DB, so a router can import it from anywhere in
 its own import block — two of the five sit after their module's imports because
 that is where the import order puts them, and nothing here depends on going
@@ -47,6 +55,8 @@ from __future__ import annotations
 from typing import Callable
 
 from fastapi import Depends, HTTPException, Request
+
+from istota.lib.tokens import bearer_token
 
 
 def require_auth(request: Request) -> dict:
@@ -75,6 +85,42 @@ def verify_origin(request: Request) -> None:
     app installs a real Origin/Referer check. Same shape as ``require_auth``.
     """
     return None
+
+
+def session_or_device(
+    request: Request,
+    user: dict = Depends(require_auth),
+    _csrf: None = Depends(verify_origin),
+) -> dict:
+    """The caller as ``{"username", ..., "device_token": token | None}``.
+
+    The stub is session only, with the origin check, and refuses any request
+    carrying a bearer: it has no token store, and a bearer must never fall
+    back to the cookie. The host overrides it with the real rule — a bearer
+    is checked as a device token and nothing else, and without one this
+    stub's session-and-origin path applies. ``device_token`` is the
+    authenticated row (it has ``scopes``, ``id`` and ``token_hash``), or None
+    on the session path.
+    """
+    if bearer_token(request.headers.get("authorization", "")) is not None:
+        raise HTTPException(401, "unauthorized")
+    return {**user, "device_token": None}
+
+
+def require_session_or_device(scope: str | None) -> Callable:
+    """A route dependency accepting the session or a device token holding ``scope``.
+
+    ``scope=None`` accepts a token of any scope. Returns the caller from
+    ``session_or_device``; a token without the scope is a 403.
+    """
+
+    def dependency(caller: dict = Depends(session_or_device)) -> dict:
+        token = caller.get("device_token")
+        if token is not None and scope is not None and scope not in token.scopes:
+            raise HTTPException(403, f"this device token does not carry the {scope} scope")
+        return caller
+
+    return dependency
 
 
 def make_get_user_context(

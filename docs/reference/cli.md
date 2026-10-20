@@ -67,7 +67,7 @@ istota user lookup --email ADDR               # Find user by email
 istota user init USER                        # Initialize user workspace
 istota user status USER                      # User status and resources
 istota user show --name USER_ID              # Dump the stored profile row as JSON
-istota user remove --name USER_ID            # Delete a user_profiles row (no other tables touched)
+istota user remove --name USER_ID            # Delete a user_profiles row, with the user's avatars, WhatsApp binding and device tokens
 istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR ...] [--sms-number E164 | --clear-sms-number] [--whatsapp-number E164 | --clear-whatsapp | --reset-whatsapp-identity] [--whatsapp-bsuid BSUID] [--max-foreground-workers N] [--max-background-workers N] [--log-channel TOKEN] [--alerts-channel TOKEN] [--default-destination DESCRIPTOR] [--route PURPOSE=DESCRIPTOR ...] [--disabled-skill NAME ...] [--disabled-module NAME ...] [--trusted-sender PATTERN ...] [--quiet-sender PATTERN ...] [--outbound-approval off|untrusted|all|""] [--external-turn-display full|collapsed|hidden] [--briefing-email-html | --no-briefing-email-html] [--timezone-follow-location | --no-timezone-follow-location]
 ```
 

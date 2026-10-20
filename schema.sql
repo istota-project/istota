@@ -2732,6 +2732,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_location_ingest_tokens_device
 CREATE INDEX IF NOT EXISTS idx_location_ingest_tokens_user
     ON location_ingest_tokens(user_id);
 
+-- Per-device bearer tokens for the shell's native actions, scoped by capability
+-- (istota.device_tokens). Only the SHA-256 of a token is kept. `scopes` is
+-- space-separated and sorted. One row per (user_id, device_id): minting again
+-- replaces the token in place.
+CREATE TABLE IF NOT EXISTS device_tokens (
+    id INTEGER PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    token_tail TEXT NOT NULL,
+    scopes TEXT NOT NULL,
+    label TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at TEXT,
+    UNIQUE (user_id, device_id)
+);
+
 -- Idempotency keys for quick notes (istota.workspace.quick_notes). A key is
 -- claimed with `path` NULL before the file is written and given the file's
 -- path after, so a retried create replays rather than writing a second file.

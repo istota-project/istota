@@ -1101,4 +1101,7 @@ def test_no_api_route_takes_a_body_without_a_session(configured):
             continue
         if configured._require_api_auth not in _dependency_calls(app, route.dependant, set()):
             unauthenticated.add(route.path)
-    assert unauthenticated == SESSIONLESS_API_WRITES
+    # A device token route checks the session or the bearer itself, and the
+    # guard checks the bearer before the body (`DEVICE_TOKEN_ROUTES`).
+    device_routes = {path for _, path in configured.DEVICE_TOKEN_ROUTES}
+    assert unauthenticated == SESSIONLESS_API_WRITES | device_routes
