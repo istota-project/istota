@@ -145,6 +145,48 @@ describe('app.css touch-zoom floor', () => {
 });
 
 /**
+ * A double tap anywhere in the app is a tap, never a zoom (ISSUE-818). The
+ * opt-out is page-wide rather than per control: the first tap of a double tap
+ * can change what sits under the finger (the sidebar toggle opens a drawer), so
+ * the second tap lands on an element nobody thought to opt out.
+ */
+describe('double-tap zoom is off page-wide', () => {
+  const universal = rules(readLayer('primitives')).find(
+    (r) => r.selector.trim() === '*' && /touch-action:\s*manipulation/.test(r.body),
+  );
+
+  it('sets touch-action: manipulation on every element', () => {
+    // On every element rather than on `html`: touch-action is not inherited,
+    // and the ancestor intersection stops at each scroll container.
+    expect(
+      universal,
+      'no `*` rule in primitives.css sets touch-action: manipulation',
+    ).toBeDefined();
+  });
+
+  it('lets no stylesheet re-allow double-tap zoom on an element', () => {
+    // `auto` is the only value that allows double-tap zoom; `none`, `pan-*` and
+    // `pinch-zoom` all exclude it, for a component handling its own gesture.
+    // Stylesheets only: an inline style or `el.style.touchAction` is not seen.
+    const offenders: string[] = [];
+    for (const file of styleFiles(SRC)) {
+      const rel = file.slice(SRC.length);
+      const source = readFileSync(file, 'utf8');
+      for (const block of styleBlocks(file, source)) {
+        for (const rule of rules(block)) {
+          for (const m of rule.body.matchAll(/(?:^|[;\s])touch-action:\s*([^;}]+)/g)) {
+            const value = m[1].trim();
+            if (!/\bauto\b/.test(value)) continue;
+            offenders.push(`${rel}: ${rule.selector} → ${value}`);
+          }
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+});
+
+/**
  * A control whose size is inherited or written as a literal reads no token, so
  * the floor above cannot reach it. Each exemption states why it is one.
  *
