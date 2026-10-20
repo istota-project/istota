@@ -16,8 +16,10 @@ server_name ${DOMAIN};
 client_max_body_size ${NGINX_CLIENT_MAX_BODY_SIZE};
 charset utf-8;
 
-# Not for search engines.
-add_header X-Robots-Tag "noindex, nofollow" always;
+# Not for search engines. root-locations-site.conf empties it for the
+# operator's own site; nginx sends no header whose value is empty.
+set $istota_robots "noindex, nofollow";
+add_header X-Robots-Tag $istota_robots always;
 
 # Long-poll friendliness for Talk and the web UI.
 proxy_read_timeout 600s;
@@ -202,6 +204,8 @@ location /standalone-signaling/ {
 }
 
 # Everything else: root-locations.conf, which sends `/` to the web UI and
-# answers 404 for the rest. The stack serves no Nextcloud; the full test tier
-# replaces this file with its fixture's locations.
+# answers 404 for the rest, or with host.env's SITE_DIR set
+# root-locations-site.conf, which serves the operator's site from /srv/site.
+# The stack serves no Nextcloud; the full test tier replaces this file with its
+# fixture's locations.
 include /etc/nginx/istota/root.conf;
