@@ -72,9 +72,13 @@
     else running = true;
     notice = '';
     try {
-      const result = await waitForDoctorRun(deep, (next) => {
-        report = next;
+      const result = await waitForDoctorRun(deep, {
+        onReport: (next) => {
+          report = next;
+        },
+        signal: unmounted.signal,
       });
+      if (result.cancelled) return;
       if (result.answered) {
         if (result.deep) {
           notice = 'Deep checks included: the daemon spawned a sandbox namespace and inspected it.';
@@ -90,7 +94,13 @@
     }
   }
 
-  onMount(() => load());
+  // Leaving ends a run's wait (ISSUE-807); the daemon still finishes the run.
+  const unmounted = new AbortController();
+
+  onMount(() => {
+    load();
+    return () => unmounted.abort();
+  });
 </script>
 
 <div class="settings health-page card-pane">

@@ -8,6 +8,7 @@
     deleteSharedBlock,
     runSharedBlock,
     type SharedBlock,
+    type SharedBlockRunAnswer,
   } from '$lib/api';
   import {
     Alert,
@@ -220,34 +221,22 @@
     not_found: 'The block was deleted before it ran.',
   };
 
+  // The block's last Run now, as the daemon recorded it: it outlives the page
+  // that pressed it, so a run finished after the user left still shows here.
+  const SHARED_RUN_LABELS: Record<SharedBlockRunAnswer['outcome'], string> = {
+    regenerated: 'regenerated',
+    kept_prior: 'kept prior content',
+    brain_unavailable: 'model unavailable, kept prior content',
+    failed: 'failed',
+    not_found: 'block was missing',
+  };
+
   async function doRunShared(name: string) {
     sharedRunning = new Set(sharedRunning).add(name);
     try {
       const asked = await runSharedBlock(name);
       if (!active) return;
-      const until = Date.now() + SHARED_RUN_WAIT_MS;
-      while (Date.now() < until) {
-        await new Promise((resolve) => setTimeout(resolve, SHARED_RUN_POLL_MS));
-        if (!active) return;
-        await reloadSharedBlocks();
-        if (!active) return;
-        const block = sharedBlocks.find((b) => b.name === name);
-        if (!block) {
-          notifyWarning(`${name}: ${SHARED_RUN_OUTCOMES.not_found}`);
-          return;
-        }
-        const answer = block.status.run_answered;
-        if (answer?.id === asked.id) {
-          const message = SHARED_RUN_OUTCOMES[answer.outcome];
-          if (answer.outcome === 'failed') notifyError(`${name}: ${message}`);
-          else if (message) notifyWarning(`${name}: ${message}`);
-          return;
-        }
-      }
-      notifyWarning(
-        `${name}: the daemon has not answered yet. It may still be generating; ` +
-          'if this persists, check that the daemon is running.',
-      );
+      await waitForSharedRun(name, asked.id);
     } catch (e) {
       if (active) notifyError((e as Error).message || 'Run failed');
     } finally {
@@ -255,6 +244,47 @@
       next.delete(name);
       sharedRunning = next;
     }
+  }
+
+  // A run pressed on an earlier visit is still pending: follow it, so its
+  // line moves from waiting to the outcome without a reload.
+  async function followPendingRun(name: string, id: string) {
+    sharedRunning = new Set(sharedRunning).add(name);
+    try {
+      await waitForSharedRun(name, id);
+    } catch (e) {
+      if (active) notifyError((e as Error).message || 'Run failed');
+    } finally {
+      const next = new Set(sharedRunning);
+      next.delete(name);
+      sharedRunning = next;
+    }
+  }
+
+  async function waitForSharedRun(name: string, id: string) {
+    const until = Date.now() + SHARED_RUN_WAIT_MS;
+    while (Date.now() < until) {
+      await new Promise((resolve) => setTimeout(resolve, SHARED_RUN_POLL_MS));
+      if (!active) return;
+      await reloadSharedBlocks();
+      if (!active) return;
+      const block = sharedBlocks.find((b) => b.name === name);
+      if (!block) {
+        notifyWarning(`${name}: ${SHARED_RUN_OUTCOMES.not_found}`);
+        return;
+      }
+      const answer = block.status.run_answered;
+      if (answer?.id === id) {
+        const message = SHARED_RUN_OUTCOMES[answer.outcome];
+        if (answer.outcome === 'failed') notifyError(`${name}: ${message}`);
+        else if (message) notifyWarning(`${name}: ${message}`);
+        return;
+      }
+    }
+    notifyWarning(
+      `${name}: the daemon has not answered yet. It may still be generating; ` +
+        'if this persists, check that the daemon is running.',
+    );
   }
 
   async function doDeleteShared(name: string) {
@@ -274,7 +304,14 @@
   ];
 
   $effect(() => {
-    reloadSharedBlocks().catch(() => (sharedBlocks = []));
+    reloadSharedBlocks()
+      .then(() => {
+        for (const b of sharedBlocks) {
+          const pending = b.status.run_pending;
+          if (pending && !sharedRunning.has(b.name)) void followPendingRun(b.name, pending.id);
+        }
+      })
+      .catch(() => (sharedBlocks = []));
   });
 </script>
 
@@ -323,8 +360,22 @@
                   format="datetime"
                   options={LAST_RUN}
                   empty="—"
-                /></td
-              >
+                />
+                {#if b.status.run_pending}
+                  <div class="caption sb-run">Run now: waiting for the daemon</div>
+                {:else if b.status.run_answered}
+                  <div class="caption sb-run">
+                    Run now: <span class:sb-run-failed={b.status.run_answered.outcome === 'failed'}
+                      >{SHARED_RUN_LABELS[b.status.run_answered.outcome]}</span
+                    >,
+                    <Timestamp
+                      value={b.status.run_answered.at}
+                      format="datetime"
+                      options={LAST_RUN}
+                    />
+                  </div>
+                {/if}
+              </td>
               <td class="col-actions">
                 <KebabMenu items={sharedMenu(b)} ariaLabel="Shared block actions" />
               </td>
@@ -471,6 +522,13 @@
   }
   .sb-name {
     min-width: 9rem;
+  }
+  /* The cell is nowrap for the timestamp; the outcome line may be long. */
+  .sb-run {
+    white-space: normal;
+  }
+  .sb-run-failed {
+    color: var(--status-danger-fg);
   }
   .sb-preview {
     max-width: 16rem;

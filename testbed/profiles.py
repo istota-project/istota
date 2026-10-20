@@ -263,10 +263,16 @@ FULL = Profile(
 # no Nextcloud. `poll_emails` needs none for attachment-free mail, so everything
 # except the attachment upload is reachable thirty seconds after `up` rather
 # than a minute.
+#
+# It also lets a user connect the mail server as an account of their own
+# (`tests/smoke/test_multi_account_email.py`). `mail` resolves to a
+# compose-network address, which `mail.connect` refuses for a user account
+# unless the operator lists the host; the CA is already trusted, since the
+# overlay's `SSL_CERT_FILE` reaches every verified context the daemon builds.
 MAIL = Profile(
     "mail",
     services=("model", "mail"),
-    config=MAIL_CONFIG,
+    config={**MAIL_CONFIG, "mail_accounts": {"private_hosts": ["mail"]}},
     compose_overlays=(MAIL_OVERLAY,),
 )
 

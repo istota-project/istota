@@ -24,6 +24,7 @@
     LoadState,
   } from '$lib/components/ui';
   import { notifyError, notifyWarning } from '$lib/stores/notices';
+  import { latest } from '$lib/ui/latest';
   import { MessageCircle } from '@lucide/svelte';
   import ConnectionCard from './ConnectionCard.svelte';
   import NextcloudCard from './NextcloudCard.svelte';
@@ -52,6 +53,7 @@
   const QR_RETRY_DELAY_MS = 500;
 
   let connections = $state<AdminConnection[] | null>(null);
+  const loads = latest();
   let pairingRow = $state<AdminPairingState | null>(null);
   let loading = $state(true);
   let error = $state('');
@@ -544,8 +546,10 @@
 
   async function load(opts: { quiet?: boolean } = {}) {
     if (!opts.quiet) loading = true;
+    const current = loads.next();
     try {
       const payload = await getAdminConnections();
+      if (!current()) return;
       // Read off the payload rather than through the derived, so the row and
       // the link can never be one render apart.
       const found = findWhatsApp(payload.connections);
@@ -553,6 +557,8 @@
       pairingRow = found?.pairing ?? null;
       error = '';
     } catch (e) {
+      // A reload after Check now can land after the page has gone (ISSUE-807).
+      if (!current()) return;
       const message = e instanceof Error ? e.message : 'Failed to load connections';
       if (connections) notifyError(message);
       else error = message;
@@ -656,6 +662,7 @@
 
   onMount(() => load());
   onDestroy(() => {
+    loads.dispose();
     clearQrRetry();
     stopStream();
   });

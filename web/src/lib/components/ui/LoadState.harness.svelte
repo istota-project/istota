@@ -11,6 +11,7 @@
     onRetry,
     withEmpty = true,
     withHeader = false,
+    announce,
   }: {
     loading: boolean;
     error?: string | null;
@@ -21,6 +22,7 @@
     onRetry?: () => void;
     withEmpty?: boolean;
     withHeader?: boolean;
+    announce?: boolean;
   } = $props();
 </script>
 
@@ -35,6 +37,7 @@
   {scope}
   {loadingLabel}
   {onRetry}
+  {announce}
   emptyState={withEmpty ? emptyNote : undefined}
   header={withHeader ? bar : undefined}
 >

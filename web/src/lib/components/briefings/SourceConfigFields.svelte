@@ -7,6 +7,7 @@
   import { checkBriefingPath, getBriefingPathSuggestions, type EmailAccount } from '$lib/api';
   import { debounce } from '$lib/ui/debounce';
   import { latest } from '$lib/ui/latest';
+  import { FEEDS_FAILED_MESSAGE } from './settings/briefingSettings';
   import {
     AutocompleteInput,
     Button,
@@ -24,6 +25,7 @@
     onChange: (patch: Record<string, unknown>) => void;
     browseOptions?: SelectOption[];
     rssOptions?: SelectOption[];
+    feedsFailed?: boolean;
     sharedBlockOptions?: SelectOption[];
     userId?: string;
     fileOptions?: string[];
@@ -38,6 +40,7 @@
     onChange,
     browseOptions = [],
     rssOptions = [],
+    feedsFailed = false,
     sharedBlockOptions = [],
     userId = '',
     fileOptions = [],
@@ -46,19 +49,38 @@
     ownerFixed = false,
   }: Props = $props();
 
+  const accountValue = $derived((config.account as string) || 'bot');
+  // A connected account deleted since the source was saved is no longer
+  // listed; the config keeps its id, so it is shown as an unavailable choice
+  // until the user picks another one.
+  const staleAccount = $derived(
+    emailAccounts.length > 0 &&
+      accountValue.startsWith('imap:') &&
+      !emailAccounts.some((account) => account.id === accountValue),
+  );
   // Until the account list loads, the bot address stands in: it is the default
   // the server reads when the config names no account.
   const accountOptions = $derived<SelectOption[]>(
     emailAccounts.length
-      ? emailAccounts.map((account) => ({
-          value: account.id,
-          label: account.address ? `${account.label} (${account.address})` : account.label,
-          disabled: !account.available,
-        }))
+      ? [
+          ...emailAccounts.map((account) => ({
+            value: account.id,
+            label: account.address ? `${account.label} (${account.address})` : account.label,
+            disabled: !account.available,
+          })),
+          ...(staleAccount
+            ? [{ value: accountValue, label: 'Mail account no longer connected', disabled: true }]
+            : []),
+        ]
       : [{ value: 'bot', label: 'Your bot address' }],
   );
-  const selectedAccount = $derived(
-    emailAccounts.find((account) => account.id === ((config.account as string) || 'bot')),
+  const selectedAccount = $derived(emailAccounts.find((account) => account.id === accountValue));
+  const accountWarning = $derived(
+    staleAccount
+      ? 'This mail account is no longer connected, so the source reads nothing. Pick another account.'
+      : selectedAccount && !selectedAccount.available
+        ? selectedAccount.reason
+        : undefined,
   );
 
   let pathSuggestions = $state<string[]>([]);
@@ -316,12 +338,9 @@
     />
   </Field>
 {:else if kind === 'my_email'}
-  <Field
-    label="Account"
-    warning={selectedAccount && !selectedAccount.available ? selectedAccount.reason : undefined}
-  >
+  <Field label="Account" warning={accountWarning}>
     <Select
-      value={(config.account as string) || 'bot'}
+      value={accountValue}
       options={accountOptions}
       onValueChange={(v) => onChange({ account: v })}
       ariaLabel="Email account"
@@ -354,7 +373,9 @@
       fullWidth
     />
   </Field>
-  {#if rssOptions.length === 0}
+  {#if feedsFailed}
+    <p class="caption">{FEEDS_FAILED_MESSAGE}</p>
+  {:else if rssOptions.length === 0}
     <p class="caption">No feeds available — subscribe in the Feeds module first.</p>
   {/if}
   <div class="inline-fields">

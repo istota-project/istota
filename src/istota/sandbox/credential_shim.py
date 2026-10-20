@@ -313,6 +313,48 @@ def fetch_card(purchase_id: int, *, credential_fd: str | None) -> tuple[dict[str
     return fields, hosts
 
 
+MAIL_ACCOUNT_REASONS = frozenset({
+    "account_channel_unavailable", "skill_not_permitted", "account_not_found",
+    "invalid_credential_request", "mail_accounts_disabled", "permission_denied",
+    "not_owner_turn", "password_missing", "mail_account_error",
+})
+
+
+def _mail_login(block: object) -> bool:
+    return (isinstance(block, dict)
+            and set(block) == {"host", "port", "security", "username", "password"}
+            and all(isinstance(block[key], str) for key in ("host", "security", "username", "password"))
+            and type(block["port"]) is int)
+
+
+def fetch_mail_account(account_id: int, purpose: str, *, credential_fd: str | None) -> dict:
+    """One connected mail account's sign-in, over the invocation's private channel.
+
+    ``{"imap": {host, port, security, username, password}, "smtp": {...} | None}``,
+    with ``smtp`` set only for purpose ``send``. A ``ProxyError``'s message is
+    always one of ``MAIL_ACCOUNT_REASONS``, so no reply text reaches an error.
+    There is no public fallback. The caller boxes the passwords.
+    """
+    if credential_fd is None:
+        raise ProxyError("account_channel_unavailable")
+    try:
+        reply = _request({"type": "mail_account", "account_id": account_id, "purpose": purpose},
+                         credential_fd=credential_fd)
+    except ProxyError:
+        raise ProxyError("account_channel_unavailable") from None
+    if not isinstance(reply, dict):
+        raise ProxyError("mail_account_error")
+    if reply.get("ok") is False:
+        reason = reply.get("reason")
+        raise ProxyError(reason if isinstance(reason, str) and reason in MAIL_ACCOUNT_REASONS
+                         else "mail_account_error")
+    smtp = reply.get("smtp")
+    if (set(reply) != {"imap", "smtp"} or not _mail_login(reply.get("imap"))
+            or not (smtp is None or _mail_login(smtp))):
+        raise ProxyError("mail_account_error")
+    return {"imap": reply["imap"], "smtp": smtp}
+
+
 def list_entries() -> list[str]:
     """The vault entry names this task can read, with no values. Not charged.
 

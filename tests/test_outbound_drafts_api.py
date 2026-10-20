@@ -164,6 +164,31 @@ class TestListDrafts:
         assert [d["id"] for d in drafts] == [mine]
         assert drafts[0]["subject"] == "Mine"
 
+    async def test_an_account_draft_carries_its_from_line(
+        self, client, app, db_path,
+    ):
+        from istota.mail import accounts
+        with db.get_db(db_path) as conn:
+            account, _ = accounts.ensure_account(
+                conn, "alice", slug="home", label="Home", imap_host="imap.home.example",
+                imap_username="alice@home.example", permission="read_send",
+                smtp_host="smtp.home.example", from_address="alice@home.example",
+            )
+            conn.commit()
+        bot = _hold(db_path, subject="From the bot")
+        held = _hold(db_path, subject="From home")
+        with db.get_db(db_path) as conn:
+            conn.execute("UPDATE outbound_drafts SET account_id = ? WHERE id = ?",
+                         (account.id, held))
+            conn.commit()
+        cookies = await _login(client)
+
+        resp = await client.get("/istota/api/chat/drafts", cookies=cookies)
+
+        by_id = {d["id"]: d for d in resp.json()["drafts"]}
+        assert by_id[held]["from_line"] == "Home (alice@home.example)"
+        assert by_id[bot]["from_line"] is None
+
     async def test_a_roomless_draft_is_still_listed(self, client, app, db_path):
         """A cron job mailing an external address has no room to render a card
         in, and the global list is the only place it is reachable."""

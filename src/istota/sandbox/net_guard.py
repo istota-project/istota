@@ -1,11 +1,15 @@
 """Whether an address is a routable public one: the SSRF rule, in one place.
 
-Two daemon-network callers fetch a URL somebody else chose and must not be
+Daemon-network callers reach a host somebody else chose and must not be
 turned against the host's own network: the native WebFetch tool
-(`session/tools/web_fetch.py`) and the `wordpress` skill CLI, which runs
-host-side with no egress confinement at all. Both resolve the host, refuse the
-request if *any* resolved address is non-public, and connect to the address
-they checked.
+(`session/tools/web_fetch.py`), and three host-side callers with no egress
+confinement at all: `mail/connect.py` (a user's connected mail account), and
+the `wordpress` and `servarr` skill CLIs. Each resolves the host, refuses the
+request if *any* resolved address is non-public unless the operator listed
+the exact name, and connects to the address it checked. The resolver
+(`resolve_host`, `host_addresses`), the listed-name rule (`normal_host`,
+`host_set`) and the check (`first_non_public`) are here so the three host-side
+callers share one copy; each keeps its own error vocabulary.
 
 Lifted out of `web_fetch` rather than imported from it, because importing that
 module from a skill pulls in the native tool package (about fifty modules), and
@@ -19,6 +23,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import socket
 
 logger = logging.getLogger(__name__)
 
@@ -92,3 +97,57 @@ def ip_is_public(ip, extra_blocked=()) -> bool:
     ):
         return False
     return True
+
+
+def normal_host(host) -> str:
+    """A host name as the listed-name rule compares it: trimmed, lowercase, no root dot."""
+    return str(host).strip().lower().rstrip(".")
+
+
+def host_set(hosts) -> frozenset:
+    """An operator's ``private_hosts`` list as the exact names it allows."""
+    return frozenset(normal_host(h) for h in (hosts or ()) if str(h).strip())
+
+
+def resolve_host(host: str, port: int) -> list:
+    """Every address ``host`` resolves to, in resolver order; empty on failure."""
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return []
+    seen = []
+    for info in infos:
+        address = info[4][0]
+        if address not in seen:
+            seen.append(address)
+    return seen
+
+
+def host_addresses(host: str, port: int, *, resolve=None) -> list:
+    """``host``'s addresses as ``ipaddress`` objects, a literal unresolved.
+
+    A scoped IPv6 answer's ``%zone`` is dropped before parsing; anything that
+    does not parse is skipped. Empty when nothing resolved. ``resolve``
+    defaults to `resolve_host`, and takes ``(host, port)``.
+    """
+    try:
+        return [ipaddress.ip_address(normal_host(host))]
+    except ValueError:
+        pass
+    addresses = []
+    for raw in (resolve or resolve_host)(host, port):
+        try:
+            address = ipaddress.ip_address(str(raw).split("%", 1)[0])
+        except ValueError:
+            continue
+        if address not in addresses:
+            addresses.append(address)
+    return addresses
+
+
+def first_non_public(addresses, extra_blocked=()):
+    """The first address `ip_is_public` refuses, or None when all are public."""
+    for address in addresses:
+        if not ip_is_public(address, extra_blocked):
+            return address
+    return None

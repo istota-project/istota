@@ -35,7 +35,7 @@
   import { createConfirm } from '$lib/ui/confirm.svelte';
   import BlockEditor from './BlockEditor.svelte';
   import BriefingPreview from './BriefingPreview.svelte';
-  import { sourceKindLabel } from './settings/briefingSettings';
+  import { FEEDS_FAILED_MESSAGE, sourceKindLabel } from './settings/briefingSettings';
 
   interface Props {
     briefingName: string;
@@ -47,6 +47,7 @@
     rssOptions: SelectOption[];
     sharedBlockOptions: SelectOption[];
     feedsAvailable: boolean;
+    feedsFailed?: boolean;
     localDraft?: boolean;
     allowSourceDisable?: boolean;
     userId?: string;
@@ -65,6 +66,7 @@
     rssOptions,
     sharedBlockOptions,
     feedsAvailable,
+    feedsFailed = false,
     onChange,
     localDraft = false,
     allowSourceDisable = true,
@@ -149,7 +151,7 @@
 
   function unavailable(template: BriefingBlockTemplate): string {
     if (template.block.sources.some((source) => source.kind === 'rss') && !feedsAvailable)
-      return 'Enable Feeds and subscribe to a feed first.';
+      return feedsFailed ? FEEDS_FAILED_MESSAGE : 'Enable Feeds and subscribe to a feed first.';
     if (
       template.block.sources.some((source) => source.kind === 'shared_block') &&
       !sharedBlockOptions.length
@@ -450,6 +452,7 @@
     {rssOptions}
     {sharedBlockOptions}
     {feedsAvailable}
+    {feedsFailed}
     allowPreview={!localDraft}
     {allowSourceDisable}
     {userId}
