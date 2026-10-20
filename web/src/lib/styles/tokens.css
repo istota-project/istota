@@ -342,6 +342,8 @@
   --duration-fast: 0.15s;
   --duration-slow: 0.3s;
   --ease-standard: ease;
+  /* Fast out, long settle: a panel sliding in from an edge (the sidebar drawer). */
+  --ease-decelerate: cubic-bezier(0.32, 0.72, 0, 1);
   --transition-fast: var(--duration-fast) var(--ease-standard);
 
   /* A disabled control, drawn at reduced strength rather than recoloured, so

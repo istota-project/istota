@@ -316,7 +316,7 @@ describe('type and motion scales', () => {
       /^--disabled-opacity$/,
     ];
     const inFamily = (name: string) => families.some((re) => re.test(name));
-    expect(Object.keys(dark).filter(inFamily)).toHaveLength(20);
+    expect(Object.keys(dark).filter(inFamily)).toHaveLength(21);
     expect(Object.keys(light).filter(inFamily)).toEqual([]);
   });
 });

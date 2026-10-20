@@ -50,6 +50,8 @@
      * the menu still takes focus and arrow keys move through it.
      */
     retainFocus?: boolean;
+    /** Row size: `sm` for actions, `base` for the app nav's sections. */
+    density?: 'sm' | 'base';
   }
 
   let {
@@ -60,6 +62,7 @@
     side = 'bottom',
     open = $bindable(false),
     retainFocus = false,
+    density = 'sm',
   }: Props = $props();
 
   let triggerEl: HTMLElement | null = $state(null);
@@ -111,7 +114,7 @@
   </DropdownMenu.Trigger>
   <DropdownMenu.Portal>
     <DropdownMenu.Content
-      class="ui-menu-content"
+      class="ui-menu-content density-{density}"
       aria-label={label}
       {side}
       {align}
@@ -193,6 +196,10 @@
     cursor: pointer;
     user-select: none;
     white-space: nowrap;
+  }
+  :global(.ui-menu-content.density-base .ui-menu-item) {
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-base);
   }
   :global(.ui-menu-item[aria-current='page']) {
     color: var(--text-primary);

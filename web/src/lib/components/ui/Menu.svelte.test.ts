@@ -47,6 +47,16 @@ describe('Menu', () => {
     expect(edit).toHaveClass('ui-menu-item');
   });
 
+  it('takes the sm density unless asked for base', async () => {
+    const { unmount } = render(Harness, { items });
+    expect(await openByKeyboard()).toHaveClass('density-sm');
+    unmount();
+    render(Harness, { items, density: 'base' });
+    const menu = await openByKeyboard();
+    expect(menu).toHaveClass('density-base');
+    expect(menu).not.toHaveClass('density-sm');
+  });
+
   it('marks a danger item with the danger class', async () => {
     render(Harness, { items });
     await openByKeyboard();

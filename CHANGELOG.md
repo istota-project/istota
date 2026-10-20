@@ -84,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Every inline notice in the web UI is now drawn by the shared `Alert` component, so admin, settings, health, money, briefings, feeds and location notices look and announce alike, with Retry and Reload buttons in the notice's own action row. Failed actions on a list still on screen now report in the notice drawer instead of a box above the page, and a failed lab CSV import no longer replaces the Labs page. Wallet, feeds, health and money tax settings show a failed first load across the whole pane with a Retry button, where an editable form used to sit under the error with empty or default values.
 - Settings → Preferences picks disabled skills from a searchable list instead of a comma-separated text field, so a misspelled name can no longer be saved. The list holds only the skills your account can use, and a skill you turned off earlier that is no longer offered stays selected.
+- On a phone, the sidebar drawer now slides in and out instead of appearing and disappearing at once. It is drawn on the GPU so it stays smooth on slower phones, and it does not animate when the system asks for reduced motion.
 - Admin → Groups picks a group from a dropdown instead of a table. Choosing another group swaps the details in place, keeping the current ones on screen until the next group has loaded, where the page used to blank and redraw as if reloading.
 - "Generate token" on Location settings is now "Create code", which adds a new device token instead of replacing the account's only one, and the generate API route is removed. The account's existing shared token keeps working through the upgrade and appears in the device list until you remove it.
 - Signing in from the iOS app shows a plain sign-in form at the top of the sign-in sheet, without the card, background glow and footer of the browser sign-in page. Signing in from a browser looks the same as before.
@@ -121,6 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Leaving the admin Logs page with Follow on while a page of records was still loading no longer leaves a live tail connection open in the background.
 - The iOS app's location tracker card now shows its Dropped and Last error rows in the warning colour. The card's own style for the other rows had been overriding it.
+- The ntfy push card in Settings → Connections shows the stored server URL and default topic, and you can edit them in place. They were masked like passwords, so there was no way to check what was set. The access token and password stay hidden.
 - iOS chat notification previews show a reply as plain text rather than raw Markdown, so bold markers, code backticks, link URLs, list bullets and table pipes no longer appear or use up the preview's length. Plain-text briefing email also keeps the underscores in names like `snake_case_name`.
 - Opening a menu on an iPhone no longer draws a blue outline around it.
 - A dropdown stretched to fill its row keeps its arrow at the right edge, rather than right after the selected text.

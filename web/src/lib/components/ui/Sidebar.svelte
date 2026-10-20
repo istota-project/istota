@@ -66,8 +66,11 @@
   }
 
   @media (max-width: 768px) {
+    /* The drawer slides on transform alone, so the compositor runs the whole
+       animation without layout or paint. `visibility` waits out the slide on
+       close and keeps the closed drawer out of the tab order and the
+       accessibility tree, which `display: none` used to do. */
     .sidebar {
-      display: none;
       position: absolute;
       top: 0;
       left: 0;
@@ -76,10 +79,20 @@
       width: 220px;
       background: var(--surface-base);
       border-right: 1px solid var(--border-default);
+      transform: translate3d(-100%, 0, 0);
+      visibility: hidden;
+      will-change: transform;
+      transition:
+        transform var(--duration-fast) var(--ease-decelerate),
+        visibility 0s linear var(--duration-fast);
     }
 
     .sidebar.open {
-      display: flex;
+      transform: translate3d(0, 0, 0);
+      visibility: visible;
+      transition:
+        transform var(--duration-slow) var(--ease-decelerate),
+        visibility 0s;
     }
 
     /* The drawer is positioned against the shell body, so it sits outside the
@@ -98,6 +111,13 @@
       padding: 0;
       cursor: default;
       z-index: var(--z-drawer-backdrop);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sidebar,
+    .sidebar.open {
+      transition: none;
     }
   }
 </style>

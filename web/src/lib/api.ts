@@ -1856,6 +1856,8 @@ export interface SettingsField {
   key: string;
   label: string;
   type: 'text' | 'email' | 'password' | 'url';
+  // A setting stored beside the credentials; its value comes back in `values`.
+  plain?: boolean;
 }
 
 export interface ServiceCard {
@@ -1864,6 +1866,8 @@ export interface ServiceCard {
   status: 'configured' | 'partial' | 'missing' | 'unavailable';
   fields: SettingsField[];
   configured_keys: string[];
+  // Stored values of the `plain` fields only; credentials never come back.
+  values?: Record<string, string>;
   last_updated: string | null;
   used_by?: string[];
   // Optional prose from the service schema: where to get the credential, or
