@@ -1008,3 +1008,203 @@ async def test_scripts_unexpected_error_does_not_expose_host_path(app, config, m
         response = await client.get("/workspace/scripts")
     assert response.status_code == 500
     assert str(config.workspace_path) not in response.text
+
+
+# --- text files in My files (ISSUE-734) --------------------------------------
+
+def _home(config):
+    return config.workspace_path / "Users/alice"
+
+
+def _text_params(path="notes", name="plan.md", place="home"):
+    return {"place": place, "path": path, "name": name}
+
+
+def _text_body(content, revision, path="notes", name="plan.md", place="home"):
+    return {"place": place, "path": path, "name": name, "content": content, "revision": revision}
+
+
+async def test_text_file_read_and_save(client, config):
+    response = await client.get("/workspace/files", params=_text_params())
+    assert response.status_code == 200
+    assert response.json() == {"content": "plan", "revision": _rev("plan"), "exists": True}
+    assert response.headers["cache-control"] == "private, no-store"
+    response = await client.put("/workspace/files", json=_text_body("plan\nmore\n", _rev("plan")))
+    assert response.status_code == 200
+    assert response.json() == {"revision": _rev("plan\nmore\n")}
+    assert (_home(config) / "notes/plan.md").read_text() == "plan\nmore\n"
+
+
+async def test_text_file_save_compares_against_the_disk(client, config):
+    """A change made in the host folder between load and save is a conflict."""
+    (_home(config) / "notes/plan.md").write_text("edited on the Mac\n")
+    response = await client.put("/workspace/files", json=_text_body("from the browser\n", _rev("plan")))
+    assert response.status_code == 409
+    assert response.json()["code"] == "conflict"
+    assert (_home(config) / "notes/plan.md").read_text() == "edited on the Mac\n"
+
+
+@pytest.mark.parametrize("data", [b"\x89PNG\r\n\x1a\n\x00\x00", b"text\x00more", b"caf\xe9"])
+async def test_text_file_refuses_what_is_not_text(client, config, data):
+    (_home(config) / "notes/blob.bin").write_bytes(data)
+    response = await client.get("/workspace/files", params=_text_params(name="blob.bin"))
+    assert response.status_code == 415
+    assert response.json()["code"] == "not_text"
+    response = await client.put("/workspace/files", json=_text_body("x", _rev(""), name="blob.bin"))
+    assert response.status_code == 415
+    assert (_home(config) / "notes/blob.bin").read_bytes() == data
+
+
+async def test_text_file_size_cap(client, config):
+    from istota.workspace.editable import MAX_BYTES
+    (_home(config) / "notes/big.txt").write_text("x" * (MAX_BYTES + 1))
+    response = await client.get("/workspace/files", params=_text_params(name="big.txt"))
+    assert response.status_code == 413
+    assert response.json()["max_bytes"] == MAX_BYTES
+    response = await client.put("/workspace/files", json=_text_body("y" * (MAX_BYTES + 1), _rev("plan")))
+    assert response.status_code == 413
+    assert (_home(config) / "notes/plan.md").read_text() == "plan"
+
+
+async def test_text_file_save_refuses_a_nul(client, config):
+    response = await client.put("/workspace/files", json=_text_body("a\x00b", _rev("plan")))
+    assert response.status_code == 415
+    assert (_home(config) / "notes/plan.md").read_text() == "plan"
+
+
+async def test_text_file_refuses_a_symlink_leaf(client, config, tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret")
+    (_home(config) / "notes/link.txt").symlink_to(outside)
+    response = await client.get("/workspace/files", params=_text_params(name="link.txt"))
+    assert response.status_code == 422
+    assert "secret" not in response.text
+    response = await client.put("/workspace/files", json=_text_body("owned", _rev("secret"), name="link.txt"))
+    assert response.status_code == 422
+    assert outside.read_text() == "secret"
+    assert (_home(config) / "notes/link.txt").is_symlink()
+
+
+async def test_text_file_refuses_a_symlink_below_the_root(client, config, tmp_path):
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "plan.md").write_text("theirs")
+    (_home(config) / "linked").symlink_to(outside)
+    response = await client.get("/workspace/files", params=_text_params(path="linked"))
+    assert response.status_code == 404
+    response = await client.put("/workspace/files", json=_text_body("mine", _rev("theirs"), path="linked"))
+    assert response.status_code == 404
+    assert (outside / "plan.md").read_text() == "theirs"
+
+
+async def test_text_file_missing_is_404_and_save_creates_nothing(client, config):
+    assert (await client.get("/workspace/files", params=_text_params(name="nope.txt"))).status_code == 404
+    response = await client.put("/workspace/files", json=_text_body("new", _rev(""), name="nope.txt"))
+    assert response.status_code == 404
+    assert not (_home(config) / "notes/nope.txt").exists()
+
+
+@pytest.mark.parametrize("path,name", [
+    ("../bob", "plan.md"), ("notes", "../plan.md"), ("notes", ".."), ("notes", "a/b"), ("notes", ""),
+])
+async def test_text_file_names_are_parts_not_paths(client, config, path, name):
+    (config.workspace_path / "Users/bob").mkdir(parents=True)
+    (config.workspace_path / "Users/bob/plan.md").write_text("bob")
+    response = await client.get("/workspace/files", params=_text_params(path=path, name=name))
+    assert response.status_code in {404, 422}
+    response = await client.put("/workspace/files", json=_text_body("x", _rev("bob"), path=path, name=name))
+    assert response.status_code in {404, 422}
+    assert (config.workspace_path / "Users/bob/plan.md").read_text() == "bob"
+
+
+async def test_text_file_only_in_my_files(client, config):
+    with db.get_db(config.db_path) as conn:
+        room = db.create_web_chat_room(conn, "alice", "Shared")
+    (config.workspace_path / "Channels" / room.token).mkdir(parents=True)
+    (config.workspace_path / "Channels" / room.token / "notes.md").write_text("room")
+    params = _text_params(place=f"room:{room.token}", path="", name="notes.md")
+    assert (await client.get("/workspace/files", params=params)).status_code == 404
+    body = _text_body("x", _rev("room"), place=f"room:{room.token}", path="", name="notes.md")
+    assert (await client.put("/workspace/files", json=body)).status_code == 404
+    assert (config.workspace_path / "Channels" / room.token / "notes.md").read_text() == "room"
+
+
+@pytest.mark.parametrize("path", ["{bot}/config", "{bot}/config/skills", "{BOT}/Config"])
+async def test_bot_config_files_keep_their_own_editor(client, config, path):
+    path = path.format(bot=config.bot_dir_name, BOT=config.bot_dir_name.upper())
+    directory = _home(config) / path
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "CRON.md").write_text("cron")
+    response = await client.get("/workspace/files", params=_text_params(path=path, name="CRON.md"))
+    assert response.status_code == 403
+    assert response.json()["code"] == "config_file"
+    response = await client.put("/workspace/files", json=_text_body("x", _rev("cron"), path=path, name="CRON.md"))
+    assert response.status_code == 403
+    assert (directory / "CRON.md").read_text() == "cron"
+
+
+async def test_bot_files_outside_config_are_editable(client, config):
+    scripts = _home(config) / config.bot_dir_name / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "report.py").write_text("print(1)\n")
+    (scripts / "report.py").chmod(0o755)
+    path = f"{config.bot_dir_name}/scripts"
+    response = await client.put("/workspace/files", json=_text_body("print(2)\n", _rev("print(1)\n"), path=path, name="report.py"))
+    assert response.status_code == 200
+    assert (scripts / "report.py").read_text() == "print(2)\n"
+    assert (scripts / "report.py").stat().st_mode & 0o777 == 0o755
+
+
+async def test_text_file_locked_is_423(client, config, monkeypatch):
+    from istota.memory.curation.file_lock import MemoryMdLocked
+    from istota.workspace import text_files
+
+    def held(*args, **kwargs):
+        raise MemoryMdLocked("held")
+
+    monkeypatch.setattr(text_files._md_lock, "memory_md_lock", held)
+    response = await client.put("/workspace/files", json=_text_body("x", _rev("plan")))
+    assert response.status_code == 423
+    assert (_home(config) / "notes/plan.md").read_text() == "plan"
+
+
+async def test_text_file_keeps_crlf_line_endings(client, config):
+    (_home(config) / "notes/win.txt").write_bytes(b"a\r\nb\r\n")
+    response = await client.get("/workspace/files", params=_text_params(name="win.txt"))
+    assert response.json()["content"] == "a\nb\n"
+    revision = response.json()["revision"]
+    response = await client.put("/workspace/files", json=_text_body("a\nb\nc\n", revision, name="win.txt"))
+    assert response.status_code == 200
+    assert (_home(config) / "notes/win.txt").read_bytes() == b"a\r\nb\r\nc\r\n"
+    # The revision handed back is the one the next load computes.
+    again = await client.get("/workspace/files", params=_text_params(name="win.txt"))
+    assert again.json()["revision"] == response.json()["revision"]
+
+
+async def test_text_file_save_refuses_unencodable_text(client, config):
+    response = await client.put(
+        "/workspace/files", content='{"place":"home","path":"notes","name":"plan.md","content":"\\ud800","revision":"%s"}' % _rev("plan"),
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 415
+    assert (_home(config) / "notes/plan.md").read_text() == "plan"
+
+
+async def test_a_relinked_config_folder_is_still_refused(client, config):
+    settings = _home(config) / "settings"
+    settings.mkdir()
+    (settings / "CRON.md").write_text("cron")
+    (_home(config) / config.bot_dir_name).mkdir()
+    (_home(config) / config.bot_dir_name / "config").symlink_to(settings)
+    response = await client.get("/workspace/files", params=_text_params(path="settings", name="CRON.md"))
+    assert response.status_code == 403
+    response = await client.put("/workspace/files", json=_text_body("x", _rev("cron"), path="settings", name="CRON.md"))
+    assert response.status_code == 403
+    assert (settings / "CRON.md").read_text() == "cron"
+
+
+async def test_text_file_save_requires_revision(client, config):
+    body = _text_body("x", _rev("plan"))
+    del body["revision"]
+    assert (await client.put("/workspace/files", json=body)).status_code == 400
+    assert (_home(config) / "notes/plan.md").read_text() == "plan"

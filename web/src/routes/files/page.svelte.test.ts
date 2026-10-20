@@ -1322,3 +1322,88 @@ it('links a group folder to its notebook and members without adding links to per
   await fireEvent.click(screen.getByRole('link', { name: 'My files' }));
   await waitFor(() => expect(screen.queryByRole('link', { name: 'Group overview' })).toBeNull());
 });
+
+it('edits a text file in My files from its row and saves it', async () => {
+  api.getWorkspaceTextFile.mockResolvedValue({
+    content: 'plan\n',
+    revision: 'rev-0',
+    exists: true,
+  });
+  api.saveWorkspaceTextFile.mockResolvedValue({ revision: 'rev-1' });
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('link', { name: 'notes & drafts' }));
+  await openActions('plan #1.md');
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
+  await waitFor(() => expect(editorBox().value).toBe('plan\n'));
+  expect(api.getWorkspaceTextFile).toHaveBeenCalledWith('notes & drafts', 'plan #1.md');
+  await fireEvent.input(editorBox(), { target: { value: 'plan\nmore\n' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await screen.findByText('Saved.');
+  expect(api.saveWorkspaceTextFile).toHaveBeenCalledWith(
+    'notes & drafts',
+    'plan #1.md',
+    'plan\nmore\n',
+    'rev-0',
+  );
+  const loads = api.getWorkspaceListing.mock.calls.length;
+  await fireEvent.click(screen.getAllByRole('button', { name: 'Close' }).at(-1)!);
+  await waitFor(() => expect(api.getWorkspaceListing.mock.calls.length).toBe(loads + 1));
+});
+
+it("shows the server's refusal when a file is not text", async () => {
+  api.getWorkspaceTextFile.mockRejectedValue(new Error('Only text files can be edited here.'));
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('link', { name: 'notes & drafts' }));
+  await openActions('plan #1.md');
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
+  await screen.findByText('Only text files can be edited here.');
+  expect(document.querySelector('[role=dialog] textarea')).toBeNull();
+});
+
+it('offers Edit only for files in My files that may be text', async () => {
+  api.getWorkspaceListing.mockImplementation(async (place, path) => ({
+    place,
+    path,
+    entries: [entry('photo.jpg'), { ...entry('huge.log'), size: 2_000_000 }, entry('notes.txt')],
+    truncated: false,
+    skipped_names: 0,
+  }));
+  render(Workspace);
+  await openActions('photo.jpg');
+  expect(screen.queryByRole('menuitem', { name: 'Edit' })).toBeNull();
+  await fireEvent.keyDown(await screen.findByRole('menuitem', { name: 'Download' }), {
+    key: 'Escape',
+  });
+  await openActions('huge.log');
+  expect(screen.queryByRole('menuitem', { name: 'Edit' })).toBeNull();
+  await fireEvent.keyDown(await screen.findByRole('menuitem', { name: 'Download' }), {
+    key: 'Escape',
+  });
+  await openActions('notes.txt');
+  expect(await screen.findByRole('menuitem', { name: 'Edit' })).toBeTruthy();
+  await fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Edit' }), { key: 'Escape' });
+
+  __history.reset('/istota/files?place=room%3Asample');
+  cleanup();
+  render(Workspace);
+  await openActions('notes.txt');
+  await screen.findByRole('menuitem', { name: 'Download' });
+  expect(screen.queryByRole('menuitem', { name: 'Edit' })).toBeNull();
+});
+
+it('opens a config file found in the listing in its own editor', async () => {
+  api.getWorkspaceConfigFile.mockResolvedValue({ content: '', revision: 'rev-0', exists: false });
+  api.getWorkspaceListing.mockImplementation(async (place, path) => ({
+    place,
+    path,
+    entries: [entry('CRON.md')],
+    truncated: false,
+    skipped_names: 0,
+  }));
+  __history.reset('/istota/files?place=home&path=Helper%2Fconfig');
+  render(Workspace);
+  await openActions('CRON.md');
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
+  await waitFor(() => expect(api.getWorkspaceConfigFile).toHaveBeenCalledWith('CRON.md'));
+  expect(api.getWorkspaceTextFile).not.toHaveBeenCalled();
+});
