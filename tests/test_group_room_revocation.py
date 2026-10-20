@@ -706,3 +706,43 @@ class TestARemovedMemberCannotReachBack:
             reply = await commands.cmd_more(ctx)
         assert "the private plan" not in str(reply)
         assert "group" in str(reply)
+
+
+class TestALostHostIsSucceeded:
+    """The host's web identity disabled: the access check drops them on the
+    next read, and an owner who is still in the room takes over there and
+    then, not at the next membership change."""
+
+    @pytest.fixture
+    def two_owners(self, config):
+        with db.get_db(config.db_path) as conn:
+            service.create_group(conn, config, "team", actor_id="admin", is_admin=True,
+                                 expected_revision=0, owners=["alice", "carol"],
+                                 display_name="Team", kind="team")
+            _change(conn, config, "bob", role="member", acknowledge_history=True)
+            token = create_group_room(conn, "alice", "team", "Planning",
+                                      "req-00000002")["room"].token
+        return token
+
+    def test_a_disabled_hosts_room_takes_the_next_owner(self, config, two_owners):
+        from istota.rooms import policy as room_policy
+        from istota.rooms import speech_gate
+        from istota.transport.ingest import record_inbound
+
+        with db.get_db(config.db_path) as conn:
+            assert room_policy.get_policy(conn, two_owners).host_user_id == "alice"
+            conn.execute(
+                "INSERT INTO web_auth_identities (user_id, email, disabled) "
+                "VALUES ('alice', 'alice@example.com', 1)")
+            result = record_inbound(
+                conn, config, surface="web", surface_ref=two_owners, user_id="bob",
+                text="what's the plan?", source_type="web", output_target="room",
+                addressed_to_bot=True,
+            )
+            rung = conn.execute(
+                "SELECT rung FROM speech_gate_decisions WHERE message_id = ?",
+                (result.message_id,),
+            ).fetchone()
+            assert rung is None or rung[0] != speech_gate.RUNG_HOST_LOST
+            assert result.outcome == "created"
+            assert room_policy.get_policy(conn, two_owners).host_user_id == "carol"

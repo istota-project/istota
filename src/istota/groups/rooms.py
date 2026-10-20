@@ -282,7 +282,7 @@ def reconcile_group_room_members(
     for token in group_owned_room_tokens(conn, group_id):
         room = db.get_room(conn, token)
         change = _reconcile_roster(conn, room, members, display_name)
-        change["host"] = _succeed_host(conn, token, group_id)
+        change["host"] = succeed_host(conn, token, group_id)
         changes.append(change)
     return changes
 
@@ -333,7 +333,7 @@ def _reconcile_roster(
     return {"room_token": token, "added": added, "removed": removed, "pids": pids}
 
 
-def _succeed_host(conn: sqlite3.Connection, room_token: str, group_id: str) -> str | None:
+def succeed_host(conn: sqlite3.Connection, room_token: str, group_id: str) -> str | None:
     """The room's host, appointing one when the last has left.
 
     A present host stays, owner or not: hosting is an operational role and a

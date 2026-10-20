@@ -243,12 +243,22 @@ def ensure_policy(conn: sqlite3.Connection, room_token: str) -> RoomPolicy | Non
 
 def current_host(conn: sqlite3.Connection, policy: RoomPolicy | None) -> str | None:
     """The host, or None when there is none. A host found to have left is
-    cleared on the row, so a later return does not restore them (D14)."""
+    cleared on the row, so a later return does not restore them (D14).
+
+    A group-owned room appoints the successor owner then and there: the host
+    can drop out with no membership change (a disabled identity), and the
+    succession otherwise runs only when the group's membership is reconciled.
+    """
     if policy is None or not policy.host_user_id:
         return None
     if host_present(conn, policy.room_token, policy.host_user_id):
         return policy.host_user_id
     lose_host(conn, policy.room_token, policy.host_user_id)
+    room = db.get_room(conn, policy.room_token)
+    if db.is_group_owned_room(room) and room.group_id:
+        from istota.groups.rooms import succeed_host
+
+        return succeed_host(conn, room.token, room.group_id)
     return None
 
 
