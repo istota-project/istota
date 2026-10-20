@@ -81,6 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Signing in from the iOS app shows a plain sign-in form at the top of the sign-in sheet, without the card, background glow and footer of the browser sign-in page. Signing in from a browser looks the same as before.
 - A phone browser's toolbar now takes the color of the web UI's top navigation bar instead of the page background, so the two read as one header in light and dark themes. The iOS app takes its status bar contrast from the same color.
 - The web dashboard shows two module tiles per row on a phone instead of one, so the whole list fits on screen. The tile descriptions are shorter so they stay at two lines.
 - On a wide screen, every web dashboard tile is now as tall as the welcome card's row. Before, the tile beside the welcome card was taller than the tiles below it. Narrower layouts keep their shorter tiles.
