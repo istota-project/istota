@@ -5,7 +5,7 @@ write (``config_for_check``: ``container_config_document`` with the
 credentials inline, mapped by ``config.config_from_document``, the mapping
 ``load_config`` uses), and calls the client istota already uses for that
 service: the native brain's one-shot completion, the Nextcloud OCS and WebDAV
-helpers, ``skills.email``'s IMAP session and SMTP opener, and the calendar
+helpers, ``mail.connect``'s IMAP and SMTP openers, and the calendar
 skill's CalDAV client. A check that passes has tested the config, not a
 parallel reimplementation of it.
 
@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from istota.config import Config, config_from_document
 from istota.lib.unreachable import (  # noqa: F401 - timed_out_message is setup_app's too
     _chain_text,
+    chain_class_names,
     host_of,
     timed_out_message,
     unreachable_message,
@@ -311,43 +312,68 @@ def check_nextcloud(config: Config, own_user_id: str, *, seconds: float = CHECK_
 
 
 def check_email(config: Config, *, seconds: float = CHECK_SECONDS) -> CheckResult:
-    """An IMAP login and logout, then SMTP's EHLO, STARTTLS and AUTH; no message."""
+    """The bot box: an IMAP login and logout, then SMTP's EHLO, STARTTLS and AUTH."""
     try:
         from istota.mail.support import get_email_config  # noqa: PLC0415
-        from istota.skills.email import _open_smtp, imap_session  # noqa: PLC0415
     except ImportError as exc:
         log_failure("email", "import", exc, config)
         return CheckResult(False, "This installation can't test an email connection.")
+    return check_mailbox(get_email_config(config), seconds=seconds)
+
+
+def check_mailbox(
+    email, *, smtp: bool = True, check_public: bool = False, private_hosts=(),
+    seconds: float = CHECK_SECONDS,
+) -> CheckResult:
+    """Sign in to ``email``'s IMAP and, with ``smtp``, its SMTP; send nothing.
+
+    Connects through `istota.mail.connect`, as every reader and sender does, so
+    a check that passes signed in the way the poller and the skill will.
+    ``check_public`` and ``private_hosts`` are for a host a user typed. The log
+    line carries the classified reason and exception class names, never the
+    text: an auth failure's text can echo the username.
+    """
+    try:
+        from istota.mail import connect  # noqa: PLC0415
+    except ImportError as exc:
+        _log_mail_failure("import", "connect_failed", exc)
+        return CheckResult(False, "This installation can't test an email connection.")
 
     deadline = Deadline(seconds)
-    email = get_email_config(config)
     lines: list[CheckLine] = []
 
     email.imap_timeout = math.ceil(deadline.timeout())
     try:
-        with imap_session(email):
-            pass
+        with connect.open_imap(email, check_public=check_public, private_hosts=private_hosts) as mailbox:
+            mailbox.login(email.imap_user, connect.reveal_password(email.imap_password))
         lines.append(CheckLine("imap", True, f"Signed in to {email.imap_host}."))
     except ImportError as exc:
-        log_failure("email", "imap", exc, config)
+        _log_mail_failure("imap", "connect_failed", exc)
         return CheckResult(False, "This installation can't test an email connection.")
     except Exception as exc:  # noqa: BLE001 - every failure becomes a plain message
-        log_failure("email", "imap", exc, config)
-        if type(exc).__name__ == "MailboxLoginError":
+        reason = connect.classify_error(exc)
+        _log_mail_failure("imap", reason, exc)
+        if reason == "auth_failed":
             message = "The mail server didn't accept that username and password."
         else:
-            message = unreachable_message(email.imap_host, exc=exc, seconds=seconds)
+            message = _mail_unreachable(email.imap_host, reason, exc, seconds)
         lines.append(CheckLine("imap", False, message))
-        lines.append(CheckLine("smtp", False, "Not checked, because a step above failed."))
+        if smtp:
+            lines.append(CheckLine("smtp", False, "Not checked, because a step above failed."))
         return CheckResult(False, message, lines=lines)
+
+    if not smtp:
+        return CheckResult(True, "Signed in for receiving mail.", lines=lines)
 
     smtp_host = email.smtp_host
     stage = "connect"
     try:
-        server = _open_smtp(email, timeout=deadline.timeout())
+        server = connect.open_smtp(
+            email, timeout=deadline.timeout(), check_public=check_public, private_hosts=private_hosts,
+        )
         try:
             stage = "auth"
-            server.login(email.effective_smtp_user, email.effective_smtp_password)
+            server.login(email.effective_smtp_user, connect.reveal_password(email.effective_smtp_password))
         finally:
             try:
                 server.quit()
@@ -355,12 +381,12 @@ def check_email(config: Config, *, seconds: float = CHECK_SECONDS) -> CheckResul
                 server.close()
         lines.append(CheckLine("smtp", True, f"Signed in to {smtp_host} for sending."))
     except smtplib.SMTPAuthenticationError as exc:
-        log_failure("email", "smtp", exc, config)
+        _log_mail_failure("smtp", "auth_failed", exc)
         message = "The outgoing mail server didn't accept that username and password."
         lines.append(CheckLine("smtp", False, message))
         return CheckResult(False, message, lines=lines)
     except smtplib.SMTPNotSupportedError as exc:
-        log_failure("email", "smtp", exc, config)
+        _log_mail_failure("smtp", "tls_failed" if stage == "connect" else "auth_failed", exc)
         if stage == "connect":
             message = f"The outgoing mail server at {smtp_host} doesn't offer a secure connection."
         else:
@@ -368,16 +394,36 @@ def check_email(config: Config, *, seconds: float = CHECK_SECONDS) -> CheckResul
         lines.append(CheckLine("smtp", False, message))
         return CheckResult(False, message, lines=lines)
     except smtplib.SMTPException as exc:
-        log_failure("email", "smtp", exc, config)
+        _log_mail_failure("smtp", "connect_failed", exc)
         message = f"The outgoing mail server at {smtp_host} refused the test."
         lines.append(CheckLine("smtp", False, message))
         return CheckResult(False, message, lines=lines)
     except Exception as exc:  # noqa: BLE001
-        log_failure("email", "smtp", exc, config)
-        message = unreachable_message(smtp_host, exc=exc, seconds=seconds)
+        reason = connect.classify_error(exc)
+        _log_mail_failure("smtp", reason, exc)
+        message = _mail_unreachable(smtp_host, reason, exc, seconds)
         lines.append(CheckLine("smtp", False, message))
         return CheckResult(False, message, lines=lines)
     return CheckResult(True, "Signed in for receiving and sending mail.", lines=lines)
+
+
+
+
+def _mail_unreachable(host: str, reason: str, exc: BaseException, seconds: float) -> str:
+    if reason == "address_not_public":
+        return f"{host} is on a private network, which a connected mail account may not reach."
+    if reason == "dns_failed":
+        return f"Couldn't reach {host}: the name doesn't resolve."
+    if reason == "tls_failed":
+        return f"Couldn't make a secure connection to {host}."
+    return unreachable_message(host, exc=exc, seconds=seconds)
+
+
+def _log_mail_failure(step: str, reason: str, exc: BaseException) -> None:
+    logger.info(
+        "setup: check email %s failed: reason=%s chain=%s",
+        step, reason, ",".join(chain_class_names(exc)),
+    )
 
 
 # --- calendar ------------------------------------------------------------------

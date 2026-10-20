@@ -480,7 +480,7 @@ class TestDeferredSentEmail:
             "ISTOTA_TASK_ID": "99",
             "ISTOTA_DEFERRED_DIR": str(tmp_path),
         }
-        args = MagicMock()
+        args = MagicMock(account=None)
         args.to = "bob@example.com"
         args.subject = "Meeting"
         args.body = "Let's meet"

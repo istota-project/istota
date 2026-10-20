@@ -243,6 +243,10 @@ class EmailConfig:
     # noise, and it is why this is not "blank means nothing changed".
     authserv_id: str = ""
     imap_timeout_seconds: int = 30  # socket timeout for IMAP connections (0/unset → 30)
+    # "tls" (implicit) or "starttls"; blank infers from the port, 993 and 465
+    # being implicit TLS. Every mode verifies the certificate (`mail.connect`).
+    imap_security: str = ""
+    smtp_security: str = ""
     # Outbound approval floor: the weakest policy any user may run. One of
     # `off` (no holds), `untrusted` (hold unless every recipient is explicitly
     # trusted), `all` (hold unless every recipient is one of the user's own
@@ -285,7 +289,26 @@ class WordPressConfig:
     max_upload_mb: int = 25
 
 
-# What a `private_hosts` entry (`[wordpress]`, `[servarr]`) may look like: a
+@dataclass
+class MailAccountsConfig:
+    """Operator settings for the mail accounts users connect (`[mail_accounts]`).
+
+    Its own table rather than keys under ``[email]``: ``[email]`` is the bot's
+    mailbox and is off by default, and user accounts work without it.
+
+    ``enabled`` off keeps the rows but makes every account unreachable.
+    ``allow_send`` off makes every account behave as ``read``.
+    ``private_hosts`` has ``[wordpress] private_hosts``'s meaning and reason for
+    being operator-only.
+    """
+    enabled: bool = True
+    allow_send: bool = True
+    max_per_user: int = 10
+    private_hosts: list[str] = field(default_factory=list)
+
+
+# What a `private_hosts` entry (`[wordpress]`, `[servarr]`,
+# `[mail_accounts]`) may look like: a
 # host name (with an optional trailing dot) or an IP literal. The skills match
 # entries by exact name, so a URL, a port or a wildcard matches nothing. The
 # Ansible role asserts with this same string.
@@ -2388,6 +2411,7 @@ class Config:
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     devbox: DevboxConfig = field(default_factory=DevboxConfig)
     wordpress: WordPressConfig = field(default_factory=WordPressConfig)
+    mail_accounts: MailAccountsConfig = field(default_factory=MailAccountsConfig)
     servarr: ServarrConfig = field(default_factory=ServarrConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     briefings: BriefingsModuleConfig = field(default_factory=BriefingsModuleConfig)
@@ -3707,6 +3731,8 @@ def _validate_sandbox_ro_paths(raw: object) -> list[str]:
 
 
 CONFIRM_SENDER_MATCH_POLICIES = ("off", "verify", "gate")
+# `[email] imap_security` / `smtp_security`; blank infers from the port.
+MAIL_SECURITY_MODES = ("", "tls", "starttls")
 
 
 def _validate_confirm_sender_match(raw: object, authserv_id: str) -> str:
@@ -4692,6 +4718,10 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     # alone.
     "security.sandbox_ro_paths": lambda raw, key: _validate_sandbox_ro_paths(raw),
     "scheduler.email_task_queue": lambda raw, key: _valid_task_queue(raw),
+    # Blank is a value: infer from the port. A typo falls back to it too, and
+    # every mode verifies, so the fallback changes the handshake, not the trust.
+    "email.imap_security": _one_of(*MAIL_SECURITY_MODES),
+    "email.smtp_security": _one_of(*MAIL_SECURITY_MODES),
     # A zero-second long-poll is a round trip that cannot carry news, and it
     # used to be worse than useless: the same number was the `asyncio.wait`
     # deadline for the whole cycle, so `0` cancelled every room mid-flight and
@@ -4771,6 +4801,8 @@ FIELD_CHOICES: dict[tuple[str, ...], tuple[str, ...]] = {
     ("nextcloud", "sharing", "contacts"): _CONFIG_HOOKS["nextcloud.sharing.contacts"].choices,
     ("email", "outbound_approval_floor"): OUTBOUND_APPROVAL_POLICIES,
     ("email", "confirm_sender_match"): CONFIRM_SENDER_MATCH_POLICIES,
+    ("email", "imap_security"): MAIL_SECURITY_MODES,
+    ("email", "smtp_security"): MAIL_SECURITY_MODES,
     ("brain", "kind"): BRAIN_KINDS,
     # Empty is a value here: no failover (ISSUE-362).
     ("brain", "fallback"): BRAIN_KINDS + ("",),
@@ -5423,6 +5455,7 @@ def load_config(
     _validate_brain_fallback(config)
     _validate_room_selectable(config)
     _validate_wordpress_private_hosts(config)
+    _warn_malformed_private_hosts("mail_accounts", config.mail_accounts.private_hosts, "account")
     _validate_servarr(config)
     _validate_claude_code_brain(config)
     _validate_configured_model_references(config)

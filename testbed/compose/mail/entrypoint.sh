@@ -1,5 +1,5 @@
 #!/bin/sh
-# Create the testbed's two mailboxes, then serve.
+# Create the testbed's three mailboxes, then serve.
 #
 # One file rather than two copies of the same shell, because the container is
 # started two ways: `docker run` from `run_standalone`, for the wire suite, and
@@ -20,7 +20,7 @@
 # `state_dir` and the same DB dsns, so the accounts created are the ones served.
 set -e
 
-ACCOUNTS='bot@bot.test catchall@ext.test'
+ACCOUNTS='bot@bot.test catchall@ext.test me@personal.test'
 PASSWORD='maddy-testbed'
 
 for acct in $ACCOUNTS; do

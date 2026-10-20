@@ -145,6 +145,8 @@ def get_email_config(config: Config) -> EmailConfig:
         smtp_password=config.email.smtp_password,
         bot_email=config.email.bot_email,
         imap_timeout=config.email.imap_timeout_seconds,
+        imap_security=config.email.imap_security,
+        smtp_security=config.email.smtp_security,
     )
 
 

@@ -5723,6 +5723,96 @@ function mockWalletRoutes(url: string, method: string, body: any): unknown | und
   return undefined;
 }
 
+// Connected mail accounts. Passwords are never kept: only whether one was sent.
+const mockMailAccounts = {
+  enabled: true,
+  allow_send: true,
+  max_per_user: 10,
+  refusal: null as string | null,
+  accounts: [
+    {
+      id: 1,
+      slug: 'work',
+      label: 'Work',
+      permission: 'read',
+      imap_host: 'imap.example.com',
+      imap_port: 993,
+      imap_security: 'tls',
+      imap_username: 'alice@example.com',
+      default_folder: 'INBOX',
+      smtp: null as Record<string, unknown> | null,
+      from_address: '',
+      from_name: '',
+      sent_folder: '',
+      enabled: true,
+      imap_password_set: true,
+      smtp_password_set: false,
+      pending_drafts: 0,
+      updated_at: '2026-10-20T09:00:00Z',
+    },
+  ],
+};
+let nextMailAccount = 2;
+const mockMailTests = new Map<string, number>();
+function mockMailAccountRoutes(url: string, method: string, body: any): unknown | undefined {
+  const root = '/istota/api/settings/mail-accounts';
+  if (!url.startsWith(root)) return undefined;
+  if (url === root && method === 'GET') return mockMailAccounts;
+  const poll = url.match(/^\/istota\/api\/settings\/mail-accounts\/test-requests\/(\w+)$/);
+  if (poll && method === 'GET') {
+    const asked = mockMailTests.get(poll[1]);
+    if (asked === undefined) return { status: 'unknown' };
+    if (Date.now() - asked < 3000) return { status: 'pending' };
+    mockMailTests.delete(poll[1]);
+    return {
+      status: 'answered',
+      result: {
+        ok: true,
+        message: 'Signed in.',
+        lines: [{ step: 'imap', ok: true, message: 'Signed in to the IMAP server.' }],
+      },
+    };
+  }
+  if (mockMailAccounts.refusal) return { __status: 403, detail: mockMailAccounts.refusal };
+  const one = url.match(/^\/istota\/api\/settings\/mail-accounts\/(\d+)(\/test)?$/);
+  const apply = (row: (typeof mockMailAccounts.accounts)[number]) => {
+    const { imap_password, smtp_password, ...fields } = body ?? {};
+    Object.assign(row, fields);
+    if (imap_password) row.imap_password_set = true;
+    if (smtp_password) row.smtp_password_set = true;
+    if (row.smtp === null) row.permission = 'read';
+    row.updated_at = new Date().toISOString();
+  };
+  if (url === root && method === 'POST') {
+    if (!body?.slug) return { __status: 400, detail: 'This field is required', field: 'slug' };
+    if (mockMailAccounts.accounts.some((a) => a.slug === body.slug))
+      return { __status: 409, detail: 'You already have an account with that slug', field: 'slug' };
+    const row = { ...mockMailAccounts.accounts[0], id: nextMailAccount++, smtp: null };
+    row.imap_password_set = false;
+    row.pending_drafts = 0;
+    apply(row);
+    mockMailAccounts.accounts.push(row);
+    return { account: row };
+  }
+  if (!one) return undefined;
+  const row = mockMailAccounts.accounts.find((a) => a.id === Number(one[1]));
+  if (!row) return { __status: 404, detail: 'Mail account not found' };
+  if (one[2] && method === 'POST') {
+    const id = Math.random().toString(36).slice(2);
+    mockMailTests.set(id, Date.now());
+    return { __status: 202, request_id: id };
+  }
+  if (method === 'PATCH') {
+    apply(row);
+    return { account: row };
+  }
+  if (method === 'DELETE') {
+    mockMailAccounts.accounts = mockMailAccounts.accounts.filter((a) => a.id !== row.id);
+    return { deleted: true, drafts_discarded: row.pending_drafts };
+  }
+  return undefined;
+}
+
 const searchHandler: MockHandler = ({ url }) => {
   if (!url.startsWith('/istota/api/search?')) return;
   const params = new URL(url, 'http://localhost').searchParams;
@@ -7469,6 +7559,7 @@ const handlers: MockHandler[] = [
   workspaceHandler,
   searchHandler,
   ({ url, method, body }) => mockWalletRoutes(url, method, body),
+  ({ url, method, body }) => mockMailAccountRoutes(url, method, body),
   ({ url }) => (url === '/istota/api/me' ? user : undefined),
   ({ url }) =>
     url === '/istota/api/nav/unread'

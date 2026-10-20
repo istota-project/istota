@@ -117,7 +117,7 @@ class TestEmailOperations:
         assert result.references == "<ref1@example.com>"
 
     @patch("istota.skills.email._save_to_sent")
-    @patch("istota.skills.email.smtplib.SMTP")
+    @patch("smtplib.SMTP")
     def test_send_email(self, mock_smtp_class, mock_save, email_config):
         # `_send_smtp` opens the session explicitly rather than with `with`, so
         # that a QUIT failure after the server accepted the message cannot be
@@ -145,7 +145,7 @@ class TestEmailOperations:
         assert sent_msg["Message-ID"] is not None
 
     @patch("istota.skills.email._save_to_sent")
-    @patch("istota.skills.email.smtplib.SMTP")
+    @patch("smtplib.SMTP")
     def test_reply_with_threading(self, mock_smtp_class, mock_save, email_config):
         # `_send_smtp` opens the session explicitly rather than with `with`, so
         # that a QUIT failure after the server accepted the message cannot be
@@ -168,7 +168,7 @@ class TestEmailOperations:
         assert sent_msg["Subject"] == "Re: Meeting"
 
     @patch("istota.skills.email._save_to_sent")
-    @patch("istota.skills.email.smtplib.SMTP")
+    @patch("smtplib.SMTP")
     def test_reply_already_has_re_prefix(self, mock_smtp_class, mock_save, email_config):
         # `_send_smtp` opens the session explicitly rather than with `with`, so
         # that a QUIT failure after the server accepted the message cannot be
@@ -189,7 +189,7 @@ class TestEmailOperations:
         assert not sent_msg["Subject"].startswith("Re: Re:")
 
     @patch("istota.skills.email._save_to_sent")
-    @patch("istota.skills.email.smtplib.SMTP")
+    @patch("smtplib.SMTP")
     def test_reply_uses_in_reply_to_as_references_fallback(
         self, mock_smtp_class, mock_save, email_config
     ):
@@ -301,8 +301,13 @@ class TestConfigFromEnv:
 
 class TestCmdSend:
     @pytest.fixture(autouse=True)
-    def _gate_off(self, outbound_gate_off):
-        """Send mechanics, not approval policy — see the fixture's docstring."""
+    def _gate_off(self, outbound_gate_off, monkeypatch):
+        """Send mechanics, not approval policy — see the fixture's docstring.
+
+        `SMTP_HOST` is what says the bot box is configured; the proxy exports
+        it only when `[email]` is enabled.
+        """
+        monkeypatch.setenv("SMTP_HOST", "smtp.test.com")
 
     @patch("istota.skills.email._config_from_env")
     @patch("istota.skills.email.send_email")
@@ -312,7 +317,7 @@ class TestCmdSend:
             imap_host="", imap_port=993, imap_user="", imap_password="",
             smtp_host="smtp.test.com", smtp_port=587, bot_email="bot@test.com",
         )
-        args = MagicMock()
+        args = MagicMock(account=None)
         args.to = "alice@example.com"
         args.subject = "Hello"
         args.body = "Test body"
@@ -350,7 +355,7 @@ class TestCmdSend:
             imap_host="", imap_port=993, imap_user="", imap_password="",
             smtp_host="smtp.test.com", smtp_port=587,
         )
-        args = MagicMock()
+        args = MagicMock(account=None)
         args.to = "bob@example.com"
         args.subject = "Report"
         args.body = "<h1>Report</h1>"
@@ -373,7 +378,7 @@ class TestCmdSend:
         body_file = tmp_path / "body.html"
         body_file.write_text("<p>Hello from file</p>")
 
-        args = MagicMock()
+        args = MagicMock(account=None)
         args.to = "bob@example.com"
         args.subject = "File body"
         args.body = None
@@ -391,7 +396,7 @@ class TestCmdSend:
             imap_host="", imap_port=993, imap_user="", imap_password="",
             smtp_host="smtp.test.com", smtp_port=587,
         )
-        args = MagicMock()
+        args = MagicMock(account=None)
         args.to = "bob@example.com"
         args.subject = "Empty"
         args.body = None
@@ -404,8 +409,13 @@ class TestCmdSend:
 
 class TestEmailCLIMain:
     @pytest.fixture(autouse=True)
-    def _gate_off(self, outbound_gate_off):
-        """Send mechanics, not approval policy — see the fixture's docstring."""
+    def _gate_off(self, outbound_gate_off, monkeypatch):
+        """Send mechanics, not approval policy — see the fixture's docstring.
+
+        `SMTP_HOST` is what says the bot box is configured; the proxy exports
+        it only when `[email]` is enabled.
+        """
+        monkeypatch.setenv("SMTP_HOST", "smtp.test.com")
 
     @patch("istota.skills.email._config_from_env")
     @patch("istota.skills.email.send_email")
@@ -795,7 +805,7 @@ class TestSanitizeHeader:
 
 class TestSendEmailSanitizesSubject:
     @patch("istota.skills.email._save_to_sent")
-    @patch("istota.skills.email.smtplib.SMTP")
+    @patch("smtplib.SMTP")
     def test_newlines_stripped_from_subject(self, mock_smtp_class, mock_save, email_config):
         # `_send_smtp` opens the session explicitly rather than with `with`, so
         # that a QUIT failure after the server accepted the message cannot be
@@ -815,7 +825,7 @@ class TestSendEmailSanitizesSubject:
         assert sent_msg["Subject"] == "Hello World"
 
     @patch("istota.skills.email._save_to_sent")
-    @patch("istota.skills.email.smtplib.SMTP")
+    @patch("smtplib.SMTP")
     def test_reply_newlines_stripped_from_subject(self, mock_smtp_class, mock_save, email_config):
         # `_send_smtp` opens the session explicitly rather than with `with`, so
         # that a QUIT failure after the server accepted the message cannot be
@@ -835,7 +845,7 @@ class TestSendEmailSanitizesSubject:
         assert sent_msg["Subject"] == "Re: Meeting Notes"
 
     @patch("istota.skills.email._save_to_sent")
-    @patch("istota.skills.email.smtplib.SMTP")
+    @patch("smtplib.SMTP")
     def test_reply_sanitizes_threading_headers(self, mock_smtp_class, mock_save, email_config):
         """Folded newlines in References/In-Reply-To from original email are stripped."""
         # `_send_smtp` opens the session explicitly rather than with `with`, so

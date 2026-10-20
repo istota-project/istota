@@ -57,6 +57,18 @@ describe('a pending draft', () => {
     expect(container.textContent).toContain('Wednesday at two works.');
   });
 
+  it('names the connected account a draft goes out from', () => {
+    const { container } = mount(draft({ from_line: 'Work (me@example.com)' }));
+    const fields = container.querySelector('.draft-fields')!;
+    expect(fields.textContent).toContain('From');
+    expect(fields.textContent).toContain('Work (me@example.com)');
+  });
+
+  it('has no From line for a bot-box draft', () => {
+    const { container } = mount(draft({ from_line: null }));
+    expect(container.querySelector('.draft-fields')!.textContent).not.toContain('From');
+  });
+
   it('lists cc and bcc alongside the To recipients', () => {
     // One untrusted address holds the whole message, so the card has to show
     // everyone it would reach — not just the To line.
@@ -199,6 +211,15 @@ describe('the banner placement is a compact shape, not a shorter one', () => {
     expect(container.querySelector('.draft-fields')).toBeNull();
     expect(container.querySelector('.draft-summary')!.textContent).toBe(
       'stranger@example.invalid · Re: Invite',
+    );
+  });
+
+  it('leads the folded line with the account a draft goes out from', () => {
+    const { container } = mount(draft({ from_line: 'Work (me@example.com)' }), {
+      placement: 'banner',
+    });
+    expect(container.querySelector('.draft-summary')!.textContent).toBe(
+      'From Work (me@example.com) · stranger@example.invalid · Re: Invite',
     );
   });
 

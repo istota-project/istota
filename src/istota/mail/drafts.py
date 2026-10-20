@@ -117,6 +117,28 @@ class OutboundDraft:
     created_at: str
     resolved_at: str | None
     nagged_at: str | None
+    # The connected mail account this goes out through; None for the bot box.
+    account_id: int | None = None
+    # That account's label and From address, from `mail_accounts`; None for a
+    # bot-box draft or an account that has gone.
+    account_label: str | None = None
+    account_address: str | None = None
+
+    @property
+    def from_line(self) -> str | None:
+        """``Label (address)`` for an account draft, ``None`` for the bot box.
+
+        Deleting an account discards its pending drafts, so an account draft
+        with no account is one whose account went while it was being sent.
+        """
+        if self.account_id is None:
+            return None
+        # Both columns are NOT NULL, so NULL from the join means no row.
+        if self.account_label is None:
+            return "a mail account that has been removed"
+        if self.account_label and self.account_address:
+            return f"{self.account_label} ({self.account_address})"
+        return self.account_label or self.account_address
 
     @property
     def all_recipients(self) -> list[str]:
@@ -207,7 +229,18 @@ def normalize_addresses(values: list[str], *, field: str) -> list[str]:
     return out
 
 
+# Every read of a draft: the row and, for an account draft, the account's
+# label and From address. Joined on `user_id` as well as the id, so a draft can
+# never show another user's account.
+_SELECT_DRAFTS = """
+    SELECT d.*, a.label AS account_label, a.from_address AS account_address
+    FROM outbound_drafts d
+    LEFT JOIN mail_accounts a ON a.id = d.account_id AND a.user_id = d.user_id
+"""
+
+
 def _row(row: sqlite3.Row) -> OutboundDraft:
+    """A row read through `_SELECT_DRAFTS`, which adds the account's columns."""
     return OutboundDraft(
         id=row["id"],
         user_id=row["user_id"],
@@ -230,6 +263,9 @@ def _row(row: sqlite3.Row) -> OutboundDraft:
         created_at=row["created_at"],
         resolved_at=row["resolved_at"],
         nagged_at=row["nagged_at"],
+        account_id=row["account_id"],
+        account_label=row["account_label"],
+        account_address=row["account_address"],
     )
 
 
@@ -251,8 +287,12 @@ def hold(
     origin_target: str | None,
     hold_reason: str,
     reply_to: str | None = None,
+    account_id: int | None = None,
 ) -> int:
     """Record a held draft and return its id.
+
+    ``account_id`` is the connected mail account the draft goes out through,
+    ``None`` for the bot box. :func:`release` re-checks it.
 
     Everything needed to send later is stored now. See the module docstring for
     why the threading headers in particular are snapshotted rather than
@@ -275,8 +315,8 @@ def hold(
             user_id, task_id, room_token, status,
             to_addrs, cc_addrs, bcc_addrs,
             subject, body, html, in_reply_to, "references", reply_to,
-            attachments, origin_target, hold_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            attachments, origin_target, hold_reason, account_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -287,7 +327,7 @@ def hold(
             subject or "", body or "", 1 if html else 0,
             in_reply_to, references, reply_to,
             json.dumps(list(attachments or [])),
-            origin_target, hold_reason or "",
+            origin_target, hold_reason or "", account_id,
         ),
     )
     return cursor.fetchone()[0]
@@ -295,15 +335,14 @@ def hold(
 
 def get(conn: sqlite3.Connection, draft_id: int) -> OutboundDraft | None:
     row = conn.execute(
-        "SELECT * FROM outbound_drafts WHERE id = ?", (draft_id,),
+        _SELECT_DRAFTS + " WHERE d.id = ?", (draft_id,),
     ).fetchone()
     return _row(row) if row else None
 
 
 def pending_for_user(conn: sqlite3.Connection, user_id: str) -> list[OutboundDraft]:
     rows = conn.execute(
-        "SELECT * FROM outbound_drafts WHERE user_id = ? AND status = ? "
-        "ORDER BY id",
+        _SELECT_DRAFTS + " WHERE d.user_id = ? AND d.status = ? ORDER BY d.id",
         (user_id, STATUS_PENDING),
     ).fetchall()
     return [_row(r) for r in rows]
@@ -331,8 +370,7 @@ def open_for_user(conn: sqlite3.Connection, user_id: str) -> DraftListing:
     that cannot be read instead of the mail silently disappearing.
     """
     rows = conn.execute(
-        "SELECT * FROM outbound_drafts WHERE user_id = ? AND status IN (?, ?) "
-        "ORDER BY id",
+        _SELECT_DRAFTS + " WHERE d.user_id = ? AND d.status IN (?, ?) ORDER BY d.id",
         (user_id, STATUS_PENDING, STATUS_SENDING),
     ).fetchall()
     readable: list[OutboundDraft] = []
@@ -375,8 +413,7 @@ def pending_for_room(
     one that means anything to the reader.
     """
     rows = conn.execute(
-        "SELECT * FROM outbound_drafts WHERE room_token = ? AND status = ? "
-        "ORDER BY id",
+        _SELECT_DRAFTS + " WHERE d.room_token = ? AND d.status = ? ORDER BY d.id",
         (room_token, STATUS_PENDING),
     ).fetchall()
     return [_row(r) for r in rows]
@@ -571,19 +608,39 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
 
     **Never marks sent optimistically.** A draft wrongly marked sent is a
     message the user believes went out and did not.
+
+    **A draft with an ``account_id`` goes out through that connected account**,
+    re-checked before the claim through `mail.accounts.resolve_for_daemon`: an
+    account deleted, turned off, downgraded to read or missing its password is
+    a `DraftError` and the draft stays pending. It writes no `sent_emails` row
+    and registers no thread, since nothing polls that mailbox for the reply.
     """
     from istota import db
     from istota.mail.support import get_email_config
     from istota.skills.email import plain_part, send_email
-    from istota.transport.email import threads as email_threads
 
-    email_config = get_email_config(config)
-    if not config.email.enabled or not email_config.smtp_host:
-        # Checked before the claim, and on `smtp_host` specifically: an empty
-        # host resolves to loopback, so a config with IMAP but no SMTP would
-        # relay through whatever local MTA happens to be listening rather than
-        # refusing. Reads as a config error, not a transient send failure.
-        raise DraftError("email sending is not configured on this instance")
+    with db.get_db(config.db_path) as conn:
+        current = conn.execute(
+            "SELECT user_id, account_id, status FROM outbound_drafts WHERE id = ?",
+            (draft_id,),
+        ).fetchone()
+    account_id = current["account_id"] if current else None
+
+    # How the draft goes out, decided before the claim so a refusal leaves it
+    # pending with the reason. `sender` stays None for the bot box.
+    sender = None
+    if account_id is None:
+        email_config = get_email_config(config)
+        if not config.email.enabled or not email_config.smtp_host:
+            # Checked on `smtp_host` specifically: an empty host resolves to
+            # loopback, so a config with IMAP but no SMTP would relay through
+            # whatever local MTA happens to be listening rather than refusing.
+            # Reads as a config error, not a transient send failure.
+            raise DraftError("email sending is not configured on this instance")
+    elif current["status"] == STATUS_PENDING:
+        # The account may have been turned off, downgraded to read or lost
+        # its password since the hold.
+        sender = _account_sender(config, current["user_id"], account_id)
 
     with db.get_db(config.db_path) as conn:
         draft = get(conn, draft_id)
@@ -671,6 +728,22 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
             return
         logger.info("draft %d returned to pending: %s", draft_id, reason)
 
+    if draft.account_id != account_id or (account_id is not None and sender is None):
+        # The account was not checked for this claim: the column moved, or the
+        # row was mid-send at the check and came back to pending since.
+        _revert("the sending account was not checked for this claim")
+        raise DraftError(f"draft {draft_id} changed while being sent; try again")
+
+    outcome: dict = {}
+    if sender is None:
+        sending = {"config": email_config, "from_addr": config.email.bot_email}
+    else:
+        sending = {
+            "config": sender.config, "from_addr": sender.from_address,
+            "from_name": sender.from_name, "sent_folder": sender.sent_folder,
+            "outcome": outcome,
+        }
+
     try:
         attachments = [
             str(_confined_attachment(config, draft, p)) for p in draft.attachments
@@ -679,8 +752,7 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
             to=", ".join(draft.to_addrs),
             subject=draft.subject,
             body=draft.body,
-            config=email_config,
-            from_addr=config.email.bot_email,
+            **sending,
             content_type="html" if draft.html else "plain",
             cc=draft.cc_addrs or None,
             bcc=draft.bcc_addrs or None,
@@ -692,6 +764,11 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
     except Exception:
         _revert("send failed")
         raise
+    if outcome.get("sent_copy") == "failed":
+        logger.warning(
+            "released draft %d from mail account %s; its sent copy failed",
+            draft_id, account_id,
+        )
 
     # What a plain-text reader of the mail sees, which is what both the
     # thread's room and the draft's card record (ISSUE-770).
@@ -711,41 +788,11 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
                 "resolved_at = datetime('now') WHERE id = ? AND status = ?",
                 (STATUS_SENT, message_id, draft_id, STATUS_SENDING),
             )
-            # The provenance row the direct send path writes, so a reply to the
-            # released mail routes back to the room the originating task came
-            # from rather than falling to the alerts ladder. `origin_target`
-            # was resolved at hold time, when the task was still in scope.
-            try:
-                db.record_sent_email(
-                    conn,
-                    user_id=draft.user_id,
-                    message_id=message_id,
-                    # To and Cc, the form the direct CLI path and a thread
-                    # reply store. Bcc is never recorded.
-                    to_addr=", ".join([*draft.to_addrs, *draft.cc_addrs]),
-                    subject=draft.subject,
-                    task_id=draft.task_id,
-                    in_reply_to=draft.in_reply_to,
-                    references=draft.references,
-                    conversation_token=draft.room_token,
-                    talk_delivery_token=_talk_delivery_token(conn, draft.task_id),
-                    origin_target=draft.origin_target,
-                )
-                # Never raises; a failure rolls back only its own writes.
-                email_threads.register_sent_thread(
-                    conn, config, user_id=draft.user_id, message_id=message_id,
-                    in_reply_to=draft.in_reply_to, references=draft.references,
-                    to=list(draft.to_addrs), cc=list(draft.cc_addrs),
-                    subject=draft.subject, body=sent_text, task_id=draft.task_id,
-                )
-            except Exception as e:  # noqa: BLE001 — provenance is not the send
-                # Losing this row costs reply routing on this thread, not the
-                # send, and the status update above is worth keeping. Swallowed
-                # deliberately, unlike the status update itself.
-                logger.warning(
-                    "released draft %d but failed to record sent_emails: %s",
-                    draft_id, e,
-                )
+            # Nothing polls a connected account, so a `sent_emails` row or a
+            # thread room for its mail would wait for a reply that never
+            # arrives through istota.
+            if account_id is None:
+                _record_provenance(conn, config, draft, message_id, sent_text)
             # The card on the room's row for this mail, if it has one
             # (ISSUE-612). Swallowed for the same reason: a view of the send.
             try:
@@ -768,6 +815,101 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
         raise DraftSentButUnrecorded(message_id, e) from e
 
     return message_id
+
+
+def _record_provenance(
+    conn: sqlite3.Connection, config: "Config", draft: OutboundDraft,
+    message_id: str, sent_text: str,
+) -> None:
+    """The `sent_emails` row and thread room a released bot-box draft gets.
+
+    The provenance row the direct send path writes, so a reply to the released
+    mail routes back to the room the originating task came from rather than
+    falling to the alerts ladder. `origin_target` was resolved at hold time,
+    when the task was still in scope.
+    """
+    from istota import db
+    from istota.transport.email import threads as email_threads
+
+    try:
+        db.record_sent_email(
+            conn,
+            user_id=draft.user_id,
+            message_id=message_id,
+            # To and Cc, the form the direct CLI path and a thread reply store.
+            # Bcc is never recorded.
+            to_addr=", ".join([*draft.to_addrs, *draft.cc_addrs]),
+            subject=draft.subject,
+            task_id=draft.task_id,
+            in_reply_to=draft.in_reply_to,
+            references=draft.references,
+            conversation_token=draft.room_token,
+            talk_delivery_token=_talk_delivery_token(conn, draft.task_id),
+            origin_target=draft.origin_target,
+        )
+        # Never raises; a failure rolls back only its own writes.
+        email_threads.register_sent_thread(
+            conn, config, user_id=draft.user_id, message_id=message_id,
+            in_reply_to=draft.in_reply_to, references=draft.references,
+            to=list(draft.to_addrs), cc=list(draft.cc_addrs),
+            subject=draft.subject, body=sent_text, task_id=draft.task_id,
+        )
+    except Exception as e:  # noqa: BLE001 — provenance is not the send
+        # Losing this row costs reply routing on this thread, not the send,
+        # and the status update before it is worth keeping. Swallowed
+        # deliberately, unlike the status update itself.
+        logger.warning(
+            "released draft %d but failed to record sent_emails: %s", draft.id, e,
+        )
+
+
+@dataclass
+class _AccountSender:
+    config: object  # the email skill's EmailConfig
+    from_address: str
+    from_name: str
+    sent_folder: str
+
+
+_UNSENDABLE = {
+    "mail_accounts_disabled": "connected mail accounts are turned off on this instance",
+    "account_not_found": "the mail account this draft was written from no longer exists or is turned off",
+    "permission_denied": "the {label} account no longer allows sending",
+    "password_missing": "the {label} account has no password set for sending",
+}
+
+
+def _account_sender(config: "Config", user_id: str, account_id: int) -> _AccountSender:
+    """How an account draft goes out, or a `DraftError` naming why it cannot.
+
+    The same refusals as the private channel, through the one function the
+    daemon decrypts an account's passwords with.
+    """
+    from istota import db
+    from istota.mail import accounts
+    from istota.skills.email import account_email_config
+
+    resolved = accounts.resolve_for_daemon(
+        config.db_path, user_id, account_id, purpose="send",
+        settings=config.mail_accounts,
+    )
+    if isinstance(resolved, accounts.Unresolved):
+        label = "mail"
+        with db.get_db(config.db_path) as conn:
+            row = accounts.get_account_by_id(conn, user_id, account_id)
+        if row is not None:
+            label = row.label or row.slug
+        message = _UNSENDABLE.get(resolved.reason, "the mail account cannot send")
+        raise DraftError(message.format(label=label))
+    account = resolved.account
+    email_config = account_email_config(
+        account, accounts.login_blocks(resolved),
+        private_hosts=config.mail_accounts.private_hosts, readonly=False,
+    )
+    return _AccountSender(
+        config=email_config, from_address=account.from_address,
+        from_name=account.from_name, sent_folder=account.sent_folder,
+    )
 
 
 def _talk_delivery_token(conn: sqlite3.Connection, task_id: int | None) -> str | None:
@@ -820,8 +962,8 @@ def stale_unnagged(
         )
         return []
     rows = conn.execute(
-        "SELECT * FROM outbound_drafts WHERE status = ? AND nagged_at IS NULL "
-        "AND created_at < datetime('now', ?) ORDER BY id",
+        _SELECT_DRAFTS + " WHERE d.status = ? AND d.nagged_at IS NULL "
+        "AND d.created_at < datetime('now', ?) ORDER BY d.id",
         (STATUS_PENDING, f"-{int(older_than_hours)} hours"),
     ).fetchall()
     out: list[OutboundDraft] = []

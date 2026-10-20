@@ -6121,6 +6121,29 @@ def poll_health_extract_requests(config: Config, inflight: dict) -> None:
         )
 
 
+def poll_mail_account_test_requests(config: Config, inflight: dict) -> None:
+    """The `mail-account-test-request` gate: one read on the dispatch loop, and
+    the connection tests on a thread only when Settings asked for one. Here
+    rather than in the web process because a test signs in to a host a user
+    typed, and the daemon is where the egress posture is decided. Never raises."""
+    from istota.mail import account_tests
+
+    try:
+        pending = account_tests.requests_pending(config)
+    except sqlite3.OperationalError as exc:
+        logger.debug("mail_account_test_request_poll_skipped reason=%s", exc)
+        return
+    except Exception:  # noqa: BLE001 - a raise here takes the dispatch loop
+        logger.warning("mail_account_test_request_poll_failed", exc_info=True)
+        return
+    if pending:
+        _spawn_background_check(
+            "mail-account-test-request",
+            lambda: account_tests.answer_pending(config),
+            inflight, overlap_expected=True,
+        )
+
+
 def _parse_shared_kv_target(target: str) -> tuple[str, str]:
     """Parse a ``publish_shared_kv`` target into ``(namespace, key)``.
 
@@ -10063,6 +10086,9 @@ def build_interval_gates(
     def _health_extract_request(now: float) -> None:
         poll_health_extract_requests(config, keeper)
 
+    def _mail_account_test_request(now: float) -> None:
+        poll_mail_account_test_requests(config, keeper)
+
     def _notification_handoff(now: float) -> None:
         poll_notification_handoffs(config, keeper)
 
@@ -10209,6 +10235,14 @@ def build_interval_gates(
             run=_health_extract_request,
             fixed_interval=1,
             on_error="Error polling health extraction requests: %s",
+        ),
+        # A connected mail account's connection test, the same shape: the
+        # web process makes no sign-in to a host a user typed.
+        IntervalGate(
+            name="mail-account-test-request",
+            run=_mail_account_test_request,
+            fixed_interval=1,
+            on_error="Error polling mail account test requests: %s",
         ),
         # Notification pushes the web process left for the daemon to send.
         IntervalGate(

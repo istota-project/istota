@@ -1,7 +1,8 @@
 """IMAP and SMTP servers that speak just enough to sign in, over STARTTLS.
 
 For the first-run setup's email check, which signs in and out and sends no
-message. The real clients (`imap_tools` through `skills.email.imap_session`,
+message, and for `mail.connect`'s wire cases, which also need implicit TLS
+(`implicit_tls=True`: the handshake comes first and no STARTTLS is offered). The real clients (`imap_tools` through `skills.email.imap_session`,
 `smtplib` through `skills.email._open_smtp`) talk to these over a socket, TLS
 included, so nothing of istota's is patched. The wire-level mail suite runs a
 real server in a container; these are for the default suite.
@@ -30,10 +31,11 @@ class _LineStub:
     """A line-oriented server on an ephemeral loopback port."""
 
     def __init__(self, *, cert: Path, key: Path, username: str, password: str,
-                 starttls: bool = True) -> None:
+                 starttls: bool = True, implicit_tls: bool = False) -> None:
         self.username = username
         self.password = password
-        self.starttls = starttls
+        self.starttls = starttls and not implicit_tls
+        self.implicit_tls = implicit_tls
         self.commands: list[str] = []
         self.logins: list[tuple[str, bool]] = []
         self._lock = threading.Lock()
@@ -46,6 +48,8 @@ class _LineStub:
 
             def handle(self) -> None:
                 try:
+                    if stub.implicit_tls:
+                        stub._wrap(self)
                     stub._serve(self)
                 except (OSError, ssl.SSLError, ValueError):
                     pass
@@ -93,7 +97,7 @@ class ImapStub(_LineStub):
 
     def _serve(self, h) -> None:
         self._send(h, "* OK stub IMAP4rev1 ready")
-        secure = False
+        secure = self.implicit_tls
         while True:
             raw = h.rfile.readline()
             if not raw:
@@ -163,7 +167,7 @@ class SmtpStub(_LineStub):
 
     def _serve(self, h) -> None:
         self._send(h, "220 stub ESMTP ready")
-        secure = False
+        secure = self.implicit_tls
         while True:
             raw = h.rfile.readline()
             if not raw:
