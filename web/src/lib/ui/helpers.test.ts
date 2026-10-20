@@ -49,11 +49,12 @@ describe('latest', () => {
     expect(second()).toBe(true);
   });
 
-  it('invalidates every outstanding request', () => {
+  it('turns every check false once disposed, including later ones', () => {
     const loads = latest();
     const current = loads.next();
-    loads.invalidate();
+    loads.dispose();
     expect(current()).toBe(false);
+    expect(loads.next()()).toBe(false);
   });
 });
 

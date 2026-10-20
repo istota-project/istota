@@ -32,6 +32,7 @@
   } from '$lib/api';
   import { getCurrentUser } from '$lib/userContext';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
+  import { latest } from '$lib/ui/latest';
 
   const current = getCurrentUser();
   let groups = $state<AdminGroupSummary[]>([]);
@@ -53,7 +54,7 @@
   let storageNotes = $state<Record<string, string>>({});
   let storageErrors = $state<Record<string, string>>({});
   let active = true;
-  let request = 0;
+  const details = latest();
   const selection = createUrlSelection<string>({
     key: 'adminGroups',
     params: ['group'],
@@ -119,17 +120,17 @@
     selected = id;
     detailError = '';
     detailLoading = true;
-    const pending = ++request;
+    const isCurrent = details.next();
     try {
       const result = await getAdminGroup(id);
-      if (active && pending === request) group = result;
+      if (isCurrent()) group = result;
     } catch (e) {
-      if (active && pending === request) {
+      if (isCurrent()) {
         group = null;
         detailError = message(e);
       }
     } finally {
-      if (active && pending === request) detailLoading = false;
+      if (isCurrent()) detailLoading = false;
     }
   }
   async function load() {
@@ -150,10 +151,10 @@
   async function refresh() {
     if (!selected) return;
     const id = selected;
-    const pending = ++request;
+    const isCurrent = details.next();
     const result = await getAdminGroup(id);
     const list = await getAdminGroups();
-    if (active && pending === request) {
+    if (isCurrent()) {
       group = result;
       groups = list.groups;
     }
@@ -244,7 +245,7 @@
     load();
     return () => {
       active = false;
-      ++request;
+      details.dispose();
     };
   });
 </script>

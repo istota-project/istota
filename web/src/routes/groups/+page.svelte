@@ -16,6 +16,7 @@
   import { getGroups, getGroup, AuthError, type GroupSummary, type GroupDetail } from '$lib/api';
   import { getCurrentUser } from '$lib/userContext';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
+  import { latest } from '$lib/ui/latest';
   import GroupNotebook from '$lib/components/groups/GroupNotebook.svelte';
   import GroupMembers from '$lib/components/groups/GroupMembers.svelte';
   import GroupRooms from '$lib/components/groups/GroupRooms.svelte';
@@ -33,7 +34,7 @@
   let sidebarOpen = $state(false);
   const selectedGroup = $derived(groups.find((group) => group.group_id === selected?.group));
   let active = true;
-  let request = 0;
+  const details = latest();
   // A link from before the overview may still carry `view=`; it is ignored.
   const selection = createUrlSelection<Selection>({
     key: 'groups',
@@ -58,14 +59,14 @@
     detail = null;
     error = '';
     detailLoading = true;
-    const id = ++request;
+    const isCurrent = details.next();
     try {
       const result = await getGroup(next.group);
-      if (active && id === request) detail = result;
+      if (isCurrent()) detail = result;
     } catch (e) {
-      if (active && id === request) error = message(e);
+      if (isCurrent()) error = message(e);
     } finally {
-      if (active && id === request) detailLoading = false;
+      if (isCurrent()) detailLoading = false;
     }
   }
   async function load(resetSelection = false) {
@@ -99,23 +100,23 @@
     }
     const prior = selected;
     if (!prior) return;
-    const id = ++request;
+    const isCurrent = details.next();
     try {
       const updated = await getGroup(prior.group);
       const result = await getGroups();
-      if (active && id === request) {
+      if (isCurrent()) {
         detail = updated;
         groups = result.groups;
       }
     } catch (e) {
-      if (active && id === request) error = message(e);
+      if (isCurrent()) error = message(e);
     }
   }
   onMount(() => {
     load();
     return () => {
       active = false;
-      ++request;
+      details.dispose();
     };
   });
 </script>

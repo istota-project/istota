@@ -118,6 +118,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Leaving the admin Logs page with Follow on while a page of records was still loading no longer leaves a live tail connection open in the background.
 - The iOS app's location tracker card now shows its Dropped and Last error rows in the warning colour. The card's own style for the other rows had been overriding it.
 - iOS chat notification previews show a reply as plain text rather than raw Markdown, so bold markers, code backticks, link URLs, list bullets and table pipes no longer appear or use up the preview's length. Plain-text briefing email also keeps the underscores in names like `snake_case_name`.
 - Opening a menu on an iPhone no longer draws a blue outline around it.

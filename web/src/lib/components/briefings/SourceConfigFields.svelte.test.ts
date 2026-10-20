@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
@@ -36,5 +36,27 @@ describe('email sender filters', () => {
   it('names the add field without the caption', () => {
     mountSenders();
     expect(screen.getByRole('textbox', { name: 'Add a sender pattern' })).toBeTruthy();
+  });
+});
+
+describe('file path check', () => {
+  it('checks once after typing stops and drops an answer for an older path', async () => {
+    vi.mocked(api.getBriefingPathSuggestions).mockResolvedValue({ paths: [] });
+    let answerOld!: (value: { ok: boolean; resolved?: string }) => void;
+    vi.mocked(api.checkBriefingPath)
+      .mockReturnValueOnce(new Promise((resolve) => (answerOld = resolve)))
+      .mockResolvedValueOnce({ ok: true, resolved: '/files/new.md' });
+    const props = { kind: 'todos', config: { path: 'old.md' }, onChange: vi.fn() };
+    const { rerender } = render(SourceConfigFields, props);
+    await waitFor(() => expect(api.checkBriefingPath).toHaveBeenCalledWith('old.md'));
+
+    await rerender({ ...props, config: { path: 'ne' } });
+    await rerender({ ...props, config: { path: 'new.md' } });
+    await waitFor(() => expect(screen.getByText('Resolves to /files/new.md')).toBeTruthy());
+    expect(api.checkBriefingPath).toHaveBeenCalledTimes(2);
+
+    answerOld({ ok: false });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText('Resolves to /files/new.md')).toBeTruthy();
   });
 });
