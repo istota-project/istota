@@ -284,7 +284,7 @@
   .linked h2 {
     margin: 0 0 var(--space-2);
   }
-  .card-head {
+  .linked .card-head {
     align-items: center;
   }
 </style>

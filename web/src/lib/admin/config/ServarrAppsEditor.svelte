@@ -135,7 +135,7 @@
     margin: 0;
   }
 
-  .caption {
+  .servarr-apps .caption {
     margin: 0;
   }
 

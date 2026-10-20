@@ -351,7 +351,7 @@
                 <KebabMenu items={entityMenu(entity)} ariaLabel="Entity actions" />
               </span>
             </div>
-            <dl class="kv compact">
+            <dl class="kv">
               {#if entity.email}
                 <dt>Email</dt>
                 <dd>{entity.email}</dd>
@@ -532,18 +532,18 @@
 	   imported by app.css). Only money-specific styling (kv, entity grid)
 	   stays. */
 
-  .kv.compact {
+  .entity-grid .kv {
     /* design-lint-allow: sub---space-1 hairline between the rows of a compact
        definition list — the ramp starts a step above what this wants */
     gap: 0.15rem var(--space-2);
     font-size: var(--text-xs);
   }
 
-  .kv dd {
+  dd {
     color: var(--text-secondary);
   }
 
-  .kv dd.pre {
+  dd.pre {
     white-space: pre-line;
   }
 

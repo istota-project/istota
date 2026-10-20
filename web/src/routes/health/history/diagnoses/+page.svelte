@@ -587,7 +587,7 @@
     opacity: 0.7;
   }
   /* flex-start: a long diagnosis name wraps to a second line. */
-  .card-head {
+  .list .card-head {
     align-items: flex-start;
   }
   .name {

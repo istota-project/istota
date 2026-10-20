@@ -659,7 +659,7 @@
                 <TextArea rows={3} bind:value={researchPrompt} />
               </Field>
             {/if}
-            <p class="micro-label">Sources (optional)</p>
+            <p class="micro-label sources-label">Sources (optional)</p>
           {/if}
           {#if unsupported.length}
             <Alert title="Some sources cannot be used by a group" collapsed={false}>
@@ -878,7 +878,7 @@
 {/if}
 
 <style>
-  .micro-label {
+  .sources-label {
     margin: var(--space-2) 0 0;
   }
   .summary {

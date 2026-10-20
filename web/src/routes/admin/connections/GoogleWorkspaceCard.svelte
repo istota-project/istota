@@ -118,10 +118,6 @@
     color: var(--text-secondary);
   }
 
-  .caption {
-    margin: 0;
-  }
-
   .unset {
     color: var(--text-muted);
   }

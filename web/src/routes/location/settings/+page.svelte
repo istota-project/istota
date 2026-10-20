@@ -195,7 +195,7 @@
     color: var(--status-danger-fg);
   }
 
-  .kv dd {
+  dd {
     color: var(--text-secondary);
   }
 </style>

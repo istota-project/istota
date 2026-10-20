@@ -74,7 +74,7 @@
 
   /* flex-start: a long document name wraps, and a centred row would float
      the kebab against the middle of it. */
-  .card-head {
+  .doc-card .card-head {
     align-items: flex-start;
   }
 

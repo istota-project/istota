@@ -1173,7 +1173,7 @@
 
   /* Short key/value pairs, which read better with the columns further
      apart than the shared default. */
-  .kv {
+  .admin-page .kv {
     --kv-gap: var(--space-6);
   }
 

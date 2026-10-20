@@ -469,7 +469,7 @@
     flex-direction: column;
     gap: var(--space-2);
   }
-  .card-head {
+  .timeline .card-head {
     align-items: center;
   }
   .card-body .who {
@@ -493,40 +493,40 @@
      onto the status scale would make a routine visit and a screening the same
      color. Each carries an explicit light value because the tinted fills are
      tuned per hue rather than derived from a token pair. */
-  .card-head :global(.encounter-type.type-visit) {
+  .timeline .card-head :global(.encounter-type.type-visit) {
     --badge-bg: hsla(210, 45%, 65%, 0.22);
     --badge-fg: #b6ccea;
   }
-  .card-head :global(.encounter-type.type-procedure) {
+  .timeline .card-head :global(.encounter-type.type-procedure) {
     --badge-bg: hsla(35, 60%, 60%, 0.22);
     --badge-fg: #e6b96b;
   }
-  .card-head :global(.encounter-type.type-screening) {
+  .timeline .card-head :global(.encounter-type.type-screening) {
     --badge-bg: hsla(195, 50%, 60%, 0.22);
     --badge-fg: #9cd5ea;
   }
-  .card-head :global(.encounter-type.type-hospitalization) {
+  .timeline .card-head :global(.encounter-type.type-hospitalization) {
     --badge-bg: hsla(0, 55%, 60%, 0.25);
     --badge-fg: #f0a09c;
   }
-  .card-head :global(.encounter-type.type-er) {
+  .timeline .card-head :global(.encounter-type.type-er) {
     --badge-bg: hsla(0, 60%, 55%, 0.32);
     --badge-fg: #ff9d96;
   }
-  .card-head :global(.encounter-type.type-telehealth) {
+  .timeline .card-head :global(.encounter-type.type-telehealth) {
     --badge-bg: hsla(145, 40%, 55%, 0.22);
     --badge-fg: #9bd6a6;
   }
-  .card-head :global(.encounter-type.type-imaging) {
+  .timeline .card-head :global(.encounter-type.type-imaging) {
     --badge-bg: hsla(280, 45%, 65%, 0.22);
     --badge-fg: #d0aeec;
   }
-  .card-head :global(.encounter-type.type-dental) {
+  .timeline .card-head :global(.encounter-type.type-dental) {
     --badge-bg: hsla(185, 45%, 60%, 0.22);
     --badge-fg: #95d2dc;
   }
   /* design-lint-allow-end */
-  .card-head :global(.encounter-type.type-other) {
+  .timeline .card-head :global(.encounter-type.type-other) {
     --badge-bg: hsla(220, 8%, 60%, 0.18);
     --badge-fg: var(--text-muted);
   }
@@ -613,28 +613,31 @@
 
   /* design-lint-allow-begin: light half of the categorical encounter-type
      palette above. */
-  :global(:root[data-theme='light']) .card-head :global(.encounter-type.type-visit) {
+  :global(:root[data-theme='light']) .timeline .card-head :global(.encounter-type.type-visit) {
     --badge-fg: #2563b0;
   }
-  :global(:root[data-theme='light']) .card-head :global(.encounter-type.type-procedure) {
+  :global(:root[data-theme='light']) .timeline .card-head :global(.encounter-type.type-procedure) {
     --badge-fg: #946a00;
   }
-  :global(:root[data-theme='light']) .card-head :global(.encounter-type.type-screening) {
+  :global(:root[data-theme='light']) .timeline .card-head :global(.encounter-type.type-screening) {
     --badge-fg: #2563b0;
   }
-  :global(:root[data-theme='light']) .card-head :global(.encounter-type.type-hospitalization) {
+  :global(:root[data-theme='light'])
+    .timeline
+    .card-head
+    :global(.encounter-type.type-hospitalization) {
     --badge-fg: #c0271d;
   }
-  :global(:root[data-theme='light']) .card-head :global(.encounter-type.type-er) {
+  :global(:root[data-theme='light']) .timeline .card-head :global(.encounter-type.type-er) {
     --badge-fg: #c0271d;
   }
-  :global(:root[data-theme='light']) .card-head :global(.encounter-type.type-telehealth) {
+  :global(:root[data-theme='light']) .timeline .card-head :global(.encounter-type.type-telehealth) {
     --badge-fg: #15803d;
   }
-  :global(:root[data-theme='light']) .card-head :global(.encounter-type.type-imaging) {
+  :global(:root[data-theme='light']) .timeline .card-head :global(.encounter-type.type-imaging) {
     --badge-fg: #7c3aed;
   }
-  :global(:root[data-theme='light']) .card-head :global(.encounter-type.type-dental) {
+  :global(:root[data-theme='light']) .timeline .card-head :global(.encounter-type.type-dental) {
     --badge-fg: #0d8f7e;
   }
   /* design-lint-allow-end */

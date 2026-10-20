@@ -219,10 +219,6 @@
 </ConnectionCard>
 
 <style>
-  .caption {
-    margin: 0;
-  }
-
   .stale {
     font-size: var(--text-xs);
     color: var(--status-warn-fg);
