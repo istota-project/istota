@@ -1103,4 +1103,38 @@ describe('RoomSettings — a group-owned room', () => {
     expect(screen.getByText(/Only an owner of group team/)).toBeTruthy();
     expect(screen.getByText(/Leaving this room means leaving Team/)).toBeTruthy();
   });
+
+  const managed = (isOwner: boolean) =>
+    room({
+      managed_by: {
+        group_id: 'team',
+        display_name: 'Team',
+        manage_url: '/istota/groups/?group=team',
+        is_owner: isOwner,
+      },
+    });
+
+  // A group room read by one member has no policy payload, so no server
+  // refusal to lock on; the PATCH still answers a non-owner with 403.
+  it('locks name, model and effort for a member who is not an owner', async () => {
+    const onSave = vi.fn();
+    await mountSettled(managed(false), onSave);
+    expect(screen.getByText(/Only an owner of Team/)).toBeTruthy();
+    const name = screen.getByPlaceholderText('Room name') as HTMLInputElement;
+    expect(name.readOnly).toBe(true);
+    const model = screen.getByRole('button', { name: 'Room model default' }) as HTMLButtonElement;
+    expect(model.disabled).toBe(true);
+    await fireEvent.input(name, { target: { value: 'renamed' } });
+    const tint = screen.getAllByRole('radio').find((r) => (r as HTMLInputElement).value !== '');
+    await fireEvent.click(tint!);
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(Object.keys(onSave.mock.calls[0][0] as RoomPatch)).toEqual(['color']);
+  });
+
+  it('leaves them editable for an owner', async () => {
+    await mountSettled(managed(true));
+    expect(screen.queryByText(/Only an owner of Team/)).toBeNull();
+    const name = screen.getByPlaceholderText('Room name') as HTMLInputElement;
+    expect(name.readOnly).toBe(false);
+  });
 });

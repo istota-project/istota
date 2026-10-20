@@ -65,11 +65,17 @@
   // apply to every member's turn, so they are the host's (multiplayer Stage
   // 16). The server's own refusal says why, and the controls show the values
   // without offering to change them; personal settings stay editable.
-  const lockedReason = $derived(room.policy?.settings_refusal ?? null);
-  const locked = $derived(!!lockedReason);
   // A group-owned room's settings are its group owners', not its host's, and
   // its membership is the group's: no per-room delete, guest policy or Talk.
+  // One read by a single member has no policy, so `is_owner` locks it there.
   const managedBy = $derived(room.managed_by ?? null);
+  const lockedReason = $derived(
+    room.policy?.settings_refusal ??
+      (managedBy && !managedBy.is_owner
+        ? `Only an owner of ${managedBy.display_name} can change this room's settings.`
+        : null),
+  );
+  const locked = $derived(!!lockedReason);
   const policyEditable = $derived(managedBy ? !locked : !!room.policy?.is_host);
 
   // How a guest's turn is answered (D11). Only a shared room has a policy to
