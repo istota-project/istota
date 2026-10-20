@@ -1,6 +1,10 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import { createRawSnippet } from 'svelte';
+import { compile } from 'svelte/compiler';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { rules } from '$lib/styles/cascade';
 import Card from './Card.svelte';
 
 afterEach(cleanup);
@@ -8,6 +12,26 @@ afterEach(cleanup);
 const text = (s: string) => createRawSnippet(() => ({ render: () => `<span>${s}</span>` }));
 
 describe('Card', () => {
+  // jsdom runs no cascade over Svelte's scoped CSS, so this reads the compiled
+  // rule and asks which paragraphs its selector reaches.
+  it('zeroes its own paragraph margins but leaves rendered markdown its spacing', () => {
+    const filename = join(process.cwd(), 'src/lib/components/ui/Card.svelte');
+    const css = compile(readFileSync(filename, 'utf8'), {
+      filename,
+      generate: 'client',
+      css: 'external',
+    }).css!.code;
+    const reset = rules(css).filter((r) => /margin-block:\s*0/.test(r.body));
+    expect(reset).toHaveLength(1);
+    const selector = reset[0].selector.replace(/\.svelte-[\w-]+/g, '');
+    document.body.innerHTML =
+      '<section class="ui-card"><div><p class="own">Lead</p>' +
+      '<div class="block-body markdown prose"><p class="md">One</p><ul class="md-list"></ul></div></div></section>';
+    expect(document.querySelector('p.own')!.matches(selector)).toBe(true);
+    expect(document.querySelector('p.md')!.matches(selector)).toBe(false);
+    expect(document.querySelector('ul.md-list')!.matches(selector)).toBe(false);
+  });
+
   it('renders its title, body, actions and footer', () => {
     const { container } = render(Card, {
       title: 'Identity',

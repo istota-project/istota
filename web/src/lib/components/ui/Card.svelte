@@ -190,8 +190,9 @@
     flex-wrap: wrap;
   }
 
-  /* The card's gap spaces its children, so a browser paragraph margin would double it. */
-  .ui-card :global(:where(p, ul, ol)) {
+  /* The card's gap spaces its children, so a browser paragraph margin would double it.
+     Rendered content (a briefing's markdown) keeps its own paragraph spacing. */
+  .ui-card :global(:where(p, ul, ol):not(:where(.markdown *, .prose *))) {
     margin-block: 0;
   }
 
