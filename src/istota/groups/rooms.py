@@ -47,17 +47,92 @@ def group_room_access(conn: sqlite3.Connection, room_token: str, user_id: str) -
     closed. For any other room the answer is True, because the room's own
     roster decides and the group link never does. An unknown room is False.
 
-    This is the backstop behind roster synchronization, so a caller asks it in
-    addition to room membership, never instead of it.
+    This is the backstop behind roster synchronization. The room-access
+    resolver asks it for every reader: `db.is_room_member` and
+    `db.list_member_rooms` carry its rule in SQL (`db.group_room_admits_sql`),
+    which is the one spelling of it.
     """
     room = _canonical_room(conn, room_token)
     if room is None:
         return False
-    if not db.is_group_owned_room(room):
-        return True
-    if not room.group_id:
+    return db.group_room_admits(conn, room.token, user_id)
+
+
+def group_room_refuses(conn: sqlite3.Connection, room_token: str | None, user_id: str) -> bool:
+    """Whether ``room_token`` names a group-owned room that refuses ``user_id``.
+
+    The question for a caller holding something already addressed to a room,
+    a chat handle or a task: an unknown token or an ordinary room is not
+    refused here, since its roster or the caller's own checks decide it.
+    """
+    if not room_token:
         return False
-    return db.is_group_member(conn, room.group_id, user_id)
+    room = _canonical_room(conn, room_token)
+    if room is None or not db.is_group_owned_room(room):
+        return False
+    return not db.group_room_admits(conn, room.token, user_id)
+
+
+def task_delivery_refused(conn: sqlite3.Connection, task: db.Task) -> bool:
+    """Whether a task's output may no longer reach its room: the task is in a
+    group-owned room and its author is no longer let in.
+
+    Read from the live group on every call, so it holds from the commit that
+    removed the author (or archived the group) whether or not the task's
+    cancellation has landed yet, and a crash cannot bring delivery back.
+    """
+    return group_room_refuses(conn, task.conversation_token, task.user_id)
+
+
+#: The task states a removal or an archive stops. A park is answered nowhere
+#: once its asker is out of the room, so it goes with the queued ones.
+_STOPPABLE = ("pending", "locked", "running", "pending_confirmation")
+
+
+def stop_room_tasks(
+    conn: sqlite3.Connection, room_token: str, user_id: str | None = None,
+) -> list[int]:
+    """Stop the unfinished tasks in a room, ``user_id``'s alone or everyone's.
+
+    In the caller's transaction, through the paths `!stop` and the web cancel
+    use: a queued or parked task is cancelled outright (`db.cancel_task`), and
+    a claimed or running one gets ``cancel_requested``, which the brain's
+    cancel check and startup recovery both honour. Returns the worker pids to
+    signal once the caller has committed (`signal_stopped_tasks`); nothing is
+    signalled here, so no lock is held while a process stops.
+    """
+    refs = db.room_ref_tokens(conn, room_token, include_surface_refs=False)
+    marks = ", ".join("?" for _ in refs)
+    sql = (f"SELECT id, status, worker_pid FROM tasks WHERE conversation_token IN ({marks}) "
+           f"AND status IN ({', '.join('?' for _ in _STOPPABLE)})")
+    params: list = [*refs, *_STOPPABLE]
+    if user_id is not None:
+        sql += " AND user_id = ?"
+        params.append(user_id)
+    pids = []
+    for row in conn.execute(sql, params).fetchall():
+        if row["status"] in ("pending", "pending_confirmation"):
+            db.cancel_task(conn, row["id"])
+            continue
+        conn.execute("UPDATE tasks SET cancel_requested = 1 WHERE id = ?", (row["id"],))
+        if row["worker_pid"]:
+            pids.append(row["worker_pid"])
+    return pids
+
+
+def signal_stopped_tasks(pids: list[int]) -> None:
+    """SIGTERM each pid `stop_room_tasks` returned. Call after the commit.
+
+    `signal_task_worker` signals only in the scheduler's own process; anywhere
+    else (the web container) ``cancel_requested`` carries the stop, as for a
+    web cancel.
+    """
+    import signal
+
+    from istota.sandbox import process_group
+
+    for pid in pids:
+        process_group.signal_task_worker(pid, signal.SIGTERM)
 
 
 def owner_settings_refusal(
@@ -170,7 +245,11 @@ def reconcile_group_room_members(conn: sqlite3.Connection, group_id: str) -> lis
     archived or missing group is left alone: archiving suspends its rooms
     (`group_room_access` refuses everyone) without emptying them.
 
-    One entry per room: ``room_token``, ``added``, ``removed`` and ``host``.
+    A removed member's unfinished tasks in the room are stopped with them
+    (`stop_room_tasks`); the pids to signal after the commit ride the entry.
+
+    One entry per room: ``room_token``, ``added``, ``removed``, ``pids`` and
+    ``host``.
     """
     if db.get_group(conn, group_id) is None:
         return []
@@ -182,6 +261,18 @@ def reconcile_group_room_members(conn: sqlite3.Connection, group_id: str) -> lis
         change["host"] = _succeed_host(conn, token, group_id)
         changes.append(change)
     return changes
+
+
+def suspend_group_rooms(conn: sqlite3.Connection, group_id: str) -> list[int]:
+    """Stop every unfinished task in ``group_id``'s group-owned rooms, in the
+    caller's archive transaction. Access needs nothing written: an archived
+    group admits nobody (`db.group_room_admits_sql`), and the rosters and
+    transcripts stay for recovery. Returns the pids to signal after commit.
+    """
+    pids = []
+    for token in group_owned_room_tokens(conn, group_id):
+        pids.extend(stop_room_tasks(conn, token))
+    return pids
 
 
 def _reconcile_roster(conn: sqlite3.Connection, room: db.Room, members: set[str]) -> dict:
@@ -205,9 +296,11 @@ def _reconcile_roster(conn: sqlite3.Connection, room: db.Room, members: set[str]
     for user_id in sorted(members):
         db.ensure_web_chat_handle(conn, user_id, token, room.name or "room")
     removed = sorted((on_roster | present | holders) - members)
+    pids = []
     for user_id in removed:
         db.drop_web_room_member(conn, token, user_id)
-    return {"room_token": token, "added": added, "removed": removed}
+        pids.extend(stop_room_tasks(conn, token, user_id))
+    return {"room_token": token, "added": added, "removed": removed, "pids": pids}
 
 
 def _succeed_host(conn: sqlite3.Connection, room_token: str, group_id: str) -> str | None:

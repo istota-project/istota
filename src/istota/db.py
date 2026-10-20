@@ -5036,7 +5036,7 @@ def add_room_member(
     epoch unless `acknowledged` — see `note_audience_join`.
     """
     room_token = _canonical_room_token(conn, room_token, cross_surface=False)
-    joining = not is_room_member(conn, room_token, user_id)
+    joining = not _on_room_roster(conn, room_token, user_id)
     audience = audience_persons(conn, room_token) if joining else set()
     conn.execute(
         "INSERT OR IGNORE INTO room_members (room_token, user_id) VALUES (?, ?)",
@@ -5074,7 +5074,24 @@ def remove_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) 
 
 
 def is_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
+    """Whether ``user_id`` is in the room: a roster row the room admits.
+
+    The access answer, so it asks `group_room_admits_sql` too: a group-owned
+    room whose group was archived, or a roster row written around the group,
+    admits nobody, whatever the roster says. `_on_room_roster` is the bare
+    roster fact, for the writers that keep the roster.
+    """
     room_token = _canonical_room_token(conn, room_token, cross_surface=False)
+    row = conn.execute(
+        "SELECT 1 FROM room_members m LEFT JOIN rooms r ON r.token = m.room_token "
+        "WHERE m.room_token = ? AND m.user_id = ? "
+        f"AND (r.token IS NULL OR {group_room_admits_sql('r', 'm.user_id')}) LIMIT 1",
+        (room_token, user_id),
+    ).fetchone()
+    return row is not None
+
+
+def _on_room_roster(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM room_members WHERE room_token = ? AND user_id = ? LIMIT 1",
         (room_token, user_id),
@@ -5179,7 +5196,7 @@ def count_room_messages(conn: sqlite3.Connection, room_token: str) -> int:
     ).fetchone()[0])
 
 
-def note_member_turn(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
+def note_member_turn(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
     """An istota user spoke in this room: make them a member and clear their hide.
 
     Every sender is a member, so a shared room surfaces in each participant's
@@ -5187,9 +5204,16 @@ def note_member_turn(conn: sqlite3.Connection, room_token: str, user_id: str) ->
     tombstone only, never a co-member's. One helper because two paths reach it:
     `record_inbound` for every stored turn, and the Talk poller for a turn it
     consumes before ingest (a `!command`, a confirmation answer).
+
+    False, writing nothing, when the room refuses them (`group_room_admits`):
+    speaking in a group-owned room never brings back someone the group
+    removed, so the caller drops the turn.
     """
+    if not group_room_admits(conn, room_token, user_id):
+        return False
     add_room_member(conn, room_token, user_id)
     undismiss_room(conn, room_token, user_id)
+    return True
 
 
 def add_web_room_member(
@@ -5204,7 +5228,7 @@ def add_web_room_member(
     counts them in the room's audience before they have said anything.
     """
     room_token = _canonical_room_token(conn, room_token, cross_surface=False)
-    added = not is_room_member(conn, room_token, user_id)
+    added = not _on_room_roster(conn, room_token, user_id)
     # The add endpoint refuses without `acknowledge_history`, so the creator
     # has said the new member may read what came before: no epoch (D3).
     add_room_member(conn, room_token, user_id, acknowledged=True)
@@ -5644,7 +5668,8 @@ def list_member_rooms(
         "), r.created_at) AS last_activity "
         "FROM rooms r "
         "JOIN room_members m ON m.room_token = r.token "
-        "WHERE m.user_id = ?"
+        "WHERE m.user_id = ? "
+        f"AND {group_room_admits_sql('r', 'm.user_id')}"
     )
     if not include_dismissed:
         sql += (
@@ -5918,6 +5943,46 @@ def is_group_owned_room(room: Room | None) -> bool:
     `set_room_membership_source` fails toward the stricter relationship.
     """
     return room is not None and room.membership_source != "room"
+
+
+def _live_group_member_sql(group: str, user: str) -> str:
+    """`is_group_member`'s rule as an SQL ``EXISTS``, over the given SQL
+    expressions for the group id and the user id. The one spelling of it, so
+    the access predicate below and the Python gate cannot disagree."""
+    return (
+        "EXISTS (SELECT 1 FROM group_members gm JOIN groups g ON g.group_id = gm.group_id "
+        f"WHERE gm.group_id = {group} AND gm.user_id = {user} AND gm.ended_at IS NULL "
+        "AND g.archived_at IS NULL AND NOT EXISTS (SELECT 1 FROM web_auth_identities i "
+        "WHERE i.user_id = gm.user_id AND i.disabled = 1))"
+    )
+
+
+def group_room_admits_sql(room: str, user: str) -> str:
+    """SQL true when the group relationship lets ``user`` into the ``room`` row.
+
+    ``room`` is a `rooms` alias, ``user`` an SQL expression. A room with its
+    own roster always passes, so the roster decides; a group-owned one (any
+    value but ``room``, as `is_group_owned_room` reads it) passes only for a
+    current member of its live linked group. Every reader that turns room
+    membership into access appends this: `is_room_member`, `list_member_rooms`,
+    the cross-room views and the room stream, and the unread counts.
+    """
+    return (
+        f"({room}.membership_source = 'room' OR "
+        f"{_live_group_member_sql(f'{room}.group_id', user)})"
+    )
+
+
+def group_room_admits(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
+    """Whether the group relationship lets ``user_id`` into ``room_token``:
+    `group_room_admits_sql` for one room. True for a room the group does not
+    own and for an unknown token, since the roster decides those."""
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
+    row = conn.execute(
+        f"SELECT {group_room_admits_sql('r', '?')} FROM rooms r WHERE r.token = ?",
+        (user_id, room_token),
+    ).fetchone()
+    return row is None or bool(row[0])
 
 
 def set_room_membership_source(
@@ -7008,6 +7073,7 @@ def total_unread_messages(
         LEFT JOIN room_read_state rs ON rs.room_token = r.token
             AND rs.user_id = rm.user_id AND rs.surface = ?
         WHERE r.archived = 0 AND m.role != 'user'
+          AND """ + group_room_admits_sql('r', 'rm.user_id') + """
           AND m.id > COALESCE(rs.last_read_message_id, 0)
           AND NOT EXISTS (SELECT 1 FROM room_dismissals d
                           WHERE d.room_token = r.token AND d.user_id = rm.user_id)
@@ -7037,6 +7103,7 @@ def unread_rooms_since(
         LEFT JOIN room_read_state rs ON rs.room_token = r.token
             AND rs.user_id = rm.user_id AND rs.surface = ?
         WHERE r.archived = 0 AND m.role != 'user'
+          AND """ + group_room_admits_sql('r', 'rm.user_id') + """
           AND m.id > ? AND m.id <= ?
           AND m.id > COALESCE(rs.last_read_message_id, 0)
           AND NOT EXISTS (SELECT 1 FROM room_dismissals d
@@ -7222,6 +7289,7 @@ def list_message_deletions_since(
         "  AND mm.user_id = :user "
         "WHERE NOT EXISTS (SELECT 1 FROM room_dismissals dd "
         "  WHERE dd.room_token = d.room_token AND dd.user_id = :user) "
+        f"AND {group_room_admits_sql('r', ':user')} "
         "AND d.id > :since_id ORDER BY d.id ASC LIMIT :limit",
         {"user": user_id, "since_id": since_id, "limit": limit},
     ).fetchall()
@@ -7392,6 +7460,7 @@ _CROSS_ROOM_WHERE = (
     "WHERE NOT EXISTS (SELECT 1 FROM room_dismissals d "
     "  WHERE d.room_token = m.room_token AND d.user_id = :user) "
     f"AND ({TRANSCRIPT_SURFACE_FILTER} OR m.role = 'system') "
+    f"AND {group_room_admits_sql('r', ':user')} "
 )
 
 
@@ -11524,13 +11593,9 @@ def is_group_member(conn: sqlite3.Connection, group_id: str, user_id: str) -> bo
     if not group_id or not user_id:
         return False
     row = conn.execute(
-        "SELECT 1 FROM group_members m JOIN groups g ON g.group_id = m.group_id "
-        "WHERE m.group_id = ? AND m.user_id = ? AND m.ended_at IS NULL "
-        "AND g.archived_at IS NULL "
-        "AND NOT EXISTS (SELECT 1 FROM web_auth_identities i WHERE i.user_id = m.user_id AND i.disabled = 1) LIMIT 1",
-        (group_id, user_id),
+        f"SELECT {_live_group_member_sql('?', '?')}", (group_id, user_id),
     ).fetchone()
-    return row is not None
+    return bool(row[0])
 
 
 def is_group_owner(conn: sqlite3.Connection, group_id: str, user_id: str) -> bool:

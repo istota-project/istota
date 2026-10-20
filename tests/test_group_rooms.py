@@ -687,7 +687,10 @@ class TestHostClaims:
         with db.get_db(team.db_path) as conn:
             token = self._hostless(conn)
             db.add_web_room_member(conn, token, "erin")
-            assert room_policy.claim_host(conn, token, "erin") == "group_managed"
+            # The room-access resolver asks the group first, so a roster row
+            # the group does not back is not membership at all.
+            assert room_policy.claim_host(conn, token, "erin") == "not_a_member"
+            assert room_policy.get_policy(conn, token).host_user_id is None
 
     def test_a_linked_room_member_still_claims(self, team):
         with db.get_db(team.db_path) as conn:

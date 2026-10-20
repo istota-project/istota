@@ -4469,6 +4469,17 @@ def _task_owner(task_id: int) -> str | None:
         return task.user_id if task else None
 
 
+def _task_delivery_refused(task_id: int) -> bool:
+    """`groups.rooms.task_delivery_refused` for a task id: its group-owned
+    room no longer lets its author in, so nothing more of it is served."""
+    from istota import db
+    from istota.groups.rooms import task_delivery_refused
+
+    with db.get_db(_config.db_path) as conn:
+        task = db.get_task(conn, task_id)
+        return task is not None and task_delivery_refused(conn, task)
+
+
 def _load_task_events(task_id: int, since_seq: int) -> list[dict]:
     from istota import db
     with db.get_db(_config.db_path) as conn:
@@ -4544,10 +4555,15 @@ def _synthetic_terminal_events(task_id: int, after_seq: int) -> list[dict]:
 
 
 async def _authorize_task_access(task_id: int, user: dict) -> None:
-    """404 if the task is unknown, 403 if it isn't the caller's (admins exempt)."""
+    """404 if the task is unknown, 403 if it isn't the caller's (admins exempt).
+
+    A task its group-owned room has stopped delivering (its author left the
+    group, or the group was archived) is unknown to everyone, the admin
+    exemption included.
+    """
     from fastapi import HTTPException
     owner = await asyncio.to_thread(_task_owner, task_id)
-    if owner is None:
+    if owner is None or await asyncio.to_thread(_task_delivery_refused, task_id):
         raise HTTPException(status_code=404, detail="task not found")
     if owner != user["username"] and not _user_is_web_admin(user["username"]):
         raise HTTPException(status_code=403, detail="not your task")
@@ -4597,6 +4613,10 @@ async def chat_task_stream(
         while True:
             if (await request.is_disconnected() or web_shutdown.is_shutting_down()
                     or not await _stream_authorized(request)):
+                return
+            # Every batch, not only at connect: a removal mid-task stops the
+            # stream at the next read, whether or not the cancel has landed.
+            if await asyncio.to_thread(_task_delivery_refused, task_id):
                 return
             events = await asyncio.to_thread(_load_task_events, task_id, last)
             for ev in events:
@@ -7071,14 +7091,30 @@ def _chat_create_room(username: str, name: str) -> dict:
     return d
 
 
+def _own_handle(conn, username: str, room_id: int):
+    """``username``'s own `web_chat_rooms` handle for ``room_id``, or None.
+
+    The handle half of the room-access resolver: the handle is theirs, and a
+    group-owned room's group still lets them in (`group_room_refuses`). A
+    handle outlives a group archive, so holding one is not enough; every route
+    that acts through a handle asks this rather than reading the row itself.
+    """
+    from istota import db
+    from istota.groups.rooms import group_room_refuses
+
+    handle = db.get_web_chat_room(conn, room_id)
+    if handle is None or handle.user_id != username:
+        return None
+    if group_room_refuses(conn, handle.token, username):
+        return None
+    return handle
+
+
 def _chat_owned_room(username: str, room_id: int):
     """Return the room if it belongs to ``username``, else None."""
     from istota import db
     with db.get_db(_config.db_path) as conn:
-        room = db.get_web_chat_room(conn, room_id)
-    if room is None or room.user_id != username:
-        return None
-    return room
+        return _own_handle(conn, username, room_id)
 
 
 def _phone_room(room_token: str):
@@ -7249,8 +7285,8 @@ def _chat_mark_room_read(username: str, room_id: int) -> dict | None:
     not hit Nextcloud."""
     from istota import db
     with db.get_db(_config.db_path) as conn:
-        room = db.get_web_chat_room(conn, room_id)
-        if room is None or room.user_id != username:
+        room = _own_handle(conn, username, room_id)
+        if room is None:
             return None
         old = db.get_room_read_state(conn, room.token, "web", username)
         max_id = db.room_max_message_id(conn, room.token)
@@ -7348,8 +7384,8 @@ def _chat_update_room(
     from istota import db
     from istota.rooms import policy as room_policy
     with db.get_db(_config.db_path) as conn:
-        room = db.get_web_chat_room(conn, room_id)
-        if room is None or room.user_id != username:
+        room = _own_handle(conn, username, room_id)
+        if room is None:
             return None
         if push_notifications is not _UNSET and not db.is_room_member(conn, room.token, username):
             return None
@@ -7490,11 +7526,14 @@ def _chat_update_room(
                         # to clear by unarchiving their own handle.
                         if reg is not None and reg.origin != "talk":
                             db.set_room_archived(conn, updated.token, False)
-                elif reg is not None and reg.user_id != username:
+                elif reg is not None and (reg.user_id != username
+                                          or db.is_group_owned_room(reg)):
                     # A co-member's archive is their own hide, never the global
                     # flag that hides the room from its creator too. Membership
                     # stays: hiding is not leaving, and they are still someone
-                    # an answer here can reach.
+                    # an answer here can reach. In a group-owned room the
+                    # creator's hide is the same: the room is the group's, and
+                    # leaving it is leaving the group.
                     if archived:
                         db.dismiss_room(conn, updated.token, username)
                     else:
@@ -7542,16 +7581,29 @@ def _chat_update_room(
     return d
 
 
+#: A room action that belongs to group membership. Stage 4 of the group-owned
+#: rooms spec adds where in Groups to go instead.
+_GROUP_MANAGED_REFUSAL = {
+    "error": "this room's membership follows its group; leave the group instead",
+    "reason": "group_managed",
+}
+
+
 def _chat_delete_room(username: str, room_id: int) -> str:
     """Hard-delete a room and its token-scoped rows. Returns a status string:
-    ``"not_found"`` (unknown / not owned), ``"busy"`` (a task is in flight), or
+    ``"not_found"`` (unknown / not owned), ``"busy"`` (a task is in flight),
+    ``"group_managed"`` (a group-owned room, left only by leaving the group), or
     ``"ok"``. The DB cascade is one transaction; the ``CHANNEL.md`` removal is
     best-effort and never fails the delete."""
     from istota import db
     with db.get_db(_config.db_path) as conn:
-        room = db.get_web_chat_room(conn, room_id)
-        if room is None or room.user_id != username:
+        room = _own_handle(conn, username, room_id)
+        if room is None:
             return "not_found"
+        # A group's room is left by leaving the group, and goes only with it:
+        # neither a member's leave nor the creator's delete applies.
+        if db.is_group_owned_room(db.get_room(conn, room.token)):
+            return "group_managed"
         if db.count_active_web_tasks(conn, room.token, username) > 0:
             return "busy"
         # A Talk-backed room is hidden per-user, not destroyed: deleting from web
@@ -7615,8 +7667,8 @@ def _chat_member_room(conn, username: str, room_id: int):
     says nothing about whether the room exists.
     """
     from istota import db
-    handle = db.get_web_chat_room(conn, room_id)
-    if handle is None or handle.user_id != username:
+    handle = _own_handle(conn, username, room_id)
+    if handle is None:
         return None
     if not db.is_room_member(conn, handle.token, username):
         return None
@@ -7801,6 +7853,8 @@ def _chat_remove_member(username: str, room_id: int, target: str) -> tuple[int, 
         handle, reg = found
         if _is_talk_backed(conn, reg, handle.token):
             return 409, {"error": "membership of a Talk room is managed in Talk"}
+        if db.is_group_owned_room(reg):
+            return 409, dict(_GROUP_MANAGED_REFUSAL)
         if target != username and reg.user_id != username:
             return 403, {"error": "only the room's creator can remove others"}
         if not db.is_room_member(conn, handle.token, target):
@@ -8048,8 +8102,8 @@ def _room_talk_binding(username: str, room_id: int) -> str | None:
     """The Talk room token a web room is bound to, or None. Owner-scoped."""
     from istota import db
     with db.get_db(_config.db_path) as conn:
-        handle = db.get_web_chat_room(conn, room_id)
-        if handle is None or handle.user_id != username:
+        handle = _own_handle(conn, username, room_id)
+        if handle is None:
             return None
         binding = db.get_room_binding(conn, handle.token, "talk")
     return binding.surface_ref if binding else None
@@ -8186,8 +8240,8 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
     from istota.nextcloud.talk import TalkClient
 
     with db.get_db(_config.db_path) as conn:
-        handle = db.get_web_chat_room(conn, room_id)
-        if handle is None or handle.user_id != username:
+        handle = _own_handle(conn, username, room_id)
+        if handle is None:
             return "not_found", None
         token = handle.token
         reg = db.get_room(conn, token)
@@ -10924,6 +10978,8 @@ async def chat_delete_room(
         return JSONResponse(
             {"error": "room has a task in progress"}, status_code=409,
         )
+    if result == "group_managed":
+        return JSONResponse(_GROUP_MANAGED_REFUSAL, status_code=409)
     return {"status": "ok"}
 
 
