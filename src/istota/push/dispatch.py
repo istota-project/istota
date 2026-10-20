@@ -17,12 +17,15 @@ from pathlib import Path
 
 from istota import db, user_profiles
 from istota.config import Config
+from istota.lib.markdown_plain import to_plain_text
 from istota.notifications import sources, store
 from istota.push import apns, devices, preferences
 
 logger = logging.getLogger(__name__)
 _ALERT_TITLE_MAX = 80
 _ALERT_BODY_MAX = 180
+# Enough source for 180 characters of preview, and a bound on the flattening work.
+_PREVIEW_SOURCE_MAX = 4000
 _MAX_PAYLOAD_BYTES = 4096
 _warned_unavailable = False
 _dispatch_lock = threading.Lock()
@@ -96,7 +99,8 @@ def _chat_pushes(rows: list[dict], badge: int, preview: bool, oldest: float):
         newest = messages[-1]
         name = newest["room_name"] or "Chat"
         title = name if preview else "New message in " + name
-        body = newest["body"] if preview else ""
+        # Stripped before _sanitize truncates, so markup cannot spend the budget.
+        body = to_plain_text(newest["body"][:_PREVIEW_SOURCE_MAX]) if preview else ""
         if preview and len(messages) > 1:
             body = f"{len(messages)} new messages: {body}"
         target = {"kind": "chat", "room_token": token}

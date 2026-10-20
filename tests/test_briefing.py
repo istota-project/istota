@@ -109,6 +109,9 @@ class TestStripMarkdown:
         assert strip_markdown("**bold** and *italic* and _under_") == "bold and italic and under"
         assert strip_markdown("[text](https://x.com)") == "text"
 
+    def test_keeps_underscores_inside_words(self):
+        assert strip_markdown("call snake_case_name and _this_") == "call snake_case_name and this"
+
     def test_bold_market_label_flattens(self):
         # The new market source label round-trips to a clean plain label.
         assert strip_markdown("**Market Close:**") == "Market Close:"
