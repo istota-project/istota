@@ -32,7 +32,7 @@
   role={label ? 'img' : undefined}
   aria-label={label}
   aria-hidden={label ? undefined : 'true'}
-  ><Glyph size="100%" strokeWidth={stroke} {fill} aria-hidden="true" /></span
+  ><Glyph size="100%" strokeWidth={stroke} fill={fill ?? 'none'} aria-hidden="true" /></span
 >
 
 <style>

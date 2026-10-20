@@ -42,6 +42,13 @@ describe('Icon', () => {
     expect(svg?.getAttribute('fill')).toBe('currentColor');
   });
 
+  it('leaves the glyph unfilled when no fill is given', () => {
+    // An undefined fill reaching lucide drops its fill="none" and paints the
+    // outline solid black.
+    const { container } = render(Icon, { icon: X });
+    expect(container.querySelector('svg')?.getAttribute('fill')).toBe('none');
+  });
+
   it('keeps lucide stroke width when none is given', () => {
     const { container } = render(Icon, { icon: X });
     expect(container.querySelector('svg')?.getAttribute('stroke-width')).toBe('2');
