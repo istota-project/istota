@@ -4,6 +4,7 @@
   import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
   import { codeSpans, describeRoomOff } from '$lib/roomOff';
   import { latest } from '$lib/ui/latest';
+  import { createDrawerClose } from '$lib/ui/drawerClose';
   import {
     Plus,
     MessageSquare,
@@ -243,6 +244,11 @@
   let notesRoom = $state<ChatRoom | null>(null);
 
   let sidebarOpen = $state(false);
+  const drawer = createDrawerClose(
+    () => sidebarOpen,
+    () => (sidebarOpen = false),
+  );
+  onDestroy(drawer.cancel);
   /* The identity the root layout resolved, rather than a `/me` of this page's
      own (ISSUE-355). Derived rather than read once, because the layout swaps a
      cached identity for the live one when the connection returns. The generic
@@ -1020,9 +1026,10 @@
   });
 
   function selectRoom(id: number) {
-    const room = get(rooms).find((room) => room.id === id);
-    if (room) chatSel.push({ kind: 'room', room: room.token });
-    sidebarOpen = false;
+    drawer.run(() => {
+      const room = get(rooms).find((room) => room.id === id);
+      if (room) chatSel.push({ kind: 'room', room: room.token });
+    });
   }
 
   // The notes panes are siblings of Settings rather than buttons inside it:
@@ -1048,8 +1055,7 @@
   }
 
   function selectView(v: ChatView) {
-    chatSel.push({ kind: 'view', view: v });
-    sidebarOpen = false;
+    drawer.run(() => chatSel.push({ kind: 'view', view: v }));
   }
 
   // Mark every room read (header chip). Confirmed like the feeds equivalent —

@@ -296,6 +296,16 @@ describe('type and motion scales', () => {
     expect(num('--duration-fast')).toBeLessThan(num('--duration-slow'));
   });
 
+  it('puts the exit duration between the fast and the slow one', () => {
+    // An exit long enough to be seen leaving, still quicker than an entrance.
+    expect(num('--duration-exit')).toBeGreaterThanOrEqual(num('--duration-fast'));
+    expect(num('--duration-exit')).toBeLessThan(num('--duration-slow'));
+  });
+
+  it('has an exit curve beside the entrance one', () => {
+    expect(dark['--ease-accelerate']).toMatch(/^cubic-bezier\(/);
+  });
+
   it('builds the fast transition from the duration and easing tokens', () => {
     // So an animation written with var(--duration-fast) and a transition
     // written with var(--transition-fast) cannot drift apart.
@@ -316,7 +326,7 @@ describe('type and motion scales', () => {
       /^--disabled-opacity$/,
     ];
     const inFamily = (name: string) => families.some((re) => re.test(name));
-    expect(Object.keys(dark).filter(inFamily)).toHaveLength(21);
+    expect(Object.keys(dark).filter(inFamily)).toHaveLength(23);
     expect(Object.keys(light).filter(inFamily)).toEqual([]);
   });
 });

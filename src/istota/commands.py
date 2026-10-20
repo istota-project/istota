@@ -3919,7 +3919,10 @@ def _draft_line(draft) -> str:
     others off a phone screen.
     """
     subject = (draft.subject or "(no subject)").replace("\n", " ")
-    return f"- `#{draft.id}` → {_visible_recipients(draft)} — {subject}"
+    line = f"- `#{draft.id}` → {_visible_recipients(draft)} — {subject}"
+    if draft.from_line:
+        line += f" (from {draft.from_line})"
+    return line
 
 
 def _drafts_listing(drafts_list, *, lead: str) -> str:

@@ -13,6 +13,17 @@
   }
 
   let { title, count, open = false, width = '220px', onClose, extras, children }: Props = $props();
+
+  // Whether the sidebar is the drawer, by the same query as the CSS below.
+  const DRAWER_QUERY = '(max-width: 768px)';
+  const drawerQuery = typeof window === 'undefined' ? undefined : window.matchMedia?.(DRAWER_QUERY);
+  let isDrawer = $state(drawerQuery?.matches ?? false);
+  $effect(() => {
+    if (!drawerQuery) return;
+    const update = () => (isDrawer = drawerQuery.matches);
+    drawerQuery.addEventListener('change', update);
+    return () => drawerQuery.removeEventListener('change', update);
+  });
 </script>
 
 {#if open && onClose}
@@ -20,7 +31,7 @@
   ></button>
 {/if}
 
-<aside class="sidebar" class:open style="--sidebar-width: {width}">
+<aside class="sidebar" class:open inert={isDrawer && !open} style="--sidebar-width: {width}">
   {#if title}
     <div class="sidebar-header">
       <span class="sidebar-title micro-label">{title}</span>
@@ -67,9 +78,9 @@
 
   @media (max-width: 768px) {
     /* The drawer slides on transform alone, so the compositor runs the whole
-       animation without layout or paint. `visibility` waits out the slide on
-       close and keeps the closed drawer out of the tab order and the
-       accessibility tree, which `display: none` used to do. */
+       animation without layout or paint. Closed, it stays visible off-screen
+       and `inert` keeps it out of the tab order and the accessibility tree:
+       a `visibility` change riding on the close made it read as a cut. */
     .sidebar {
       position: absolute;
       top: 0;
@@ -80,19 +91,13 @@
       background: var(--surface-base);
       border-right: 1px solid var(--border-default);
       transform: translate3d(-100%, 0, 0);
-      visibility: hidden;
       will-change: transform;
-      transition:
-        transform var(--duration-fast) var(--ease-decelerate),
-        visibility 0s linear var(--duration-fast);
+      transition: transform var(--duration-exit) var(--ease-accelerate);
     }
 
     .sidebar.open {
       transform: translate3d(0, 0, 0);
-      visibility: visible;
-      transition:
-        transform var(--duration-slow) var(--ease-decelerate),
-        visibility 0s;
+      transition: transform var(--duration-slow) var(--ease-decelerate);
     }
 
     /* The drawer is positioned against the shell body, so it sits outside the
@@ -110,6 +115,9 @@
       border: none;
       padding: 0;
       cursor: default;
+      /* WebKit greys a tapped button for a moment, and this one covers the
+         viewport: tapping it to close flashed the whole page. */
+      -webkit-tap-highlight-color: transparent;
       z-index: var(--z-drawer-backdrop);
     }
   }

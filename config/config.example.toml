@@ -441,6 +441,11 @@ bot_email = "istota@example.com"  # bot's email address (to skip own messages)
 # signup_task_window_minutes = 30  # first signup message may mint one follow-up task; 0 only files mail
 # signup_body_retention_days = 14  # blank old filed bodies, retain message rows
 # imap_timeout_seconds = 30  # socket timeout for IMAP connections (fail fast on a dead host)
+# "tls" (implicit) or "starttls". Blank infers from the port: 993 and 465 are
+# implicit TLS, anything else STARTTLS. Every mode verifies the certificate; a
+# private CA is trusted through SSL_CERT_FILE.
+# imap_security = ""
+# smtp_security = ""
 # Who checks that mail from a user's own address really is theirs: "off" (the
 # receiving MTA enforces DMARC), "verify" (trust a dmarc=pass stamped by
 # authserv_id, hold the rest) or "gate" (hold every such message).
@@ -1209,6 +1214,20 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #                                 #   private or loopback address, e.g. a local
 #                                 #   ddev site. Every other site must be public.
 # max_upload_mb = 25              # largest file one media upload may send
+
+# ============================================================================
+# Connected mail accounts (docs/features/email.md)
+# ============================================================================
+# Users connect their own IMAP (and optionally SMTP) mailboxes in Settings >
+# Connections or with `istota mail-account`. Separate from [email], which is
+# the bot's own mailbox.
+# [mail_accounts]
+# enabled = true                  # off: rows kept, every account unreachable
+# allow_send = true               # off: every account behaves as read-only
+# max_per_user = 10
+# private_hosts = []              # exact host names a user account may reach
+#                                 #   on a private address; every other host
+#                                 #   must resolve to a public one
 
 # ============================================================================
 # Servarr skill: Sonarr, Radarr, Lidarr and Prowlarr (docs/features/servarr.md)

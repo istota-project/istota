@@ -267,6 +267,44 @@ Mail between you and the bot alone, with nobody else on From, To or Cc, is a tur
 
 Mail you sent yourself before this existed is not copied into the room.
 
+## Your own mail accounts
+
+Besides the bot's mailbox, each user can connect mail accounts of their own, such as a work or personal mailbox, under Settings > Connections. A connected account is an IMAP login, an optional SMTP login for sending, and a permission:
+
+- **Read.** The bot can list, search and read the account's mail. The folder is opened read-only (IMAP `EXAMINE`), so the server itself refuses any change.
+- **Read and send.** The bot can also send, reply and mark messages from the account. A send goes out from the account's own address through its own SMTP server, through the same [outbound approval gate](#the-outbound-approval-gate) as the bot's mailbox, so a held send waits as a draft that names the account it will go out from. If you give the account a sent folder, a copy of each sent message is saved there; leave it empty for a provider that saves sent mail itself.
+
+Use "Test" on an account to check that it signs in. The test runs in the daemon, and the page shows each step's result.
+
+The bot reaches an account with the email skill's `--account <slug>` (`email accounts` lists them). There is no default account: a request that does not say which mailbox reads the bot's, and if this instance has no bot mailbox the bot asks which account you mean. Scheduled prompt jobs can read an account too, and a personal briefing's "My email" source can read any of your accounts. A `command:` or `skill:` job cannot, since only a task's own skill call is given the password.
+
+What stays the same and what does not:
+
+- **Nothing polls an account.** Mail arriving there does not start a task, and a reply to something the bot sent from your account lands in your mailbox, not in a [thread room](#email-thread-rooms). Sends from an account create no thread room.
+- **Your accounts are yours.** No setting lets another user's task read them, and they are not offered when a correspondent's mail runs on an email thread: the bot can read your accounts only on a turn you wrote. In a room other people can read, the bot asks before quoting mail from your account there.
+- **No delete.** The bot cannot delete mail in a connected account.
+- **Passwords.** They are stored encrypted with the other secrets, and given to the email skill for one call at a time. They never appear in the model's environment, in logs or in an error message.
+- **Microsoft 365 and Gmail.** Exchange Online no longer allows password sign-in over IMAP, so a Microsoft 365 mailbox cannot be connected this way. Gmail is already reachable through the Google Workspace connection.
+- **Snapshots.** `istota snapshot` and `istota apply` do not carry mail accounts, because a plan file would then hold mail passwords. After restoring from a snapshot, connect the accounts again. A database restore (`istota migrate restore-workspace`) carries them with everything else.
+
+Operators can manage accounts from the command line with `istota mail-account {list,ensure,set-password,clear-password,remove,test}`. Passwords are read from stdin only:
+
+```bash
+printf '%s' "$PASSWORD" | istota mail-account set-password alice work --imap
+```
+
+The operator settings are in `[mail_accounts]`:
+
+```toml
+[mail_accounts]
+enabled = true          # false: accounts are kept but unreachable, and the card is hidden
+allow_send = true       # false: every account behaves as read-only
+max_per_user = 10
+private_hosts = []      # hostnames an account may reach on a private address
+```
+
+An account's servers are reached from the daemon, and an address that is not public (a LAN address, loopback, the stack's own network) is refused unless the hostname is listed in `private_hosts`. The address is checked when the connection is made and the connection goes to the address that was checked. Certificates are verified as for the bot's mailbox (see below), with no way to turn that off. On a multi-user install with no working sandbox, the web UI refuses to store account passwords, as it refuses vault credentials, and `istota doctor` warns.
+
 ## Configuration
 
 ```toml
@@ -287,7 +325,7 @@ outbound_approval_floor = "untrusted"  # off | untrusted | all
 
 SMTP credentials fall back to IMAP credentials if not set.
 
-Port 993 (IMAP) and 465 (SMTP) use implicit TLS; any other port upgrades with STARTTLS. Every connection verifies the server's certificate and hostname against the system trust store, and there is no setting that turns verification off. A server whose certificate does not verify (self-signed, a private CA, or a name that does not match `imap_host` / `smtp_host`) is refused, and polling logs a certificate verification error on every tick. To trust a private CA, point `SSL_CERT_FILE` at it in the environment of every process that talks to the mail server: the daemon, and the web service, which sends sign-in and verification mail. `SSL_CERT_FILE` replaces the default bundle rather than adding to it, so set `SSL_CERT_DIR` to the system certificate directory as well. The shipped compose file does not pass either variable to the web service yet.
+Port 993 (IMAP) and 465 (SMTP) use implicit TLS; any other port upgrades with STARTTLS. `imap_security` and `smtp_security` (`"tls"` or `"starttls"`) override that for a server on an unusual port. Every connection verifies the server's certificate and hostname against the system trust store, and there is no setting that turns verification off. A server whose certificate does not verify (self-signed, a private CA, or a name that does not match `imap_host` / `smtp_host`) is refused, and polling logs a certificate verification error on every tick. To trust a private CA, point `SSL_CERT_FILE` at it in the environment of every process that talks to the mail server: the daemon, and the web service, which sends sign-in and verification mail. `SSL_CERT_FILE` replaces the default bundle rather than adding to it, so set `SSL_CERT_DIR` to the system certificate directory as well. The shipped compose file does not pass either variable to the web service yet. `istota doctor` checks that the connection code verifies (`mail.connect_verified`).
 
 Polling interval is controlled by `email_poll_interval` in `[scheduler]` (default 60s), and `email_poll_batch_size` (default 50) caps how many messages one poll walks. The cap is a batch boundary, not a window: each poll takes the oldest unprocessed mail and leaves the rest for the next tick, so a burst larger than one batch drains in arrival order instead of burying the messages underneath it. A poll that fills its batch logs that a backlog remains. Mail is deleted from the IMAP folder after `email_retention_days` (default 7) via a server-side date search, so the sweep keeps working on a busy mailbox. It deletes everything in the folder past the cutoff, not only mail Istota processed, and the deletion is permanent — set the window deliberately, and note that the first run after upgrading from a version whose sweep silently did nothing will clear the accumulated backlog (the candidate count is logged before anything is removed). A backlog is drained a couple of thousand messages per cleanup tick rather than in one pass, so a large one clears over several minutes; each tick logs how many are left. The record of which messages have already been processed is pruned separately after `processed_email_retention_days` (default 90) — always at least as long as the mail itself, so a message still in the folder can't lose its record and be ingested a second time.
 

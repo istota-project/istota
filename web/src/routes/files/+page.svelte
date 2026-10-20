@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import { createDrawerClose } from '$lib/ui/drawerClose';
   import { base } from '$app/paths';
   import {
     Icon,
@@ -174,9 +175,10 @@
     void loadConfigFiles();
   }
   function editConfigFile(file: WorkspaceConfigFile) {
-    sidebarOpen = false;
-    editing = file;
-    editorOpen = true;
+    drawer.run(() => {
+      editing = file;
+      editorOpen = true;
+    });
   }
   function closeEditor() {
     editorOpen = false;
@@ -200,6 +202,11 @@
   let loading = $state(true);
   let error = $state('');
   let sidebarOpen = $state(false);
+  const drawer = createDrawerClose(
+    () => sidebarOpen,
+    () => (sidebarOpen = false),
+  );
+  onDestroy(drawer.cancel);
   let selected = $state<Selection | null>(null);
   let place = $derived(places.find((item) => item.id === selected?.place));
   let view = $derived(selected?.view ?? null);
@@ -371,14 +378,12 @@
   function navigate(event: MouseEvent, place: string, path = '') {
     if (!plainClick(event)) return;
     event.preventDefault();
-    sidebarOpen = false;
-    selection.push({ place, path });
+    drawer.run(() => selection.push({ place, path }));
   }
   function navigateView(event: MouseEvent, view: IndexView) {
     if (!plainClick(event)) return;
     event.preventDefault();
-    sidebarOpen = false;
-    selection.push({ place: '', path: '', view });
+    drawer.run(() => selection.push({ place: '', path: '', view }));
   }
   function driveFolder(path: string) {
     return path.split('/').filter(Boolean).at(-1)?.split(':')[0] || 'root';
@@ -410,8 +415,7 @@
     try {
       const result = await getWorkspaceDriveParent(ref);
       if (!active) return;
-      sidebarOpen = false;
-      selection.push({ place, path: result.folder });
+      drawer.run(() => selection.push({ place, path: result.folder }));
     } catch (error) {
       if (active) pinError = error instanceof Error ? error.message : 'Could not reveal this file.';
     }

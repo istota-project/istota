@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, untrack } from 'svelte';
+  import { createDrawerClose } from '$lib/ui/drawerClose';
   import { page } from '$app/state';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import { getAccounts, type AccountRow } from '$lib/money/api';
@@ -29,6 +30,11 @@
 
   let accounts: AccountRow[] = $state([]);
   let sidebarOpen = $state(false);
+  const drawer = createDrawerClose(
+    () => sidebarOpen,
+    () => (sidebarOpen = false),
+  );
+  onDestroy(drawer.cancel);
   const handleFilterInput = debounce((value: string) => filterText.set(value), 300);
   onDestroy(() => handleFilterInput.cancel());
 
@@ -92,8 +98,7 @@
   });
 
   function navigateToAccount(account: string) {
-    transactionSel.push({ account, year: $selectedYear });
-    sidebarOpen = false;
+    drawer.run(() => transactionSel.push({ account, year: $selectedYear }));
   }
   setTransactionNavigation(navigateToAccount);
 

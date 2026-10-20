@@ -60,3 +60,31 @@ describe('file path check', () => {
     expect(screen.getByText('Resolves to /files/new.md')).toBeTruthy();
   });
 });
+
+describe('my email account', () => {
+  const accounts = [
+    { id: 'bot', label: 'Your bot address', address: null, available: true, reason: '' },
+    { id: 'imap:3', label: 'Work', address: 'me@example.com', available: true, reason: '' },
+  ] as const;
+
+  function mountAccount(account: string) {
+    render(SourceConfigFields, {
+      kind: 'my_email',
+      config: { account },
+      emailAccounts: [...accounts],
+      onChange: vi.fn(),
+    });
+  }
+
+  it('shows a connected account that is gone as unavailable', () => {
+    mountAccount('imap:9');
+    expect(screen.getByText(/This mail account is no longer connected/)).toBeInTheDocument();
+    expect(screen.getByText('Mail account no longer connected')).toBeInTheDocument();
+  });
+
+  it('says nothing about an account that is still connected', () => {
+    mountAccount('imap:3');
+    expect(screen.queryByText(/no longer connected/)).toBeNull();
+    expect(screen.getByText('Work (me@example.com)')).toBeInTheDocument();
+  });
+});
