@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invalidateNotificationCounts } from '$lib/stores/notifications';
+  import { syncDeviceActions } from '$lib/stores/deviceActions';
   import { onDestroy, onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { createDrawerClose } from '$lib/ui/drawerClose';
@@ -130,6 +131,7 @@
       await updateProfile(patch);
       if (patch.push_chat_alerts !== undefined || patch.push_inbox_categories !== undefined)
         invalidateNotificationCounts();
+      if (patch.quick_notes_folder !== undefined) void syncDeviceActions();
       await reload();
       info = 'Profile saved.';
     } catch (e) {

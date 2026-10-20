@@ -5,6 +5,7 @@
   import { DeviceTokensCard, SettingsLayout } from '$lib/components/settings';
   import { getCurrentUser } from '$lib/userContext';
   import { latest } from '$lib/ui/latest';
+  import { actionsStatus } from '$lib/platform/nativeActions';
 
   const identity = getCurrentUser();
   const user = $derived(identity.user);
@@ -12,6 +13,7 @@
   let devices: DeviceToken[] | null = $state(null);
   let error = $state('');
   let loading = $state(true);
+  let thisDeviceId: string | null = $state(null);
   const loads = latest();
   onDestroy(() => loads.dispose());
 
@@ -37,7 +39,12 @@
     void refresh();
   }
 
-  onMount(refresh);
+  onMount(() => {
+    void refresh();
+    void actionsStatus().then((status) => {
+      thisDeviceId = status?.deviceId ?? null;
+    });
+  });
 </script>
 
 <SettingsLayout
@@ -48,7 +55,7 @@
   onRetry={retry}
 >
   {#if devices}
-    <DeviceTokensCard {devices} onChanged={refresh}>
+    <DeviceTokensCard {devices} {thisDeviceId} onChanged={refresh}>
       {#if user.features.location}
         <p class="caption">
           Phones that send your location are listed in

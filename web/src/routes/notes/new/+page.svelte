@@ -30,6 +30,7 @@
   import { Alert, AppShell, Button, ShellHeader, TextArea } from '$lib/components/ui';
   import FolderPicker from '$lib/components/FolderPicker.svelte';
   import { getCurrentUser } from '$lib/userContext';
+  import { syncDeviceActions } from '$lib/stores/deviceActions';
   import { debounce } from '$lib/ui/debounce';
   import { loadSetting, saveSetting } from '$lib/ui/persisted';
 
@@ -278,6 +279,7 @@
       folderBusy = false;
     }
     problem = null;
+    void syncDeviceActions();
     await save();
   }
 

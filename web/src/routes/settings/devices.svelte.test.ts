@@ -28,6 +28,22 @@ vi.mock('$lib/platform/native', () => ({
   onKeyboardGeometry: vi.fn(() => () => {}),
 }));
 
+const shellActions = vi.hoisted(() => ({ deviceId: null as string | null }));
+vi.mock('$lib/platform/nativeActions', () => ({
+  actionsAvailable: vi.fn(() => false),
+  actionsStatus: vi.fn(async () =>
+    shellActions.deviceId
+      ? {
+          deviceId: shellActions.deviceId,
+          scopes: ['notes'],
+          tokenRejected: false,
+          pendingNotes: 0,
+          failedNotes: 0,
+        }
+      : null,
+  ),
+}));
+
 import Page from './devices/+page.svelte';
 import DeviceTokensCard from '$lib/components/settings/DeviceTokensCard.svelte';
 import SettingsLayout from './+layout.svelte';
@@ -72,6 +88,7 @@ beforeEach(() => {
     device(1, PHONE, 'iPhone', 'ab12'),
     device(2, '0E984725-C51C-4BF4-9960-E1C80E27ABA0', 'iPad', 'cd34'),
   ];
+  shellActions.deviceId = null;
   vi.clearAllMocks();
 });
 
@@ -107,6 +124,14 @@ describe('Settings → Devices', () => {
     store.devices = [];
     render(Harness, { component: Page, layout: SettingsLayout, user: person(false) });
     expect(await screen.findByText(/No devices yet/)).toBeInTheDocument();
+  });
+
+  it('marks the row whose device id the shell reports', async () => {
+    shellActions.deviceId = PHONE;
+    render(Harness, { component: Page, layout: SettingsLayout, user: person(false) });
+    const row = (await screen.findByText('iPhone · …ab12')).closest('li') as HTMLElement;
+    expect(await within(row).findByText('This device')).toBeInTheDocument();
+    expect(screen.getAllByText('This device')).toHaveLength(1);
   });
 
   it('marks the phone the page runs on as this device', async () => {
