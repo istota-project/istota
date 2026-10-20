@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import type { Snippet } from 'svelte';
   import { Camera } from '@lucide/svelte';
   import Button from './Button.svelte';
@@ -119,7 +120,7 @@
   {:else}
     <button type="button" class="target" aria-label={pickLabel} onclick={() => fileInput?.click()}>
       {@render preview()}
-      <span class="overlay" aria-hidden="true"><Camera size={18} /></span>
+      <span class="overlay" aria-hidden="true"><Icon icon={Camera} size="lg" /></span>
     </button>
     <!-- `hidden` rather than a class, so the input leaves the a11y tree with
          it: the picture is the affordance, and .click() reaches it either way.

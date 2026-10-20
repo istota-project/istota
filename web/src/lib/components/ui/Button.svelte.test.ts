@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import { createRawSnippet } from 'svelte';
 import Button from './Button.svelte';
+import { Plus } from '@lucide/svelte';
 
 afterEach(cleanup);
 
@@ -58,5 +59,20 @@ describe('Button', () => {
   it('carries an accessible name from ariaLabel for icon-only content', () => {
     render(Button, { children: label('×'), ariaLabel: 'Remove row' });
     expect(screen.getByRole('button', { name: 'Remove row' })).toBeInTheDocument();
+  });
+
+  it('draws an icon before the label at the label step', () => {
+    const { container } = render(Button, { children: label('Add'), icon: Plus });
+    const glyph = container.querySelector('.btn .ui-icon');
+    expect(glyph?.classList.contains('ui-icon-sm')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Add' })).toBeInTheDocument();
+    cleanup();
+    const small = render(Button, { children: label('Add'), icon: Plus, size: 'sm' });
+    expect(small.container.querySelector('.btn .ui-icon-xs')).toBeTruthy();
+  });
+
+  it('drops the icon while loading', () => {
+    const { container } = render(Button, { children: label('Add'), icon: Plus, loading: true });
+    expect(container.querySelector('.ui-icon')).toBeNull();
   });
 });

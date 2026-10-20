@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import { Select as BitsSelect } from 'bits-ui';
   import { ChevronDown } from '@lucide/svelte';
   import { getFieldContext } from './fieldContext';
@@ -127,7 +128,7 @@
     aria-required={(owned && field?.required) || undefined}
   >
     <span class="ui-select-label" style={labelStyle}>{selectedLabel}</span>
-    <ChevronDown size={12} />
+    <Icon icon={ChevronDown} size="xs" />
   </BitsSelect.Trigger>
   <BitsSelect.Portal>
     <!-- collisionPadding matches the tightest page gutter in the app (the

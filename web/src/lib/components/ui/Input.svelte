@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import type { Snippet } from 'svelte';
   import type { HTMLInputAttributes } from 'svelte/elements';
   import { Eye, EyeOff, X } from '@lucide/svelte';
@@ -121,7 +122,7 @@
     {#if suffix}{@render adornment(suffix, 'ui-input-suffix')}{/if}
     {#if clearable && hasValue && !disabled}
       <IconButton label="Clear" size="sm" class="ui-input-action" onclick={clear}>
-        <X size={14} />
+        <Icon icon={X} size="sm" />
       </IconButton>
     {/if}
     {#if canReveal}
@@ -133,7 +134,7 @@
         disabled={!!disabled}
         onclick={() => (revealed = !revealed)}
       >
-        {#if revealed}<EyeOff size={14} />{:else}<Eye size={14} />{/if}
+        {#if revealed}<Icon icon={EyeOff} size="sm" />{:else}<Icon icon={Eye} size="sm" />{/if}
       </IconButton>
     {/if}
   </span>

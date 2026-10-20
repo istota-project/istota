@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte';
   /**
    * The app nav's notification control: a `.nav-icon-btn` carrying a bell and
    * the open count, opening `NotificationPanel`.
@@ -39,7 +40,7 @@
       title="Notifications"
       aria-label={label}
     >
-      <Bell size={15} />
+      <Icon icon={Bell} size="md" />
       <CountPill count={open} />
     </button>
   {/snippet}

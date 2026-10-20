@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import { Popover } from 'bits-ui';
   import { TriangleAlert } from '@lucide/svelte';
 
@@ -53,7 +54,7 @@
             trigger.onclick?.(e);
           }}
         >
-          {#if variant === 'warning'}<TriangleAlert size={14} aria-hidden="true" />{:else}?{/if}
+          {#if variant === 'warning'}<Icon icon={TriangleAlert} size="sm" />{:else}?{/if}
         </span>
       {/snippet}
     </Popover.Trigger>

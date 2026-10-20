@@ -29,6 +29,7 @@
 </script>
 
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import { DropdownMenu } from 'bits-ui';
 
   type Handler<E extends Event> = ((e: E) => void) | undefined;
@@ -96,9 +97,9 @@
 </script>
 
 {#snippet body(item: MenuItem)}
-  {#if item.icon}<item.icon
-      size={14}
-      aria-hidden="true"
+  {#if item.icon}<Icon
+      icon={item.icon}
+      size="sm"
     />{/if}{item.label}{#if item.trailing}{@render item.trailing()}{/if}
 {/snippet}
 

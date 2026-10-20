@@ -5,6 +5,7 @@
 </script>
 
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import { MoreVertical } from '@lucide/svelte';
   import Menu from './Menu.svelte';
 
@@ -16,7 +17,7 @@
     icon?: typeof MoreVertical;
   }
 
-  let { items, ariaLabel = 'Actions', icon: Icon = MoreVertical }: Props = $props();
+  let { items, ariaLabel = 'Actions', icon: Glyph = MoreVertical }: Props = $props();
 </script>
 
 <!-- `Menu` with the kebab trigger: the row and card actions preset. -->
@@ -33,7 +34,7 @@
         if (typeof props.onclick === 'function') props.onclick(e);
       }}
     >
-      <Icon size={15} />
+      <Icon icon={Glyph} size="md" />
     </button>
   {/snippet}
 </Menu>

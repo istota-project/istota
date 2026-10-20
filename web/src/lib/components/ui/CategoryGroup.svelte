@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack, type Snippet } from 'svelte';
   import { ChevronRight } from '@lucide/svelte';
+  import Icon from './Icon.svelte';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
 
   interface Props {
@@ -55,7 +56,7 @@
         aria-label="Show {label}"
         aria-expanded={open}
       >
-        <span class="caret" class:open><ChevronRight aria-hidden="true" /></span>
+        <span class="caret" class:open><Icon icon={ChevronRight} size="xs" /></span>
       </button>
       <button class="cat-select micro-label" onclick={onSelect} type="button">
         <span class="cat-label-text">{label}</span>
@@ -72,7 +73,7 @@
       type="button"
       aria-expanded={open}
     >
-      <span class="caret" class:open><ChevronRight aria-hidden="true" /></span>
+      <span class="caret" class:open><Icon icon={ChevronRight} size="xs" /></span>
       <span class="cat-label-text">{label}</span>
       {#if count !== undefined}<span class="cat-count caption num">{count}</span>{/if}
     </button>
@@ -177,14 +178,8 @@
     display: inline-flex;
     flex: none;
     align-self: center;
-    width: var(--icon-xs);
-    height: var(--icon-xs);
     color: var(--text-dim);
     transition: transform var(--transition-fast);
-  }
-  .caret :global(svg) {
-    width: 100%;
-    height: 100%;
   }
 
   .caret.open {

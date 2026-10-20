@@ -8,6 +8,7 @@
 </script>
 
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import { ArrowDown, ArrowUp, ArrowUpDown } from '@lucide/svelte';
 
   interface Props {
@@ -45,9 +46,10 @@
   {onclick}
 >
   {label}<span class="sort-arrow" aria-hidden="true"
-    >{#if !direction}<ArrowUpDown size={12} />{:else if direction === 'descending'}<ArrowDown
-        size={12}
-      />{:else}<ArrowUp size={12} />{/if}</span
+    >{#if !direction}<Icon icon={ArrowUpDown} size="xs" />{:else if direction === 'descending'}<Icon
+        icon={ArrowDown}
+        size="xs"
+      />{:else}<Icon icon={ArrowUp} size="xs" />{/if}</span
   >
 </button>
 

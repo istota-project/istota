@@ -11,6 +11,7 @@
 </script>
 
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import { untrack, type Snippet } from 'svelte';
   import { ChevronLeft, ChevronRight, LoaderCircle, X } from '@lucide/svelte';
   import IconButton from './IconButton.svelte';
@@ -143,9 +144,9 @@
       label={navigation.previousLabel}
       disabled={!navigation.canPrevious}
       onclick={navigation.onPrevious}
-    >
-      <ChevronLeft size={20} />
-    </IconButton>
+      icon={ChevronLeft}
+      iconSize="lg"
+    />
   {/if}
 {/snippet}
 
@@ -159,8 +160,8 @@
       }}
     >
       {#if navigation.busy}
-        <span role="status" aria-label="Loading"><LoaderCircle size={20} /></span>
-      {:else}<ChevronRight size={20} />{/if}
+        <span role="status" aria-label="Loading"><Icon icon={LoaderCircle} size="lg" /></span>
+      {:else}<Icon icon={ChevronRight} size="lg" />{/if}
     </IconButton>
   {/if}
 {/snippet}
@@ -221,8 +222,10 @@
                 onclick={() => {
                   open = false;
                   onOpenChange?.(false);
-                }}><X size={20} /></IconButton
-              >
+                }}
+                icon={X}
+                iconSize="lg"
+              />
             </div>
             {#if navigation}
               <div class="ui-viewer-mobile-navigation">{@render previous()}{@render next()}</div>
@@ -244,8 +247,10 @@
                 onclick={() => {
                   open = false;
                   onOpenChange?.(false);
-                }}><X size={20} /></IconButton
-              >
+                }}
+                icon={X}
+                iconSize="lg"
+              />
             {/if}
           </header>
         {:else}

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import { Search } from '@lucide/svelte';
   let { onclick }: { onclick: () => void } = $props();
 </script>
@@ -11,7 +12,7 @@
   title="Search"
   {onclick}
 >
-  <Search size={15} />
+  <Icon icon={Search} size="md" />
 </button>
 
 <style>

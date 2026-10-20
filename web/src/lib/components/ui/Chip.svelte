@@ -2,6 +2,7 @@
   import type { Snippet } from 'svelte';
   import type { HTMLButtonAttributes } from 'svelte/elements';
   import { X } from '@lucide/svelte';
+  import Icon from './Icon.svelte';
 
   interface Props extends Omit<HTMLButtonAttributes, 'children' | 'aria-pressed'> {
     checked?: boolean;
@@ -56,7 +57,7 @@
       aria-label={removeLabel}
       title={removeLabel}
       {disabled}
-      onclick={onremove}><X size="1em" aria-hidden="true" /></button
+      onclick={onremove}><Icon icon={X} size={size === 'xs' ? 'xs' : 'sm'} /></button
     ></span
   >
 {:else}

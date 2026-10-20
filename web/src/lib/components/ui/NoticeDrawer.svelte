@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import { Info, CircleCheck, TriangleAlert, CircleAlert, X } from '@lucide/svelte';
   import { currentNotice, dismissNotice, type NoticeSeverity } from '$lib/stores/notices';
 
@@ -42,7 +43,7 @@
     error: 'Error',
   };
 
-  const Icon = $derived(notice ? ICONS[notice.severity] : Info);
+  const SeverityGlyph = $derived(notice ? ICONS[notice.severity] : Info);
 
   /**
    * Announcement text, routed into whichever of the two regions below matches
@@ -122,7 +123,7 @@
       transition:slideDown={{ duration: motionDuration() }}
     >
       <span class="notice-icon" data-testid="notice-icon" aria-hidden="true">
-        <Icon size={16} />
+        <Icon icon={SeverityGlyph} size="md" />
       </span>
       <p class="notice-message">
         <span class="visually-hidden">{LABELS[notice.severity]}:</span>
@@ -147,7 +148,7 @@
         aria-label="Dismiss notification"
         onclick={dismissCurrent}
       >
-        <X size={15} />
+        <Icon icon={X} size="md" />
       </button>
     </div>
   {/if}

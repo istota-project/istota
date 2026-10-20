@@ -4,12 +4,13 @@
 -->
 <script lang="ts">
   import { ArrowLeft } from '@lucide/svelte';
+  import Icon from './Icon.svelte';
 
   let { href, label }: { href: string; label: string } = $props();
 </script>
 
 <a class="ui-back-link link-muted" {href}>
-  <ArrowLeft size="1em" aria-hidden="true" />{label}
+  <Icon icon={ArrowLeft} size="xs" />{label}
 </a>
 
 <style>

@@ -10,6 +10,7 @@
 </script>
 
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import { ToggleGroup } from 'bits-ui';
   import Chip from './Chip.svelte';
   import { getFieldContext } from './fieldContext';
@@ -74,9 +75,9 @@
         icon={iconOnly && !!option.icon}
         aria-label={iconOnly ? option.label : undefined}
         title={iconOnly ? option.label : undefined}
-        >{#if option.icon}<option.icon
-            size={14}
-            aria-hidden="true"
+        >{#if option.icon}<Icon
+            icon={option.icon}
+            size="sm"
           />{/if}{#if !iconOnly}{option.label}{/if}</Chip
       >
     {/snippet}

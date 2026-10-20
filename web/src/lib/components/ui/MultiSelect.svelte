@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import { Combobox } from 'bits-ui';
   import { Check, X } from '@lucide/svelte';
   import Input from './Input.svelte';
@@ -80,7 +81,7 @@
             type="button"
             class="pick-remove"
             aria-label="Remove {labels.get(item) ?? item}"
-            onclick={() => remove(item)}><X size={12} /></button
+            onclick={() => remove(item)}><Icon icon={X} size="xs" /></button
           >{/if}
       </span>
     {:else}
@@ -127,7 +128,7 @@
               >
                 {#snippet children({ selected })}
                   <span class="ui-multiselect-check" aria-hidden="true"
-                    >{#if selected}<Check size={14} />{/if}</span
+                    >{#if selected}<Icon icon={Check} size="sm" />{/if}</span
                   >
                   {opt.label}
                 {/snippet}

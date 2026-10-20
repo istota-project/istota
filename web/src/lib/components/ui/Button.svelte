@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import type { Component, Snippet } from 'svelte';
+  import Icon from './Icon.svelte';
 
   type Variant = 'primary' | 'secondary' | 'pill' | 'danger' | 'danger-icon';
   type Size = 'sm' | 'md';
@@ -37,6 +38,8 @@
     loading?: boolean;
     loadingLabel?: string;
     ariaLabel?: string;
+    /** A glyph before the label, drawn through `Icon` at the label's step. */
+    icon?: Component;
     children: Snippet;
   }
 
@@ -55,9 +58,14 @@
     loading = false,
     loadingLabel = 'Saving…',
     ariaLabel,
+    icon,
     children,
   }: Props = $props();
 </script>
+
+{#snippet label()}
+  {#if icon}<Icon {icon} size={size === 'sm' ? 'xs' : 'sm'} />{/if}{@render children()}
+{/snippet}
 
 {#if href}
   <!-- A disabled link is not a thing the platform has, so a disabled href
@@ -65,7 +73,7 @@
        that still navigates. -->
   {#if disabled || loading}
     <button class="btn btn-{variant} btn-{size}" type="button" disabled aria-label={ariaLabel}>
-      {#if loading}{loadingLabel}{:else}{@render children()}{/if}
+      {#if loading}{loadingLabel}{:else}{@render label()}{/if}
     </button>
   {:else}
     <a
@@ -79,7 +87,7 @@
       data-sveltekit-reload={reload ? '' : undefined}
       aria-label={ariaLabel}
     >
-      {@render children()}
+      {@render label()}
     </a>
   {/if}
 {:else}
@@ -92,7 +100,7 @@
     aria-busy={loading || undefined}
     aria-label={ariaLabel}
   >
-    {#if loading}{loadingLabel}{:else}{@render children()}{/if}
+    {#if loading}{loadingLabel}{:else}{@render label()}{/if}
   </button>
 {/if}
 

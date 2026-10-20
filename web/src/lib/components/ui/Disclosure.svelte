@@ -6,6 +6,7 @@
 <script lang="ts">
   import { untrack, type Snippet } from 'svelte';
   import { ChevronRight } from '@lucide/svelte';
+  import Icon from './Icon.svelte';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
 
   interface Props {
@@ -58,7 +59,7 @@
   {ontoggle}
 >
   <summary class="ui-disclosure-summary">
-    <span class="ui-disclosure-marker"><ChevronRight aria-hidden="true" /></span>
+    <span class="ui-disclosure-marker"><Icon icon={ChevronRight} size="xs" /></span>
     <span class="ui-disclosure-label"
       >{#if typeof summary === 'string'}{summary}{:else}{@render summary()}{/if}</span
     >
@@ -91,13 +92,7 @@
   .ui-disclosure-marker {
     display: inline-flex;
     flex: none;
-    width: var(--icon-xs);
-    height: var(--icon-xs);
     transition: transform var(--transition-fast);
-  }
-  .ui-disclosure-marker :global(svg) {
-    width: 100%;
-    height: 100%;
   }
   .ui-disclosure[open] > .ui-disclosure-summary .ui-disclosure-marker {
     transform: rotate(90deg);

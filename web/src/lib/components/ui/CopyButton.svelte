@@ -40,7 +40,5 @@
 {#if variant === 'button'}
   <Button variant="secondary" {size} {disabled} onclick={copy}>{label}</Button>
 {:else}
-  <IconButton {label} title={label} {size} {disabled} onclick={copy}>
-    <Copy size={14} />
-  </IconButton>
+  <IconButton {label} title={label} {size} {disabled} onclick={copy} icon={Copy} iconSize="sm" />
 {/if}

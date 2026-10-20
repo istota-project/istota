@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import type { Component, Snippet } from 'svelte';
+  import Icon, { type IconSize } from './Icon.svelte';
 
   type Size = 'sm' | 'md' | 'round';
 
@@ -31,7 +32,14 @@
     target?: string;
     rel?: string;
     onclick?: (e: MouseEvent) => void;
-    children: Snippet;
+    /**
+     * The glyph, drawn through `Icon` at the button's own step (`sm` and
+     * `md` alike); `iconSize` for a toolbar or dialog glyph a step up.
+     * Children instead, for anything that is not one lucide glyph.
+     */
+    icon?: Component;
+    iconSize?: IconSize;
+    children?: Snippet;
   }
 
   let {
@@ -49,9 +57,17 @@
     target,
     rel,
     onclick,
+    icon,
+    iconSize,
     children,
   }: Props = $props();
+
+  const glyphSize = $derived(iconSize ?? (size === 'sm' ? 'sm' : 'md'));
 </script>
+
+{#snippet glyph()}
+  {#if icon}<Icon {icon} size={glyphSize} />{:else if children}{@render children()}{/if}
+{/snippet}
 
 {#if href && !disabled}
   <a
@@ -66,7 +82,7 @@
     {onclick}
     aria-label={label}
   >
-    {@render children()}
+    {@render glyph()}
   </a>
 {:else}
   <button
@@ -80,7 +96,7 @@
     aria-label={label}
     aria-pressed={pressed}
   >
-    {@render children()}
+    {@render glyph()}
   </button>
 {/if}
 
@@ -152,6 +168,7 @@
     border-radius: var(--radius-round);
   }
 
+  .icon-btn-round :global(.ui-icon),
   .icon-btn-round :global(svg) {
     width: 1.25em;
     height: 1.25em;

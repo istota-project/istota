@@ -17,6 +17,7 @@
 
 <script lang="ts" generics="T extends SidebarNavItem">
   import CountPill from './CountPill.svelte';
+  import Icon from './Icon.svelte';
   import ListRow from './ListRow.svelte';
 
   interface Props {
@@ -36,7 +37,7 @@
 
 <nav class="ui-sidebar-nav" class:divider aria-label={label}>
   {#each items as item (item.href)}
-    {#snippet icon()}{#if item.icon}<item.icon size={14} aria-hidden="true" />{/if}{/snippet}
+    {#snippet icon()}{#if item.icon}<Icon icon={item.icon} size="sm" />{/if}{/snippet}
     {#snippet badge()}<CountPill
         count={item.count ?? 0}
         tone={item.countTone}
