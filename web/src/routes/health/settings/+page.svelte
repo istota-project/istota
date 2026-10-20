@@ -10,6 +10,9 @@
   let loading = $state(true);
   let saving = $state(false);
   let error = $state('');
+  // Until the settings have loaded once the form would show defaults, and a
+  // save would write them over the stored values: a failure takes the pane.
+  let loaded = $state(false);
   let info = $state('');
 
   let settings: HealthSettings = $state({
@@ -75,6 +78,7 @@
       dobInput = settings.dob || '';
       syncHeightInputs(settings.height_cm);
       changes.mark();
+      loaded = true;
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load settings';
     } finally {
@@ -163,7 +167,9 @@
   title="Health settings"
   description="Profile basics and display preferences. All values are stored in metric; display unit choices only affect what you see."
   {loading}
-  {error}
+  error={loaded ? error : ''}
+  loadError={loaded ? '' : error}
+  onRetry={load}
   {info}
 >
   <Card title="Profile">

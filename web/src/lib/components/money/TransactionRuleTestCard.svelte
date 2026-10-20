@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Badge, Button, Field, Input, Select, Card } from '$lib/components/ui';
+  import { Alert, Badge, Button, Field, Input, Select, Card } from '$lib/components/ui';
   import {
     ApiError,
     getLedgers,
@@ -194,7 +194,7 @@
     </div>
 
     {#if error}
-      <div class="banner error">{error}</div>
+      <Alert appearance="inline" variant="danger" role="alert">{error}</Alert>
     {/if}
 
     {#if resolution}
@@ -228,10 +228,10 @@
         <p class="caption">{resolution.considered} rules evaluated.</p>
 
         {#if dropped.length > 0}
-          <div class="banner warn">
+          <Alert appearance="inline" variant="warn">
             Skipped as uncompilable, so they did not run: rules {dropped.join(', ')}. Dropping a
             skip rule imports a transaction that was meant to be excluded.
-          </div>
+          </Alert>
         {/if}
 
         <h4 class="micro-label trace-head">Trace</h4>

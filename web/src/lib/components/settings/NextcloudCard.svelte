@@ -13,6 +13,7 @@
     type NextcloudTokenStatus,
   } from '$lib/api';
   import {
+    Alert,
     Badge,
     Button,
     ConfirmDialog,
@@ -249,7 +250,7 @@
     {#if loading && !sharing}
       <p class="caption">Loading…</p>
     {:else if loadError}
-      <div class="banner error">{loadError}</div>
+      <Alert appearance="inline" variant="danger" role="alert">{loadError}</Alert>
     {:else if isBotAccount}
       <p class="caption note">
         This is Istota's own Nextcloud account, so there is nothing to share with it.
@@ -311,7 +312,7 @@
     </div>
     {#if inBrowser}{@render browserNote()}{/if}
     {#if disconnectError && !confirmingDisconnect}
-      <div class="banner error">{disconnectError}</div>
+      <Alert appearance="inline" variant="danger" role="alert">{disconnectError}</Alert>
     {/if}
   {:else}
     <div class="card-actions">
@@ -326,10 +327,10 @@
   {/if}
 
   {#if error}
-    <div class="banner error">{error}</div>
+    <Alert appearance="inline" variant="danger" role="alert">{error}</Alert>
   {/if}
   {#if info}
-    <div class="banner success">{info}</div>
+    <Alert appearance="inline" variant="success" role="status">{info}</Alert>
   {/if}
 </Card>
 

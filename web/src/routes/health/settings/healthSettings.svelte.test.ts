@@ -84,3 +84,22 @@ describe('health settings unsaved changes', () => {
     expect(heightCm()).toHaveValue(178);
   });
 });
+
+describe('a failed first load', () => {
+  // The form would otherwise show defaults, and a save would write them.
+  it('takes the whole pane, and Retry brings the form back', async () => {
+    vi.mocked(getHealthSettings).mockRejectedValueOnce(new Error('Health database unavailable'));
+    const { container } = render(Page);
+    const failure = await waitFor(() => {
+      const el = container.querySelector('.center-msg.error');
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(failure.textContent).toContain('Health database unavailable');
+    expect(screen.queryByRole('heading', { name: 'Display preferences' })).toBeNull();
+
+    await fireEvent.click(within(failure).getByRole('button', { name: 'Retry' }));
+    await screen.findByRole('heading', { name: 'Display preferences' });
+    expect(heightCm()).toHaveValue(178);
+  });
+});

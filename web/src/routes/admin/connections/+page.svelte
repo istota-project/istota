@@ -15,7 +15,15 @@
     type AdminServarrConnection,
     type AdminWhatsAppConnection,
   } from '$lib/api';
-  import { Button, ConfirmDialog, Disclosure, EmptyState, LoadState } from '$lib/components/ui';
+  import {
+    Alert,
+    Button,
+    ConfirmDialog,
+    Disclosure,
+    EmptyState,
+    LoadState,
+  } from '$lib/components/ui';
+  import { notifyError, notifyWarning } from '$lib/stores/notices';
   import { MessageCircle } from '@lucide/svelte';
   import ConnectionCard from './ConnectionCard.svelte';
   import NextcloudCard from './NextcloudCard.svelte';
@@ -48,7 +56,6 @@
   let loading = $state(true);
   let error = $state('');
   let notice = $state('');
-  let actionError = $state('');
   let streamError = $state('');
   let starting = $state(false);
   let cancelling = $state(false);
@@ -547,7 +554,7 @@
       error = '';
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Failed to load connections';
-      if (connections) actionError = message;
+      if (connections) notifyError(message);
       else error = message;
     } finally {
       loading = false;
@@ -599,7 +606,6 @@
     if (starting) return;
     starting = true;
     notice = '';
-    actionError = '';
     let receipt = '';
     try {
       // Both flags on every call, and neither inferred. `force` is the
@@ -610,7 +616,7 @@
         ? 'Re-pair requested. The sidecar is being asked to stop; a code follows once it restarts.'
         : 'Pairing requested. The scheduler picks it up within one poll interval.';
     } catch (e) {
-      actionError = startFailure(e);
+      notifyError(startFailure(e));
     } finally {
       starting = false;
       await refreshPairing();
@@ -624,7 +630,6 @@
     if (cancelling) return;
     cancelling = true;
     notice = '';
-    actionError = '';
     let receipt = '';
     try {
       const outcome = await cancelWhatsAppPairing();
@@ -633,14 +638,15 @@
           'Pairing cancelled. Any session directory already moved aside is left where it is — ' +
           'the message below names it.';
       } else if (outcome.reason === 'servicing') {
-        actionError =
+        notifyWarning(
           'The re-pair is already running and cannot be stopped part-way. It will report its ' +
-          'outcome here.';
+            'outcome on the WhatsApp card.',
+        );
       } else {
         receipt = 'There was no open pairing request to cancel.';
       }
     } catch (e) {
-      actionError = e instanceof Error ? e.message : 'Failed to cancel pairing';
+      notifyError(e instanceof Error ? e.message : 'Failed to cancel pairing');
     } finally {
       cancelling = false;
       await refreshPairing();
@@ -687,14 +693,11 @@
       {/if}
     </Disclosure>
 
-    {#if actionError}
-      <div class="banner error">{actionError}</div>
-    {/if}
     {#if streamError}
-      <div class="banner warn">{streamError}</div>
+      <Alert appearance="inline" variant="warn">{streamError}</Alert>
     {/if}
     {#if notice}
-      <div class="banner info">{notice}</div>
+      <Alert appearance="inline" variant="info" role="status">{notice}</Alert>
     {/if}
 
     <!-- Full-width cards, one under another; each card's body is the grid
@@ -715,18 +718,20 @@
           {badge}
         >
           {#if whatsapp.credential_errors.length}
-            <div class="banner warn wide">
+            <Alert appearance="inline" variant="warn" class="wide">
               The active adapter reports missing configuration: {whatsapp.credential_errors.join(
                 '; ',
               )}.
-            </div>
+            </Alert>
           {/if}
 
           {#if whatsapp.pairing_blocked_reason}
-            <div class="banner warn wide" data-testid="pairing-blocked">
-              A pairing code cannot be written on this deployment: the relay would land inside a
-              directory the task sandbox binds ({whatsapp.pairing_blocked_reason}). Point
-              <code>[whatsapp.baileys] pairing_relay_path</code> outside it, or pair from a terminal.
+            <div class="wide" data-testid="pairing-blocked">
+              <Alert appearance="inline" variant="warn">
+                A pairing code cannot be written on this deployment: the relay would land inside a
+                directory the task sandbox binds ({whatsapp.pairing_blocked_reason}). Point
+                <code>[whatsapp.baileys] pairing_relay_path</code> outside it, or pair from a terminal.
+              </Alert>
             </div>
           {/if}
 
@@ -751,7 +756,7 @@
           <div class="panel">
             <h3 class="micro-label">Status</h3>
             {#if knownDead || (link && link.connection_replaced_latched && !link.ready)}
-              <p class="banner danger summary-problem">{linkSummary}</p>
+              <Alert appearance="inline" variant="danger">{linkSummary}</Alert>
             {:else}
               <p class="summary">{linkSummary}</p>
             {/if}
@@ -870,10 +875,6 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
-  }
-
-  .summary-problem {
-    margin: 0;
   }
 
   .pairing {

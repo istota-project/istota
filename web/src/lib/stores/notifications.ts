@@ -34,6 +34,7 @@ import {
   type ResolvedNotification,
 } from '$lib/api';
 import { notifyError } from './notices';
+import { onDocumentVisible } from '$lib/ui/visibility';
 
 export type NotificationFilter = 'all' | 'action';
 
@@ -80,7 +81,7 @@ let timer: ReturnType<typeof setTimeout> | null = null;
 let polling = false;
 let consecutiveFailures = 0;
 let activeFilter: NotificationFilter = 'all';
-let visibilityHandler: (() => void) | null = null;
+let offVisible: (() => void) | null = null;
 
 /** Bumped by every `start`/`stop`, and captured before each request.
  *
@@ -335,18 +336,14 @@ export function startNotificationPoll(): void {
   polling = true;
   generation += 1;
   consecutiveFailures = 0;
-  if (typeof document !== 'undefined') {
-    // A background tab's timer is throttled and a suspended PWA's is stopped
-    // outright, so returning to the app is both the moment a fresh count is
-    // worth something and the moment a backed-off poll should be forgiven.
-    visibilityHandler = () => {
-      if (document.visibilityState !== 'visible') return;
-      consecutiveFailures = 0;
-      void refreshCounts();
-      arm();
-    };
-    document.addEventListener('visibilitychange', visibilityHandler);
-  }
+  // A background tab's timer is throttled and a suspended PWA's is stopped
+  // outright, so returning to the app is both the moment a fresh count is
+  // worth something and the moment a backed-off poll should be forgiven.
+  offVisible = onDocumentVisible(() => {
+    consecutiveFailures = 0;
+    void refreshCounts();
+    arm();
+  });
   void refreshCounts();
   arm();
 }
@@ -360,10 +357,8 @@ export function stopNotificationPoll(): void {
     clearTimeout(timer);
     timer = null;
   }
-  if (visibilityHandler && typeof document !== 'undefined') {
-    document.removeEventListener('visibilitychange', visibilityHandler);
-  }
-  visibilityHandler = null;
+  offVisible?.();
+  offVisible = null;
 }
 
 /** Whether the loop is running. For the layout's teardown and for tests. */

@@ -735,7 +735,8 @@ describe('RoomSettings — when the bot replies', () => {
     await mountSettled(shared());
     expect(screen.queryByText(/answer every message/)).toBeNull();
     await pick(SPEAK, 'Every turn');
-    expect(screen.getByText(/answer every message anyone sends/)).toBeTruthy();
+    // The field's own warning, under the Replies control, not a banner.
+    expect(screen.getByText(/answer every message anyone sends/)).toHaveClass('field-warning');
   });
 
   it('is read-only for a member who is not the host', async () => {

@@ -4,6 +4,11 @@ import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api, { getAdminDoctor: vi.fn(), requestDoctorRun: vi.fn() });
+const notices = vi.hoisted(() => ({ notifyError: vi.fn() }));
+vi.mock('$lib/stores/notices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$lib/stores/notices')>()),
+  notifyError: notices.notifyError,
+}));
 import Page from './+page.svelte';
 
 afterEach(() => {
@@ -56,7 +61,17 @@ it('says so when the daemon never answers', async () => {
   await vi.advanceTimersByTimeAsync(0);
   await fireEvent.click(screen.getByRole('button', { name: 'Re-run' }));
   await vi.advanceTimersByTimeAsync(125_000);
-  expect(screen.getByText(/has not answered the request yet/)).toBeTruthy();
+  expect(screen.getByRole('status')).toHaveTextContent(/has not answered the request yet/);
+});
+
+it('reports a failed re-run as a notice and keeps the report on screen', async () => {
+  api.getAdminDoctor.mockResolvedValue(report(null));
+  api.requestDoctorRun.mockRejectedValue(new Error('API error: 500'));
+  render(Page);
+  await fireEvent.click(await screen.findByRole('button', { name: 'Re-run' }));
+  await vi.waitFor(() => expect(notices.notifyError).toHaveBeenCalledWith('API error: 500'));
+  expect(screen.queryByText(/API error: 500/)).toBeNull();
+  expect(screen.getByRole('button', { name: 'Re-run' })).toBeTruthy();
 });
 
 it('leads with the overall status as a closed disclosure over the about text', async () => {

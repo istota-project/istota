@@ -20,6 +20,7 @@
     type ServiceCard as ServiceCardData,
   } from '$lib/api';
   import {
+    Alert,
     Button,
     ConfirmDialog,
     EmptyState,
@@ -48,6 +49,9 @@
   let refreshing = $state(false);
   let error = $state('');
   let info = $state('');
+  // Until the config has loaded once there is nothing to edit: a failure then
+  // takes the pane, or the one save would send the empty draft.
+  let loaded = $state(false);
 
   // The loaded config is the draft the page edits, and the one save sends.
   const draft = createDraft<FeedsConfigPayload>({ settings: {}, categories: [], feeds: [] });
@@ -82,10 +86,12 @@
       moduleEnabled = mod.module_enabled;
       moduleServices = mod.services;
       if (!moduleEnabled) {
+        loaded = true;
         return;
       }
       const data = await getFeedsConfig();
       draft.reset(data.config);
+      loaded = true;
       diagnostics = data.diagnostics;
       feedStateByUrl = Object.fromEntries(data.feed_state.map((s) => [s.url, s]));
     } catch (e) {
@@ -335,14 +341,16 @@
   title="Feed settings"
   description="Edit subscriptions, categories, and poll defaults. Saved straight to your local SQLite."
   {loading}
-  {error}
+  error={loaded ? error : ''}
+  loadError={loaded ? '' : error}
+  onRetry={refresh}
   {info}
 >
   {#if !moduleEnabled}
-    <div class="banner info">
+    <Alert appearance="inline" variant="info">
       Feeds module is disabled. Enable it in
       <a href="{base}/settings">Settings → Preferences</a> to manage subscriptions.
-    </div>
+    </Alert>
   {:else}
     {#if diagnostics}
       <Card title="Diagnostics">

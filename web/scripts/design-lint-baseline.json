@@ -1,10 +1,4 @@
 {
-  "src/lib/admin/config/ServarrAppsEditor.svelte": {
-    "redefined-primitive": 1
-  },
-  "src/lib/components/briefings/GroupBriefingEditor.svelte": {
-    "redefined-primitive": 1
-  },
   "src/lib/components/briefings/SourceConfigFields.svelte": {
     "off-scale-space": 2
   },
@@ -23,26 +17,11 @@
   "src/lib/components/FeedReader.svelte": {
     "off-scale-space": 5
   },
-  "src/lib/components/health/DocumentCard.svelte": {
-    "redefined-primitive": 1
-  },
-  "src/lib/components/location/DeviceTrackerCard.svelte": {
-    "redefined-primitive": 1
-  },
-  "src/lib/components/location/ElevationProfile.svelte": {
-    "redefined-primitive": 1
-  },
-  "src/lib/components/location/PlaceForm.svelte": {
-    "redefined-primitive": 1
-  },
   "src/lib/components/location/StopTimeline.svelte": {
     "off-scale-space": 1
   },
   "src/lib/components/location/TripList.svelte": {
     "off-scale-space": 1
-  },
-  "src/lib/components/setup/StepReview.svelte": {
-    "redefined-primitive": 1
   },
   "src/lib/components/ui/Badge.svelte": {
     "off-scale-space": 1
@@ -84,14 +63,7 @@
     "off-scale-space": 2
   },
   "src/routes/admin/+page.svelte": {
-    "off-scale-space": 4,
-    "redefined-primitive": 1
-  },
-  "src/routes/admin/connections/GoogleWorkspaceCard.svelte": {
-    "redefined-primitive": 1
-  },
-  "src/routes/admin/connections/ServarrCard.svelte": {
-    "redefined-primitive": 1
+    "off-scale-space": 4
   },
   "src/routes/chat/+page.svelte": {
     "off-scale-space": 1
@@ -104,11 +76,9 @@
   },
   "src/routes/health/history/+page.svelte": {
     "off-scale-space": 2,
-    "redefined-primitive": 2,
     "raw-color": 1
   },
   "src/routes/health/history/diagnoses/+page.svelte": {
-    "redefined-primitive": 1,
     "off-scale-space": 3,
     "raw-color": 3
   },
@@ -119,8 +89,7 @@
     "off-scale-space": 2
   },
   "src/routes/health/immunizations/detail/+page.svelte": {
-    "off-scale-space": 1,
-    "redefined-primitive": 1
+    "off-scale-space": 1
   },
   "src/routes/health/immunizations/vaccine/+page.svelte": {
     "off-scale-space": 2
@@ -133,14 +102,8 @@
     "off-scale-space": 5,
     "raw-color": 5
   },
-  "src/routes/health/stats/+page.svelte": {
-    "redefined-primitive": 1
-  },
   "src/routes/location/+layout.svelte": {
     "off-scale-space": 2
-  },
-  "src/routes/location/settings/+page.svelte": {
-    "redefined-primitive": 1
   },
   "src/routes/money/+layout.svelte": {
     "off-scale-space": 3
@@ -153,8 +116,5 @@
   },
   "src/routes/money/settings/+page.svelte": {
     "off-scale-space": 2
-  },
-  "src/routes/money/settings/invoicing/+page.svelte": {
-    "redefined-primitive": 3
   }
 }

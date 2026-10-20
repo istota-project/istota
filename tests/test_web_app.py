@@ -2672,6 +2672,34 @@ class TestSettingsEndpoints:
         assert body["enabled_for_user"]["feeds"] is True
         assert body["enabled_for_user"]["health"] is True
 
+    async def test_modules_endpoint_lists_the_skills_a_member_can_turn_off(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        cfg.admin_users = {"bob"}
+        cfg.disabled_skills = ["notes"]
+        cfg.users["alice"].disabled_skills = ["calendar"]
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+        resp = await client.get("/istota/api/settings/modules", cookies=cookies)
+        assert resp.status_code == 200
+        skills = resp.json()["skills"]
+        assert skills == sorted(skills)
+        assert "email" in skills
+        # Her own disabled skill stays in the list, so the picker can turn it back on.
+        assert "calendar" in skills
+        # Admin-only, off for the instance, and missing its capability (no browser here).
+        assert "tasks" not in skills
+        assert "notes" not in skills
+        assert "browse" not in skills
+
+    async def test_modules_endpoint_offers_admin_only_skills_to_an_admin(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        cfg.admin_users = {"alice"}
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+        resp = await client.get("/istota/api/settings/modules", cookies=cookies)
+        assert resp.status_code == 200
+        assert "tasks" in resp.json()["skills"]
+
     async def test_services_never_returns_plaintext(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)

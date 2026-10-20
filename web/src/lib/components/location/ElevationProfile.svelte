@@ -93,7 +93,7 @@
     stroke-dasharray: 3 3;
   }
 
-  .caption {
+  .elevation .caption {
     margin: 0;
   }
 </style>

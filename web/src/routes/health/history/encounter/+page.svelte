@@ -17,6 +17,7 @@
     type HealthPanel,
   } from '$lib/api';
   import {
+    Alert,
     Badge,
     Button,
     Card,
@@ -384,7 +385,7 @@
         >
       </div>
       {#if linkError}
-        <div class="banner error">{linkError}</div>
+        <Alert appearance="inline" variant="danger" role="alert">{linkError}</Alert>
       {/if}
     </section>
 

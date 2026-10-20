@@ -205,7 +205,9 @@
   title="Taxes"
   description="The rates behind the quarterly estimate, and where they came from. Shipped figures are used unless you override them."
   {loading}
-  error={loadError}
+  error={settings ? loadError : ''}
+  loadError={settings ? '' : loadError}
+  onRetry={load}
 >
   <Card title="Filing">
     <Field label="Filing status">

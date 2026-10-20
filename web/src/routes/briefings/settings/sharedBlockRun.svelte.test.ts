@@ -10,6 +10,13 @@ import type { SharedBlock, SharedBlockRunAnswer, User } from '$lib/api';
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 
+const notices = vi.hoisted(() => ({ notifyError: vi.fn(), notifyWarning: vi.fn() }));
+vi.mock('$lib/stores/notices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$lib/stores/notices')>()),
+  notifyError: notices.notifyError,
+  notifyWarning: notices.notifyWarning,
+}));
+
 const answers = vi.hoisted(() => ({ queue: [] as (SharedBlockRunAnswer | null)[] }));
 
 function block(answer: SharedBlockRunAnswer | null): SharedBlock {
@@ -135,8 +142,14 @@ describe('Shared block Run now', () => {
     render(Harness, { component: Page, user: admin });
     await pressRunNow();
     expect(api.runSharedBlock).toHaveBeenCalledWith('mk');
-    await waitFor(() => expect(screen.getByText(/mk: Nothing was generated/)).toBeInTheDocument(), {
-      timeout: 6000,
-    });
+    // The answer arrives long after the click, so it is a notice, not a banner in the card.
+    await waitFor(
+      () =>
+        expect(notices.notifyWarning).toHaveBeenCalledWith(
+          expect.stringMatching(/^mk: Nothing was generated/),
+        ),
+      { timeout: 6000 },
+    );
+    expect(screen.queryByText(/mk: Nothing was generated/)).toBeNull();
   }, 10_000);
 });

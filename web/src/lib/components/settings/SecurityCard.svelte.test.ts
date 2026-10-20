@@ -63,7 +63,11 @@ it('keeps errors visible and refuses mismatched confirmation', async () => {
     target: { value: 'different' },
   });
   await fireEvent.click(screen.getByRole('button', { name: 'Change password' }));
-  expect(screen.getByRole('alert').textContent).toContain('Passwords must match');
+  // A mismatch is the confirmation field's error, beside it, not a banner.
+  const confirmField = screen.getByLabelText('Confirm new password');
+  expect(confirmField).toHaveAttribute('aria-invalid', 'true');
+  expect(confirmField).toHaveAccessibleDescription(/Passwords must match/);
+  expect(screen.queryByRole('alert')).toBeNull();
   expect(changePassword).not.toHaveBeenCalled();
   await fireEvent.input(screen.getByLabelText('Confirm new password'), {
     target: { value: 'new passphrase' },

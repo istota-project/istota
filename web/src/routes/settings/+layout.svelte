@@ -34,6 +34,7 @@
   const profileDraft = createDraft<UserProfile | null>(null);
   const profile = $derived(profileDraft.value);
   let allModules: string[] = $state([]);
+  let allSkills: string[] = $state([]);
   let loading = $state(true);
   let error = $state('');
   let info = $state('');
@@ -75,6 +76,7 @@
       }
       profileDraft.reset(next);
       allModules = modResp.modules;
+      allSkills = modResp.skills ?? [];
       error = '';
     } catch (e) {
       error = (e as Error).message || 'Failed to load settings';
@@ -134,6 +136,9 @@
     },
     get allModules() {
       return allModules;
+    },
+    get allSkills() {
+      return allSkills;
     },
     get loading() {
       return loading;

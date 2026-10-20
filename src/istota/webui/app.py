@@ -15363,6 +15363,10 @@ async def settings_modules(user: dict = Depends(_require_api_auth)) -> dict:
     unless the operator has enabled the matching ``module_<name>`` flag
     via ``[experimental] features`` — they shouldn't appear in the
     settings UI on standard installs.
+
+    ``skills`` is what the "Disabled skills" picker offers: the skills this
+    user's tasks can load, with the user's own disabled ones kept in so they
+    can be turned back on (ISSUE-793).
     """
     if not _config:
         modules = _visible_modules(None)
@@ -15370,6 +15374,7 @@ async def settings_modules(user: dict = Depends(_require_api_auth)) -> dict:
             "modules": modules,
             "disabled": [],
             "enabled_for_user": {m: True for m in modules},
+            "skills": [],
         }
 
     username = user["username"]
@@ -15382,7 +15387,19 @@ async def settings_modules(user: dict = Depends(_require_api_auth)) -> dict:
         "enabled_for_user": {
             m: _config.is_module_enabled(username, m) for m in modules
         },
+        "skills": await asyncio.to_thread(_settings_skill_options, _config, username),
     }
+
+
+def _settings_skill_options(config, user_id: str) -> list[str]:
+    from istota.skills._loader import load_skill_index, user_skill_names
+
+    try:
+        index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+        return user_skill_names(config, user_id, index, count_user_disabled=False)
+    except Exception:
+        logger.warning("settings: skill index unavailable", exc_info=True)
+        return []
 
 
 @api_router.get("/settings/module-services/{module}")

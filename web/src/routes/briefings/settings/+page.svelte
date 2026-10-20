@@ -28,6 +28,7 @@
     type UserBriefingRow,
   } from '$lib/api';
   import {
+    Alert,
     ConfirmDialog,
     EmptyState,
     KebabMenu,
@@ -399,10 +400,10 @@
     {#if menu.length}<KebabMenu items={menu} ariaLabel="Briefing actions" />{/if}
   {/snippet}
   {#if !moduleEnabled}
-    <div class="banner info">
+    <Alert appearance="inline" variant="info">
       Briefings module is disabled. Enable it in
       <a href="{base}/settings">Settings → Preferences</a> to manage schedules and content.
-    </div>
+    </Alert>
   {:else if view === 'delivery'}
     <Card title="Email" description="For every briefing delivered to you by email.">
       <Field

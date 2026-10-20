@@ -55,6 +55,7 @@
     type Picked,
   } from '$lib/platform/nativePicker';
   import { readDraft, readDraftReply, writeDraft } from '$lib/stores/drafts';
+  import { debounce } from '$lib/ui/debounce';
   import type { MessageReply } from '$lib/stores/segments';
   import { online } from '$lib/stores/connectivity';
   import { putBlob, deleteBlob, hasHeadroom, MAX_PENDING_BLOB_BYTES } from '$lib/offline/db';
@@ -234,7 +235,7 @@
   // not answered yet" from "the room went away under us", which look identical
   // from the prop alone and want opposite treatment — see switchDraft.
   let hasHadDraftKey = false;
-  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  const saveDraftSoon = debounce(flushDraft, DRAFT_SAVE_DEBOUNCE_MS);
   // Messages handed to `onSend` whose backend ack has not arrived, by draft
   // key. Until an ack lands, that key's emptied field is not a cleared draft —
   // the text went to the server and the stored copy is what a reload would
@@ -255,8 +256,7 @@
 
   /** Write the field down now, cancelling any pending debounced write. */
   function flushDraft() {
-    clearTimeout(saveTimer);
-    saveTimer = undefined;
+    saveDraftSoon.cancel();
     if (!activeDraftKey) return;
     // Hold the submitted text through the ack. Every departure flushes — a
     // room switch, an unmount, `pagehide` — so without this the draft the
@@ -321,8 +321,7 @@
 
   function scheduleDraftSave() {
     if (!activeDraftKey) return;
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(flushDraft, DRAFT_SAVE_DEBOUNCE_MS);
+    saveDraftSoon();
   }
 
   function setText(next: string) {
@@ -855,11 +854,10 @@
     //
     // Written rather than merely left alone: a submit inside the debounce
     // window would otherwise leave nothing stored at all, or a stale prefix of
-    // what was sent. Cancelling the timer first stops that write landing after
-    // this one and clearing it back out.
+    // what was sent. Cancelling the pending save first stops that write landing
+    // after this one and clearing it back out.
     if (activeDraftKey) {
-      clearTimeout(saveTimer);
-      saveTimer = undefined;
+      saveDraftSoon.cancel();
       const held = unsettledSends.get(activeDraftKey);
       if (held !== undefined) {
         // A second send is open in this room: since ISSUE-300 a `!command`

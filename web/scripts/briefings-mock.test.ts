@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { join } from 'node:path';
 import { mockApi } from '../vite-mock-api';
 
 type Middleware = (req: IncomingMessage, res: ServerResponse, next: () => void) => void;
@@ -34,6 +36,20 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
+// The mock keeps its own copy of BLOCK_TEMPLATES; this holds its ids, in order, to the backend's.
+function backendTemplateIds(): string[] {
+  const source = readFileSync(
+    join(process.cwd(), '..', 'src', 'istota', 'briefings', 'models.py'),
+    'utf8',
+  );
+  const start = source.indexOf('BLOCK_TEMPLATES = [');
+  const end = source.indexOf('\n]\n', start);
+  if (start < 0 || end < 0) throw new Error('BLOCK_TEMPLATES not found in models.py');
+  const ids = [...source.slice(start, end).matchAll(/^\s+\("(\w+)", "/gm)].map((m) => m[1]);
+  if (ids.length === 0) throw new Error('No template ids parsed from BLOCK_TEMPLATES');
+  return ids;
+}
+
 async function api(path: string, method = 'GET', body?: unknown) {
   const response = await fetch(origin + path, {
     method,
@@ -66,7 +82,9 @@ describe('briefing development data', () => {
 
   it('provides presets, disabled schedules and atomic saved sources', async () => {
     const { data: config } = await api('/briefings/config');
-    expect(config.block_templates).toHaveLength(10);
+    expect(config.block_templates.map((row: { id: string }) => row.id)).toEqual(
+      backendTemplateIds(),
+    );
     const schedules = await api('/settings/briefings');
     expect(schedules.data.briefings.some((row: any) => !row.enabled)).toBe(true);
     const block = config.briefings.find((row: any) => row.name === 'morning').blocks[0];

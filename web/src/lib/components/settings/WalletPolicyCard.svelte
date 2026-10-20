@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { AuthError, saveWalletPolicy, type WalletPolicy, type WalletSettings } from '$lib/api';
-  import { Field, FormStack, Input, Select, Card, Checkbox } from '$lib/components/ui';
+  import { Alert, Field, FormStack, Input, Select, Card, Checkbox } from '$lib/components/ui';
   import { createDraft } from '$lib/ui/draft.svelte';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   let {
@@ -99,5 +99,5 @@
       ><Checkbox bind:checked={form.value.scheduled} /></Field
     >
   </FormStack>
-  {#if error}<p class="banner error" role="alert">{error}</p>{/if}
+  {#if error}<Alert appearance="inline" variant="danger" role="alert">{error}</Alert>{/if}
 </Card>

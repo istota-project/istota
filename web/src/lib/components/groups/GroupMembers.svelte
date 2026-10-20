@@ -1,5 +1,6 @@
 <script lang="ts">
   import {
+    Alert,
     Button,
     Field,
     Input,
@@ -169,6 +170,11 @@
   }
 </script>
 
+{#snippet reload()}<Button onclick={() => onChanged()}>Reload group details</Button>{/snippet}
+{#snippet failure()}<Alert appearance="inline" variant="danger" role="alert" actions={reload}
+    >{error}</Alert
+  >{/snippet}
+
 <div class="vstack">
   {#if group.system_key === 'all_users'}
     <p class="caption">Everyone in this installation; membership is automatic.</p>
@@ -267,8 +273,7 @@
         ><Checkbox bind:checked={acknowledged} /></Field
       >
     {/if}
-    {#if error}<p class="banner error">{error}</p>
-      <Button onclick={() => onChanged()}>Reload group details</Button>{/if}
+    {#if error}{@render failure()}{/if}
   </div>
   {#snippet footer()}<Button
       variant="secondary"
@@ -288,8 +293,7 @@
       ><Input bind:value={kind} /></Field
     >
     <p class="caption">Group ID: {group.group_id}</p>
-    {#if error}<p class="banner error">{error}</p>
-      <Button onclick={() => onChanged()}>Reload group details</Button>{/if}
+    {#if error}{@render failure()}{/if}
   </div>
   {#snippet footer()}<Button
       variant="secondary"
@@ -323,8 +327,7 @@
         fullWidth
       /></Field
     >
-    {#if error}<p class="banner error">{error}</p>
-      <Button onclick={() => onChanged()}>Reload group details</Button>{/if}
+    {#if error}{@render failure()}{/if}
   {/snippet}
 </ConfirmDialog>
 

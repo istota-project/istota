@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createConfirm } from '$lib/ui/confirm.svelte';
   import {
+    Alert,
     Badge,
     Button,
     Card,
@@ -204,7 +205,7 @@
       {/if}
     {/each}
     {#if saveError}
-      <div class="banner error">{saveError}</div>
+      <Alert appearance="inline" variant="danger" role="alert">{saveError}</Alert>
     {/if}
   {/if}
 </Card>

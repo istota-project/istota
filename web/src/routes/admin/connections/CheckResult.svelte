@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Icon } from '$lib/components/ui';
+  import { Alert, Icon } from '$lib/components/ui';
   import type { AdminNextcloudCheck } from '$lib/api';
   import { CircleCheck } from '@lucide/svelte';
 
@@ -24,16 +24,14 @@
 {#if check === null}
   <p class="check-line caption">{empty}</p>
 {:else if failing}
-  <div
-    class="banner check-problem"
-    class:danger={check.status === 'fail'}
-    class:warn={check.status === 'warn'}
-  >
-    <p>{check.detail}</p>
-    {#if check.remedy}
-      <p class="remedy" data-testid={remedyTestid}>{check.remedy}</p>
-    {/if}
-  </div>
+  <Alert appearance="inline" variant={check.status === 'fail' ? 'danger' : 'warn'}>
+    <div class="check-problem">
+      <p>{check.detail}</p>
+      {#if check.remedy}
+        <p class="remedy" data-testid={remedyTestid}>{check.remedy}</p>
+      {/if}
+    </div>
+  </Alert>
 {:else}
   <p class="check-line">
     {#if check.status === 'ok'}
@@ -65,7 +63,6 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-1);
-    margin: 0;
     overflow-wrap: anywhere;
   }
 

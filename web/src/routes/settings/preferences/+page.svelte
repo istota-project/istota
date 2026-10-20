@@ -8,6 +8,7 @@
     Card,
     Checkbox,
     Input,
+    MultiSelect,
     ToggleGroup,
   } from '$lib/components/ui';
   import { SettingsLayout } from '$lib/components/settings';
@@ -184,17 +185,22 @@
         />
       </Field>
       <Field
-        label="Disabled skills (comma-separated)"
+        label="Disabled skills"
         badge={managedBadge(profile, 'disabled_skills')}
+        hint="Skills are on by default. Pick one to turn it off for your account."
       >
-        <Input
-          type="text"
-          disabled={isManaged(profile, 'disabled_skills')}
-          value={formatList(profile.disabled_skills)}
-          oninput={(e) => {
-            if (profile)
-              profile.disabled_skills = parseList((e.currentTarget as HTMLInputElement).value);
+        <!-- A stored name the list no longer offers still shows as a chip and is
+             saved back unchanged, since the picks are the stored list itself. -->
+        <MultiSelect
+          value={profile.disabled_skills || []}
+          options={settings.allSkills.map((name) => ({ value: name, label: name }))}
+          onValueChange={(next) => {
+            if (profile) profile.disabled_skills = next;
           }}
+          disabled={isManaged(profile, 'disabled_skills')}
+          placeholder="Search skills to turn off…"
+          emptyLabel="All skills are on."
+          ariaLabel="Disabled skills"
         />
       </Field>
       {#if settings.allModules.length > 0}

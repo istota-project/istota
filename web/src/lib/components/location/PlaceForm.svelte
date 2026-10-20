@@ -128,7 +128,7 @@
   {onCancel}
 >
   {#if cluster && !editing}
-    <div class="caption">{cluster.total_pings} pings recorded here</div>
+    <div class="caption ping-count">{cluster.total_pings} pings recorded here</div>
   {/if}
 
   <div class="vstack">
@@ -192,7 +192,7 @@
 
 <style>
   /* Typography is the global .caption; the spacing stays at the call site. */
-  .caption {
+  .ping-count {
     margin-bottom: var(--space-2);
   }
 

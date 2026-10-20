@@ -299,7 +299,7 @@
 >
   <Card title="Business defaults">
     {#if businessError}
-      <div class="banner error">{businessError}</div>
+      <Alert appearance="inline" variant="danger" role="alert">{businessError}</Alert>
     {:else if !defaults}
       <EmptyState>No invoicing configuration found.</EmptyState>
     {:else}
@@ -351,7 +351,7 @@
                 <KebabMenu items={entityMenu(entity)} ariaLabel="Entity actions" />
               </span>
             </div>
-            <dl class="kv compact">
+            <dl class="kv">
               {#if entity.email}
                 <dt>Email</dt>
                 <dd>{entity.email}</dd>
@@ -441,7 +441,7 @@
       <Alert title={clientNotice} variant="warn" />
     {/if}
     {#if clientsError}
-      <div class="banner error">{clientsError}</div>
+      <Alert appearance="inline" variant="danger" role="alert">{clientsError}</Alert>
     {:else if clients.length === 0}
       <EmptyState>No clients yet. Add the first one you invoice.</EmptyState>
     {:else}
@@ -532,18 +532,18 @@
 	   imported by app.css). Only money-specific styling (kv, entity grid)
 	   stays. */
 
-  .kv.compact {
+  .entity-grid .kv {
     /* design-lint-allow: sub---space-1 hairline between the rows of a compact
        definition list — the ramp starts a step above what this wants */
     gap: 0.15rem var(--space-2);
     font-size: var(--text-xs);
   }
 
-  .kv dd {
+  dd {
     color: var(--text-secondary);
   }
 
-  .kv dd.pre {
+  dd.pre {
     white-space: pre-line;
   }
 

@@ -3,6 +3,7 @@
   import { createConfirm } from '$lib/ui/confirm.svelte';
   import { onMount } from 'svelte';
   import {
+    Alert,
     Badge,
     Button,
     ConfirmDialog,
@@ -399,7 +400,7 @@
        with it, so nothing on screen could trigger another load and only a page
        reload got the section back. -->
   {#if loadError}
-    <div class="banner error">{loadError}</div>
+    <Alert appearance="inline" variant="danger" role="alert">{loadError}</Alert>
   {/if}
   {#if everLoaded || !loadError}
     <p class="card-hint caption">

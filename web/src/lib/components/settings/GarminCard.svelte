@@ -9,7 +9,7 @@
     importGarminTracks,
     type GarminStatus,
   } from '$lib/api';
-  import { Button, Card, Field, Input, Timestamp } from '$lib/components/ui';
+  import { Alert, Button, Card, Field, Input, Timestamp } from '$lib/components/ui';
 
   let loading = $state(true);
   let busy = $state(false);
@@ -168,9 +168,9 @@
       </div>
     </div>
     {#if status.error}
-      <div class="banner error">
+      <Alert appearance="inline" variant="danger">
         {status.error === 'token_expired' ? 'Token expired — please reconnect.' : status.error}
-      </div>
+      </Alert>
     {/if}
     <div class="actions">
       <Button variant="primary" onclick={syncNow} loading={busy} loadingLabel="Working…">
@@ -227,10 +227,10 @@
   {/if}
 
   {#if error}
-    <div class="banner error">{error}</div>
+    <Alert appearance="inline" variant="danger" role="alert">{error}</Alert>
   {/if}
   {#if info}
-    <div class="banner success">{info}</div>
+    <Alert appearance="inline" variant="success" role="status">{info}</Alert>
   {/if}
 </Card>
 

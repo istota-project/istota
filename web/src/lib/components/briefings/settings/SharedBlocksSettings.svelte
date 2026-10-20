@@ -9,6 +9,7 @@
     type SharedBlock,
   } from '$lib/api';
   import {
+    Alert,
     Button,
     ConfirmDialog,
     EmptyState,
@@ -26,6 +27,7 @@
     Badge,
     Timestamp,
   } from '$lib/components/ui';
+  import { notifyError, notifyWarning } from '$lib/stores/notices';
   import SourceConfigFields from '../SourceConfigFields.svelte';
   import { sourceKindLabel, uniqueName } from './briefingSettings';
 
@@ -221,21 +223,23 @@
         await reloadSharedBlocks();
         const block = sharedBlocks.find((b) => b.name === name);
         if (!block) {
-          sharedError = `${name}: ${SHARED_RUN_OUTCOMES.not_found}`;
+          notifyWarning(`${name}: ${SHARED_RUN_OUTCOMES.not_found}`);
           return;
         }
         const answer = block.status.run_answered;
         if (answer?.id === asked.id) {
           const message = SHARED_RUN_OUTCOMES[answer.outcome];
-          if (message) sharedError = `${name}: ${message}`;
+          if (answer.outcome === 'failed') notifyError(`${name}: ${message}`);
+          else if (message) notifyWarning(`${name}: ${message}`);
           return;
         }
       }
-      sharedError =
+      notifyWarning(
         `${name}: the daemon has not answered yet. It may still be generating; ` +
-        'if this persists, check that the daemon is running.';
+          'if this persists, check that the daemon is running.',
+      );
     } catch (e) {
-      sharedError = (e as Error).message || 'Run failed';
+      notifyError((e as Error).message || 'Run failed');
     } finally {
       const next = new Set(sharedRunning);
       next.delete(name);
@@ -248,7 +252,7 @@
       await deleteSharedBlock(name);
       await reloadSharedBlocks();
     } catch (e) {
-      sharedError = (e as Error).message || 'Delete failed';
+      notifyError((e as Error).message || 'Delete failed');
     } finally {
       confirmSharedDelete.cancel();
     }
@@ -271,10 +275,6 @@
   {#snippet actions()}
     <Button size="sm" onclick={startNewShared}>New shared block</Button>
   {/snippet}
-  {#if sharedError}
-    <div class="banner error">{sharedError}</div>
-  {/if}
-
   {#if sharedBlocks.length === 0}
     <EmptyState>No shared blocks yet.</EmptyState>
   {:else}
@@ -336,7 +336,8 @@
     width="40rem"
   >
     <div class="vstack">
-      {#if sharedError}<div class="banner error">{sharedError}</div>{/if}
+      {#if sharedError}<Alert appearance="inline" variant="danger" role="alert">{sharedError}</Alert
+        >{/if}
       <div class="sb-grid">
         <Field label="Name" hint="Slug: lowercase, digits, - and _">
           <Input

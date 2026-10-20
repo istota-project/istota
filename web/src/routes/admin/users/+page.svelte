@@ -11,6 +11,7 @@
     type AdminUserAction,
   } from '$lib/api';
   import {
+    Alert,
     Button,
     Input,
     Field,
@@ -29,6 +30,7 @@
   import UserCell from '$lib/admin/UserCell.svelte';
   import { signInStateLabel } from '$lib/admin/signInState';
   import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { notifyError } from '$lib/stores/notices';
   import AdminUserModal from './AdminUserModal.svelte';
 
   let view = $state<AdminUsers | null>(null);
@@ -48,9 +50,16 @@
   const removeCopy =
     'Remove withdraws email login and ends existing web sessions. A fresh Nextcloud sign-in is still allowed when Nextcloud is enabled. The profile and user data are kept.';
 
+  // With the table on screen a failure is an action failing, so it is a
+  // notice; before the first load it is the pane's load failure.
   function failed(e: unknown) {
-    if (e instanceof AuthError) window.location.assign(`${base}/login`);
-    else error = e instanceof Error ? e.message : 'The user operation failed.';
+    if (e instanceof AuthError) {
+      window.location.assign(`${base}/login`);
+      return;
+    }
+    const message = e instanceof Error ? e.message : 'The user operation failed.';
+    if (view) notifyError(message);
+    else error = message;
   }
 
   async function load() {
@@ -87,13 +96,13 @@
   }
 
   function edit(user: AdminUser) {
-    error = notice = '';
+    notice = '';
     editing = user.user_id;
   }
 
   function add() {
     userId = email = displayName = '';
-    error = notice = '';
+    notice = '';
     formOpen = true;
   }
 
@@ -129,7 +138,7 @@
   async function act(user: AdminUser, action: AdminUserAction) {
     if (busy) return;
     busy = true;
-    error = notice = '';
+    notice = '';
     try {
       await adminUserAction(user.user_id, action);
       notice = ['invite', 'reset'].includes(action) ? 'Link sent.' : 'Identity updated.';
@@ -164,12 +173,11 @@
 <div class="settings admin-page card-pane">
   <LoadState loading={!view && !error} error={view ? null : error} loadingLabel="Loading users…">
     {#if view}
-      {#if error}<p class="banner error" role="alert">{error}</p>{/if}
-      {#if notice}<p class="banner success" role="status">{notice}</p>{/if}
+      {#if notice}<Alert appearance="inline" variant="success" role="status">{notice}</Alert>{/if}
       {#if !view.email_enabled}
-        <p class="banner warn">
+        <Alert appearance="inline" variant="warn">
           Email sign-in is not enabled. Sending links and attaching email are unavailable.
-        </p>
+        </Alert>
       {/if}
       <Disclosure variant="card" summary="About web access">
         <p>{disableCopy}</p>

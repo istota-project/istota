@@ -3746,6 +3746,7 @@ function mockModulesResponse() {
     modules: MODULE_NAMES,
     disabled: [...mockDisabledModules],
     enabled_for_user: Object.fromEntries(MODULE_NAMES.map((m) => [m, !mockDisabledModules.has(m)])),
+    skills: ['calendar', 'developer', 'email', 'files', 'notes', 'whisper'],
   };
 }
 

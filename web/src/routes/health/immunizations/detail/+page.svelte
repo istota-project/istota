@@ -12,6 +12,7 @@
     type Immunization,
   } from '$lib/api';
   import {
+    Alert,
     Badge,
     Button,
     Card,
@@ -235,7 +236,7 @@
           {/if}
         </div>
         {#if formError}
-          <div class="banner error">{formError}</div>
+          <Alert appearance="inline" variant="danger" role="alert">{formError}</Alert>
         {/if}
         <div class="form-actions">
           <Button variant="primary" type="submit" loading={saving}>Save</Button>
@@ -284,7 +285,7 @@
   .linked h2 {
     margin: 0 0 var(--space-2);
   }
-  .card-head {
+  .linked .card-head {
     align-items: center;
   }
 </style>

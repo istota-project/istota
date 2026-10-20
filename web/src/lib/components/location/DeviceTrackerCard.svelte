@@ -660,7 +660,9 @@
     word-break: break-all;
   }
 
-  .kv dd {
+  /* A bare `dd`, so `.tracker-bad` outranks it: `.kv dd` scored a class
+     higher and painted the dropped and error rows in this colour. */
+  dd {
     color: var(--text-secondary);
   }
 

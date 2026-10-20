@@ -574,7 +574,7 @@
     margin-top: var(--space-2);
   }
   /* Typography is the global .caption; the spacing stays at the call site. */
-  .caption {
+  .grid .caption {
     margin-top: var(--space-1);
   }
 

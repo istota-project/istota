@@ -24,7 +24,7 @@
     type NotificationAction,
     type ResolvedNotification,
   } from '$lib/api';
-  import { Button, Modal } from '$lib/components/ui';
+  import { Alert, Button, Modal } from '$lib/components/ui';
 
   interface Props {
     item: ResolvedNotification | null;
@@ -66,7 +66,9 @@
       <!-- Says *why* there are no actions. An empty action list on its own
            conflates "this draft is mid-send" with "nobody registered this
            source", which are different things to tell someone. -->
-      <p class="banner info detail-note">{item.status_note}</p>
+      <div class="detail-note">
+        <Alert appearance="inline" variant="info">{item.status_note}</Alert>
+      </div>
     {/if}
     {#if isSafeActionPath(item.link)}
       <!-- Checked, not merely truthy-tested. `link` and `href` are the *worse*

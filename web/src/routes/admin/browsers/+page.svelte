@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getAdminBrowsers, type AdminBrowsers } from '$lib/api';
-  import { Button, Card, Disclosure, LoadState, Timestamp } from '$lib/components/ui';
+  import { Alert, Button, Card, Disclosure, LoadState, Timestamp } from '$lib/components/ui';
 
   let report = $state<AdminBrowsers | null>(null);
   let loading = $state(true);
@@ -64,10 +64,10 @@
         </p>
       </Disclosure>
       {#if !report.console_configured}
-        <div class="banner info">
+        <Alert appearance="inline" variant="info">
           No external VNC URL is configured. Set a reachable viewer URL without an embedded password
           to enable Open VNC links.
-        </div>
+        </Alert>
       {/if}
       {#if report.instances.length === 0}
         <Card><p class="caption">No live browsers.</p></Card>
