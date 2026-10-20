@@ -708,6 +708,85 @@ class TestARemovedMemberCannotReachBack:
         assert "group" in str(reply)
 
 
+class TestAnAdminOutsideTheGroup:
+    """Being an admin grants no group membership (ISSUE-811): the actor must be
+    let into the group room as well as the task's author."""
+
+    @pytest.mark.parametrize("resume", [False, True])
+    def test_retry_and_resume_are_refused(self, config, room, resume):
+        from istota import commands
+
+        config.admin_users = {"carol"}
+        task_id = _task(config, room, "bob", status="failed")
+        with db.get_db(config.db_path) as conn:
+            before = db.count_room_messages(conn, room)
+            tasks_before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+            outcome = commands.retry_task(conn, config, "carol", db.get_task(conn, task_id),
+                                          resume=resume, surface="web")
+            assert isinstance(outcome, str)
+            assert "you are not a member" in outcome
+            assert db.count_room_messages(conn, room) == before
+            assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == tasks_before
+
+    async def test_more_does_not_show_the_trace(self, config, room):
+        from istota import commands
+
+        config.admin_users = {"carol"}
+        trace = json.dumps([{"type": "text", "text": "the private plan"}])
+        task_id = _task(config, room, "bob", status="failed", execution_trace=trace)
+        with db.get_db(config.db_path) as conn:
+            own = db.create_web_chat_room(conn, "carol", "Mine").token
+            ctx = commands.CommandContext(
+                config=config, conn=conn, user_id="carol", conversation_token=own,
+                surface="web", args=f"#{task_id}",
+            )
+            reply = await commands.cmd_more(ctx)
+        assert "the private plan" not in str(reply)
+        assert "you are not a member" in str(reply)
+
+    @_needs_web
+    async def test_the_web_task_routes_refuse(self, client, config, room):
+        config.admin_users = {"carol", "alice"}
+        task_id = _task(config, room, "bob", status="failed")
+        with db.get_db(config.db_path) as conn:
+            before = db.count_room_messages(conn, room)
+            tasks_before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        carol = await _login(client, "carol")
+        assert (await client.get(f"/istota/api/chat/tasks/{task_id}/events",
+                                 cookies=carol)).status_code == 404
+        retry = await client.post(f"/istota/api/chat/tasks/{task_id}/retry",
+                                  cookies=carol, headers=ORIGIN, json={"mode": "retry"})
+        assert retry.status_code == 404
+        with db.get_db(config.db_path) as conn:
+            assert db.count_room_messages(conn, room) == before
+            assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == tasks_before
+        alice = await _login(client, "alice")
+        assert (await client.get(f"/istota/api/chat/tasks/{task_id}/events",
+                                 cookies=alice)).status_code == 200
+
+    @_needs_web
+    async def test_an_admin_outside_the_group_can_still_stop_a_task(self, client, config, room):
+        """Cancel keeps the operator's reach `!stop` has: stopping writes nothing
+        into the room."""
+        config.admin_users = {"carol"}
+        task_id = _task(config, room, "bob", status="running")
+        carol = await _login(client, "carol")
+        resp = await client.post(f"/istota/api/chat/tasks/{task_id}/cancel",
+                                 cookies=carol, headers=ORIGIN)
+        assert resp.status_code == 200
+        assert _task_row(config, task_id)["cancel_requested"] == 1
+
+    def test_an_admin_in_the_group_can_still_retry(self, config, room):
+        from istota import commands
+
+        config.admin_users = {"alice"}
+        task_id = _task(config, room, "bob", status="failed")
+        with db.get_db(config.db_path) as conn:
+            outcome = commands.retry_task(conn, config, "alice", db.get_task(conn, task_id),
+                                          surface="web")
+            assert isinstance(outcome, commands.RetryOutcome)
+
+
 class TestALostHostIsSucceeded:
     """The host's web identity disabled: the access check drops them on the
     next read, and an owner who is still in the room takes over there and

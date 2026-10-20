@@ -1206,17 +1206,20 @@ def _task_refusal(ctx: CommandContext, task: "db.Task") -> str | None:
 
 def _left_group_room_refusal(conn, user_id: str, task: "db.Task") -> str | None:
     """The refusal for a command that would write into, or read the output of,
-    a task in a group room its author is no longer let into, else None.
+    a task in a group room its author or ``user_id`` is not let into, else None.
 
     A task id reaches from any room, so without this a removed member's
-    private room is a way back into the group room's transcript.
+    private room is a way back into the group room's transcript. The actor is
+    asked too: being an admin grants no group membership (ISSUE-811).
     """
     from .groups.rooms import task_delivery_refused
 
-    if not task_delivery_refused(conn, task):
-        return None
-    who = "you are" if task.user_id == user_id else "its author is"
-    return f"Task #{task.id} is in a group room {who} no longer a member of."
+    if task_delivery_refused(conn, task):
+        who = "you are" if task.user_id == user_id else "its author is"
+        return f"Task #{task.id} is in a group room {who} no longer a member of."
+    if not db.group_room_admits(conn, task.conversation_token, user_id):
+        return f"Task #{task.id} is in a group room you are not a member of."
+    return None
 
 
 def _ctx_brain(ctx: CommandContext):
