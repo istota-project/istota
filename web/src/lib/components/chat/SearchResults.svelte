@@ -1,7 +1,7 @@
 <script lang="ts">
   import { CornerDownRight, MessageSquare, FileText } from '@lucide/svelte';
   import type { SearchResultsData, SearchResultItem } from '$lib/stores/segments';
-  import { Chip, EmptyState } from '$lib/components/ui';
+  import { Icon, Chip, EmptyState } from '$lib/components/ui';
 
   let {
     data,
@@ -66,9 +66,9 @@
           <div class="hstack caption">
             <span class="icon" aria-hidden="true">
               {#if isMemory(r)}
-                <FileText size={14} />
+                <Icon icon={FileText} size="sm" />
               {:else}
-                <MessageSquare size={14} />
+                <Icon icon={MessageSquare} size="sm" />
               {/if}
             </span>
             <span class="source">
@@ -84,7 +84,7 @@
           <div class="card-actions">
             {#if canJump(r)}
               <Chip size="xs" class="jump-btn" onclick={() => onJump?.(r.room_token!, r.task_id!)}>
-                <CornerDownRight size={12} aria-hidden="true" />
+                <Icon icon={CornerDownRight} size="xs" />
                 Jump to reply
               </Chip>
             {:else if r.talk_link}

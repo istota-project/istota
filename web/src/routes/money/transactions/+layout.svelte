@@ -12,7 +12,7 @@
     type TransactionSelection,
   } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
-  import { Chip, ListRow, Sidebar, SidebarToggle, Select, Input } from '$lib/components/ui';
+  import { Icon, Chip, ListRow, Sidebar, SidebarToggle, Select, Input } from '$lib/components/ui';
   import { Search } from '@lucide/svelte';
 
   let { children } = $props();
@@ -196,7 +196,7 @@
       ariaLabel="Year"
       minChars={4}
     />
-    {#snippet searchIcon()}<Search size={14} />{/snippet}
+    {#snippet searchIcon()}<Icon icon={Search} size="sm" />{/snippet}
     <Input
       type="search"
       size="toolbar"

@@ -6,6 +6,7 @@
   its line and link and drops the frame, rather than leaving an empty canvas.
 -->
 <script lang="ts">
+  import { Icon } from '$lib/components/ui';
   import { MapPin } from '@lucide/svelte';
   import ShareMap from '$lib/components/location/ShareMap.svelte';
   import { isMercatorSafe } from '$lib/location/shareMap';
@@ -28,7 +29,7 @@
 
 <div class="location-share-card" data-testid="location-share-card">
   <div class="location-share-head caption">
-    <span class="location-share-mark" aria-hidden="true"><MapPin size={13} /></span>
+    <span class="location-share-mark" aria-hidden="true"><Icon icon={MapPin} size="sm" /></span>
     <span class="location-share-owner">{share.ownerLabel}</span>
     <span>· {precisionLabel}</span>
     {#if href}

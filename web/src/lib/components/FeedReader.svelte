@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import { FileText, Play, Star, ExternalLink } from '@lucide/svelte';
-  import { Modal, IconButton, Button, Timestamp } from '$lib/components/ui';
+  import { Icon, Modal, IconButton, Button, Timestamp } from '$lib/components/ui';
   import MediaPreview from '$lib/components/viewer/MediaPreview.svelte';
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
@@ -220,7 +220,7 @@
     {#snippet actions()}
       <span class="reader-star" class:starred={entry.starred}>
         <IconButton label={entry.starred ? 'Unstar' : 'Star'} onclick={toggleStar}>
-          <Star size={18} fill={entry.starred ? 'currentColor' : 'none'} />
+          <Icon icon={Star} size="lg" fill={entry.starred ? 'currentColor' : 'none'} />
         </IconButton>
       </span>
       {#if permalink}
@@ -231,7 +231,7 @@
           rel="noopener"
           ariaLabel="Open original"
         >
-          <ExternalLink size={18} />
+          <Icon icon={ExternalLink} size="lg" />
         </Button>
       {/if}
     {/snippet}
@@ -348,7 +348,7 @@
 
         {#if permalink}
           <a class="open-original" href={permalink} target="_blank" rel="noopener">
-            Open original <ExternalLink size={15} />
+            Open original <Icon icon={ExternalLink} size="md" />
           </a>
         {/if}
       </article>

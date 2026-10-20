@@ -25,6 +25,7 @@
   } from '$lib/stores/location';
   import PlaceForm from '$lib/components/location/PlaceForm.svelte';
   import {
+    Icon,
     AppShell,
     ShellHeader,
     Sidebar,
@@ -260,7 +261,7 @@
 			     unless one is registered. -->
         <HeaderSave />
         <Chip icon checked={onSettings} onclick={toggleSettings} title="Location settings">
-          <Cog size={14} />
+          <Icon icon={Cog} size="sm" />
         </Chip>
       {/snippet}
     </ShellHeader>
@@ -301,9 +302,8 @@
                     label="Edit place"
                     onclick={() => handleEditPlace(selectedPlace!)}
                     title="Edit place"
-                  >
-                    <Pencil size={13} />
-                  </IconButton>
+                    icon={Pencil}
+                  />
                   <IconButton
                     class="stats-close touch-target"
                     size="sm"
@@ -312,9 +312,8 @@
                       selectedPlace = null;
                       placeStats = null;
                     }}
-                  >
-                    <X size={13} />
-                  </IconButton>
+                    icon={X}
+                  />
                 </div>
               </div>
               {#if selectedPlace.notes}

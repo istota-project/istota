@@ -2,6 +2,7 @@
   import { CircleDashed, Lock } from '@lucide/svelte';
   import type { AdminConfigField, ConfigOp, ConfigSecretSource } from '$lib/api';
   import {
+    Icon,
     Badge,
     Button,
     ToggleGroup,
@@ -165,14 +166,14 @@
 
 {#snippet lockMark()}
   <span class="lock-mark" role="img" aria-label="Needs confirmation" title="Needs confirmation"
-    ><Lock size={13} aria-hidden="true" /></span
+    ><Icon icon={Lock} size="sm" /></span
   >
 {/snippet}
 
 {#snippet defaultMark()}
   {#if notInFile}
     <span class="default-mark" role="img" aria-label={markLabel} title={markLabel}
-      ><CircleDashed size={14} /></span
+      ><Icon icon={CircleDashed} size="sm" /></span
     >
   {/if}
 {/snippet}

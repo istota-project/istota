@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import {
+    Icon,
     AppShell,
     ShellHeader,
     Sidebar,
@@ -682,7 +683,7 @@
         <div class="folder-actions hstack wrap">
           {#if place.kind === 'nextcloud'}
             <Badge size="sm"
-              ><span class="only-you"><BotOff size={12} aria-hidden="true" />Only you</span></Badge
+              ><span class="only-you"><Icon icon={BotOff} size="xs" />Only you</span></Badge
             >
           {:else}
             <ReachBadge access={place.reach.private} />

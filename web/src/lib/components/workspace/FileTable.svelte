@@ -8,6 +8,7 @@
     WorkspacePinInput,
   } from '$lib/api';
   import {
+    Icon,
     Button,
     Input,
     Select,
@@ -234,15 +235,19 @@
     /><IconButton
       label={sort.descending ? 'Sort ascending' : 'Sort descending'}
       onclick={() => sort.toggle(sort.key)}
-      >{#if sort.descending}<ArrowDown size={16} />{:else}<ArrowUp size={16} />{/if}</IconButton
+      >{#if sort.descending}<Icon icon={ArrowDown} size="md" />{:else}<Icon
+          icon={ArrowUp}
+          size="md"
+        />{/if}</IconButton
     >
   </div>
   {#if onRefresh}<IconButton
       label="Refresh files"
       title="Refresh files"
       disabled={deleting}
-      onclick={onRefresh}><RefreshCw size={16} /></IconButton
-    >{/if}
+      onclick={onRefresh}
+      icon={RefreshCw}
+    />{/if}
 </div>
 <div class="selection-toolbar toolbar">
   <span class="muted" role="status"
@@ -317,10 +322,15 @@
           <td>
             <div class="entry-name">
               <span class="entry-icon" aria-hidden="true">
-                {#if entry.kind === 'dir'}<Folder size={16} />{:else if entry.kind === 'link'}<Link
-                    size={16}
-                  />{:else if entry.kind === 'file'}<EntryIcon size={16} />{:else}<Minus
-                    size={16}
+                {#if entry.kind === 'dir'}<Icon
+                    icon={Folder}
+                    size="md"
+                  />{:else if entry.kind === 'link'}<Icon
+                    icon={Link}
+                    size="md"
+                  />{:else if entry.kind === 'file'}<Icon icon={EntryIcon} size="md" />{:else}<Icon
+                    icon={Minus}
+                    size="md"
                   />{/if}
               </span>
               <div class="entry-label" title={entry.name}>
@@ -357,7 +367,7 @@
                     aria-label={`Shared · ${entry.share.count} ${entry.share.kind} shares`}
                     title={`Nextcloud ${entry.share.kind} shares`}
                   >
-                    <Users size={14} aria-hidden="true" /><span class="marker-label"
+                    <Icon icon={Users} size="sm" /><span class="marker-label"
                       >Shared{entry.share.count > 1 ? ` · ${entry.share.count}` : ''}</span
                     >
                   </span>

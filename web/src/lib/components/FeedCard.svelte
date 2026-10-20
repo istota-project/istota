@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Timestamp } from '$lib/components/ui';
+  import { Icon, Timestamp } from '$lib/components/ui';
   import { FileText, Play, Star } from '@lucide/svelte';
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
@@ -216,7 +216,7 @@
         {#if isImage}
           <img src={entry.images[0]} alt={entry.title || ''} loading="lazy" />
         {/if}
-        <span class="play-badge"><Play size={26} fill="currentColor" /></span>
+        <span class="play-badge"><Icon icon={Play} size="xl" fill="currentColor" /></span>
       </button>
     {/if}
     {#if entry.title}
@@ -360,7 +360,7 @@
       title={entry.starred ? 'Unstar' : 'Star'}
       aria-label={entry.starred ? 'Unstar entry' : 'Star entry'}
     >
-      <Star size={14} fill={entry.starred ? 'currentColor' : 'none'} />
+      <Icon icon={Star} size="sm" fill={entry.starred ? 'currentColor' : 'none'} />
     </button>
     <span class="feed-name">{entry.feed.title}</span>
     {#if repeatCount > 0}

@@ -7,6 +7,7 @@
   } from '$lib/api';
   import { deleteBriefingBlock, putBriefingBlock } from '$lib/api';
   import {
+    Icon,
     Button,
     ConfirmDialog,
     EmptyState,
@@ -414,7 +415,9 @@
                 aria-labelledby={`${uid}-${template.id}-label`}
                 aria-describedby={`${uid}-${template.id}-desc`}
               >
-                <span class="preset-icon" aria-hidden="true"><PresetIcon size={18} /></span>
+                <span class="preset-icon" aria-hidden="true"
+                  ><Icon icon={PresetIcon} size="lg" /></span
+                >
                 <span class="preset-text">
                   <span class="preset-label" id={`${uid}-${template.id}-label`}
                     >{template.label}</span

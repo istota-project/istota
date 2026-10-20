@@ -109,7 +109,7 @@ describe('briefing bulk read in the real layout', () => {
     expect(button.getAttribute('title')).toBe(allLabel);
     expect(button.classList.contains('chip')).toBe(true);
     expect(button.classList.contains('icon')).toBe(true);
-    expect(button.querySelector('svg')?.getAttribute('width')).toBe('14');
+    expect(button.querySelector('.ui-icon')?.classList.contains('ui-icon-sm')).toBe(true);
     const tools = button.closest('.header-tools') as HTMLElement;
     expect(
       within(tools)

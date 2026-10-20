@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Icon } from '$lib/components/ui';
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import { CircleAlert, House, Lock, RotateCw, SearchX, ServerCrash } from '@lucide/svelte';
@@ -46,13 +47,13 @@
   <div class="error-inner">
     <div class="error-badge severity-{severity}">
       {#if isMissing}
-        <SearchX size={26} strokeWidth={1.5} />
+        <Icon icon={SearchX} size="xl" stroke={1.5} />
       {:else if isForbidden}
-        <Lock size={26} strokeWidth={1.5} />
+        <Icon icon={Lock} size="xl" stroke={1.5} />
       {:else if isServer}
-        <ServerCrash size={26} strokeWidth={1.5} />
+        <Icon icon={ServerCrash} size="xl" stroke={1.5} />
       {:else}
-        <CircleAlert size={26} strokeWidth={1.5} />
+        <Icon icon={CircleAlert} size="xl" stroke={1.5} />
       {/if}
     </div>
 
@@ -67,12 +68,12 @@
     <div class="error-actions">
       {#if isServer}
         <button type="button" class="action primary" onclick={() => location.reload()}>
-          <RotateCw size={14} />
+          <Icon icon={RotateCw} size="sm" />
           Reload
         </button>
       {/if}
       <a href="{base}/" class="action" class:primary={!isServer}>
-        <House size={14} />
+        <Icon icon={House} size="sm" />
         Go to dashboard
       </a>
     </div>

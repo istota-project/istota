@@ -15,7 +15,7 @@
     renderGroups,
   } from '$lib/stores/segments';
   import { online } from '$lib/stores/connectivity';
-  import { Avatar, Badge, Button, Chip, IconButton } from '$lib/components/ui';
+  import { Icon, Avatar, Badge, Button, Chip, IconButton } from '$lib/components/ui';
   import ActivityTrace from './ActivityTrace.svelte';
   import ConfirmationCard from './ConfirmationCard.svelte';
   import DraftCard from './DraftCard.svelte';
@@ -630,7 +630,7 @@
         title="Copy"
         type="button"
       >
-        <Copy size={15} />
+        <Icon icon={Copy} size="md" />
       </button>
     {/if}
     {#if showRowStar}
@@ -649,7 +649,7 @@
         title={message.starred ? 'Unstar' : 'Star'}
         type="button"
       >
-        <Star size={15} fill={message.starred ? 'currentColor' : 'none'} />
+        <Icon icon={Star} size="md" fill={message.starred ? 'currentColor' : 'none'} />
       </button>
     {/if}
     {#if showReply}
@@ -667,7 +667,7 @@
         title="Reply"
         type="button"
       >
-        <Reply size={15} />
+        <Icon icon={Reply} size="md" />
       </button>
     {/if}
     {#if showDelete}
@@ -681,7 +681,7 @@
         title="Delete"
         type="button"
       >
-        <Trash2 size={15} />
+        <Icon icon={Trash2} size="md" />
       </button>
     {/if}
     <!-- Task id / model / duration / tool count, right-aligned on the same
@@ -957,7 +957,7 @@
                above is sanitized at write time. -->
           <div class="external">
             <div class="external-head">
-              <span class="external-mark" aria-hidden="true"><Mail size={13} /></span>
+              <span class="external-mark" aria-hidden="true"><Icon icon={Mail} size="sm" /></span>
               <span class="external-label">{externalLabel}</span>
               {#if message.subject}
                 <span class="external-subject">{message.subject}</span>
@@ -1081,9 +1081,9 @@
                 label="Edit queued message"
                 title="Edit"
                 onclick={() => onQueueEdit?.(message.cid)}
-              >
-                <Pencil size={15} />
-              </IconButton>
+                icon={Pencil}
+                iconSize="md"
+              />
             {/if}
             {#if onQueueRemove}
               <!-- `danger`, and an X rather than the turn row's Trash2: the two
@@ -1096,9 +1096,9 @@
                 label="Remove queued message"
                 title="Remove"
                 onclick={() => onQueueRemove?.(message.cid)}
-              >
-                <X size={15} />
-              </IconButton>
+                icon={X}
+                iconSize="md"
+              />
             {/if}
           </div>
         {/if}
@@ -1200,7 +1200,7 @@
               title={retryBusy ? 'Wait for the current turn to finish' : 'Run this again'}
               onclick={() => onRetryTask?.(message.cid, 'retry')}
             >
-              <RotateCcw size={14} />
+              <Icon icon={RotateCcw} size="sm" />
               Retry
             </Button>
             {#if showContinue}

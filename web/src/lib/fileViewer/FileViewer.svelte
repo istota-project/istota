@@ -106,15 +106,19 @@
           title="Rendered"
           active={!source}
           pressed={!source}
-          onclick={() => (source = false)}><Eye size={18} /></IconButton
-        >
+          onclick={() => (source = false)}
+          icon={Eye}
+          iconSize="lg"
+        />
         <IconButton
           label="Source"
           title="Source"
           active={source}
           pressed={source}
-          onclick={() => (source = true)}><Code size={18} /></IconButton
-        >
+          onclick={() => (source = true)}
+          icon={Code}
+          iconSize="lg"
+        />
       </div>{/if}
     {#if reconnect}<Button size="sm" variant="secondary" href={`${base}/settings/connections`}
         >Reconnect</Button
@@ -124,18 +128,27 @@
         title="Open in Nextcloud"
         href={webUrl}
         target="_blank"
-        rel="noopener noreferrer"><ExternalLink size={18} /></IconButton
-      >{/if}
+        rel="noopener noreferrer"
+        icon={ExternalLink}
+        iconSize="lg"
+      />{/if}
     {#if direct}
-      {#if !missing}<IconButton label="Download" title="Download" href={direct.url} download=""
-          ><Download size={18} /></IconButton
-        >{/if}
+      {#if !missing}<IconButton
+          label="Download"
+          title="Download"
+          href={direct.url}
+          download=""
+          icon={Download}
+          iconSize="lg"
+        />{/if}
     {:else if canDownload}<IconButton
         label="Download"
         title="Download"
         href={fileUrl(path)}
-        download={name}><Download size={18} /></IconButton
-      >{/if}
+        download={name}
+        icon={Download}
+        iconSize="lg"
+      />{/if}
   {/snippet}
   <div class="file-content">
     {#if direct}

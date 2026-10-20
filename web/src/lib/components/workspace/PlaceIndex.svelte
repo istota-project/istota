@@ -1,7 +1,7 @@
 <script lang="ts">
   import IndexCaption from './IndexCaption.svelte';
   import { MessageSquare, Users } from '@lucide/svelte';
-  import { EmptyState } from '$lib/components/ui';
+  import { Icon, EmptyState } from '$lib/components/ui';
   import type { WorkspacePlace } from '$lib/api';
   import ReachBadge from './ReachBadge.svelte';
 
@@ -37,9 +37,9 @@
             onclick={(event) => onNavigate(event, place.id)}
             title={place.label}
           >
-            {#if place.kind === 'group'}<Users size={14} aria-hidden="true" />{:else}<MessageSquare
-                size={14}
-                aria-hidden="true"
+            {#if place.kind === 'group'}<Icon icon={Users} size="sm" />{:else}<Icon
+                icon={MessageSquare}
+                size="sm"
               />{/if}<span class="index-label truncate">{place.label}</span>
           </a>
           <ReachBadge access={place.reach.private} />

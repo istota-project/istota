@@ -43,16 +43,18 @@
               size="sm"
               label={`Settings for ${block.title}`}
               title="Block settings"
-              onclick={onEdit}><Settings2 size={14} /></IconButton
-            >
+              onclick={onEdit}
+              icon={Settings2}
+            />
           {/if}
           <IconButton
             class="briefing-action touch-target"
             size="sm"
             label={`Expand ${block.title}`}
             title="Expand block"
-            onclick={() => onReadFull?.(block)}><Maximize2 size={14} /></IconButton
-          >
+            onclick={() => onReadFull?.(block)}
+            icon={Maximize2}
+          />
         </div>
       </header>
       {@render body()}

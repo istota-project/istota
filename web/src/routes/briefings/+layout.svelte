@@ -31,6 +31,7 @@
     briefingReadAck,
   } from '$lib/stores/briefings';
   import {
+    Icon,
     AppShell,
     ShellHeader,
     ListRow,
@@ -556,7 +557,7 @@
       {#snippet tools()}
         {#if !onSettings}
           <Chip icon onclick={() => goto(`${base}/briefings/settings/?new=1`)} title="New briefing">
-            <Plus size={14} />
+            <Icon icon={Plus} size="sm" />
           </Chip>
         {/if}
         {#if onReader}
@@ -568,7 +569,7 @@
               ? "Mark this briefing's archive as read"
               : 'Mark all briefings as read'}
           >
-            <CheckCheck size={14} />
+            <Icon icon={CheckCheck} size="sm" />
           </Chip>
         {/if}
         <!-- Ahead of the cog, so the cog keeps the bar's right edge and stays
@@ -576,7 +577,7 @@
 			     unless one is registered. -->
         <HeaderSave />
         <Chip icon checked={onSettings} onclick={toggleSettings} title="Briefing settings">
-          <Cog size={14} />
+          <Icon icon={Cog} size="sm" />
         </Chip>
       {/snippet}
     </ShellHeader>
@@ -584,17 +585,15 @@
 
   {#snippet sidebar()}
     {#snippet heldMark()}<span class="view-state" title="Paused by an administrator"
-        ><CirclePause size={13} aria-hidden="true" /><span class="visually-hidden"
+        ><Icon icon={CirclePause} size="sm" /><span class="visually-hidden"
           >, paused by an administrator</span
         ></span
       >{/snippet}
     {#snippet offMark()}<span class="view-state" title="Off"
-        ><CirclePause size={13} aria-hidden="true" /><span class="visually-hidden">, off</span
-        ></span
+        ><Icon icon={CirclePause} size="sm" /><span class="visually-hidden">, off</span></span
       >{/snippet}
     {#snippet draftMark()}<span class="view-state" title="Draft"
-        ><PencilLine size={13} aria-hidden="true" /><span class="visually-hidden">, draft</span
-        ></span
+        ><Icon icon={PencilLine} size="sm" /><span class="visually-hidden">, draft</span></span
       >{/snippet}
     {#if onSettings}
       <Sidebar
@@ -706,7 +705,7 @@
               {/snippet}
               {#snippet meta()}
                 <span class="archive-audience caption">
-                  {#if entry.kind === 'group'}<Users size={12} aria-hidden="true" />{/if}
+                  {#if entry.kind === 'group'}<Icon icon={Users} size="xs" />{/if}
                   <span class="truncate">{row.audience}</span>
                   <CountPill count={row.unread ? 1 : 0} title="Unread" shape="inline-mark" />
                   {#if row.unread}<span class="visually-hidden">, unread</span>{/if}

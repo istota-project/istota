@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Disclosure } from '$lib/components/ui';
+  import { Icon, Disclosure } from '$lib/components/ui';
   import { Bot } from '@lucide/svelte';
   import type { WorkspacePlace } from '$lib/api';
   import ReachBadge from './ReachBadge.svelte';
@@ -15,10 +15,10 @@
     <Disclosure summary="How {botName} reaches your files">
       <div class="reach-body">
         <p class="reach-legend">
-          <Bot size={14} role="img" aria-label="The robot icon" /> in the sidebar means your tasks can
-          reach that place, in any of your rooms. A room folder is reached only in that room, and a group
-          folder in a shared room only when everyone there is in the group. Places without it are visible
-          to you only.
+          <Icon icon={Bot} size="sm" label="The robot icon" /> in the sidebar means your tasks can reach
+          that place, in any of your rooms. A room folder is reached only in that room, and a group folder
+          in a shared room only when everyone there is in the group. Places without it are visible to
+          you only.
         </p>
         {#each notes as note}<p>{note}</p>{/each}
         <dl>
@@ -49,7 +49,7 @@
   .reach-body p {
     margin: var(--space-2) 0;
   }
-  .reach-legend :global(svg) {
+  .reach-legend :global(.ui-icon) {
     vertical-align: text-bottom;
     color: var(--accent-blue);
   }

@@ -12,6 +12,7 @@
     type Encounter,
   } from '$lib/api';
   import {
+    Icon,
     Button,
     Card,
     ConfirmDialog,
@@ -383,7 +384,7 @@
             onclick={() => (documentsFor = d)}
             title="{d.document_count} attached document{d.document_count === 1 ? '' : 's'}"
           >
-            <Paperclip size={11} aria-hidden="true" />
+            <Icon icon={Paperclip} size="xs" />
             {d.document_count}
           </button>
         {/if}

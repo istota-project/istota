@@ -7,21 +7,22 @@
    * envelope.
    */
   import { Mail, Smartphone, MessageCircle, MessagesCircle } from '@lucide/svelte';
+  import { Icon, type IconSize } from '$lib/components/ui';
 
   let {
     surface,
     group = false,
-    size = 13,
-  }: { surface: 'sms' | 'whatsapp' | 'email'; group?: boolean; size?: number } = $props();
+    size = 'sm',
+  }: { surface: 'sms' | 'whatsapp' | 'email'; group?: boolean; size?: IconSize } = $props();
 </script>
 
 {#if surface === 'sms'}
-  <Smartphone {size} />
+  <Icon icon={Smartphone} {size} />
 {:else if surface === 'email'}
-  <Mail {size} />
+  <Icon icon={Mail} {size} />
 {:else}
   <span class="whatsapp" data-whatsapp={group ? 'group' : 'private'}>
-    {#if group}<MessagesCircle {size} />{:else}<MessageCircle {size} />{/if}
+    <Icon icon={group ? MessagesCircle : MessageCircle} {size} />
   </span>
 {/if}
 

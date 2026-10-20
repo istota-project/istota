@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { CategoryGroup, ListRow } from '$lib/components/ui';
+  import { Icon, CategoryGroup, ListRow } from '$lib/components/ui';
   import {
     BookOpen,
     FileCode,
@@ -62,7 +62,7 @@
         aria-describedby={reachesTasks(home.reach.private) ? `task-reach-${home.id}` : undefined}
         onclick={(event) => onNavigate(event, home.id)}
       >
-        {#snippet icon()}<span class="entry-icon"><House size={14} /></span>{/snippet}
+        {#snippet icon()}<span class="entry-icon"><Icon icon={House} size="sm" /></span>{/snippet}
         {home.label}
         {#snippet badge()}
           <TaskReachIcon access={home.reach.private} botName={label} id={`task-reach-${home.id}`} />
@@ -76,12 +76,13 @@
         aria-current={current === entry.view ? (viewOpen ? 'page' : 'location') : undefined}
         onclick={(event) => onNavigateView(event, entry.view)}
       >
-        {#snippet icon()}<span class="entry-icon"><entry.icon size={14} /></span>{/snippet}
+        {#snippet icon()}<span class="entry-icon"><Icon icon={entry.icon} size="sm" /></span
+          >{/snippet}
         {entry.label}
         {#snippet badge()}
           {#if warnings[entry.view]}
             <span class="view-warning">
-              <TriangleAlert size={14} role="img" aria-label={warnings[entry.view]} />
+              <Icon icon={TriangleAlert} size="sm" label={warnings[entry.view]} />
             </span>
           {/if}
         {/snippet}

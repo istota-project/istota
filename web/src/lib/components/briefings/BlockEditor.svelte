@@ -239,8 +239,9 @@
               title="Remove source"
               onclick={() => {
                 form.value.sources = form.value.sources.filter((_, i) => i !== index);
-              }}><Trash2 size={14} /></IconButton
-            >
+              }}
+              icon={Trash2}
+            />
           </div>
           <div class="source-body">
             <SourceConfigFields

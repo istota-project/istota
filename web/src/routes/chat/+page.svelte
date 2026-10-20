@@ -17,6 +17,7 @@
   import ViewFilters from '$lib/components/ViewFilters.svelte';
   import { base } from '$app/paths';
   import {
+    Icon,
     AppShell,
     ShellHeader,
     Sidebar,
@@ -1211,7 +1212,7 @@
        what follows the last message. Rendered from the listing, not stored,
        since who has agreed changes without a new message. -->
   <div class="room-off-row" role="status">
-    <span class="room-off-title"><PowerOff size={14} /> This room is switched off</span>
+    <span class="room-off-title"><Icon icon={PowerOff} size="sm" /> This room is switched off</span>
     <p>
       {describeRoomOff(off)} Nothing said here is recorded or answered.
       {#each codeSpans(off.way_back) as part, i (i)}{#if part.code}<code>{part.text}</code
@@ -1240,7 +1241,6 @@
             <PhoneSurfaceIcon
               surface={activeRoom.phone_surface}
               group={isWhatsAppGroup(activeRoom)}
-              size={14}
             />
           </span>
         {/if}
@@ -1254,7 +1254,7 @@
             title={sharedRoomTitle(activeRoom)}
             aria-label={sharedRoomTitle(activeRoom)}
           >
-            <Users size={14} />
+            <Icon icon={Users} size="sm" />
           </span>
         {/if}
       {/snippet}
@@ -1299,7 +1299,7 @@
       {/snippet}
       {#snippet tools()}
         <Chip icon onclick={() => (confirmMarkAllRead = true)} title="Mark all rooms as read">
-          <CheckCheck size={14} />
+          <Icon icon={CheckCheck} size="sm" />
         </Chip>
       {/snippet}
     </ShellHeader>
@@ -1323,7 +1323,7 @@
             title={sharedRoomTitle(room)}
             aria-label={sharedRoomTitle(room)}
           >
-            <Users size={13} />
+            <Icon icon={Users} size="sm" />
           </span>
         {:else if room.phone_surface}
           <!-- A room bound to a phone thread: an SMS conversation, or a
@@ -1344,11 +1344,11 @@
 							     title so it never eats name width or gets clipped by the
 							     title's ellipsis (ISSUE-129). -->
           <span class="room-origin talk" title="Also on Nextcloud Talk">
-            <Cloud size={13} />
+            <Icon icon={Cloud} size="sm" />
           </span>
         {:else}
           <span class="room-origin" title="Web room">
-            <MessageSquare size={13} />
+            <Icon icon={MessageSquare} size="sm" />
           </span>
         {/if}
       {/snippet}
@@ -1428,7 +1428,7 @@
           />
         {:else}
           <button class="room-add" onclick={() => (creatingRoom = true)} type="button">
-            <Plus size={14} /> New room
+            <Icon icon={Plus} size="sm" /> New room
           </button>
         {/if}
       </div>
@@ -1489,14 +1489,14 @@
         {:else if $messages.length === 0}
           <div class="chat-placeholder">
             {#if $view === 'unread'}
-              <CheckCheck size={28} />
+              <Icon icon={CheckCheck} size="xl" />
               <p>All caught up</p>
             {:else if $view === 'starred'}
-              <Star size={28} />
+              <Icon icon={Star} size="xl" />
               <p>Nothing starred yet.</p>
               <span class="hint">Hover a message and hit the star.</span>
             {:else if $view === 'all'}
-              <MessageSquare size={28} />
+              <Icon icon={MessageSquare} size="xl" />
               <p>No messages yet</p>
             {:else if $offlineTranscript}
               <!-- An empty room offline is two different facts, and the prompt
@@ -1506,7 +1506,7 @@
                    between a room that is empty and a room that cannot be read
                    from here. The composer below still queues, which is why the
                    second line says so rather than leaving it to be found. -->
-              <MessageSquare size={28} />
+              <Icon icon={MessageSquare} size="xl" />
               <p>Nothing from this room is saved on this device.</p>
               <span class="hint">
                 Its messages are here again when you’re back online. You can still write one — it
@@ -1515,7 +1515,7 @@
             {:else if roomOff}
               {@render roomOffNotice(roomOff)}
             {:else}
-              <MessageSquare size={28} />
+              <Icon icon={MessageSquare} size="xl" />
               <p>
                 {activeRoom
                   ? `Ask anything in #${activeRoom.name.replace(/^#+/, '')}.`
@@ -1625,7 +1625,7 @@
           aria-label="Scroll to latest message"
           title="Scroll to latest"
         >
-          <ChevronDown size={20} />
+          <Icon icon={ChevronDown} size="lg" />
         </button>
       {/if}
     </div>

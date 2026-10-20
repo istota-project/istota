@@ -2,7 +2,7 @@
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
-  import { AppShell, ShellHeader, HeaderNav, Chip } from '$lib/components/ui';
+  import { Icon, AppShell, ShellHeader, HeaderNav, Chip } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { Cog } from '@lucide/svelte';
 
@@ -57,7 +57,7 @@
 			     unless one is registered. -->
         <HeaderSave />
         <Chip icon checked={onSettings} onclick={toggleSettings} title="Health settings">
-          <Cog size={14} />
+          <Icon icon={Cog} size="sm" />
         </Chip>
       {/snippet}
     </ShellHeader>

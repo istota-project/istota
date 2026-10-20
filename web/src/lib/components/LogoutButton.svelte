@@ -1,7 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { LogOut } from '@lucide/svelte';
-  import { ConfirmDialog } from '$lib/components/ui';
+  import { Icon, ConfirmDialog } from '$lib/components/ui';
   import { forgetLastUserId } from '$lib/offline/lastUser';
   import { signOutOfApp } from '$lib/platform/nativeConnection';
   import { notifyError } from '$lib/stores/notices';
@@ -69,7 +69,7 @@
   title="Log out"
   aria-label="Log out"
 >
-  <LogOut size={14} />
+  <Icon icon={LogOut} size="sm" />
 </button>
 
 <ConfirmDialog

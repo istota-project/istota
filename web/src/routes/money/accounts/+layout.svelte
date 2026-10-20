@@ -1,7 +1,7 @@
 <script lang="ts">
   import { selectedYear } from '$lib/money/stores/transactions';
   import { accountFilter } from '$lib/money/stores/accounts';
-  import { Select, Input } from '$lib/components/ui';
+  import { Icon, Select, Input } from '$lib/components/ui';
   import { Search } from '@lucide/svelte';
 
   let { children } = $props();
@@ -25,7 +25,7 @@
       ariaLabel="Year"
       minChars={4}
     />
-    {#snippet searchIcon()}<Search size={14} />{/snippet}
+    {#snippet searchIcon()}<Icon icon={Search} size="sm" />{/snippet}
     <Input
       type="search"
       size="toolbar"

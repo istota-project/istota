@@ -8,7 +8,7 @@
     type GroupBriefingRun,
     type BriefingDelivery,
   } from '$lib/api';
-  import { LoadState, Timestamp } from '$lib/components/ui';
+  import { Icon, LoadState, Timestamp } from '$lib/components/ui';
   import type { GroupEditionSelection } from '$lib/stores/briefings';
   import BriefingEdition from './BriefingEdition.svelte';
   import { channelLabel } from './settings/briefingSettings';
@@ -86,7 +86,7 @@
       {#snippet meta()}
         {@const at = run!.published_at || run!.created_at || ''}
         <p class="caption edition-meta">
-          <span class="group-label"><Users size={13} aria-hidden="true" />{groupLabel}</span>
+          <span class="group-label"><Icon icon={Users} size="sm" />{groupLabel}</span>
           <Timestamp
             value={at}
             format="datetime"

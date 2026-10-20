@@ -121,9 +121,7 @@
     {@render control('ui-input-inner')}
     {#if suffix}{@render adornment(suffix, 'ui-input-suffix')}{/if}
     {#if clearable && hasValue && !disabled}
-      <IconButton label="Clear" size="sm" class="ui-input-action" onclick={clear}>
-        <Icon icon={X} size="sm" />
-      </IconButton>
+      <IconButton label="Clear" size="sm" class="ui-input-action" onclick={clear} icon={X} />
     {/if}
     {#if canReveal}
       <IconButton

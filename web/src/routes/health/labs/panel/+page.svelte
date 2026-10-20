@@ -391,9 +391,8 @@
                           danger
                           label="Remove biomarker"
                           onclick={() => removeRow(i)}
-                        >
-                          <X size={13} />
-                        </IconButton>
+                          icon={X}
+                        />
                       </td>
                     {/if}
                   </tr>

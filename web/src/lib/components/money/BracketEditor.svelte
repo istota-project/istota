@@ -165,9 +165,8 @@
           danger
           {disabled}
           onclick={() => removeRow(i)}
-        >
-          <X size={14} />
-        </IconButton>
+          icon={X}
+        />
       </div>
     </div>
   {/each}
@@ -183,9 +182,9 @@
   {/if}
 
   <div class="actions">
-    <Button variant="secondary" size="sm" {disabled} onclick={addRow}>
-      <Plus size={14} /> Add bracket
-    </Button>
+    <Button variant="secondary" size="sm" {disabled} onclick={addRow} icon={Plus}
+      >Add bracket</Button
+    >
   </div>
 </div>
 

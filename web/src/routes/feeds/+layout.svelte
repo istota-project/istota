@@ -21,6 +21,7 @@
     refreshFeedCounts,
   } from '$lib/stores/feeds';
   import {
+    Icon,
     AppShell,
     ShellHeader,
     Sidebar,
@@ -276,7 +277,7 @@
             onclick={handleMarkAllRead}
             title={$selectedFeedId ? 'Mark this feed as read' : 'Mark every feed as read'}
           >
-            <CheckCheck size={14} />
+            <Icon icon={CheckCheck} size="sm" />
           </Chip>
         {/if}
         <!-- Ahead of the cog, so the cog keeps the bar's right edge and stays
@@ -284,7 +285,7 @@
 			     unless one is registered. -->
         <HeaderSave />
         <Chip icon checked={onSettings} onclick={toggleSettings} title="Feed settings">
-          <Cog size={14} />
+          <Icon icon={Cog} size="sm" />
         </Chip>
       {/snippet}
     </ShellHeader>

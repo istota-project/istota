@@ -26,7 +26,7 @@
     Folder,
     Reply,
   } from '@lucide/svelte';
-  import { IconButton, Menu, type MenuItem } from '$lib/components/ui';
+  import { Icon, IconButton, Menu, type MenuItem } from '$lib/components/ui';
   import { pinViewportZoom, releaseViewportZoom } from '$lib/zoomPin';
   import {
     uploadChatAttachment,
@@ -1098,24 +1098,27 @@
        visible while it is being written. -->
   {#if replyTo}
     <div class="reply-chip">
-      <Reply size={13} class="reply-chip-icon" />
+      <Icon icon={Reply} size="sm" class="reply-chip-icon" />
       <span class="reply-chip-text">{replyTo.excerpt ?? 'the selected message'}</span>
       <IconButton
         size="sm"
         label="Clear reply"
         onclick={() => onReplyChange?.(null)}
         title="Clear reply"
-      >
-        <X size={13} />
-      </IconButton>
+        icon={X}
+      />
     </div>
   {/if}
   {#if linkTarget && !replyTo}
     <div class="reply-chip" data-testid="link-chip">
       <span class="reply-chip-text">re: {linkTarget.name}</span>
-      <IconButton size="sm" label="Clear link" onclick={() => onLinkClear?.()} title="Clear link">
-        <X size={13} />
-      </IconButton>
+      <IconButton
+        size="sm"
+        label="Clear link"
+        onclick={() => onLinkClear?.()}
+        title="Clear link"
+        icon={X}
+      />
     </div>
   {/if}
   {#if attachments.length || uploading}
@@ -1133,7 +1136,7 @@
             type="button"
             aria-label="Remove {att.name}"
           >
-            <X size={11} />
+            <Icon icon={X} size="xs" />
           </button>
         </span>
       {/each}

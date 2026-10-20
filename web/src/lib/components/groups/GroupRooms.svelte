@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { MessageSquare } from '@lucide/svelte';
-  import { CountPill, EmptyState, Card, Timestamp } from '$lib/components/ui';
+  import { Icon, CountPill, EmptyState, Card, Timestamp } from '$lib/components/ui';
   import { getChatRooms, type ChatRoom, type GroupDetail } from '$lib/api';
 
   let { rooms }: { rooms: GroupDetail['rooms'] } = $props();
@@ -35,7 +35,7 @@
     <ul class="rooms list-reset">
       {#each ordered as room (room.token)}
         <li>
-          <span class="entry-icon" aria-hidden="true"><MessageSquare size={16} /></span>
+          <span class="entry-icon" aria-hidden="true"><Icon icon={MessageSquare} size="md" /></span>
           <a class="name" href="{base}/chat?room={encodeURIComponent(room.token)}" title={room.name}
             >{room.name}</a
           >

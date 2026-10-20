@@ -9,6 +9,7 @@
   import { getMe, AuthError, type User } from '$lib/api';
   import LogoutButton from '$lib/components/LogoutButton.svelte';
   import {
+    Icon,
     CountPill,
     Menu,
     NotificationBell,
@@ -580,9 +581,9 @@
             aria-label="Toggle color theme"
           >
             {#if $theme === 'dark'}
-              <Sun size={15} />
+              <Icon icon={Sun} size="md" />
             {:else}
-              <Moon size={15} />
+              <Icon icon={Moon} size="md" />
             {/if}
           </button>
           <LogoutButton />
@@ -593,7 +594,7 @@
                 aria-label="Open menu"
                 {...props}
               >
-                <MenuIcon size={18} />
+                <Icon icon={MenuIcon} size="lg" />
               </button>
             {/snippet}
           </Menu>

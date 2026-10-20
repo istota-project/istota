@@ -14,6 +14,7 @@
   import { forgetLastUserId } from '$lib/offline/lastUser';
   import { selectedLedger, availableLedgers } from '$lib/money/stores/ledger';
   import {
+    Icon,
     AppShell,
     ShellHeader,
     HeaderNav,
@@ -174,7 +175,7 @@
 				     unless one is registered. -->
           <HeaderSave />
           <Chip icon checked={onSettings} onclick={toggleSettings} title="Money settings">
-            <Cog size={14} />
+            <Icon icon={Cog} size="sm" />
           </Chip>
         {/snippet}
       </ShellHeader>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { CategoryGroup, ListRow } from '$lib/components/ui';
+  import { Icon, CategoryGroup, ListRow } from '$lib/components/ui';
   import { Folder, Cloud, Paperclip } from '@lucide/svelte';
   import type { WorkspacePlace } from '$lib/api';
   import TaskReachIcon from './TaskReachIcon.svelte';
@@ -45,8 +45,9 @@
         >
           {#snippet icon()}
             <span class="place-icon"
-              >{#if place.kind === 'talk'}<Paperclip size={14} />{:else}<group.icon
-                  size={14}
+              >{#if place.kind === 'talk'}<Icon icon={Paperclip} size="sm" />{:else}<Icon
+                  icon={group.icon}
+                  size="sm"
                 />{/if}</span
             >
           {/snippet}

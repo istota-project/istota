@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Icon } from '$lib/components/ui';
   import { ChevronRight, ChevronDown, X } from '@lucide/svelte';
   import type { Segment } from '$lib/stores/segments';
 
@@ -35,7 +36,10 @@
     aria-expanded={expanded}
   >
     <span class="chev">
-      {#if expanded}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
+      {#if expanded}<Icon icon={ChevronDown} size="sm" />{:else}<Icon
+          icon={ChevronRight}
+          size="sm"
+        />{/if}
     </span>
     <!-- Collapsed: the active action. Expanded: a static label only — every
 		     call is listed in the chain below, so repeating the latest here would
@@ -46,7 +50,7 @@
       {:else if activeTool}
         <span class="action">
           {#if activeTool.success === false}
-            <span class="status"><X size={12} /></span>
+            <span class="status"><Icon icon={X} size="xs" /></span>
           {/if}
           <span class="desc">{activeTool.description || activeTool.name}</span>
         </span>
@@ -63,7 +67,7 @@
       {#each tools as step (step.id)}
         <div class="action chain-action">
           {#if step.tool.success === false}
-            <span class="status"><X size={12} /></span>
+            <span class="status"><Icon icon={X} size="xs" /></span>
           {/if}
           <span class="desc">{step.tool.description || step.tool.name}</span>
         </div>

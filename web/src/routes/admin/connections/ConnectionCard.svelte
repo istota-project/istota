@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Component, Snippet } from 'svelte';
-  import { Badge, Card } from '$lib/components/ui';
+  import { Icon, Badge, Card } from '$lib/components/ui';
 
   type BadgeVariant = 'success' | 'warn' | 'danger' | 'neutral' | 'info';
 
@@ -18,7 +18,7 @@
     actions?: Snippet;
   }
 
-  let { testid, title, subtitle, icon: Icon, badge, children, meta, actions }: Props = $props();
+  let { testid, title, subtitle, icon: Glyph, badge, children, meta, actions }: Props = $props();
 
   const foot = $derived(meta || actions ? footSnippet : undefined);
 </script>
@@ -31,7 +31,7 @@
 -->
 <Card {title} description={subtitle} data-testid={testid} footer={foot}>
   {#snippet icon()}
-    <span class="connection-icon" aria-hidden="true"><Icon size={18} /></span>
+    <span class="connection-icon" aria-hidden="true"><Icon icon={Glyph} size="lg" /></span>
   {/snippet}
   {#snippet status()}
     {#if badge}

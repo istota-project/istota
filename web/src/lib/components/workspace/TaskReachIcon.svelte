@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Icon } from '$lib/components/ui';
   import { Bot } from '@lucide/svelte';
   import type { WorkspaceAccess } from '$lib/api';
   import { taskReachDescription, type TaskReachScope } from './reach';
@@ -14,7 +15,7 @@
 <!-- Hidden from the tree so the row's link keeps its label as its name; aria-describedby still reads the id. -->
 {#if description}
   <span class="task-reach" title={description} aria-hidden="true">
-    <Bot size={14} />
+    <Icon icon={Bot} size="sm" />
     <span {id} class="visually-hidden">{description}</span>
   </span>
 {/if}

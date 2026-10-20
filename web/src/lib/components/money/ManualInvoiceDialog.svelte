@@ -158,9 +158,7 @@
         <Input bind:value={line.description} placeholder="Optional" />
       </Field>
       {#if lines.length > 1}
-        <IconButton label="Remove line {i + 1}" onclick={() => removeLine(line.id)}>
-          <X size={16} />
-        </IconButton>
+        <IconButton label="Remove line {i + 1}" onclick={() => removeLine(line.id)} icon={X} />
       {/if}
     </div>
   {/each}

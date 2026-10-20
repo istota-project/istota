@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { Folder } from '@lucide/svelte';
-  import { Button, EmptyState, Card, Timestamp } from '$lib/components/ui';
+  import { Icon, Button, EmptyState, Card, Timestamp } from '$lib/components/ui';
   import { getWorkspaceListing, getWorkspacePlaces, type WorkspaceEntry } from '$lib/api';
   import { viewer } from '$lib/fileViewer/store.svelte';
   import { fileIcon } from '$lib/components/workspace/filePresentation';
@@ -60,7 +60,10 @@
         {@const EntryIcon = fileIcon(entry.name)}
         <li>
           <span class="entry-icon" aria-hidden="true"
-            >{#if entry.kind === 'dir'}<Folder size={16} />{:else}<EntryIcon size={16} />{/if}</span
+            >{#if entry.kind === 'dir'}<Icon icon={Folder} size="md" />{:else}<Icon
+                icon={EntryIcon}
+                size="md"
+              />{/if}</span
           >
           {#if entry.kind === 'dir'}<a
               class="name link-quiet"
