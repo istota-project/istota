@@ -15829,7 +15829,22 @@ _PROFILE_FIELD_SPECS: dict[str, dict] = {
     "relay_delivery":         {
         "type": "enum", "values": user_profiles.RELAY_DELIVERY_VALUES,
     },
+    # A folder below My files, walked with no link followed; '' clears it.
+    "quick_notes_folder":     {"type": "workspace_folder"},
 }
+
+
+class ProfileFieldRefused(ValueError):
+    """A profile field refusal that carries its own status and code.
+
+    The self PUT answers the other refusals with a bare 400; this one is
+    `{error, code}` with the status the field's validator chose.
+    """
+
+    def __init__(self, status: int, code: str, message: str):
+        super().__init__(message)
+        self.status = status
+        self.code = code
 
 # The fields the self PUT accepts. Worker caps are in the specs above and not
 # here: a user raising their own cap was accepted until the authority table
@@ -16452,6 +16467,14 @@ def coerce_profile_field(
     if spec is None:
         raise ValueError(f"unknown profile field: {field}")
     t = spec["type"]
+    if t == "workspace_folder":
+        from istota.workspace.quick_notes import QuickNoteError, normalize_folder
+        if _config is None:
+            raise ValueError("config not loaded")
+        try:
+            return normalize_folder(_config, user_id, value)
+        except QuickNoteError as exc:
+            raise ProfileFieldRefused(exc.status, exc.code, exc.message) from None
     if t == "push_categories":
         from istota.push.preferences import validate_inbox_categories
         return validate_inbox_categories(value)
@@ -16695,6 +16718,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "external_turn_display": profile.external_turn_display or "collapsed",
         "relay_delivery": profile.relay_delivery,
         "relay_delivery_options": _relay_delivery_options(user["username"]),
+        "quick_notes_folder": profile.quick_notes_folder,
         "delivery_surfaces": _registered_delivery_surfaces(),
         "web_rooms": _user_web_rooms(user["username"]),
         # Which of this profile's own web pins are dead, asked of the server
@@ -16751,6 +16775,10 @@ async def settings_update_profile(
         try:
             coerced[field] = coerce_profile_field(
                 field, value, user["username"], getattr(current, field, None),
+            )
+        except ProfileFieldRefused as e:
+            return JSONResponse(
+                {"error": str(e), "code": e.code, "field": field}, status_code=e.status,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))

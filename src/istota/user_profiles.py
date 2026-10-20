@@ -114,6 +114,10 @@ class UserProfile:
     # ceiling. Empty is "unset" and resolves to the whole ceiling, which is
     # what every user had before the picker existed. See istota.credentials.google_scopes.
     google_scopes: dict[str, str] = field(default_factory=dict)
+    # The folder below My files that quick notes go to, as parts joined by
+    # `/` with no leading or trailing slash. None is unset. Validated against
+    # the workspace by `workspace.quick_notes.normalize_folder`.
+    quick_notes_folder: str | None = None
 
 
 _PROFILE_COLUMNS = (
@@ -127,7 +131,7 @@ _PROFILE_COLUMNS = (
     "default_briefings", "briefing_email_html",
     "timezone_follow_location", "show_nav_unread_badges",
     "push_chat_alerts", "push_preview", "push_inbox_categories",
-    "google_scopes",
+    "google_scopes", "quick_notes_folder",
 )
 
 # Columns whose value is a JSON-encoded dict (vs the JSON-list columns).
@@ -164,6 +168,7 @@ SELF_EDITABLE_FIELDS = (
     "default_destination", "default_room", "routing",
     "briefing_email_html", "timezone_follow_location", "show_nav_unread_badges",
     "external_turn_display", "relay_delivery", "push_chat_alerts", "push_preview", "push_inbox_categories",
+    "quick_notes_folder",
 )
 ADMIN_EDITABLE_FIELDS = (
     "display_name", "timezone", "email_addresses",
@@ -474,6 +479,7 @@ def _row_to_profile(row: sqlite3.Row, *, strict: bool = False) -> UserProfile:
         push_preview=_coerce_bool(_row_get(row, "push_preview"), True),
         push_inbox_categories=stored_inbox_categories(_row_get(row, "push_inbox_categories") or {}, strict=strict),
         google_scopes=_parse_json_dict(_row_get(row, "google_scopes")),
+        quick_notes_folder=_row_get(row, "quick_notes_folder") or None,
     )
 
 
@@ -736,6 +742,8 @@ def _same_value(col: str, current: object, value: object) -> bool:
         return (current or "collapsed") == (value or "collapsed")
     if col in {"max_foreground_workers", "max_background_workers"}:
         return int(current or 0) == int(value or 0)
+    if col == "quick_notes_folder":
+        return _normalized_profile_value(col, current) == _normalized_profile_value(col, value)
     return (current or "") == (value or "")
 
 
@@ -1033,6 +1041,7 @@ def insert_profile(conn: sqlite3.Connection, profile: UserProfile, *, replace: b
         1 if profile.push_preview else 0,
         json.dumps(_normalized_profile_value("push_inbox_categories", profile.push_inbox_categories)),
         json.dumps(dict(profile.google_scopes)),
+        _normalized_profile_value("quick_notes_folder", profile.quick_notes_folder),
     )
     cols_sql = ", ".join(insert_cols)
     if replace:
@@ -1290,6 +1299,10 @@ def _normalized_profile_value(col: str, value: object) -> object:
         return str(value) if value else "talk"
     if col == "external_turn_display":
         return str(value) if value else "collapsed"
+    if col == "quick_notes_folder":
+        # Stored without empty parts; '' clears to NULL. Callers that take the
+        # value from a user validate it first, against the workspace.
+        return "/".join(part for part in str(value or "").split("/") if part) or None
     return str(value or "")
 
 

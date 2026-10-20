@@ -2,6 +2,7 @@
 
 import asyncio
 import errno
+import json
 import logging
 from dataclasses import asdict
 from pathlib import PurePosixPath
@@ -21,11 +22,13 @@ from istota.google import drive
 from istota.nextcloud import OcsError, shares
 from istota.webui.chat_files import servable_roots
 from istota.workspace.pins import validate_pin, workspace_pin_kind
+from istota.webui.request_guards import BodyError, read_bounded_body
 from istota.webui.router_stubs import require_auth, verify_origin
 from istota.workspace.listing import ListingError, list_dir, list_file
 from istota.workspace.places import list_places, place_anchor
 from istota.workspace.reach import deployment_notes, place_reach
-from istota.workspace import config_files, scripts, text_files
+from istota.workspace import config_files, quick_notes, scripts, text_files
+from istota.workspace.quick_notes import QuickNoteError
 from istota.workspace.writes import delete_entry, make_folder, write_new_file
 
 logger = logging.getLogger(__name__)
@@ -422,6 +425,103 @@ async def api_workspace_config_file_save(
     if outcome.status == "too_large":
         payload["max_bytes"] = file.max_bytes
     return JSONResponse(payload, status_code=status)
+
+
+# A note's JSON body: the content escaped at worst six bytes a character, plus
+# the other fields. The note's own cap is checked on the decoded text.
+_NOTE_BODY_LIMIT = quick_notes.QUICK_NOTE_MAX_BYTES * 6 + 4096
+
+# Why `save` could not read the note back, beside `_SAVE_REFUSALS`.
+_NOTE_READ_REFUSALS = {
+    "missing": (404, "This note no longer exists."),
+    "invalid_folder": (422, "The quick notes folder is not a folder in My files."),
+    "not_a_file": (422, "This note is not a regular file."),
+    "too_large": (413, "This file is too large."),
+    "not_utf8": (422, "This note is not UTF-8 text."),
+}
+
+
+def _quick_note_refusal(exc: QuickNoteError) -> JSONResponse:
+    return JSONResponse({"error": exc.message, "code": exc.code}, status_code=exc.status)
+
+
+async def _note_body(request: Request):
+    """The decoded JSON body, or the refusal to answer instead."""
+    try:
+        return json.loads(await read_bounded_body(request, _NOTE_BODY_LIMIT)), None
+    except BodyError as exc:
+        code = "too_large" if exc.status == 413 else "invalid_body"
+        return None, JSONResponse({"error": exc.message, "code": code}, status_code=exc.status)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return None, JSONResponse({"error": "invalid JSON", "code": "invalid_body"}, status_code=400)
+
+
+@router.post("/notes")
+async def api_workspace_note_create(
+    request: Request, user: dict = Depends(require_auth), _csrf: None = Depends(verify_origin),
+):
+    """Create a quick note in the user's quick notes folder.
+
+    201 for a new file, 200 when `client_note_id` replays one already written.
+    """
+    config = getattr(request.app.state, "istota_config", None)
+    refusal = _no_workspace(config)
+    if refusal is not None:
+        return refusal
+    body, refusal = await _note_body(request)
+    if refusal is not None:
+        return refusal
+    if (not isinstance(body, dict) or not isinstance(body.get("content"), str)
+            or not isinstance(body.get("client_note_id"), (str, type(None)))):
+        return JSONResponse({"error": "content is required", "code": "invalid_body"}, status_code=400)
+    user_id = user["username"]
+
+    def write():
+        with db.get_db(config.db_path) as conn:
+            return quick_notes.create(config, conn, user_id, body["content"], body.get("client_note_id"))
+
+    try:
+        result = await asyncio.to_thread(write)
+    except QuickNoteError as exc:
+        return _quick_note_refusal(exc)
+    except (ListingError, OSError) as exc:
+        return _filesystem_error(config, exc, "home", write=True)
+    return JSONResponse(asdict(result), status_code=201 if result.created else 200)
+
+
+@router.put("/notes")
+async def api_workspace_note_save(
+    request: Request, user: dict = Depends(require_auth), _csrf: None = Depends(verify_origin),
+):
+    """Replace a quick note the web editor created. Session only: never a bearer."""
+    config = getattr(request.app.state, "istota_config", None)
+    refusal = _no_workspace(config)
+    if refusal is not None:
+        return refusal
+    body, refusal = await _note_body(request)
+    if refusal is not None:
+        return refusal
+    if not isinstance(body, dict) or any(not isinstance(body.get(key), str) for key in ("path", "content", "revision")):
+        return JSONResponse({"error": "path, content and revision are required", "code": "invalid_body"}, status_code=400)
+
+    def write():
+        return quick_notes.save(config, user["username"], body["path"], body["content"], body["revision"])
+
+    try:
+        outcome = await asyncio.to_thread(write)
+    except QuickNoteError as exc:
+        return _quick_note_refusal(exc)
+    except OSError as exc:
+        return _filesystem_error(config, exc, "home", write=True)
+    if outcome.status == "ok":
+        return {"revision": outcome.revision}
+    if outcome.status == "read_refused":
+        status, message = _NOTE_READ_REFUSALS.get(outcome.reason, (422, "Could not read this note."))
+        return JSONResponse({"error": message, "code": outcome.reason or "unreadable"}, status_code=status)
+    status, message = _SAVE_REFUSALS[outcome.status]
+    return JSONResponse({"error": message, "code": outcome.status}, status_code=status)
+
+
 @router.delete("/files")
 async def api_workspace_delete(
     request: Request, place: str, path: str, name: str,
