@@ -77,10 +77,14 @@ MAIL_IMAGE_ENV = "ISTOTA_TESTBED_MAIL_IMAGE"
 #: escaped this rig would go nowhere rather than somewhere.
 BOT_ADDRESS = "bot@bot.test"
 EXTERNAL_ADDRESS = "catchall@ext.test"
-ACCOUNTS = (BOT_ADDRESS, EXTERNAL_ADDRESS)
+#: A user's own mailbox, which nothing polls: what a scenario connects as a
+#: mail account (`[mail_accounts]`), so reading it is distinguishable from
+#: reading the bot's. Every recipient at `personal.test` lands here.
+PERSONAL_ADDRESS = "me@personal.test"
+ACCOUNTS = (BOT_ADDRESS, EXTERNAL_ADDRESS, PERSONAL_ADDRESS)
 
-#: Both accounts share it. Not a secret in any sense that matters: the server
-#: has two mailboxes, serves a domain that cannot resolve, and publishes its
+#: Every account shares it. Not a secret in any sense that matters: the server
+#: has three mailboxes, serves a domain that cannot resolve, and publishes its
 #: ports on loopback only. A generated value would have to be threaded into the
 #: rendered config, the overlay and every wire test, buying nothing.
 MAIL_PASSWORD = "maddy-testbed"  # private-data-ok
@@ -786,9 +790,9 @@ def _container_logs(name: str) -> str:
 def wait_reachable(
     server: MailServer, *, timeout: float = READY_TIMEOUT, logs=None
 ) -> None:
-    """Poll until both mailboxes accept a login, or raise with the server log.
+    """Poll until every mailbox accepts a login, or raise with the server log.
 
-    Both, not one. Account creation runs before the server starts, so a partial
+    Every one, not the first. Account creation runs before the server starts, so a partial
     failure leaves an IMAP endpoint that answers and one mailbox that does not
     exist — which surfaces at the first test as an authentication error against
     whichever account that test happened to use.
@@ -940,7 +944,7 @@ class MailService:
         return self._server
 
     def session(self, account: str = BOT_ADDRESS) -> ImapSession:
-        """An `ImapSession` against one of the two mailboxes."""
+        """An `ImapSession` against one of the mailboxes in `ACCOUNTS`."""
         return ImapSession(self.server, account=account)
 
     def send(self, **kwargs) -> str:
@@ -948,7 +952,7 @@ class MailService:
         return send(self.server, **kwargs)
 
     def reset(self) -> None:
-        """Empty both mailboxes.
+        """Empty every mailbox.
 
         Total, unlike the Nextcloud reset one shape over: a mailbox has nothing
         the boot put there and nothing a scenario needs to keep, so an expunge
@@ -967,7 +971,7 @@ class MailService:
                 session.purge()
 
     def describe(self) -> str:
-        """Both mailboxes' subjects, for `Stack.diagnostics`.
+        """Every mailbox's subjects, for `Stack.diagnostics`.
 
         A scenario that failed because no reply arrived and one that failed
         because the reply went to the wrong address print the same task row.
