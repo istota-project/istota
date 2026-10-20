@@ -434,3 +434,33 @@ describe('chat jump history', () => {
     expect(get(session.activeRoomId)).toBeNull();
   });
 });
+
+describe('closing the room drawer (ISSUE-805)', () => {
+  let frames: FrameRequestCallback[] = [];
+  const runFrame = () => {
+    const pending = frames;
+    frames = [];
+    for (const callback of pending) callback(0);
+  };
+
+  beforeEach(() => {
+    frames = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    vi.stubGlobal('cancelAnimationFrame', () => {});
+  });
+
+  it('starts the slide before switching the room', async () => {
+    renderPage();
+    await waitFor(() => expect(currentUrl()).toContain('room=room-a'));
+    await fireEvent.click(screen.getByRole('button', { name: /^Open Rooms/ }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Room B' }));
+    expect(screen.getByRole('button', { name: /^Open Rooms/ })).toBeInTheDocument();
+    expect(currentUrl()).toBe('/istota/chat/?room=room-a');
+    runFrame();
+    runFrame();
+    await waitFor(() => expect(currentUrl()).toBe('/istota/chat/?room=room-b'));
+  });
+});
