@@ -277,4 +277,4 @@ A web room can hold several members (multiplayer Stages 8, 17). Surface-neutral 
 
 **Settings refuse a shared room.** Routes, briefing token, `alerts_channel`, `log_channel`, `default_room` via `_refuse_shared_destination`; unchanged values are not re-judged; pickers disable shared options but keep a current pin.
 
-**Dev mock.** `web/vite-mock-api.ts` serves the membership, host and group endpoints and `shared`/`policy`/`off`, seeded with a carol/dave room and a guest-switched-off Talk room.
+**Dev mock.** `web/vite-mock-api.ts` serves the membership, host and group endpoints and `shared`/`policy`/`off`, seeded with a carol/dave room and a guest-switched-off Talk room. It also serves `GET`/`POST /groups/{id}/rooms` (a replayed `request_id` returns the same room, another name under it or a stale revision is a 409) and two group-owned rooms carrying `managed_by`: Planning in Team, which carol owns, and Book picks in Reading circle, where she is only a member, so the locked settings and the managed people panel both show (ISSUE-815).
