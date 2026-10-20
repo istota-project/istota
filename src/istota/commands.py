@@ -4193,7 +4193,7 @@ async def cmd_relay(ctx: CommandContext):
             return "Relay unavailable."
 
 
-@command("arr", "Request media without a model turn: `!arr search film <title>`, `!arr add film <tmdb-id>`, `!arr add show <tvdb-id> [monitor]`, `!arr add album <mbid>`")
+@command("arr", "Request media without a model turn: `!arr search film <title>`, `!arr add film <tmdb-id>`, `!arr add show <tvdb-id> [monitor]`, `!arr add album <mbid>`, or a result number for the id")
 async def cmd_arr(ctx: CommandContext):
     """Search the arr stack and add to its Wanted list, through the servarr skill.
 
