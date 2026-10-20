@@ -198,6 +198,56 @@ describe('Shared block Run now', () => {
     expect(notices.notifyWarning).not.toHaveBeenCalled();
   }, 10_000);
 
+  it('shows the last Run now outcome on the block, with no wait running', async () => {
+    answers.queue = [{ id: 'req-1', outcome: 'kept_prior', at: '2026-10-11T10:42:00Z' }];
+    page.url = new URL('http://localhost/istota/briefings/settings?view=shared');
+    render(Harness, { component: Page, user: admin });
+    const line = await screen.findByText(
+      (_, el) =>
+        el?.tagName === 'DIV' && /^Run now: kept prior content,/.test(el.textContent?.trim() ?? ''),
+    );
+    expect(line.closest('td')).not.toBeNull();
+    expect(line.querySelector('time')?.getAttribute('datetime')).toBe('2026-10-11T10:42:00Z');
+  });
+
+  it('shows a Run now still waiting for the daemon, then follows it to its outcome', async () => {
+    notices.notifyWarning.mockClear();
+    api.runSharedBlock.mockClear();
+    // Every poll after the first load sees the daemon's answer to the pending request.
+    answers.queue = [{ id: 'req-3', outcome: 'kept_prior', at: '2026-10-11T10:51:00Z' }];
+    api.getSharedBlocks.mockImplementationOnce(async () => {
+      const b = block({ id: 'req-1', outcome: 'failed', at: '2026-10-11T10:42:00Z' });
+      b.status.run_pending = { id: 'req-3', name: 'mk', at: '2026-10-11T10:50:00Z' };
+      return {
+        shared_blocks: [b],
+        allowed_source_kinds: ['markets'],
+        render_modes: ['synthesis', 'structured'],
+        shared_block_timezone: 'UTC',
+      };
+    });
+    page.url = new URL('http://localhost/istota/briefings/settings?view=shared');
+    render(Harness, { component: Page, user: admin });
+    const waiting = await screen.findByText(/Run now: waiting for the daemon/);
+    // One Run now line per block: the pending request, not the older answer beside it.
+    expect(waiting.closest('td')?.querySelectorAll('.sb-run')).toHaveLength(1);
+    await waitFor(
+      () =>
+        expect(
+          screen.getByText(
+            (_, el) =>
+              el?.tagName === 'DIV' &&
+              /^Run now: kept prior content,/.test(el.textContent?.trim() ?? ''),
+          ),
+        ).toBeTruthy(),
+      { timeout: 4000 },
+    );
+    expect(screen.queryByText(/Run now: waiting for the daemon/)).toBeNull();
+    expect(notices.notifyWarning).toHaveBeenCalledWith(
+      expect.stringMatching(/^mk: Nothing was generated/),
+    );
+    expect(api.runSharedBlock).not.toHaveBeenCalled();
+  }, 10_000);
+
   it('reports nothing when the page goes while a delete is in flight', async () => {
     answers.queue = [null];
     notices.notifyError.mockClear();
