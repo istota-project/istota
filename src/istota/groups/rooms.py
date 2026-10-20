@@ -24,10 +24,15 @@ import hashlib
 import json
 import re
 import sqlite3
+from collections.abc import Callable
+from urllib.parse import quote
 
 from istota import db
 from istota.groups.policy import GroupError, require_group_member
 from istota.rooms import policy as room_policy
+
+#: A user id to the display name a participant row records, or None.
+DisplayName = Callable[[str], "str | None"]
 
 #: A client-generated idempotency token: a UUID fits, a person's typing does not.
 _REQUEST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
@@ -166,20 +171,26 @@ def _request_hash(actor_id: str, name: str) -> str:
 
 def create_group_room(
     conn: sqlite3.Connection, actor_id: str, group_id: str, name: str,
-    request_id: str,
+    request_id: str, *, expected_revision: int | None = None,
+    display_name: DisplayName | None = None,
 ) -> dict:
     """Create a room whose membership is ``group_id``'s, or return the one this
     request already made.
 
     Owner only, in a live group. The connection must have no open transaction:
-    the room, its link, every member's handle and presence, the host and the
-    request record commit together. A replay of ``request_id`` by the same
-    actor with the same name returns the same room; anything else is a 409.
+    the room, its link, every member's handle and presence, the host, the
+    request record, a ``room_created`` event and the group's revision bump
+    commit together. A replay of ``request_id`` by the same actor with the same
+    name returns the same room whatever the revision; anything else is a 409.
+    ``expected_revision`` is checked for a new room only, since the creation
+    itself moved it. The bump is what makes an add-member acknowledgement
+    written against the old room list a revision conflict.
 
-    Returns ``{"room", "handle", "created"}``: the registry room, the actor's
-    own `web_chat_rooms` handle, and whether this call made the room.
+    Returns ``{"room", "handle", "created", "revision"}``: the registry room,
+    the actor's own `web_chat_rooms` handle, whether this call made the room,
+    and the group's revision after the call.
     """
-    from istota.groups.service import _metadata, _transaction
+    from istota.groups.service import _event, _finish, _metadata, _revision, _transaction
 
     if not isinstance(request_id, str) or not _REQUEST_ID_RE.fullmatch(request_id):
         raise GroupError(422, "invalid_request_id",
@@ -203,6 +214,8 @@ def create_group_room(
             token = row["room_token"]
             created = False
         else:
+            if expected_revision is not None:
+                _revision(db.get_group(conn, group_id), expected_revision)
             token = db.create_web_chat_room(conn, actor_id, name).token
             db.set_room_group(conn, token, group_id)
             db.set_room_membership_source(conn, token, "group")
@@ -210,7 +223,7 @@ def create_group_room(
         room = db.get_room(conn, token)
         members = set(db.list_group_members(conn, group_id))
         if created:
-            _reconcile_roster(conn, room, members)
+            _reconcile_roster(conn, room, members, display_name)
             # Fixed now, while the creator is the one present member the
             # policy's host rule can find, rather than by whichever later read
             # first needs a policy.
@@ -221,8 +234,14 @@ def create_group_room(
                 "VALUES (?, ?, ?, ?, ?)",
                 (group_id, request_id, token, actor_id, request_hash),
             )
+            _event(conn, group_id, actor_id, "room_created",
+                   details={"room_token": token, "name": name})
+            group = _finish(conn, group_id)
+        else:
+            group = db.get_group(conn, group_id)
         handle = db.ensure_web_chat_handle(conn, actor_id, token, room.name or name)
-    return {"room": room, "handle": handle, "created": created}
+    return {"room": room, "handle": handle, "created": created,
+            "revision": group["revision"]}
 
 
 def group_owned_room_tokens(conn: sqlite3.Connection, group_id: str) -> list[str]:
@@ -235,7 +254,9 @@ def group_owned_room_tokens(conn: sqlite3.Connection, group_id: str) -> list[str
     return [row["token"] for row in rows]
 
 
-def reconcile_group_room_members(conn: sqlite3.Connection, group_id: str) -> list[dict]:
+def reconcile_group_room_members(
+    conn: sqlite3.Connection, group_id: str, display_name: DisplayName | None = None,
+) -> list[dict]:
     """Make every group-owned room of ``group_id`` hold exactly its current
     members, and give a room whose host has left an owner as host.
 
@@ -248,6 +269,9 @@ def reconcile_group_room_members(conn: sqlite3.Connection, group_id: str) -> lis
     A removed member's unfinished tasks in the room are stopped with them
     (`stop_room_tasks`); the pids to signal after the commit ride the entry.
 
+    ``display_name`` names an added member's participant row; without it the
+    row has none, as for a caller holding no config.
+
     One entry per room: ``room_token``, ``added``, ``removed``, ``pids`` and
     ``host``.
     """
@@ -257,7 +281,7 @@ def reconcile_group_room_members(conn: sqlite3.Connection, group_id: str) -> lis
     changes = []
     for token in group_owned_room_tokens(conn, group_id):
         room = db.get_room(conn, token)
-        change = _reconcile_roster(conn, room, members)
+        change = _reconcile_roster(conn, room, members, display_name)
         change["host"] = _succeed_host(conn, token, group_id)
         changes.append(change)
     return changes
@@ -275,7 +299,10 @@ def suspend_group_rooms(conn: sqlite3.Connection, group_id: str) -> list[int]:
     return pids
 
 
-def _reconcile_roster(conn: sqlite3.Connection, room: db.Room, members: set[str]) -> dict:
+def _reconcile_roster(
+    conn: sqlite3.Connection, room: db.Room, members: set[str],
+    display_name: DisplayName | None = None,
+) -> dict:
     token = room.token
     on_roster = set(db.list_room_members(conn, token))
     present = {row["user_id"] for row in conn.execute(
@@ -292,7 +319,10 @@ def _reconcile_roster(conn: sqlite3.Connection, room: db.Room, members: set[str]
     # transaction refuses without it), so `add_web_room_member` starts no epoch.
     added = sorted(members - (on_roster & present))
     for user_id in added:
-        db.add_web_room_member(conn, token, user_id)
+        db.add_web_room_member(
+            conn, token, user_id,
+            display_name=display_name(user_id) if display_name else None,
+        )
     for user_id in sorted(members):
         db.ensure_web_chat_handle(conn, user_id, token, room.name or "room")
     removed = sorted((on_roster | present | holders) - members)
@@ -331,3 +361,82 @@ def _succeed_host(conn: sqlite3.Connection, room_token: str, group_id: str) -> s
         )
         return user_id
     return None
+
+
+def display_names(config) -> DisplayName:
+    """The participant-row name for a user id, from the loaded config."""
+    def name(user_id: str) -> str | None:
+        profile = config.users.get(user_id) if config is not None else None
+        return (getattr(profile, "display_name", None) or None) if profile else None
+    return name
+
+
+def manage_url(group_id: str) -> str:
+    """Where in the web app a group's membership is managed."""
+    return f"/istota/groups/?group={quote(group_id, safe='')}"
+
+
+def _group_label(conn: sqlite3.Connection, room: db.Room) -> dict:
+    group = db.get_group(conn, room.group_id) if room.group_id else None
+    return {
+        "group_id": room.group_id,
+        "display_name": (group or {}).get("display_name") or room.group_id,
+    }
+
+
+def managed_by(conn: sqlite3.Connection, room: db.Room | None, user_id: str) -> dict | None:
+    """The group a room's membership follows, as the Chat panes show it, or
+    None for a room with its own roster.
+
+    ``is_owner`` says whether ``user_id`` governs the room's settings now. It
+    is display data: every write asks the policy again.
+    """
+    if not db.is_group_owned_room(room):
+        return None
+    return {
+        **_group_label(conn, room),
+        "manage_url": manage_url(room.group_id or ""),
+        "is_owner": bool(room.group_id) and db.is_group_owner(conn, room.group_id, user_id),
+    }
+
+
+def managed_refusal(conn: sqlite3.Connection, room: db.Room, error: str | None = None) -> dict:
+    """The 409 body for a Chat action on a group-owned room that belongs to
+    the group's membership: ``reason="group_managed"`` and where in Groups to
+    go instead."""
+    return {
+        "error": error or "This room's membership follows its group; manage it in Groups.",
+        "reason": "group_managed",
+        "group": _group_label(conn, room),
+        "manage_url": manage_url(room.group_id or ""),
+    }
+
+
+def list_group_rooms(conn: sqlite3.Connection, group_id: str, user_id: str) -> list[dict]:
+    """The rooms linked to ``group_id`` that ``user_id`` can open, each labelled
+    with its ``membership_source``.
+
+    The group's own rooms and the linked rooms whose roster has the user; a
+    linked room they are not in is left out, name included. A hidden room is
+    still listed, since hiding a group's room is not leaving it. ``room_id`` is
+    the user's own chat handle, None where none has been minted yet.
+    """
+    rooms = []
+    for room in db.list_member_rooms(conn, user_id, include_dismissed=True):
+        if room.group_id != group_id:
+            continue
+        refs = db.room_ref_tokens(conn, room.token, include_surface_refs=False)
+        marks = ", ".join("?" for _ in refs)
+        handle = conn.execute(
+            f"SELECT id FROM web_chat_rooms WHERE user_id = ? AND token IN ({marks}) "
+            "ORDER BY id LIMIT 1",
+            (user_id, *refs),
+        ).fetchone()
+        rooms.append({
+            "token": room.token,
+            "name": room.name or "",
+            "origin": room.origin,
+            "membership_source": "group" if db.is_group_owned_room(room) else "room",
+            "room_id": handle["id"] if handle else None,
+        })
+    return rooms

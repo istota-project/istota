@@ -350,6 +350,8 @@ class TestListingMembers:
             # discloses.
             "message_count": 1,
             "email_thread": False,
+            # Its own roster: no group decides who is in it.
+            "managed_by": None,
         }
         bob = await _login(client, "bob")
         bob_room = (await _room_ids(client, bob))[room.token]

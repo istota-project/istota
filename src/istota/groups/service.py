@@ -87,8 +87,9 @@ def history_disclosure(group_id: str, conn=None) -> dict:
             "briefings": ["All retained group briefing editions, including those published before joining"]}
 
 
-def reconcile_rooms(conn, group_id: str) -> list[int]:
-    """`group_rooms.reconcile_group_room_members` inside a membership mutation.
+def reconcile_rooms(conn, group_id: str, config=None) -> list[int]:
+    """`group_rooms.reconcile_group_room_members` inside a membership mutation,
+    naming added members from ``config`` when it is given.
 
     A database failure becomes a retryable 503, and the caller's transaction
     rolls the membership change back with it: a partial roster never commits.
@@ -96,7 +97,10 @@ def reconcile_rooms(conn, group_id: str) -> list[int]:
     `group_rooms.signal_stopped_tasks` once the caller has committed.
     """
     try:
-        changes = group_rooms.reconcile_group_room_members(conn, group_id)
+        changes = group_rooms.reconcile_group_room_members(
+            conn, group_id,
+            display_name=group_rooms.display_names(config) if config is not None else None,
+        )
     except sqlite3.Error as exc:
         logger.warning("Group room reconciliation failed: group=%s error=%s",
                        group_id, type(exc).__name__)
@@ -211,7 +215,7 @@ def change_membership(conn, config, group_id: str, user_id: str, *, actor_id: st
                    details={"old_role": current["role"], "new_role": role})
             changed = True
         if changed:
-            pids = reconcile_rooms(conn, group_id)
+            pids = reconcile_rooms(conn, group_id, config)
         result = _finish(conn, group_id) if changed else group
     group_rooms.signal_stopped_tasks(pids)
     return {**result, "changed": changed}

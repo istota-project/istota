@@ -5291,6 +5291,10 @@ def upsert_room_participant(
     """
     if kind not in PARTICIPANT_KINDS:
         raise ValueError(f"unknown participant kind: {kind!r}")
+    if kind == "guest" and is_group_owned_room(get_room(conn, room_token)):
+        # Every reader of a group-owned room is a group member; a guest would
+        # be an audience the group never agreed to.
+        raise ValueError("a group-owned room takes no guests")
     previous = conn.execute(
         "SELECT kind, user_id FROM room_participants WHERE room_token = ? AND surface = ? "
         "AND surface_ref = ? AND left_at IS NULL",
@@ -6014,6 +6018,22 @@ def set_room_membership_source(
     )
 
 
+def _refuses_external_binding(
+    conn: sqlite3.Connection, room_token: str, surface: str,
+) -> bool:
+    """Whether binding ``surface`` would give a group-owned room an audience
+    outside its group. Talk, WhatsApp, email and SMS keep rosters of their own
+    that nothing synchronizes with the group, so only ``web`` binds."""
+    if surface == "web":
+        return False
+    room = get_room(conn, _canonical_room_token(conn, room_token, cross_surface=False))
+    if not is_group_owned_room(room):
+        return False
+    logger.warning("room_binding.refused room=%s surface=%s: group-owned room",
+                   room.token, surface)
+    return True
+
+
 def add_room_binding(
     conn: sqlite3.Connection, room_token: str, surface: str, surface_ref: str,
 ) -> bool:
@@ -6026,7 +6046,12 @@ def add_room_binding(
     that surface (the PK). Neither raises, because the Talk poller binds inside
     a whole-batch transaction and one exception would roll back the batch; a
     caller that minted the room checks the result instead (ISSUE-581).
+
+    A group-owned room takes no surface but its own web binding
+    (`_refuses_external_binding`), and False comes back for any other.
     """
+    if _refuses_external_binding(conn, room_token, surface):
+        return False
     cur = conn.execute(
         "INSERT OR IGNORE INTO room_bindings (room_token, surface, surface_ref) "
         "VALUES (?, ?, ?)",
@@ -6079,6 +6104,8 @@ def replace_room_binding(
     would point the room at a conversation the winner is not using, on top of
     the orphan it already made.
     """
+    if _refuses_external_binding(conn, room_token, surface):
+        return False
     if expected_ref is None:
         cur = conn.execute(
             "INSERT OR IGNORE INTO room_bindings (room_token, surface, surface_ref) "

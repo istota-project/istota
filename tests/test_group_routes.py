@@ -15,8 +15,9 @@ WRITES = [
     ("PATCH", "/groups/family"), ("PUT", "/groups/family/members/carol"),
     ("DELETE", "/groups/family/members/bob"), ("POST", "/admin/groups"),
     ("PATCH", "/admin/groups/family"), ("POST", "/admin/groups/family/archive"),
+    ("POST", "/groups/family/rooms"),
 ]
-READS = ["/groups", "/groups/family", "/groups/family/user-options",
+READS = ["/groups", "/groups/family", "/groups/family/user-options", "/groups/family/rooms",
          "/admin/groups", "/admin/groups/family", "/admin/groups/user-options"]
 
 
@@ -94,6 +95,8 @@ async def test_writes_require_real_origin_guard(client, configured, method, path
     ("GET", "/user-options", None),
     ("PUT", "/members/carol", {"revision": 0, "role": "member", "acknowledge_history": True}),
     ("DELETE", "/members/bob", {"revision": 0}),
+    ("GET", "/rooms", None),
+    ("POST", "/rooms", {"name": "Planning", "request_id": "req-00000001", "revision": 0}),
 ])
 async def test_member_routes_hide_unknown_archived_and_nonmember_groups(client, configured, method, suffix, payload):
     with db.get_db(configured._config.db_path) as conn:
