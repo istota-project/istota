@@ -1,7 +1,7 @@
 /**
  * The settings row that opens the generic iOS app's own settings (0.12.0).
  *
- * It is a convenience beside the native bar's Device settings control, so what
+ * It is a convenience beside the nav menu item and the app icon's quick action, so what
  * matters is that it appears only where the app can answer, that it names the
  * device, and that a refusal is reported rather than swallowed.
  */

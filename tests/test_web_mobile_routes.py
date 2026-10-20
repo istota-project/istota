@@ -122,6 +122,36 @@ async def test_email_handoff_continues_login_and_creates_fresh_session(client, c
         assert (await native.get("/istota/api/mobile/session")).status_code == 401
 
 
+def in_app_sheet(page) -> bool:
+    return '<body class="in-app-sheet">' in page.text
+
+
+async def test_sign_in_pages_inside_the_app_sheet_drop_the_page_chrome(client, configured, monkeypatch):
+    monkeypatch.setattr(configured, "_LOGIN_FAILURE_SECONDS", 0)
+    plain = await client.get("/istota/login")
+    assert not in_app_sheet(plain) and "<footer>" in plain.text
+    attempt, _, _ = await create(client)
+    await client.get(attempt["authorize_path"])
+    login = await client.get("/istota/login")
+    assert in_app_sheet(login) and "<footer>" not in login.text
+    refused = await client.post("/istota/login/email", data={
+        "email": "alice@example.com", "password": "not the password", "csrf_token": csrf(login),
+    })
+    assert refused.status_code == 400 and in_app_sheet(refused)
+    await sign_in(client)
+    # The fresh session no longer holds the request; the authorize path still says where we are.
+    assert in_app_sheet(await client.get(attempt["authorize_path"]))
+
+
+async def test_a_browser_sign_in_keeps_the_full_page(client, configured, monkeypatch):
+    monkeypatch.setattr(configured, "_LOGIN_FAILURE_SECONDS", 0)
+    refused = await client.post("/istota/login/email", data={
+        "email": "alice@example.com", "password": "not the password",
+        "csrf_token": csrf(await client.get("/istota/login")),
+    })
+    assert refused.status_code == 400 and not in_app_sheet(refused) and "<footer>" in refused.text
+
+
 @pytest.mark.parametrize("endpoint,content_type", [
     ("requests", "application/json"), ("exchange", "application/x-www-form-urlencoded"),
 ])
