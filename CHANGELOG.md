@@ -83,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Checkboxes in the web UI look and behave the same everywhere. They were the browser's own box at whatever size each page gave them, which made them very small in Settings → Notifications. They are now one consistent box that is larger and easier to tap on a phone. Selecting a file in Files no longer shifts the list down by a few pixels.
 - Every inline notice in the web UI is now drawn by the shared `Alert` component, so admin, settings, health, money, briefings, feeds and location notices look and announce alike, with Retry and Reload buttons in the notice's own action row. Failed actions on a list still on screen now report in the notice drawer instead of a box above the page, and a failed lab CSV import no longer replaces the Labs page. Wallet, feeds, health and money tax settings show a failed first load across the whole pane with a Retry button, where an editable form used to sit under the error with empty or default values.
 - Settings → Preferences picks disabled skills from a searchable list instead of a comma-separated text field, so a misspelled name can no longer be saved. The list holds only the skills your account can use, and a skill you turned off earlier that is no longer offered stays selected.
 - On a phone, the sidebar drawer now slides in and out instead of appearing and disappearing at once. It is drawn on the GPU so it stays smooth on slower phones, and it does not animate when the system asks for reduced motion.

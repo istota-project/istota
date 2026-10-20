@@ -452,10 +452,6 @@
   .col-select + td {
     padding-inline-start: 0;
   }
-  .file-controls :global(.ui-checkbox-input),
-  .col-select :global(.ui-checkbox-input) {
-    margin: 0;
-  }
   .delete-errors {
     padding: var(--space-2) var(--space-3);
   }

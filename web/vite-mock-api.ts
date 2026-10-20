@@ -9223,6 +9223,25 @@ const handlers: MockHandler[] = [
   },
   locationDevicesHandler,
 
+  ({ url, method }) => {
+    const path = url.split('?')[0];
+    if (method !== 'GET') return undefined;
+    if (path === '/istota/api/push/devices') return { devices: [] };
+    if (path === '/istota/api/push/categories') {
+      return {
+        categories: [
+          { id: 'confirmation', label: 'Approvals' },
+          { id: 'outbound_draft', label: 'Draft replies' },
+          { id: 'relay_question', label: 'Questions from others' },
+          { id: 'job_failure', label: 'Failed jobs' },
+          { id: 'task_alert', label: 'Task alerts' },
+          { id: 'group_briefing', label: 'Group briefings' },
+        ],
+      };
+    }
+    return undefined;
+  },
+
   ({ url }) => (url.startsWith('/istota/api/location/current') ? mockCurrent : undefined),
 
   // Place stats
