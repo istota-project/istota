@@ -120,6 +120,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- In Money → Settings → Invoicing, a failed delete of an entity or service no longer replaces the Business defaults card with an error as if the page had failed to load. It now shows as a notice and the list stays as it was. The same goes for a client. A card whose list did fail to load says so with a Retry button, rather than showing an empty list.
 - Leaving the admin Logs page with Follow on while a page of records was still loading no longer leaves a live tail connection open in the background.
 - The iOS app's location tracker card now shows its Dropped and Last error rows in the warning colour. The card's own style for the other rows had been overriding it.
 - The ntfy push card in Settings → Connections shows the stored server URL and default topic, and you can edit them in place. They were masked like passwords, so there was no way to check what was set. The access token and password stay hidden.
