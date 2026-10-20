@@ -24,8 +24,15 @@ set -eu
 SRC=/etc/istota-nginx
 OUT=/etc/nginx/istota
 CONF=/etc/nginx/conf.d/default.conf
-# The full test tier's Nextcloud fixture swaps in its own locations here.
-ROOT_LOCATIONS="${ISTOTA_NGINX_ROOT_LOCATIONS:-$SRC/root-locations.conf}"
+# ISTOTA_SITE is compose's: 1 when istota-stack passed host.env's SITE_DIR,
+# mounted read-only at /srv/site. The full test tier's Nextcloud fixture swaps
+# in its own locations through ISTOTA_NGINX_ROOT_LOCATIONS, which wins.
+if [ "${ISTOTA_SITE:-}" = 1 ]; then
+    ROOT_LOCATIONS="$SRC/root-locations-site.conf"
+else
+    ROOT_LOCATIONS="$SRC/root-locations.conf"
+fi
+ROOT_LOCATIONS="${ISTOTA_NGINX_ROOT_LOCATIONS:-$ROOT_LOCATIONS}"
 
 INGRESS="${INGRESS:-local}"
 TLS_CERT_SOURCE="${TLS_CERT_SOURCE:-}"
@@ -128,4 +135,7 @@ esac
 render tls.conf > "$OUT/tls.conf"
 render istota.conf.template > "$OUT/server.conf"
 cp "$ROOT_LOCATIONS" "$OUT/root.conf"
+if [ "$ROOT_LOCATIONS" = "$SRC/root-locations-site.conf" ] && [ ! -f /srv/site/index.html ]; then
+    log "SITE_DIR is set and has no index.html; / answers 404."
+fi
 log "INGRESS=${INGRESS} rendered for ${DOMAIN}."

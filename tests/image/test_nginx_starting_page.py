@@ -43,13 +43,15 @@ def network():
     _docker("network", "rm", name, check=False)
 
 
-def _start_nginx(network: str) -> str:
+def _start_nginx(network: str, *extra: str) -> str:
+    """The shipped nginx in local ingress; `extra` is more `docker run` options."""
     name = f"istota-starting-nginx-{uuid.uuid4().hex[:8]}"
     _docker(
         "run", "-d", "--name", name, "--network", network,
         "-v", f"{NGINX_DIR}:/etc/istota-nginx:ro",
         "-v", f"{SCRIPT}:/docker-entrypoint.d/15-istota-ingress.sh:ro",
         "-e", "INGRESS=local", "-e", "DOMAIN=localhost", "-e", f"WEB_PORT={WEB_PORT}",
+        *extra,
         _nginx_image(),
     )
     deadline = time.monotonic() + 30
@@ -83,15 +85,21 @@ def nginx_without_web(network):
     _docker("rm", "-f", name, check=False)
 
 
-@pytest.fixture
-def nginx_with_a_failing_web(network):
+def _start_web(network: str, status: int, body: str) -> str:
+    """A stand-in `web` on the network, answering every request with `status`."""
     web = f"istota-starting-web-{uuid.uuid4().hex[:8]}"
-    conf = f"server {{ listen {WEB_PORT}; location / {{ return 503 app-own-503; }} }}"
+    conf = f"server {{ listen {WEB_PORT}; location / {{ return {status} {body}; }} }}"
     _docker(
         "run", "-d", "--name", web, "--network", network, "--network-alias", "web",
         "--entrypoint", "sh", _nginx_image(), "-c",
         f"printf '%s' '{conf}' > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'",
     )
+    return web
+
+
+@pytest.fixture
+def nginx_with_a_failing_web(network):
+    web = _start_web(network, 503, "app-own-503")
     name = _start_nginx(network)
     yield name
     _docker("rm", "-f", name, web, check=False)

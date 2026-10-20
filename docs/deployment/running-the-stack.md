@@ -329,6 +329,21 @@ The compose `nginx` is the only listener the stack publishes. The mode is `INGRE
 
 Behind TLS (`direct` and `proxied`) the entrypoint refuses to start when `[site] hostname` and the stack's `DOMAIN` differ, since every login would then fail its origin check.
 
+### A static site at the root
+
+By default `/` redirects to `/istota/` and every other path outside the app answers 404. To serve a static site of your own at the root of the hostname instead, put its files in a directory on the VM and name it in `host.env`:
+
+```bash
+sudo mkdir -p /srv/app/istota/site
+sudo cp -r ./my-site/. /srv/app/istota/site/
+sudo istota-stack host-env SITE_DIR=/srv/app/istota/site
+sudo istota-stack up
+```
+
+nginx then serves `index.html` at `/` and any other file by its path. A missing file is 404, and so is anything whose path has a part starting with a dot (`.git/`, for one). `/istota/`, `/webhooks/` and the signaling path still go to the app. Removing the key and running `istota-stack up` again puts the redirect back.
+
+The directory is mounted read-only into the `nginx` container and into no other. That is the point of the option: the agent cannot write to anything the stack publishes, so the site changes only when you change it (instance site hosting, which let the agent write to a public directory, was removed for that reason). `istota-stack` therefore refuses a `SITE_DIR` that is inside the workspace mount, the state directory, `config/`, `secrets/`, `requests/`, the checkout, the setup directories, Docker's data directory or rclone's cache, or that holds any of them, such as `/srv/app/istota` itself. A refused or missing directory prints a warning and the stack starts with the redirect.
+
 ### Encrypting the hop from a reverse proxy
 
 In `proxied` mode the reverse proxy terminates the public TLS and forwards to the VM. What crosses that hop is everything: passwords at login, session cookies, OAuth codes, and webhook payloads (messages, location points). Plain HTTP there is acceptable only on a network nothing else shares. Otherwise encrypt it, and make the proxy check what it connects to. A certificate the proxy does not verify stops only passive reading: anyone who can redirect the traffic presents their own certificate and the proxy accepts it.

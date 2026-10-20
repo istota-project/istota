@@ -210,6 +210,41 @@ mount_dir_for_storage() {
 
 MOUNT_DIR="${ISTOTA_MOUNT_DIR:-$(mount_dir_for_storage "$(env_get "$HOST_ENV" STORAGE)")}"
 
+# host.env's SITE_DIR, resolved, when it may be served: the operator's static
+# site, which nginx alone mounts read-only at /srv/site (#804). Refused when it
+# is inside, or holds, a directory a container writes or the stack keeps: a
+# public directory the agent can write to is the egress channel ISSUE-194
+# removed. Refused is a warning on stderr and no site, never a failed verb.
+site_dir() {
+    local value resolved guard
+    value="$(env_get "$HOST_ENV" SITE_DIR)"
+    [ -n "$value" ] || return 0
+    case "$value" in
+        /*) ;;
+        *) echo "[istota-stack] WARNING: SITE_DIR '${value}' is not an absolute path; no site is served." >&2; return 0 ;;
+    esac
+    if ! resolved="$(cd "$value" 2>/dev/null && pwd -P)"; then
+        echo "[istota-stack] WARNING: SITE_DIR '${value}' is not a directory; no site is served." >&2
+        return 0
+    fi
+    # Docker's root holds the named volumes (the browser profile, the devboxes),
+    # and rclone's cache holds what the agent wrote to the mount.
+    local docker_root
+    docker_root="$(command docker info -f '{{.DockerRootDir}}' 2>/dev/null)" || docker_root=""
+    for guard in "$MOUNT_DIR" "$DATA_DIR" "$CONFIG_DIR" "$SECRETS_DIR" "${STACK}/requests" \
+                 "$SRC" "$SETUP_DIR" "$STAGING_DIR" "${docker_root:-/var/lib/docker}" \
+                 /var/lib/docker /var/cache/istota-rclone; do
+        guard="$(cd "$guard" 2>/dev/null && pwd -P || echo "$guard")"
+        case "${resolved}/" in
+            "${guard}/"*) ;;
+            *) case "${guard}/" in "${resolved}/"*) ;; *) continue ;; esac ;;
+        esac
+        echo "[istota-stack] WARNING: SITE_DIR '${value}' overlaps ${guard}, which the stack writes; no site is served." >&2
+        return 0
+    done
+    echo "$resolved"
+}
+
 # host.env's APT_MIRROR, which the images' builds take as a build arg.
 # provision.sh carries the same check; tests hold the two equal.
 valid_apt_mirror() {
@@ -327,7 +362,8 @@ compose() {
     fi
     local certs="${STACK}/certs"
     if [ "$(env_get "$HOST_ENV" TLS_CERT_SOURCE)" = "acme" ]; then certs="${STACK}/letsencrypt"; fi
-    local pin apt_mirror
+    local pin apt_mirror site
+    site="$(site_dir)"
     pin="$(env_get "$HOST_ENV" CLAUDE_CODE_VERSION)"
     apt_mirror="$(env_get "$HOST_ENV" APT_MIRROR)"
     if [ -n "$apt_mirror" ] && ! valid_apt_mirror "$apt_mirror"; then
@@ -347,6 +383,8 @@ compose() {
         # build arg, which overrides the Dockerfile's default and fails the build.
         if [ -n "$pin" ]; then export CLAUDE_CODE_VERSION="$pin"; else unset CLAUDE_CODE_VERSION; fi
         if [ -n "$apt_mirror" ]; then export APT_MIRROR="$apt_mirror"; else unset APT_MIRROR; fi
+        # Empty rather than unset, since .env would otherwise supply one unchecked.
+        export ISTOTA_SITE_DIR="$site"
         # The image has no .git: the commit being built and its deployed name
         # are how a running stack says which code it is. Every build caller
         # sets ISTOTA_TAG and has the checkout at that commit.
