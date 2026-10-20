@@ -179,12 +179,14 @@ def is_current_member(conn: sqlite3.Connection, room_token: str, user_id: str) -
     return present[0] == 0 or present[1] > 0
 
 
-def _written_by_someone_else(conn: sqlite3.Connection, task: "db.Task") -> bool:
+def written_by_someone_else(conn: sqlite3.Connection, task: "db.Task") -> bool:
     """Whether the stored turn this task answers names an author other than
     the task's user. A row with neither column set predates attribution and is
-    read as the user's, as every history reader reads it. Read by
-    `private_replies.my_notes_room`: a correspondent's mail on an email thread
-    runs as the host, and carries none of the host's private notes."""
+    read as the user's, as every history reader reads it. A correspondent's
+    mail on an email thread runs as the host, so two readers ask this: it
+    carries none of the host's private notes (`private_replies.my_notes_room`)
+    and reaches none of the host's connected mail accounts (the skill proxy's
+    `mail_account` channel)."""
     row = conn.execute(
         "SELECT author_user_id, author_label FROM messages "
         "WHERE task_id = ? AND role = 'user' ORDER BY id LIMIT 1",
