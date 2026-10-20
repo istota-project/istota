@@ -26,6 +26,7 @@
   import { installKeyboardDismiss } from '$lib/platform/input';
   import { startPushBadgeSync } from '$lib/stores/pushBadge';
   import { startPushOpenHandling } from '$lib/platform/pushOpen';
+  import { refreshStaleEnrollment } from '$lib/platform/pushEnrollment';
   import { shellRunsServiceWorker } from '$lib/platform/native';
   import {
     canReadCachedUser,
@@ -242,6 +243,7 @@
   let loadGeneration = 0;
   let stopPushBadge: (() => void) | undefined;
   let stopPushOpen: (() => void) | undefined;
+  let pushEnrollmentChecked = false;
 
   /**
    * Resolve who is signed in, and paint something either way.
@@ -311,6 +313,10 @@
       startNotificationPoll();
       stopPushBadge ??= startPushBadgeSync();
       stopPushOpen ??= startPushOpenHandling();
+      if (!pushEnrollmentChecked) {
+        pushEnrollmentChecked = true;
+        void refreshStaleEnrollment();
+      }
       if (fresh.show_nav_unread_badges === true) startNavUnreadPoll(fresh.username);
       else stopNavUnreadPoll();
       return true;
