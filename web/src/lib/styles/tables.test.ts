@@ -120,11 +120,9 @@ describe('table.css', () => {
     expect(blockAfter(cascade, '.table--on-card tbody tr.is-selected:hover {')).toContain(
       'background: var(--surface-badge)',
     );
-    for (const page of ['routes/admin/users/+page.svelte', 'routes/admin/groups/+page.svelte']) {
-      expect(readFileSync(join(SRC, page), 'utf8')).toMatch(
-        /<table\s+class="[^"]*table--interactive table--on-card/,
-      );
-    }
+    expect(readFileSync(join(SRC, 'routes/admin/users/+page.svelte'), 'utf8')).toMatch(
+      /<table\s+class="[^"]*table--interactive table--on-card/,
+    );
   });
 
   it('has two densities and no more', () => {

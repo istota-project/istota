@@ -80,7 +80,7 @@ afterEach(cleanup);
 it('shows owner recovery, membership history and events without loading notebook content', async () => {
   render(Groups);
   await screen.findByRole('heading', { name: 'Team' });
-  expect(screen.getByRole('button', { name: 'Team' })).toHaveAttribute('aria-current', 'true');
+  expect(screen.getByRole('button', { name: 'Group' })).toHaveTextContent('Team (needs owner)');
   expect(screen.getAllByText('Needs owner').length).toBeGreaterThan(0);
   const history = screen.getByRole('table', { name: 'Membership history' });
   expect(within(history).getByText('Bob')).toBeTruthy();
@@ -92,6 +92,35 @@ it('shows owner recovery, membership history and events without loading notebook
   expect(screen.queryByRole('button', { name: 'Leave group' })).toBeNull();
   expect(api.getGroup).not.toHaveBeenCalled();
   expect(api.getGroupMemory).not.toHaveBeenCalled();
+});
+it('swaps the group details in place, keeping the current ones until the next arrives', async () => {
+  const family = {
+    ...group,
+    group_id: 'family',
+    display_name: 'Family',
+    needs_owner: false,
+    history: [],
+    events: [],
+  };
+  api.getAdminGroups.mockResolvedValue({ groups: [group, family] });
+  let resolve!: (value: typeof family) => void;
+  render(Groups);
+  await screen.findByRole('heading', { name: 'Team' });
+  api.getAdminGroup.mockReturnValueOnce(new Promise((r) => (resolve = r)));
+  const trigger = screen.getByRole('button', { name: 'Group' });
+  await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
+  await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
+  await fireEvent.click(trigger);
+  const option = await screen.findByRole('option', { name: 'Family' });
+  await fireEvent.pointerUp(option, { pointerType: 'mouse', button: 0 });
+  await fireEvent.click(option);
+  await waitFor(() => expect(api.getAdminGroup).toHaveBeenLastCalledWith('family'));
+  // The previous group stays on screen, marked busy, rather than the pane emptying.
+  expect(screen.getByRole('heading', { name: 'Team' }).closest('[aria-busy="true"]')).toBeTruthy();
+  resolve(family);
+  await screen.findByRole('heading', { name: 'Family' });
+  expect(screen.getByRole('heading', { name: 'Family' }).closest('[aria-busy="true"]')).toBeNull();
+  expect(__history.entries).toHaveLength(2);
 });
 it('creates a group with explicit enabled owners, without automatically adding the admin', async () => {
   render(Groups);

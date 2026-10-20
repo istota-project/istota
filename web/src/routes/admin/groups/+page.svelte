@@ -14,6 +14,7 @@
     LoadState,
     Card,
     Checkbox,
+    Select,
     Timestamp,
   } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
@@ -63,6 +64,18 @@
   });
   selection.start();
 
+  // The status rides the label, since the dropdown is the only list of groups.
+  const groupOptions = $derived(
+    groups.map((item) => ({
+      value: item.group_id,
+      label: item.archived_at
+        ? `${item.display_name} (archived)`
+        : item.needs_owner
+          ? `${item.display_name} (needs owner)`
+          : item.display_name,
+    })),
+  );
+
   function eventTitle(type: string): string {
     const titles: Record<string, string> = {
       created: 'Group created',
@@ -104,7 +117,6 @@
   }
   async function select(id: string) {
     selected = id;
-    group = null;
     detailError = '';
     detailLoading = true;
     const pending = ++request;
@@ -112,7 +124,10 @@
       const result = await getAdminGroup(id);
       if (active && pending === request) group = result;
     } catch (e) {
-      if (active && pending === request) detailError = message(e);
+      if (active && pending === request) {
+        group = null;
+        detailError = message(e);
+      }
     } finally {
       if (active && pending === request) detailLoading = false;
     }
@@ -246,206 +261,168 @@
         their recipients. Archiving keeps the data and history, and the group ID cannot be reused.
       </p>
     </Disclosure>
-    <Card title="Groups">
-      {#snippet actions()}<Button variant="primary" size="sm" onclick={openCreate} disabled={busy}
-          >Create group</Button
-        >{/snippet}
-      {#if !groups.length}<EmptyState
-          >No groups yet. Create one to choose its first owners.</EmptyState
-        >
-      {:else}<div class="table-scroll">
-          <table
-            class="table table--fixed table--interactive table--on-card groups-grid"
-            aria-label="Groups"
-          >
-            <thead
-              ><tr
-                ><th scope="col" class="col-group">Group</th><th scope="col" class="col-kind"
-                  >Kind</th
-                ><th scope="col" class="col-created">Created</th><th scope="col" class="col-status"
-                  >Status</th
-                ></tr
-              ></thead
-            >
-            <tbody>
-              {#each groups as item (item.group_id)}
-                <!-- The row is a shortcut; the name button is the keyboard route. -->
-                <tr
-                  class="row-clickable"
-                  class:is-selected={item.group_id === selected}
-                  class:archived={item.archived_at}
-                  onclick={() => !busy && selection.push(item.group_id)}
-                >
-                  <td>
-                    <button
-                      type="button"
-                      class="group-name button-reset"
-                      aria-current={item.group_id === selected ? 'true' : undefined}
-                      disabled={busy}
-                      onclick={(event) => {
-                        event.stopPropagation();
-                        selection.push(item.group_id);
-                      }}>{item.display_name}</button
-                    >
-                    <div class="caption mono">{item.group_id}</div>
-                  </td>
-                  <td class="col-kind muted">{item.kind}</td>
-                  <td class="col-created muted"><Timestamp value={item.created_at} /></td>
-                  <td class="col-status"
-                    >{#if item.archived_at}<Badge size="sm">Archived</Badge
-                      >{:else if item.needs_owner}<Badge size="sm" variant="warn">Needs owner</Badge
-                      >{:else}<Badge size="sm" variant="success">Active</Badge>{/if}</td
-                  >
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>{/if}
-    </Card>
+    <div class="group-picker toolbar control-row">
+      {#if groups.length}<Select
+          value={selected ?? ''}
+          options={groupOptions}
+          onValueChange={(id) => selection.push(id)}
+          ariaLabel="Group"
+          size="md"
+          disabled={busy}
+        />{/if}
+      <Button variant="primary" onclick={openCreate} disabled={busy}>Create group</Button>
+    </div>
+    {#if !groups.length}<EmptyState
+        >No groups yet. Create one to choose its first owners.</EmptyState
+      >{/if}
     <LoadState
       loading={detailLoading}
       error={detailError}
       loadingLabel="Loading group…"
       onRetry={() => selected && select(selected)}
       retryLabel="Reload group details"
+      hasData={group !== null}
     >
-      {#if group}
-        <Card title={group.display_name}>
-          {#snippet status()}
-            {#if group?.archived_at}<Badge size="sm">Archived</Badge
-              >{:else if group?.needs_owner}<Badge size="sm" variant="warn">Needs owner</Badge>{/if}
-          {/snippet}
-          {#snippet actions()}
-            {#if group?.capabilities.read_memory}<Button
-                size="sm"
-                href="{base}/groups/?group={encodeURIComponent(group.group_id)}"
-                >Open group notebook</Button
-              >{/if}
-            {#if group && !group.archived_at && group.capabilities.archive}<Button
-                variant="danger"
-                size="sm"
-                disabled={busy}
-                onclick={() => {
-                  formError = '';
-                  archiveOpen = true;
-                }}>Archive group</Button
-              >{/if}
-          {/snippet}
-          <dl class="kv group-facts">
-            <dt>Group ID</dt>
-            <dd class="mono">{group.group_id}</dd>
-            <dt>Kind</dt>
-            <dd>{group.kind}</dd>
-            <dt>Created</dt>
-            <dd>
-              <Timestamp value={group.created_at} />
-              <span class="muted">by {group.created_by}</span>
-            </dd>
-            {#if group.archived_at}
-              <dt>Archived</dt>
+      {#if group}<div class="group-detail vstack" inert={detailLoading} aria-busy={detailLoading}>
+          <Card title={group.display_name}>
+            {#snippet status()}
+              {#if group?.archived_at}<Badge size="sm">Archived</Badge
+                >{:else if group?.needs_owner}<Badge size="sm" variant="warn">Needs owner</Badge
+                >{/if}
+            {/snippet}
+            {#snippet actions()}
+              {#if group?.capabilities.read_memory}<Button
+                  size="sm"
+                  href="{base}/groups/?group={encodeURIComponent(group.group_id)}"
+                  >Open group notebook</Button
+                >{/if}
+              {#if group && !group.archived_at && group.capabilities.archive}<Button
+                  variant="danger"
+                  size="sm"
+                  disabled={busy}
+                  onclick={() => {
+                    formError = '';
+                    archiveOpen = true;
+                  }}>Archive group</Button
+                >{/if}
+            {/snippet}
+            <dl class="kv group-facts">
+              <dt>Group ID</dt>
+              <dd class="mono">{group.group_id}</dd>
+              <dt>Kind</dt>
+              <dd>{group.kind}</dd>
+              <dt>Created</dt>
               <dd>
-                <Timestamp value={group.archived_at} />
-                <span class="muted">· data and membership history are kept</span>
+                <Timestamp value={group.created_at} />
+                <span class="muted">by {group.created_by}</span>
               </dd>
+              {#if group.archived_at}
+                <dt>Archived</dt>
+                <dd>
+                  <Timestamp value={group.archived_at} />
+                  <span class="muted">· data and membership history are kept</span>
+                </dd>
+              {/if}
+            </dl>
+            {#if !group.archived_at && group.needs_owner}<p class="banner warn">
+                This group has no owner. Members can still use it, but nobody can manage its
+                membership until you assign one.
+              </p>{/if}
+          </Card>
+          {#if !group.archived_at}
+            <Card title="Members">
+              {#key group.group_id}<GroupMembers {group} administration onChanged={refresh} />{/key}
+            </Card>
+            <Card
+              title="Storage"
+              description="Retry setup if the group's workspace was unavailable. Existing files are kept."
+            >
+              {#snippet actions()}<Button
+                  size="sm"
+                  onclick={retryStorage}
+                  loading={busy}
+                  loadingLabel="Working…">Retry storage setup</Button
+                >{/snippet}
+              {#if storageNotes[group.group_id]}<p class="banner info" role="status">
+                  {storageNotes[group.group_id]}
+                </p>{/if}
+              {#if storageErrors[group.group_id]}<p class="banner error" role="alert">
+                  {storageErrors[group.group_id]}
+                </p>{/if}
+            </Card>
+          {/if}
+          {#if group.system_key === 'all_users'}
+            <p class="caption">
+              Its notebook, files and retained briefing history are shared with all current and
+              future installation users.
+            </p>
+          {/if}
+          <Card title="Membership history">
+            {#if !group.history.length}<EmptyState size="sm">No membership history.</EmptyState
+              >{:else}
+              <div class="table-scroll">
+                <table class="table table--fixed" aria-label="Membership history">
+                  <thead
+                    ><tr
+                      ><th scope="col">Member</th><th scope="col" class="col-role">Role</th><th
+                        scope="col">Joined</th
+                      ><th scope="col">Left</th></tr
+                    ></thead
+                  >
+                  <tbody
+                    >{#each group.history as membership}<tr
+                        ><td
+                          ><UserCell
+                            userId={membership.user_id}
+                            displayName={membership.display_name}
+                          /></td
+                        ><td class="col-role"
+                          ><Badge
+                            size="sm"
+                            variant={membership.role === 'owner' ? 'info' : 'neutral'}
+                            >{membership.role === 'owner' ? 'Owner' : 'Member'}</Badge
+                          ></td
+                        ><td
+                          ><Timestamp value={membership.added_at} />
+                          <div class="caption">by {membership.added_by}</div></td
+                        ><td
+                          >{#if membership.ended_at}<Timestamp
+                              value={membership.ended_at}
+                            />{#if membership.ended_by}<div class="caption">
+                                by {membership.ended_by}
+                              </div>{/if}{:else}<span class="muted">Current member</span>{/if}</td
+                        ></tr
+                      >{/each}</tbody
+                  >
+                </table>
+              </div>
             {/if}
-          </dl>
-          {#if !group.archived_at && group.needs_owner}<p class="banner warn">
-              This group has no owner. Members can still use it, but nobody can manage its
-              membership until you assign one.
-            </p>{/if}
-        </Card>
-        {#if !group.archived_at}
-          <Card title="Members">
-            {#key group.group_id}<GroupMembers {group} administration onChanged={refresh} />{/key}
           </Card>
           <Card
-            title="Storage"
-            description="Retry setup if the group's workspace was unavailable. Existing files are kept."
+            title="Management events"
+            description="Role changes keep the membership period intact. Each change is recorded here."
           >
-            {#snippet actions()}<Button
-                size="sm"
-                onclick={retryStorage}
-                loading={busy}
-                loadingLabel="Working…">Retry storage setup</Button
-              >{/snippet}
-            {#if storageNotes[group.group_id]}<p class="banner info" role="status">
-                {storageNotes[group.group_id]}
-              </p>{/if}
-            {#if storageErrors[group.group_id]}<p class="banner error" role="alert">
-                {storageErrors[group.group_id]}
-              </p>{/if}
+            {#if !group.events.length}<EmptyState size="sm">No management events.</EmptyState
+              >{:else}<ol class="list-reset">
+                {#each group.events as event (event.id)}
+                  {@const lines = eventDetails(event)}
+                  <li class="event">
+                    <div class="event-head">
+                      <span class="event-title">{eventTitle(event.event_type)}</span>
+                      <Timestamp class="caption" value={event.created_at} format="relative" />
+                    </div>
+                    <div class="caption">
+                      by {event.actor_id}{#if event.subject_user_id}
+                        · {event.subject_user_id}{/if}
+                    </div>
+                    {#if lines.length}<ul class="event-details muted">
+                        {#each lines as line}<li>{line}</li>{/each}
+                      </ul>{/if}
+                  </li>
+                {/each}
+              </ol>{/if}
           </Card>
-        {/if}
-        {#if group.system_key === 'all_users'}
-          <p class="caption">
-            Its notebook, files and retained briefing history are shared with all current and future
-            installation users.
-          </p>
-        {/if}
-        <Card title="Membership history">
-          {#if !group.history.length}<EmptyState size="sm">No membership history.</EmptyState
-            >{:else}
-            <div class="table-scroll">
-              <table class="table table--fixed" aria-label="Membership history">
-                <thead
-                  ><tr
-                    ><th scope="col">Member</th><th scope="col" class="col-role">Role</th><th
-                      scope="col">Joined</th
-                    ><th scope="col">Left</th></tr
-                  ></thead
-                >
-                <tbody
-                  >{#each group.history as membership}<tr
-                      ><td
-                        ><UserCell
-                          userId={membership.user_id}
-                          displayName={membership.display_name}
-                        /></td
-                      ><td class="col-role"
-                        ><Badge size="sm" variant={membership.role === 'owner' ? 'info' : 'neutral'}
-                          >{membership.role === 'owner' ? 'Owner' : 'Member'}</Badge
-                        ></td
-                      ><td
-                        ><Timestamp value={membership.added_at} />
-                        <div class="caption">by {membership.added_by}</div></td
-                      ><td
-                        >{#if membership.ended_at}<Timestamp
-                            value={membership.ended_at}
-                          />{#if membership.ended_by}<div class="caption">
-                              by {membership.ended_by}
-                            </div>{/if}{:else}<span class="muted">Current member</span>{/if}</td
-                      ></tr
-                    >{/each}</tbody
-                >
-              </table>
-            </div>
-          {/if}
-        </Card>
-        <Card
-          title="Management events"
-          description="Role changes keep the membership period intact. Each change is recorded here."
-        >
-          {#if !group.events.length}<EmptyState size="sm">No management events.</EmptyState
-            >{:else}<ol class="list-reset">
-              {#each group.events as event (event.id)}
-                {@const lines = eventDetails(event)}
-                <li class="event">
-                  <div class="event-head">
-                    <span class="event-title">{eventTitle(event.event_type)}</span>
-                    <Timestamp class="caption" value={event.created_at} format="relative" />
-                  </div>
-                  <div class="caption">
-                    by {event.actor_id}{#if event.subject_user_id}
-                      · {event.subject_user_id}{/if}
-                  </div>
-                  {#if lines.length}<ul class="event-details muted">
-                      {#each lines as line}<li>{line}</li>{/each}
-                    </ul>{/if}
-                </li>
-              {/each}
-            </ol>{/if}
-        </Card>
-      {/if}
+        </div>{/if}
     </LoadState>
   </LoadState>
 </div>
@@ -508,30 +485,20 @@
   .create-fields p {
     margin: 0;
   }
-  .row-clickable {
-    cursor: pointer;
+  .group-picker {
+    flex-wrap: nowrap;
+    max-width: 36rem;
   }
-  .row-clickable.archived .group-name {
-    color: var(--text-muted);
+  .group-picker :global(.ui-select-trigger) {
+    flex: 1;
+    min-width: 0;
   }
-  .group-name {
-    color: var(--text-primary);
-    font-weight: var(--weight-medium);
-    text-align: left;
-    overflow-wrap: anywhere;
+  .group-detail {
+    --vstack-gap: var(--space-4);
+    transition: opacity 120ms;
   }
-  /* Group is the unsized column: the min-width reserves it 10rem past the
-     sized ones, and adminTables.test.ts holds the sum. */
-  .groups-grid {
-    min-width: 33rem;
-  }
-  .col-kind,
-  .col-role {
-    width: 7rem;
-  }
-  .col-created,
-  .col-status {
-    width: 8rem;
+  .group-detail[aria-busy='true'] {
+    opacity: 0.6;
   }
   .group-facts {
     --kv-gap: var(--space-6);
@@ -564,14 +531,5 @@
     margin: var(--space-1) 0 0;
     padding-left: var(--space-4);
     font-size: var(--text-sm);
-  }
-  @container settings (max-width: 40rem) {
-    .groups-grid {
-      min-width: 18rem;
-    }
-    .col-created,
-    .col-kind {
-      display: none;
-    }
   }
 </style>

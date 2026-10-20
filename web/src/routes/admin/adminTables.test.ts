@@ -243,14 +243,6 @@ const TABLES: Table[] = [
     floor: 5.5,
   },
   {
-    // The Groups page. Group holds the name over the id, which wraps.
-    page: 'src/routes/admin/groups/+page.svelte',
-    grid: '.groups-grid',
-    unsized: '.col-group',
-    sized: ['.col-kind', '.col-created', '.col-status'],
-    floor: 10,
-  },
-  {
     // The Briefings page's Personal and Group tables (one snippet). The
     // Briefing column holds the title over its name; twelve rem, as for Job.
     page: 'src/routes/admin/briefings/+page.svelte',
