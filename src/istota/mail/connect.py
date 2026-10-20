@@ -31,12 +31,11 @@ under ``src/istota``.
 from __future__ import annotations
 
 import imaplib
-import ipaddress
 import smtplib
 import socket
 import ssl
 
-from istota.sandbox.net_guard import ip_is_public
+from istota.sandbox import net_guard
 
 try:
     from imap_tools import MailBox, MailBoxStartTls
@@ -107,40 +106,19 @@ def _imap_timeout(config) -> int:
 # --- the address check -----------------------------------------------------------
 
 
-def _normal_host(host: str) -> str:
-    return str(host).strip().lower().rstrip(".")
-
-
 def checked_address(host: str, port: int, *, private_hosts=()) -> str:
     """The address to connect to for ``host``, or `ConnectRefused`.
 
     Every address the name resolves to must be public, unless the exact host
     is listed in ``private_hosts``. The first one is the one connected to.
     """
-    name = _normal_host(host)
-    listed = {_normal_host(h) for h in (private_hosts or ()) if str(h).strip()}
-    try:
-        addresses = [ipaddress.ip_address(name)]
-    except ValueError:
-        try:
-            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-        except (OSError, UnicodeError):
-            raise ConnectRefused("dns_failed", name) from None
-        addresses = []
-        for info in infos:
-            raw = str(info[4][0]).split("%", 1)[0]
-            try:
-                address = ipaddress.ip_address(raw)
-            except ValueError:
-                continue
-            if address not in addresses:
-                addresses.append(address)
+    name = net_guard.normal_host(host)
+    addresses = net_guard.host_addresses(host, port)
     if not addresses:
         raise ConnectRefused("dns_failed", name)
-    if name not in listed:
-        for address in addresses:
-            if not ip_is_public(address):
-                raise ConnectRefused("address_not_public", name)
+    if name not in net_guard.host_set(private_hosts):
+        if net_guard.first_non_public(addresses) is not None:
+            raise ConnectRefused("address_not_public", name)
     return str(addresses[0])
 
 

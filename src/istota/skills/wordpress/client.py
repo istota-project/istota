@@ -31,16 +31,15 @@ redirect authenticated traffic; the TLS trust store still honours
 from __future__ import annotations
 
 import base64
-import ipaddress
 import json
 import logging
 import re
-import socket
 from urllib.parse import urlsplit
 
 import httpx
 
-from istota.sandbox.net_guard import ip_is_public
+from istota.sandbox import net_guard
+from istota.sandbox.net_guard import resolve_host
 from istota.lib.untrusted import frame_untrusted
 
 from .sites import SiteError, check_bound
@@ -90,20 +89,6 @@ def fence(text: object) -> str:
     return frame_untrusted(text, LABEL)
 
 
-def resolve_host(host: str, port: int) -> list[str]:
-    """Every address `host` resolves to, in resolver order; empty on failure."""
-    try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except (socket.gaierror, OSError, UnicodeError):
-        return []
-    seen: list[str] = []
-    for info in infos:
-        address = info[4][0]
-        if address not in seen:
-            seen.append(address)
-    return seen
-
-
 def _wp_code(body: bytes) -> str | None:
     """The ``code`` of a WordPress error body, when it is one and well formed."""
     try:
@@ -137,9 +122,7 @@ class WordPressClient:
         self._username = username
         self._password = password
         self._bound = tuple(bound_hosts or ())
-        self._private = frozenset(
-            str(h).strip().lower().rstrip(".") for h in (private_hosts or ()) if str(h).strip()
-        )
+        self._private = net_guard.host_set(private_hosts)
         self._resolve = resolve or resolve_host
         self._timeout = timeout
         # `verify` is built with trust_env=True on its own: that reads only
@@ -164,28 +147,20 @@ class WordPressClient:
         return f"{root}/wp-json/{route.lstrip('/')}"
 
     def _checked_addresses(self, host: str, port: int) -> list[str]:
-        name = host.lower().rstrip(".")
-        try:
-            addresses = [ipaddress.ip_address(name)]
-        except ValueError:
-            addresses = []
-            for raw in self._resolve(host, port):
-                try:
-                    addresses.append(ipaddress.ip_address(raw.split("%", 1)[0]))
-                except ValueError:
-                    continue
+        name = net_guard.normal_host(host)
+        addresses = net_guard.host_addresses(host, port, resolve=self._resolve)
         if not addresses:
             raise WordPressError(f"Could not resolve {name}; nothing was sent.",
                                  "connection_failed")
         if name not in self._private:
-            for address in addresses:
-                if not ip_is_public(address):
-                    raise WordPressError(
-                        f"{name} resolves to a private or reserved address ({address}). "
-                        f"Only a host the operator lists in [wordpress] private_hosts "
-                        f"may; nothing was sent.",
-                        "host_refused",
-                    )
+            address = net_guard.first_non_public(addresses)
+            if address is not None:
+                raise WordPressError(
+                    f"{name} resolves to a private or reserved address ({address}). "
+                    f"Only a host the operator lists in [wordpress] private_hosts "
+                    f"may; nothing was sent.",
+                    "host_refused",
+                )
         return [str(a) for a in addresses]
 
     def _build(self, method, url, host, port, address, params, body, *,
