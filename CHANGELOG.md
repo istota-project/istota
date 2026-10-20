@@ -120,6 +120,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Email connections over IMAP on any port and SMTP on port 587 now verify the mail server's certificate and hostname. Before, only SMTP on port 465 did, so someone on the network path could read the mailbox password. **Upgrade note:** a mail server with a self-signed or private-CA certificate is now refused, and polling logs a certificate verification error; trust the CA through `SSL_CERT_FILE` (see docs/features/email.md).
+- `email mark` no longer permanently deletes other messages in the folder. Each mark ran a folder-wide expunge, which removed any message another mail client had flagged deleted but not yet expunged. `email mark` and `email delete` now take a single message id, so a range such as `1:*` can no longer reach other users' mail in a shared mailbox.
 - Leaving the admin Logs page with Follow on while a page of records was still loading no longer leaves a live tail connection open in the background.
 - The iOS app's location tracker card now shows its Dropped and Last error rows in the warning colour. The card's own style for the other rows had been overriding it.
 - The ntfy push card in Settings → Connections shows the stored server URL and default topic, and you can edit them in place. They were masked like passwords, so there was no way to check what was set. The access token and password stay hidden.

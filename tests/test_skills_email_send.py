@@ -16,6 +16,7 @@ from istota.skills.email import (
     _is_bot_address,
     _recipients,
     cmd_delete,
+    delete_email,
     cmd_mark,
     cmd_reply,
     cmd_send,
@@ -374,15 +375,67 @@ class TestGatedOps:
         assert res["status"] == "not_found"
         de.assert_not_called()
 
-    def test_mark_email_flag_mapping(self, econf):
-        mb = MagicMock()
-        mb.__enter__ = MagicMock(return_value=mb)
-        mb.__exit__ = MagicMock(return_value=False)
-        with patch("istota.skills.email._get_mailbox", return_value=mb):
-            mark_email("5", "unread", config=econf)
-        args, _ = mb.flag.call_args
-        assert args[0] == "5"
-        assert args[2] is False  # unread → clear \Seen
+    @staticmethod
+    def _wire(econf, email_id, action):
+        """Run ``mark_email`` through the real imap-tools ``MailBox`` over a
+        fake ``imaplib`` connection, and answer that connection."""
+        client = MagicMock()
+        client._simple_command.return_value = ("OK", [b"logged in"])
+        client.select.return_value = ("OK", [b"1"])
+        client.uid.return_value = ("OK", [b""])
+        client.expunge.return_value = ("OK", [None])
+        client.logout.return_value = ("BYE", [b""])
+        with patch("imaplib.IMAP4_SSL", return_value=client):
+            mark_email(email_id, action, config=econf)
+        return client
+
+    @pytest.mark.parametrize("action,store", [
+        ("read", ("+FLAGS", "(\\Seen)")),
+        ("unread", ("-FLAGS", "(\\Seen)")),
+        ("flagged", ("+FLAGS", "(\\Flagged)")),
+    ])
+    def test_mark_email_flag_mapping(self, econf, action, store):
+        client = self._wire(econf, "5", action)
+        client.uid.assert_called_once_with("STORE", "5", *store)
+
+    def test_mark_never_expunges(self, econf):
+        """ISSUE-799: imap-tools' ``flag()`` runs a folder-wide ``EXPUNGE``
+        after its STORE, which removes every message another client flagged
+        ``\\Deleted``. A mark sends the STORE and nothing that removes mail."""
+        client = self._wire(econf, "5", "read")
+        client.expunge.assert_not_called()
+        commands = [c.args[0].upper() for c in client.uid.call_args_list]
+        assert "EXPUNGE" not in commands
+
+    @pytest.mark.parametrize("bad_id", [
+        "5 +FLAGS (\\Deleted)\r\nA1 EXPUNGE", "1:*", "5,9", "*", "", "\u00b2",
+    ])
+    def test_mark_and_delete_take_one_uid_only(self, econf, bad_id):
+        """A set passes `clean_uids`, but the scope check reads only its first
+        message, so `1:*` would flag or delete other users' mail."""
+        with patch("imaplib.IMAP4_SSL") as ssl_client:
+            with pytest.raises(ValueError):
+                mark_email(bad_id, "read", config=econf)
+            assert delete_email(bad_id, config=econf) is False
+        ssl_client.assert_not_called()
+
+    @pytest.mark.parametrize("cmd", [cmd_mark, cmd_delete])
+    def test_a_uid_set_is_refused_before_the_scope_check(self, cmd):
+        args = MagicMock(id="1:*", confirmed=True, action="read")
+        with patch("istota.skills.email._read_scoped") as scoped:
+            res = cmd(args)
+        assert res["status"] == "error"
+        scoped.assert_not_called()
+
+    def test_mark_raises_when_the_server_refuses(self, econf):
+        client = MagicMock()
+        client._simple_command.return_value = ("OK", [b"logged in"])
+        client.select.return_value = ("OK", [b"1"])
+        client.uid.return_value = ("NO", [b"no such message"])
+        client.logout.return_value = ("BYE", [b""])
+        with patch("imaplib.IMAP4_SSL", return_value=client), \
+             pytest.raises(RuntimeError, match="no such message"):
+            mark_email("5", "read", config=econf)
 
     def test_mark_email_invalid_action(self, econf):
         with pytest.raises(ValueError):
