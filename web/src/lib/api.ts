@@ -3448,6 +3448,19 @@ export interface ChatRoom {
   /** Set while the room is switched off (multiplayer D8): nothing in it is
    * recorded or answered. null while it is on. */
   off?: RoomOffView | null;
+  /** The group whose current members are this room's members, or null for a
+   * room with its own roster. Membership is managed in Groups. */
+  managed_by?: RoomManagedBy | null;
+}
+
+/** A group-owned room's group, as the Chat panes show it. `is_owner` is
+ * display data; the server decides every write. */
+export interface RoomManagedBy {
+  group_id: string;
+  display_name: string;
+  /** The Groups page for this group, already under the app's base. */
+  manage_url: string;
+  is_owner: boolean;
 }
 
 export interface RoomOffView {
@@ -4066,6 +4079,8 @@ export interface RoomMembers {
   message_count: number;
   /** An email thread room belongs to its host and takes no members. */
   email_thread?: boolean;
+  /** A group-owned room's people are its group's, managed in Groups. */
+  managed_by?: RoomManagedBy | null;
 }
 
 export function getRoomMembers(id: number): Promise<RoomMembers> {
@@ -4113,6 +4128,10 @@ export interface RoomGroupLink {
   can_set: boolean;
   refusal: string | null;
   choices: { group_id: string; display_name: string }[];
+  /** The room's membership follows the group, so the link is fixed. */
+  managed?: boolean;
+  /** The Groups page for a managed room's group. */
+  manage_url?: string | null;
 }
 
 export function getRoomGroup(id: number): Promise<RoomGroupLink> {
@@ -6380,10 +6399,26 @@ export interface GroupDisclosure {
   rooms: string[];
   briefings: string[];
 }
+/** A room linked to a group that the caller can open. `group` rooms hold the
+ * whole group; `room` rooms keep their own roster. `room_id` is the caller's
+ * chat handle, null until one has been minted. */
+export interface GroupRoom {
+  token: string;
+  name: string;
+  origin: string;
+  membership_source?: 'group' | 'room';
+  room_id?: number | null;
+}
 export interface GroupDetail extends GroupSummary {
   members: GroupMember[];
-  rooms: { token: string; name: string; origin: string }[];
+  rooms: GroupRoom[];
   disclosure: GroupDisclosure;
+}
+export interface GroupRoomCreated {
+  group_id: string;
+  created: boolean;
+  revision: number;
+  room: GroupRoom & { room_id: number };
 }
 export interface GroupMemoryChange {
   id: string;
@@ -6485,6 +6520,14 @@ export function deleteGroupMember(
   payload: { revision: number; replacement_owner?: string },
 ): Promise<GroupSummary> {
   return groupRequest(`${groupPath(id)}/members/${encodeURIComponent(user)}`, 'DELETE', payload);
+}
+/** Create a room for the whole group. `request_id` makes a retry return the
+ * same room, so a caller reuses it until a creation succeeds. */
+export function createGroupRoom(
+  id: string,
+  payload: { name: string; request_id: string; revision: number },
+): Promise<GroupRoomCreated> {
+  return groupRequest(`${groupPath(id)}/rooms`, 'POST', payload);
 }
 export function getGroupMemory(id: string): Promise<GroupMemory> {
   return groupRequest(`${groupPath(id)}/memory`);

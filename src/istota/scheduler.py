@@ -3284,6 +3284,15 @@ def process_one_task(
         task_id = task.id
         db.log_task(conn, task_id, "info", f"Task claimed by {worker_id}")
 
+        # The removal that stopped this task's author normally cancelled it
+        # too; this catches one that slipped past, before anything runs.
+        from .groups.rooms import task_delivery_refused
+        if task_delivery_refused(conn, task):
+            db.cancel_task(conn, task_id)
+            db.log_task(conn, task_id, "info",
+                        "Task cancelled: its group room no longer admits its author")
+            return task_id, False
+
         # Update to running
         db.update_task_status(conn, task_id, "running")
         # Every attempt counts its own tool calls from zero, in the same write
@@ -3508,8 +3517,18 @@ def process_one_task(
     # double-apply deferred ops. The superseding worker owns delivery + the
     # terminal event frame (its EventWriter resumes seq), so we just bail.
     if not dry_run:
+        from .groups.rooms import task_delivery_refused
         with db.get_db(config.db_path) as conn:
             _current = db.get_task(conn, task_id)
+            _refused = _current is not None and task_delivery_refused(conn, _current)
+        if _refused:
+            # Removed from the group (or the group archived) while this ran.
+            # The cancel may have lost the race to completion, so the result
+            # takes the cancelled path whatever it was: nothing is stored,
+            # posted or streamed, and no deferred op is replayed.
+            logger.info("Task %d: its group room no longer admits its author; "
+                        "withholding the result", task_id)
+            success, result = False, "Cancelled by user"
         if _current is None or _current.attempt_count != task.attempt_count:
             logger.warning(
                 "Task %d superseded mid-run (claimed attempt=%s, now=%s) — "

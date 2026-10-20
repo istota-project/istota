@@ -1372,9 +1372,30 @@ CREATE TABLE IF NOT EXISTS rooms (
     -- to a group the host belongs to. No foreign key: a group is archived rather
     -- than deleted, and a link to one that is gone or archived loads nothing.
     -- db._migrate_room_group adds it.
-    group_id    TEXT
+    group_id    TEXT,
+    -- Who belongs: 'room' (its own roster, a linked room included) or 'group'
+    -- (the linked group's current members, governed by the group's owners).
+    -- Validated by db.set_room_membership_source, one way only; any other
+    -- stored value reads as 'group' (db.is_group_owned_room). The group link
+    -- filters memory either way. db._migrate_group_owned_rooms adds it and
+    -- converts nothing.
+    membership_source TEXT NOT NULL DEFAULT 'room'
 );
 CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived);
+CREATE INDEX IF NOT EXISTS idx_rooms_group_source ON rooms (group_id, membership_source);
+
+-- One row per group-room creation request, so a retried request returns the
+-- room the first one made rather than a second room. `request_hash` is the
+-- request's parameters: the same id with different ones is a conflict.
+CREATE TABLE IF NOT EXISTS group_room_requests (
+    group_id     TEXT NOT NULL,
+    request_id   TEXT NOT NULL,
+    room_token   TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    actor_id     TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (group_id, request_id)
+);
 
 -- Permanent forwarding from pre-migration tokens, including descriptors in
 -- mail already sent. No room FK: the mapping must survive room deletion.

@@ -156,3 +156,29 @@ describe('RoomMembers', () => {
     expect(getChatUsers).not.toHaveBeenCalled();
   });
 });
+
+describe('RoomMembers in a group-owned room', () => {
+  it('says membership follows the group and links to it, with no per-room changes', async () => {
+    getRoomMembers.mockResolvedValue(
+      listing({
+        members: [ALICE, BOB],
+        can_manage: false,
+        managed_by: {
+          group_id: 'team',
+          display_name: 'Team',
+          manage_url: '/istota/groups/?group=team',
+          is_owner: false,
+        },
+      }),
+    );
+    render(RoomMembers, { roomId: 1, userId: 'bob' });
+    await screen.findByText(/Membership follows Team/);
+    const link = screen.getByRole('link', { name: 'Manage membership in Groups' });
+    expect(link.getAttribute('href')).toBe('/istota/groups/?group=team');
+    expect(screen.queryByText('Leave')).toBeNull();
+    expect(screen.queryByText('Remove')).toBeNull();
+    expect(screen.queryByText('created the room')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Member to add' })).toBeNull();
+    expect(getChatUsers).not.toHaveBeenCalled();
+  });
+});

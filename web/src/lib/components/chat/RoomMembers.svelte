@@ -135,8 +135,8 @@
       {#each data.members as m (m.user_id)}
         <li>
           <span class="name">{m.display_name}</span>
-          {#if m.is_owner}<span class="caption">created the room</span>{/if}
-          {#if !talkBound && !m.is_owner && (data.can_manage || m.user_id === userId)}
+          {#if m.is_owner && !data.managed_by}<span class="caption">created the room</span>{/if}
+          {#if !talkBound && !data.managed_by && !m.is_owner && (data.can_manage || m.user_id === userId)}
             <button
               class="remove button-reset caption"
               type="button"
@@ -150,7 +150,14 @@
         </li>
       {/each}
     </ul>
-    {#if talkBound}
+    {#if data.managed_by}
+      <!-- The group's members are the room's, so joining and leaving happen in
+           Groups and nothing here changes the list. -->
+      <p class="caption">
+        Membership follows {data.managed_by.display_name}. Everyone in the group is in this room.
+        <a href={data.managed_by.manage_url}>Manage membership in Groups</a>
+      </p>
+    {:else if talkBound}
       <p class="caption">Membership of a room on Nextcloud Talk is changed in Talk.</p>
     {:else if phoneLabel}
       <p class="caption">

@@ -783,8 +783,11 @@ def record_inbound(
         # each participant's web room list (ISSUE-134), and their own next
         # message un-hides a room they hid. A guest is neither: membership is
         # what makes an istota user a principal.
-        if user_author:
-            db.note_member_turn(conn, room_token, user_id)
+        if user_author and not db.note_member_turn(conn, room_token, user_id):
+            # A group-owned room the sender's group membership no longer
+            # admits: a stale handle does not speak, and does not rejoin.
+            logger.info("Dropping a turn the room refuses (room=%s)", room_token)
+            return InboundResult(room_token, None, None, "dropped")
 
         # 2. Echo check (loop-prevention ledger) — armed by post-as-user
         #    mirroring: a web-origin row stamped with a Talk id catches the

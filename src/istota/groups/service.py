@@ -2,12 +2,17 @@
 
 Callers supply a trusted actor and authority, never values from a request body.
 Connections must have no open transaction. File seeding happens after commit.
+A membership change reconciles the group's group-owned rooms before commit, and
+an archive stops the tasks in them; the workers of running tasks are signalled
+after the commit, so no lock is held while a process stops.
 """
 import json
 import logging
+import sqlite3
 from contextlib import contextmanager
 
 from istota import db, storage
+from istota.groups import rooms as group_rooms
 from istota.groups.policy import GroupError, group_capabilities, require_group_member
 
 logger = logging.getLogger(__name__)
@@ -71,9 +76,38 @@ def _finish(conn, group_id):
     return db.get_group(conn, group_id, include_archived=True)
 
 
-def history_disclosure(group_id: str) -> dict:
-    return {"memory": f"Groups/{group_id}/GROUP.md", "rooms": [],
+def history_disclosure(group_id: str, conn=None) -> dict:
+    """What joining discloses. ``rooms`` names the group-owned rooms, whose whole
+    history a new member reads; it needs ``conn`` and is empty without one."""
+    rooms = []
+    if conn is not None:
+        rooms = [db.get_room(conn, token).name or token
+                 for token in group_rooms.group_owned_room_tokens(conn, group_id)]
+    return {"memory": f"Groups/{group_id}/GROUP.md", "rooms": rooms,
             "briefings": ["All retained group briefing editions, including those published before joining"]}
+
+
+def reconcile_rooms(conn, group_id: str, config=None) -> list[int]:
+    """`group_rooms.reconcile_group_room_members` inside a membership mutation,
+    naming added members from ``config`` when it is given.
+
+    A database failure becomes a retryable 503, and the caller's transaction
+    rolls the membership change back with it: a partial roster never commits.
+    Returns the worker pids of a removed member's running tasks, for
+    `group_rooms.signal_stopped_tasks` once the caller has committed.
+    """
+    try:
+        changes = group_rooms.reconcile_group_room_members(
+            conn, group_id,
+            display_name=group_rooms.display_names(config) if config is not None else None,
+        )
+    except sqlite3.Error as exc:
+        logger.warning("Group room reconciliation failed: group=%s error=%s",
+                       group_id, type(exc).__name__)
+        raise GroupError(503, "rooms_unavailable",
+                         "Group rooms could not be updated; try again",
+                         retryable=True) from exc
+    return [pid for change in changes for pid in change["pids"]]
 
 
 def create_group(conn, config, group_id: str, *, actor_id: str, expected_revision: int,
@@ -130,6 +164,7 @@ def change_membership(conn, config, group_id: str, user_id: str, *, actor_id: st
                       expected_revision: int, role: str | None,
                       acknowledge_history: bool = False, replacement_owner: str | None = None,
                       is_admin: bool = False, is_operator: bool = False) -> dict:
+    pids: list[int] = []
     with _transaction(conn):
         if user_id == actor_id and role is None and not (is_admin or is_operator):
             require_group_member(conn, group_id, actor_id)
@@ -149,7 +184,7 @@ def change_membership(conn, config, group_id: str, user_id: str, *, actor_id: st
             _enabled_user(conn, config, user_id)
         if current is None and acknowledge_history is not True:
             raise GroupError(409, "history_acknowledgement_required", "Acknowledge access to existing group history",
-                             disclosure=history_disclosure(group_id))
+                             disclosure=history_disclosure(group_id, conn))
         if replacement_owner is not None:
             _managed_group(conn, group_id, actor_id, is_admin, is_operator)
             if replacement_owner == user_id or replacement_owner not in members:
@@ -168,7 +203,7 @@ def change_membership(conn, config, group_id: str, user_id: str, *, actor_id: st
         if current is None:
             db.add_group_member(conn, group_id, user_id, role=role, added_by=actor_id)
             _event(conn, group_id, actor_id, "member_added", subject=user_id,
-                   details={"role": role, "acknowledge_history": True, "disclosure": history_disclosure(group_id)})
+                   details={"role": role, "acknowledge_history": True, "disclosure": history_disclosure(group_id, conn)})
             changed = True
         elif role is None:
             db.end_group_membership(conn, group_id, user_id, ended_by=actor_id)
@@ -179,8 +214,11 @@ def change_membership(conn, config, group_id: str, user_id: str, *, actor_id: st
             _event(conn, group_id, actor_id, "role_changed", subject=user_id,
                    details={"old_role": current["role"], "new_role": role})
             changed = True
+        if changed:
+            pids = reconcile_rooms(conn, group_id, config)
         result = _finish(conn, group_id) if changed else group
-        return {**result, "changed": changed}
+    group_rooms.signal_stopped_tasks(pids)
+    return {**result, "changed": changed}
 
 
 def archive_group(conn, group_id: str, *, actor_id: str, expected_revision: int,
@@ -195,5 +233,8 @@ def archive_group(conn, group_id: str, *, actor_id: str, expected_revision: int,
         if confirm is not True:
             raise GroupError(409, "confirmation_required", "Confirm archiving the group")
         db.archive_group(conn, group_id)
+        pids = group_rooms.suspend_group_rooms(conn, group_id)
         _event(conn, group_id, actor_id, "archived")
-        return _finish(conn, group_id)
+        result = _finish(conn, group_id)
+    group_rooms.signal_stopped_tasks(pids)
+    return result

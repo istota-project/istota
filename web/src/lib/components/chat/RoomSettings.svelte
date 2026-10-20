@@ -65,8 +65,18 @@
   // apply to every member's turn, so they are the host's (multiplayer Stage
   // 16). The server's own refusal says why, and the controls show the values
   // without offering to change them; personal settings stay editable.
-  const lockedReason = $derived(room.policy?.settings_refusal ?? null);
+  // A group-owned room's settings are its group owners', not its host's, and
+  // its membership is the group's: no per-room delete, guest policy or Talk.
+  // One read by a single member has no policy, so `is_owner` locks it there.
+  const managedBy = $derived(room.managed_by ?? null);
+  const lockedReason = $derived(
+    room.policy?.settings_refusal ??
+      (managedBy && !managedBy.is_owner
+        ? `Only an owner of ${managedBy.display_name} can change this room's settings.`
+        : null),
+  );
   const locked = $derived(!!lockedReason);
+  const policyEditable = $derived(managedBy ? !locked : !!room.policy?.is_host);
 
   // How a guest's turn is answered (D11). Only a shared room has a policy to
   // show, and only its host may change it.
@@ -259,7 +269,7 @@
   // failing isPromoted, mislabelling the button.
   // A phone room is not offered either: the server refuses to promote anything
   // but a web-origin room, and its binding is the user's phone identity.
-  const canPromote = $derived(room.origin !== 'talk' && !room.phone_surface);
+  const canPromote = $derived(room.origin !== 'talk' && !room.phone_surface && !managedBy);
   const phoneLabel = $derived(
     room.phone_surface === 'sms'
       ? 'SMS'
@@ -452,7 +462,9 @@
 {/snippet}
 
 {#snippet repliesNote()}
-  {#if room.policy?.is_host}
+  {#if managedBy}
+    When the bot answers a message nobody addressed to it. Owners of {managedBy.display_name} set this.
+  {:else if room.policy?.is_host}
     When the bot answers a message nobody addressed to it. You set this as the room's host.
   {:else if room.policy?.host}
     When the bot answers a message nobody addressed to it. This room's host, {room.policy.host},
@@ -465,7 +477,9 @@
 {#snippet dispositionNote()}
   Friendly also answers thanks or a remark about what the bot just said; reserved answers only a
   message addressed to it or asking it something.
-  {#if room.policy?.is_host}
+  {#if managedBy}
+    Owners of {managedBy.display_name} set this.
+  {:else if room.policy?.is_host}
     You set this as the room's host.
   {:else if room.policy?.host}
     This room's host, {room.policy.host}, sets this.
@@ -595,14 +609,14 @@
       />
     </Field>
 
-    {#if room.policy && !room.policy.email_thread}
+    {#if room.policy && !room.policy.email_thread && !managedBy}
       <Field label="Guests" description={guestsNote}>
         <Select
           value={guestReplyValue}
           options={GUEST_REPLY_OPTIONS}
           onValueChange={(v) => (guestReplyValue = v as GuestReply)}
           ariaLabel="How guests are answered"
-          disabled={!room.policy.is_host}
+          disabled={!policyEditable}
           fullWidth
         />
       </Field>
@@ -621,7 +635,7 @@
           options={speechModeOptions}
           onValueChange={(v) => (speechModeValue = v)}
           ariaLabel="When to reply to a message not addressed to the bot"
-          disabled={!room.policy.is_host}
+          disabled={!policyEditable}
           fullWidth
         />
       </Field>
@@ -634,7 +648,7 @@
           options={dispositionOptions}
           onValueChange={(v) => (dispositionValue = v)}
           ariaLabel="How readily the bot replies when it decides from context"
-          disabled={!room.policy.is_host}
+          disabled={!policyEditable}
           fullWidth
         />
       </Field>
@@ -708,7 +722,12 @@
       </Field>
     {/if}
 
-    {#if isImported}
+    {#if managedBy}
+      <p class="caption hide-hint">
+        Leaving this room means leaving {managedBy.display_name}.
+        <a href={managedBy.manage_url}>Manage membership in Groups</a>
+      </p>
+    {:else if isImported}
       <p class="caption hide-hint">
         Hiding only removes this room from your web chat list. The Nextcloud Talk conversation and
         its messages aren't deleted, and it reappears here if you post in it again.
@@ -717,7 +736,9 @@
   </div>
 
   {#snippet footer()}
-    {#if isImported}
+    {#if managedBy}
+      <!-- Nothing to delete or hide here: the room goes with its group. -->
+    {:else if isImported}
       <!-- A hide is reversible (re-engagement un-hides), so it's a one-click
 			     action with no type-the-name confirm — unlike a real delete. -->
       <span class="footer-start">

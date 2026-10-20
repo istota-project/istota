@@ -195,7 +195,13 @@
               {#snippet status()}<span class="caption">{detail?.members.length}</span>{/snippet}
               <GroupMembers group={detail} onChanged={changed} />
             </Card>
-            <GroupRooms rooms={detail.rooms} />
+            <GroupRooms
+              rooms={detail.rooms}
+              groupId={detail.group_id}
+              revision={detail.revision}
+              canCreate={!!detail.capabilities.owner && !detail.system_key}
+              onChanged={() => changed()}
+            />
             {#if detail.capabilities.read_briefings}<GroupBriefings
                 groupId={detail.group_id}
                 canAuthor={!!detail.capabilities.author_briefings}
