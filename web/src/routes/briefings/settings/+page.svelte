@@ -537,6 +537,7 @@
         {rssOptions}
         sharedBlockOptions={sharedBlockSelectOptions}
         feedsAvailable={!!feedOptions?.available && rssOptions.length > 0}
+        feedsFailed={missingOptions.includes('feeds') && rssOptions.length === 0}
         {emailAccounts}
         {outputs}
         {rooms}

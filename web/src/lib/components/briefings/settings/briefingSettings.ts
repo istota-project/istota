@@ -43,6 +43,10 @@ export const GROUP_SOURCE_KINDS = [
   'personal_calendar',
 ];
 
+// Said in place of the subscribe hint when the feed list failed to load
+// (ISSUE-809): the user may have feeds the page could not read.
+export const FEEDS_FAILED_MESSAGE = 'Feeds could not be loaded.';
+
 export function sourceKindLabel(kind: string): string {
   return SOURCE_KIND_LABELS[kind] ?? kind;
 }
