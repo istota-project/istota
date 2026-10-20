@@ -1190,6 +1190,163 @@ def _read_secret_stdin() -> str:
     return value.removesuffix("\n").removesuffix("\r")
 
 
+#: `istota mail-account ensure` options, each mapped onto the store field of
+#: the same name. An option left off keeps the stored value.
+_MAIL_ACCOUNT_OPTIONS = (
+    "label", "permission", "imap_host", "imap_port", "imap_security",
+    "imap_username", "default_folder", "smtp_host", "smtp_port", "smtp_security",
+    "smtp_same_login", "smtp_username", "from_address", "from_name",
+    "sent_folder", "enabled",
+)
+
+
+def _mail_account_context(args):
+    """Config and a known user, or an error exit."""
+    config = load_config(Path(args.config) if args.config else None)
+    if args.user not in config.users:
+        print(f"Error: no configured user {args.user!r}", file=sys.stderr)
+        sys.exit(1)
+    return config
+
+
+def _mail_account_fail(error) -> None:
+    where = f" ({error.field})" if getattr(error, "field", None) else ""
+    print(f"Error: {error}{where}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _mail_account_or_exit(conn, args):
+    from istota.mail import accounts
+
+    account = accounts.get_account(conn, args.user, args.slug)
+    if account is None:
+        print(f"Error: {args.user!r} has no mail account {args.slug!r}", file=sys.stderr)
+        sys.exit(1)
+    return account
+
+
+def cmd_mail_account_list(args):
+    """List a user's mail accounts. Never prints a password."""
+    from istota.mail import accounts
+
+    config = _mail_account_context(args)
+    with db.get_db(config.db_path) as conn:
+        rows = accounts.list_accounts(conn, args.user)
+    if args.json:
+        print(json.dumps([
+            {
+                "id": a.id, "slug": a.slug, "label": a.label,
+                "permission": a.permission, "enabled": a.enabled,
+                "imap_host": a.imap_host, "imap_port": a.imap_port,
+                "imap_security": a.imap_security, "imap_username": a.imap_username,
+                "default_folder": a.default_folder,
+                "smtp": None if a.smtp_host is None else {
+                    "host": a.smtp_host, "port": a.smtp_port,
+                    "security": a.smtp_security, "same_login": a.smtp_same_login,
+                    "username": a.smtp_username,
+                },
+                "from_address": a.from_address, "from_name": a.from_name,
+                "sent_folder": a.sent_folder,
+                "imap_password_set": a.has_imap_password,
+                "smtp_password_set": a.has_smtp_password,
+                "pending_drafts": a.pending_drafts,
+            }
+            for a in rows
+        ], indent=2))
+        return
+    if not rows:
+        print(f"No mail accounts for {args.user!r}.")
+        return
+    for a in rows:
+        smtp = f"{a.smtp_host}:{a.smtp_port}" if a.smtp_host else "-"
+        state = "enabled" if a.enabled else "disabled"
+        print(
+            f"  {a.slug:20} {a.permission:9} {state:8} "
+            f"imap={a.imap_host}:{a.imap_port} smtp={smtp} "
+            f"imap_password={'set' if a.has_imap_password else 'missing'}"
+        )
+
+
+def cmd_mail_account_ensure(args):
+    """Create or update an account by slug; prints `STATE: created|updated|noop`."""
+    from istota.mail import accounts
+
+    config = _mail_account_context(args)
+    fields = {}
+    for name in _MAIL_ACCOUNT_OPTIONS:
+        value = getattr(args, name)
+        if value is not None:
+            fields[name] = value
+    if args.no_smtp:
+        fields["smtp_host"] = None
+    try:
+        with db.get_db(config.db_path) as conn:
+            account, state = accounts.ensure_account(
+                conn, args.user, slug=args.slug, rename_to=args.rename_to,
+                max_accounts=config.mail_accounts.max_per_user, **fields,
+            )
+    except accounts.MailAccountError as e:
+        _mail_account_fail(e)
+    print(f"Mail account ensured for {args.user!r}: slug={account.slug} id={account.id}")
+    print(f"STATE: {state}")
+
+
+def cmd_mail_account_set_password(args):
+    """Store an account's IMAP or SMTP password, read from stdin only."""
+    from istota.credentials.store import SecretKeyMissingError, SecretKeyTooWeakError
+    from istota.mail import accounts
+
+    config = _mail_account_context(args)
+    which = "smtp" if args.smtp else "imap"
+    value = _read_secret_stdin()
+    if not value:
+        print("Error: no password on stdin", file=sys.stderr)
+        sys.exit(1)
+    try:
+        with db.get_db(config.db_path) as conn:
+            account = _mail_account_or_exit(conn, args)
+            state = accounts.set_password(conn, args.user, account.id, which, value)
+    except accounts.MailAccountError as e:
+        _mail_account_fail(e)
+    except (SecretKeyMissingError, SecretKeyTooWeakError):
+        print("Error: the master key (ISTOTA_SECRET_KEY) is not available", file=sys.stderr)
+        sys.exit(1)
+    print(f"{which.upper()} password stored for {args.user!r}: slug={args.slug}")
+    print(f"STATE: {state}")
+
+
+def cmd_mail_account_clear_password(args):
+    from istota.mail import accounts
+
+    config = _mail_account_context(args)
+    which = "smtp" if args.smtp else "imap"
+    with db.get_db(config.db_path) as conn:
+        account = _mail_account_or_exit(conn, args)
+        removed = accounts.clear_password(conn, args.user, account.id, which)
+    print(f"{which.upper()} password cleared for {args.user!r}: slug={args.slug}")
+    print(f"STATE: {'removed' if removed else 'noop'}")
+
+
+def cmd_mail_account_remove(args):
+    """Remove an account, its passwords and its pending drafts."""
+    from istota.mail import accounts
+
+    config = _mail_account_context(args)
+    with db.get_db(config.db_path) as conn:
+        account = accounts.get_account(conn, args.user, args.slug)
+        removed = account is not None and accounts.delete_account(
+            conn, args.user, account.id, by="cli",
+        )
+    if removed:
+        print(
+            f"Removed mail account {args.slug!r} for {args.user!r}; "
+            f"discarded {account.pending_drafts} pending draft(s)."
+        )
+    else:
+        print(f"No mail account {args.slug!r} for {args.user!r} (nothing to remove).")
+    print(f"STATE: {'removed' if removed else 'noop'}")
+
+
 def _cmd_secret_file(config, args) -> None:
     """Import or export credentials at the operator's terminal."""
     import getpass
@@ -5437,6 +5594,64 @@ def main():
         help="Read the value from stdin instead, keeping it off the command line (ensure only)",
     )
 
+    # mail-account: mail accounts a user connected. Passwords from stdin only.
+    mail_account_parser = subparsers.add_parser(
+        "mail-account", allow_abbrev=False,
+        help="Manage a user's connected mail accounts (idempotent; passwords on stdin)",
+    )
+    mail_account_subparsers = mail_account_parser.add_subparsers(
+        dest="mail_account_action", required=True,
+    )
+    ma_list = mail_account_subparsers.add_parser("list", help="List a user's accounts", allow_abbrev=False)
+    ma_list.add_argument("user")
+    ma_list.add_argument("--json", action="store_true", help="Emit JSON")
+    ma_ensure = mail_account_subparsers.add_parser(
+        "ensure", allow_abbrev=False,
+        help="Create or update an account by slug; options left off keep their value",
+    )
+    ma_ensure.add_argument("user")
+    ma_ensure.add_argument("slug")
+    ma_ensure.add_argument("--rename-to", help="New slug for an existing account (keeps its passwords)")
+    ma_ensure.add_argument("--label")
+    ma_ensure.add_argument("--permission", choices=["read", "read_send"])
+    ma_ensure.add_argument("--imap-host")
+    ma_ensure.add_argument("--imap-port", type=int)
+    ma_ensure.add_argument("--imap-security", choices=["tls", "starttls"])
+    ma_ensure.add_argument("--imap-username")
+    ma_ensure.add_argument("--default-folder")
+    ma_ensure_smtp = ma_ensure.add_mutually_exclusive_group()
+    ma_ensure_smtp.add_argument("--smtp-host")
+    ma_ensure_smtp.add_argument(
+        "--no-smtp", action="store_true", help="Remove SMTP; the account becomes read-only",
+    )
+    ma_ensure.add_argument("--smtp-port", type=int)
+    ma_ensure.add_argument("--smtp-security", choices=["tls", "starttls"])
+    ma_ensure.add_argument(
+        "--smtp-same-login", action=argparse.BooleanOptionalAction, default=None,
+        help="SMTP signs in with the IMAP username and password",
+    )
+    ma_ensure.add_argument("--smtp-username")
+    ma_ensure.add_argument("--from-address")
+    ma_ensure.add_argument("--from-name")
+    ma_ensure.add_argument("--sent-folder", help="Folder a sent copy goes to; empty for none")
+    ma_ensure.add_argument("--enabled", action=argparse.BooleanOptionalAction, default=None)
+    for verb, help_text in (
+        ("set-password", "Store a password read from stdin"),
+        ("clear-password", "Delete a stored password"),
+    ):
+        ma_password = mail_account_subparsers.add_parser(verb, help=help_text, allow_abbrev=False)
+        ma_password.add_argument("user")
+        ma_password.add_argument("slug")
+        ma_which = ma_password.add_mutually_exclusive_group(required=True)
+        ma_which.add_argument("--imap", action="store_true")
+        ma_which.add_argument("--smtp", action="store_true")
+    ma_remove = mail_account_subparsers.add_parser(
+        "remove", allow_abbrev=False,
+        help="Remove an account, its passwords and its pending drafts",
+    )
+    ma_remove.add_argument("user")
+    ma_remove.add_argument("slug")
+
     # email
     email_parser = subparsers.add_parser("email", help="Email management")
     email_parser.add_argument("action", choices=["poll", "list", "test"], help="Action")
@@ -6090,6 +6305,15 @@ def main():
         result = whatsapp_commands[args.whatsapp_action](args)
         if result:
             sys.exit(result)
+    elif args.command == "mail-account":
+        mail_account_commands = {
+            "list": cmd_mail_account_list,
+            "ensure": cmd_mail_account_ensure,
+            "set-password": cmd_mail_account_set_password,
+            "clear-password": cmd_mail_account_clear_password,
+            "remove": cmd_mail_account_remove,
+        }
+        mail_account_commands[args.mail_account_action](args)
     elif args.command == "experimental":
         experimental_commands = {
             "list": cmd_experimental_list,
