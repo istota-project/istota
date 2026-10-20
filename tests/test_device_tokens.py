@@ -281,6 +281,29 @@ async def test_a_bad_bearer_is_a_401_even_beside_a_valid_session(client, config,
     assert not _notes_dir(config).exists()
 
 
+@pytest.mark.parametrize("method,url,body", [
+    ("POST", NOTES, {"content": "Buy milk"}),
+    ("DELETE", DEVICES + "/self", None),
+])
+async def test_the_route_itself_refuses_a_bad_bearer_beside_a_valid_session(
+    client, config, monkeypatch, method, url, body,
+):
+    # Every request that may carry a body meets the API body guard first, and
+    # it asks the same question; taken out, this is the route's own answer.
+    import istota.webui.app as mod
+
+    async def guard_passes(request):
+        return True
+
+    monkeypatch.setattr(mod, "_body_request_authorized", guard_passes)
+    cookies = await _login(client)
+    response = await client.request(
+        method, url, cookies=cookies, headers={**ORIGIN, **_bearer("not-a-token")}, json=body,
+    )
+    assert response.status_code == 401
+    assert not _notes_dir(config).exists()
+
+
 async def test_a_non_bearer_authorization_header_leaves_the_session_path(client, config):
     # A basic-auth proxy in front of the app makes the browser send this on every request.
     cookies = await _login(client)
@@ -321,7 +344,7 @@ def test_last_used_is_written_at_most_once_a_minute(config):
         conn.execute("UPDATE device_tokens SET last_used_at = ?", ("2000-01-01T00:00:00.000Z",))
     with db.get_db(config.db_path) as conn:
         device_tokens.authenticate(conn, token)
-        assert conn.execute("SELECT last_used_at FROM device_tokens").fetchone()[0] > "2000"
+        assert conn.execute("SELECT last_used_at FROM device_tokens").fetchone()[0] != "2000-01-01T00:00:00.000Z"
         assert first is not None
         stamped = conn.execute("SELECT last_used_at FROM device_tokens").fetchone()[0]
         device_tokens.authenticate(conn, token)
