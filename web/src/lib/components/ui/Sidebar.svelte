@@ -2,7 +2,8 @@
   import type { Snippet } from 'svelte';
 
   interface Props {
-    title: string;
+    /** The list's heading. Leave it out when the groups inside name themselves. */
+    title?: string;
     count?: number;
     open?: boolean;
     width?: string;
@@ -20,12 +21,14 @@
 {/if}
 
 <aside class="sidebar" class:open style="--sidebar-width: {width}">
-  <div class="sidebar-header">
-    <span class="sidebar-title micro-label">{title}</span>
-    {#if count !== undefined}<span class="sidebar-count caption num">{count}</span>{/if}
-  </div>
+  {#if title}
+    <div class="sidebar-header">
+      <span class="sidebar-title micro-label">{title}</span>
+      {#if count !== undefined}<span class="sidebar-count caption num">{count}</span>{/if}
+    </div>
+  {/if}
   {#if extras}{@render extras()}{/if}
-  <div class="sidebar-list">{@render children()}</div>
+  <div class="sidebar-list" class:untitled={!title}>{@render children()}</div>
 </aside>
 
 <style>
@@ -44,6 +47,10 @@
     gap: var(--space-2);
     padding: var(--space-3);
     flex-shrink: 0;
+  }
+
+  .sidebar-list.untitled {
+    padding-top: var(--space-2);
   }
 
   .sidebar-list {

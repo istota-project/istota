@@ -114,6 +114,25 @@ describe('transaction selection history', () => {
     expect(__history.entries).toHaveLength(3);
   });
 
+  it('groups the sidebar by top-level account and filters on a group label', async () => {
+    vi.mocked(getAccounts).mockResolvedValue({
+      status: 'ok',
+      accounts: [
+        { account: 'Assets:Checking', 'sum(position)': '0 USD' },
+        { account: 'Assets:AR:Acme', 'sum(position)': '0 USD' },
+        { account: 'Expenses:Supplies', 'sum(position)': '0 USD' },
+      ],
+    });
+    mount();
+    // A third level reads as the rest of its path, one row in its group.
+    const acme = await screen.findByRole('button', { name: 'AR:Acme' });
+    expect(acme.getAttribute('title')).toBe('Assets:AR:Acme');
+    expect(screen.queryByText('Accounts')).toBeNull();
+    // The label button's name carries the group's count.
+    await fireEvent.click(screen.getByRole('button', { name: 'Assets 2' }));
+    expect(new URL(currentUrl(), location.origin).searchParams.get('account')).toBe('Assets');
+  });
+
   it.each(['transaction', 'posting'])(
     'pushes a %s account and restores its previous account on Back',
     async (control) => {

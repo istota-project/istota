@@ -156,8 +156,5 @@
   },
   "src/routes/money/settings/invoicing/+page.svelte": {
     "redefined-primitive": 3
-  },
-  "src/routes/money/transactions/+layout.svelte": {
-    "off-scale-space": 1
   }
 }

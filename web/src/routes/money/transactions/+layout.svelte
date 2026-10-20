@@ -12,8 +12,17 @@
     type TransactionSelection,
   } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
-  import { Icon, Chip, ListRow, Sidebar, SidebarToggle, Select, Input } from '$lib/components/ui';
-  import { ChevronRight, Search } from '@lucide/svelte';
+  import {
+    CategoryGroup,
+    Chip,
+    Icon,
+    ListRow,
+    Sidebar,
+    SidebarToggle,
+    Select,
+    Input,
+  } from '$lib/components/ui';
+  import { Search } from '@lucide/svelte';
   import { debounce } from '$lib/ui/debounce';
 
   let { children } = $props();
@@ -68,53 +77,19 @@
     selectionReady = true;
   });
 
-  interface AccountNode {
-    name: string;
-    fullName: string;
-    children: AccountNode[];
-  }
-
-  let tree: AccountNode[] = $state([]);
-  let expandedSet = $state(new Set<string>());
-
-  function buildTree(rows: AccountRow[]): AccountNode[] {
-    const root: AccountNode[] = [];
-    const nodeMap = new Map<string, AccountNode>();
-
-    for (const row of rows) {
-      const parts = row.account.split(':');
-      let current = root;
-      let path = '';
-
-      for (let i = 0; i < parts.length; i++) {
-        path = path ? `${path}:${parts[i]}` : parts[i];
-        let node = nodeMap.get(path);
-        if (!node) {
-          node = { name: parts[i], fullName: path, children: [] };
-          nodeMap.set(path, node);
-          current.push(node);
-        }
-        current = node.children;
-      }
+  /** The ledger's accounts by their top-level segment, in ledger order. Each
+   *  account keeps the rest of its path as its label, so a third level reads
+   *  `AR:Acme` under Assets rather than nesting another indent. */
+  const groups = $derived.by(() => {
+    const out = new Map<string, { account: string; label: string }[]>();
+    for (const row of accounts) {
+      const [top, ...rest] = row.account.split(':');
+      if (!out.has(top)) out.set(top, []);
+      if (rest.length > 0) out.get(top)!.push({ account: row.account, label: rest.join(':') });
     }
-
-    for (const node of root) {
-      expandedSet.add(node.fullName);
-    }
-
-    return root;
-  }
-
-  function toggleExpand(e: MouseEvent, fullName: string) {
-    e.stopPropagation();
-    const next = new Set(expandedSet);
-    if (next.has(fullName)) {
-      next.delete(fullName);
-    } else {
-      next.add(fullName);
-    }
-    expandedSet = next;
-  }
+    for (const rows of out.values()) rows.sort((a, b) => a.label.localeCompare(b.label));
+    return [...out];
+  });
 
   function navigateToAccount(account: string) {
     transactionSel.push({ account, year: $selectedYear });
@@ -127,11 +102,9 @@
   }
 
   async function loadAccounts(ledger: string) {
-    expandedSet = new Set<string>();
     try {
       const resp = await getAccounts({ ledger: ledger || undefined });
       accounts = resp.accounts;
-      tree = buildTree(accounts);
     } catch {
       // page handles its own loading/error
     }
@@ -206,14 +179,26 @@
 </div>
 
 <div class="txn-body">
-  <Sidebar
-    title="Accounts"
-    count={accounts.length}
-    open={sidebarOpen}
-    onClose={() => (sidebarOpen = false)}
-  >
-    {#each tree as node (node.fullName)}
-      {@render accountNode(node, 0)}
+  <Sidebar open={sidebarOpen} onClose={() => (sidebarOpen = false)}>
+    {#each groups as [top, rows] (top)}
+      <CategoryGroup
+        label={top}
+        count={rows.length}
+        collapsible
+        active={$selectedAccount === top}
+        onSelect={() => selectAccount(top)}
+      >
+        {#each rows as row (row.account)}
+          <ListRow
+            density="sm"
+            title={row.account}
+            active={$selectedAccount === row.account}
+            onclick={() => selectAccount(row.account)}
+          >
+            {row.label}
+          </ListRow>
+        {/each}
+      </CategoryGroup>
     {/each}
   </Sidebar>
 
@@ -221,33 +206,6 @@
     {@render children()}
   </div>
 </div>
-
-{#snippet accountNode(node: AccountNode, depth: number)}
-  <div class="acct-row" style="padding-left: {0.5 + depth * 0.75}rem">
-    {#if node.children.length > 0}
-      <button class="acct-caret" onclick={(e) => toggleExpand(e, node.fullName)} type="button">
-        <span class="caret" class:open={expandedSet.has(node.fullName)}
-          ><Icon icon={ChevronRight} size="xs" /></span
-        >
-      </button>
-    {:else}
-      <span class="caret-spacer"></span>
-    {/if}
-    <ListRow
-      class="acct-list-row"
-      density="sm"
-      active={$selectedAccount === node.fullName}
-      onclick={() => selectAccount(node.fullName)}
-    >
-      {node.name}
-    </ListRow>
-  </div>
-  {#if node.children.length > 0 && expandedSet.has(node.fullName)}
-    {#each node.children as child (child.fullName)}
-      {@render accountNode(child, depth + 1)}
-    {/each}
-  {/if}
-{/snippet}
 
 <style>
   /* The chip precedes the toolbar in the DOM because on a wide screen it sits
@@ -270,45 +228,6 @@
     flex: 1;
     min-height: 0;
     position: relative;
-  }
-
-  .acct-row {
-    display: flex;
-    align-items: center;
-  }
-
-  .acct-caret {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    cursor: pointer;
-    padding: 0.15rem var(--space-1);
-    display: inline-flex;
-    align-items: center;
-    flex-shrink: 0;
-  }
-
-  .caret {
-    display: inline-flex;
-    transition: transform var(--transition-fast);
-  }
-
-  .caret.open {
-    transform: rotate(90deg);
-  }
-
-  /* The caret button's width: the marker and its inline padding. */
-  .caret-spacer {
-    width: calc(var(--icon-xs) + 2 * var(--space-1));
-    display: inline-block;
-    flex-shrink: 0;
-  }
-
-  /* The caret is a button of its own, so it sits beside the row rather than
-     in it; the row takes the rest of the line. */
-  .acct-row :global(.acct-list-row) {
-    flex: 1;
-    min-width: 0;
   }
 
   .txn-main {
