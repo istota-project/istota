@@ -430,7 +430,7 @@ run_group_rooms_control() {
         uv run pytest -m image -n0 -q --no-header -p no:randomly "$GROUP_ROOMS_TESTS" 2>&1 | tee "$group_out"
     set -e
     if ! grep -Fq "FAILED ${GROUP_ROOMS_TESTS}::${group_red}" "$group_out" \
-        || ! grep -Fq "1 failed, 1 passed" "$group_out"; then
+        || ! grep -Fq "1 failed, 2 passed" "$group_out"; then
         rm -f "$group_out"
         echo "[control] FAILED: group-rooms/${group_name} did not turn exactly ${group_red} red."
         exit 1

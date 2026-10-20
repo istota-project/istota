@@ -1417,6 +1417,7 @@ def _warn_if_not_regular(path: Path, *, dir_fd: int | None = None) -> None:
 
 def write_regular_file(
     path: Path, text: str | bytes, *, dir_fd: int | None = None,
+    keep_mode: bool = False,
 ) -> bool:
     """Replace ``path``'s contents, refusing anything that is not a plain file.
 
@@ -1449,6 +1450,9 @@ def write_regular_file(
     swap a component for a link; holding the descriptor closes it. Without
     one, the parent is opened here, following links as the path always did,
     and the caller owns ancestor containment as before.
+
+    ``keep_mode`` gives the new file the permission bits the old one had, for
+    an editor of the user's own files, where a script's executable bit matters.
     """
     path = Path(path)
     try:
@@ -1462,7 +1466,8 @@ def write_regular_file(
         logger.warning("write_refused path=%s errno=%s", path.name, e.errno)
         return False
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        probed = os.fstat(fd).st_mode
+        if not stat.S_ISREG(probed):
             logger.warning("write_refused path=%s reason=not_a_regular_file", path.name)
             return False
     except OSError as e:
@@ -1480,7 +1485,8 @@ def write_regular_file(
             # 0o644, the mode every workspace file has (and the one the user
             # reads it with over Nextcloud); `replace_at` applies it to the
             # descriptor rather than the name.
-            replace_at(target_fd, path.name, data, mode=0o644)
+            mode = stat.S_IMODE(probed) if keep_mode else 0o644
+            replace_at(target_fd, path.name, data, mode=mode)
         finally:
             if dir_fd is None:
                 os.close(target_fd)

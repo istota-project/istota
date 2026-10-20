@@ -16,6 +16,11 @@ def database(tmp_path):
     return path
 
 
+def test_current_schema_is_fully_classified(database):
+    with sqlite3.connect(database) as conn:
+        room_relocate.check_inventory(conn)
+
+
 def legacy(conn, token="old-talk", origin="talk"):
     db.register_room(conn, token, "alice", origin=origin, name="Example")
     db.add_room_binding(conn, token, origin, token)

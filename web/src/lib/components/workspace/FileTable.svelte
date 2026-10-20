@@ -22,9 +22,9 @@
     Checkbox,
     Timestamp,
   } from '$lib/components/ui';
-  import { chatFileUrl, nextcloudFileUrl } from '$lib/api';
+  import { chatFileUrl, nextcloudFileUrl, WORKSPACE_TEXT_EDIT_MAX_BYTES } from '$lib/api';
   import { formatBytes } from '$lib/format';
-  import { fileIcon } from './filePresentation';
+  import { fileIcon, mayBeText } from './filePresentation';
   import { loadSetting, saveSetting } from '$lib/ui/persisted';
   import { createTableSort } from '$lib/ui/tableSort.svelte';
   import { viewer } from '$lib/fileViewer/store.svelte';
@@ -40,9 +40,12 @@
     pinsBusy = false,
     onTogglePin,
     onDelete,
+    onEdit,
     onRefresh,
   }: {
     onDelete?: (names: string[]) => Promise<{ deleted: string[]; errors: string[] }>;
+    /** Offered on files that may be text; `path` is the folder, relative to the place. */
+    onEdit?: (path: string, name: string) => void;
     onRefresh?: () => void;
     pins?: WorkspacePin[];
     pinsBusy?: boolean;
@@ -167,6 +170,14 @@
   function menuItems(entry: (typeof entries)[number]): KebabItem[] {
     if (entry.kind !== 'file' && entry.kind !== 'dir') return [];
     const items: KebabItem[] = [];
+    if (
+      onEdit &&
+      entry.kind === 'file' &&
+      (entry.size ?? 0) <= WORKSPACE_TEXT_EDIT_MAX_BYTES &&
+      mayBeText(entry.name)
+    ) {
+      items.push({ label: 'Edit', onSelect: () => onEdit(listing?.path ?? '', entry.name) });
+    }
     if (onTogglePin && entry.ref) {
       const provider = place.kind === 'drive' ? 'drive' : 'workspace';
       const pinned = pins.some((pin) => pin.provider === provider && pin.ref === entry.ref);

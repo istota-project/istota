@@ -6455,16 +6455,43 @@ export function getWorkspaceConfigFile(name: string): Promise<WorkspaceConfigFil
 }
 /** `applies: 'next_sync'` on a CRON.md save: the scheduler picks the jobs up
  * at its next CRON.md sync, not at once. */
-export async function saveWorkspaceConfigFile(
+export function saveWorkspaceConfigFile(
   name: string,
   content: string,
   revision: string,
 ): Promise<{ revision: string; applies?: 'next_sync' }> {
-  const resp = await fetch(`${base}/api${configFilePath(name)}`, {
+  return putTextFile(configFilePath(name), { content, revision });
+}
+
+/** Files above this size open in the viewer only; the server holds the same cap. */
+export const WORKSPACE_TEXT_EDIT_MAX_BYTES = 1_048_576;
+
+/** A text file in My files. The server refuses anything that is not text by
+ * its bytes (415), a link (422) and the bot's config folder (403). */
+export function getWorkspaceTextFile(
+  path: string,
+  name: string,
+): Promise<WorkspaceConfigFileContent> {
+  return apiFetch(`/workspace/files?${new URLSearchParams({ place: 'home', path, name })}`);
+}
+export function saveWorkspaceTextFile(
+  path: string,
+  name: string,
+  content: string,
+  revision: string,
+): Promise<{ revision: string }> {
+  return putTextFile('/workspace/files', { place: 'home', path, name, content, revision });
+}
+
+async function putTextFile<T extends { revision: string }>(
+  path: string,
+  payload: Record<string, string>,
+): Promise<T> {
+  const resp = await fetch(`${base}/api${path}`, {
     method: 'PUT',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content, revision }),
+    body: JSON.stringify(payload),
   });
   if (resp.status === 401) throw new AuthError();
   if (resp.ok) return resp.json();

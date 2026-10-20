@@ -5,8 +5,9 @@
     <!-- viewport-fit=cover lets the page paint into the rounded corners / home
          indicator instead of being letterboxed above them, which is what makes
          env(safe-area-inset-*) report real values. Everything pinned to a
-         viewport edge pads by the matching --safe-* token in app.css. Composer
-         rewrites this tag on focus (iOS zoom guard) — keep the flag in both of
+         viewport edge pads by the matching --safe-* token in app.css. The
+         pre-paint script below locks zoom in the iOS app, and zoomPin.ts
+         rewrites this tag on focus (iOS zoom guard) — keep the flag in all of
          its strings. -->
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="text-scale" content="scale" />
@@ -35,7 +36,8 @@
     <meta name="mobile-web-app-capable" content="yes" />
 
     <script>
-      // Apply the saved theme and text scale before first paint to avoid a flash
+      // Apply the saved theme and text scale, and the iOS app's viewport lock,
+      // before first paint to avoid a flash
       // of the wrong theme / a reflow once the size lands. Mirrors
       // lib/ui/persisted.ts (values are JSON-encoded).
       (function () {
@@ -61,6 +63,17 @@
         if (chrome) chrome.setAttribute('content', theme === 'light' ? '#f4f4f5' : '#1a1a1a');
         var size = read('fontSize', 'medium');
         root.setAttribute('data-font-size', size === 'small' || size === 'large' ? size : 'medium');
+        // The iOS app never page-zooms (ISSUE-818). Set before first paint, not
+        // after hydration, or a double tap in between can still zoom. Mirrors
+        // VIEWPORT_LOCKED in lib/zoomPin.ts; a browser keeps pinch-zoom.
+        if (/(?:^|\s)IstotaApp\//.test(navigator.userAgent)) {
+          var viewport = document.querySelector('meta[name="viewport"]');
+          if (viewport)
+            viewport.setAttribute(
+              'content',
+              'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover',
+            );
+        }
       })();
     </script>
     %sveltekit.head%

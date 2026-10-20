@@ -152,7 +152,7 @@ Sweep (ISSUE-317): `sandbox_cache_sweep_enabled`, `sandbox_cache_max_gb` (10/use
 
 `[web.chat] talk_read_sync_interval` (60; 0 off).
 
-`SiteConfig` is only `hostname`. Sites were removed (per-user ISSUE-171, instance **ISSUE-194**): a RW-bound, publicly served dir made `cp` an egress channel the confirmation model read as a local write, and removing it beat teaching the model "is this path public". Gone: the bind, the `native_fs_roots` root, `WEBSITE_PATH`/`WEBSITE_URL`, the prompt section. Stale `enabled`/`base_path` warns. The stack's nginx answers 404 for everything outside the app's locations (`root-locations.conf`).
+`SiteConfig` is only `hostname`. Sites were removed (per-user ISSUE-171, instance **ISSUE-194**): a RW-bound, publicly served dir made `cp` an egress channel the confirmation model read as a local write, and removing it beat teaching the model "is this path public". Gone: the bind, the `native_fs_roots` root, `WEBSITE_PATH`/`WEBSITE_URL`, the prompt section. Stale `enabled`/`base_path` warns. The stack's nginx answers 404 for everything outside the app's locations (`root-locations.conf`). The operator's case came back as host.env's `SITE_DIR` (#804): a hand-maintained static site mounted `:ro` on nginx alone (`root-locations-site.conf`), never in daemon, web, devbox or browser and in no `native_fs_roots` root, so the agent cannot write to a published path. `istota-stack`'s `site_dir` refuses (a warning, no site) one inside or holding a directory the stack writes; keep that list in step with any new RW bind.
 
 `[caldav]`: any field set overrides the NC-derived `caldav_*`; all blank = derivation.
 

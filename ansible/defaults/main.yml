@@ -70,6 +70,9 @@ istota_acme_email: ""
 istota_acme_server: ""
 # nextcloud only: the remote's name in rclone.conf.
 istota_rclone_remote: ""
+# A directory of static files nginx serves read-only at / (#804), made and
+# filled by the operator. Empty keeps the redirect to the web UI.
+istota_site_dir: ""
 istota_zram_enabled: true
 # Drop container traffic to istota_host_gateway_addr, except its DNS and the
 # TCP ports in istota_host_loopback_allow. The local VM's setting (Lima's
@@ -103,6 +106,7 @@ istota_host_env:
   LOCAL_FORWARD_PORT: ""
   ISTOTA_LOCAL_LAYERS: ""
   ISTOTA_DESKTOP_APP: ""
+  SITE_DIR: "{{ istota_site_dir }}"
 # Optional keys only a unit reads (ISTOTA_DEVBOX_SUBNET, the browser watchdog's
 # ISTOTA_BROWSER_WATCHDOG_*), written beside the ones above.
 istota_host_env_extra: {}

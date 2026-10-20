@@ -7,6 +7,10 @@
  * — anchoring a pinch so the content under the fingers stays put, and holding
  * the image against the viewport edge — testable without a layout engine.
  *
+ * The PDF preview zooms a page inside a native scroller instead, where the
+ * browser clamps and the anchoring is a scroll offset rather than a
+ * translation; `scrollAfterZoom` and `previewTransform` are that half.
+ *
  * The state maps onto `transform: translate(x, y) scale(scale)` with the
  * default centre origin. CSS applies that right to left, so the translation is
  * in the parent's own pixels rather than scaled ones, and `x`/`y` are simply
@@ -64,6 +68,15 @@ export const KEY_ZOOM_STEP = 1.4;
 /** Movement past this ends a tap and makes the gesture a drag. */
 export const TAP_SLOP = 8;
 
+/** How soon a second tap must follow the first to make a double tap. */
+export const DOUBLE_TAP_MS = 300;
+
+/** How far apart the two taps of a double tap may land. */
+export const DOUBLE_TAP_SLOP = 24;
+
+/** Where a double tap at the fit scale zooms to. */
+export const DOUBLE_TAP_SCALE = 2.5;
+
 /**
  * How long after an overlay closes the click of the tap that closed it may
  * still arrive.
@@ -106,6 +119,11 @@ export function isZoomed(state: ZoomState): boolean {
 
 function clamp(value: number, low: number, high: number): number {
   return Math.min(high, Math.max(low, value));
+}
+
+/** A scale held inside the zoom range. */
+export function clampScale(scale: number): number {
+  return clamp(scale, MIN_SCALE, MAX_SCALE);
 }
 
 /**
@@ -172,7 +190,7 @@ export interface Gesture {
  * overshoots the cap.
  */
 export function applyGesture(start: ZoomState, gesture: Gesture, geometry: Geometry): ZoomState {
-  const scale = clamp(start.scale * gesture.scaleFactor, MIN_SCALE, MAX_SCALE);
+  const scale = clampScale(start.scale * gesture.scaleFactor);
   const factor = scale / start.scale;
 
   const centerX = geometry.origin.x + start.x;
@@ -238,3 +256,45 @@ export const WHEEL_DELTA_CAP = 50;
  * wheel has no equivalent of a finger lifting.
  */
 export const WHEEL_IDLE_MS = 140;
+
+/**
+ * Where a native scroller has to scroll after its content is scaled, so the
+ * content that was under `anchorStart` lands under `anchorNow`.
+ *
+ * Anchors are in the scroller's visible box. The offsets are where the
+ * content's top-left sits in the scrolled area before and after the new layout:
+ * padding, and auto margins that stop centring once the content overflows, both
+ * move it, so the caller measures the second one after the layout settles
+ * rather than assuming it. The browser clamps whatever this returns.
+ */
+export function scrollAfterZoom(zoom: {
+  scroll: Point;
+  offsetBefore: Point;
+  offsetAfter: Point;
+  anchorStart: Point;
+  anchorNow: Point;
+  factor: number;
+}): Point {
+  const { scroll, offsetBefore, offsetAfter, anchorStart, anchorNow, factor } = zoom;
+  return {
+    x: (scroll.x + anchorStart.x - offsetBefore.x) * factor + offsetAfter.x - anchorNow.x,
+    y: (scroll.y + anchorStart.y - offsetBefore.y) * factor + offsetAfter.y - anchorNow.y,
+  };
+}
+
+/**
+ * The transform that shows a zoom in progress before the layout follows it.
+ *
+ * For `transform-origin: 0 0`, with both anchors relative to the content's
+ * top-left as laid out. Re-laying out and re-rendering a PDF page on every
+ * frame of a pinch is too slow, so the page is scaled by this until the
+ * gesture ends, then laid out at the new size and scrolled by
+ * `scrollAfterZoom`, which lands the same content under the same point.
+ */
+export function previewTransform(anchorStart: Point, anchorNow: Point, factor: number): ZoomState {
+  return {
+    scale: factor,
+    x: anchorNow.x - anchorStart.x * factor,
+    y: anchorNow.y - anchorStart.y * factor,
+  };
+}

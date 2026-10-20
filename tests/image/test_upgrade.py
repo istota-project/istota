@@ -1280,9 +1280,12 @@ def group_room_upgrade(volume_upgrade, istota_image, tmp_path_factory) -> dict:
     conn.close()
     migrated = _docker_run(istota_image, volume_upgrade.config_dir, release, ["-c", _istota("init")])
     assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+    first = state(release)
+    again = _docker_run(istota_image, volume_upgrade.config_dir, release, ["-c", _istota("init")])
+    assert again.returncode == 0, again.stdout + again.stderr
 
     return {"declared": state(declared), "fresh": state(fresh),
-            "floor": state(volume_upgrade.db_dir), "release": state(release)}
+            "floor": state(volume_upgrade.db_dir), "release": first, "release_again": state(release)}
 
 
 class TestGroupOwnedRoomsUpgrade:
@@ -1298,6 +1301,14 @@ class TestGroupOwnedRoomsUpgrade:
             assert group_room_upgrade[name]["schema"] == declared, (
                 f"the {name} database's group-room schema is not the one schema.sql declares"
             )
+
+    def test_the_migration_is_markered_and_a_second_init_changes_nothing(self, group_room_upgrade):
+        assert not group_room_upgrade["declared"]["marker"]
+        for name in ("fresh", "floor", "release"):
+            assert group_room_upgrade[name]["marker"], f"the {name} database has no group_owned_rooms_v1 marker"
+        assert group_room_upgrade["release_again"] == group_room_upgrade["release"], (
+            "a second init changed the migrated state"
+        )
 
     def test_no_linked_room_is_converted(self, group_room_upgrade):
         assert group_room_upgrade["release"]["rooms"] == {

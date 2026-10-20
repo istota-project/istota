@@ -27,8 +27,16 @@ rooms = {
         "SELECT name, group_id, membership_source FROM rooms WHERE name LIKE 'Group upgrade %'"
     )
 }
+# Only the migration writes the row, so `schema.sql` applied alone reads False.
+has_state = conn.execute(
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='_migration_state'"
+).fetchone()
+marker = bool(has_state and conn.execute(
+    "SELECT 1 FROM _migration_state WHERE name='group_owned_rooms_v1'"
+).fetchone())
 conn.close()
 print(json.dumps({
+    'marker': marker,
     'schema': {
         'column': column,
         'requests': requests,
