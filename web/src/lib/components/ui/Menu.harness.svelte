@@ -6,7 +6,13 @@
     items,
     retainFocus = false,
     trailing = false,
-  }: { items: MenuItem[]; retainFocus?: boolean; trailing?: boolean } = $props();
+    density,
+  }: {
+    items: MenuItem[];
+    retainFocus?: boolean;
+    trailing?: boolean;
+    density?: 'sm' | 'base';
+  } = $props();
 
   const shown = $derived(
     trailing ? items.map((item, i) => (i === 0 ? { ...item, trailing: count } : item)) : items,
@@ -17,7 +23,7 @@
 
 <!-- A field that keeps focus, standing in for the chat composer's textarea. -->
 <textarea data-testid="field"></textarea>
-<Menu items={shown} label="Row actions" {retainFocus}>
+<Menu items={shown} label="Row actions" {retainFocus} {density}>
   {#snippet trigger(props)}
     <button type="button" {...props}>Open</button>
   {/snippet}

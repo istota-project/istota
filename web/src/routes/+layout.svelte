@@ -587,7 +587,7 @@
             {/if}
           </button>
           <LogoutButton />
-          <Menu items={navMenuItems} label="Sections">
+          <Menu items={navMenuItems} label="Sections" density="base">
             {#snippet trigger(props)}
               <button
                 class="nav-icon-btn touch-target hamburger-btn"
