@@ -165,7 +165,8 @@ class BrainRequest:
     # resolved brain ``supports_steering``.
     poll_steers: Callable[[], list[str]] | None = None
 
-    # Called once with the subprocess PID after spawn (for !stop support).
+    # Called with the subprocess PID after spawn (for !stop support), and with
+    # 0 once that child is reaped (`report_child_reaped`, ISSUE-823).
     on_pid: Callable[[int], None] | None = None
 
     # Per-task cgroup v2 directory (A6), already created with its limits

@@ -48,6 +48,7 @@ __all__ = [
     "descends_from",
     "parent_pid",
     "peer_pid",
+    "report_child_reaped",
     "reporting_pid",
     "start_time",
     "supported",
@@ -206,10 +207,27 @@ def supported() -> bool:
         b.close()
 
 
+def report_child_reaped(on_pid: Callable[[int], None] | None) -> None:
+    """Tell a brain's ``on_pid`` that the child it last reported is gone.
+
+    ``on_pid(0)`` clears ``tasks.worker_pid`` (ISSUE-823). Call it only once
+    the child is reaped: a cleared row is what puts a child out of the cancel
+    watch's reach. Never raises.
+    """
+    if on_pid is None:
+        return
+    try:
+        on_pid(0)
+    except Exception:
+        pass
+
+
 @contextlib.contextmanager
 def reporting_pid(
     on_pid: Callable[[int], None] | None,
     preexec: Callable[[], None] | None = None,
+    *,
+    report_reap: bool = False,
 ) -> Iterator[Callable[[], None] | None]:
     """A ``preexec_fn`` that reports the child's pid to ``on_pid``.
 
@@ -224,6 +242,11 @@ def reporting_pid(
     ``preexec`` runs first, so a cgroup placement composed with this happens
     before anything else in the child. A failed write is swallowed: a pid that
     was not reported costs the child its registration, never its spawn.
+
+    With ``report_reap``, the reader also sends the reap report once it sees
+    EOF, which is after the context exits and so after ``subprocess.run`` has
+    waited: on one thread, so it cannot overtake a slow spawn report. Only a
+    brain's ``on_pid`` takes 0; the skill proxy's registration does not.
 
     With ``on_pid`` of ``None`` this yields ``preexec`` unchanged.
     """
@@ -242,6 +265,7 @@ def reporting_pid(
 
     def _read() -> None:
         buffered = b""
+        delivered = False
         try:
             while True:
                 chunk = os.read(read_fd, 64)
@@ -250,10 +274,13 @@ def reporting_pid(
                 buffered += chunk
                 while b"\n" in buffered:
                     line, buffered = buffered.split(b"\n", 1)
+                    delivered = True
                     try:
                         on_pid(int(line))
                     except Exception:
                         pass
+            if report_reap and delivered:
+                report_child_reaped(on_pid)
         except OSError:
             pass
         finally:

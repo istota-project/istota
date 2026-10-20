@@ -121,7 +121,7 @@ Request fields:
 - `advisor` only for an anthropic-namespace brain, via `_resolve_advisor`; a model pin drops it (the CLI's fatal advisor gate depends on the main model). Kept on an anthropic reroute, dropped to native (Stage 3).
 - `on_progress = stream.on_event`: tool use/end/progress, text and context-management events become `tool_start`/`tool_end`/`tool_progress`/`progress_text`/`context_management`; `tool_*` gated on `progress_show_tool_use`, text on `progress_show_text`, progress always (SSE only).
 - `cancel_check` polls `db.is_task_cancelled()`.
-- `on_pid` calls `SkillProxy.authorize_pid` first (ISSUE-550: a brain that never calls it gets every skill call refused), then cgroup placement and `db.update_task_pid()`.
+- `on_pid` is `_record_worker_pid`: `SkillProxy.authorize_pid` first (ISSUE-550: a brain that never calls it gets every skill call refused), then cgroup placement and `db.update_task_pid()`. A pid of 0 is the brain's reap report (ISSUE-823) and only writes NULL: placing 0 would move the daemon into the task cgroup.
 - `sandbox_wrap` / `native_sandbox_wrap`: closures over `build_bwrap_cmd` with `CLAUDE` and `NATIVE` profiles. Two fields because `_run_fallback`'s `dataclasses.replace` names neither, and one field would hand the Claude namespace to NativeBrain (ISSUE-389).
 
 After execution: on failure with `partial_text`, set `task.partial_result` (ISSUE-372; `result_text` is dispatched on by equality, so it cannot carry it; never on success); compose; append the dropped-pin note after composition; update the fingerprint; return the four-tuple.
