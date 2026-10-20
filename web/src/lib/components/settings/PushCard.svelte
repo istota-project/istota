@@ -3,7 +3,6 @@
   import {
     AuthError,
     listPushDevices,
-    registerPushDevice,
     deletePushDevice,
     type PushDevice,
     listPushCategories,
@@ -14,14 +13,14 @@
   import { getUserSettings } from '$lib/settings/userSettingsContext';
   import { isManaged, managedBadge } from '$lib/settings/managed';
   import { getCurrentUser } from '$lib/userContext';
-  import { shellVersion } from '$lib/platform/native';
   import {
     pushAvailable,
     pushPermissions,
     registerForPush,
     type PushPermission,
   } from '$lib/platform/nativePush';
-  import { connectionContext, recordPushRegistration } from '$lib/platform/nativeConnection';
+  import { connectionContext } from '$lib/platform/nativeConnection';
+  import { saveEnrollment } from '$lib/platform/pushEnrollment';
   // The location plugin already opens this app's system Settings page.
   import { openAppSettings } from '$lib/platform/nativeLocation';
   import { invalidateNotificationCounts } from '$lib/stores/notifications';
@@ -69,19 +68,7 @@
       permission = result.permission;
       if (result.permission !== 'granted') return;
       if (!result.token) throw new Error('No device token was returned. Try again.');
-      const registration = await registerPushDevice({
-        token: result.token,
-        environment: result.environment,
-        platform: 'ios',
-        app_version: shellVersion() ?? '',
-        ...(context
-          ? {
-              connection_binding: context.connectionBinding,
-              connection_generation: context.generation,
-            }
-          : {}),
-      });
-      if (context) await recordPushRegistration(registration.id, context);
+      await saveEnrollment({ ...result, token: result.token }, context);
       registrationMessage = 'This device is registered.';
       invalidateNotificationCounts();
       await loadDevices();

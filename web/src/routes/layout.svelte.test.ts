@@ -679,6 +679,25 @@ describe('native push lifecycle', () => {
     window.dispatchEvent(new Event('istotaPushOpen'));
     expect(plugin.consumePendingOpen).toHaveBeenCalledTimes(2);
   });
+  it('checks the push enrollment only after live authentication', async () => {
+    const plugin = installPush();
+    useAgent('IstotaApp/0.12.0');
+    app.appConnectionAvailable.mockReturnValue(true);
+    const permissions = vi.fn(async () => ({ permission: 'denied', registered: false }));
+    Object.assign(plugin, { permissions });
+    let resolve!: (value: User) => void;
+    getMe.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+    render(Layout, { children });
+    expect(permissions).not.toHaveBeenCalled();
+    resolve(person());
+    await screen.findByText('Alice');
+    expect(permissions).toHaveBeenCalledTimes(1);
+  });
   it('leaves the badge and pending tap untouched with only an offline identity', async () => {
     const plugin = installPush();
     online.set(false);
