@@ -236,6 +236,66 @@ class TestRefused:
         assert "RuntimeError" in caplog.text
 
 
+class TestASubtaskAnswersForItsParentsTurn:
+    """A subtask has no stored turn of its own; the turn it serves is its root's.
+
+    A correspondent's mail on an email thread room runs as the host, and a
+    subtask it spawns gets the host's user id, the room's token and no
+    `messages` row, so the task's own row says nothing about who asked.
+    """
+
+    def _child_of(self, env, parent_id, **columns):
+        with db.get_db(env["path"]) as conn:
+            child = db.create_task(conn, user_id="alice", prompt="go on",
+                                   source_type="subtask", parent_task_id=parent_id)
+            for name, value in columns.items():
+                conn.execute(f"UPDATE tasks SET {name} = ? WHERE id = ?", (value, child))
+            conn.commit()
+        return child
+
+    def _ask_as(self, env, tmp_path, task_id):
+        proxy = proxy_for(env, tmp_path)
+        proxy.task_id = task_id
+        return exchange(proxy, ask(env["reader"]))
+
+    def test_a_correspondents_subtask_is_refused(self, env, tmp_path):
+        _turn(env, author_user_id="stranger")
+        child = self._child_of(env, env["task_id"])
+        assert self._ask_as(env, tmp_path, child) == {"ok": False, "reason": "not_owner_turn"}
+
+    def test_an_outside_senders_grandchild_is_refused(self, env, tmp_path):
+        _turn(env, author_label="mallory@elsewhere.example")
+        grandchild = self._child_of(env, self._child_of(env, env["task_id"]))
+        assert self._ask_as(env, tmp_path, grandchild) == {
+            "ok": False, "reason": "not_owner_turn",
+        }
+
+    def test_a_guest_ancestor_is_refused(self, env, tmp_path):
+        with db.get_db(env["path"]) as conn:
+            conn.execute("UPDATE tasks SET guest_participant_id = 7 WHERE id = ?",
+                         (env["task_id"],))
+            conn.commit()
+        child = self._child_of(env, env["task_id"])
+        assert self._ask_as(env, tmp_path, child)["reason"] == "not_owner_turn"
+
+    def test_the_owners_own_turn_serves_its_subtask(self, env, tmp_path):
+        _turn(env, author_user_id="alice")
+        child = self._child_of(env, env["task_id"])
+        assert "imap" in self._ask_as(env, tmp_path, child)
+
+    def test_a_missing_parent_is_refused(self, env, tmp_path):
+        child = self._child_of(env, 999_999)
+        assert self._ask_as(env, tmp_path, child)["reason"] == "not_owner_turn"
+
+    def test_a_cycle_is_refused_and_ends(self, env, tmp_path):
+        child = self._child_of(env, env["task_id"])
+        with db.get_db(env["path"]) as conn:
+            conn.execute("UPDATE tasks SET parent_task_id = ? WHERE id = ?",
+                         (child, env["task_id"]))
+            conn.commit()
+        assert self._ask_as(env, tmp_path, child)["reason"] == "not_owner_turn"
+
+
 class TestTheSkillNameComesFromTheDispatch:
     """The skill name the channel checks is the one the proxy spawned, never a
     claim in the request: driven through `_handle_connection` with the
