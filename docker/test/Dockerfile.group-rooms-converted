@@ -1,0 +1,22 @@
+# Negative control for tests/image/test_upgrade.py::TestGroupOwnedRoomsUpgrade:
+# the real image with a migration that makes every linked room group-owned.
+# The schema is untouched, so only `test_no_linked_room_is_converted` may go red.
+ARG BASE
+FROM ${BASE}
+RUN /app/.venv/bin/python - <<'PY'
+import pathlib
+path = pathlib.Path("/app/src/istota/db.py")
+old = """        conn, "rooms", {"membership_source": "TEXT NOT NULL DEFAULT 'room'"},
+    )
+"""
+# Tolerant like the real migration, so a fresh database (no `rooms` yet) still
+# initialises and the fixture reaches its assertions.
+new = old + """    try:
+        conn.execute("UPDATE rooms SET membership_source = 'group' WHERE group_id IS NOT NULL")
+    except sqlite3.OperationalError:
+        pass
+"""
+text = path.read_text()
+assert text.count(old) == 1, "the migration this control breaks has moved"
+path.write_text(text.replace(old, new))
+PY
