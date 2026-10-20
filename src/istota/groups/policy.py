@@ -13,11 +13,7 @@ class GroupError(ValueError):
 def group_capabilities(conn, group_id: str, actor_id: str, *, is_admin: bool) -> dict:
     group = db.get_group(conn, group_id)
     member = bool(group) and db.is_group_member(conn, group_id, actor_id)
-    row = conn.execute(
-        "SELECT role FROM group_members WHERE group_id = ? AND user_id = ? AND ended_at IS NULL",
-        (group_id, actor_id),
-    ).fetchone() if member else None
-    owner = bool(row and row["role"] == "owner")
+    owner = member and db.is_group_owner(conn, group_id, actor_id)
     system = bool(group and group["system_key"] == "all_users")
     return {
         "member": member, "owner": owner,

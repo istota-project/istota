@@ -23,6 +23,9 @@ rule below is a no-op for it.
   a principal last spoke, after which a guest's turn is recorded only.
 - **The audience class** (D3): `private` for one human, `principals` when
   every present human is a member, `mixed` once a guest is present.
+- **A group-owned room** (`db.is_group_owned_room`) takes its settings
+  authority from the linked group's current owners rather than the host, and
+  its group link never changes (`groups.rooms`).
 
 Every function takes the caller's connection and writes nothing the caller did
 not ask for, apart from the sticky host loss, which is a fact about the room
@@ -291,10 +294,13 @@ def settings_refusal(conn: sqlite3.Connection, room_token: str, user_id: str) ->
     reads they are therefore the host's, the same authority `!room guests`
     takes; in a private room the one member changes them freely.
     Per-member choices (a colour, hiding the room) and the room's notes are not
-    settings: every member has those.
+    settings: every member has those. In a group-owned room they are the
+    group's current owners', at any headcount (`groups.rooms`).
     """
     room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     room = db.get_room(conn, room_token)
+    if db.is_group_owned_room(room):
+        return _group_owner_refusal(conn, room, user_id)
     if room is None or not db.room_is_shared(conn, room_token):
         return None
     host = current_host(conn, ensure_policy(conn, room_token))
@@ -308,14 +314,23 @@ def settings_refusal(conn: sqlite3.Connection, room_token: str, user_id: str) ->
     return f"Only this room's host ({host}) can change its settings."
 
 
+def _group_owner_refusal(conn: sqlite3.Connection, room: db.Room, user_id: str) -> str | None:
+    from istota.groups.rooms import owner_settings_refusal
+
+    return owner_settings_refusal(conn, room, user_id)
+
+
 def guest_reply_refusal(conn: sqlite3.Connection, room_token: str, user_id: str) -> str | None:
     """Why ``user_id`` may not change how guests are answered here, or None.
 
     Host only, in a private room as in a shared one: the host is who a guest's
     turn runs as, so the choice is theirs. `!room guests` and the web PATCH
-    both ask this.
+    both ask this. A group-owned room's group owners decide instead.
     """
     room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
+    room = db.get_room(conn, room_token)
+    if db.is_group_owned_room(room):
+        return _group_owner_refusal(conn, room, user_id)
     policy = ensure_policy(conn, room_token)
     if policy is None:
         return "This room has no guest policy."
@@ -335,11 +350,19 @@ def group_link_refusal(
     needs the caller to be a current member of a live group;
     every refusal of the group reads the same, as `kv --group`'s does, so the
     command is not a way to learn which groups exist.
+
+    A group-owned room refuses every change, its group's owners included:
+    there the link is the membership, so changing it would hand the room's
+    history to another audience.
     """
+    from istota.groups.rooms import link_refusal
+
     room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     room = db.get_room(conn, room_token)
     if room is None:
         return "This room isn't registered yet."
+    if db.is_group_owned_room(room):
+        return link_refusal(room)
     if not host_present(conn, room_token, user_id):
         return "Only a member of this room can link it to a group."
     refusal = settings_refusal(conn, room_token, user_id)
@@ -373,6 +396,7 @@ def speech_mode_refusal(conn: sqlite3.Connection, room_token: str, user_id: str)
     room, where speaking is a reply-all to everyone on the thread, so only the
     bot in To makes it speak. `!room speak`, `!room disposition` and the web
     PATCH all ask this, since the disposition is part of the same decision.
+    A group-owned room's group owners decide instead of its host.
     """
     from .scopes import is_email_thread_room
 
@@ -382,6 +406,9 @@ def speech_mode_refusal(conn: sqlite3.Connection, room_token: str, user_id: str)
             "This room is an email thread: I reply only when the mail is "
             "addressed to me, and that is not a setting."
         )
+    room = db.get_room(conn, room_token)
+    if db.is_group_owned_room(room):
+        return _group_owner_refusal(conn, room, user_id)
     policy = ensure_policy(conn, room_token)
     if policy is None:
         return "This room has no speech setting."

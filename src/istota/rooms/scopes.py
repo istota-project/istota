@@ -203,7 +203,10 @@ def ambient_memory_off(conn: sqlite3.Connection | None, task: "db.Task") -> bool
 
     True in a room more than one human reads now: a guest's turn, a turn whose
     stored audience is ``mixed``, a surface roster saying "group", or a
-    registered room with more than one member. `USER.md`, dated and recalled
+    registered room with more than one member. True as well in a group-owned
+    room at any headcount (`db.is_group_owned_room`), one member included,
+    without the turn being a group chat: `task_group_ids` still loads that
+    group's notebook and the member's reach is unchanged. `USER.md`, dated and recalled
     memories, knowledge-graph facts and playbooks reach the prompt without the
     member asking for them, so a question about lunch could come back carrying
     a health note; that is the one thing asking in the room did not consent to.
@@ -232,7 +235,13 @@ def ambient_memory_off(conn: sqlite3.Connection | None, task: "db.Task") -> bool
         return False
     try:
         token = canonical_token(conn, task.conversation_token)
-        return token is not None and db.room_is_shared(conn, token)
+        if token is None:
+            return False
+        # Headcount is not the rule here: a group room's history is read by
+        # every future member, so a lone member's turn is no more private.
+        if db.is_group_owned_room(db.get_room(conn, token)):
+            return True
+        return db.room_is_shared(conn, token)
     except Exception as exc:
         logger.warning(
             "room_scopes: could not read the audience of %s, leaving ambient "

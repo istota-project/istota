@@ -1229,6 +1229,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_system_groups(conn)
     _migrate_group_briefings(conn)
     _migrate_room_group(conn)
+    _migrate_group_owned_rooms(conn)
     # ISSUE-612. Nothing to backfill: no earlier row recorded its mail.
     _add_columns(conn, "messages", {"outgoing_mail": "TEXT"})
     # Hidden email threads, stage 3. A row from before it renders the card from
@@ -4819,6 +4820,9 @@ class Room:
     last_activity: str | None = None
     #: The group the room is linked to (multiplayer Stage 27), or None.
     group_id: str | None = None
+    #: ``room`` keeps its own roster; ``group`` holds the linked group's
+    #: current membership. See `is_group_owned_room`.
+    membership_source: str = "room"
 
 
 @dataclass
@@ -4882,6 +4886,9 @@ def _row_to_room(row: sqlite3.Row) -> Room:
         ),
         last_activity=row["last_activity"] if "last_activity" in keys else None,
         group_id=row["group_id"] if "group_id" in keys else None,
+        membership_source=(
+            row["membership_source"] if "membership_source" in keys else "room"
+        ),
     )
 
 
@@ -5890,10 +5897,55 @@ def set_room_group(conn: sqlite3.Connection, token: str, group_id: str | None) -
     Stored as given: who may write it is `room_policy.group_link_refusal`'s
     question, and whether it loads anything is asked per turn by
     `room_scopes.task_group_ids`, so a link outlives a membership change
-    without being trusted across it.
+    without being trusted across it. Raises ``ValueError`` for a change to a
+    group-owned room's link, since there the link is the membership.
     """
+    room = get_room(conn, token)
+    if is_group_owned_room(room) and room.group_id != group_id:
+        raise ValueError(f"room {token!r} is group-owned; its group link is fixed")
     conn.execute(
         "UPDATE rooms SET group_id = ? WHERE token = ?", (group_id, token)
+    )
+
+
+ROOM_MEMBERSHIP_SOURCES = ("room", "group")
+
+
+def is_group_owned_room(room: Room | None) -> bool:
+    """Whether the room's membership follows its linked group.
+
+    Any stored value but ``room`` counts, so a row written around
+    `set_room_membership_source` fails toward the stricter relationship.
+    """
+    return room is not None and room.membership_source != "room"
+
+
+def set_room_membership_source(
+    conn: sqlite3.Connection, token: str, source: str,
+) -> None:
+    """Set who belongs to the room: its own roster (``room``) or its linked
+    group's current members (``group``).
+
+    One way only: ``group`` needs a live linked group, and a group-owned room
+    never becomes ordinary again. Raises ``ValueError`` otherwise. Writes the
+    column alone; reconciling the roster is the caller's.
+    """
+    if source not in ROOM_MEMBERSHIP_SOURCES:
+        raise ValueError(f"invalid membership source: {source!r}")
+    room = get_room(conn, token)
+    if room is None:
+        raise ValueError(f"no such room: {token!r}")
+    if is_group_owned_room(room):
+        if source != "group":
+            raise ValueError(f"room {token!r} is group-owned and stays so")
+        return
+    if source == "room":
+        return
+    if not room.group_id or get_group(conn, room.group_id) is None:
+        raise ValueError(f"room {token!r} is not linked to a live group")
+    conn.execute(
+        "UPDATE rooms SET membership_source = 'group' WHERE token = ?",
+        (room.token,),
     )
 
 
@@ -8804,6 +8856,27 @@ def _migrate_private_replies(conn: sqlite3.Connection) -> None:
         logger.warning("side-room removal failed, will retry: %s", e)
 
 
+def _migrate_group_owned_rooms(conn: sqlite3.Connection) -> None:
+    """Add `rooms.membership_source` (group-owned rooms, Stage 1).
+
+    Markered (`group_owned_rooms_v1`). Nothing is backfilled: every existing
+    room keeps its own roster, a linked room included, since making one
+    group-owned would hand its history to the group. `group_room_requests` and
+    the `(group_id, membership_source)` index are `schema.sql`'s, which runs
+    after this and creates both on an upgraded database too.
+    """
+    _add_columns(
+        conn, "rooms", {"membership_source": "TEXT NOT NULL DEFAULT 'room'"},
+    )
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) "
+            "VALUES ('group_owned_rooms_v1')"
+        )
+    except sqlite3.OperationalError:
+        return  # marker table not created yet
+
+
 def _migrate_room_group(conn: sqlite3.Connection) -> None:
     """Add `rooms.group_id` (multiplayer Stage 27).
 
@@ -11455,6 +11528,18 @@ def is_group_member(conn: sqlite3.Connection, group_id: str, user_id: str) -> bo
         "WHERE m.group_id = ? AND m.user_id = ? AND m.ended_at IS NULL "
         "AND g.archived_at IS NULL "
         "AND NOT EXISTS (SELECT 1 FROM web_auth_identities i WHERE i.user_id = m.user_id AND i.disabled = 1) LIMIT 1",
+        (group_id, user_id),
+    ).fetchone()
+    return row is not None
+
+
+def is_group_owner(conn: sqlite3.Connection, group_id: str, user_id: str) -> bool:
+    """`is_group_member`, holding the ``owner`` role."""
+    if not is_group_member(conn, group_id, user_id):
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? "
+        "AND ended_at IS NULL AND role = 'owner' LIMIT 1",
         (group_id, user_id),
     ).fetchone()
     return row is not None
