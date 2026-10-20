@@ -1,17 +1,8 @@
 import { CHAT_FILES_PREFIX } from '$lib/markdown';
+import { isPlainClick } from '$lib/ui/plainClick';
 import { viewer } from './store.svelte';
 
-/** Whether a link click can be handled without changing modified-click behavior. */
-export function isPlainClick(event: MouseEvent): boolean {
-  return !(
-    event.defaultPrevented ||
-    event.button !== 0 ||
-    event.ctrlKey ||
-    event.metaKey ||
-    event.shiftKey ||
-    event.altKey
-  );
-}
+export { isPlainClick };
 
 /** The workspace path to preview, or null to keep the browser's link behavior. */
 export function fileLinkFromEvent(event: MouseEvent): string | null {

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { onDocumentVisible } from '$lib/ui/visibility';
+  import { latest } from '$lib/ui/latest';
   import {
     AuthError,
     listPushDevices,
@@ -48,16 +49,16 @@
   let permission: PushPermission | null = $state(null);
   let registering = $state(false);
   let registrationMessage = $state('');
-  let permissionRequest = 0;
+  const permissionReads = latest();
 
   async function readPermission() {
     if (registering) return;
-    const request = ++permissionRequest;
+    const current = permissionReads.next();
     try {
       const result = await pushPermissions();
-      if (request === permissionRequest) permission = result?.permission ?? null;
+      if (current()) permission = result?.permission ?? null;
     } catch {
-      if (request !== permissionRequest) return;
+      if (!current()) return;
       error = 'Could not read notification permission. Try registering again.';
     }
   }
@@ -65,7 +66,7 @@
   async function registerDevice() {
     if (registering) return;
     registering = true;
-    permissionRequest += 1;
+    permissionReads.invalidate();
     error = '';
     registrationMessage = '';
     try {
@@ -147,7 +148,11 @@
     void loadCategories();
     if (!native) return;
     void readPermission();
-    return onDocumentVisible(() => void readPermission());
+    const offVisible = onDocumentVisible(() => void readPermission());
+    return () => {
+      offVisible();
+      permissionReads.dispose();
+    };
   });
 </script>
 

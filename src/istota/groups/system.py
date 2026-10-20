@@ -3,6 +3,7 @@ import logging
 from uuid import uuid4
 
 from istota import db, storage
+from istota.groups import rooms as group_rooms
 from istota.groups.service import _event, _finish, _transaction
 
 logger = logging.getLogger(__name__)
@@ -28,11 +29,15 @@ def sync_account_membership(conn, user_id: str, *, enabled: bool = True) -> None
     if enabled and not current:
         db.add_group_member(conn, group_id, user_id, added_by="__system__")
         _event(conn, group_id, "__system__", "member_added", subject=user_id)
-        _finish(conn, group_id)
     elif not enabled and current:
         db.end_group_membership(conn, group_id, user_id, ended_by="__system__")
         _event(conn, group_id, "__system__", "member_removed", subject=user_id)
-        _finish(conn, group_id)
+    else:
+        return
+    # The system group has no owner to create a room, so this finds none
+    # today; it is here so no membership mutation skips its rooms.
+    group_rooms.reconcile_group_room_members(conn, group_id)
+    _finish(conn, group_id)
 
 
 def eligible_user_ids(conn, config) -> set[str]:

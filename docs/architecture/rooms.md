@@ -87,7 +87,7 @@ The room's mode is its own `room_policy.speech_mode` if set, else the deployment
 
 A room that is shared, or that a guest writes in, gets one `room_policy` row, created the first time it is needed (`rooms.policy.ensure_policy`). It holds:
 
-- **`host_user_id`**: the creator if still present, else the first present member. The host is fixed at creation. If the host leaves, the field is cleared and the room records without answering until a member runs `!room host`. A returning host has to claim it like anyone else. On WhatsApp, a host who leaves makes the bot leave the group.
+- **`host_user_id`**: the creator if still present, else the first present member. The host is fixed at creation. If the host leaves, the field is cleared and the room records without answering until a member runs `!room host`. A returning host has to claim it like anyone else. On WhatsApp, a host who leaves makes the bot leave the group. A group room is the one exception: when its host leaves the group, `groups.rooms` hands the role to the group's first current owner by membership row id in the same transaction, and only a current owner may claim it (see [group rooms](#group-rooms)).
 - **`guest_reply`**: `direct` (answer in the room), `held` (propose the answer to the host privately) or `off` (record only). It defaults by surface: `direct` on Talk and web, `held` on WhatsApp and email, `held` for anything else.
 - **`max_bot_turns_without_human`** (default 3): the loop cap for guest turns.
 - The veto state and the one-time announcement (below).
@@ -139,7 +139,7 @@ The withheld set is applied at every seam that grants reach: the skill index and
 
 Without bubblewrap (`istota serve` on macOS), withholding removes the scope from the prompt, the skill list and the environment, but the task's own file tools can still reach the host's workspace. `istota doctor` reports this as `security.room_scope_confinement`.
 
-**Ambient memory is left out of every shared room**, whatever the turn. A member's turn there does not load `USER.md`, dated memories, recall, knowledge facts or playbooks into the prompt (`executor._ambient_memory_off`), since those arrive without being asked for. The memory skill still works when asked.
+**Ambient memory is left out of every shared room**, whatever the turn. A member's turn there does not load `USER.md`, dated memories, recall, knowledge facts or playbooks into the prompt (`executor._ambient_memory_off`), since those arrive without being asked for. The memory skill still works when asked. A group room (`rooms.membership_source = 'group'`) leaves ambient memory out at any headcount, one member included, because its history is read by future members (`rooms.scopes.ambient_memory_off`); the task's `is_group_chat` flag and the group set are left as they are, so a one-member group room still loads its own group's notebook.
 
 ## What the model is told
 
@@ -206,11 +206,23 @@ Two surfaces bring rooms that are not created by a member turn.
 
 Mail between the user and the bot alone is not a thread: it is the user's **private email room**, bound `surface='email'`, `surface_ref=email_conversation_token(user)` (`transport/email/private_room.py`), minted through `ingest.record_phone_turn` like an SMS room. Email stays a `guest` surface in `rooms.surfaces`, so the private room takes the container path. An email binding is a thread only when its ref is not the creator's private token (`threads.thread_binding`, `scopes.is_email_thread_room`), so no message threads into the private room and its turns are the user's own. `routing.phone_room` and `phone_transcript_surface` answer `email` for it, which makes it read-only in web. See [your private email room](../features/email.md#your-private-email-room).
 
+## Group rooms
+
+A room's `group_id` is a filter: it decides which group's notebook a turn may load. `rooms.membership_source` decides who the members are. `room`, the default and every room made before group rooms, keeps its own roster and the host rules above. `group` makes the room the group's: its roster is the group's current membership, nobody else. User-facing behaviour is in [groups](../features/groups.md#group-rooms).
+
+- **Creation** is `groups.rooms.create_group_room`, owner only, in one transaction: the web room, each member's handle and presence, the link and the `group_room_requests` row. A retry with the same request id returns the same room; the same id with another name is a 409.
+- **The roster follows the group.** `groups.service.change_membership` calls `reconcile_group_room_members` before it commits, through the same `add_web_room_member` and `drop_web_room_member` an ordinary room uses. A failed reconciliation rolls the membership change back. An addition acknowledges the room's history, so it splits no audience epoch.
+- **Admission asks the live group** (`db.group_room_admits`, `groups.rooms.group_room_access`) on top of the roster, from the one resolver every listing, read, send, file link, search and stream goes through. A roster row written around the group admits nobody, an archived group admits nobody, and `note_member_turn` adds no one the group refuses.
+- **Removal is revocation.** The removed member's handles go in the same transaction; their pending tasks are cancelled and running ones flagged, the process groups signalled after the commit. The room and task streams recheck on each batch, and `scheduler.process_one_task` drops the result of a task whose author has left (`groups.rooms.task_delivery_refused`).
+- **Refused on a group room**, in the backend operations: member add and remove, leave, delete, group link changes, promote to Talk, any non-web binding (`db._refuses_external_binding`) and a guest participant. Hiding is a per-member dismissal that keeps the roster row. The web routes answer 409 with `reason: "group_managed"` and the group's Groups URL.
+- **Settings are the owners'**: `rooms.policy.settings_refusal` and its siblings route a group room to `db.is_group_owner`.
+
 ## Tables
 
 | Table | Role here |
 |---|---|
-| `rooms` | One row per room; `group_id` for a group link |
+| `rooms` | One row per room; `group_id` for a group link, `membership_source` (`room` or `group`) for who decides its members |
+| `group_room_requests` | The request id each group room was created under, so a retried create returns the same room |
 | `room_bindings` | Which surfaces expose the room, and each surface's own ref |
 | `room_members` | Sidebar membership |
 | `room_participants` | Everyone seen in the room, with kind and join/leave history |

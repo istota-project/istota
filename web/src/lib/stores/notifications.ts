@@ -35,6 +35,7 @@ import {
 } from '$lib/api';
 import { notifyError } from './notices';
 import { onDocumentVisible } from '$lib/ui/visibility';
+import { latest } from '$lib/ui/latest';
 
 export type NotificationFilter = 'all' | 'action';
 
@@ -83,23 +84,21 @@ let consecutiveFailures = 0;
 let activeFilter: NotificationFilter = 'all';
 let offVisible: (() => void) | null = null;
 
-/** Bumped by every `start`/`stop`, and captured before each request.
+/** Only the newest list and count request may publish, and `start`/`stop`
+ *  invalidates both.
+ *
+ * Two overlapping list loads are easy to produce — the two filter chips, or a
+ * chip click racing the refresh an action fires — and without this the slower
+ * one wins by landing last. The visible symptom is one filter's rows under the
+ * other filter's chip, with `aria-pressed` on the chip that did not fetch them.
  *
  * A response already on the wire when the loop stops would otherwise resolve
  * afterwards and re-publish a badge over a page that has logged out — the
  * `AuthError` branch zeroes the counts, and a concurrent list success would
  * write a non-zero `open` straight back over them. Clearing the timer cannot
- * recall a request; a generation can refuse its answer. */
-let generation = 0;
-
-/** Bumped by every `refreshItems`; only the newest response may publish.
- *
- * Two overlapping loads are easy to produce — the two filter chips, or a chip
- * click racing the refresh an action fires — and without this the slower one
- * wins by landing last. The visible symptom is one filter's rows under the
- * other filter's chip, with `aria-pressed` on the chip that did not fetch them. */
-let listRequest = 0;
-let countRequest = 0;
+ * recall a request; invalidating can refuse its answer. */
+const listLoads = latest();
+const countLoads = latest();
 
 /** How many loads are in flight. A boolean cleared in the first `finally`
  *  reports "loaded" while the second request is still running. */
@@ -130,15 +129,14 @@ async function tick() {
  * until a success or a focus event resets it.
  */
 export async function refreshCounts(): Promise<void> {
-  const mine = generation;
-  const request = ++countRequest;
+  const current = countLoads.next();
   try {
     const next = await getNotificationCounts();
-    if (mine !== generation || request !== countRequest) return;
+    if (!current()) return;
     counts.set(next);
     consecutiveFailures = 0;
   } catch (e) {
-    if (mine !== generation || request !== countRequest) return;
+    if (!current()) return;
     if (e instanceof AuthError) {
       // The session is gone. The layout redirects to login on its own; keeping
       // the loop running would spend the interval hammering a 401 and leave a
@@ -166,12 +164,12 @@ export function invalidateNotificationCounts(): void {
  * `room_stream_room_check_seconds = 0` disables outright, so nothing here may
  * be tuned down on its account.
  *
- * **Ignored unless the poll is running**, which is the same guard `generation`
- * gives a request already on the wire. A stream frame is not authenticated by
- * this module, and an EventSource outliving a logout by a tick would otherwise
- * publish a badge over a page that has logged out. It does not touch
- * `consecutiveFailures` either: a frame arriving says nothing about whether the
- * endpoint the poll backed off from has recovered.
+ * **Ignored unless the poll is running**, which is the same guard
+ * `invalidateRequests` gives a request already on the wire. A stream frame is
+ * not authenticated by this module, and an EventSource outliving a logout by a
+ * tick would otherwise publish a badge over a page that has logged out. It does
+ * not touch `consecutiveFailures` either: a frame arriving says nothing about
+ * whether the endpoint the poll backed off from has recovered.
  */
 export function applyNotificationCounts(next: NotificationCounts): void {
   if (!polling) return;
@@ -208,15 +206,14 @@ export async function refreshItems(
   filter: NotificationFilter = activeFilter,
 ): Promise<ResolvedNotification[] | null> {
   activeFilter = filter;
-  const mine = ++listRequest;
-  const gen = generation;
+  const current = listLoads.next();
   listInFlight += 1;
   notificationsLoading.set(true);
   try {
     const listing = await listNotifications(filter, PANEL_LIMIT);
     // Superseded, or the session ended under us: publish nothing at all rather
     // than half of it. Every write below moves a store another tab is reading.
-    if (mine !== listRequest || gen !== generation) return null;
+    if (!current()) return null;
     const items = listing.notifications ?? [];
     notificationItems.set(items);
     notificationTotalOpen.set(listing.total_open ?? 0);
@@ -226,7 +223,7 @@ export async function refreshItems(
     void refreshCounts();
     return items;
   } catch (e) {
-    if (mine !== listRequest || gen !== generation) return null;
+    if (!current()) return null;
     if (e instanceof AuthError) stopNotificationPoll();
     // Deliberately leaves whatever was on screen rather than blanking the list:
     // an empty panel reads as "nothing is waiting on you", which is the one
@@ -330,11 +327,16 @@ export async function markPanelSeen(seen: NotificationSeen[]): Promise<void> {
   void refreshCounts();
 }
 
+function invalidateRequests(): void {
+  listLoads.invalidate();
+  countLoads.invalidate();
+}
+
 /** Begin the count poll. Idempotent; call it once the user has resolved. */
 export function startNotificationPoll(): void {
   if (polling) return;
   polling = true;
-  generation += 1;
+  invalidateRequests();
   consecutiveFailures = 0;
   // A background tab's timer is throttled and a suspended PWA's is stopped
   // outright, so returning to the app is both the moment a fresh count is
@@ -350,9 +352,9 @@ export function startNotificationPoll(): void {
 
 export function stopNotificationPoll(): void {
   polling = false;
-  // Clearing the timer cannot recall a request already on the wire. Bumping the
-  // generation is what stops its answer being published over a logged-out page.
-  generation += 1;
+  // Clearing the timer cannot recall a request already on the wire.
+  // Invalidating is what stops its answer being published over a logged-out page.
+  invalidateRequests();
   if (timer !== null) {
     clearTimeout(timer);
     timer = null;

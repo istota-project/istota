@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import { createDrawerClose } from '$lib/ui/drawerClose';
   import { base } from '$app/paths';
   import {
     AppShell,
@@ -32,6 +33,11 @@
   let detailLoading = $state(false);
   let error = $state('');
   let sidebarOpen = $state(false);
+  const drawer = createDrawerClose(
+    () => sidebarOpen,
+    () => (sidebarOpen = false),
+  );
+  onDestroy(drawer.cancel);
   const selectedGroup = $derived(groups.find((group) => group.group_id === selected?.group));
   let active = true;
   const details = latest();
@@ -159,7 +165,7 @@
             event.button === 0
           ) {
             event.preventDefault();
-            selection.push({ group: item.group });
+            drawer.run(() => selection.push({ group: item.group }));
           }
         }}
       />
@@ -195,7 +201,13 @@
               {#snippet status()}<span class="caption">{detail?.members.length}</span>{/snippet}
               <GroupMembers group={detail} onChanged={changed} />
             </Card>
-            <GroupRooms rooms={detail.rooms} />
+            <GroupRooms
+              rooms={detail.rooms}
+              groupId={detail.group_id}
+              revision={detail.revision}
+              canCreate={!!detail.capabilities.owner && !detail.system_key}
+              onChanged={() => changed()}
+            />
             {#if detail.capabilities.read_briefings}<GroupBriefings
                 groupId={detail.group_id}
                 canAuthor={!!detail.capabilities.author_briefings}

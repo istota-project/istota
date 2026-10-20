@@ -123,6 +123,25 @@ describe('briefing selection history', () => {
     expect(__history.entries).toHaveLength(1);
   });
 
+  it('drops an archive answer that lands after the layout unmounts', async () => {
+    let finish!: (value: ReturnType<typeof archive>) => void;
+    vi.mocked(getBriefingArchive).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const view = render(Harness, { layout: Layout, user: { username: 'alice' } as User });
+    await waitFor(() => expect(getBriefingArchive).toHaveBeenCalled());
+    view.unmount();
+    finish(archive());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // The archive stores outlive the layout; a late answer would seed a
+    // selection and a count for a reader nobody is looking at.
+    expect(get(briefingArchiveCount)).toBeNull();
+    expect(get(selectedBriefingId)).toBeNull();
+  });
+
   it.each(['999', '-1', '1.5'])(
     'replaces a missing or invalid id %s with the first item',
     async (id) => {

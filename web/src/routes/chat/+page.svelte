@@ -3,6 +3,8 @@
   import { get } from 'svelte/store';
   import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
   import { codeSpans, describeRoomOff } from '$lib/roomOff';
+  import { latest } from '$lib/ui/latest';
+  import { createDrawerClose } from '$lib/ui/drawerClose';
   import {
     Plus,
     MessageSquare,
@@ -242,6 +244,11 @@
   let notesRoom = $state<ChatRoom | null>(null);
 
   let sidebarOpen = $state(false);
+  const drawer = createDrawerClose(
+    () => sidebarOpen,
+    () => (sidebarOpen = false),
+  );
+  onDestroy(drawer.cancel);
   /* The identity the root layout resolved, rather than a `/me` of this page's
      own (ISSUE-355). Derived rather than read once, because the layout swaps a
      cached identity for the live one when the connection returns. The generic
@@ -802,13 +809,13 @@
     if (!repaint || typeof requestAnimationFrame === 'undefined') return;
     // Until the last frame lands, a scroll event reports an offset the pin is
     // about to overwrite, so `onScroll` neither samples nor pages on it.
-    const gen = ++settleGen;
+    const current = settles.next();
     settling = true;
     const settle = () => {
-      if (gen === settleGen) settling = false;
+      if (current()) settling = false;
     };
     requestAnimationFrame(() => {
-      if (!listEl || gen !== settleGen) return settle();
+      if (!listEl || !current()) return settle();
       // Relative to the max *scroll offset*, not scrollHeight: scrollHeight - 1
       // clamps straight back to the bottom on any scroller taller than a pixel,
       // so it would leave the offset unchanged and repaint nothing.
@@ -816,13 +823,13 @@
       if (maxTop <= 1) return settle(); // nothing to scroll, so nothing was jumped
       listEl.scrollTop = maxTop - 1;
       requestAnimationFrame(() => {
-        if (listEl && gen === settleGen) listEl.scrollTop = listEl.scrollHeight;
+        if (listEl && current()) listEl.scrollTop = listEl.scrollHeight;
         settle();
       });
     });
   }
   let settling = false;
-  let settleGen = 0;
+  const settles = latest();
 
   async function onScroll() {
     if (!listEl) return;
@@ -1007,7 +1014,7 @@
       // scroll event re-samples if it happens to land at the bottom.
       atBottom = false;
       showJumpToLatest = true;
-      ++settleGen;
+      settles.invalidate();
       settling = false;
       // A long smooth scroll can still report the old bottom before moving,
       // which lets the resize pin cancel the jump. Move atomically instead.
@@ -1019,9 +1026,10 @@
   });
 
   function selectRoom(id: number) {
-    const room = get(rooms).find((room) => room.id === id);
-    if (room) chatSel.push({ kind: 'room', room: room.token });
-    sidebarOpen = false;
+    drawer.run(() => {
+      const room = get(rooms).find((room) => room.id === id);
+      if (room) chatSel.push({ kind: 'room', room: room.token });
+    });
   }
 
   // The notes panes are siblings of Settings rather than buttons inside it:
@@ -1047,8 +1055,7 @@
   }
 
   function selectView(v: ChatView) {
-    chatSel.push({ kind: 'view', view: v });
-    sidebarOpen = false;
+    drawer.run(() => chatSel.push({ kind: 'view', view: v }));
   }
 
   // Mark every room read (header chip). Confirmed like the feeds equivalent —

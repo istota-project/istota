@@ -4469,6 +4469,17 @@ def _task_owner(task_id: int) -> str | None:
         return task.user_id if task else None
 
 
+def _task_delivery_refused(task_id: int) -> bool:
+    """`groups.rooms.task_delivery_refused` for a task id: its group-owned
+    room no longer lets its author in, so nothing more of it is served."""
+    from istota import db
+    from istota.groups.rooms import task_delivery_refused
+
+    with db.get_db(_config.db_path) as conn:
+        task = db.get_task(conn, task_id)
+        return task is not None and task_delivery_refused(conn, task)
+
+
 def _load_task_events(task_id: int, since_seq: int) -> list[dict]:
     from istota import db
     with db.get_db(_config.db_path) as conn:
@@ -4544,10 +4555,15 @@ def _synthetic_terminal_events(task_id: int, after_seq: int) -> list[dict]:
 
 
 async def _authorize_task_access(task_id: int, user: dict) -> None:
-    """404 if the task is unknown, 403 if it isn't the caller's (admins exempt)."""
+    """404 if the task is unknown, 403 if it isn't the caller's (admins exempt).
+
+    A task its group-owned room has stopped delivering (its author left the
+    group, or the group was archived) is unknown to everyone, the admin
+    exemption included.
+    """
     from fastapi import HTTPException
     owner = await asyncio.to_thread(_task_owner, task_id)
-    if owner is None:
+    if owner is None or await asyncio.to_thread(_task_delivery_refused, task_id):
         raise HTTPException(status_code=404, detail="task not found")
     if owner != user["username"] and not _user_is_web_admin(user["username"]):
         raise HTTPException(status_code=403, detail="not your task")
@@ -4597,6 +4613,10 @@ async def chat_task_stream(
         while True:
             if (await request.is_disconnected() or web_shutdown.is_shutting_down()
                     or not await _stream_authorized(request)):
+                return
+            # Every batch, not only at connect: a removal mid-task stops the
+            # stream at the next read, whether or not the cancel has landed.
+            if await asyncio.to_thread(_task_delivery_refused, task_id):
                 return
             events = await asyncio.to_thread(_load_task_events, task_id, last)
             for ev in events:
@@ -7071,14 +7091,30 @@ def _chat_create_room(username: str, name: str) -> dict:
     return d
 
 
+def _own_handle(conn, username: str, room_id: int):
+    """``username``'s own `web_chat_rooms` handle for ``room_id``, or None.
+
+    The handle half of the room-access resolver: the handle is theirs, and a
+    group-owned room's group still lets them in (`group_room_refuses`). A
+    handle outlives a group archive, so holding one is not enough; every route
+    that acts through a handle asks this rather than reading the row itself.
+    """
+    from istota import db
+    from istota.groups.rooms import group_room_refuses
+
+    handle = db.get_web_chat_room(conn, room_id)
+    if handle is None or handle.user_id != username:
+        return None
+    if group_room_refuses(conn, handle.token, username):
+        return None
+    return handle
+
+
 def _chat_owned_room(username: str, room_id: int):
     """Return the room if it belongs to ``username``, else None."""
     from istota import db
     with db.get_db(_config.db_path) as conn:
-        room = db.get_web_chat_room(conn, room_id)
-    if room is None or room.user_id != username:
-        return None
-    return room
+        return _own_handle(conn, username, room_id)
 
 
 def _phone_room(room_token: str):
@@ -7249,8 +7285,8 @@ def _chat_mark_room_read(username: str, room_id: int) -> dict | None:
     not hit Nextcloud."""
     from istota import db
     with db.get_db(_config.db_path) as conn:
-        room = db.get_web_chat_room(conn, room_id)
-        if room is None or room.user_id != username:
+        room = _own_handle(conn, username, room_id)
+        if room is None:
             return None
         old = db.get_room_read_state(conn, room.token, "web", username)
         max_id = db.room_max_message_id(conn, room.token)
@@ -7348,8 +7384,8 @@ def _chat_update_room(
     from istota import db
     from istota.rooms import policy as room_policy
     with db.get_db(_config.db_path) as conn:
-        room = db.get_web_chat_room(conn, room_id)
-        if room is None or room.user_id != username:
+        room = _own_handle(conn, username, room_id)
+        if room is None:
             return None
         if push_notifications is not _UNSET and not db.is_room_member(conn, room.token, username):
             return None
@@ -7490,11 +7526,14 @@ def _chat_update_room(
                         # to clear by unarchiving their own handle.
                         if reg is not None and reg.origin != "talk":
                             db.set_room_archived(conn, updated.token, False)
-                elif reg is not None and reg.user_id != username:
+                elif reg is not None and (reg.user_id != username
+                                          or db.is_group_owned_room(reg)):
                     # A co-member's archive is their own hide, never the global
                     # flag that hides the room from its creator too. Membership
                     # stays: hiding is not leaving, and they are still someone
-                    # an answer here can reach.
+                    # an answer here can reach. In a group-owned room the
+                    # creator's hide is the same: the room is the group's, and
+                    # leaving it is leaving the group.
                     if archived:
                         db.dismiss_room(conn, updated.token, username)
                     else:
@@ -7542,16 +7581,39 @@ def _chat_update_room(
     return d
 
 
+_LEAVE_THE_GROUP = "This room's membership follows its group; leave the group instead."
+
+
+def _group_managed_refusal(username: str, room_id: int) -> dict:
+    """The 409 body for a refused action on a group-owned room, read again
+    for a route whose worker returned only a status. It names the group and
+    where in Groups to go (`groups.rooms.managed_refusal`)."""
+    from istota import db
+    from istota.groups.rooms import managed_refusal
+
+    with db.get_db(_config.db_path) as conn:
+        handle = _own_handle(conn, username, room_id)
+        reg = db.get_room(conn, handle.token) if handle is not None else None
+        if reg is not None and db.is_group_owned_room(reg):
+            return managed_refusal(conn, reg, _LEAVE_THE_GROUP)
+    return {"error": _LEAVE_THE_GROUP, "reason": "group_managed"}
+
+
 def _chat_delete_room(username: str, room_id: int) -> str:
     """Hard-delete a room and its token-scoped rows. Returns a status string:
-    ``"not_found"`` (unknown / not owned), ``"busy"`` (a task is in flight), or
+    ``"not_found"`` (unknown / not owned), ``"busy"`` (a task is in flight),
+    ``"group_managed"`` (a group-owned room, left only by leaving the group), or
     ``"ok"``. The DB cascade is one transaction; the ``CHANNEL.md`` removal is
     best-effort and never fails the delete."""
     from istota import db
     with db.get_db(_config.db_path) as conn:
-        room = db.get_web_chat_room(conn, room_id)
-        if room is None or room.user_id != username:
+        room = _own_handle(conn, username, room_id)
+        if room is None:
             return "not_found"
+        # A group's room is left by leaving the group, and goes only with it:
+        # neither a member's leave nor the creator's delete applies.
+        if db.is_group_owned_room(db.get_room(conn, room.token)):
+            return "group_managed"
         if db.count_active_web_tasks(conn, room.token, username) > 0:
             return "busy"
         # A Talk-backed room is hidden per-user, not destroyed: deleting from web
@@ -7615,8 +7677,8 @@ def _chat_member_room(conn, username: str, room_id: int):
     says nothing about whether the room exists.
     """
     from istota import db
-    handle = db.get_web_chat_room(conn, room_id)
-    if handle is None or handle.user_id != username:
+    handle = _own_handle(conn, username, room_id)
+    if handle is None:
         return None
     if not db.is_room_member(conn, handle.token, username):
         return None
@@ -7629,6 +7691,9 @@ def _chat_member_room(conn, username: str, room_id: int):
 def _room_sharing(conn, reg, username: str) -> dict:
     """``shared`` and ``policy`` for one room, as the settings modal reads them.
 
+    ``managed_by`` names the group a group-owned room's membership follows
+    (`groups.rooms.managed_by`), else None, whatever the headcount.
+
     ``policy`` is None for a room one human reads. For a
     shared room it carries the host, the guest reply mode and
     ``settings_refusal``, which is `room_policy.settings_refusal`'s own answer,
@@ -7637,18 +7702,21 @@ def _room_sharing(conn, reg, username: str) -> dict:
     what the chat page shows as a hostless room.
     """
     from istota import db
+    from istota.groups.rooms import managed_by as group_managed_by
     from istota.rooms import policy as room_policy
 
     off = _room_off(conn, reg)
+    managed_by = group_managed_by(conn, reg, username)
     if reg is None or not db.room_is_shared(conn, reg.token):
-        return {"shared": False, "policy": None, "off": off}
+        return {"shared": False, "policy": None, "off": off, "managed_by": managed_by}
     refusal = room_policy.settings_refusal(conn, reg.token, username)
     policy = room_policy.get_policy(conn, reg.token)
     if policy is None:
-        return {"shared": True, "policy": None, "off": off}
+        return {"shared": True, "policy": None, "off": off, "managed_by": managed_by}
     return {
         "shared": True,
         "off": off,
+        "managed_by": managed_by,
         "policy": {
             "host": policy.host_user_id,
             "is_host": policy.host_user_id == username,
@@ -7725,7 +7793,11 @@ def _chat_list_members(username: str, room_id: int) -> dict | None:
         members = [
             _member_dict(reg, m) for m in db.list_room_members(conn, handle.token)
         ]
-        can_manage = reg.user_id == username and not _is_talk_backed(
+        # A group-owned room's people are its group's, so nobody manages them
+        # here: the pane links to Groups instead.
+        from istota.groups.rooms import managed_by
+        managed = managed_by(conn, reg, username)
+        can_manage = managed is None and reg.user_id == username and not _is_talk_backed(
             conn, reg, handle.token,
         )
         # What an add discloses, for the add dialog to state before the
@@ -7736,7 +7808,7 @@ def _chat_list_members(username: str, room_id: int) -> dict | None:
         email_thread = is_email_thread_room(conn, reg.token)
     members.sort(key=lambda m: (not m["is_owner"], m["user_id"]))
     return {"members": members, "can_manage": can_manage, "message_count": message_count,
-            "email_thread": email_thread}
+            "email_thread": email_thread, "managed_by": managed}
 
 
 def _chat_add_member(
@@ -7754,6 +7826,10 @@ def _chat_add_member(
         if found is None:
             return 404, {"error": "room not found"}
         handle, reg = found
+        if db.is_group_owned_room(reg):
+            from istota.groups.rooms import managed_refusal
+            return 409, managed_refusal(
+                conn, reg, "This room's members are its group's; add them to the group in Groups.")
         if _is_talk_backed(conn, reg, handle.token):
             return 409, {"error": "membership of a Talk room is managed in Talk"}
         # A private phone thread has one reader. A second member makes it
@@ -7801,6 +7877,11 @@ def _chat_remove_member(username: str, room_id: int, target: str) -> tuple[int, 
         handle, reg = found
         if _is_talk_backed(conn, reg, handle.token):
             return 409, {"error": "membership of a Talk room is managed in Talk"}
+        if db.is_group_owned_room(reg):
+            from istota.groups.rooms import managed_refusal
+            return 409, managed_refusal(conn, reg, (
+                "This room's membership follows its group; change it in Groups."
+                if target != username else _LEAVE_THE_GROUP))
         if target != username and reg.user_id != username:
             return 403, {"error": "only the room's creator can remove others"}
         if not db.is_room_member(conn, handle.token, target):
@@ -7845,6 +7926,12 @@ def _chat_claim_host(username: str, room_id: int) -> tuple[int, dict]:
     if outcome == "held_by_another":
         payload["error"] = "this room has a host, and a present host is never replaced"
         return 409, payload
+    if outcome == "group_managed":
+        from istota.groups.rooms import manage_url
+        payload["error"] = "only an owner of this room's group can host it"
+        payload["reason"] = "group_managed"
+        payload["manage_url"] = manage_url(reg.group_id or "")
+        return 409, payload
     return 200, payload
 
 
@@ -7868,6 +7955,9 @@ def _chat_room_group(
             return 404, {"error": "room not found"}
         _handle, reg = found
         if group_id is not _UNSET:
+            if db.is_group_owned_room(reg):
+                from istota.groups.rooms import link_refusal, managed_refusal
+                return 409, managed_refusal(conn, reg, link_refusal(reg))
             refusal = room_policy.group_link_refusal(conn, reg.token, username, group_id)
             if refusal:
                 return 403, {"error": refusal}
@@ -7883,12 +7973,18 @@ def _chat_room_group(
                     "display_name": (group or {}).get("display_name") or gid,
                 })
         linked = db.get_group(conn, reg.group_id) if reg.group_id else None
+    from istota.groups.rooms import manage_url
+    managed = db.is_group_owned_room(reg)
     return 200, {
         "group_id": reg.group_id,
         "group_name": (linked or {}).get("display_name") or reg.group_id,
         "can_set": refusal is None,
         "refusal": refusal,
         "choices": choices,
+        # The room's membership follows the group, so the link is fixed and
+        # membership is managed in Groups.
+        "managed": managed,
+        "manage_url": manage_url(reg.group_id) if managed and reg.group_id else None,
     }
 
 
@@ -8044,8 +8140,8 @@ def _room_talk_binding(username: str, room_id: int) -> str | None:
     """The Talk room token a web room is bound to, or None. Owner-scoped."""
     from istota import db
     with db.get_db(_config.db_path) as conn:
-        handle = db.get_web_chat_room(conn, room_id)
-        if handle is None or handle.user_id != username:
+        handle = _own_handle(conn, username, room_id)
+        if handle is None:
             return None
         binding = db.get_room_binding(conn, handle.token, "talk")
     return binding.surface_ref if binding else None
@@ -8182,13 +8278,20 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
     from istota.nextcloud.talk import TalkClient
 
     with db.get_db(_config.db_path) as conn:
-        handle = db.get_web_chat_room(conn, room_id)
-        if handle is None or handle.user_id != username:
+        handle = _own_handle(conn, username, room_id)
+        if handle is None:
             return "not_found", None
         token = handle.token
         reg = db.get_room(conn, token)
         if reg is None or reg.origin != "web":
             return "not_found", None  # only web-origin rooms promote
+        # A Talk conversation keeps a roster nothing synchronizes with the
+        # group, so a group's room never gets one.
+        if db.is_group_owned_room(reg):
+            from istota.groups.rooms import managed_refusal
+            return "group_managed", managed_refusal(
+                conn, reg, "A group's room is not opened in Talk: Talk's members "
+                "would not follow the group.")
         # Binding a Talk conversation changes where every member's room
         # lives, so in a shared room it is the host's call.
         from istota.rooms.policy import settings_refusal
@@ -10889,6 +10992,8 @@ async def chat_promote_room(
     does nothing.
     """
     status, room = await _chat_promote_to_talk(user["username"], room_id)
+    if status == "group_managed":
+        return JSONResponse(room, status_code=409)
     if status == "refused":
         return JSONResponse(
             {"error": "only this room's host can open it in Talk"}, status_code=403,
@@ -10919,6 +11024,11 @@ async def chat_delete_room(
     if result == "busy":
         return JSONResponse(
             {"error": "room has a task in progress"}, status_code=409,
+        )
+    if result == "group_managed":
+        return JSONResponse(
+            await asyncio.to_thread(_group_managed_refusal, user["username"], room_id),
+            status_code=409,
         )
     return {"status": "ok"}
 

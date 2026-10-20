@@ -1233,6 +1233,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_system_groups(conn)
     _migrate_group_briefings(conn)
     _migrate_room_group(conn)
+    _migrate_group_owned_rooms(conn)
     # ISSUE-612. Nothing to backfill: no earlier row recorded its mail.
     _add_columns(conn, "messages", {"outgoing_mail": "TEXT"})
     # Hidden email threads, stage 3. A row from before it renders the card from
@@ -4509,7 +4510,7 @@ def _usable_as_delivery_default(
 ) -> bool:
     """Whether ``token`` may be ``user_id``'s default delivery room.
 
-    Six exclusions, each about the room being written to unprompted. Three of
+    Seven exclusions, each about the room being written to unprompted. Three of
     them are `visible_room`'s — the room exists, is not archived, and the user
     has not hidden it — and are shared with the picker. The others are the
     ones that separate an *implicit* default from a room a user may pin:
@@ -4528,10 +4529,13 @@ def _usable_as_delivery_default(
       user reads only from web and answers only by text. Any phone binding
       excludes, not only a private one: a WhatsApp group is shared and the
       arm below refuses it anyway.
+    - **A group-owned room.** Its history is read by every future member of
+      the group, so a one-member group room is not private either.
     """
     if token in channels:
         return False
-    if visible_room(conn, user_id, token) is None:
+    room = visible_room(conn, user_id, token)
+    if room is None or is_group_owned_room(room):
         return False
     if room_has_phone_binding(conn, token):
         return False
@@ -4823,6 +4827,9 @@ class Room:
     last_activity: str | None = None
     #: The group the room is linked to (multiplayer Stage 27), or None.
     group_id: str | None = None
+    #: ``room`` keeps its own roster; ``group`` holds the linked group's
+    #: current membership. See `is_group_owned_room`.
+    membership_source: str = "room"
 
 
 @dataclass
@@ -4886,6 +4893,9 @@ def _row_to_room(row: sqlite3.Row) -> Room:
         ),
         last_activity=row["last_activity"] if "last_activity" in keys else None,
         group_id=row["group_id"] if "group_id" in keys else None,
+        membership_source=(
+            row["membership_source"] if "membership_source" in keys else "room"
+        ),
     )
 
 
@@ -5033,7 +5043,7 @@ def add_room_member(
     epoch unless `acknowledged` — see `note_audience_join`.
     """
     room_token = _canonical_room_token(conn, room_token, cross_surface=False)
-    joining = not is_room_member(conn, room_token, user_id)
+    joining = not _on_room_roster(conn, room_token, user_id)
     audience = audience_persons(conn, room_token) if joining else set()
     conn.execute(
         "INSERT OR IGNORE INTO room_members (room_token, user_id) VALUES (?, ?)",
@@ -5071,7 +5081,24 @@ def remove_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) 
 
 
 def is_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
+    """Whether ``user_id`` is in the room: a roster row the room admits.
+
+    The access answer, so it asks `group_room_admits_sql` too: a group-owned
+    room whose group was archived, or a roster row written around the group,
+    admits nobody, whatever the roster says. `_on_room_roster` is the bare
+    roster fact, for the writers that keep the roster.
+    """
     room_token = _canonical_room_token(conn, room_token, cross_surface=False)
+    row = conn.execute(
+        "SELECT 1 FROM room_members m LEFT JOIN rooms r ON r.token = m.room_token "
+        "WHERE m.room_token = ? AND m.user_id = ? "
+        f"AND (r.token IS NULL OR {group_room_admits_sql('r', 'm.user_id')}) LIMIT 1",
+        (room_token, user_id),
+    ).fetchone()
+    return row is not None
+
+
+def _on_room_roster(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM room_members WHERE room_token = ? AND user_id = ? LIMIT 1",
         (room_token, user_id),
@@ -5176,7 +5203,7 @@ def count_room_messages(conn: sqlite3.Connection, room_token: str) -> int:
     ).fetchone()[0])
 
 
-def note_member_turn(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
+def note_member_turn(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
     """An istota user spoke in this room: make them a member and clear their hide.
 
     Every sender is a member, so a shared room surfaces in each participant's
@@ -5184,9 +5211,16 @@ def note_member_turn(conn: sqlite3.Connection, room_token: str, user_id: str) ->
     tombstone only, never a co-member's. One helper because two paths reach it:
     `record_inbound` for every stored turn, and the Talk poller for a turn it
     consumes before ingest (a `!command`, a confirmation answer).
+
+    False, writing nothing, when the room refuses them (`group_room_admits`):
+    speaking in a group-owned room never brings back someone the group
+    removed, so the caller drops the turn.
     """
+    if not group_room_admits(conn, room_token, user_id):
+        return False
     add_room_member(conn, room_token, user_id)
     undismiss_room(conn, room_token, user_id)
+    return True
 
 
 def add_web_room_member(
@@ -5201,7 +5235,7 @@ def add_web_room_member(
     counts them in the room's audience before they have said anything.
     """
     room_token = _canonical_room_token(conn, room_token, cross_surface=False)
-    added = not is_room_member(conn, room_token, user_id)
+    added = not _on_room_roster(conn, room_token, user_id)
     # The add endpoint refuses without `acknowledge_history`, so the creator
     # has said the new member may read what came before: no epoch (D3).
     add_room_member(conn, room_token, user_id, acknowledged=True)
@@ -5264,6 +5298,10 @@ def upsert_room_participant(
     """
     if kind not in PARTICIPANT_KINDS:
         raise ValueError(f"unknown participant kind: {kind!r}")
+    if kind == "guest" and is_group_owned_room(get_room(conn, room_token)):
+        # Every reader of a group-owned room is a group member; a guest would
+        # be an audience the group never agreed to.
+        raise ValueError("a group-owned room takes no guests")
     previous = conn.execute(
         "SELECT kind, user_id FROM room_participants WHERE room_token = ? AND surface = ? "
         "AND surface_ref = ? AND left_at IS NULL",
@@ -5641,7 +5679,8 @@ def list_member_rooms(
         "), r.created_at) AS last_activity "
         "FROM rooms r "
         "JOIN room_members m ON m.room_token = r.token "
-        "WHERE m.user_id = ?"
+        "WHERE m.user_id = ? "
+        f"AND {group_room_admits_sql('r', 'm.user_id')}"
     )
     if not include_dismissed:
         sql += (
@@ -5894,11 +5933,112 @@ def set_room_group(conn: sqlite3.Connection, token: str, group_id: str | None) -
     Stored as given: who may write it is `room_policy.group_link_refusal`'s
     question, and whether it loads anything is asked per turn by
     `room_scopes.task_group_ids`, so a link outlives a membership change
-    without being trusted across it.
+    without being trusted across it. Raises ``ValueError`` for a change to a
+    group-owned room's link, since there the link is the membership.
     """
+    room = get_room(conn, token)
+    if is_group_owned_room(room) and room.group_id != group_id:
+        raise ValueError(f"room {token!r} is group-owned; its group link is fixed")
     conn.execute(
         "UPDATE rooms SET group_id = ? WHERE token = ?", (group_id, token)
     )
+
+
+ROOM_MEMBERSHIP_SOURCES = ("room", "group")
+
+
+def is_group_owned_room(room: Room | None) -> bool:
+    """Whether the room's membership follows its linked group.
+
+    Any stored value but ``room`` counts, so a row written around
+    `set_room_membership_source` fails toward the stricter relationship.
+    """
+    return room is not None and room.membership_source != "room"
+
+
+def _live_group_member_sql(group: str, user: str) -> str:
+    """`is_group_member`'s rule as an SQL ``EXISTS``, over the given SQL
+    expressions for the group id and the user id. The one spelling of it, so
+    the access predicate below and the Python gate cannot disagree."""
+    return (
+        "EXISTS (SELECT 1 FROM group_members gm JOIN groups g ON g.group_id = gm.group_id "
+        f"WHERE gm.group_id = {group} AND gm.user_id = {user} AND gm.ended_at IS NULL "
+        "AND g.archived_at IS NULL AND NOT EXISTS (SELECT 1 FROM web_auth_identities i "
+        "WHERE i.user_id = gm.user_id AND i.disabled = 1))"
+    )
+
+
+def group_room_admits_sql(room: str, user: str) -> str:
+    """SQL true when the group relationship lets ``user`` into the ``room`` row.
+
+    ``room`` is a `rooms` alias, ``user`` an SQL expression. A room with its
+    own roster always passes, so the roster decides; a group-owned one (any
+    value but ``room``, as `is_group_owned_room` reads it) passes only for a
+    current member of its live linked group. Every reader that turns room
+    membership into access appends this: `is_room_member`, `list_member_rooms`,
+    the cross-room views and the room stream, and the unread counts.
+    """
+    return (
+        f"({room}.membership_source = 'room' OR "
+        f"{_live_group_member_sql(f'{room}.group_id', user)})"
+    )
+
+
+def group_room_admits(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
+    """Whether the group relationship lets ``user_id`` into ``room_token``:
+    `group_room_admits_sql` for one room. True for a room the group does not
+    own and for an unknown token, since the roster decides those."""
+    room_token = _canonical_room_token(conn, room_token, cross_surface=False)
+    row = conn.execute(
+        f"SELECT {group_room_admits_sql('r', '?')} FROM rooms r WHERE r.token = ?",
+        (user_id, room_token),
+    ).fetchone()
+    return row is None or bool(row[0])
+
+
+def set_room_membership_source(
+    conn: sqlite3.Connection, token: str, source: str,
+) -> None:
+    """Set who belongs to the room: its own roster (``room``) or its linked
+    group's current members (``group``).
+
+    One way only: ``group`` needs a live linked group, and a group-owned room
+    never becomes ordinary again. Raises ``ValueError`` otherwise. Writes the
+    column alone; reconciling the roster is the caller's.
+    """
+    if source not in ROOM_MEMBERSHIP_SOURCES:
+        raise ValueError(f"invalid membership source: {source!r}")
+    room = get_room(conn, token)
+    if room is None:
+        raise ValueError(f"no such room: {token!r}")
+    if is_group_owned_room(room):
+        if source != "group":
+            raise ValueError(f"room {token!r} is group-owned and stays so")
+        return
+    if source == "room":
+        return
+    if not room.group_id or get_group(conn, room.group_id) is None:
+        raise ValueError(f"room {token!r} is not linked to a live group")
+    conn.execute(
+        "UPDATE rooms SET membership_source = 'group' WHERE token = ?",
+        (room.token,),
+    )
+
+
+def _refuses_external_binding(
+    conn: sqlite3.Connection, room_token: str, surface: str,
+) -> bool:
+    """Whether binding ``surface`` would give a group-owned room an audience
+    outside its group. Talk, WhatsApp, email and SMS keep rosters of their own
+    that nothing synchronizes with the group, so only ``web`` binds."""
+    if surface == "web":
+        return False
+    room = get_room(conn, _canonical_room_token(conn, room_token, cross_surface=False))
+    if not is_group_owned_room(room):
+        return False
+    logger.warning("room_binding.refused room=%s surface=%s: group-owned room",
+                   room.token, surface)
+    return True
 
 
 def add_room_binding(
@@ -5913,7 +6053,12 @@ def add_room_binding(
     that surface (the PK). Neither raises, because the Talk poller binds inside
     a whole-batch transaction and one exception would roll back the batch; a
     caller that minted the room checks the result instead (ISSUE-581).
+
+    A group-owned room takes no surface but its own web binding
+    (`_refuses_external_binding`), and False comes back for any other.
     """
+    if _refuses_external_binding(conn, room_token, surface):
+        return False
     cur = conn.execute(
         "INSERT OR IGNORE INTO room_bindings (room_token, surface, surface_ref) "
         "VALUES (?, ?, ?)",
@@ -5966,6 +6111,8 @@ def replace_room_binding(
     would point the room at a conversation the winner is not using, on top of
     the orphan it already made.
     """
+    if _refuses_external_binding(conn, room_token, surface):
+        return False
     if expected_ref is None:
         cur = conn.execute(
             "INSERT OR IGNORE INTO room_bindings (room_token, surface, surface_ref) "
@@ -6129,10 +6276,11 @@ def is_private_room_of(
     default-room destination and the private-reply resolver. Not archived,
     members exactly ``[user_id]``, and no SMS or WhatsApp binding unless
     ``allow_phone``: a phone room is a read-only transcript in web, so only a
-    caller that sends on the phone surface itself may choose one.
+    caller that sends on the phone surface itself may choose one. Never a
+    group-owned room, whatever its headcount: every future member reads it.
     """
     room = get_room(conn, token) if token else None
-    if room is None or room.archived:
+    if room is None or room.archived or is_group_owned_room(room):
         return False
     if list_room_members(conn, room.token) != [user_id]:
         return False
@@ -6960,6 +7108,7 @@ def total_unread_messages(
         LEFT JOIN room_read_state rs ON rs.room_token = r.token
             AND rs.user_id = rm.user_id AND rs.surface = ?
         WHERE r.archived = 0 AND m.role != 'user'
+          AND """ + group_room_admits_sql('r', 'rm.user_id') + """
           AND m.id > COALESCE(rs.last_read_message_id, 0)
           AND NOT EXISTS (SELECT 1 FROM room_dismissals d
                           WHERE d.room_token = r.token AND d.user_id = rm.user_id)
@@ -6989,6 +7138,7 @@ def unread_rooms_since(
         LEFT JOIN room_read_state rs ON rs.room_token = r.token
             AND rs.user_id = rm.user_id AND rs.surface = ?
         WHERE r.archived = 0 AND m.role != 'user'
+          AND """ + group_room_admits_sql('r', 'rm.user_id') + """
           AND m.id > ? AND m.id <= ?
           AND m.id > COALESCE(rs.last_read_message_id, 0)
           AND NOT EXISTS (SELECT 1 FROM room_dismissals d
@@ -7174,6 +7324,7 @@ def list_message_deletions_since(
         "  AND mm.user_id = :user "
         "WHERE NOT EXISTS (SELECT 1 FROM room_dismissals dd "
         "  WHERE dd.room_token = d.room_token AND dd.user_id = :user) "
+        f"AND {group_room_admits_sql('r', ':user')} "
         "AND d.id > :since_id ORDER BY d.id ASC LIMIT :limit",
         {"user": user_id, "since_id": since_id, "limit": limit},
     ).fetchall()
@@ -7344,6 +7495,7 @@ _CROSS_ROOM_WHERE = (
     "WHERE NOT EXISTS (SELECT 1 FROM room_dismissals d "
     "  WHERE d.room_token = m.room_token AND d.user_id = :user) "
     f"AND ({TRANSCRIPT_SURFACE_FILTER} OR m.role = 'system') "
+    f"AND {group_room_admits_sql('r', ':user')} "
 )
 
 
@@ -8806,6 +8958,27 @@ def _migrate_private_replies(conn: sqlite3.Connection) -> None:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         logger.warning("side-room removal failed, will retry: %s", e)
+
+
+def _migrate_group_owned_rooms(conn: sqlite3.Connection) -> None:
+    """Add `rooms.membership_source` (group-owned rooms, Stage 1).
+
+    Markered (`group_owned_rooms_v1`). Nothing is backfilled: every existing
+    room keeps its own roster, a linked room included, since making one
+    group-owned would hand its history to the group. `group_room_requests` and
+    the `(group_id, membership_source)` index are `schema.sql`'s, which runs
+    after this and creates both on an upgraded database too.
+    """
+    _add_columns(
+        conn, "rooms", {"membership_source": "TEXT NOT NULL DEFAULT 'room'"},
+    )
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) "
+            "VALUES ('group_owned_rooms_v1')"
+        )
+    except sqlite3.OperationalError:
+        return  # marker table not created yet
 
 
 def _migrate_room_group(conn: sqlite3.Connection) -> None:
@@ -11455,10 +11628,18 @@ def is_group_member(conn: sqlite3.Connection, group_id: str, user_id: str) -> bo
     if not group_id or not user_id:
         return False
     row = conn.execute(
-        "SELECT 1 FROM group_members m JOIN groups g ON g.group_id = m.group_id "
-        "WHERE m.group_id = ? AND m.user_id = ? AND m.ended_at IS NULL "
-        "AND g.archived_at IS NULL "
-        "AND NOT EXISTS (SELECT 1 FROM web_auth_identities i WHERE i.user_id = m.user_id AND i.disabled = 1) LIMIT 1",
+        f"SELECT {_live_group_member_sql('?', '?')}", (group_id, user_id),
+    ).fetchone()
+    return bool(row[0])
+
+
+def is_group_owner(conn: sqlite3.Connection, group_id: str, user_id: str) -> bool:
+    """`is_group_member`, holding the ``owner`` role."""
+    if not is_group_member(conn, group_id, user_id):
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? "
+        "AND ended_at IS NULL AND role = 'owner' LIMIT 1",
         (group_id, user_id),
     ).fetchone()
     return row is not None

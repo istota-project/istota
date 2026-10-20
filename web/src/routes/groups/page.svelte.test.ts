@@ -505,3 +505,88 @@ it('opens group briefings through Groups when personal Briefings is disabled', a
   );
   expect(screen.queryByRole('checkbox')).toBeNull();
 });
+
+it('labels the group’s own rooms apart from linked ones', async () => {
+  api.getGroup.mockResolvedValue({
+    ...group,
+    rooms: [
+      { token: 'own', name: 'Planning', origin: 'web', membership_source: 'group', room_id: 7 },
+      { token: 'linked', name: 'Side room', origin: 'web', membership_source: 'room', room_id: 8 },
+    ],
+  });
+  render(Groups);
+  const card = (await screen.findByRole('heading', { name: 'Rooms' })).closest('section')!;
+  await within(card).findByText('Planning');
+  const own = within(card).getByText('Planning').closest('li')!;
+  const linked = within(card).getByText('Side room').closest('li')!;
+  expect(within(own).getByText('Group room')).toBeTruthy();
+  expect(within(linked).getByText('Linked')).toBeTruthy();
+  // Only an owner creates a room.
+  expect(within(card).queryByRole('button', { name: 'Create room' })).toBeNull();
+});
+it('lets an owner create a group room, suggesting General, and reloads the group', async () => {
+  const owned = {
+    ...group,
+    role: 'owner',
+    capabilities: { ...group.capabilities, owner: true, manage: true },
+    rooms: [],
+  };
+  api.getGroup.mockResolvedValue(owned);
+  api.createGroupRoom.mockResolvedValue({
+    group_id: 'team',
+    created: true,
+    revision: 4,
+    room: {
+      room_id: 9,
+      token: 'rm_new',
+      name: 'General',
+      origin: 'web',
+      membership_source: 'group',
+    },
+  });
+  render(Groups);
+  const card = (await screen.findByRole('heading', { name: 'Rooms' })).closest('section')!;
+  const field = await within(card).findByRole('textbox', { name: 'Room name' });
+  expect((field as HTMLInputElement).value).toBe('General');
+  await fireEvent.click(within(card).getByRole('button', { name: 'Create room' }));
+  await waitFor(() => expect(api.createGroupRoom).toHaveBeenCalledTimes(1));
+  const [id, payload] = api.createGroupRoom.mock.calls[0];
+  expect(id).toBe('team');
+  expect(payload.name).toBe('General');
+  expect(payload.revision).toBe(3);
+  expect(typeof payload.request_id).toBe('string');
+  expect(payload.request_id.length).toBeGreaterThanOrEqual(8);
+  await waitFor(() => expect(api.getGroup.mock.calls.length).toBeGreaterThan(1));
+});
+it('retries a failed creation with the same request id', async () => {
+  api.getGroup.mockResolvedValue({
+    ...group,
+    role: 'owner',
+    capabilities: { ...group.capabilities, owner: true, manage: true },
+    rooms: [],
+  });
+  api.createGroupRoom.mockRejectedValueOnce(new Error('Group management unavailable'));
+  api.createGroupRoom.mockResolvedValueOnce({
+    group_id: 'team',
+    created: false,
+    revision: 4,
+    room: {
+      room_id: 9,
+      token: 'rm_new',
+      name: 'General',
+      origin: 'web',
+      membership_source: 'group',
+    },
+  });
+  render(Groups);
+  const card = (await screen.findByRole('heading', { name: 'Rooms' })).closest('section')!;
+  const create = await within(card).findByRole('button', { name: 'Create room' });
+  await fireEvent.click(create);
+  await within(card).findByText('Group management unavailable');
+  await fireEvent.click(within(card).getByRole('button', { name: 'Create room' }));
+  await waitFor(() => expect(api.createGroupRoom).toHaveBeenCalledTimes(2));
+  const ids = api.createGroupRoom.mock.calls.map(
+    (call: unknown[]) => (call[1] as { request_id: string }).request_id,
+  );
+  expect(ids[0]).toBe(ids[1]);
+});

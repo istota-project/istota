@@ -1,7 +1,9 @@
 <script lang="ts">
   import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { latest } from '$lib/ui/latest';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
+  import { createDrawerClose } from '$lib/ui/drawerClose';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
@@ -49,6 +51,11 @@
 
   let feeds: Feed[] = $derived($feedsList);
   let sidebarOpen = $state(false);
+  const drawer = createDrawerClose(
+    () => sidebarOpen,
+    () => (sidebarOpen = false),
+  );
+  onDestroy(drawer.cancel);
 
   let onSettings = $derived(page.url.pathname.startsWith(`${base}/feeds/settings`));
 
@@ -57,7 +64,7 @@
   let feedsReady = $state(false);
   let selectionReady = $state(false);
   let mounted = false;
-  let loadGeneration = 0;
+  const feedLoads = latest();
 
   function encodeSelection(selection: FeedSelection): Params {
     if (selection.feed) return { feed: String(selection.feed) };
@@ -120,7 +127,7 @@
     untrack(() => {
       if (!mounted) return;
       if (onSettings) {
-        loadGeneration++;
+        feedLoads.invalidate();
         return;
       }
       void loadFeeds();
@@ -139,12 +146,13 @@
   }
 
   function pickSelection(selection: FeedSelection) {
-    sidebarOpen = false;
-    if (onSettings) goto(readerUrl(selection));
-    else {
-      selectionReady = true;
-      feedSel.push(selection);
-    }
+    drawer.run(() => {
+      if (onSettings) goto(readerUrl(selection));
+      else {
+        selectionReady = true;
+        feedSel.push(selection);
+      }
+    });
   }
 
   let groupedFeeds = $derived.by(() => {
@@ -197,18 +205,18 @@
   }
 
   async function loadFeeds() {
-    const generation = ++loadGeneration;
+    const current = feedLoads.next();
     feedsReady = false;
     selectionReady = false;
     try {
       const data = await getFeeds({ limit: '1', offset: '0' });
-      if (generation !== loadGeneration) return;
+      if (!current()) return;
       feedsList.set(data.feeds);
       feedsReady = true;
       if (!onSettings) applySelection(feedSel.current() ?? all);
       selectionReady = true;
     } catch {
-      if (generation !== loadGeneration) return;
+      if (!current()) return;
       // Views do not need subscriptions. Keep unresolved ids in the URL.
       const selection = feedSel.current();
       if (selection) {
@@ -224,7 +232,7 @@
     void refreshFeedCounts();
     return () => {
       mounted = false;
-      loadGeneration++;
+      feedLoads.dispose();
     };
   });
 </script>

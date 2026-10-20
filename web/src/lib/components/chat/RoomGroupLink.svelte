@@ -56,7 +56,16 @@
 </script>
 
 <div class="group-link">
-  {#if link}
+  {#if link?.managed}
+    <!-- A group's own room: the link is the room's identity and cannot change. -->
+    <p class="caption">
+      Membership follows {link.group_name ?? link.group_id}. Members' turns here carry this group's
+      memory.
+      {#if link.manage_url}<a href={link.manage_url}
+          >Open {link.group_name ?? link.group_id} in Groups</a
+        >{/if}
+    </p>
+  {:else if link}
     <Select
       value={link.group_id ?? ''}
       {options}

@@ -74,8 +74,12 @@ class TestTheColumn:
         old = tmp_path / "old.db"
         db.init_db(old)
         raw = sqlite3.connect(old)
+        # A database from before the link predates group-owned rooms too.
+        raw.execute("DROP INDEX idx_rooms_group_source")
+        raw.execute("ALTER TABLE rooms DROP COLUMN membership_source")
         raw.execute("ALTER TABLE rooms DROP COLUMN group_id")
-        raw.execute("DELETE FROM _migration_state WHERE name = 'room_group_v1'")
+        raw.execute("DELETE FROM _migration_state WHERE name IN "
+                    "('room_group_v1', 'group_owned_rooms_v1')")
         raw.execute("INSERT INTO rooms (token, user_id, name, origin) "
                     "VALUES ('old-room', 'alice', 'Old', 'web')")
         raw.commit()

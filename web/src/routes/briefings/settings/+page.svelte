@@ -29,6 +29,7 @@
   } from '$lib/api';
   import {
     Alert,
+    Button,
     ConfirmDialog,
     EmptyState,
     KebabMenu,
@@ -36,6 +37,7 @@
     Card,
     Field,
     Checkbox,
+    LoadState,
   } from '$lib/components/ui';
   import { SettingsLayout } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
@@ -75,7 +77,14 @@
   const groupName = $derived(params.get('briefing') ?? '');
 
   let loading = $state(true);
-  let error = $state('');
+  // The schedules and the content config are the page's data. Without either,
+  // the personal editor would draw a schedule from defaults that Save would then
+  // write over the stored one, so their failure takes the pane (ISSUE-801).
+  let coreError = $state('');
+  let coreLoaded = $state(false);
+  // The option lists only narrow a picker; a failure among them leaves the page
+  // and names what is missing.
+  let missingOptions = $state<string[]>([]);
   let briefings = $state<UserBriefingRow[]>([]);
   let outputs = $state<string[]>(['talk', 'email', 'ntfy', 'web']);
   let rooms = $state<BriefingRoomOption[]>([]);
@@ -93,6 +102,8 @@
   let emailHtmlSaved = $state(true);
   let emailHtmlSaving = $state(false);
   let emailHtmlManaged = $state(false);
+  let profileLoaded = $state(false);
+  let profileError = $state('');
 
   async function saveEmailHtml() {
     emailHtmlSaving = true;
@@ -107,7 +118,7 @@
   }
 
   useSettingsSave(() =>
-    moduleEnabled && view === 'delivery'
+    moduleEnabled && view === 'delivery' && profileLoaded
       ? { dirty: emailHtml !== emailHtmlSaved, saving: emailHtmlSaving, save: saveEmailHtml }
       : null,
   );
@@ -177,44 +188,94 @@
     if (!moduleEnabled) loading = false;
   });
 
-  async function load() {
+  const failed = (e: unknown, fallback: string) =>
+    e instanceof Error && e.message ? e.message : fallback;
+
+  async function loadCore() {
+    coreError = '';
     try {
-      await Promise.all([
-        reloadSchedule(),
-        (async () => {
-          [presets, feedOptions] = await Promise.all([
-            getBrowsePresets().then((r) => r.presets),
-            getFeedOptions(),
-          ]);
-          await reloadContent();
-        })(),
-        getBriefingTargets()
-          .then((r) => {
-            targets = r.targets;
-            channels = r.channels;
-            deploymentTimezone = r.timezone;
-          })
-          .catch(() => {}),
-        getSharedBlockOptions()
-          .then((r) => (sharedBlockOptions = r.options))
-          .catch(() => (sharedBlockOptions = [])),
-        getEmailAccounts()
-          .then((r) => (emailAccounts = r.accounts))
-          .catch(() => (emailAccounts = [])),
-        getProfile()
-          .then((r) => {
-            emailHtml = r.profile?.briefing_email_html !== false;
-            emailHtmlSaved = emailHtml;
-            emailHtmlManaged = isManaged(r.profile, 'briefing_email_html');
-          })
-          .catch(() => {}),
-      ]);
+      await Promise.all([reloadSchedule(), reloadContent()]);
+      coreLoaded = true;
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Failed to load settings';
-    } finally {
-      loading = false;
+      coreError = failed(e, 'Failed to load briefings.');
     }
   }
+
+  async function loadProfile() {
+    profileError = '';
+    try {
+      const r = await getProfile();
+      emailHtml = r.profile?.briefing_email_html !== false;
+      emailHtmlSaved = emailHtml;
+      emailHtmlManaged = isManaged(r.profile, 'briefing_email_html');
+      profileLoaded = true;
+    } catch (e) {
+      profileError = failed(e, 'Could not load the email format.');
+    }
+  }
+
+  let optionsLoading = $state(false);
+
+  async function loadOptions() {
+    optionsLoading = true;
+    const missing: string[] = [];
+    const option = (label: string, run: () => Promise<void>) =>
+      run().catch(() => {
+        missing.push(label);
+      });
+    await Promise.all([
+      option('group briefings', async () => {
+        const r = await getBriefingTargets();
+        targets = r.targets;
+        channels = r.channels;
+        deploymentTimezone = r.timezone;
+      }),
+      option('browse presets', async () => {
+        presets = (await getBrowsePresets()).presets;
+      }),
+      option('feeds', async () => {
+        feedOptions = await getFeedOptions();
+      }),
+      option('shared blocks', async () => {
+        sharedBlockOptions = (await getSharedBlockOptions()).options;
+      }),
+      option('email accounts', async () => {
+        emailAccounts = (await getEmailAccounts()).accounts;
+      }),
+    ]);
+    missingOptions = missing;
+    optionsLoading = false;
+  }
+
+  async function load() {
+    loading = true;
+    await Promise.all([loadCore(), loadOptions(), loadProfile()]);
+    loading = false;
+  }
+
+  // The pane's Retry asks again only for what the pane failed on, so it cannot
+  // reset an unsaved email-format edit or refetch lists that loaded.
+  async function retryCore() {
+    loading = true;
+    await loadCore();
+    loading = false;
+  }
+
+  // Delivery and Shared blocks read neither schedules nor content.
+  const needsCore = $derived(view !== 'delivery' && view !== 'shared');
+  const loadError = $derived(needsCore && !coreLoaded ? coreError : '');
+  // Only the lists the current view reads; a group editor takes no feeds or
+  // email accounts, and the create flow only the group targets.
+  const optionsUsed = $derived.by((): string[] | null => {
+    if (view === 'delivery') return [];
+    if (view === 'shared') return ['browse presets'];
+    if (creating) return ['group briefings'];
+    if (groupId) return ['group briefings', 'browse presets', 'shared blocks'];
+    return null;
+  });
+  const missingHere = $derived(
+    optionsUsed ? missingOptions.filter((label) => optionsUsed.includes(label)) : missingOptions,
+  );
 
   function updateBlocks(name: string, blocks: BriefingBlock[]) {
     if (!config) return;
@@ -395,10 +456,25 @@
   <title>Briefings settings</title>
 </svelte:head>
 
-<SettingsLayout {title} {description} {loading} {error}>
+{#snippet retryOptions()}
+  <Button
+    size="sm"
+    variant="secondary"
+    loading={optionsLoading}
+    loadingLabel="Retrying…"
+    onclick={() => void loadOptions()}>Retry</Button
+  >
+{/snippet}
+
+<SettingsLayout {title} {description} {loading} {loadError} onRetry={() => void retryCore()}>
   {#snippet headerActions()}
     {#if menu.length}<KebabMenu items={menu} ariaLabel="Briefing actions" />{/if}
   {/snippet}
+  {#if moduleEnabled && missingHere.length}
+    <Alert appearance="inline" variant="warn" actions={retryOptions}>
+      Could not load {missingHere.join(', ')}. The choices that use them are incomplete.
+    </Alert>
+  {/if}
   {#if !moduleEnabled}
     <Alert appearance="inline" variant="info">
       Briefings module is disabled. Enable it in
@@ -406,14 +482,21 @@
     </Alert>
   {:else if view === 'delivery'}
     <Card title="Email" description="For every briefing delivered to you by email.">
-      <Field
-        label="Send as HTML"
-        checkbox
-        badge={emailHtmlManaged ? MANAGED_BADGE : undefined}
-        hint="Formatted mail, so an article link stays clickable. A plain-text copy is always sent alongside it."
+      <LoadState
+        scope="card"
+        loading={!profileLoaded && !profileError}
+        error={profileError}
+        onRetry={() => void loadProfile()}
       >
-        <Checkbox bind:checked={emailHtml} disabled={emailHtmlManaged} />
-      </Field>
+        <Field
+          label="Send as HTML"
+          checkbox
+          badge={emailHtmlManaged ? MANAGED_BADGE : undefined}
+          hint="Formatted mail, so an article link stays clickable. A plain-text copy is always sent alongside it."
+        >
+          <Checkbox bind:checked={emailHtml} disabled={emailHtmlManaged} />
+        </Field>
+      </LoadState>
     </Card>
     <GroupDeliveryPreferences />
   {:else if view === 'shared'}

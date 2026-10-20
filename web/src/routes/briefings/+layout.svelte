@@ -1,7 +1,9 @@
 <script lang="ts">
   import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { latest } from '$lib/ui/latest';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
+  import { createDrawerClose } from '$lib/ui/drawerClose';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
@@ -104,6 +106,11 @@
   let names = $state<string[]>([]);
   let offset = $state(0);
   let sidebarOpen = $state(false);
+  const drawer = createDrawerClose(
+    () => sidebarOpen,
+    () => (sidebarOpen = false),
+  );
+  onDestroy(drawer.cancel);
   let loadingMore = $state(false);
 
   // The archived briefing pending a delete confirmation (null = no dialog).
@@ -143,7 +150,11 @@
   // The settings sidebar: every briefing the caller can open, under its audience,
   // then the two settings sections that are not one briefing.
   let settingsSidebarOpen = $state(false);
-  const closeSettingsSidebar = () => (settingsSidebarOpen = false);
+  const settingsDrawer = createDrawerClose(
+    () => settingsSidebarOpen,
+    () => (settingsSidebarOpen = false),
+  );
+  onDestroy(settingsDrawer.cancel);
   let personalBriefings = $state<UserBriefingRow[]>([]);
   let groupBriefings = $state<Record<string, GroupBriefingDefinition[]>>({});
   const settingsParams = $derived(onSettings ? page.url.searchParams : new URLSearchParams());
@@ -154,14 +165,14 @@
     const keys = ['view', 'name', 'group', 'briefing', 'new'];
     return keys.every((key) => (settingsParams.get(key) ?? '') === (query[key] ?? ''));
   }
-  let settingsIndexGeneration = 0;
+  const settingsIndexLoads = latest();
   async function loadSettingsIndex() {
-    const generation = ++settingsIndexGeneration;
+    const current = settingsIndexLoads.next();
     const [personal, ...groups] = await Promise.allSettled([
       getBriefings(),
       ...targets.map((target) => getGroupBriefings(target.group_id!)),
     ]);
-    if (generation !== settingsIndexGeneration) return;
+    if (!current()) return;
     if (personal.status === 'fulfilled') personalBriefings = personal.value?.briefings ?? [];
     groupBriefings = Object.fromEntries(
       targets.map((target, index) => {
@@ -219,7 +230,7 @@
     run?: number;
   };
   let initialized = $state(false);
-  let loadGeneration = 0;
+  const archiveLoads = latest();
 
   function encodeSelection(selection: BriefingSelection): Params {
     const params: Params = {};
@@ -300,7 +311,7 @@
   }
 
   async function load(reset = true) {
-    const generation = ++loadGeneration;
+    const current = archiveLoads.next();
     loadingMore = !reset;
     if (reset) {
       briefingArchiveCount.set(null);
@@ -313,7 +324,7 @@
       };
       if ($briefingFilterName) params.briefing_name = $briefingFilterName;
       const resp = await getBriefingArchive(params);
-      if (generation !== loadGeneration) return;
+      if (!current()) return;
       if ($briefingFilterName && !resp.briefing_names.includes($briefingFilterName)) {
         briefingFilterName.set('');
         offset = 0;
@@ -334,15 +345,15 @@
             const selected = await getBriefingArchiveItem(selectedId);
             stillPresent = !$briefingFilterName || selected.briefing_name === $briefingFilterName;
           } catch (error) {
-            if (generation !== loadGeneration || $selectedBriefingId !== selectedId) return;
+            if (!current() || $selectedBriefingId !== selectedId) return;
             if ((error as { status?: number } | null)?.status !== 404) throw error;
           }
-          if (generation !== loadGeneration || $selectedBriefingId !== selectedId) return;
+          if (!current() || $selectedBriefingId !== selectedId) return;
         }
         if (!stillPresent) selectedBriefingId.set(items[0]?.id ?? null);
       }
     } catch {
-      if (generation !== loadGeneration) return;
+      if (!current()) return;
       // Published rather than swallowed. This used to read "the reader page
       // surfaces its own load errors", which is false for the only case that
       // reaches here: the reader fetches the *selected* briefing, a failed list
@@ -357,7 +368,7 @@
       briefingArchiveCount.set(items.length);
       briefingArchiveError.set('Failed to load briefings');
     } finally {
-      if (generation === loadGeneration) loadingMore = false;
+      if (current()) loadingMore = false;
     }
   }
 
@@ -368,14 +379,14 @@
   }
 
   function pickItem(id: number) {
-    sidebarOpen = false;
     const selection = { id, name: $briefingFilterName };
-    if (onSettings) goto(readerUrl(selection));
-    else briefingSel.push(selection);
+    drawer.run(() => {
+      if (onSettings) goto(readerUrl(selection));
+      else briefingSel.push(selection);
+    });
   }
 
   function pickGroupEdition(item: GroupEditionSummary) {
-    sidebarOpen = false;
     const selection = {
       id: null,
       name: $briefingFilterName,
@@ -383,25 +394,27 @@
       briefing: item.briefing_name,
       run: item.run_id,
     };
-    if (onSettings) goto(readerUrl(selection));
-    else briefingSel.push(selection);
+    drawer.run(() => {
+      if (onSettings) goto(readerUrl(selection));
+      else briefingSel.push(selection);
+    });
   }
 
-  let groupGeneration = 0;
+  const groupLoads = latest();
   async function loadGroupEditions(reset = true) {
     if (audience === 'user' || !targets.length) return;
-    const generation = ++groupGeneration;
+    const current = groupLoads.next();
     try {
       const response = await getGroupEditions({
         group: audience === 'all' ? undefined : audience,
         limit: PAGE,
         offset: reset ? 0 : groupItems.length,
       });
-      if (generation !== groupGeneration) return;
+      if (!current()) return;
       groupItems = reset ? response.items : [...groupItems, ...response.items];
       groupTotal = response.total;
     } catch {
-      if (generation === groupGeneration && reset) {
+      if (current() && reset) {
         groupItems = [];
         groupTotal = 0;
       }
@@ -509,6 +522,9 @@
     initialized = true;
     return () => {
       mounted = false;
+      settingsIndexLoads.dispose();
+      archiveLoads.dispose();
+      groupLoads.dispose();
     };
   });
 </script>
@@ -613,7 +629,7 @@
             ]}
             label="New briefing"
             divider
-            onnavigate={closeSettingsSidebar}
+            onnavigate={(item, event) => settingsDrawer.link(event, () => void goto(item.href))}
           />
           <CategoryGroup label="Just me" count={personalBriefings.length}>
             <SidebarNav
@@ -625,7 +641,7 @@
               }))}
               label="Just me"
               divider
-              onnavigate={closeSettingsSidebar}
+              onnavigate={(item, event) => settingsDrawer.link(event, () => void goto(item.href))}
             />
           </CategoryGroup>
           {#each targets as target (target.group_id)}
@@ -644,7 +660,8 @@
                   })}
                   label={target.label}
                   divider
-                  onnavigate={closeSettingsSidebar}
+                  onnavigate={(item, event) =>
+                    settingsDrawer.link(event, () => void goto(item.href))}
                 />
               </CategoryGroup>
             {/if}
@@ -669,7 +686,7 @@
                 : []),
             ]}
             label="Briefing settings"
-            onnavigate={closeSettingsSidebar}
+            onnavigate={(item, event) => settingsDrawer.link(event, () => void goto(item.href))}
           />
         </div>
       </Sidebar>

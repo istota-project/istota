@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from istota import db, storage
 from istota.config import refresh_user_profiles_if_changed
 from istota.groups import memory, service
+from istota.groups import rooms as group_rooms
 from istota.groups.policy import GroupError, group_capabilities, require_group_member
 from istota.webui.request_guards import BodyError, read_bounded_body
 from istota.webui.router_stubs import require_auth, verify_origin
@@ -71,7 +72,8 @@ async def _run(request, user, operation, *args, read=False, **kwargs):
         return JSONResponse({"error": "groups_unavailable", "message": "Group management unavailable"}, status_code=503)
     if not read:
         logger.info("Group request actor=%s group=%s operation=%s outcome=ok",
-                    actor, result.get("group_id", group_id), operation.__name__)
+                    actor, result.get("group_id", group_id) if isinstance(result, dict) else group_id,
+                    operation.__name__)
     return result
 
 
@@ -125,10 +127,35 @@ def _detail(conn, config, actor, group_id, *, admin=False):
         result["needs_owner"] = not group["archived_at"] and not group["system_key"] and not any(
             m["role"] == "owner" and m["ended_at"] is None for m in history)
     else:
-        result["rooms"] = [{"token": room.token, "name": room.name, "origin": room.origin}
-                           for room in db.list_member_rooms(conn, actor) if room.group_id == group_id]
-    result["disclosure"] = service.history_disclosure(group_id)
+        result["rooms"] = group_rooms.list_group_rooms(conn, group_id, actor)
+    result["disclosure"] = service.history_disclosure(group_id, conn)
     return result
+
+
+def _rooms(conn, config, actor, group_id):
+    require_group_member(conn, group_id, actor)
+    group = db.get_group(conn, group_id)
+    owner = group_capabilities(conn, group_id, actor, is_admin=False)["owner"]
+    return {"group_id": group_id, "rooms": group_rooms.list_group_rooms(conn, group_id, actor),
+            "can_create": bool(owner and not group["system_key"])}
+
+
+def _create_room(conn, config, actor, group_id, payload):
+    result = group_rooms.create_group_room(
+        conn, actor, group_id, payload["name"], payload["request_id"],
+        expected_revision=payload["revision"],
+        display_name=group_rooms.display_names(config),
+    )
+    room, handle = result["room"], result["handle"]
+    body = {
+        "group_id": group_id,
+        "created": result["created"],
+        "revision": result["revision"],
+        "room": {"room_id": handle.id, "token": room.token, "name": room.name or "",
+                 "origin": room.origin, "membership_source": room.membership_source},
+    }
+    # The replay is the same answer with the status a repeat deserves.
+    return JSONResponse(body, status_code=201 if result["created"] else 200)
 
 
 def _user_options(conn, config, actor, group_id=None):
@@ -167,6 +194,7 @@ def _archive(conn, config, actor, group_id, payload):
 
 
 METADATA_FIELDS = {"revision": (int,), "display_name": (str,), "kind": (str,)}
+ROOM_FIELDS = {"name": (str,), "request_id": (str,), "revision": (int,)}
 MEMBERSHIP_FIELDS = {"revision": (int,), "role": (str,), "acknowledge_history": (bool,),
                      "replacement_owner": (str,)}
 
@@ -184,6 +212,18 @@ async def group_detail(group_id: str, request: Request, user: dict = Depends(req
 @router.get("/groups/{group_id}/user-options")
 async def member_user_options(group_id: str, request: Request, user: dict = Depends(require_auth)):
     return await _run(request, user, _user_options, group_id, read=True)
+
+
+@router.get("/groups/{group_id}/rooms")
+async def group_rooms_list(group_id: str, request: Request, user: dict = Depends(require_auth)):
+    return await _run(request, user, _rooms, group_id, read=True)
+
+
+@router.post("/groups/{group_id}/rooms")
+async def post_group_room(group_id: str, request: Request, user: dict = Depends(require_auth),
+                            _csrf: None = Depends(verify_origin)):
+    payload = await _payload(request, ROOM_FIELDS, set(ROOM_FIELDS))
+    return await _run(request, user, _create_room, group_id, payload)
 
 
 @router.patch("/groups/{group_id}")

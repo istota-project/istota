@@ -7,6 +7,7 @@
     type KeepassImportItem,
   } from '$lib/api';
   import { Button, Field, FormStack, Input, Card, Checkbox } from '$lib/components/ui';
+  import { latest } from '$lib/ui/latest';
 
   let { onImported }: { onImported?: () => void } = $props();
   let file: File | null = $state(null);
@@ -19,6 +20,7 @@
   let busy = $state(false);
   let pickerVersion = $state(0);
   let pending: AbortController | null = null;
+  const runs = latest();
   const groups: { status: KeepassImportItem['status']; label: string }[] = [
     { status: 'new', label: 'New' },
     { status: 'changed', label: 'Changed' },
@@ -30,6 +32,7 @@
   function clear() {
     pending?.abort();
     pending = null;
+    runs.invalidate();
     file = keyfile = null;
     passphrase = '';
     preview = null;
@@ -37,11 +40,15 @@
     busy = false;
     pickerVersion += 1;
   }
-  onDestroy(clear);
+  onDestroy(() => {
+    clear();
+    runs.dispose();
+  });
 
   async function run(apply: boolean) {
     if (!file) return;
     const controller = new AbortController();
+    const current = runs.next();
     pending = controller;
     busy = true;
     error = result = '';
@@ -55,7 +62,7 @@
           preview.digest,
           controller.signal,
         );
-        if (pending !== controller) return;
+        if (!current()) return;
         const count = response.imported.length;
         const refused = Object.entries(response.not_imported).map(
           ([name, status]) => `${name}: ${status}`,
@@ -66,14 +73,14 @@
         onImported?.();
       } else {
         const response = await previewKeepassImport(file, passphrase, keyfile, controller.signal);
-        if (pending !== controller) return;
+        if (!current()) return;
         preview = response;
         selected = response.items.filter((item) => item.default_selected).map((item) => item.name);
       }
     } catch (e) {
-      if (pending === controller) error = (e as Error).message;
+      if (current()) error = (e as Error).message;
     } finally {
-      if (pending === controller) {
+      if (current()) {
         pending = null;
         busy = false;
       }

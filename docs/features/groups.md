@@ -25,11 +25,11 @@ Nothing writes to a group store on its own. The nightly sleep cycle extracts int
 
 ## Using Groups
 
-Open **Groups** to see your current memberships. Select a group to open its Memory, Members, Rooms or Briefings view. Memory is the shared notebook, with an editor, a size warning above 32 KiB and recorded changes. Members shows the current roster. Rooms lists only linked rooms you already belong to; a link does not grant room access. Files opens the group's folder in Files, where Group memory and Group members lead back to these views.
+Open **Groups** to see your current memberships. Select a group to open its Memory, Members, Rooms or Briefings view. Memory is the shared notebook, with an editor, a size warning above 32 KiB and recorded changes. Members shows the current roster. Rooms lists the group's own rooms, which every member is in, and the linked rooms you already belong to, each labelled; a link does not grant room access, and a linked room you are not in is not named. Owners create group rooms from this view (see [Group rooms](#group-rooms)). Files opens the group's folder in Files, where Group memory and Group members lead back to these views.
 
 `GROUP.md` is the curated notebook. Other files and the `memories/` directory are shared documents browsed through Files; they are not automatically recalled or turned into notebook facts. `group_kv` holds structured state. Linking a room leaves its `CHANNEL.md` in that room. Personal memory and knowledge graph facts stay personal.
 
-Owners can change the display name and kind, add existing enabled users, change roles and remove members. Every addition requires acknowledgement that the new member can read existing group memory and retained briefing editions. The form lists what access it grants. Ordinary linked rooms are not granted. A member may leave, but the last owner must appoint a replacement in the same operation if other members remain. `kind` is only a display label; `owner` grants group management authority.
+Owners can change the display name and kind, add existing enabled users, change roles and remove members. Every addition requires acknowledgement that the new member can read existing group memory and retained briefing editions. The form lists what access it grants, including the group's own rooms and their history. Ordinary linked rooms are not granted. A member may leave, but the last owner must appoint a replacement in the same operation if other members remain. `kind` is only a display label; `owner` grants group management authority.
 
 Admins use **Admin → Groups**, below Users, to create groups, appoint owners, inspect membership history, recover an ownerless group and archive a group. Creation requires at least one enabled owner; the acting admin need not join. Admins outside the group can inspect its metadata and membership but cannot read its notebook through member pages or the file viewer. Older groups without owners remain readable and editable by members and are marked “Needs owner” in administration. Migration does not appoint an owner.
 
@@ -82,6 +82,22 @@ A link to a group that is later archived, or that the room's members leave, stay
 
 A member's turn in a shared room runs with everything that member can reach, but that reach is their own data and does not widen any of this. Group material follows only the audience rule above.
 
+### Group rooms
+
+A group room belongs to the group rather than to the people in it. Its members are the group's current members, nobody else, and they change when the group's membership changes. An owner creates one from the group's Rooms view with a name; Istota suggests "General" for the first. Nothing creates a group room on its own. A group with no owner, an archived group and a group with no members cannot create one. Group rooms are web chat rooms only in this version.
+
+Membership is managed in Groups, not in the room. Chat labels the room "Membership follows" the group and links its people panel to the group's Members view. There is no per-room invite, remove, leave or delete. Hiding a group room only hides it from your room list: you are still a member and still part of its audience. To leave the room, leave the group.
+
+- **Joining the group** adds the new member to every group room, with its whole history. The acknowledgement an owner gives when adding a member covers that history.
+- **Leaving or being removed** takes the member out of every group room in the same change. Their room handles stop working, the next batch of an open stream stops, a send from an old tab is refused and does not put them back. Their earlier messages stay in the transcript. Their pending tasks in the room are cancelled and a running one is asked to stop; nothing it produces is delivered. One narrow gap remains: the check runs just before a finished answer is stored, so a removal that commits in that moment can still let the answer into the room, where the remaining members see it and the removed member does not. Anything they already downloaded stays with them.
+- **Archiving the group** suspends its rooms for everyone. The transcripts are kept, but nobody can read or post. There is no unarchive in this version.
+
+Current owners decide the room's settings: name, model, speech mode and the rest of what a host decides in an ordinary shared room. A room still has one host, who is accountable for its tasks. The host starts as the owner who created it. When the host leaves the group, a remaining owner takes over, the first by membership order, so the room keeps working after its creator is gone. The room's creator is kept as history and gives no lasting rights. If no owner is left, the room has no host until the group has an owner again.
+
+A group room never loads anyone's personal memory (`USER.md`, personal recall, knowledge graph facts, playbooks), even while the group has one member, because everything said in it is shared with future members. It loads the group's own notebook under the audience rule above, and no other group's. A member's turn still runs with that member's own tools and resources when they ask for them.
+
+A group room cannot be linked to another group, unlinked, opened in Talk, or given a guest or an external surface. Rooms created before group rooms existed are not converted: a linked room keeps its own members and its own host rules.
+
 ## How the model sees it
 
 `GROUP.md` arrives in the user half of the prompt between the knowledge graph facts and channel memory, so memory narrows from the user to the group to the room. Each group gets a `### <display name>` heading under one `## Group memory` section, in id order.
@@ -113,4 +129,5 @@ Memory operations record applied and rejected outcomes in the group's reserved `
 - An approval queue, or any automatic extraction into a group store.
 - A per-fact audience. The charter is the audience.
 - Sharing `Groups/<id>/` with members' own Nextcloud accounts, so it would appear in their Files app.
-- Group-scoped knowledge graph facts, and group-owned rooms. A room can be linked to a group, but it still belongs to the people in it.
+- Group-scoped knowledge graph facts.
+- Group rooms on Talk or WhatsApp, a group room for part of a group, and converting an existing linked room into a group room.

@@ -85,6 +85,7 @@ import { rememberLastUserId, seedUserId } from '$lib/offline/lastUser';
 import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
 import { isHiddenRoom, sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
 import { applyNotificationCounts, invalidateNotificationCounts } from '$lib/stores/notifications';
+import { latest } from '$lib/ui/latest';
 import {
   isKnownCommand,
   dropRoomCatalogue,
@@ -472,10 +473,10 @@ function createSession(): ChatSession {
   // Which older-page request owns `loadingOlder`. A request that outlives the
   // transcript it was made for must not clear a newer one's guard on its way
   // out, or a second overlapping load gets through behind it.
-  let olderRequest = 0;
+  const olderPages = latest();
   function resetPaging() {
     oldestCursor = null;
-    olderRequest += 1;
+    olderPages.invalidate();
     hasMore.set(false);
     loadingOlder.set(false);
     // Cleared with the rest of the transcript's state, so the flag is only
@@ -521,10 +522,11 @@ function createSession(): ChatSession {
   // `messages` row can have been missed, which is what lets a recovery skip the
   // history reload (see `recoverStream`'s `metadataOnly`).
   let roomStreamLive = false;
-  // Bumped by every `init()` and by `teardown()`, so a load interrupted
-  // mid-flight abandons its remaining side effects instead of installing them
-  // on a page the user has left.
-  let initGeneration = 0;
+  // Advanced by every `init()` and invalidated by `teardown()`, so a load
+  // interrupted mid-flight abandons its remaining side effects instead of
+  // installing them on a page the user has left. Not disposed: the store
+  // outlives the page, and the next mount calls `init()` again.
+  const inits = latest();
   let roomCursor = 0;
   // The deletion tail's own cursor. Separate from `roomCursor` because a
   // delete is hard — there is no `messages` row left for the id-ordered event
@@ -1738,6 +1740,7 @@ function createSession(): ChatSession {
           shared: fresh.shared,
           policy: fresh.policy ?? null,
           off: fresh.off ?? null,
+          managed_by: fresh.managed_by ?? null,
           unread_count: unreadFor(fresh),
           starred_count: fresh.starred_count ?? 0,
           // Whichever stamp is newer. This response was built before it was
@@ -2690,12 +2693,12 @@ function createSession(): ChatSession {
     // covers a connection that returned during it.
     if (!get(loaded)) return;
     // Everything below runs after an await, and `teardown` cannot recall a
-    // call already suspended in one — so the same generation counter `init`
-    // checks is captured here. Without it a page left mid-reconnect still gets
-    // a settle (which rewrites `messages`, `rooms` and the queue) and a stream
-    // recovery, on a session nothing is rendering.
-    const gen = initGeneration;
-    const superseded = () => gen !== initGeneration;
+    // call already suspended in one — so the same check `init` makes is taken
+    // here, without superseding the init it rides on. Without it a page left
+    // mid-reconnect still gets a settle (which rewrites `messages`, `rooms` and
+    // the queue) and a stream recovery, on a session nothing is rendering.
+    const thisInit = inits.peek();
+    const superseded = () => !thisInit();
     // Ahead of the reconcile, and only for a session that booted from the
     // pointer (ISSUE-202): this is the first moment the server can say who
     // this device belongs to, and if the guess was wrong the transcript being
@@ -3068,7 +3071,7 @@ function createSession(): ChatSession {
     // here the way a room switch orphans it.
     oldestCursor = hist.oldest_cursor ?? null;
     hasMore.set(!!hist.has_more);
-    olderRequest += 1;
+    olderPages.invalidate();
     loadingOlder.set(false);
 
     // Resume the room's in-flight tasks in order: the first streams, the rest
@@ -3134,7 +3137,7 @@ function createSession(): ChatSession {
       messages.set(v === 'all' ? carryClientOnlyRows(prev, next, null) : next);
       oldestCursor = hist.oldest_cursor ?? null;
       hasMore.set(!!hist.has_more);
-      olderRequest += 1;
+      olderPages.invalidate();
       loadingOlder.set(false);
     } catch {
       // The aggregate panes are deliberately not cached — they are a cross-room
@@ -3239,11 +3242,11 @@ function createSession(): ChatSession {
       // bands here — the durable store is the only source — but dedup by
       // msg_id anyway so a boundary anomaly can't double a row.
       if (!get(hasMore) || get(loadingOlder) || !oldestCursor) return false;
-      const req = ++olderRequest;
+      const isCurrent = olderPages.next();
       loadingOlder.set(true);
       try {
         const hist = await getChatMessagesView(v, { before: oldestCursor });
-        if (get(view) !== v || req !== olderRequest) return false;
+        if (get(view) !== v || !isCurrent()) return false;
         const have = new Set<number>();
         for (const m of get(messages)) {
           if (typeof m.msgId === 'number') have.add(m.msgId);
@@ -3259,7 +3262,7 @@ function createSession(): ChatSession {
         // Transient — leave the cursor untouched so the next scroll retries.
         return false;
       } finally {
-        if (req === olderRequest) loadingOlder.set(false);
+        if (isCurrent()) loadingOlder.set(false);
       }
     }
     const result = await loadOlderRoom();
@@ -3280,7 +3283,7 @@ function createSession(): ChatSession {
         until.ts > oldestCursor.ts ||
         (until.ts === oldestCursor.ts && until.id >= oldestCursor.id));
     const before = fillsHole ? { ts: until!.ts, id: until!.id + 1 } : oldestCursor!;
-    const req = ++olderRequest;
+    const isCurrent = olderPages.next();
     loadingOlder.set(true);
     try {
       // Deliberately unbounded: a timeout here reports the connection offline,
@@ -3293,7 +3296,7 @@ function createSession(): ChatSession {
       // Switched rooms mid-fetch — drop the page rather than prepend it into
       // the wrong transcript. The request check also catches a switch away and
       // back, which leaves the room id equal and the transcript replaced.
-      if (get(activeRoomId) !== roomId || req !== olderRequest) return null;
+      if (get(activeRoomId) !== roomId || !isCurrent()) return null;
       // Dedup against what's already on screen by the same identity the server
       // dedups on: (role, taskId) for task-backed turns, notif_id for system
       // rows. The band tiling already prevents overlap; this guards a
@@ -3332,7 +3335,7 @@ function createSession(): ChatSession {
       // Transient — leave the cursor untouched so the next scroll retries.
       return null;
     } finally {
-      if (req === olderRequest) loadingOlder.set(false);
+      if (isCurrent()) loadingOlder.set(false);
     }
   }
 
@@ -3352,7 +3355,7 @@ function createSession(): ChatSession {
     // side effect of a derivation it no longer has: the consumer of the
     // snapshot owns loading it, and this is the function `teardown`'s
     // `resetCommandCatalogue()` pairs with. Fire-and-forget and idempotent —
-    // the catalogue caches its own promise — so it needs no generation guard.
+    // the catalogue caches its own promise — so it needs no stale guard.
     //
     // Caught rather than left to `void`: `loadCatalogue` already degrades a
     // failed *fetch* to an empty catalogue, so anything reaching here is a
@@ -3372,9 +3375,9 @@ function createSession(): ChatSession {
     // *after* teardown — starting a stream, a timer and a visibility listener
     // on a page the user has left, and leaking one more of each per remount
     // (only the newest listener is ever removed). Every await below is followed
-    // by a generation check; teardown bumps the counter.
-    const gen = ++initGeneration;
-    const superseded = () => gen !== initGeneration;
+    // by a `superseded()` check; teardown invalidates it.
+    const thisInit = inits.next();
+    const superseded = () => !thisInit();
     try {
       // Who to read the cache by before anything has said (ISSUE-202). A cold
       // launch with no connection gets no config at all, so without this seed
@@ -5516,7 +5519,7 @@ function createSession(): ChatSession {
   function teardown() {
     // Invalidate any `init()` still in flight, so a navigation away mid-load
     // can't install a stream / timer / listener behind us.
-    initGeneration += 1;
+    inits.invalidate();
     stopConnectivityWatch();
     // Nothing in the next session can be the same send, and a membership left
     // here would let a body-matched echo claim a row that session re-minted.
