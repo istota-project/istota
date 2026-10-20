@@ -36,6 +36,7 @@
     rssOptions,
     sharedBlockOptions,
     feedsAvailable,
+    feedsFailed = false,
     emailAccounts = [],
     outputs,
     rooms,
@@ -52,6 +53,7 @@
     rssOptions: SelectOption[];
     sharedBlockOptions: SelectOption[];
     feedsAvailable: boolean;
+    feedsFailed?: boolean;
     emailAccounts?: EmailAccount[];
     outputs: string[];
     rooms: BriefingRoomOption[];
@@ -202,6 +204,7 @@
       {rssOptions}
       {sharedBlockOptions}
       {feedsAvailable}
+      {feedsFailed}
       {emailAccounts}
       onChange={onBlocksChange}
     />

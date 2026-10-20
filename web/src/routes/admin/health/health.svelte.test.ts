@@ -74,6 +74,34 @@ it('reports a failed re-run as a notice and keeps the report on screen', async (
   expect(screen.getByRole('button', { name: 'Re-run' })).toBeTruthy();
 });
 
+it('ends the wait when the page goes, with no notice and no further request', async () => {
+  vi.useFakeTimers();
+  api.getAdminDoctor.mockResolvedValue(report(null));
+  api.requestDoctorRun.mockResolvedValue({ id: 'r3', deep: false });
+  render(Page);
+  await vi.advanceTimersByTimeAsync(0);
+  await fireEvent.click(screen.getByRole('button', { name: 'Re-run' }));
+  await vi.advanceTimersByTimeAsync(1600);
+  const reads = api.getAdminDoctor.mock.calls.length;
+  cleanup();
+  await vi.advanceTimersByTimeAsync(125_000);
+  expect(api.getAdminDoctor.mock.calls.length).toBe(reads);
+  expect(notices.notifyError).not.toHaveBeenCalled();
+});
+
+it('raises no notice for a re-run that fails after the page has gone', async () => {
+  let fail!: (e: Error) => void;
+  api.getAdminDoctor.mockResolvedValue(report(null));
+  api.requestDoctorRun.mockImplementationOnce(() => new Promise((_, reject) => (fail = reject)));
+  render(Page);
+  await fireEvent.click(await screen.findByRole('button', { name: 'Re-run' }));
+  await vi.waitFor(() => expect(fail).toBeTypeOf('function'));
+  cleanup();
+  fail(new Error('API error: 500'));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(notices.notifyError).not.toHaveBeenCalled();
+});
+
 it('leads with the overall status as a closed disclosure over the about text', async () => {
   api.getAdminDoctor.mockResolvedValue({ ...report(null), status: 'fail' });
   render(Page);

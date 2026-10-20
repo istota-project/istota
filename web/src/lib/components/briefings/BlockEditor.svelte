@@ -36,6 +36,7 @@
     rssOptions: SelectOption[];
     sharedBlockOptions: SelectOption[];
     feedsAvailable: boolean;
+    feedsFailed?: boolean;
     allowPreview?: boolean;
     allowSourceDisable?: boolean;
     userId?: string;
@@ -53,6 +54,7 @@
     rssOptions,
     sharedBlockOptions,
     feedsAvailable,
+    feedsFailed = false,
     allowPreview = true,
     allowSourceDisable = true,
     userId = '',
@@ -250,6 +252,7 @@
               onChange={(patch) => patchSource(index, patch)}
               {browseOptions}
               {rssOptions}
+              {feedsFailed}
               {sharedBlockOptions}
               {userId}
               {fileOptions}
@@ -259,7 +262,9 @@
           </div>
         </div>
       {/each}
-      {#if !feedsAvailable && sourceKinds.includes('rss')}
+      {#if feedsFailed && sourceKinds.includes('rss')}
+        <p class="caption">Feeds could not be loaded, so a feed source cannot be added.</p>
+      {:else if !feedsAvailable && sourceKinds.includes('rss')}
         <p class="caption">Enable Feeds and subscribe to a feed first to use a feed source.</p>
       {/if}
     </section>
