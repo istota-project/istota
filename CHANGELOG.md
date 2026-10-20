@@ -117,6 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- iOS chat notification previews show a reply as plain text rather than raw Markdown, so bold markers, code backticks, link URLs, list bullets and table pipes no longer appear or use up the preview's length. Plain-text briefing email also keeps the underscores in names like `snake_case_name`.
 - Opening a menu on an iPhone no longer draws a blue outline around it.
 - A dropdown stretched to fill its row keeps its arrow at the right edge, rather than right after the selected text.
 - Tapping a chat notification in the iOS app opens the room the message came from. It used to open the chat page on whatever room was last shown, including when the app was already on that page.

@@ -112,7 +112,7 @@ def strip_markdown(text: str, *, preserve_links: bool = False) -> str:
     text = re.sub(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+", "", text)
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)  # **bold**
     text = re.sub(r"\*(.+?)\*", r"\1", text)       # *italic*
-    text = re.sub(r"_(.+?)_", r"\1", text)          # _italic_
+    text = _HTML_UNDER_ITALIC_RE.sub(r"\1", text)   # _italic_, not snake_case
     text = re.sub(r"==(.+?)==", r"\1", text)         # ==highlight==
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)  # [text](url)
     if preserve_links:

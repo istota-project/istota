@@ -1,6 +1,7 @@
 """Attacker-controlled alert text is bounded before reaching APNs."""
 
 import json
+import time
 
 import pytest
 
@@ -53,3 +54,47 @@ def test_unsafe_stored_link_is_not_sent():
            "body": "", "source": "confirmation", "link": "https://example.com"}
     payload, _ = next(dispatch._notification_pushes([row], 0, True, 0))
     assert "link" not in payload["istota"]
+
+
+def _chat_body(body: str, count: int = 1) -> str:
+    rows = [{"room_token": "room:test", "room_id": 5, "room_name": "Work", "body": body,
+             "created_at": "2033-05-18T03:33:20Z"}] * count
+    payload, _ = next(dispatch._chat_pushes(rows, 0, True, 0))
+    return payload["aps"]["alert"]["body"]
+
+
+def test_chat_preview_is_plain_text_not_markdown():
+    body = ("## Done\n\n**Deployed** the fix. See [the log](https://example.com/run_42).\n\n"
+            "- `uv sync` ran\n- [x] tests green\n\n> note\n\n| a | b |\n|---|---|\n| 1 | 2 |")
+    assert _chat_body(body) == (
+        "Done Deployed the fix. See the log. uv sync ran tests green note a · b 1 · 2")
+
+
+def test_markup_does_not_spend_the_preview_budget():
+    body = " ".join(f"**w{i:02d}** [x{i}](https://example.com/{'p' * 20})" for i in range(40))
+    preview = _chat_body(body)
+    assert len(preview) == 180
+    assert not any(stray in preview for stray in ("**", "`", "](", "https://"))
+    assert preview.startswith("w00 x0 w01 x1")
+
+
+def test_a_huge_degenerate_body_is_cheap_to_preview():
+    started = time.perf_counter()
+    preview = _chat_body("**a " * 50000)
+    assert time.perf_counter() - started < 0.5
+    assert len(preview) == 180
+
+
+def test_code_fence_only_body_previews_its_contents():
+    assert _chat_body("```bash\nistota-stack update\n```") == "istota-stack update"
+
+
+def test_count_prefix_is_added_after_stripping():
+    assert _chat_body("**hi** snake_case_name", count=2) == "2 new messages: hi snake_case_name"
+
+
+def test_notification_body_passes_through_unchanged():
+    row = {"id": 1, "state": "open", "updated_at": "2033-05-18T03:33:20Z", "title": "Notice",
+           "body": "**literal** `text`", "source": "confirmation", "link": "/chat"}
+    payload, _ = next(dispatch._notification_pushes([row], 0, True, 0))
+    assert payload["aps"]["alert"]["body"] == "**literal** `text`"
