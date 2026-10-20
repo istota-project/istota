@@ -23,7 +23,7 @@
     ConfirmDialog,
     EmptyState,
     KebabMenu,
-    NoticeBanner,
+    Alert,
     Select,
     type KebabItem,
     type SelectOption,
@@ -332,8 +332,11 @@
 <div class="work-content">
   {#if conflict}
     <div class="money-notice-bar">
-      <NoticeBanner title={conflict} variant="warn" />
-      <Button variant="secondary" onclick={reloadFromConflict}>Reload</Button>
+      <Alert title={conflict} variant="warn">
+        {#snippet actions()}
+          <Button variant="secondary" size="sm" onclick={reloadFromConflict}>Reload</Button>
+        {/snippet}
+      </Alert>
     </div>
   {/if}
 

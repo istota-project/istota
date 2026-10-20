@@ -35,7 +35,7 @@
     KebabMenu,
     Modal,
     MultiSelect,
-    NoticeBanner,
+    Alert,
     OptionCards,
     LoadState,
     Select,
@@ -547,17 +547,17 @@
 >
   {#if saved}
     {#if accessLost}
-      <NoticeBanner title="You can no longer edit this briefing" variant="danger" collapsed={false}>
+      <Alert title="You can no longer edit this briefing" variant="danger" collapsed={false}>
         Its group, or your role in the group, has changed. Reload to see what you can still do.
-      </NoticeBanner>
+      </Alert>
     {/if}
 
     {#if showsDefinition}
       <Card title="Schedule and delivery">
         {#if held}
-          <NoticeBanner title="Paused by an administrator" variant="warn" collapsed={false}>
+          <Alert title="Paused by an administrator" variant="warn" collapsed={false}>
             This briefing will not run until an administrator resumes it.
-          </NoticeBanner>
+          </Alert>
         {/if}
         <FormStack disabled={busy || accessLost}>
           <Field label="Title" hint="Shown on every edition, followed by its date.">
@@ -662,15 +662,15 @@
             <p class="micro-label">Sources (optional)</p>
           {/if}
           {#if unsupported.length}
-            <NoticeBanner title="Some sources cannot be used by a group" collapsed={false}>
+            <Alert title="Some sources cannot be used by a group" collapsed={false}>
               Remove {unsupported.map((s) => s.kind).join(', ')}, or replace them with a personal
               file or calendar that its owner shares.
-            </NoticeBanner>
+            </Alert>
           {/if}
           {#if switchedOff.length}
-            <NoticeBanner title="Some sources are switched off" collapsed={false}>
+            <Alert title="Some sources are switched off" collapsed={false}>
               Group briefings have no switched-off sources. Turn each one on or remove it.
-            </NoticeBanner>
+            </Alert>
           {/if}
           {#key `${group}/${name}`}
             <BlockBuilder

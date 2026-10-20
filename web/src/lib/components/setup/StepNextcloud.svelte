@@ -4,7 +4,7 @@
     Button,
     Field,
     Input,
-    NoticeBanner,
+    Alert,
     OptionCards,
     Checkbox,
     SecretField,
@@ -210,7 +210,7 @@
     {#snippet selected(value)}
       {#if value === 'nextcloud'}
         <div class="vstack">
-          <NoticeBanner variant="info" title="Before you continue" collapsed={false}>
+          <Alert variant="info" title="Before you continue" collapsed={false}>
             {#snippet children()}
               <ol class="checklist">
                 <li>
@@ -230,7 +230,7 @@
                 <li>Enter the details below.</li>
               </ol>
             {/snippet}
-          </NoticeBanner>
+          </Alert>
           <Field
             label="Nextcloud address"
             error={shown.nextcloud_public_url ?? (internal ? undefined : shown.nextcloud_url)}

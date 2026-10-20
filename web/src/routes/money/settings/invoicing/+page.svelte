@@ -31,7 +31,7 @@
     ConfirmDialog,
     EmptyState,
     KebabMenu,
-    NoticeBanner,
+    Alert,
     type KebabItem,
     Card,
   } from '$lib/components/ui';
@@ -336,7 +336,7 @@
       <Button variant="primary" size="sm" onclick={() => openEntityForm(null)}>Add entity</Button>
     {/snippet}
     {#if entityNotice}
-      <NoticeBanner title={entityNotice} variant="warn" />
+      <Alert title={entityNotice} variant="warn" />
     {/if}
     {#if entities.length === 0}
       <EmptyState>No entities yet. Add the one that bills your clients.</EmptyState>
@@ -392,7 +392,7 @@
       <Button variant="primary" size="sm" onclick={() => openServiceForm(null)}>Add service</Button>
     {/snippet}
     {#if serviceNotice}
-      <NoticeBanner title={serviceNotice} variant="warn" />
+      <Alert title={serviceNotice} variant="warn" />
     {/if}
     {#if services.length === 0}
       <EmptyState>No services yet. Add what you bill for.</EmptyState>
@@ -438,7 +438,7 @@
       <Button variant="primary" size="sm" onclick={() => openClientForm(null)}>Add client</Button>
     {/snippet}
     {#if clientNotice}
-      <NoticeBanner title={clientNotice} variant="warn" />
+      <Alert title={clientNotice} variant="warn" />
     {/if}
     {#if clientsError}
       <div class="banner error">{clientsError}</div>

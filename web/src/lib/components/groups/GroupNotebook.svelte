@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Button, EmptyState, NoticeBanner, Card, LoadMore, Timestamp } from '$lib/components/ui';
+  import { Button, EmptyState, Alert, Card, LoadMore, Timestamp } from '$lib/components/ui';
   import TextFileEditor from '$lib/components/TextFileEditor.svelte';
   import TextPreview from '$lib/components/viewer/TextPreview.svelte';
   import { formatBytes } from '$lib/format';
@@ -124,10 +124,10 @@
 </script>
 
 <div class="notebook">
-  {#if notebook?.large}<NoticeBanner variant="warn" title="Large notebook" collapsed={false}
-      >Keep the notebook concise so shared facts remain easy to find.</NoticeBanner
+  {#if notebook?.large}<Alert variant="warn" title="Large notebook" collapsed={false}
+      >Keep the notebook concise so shared facts remain easy to find.</Alert
     >{/if}
-  {#if auditWarning}<NoticeBanner variant="warn" title={auditWarning} />{/if}
+  {#if auditWarning}<Alert variant="warn" title={auditWarning} />{/if}
   <Card title="Notebook" description={charter}>
     {#snippet status()}{#if notebook}<span class="caption">{formatBytes(notebook.bytes)}</span
         >{/if}{/snippet}

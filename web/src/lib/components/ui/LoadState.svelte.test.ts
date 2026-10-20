@@ -86,9 +86,9 @@ describe('LoadState, card scope', () => {
     expect(get(pageLoading)).toBe(false);
   });
 
-  it('renders a failure as a .banner error alert', () => {
+  it('renders a failure as an inline danger Alert', () => {
     const { container } = render(Harness, { loading: false, error: 'No rules', scope: 'card' });
-    const banner = container.querySelector('.banner.error');
+    const banner = container.querySelector('.ui-alert-inline.banner.danger');
     expect(banner).toHaveTextContent('No rules');
     expect(banner).toHaveAttribute('role', 'alert');
     expect(container.querySelector('.center-msg')).toBeNull();

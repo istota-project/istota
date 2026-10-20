@@ -3,12 +3,13 @@
   `scope="pane"` is the whole-pane chain `web/AGENTS.md` describes: `PageLoading`
   while loading, `.center-msg error` for the failure (its exclusive twin, so the
   same box), the empty snippet at the top of the pane. `scope="card"` is the same
-  chain inside a card: a caption line and a `.banner error`. The page still
+  chain inside a card: a caption line and an inline danger `Alert`. The page still
   computes the error string; this only decides where it goes.
 -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import { notifyError } from '$lib/stores/notices';
+  import Alert from './Alert.svelte';
   import Button from './Button.svelte';
   import PageLoading from './PageLoading.svelte';
 
@@ -67,15 +68,22 @@
   {/if}
 {/snippet}
 
+{#snippet retryAction()}
+  <Button size="sm" variant="secondary" onclick={onRetry}>{retryLabel}</Button>
+{/snippet}
+
 {#if scope === 'card'}
   {#if loading && !hasData}
     <p class="caption">{loadingLabel}</p>
   {:else if error && !hasData}
-    <div class="banner error" role="alert">
+    <Alert
+      appearance="inline"
+      variant="danger"
+      role="alert"
+      actions={onRetry ? retryAction : undefined}
+    >
       {error}
-      {#if onRetry}<Button size="sm" variant="secondary" onclick={onRetry}>{retryLabel}</Button
-        >{/if}
-    </div>
+    </Alert>
   {:else}
     {@render content()}
   {/if}

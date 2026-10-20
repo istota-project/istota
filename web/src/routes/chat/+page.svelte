@@ -28,7 +28,7 @@
     ConfirmDialog,
     CountPill,
     ListRow,
-    NoticeBanner,
+    Alert,
     Button,
     CategoryGroup,
     LoadingOctopus,
@@ -1462,7 +1462,7 @@
   <div class="chat-pane" style:--composer-h="{composerH}px">
     {#if hostLost && !inViewMode}
       <div class="room-notice">
-        <NoticeBanner title="This room has no host" variant="warn" collapsed={false}>
+        <Alert title="This room has no host" variant="warn" collapsed={false}>
           <p>
             Its host left, so nobody is answered here and its settings cannot change until a member
             claims it. Whoever claims it is who guests' turns run on behalf of.
@@ -1470,7 +1470,7 @@
           <Button size="sm" loading={claiming} loadingLabel="Claiming…" onclick={claimHost}>
             Claim this room
           </Button>
-        </NoticeBanner>
+        </Alert>
       </div>
     {/if}
     <div class="messages-wrap">

@@ -41,7 +41,7 @@
   import {
     Icon,
     Badge,
-    NoticeBanner,
+    Alert,
     Chip,
     ConfirmDialog,
     EmptyState,
@@ -405,8 +405,8 @@
     </PageHeader>
     {#if pageNotice}
       <div class="page-notice">
-        <NoticeBanner title="Some records are not shown" variant="warn" collapsed={false}
-          >{pageNotice}</NoticeBanner
+        <Alert title="Some records are not shown" variant="warn" collapsed={false}
+          >{pageNotice}</Alert
         >
       </div>
     {/if}

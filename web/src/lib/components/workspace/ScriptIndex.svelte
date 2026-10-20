@@ -5,7 +5,7 @@
     EmptyState,
     KebabMenu,
     LoadState,
-    NoticeBanner,
+    Alert,
     type KebabItem,
     Timestamp,
   } from '$lib/components/ui';
@@ -60,7 +60,7 @@
     {#if index}
       {#if broken.length}
         <div class="broken">
-          <NoticeBanner title="Jobs refer to missing files" collapsed={false}>
+          <Alert title="Jobs refer to missing files" collapsed={false}>
             <ul class="list-reset">
               {#each broken as item (item.path)}
                 <li>
@@ -68,7 +68,7 @@
                 </li>
               {/each}
             </ul>
-          </NoticeBanner>
+          </Alert>
         </div>
       {/if}
       {#if files.length}

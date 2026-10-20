@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { NoticeBanner } from '$lib/components/ui';
+  import { Alert } from '$lib/components/ui';
   import {
     TAX_DISCLAIMER_GAPS,
     TAX_DISCLAIMER_LEAD,
@@ -12,7 +12,7 @@
   // missing will not click.
 </script>
 
-<NoticeBanner title={TAX_DISCLAIMER_TITLE} variant="info" collapsed={false}>
+<Alert title={TAX_DISCLAIMER_TITLE} variant="info" collapsed={false}>
   <p class="lead">{TAX_DISCLAIMER_LEAD}</p>
   <p class="gaps-label">Not modelled:</p>
   <ul>
@@ -20,10 +20,10 @@
       <li>{gap}</li>
     {/each}
   </ul>
-</NoticeBanner>
+</Alert>
 
 <style>
-  /* Weight, colour and layout only — the type sizes belong to NoticeBanner. */
+  /* Weight, colour and layout only — the type sizes belong to Alert. */
   .lead {
     margin: 0 0 var(--space-2);
   }

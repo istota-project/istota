@@ -107,7 +107,7 @@ interface CallSite {
 }
 
 /** The tags whose slot content the rule covers. */
-const TAGS = ['Alert', 'NoticeBanner'];
+const TAGS = ['Alert'];
 
 /**
  * Call sites that pass slot content. A self-closing `<Alert … />` is

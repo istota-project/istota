@@ -21,7 +21,7 @@
     Badge,
     Button,
     EmptyState,
-    NoticeBanner,
+    Alert,
     KebabMenu,
     type KebabItem,
     SortHeader,
@@ -292,10 +292,7 @@
       </div>
       {#if reviews.length > 0}
         <div class="money-notice-bar">
-          <NoticeBanner
-            title={`Payments to review (${reviews.length})`}
-            bind:collapsed={reviewsCollapsed}
-          >
+          <Alert title={`Payments to review (${reviews.length})`} bind:collapsed={reviewsCollapsed}>
             {#each reviews as review (review.ledger_txn_id)}
               <div class="payment-review">
                 <p>
@@ -328,7 +325,7 @@
               </div>
             {/each}
             {#if reviewError}<p class="form-error" role="alert">{reviewError}</p>{/if}
-          </NoticeBanner>
+          </Alert>
         </div>
       {/if}
     {/snippet}

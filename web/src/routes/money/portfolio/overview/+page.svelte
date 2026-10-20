@@ -10,7 +10,7 @@
   import { seriesColors } from '$lib/money/portfolioPalette';
   import { chartChrome } from '$lib/chartTheme';
   import { theme } from '$lib/stores/theme';
-  import { Card, EmptyState, NoticeBanner, StatTile, LoadState } from '$lib/components/ui';
+  import { Card, EmptyState, Alert, StatTile, LoadState } from '$lib/components/ui';
   import { directionColor } from '$lib/money/direction';
   import { portfolioGroup, portfolioKnownGroups } from '$lib/money/stores/portfolio';
 
@@ -175,10 +175,10 @@
 
     {#if unclassified.length > 0}
       <div class="money-notice-bar spaced">
-        <NoticeBanner variant="info" title="Unclassified symbols">
+        <Alert variant="info" title="Unclassified symbols" collapsed>
           {unclassified.join(', ')} — classify them in
           <a href="{base}/money/settings">Money settings</a> to complete the allocation charts.
-        </NoticeBanner>
+        </Alert>
       </div>
     {/if}
 

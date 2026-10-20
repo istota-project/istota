@@ -10,7 +10,7 @@
   } from '$lib/api';
   import {
     Input,
-    NoticeBanner,
+    Alert,
     Select,
     type SelectOption,
     Card,
@@ -131,9 +131,9 @@
 
 <Card title="Schedule and delivery">
   {#if held}
-    <NoticeBanner title="Paused by an administrator" variant="warn" collapsed={false}>
+    <Alert title="Paused by an administrator" variant="warn" collapsed={false}>
       This briefing will not run until an administrator resumes it.
-    </NoticeBanner>
+    </Alert>
   {/if}
   <FormStack>
     <Field

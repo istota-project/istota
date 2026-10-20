@@ -12,7 +12,7 @@ Before planning or changing any UI, read `web/AGENTS.md` from disk, even when wo
 
 - Start with `web/src/lib/components/ui/index.ts`, `web/src/lib/styles/tokens.css`, and the nearest sibling page. Reuse the existing primitives and page skeleton. Import UI components through `$lib/components/ui`.
 - Use theme tokens and the spacing/type scales. Add new color tokens to both themes. Reuse shared styles rather than redefining primitives or adding per-page theme overrides.
-- Follow chat's feedback patterns: out-of-band action failures use `notifyError` / `notifyWarning`; lasting conditions use `NoticeBanner`. Field validation and failed sends stay beside their field or message. Do not invent ad-hoc error banners.
+- Follow chat's feedback patterns: out-of-band action failures use `notifyError` / `notifyWarning`; lasting conditions use `Alert`. Field validation and failed sends stay beside their field or message. Do not invent ad-hoc error banners.
 - Use `Modal`, `ConfirmDialog`, and `EmptyState` for their existing roles. Use `copyText` for clipboard actions and the platform facade for native-shell behavior.
 - Keep desktop and mobile behavior consistent with sibling pages. Run the design lint and the frontend checks specified in `web/AGENTS.md` for UI changes.
 

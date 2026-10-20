@@ -22,7 +22,7 @@
     Card,
     EmptyState,
     Input,
-    NoticeBanner,
+    Alert,
     Disclosure,
     LoadState,
   } from '$lib/components/ui';
@@ -469,10 +469,10 @@
   <LoadState {loading} {error} hasData={!!view}>
     {#if view}
       {#if !view.applier.available}
-        <NoticeBanner title="Read-only: changes are made on the host" variant="info">
+        <Alert title="Read-only: changes are made on the host" variant="info" collapsed>
           <p>{view.applier.reason}</p>
           <p>Credentials are never sent to the browser. A secret shows only whether it is set.</p>
-        </NoticeBanner>
+        </Alert>
       {:else if !view.editable}
         <Disclosure variant="card" summary="Read-only view of the running configuration">
           <p>
@@ -483,17 +483,17 @@
       {/if}
 
       {#each managedResources.filter((e) => e.resource !== 'config') as entry (entry.resource)}
-        <NoticeBanner
+        <Alert
           title="{RESOURCE_LABELS[entry.resource]} is managed by {entry.source ?? 'a plan'}"
           variant="warn"
           collapsed={false}
         >
           {@render managedDetail(entry.source)}
-        </NoticeBanner>
+        </Alert>
       {/each}
 
       {#if fileNotice}
-        <NoticeBanner
+        <Alert
           title={fileNotice.title}
           variant={fileNotice.variant}
           collapsed={fileNotice.variant === 'info'}
@@ -577,7 +577,7 @@
               </p>
             </div>
           {/if}
-        </NoticeBanner>
+        </Alert>
       {/if}
 
       {#if pageNotice}

@@ -49,7 +49,6 @@ export type { MenuItem } from './Menu.svelte';
 export { default as KebabMenu } from './KebabMenu.svelte';
 export { default as SortHeader, sortAria } from './SortHeader.svelte';
 export { default as Alert } from './Alert.svelte';
-export { default as NoticeBanner } from './NoticeBanner.svelte';
 export { default as HintPopover } from './HintPopover.svelte';
 export { default as EmptyState } from './EmptyState.svelte';
 export { default as CardGrid } from './CardGrid.svelte';

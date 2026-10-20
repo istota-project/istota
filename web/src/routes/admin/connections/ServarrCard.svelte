@@ -1,7 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import type { AdminServarrApp, AdminServarrConnection } from '$lib/api';
-  import { Badge, Button, Card, EmptyState, NoticeBanner, Timestamp } from '$lib/components/ui';
+  import { Badge, Button, Card, EmptyState, Alert, Timestamp } from '$lib/components/ui';
   import { waitForDoctorRun } from '$lib/doctorRun';
   import { notifyError } from '$lib/stores/notices';
   import { Clapperboard } from '@lucide/svelte';
@@ -103,7 +103,7 @@
   {:else}
     {#if noneAnswered}
       <div class="wide">
-        <NoticeBanner title="None of the apps passed the last check" variant="warn" />
+        <Alert title="None of the apps passed the last check" variant="warn" />
       </div>
     {/if}
 

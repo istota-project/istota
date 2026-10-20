@@ -1,7 +1,7 @@
 <script lang="ts">
   import { Check } from '@lucide/svelte';
   import { onMount } from 'svelte';
-  import { Icon, NoticeBanner, Spinner } from '$lib/components/ui';
+  import { Icon, Alert, Spinner } from '$lib/components/ui';
   import {
     LONG_WAIT_MS,
     POLL_INTERVAL_MS,
@@ -118,7 +118,7 @@
     </p>
   {/if}
   {#if longWait && !ready}
-    <NoticeBanner variant="warn" title="This is taking longer than expected" collapsed={false}>
+    <Alert variant="warn" title="This is taking longer than expected" collapsed={false}>
       {#snippet children()}
         <p>
           On the server, run <code>sudo istota-stack status</code> to see what {botName} is doing.
@@ -128,7 +128,7 @@
           This page keeps checking.
         </p>
       {/snippet}
-    </NoticeBanner>
+    </Alert>
   {/if}
 </div>
 

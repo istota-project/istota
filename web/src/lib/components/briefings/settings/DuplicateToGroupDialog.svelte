@@ -8,7 +8,7 @@
   } from '$lib/api';
   import {
     FormModal,
-    NoticeBanner,
+    Alert,
     OptionCards,
     type OptionCard,
     Field,
@@ -153,12 +153,12 @@
       <p class="caption">You are not an owner of any group you could copy this into.</p>
     {/if}
     {#if dropped.length}
-      <NoticeBanner title="Left out of the copy" collapsed={false}>
+      <Alert title="Left out of the copy" collapsed={false}>
         These sources cannot run in a group briefing:
         <ul>
           {#each dropped as item}<li>{item}</li>{/each}
         </ul>
-      </NoticeBanner>
+      </Alert>
     {/if}
     {#if asPrompt && from.mode !== 'prompt'}
       <Field
