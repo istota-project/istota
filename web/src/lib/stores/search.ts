@@ -1,6 +1,7 @@
 import { get, writable } from 'svelte/store';
 import { search, type SearchGroup } from '$lib/api';
 import { loadSetting, saveSetting } from '$lib/ui/persisted';
+import { latest } from '$lib/ui/latest';
 
 const RECENTS_KEY = 'istota.search.recent';
 type Source = { source: string; label: string };
@@ -33,13 +34,13 @@ export function createSearch() {
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
   let controller: AbortController | undefined;
-  let generation = 0;
+  const queries = latest();
   let offset = 0;
 
   function cancel() {
     clearTimeout(timer);
     controller?.abort();
-    generation++;
+    queries.invalidate();
   }
 
   async function runQuery(append = false) {
@@ -47,7 +48,7 @@ export function createSearch() {
     const current = get(state);
     const query = current.query.trim();
     if (query.length < 2) return;
-    const version = generation;
+    const fresh = queries.next();
     controller = new AbortController();
     const nextOffset = append ? offset + 20 : 0;
     state.update((s) => ({ ...s, loading: true, error: '' }));
@@ -58,7 +59,7 @@ export function createSearch() {
         offset: nextOffset,
         signal: controller.signal,
       });
-      if (version !== generation || get(state).query.trim() !== query) return;
+      if (!fresh() || get(state).query.trim() !== query) return;
       if (response.query !== undefined && response.query !== query) return;
       const groups = Array.isArray(response.groups) ? response.groups : [];
       offset = nextOffset;
@@ -83,10 +84,10 @@ export function createSearch() {
         return { ...s, results, sources, onDemand, activeIndex: append ? s.activeIndex : 0 };
       });
     } catch (error) {
-      if (version !== generation || (error instanceof Error && error.name === 'AbortError')) return;
+      if (!fresh() || (error instanceof Error && error.name === 'AbortError')) return;
       state.update((s) => ({ ...s, error: 'Search is unavailable right now.' }));
     } finally {
-      if (version === generation) state.update((s) => ({ ...s, loading: false }));
+      if (fresh()) state.update((s) => ({ ...s, loading: false }));
     }
   }
 

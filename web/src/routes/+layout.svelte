@@ -23,6 +23,7 @@
   import { clearNotices } from '$lib/stores/notices';
   import { isEditableTarget } from '$lib/ui/editableTarget';
   import { onDocumentVisible } from '$lib/ui/visibility';
+  import { latest } from '$lib/ui/latest';
   import { navUnreadCounts, startNavUnreadPoll, stopNavUnreadPoll } from '$lib/stores/navUnread';
   import { startNotificationPoll, stopNotificationPoll } from '$lib/stores/notifications';
   import { online, startConnectivity } from '$lib/stores/connectivity';
@@ -231,13 +232,12 @@
   }
 
   /**
-   * The run counter `chat.ts` and `notifications.ts` both keep, for the reason
-   * they keep it: two loads can be in flight at once — a reconnect while the
-   * first is still awaiting — and without this the slower one wins whatever it
-   * has, which here means a month-old cached identity painted over the live one
-   * the app had just resolved.
+   * Two loads can be in flight at once — a reconnect while the first is still
+   * awaiting — and without this the slower one wins whatever it has, which
+   * here means a month-old cached identity painted over the live one the app
+   * had just resolved.
    */
-  let loadGeneration = 0;
+  const userLoads = latest();
   let stopPushBadge: (() => void) | undefined;
   let stopPushOpen: (() => void) | undefined;
   let pushEnrollmentChecked = false;
@@ -263,7 +263,7 @@
    * supplied, and only the caller knows which of the two its own screen needs.
    */
   function expireSession() {
-    loadGeneration += 1;
+    userLoads.invalidate();
     stopNavUnreadPoll();
     stopNotificationPoll();
     stopPushBadge?.();
@@ -278,8 +278,7 @@
   }
 
   async function loadUser(): Promise<boolean> {
-    const mine = ++loadGeneration;
-    const current = () => mine === loadGeneration;
+    const current = userLoads.next();
     try {
       const fresh = await getMe();
       // Reported as an answer even when a newer load owns the paint: the
@@ -319,7 +318,7 @@
       return true;
     } catch (e) {
       if (e instanceof AuthError) {
-        // Ahead of every offline branch below, and ahead of the generation
+        // Ahead of every offline branch below, and ahead of the `current()`
         // check too: a dead session and a dead network are different answers
         // and must stay different, and a 401 is authoritative whoever asked.
         expireSession();
@@ -429,7 +428,7 @@
   // is silently dropped, which would leave the poll running against a torn-down
   // layout.
   onMount(() => () => {
-    loadGeneration += 1;
+    userLoads.dispose();
     stopNotificationPoll();
     stopNavUnreadPoll();
     stopPushBadge?.();

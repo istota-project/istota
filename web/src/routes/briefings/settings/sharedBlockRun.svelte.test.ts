@@ -152,4 +152,69 @@ describe('Shared block Run now', () => {
     );
     expect(screen.queryByText(/mk: Nothing was generated/)).toBeNull();
   }, 10_000);
+
+  it('ends the wait when the page goes, with no notice and no further request', async () => {
+    answers.queue = [null];
+    notices.notifyWarning.mockClear();
+    notices.notifyError.mockClear();
+    api.runSharedBlock.mockClear();
+    page.url = new URL('http://localhost/istota/briefings/settings?view=shared');
+    render(Harness, { component: Page, user: admin });
+    await pressRunNow();
+    await waitFor(() => expect(api.runSharedBlock).toHaveBeenCalledTimes(1));
+    const reads = api.getSharedBlocks.mock.calls.length;
+    cleanup();
+    // The daemon answers after the page has gone; a loop still running would report it.
+    answers.queue = [{ id: 'req-2', outcome: 'kept_prior', at: '2026-10-11T00:01:00Z' }];
+    await new Promise((resolve) => setTimeout(resolve, 3500));
+    expect(api.getSharedBlocks.mock.calls.length).toBe(reads);
+    expect(notices.notifyWarning).not.toHaveBeenCalled();
+    expect(notices.notifyError).not.toHaveBeenCalled();
+  }, 10_000);
+
+  it('reports nothing when the page goes while a poll is in flight', async () => {
+    answers.queue = [null];
+    notices.notifyWarning.mockClear();
+    notices.notifyError.mockClear();
+    api.runSharedBlock.mockClear();
+    page.url = new URL('http://localhost/istota/briefings/settings?view=shared');
+    render(Harness, { component: Page, user: admin });
+    await pressRunNow();
+    await waitFor(() => expect(api.runSharedBlock).toHaveBeenCalledTimes(1));
+    let answerPoll!: (v: unknown) => void;
+    api.getSharedBlocks.mockImplementationOnce(
+      () => new Promise((resolve) => (answerPoll = resolve)),
+    );
+    await waitFor(() => expect(answerPoll).toBeTypeOf('function'), { timeout: 3000 });
+    cleanup();
+    answerPoll({
+      shared_blocks: [block({ id: 'req-2', outcome: 'failed', at: '2026-10-11T00:01:00Z' })],
+      allowed_source_kinds: ['markets'],
+      render_modes: ['synthesis', 'structured'],
+      shared_block_timezone: 'UTC',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(notices.notifyError).not.toHaveBeenCalled();
+    expect(notices.notifyWarning).not.toHaveBeenCalled();
+  }, 10_000);
+
+  it('reports nothing when the page goes while a delete is in flight', async () => {
+    answers.queue = [null];
+    notices.notifyError.mockClear();
+    let failDelete!: (e: Error) => void;
+    api.deleteSharedBlock.mockImplementationOnce(
+      () => new Promise((_, reject) => (failDelete = reject)),
+    );
+    page.url = new URL('http://localhost/istota/briefings/settings?view=shared');
+    render(Harness, { component: Page, user: admin });
+    const trigger = await screen.findByLabelText('Shared block actions');
+    await fireEvent.keyDown(trigger, { key: 'Enter' });
+    await fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(failDelete).toBeTypeOf('function'));
+    cleanup();
+    failDelete(new Error('Delete failed upstream'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(notices.notifyError).not.toHaveBeenCalled();
+  });
 });

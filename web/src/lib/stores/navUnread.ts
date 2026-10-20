@@ -1,6 +1,7 @@
 import { get, writable, type Readable } from 'svelte/store';
 import { AuthError, getNavUnreadCounts, type NavUnreadCounts } from '$lib/api';
 import { online } from './connectivity';
+import { latest } from '$lib/ui/latest';
 
 type Counts = Omit<NavUnreadCounts, 'enabled'>;
 const empty: Counts = { chat: null, briefings: null, feeds: null };
@@ -8,8 +9,10 @@ const counts = writable<Counts>(empty);
 export const navUnreadCounts: Readable<Counts> = { subscribe: counts.subscribe };
 
 let username: string | null = null;
-let generation = 0;
-let revision = 0;
+// `sessions` ends with each stop; `revisions` with anything that makes an
+// answer already on the wire out of date (availability, a mutation).
+const sessions = latest();
+const revisions = latest();
 let dirty = false;
 let available = false;
 let inFlight = false;
@@ -45,21 +48,21 @@ async function refresh() {
   inFlight = true;
   dirty = false;
   lastRequest = Date.now();
-  const mine = generation;
-  const snapshot = revision;
+  const sameSession = sessions.peek();
+  const unchanged = revisions.peek();
   try {
     const next = await getNavUnreadCounts();
-    if (mine !== generation) return;
+    if (!sameSession()) return;
     if (!validSummary(next)) throw new Error('Invalid navigation counts');
     if (!next.enabled) {
       stopNavUnreadPoll();
       return;
     }
-    if (snapshot !== revision || !available) return;
+    if (!unchanged() || !available) return;
     counts.set({ chat: next.chat, briefings: next.briefings, feeds: next.feeds });
     failures = 0;
   } catch (error) {
-    if (mine !== generation) return;
+    if (!sameSession()) return;
     if (error instanceof AuthError) {
       stopNavUnreadPoll();
       return;
@@ -79,7 +82,7 @@ function updateAvailability() {
   const next = get(online) && document.visibilityState === 'visible';
   if (next === available) return;
   available = next;
-  revision += 1;
+  revisions.invalidate();
   dirty = true;
   cancelTimer();
   counts.set(empty);
@@ -101,7 +104,7 @@ export function startNavUnreadPoll(user: string) {
 }
 
 export function stopNavUnreadPoll() {
-  generation += 1;
+  sessions.invalidate();
   username = null;
   available = false;
   dirty = false;
@@ -118,7 +121,7 @@ export function stopNavUnreadPoll() {
 
 export function invalidateNavUnreadCounts() {
   if (!username) return;
-  revision += 1;
+  revisions.invalidate();
   dirty = true;
   schedule(Math.max(0, lastRequest + 1000 - Date.now()));
 }

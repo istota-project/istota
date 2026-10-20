@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { latest } from '$lib/ui/latest';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { onMount, untrack } from 'svelte';
   import { base } from '$app/paths';
@@ -57,7 +58,7 @@
   let feedsReady = $state(false);
   let selectionReady = $state(false);
   let mounted = false;
-  let loadGeneration = 0;
+  const feedLoads = latest();
 
   function encodeSelection(selection: FeedSelection): Params {
     if (selection.feed) return { feed: String(selection.feed) };
@@ -120,7 +121,7 @@
     untrack(() => {
       if (!mounted) return;
       if (onSettings) {
-        loadGeneration++;
+        feedLoads.invalidate();
         return;
       }
       void loadFeeds();
@@ -197,18 +198,18 @@
   }
 
   async function loadFeeds() {
-    const generation = ++loadGeneration;
+    const current = feedLoads.next();
     feedsReady = false;
     selectionReady = false;
     try {
       const data = await getFeeds({ limit: '1', offset: '0' });
-      if (generation !== loadGeneration) return;
+      if (!current()) return;
       feedsList.set(data.feeds);
       feedsReady = true;
       if (!onSettings) applySelection(feedSel.current() ?? all);
       selectionReady = true;
     } catch {
-      if (generation !== loadGeneration) return;
+      if (!current()) return;
       // Views do not need subscriptions. Keep unresolved ids in the URL.
       const selection = feedSel.current();
       if (selection) {
@@ -224,7 +225,7 @@
     void refreshFeedCounts();
     return () => {
       mounted = false;
-      loadGeneration++;
+      feedLoads.dispose();
     };
   });
 </script>

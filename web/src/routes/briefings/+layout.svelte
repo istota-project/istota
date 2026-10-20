@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { latest } from '$lib/ui/latest';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { onMount, untrack } from 'svelte';
   import { base } from '$app/paths';
@@ -154,14 +155,14 @@
     const keys = ['view', 'name', 'group', 'briefing', 'new'];
     return keys.every((key) => (settingsParams.get(key) ?? '') === (query[key] ?? ''));
   }
-  let settingsIndexGeneration = 0;
+  const settingsIndexLoads = latest();
   async function loadSettingsIndex() {
-    const generation = ++settingsIndexGeneration;
+    const current = settingsIndexLoads.next();
     const [personal, ...groups] = await Promise.allSettled([
       getBriefings(),
       ...targets.map((target) => getGroupBriefings(target.group_id!)),
     ]);
-    if (generation !== settingsIndexGeneration) return;
+    if (!current()) return;
     if (personal.status === 'fulfilled') personalBriefings = personal.value?.briefings ?? [];
     groupBriefings = Object.fromEntries(
       targets.map((target, index) => {
@@ -219,7 +220,7 @@
     run?: number;
   };
   let initialized = $state(false);
-  let loadGeneration = 0;
+  const archiveLoads = latest();
 
   function encodeSelection(selection: BriefingSelection): Params {
     const params: Params = {};
@@ -300,7 +301,7 @@
   }
 
   async function load(reset = true) {
-    const generation = ++loadGeneration;
+    const current = archiveLoads.next();
     loadingMore = !reset;
     if (reset) {
       briefingArchiveCount.set(null);
@@ -313,7 +314,7 @@
       };
       if ($briefingFilterName) params.briefing_name = $briefingFilterName;
       const resp = await getBriefingArchive(params);
-      if (generation !== loadGeneration) return;
+      if (!current()) return;
       if ($briefingFilterName && !resp.briefing_names.includes($briefingFilterName)) {
         briefingFilterName.set('');
         offset = 0;
@@ -334,15 +335,15 @@
             const selected = await getBriefingArchiveItem(selectedId);
             stillPresent = !$briefingFilterName || selected.briefing_name === $briefingFilterName;
           } catch (error) {
-            if (generation !== loadGeneration || $selectedBriefingId !== selectedId) return;
+            if (!current() || $selectedBriefingId !== selectedId) return;
             if ((error as { status?: number } | null)?.status !== 404) throw error;
           }
-          if (generation !== loadGeneration || $selectedBriefingId !== selectedId) return;
+          if (!current() || $selectedBriefingId !== selectedId) return;
         }
         if (!stillPresent) selectedBriefingId.set(items[0]?.id ?? null);
       }
     } catch {
-      if (generation !== loadGeneration) return;
+      if (!current()) return;
       // Published rather than swallowed. This used to read "the reader page
       // surfaces its own load errors", which is false for the only case that
       // reaches here: the reader fetches the *selected* briefing, a failed list
@@ -357,7 +358,7 @@
       briefingArchiveCount.set(items.length);
       briefingArchiveError.set('Failed to load briefings');
     } finally {
-      if (generation === loadGeneration) loadingMore = false;
+      if (current()) loadingMore = false;
     }
   }
 
@@ -387,21 +388,21 @@
     else briefingSel.push(selection);
   }
 
-  let groupGeneration = 0;
+  const groupLoads = latest();
   async function loadGroupEditions(reset = true) {
     if (audience === 'user' || !targets.length) return;
-    const generation = ++groupGeneration;
+    const current = groupLoads.next();
     try {
       const response = await getGroupEditions({
         group: audience === 'all' ? undefined : audience,
         limit: PAGE,
         offset: reset ? 0 : groupItems.length,
       });
-      if (generation !== groupGeneration) return;
+      if (!current()) return;
       groupItems = reset ? response.items : [...groupItems, ...response.items];
       groupTotal = response.total;
     } catch {
-      if (generation === groupGeneration && reset) {
+      if (current() && reset) {
         groupItems = [];
         groupTotal = 0;
       }
@@ -509,6 +510,9 @@
     initialized = true;
     return () => {
       mounted = false;
+      settingsIndexLoads.dispose();
+      archiveLoads.dispose();
+      groupLoads.dispose();
     };
   });
 </script>

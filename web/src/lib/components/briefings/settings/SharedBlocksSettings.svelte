@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { X } from '@lucide/svelte';
   import { createConfirm } from '$lib/ui/confirm.svelte';
   import {
@@ -65,6 +66,12 @@
   let sharedError = $state('');
   let sharedSaving = $state(false);
   let sharedRunning = $state<Set<string>>(new Set());
+  // An outcome landing after unmount is dropped (ISSUE-803): its notice would
+  // land on whatever page the user went to, and the daemon finishes the run.
+  let active = true;
+  onMount(() => () => {
+    active = false;
+  });
   const confirmSharedDelete = createConfirm<string>();
 
   const sharedKindOptions: SelectOption[] = $derived(
@@ -217,10 +224,13 @@
     sharedRunning = new Set(sharedRunning).add(name);
     try {
       const asked = await runSharedBlock(name);
+      if (!active) return;
       const until = Date.now() + SHARED_RUN_WAIT_MS;
       while (Date.now() < until) {
         await new Promise((resolve) => setTimeout(resolve, SHARED_RUN_POLL_MS));
+        if (!active) return;
         await reloadSharedBlocks();
+        if (!active) return;
         const block = sharedBlocks.find((b) => b.name === name);
         if (!block) {
           notifyWarning(`${name}: ${SHARED_RUN_OUTCOMES.not_found}`);
@@ -239,7 +249,7 @@
           'if this persists, check that the daemon is running.',
       );
     } catch (e) {
-      notifyError((e as Error).message || 'Run failed');
+      if (active) notifyError((e as Error).message || 'Run failed');
     } finally {
       const next = new Set(sharedRunning);
       next.delete(name);
@@ -252,7 +262,7 @@
       await deleteSharedBlock(name);
       await reloadSharedBlocks();
     } catch (e) {
-      notifyError((e as Error).message || 'Delete failed');
+      if (active) notifyError((e as Error).message || 'Delete failed');
     } finally {
       confirmSharedDelete.cancel();
     }

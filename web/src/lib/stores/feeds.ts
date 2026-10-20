@@ -1,6 +1,7 @@
 import { writable } from 'svelte/store';
 import { getFeedCounts, type Feed, type FeedCounts } from '$lib/api';
 import { loadSetting, saveSetting } from '$lib/ui/persisted';
+import { latest } from '$lib/ui/latest';
 
 /** Shared feeds list, loaded once by the feeds layout. */
 export const feedsList = writable<Feed[]>([]);
@@ -21,15 +22,15 @@ export const feedsRefreshNonce = writable(0);
 /** Totals behind the sidebar's Unread and Starred views. */
 export const feedCounts = writable<FeedCounts>({ unread: 0, starred: 0, unread_by_feed: {} });
 
-let countsGeneration = 0;
+const countLoads = latest();
 
 /** Re-read the totals. Call after a write the server has confirmed; a
  *  response overtaken by a later request is dropped. */
 export async function refreshFeedCounts(): Promise<void> {
-  const mine = ++countsGeneration;
+  const current = countLoads.next();
   try {
     const next = await getFeedCounts();
-    if (mine !== countsGeneration) return;
+    if (!current()) return;
     if (!next || !Number.isSafeInteger(next.unread) || !Number.isSafeInteger(next.starred)) return;
     const byFeed: Record<string, number> = {};
     for (const [id, n] of Object.entries(next.unread_by_feed ?? {})) {

@@ -56,6 +56,43 @@ describe('latest', () => {
     expect(current()).toBe(false);
     expect(loads.next()()).toBe(false);
   });
+
+  it('peeks at the newest request without superseding it', () => {
+    const loads = latest();
+    const load = loads.next();
+    const page = loads.peek();
+    expect(load()).toBe(true);
+    expect(page()).toBe(true);
+    loads.next();
+    expect(load()).toBe(false);
+    expect(page()).toBe(false);
+  });
+
+  it('peeks before any request, until something invalidates it', () => {
+    const uploads = latest();
+    const first = uploads.peek();
+    const second = uploads.peek();
+    expect(first() && second()).toBe(true);
+    uploads.invalidate();
+    expect(first()).toBe(false);
+    expect(second()).toBe(false);
+  });
+
+  it('invalidates outstanding checks and keeps working afterwards', () => {
+    const loads = latest();
+    const before = loads.next();
+    loads.invalidate();
+    expect(before()).toBe(false);
+    const after = loads.next();
+    expect(after()).toBe(true);
+    expect(loads.peek()()).toBe(true);
+  });
+
+  it('keeps peeks false once disposed', () => {
+    const loads = latest();
+    loads.dispose();
+    expect(loads.peek()()).toBe(false);
+  });
 });
 
 describe('isEditableTarget', () => {

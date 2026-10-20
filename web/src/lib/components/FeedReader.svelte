@@ -7,6 +7,7 @@
   import { updateEntryStarred } from '$lib/api';
   import { fileKind, inlineMedia, linkUrl, playerUrl, providerLabel } from '$lib/feeds/embed';
   import { notifyError } from '$lib/stores/notices';
+  import { latest } from '$lib/ui/latest';
 
   let {
     entries = [],
@@ -32,7 +33,7 @@
   } = $props();
 
   let current = $state<number | null>(null);
-  let pendingPage: object | null = null;
+  const pageLoads = latest();
   let loadingMore = $state(false);
 
   $effect(() => {
@@ -98,17 +99,17 @@
   const entryId = $derived(entry?.id ?? null);
   $effect(() => {
     const id = entryId;
-    pendingPage = null;
+    pageLoads.invalidate();
     loadingMore = false;
     playingId = null;
     if (id !== null) untrack(() => onView?.(id));
     return () => {
-      pendingPage = null;
+      pageLoads.invalidate();
     };
   });
 
   function close() {
-    pendingPage = null;
+    pageLoads.invalidate();
     current = null;
     onClose();
   }
@@ -144,17 +145,16 @@
     // advance if it grew. Respects the active filter (feed/category/unread/
     // starred) because the page loads with those same params.
     if (hasMore && onNeedMore) {
-      const request = {};
+      const isCurrent = pageLoads.next();
       const targetId = entryId;
       const targetIndex = current;
-      pendingPage = request;
       loadingMore = true;
       try {
         const before = entries.length;
         await onNeedMore();
         await tick();
         if (
-          pendingPage === request &&
+          isCurrent() &&
           entryId === targetId &&
           current === targetIndex &&
           entries.length > before
@@ -164,10 +164,7 @@
       } catch {
         // The page owns load failure reporting. Leave the article and retry available.
       } finally {
-        if (pendingPage === request) {
-          pendingPage = null;
-          loadingMore = false;
-        }
+        if (isCurrent()) loadingMore = false;
       }
     }
   }
