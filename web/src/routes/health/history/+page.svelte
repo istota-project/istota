@@ -11,6 +11,7 @@
     type Encounter,
   } from '$lib/api';
   import {
+    Alert,
     Button,
     Card,
     DateRangeFilter,
@@ -235,7 +236,7 @@
 
 {#if formWarning}
   <!-- Outside the form: it reports on a save that already closed the form. -->
-  <div class="banner warn">{formWarning}</div>
+  <Alert appearance="inline" variant="warn" role="status">{formWarning}</Alert>
 {/if}
 
 {#if formOpen}
@@ -306,7 +307,7 @@
         </div>
 
         {#if formError}
-          <div class="banner error">{formError}</div>
+          <Alert appearance="inline" variant="danger" role="alert">{formError}</Alert>
         {/if}
         <div class="form-actions">
           <Button variant="primary" type="submit" loading={saving}>Save</Button>

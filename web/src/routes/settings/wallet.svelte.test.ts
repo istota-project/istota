@@ -278,3 +278,30 @@ it('uses API precision even when browser currency defaults differ', async () => 
     25250,
   );
 });
+
+it('gives a failed first load the whole pane, with a Retry that recovers', async () => {
+  installMock();
+  const mocked = globalThis.fetch;
+  let failures = 1;
+  vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/settings/wallet') && (init?.method ?? 'GET') === 'GET' && failures > 0) {
+      failures -= 1;
+      return new Response(JSON.stringify({ detail: 'Wallet store unavailable' }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return mocked(url, init);
+  });
+  const { container } = render(Harness);
+  const failure = await waitFor(() => {
+    const el = container.querySelector('.center-msg.error');
+    expect(el).not.toBeNull();
+    return el as HTMLElement;
+  });
+  expect(failure.textContent).toContain('Wallet store unavailable');
+  expect(container.querySelector('.banner')).toBeNull();
+  await fireEvent.click(within(failure).getByRole('button', { name: 'Retry' }));
+  await screen.findByRole('heading', { name: 'Spending policy' });
+  expect(container.querySelector('.center-msg.error')).toBeNull();
+});

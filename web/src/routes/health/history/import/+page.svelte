@@ -8,6 +8,7 @@
     type ParsedEncounter,
   } from '$lib/api';
   import {
+    Alert,
     Badge,
     Button,
     Card,
@@ -160,7 +161,7 @@
   </Card>
 
   {#if error}
-    <div class="banner error">{error}</div>
+    <Alert appearance="inline" variant="danger" role="alert">{error}</Alert>
   {/if}
 
   {#if extracting}
@@ -173,13 +174,13 @@
   {/if}
 
   {#if warnings.length > 0}
-    <div class="banner warn">
+    <Alert appearance="inline" variant="warn">
       <ul>
         {#each warnings as w (w)}
           <li>{w}</li>
         {/each}
       </ul>
-    </div>
+    </Alert>
   {/if}
 
   {#if parsed.length > 0}

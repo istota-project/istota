@@ -23,7 +23,7 @@
     EmptyState,
     LoadState,
   } from '$lib/components/ui';
-  import { notifyError } from '$lib/stores/notices';
+  import { notifyError, notifyWarning } from '$lib/stores/notices';
   import { MessageCircle } from '@lucide/svelte';
   import ConnectionCard from './ConnectionCard.svelte';
   import NextcloudCard from './NextcloudCard.svelte';
@@ -638,9 +638,9 @@
           'Pairing cancelled. Any session directory already moved aside is left where it is — ' +
           'the message below names it.';
       } else if (outcome.reason === 'servicing') {
-        notifyError(
+        notifyWarning(
           'The re-pair is already running and cannot be stopped part-way. It will report its ' +
-            'outcome here.',
+            'outcome on the WhatsApp card.',
         );
       } else {
         receipt = 'There was no open pairing request to cancel.';

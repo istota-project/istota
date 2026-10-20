@@ -27,10 +27,21 @@
     if (e instanceof AuthError) identity.expireSession();
     else error = (e as Error).message || 'The wallet could not be loaded.';
   }
+  function retry() {
+    loading = true;
+    error = '';
+    void refresh();
+  }
   onMount(refresh);
 </script>
 
-<SettingsLayout description="Cards, spending limits and recent purchases." {loading} {error}>
+<SettingsLayout
+  description="Cards, spending limits and recent purchases."
+  {loading}
+  error={data ? error : ''}
+  loadError={data ? '' : error}
+  onRetry={retry}
+>
   {#if data}
     {@const writable = !data.refusal}
     {#if data.refusal}<Alert appearance="inline" variant="info">{data.refusal}</Alert>{/if}

@@ -299,7 +299,7 @@
 >
   <Card title="Business defaults">
     {#if businessError}
-      <div class="banner error">{businessError}</div>
+      <Alert appearance="inline" variant="danger" role="alert">{businessError}</Alert>
     {:else if !defaults}
       <EmptyState>No invoicing configuration found.</EmptyState>
     {:else}
@@ -441,7 +441,7 @@
       <Alert title={clientNotice} variant="warn" />
     {/if}
     {#if clientsError}
-      <div class="banner error">{clientsError}</div>
+      <Alert appearance="inline" variant="danger" role="alert">{clientsError}</Alert>
     {:else if clients.length === 0}
       <EmptyState>No clients yet. Add the first one you invoice.</EmptyState>
     {:else}

@@ -82,6 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Every inline notice in the web UI is now drawn by the shared `Alert` component, so admin, settings, health, money, briefings, feeds and location notices look and announce alike, with Retry and Reload buttons in the notice's own action row. Failed actions on a list still on screen now report in the notice drawer instead of a box above the page, and a failed lab CSV import no longer replaces the Labs page. Wallet, feeds, health and money tax settings show a failed first load across the whole pane with a Retry button, where an editable form used to sit under the error with empty or default values.
 - Settings → Preferences picks disabled skills from a searchable list instead of a comma-separated text field, so a misspelled name can no longer be saved. The list holds only the skills your account can use, and a skill you turned off earlier that is no longer offered stays selected.
 - Admin → Groups picks a group from a dropdown instead of a table. Choosing another group swaps the details in place, keeping the current ones on screen until the next group has loaded, where the page used to blank and redraw as if reloading.
 - "Generate token" on Location settings is now "Create code", which adds a new device token instead of replacing the account's only one, and the generate API route is removed. The account's existing shared token keeps working through the upgrade and appears in the device list until you remove it.

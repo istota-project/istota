@@ -12,6 +12,7 @@
     type Encounter,
   } from '$lib/api';
   import {
+    Alert,
     Icon,
     Button,
     Card,
@@ -353,7 +354,7 @@
           <TextArea bind:value={formNotes} rows={3} />
         </Field>
         {#if formError}
-          <div class="banner error">{formError}</div>
+          <Alert appearance="inline" variant="danger" role="alert">{formError}</Alert>
         {/if}
         <div class="form-actions">
           <Button variant="primary" type="submit" loading={saving}>
