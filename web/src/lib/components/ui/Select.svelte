@@ -157,6 +157,9 @@
   :global(.ui-select-trigger) {
     display: inline-flex;
     align-items: center;
+    /* A caller that widens the trigger (flex: 1, a stretched grid cell) gets
+       the chevron at the right edge, not trailing the label. */
+    justify-content: space-between;
     gap: var(--space-2);
     background: var(--surface-card);
     color: var(--text-primary);
@@ -193,7 +196,6 @@
 	   so no mobile-specific override is needed. */
   :global(.ui-select-trigger--full) {
     display: flex;
-    justify-content: space-between;
     width: 100%;
     max-width: 24rem;
     box-sizing: border-box;
