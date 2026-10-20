@@ -6443,8 +6443,14 @@ function mockGroups(path: string, method: string) {
       members: mockTeamMembers,
       // Tokens of mocked chat rooms, so the overview's Rooms card has activity to sort by.
       rooms: [
-        { token: 'web-carol-general', name: 'general', origin: 'web' },
-        { token: 'talk-design-review', name: 'design review', origin: 'talk' },
+        { token: 'web-team-planning', name: 'Planning', origin: 'web', membership_source: 'group' },
+        { token: 'web-carol-general', name: 'general', origin: 'web', membership_source: 'room' },
+        {
+          token: 'talk-design-review',
+          name: 'design review',
+          origin: 'talk',
+          membership_source: 'room',
+        },
       ],
       disclosure: { memory: 'Members can read and edit the notebook.', rooms: [], briefings: [] },
     };

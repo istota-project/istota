@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Group rooms.** A group owner can create a web chat room from Groups whose members are always the group's current members: joining adds you with its history, and leaving takes you out and stops your tasks there. Another owner takes over when the creator leaves, and the room never loads personal memory. **Upgrade note:** rolling back to an earlier release leaves each group room an ordinary shared room with the members it had. See docs/features/groups.md.
 - In the Istota iOS app (0.6.0 and later), Location settings has a "Turn on location tracking" button that sets up this phone in one tap: it creates a token for the phone, configures the tracker, asks for location permission and starts tracking. No QR code or second screen is needed, and if the server later refuses the phone's token the card offers "Set up again".
 - Location settings lists every device that can send locations, with when it was added and when it last sent, and each can be removed on its own. Every device now has its own ingest token, stored only as a hash, so setting up or removing one device never affects another.
 - In the iOS app, Settings has a Device section that opens the app's own settings, where you can change server, disconnect and see which account you are signed in as. The app no longer shows its own bar above the page, so this is how to get there from a loaded page; long-pressing the app icon also offers Device settings.

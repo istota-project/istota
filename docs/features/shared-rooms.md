@@ -147,7 +147,7 @@ How a guest is answered is the room's `guest_reply` setting, which the host chan
 
 A guest's `!commands` are ignored, apart from switching the bot off. A guest cannot stop, retry or steer anyone's task, or answer a confirmation.
 
-If the host leaves, the room goes quiet: turns are recorded and nobody is answered until a member runs `!room host` to take over. Nobody becomes host automatically. On WhatsApp the bot leaves the group instead.
+If the host leaves, the room goes quiet: turns are recorded and nobody is answered until a member runs `!room host` to take over. Nobody becomes host automatically. On WhatsApp the bot leaves the group instead. A [group room](groups.md#group-rooms) is different: when its host leaves the group, another owner of the group becomes host.
 
 After three of its own replies in a row with no member speaking, the bot stops answering guests until a member writes again, so a guest's autoresponder cannot keep it talking. The cap applies to guests only and never holds back a member's turn. An email thread has no cap: a correspondent's mail runs as the host, and the email volume limits bound a mail loop instead. Another bot is never answered at all.
 
@@ -157,7 +157,7 @@ A turn runs with its sender's reach. When you ask the bot something in a shared 
 
 This holds with a guest in the room too. Having the guest there, and asking in front of them, is your choice. The room card tells the bot that a guest is reading.
 
-One thing is left out, except on an email thread, which is your correspondence and loads it as any email does. In a shared room the bot does not load your personal memory into the prompt: `USER.md`, dated memories, recalled memories, remembered facts and playbooks. Those reach a private prompt without you asking for them, so a question about lunch could otherwise come back with something from your health notes. The memory files are still there, so "what did I note about X" works when you ask for it.
+One thing is left out, except on an email thread, which is your correspondence and loads it as any email does. In a shared room the bot does not load your personal memory into the prompt: `USER.md`, dated memories, recalled memories, remembered facts and playbooks. Those reach a private prompt without you asking for them, so a question about lunch could otherwise come back with something from your health notes. The memory files are still there, so "what did I note about X" works when you ask for it. A [group room](groups.md#group-rooms) leaves personal memory out even while you are its only member, since everyone who joins the group later can read what it said.
 
 Two kinds of task run with less:
 
@@ -226,7 +226,7 @@ Personal memory is not extracted from shared rooms: what is said in front of mor
 
 ## Who can change what
 
-- **Membership** of a web room: only the creator adds or removes members. Any other member can leave; the creator deletes the room instead. A room bound to Talk takes its membership from Talk.
+- **Membership** of a web room: only the creator adds or removes members. Any other member can leave; the creator deletes the room instead. A room bound to Talk takes its membership from Talk. A [group room](groups.md#group-rooms) takes its membership from its group, and its settings are decided by the group's owners.
 - **Room settings** that affect everyone (name, model, effort, brain, opening it in Talk, the guest setting, the group link): the host only. Other members see them read-only.
 - **Colour and hiding** stay per member.
 - **`CHANNEL.md`**: any member.
