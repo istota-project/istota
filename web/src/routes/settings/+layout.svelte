@@ -11,6 +11,8 @@
   import { notifyInfo, notifySuccess, notifyWarning, notifyError } from '$lib/stores/notices';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { USER_SETTINGS_SECTIONS } from '$lib/settings/sections';
+  import { appConnectionAvailable, openAppSettings } from '$lib/platform/nativeConnection';
+  import { Smartphone } from '@lucide/svelte';
   import { setUserSettings } from '$lib/settings/userSettingsContext';
 
   let { children } = $props();
@@ -189,6 +191,22 @@
 
   // `/settings` is a prefix of every section, so the index matches exactly
   // rather than by prefix — otherwise Account stays lit everywhere.
+  // In the app the page runs full screen with no native bar above it, so this entry is how a
+  // loaded page reaches Device settings (Change server, Disconnect). It opens the native sheet
+  // rather than a page. The app icon's quick action is the route that does not need the page.
+  const appSettingsOffered = appConnectionAvailable();
+
+  async function showAppSettings() {
+    sidebarOpen = false;
+    try {
+      await openAppSettings();
+    } catch {
+      notifyError(
+        'Could not open Device settings. Long-press the Istota icon and choose Device settings.',
+      );
+    }
+  }
+
   function sectionActive(href: string): boolean {
     const path = page.url.pathname.replace(/\/$/, '');
     return path === `${settingsBase}${href}`.replace(/\/$/, '');
@@ -232,6 +250,12 @@
             <span class="view-name">{section.label}</span>
           </a>
         {/each}
+        {#if appSettingsOffered}
+          <button type="button" class="view-btn" onclick={showAppSettings}>
+            <Smartphone size={14} />
+            <span class="view-name">Device</span>
+          </button>
+        {/if}
       </nav>
     </Sidebar>
   {/snippet}

@@ -113,21 +113,6 @@ vi.mock('$lib/offline/lastUser', async (importOriginal) => {
   };
 });
 
-const app = vi.hoisted(() => ({
-  appConnectionAvailable: vi.fn(() => false),
-  openAppSettings: vi.fn(async () => true),
-}));
-vi.mock('$lib/platform/nativeConnection', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('$lib/platform/nativeConnection')>()),
-  appConnectionAvailable: () => app.appConnectionAvailable(),
-  openAppSettings: () => app.openAppSettings(),
-}));
-const notifyError = vi.fn();
-vi.mock('$lib/stores/notices', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('$lib/stores/notices')>()),
-  notifyError: (message: string) => notifyError(message),
-}));
-
 // Imported after the mocks, so the component's own imports resolve to them.
 const Layout = (await import('./+layout.svelte')).default;
 
@@ -146,8 +131,6 @@ beforeEach(() => {
   readUser.mockResolvedValue(null);
   writeUser.mockResolvedValue(undefined);
   useAgent(SHELL_UA);
-  app.appConnectionAvailable.mockReturnValue(false);
-  app.openAppSettings.mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -480,42 +463,6 @@ it('puts Files before Groups in the nav and the menu', async () => {
   await waitFor(() => expect(screen.getByRole('menu')).toBeTruthy());
   const items = screen.getAllByRole('menuitem').map((a) => a.textContent?.trim());
   expect(items.indexOf('Files')).toBeLessThan(items.indexOf('Groups'));
-});
-
-// The app shows no native bar over a loaded page, so the menu is how the page reaches the
-// app's Device settings, and with them Change server and Disconnect.
-describe('the Device settings menu item', () => {
-  async function openMenu() {
-    getMe.mockResolvedValue(person());
-    render(Layout, { children });
-    await screen.findByText('Alice');
-    await fireEvent.keyDown(screen.getByRole('button', { name: 'Open menu' }), { key: 'Enter' });
-    await waitFor(() => expect(screen.getByRole('menu')).toBeTruthy());
-  }
-
-  it('opens the app settings where the app can answer', async () => {
-    app.appConnectionAvailable.mockReturnValue(true);
-    await openMenu();
-    await fireEvent.click(screen.getByRole('menuitem', { name: 'Device settings' }));
-    await waitFor(() => expect(app.openAppSettings).toHaveBeenCalledTimes(1));
-    expect(notifyError).not.toHaveBeenCalled();
-  });
-
-  it('is not offered in a browser or an older app', async () => {
-    await openMenu();
-    expect(screen.queryByRole('menuitem', { name: 'Device settings' })).toBeNull();
-    expect(screen.getByRole('menuitem', { name: 'Settings' })).toBeTruthy();
-  });
-
-  it('reports a refusal instead of swallowing it', async () => {
-    app.appConnectionAvailable.mockReturnValue(true);
-    app.openAppSettings.mockRejectedValue(new Error('CONNECTION_CHANGED'));
-    await openMenu();
-    await fireEvent.click(screen.getByRole('menuitem', { name: 'Device settings' }));
-    await waitFor(() =>
-      expect(notifyError).toHaveBeenCalledWith(expect.stringMatching(/Long-press/)),
-    );
-  });
 });
 
 describe('navigation counts root ownership', () => {

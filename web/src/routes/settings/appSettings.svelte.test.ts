@@ -1,7 +1,7 @@
 /**
  * The settings row that opens the generic iOS app's own settings (0.12.0).
  *
- * It is a convenience beside the nav menu item and the app icon's quick action, so what
+ * It is a convenience beside the Settings sidebar's Device entry and the app icon's quick action, so what
  * matters is that it appears only where the app can answer, that it names the
  * device, and that a refusal is reported rather than swallowed.
  */
@@ -136,5 +136,34 @@ describe('the "Device settings" row', () => {
     renderPage();
     (await screen.findByRole('button', BUTTON)).click();
     await waitFor(() => expect(notices.notifyError).toHaveBeenCalledOnce());
+  });
+});
+
+// The app shows no native bar over a loaded page, so this entry is how the page reaches the
+// app's Device settings, and with them Change server and Disconnect.
+describe('the Device entry in the settings sections', () => {
+  const ENTRY = { name: 'Device' };
+
+  it('opens the native settings instead of a page', async () => {
+    renderPage();
+    (await screen.findByRole('button', ENTRY)).click();
+    await waitFor(() => expect(app.openAppSettings).toHaveBeenCalledOnce());
+    expect(notices.notifyError).not.toHaveBeenCalled();
+  });
+
+  it('is absent in a browser and in an older app', async () => {
+    app.appConnectionAvailable.mockReturnValue(false);
+    renderPage();
+    await screen.findByRole('link', { name: 'Preferences' });
+    expect(screen.queryByRole('button', ENTRY)).toBeNull();
+  });
+
+  it('reports an app that refused to open them', async () => {
+    app.openAppSettings.mockRejectedValueOnce(new Error('The connection changed.'));
+    renderPage();
+    (await screen.findByRole('button', ENTRY)).click();
+    await waitFor(() =>
+      expect(notices.notifyError).toHaveBeenCalledWith(expect.stringMatching(/Long-press/)),
+    );
   });
 });
