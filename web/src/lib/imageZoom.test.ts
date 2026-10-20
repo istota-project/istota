@@ -8,11 +8,15 @@ import {
   FIT,
   MAX_SCALE,
   WHEEL_DELTA_CAP,
+  MIN_SCALE,
   applyGesture,
+  clampScale,
   distance,
   isZoomed,
   midpoint,
   normalizeWheelDelta,
+  previewTransform,
+  scrollAfterZoom,
   wheelScaleFactor,
   type Geometry,
 } from './imageZoom';
@@ -219,5 +223,81 @@ describe('wheel deltas', () => {
 
   it('converts a delta measured in pages against the viewport', () => {
     expect(normalizeWheelDelta(-1, 2, 800)).toBe(-800);
+  });
+});
+
+describe('clampScale', () => {
+  it('holds a scale inside the zoom range', () => {
+    expect(clampScale(0.2)).toBe(MIN_SCALE);
+    expect(clampScale(2)).toBe(2);
+    expect(clampScale(40)).toBe(MAX_SCALE);
+  });
+});
+
+describe('zooming content in a scroller', () => {
+  /** A page whose top-left sits 12px into the scrolled area, scrolled 100 down. */
+  const base = {
+    scroll: { x: 0, y: 100 },
+    offsetBefore: { x: 12, y: 12 },
+    offsetAfter: { x: 12, y: 12 },
+  };
+
+  it('keeps the content under a fixed anchor where it was', () => {
+    const anchor = { x: 200, y: 300 };
+    const next = scrollAfterZoom({ ...base, anchorStart: anchor, anchorNow: anchor, factor: 2 });
+    // The page point under the anchor: (200 - 12, 100 + 300 - 12) = (188, 388).
+    // Doubled it is (376, 776), drawn at 12 + that minus the scroll.
+    expect(12 + 376 - next.x).toBe(anchor.x);
+    expect(12 + 776 - next.y).toBe(anchor.y);
+  });
+
+  it('pans with an anchor that moved', () => {
+    const next = scrollAfterZoom({
+      ...base,
+      anchorStart: { x: 200, y: 300 },
+      anchorNow: { x: 150, y: 260 },
+      factor: 1,
+    });
+    expect(next).toEqual({ x: 50, y: 140 });
+  });
+
+  it('follows the content when the new layout moves its offset', () => {
+    // A page centred while it fitted starts at the padding once it overflows.
+    const anchor = { x: 200, y: 300 };
+    const same = scrollAfterZoom({ ...base, anchorStart: anchor, anchorNow: anchor, factor: 2 });
+    const moved = scrollAfterZoom({
+      ...base,
+      offsetAfter: { x: 40, y: 12 },
+      anchorStart: anchor,
+      anchorNow: anchor,
+      factor: 2,
+    });
+    expect(moved.x - same.x).toBe(28);
+  });
+
+  it('previews the zoom the scroll then lands on', () => {
+    // The preview draws page point p at offset + p * factor + translate, in the
+    // scroller's box with the start scroll; the committed zoom draws it at
+    // offset + p * factor - newScroll. The two must put it in the same place.
+    const anchorStart = { x: 200, y: 300 };
+    const anchorNow = { x: 180, y: 320 };
+    const factor = 1.6;
+    const toContent = (a: { x: number; y: number }) => ({
+      x: a.x + base.scroll.x - base.offsetBefore.x,
+      y: a.y + base.scroll.y - base.offsetBefore.y,
+    });
+    const preview = previewTransform(toContent(anchorStart), toContent(anchorNow), factor);
+    const next = scrollAfterZoom({ ...base, anchorStart, anchorNow, factor });
+    const page = { x: 50, y: 700 };
+    const previewed = {
+      x: base.offsetBefore.x + page.x * factor + preview.x - base.scroll.x,
+      y: base.offsetBefore.y + page.y * factor + preview.y - base.scroll.y,
+    };
+    const committed = {
+      x: base.offsetAfter.x + page.x * factor - next.x,
+      y: base.offsetAfter.y + page.y * factor - next.y,
+    };
+    expect(previewed.x).toBeCloseTo(committed.x);
+    expect(previewed.y).toBeCloseTo(committed.y);
   });
 });
