@@ -117,7 +117,7 @@ class TestEmailOperations:
         assert result.references == "<ref1@example.com>"
 
     @patch("istota.skills.email._save_to_sent")
-    @patch("istota.skills.email.smtplib.SMTP")
+    @patch("smtplib.SMTP")
     def test_send_email(self, mock_smtp_class, mock_save, email_config):
         # `_send_smtp` opens the session explicitly rather than with `with`, so
         # that a QUIT failure after the server accepted the message cannot be
@@ -145,7 +145,7 @@ class TestEmailOperations:
         assert sent_msg["Message-ID"] is not None
 
     @patch("istota.skills.email._save_to_sent")
-    @patch("istota.skills.email.smtplib.SMTP")
+    @patch("smtplib.SMTP")
     def test_reply_with_threading(self, mock_smtp_class, mock_save, email_config):
         # `_send_smtp` opens the session explicitly rather than with `with`, so
         # that a QUIT failure after the server accepted the message cannot be
@@ -168,7 +168,7 @@ class TestEmailOperations:
         assert sent_msg["Subject"] == "Re: Meeting"
 
     @patch("istota.skills.email._save_to_sent")
-    @patch("istota.skills.email.smtplib.SMTP")
+    @patch("smtplib.SMTP")
     def test_reply_already_has_re_prefix(self, mock_smtp_class, mock_save, email_config):
         # `_send_smtp` opens the session explicitly rather than with `with`, so
         # that a QUIT failure after the server accepted the message cannot be
@@ -189,7 +189,7 @@ class TestEmailOperations:
         assert not sent_msg["Subject"].startswith("Re: Re:")
 
     @patch("istota.skills.email._save_to_sent")
-    @patch("istota.skills.email.smtplib.SMTP")
+    @patch("smtplib.SMTP")
     def test_reply_uses_in_reply_to_as_references_fallback(
         self, mock_smtp_class, mock_save, email_config
     ):
@@ -795,7 +795,7 @@ class TestSanitizeHeader:
 
 class TestSendEmailSanitizesSubject:
     @patch("istota.skills.email._save_to_sent")
-    @patch("istota.skills.email.smtplib.SMTP")
+    @patch("smtplib.SMTP")
     def test_newlines_stripped_from_subject(self, mock_smtp_class, mock_save, email_config):
         # `_send_smtp` opens the session explicitly rather than with `with`, so
         # that a QUIT failure after the server accepted the message cannot be
@@ -815,7 +815,7 @@ class TestSendEmailSanitizesSubject:
         assert sent_msg["Subject"] == "Hello World"
 
     @patch("istota.skills.email._save_to_sent")
-    @patch("istota.skills.email.smtplib.SMTP")
+    @patch("smtplib.SMTP")
     def test_reply_newlines_stripped_from_subject(self, mock_smtp_class, mock_save, email_config):
         # `_send_smtp` opens the session explicitly rather than with `with`, so
         # that a QUIT failure after the server accepted the message cannot be
@@ -835,7 +835,7 @@ class TestSendEmailSanitizesSubject:
         assert sent_msg["Subject"] == "Re: Meeting Notes"
 
     @patch("istota.skills.email._save_to_sent")
-    @patch("istota.skills.email.smtplib.SMTP")
+    @patch("smtplib.SMTP")
     def test_reply_sanitizes_threading_headers(self, mock_smtp_class, mock_save, email_config):
         """Folded newlines in References/In-Reply-To from original email are stripped."""
         # `_send_smtp` opens the session explicitly rather than with `with`, so

@@ -9725,6 +9725,69 @@ def check_email_sender_match(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def check_mail_connect_verified(config: "Config", probe: bool) -> CheckResult:
+    """Whether the context every IMAP and SMTP connection uses verifies the server.
+
+    `istota.mail.connect.tls_context` is the one context, handed to all four
+    TLS paths (ISSUE-798). This builds it and reads the two settings that make
+    it a check: a context that is not ``CERT_REQUIRED`` with ``check_hostname``
+    hands the mailbox password to whoever answers. Spawns nothing.
+    """
+    import ssl
+
+    name = "mail.connect_verified"
+    try:
+        from istota.mail import connect
+
+        context = connect.tls_context()
+    except Exception as exc:  # noqa: BLE001 - a check never raises
+        return CheckResult(
+            name, FAIL, f"the mail TLS context could not be built ({type(exc).__name__})",
+            remedy="Check the image's OpenSSL and certificate store.", scope=IMAGE,
+        )
+    if context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname:
+        return CheckResult(
+            name, OK, "IMAP and SMTP connections verify the server's certificate and name",
+            scope=IMAGE,
+        )
+    return CheckResult(
+        name, FAIL,
+        "IMAP and SMTP connections would not verify the server's certificate and name",
+        remedy="Restore `istota.mail.connect.tls_context` to ssl.create_default_context().",
+        scope=IMAGE,
+    )
+
+
+def check_mail_account_isolation(config: "Config", probe: bool) -> CheckResult:
+    """Whether one user's task is kept away from another's mail passwords.
+
+    The passwords of the mail accounts users connect are in the secrets store,
+    and reach a task only over the skill proxy's private channel. Without an
+    effective sandbox a task's shell runs as the daemon's user, which is the
+    exposure ``security.credential_isolation`` reports for the vault.
+    """
+    name = "mail.account_isolation"
+    if not config.mail_accounts.enabled:
+        return CheckResult(name, SKIP, "[mail_accounts] is off")
+    if len(config.users) <= 1:
+        return CheckResult(name, OK, "one user; no other user's mail accounts to reach")
+    effective, why = _deployment_sandboxing(config, probe)
+    if effective:
+        return CheckResult(name, OK, "users' mail account passwords are separated by the sandbox")
+    if effective is None:
+        return CheckResult(
+            name, WARN, "mail account isolation could not be established: " + why,
+            remedy="Run `istota doctor --only mail.account_isolation` on the host.",
+        )
+    return CheckResult(
+        name, WARN,
+        "users can connect mail accounts, and tasks run without a sandbox here, so "
+        "a task's shell runs as the daemon's user and could reach another user's "
+        "mail account passwords",
+        remedy="Run istota with a working sandbox, or set `[mail_accounts] enabled = false`.",
+    )
+
+
 def check_email_address_uniqueness(config: "Config", probe: bool) -> CheckResult:
     """Whether any email address is held by more than one user.
 
@@ -10109,6 +10172,8 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("users.email_address_uniqueness", check_email_address_uniqueness),
     ("email.confirmation_answers", check_email_confirmation_answers),
     ("email.sender_match", check_email_sender_match),
+    ("mail.connect_verified", check_mail_connect_verified),
+    ("mail.account_isolation", check_mail_account_isolation),
     ("sandbox.masks", check_sandbox_masks),
 )
 
@@ -10279,6 +10344,9 @@ CHECK_SCOPES: dict[str, str] = {
     "users.email_address_uniqueness": DEPLOYMENT,
     "email.confirmation_answers": DEPLOYMENT,
     "email.sender_match": DEPLOYMENT,
+    # Image: it builds the TLS context and reads nothing a deployment provides.
+    "mail.connect_verified": IMAGE,
+    "mail.account_isolation": DEPLOYMENT,
     "sandbox.masks": DEPLOYMENT,
 }
 

@@ -453,7 +453,7 @@ class TestMapping:
         cfg = EmailConfig(imap_host="h", imap_port=993, imap_user="u",
                           imap_password="p", smtp_host="s", smtp_port=587,
                           imap_timeout=17)
-        with patch("istota.skills.email.MailBox") as MB:
+        with patch("istota.mail.connect.MailBox") as MB:
             _get_mailbox(cfg)
         _, kwargs = MB.call_args
         assert kwargs["timeout"] == 17
@@ -501,14 +501,14 @@ class TestTlsVerifiesTheServer:
 
     def test_starttls_smtp(self):
         from istota.skills.email import _open_smtp
-        with patch("istota.skills.email.smtplib.SMTP") as smtp_client:
+        with patch("smtplib.SMTP") as smtp_client:
             _open_smtp(self._cfg(smtp_port=587))
         _, kwargs = smtp_client.return_value.starttls.call_args
         _assert_verifying(kwargs["context"])
 
     def test_implicit_tls_smtp(self):
         from istota.skills.email import _open_smtp
-        with patch("istota.skills.email.smtplib.SMTP_SSL") as smtp_client:
+        with patch("smtplib.SMTP_SSL") as smtp_client:
             _open_smtp(self._cfg(smtp_port=465))
         _, kwargs = smtp_client.call_args
         _assert_verifying(kwargs["context"])

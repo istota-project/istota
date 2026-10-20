@@ -12,8 +12,6 @@ import logging
 import mimetypes
 import os
 import re
-import smtplib
-import ssl
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -24,6 +22,7 @@ from email.message import EmailMessage
 from email.utils import formatdate, getaddresses, parsedate_to_datetime
 from pathlib import Path
 
+from istota.mail import connect as mail_connect
 from istota.lib.filenames import (
     filename_parts, numbered_name, safe_filename,
 )
@@ -183,6 +182,9 @@ class EmailConfig:
     smtp_password: str | None = None
     bot_email: str = ""
     imap_timeout: int = 30  # socket timeout (seconds) for IMAP connections
+    # "tls" | "starttls"; blank infers from the port (`istota.mail.connect`).
+    imap_security: str = ""
+    smtp_security: str = ""
 
     @property
     def effective_smtp_user(self) -> str:
@@ -203,37 +205,15 @@ def _require_imap_tools():
         raise ImportError("imap-tools not installed. Install with: uv sync --extra email")
 
 
-def _tls_context() -> ssl.SSLContext:
-    """The context every IMAP and SMTP connection here hands its TLS layer.
-
-    Explicit on every path because imap-tools and smtplib, given none, fall
-    back to ``ssl._create_stdlib_context``, which verifies neither the
-    certificate nor the hostname (ISSUE-798). A server with a private CA is
-    trusted through ``SSL_CERT_FILE`` / ``SSL_CERT_DIR``, which this reads.
-    """
-    return ssl.create_default_context()
-
-
 def _get_mailbox(config: EmailConfig) -> MailBox:
-    """Create a MailBox connection based on config.
+    """A connected bot-box mailbox, TLS verified, through `istota.mail.connect`.
 
-    Always passes an explicit socket timeout so a blackholed / unreachable IMAP
+    Always carries an explicit socket timeout so a blackholed / unreachable IMAP
     host fails fast instead of hanging the caller (the poll loop, a briefing)
     on an infinite socket wait.
     """
     _require_imap_tools()
-    timeout = config.imap_timeout if config.imap_timeout and config.imap_timeout > 0 else 30
-    # Port 993 uses implicit TLS; other ports (typically 143) use STARTTLS.
-    if config.imap_port == 993:
-        return MailBox(
-            config.imap_host, port=config.imap_port, timeout=timeout,
-            ssl_context=_tls_context(),
-        )
-    else:
-        return MailBoxStartTls(
-            config.imap_host, port=config.imap_port, timeout=timeout,
-            ssl_context=_tls_context(),
-        )
+    return mail_connect.open_imap(config)
 
 
 @contextmanager
@@ -1033,19 +1013,7 @@ def _close_smtp_after_delivery(server) -> None:
 
 def _open_smtp(config: EmailConfig, *, timeout: float = _SMTP_TIMEOUT_SECONDS):
     """A logged-out but connected SMTP session, TLS already established."""
-    # Port 587 typically uses STARTTLS, port 465 uses implicit TLS
-    if config.smtp_port == 465:
-        return smtplib.SMTP_SSL(
-            config.smtp_host, config.smtp_port, context=_tls_context(),
-            timeout=timeout,
-        )
-    server = smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=timeout)
-    try:
-        server.starttls(context=_tls_context())
-    except BaseException:
-        server.close()
-        raise
-    return server
+    return mail_connect.open_smtp(config, timeout=timeout)
 
 
 def _send_smtp(
@@ -1566,6 +1534,8 @@ def _config_from_env() -> EmailConfig:
         smtp_password=os.environ.get("SMTP_PASSWORD", ""),
         bot_email=os.environ.get("SMTP_FROM", ""),
         imap_timeout=int(os.environ.get("IMAP_TIMEOUT", "30") or "30"),
+        imap_security=os.environ.get("IMAP_SECURITY", ""),
+        smtp_security=os.environ.get("SMTP_SECURITY", ""),
     )
 
 
