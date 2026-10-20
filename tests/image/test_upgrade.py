@@ -925,56 +925,6 @@ class TestRoomBindingUpgrade:
             assert after['refused'], 'upgraded artifact accepted a duplicate binding reference'
 
 
-class TestGroupOwnedRoomsUpgrade:
-    def test_linked_rooms_keep_their_roster_and_the_schema_matches_a_fresh_one(
-        self, volume_upgrade, istota_image, tmp_path,
-    ):
-        """ISSUE-816. The last release before group-owned rooms, migrated twice.
-
-        A linked room stays a room-roster room: converting it would hand its
-        history to the group. The migrated shape is compared with what a fresh
-        `istota init` creates, not with literals, so the two paths cannot drift.
-        """
-        anchor = upgrade.resolve_anchor(REPO, ref="v0.46.0")
-        db_dir = tmp_path / "db"
-        path = upgrade.build_anchor_db(REPO, anchor.commit, db_dir / "istota.db")
-        with sqlite3.connect(path) as conn:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(rooms)")}
-            assert "group_id" in columns and "membership_source" not in columns
-            conn.execute("INSERT INTO groups(group_id,created_by) VALUES ('upgradegroup','upgradeuser')")
-            conn.execute("INSERT INTO group_members(group_id,user_id,added_by) VALUES ('upgradegroup','upgradeuser','upgradeuser')")
-            conn.execute("INSERT INTO rooms(token,user_id,origin,name,group_id) VALUES ('linkedroom','upgradeuser','web','Linked','upgradegroup')")
-            conn.execute("INSERT INTO rooms(token,user_id,origin,name) VALUES ('plainroom','upgradeuser','web','Plain')")
-        conn.close()
-
-        def witness(directory):
-            read = _docker_run(istota_image, volume_upgrade.config_dir, directory,
-                               ["-c", "python /seed/group_room_state.py"], mounts=[(SEED_DIR, "/seed")])
-            assert read.returncode == 0, read.stdout + read.stderr
-            return json.loads(read.stdout)
-
-        observed = []
-        for _ in range(2):
-            migrated = _docker_run(istota_image, volume_upgrade.config_dir, db_dir, ["-c", _istota("init")])
-            assert migrated.returncode == 0, migrated.stdout + migrated.stderr
-            observed.append(witness(db_dir))
-        assert observed[0] == observed[1], "a second init changed the migrated state"
-        assert observed[0]["marker"]
-        assert observed[0]["rooms"] == {
-            "linkedroom": ["upgradegroup", "room"],
-            "plainroom": [None, "room"],
-        }
-
-        fresh_dir = tmp_path / "fresh"
-        fresh_dir.mkdir()
-        created = _docker_run(istota_image, volume_upgrade.config_dir, fresh_dir, ["-c", _istota("init")])
-        assert created.returncode == 0, created.stdout + created.stderr
-        fresh = witness(fresh_dir)
-        assert fresh["schema"]["membership_source"] is not None
-        assert fresh["schema"]["group_source_index"] == ["group_id", "membership_source"]
-        assert observed[0]["schema"] == fresh["schema"]
-
-
 #: The shipped run contract, as `docker run` flags. The compose file is the
 #: authority (tests/test_container_security_profiles.py holds the lean file to
 #: it); this is the same set for a single container, since the case below boots
@@ -1281,3 +1231,87 @@ class TestGroupBriefingsUpgrade:
             else:
                 assert observed == {"retried": ["carol@example.com"], "acknowledged": ["dave@example.com"],
                                     "same_edition": True, "retirement_survived_restart": True, "rollback": True}
+
+
+# The last release before `_migrate_group_owned_rooms`, and the one a rollback
+# returns to: SCHEMA_VERSION was left at 1 so that it still can. The floor
+# predates `rooms.group_id`, so it cannot hold a linked room.
+GROUP_ROOMS_RELEASE = "v0.46.0"
+
+
+@pytest.fixture(scope="session")
+def group_room_upgrade(volume_upgrade, istota_image, tmp_path_factory) -> dict:
+    """The witness over `schema.sql` alone, a fresh database, the floor's and the release's.
+
+    `schema.sql` alone is the oracle, not the fresh database: `_run_migrations`
+    creates `rooms` before `schema.sql` runs, even on an empty file, so a fresh
+    database carries the migration's column definition too and would agree
+    with a drifted one.
+    """
+    root = tmp_path_factory.mktemp("upgrade-group-rooms")
+    declared = root / "declared"
+    declared.mkdir()
+    with sqlite3.connect(declared / "istota.db") as conn:
+        conn.executescript((REPO / "schema.sql").read_text())
+    conn.close()
+
+    def state(db_dir: Path) -> dict:
+        read = _docker_run(istota_image, volume_upgrade.config_dir, db_dir,
+                           ["-c", "python /seed/group_room_state.py"], mounts=[(SEED_DIR, "/seed")])
+        assert read.returncode == 0, read.stdout + read.stderr
+        return json.loads(read.stdout)
+
+    fresh = root / "fresh"
+    fresh.mkdir()
+    made = _docker_run(istota_image, volume_upgrade.config_dir, fresh, ["-c", _istota("init")])
+    assert made.returncode == 0, made.stdout + made.stderr
+
+    release = root / "release"
+    anchor = upgrade.resolve_anchor(REPO, ref=GROUP_ROOMS_RELEASE)
+    path = upgrade.build_anchor_db(REPO, anchor.commit, release / "istota.db")
+    with sqlite3.connect(path) as conn:
+        assert "membership_source" not in {row[1] for row in conn.execute("PRAGMA table_info(rooms)")}
+        conn.execute("INSERT INTO groups(group_id,display_name,created_by) "
+                     "VALUES ('upgrade-group','Upgrade group','upgradeuser')")
+        conn.execute("INSERT INTO rooms(token,user_id,origin,name,group_id) "
+                     "VALUES ('rm_upgradelinked','upgradeuser','web','Group upgrade linked','upgrade-group')")
+        conn.execute("INSERT INTO rooms(token,user_id,origin,name) "
+                     "VALUES ('rm_upgradeplain','upgradeuser','web','Group upgrade plain')")
+    conn.close()
+    migrated = _docker_run(istota_image, volume_upgrade.config_dir, release, ["-c", _istota("init")])
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+    first = state(release)
+    again = _docker_run(istota_image, volume_upgrade.config_dir, release, ["-c", _istota("init")])
+    assert again.returncode == 0, again.stdout + again.stderr
+
+    return {"declared": state(declared), "fresh": state(fresh),
+            "floor": state(volume_upgrade.db_dir), "release": first, "release_again": state(release)}
+
+
+class TestGroupOwnedRoomsUpgrade:
+    """#816: the group-owned-rooms migration over a retained database.
+
+    Controls: `scripts/test-image-negative-control.sh group-rooms`.
+    """
+
+    def test_an_upgraded_database_matches_a_fresh_one(self, group_room_upgrade):
+        declared = group_room_upgrade["declared"]["schema"]
+        assert declared["column"] and declared["requests"] and declared["index"][1], declared
+        for name in ("fresh", "floor", "release"):
+            assert group_room_upgrade[name]["schema"] == declared, (
+                f"the {name} database's group-room schema is not the one schema.sql declares"
+            )
+
+    def test_the_migration_is_markered_and_a_second_init_changes_nothing(self, group_room_upgrade):
+        assert not group_room_upgrade["declared"]["marker"]
+        for name in ("fresh", "floor", "release"):
+            assert group_room_upgrade[name]["marker"], f"the {name} database has no group_owned_rooms_v1 marker"
+        assert group_room_upgrade["release_again"] == group_room_upgrade["release"], (
+            "a second init changed the migrated state"
+        )
+
+    def test_no_linked_room_is_converted(self, group_room_upgrade):
+        assert group_room_upgrade["release"]["rooms"] == {
+            "Group upgrade linked": ["upgrade-group", "room"],
+            "Group upgrade plain": [None, "room"],
+        }

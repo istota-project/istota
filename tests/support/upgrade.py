@@ -907,9 +907,11 @@ def build_anchor_db(repo: Path, commit: str, destination: Path) -> Path:
     """A database as the anchor's release would have created it.
 
     `db.init_db` is `_run_migrations(conn)` followed by
-    `executescript(schema.sql)`. On a database with no tables the migration half
-    has nothing to find, so applying the anchor's `schema.sql` alone *is* the
-    anchor's fresh schema — not an approximation of it.
+    `executescript(schema.sql)`. Applying the anchor's `schema.sql` alone is
+    close to the anchor's fresh schema but not identical: the migration half
+    creates a few tables itself even on an empty file (`rooms`, for one), so a
+    real fresh install has those in the migration's DDL, columns appended by
+    `ALTER TABLE`. Compare columns by name, not by position.
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():

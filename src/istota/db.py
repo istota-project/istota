@@ -5988,10 +5988,24 @@ def group_room_admits_sql(room: str, user: str) -> str:
     )
 
 
-def group_room_admits(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
-    """Whether the group relationship lets ``user_id`` into ``room_token``:
-    `group_room_admits_sql` for one room. True for a room the group does not
-    own and for an unknown token, since the roster decides those."""
+def group_room_admits(
+    conn: sqlite3.Connection, room_token: str | None, user_id: str,
+) -> bool:
+    """Whether the group relationship lets ``user_id`` into ``room_token``.
+
+    The one Python predicate for group-room admission: `group_room_admits_sql`
+    evaluated for one room, so the access queries and every Python gate read
+    the same rule. A group-owned room admits a current member of its live
+    linked group and nobody else; a broken group-owned row admits nobody.
+
+    True for a room the group does not own, for an unknown token and for no
+    token at all: the group refuses only in rooms it owns, and the roster
+    (`is_room_member`) or the caller's own checks decide the rest. A caller
+    asking whether to refuse something already addressed to a room (a chat
+    handle, a task, a delivery) takes ``not group_room_admits(...)``.
+    """
+    if not room_token:
+        return True
     room_token = _canonical_room_token(conn, room_token, cross_surface=False)
     row = conn.execute(
         f"SELECT {group_room_admits_sql('r', '?')} FROM rooms r WHERE r.token = ?",
@@ -10762,6 +10776,20 @@ def is_task_cancelled(conn: sqlite3.Connection, task_id: int) -> bool:
         "SELECT cancel_requested FROM tasks WHERE id = ?", (task_id,)
     ).fetchone()
     return bool(row and row[0])
+
+
+def get_running_worker_pid(
+    conn: sqlite3.Connection, task_id: int,
+) -> tuple[int | None, bool]:
+    """``(worker_pid, cancel_requested)`` while the task is running, else ``(None, False)``."""
+    row = conn.execute(
+        "SELECT worker_pid, cancel_requested FROM tasks "
+        "WHERE id = ? AND status = 'running'",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None, False
+    return (int(row[0]) if row[0] else None), bool(row[1])
 
 
 def update_talk_response_id(

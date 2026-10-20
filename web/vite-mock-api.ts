@@ -456,6 +456,8 @@ interface MockChatRoom {
   effort?: string | null;
   origin?: string;
   color?: string | null;
+  /** Set on a group-owned room, whose members are the group's. */
+  group_id?: string | null;
 }
 interface MockChatTask {
   id: number;
@@ -692,6 +694,27 @@ const mockChatRooms: MockChatRoom[] = [
     updated_at: new Date().toISOString(),
     color: 'rose',
   },
+  // Group-owned rooms: membership follows the group (ISSUE-815). Carol owns
+  // Team, so Planning's settings are hers; she is only a member of Reading circle,
+  // so its settings are locked and its people panel points at Groups.
+  {
+    id: 7,
+    token: 'web-team-planning',
+    name: 'Planning',
+    archived: false,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    group_id: 'team',
+  },
+  {
+    id: 8,
+    token: 'web-reading-circle-picks',
+    name: 'Book picks',
+    archived: false,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    group_id: 'reading-circle',
+  },
 ];
 // Room memory (`CHANNEL.md`), keyed by room token. `general` starts with
 // content and `design review` starts empty, so the editor and the
@@ -731,7 +754,8 @@ const mockMemoryRevision = (content: string) =>
     .digest('hex');
 
 const mockChatTasks = new Map<number, MockChatTask>();
-let mockChatRoomSeq = 1;
+// Past the seeded ids, or a created room would take one of theirs.
+let mockChatRoomSeq = Math.max(...mockChatRooms.map((r) => r.id));
 let mockChatTaskSeq = 1000;
 
 // Seed a large past-dated backlog in the `general` room so scroll-up paging +
@@ -1597,6 +1621,8 @@ function mockRoomShared(id: number): boolean {
 }
 
 function mockSettingsRefusal(id: number): string | null {
+  const groupRoom = mockChatRooms.find((r) => r.id === id && r.group_id);
+  if (groupRoom) return mockGroupRoomOwnerRefusal(groupRoom);
   if (!mockRoomShared(id)) return null;
   const host = mockRoomHosts.get(id) ?? null;
   if (host === 'carol') return null;
@@ -1619,11 +1645,13 @@ function mockRoomSharing(room: MockChatRoom) {
           'everyone who switched it off agrees by sending `!istota on` too.',
       }
     : null;
-  if (!mockRoomShared(room.id)) return { shared: false, policy: null, off };
+  const managed_by = mockGroupRoomManagedBy(room);
+  if (!mockRoomShared(room.id)) return { shared: false, policy: null, off, managed_by };
   const host = mockRoomHosts.get(room.id) ?? null;
   return {
     shared: true,
     off,
+    managed_by,
     policy: {
       host,
       is_host: host === 'carol',
@@ -1894,6 +1922,22 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
   if (path === '/istota/api/chat/users' && method === 'GET') {
     return { users: MOCK_DIRECTORY };
   }
+  // A group's room is never opened in Talk: Talk's roster would not follow the group.
+  {
+    const promote = path.match(/^\/istota\/api\/chat\/rooms\/(\d+)\/promote$/);
+    const room =
+      promote && method === 'POST'
+        ? mockChatRooms.find((r) => r.id === Number(promote[1]))
+        : undefined;
+    if (room?.group_id)
+      return {
+        __status: 409,
+        ...mockGroupManagedRefusal(
+          room,
+          "A group's room is not opened in Talk: Talk's members would not follow the group.",
+        ),
+      };
+  }
   {
     const m = path.match(/^\/istota\/api\/chat\/rooms\/(\d+)\/(members|host|group)(?:\/([^/]+))?$/);
     const room = m ? mockChatRooms.find((r) => r.id === Number(m[1])) : undefined;
@@ -1902,6 +1946,8 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
       const id = room.id;
       const members = mockRoomMembersOf(id);
       const talkBacked = room.origin === 'talk';
+      const groupReply = mockGroupRoomMembership(room, m[2], method, m[3]);
+      if (groupReply !== undefined) return groupReply;
       if (m[2] === 'members' && method === 'GET' && !m[3]) {
         return {
           members: members.map((u) => ({
@@ -2069,6 +2115,11 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
   if (roomPatch && method === 'DELETE') {
     const idx = mockChatRooms.findIndex((r) => r.id === Number(roomPatch[1]));
     if (idx < 0) return { error: 'room not found' };
+    if (mockChatRooms[idx].group_id)
+      return {
+        __status: 409,
+        ...mockGroupManagedRefusal(mockChatRooms[idx], MOCK_LEAVE_THE_GROUP),
+      };
     mockChatRooms.splice(idx, 1);
     return { status: 'ok' };
   }
@@ -6507,7 +6558,28 @@ function mockGroups(path: string, method: string) {
     };
   const adminMatch = path.match(/^\/istota\/api\/admin\/groups\/([^/]+)$/);
   if (adminMatch) return mockAdminGroupDetail(decodeURIComponent(adminMatch[1]));
-  if (path === '/istota/api/groups') return { groups: [mockGroup, mockAllUsersGroup] };
+  if (path === '/istota/api/groups')
+    return { groups: [mockGroup, mockReadingCircleGroup, mockAllUsersGroup] };
+  if (path === '/istota/api/groups/reading-circle')
+    return {
+      ...mockReadingCircleGroup,
+      members: mockReadingCircleMembers,
+      rooms: mockGroupRoomList('reading-circle'),
+      disclosure: { memory: 'Members can read and edit the notebook.', rooms: [], briefings: [] },
+    };
+  if (path === '/istota/api/groups/reading-circle/memory')
+    return {
+      group_id: 'reading-circle',
+      status: 'readable',
+      content: '# Reading circle\n\nWhat we are reading next.\n',
+      revision: 'r1',
+      bytes: Buffer.byteLength('# Reading circle\n\nWhat we are reading next.\n', 'utf8'),
+      max_bytes: 32 * 1024,
+      large: false,
+      last_change: null,
+    };
+  if (path === '/istota/api/groups/reading-circle/memory/activity')
+    return { entries: [], next_cursor: null };
   if (path === '/istota/api/groups/all-users')
     return {
       ...mockAllUsersGroup,
@@ -6537,16 +6609,7 @@ function mockGroups(path: string, method: string) {
       ...mockGroup,
       members: mockTeamMembers,
       // Tokens of mocked chat rooms, so the overview's Rooms card has activity to sort by.
-      rooms: [
-        { token: 'web-team-planning', name: 'Planning', origin: 'web', membership_source: 'group' },
-        { token: 'web-carol-general', name: 'general', origin: 'web', membership_source: 'room' },
-        {
-          token: 'talk-design-review',
-          name: 'design review',
-          origin: 'talk',
-          membership_source: 'room',
-        },
-      ],
+      rooms: mockGroupRoomList('team'),
       disclosure: { memory: 'Members can read and edit the notebook.', rooms: [], briefings: [] },
     };
   if (path === '/istota/api/groups/team/memory')
@@ -6619,6 +6682,297 @@ const mockAllUsersAdminGroup = {
   history: [],
   events: [],
 };
+
+// Group-owned rooms (ISSUE-815): `groups/routes.py`'s room routes over
+// `groups.rooms`, and the Chat side of the same rooms. Carol owns Team, whose
+// rooms grow as she creates them; Reading circle is a group she belongs to without
+// owning, so its room is the non-owner view.
+const mockReadingCircleMembers = [
+  { user_id: 'dave', display_name: 'Dave', role: 'owner' },
+  { user_id: 'carol', display_name: 'Carol', role: 'member' },
+];
+const mockReadingCircleGroup = {
+  ...mockGroup,
+  group_id: 'reading-circle',
+  display_name: 'Reading circle',
+  kind: 'group',
+  role: 'member' as const,
+  // No briefings: the group briefings mock serves Team and All users only.
+  capabilities: {
+    ...mockGroup.capabilities,
+    owner: false,
+    manage: false,
+    archive: false,
+    read_briefings: false,
+    author_briefings: false,
+    receive_briefings: false,
+  },
+};
+const mockRoomGroupDirectory: Record<
+  string,
+  {
+    group: { display_name: string; revision: number; system_key: string | null };
+    members: { user_id: string; role: string }[];
+  }
+> = {
+  team: { group: mockGroup, members: mockTeamMembers },
+  'reading-circle': { group: mockReadingCircleGroup, members: mockReadingCircleMembers },
+  'all-users': { group: mockAllUsersGroup, members: mockAllUsersMembers },
+};
+// Rooms linked to a group that keep their own roster, as the Team detail lists
+// them. A static table: it does not follow the Chat group link (`mockRoomGroups`).
+const mockLinkedGroupRooms: Record<string, { token: string; name: string; origin: string }[]> = {
+  team: [
+    { token: 'web-carol-general', name: 'general', origin: 'web' },
+    { token: 'talk-design-review', name: 'design review', origin: 'talk' },
+  ],
+};
+// `group_room_requests`: what each request id made, keyed `<group>:<request id>`.
+const mockGroupRoomRequests = new Map<string, { name: string; roomId: number }>();
+const MOCK_GROUP_ROOM_REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
+const MOCK_LEAVE_THE_GROUP = "This room's membership follows its group; leave the group instead.";
+
+for (const room of mockChatRooms) {
+  const entry = room.group_id ? mockRoomGroupDirectory[room.group_id] : undefined;
+  if (!entry) continue;
+  mockRoomMembers.set(
+    room.id,
+    entry.members.map((m) => m.user_id),
+  );
+  mockRoomHosts.set(room.id, entry.members.find((m) => m.role === 'owner')?.user_id ?? null);
+}
+
+function mockIsGroupOwner(groupId: string, userId = 'carol'): boolean {
+  return !!mockRoomGroupDirectory[groupId]?.members.some(
+    (m) => m.user_id === userId && m.role === 'owner',
+  );
+}
+
+function mockGroupLabel(groupId: string) {
+  return {
+    group_id: groupId,
+    display_name: mockRoomGroupDirectory[groupId]?.group.display_name ?? groupId,
+  };
+}
+
+function mockGroupManageUrl(groupId: string): string {
+  return `/istota/groups/?group=${encodeURIComponent(groupId)}`;
+}
+
+/** `groups.rooms.managed_by`: the room's group, or null for its own roster. */
+function mockGroupRoomManagedBy(room: MockChatRoom) {
+  if (!room.group_id) return null;
+  return {
+    ...mockGroupLabel(room.group_id),
+    manage_url: mockGroupManageUrl(room.group_id),
+    is_owner: mockIsGroupOwner(room.group_id),
+  };
+}
+
+/** `groups.rooms.owner_settings_refusal`. */
+function mockGroupRoomOwnerRefusal(room: MockChatRoom): string | null {
+  if (room.group_id && mockIsGroupOwner(room.group_id)) return null;
+  return `Only an owner of group '${room.group_id || 'its group'}' can change this room's settings.`;
+}
+
+/** `groups.rooms.managed_refusal`: the 409 body for a membership change. */
+function mockGroupManagedRefusal(room: MockChatRoom, error: string) {
+  return {
+    error,
+    reason: 'group_managed',
+    group: mockGroupLabel(room.group_id ?? ''),
+    manage_url: mockGroupManageUrl(room.group_id ?? ''),
+  };
+}
+
+/** The Chat membership, host and group-link routes on a group-owned room;
+ * undefined for any other room, which the ordinary handlers answer. */
+function mockGroupRoomMembership(
+  room: MockChatRoom,
+  action: string,
+  method: string,
+  target: string | undefined,
+) {
+  if (!room.group_id) return undefined;
+  const groupId = room.group_id;
+  if (action === 'members' && method === 'GET' && !target) {
+    const host = mockRoomHosts.get(room.id) ?? null;
+    return {
+      members: mockRoomMembersOf(room.id).map((u) => ({
+        user_id: u,
+        display_name: MOCK_DIRECTORY.find((d) => d.user_id === u)?.display_name ?? u,
+        is_owner: u === host,
+      })),
+      can_manage: false,
+      message_count: 42,
+      email_thread: false,
+      managed_by: mockGroupRoomManagedBy(room),
+    };
+  }
+  if (action === 'members' && method === 'POST' && !target)
+    return {
+      __status: 409,
+      ...mockGroupManagedRefusal(
+        room,
+        "This room's members are its group's; add them to the group in Groups.",
+      ),
+    };
+  if (action === 'members' && method === 'DELETE' && target)
+    return {
+      __status: 409,
+      ...mockGroupManagedRefusal(
+        room,
+        decodeURIComponent(target) === 'carol'
+          ? MOCK_LEAVE_THE_GROUP
+          : "This room's membership follows its group; change it in Groups.",
+      ),
+    };
+  if (action === 'host' && method === 'POST' && !mockIsGroupOwner(groupId))
+    return {
+      __status: 409,
+      outcome: 'group_managed',
+      ...mockRoomSharing(room),
+      error: "only an owner of this room's group can host it",
+      reason: 'group_managed',
+      manage_url: mockGroupManageUrl(groupId),
+    };
+  const linkRefusal =
+    `This room's membership follows group '${groupId}', so its group ` +
+    'link cannot change. Membership is managed in Groups.';
+  if (action === 'group' && method === 'PUT')
+    return { __status: 409, ...mockGroupManagedRefusal(room, linkRefusal) };
+  if (action === 'group' && method === 'GET')
+    return {
+      group_id: groupId,
+      group_name: mockGroupLabel(groupId).display_name,
+      can_set: false,
+      refusal: linkRefusal,
+      choices: [],
+      managed: true,
+      manage_url: mockGroupManageUrl(groupId),
+    };
+  return undefined;
+}
+
+/** `groups.rooms.list_group_rooms`: the group's own rooms, then its linked ones. */
+function mockGroupRoomList(groupId: string) {
+  const owned = mockChatRooms
+    .filter((r) => r.group_id === groupId)
+    .map((r) => ({
+      token: r.token,
+      name: r.name,
+      origin: r.origin ?? 'web',
+      membership_source: 'group' as const,
+      room_id: r.id,
+    }));
+  const linked = (mockLinkedGroupRooms[groupId] ?? []).map((r) => ({
+    ...r,
+    membership_source: 'room' as const,
+    room_id: mockChatRooms.find((c) => c.token === r.token)?.id ?? null,
+  }));
+  return [...owned, ...linked];
+}
+
+function mockGroupError(status: number, error: string, message: string, extra = {}) {
+  return { __status: status, error, message, ...extra };
+}
+
+/** `GET` and `POST /groups/{id}/rooms`, refused in the server's order. */
+function mockGroupRoomRoutes(path: string, method: string, body: any) {
+  const match = path.match(/^\/istota\/api\/groups\/([^/]+)\/rooms$/);
+  if (!match || (method !== 'GET' && method !== 'POST')) return undefined;
+  const groupId = decodeURIComponent(match[1]);
+  const entry = mockRoomGroupDirectory[groupId];
+  const isMember = !!entry?.members.some((m) => m.user_id === 'carol');
+  const isOwner = mockIsGroupOwner(groupId);
+  if (method === 'GET') {
+    if (!isMember) return mockGroupError(404, 'group_not_found', 'Group not found');
+    return {
+      group_id: groupId,
+      rooms: mockGroupRoomList(groupId),
+      can_create: isOwner && !entry.group.system_key,
+    };
+  }
+  const fields: Record<string, string> = {
+    name: 'string',
+    request_id: 'string',
+    revision: 'number',
+  };
+  if (
+    !body ||
+    typeof body !== 'object' ||
+    Object.keys(body).some((k) => !(k in fields)) ||
+    Object.keys(fields).some((k) => !(k in body))
+  )
+    return { __status: 422, detail: 'Missing or unknown fields' };
+  for (const [field, type] of Object.entries(fields)) {
+    if (typeof body[field] !== type || (type === 'number' && !Number.isInteger(body[field])))
+      return { __status: 422, detail: `Invalid ${field}` };
+  }
+  if (!MOCK_GROUP_ROOM_REQUEST_ID.test(body.request_id))
+    return mockGroupError(
+      422,
+      'invalid_request_id',
+      'A request id of 8-128 letters, digits or ._:- is required',
+    );
+  if (!body.name.trim() || body.name.length > 200)
+    return mockGroupError(422, 'invalid_metadata', 'Room name must contain 1–200 characters');
+  const name = body.name.trim();
+  if (!isMember) return mockGroupError(404, 'group_not_found', 'Group not found');
+  if (!isOwner) return mockGroupError(403, 'group_forbidden', 'Group owner required');
+  const group = entry.group;
+  const key = `${groupId}:${body.request_id}`;
+  const prior = mockGroupRoomRequests.get(key);
+  let room: MockChatRoom | undefined;
+  if (prior) {
+    if (prior.name !== name)
+      return mockGroupError(
+        409,
+        'request_conflict',
+        'This request id was already used for another room',
+      );
+    room = mockChatRooms.find((r) => r.id === prior.roomId);
+  } else {
+    if (body.revision < 0)
+      return mockGroupError(422, 'invalid_revision', 'A nonnegative group revision is required');
+    if (body.revision !== group.revision)
+      return mockGroupError(409, 'revision_conflict', 'Group changed; reload before saving', {
+        revision: group.revision,
+      });
+    const now = new Date().toISOString();
+    room = {
+      id: ++mockChatRoomSeq,
+      token: `web-${groupId}-${mockChatRoomSeq}`,
+      name,
+      archived: false,
+      created_at: now,
+      updated_at: now,
+      group_id: groupId,
+    };
+    mockChatRooms.push(room);
+    mockRoomMembers.set(
+      room.id,
+      entry.members.map((m) => m.user_id),
+    );
+    mockRoomHosts.set(room.id, 'carol');
+    mockGroupRoomRequests.set(key, { name, roomId: room.id });
+    group.revision += 1;
+  }
+  if (!room) return mockGroupError(404, 'group_not_found', 'Group not found');
+  return {
+    __status: prior ? 200 : 201,
+    group_id: groupId,
+    created: !prior,
+    revision: group.revision,
+    room: {
+      room_id: room.id,
+      token: room.token,
+      name: room.name,
+      origin: room.origin ?? 'web',
+      membership_source: 'group',
+    },
+  };
+}
 
 // Group briefings: one stateful store behind every /groups/{id}/briefings route.
 // Covers both generation modes, drafts, personal-source approvals (own and another
@@ -7451,6 +7805,9 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
 
   const adminBriefingReply = mockAdminBriefingRoutes(driveUrl.pathname, method, body);
   if (adminBriefingReply !== undefined) return adminBriefingReply;
+
+  const groupRoomReply = mockGroupRoomRoutes(driveUrl.pathname, method, body);
+  if (groupRoomReply !== undefined) return groupRoomReply;
 
   const groupReply = mockGroups(driveUrl.pathname, method);
   if (groupReply !== undefined) return groupReply;

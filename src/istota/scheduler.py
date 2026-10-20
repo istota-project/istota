@@ -404,6 +404,64 @@ def _stuck_running_minutes(sched) -> int:
     return sched.task_timeout_minutes + _STUCK_RUNNING_GRACE_MINUTES
 
 
+_CANCEL_POLL_SECONDS = 2.0
+
+
+@contextlib.contextmanager
+def _task_cancel_watch(config: Config, task_id: int):
+    """SIGTERM the attempt's recorded worker once its cancel is flagged (ISSUE-812).
+
+    `!stop`, the web cancel and a group removal set ``cancel_requested`` and
+    signal through `signal_task_worker`, which refuses outside the scheduler's
+    process: on the Docker stack the web container has its own PID namespace.
+    The flag alone then reached ClaudeCodeBrain only on the CLI's next event,
+    or at exit for the non-streaming child. This thread runs in the process
+    that spawned the pid, so it signals with `kill_process_group` directly
+    rather than through the daemon-lock guard, and that also covers
+    `istota run`. Each pid is signalled once; the thread stops with the attempt.
+
+    The row keeps a child's pid after the brain has reaped it (an API retry
+    backoff, an in-process `!stop`), so each pid is pinned to its start time
+    when first seen and signalled only while that still matches: a recycled
+    number is another process, and possibly another task's group.
+    """
+    from istota.sandbox import peer_process
+
+    stop = threading.Event()
+    started: dict[int, int | None] = {}
+    signalled: set[int] = set()
+
+    def _loop():
+        while not stop.wait(_CANCEL_POLL_SECONDS):
+            try:
+                with db.get_db(config.db_path, busy_timeout_ms=2000) as conn:
+                    pid, cancelled = db.get_running_worker_pid(conn, task_id)
+            except Exception:
+                logger.debug("cancel watch read failed for task %s", task_id, exc_info=True)
+                continue
+            if pid is None:
+                continue
+            if pid not in started:
+                started[pid] = peer_process.start_time(pid)
+            if not cancelled or pid in signalled:
+                continue
+            signalled.add(pid)
+            pinned = started[pid]
+            if pinned is None or peer_process.start_time(pid) != pinned:
+                continue
+            outcome = process_group.kill_process_group(pid, signal.SIGTERM)
+            logger.info("Task %s cancel requested: signalled worker pid %s (%s)",
+                        task_id, pid, outcome)
+
+    thread = threading.Thread(target=_loop, name=f"cancel-watch-{task_id}", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+
+
 @contextlib.contextmanager
 def _task_heartbeat(config: Config, task_id: int):
     """Ping the task's liveness while its body runs (ISSUE-112).
@@ -415,7 +473,17 @@ def _task_heartbeat(config: Config, task_id: int):
     a crashed one. The first ping fires immediately, so liveness is recorded as
     soon as the body starts; the thread is stopped on exit (incl. on exception),
     which lets reclaim fire promptly once a worker really dies.
+
+    It also runs `_task_cancel_watch` for the same span, whether or not the
+    heartbeat is enabled, so every place an attempt runs gets both.
     """
+    with _task_cancel_watch(config, task_id):
+        with _task_heartbeat_pings(config, task_id):
+            yield
+
+
+@contextlib.contextmanager
+def _task_heartbeat_pings(config: Config, task_id: int):
     interval = config.scheduler.worker_heartbeat_seconds
     if interval <= 0:
         yield  # heartbeat disabled
@@ -3942,8 +4010,32 @@ def process_one_task(
     # as `(row attachments, transcribed paths)` (ISSUE-611). Filled only on the
     # completed branch: a parked or failed task re-runs from the file.
     voice_notes_to_remove: list[tuple[int, str, str]] | None = None
+    # Memory indexing for the completed answer, as `(namespace, body, speaker)`,
+    # run once the transaction below has closed: `index_conversation` commits
+    # its own connection, which would end the transaction mid-way and reopen
+    # the window the delivery check at its head closes (ISSUE-813). It also
+    # runs embedding inference, which has no business under the write lock.
+    conversations_to_index: list[tuple[str, str, str]] = []
 
     with db.get_db(config.db_path) as conn:
+        if not dry_run and success:
+            # The post-run check above ran on its own connection, so a group
+            # removal committing since then would still let the answer in.
+            # Taking the write lock before asking again makes the answer and
+            # every row stored below one snapshot (ISSUE-813).
+            from .groups.rooms import task_delivery_refused
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            _current = db.get_task(conn, task_id)
+            if _current is not None and task_delivery_refused(conn, _current):
+                logger.info("Task %d: its group room stopped admitting its author "
+                            "before the answer was stored; withholding the result",
+                            task_id)
+                success, result = False, "Cancelled by user"
+                is_confirmation_request = False
+                # A relay or authorization question held on this answer goes too.
+                from istota.relay.relays import close_task_questions
+                close_task_questions(conn, task_id, reason="attempt_failed")
         if not dry_run and authorization_question and authorization_question["kind"] == "location_share":
             from istota.relay.requests import write_transaction
             # Keep this lock through parking so stop cannot race the state check.
@@ -4273,7 +4365,6 @@ def process_one_task(
                     and not is_no_final_answer(result)
                 ):
                     try:
-                        from .memory.search import index_conversation as _index_conv
                         from .memory.sleep_cycle import speaker_labels
                         # An indexed chunk is recalled back into a later prompt,
                         # so it must not label an external contact's mail as the
@@ -4284,17 +4375,16 @@ def process_one_task(
                         # A guest's turn is the host's by authority only,
                         # never by memory (multiplayer D2): nothing a guest
                         # wrote is recalled back into the host's own tasks.
+                        _indexed_body = normalized["body"] if briefing_document else result
                         if task.guest_participant_id is None:
-                            _index_conv(conn, task.user_id, task_id, task.prompt,
-                                        normalized["body"] if briefing_document else result,
-                                        speaker=_speaker)
+                            conversations_to_index.append(
+                                (task.user_id, _indexed_body, _speaker))
                         # Also index under channel namespace if in a channel.
                         if (task.conversation_token
                                 and task.guest_participant_id is None):
                             channel_uid = f"channel:{task.conversation_token}"
-                            _index_conv(conn, channel_uid, task_id, task.prompt,
-                                        normalized["body"] if briefing_document else result,
-                                        speaker=_speaker)
+                            conversations_to_index.append(
+                                (channel_uid, _indexed_body, _speaker))
                     except Exception as e:
                         logger.debug("Memory search indexing failed for task %s: %s", task_id, e)
 
@@ -4696,6 +4786,16 @@ def process_one_task(
     # opens further connections of its own, and a buffer that outlives them is a
     # buffer somebody eventually forgets to flush.
     deliver_pending(config, notification_results)
+
+    if conversations_to_index:
+        try:
+            from .memory.search import index_conversation
+            with db.get_db(config.db_path) as conn:
+                for namespace, indexed_body, speaker in conversations_to_index:
+                    index_conversation(conn, namespace, task_id, task.prompt,
+                                       indexed_body, speaker=speaker)
+        except Exception as e:
+            logger.debug("Memory search indexing failed for task %s: %s", task_id, e)
 
     # Likewise the once-job's CRON.md removal, buffered above so the mount
     # write happens with no lock held. It goes after `deliver_pending` rather

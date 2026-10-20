@@ -27,11 +27,13 @@ and the fallback is what signals it alone rather than the daemon's group.
 scheduler** (ISSUE-701). The pid is a number in the scheduler's PID namespace.
 On the Docker stack the web app is another container with its own namespace,
 where uvicorn is PID 1, so the same number there names nothing or a web-side
-process running as the same uid. `signal_task_worker` is the one entry for the
-cancel paths: it signals only once `run_daemon` has called `own_task_pids`
+process running as the same uid. `signal_task_worker` is the one entry for
+cancels issued from outside the attempt (the attempt's own
+`scheduler._task_cancel_watch` signals its child directly): it signals only once `run_daemon` has called `own_task_pids`
 under its singleton lock, which covers the daemon and the single-process
 `istota serve`. Anywhere else the cancel rests on `cancel_requested`, which the
-scheduler's cancel check reads.
+worker's own process watches and acts on (`scheduler._task_cancel_watch`,
+ISSUE-812).
 
 stdlib-only leaf so any module can import it without a cycle. Never raises.
 """

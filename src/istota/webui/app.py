@@ -4469,15 +4469,22 @@ def _task_owner(task_id: int) -> str | None:
         return task.user_id if task else None
 
 
-def _task_delivery_refused(task_id: int) -> bool:
-    """`groups.rooms.task_delivery_refused` for a task id: its group-owned
-    room no longer lets its author in, so nothing more of it is served."""
+def _task_delivery_refused(task_id: int, username: str | None = None) -> bool:
+    """`groups.rooms.task_delivery_refused` for a task id, and for ``username``
+    when given: its group-owned room no longer lets its author in, or does not
+    let ``username`` in, so nothing more of it is served to them. An admin is
+    no group member by being one (ISSUE-811)."""
     from istota import db
     from istota.groups.rooms import task_delivery_refused
 
     with db.get_db(_config.db_path) as conn:
         task = db.get_task(conn, task_id)
-        return task is not None and task_delivery_refused(conn, task)
+        if task is None:
+            return False
+        if task_delivery_refused(conn, task):
+            return True
+        return username is not None and not db.group_room_admits(
+            conn, task.conversation_token, username)
 
 
 def _load_task_events(task_id: int, since_seq: int) -> list[dict]:
@@ -4554,16 +4561,21 @@ def _synthetic_terminal_events(task_id: int, after_seq: int) -> list[dict]:
     return frames
 
 
-async def _authorize_task_access(task_id: int, user: dict) -> None:
+async def _authorize_task_access(
+    task_id: int, user: dict, *, caller_in_room: bool = True,
+) -> None:
     """404 if the task is unknown, 403 if it isn't the caller's (admins exempt).
 
     A task its group-owned room has stopped delivering (its author left the
     group, or the group was archived) is unknown to everyone, the admin
-    exemption included.
+    exemption included. With ``caller_in_room`` (every route but cancel) so is
+    one in a group room the caller is not in; cancel passes False to keep the
+    operator's reach `!stop` has.
     """
     from fastapi import HTTPException
     owner = await asyncio.to_thread(_task_owner, task_id)
-    if owner is None or await asyncio.to_thread(_task_delivery_refused, task_id):
+    reader = user["username"] if caller_in_room else None
+    if owner is None or await asyncio.to_thread(_task_delivery_refused, task_id, reader):
         raise HTTPException(status_code=404, detail="task not found")
     if owner != user["username"] and not _user_is_web_admin(user["username"]):
         raise HTTPException(status_code=403, detail="not your task")
@@ -4616,7 +4628,7 @@ async def chat_task_stream(
                 return
             # Every batch, not only at connect: a removal mid-task stops the
             # stream at the next read, whether or not the cancel has landed.
-            if await asyncio.to_thread(_task_delivery_refused, task_id):
+            if await asyncio.to_thread(_task_delivery_refused, task_id, user["username"]):
                 return
             events = await asyncio.to_thread(_load_task_events, task_id, last)
             for ev in events:
@@ -7095,17 +7107,16 @@ def _own_handle(conn, username: str, room_id: int):
     """``username``'s own `web_chat_rooms` handle for ``room_id``, or None.
 
     The handle half of the room-access resolver: the handle is theirs, and a
-    group-owned room's group still lets them in (`group_room_refuses`). A
+    group-owned room's group still lets them in (`db.group_room_admits`). A
     handle outlives a group archive, so holding one is not enough; every route
     that acts through a handle asks this rather than reading the row itself.
     """
     from istota import db
-    from istota.groups.rooms import group_room_refuses
 
     handle = db.get_web_chat_room(conn, room_id)
     if handle is None or handle.user_id != username:
         return None
-    if group_room_refuses(conn, handle.token, username):
+    if not db.group_room_admits(conn, handle.token, username):
         return None
     return handle
 
@@ -12881,7 +12892,7 @@ async def chat_cancel_task(
     user: dict = Depends(_require_api_auth),
     _csrf: None = Depends(_verify_origin),
 ):
-    await _authorize_task_access(task_id, user)
+    await _authorize_task_access(task_id, user, caller_in_room=False)
     phone = await asyncio.to_thread(_chat_cancel_task, task_id, user["username"])
     if phone is not None:
         return _read_only_refusal(phone)
