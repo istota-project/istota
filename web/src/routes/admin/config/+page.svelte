@@ -17,7 +17,15 @@
     type ConfigResource,
     type ServarrApp,
   } from '$lib/api';
-  import { Button, Card, EmptyState, Input, NoticeBanner, LoadState } from '$lib/components/ui';
+  import {
+    Button,
+    Card,
+    EmptyState,
+    Input,
+    NoticeBanner,
+    Disclosure,
+    LoadState,
+  } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
   import { notifyWarning } from '$lib/stores/notices';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
@@ -73,7 +81,6 @@
     filter = view.sections.find((item) => item.key === section)?.key ?? '';
   });
 
-  let readOnlyCollapsed = $state(true);
   let draft = $state<ConfigDraft>(emptyDraft());
   let reviewing = $state(false);
   let requestId = $state<number | null>(null);
@@ -467,16 +474,12 @@
           <p>Credentials are never sent to the browser. A secret shows only whether it is set.</p>
         </NoticeBanner>
       {:else if !view.editable}
-        <NoticeBanner
-          title="Read-only view of the running configuration"
-          bind:collapsed={readOnlyCollapsed}
-          variant="info"
-        >
+        <Disclosure variant="card" summary="Read-only view of the running configuration">
           <p>
             This process has no config.toml to change{#if view.config_path}
               at <code>{view.config_path}</code>{/if}.
           </p>
-        </NoticeBanner>
+        </Disclosure>
       {/if}
 
       {#each managedResources.filter((e) => e.resource !== 'config') as entry (entry.resource)}

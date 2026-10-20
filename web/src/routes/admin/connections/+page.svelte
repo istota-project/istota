@@ -15,7 +15,7 @@
     type AdminServarrConnection,
     type AdminWhatsAppConnection,
   } from '$lib/api';
-  import { Button, ConfirmDialog, EmptyState, NoticeBanner, LoadState } from '$lib/components/ui';
+  import { Button, ConfirmDialog, Disclosure, EmptyState, LoadState } from '$lib/components/ui';
   import { MessageCircle } from '@lucide/svelte';
   import ConnectionCard from './ConnectionCard.svelte';
   import NextcloudCard from './NextcloudCard.svelte';
@@ -50,7 +50,6 @@
   let notice = $state('');
   let actionError = $state('');
   let streamError = $state('');
-  let aboutCollapsed = $state(true);
   let starting = $state(false);
   let cancelling = $state(false);
   let confirmOpen = $state(false);
@@ -668,11 +667,7 @@
            entry this page has no card for is not drawn. -->
       <EmptyState>No deployment-level connections are configured.</EmptyState>
     {/snippet}
-    <NoticeBanner
-      title="Deployment-level connections"
-      variant="info"
-      bind:collapsed={aboutCollapsed}
-    >
+    <Disclosure variant="card" summary="Deployment-level connections">
       <p>
         These are the connections configured for the deployment. Each card shows its configuration
         and any available checks. Each user connects their own accounts in Settings → Connections.
@@ -690,7 +685,7 @@
           while one is open.
         </p>
       {/if}
-    </NoticeBanner>
+    </Disclosure>
 
     {#if actionError}
       <div class="banner error">{actionError}</div>

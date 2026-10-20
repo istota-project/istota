@@ -1,12 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getAdminBrowsers, type AdminBrowsers } from '$lib/api';
-  import { Button, Card, NoticeBanner, LoadState, Timestamp } from '$lib/components/ui';
+  import { Button, Card, Disclosure, LoadState, Timestamp } from '$lib/components/ui';
 
   let report = $state<AdminBrowsers | null>(null);
   let loading = $state(true);
   let failed = $state(false);
-  let aboutCollapsed = $state(true);
 
   function idle(seconds: number): string {
     const total = Math.floor(seconds);
@@ -54,7 +53,7 @@
     {#if report?.status === 'disabled'}
       <div class="center-msg">Browser service is disabled.</div>
     {:else if report}
-      <NoticeBanner title="Browsers start on demand" bind:collapsed={aboutCollapsed}>
+      <Disclosure variant="card" summary="Browsers start on demand">
         <p>
           Browse with a retained session to make a browser available here. The scheduler reads the
           browser pool every 15 seconds and this page refreshes every ten, without starting browsers
@@ -63,7 +62,7 @@
         <p>
           VNC opens in a new tab and uses the deployment’s VNC authentication and network access.
         </p>
-      </NoticeBanner>
+      </Disclosure>
       {#if !report.console_configured}
         <div class="banner info">
           No external VNC URL is configured. Set a reachable viewer URL without an embedded password

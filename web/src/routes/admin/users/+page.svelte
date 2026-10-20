@@ -20,7 +20,7 @@
     FormModal,
     FormStack,
     KebabMenu,
-    NoticeBanner,
+    Disclosure,
     type KebabItem,
     LoadState,
     Card,
@@ -41,7 +41,6 @@
   /* The user whose settings editor is open, or null. */
   let editing = $state<string | null>(null);
   let formOpen = $state(false);
-  let aboutCollapsed = $state(true);
   const confirmation = createConfirm<{ user: AdminUser; action: AdminUserAction }>();
   const pending = $derived(confirmation.target);
   const disableCopy =
@@ -172,14 +171,14 @@
           Email sign-in is not enabled. Sending links and attaching email are unavailable.
         </p>
       {/if}
-      <NoticeBanner title="About web access" bind:collapsed={aboutCollapsed}>
+      <Disclosure variant="card" summary="About web access">
         <p>{disableCopy}</p>
         <p>{removeCopy}</p>
         <p>
           Sign out everywhere ends email and Nextcloud web sessions. These controls do not revoke
           Nextcloud service credentials.
         </p>
-      </NoticeBanner>
+      </Disclosure>
       <Card title="Users">
         {#snippet actions()}
           <Button variant="primary" size="sm" onclick={add} disabled={busy || !view?.email_enabled}

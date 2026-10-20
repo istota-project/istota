@@ -10,7 +10,7 @@
     ConfirmDialog,
     EmptyState,
     Badge,
-    NoticeBanner,
+    Disclosure,
     LoadState,
     Card,
     Checkbox,
@@ -51,7 +51,6 @@
   let users = $state<{ user_id: string; display_name: string }[]>([]);
   let storageNotes = $state<Record<string, string>>({});
   let storageErrors = $state<Record<string, string>>({});
-  let aboutCollapsed = $state(true);
   let active = true;
   let request = 0;
   const selection = createUrlSelection<string>({
@@ -237,7 +236,7 @@
 
 <div class="settings admin-page card-pane">
   <LoadState {loading} {error} loadingLabel="Loading groups…" onRetry={load}>
-    <NoticeBanner title="About group administration" bind:collapsed={aboutCollapsed}>
+    <Disclosure variant="card" summary="About group administration">
       <p>
         Create groups and manage their owners and membership. Administration does not add you as a
         member and does not open the group's notebook.
@@ -246,7 +245,7 @@
         Removing a member ends future access. Messages and downloads already received remain with
         their recipients. Archiving keeps the data and history, and the group ID cannot be reused.
       </p>
-    </NoticeBanner>
+    </Disclosure>
     <Card title="Groups">
       {#snippet actions()}<Button variant="primary" size="sm" onclick={openCreate} disabled={busy}
           >Create group</Button

@@ -2,7 +2,15 @@
   import { onMount } from 'svelte';
   import { getAdminDoctor, type DoctorCheck, type DoctorReport } from '$lib/api';
   import { waitForDoctorRun } from '$lib/doctorRun';
-  import { Badge, Button, Card, NoticeBanner, LoadState, Timestamp } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    Card,
+    Disclosure,
+    LoadState,
+    StatusDot,
+    Timestamp,
+  } from '$lib/components/ui';
 
   let report = $state<DoctorReport | null>(null);
   let loading = $state(true);
@@ -10,7 +18,6 @@
   let deepRunning = $state(false);
   let error = $state('');
   let notice = $state('');
-  let aboutCollapsed = $state(true);
 
   // Grouped by the first dotted segment, in the order the registry produced
   // them — the same grouping `istota doctor` prints on a terminal, so an
@@ -98,11 +105,14 @@
     loadingLabel="Running checks…"
   >
     {#if report}
-      <NoticeBanner
-        title={HEADLINE[report.status]}
-        variant={report.status === 'fail' ? 'danger' : report.status === 'warn' ? 'warn' : 'info'}
-        bind:collapsed={aboutCollapsed}
-      >
+      {@const status = report.status}
+      {#snippet headline()}
+        <span class="hstack headline">
+          <StatusDot tone={status === 'fail' ? 'danger' : status === 'warn' ? 'warn' : 'success'} />
+          {HEADLINE[status]}
+        </span>
+      {/snippet}
+      <Disclosure variant="card" summary={headline}>
         <p>
           Each check names one thing the code assumes about the machine it is running on — a binary
           at a path, a writable directory, a mount that is really mounted. The daemon runs them,
@@ -117,7 +127,7 @@
           <strong>Deep checks</strong> spawn a real sandbox namespace and inspect it from the inside,
           which is slower. Their last result stays on this page until the next deep run.
         </p>
-      </NoticeBanner>
+      </Disclosure>
 
       {#if error}
         <div class="banner error">{error}</div>
@@ -217,6 +227,12 @@
 
   /* A skip is the most common row on a healthy install and the least
      interesting, so it recedes rather than competing with the two that matter. */
+  /* The overall status leads the page, so it reads at full strength rather
+     than in the disclosure's muted summary type. */
+  .headline {
+    color: var(--text-primary);
+  }
+
   .check.muted {
     opacity: 0.62;
   }
@@ -230,9 +246,9 @@
 
   /* Sizes come from the `--text-*` roster, not from hand-picked rem values. The
      first draft used 0.82 / 0.9 / 0.86rem, and 0.9rem renders a step *above*
-     `--text-base` — so the detail line sat larger than the NoticeBanner body
+     `--text-base` — so the detail line sat larger than the notice body then
      directly above it. That is verbatim the defect web/AGENTS.md records under
-     the NoticeBanner typography rule. `lint:design` cannot catch it: the ramp
+     the Alert typography rule. `lint:design` cannot catch it: the ramp
      it enforces is spacing, and a type size has its own tokens. */
   .check-name {
     font-size: var(--text-sm);

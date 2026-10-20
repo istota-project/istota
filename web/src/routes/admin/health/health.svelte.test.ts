@@ -58,3 +58,13 @@ it('says so when the daemon never answers', async () => {
   await vi.advanceTimersByTimeAsync(125_000);
   expect(screen.getByText(/has not answered the request yet/)).toBeTruthy();
 });
+
+it('leads with the overall status as a closed disclosure over the about text', async () => {
+  api.getAdminDoctor.mockResolvedValue({ ...report(null), status: 'fail' });
+  render(Page);
+  const headline = await screen.findByText(/missing or broken/);
+  const details = headline.closest('details')!;
+  expect(details).toHaveClass('ui-disclosure', 'variant-card');
+  expect(details.open).toBe(false);
+  expect(details.querySelector('summary .ui-status-dot')).toHaveClass('tone-danger');
+});
