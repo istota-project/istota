@@ -2,16 +2,21 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import {
+    AuthError,
+    getMailAccounts,
     getSettingsServices,
+    type MailAccountsSettings,
     type ServiceCard as ServiceCardData,
     type NextcloudTokenStatus,
   } from '$lib/api';
   import { EmptyState } from '$lib/components/ui';
+  import { notifyError } from '$lib/stores/notices';
   import { getCurrentUser } from '$lib/userContext';
   import {
     ServiceCard,
     GarminCard,
     GoogleWorkspaceCard,
+    MailAccountsCard,
     NextcloudCard,
     SettingsLayout,
   } from '$lib/components/settings';
@@ -40,7 +45,46 @@
     }
   }
 
-  onMount(loadServices);
+  // Connected mail accounts have their own switch, `[mail_accounts] enabled`,
+  // independent of the services list: off, the listing is a 404 and there is
+  // no card. `mailShown` keeps a card that loaded once on screen through a
+  // later failed reload.
+  let mail: MailAccountsSettings | null = $state(null);
+  let mailError = $state('');
+  let mailShown = $state(false);
+
+  async function loadMail() {
+    try {
+      mail = await getMailAccounts();
+      mailError = '';
+      mailShown = true;
+    } catch (e) {
+      if ((e as { status?: number }).status === 404) {
+        mail = null;
+        mailShown = false;
+      } else {
+        mailFailed(e);
+      }
+    }
+  }
+
+  // A refresh after a change that fails leaves the list on screen and says so
+  // out of band; a first load that fails has only the card to say it in.
+  function mailFailed(e: unknown) {
+    if (e instanceof AuthError) {
+      identity.expireSession();
+      return;
+    }
+    const message = (e as Error).message || 'The mail accounts could not be loaded.';
+    if (mail) notifyError(message);
+    else mailError = message;
+    mailShown = true;
+  }
+
+  onMount(() => {
+    void loadServices();
+    void loadMail();
+  });
 
   // /settings/services already filters to connected services (no module-owned
   // monarch/feeds/overland leak through). Skip cards whose status is
@@ -86,7 +130,17 @@
     {/if}
   {/each}
 
-  {#if !ncToken && activeServices.length === 0}
+  {#if mailShown}
+    <MailAccountsCard
+      settings={mail}
+      loadError={mailError}
+      onReload={loadMail}
+      onSaved={loadMail}
+      onError={mailFailed}
+    />
+  {/if}
+
+  {#if !ncToken && activeServices.length === 0 && !mailShown}
     <EmptyState>No connected services are available on this deployment.</EmptyState>
   {/if}
 </SettingsLayout>
