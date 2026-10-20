@@ -1183,3 +1183,55 @@ async def test_next_is_consumed_by_the_login_it_was_given_to(client):
 async def test_a_plain_login_page_forgets_an_earlier_next(client):
     await client.get("/istota/login", params={"next": "notes-new"})
     assert (await sign_in(client)).headers["location"] == "/istota/"
+
+
+DEVICE_ID = "6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b"
+
+
+async def _mint_device_token(client, configured, tmp_path, method):
+    config = configured._config
+    config.workspace_path = tmp_path / "mount"
+    config.workspace_root("alice").mkdir(parents=True)
+    user_profiles.update_profile(config.db_path, "alice", quick_notes_folder="Notes")
+    response = await sign_in(client) if method == "email" else await client.get("/istota/callback")
+    assert response.status_code == 302
+    minted = await client.post("/istota/api/devices", headers={"Origin": "https://example.com"},
+                               json={"device_id": DEVICE_ID, "label": "iPhone", "scopes": ["notes"]})
+    assert minted.status_code == 201
+    return minted.json()["token"]
+
+
+@pytest.mark.parametrize("method,mutation", [
+    ("email", "epoch"), ("email", "password"), ("email", "reset"), ("email", "delete"),
+    ("nextcloud", "epoch"), ("nextcloud", "delete"),
+])
+async def test_a_device_token_dies_with_its_credential(client, configured, tmp_path, method, mutation):
+    token = await _mint_device_token(client, configured, tmp_path, method)
+    path = configured._config.db_path
+    if mutation == "epoch":
+        web_auth.bump_epoch(path, "alice")
+    elif mutation == "password":
+        assert (await client.post("/istota/api/account/password", headers={"Origin": "https://example.com"},
+                                  json={"current_password": PASSWORD,
+                                        "new_password": PASSWORD + " changed"})).status_code == 200
+    elif mutation == "reset":
+        link = web_auth.issue_token(path, "alice", "reset", 600)
+        policy = web_auth.policy_from_config(configured._config)
+        assert web_auth.consume_and_set_password(path, link, "reset", PASSWORD + " reset", policy)
+    elif mutation == "delete":
+        web_auth.delete_identity(path, "alice")
+    client.cookies.clear()
+    response = await client.post("/istota/api/workspace/notes", json={"content": "Buy milk"},
+                                 headers={"authorization": f"Bearer {token}"})
+    assert response.status_code == 401
+    assert not (configured._config.workspace_root("alice") / "Notes").exists()
+
+
+@pytest.mark.parametrize("method", ["email", "nextcloud"])
+async def test_a_device_token_outlives_its_web_session(client, configured, tmp_path, method):
+    token = await _mint_device_token(client, configured, tmp_path, method)
+    client.cookies.clear()
+    assert (await client.get("/istota/api/me")).status_code == 401
+    response = await client.post("/istota/api/workspace/notes", json={"content": "Buy milk"},
+                                 headers={"authorization": f"Bearer {token}"})
+    assert response.status_code == 201

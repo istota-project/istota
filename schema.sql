@@ -2733,7 +2733,7 @@ CREATE INDEX IF NOT EXISTS idx_location_ingest_tokens_user
     ON location_ingest_tokens(user_id);
 
 -- Per-device bearer tokens for the shell's native actions, scoped by capability
--- (istota.device_tokens). Only the SHA-256 of a token is kept. `scopes` is
+-- (istota.webui.device_tokens). Only the SHA-256 of a token is kept. `scopes` is
 -- space-separated and sorted. One row per (user_id, device_id): minting again
 -- replaces the token in place.
 CREATE TABLE IF NOT EXISTS device_tokens (
@@ -2744,6 +2744,10 @@ CREATE TABLE IF NOT EXISTS device_tokens (
     token_tail TEXT NOT NULL,
     scopes TEXT NOT NULL,
     label TEXT,
+    -- The minting session's credential; a token whose credential was revoked
+    -- is refused, while the session's own expiry leaves it working.
+    auth_method TEXT,
+    auth_epoch INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     last_used_at TEXT,
     UNIQUE (user_id, device_id)

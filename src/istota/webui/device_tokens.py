@@ -17,6 +17,11 @@ receiver, a separate process with its own in-memory map, and released shells
 post to `/webhooks/location` with them. Separate from `istota.push.devices`
 too, since push rows die with their web session and a device token has to
 outlive it, which is the case it exists for.
+
+What a token does not outlive is its credential. `mint` records the minting
+session's method and epoch, and `webui.auth.credential_still_valid` (the
+check push rows make before each send) refuses the token once a password
+change, a reset, "log out everywhere" or a removed identity has moved it on.
 """
 
 import logging
@@ -55,6 +60,8 @@ class DeviceToken:
     token_tail: str
     created_at: str
     last_used_at: str | None
+    auth_method: str | None = None
+    auth_epoch: int | None = None
 
 
 def _token(row: sqlite3.Row) -> DeviceToken:
@@ -68,6 +75,8 @@ def _token(row: sqlite3.Row) -> DeviceToken:
         token_tail=row["token_tail"],
         created_at=row["created_at"],
         last_used_at=row["last_used_at"],
+        auth_method=row["auth_method"],
+        auth_epoch=row["auth_epoch"],
     )
 
 
@@ -84,8 +93,11 @@ def validate_scopes(scopes: Iterable[str]) -> frozenset[str]:
 
 def mint(
     conn: sqlite3.Connection, user_id: str, device_id: str, label: str | None, scopes: Iterable[str],
+    *, auth_method: str, auth_epoch: int,
 ) -> tuple[int, str]:
     """Create or replace the device's row and return `(row_id, plaintext_token)`.
+
+    `auth_method` and `auth_epoch` are the minting session's credential.
 
     The plaintext leaves here once and is never stored. Raises `ValueError`
     (or its `UnknownScope`) for the scopes, and `TooManyDevices` when a new
@@ -113,9 +125,9 @@ def mint(
             conn.execute(
                 """UPDATE device_tokens
                     SET token_hash = ?, token_tail = ?, scopes = ?, label = ?,
-                        created_at = ?, last_used_at = NULL
+                        created_at = ?, last_used_at = NULL, auth_method = ?, auth_epoch = ?
                     WHERE id = ?""",
-                (token_hash, token_tail, stored_scopes, label, now, row_id),
+                (token_hash, token_tail, stored_scopes, label, now, auth_method, auth_epoch, row_id),
             )
         else:
             count = conn.execute(
@@ -125,10 +137,12 @@ def mint(
                 raise TooManyDevices(user_id)
             row = conn.execute(
                 """INSERT INTO device_tokens
-                    (user_id, device_id, token_hash, token_tail, scopes, label, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (user_id, device_id, token_hash, token_tail, scopes, label, created_at,
+                     auth_method, auth_epoch)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     RETURNING id""",
-                (user_id, device_id, token_hash, token_tail, stored_scopes, label, now),
+                (user_id, device_id, token_hash, token_tail, stored_scopes, label, now,
+                 auth_method, auth_epoch),
             ).fetchone()
             row_id = int(row[0])
         conn.execute("RELEASE mint_device_token")

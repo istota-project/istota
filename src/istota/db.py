@@ -9593,6 +9593,7 @@ def _migrate_device_tokens(conn: sqlite3.Connection) -> None:
             UNIQUE (user_id, device_id)
         )
     """)
+    _add_columns(conn, "device_tokens", {"auth_method": "TEXT", "auth_epoch": "INTEGER"})
 
 
 def _migrate_notifications_push_pending(conn: sqlite3.Connection) -> None:

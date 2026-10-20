@@ -80,7 +80,9 @@ def _mint_direct(config, user_id="alice", device_id=DEVICE, scopes=("notes",)):
     from istota.webui import device_tokens
 
     with db.get_db(config.db_path) as conn:
-        return device_tokens.mint(conn, user_id, device_id, "iPhone", set(scopes))
+        return device_tokens.mint(
+            conn, user_id, device_id, "iPhone", set(scopes), auth_method="nextcloud", auth_epoch=0,
+        )
 
 
 def _notes_dir(config, user_id="alice"):

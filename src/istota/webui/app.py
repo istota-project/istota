@@ -17652,6 +17652,9 @@ def _authenticate_device(presented: str):
     if identity is not None and identity.disabled:
         logger.info("device token ...%s refused: account disabled", token.token_tail)
         return None
+    if not web_auth.credential_still_valid(_config, token.user_id, token.auth_method, token.auth_epoch):
+        logger.info("device token ...%s refused: credential revoked", token.token_tail)
+        return None
     return token
 
 
@@ -17662,7 +17665,9 @@ def _device_list(username: str) -> list[dict]:
         return [_device_row(token) for token in device_tokens.list_tokens(conn, username)]
 
 
-def _device_mint(username: str, device_id: str, label: str, scopes: list) -> tuple[int, str] | JSONResponse:
+def _device_mint(
+    username: str, device_id: str, label: str, scopes: list, auth: dict,
+) -> tuple[int, str] | JSONResponse:
     from istota.webui import device_tokens
     from istota.workspace import quick_notes
 
@@ -17678,7 +17683,10 @@ def _device_mint(username: str, device_id: str, label: str, scopes: list) -> tup
         if "notes" in wanted and quick_notes.configured_folder(conn, username) is None:
             return _device_error(409, "notes_folder_unset", "Choose a quick notes folder first.")
         try:
-            return device_tokens.mint(conn, username, device_id, label, wanted)
+            return device_tokens.mint(
+                conn, username, device_id, label, wanted,
+                auth_method=auth["method"], auth_epoch=auth["epoch"],
+            )
         except device_tokens.TooManyDevices:
             return _device_error(
                 409, "too_many_devices",
@@ -17726,7 +17734,8 @@ async def api_devices_mint(request: Request, user: dict = Depends(_require_api_a
     if isinstance(parsed, JSONResponse):
         return parsed
     device_id, label, scopes = parsed
-    result = await asyncio.to_thread(_device_mint, user["username"], device_id, label, scopes)
+    auth = await asyncio.to_thread(_session_auth, request)
+    result = await asyncio.to_thread(_device_mint, user["username"], device_id, label, scopes, auth)
     if isinstance(result, JSONResponse):
         return result
     row_id, token = result
