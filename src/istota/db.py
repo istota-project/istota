@@ -410,6 +410,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             " WHERE status = 'pending' AND moves_json IS NOT NULL"
             " AND base_digest NOT LIKE 'moves:%'"
         )
+        # The UPDATE opened a write transaction; holding it through the ALTERs
+        # below would block a concurrent init_db on the lock rather than let
+        # add_columns see the race, and tolerate_errors would swallow that.
+        conn.commit()
     # A password step-up where the install cannot mail. Every older row was
     # a mailed code, which the constant default says.
     _add_columns(conn, "web_auth_step_ups", {"method": "TEXT NOT NULL DEFAULT 'email'"})
