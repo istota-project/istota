@@ -14,7 +14,15 @@
    * tell whether that is by design.
    */
   import { onDestroy, onMount } from 'svelte';
-  import { Button, Select, type SelectOption, Card, Field, Timestamp } from '$lib/components/ui';
+  import {
+    AutocompleteInput,
+    Button,
+    Select,
+    type SelectOption,
+    Card,
+    Field,
+    Timestamp,
+  } from '$lib/components/ui';
   import {
     trackerAvailable,
     scannerAvailable,
@@ -339,18 +347,27 @@
   });
 
   /**
-   * The zone picker's options: off, plus one per place.
+   * The zone picker's suggestions: one label per place, mapped back to its id.
    *
-   * Keyed by place id as a string because `Select` is string-valued. A zone
-   * whose coordinates match no current place still shows as configured in the
-   * summary line below — the picker just cannot name it, which is honest: the
-   * place it referred to has been renamed or deleted.
+   * A search field rather than a dropdown, because a dropdown of every place is
+   * unusable on a phone once there are more than a screenful. Two places can
+   * share a name, and the field is string-valued, so a repeat gets a number. A
+   * zone whose coordinates match no current place shows an empty field and the
+   * warning below — the picker cannot name it, which is honest: the place it
+   * referred to has been renamed or deleted.
    */
   const ZONE_OFF = '';
-  const zoneOptions: SelectOption[] = $derived([
-    { value: ZONE_OFF, label: 'Off' },
-    ...places.map((p) => ({ value: String(p.id), label: p.name })),
-  ]);
+  const zoneLabels = $derived.by(() => {
+    const byLabel = new Map<string, string>();
+    const seen = new Map<string, number>();
+    for (const p of places) {
+      const n = (seen.get(p.name) ?? 0) + 1;
+      seen.set(p.name, n);
+      byLabel.set(n === 1 ? p.name : `${p.name} (${n})`, String(p.id));
+    }
+    return byLabel;
+  });
+  const zoneOptions = $derived([...zoneLabels.keys()]);
 
   /** Which place the stored zone points at, or '' for none. */
   const zoneChoice = $derived.by(() => {
@@ -364,6 +381,29 @@
     const match = places.find((p) => Math.abs(p.lat - lat) < 1e-6 && Math.abs(p.lon - lon) < 1e-6);
     return match ? String(match.id) : ZONE_OFF;
   });
+
+  const zoneChoiceLabel = $derived([...zoneLabels].find(([, id]) => id === zoneChoice)?.[0] ?? '');
+
+  /** What the search field holds; reset to the stored zone whenever that changes. */
+  let zoneQuery = $state('');
+  $effect(() => {
+    zoneQuery = zoneChoiceLabel;
+  });
+
+  /**
+   * Leaving the field without picking: a typed exact name counts as a pick, so
+   * someone who types "Home" and taps away gets Home; anything else goes back
+   * to the stored zone rather than leaving text that names nothing.
+   */
+  function commitZoneQuery(text: string) {
+    const typed = text.trim().toLowerCase();
+    const label = [...zoneLabels.keys()].find((l) => l.toLowerCase() === typed);
+    if (label && label !== zoneChoiceLabel) {
+      void chooseZone(zoneLabels.get(label)!);
+      return;
+    }
+    zoneQuery = zoneChoiceLabel;
+  }
 
   /**
    * Set or clear the zone.
@@ -551,14 +591,28 @@
             'better proof of being there than any one fix.'}
           warning={zoneWarning}
         >
-          <Select
-            value={zoneChoice}
-            options={zoneOptions}
-            fullWidth
-            disabled={busy || !status.currentWifi || places.length === 0}
-            ariaLabel="Wifi zone place"
-            onValueChange={chooseZone}
-          />
+          <div class="hstack zone-row">
+            <AutocompleteInput
+              bind:value={zoneQuery}
+              options={zoneOptions}
+              placeholder="Search your places"
+              disabled={busy || !status.currentWifi || places.length === 0}
+              ariaLabel="Wifi zone place"
+              onSelect={(label) => {
+                const id = zoneLabels.get(label);
+                if (id && id !== zoneChoice) void chooseZone(id);
+              }}
+              onCommit={commitZoneQuery}
+            />
+            {#if status.wifiZoneSsid}
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={busy}
+                onclick={() => chooseZone(ZONE_OFF)}>Turn off</Button
+              >
+            {/if}
+          </div>
         </Field>
       {/if}
 
@@ -670,5 +724,10 @@
 	   `web/AGENTS.md` — restating either here is what `captions.test.ts` fails. */
   dd :global(.sent-exact) {
     display: block;
+  }
+
+  .zone-row > :global(.ac-field) {
+    flex: 1;
+    min-width: 0;
   }
 </style>

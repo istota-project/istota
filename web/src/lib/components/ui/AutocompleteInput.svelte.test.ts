@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import AutocompleteInput from './AutocompleteInput.svelte';
 
@@ -13,6 +13,16 @@ describe('AutocompleteInput', () => {
     await fireEvent.focus(input);
     await fireEvent.mouseDown(screen.getByRole('option', { name: 'shared/notes.md' }));
     expect(input).toHaveValue('shared/notes.md');
+  });
+
+  it('reports a chosen suggestion through onSelect, and typing not at all', async () => {
+    const onSelect = vi.fn();
+    render(AutocompleteInput, { value: '', options, ariaLabel: 'File path', onSelect });
+    const input = screen.getByRole('combobox', { name: 'File path' });
+    await fireEvent.input(input, { target: { value: 'notes' } });
+    expect(onSelect).not.toHaveBeenCalled();
+    await fireEvent.mouseDown(screen.getByRole('option', { name: 'shared/notes.md' }));
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith('shared/notes.md');
   });
 
   it('renders the field in the same face as its suggestions', async () => {

@@ -689,6 +689,81 @@ describe('the wifi zone', () => {
     expect(screen.queryByText(/does nothing/i)).toBeNull();
   });
 
+  it('is a search field that narrows a long list to the matching places', async () => {
+    // A dropdown of every place could not be used on a phone once the list ran
+    // past a screenful; typing narrows it to what matches.
+    placesMock.mockResolvedValue({
+      places: [
+        ...PLACES,
+        ...Array.from({ length: 40 }, (_, i) => ({
+          ...PLACES[0],
+          id: 100 + i,
+          name: `Cafe ${i}`,
+        })),
+      ],
+    });
+    installShell({ currentWifi: 'HomeNet' }, true, '0.9.0');
+    render(DeviceTrackerCard);
+    await settle();
+    const field = screen.getByRole('combobox', { name: 'Wifi zone place' });
+    await fireEvent.input(field, { target: { value: 'off' } });
+    expect(screen.getAllByRole('option').map((o) => o.textContent?.trim())).toEqual(['Office']);
+  });
+
+  it('pins the zone to the place picked from the matches', async () => {
+    const { tracker } = installShell({ currentWifi: 'HomeNet' }, true, '0.9.0');
+    render(DeviceTrackerCard);
+    await settle();
+    const field = screen.getByRole('combobox', { name: 'Wifi zone place' });
+    await fireEvent.input(field, { target: { value: 'off' } });
+    await fireEvent.mouseDown(screen.getByRole('option', { name: 'Office' }));
+    await settle();
+    expect(tracker.configureWifiZone).toHaveBeenCalledWith({
+      ssid: 'HomeNet',
+      latitude: 52.24,
+      longitude: 21.02,
+    });
+  });
+
+  it('typing text that names no place pins nothing and puts the stored zone back', async () => {
+    const { tracker } = installShell(
+      {
+        currentWifi: 'HomeNet',
+        wifiZoneSsid: 'HomeNet',
+        wifiZoneLatitude: 52.23,
+        wifiZoneLongitude: 21.01,
+      },
+      true,
+      '0.9.0',
+    );
+    render(DeviceTrackerCard);
+    await settle();
+    const field = screen.getByRole('combobox', { name: 'Wifi zone place' });
+    expect(field).toHaveValue('Home');
+    await fireEvent.input(field, { target: { value: 'nowhere' } });
+    await fireEvent.blur(field);
+    expect(field).toHaveValue('Home');
+    expect(tracker.configureWifiZone).not.toHaveBeenCalled();
+  });
+
+  it('turns a set zone off from its own button', async () => {
+    const { tracker } = installShell(
+      {
+        currentWifi: 'HomeNet',
+        wifiZoneSsid: 'HomeNet',
+        wifiZoneLatitude: 52.23,
+        wifiZoneLongitude: 21.01,
+      },
+      true,
+      '0.9.0',
+    );
+    render(DeviceTrackerCard);
+    await settle();
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn off' }));
+    await settle();
+    expect(tracker.configureWifiZone).toHaveBeenCalledWith({ ssid: '', latitude: 0, longitude: 0 });
+  });
+
   it('explains itself rather than showing an empty picker when places fail to load', async () => {
     placesMock.mockRejectedValue(new Error('nope'));
     installShell({ currentWifi: 'HomeNet' }, true, '0.9.0');
