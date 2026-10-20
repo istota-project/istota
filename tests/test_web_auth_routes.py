@@ -1105,3 +1105,81 @@ def test_no_api_route_takes_a_body_without_a_session(configured):
     # guard checks the bearer before the body (`DEVICE_TOKEN_ROUTES`).
     device_routes = {path for _, path in configured.DEVICE_TOKEN_ROUTES}
     assert unauthenticated == SESSIONLESS_API_WRITES | device_routes
+
+
+# `/login?next=<key>` is how a page that lost its session asks to be brought
+# back (`expireSession` on /notes/new). The key is looked up in the fixed
+# `_POST_LOGIN_TARGETS` table and only a known key is stored, so the parameter
+# can never name a URL. Every way of signing in honours it.
+NOTES_NEW = "/istota/notes/new/"
+
+
+async def test_a_password_login_from_next_lands_on_its_page(client):
+    page = await client.get("/istota/login", params={"next": "notes-new"})
+    response = await client.post("/istota/login/email", data={
+        "email": "alice@example.com", "password": PASSWORD, "csrf_token": csrf(page),
+    })
+    assert response.status_code == 302
+    assert response.headers["location"] == NOTES_NEW
+
+
+async def test_a_code_login_from_next_lands_on_its_page(client, configured, monkeypatch):
+    from istota.skills import email as mail
+
+    configured._config.email.enabled = True
+    sent = MagicMock()
+    monkeypatch.setattr(mail, "send_email", sent)
+    page = await client.get("/istota/login", params={"next": "notes-new"})
+    route = "/istota/auth/sign-in-code/request"
+    requested = await client.post(route, data={
+        "email": "alice@example.com", "csrf_token": csrf(page, route),
+    })
+    code = re.search(r"^(\d{6})$", sent.call_args.kwargs["body"], re.M)[1]
+    response = await client.post("/istota/auth/sign-in-code", data={
+        "code": code, "csrf_token": csrf(requested, "/istota/auth/sign-in-code"),
+    })
+    assert response.status_code == 302
+    assert response.headers["location"] == NOTES_NEW
+
+
+async def test_a_nextcloud_login_from_next_carries_it_across_the_provider(client, configured):
+    from fastapi.responses import RedirectResponse
+
+    configured._oauth.nextcloud.authorize_redirect = AsyncMock(
+        return_value=RedirectResponse("https://cloud.example.com/authorize", status_code=302),
+    )
+    page = await client.get("/istota/login", params={"next": "notes-new"})
+    assert 'href="/istota/login?go=1&amp;next=notes-new"' in page.text
+    hop = await client.get("/istota/login", params={"go": "1", "next": "notes-new"})
+    assert hop.status_code == 302
+    response = await client.get("/istota/callback")
+    assert response.status_code == 302
+    assert response.headers["location"] == NOTES_NEW
+
+
+@pytest.mark.parametrize("hostile", [
+    "https://evil.example/", "//evil.example/", "/istota/../../evil",
+    "notes-new/../x", "NOTES-NEW", "",
+])
+async def test_an_unknown_next_lands_on_the_default(client, hostile):
+    page = await client.get("/istota/login", params={"next": hostile})
+    assert 'href="/istota/login?go=1"' in page.text
+    response = await client.post("/istota/login/email", data={
+        "email": "alice@example.com", "password": PASSWORD, "csrf_token": csrf(page),
+    })
+    assert response.status_code == 302
+    assert response.headers["location"] == "/istota/"
+
+
+async def test_next_is_consumed_by_the_login_it_was_given_to(client):
+    page = await client.get("/istota/login", params={"next": "notes-new"})
+    await client.post("/istota/login/email", data={
+        "email": "alice@example.com", "password": PASSWORD, "csrf_token": csrf(page),
+    })
+    assert "post_login_redirect" not in session_value(client)
+    assert (await sign_in(client)).headers["location"] == "/istota/"
+
+
+async def test_a_plain_login_page_forgets_an_earlier_next(client):
+    await client.get("/istota/login", params={"next": "notes-new"})
+    assert (await sign_in(client)).headers["location"] == "/istota/"

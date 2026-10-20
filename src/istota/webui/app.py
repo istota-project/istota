@@ -1180,11 +1180,14 @@ def _render_form_page(
 def _render_login_page(
     bot_name: str, mark: str, *, methods: list[str],
     login_csrf: str = "", code_csrf: str = "", error: str | None = None,
-    email_prefill: str = "", sheet: bool = False,
+    email_prefill: str = "", sheet: bool = False, next_key: str | None = None,
 ) -> str:
     body = f'<p class="form-error">{escape(error)}</p>' if error else ""
     if "nextcloud" in methods:
-        body += (f'<a class="btn" href="/istota/login?go=1">{_CLOUD_ICON}'
+        # The provider hop is a second GET /login, which starts the marker over,
+        # so the key has to ride on the link as well as in the session.
+        go = "/istota/login?go=1" + (f"&next={next_key}" if next_key else "")
+        body += (f'<a class="btn" href="{escape(go)}">{_CLOUD_ICON}'
                  'Log in with Nextcloud</a>')
     if "email" in methods:
         if "nextcloud" in methods:
@@ -1279,6 +1282,9 @@ async def _read_auth_form(request: Request):
 @auth_router.get("/login")
 async def login(request: Request):
     request.session.pop(_POST_LOGIN_KEY, None)
+    next_key = _requested_post_login_key(request)
+    if next_key is not None:
+        request.session[_POST_LOGIN_KEY] = next_key
     if request.query_params.get("go"):
         if not _config.web.has_method("nextcloud"):
             raise HTTPException(status_code=404)
@@ -1294,8 +1300,19 @@ async def login(request: Request):
         login_csrf=_csrf_token(request, "login"),
         code_csrf=_csrf_token(request, "sign-in-code-request"),
         email_prefill=email if len(email) <= 320 else "",
-        sheet=_in_app_sheet(request),
+        sheet=_in_app_sheet(request), next_key=next_key,
     ), headers=_AUTH_PAGE_HEADERS)
+
+
+def _requested_post_login_key(request: Request) -> str | None:
+    """The `?next=` key of a login entry, or ``None`` unless the table has it."""
+    key = request.query_params.get("next")
+    return key if key in _POST_LOGIN_TARGETS else None
+
+
+def _landing_after_login(request: Request) -> str:
+    """Where a password, code or link sign-in lands. Read before `_start_session` clears it."""
+    return _post_login_target(request.session.get(_POST_LOGIN_KEY))
 
 
 @auth_router.post("/login/email")
@@ -1328,9 +1345,9 @@ async def login_email(request: Request):
             logger.warning("Login profile lookup failed", exc_info=True)
             profile = None
         if profile is not None:
-            landing = await _mobile_login_target(request)
+            landing = await _mobile_login_target(request) or _landing_after_login(request)
             _start_session(request, identity.user_id, profile.display_name, "email", identity.credential_epoch)
-            return RedirectResponse(landing or "/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
+            return RedirectResponse(landing, status_code=302, headers=_AUTH_PAGE_HEADERS)
     await asyncio.sleep(max(0, _LOGIN_FAILURE_SECONDS - (time.monotonic() - started)))
     return await _auth_error(request, "Sign-in failed", "Email or password was not accepted.", 400)
 
@@ -1392,9 +1409,9 @@ async def _start_email_session(request: Request, result, method: str = "email") 
     if (profile is None or identity is None or identity.disabled
             or identity.email != email or identity.credential_epoch != epoch):
         return None
-    landing = await _mobile_login_target(request)
+    landing = await _mobile_login_target(request) or _landing_after_login(request)
     _start_session(request, user_id, profile.display_name, method, epoch)
-    return RedirectResponse(landing or "/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
+    return RedirectResponse(landing, status_code=302, headers=_AUTH_PAGE_HEADERS)
 
 
 async def _set_password_form(request: Request, token: str, purpose: str, error: str = ""):
@@ -1855,6 +1872,9 @@ async def reset_submit(request: Request):
 # protocol-relative one, or a traversal.
 _POST_LOGIN_TARGETS = {
     "settings": "/istota/settings/connections",
+    # `/login?next=notes-new`, from the web editor whose session ran out; its
+    # draft is in the browser and comes back with the page.
+    "notes-new": "/istota/notes/new/",
 }
 _DEFAULT_POST_LOGIN_TARGET = "/istota/"
 
@@ -2052,7 +2072,7 @@ async def callback(request: Request):
     # Read before the clear, resolve through the allowlist, and consume it: a
     # marker left in place would send every later login of this session to
     # settings.
-    landing = await _mobile_login_target(request) or _post_login_target(request.session.get(_POST_LOGIN_KEY))
+    landing = await _mobile_login_target(request) or _landing_after_login(request)
     _start_session(request, username, display_name, "nextcloud", epoch)
     return RedirectResponse(url=landing, status_code=302, headers=_AUTH_PAGE_HEADERS)
 
