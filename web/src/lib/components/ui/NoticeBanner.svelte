@@ -1,5 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { ChevronRight } from '@lucide/svelte';
+  import Icon from './Icon.svelte';
 
   /**
    * Full-width notice / alert banner for the top of a page.
@@ -33,7 +35,9 @@
       aria-expanded={!collapsed}
     >
       <span class="notice-title title-section">{title}</span>
-      <span class="notice-toggle">{collapsed ? '▸' : '▾'}</span>
+      <span class="notice-toggle" class:open={!collapsed}
+        ><Icon icon={ChevronRight} size="xs" /></span
+      >
     </button>
     {#if !collapsed}
       <div class="notice-body">{@render children?.()}</div>
@@ -92,6 +96,11 @@
        would set the header's line box from the glyph rather than the text. */
     font-size: var(--text-base);
     flex-shrink: 0;
+    display: inline-flex;
+    transition: transform var(--transition-fast);
+  }
+  .notice-toggle.open {
+    transform: rotate(90deg);
   }
 
   .notice-body {

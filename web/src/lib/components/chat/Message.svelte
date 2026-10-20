@@ -1,6 +1,17 @@
 <script lang="ts">
   import { fileLinks } from '$lib/fileViewer/links';
-  import { Copy, Star, Trash2, Reply, Mail, Info, Pencil, X, RotateCcw } from '@lucide/svelte';
+  import {
+    Copy,
+    Info,
+    Mail,
+    Paperclip,
+    Pencil,
+    Reply,
+    RotateCcw,
+    Star,
+    Trash2,
+    X,
+  } from '@lucide/svelte';
   import PhoneSurfaceIcon from './PhoneSurfaceIcon.svelte';
   import { chatFileUrl, type ExternalTurnDisplay } from '$lib/api';
   import { copyText } from '$lib/clipboard';
@@ -1024,10 +1035,11 @@
 							     label it was, rather than becoming a link that 403s. -->
               {#if href}
                 <a class="attachment attachment-link" href={chatFileUrl(href)} download={name}>
-                  📎 {name}
+                  <Icon icon={Paperclip} size="xs" />
+                  {name}
                 </a>
               {:else}
-                <span class="attachment">📎 {name}</span>
+                <span class="attachment"><Icon icon={Paperclip} size="xs" /> {name}</span>
               {/if}
             {/each}
           </div>
@@ -1932,6 +1944,9 @@
     min-width: 0;
     gap: var(--space-1);
     margin-top: var(--space-1);
+  }
+  .attachment :global(.ui-icon) {
+    vertical-align: text-bottom;
   }
   .attachment {
     max-width: 100%;

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { Check, TriangleAlert, X } from '@lucide/svelte';
+  import { Icon } from '$lib/components/ui';
   interface Line {
     key: string;
     ok: boolean;
@@ -21,7 +23,7 @@
     return item.ok ? 'ok' : 'bad';
   }
 
-  const MARK = { ok: '✓', warn: '!', bad: '✗' } as const;
+  const MARK = { ok: Check, warn: TriangleAlert, bad: X } as const;
 </script>
 
 <!--
@@ -36,7 +38,7 @@
       <ul class="check-lines">
         {#each result.lines as line (line.key)}
           <li class={tone(line)} data-check-line={line.key}>
-            <span class="mark" aria-hidden="true">{MARK[tone(line)]}</span>
+            <span class="mark"><Icon icon={MARK[tone(line)]} /></span>
             <span>{line.message}</span>
           </li>
         {/each}
@@ -73,8 +75,9 @@
 
   .mark {
     flex: none;
+    display: inline-flex;
+    justify-content: center;
     width: 1em;
-    text-align: center;
   }
 
   .ok {

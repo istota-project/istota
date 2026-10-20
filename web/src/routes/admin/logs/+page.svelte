@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { X } from '@lucide/svelte';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { page } from '$app/state';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
@@ -11,6 +12,7 @@
     type AdminLogSource,
   } from '$lib/api';
   import {
+    Icon,
     Button,
     Chip,
     EmptyState,
@@ -416,7 +418,8 @@
              picking a task off a row you are already reading is the way you
              actually arrive at one. -->
         <Chip checked onclick={clearTaskFilter} title="Clear the task filter">
-          task {taskFilter} ×
+          task {taskFilter}
+          <Icon icon={X} size="sm" />
         </Chip>
       {/if}
     </div>

@@ -13,7 +13,7 @@
   } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { Icon, Chip, ListRow, Sidebar, SidebarToggle, Select, Input } from '$lib/components/ui';
-  import { Search } from '@lucide/svelte';
+  import { ChevronRight, Search } from '@lucide/svelte';
 
   let { children } = $props();
 
@@ -232,7 +232,9 @@
   <div class="acct-row" style="padding-left: {0.5 + depth * 0.75}rem">
     {#if node.children.length > 0}
       <button class="acct-caret" onclick={(e) => toggleExpand(e, node.fullName)} type="button">
-        <span class="caret" class:open={expandedSet.has(node.fullName)}>&#9654;</span>
+        <span class="caret" class:open={expandedSet.has(node.fullName)}
+          ><Icon icon={ChevronRight} size="xs" /></span
+        >
       </button>
     {:else}
       <span class="caret-spacer"></span>
@@ -293,8 +295,7 @@
   }
 
   .caret {
-    font-size: 0.45rem;
-    display: inline-block;
+    display: inline-flex;
     transition: transform var(--transition-fast);
   }
 
@@ -302,8 +303,9 @@
     transform: rotate(90deg);
   }
 
+  /* The caret button's width: the marker and its inline padding. */
   .caret-spacer {
-    width: 1.15rem;
+    width: calc(var(--icon-xs) + 2 * var(--space-1));
     display: inline-block;
     flex-shrink: 0;
   }

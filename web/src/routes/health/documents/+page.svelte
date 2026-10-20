@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { X } from '@lucide/svelte';
   import { createConfirm } from '$lib/ui/confirm.svelte';
   /**
    * Every uploaded health document, and what it is attached to (ISSUE-423).
@@ -38,6 +39,7 @@
     type Immunization,
   } from '$lib/api';
   import {
+    Icon,
     Badge,
     NoticeBanner,
     Chip,
@@ -473,7 +475,7 @@
                       class="detach touch-target"
                       disabled={busy.has(doc.id)}
                       onclick={() => detach(doc, link)}
-                      aria-label="Detach from {link.label}">×</button
+                      aria-label="Detach from {link.label}"><Icon icon={X} size="xs" /></button
                     >
                   </span>
                 {/each}
@@ -683,6 +685,7 @@
   }
 
   .detach {
+    display: inline-flex;
     color: inherit;
   }
 

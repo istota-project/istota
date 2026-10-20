@@ -1,6 +1,8 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { X } from '@lucide/svelte';
   import Button from './Button.svelte';
+  import Icon from './Icon.svelte';
 
   interface Props {
     /** The picked file, bindable. `null` shows the prompt. */
@@ -98,7 +100,7 @@
       {file.name}
       <span class="caption">({Math.round(file.size / 1024)} KB)</span>
       <button type="button" class="clear" onclick={clearFile} aria-label="Clear selected file"
-        >×</button
+        ><Icon icon={X} size="xs" /></button
       >
     </div>
   {:else}
@@ -162,6 +164,10 @@
   }
 
   .clear {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
     background: none;
     border: 1px solid var(--border-default);
     border-radius: var(--radius-round);

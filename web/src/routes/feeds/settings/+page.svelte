@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ArrowDown, ArrowUp } from '@lucide/svelte';
   import { createConfirm } from '$lib/ui/confirm.svelte';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { onMount } from 'svelte';
@@ -502,15 +503,17 @@
                       label="Move up"
                       title="Move up"
                       onclick={() => moveCategory(idx, -1)}
-                      disabled={idx === 0}>↑</IconButton
-                    >
+                      disabled={idx === 0}
+                      icon={ArrowUp}
+                    />
                     <IconButton
                       size="sm"
                       label="Move down"
                       title="Move down"
                       onclick={() => moveCategory(idx, 1)}
-                      disabled={idx === config.categories.length - 1}>↓</IconButton
-                    >
+                      disabled={idx === config.categories.length - 1}
+                      icon={ArrowDown}
+                    />
                   </td>
                   <td class="col-actions">
                     <KebabMenu items={categoryMenu(idx)} ariaLabel="Category actions" />

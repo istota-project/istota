@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { X } from '@lucide/svelte';
   import { createConfirm } from '$lib/ui/confirm.svelte';
   import {
     getSharedBlocks,
@@ -391,8 +392,9 @@
                 title="Remove source"
                 size="sm"
                 danger
-                onclick={() => removeSharedSource(i)}>×</IconButton
-              >
+                onclick={() => removeSharedSource(i)}
+                icon={X}
+              />
             </span>
             <Field label="Type">
               <Select

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { EmptyState, LoadState } from '$lib/components/ui';
+  import { ChevronRight } from '@lucide/svelte';
+  import { EmptyState, Icon, LoadState } from '$lib/components/ui';
   import { getAccounts, type AccountRow } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { selectedYear, transactionsUrl } from '$lib/money/stores/transactions';
@@ -91,7 +92,8 @@
           {#if node.children.length > 0}
             <span
               class="record-caret"
-              class:is-open={expandedSet.has(node.fullName) || !!$accountFilter}>&#9654;</span
+              class:is-open={expandedSet.has(node.fullName) || !!$accountFilter}
+              ><Icon icon={ChevronRight} size="xs" /></span
             >
           {:else}
             <span class="caret-spacer"></span>
@@ -130,7 +132,7 @@
   }
 
   .caret-spacer {
-    width: 0.5rem;
+    width: var(--icon-xs);
     display: inline-block;
   }
 

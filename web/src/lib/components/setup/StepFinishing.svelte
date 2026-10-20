@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { Check } from '@lucide/svelte';
   import { onMount } from 'svelte';
-  import { NoticeBanner, Spinner } from '$lib/components/ui';
+  import { Icon, NoticeBanner, Spinner } from '$lib/components/ui';
   import {
     LONG_WAIT_MS,
     POLL_INTERVAL_MS,
@@ -83,15 +84,17 @@
 <div class="vstack">
   <p>Your settings are saved and {botName} is {rerun ? 'restarting' : 'starting'}.</p>
   <ol class="vstack list-reset" style:--vstack-gap="var(--space-2)" aria-live="polite">
-    <li class="hstack done"><span class="mark" aria-hidden="true">✓</span>Settings saved</li>
+    <li class="hstack done"><span class="mark"><Icon icon={Check} /></span>Settings saved</li>
     <li class="hstack" class:done={ready} class:busy={!ready}>
-      <span class="mark" aria-hidden="true"
-        >{#if ready}✓{:else}<Spinner size="sm" />{/if}</span
+      <span class="mark"
+        >{#if ready}<Icon icon={Check} />{:else}<Spinner size="sm" />{/if}</span
       >{rerun ? 'Restarting' : 'Starting'}
       {botName}
     </li>
     <li class="hstack" class:done={ready} class:todo={!ready}>
-      <span class="mark" aria-hidden="true">{ready ? '✓' : ''}</span>Ready
+      <span class="mark"
+        >{#if ready}<Icon icon={Check} />{/if}</span
+      >Ready
     </li>
   </ol>
   {#if rerun}
@@ -136,8 +139,9 @@
 
   .mark {
     flex: none;
+    display: inline-flex;
+    justify-content: center;
     width: 1em;
-    text-align: center;
   }
 
   .done {

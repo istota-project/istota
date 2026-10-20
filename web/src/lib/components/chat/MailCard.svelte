@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Mail } from '@lucide/svelte';
+  import { Mail, Paperclip } from '@lucide/svelte';
   import { base } from '$app/paths';
   import { chatFileUrl } from '$lib/api';
   import { copyText } from '$lib/clipboard';
@@ -205,11 +205,13 @@
           {@const size = formatSize(item.size)}
           {#if item.path}
             <a class="mail-attachment" href={chatFileUrl(item.path)} download={item.filename}
-              >📎 {item.filename}{#if size}<span class="mail-size"> {size}</span>{/if}</a
+              ><Icon icon={Paperclip} size="xs" />
+              {item.filename}{#if size}<span class="mail-size"> {size}</span>{/if}</a
             >
           {:else}
             <span class="mail-attachment"
-              >📎 {item.filename}{#if size}<span class="mail-size"> {size}</span>{/if}</span
+              ><Icon icon={Paperclip} size="xs" />
+              {item.filename}{#if size}<span class="mail-size"> {size}</span>{/if}</span
             >
           {/if}
         {/each}
@@ -353,6 +355,9 @@
   .mail-attachment {
     font-size: var(--text-xs);
     color: var(--text-secondary);
+  }
+  .mail-attachment :global(.ui-icon) {
+    vertical-align: text-bottom;
   }
   a.mail-attachment {
     color: var(--link);

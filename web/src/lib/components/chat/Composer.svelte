@@ -15,16 +15,17 @@
   import { onDestroy, tick, untrack } from 'svelte';
   import {
     ArrowUp,
-    Square,
-    Plus,
-    Mic,
+    Camera,
     Check,
+    Folder,
+    Image,
+    Mic,
+    Paperclip,
+    Plus,
+    Reply,
+    Square,
     Trash2,
     X,
-    Image,
-    Camera,
-    Folder,
-    Reply,
   } from '@lucide/svelte';
   import { Icon, IconButton, Menu, type MenuItem } from '$lib/components/ui';
   import { pinViewportZoom, releaseViewportZoom } from '$lib/zoomPin';
@@ -1128,7 +1129,7 @@
            it is just not anywhere yet. -->
       {#each attachments as att (attachKey(att))}
         <span class="attach-chip" class:pending={!!att.pendingBlobId}>
-          {isAudio(att.name) ? '🎤' : '📎'}
+          <Icon icon={isAudio(att.name) ? Mic : Paperclip} size="xs" />
           <span class="attach-name">{att.name}</span>
           <button
             class="attach-x touch-target"

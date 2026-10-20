@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { X } from '@lucide/svelte';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import {
@@ -13,6 +14,7 @@
     type Specimen,
   } from '$lib/api';
   import {
+    IconButton,
     Button,
     Card,
     EmptyState,
@@ -330,8 +332,14 @@
                         />
                       </td>
                       <td
-                        ><button class="del" type="button" onclick={() => removeRow(i)}>×</button
-                        ></td
+                        ><IconButton
+                          size="sm"
+                          danger
+                          label="Remove row {i + 1}"
+                          title="Remove row"
+                          onclick={() => removeRow(i)}
+                          icon={X}
+                        /></td
                       >
                     </tr>
                   {/each}
@@ -420,15 +428,6 @@
   }
   .range-pair :global(.cell-input) {
     max-width: 5rem;
-  }
-  .del {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .del:hover {
-    color: var(--status-danger-fg);
   }
   .source {
     background: var(--surface-card);
