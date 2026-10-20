@@ -128,8 +128,11 @@
   white-space: nowrap;
 }
 
+/* Sized from the box, which is larger on touch; a fixed 2rem let the 22px
+   box fill the column and sit against the name beside it. */
 .table .col-select {
-  width: 2rem;
+  width: calc(var(--checkbox-size) + var(--table-cell-px) + var(--space-3));
+  padding-inline-end: var(--space-3);
   text-align: center;
 }
 

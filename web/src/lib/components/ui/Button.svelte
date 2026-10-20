@@ -153,10 +153,11 @@
 
   /* Red outline/text for a destructive confirm action (the confirm button in
 	   ConfirmDialog). Matches the hand-rolled .btn.danger convention it replaces
-	   (#c66 dark / #c0271d light). */
+	   (#c66 dark / #c0271d light). The outline is an inset shadow like the
+	   other variants', so a danger button is the same size as its neighbours. */
   .btn-danger {
     background: transparent;
-    border: 1px solid var(--status-danger-fg);
+    box-shadow: inset 0 0 0 1px var(--status-danger-fg);
     color: var(--status-danger-fg);
   }
   .btn-danger:hover:not(:disabled) {
