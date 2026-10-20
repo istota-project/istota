@@ -119,3 +119,24 @@ def test_the_store_normalises_and_clears(config):  # noqa: F811
     assert _stored(config) == "Notes/Inbox"
     user_profiles.update_profile(config.db_path, "alice", quick_notes_folder="")
     assert _stored(config) is None
+
+
+async def test_the_folder_check_runs_off_the_event_loop(client, config, home, monkeypatch):  # noqa: F811
+    import threading
+
+    from istota.workspace import quick_notes
+
+    loop_thread = threading.get_ident()
+    seen = []
+    real_open_dir = quick_notes.open_dir
+
+    def recording_open_dir(*args, **kwargs):
+        seen.append(threading.get_ident())
+        return real_open_dir(*args, **kwargs)
+
+    monkeypatch.setattr(quick_notes, "open_dir", recording_open_dir)
+    (home / "Notes").mkdir()
+    cookies = await _login(client, "alice")
+    response = await client.put(URL, json={"quick_notes_folder": "Notes"}, cookies=cookies, headers=ORIGIN)
+    assert response.status_code == 200
+    assert seen and loop_thread not in seen

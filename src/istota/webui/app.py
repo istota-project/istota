@@ -16814,8 +16814,9 @@ async def settings_update_profile(
         if field not in _PROFILE_EDITABLE_FIELDS:
             raise HTTPException(status_code=400, detail=f"unknown field: {field}")
         try:
-            coerced[field] = coerce_profile_field(
-                field, value, user["username"], getattr(current, field, None),
+            # Off the loop: `quick_notes_folder` walks the workspace to check the folder.
+            coerced[field] = await asyncio.to_thread(
+                coerce_profile_field, field, value, user["username"], getattr(current, field, None),
             )
         except ProfileFieldRefused as e:
             return JSONResponse(
