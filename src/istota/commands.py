@@ -1204,6 +1204,21 @@ def _task_refusal(ctx: CommandContext, task: "db.Task") -> str | None:
     return _private_only(ctx, "that task")
 
 
+def _left_group_room_refusal(conn, user_id: str, task: "db.Task") -> str | None:
+    """The refusal for a command that would write into, or read the output of,
+    a task in a group room its author is no longer let into, else None.
+
+    A task id reaches from any room, so without this a removed member's
+    private room is a way back into the group room's transcript.
+    """
+    from .groups.rooms import task_delivery_refused
+
+    if not task_delivery_refused(conn, task):
+        return None
+    who = "you are" if task.user_id == user_id else "its author is"
+    return f"Task #{task.id} is in a group room {who} no longer a member of."
+
+
 def _ctx_brain(ctx: CommandContext):
     """The brain a new task from this context would run under.
 
@@ -2949,7 +2964,7 @@ async def cmd_more(ctx: CommandContext):
     if task.user_id != user_id and not config.is_admin(user_id):
         return f"Task #{task_id} belongs to another user."
 
-    refusal = _task_refusal(ctx, task)
+    refusal = _task_refusal(ctx, task) or _left_group_room_refusal(conn, user_id, task)
     if refusal is not None:
         return refusal
 
@@ -3297,7 +3312,7 @@ def retry_task(
     its current definition. ``surface`` is where the re-run was asked from, for
     the room transcript; ``None`` records nothing. The caller commits.
     """
-    refusal = retry_refusal(config, user_id, task)
+    refusal = retry_refusal(config, user_id, task) or _left_group_room_refusal(conn, user_id, task)
     if refusal is not None:
         return refusal
     if task.source_type in _RUN_NOW_SOURCE_TYPES:

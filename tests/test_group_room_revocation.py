@@ -659,3 +659,50 @@ class TestAGroupRoomIsNeverPrivate:
             assert private_room_for(conn, config, "carol", solo) is None
             with pytest.raises(RequestError):
                 _room(conn, config, "carol")
+
+
+class TestARemovedMemberCannotReachBack:
+    """Commands that take a task id run from anywhere, so a removed member's
+    private room must not become a way back into the group room."""
+
+    @pytest.mark.parametrize("resume", [False, True])
+    def test_retry_and_resume_are_refused(self, config, room, resume):
+        from istota import commands
+
+        task_id = _task(config, room, "bob", status="failed")
+        _remove(config)
+        with db.get_db(config.db_path) as conn:
+            before = db.count_room_messages(conn, room)
+            tasks_before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+            outcome = commands.retry_task(conn, config, "bob", db.get_task(conn, task_id),
+                                          resume=resume, surface="web")
+            assert isinstance(outcome, str)
+            assert "group" in outcome
+            assert db.count_room_messages(conn, room) == before
+            assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == tasks_before
+
+    def test_a_staying_member_can_still_retry(self, config, room):
+        from istota import commands
+
+        task_id = _task(config, room, "alice", status="failed")
+        _remove(config)
+        with db.get_db(config.db_path) as conn:
+            outcome = commands.retry_task(conn, config, "alice", db.get_task(conn, task_id),
+                                          surface="web")
+            assert isinstance(outcome, commands.RetryOutcome)
+
+    async def test_more_does_not_show_the_trace(self, config, room):
+        from istota import commands
+
+        trace = json.dumps([{"type": "text", "text": "the private plan"}])
+        task_id = _task(config, room, "bob", status="failed", execution_trace=trace)
+        _remove(config)
+        with db.get_db(config.db_path) as conn:
+            own = db.create_web_chat_room(conn, "bob", "Mine").token
+            ctx = commands.CommandContext(
+                config=config, conn=conn, user_id="bob", conversation_token=own,
+                surface="web", args=f"#{task_id}",
+            )
+            reply = await commands.cmd_more(ctx)
+        assert "the private plan" not in str(reply)
+        assert "group" in str(reply)
