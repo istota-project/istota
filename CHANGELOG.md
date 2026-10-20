@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Users can connect their own mail accounts under Settings > Connections, each with read or read-and-send permission, and the bot reads and sends from them with the email skill's `--account`; a personal briefing's "My email" source can read one too. Passwords are stored encrypted and reach the email skill for one call at a time over the skill proxy's private channel, never the model's environment, and nothing polls a connected account. Operators set limits and allowed private hosts under `[mail_accounts]`, and `istota mail-account` manages accounts from the command line.
 - A mail server on an unusual port can be told whether it uses implicit TLS or STARTTLS (`imap_security`, `smtp_security` under `[email]`); left blank, the port decides as before. `istota doctor` now also checks that mail connections verify the server's certificate.
 - In the Istota iOS app (0.6.0 and later), Location settings has a "Turn on location tracking" button that sets up this phone in one tap: it creates a token for the phone, configures the tracker, asks for location permission and starts tracking. No QR code or second screen is needed, and if the server later refuses the phone's token the card offers "Set up again".
 - Location settings lists every device that can send locations, with when it was added and when it last sent, and each can be removed on its own. Every device now has its own ingest token, stored only as a hash, so setting up or removing one device never affects another.

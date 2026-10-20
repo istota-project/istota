@@ -15,7 +15,8 @@ request, and `_browser`, the daemon's snapshot of the browser pool for the
 admin Browsers page, and `_shared_block_run`, a pending shared-block Run now
 and the daemon's answer to it, and `_health_extract`, a health document
 extraction the web process handed to the daemon and its result, and
-`_session_log_sweep`, the same shape for the native-brain transcript sweep —
+`_mail_account_test`, a connected mail account's connection test handed over
+the same way, and `_session_log_sweep`, the same shape for the native-brain transcript sweep —
 what the scheduler's cleanup tick reclaimed, so `runtime.session_log_dir` can
 say whether the size ceiling rather than `retention_days` is the retention in
 force — and `_room_backfill`, the scheduler's per-user marker that a minted SMS or
@@ -35,7 +36,7 @@ rows are written by the daemon, by the host-side `memory` skill CLI, by the
 Both KV tables, not only the per-user one: `skills/kv` applies this in `main`
 before it dispatches a verb, so `--shared` — which reads and writes the
 deployment-wide `shared_kv` — is covered by the same line. `_avatar_import`,
-`_session_log_sweep`, `_notification_delivery` and `_operator_persona` are `shared_kv` namespaces and
+`_session_log_sweep`, `_mail_account_test`, `_notification_delivery` and `_operator_persona` are `shared_kv` namespaces and
 would otherwise be reachable; `_credential_backup` and `_credential_migration` are per-user namespaces.
 
 The rule is a name prefix rather than a list, so a further reserved namespace

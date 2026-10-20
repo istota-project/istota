@@ -267,6 +267,44 @@ Mail between you and the bot alone, with nobody else on From, To or Cc, is a tur
 
 Mail you sent yourself before this existed is not copied into the room.
 
+## Your own mail accounts
+
+Besides the bot's mailbox, each user can connect mail accounts of their own, such as a work or personal mailbox, under Settings > Connections. A connected account is an IMAP login, an optional SMTP login for sending, and a permission:
+
+- **Read.** The bot can list, search and read the account's mail. The folder is opened read-only (IMAP `EXAMINE`), so the server itself refuses any change.
+- **Read and send.** The bot can also send, reply and mark messages from the account. A send goes out from the account's own address through its own SMTP server, through the same [outbound approval gate](#the-outbound-approval-gate) as the bot's mailbox, so a held send waits as a draft that names the account it will go out from. If you give the account a sent folder, a copy of each sent message is saved there; leave it empty for a provider that saves sent mail itself.
+
+Use "Test" on an account to check that it signs in. The test runs in the daemon, and the page shows each step's result.
+
+The bot reaches an account with the email skill's `--account <slug>` (`email accounts` lists them). There is no default account: a request that does not say which mailbox reads the bot's, and if this instance has no bot mailbox the bot asks which account you mean. Scheduled prompt jobs can read an account too, and a personal briefing's "My email" source can read any of your accounts. A `command:` or `skill:` job cannot, since only a task's own skill call is given the password.
+
+What stays the same and what does not:
+
+- **Nothing polls an account.** Mail arriving there does not start a task, and a reply to something the bot sent from your account lands in your mailbox, not in a [thread room](#email-thread-rooms). Sends from an account create no thread room.
+- **Your accounts are yours.** No setting lets another user's task read them, and they are not offered when a correspondent's mail runs on an email thread: the bot can read your accounts only on a turn you wrote. In a room other people can read, the bot asks before quoting mail from your account there.
+- **No delete.** The bot cannot delete mail in a connected account.
+- **Passwords.** They are stored encrypted with the other secrets, and given to the email skill for one call at a time. They never appear in the model's environment, in logs or in an error message.
+- **Microsoft 365 and Gmail.** Exchange Online no longer allows password sign-in over IMAP, so a Microsoft 365 mailbox cannot be connected this way. Gmail is already reachable through the Google Workspace connection.
+- **Snapshots.** `istota snapshot` and `istota apply` do not carry mail accounts, because a plan file would then hold mail passwords. After restoring from a snapshot, connect the accounts again. A database restore (`istota migrate restore-workspace`) carries them with everything else.
+
+Operators can manage accounts from the command line with `istota mail-account {list,ensure,set-password,clear-password,remove,test}`. Passwords are read from stdin only:
+
+```bash
+printf '%s' "$PASSWORD" | istota mail-account set-password alice work --imap
+```
+
+The operator settings are in `[mail_accounts]`:
+
+```toml
+[mail_accounts]
+enabled = true          # false: accounts are kept but unreachable, and the card is hidden
+allow_send = true       # false: every account behaves as read-only
+max_per_user = 10
+private_hosts = []      # hostnames an account may reach on a private address
+```
+
+An account's servers are reached from the daemon, and an address that is not public (a LAN address, loopback, the stack's own network) is refused unless the hostname is listed in `private_hosts`. The address is checked when the connection is made and the connection goes to the address that was checked. Certificates are verified as for the bot's mailbox (see below), with no way to turn that off. On a multi-user install with no working sandbox, the web UI refuses to store account passwords, as it refuses vault credentials, and `istota doctor` warns.
+
 ## Configuration
 
 ```toml
