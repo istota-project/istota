@@ -75,6 +75,7 @@
   <Button
     variant="secondary"
     size="sm"
+    class="secret-clear-btn"
     ariaLabel="Clear stored {label}"
     title="Clear stored value"
     {disabled}
@@ -138,7 +139,7 @@
     flex: 0 1 24rem;
   }
 
-  .secret-row > :global(.btn) {
+  .secret-row > :global(.secret-clear-btn) {
     flex: none;
   }
 

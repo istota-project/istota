@@ -386,7 +386,8 @@
                     {#if editing}
                       <td>
                         <IconButton
-                          class="del touch-target"
+                          class="del"
+                          touchTarget
                           size="sm"
                           danger
                           label="Remove biomarker"

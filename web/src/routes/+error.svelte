@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Icon } from '$lib/components/ui';
+  import { Button, Icon } from '$lib/components/ui';
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import { CircleAlert, House, Lock, RotateCw, SearchX, ServerCrash } from '@lucide/svelte';
@@ -67,15 +67,11 @@
 
     <div class="error-actions">
       {#if isServer}
-        <button type="button" class="action primary" onclick={() => location.reload()}>
-          <Icon icon={RotateCw} size="sm" />
-          Reload
-        </button>
+        <Button variant="primary" icon={RotateCw} onclick={() => location.reload()}>Reload</Button>
       {/if}
-      <a href="{base}/" class="action" class:primary={!isServer}>
-        <Icon icon={House} size="sm" />
+      <Button variant={isServer ? 'secondary' : 'primary'} href="{base}/" icon={House}>
         Go to dashboard
-      </a>
+      </Button>
     </div>
   </div>
 </div>
@@ -196,46 +192,5 @@
     justify-content: center;
     gap: var(--space-2);
     margin-top: 1.4rem;
-  }
-
-  .action {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    background: var(--surface-card);
-    color: var(--text-muted);
-    font: inherit;
-    font-size: var(--text-base);
-    line-height: var(--leading-tight);
-    text-decoration: none;
-    cursor: pointer;
-    transition:
-      color var(--transition-fast),
-      background var(--transition-fast),
-      border-color var(--transition-fast);
-  }
-
-  .action:hover {
-    background: var(--hover-bg);
-    color: var(--hover-fg);
-  }
-
-  /* The bot's identity accent, not the interactive blue — this is the one
-     prominent control on an otherwise empty page, so it should read as the
-     app's own rather than as a generic form button. The `-fill` token, not
-     --accent-amber: see app.css for why the light theme's darker amber is the
-     wrong value under text. */
-  .action.primary {
-    border-color: transparent;
-    background: var(--accent-amber-fill);
-    color: var(--accent-amber-fill-fg);
-  }
-
-  .action.primary:hover {
-    background: var(--accent-amber-fill-hover);
-    color: var(--accent-amber-fill-fg);
   }
 </style>

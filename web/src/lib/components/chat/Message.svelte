@@ -1089,7 +1089,7 @@
             {#if onQueueEdit}
               <IconButton
                 size="sm"
-                class="touch-target"
+                touchTarget
                 label="Edit queued message"
                 title="Edit"
                 onclick={() => onQueueEdit?.(message.cid)}
@@ -1104,7 +1104,7 @@
               <IconButton
                 size="sm"
                 danger
-                class="touch-target"
+                touchTarget
                 label="Remove queued message"
                 title="Remove"
                 onclick={() => onQueueRemove?.(message.cid)}

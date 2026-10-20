@@ -39,7 +39,8 @@
         <div class="block-actions">
           {#if onEdit}
             <IconButton
-              class="briefing-action touch-target"
+              class="briefing-action"
+              touchTarget
               size="sm"
               label={`Settings for ${block.title}`}
               title="Block settings"
@@ -48,7 +49,8 @@
             />
           {/if}
           <IconButton
-            class="briefing-action touch-target"
+            class="briefing-action"
+            touchTarget
             size="sm"
             label={`Expand ${block.title}`}
             title="Expand block"

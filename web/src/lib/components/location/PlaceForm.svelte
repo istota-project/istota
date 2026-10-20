@@ -170,7 +170,9 @@
 
   {#snippet extraActions()}
     {#if editing && onDelete}
-      <button class="delete-link" type="button" onclick={handleDelete}>Delete</button>
+      <span class="footer-start">
+        <Button variant="danger" size="sm" onclick={handleDelete}>Delete</Button>
+      </span>
     {/if}
     {#if !editing && onDismiss}
       <Button variant="secondary" onclick={handleDismiss} title="Don't show this cluster again">
@@ -202,20 +204,8 @@
     flex: 1;
   }
 
-  .delete-link {
+  /* The destructive action sits apart from Cancel and Save, at the far start. */
+  .footer-start {
     margin-right: auto;
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--text-sm);
-    cursor: pointer;
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-pill);
-    transition: color var(--transition-fast);
-  }
-
-  .delete-link:hover {
-    color: var(--status-danger-fg);
   }
 </style>

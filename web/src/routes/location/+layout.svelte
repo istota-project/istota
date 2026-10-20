@@ -291,7 +291,8 @@
                 <span class="stats-name title-card">{selectedPlace.name}</span>
                 <div class="stats-actions">
                   <IconButton
-                    class="stats-edit touch-target"
+                    class="stats-edit"
+                    touchTarget
                     size="sm"
                     label="Edit place"
                     onclick={() => handleEditPlace(selectedPlace!)}
@@ -299,7 +300,8 @@
                     icon={Pencil}
                   />
                   <IconButton
-                    class="stats-close touch-target"
+                    class="stats-close"
+                    touchTarget
                     size="sm"
                     label="Close place stats"
                     onclick={() => {

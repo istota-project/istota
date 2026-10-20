@@ -185,7 +185,7 @@ describe('settings card defaults', () => {
 
   it('keeps direct card buttons compact and action rows able to wrap', () => {
     const cardSource = read(join(SRC, 'lib/components/ui/Card.svelte'));
-    const btn = cardSource.slice(cardSource.indexOf('.ui-card > :global(.btn) {'));
+    const btn = cardSource.slice(cardSource.indexOf('.ui-card > :global(:where(button, a)) {'));
     expect(btn.slice(0, btn.indexOf('}'))).toContain('align-self: flex-start');
     // The wrapping action row is the global `hstack wrap` now; a second
     // `.settings .row` would give one name two meanings again.

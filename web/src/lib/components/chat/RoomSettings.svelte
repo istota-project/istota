@@ -719,11 +719,14 @@
     {#if isImported}
       <!-- A hide is reversible (re-engagement un-hides), so it's a one-click
 			     action with no type-the-name confirm — unlike a real delete. -->
-      <button class="delete-link" type="button" onclick={onDelete}> Hide </button>
+      <span class="footer-start">
+        <Button variant="danger" size="sm" onclick={onDelete}>Hide</Button>
+      </span>
     {:else}
-      <button class="delete-link" type="button" onclick={() => (showDeleteConfirm = true)}>
-        Delete
-      </button>
+      <span class="footer-start">
+        <Button variant="danger" size="sm" onclick={() => (showDeleteConfirm = true)}>Delete</Button
+        >
+      </span>
     {/if}
     <Button variant="secondary" onclick={onClose}>Cancel</Button>
     <Button variant="primary" onclick={handleSave} disabled={!canSave}>Save</Button>
@@ -838,19 +841,8 @@
     cursor: not-allowed;
   }
 
-  .delete-link {
+  /* The destructive action sits apart from Cancel and Save, at the far start. */
+  .footer-start {
     margin-right: auto;
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--text-sm);
-    cursor: pointer;
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-pill);
-    transition: color var(--transition-fast);
-  }
-  .delete-link:hover {
-    color: var(--status-danger-fg);
   }
 </style>

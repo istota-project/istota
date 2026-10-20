@@ -1,8 +1,9 @@
 <script lang="ts">
   import type { Component, Snippet } from 'svelte';
   import Icon from './Icon.svelte';
+  import { linkOrButton } from './internal/linkOrButton';
 
-  type Variant = 'primary' | 'secondary' | 'pill' | 'danger' | 'danger-icon';
+  type Variant = 'primary' | 'secondary' | 'pill' | 'danger';
   type Size = 'sm' | 'md';
 
   interface Props {
@@ -40,6 +41,8 @@
     ariaLabel?: string;
     /** A glyph before the label, drawn through `Icon` at the label's step. */
     icon?: Component;
+    /** Placement only: a page positions the button, never restyles it. */
+    class?: string;
     children: Snippet;
   }
 
@@ -59,50 +62,28 @@
     loadingLabel = 'Saving…',
     ariaLabel,
     icon,
+    class: className = '',
     children,
   }: Props = $props();
+
+  const el = $derived(
+    linkOrButton({ href, download, target, rel, reload, type, disabled, loading }),
+  );
 </script>
 
-{#snippet label()}
-  {#if icon}<Icon {icon} size={size === 'sm' ? 'xs' : 'sm'} />{/if}{@render children()}
-{/snippet}
-
-{#if href}
-  <!-- A disabled link is not a thing the platform has, so a disabled href
-       renders as a real disabled button instead of an inert-looking anchor
-       that still navigates. -->
-  {#if disabled || loading}
-    <button class="btn btn-{variant} btn-{size}" type="button" disabled aria-label={ariaLabel}>
-      {#if loading}{loadingLabel}{:else}{@render label()}{/if}
-    </button>
-  {:else}
-    <a
-      class="btn btn-{variant} btn-{size}"
-      {href}
-      {download}
-      {target}
-      {rel}
-      {title}
-      {onclick}
-      data-sveltekit-reload={reload ? '' : undefined}
-      aria-label={ariaLabel}
-    >
-      {@render label()}
-    </a>
-  {/if}
-{:else}
-  <button
-    class="btn btn-{variant} btn-{size}"
-    {type}
-    {onclick}
-    {title}
-    disabled={disabled || loading}
-    aria-busy={loading || undefined}
-    aria-label={ariaLabel}
-  >
-    {#if loading}{loadingLabel}{:else}{@render label()}{/if}
-  </button>
-{/if}
+<svelte:element
+  this={el.tag}
+  class="btn btn-{variant} btn-{size} {className}"
+  {...el.attrs}
+  {title}
+  {onclick}
+  aria-label={ariaLabel}
+>
+  {#if loading}{loadingLabel}{:else}{#if icon}<Icon
+        {icon}
+        size={size === 'sm' ? 'xs' : 'sm'}
+      />{/if}{@render children()}{/if}
+</svelte:element>
 
 <style>
   .btn {
@@ -180,14 +161,5 @@
   }
   .btn-danger:hover:not(:disabled) {
     background: color-mix(in srgb, var(--status-danger-fg) 12%, transparent);
-  }
-
-  .btn-danger-icon {
-    background: transparent;
-    color: var(--text-dim);
-    padding: 0.2rem var(--space-2);
-  }
-  .btn-danger-icon:hover:not(:disabled) {
-    color: var(--status-danger-fg);
   }
 </style>

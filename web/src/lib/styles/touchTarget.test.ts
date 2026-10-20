@@ -190,10 +190,14 @@ describe('compact control touch targets', () => {
     ['lib/components/ui/HintPopover.svelte', 'ui-hint-trigger'],
     ['lib/components/chat/Composer.svelte', 'attach-x'],
     ['routes/health/documents/+page.svelte', 'detach'],
-    ['routes/health/labs/panel/+page.svelte', 'del'],
   ])('uses the shared target for %s %s', (file, control) => {
     const source = readFileSync(resolve(SRC, file), 'utf8');
     expect(source).toContain(`class="${control} touch-target"`);
+  });
+
+  it('asks IconButton for the shared target on the lab panel delete', () => {
+    const source = readFileSync(resolve(SRC, 'routes/health/labs/panel/+page.svelte'), 'utf8');
+    expect(source).toMatch(/class="del"\s+touchTarget/);
   });
 
   it('keeps the category caret within its own column on touch', () => {

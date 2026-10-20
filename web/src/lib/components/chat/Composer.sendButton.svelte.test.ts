@@ -124,7 +124,7 @@ function parseRules(text: string, atRules: string[] = []): Rule[] {
 /**
  * The interaction states, and deliberately not `:disabled`.
  *
- * A disabled send button has to be grey, and `.icon-btn.send:disabled` is the
+ * A disabled send button has to be grey, and `.mode-btn.send:disabled` is the
  * one state rule allowed to say so — it is not an interaction the mode can
  * disagree with, it is the absence of one. The alternative would be a
  * `:disabled` variant of each mode rule, doubling the count the rule below
@@ -137,13 +137,13 @@ const STATE_PSEUDO = /:(hover|active|focus|focus-visible|focus-within)\b/;
  *
  * Keyed on the *subject* compound — the last one, the element the rule actually
  * styles — and on any of the classes those buttons carry, because
- * `.tools .send:hover` and `.icon-btn:hover` are both spellings that reach one
+ * `.tools .send:hover` and `.mode-btn:hover` are both spellings that reach one
  * and either would reintroduce the defect.
  *
  * A rule opts out only by excluding **both**, and that is the half ISSUE-238
  * added: Stop used to be a second mode of the send button, so `:not(.send)`
  * was enough to say "not a filled control". Now that it is its own element,
- * `.icon-btn:not(.send):hover` reaches it and would paint it grey — so a rule
+ * `.mode-btn:not(.send):hover` reaches it and would paint it grey — so a rule
  * naming only one exclusion is still in scope here. Tested per compound rather
  * than per rule: a selector list is several rules to the cascade, so one
  * excluded branch must not exempt its siblings.
@@ -152,7 +152,7 @@ function sendButtonRules(): Rule[] {
   return parseRules(css).filter((r) => {
     const subject = r.selector.split(/[\s>+~]+/).pop() ?? '';
     if (subject.includes(':not(.send)') && subject.includes(':not(.stop)')) return false;
-    return /\.(icon-btn|send|stop)\b/.test(subject);
+    return /\.(mode-btn|send|stop)\b/.test(subject);
   });
 }
 
@@ -176,23 +176,23 @@ describe('send/stop control styling', () => {
     // The failure mode of a hand-rolled parser is reporting nothing wrong
     // because it saw nothing at all. Pin that it finds the rules by name.
     const seen = sendButtonRules().map((r) => r.selector);
-    expect(seen).toContain('.icon-btn.send');
-    expect(seen).toContain('.icon-btn.stop');
-    expect(seen).toContain('.icon-btn.send:disabled');
+    expect(seen).toContain('.mode-btn.send');
+    expect(seen).toContain('.mode-btn.stop');
+    expect(seen).toContain('.mode-btn.send:disabled');
   });
 
   it('paints the two controls in two different colours', () => {
     // The symptom itself, rather than the mechanism below it: a stop button
     // that renders in the idle blue is the whole of ISSUE-201, and every
     // structural assertion here is equally happy with both of them blue.
-    expect(fillOf('.icon-btn.send')).toBe('var(--accent-blue)');
-    expect(fillOf('.icon-btn.stop')).toBe('var(--status-danger-fg)');
-    expect(fillOf('.icon-btn.send')).not.toBe(fillOf('.icon-btn.stop'));
+    expect(fillOf('.mode-btn.send')).toBe('var(--accent-blue)');
+    expect(fillOf('.mode-btn.stop')).toBe('var(--status-danger-fg)');
+    expect(fillOf('.mode-btn.send')).not.toBe(fillOf('.mode-btn.stop'));
   });
 
   it('lets nothing but the button and :disabled decide a filled control fill', () => {
-    // The defect: `.icon-btn.send:hover:not(:disabled)` re-declared the blue
-    // fill at a higher specificity than `.icon-btn.send.stop`, so hovering the
+    // The defect: `.mode-btn.send:hover:not(:disabled)` re-declared the blue
+    // fill at a higher specificity than `.mode-btn.send.stop`, so hovering the
     // stop button painted it blue under the stop glyph. On iOS that is not a
     // transient hover — Safari synthesizes :hover on tap and leaves it applied
     // until another tap displaces it, so the button stayed blue-with-a-stop
@@ -206,8 +206,8 @@ describe('send/stop control styling', () => {
 
   it('keeps the two fills on two elements, so neither can outrank the other', () => {
     // What replaced the old document-order tie-break (ISSUE-238). While Send
-    // and Stop were one element in two modes, `.icon-btn.send:disabled` and
-    // `.icon-btn.send.stop` had equal specificity and order was the difference
+    // and Stop were one element in two modes, `.mode-btn.send:disabled` and
+    // `.mode-btn.send.stop` had equal specificity and order was the difference
     // between a red stop button and a grey one wearing a stop glyph. Two
     // elements means no selector reaches both, so the tie cannot arise — and
     // this is the assertion that says so, since re-merging them would restore
@@ -225,7 +225,7 @@ describe('send/stop control styling', () => {
   it('does not animate either filled control', () => {
     // alice's call, and the right one: the fill says which button this is, so
     // easing it means the colour and the glyph disagree for the length of it.
-    for (const selector of ['.icon-btn.send', '.icon-btn.stop']) {
+    for (const selector of ['.mode-btn.send', '.mode-btn.stop']) {
       const rule = sendButtonRules().find((r) => r.selector === selector);
       expect(rule).toBeTruthy();
       expect(rule!.body).toMatch(/transition:\s*none/);
@@ -236,7 +236,7 @@ describe('send/stop control styling', () => {
     // iOS synthesizes :hover on tap and leaves it applied, so an unguarded
     // hover rule is worn by the last control the finger touched.
     //
-    // Every hover rule in the file, not only the ones on `.icon-btn`: the
+    // Every hover rule in the file, not only the ones on `.mode-btn`: the
     // attachment menu row and the chip's remove button were written outside
     // the guard and nothing reported it, since `lint:design` has no rule for
     // this. `web/AGENTS.md` states the invariant for the whole component.
@@ -251,8 +251,8 @@ describe('send/stop control styling', () => {
       props: { onSend: () => {}, onCancel: () => {}, busy: false },
     });
     const send = () =>
-      container.querySelector('.icon-btn.send:not([aria-label="Finish recording"])')!;
-    const stop = () => container.querySelector('.icon-btn.stop');
+      container.querySelector('.mode-btn.send:not([aria-label="Finish recording"])')!;
+    const stop = () => container.querySelector('.mode-btn.stop');
 
     expect(send().getAttribute('aria-label')).toBe('Send');
     expect(send().querySelector('svg')?.getAttribute('class')).toContain('arrow-up');
@@ -276,8 +276,8 @@ describe('send/stop control styling', () => {
     // Same condition the old mode carried: no `onCancel` prop, no Stop. A
     // button that cannot stop anything is worse than no button.
     const { container } = render(Composer, { props: { onSend: () => {}, busy: true } });
-    expect(container.querySelector('.icon-btn.stop')).toBeNull();
-    expect(container.querySelector('.icon-btn.send')).toBeTruthy();
+    expect(container.querySelector('.mode-btn.stop')).toBeNull();
+    expect(container.querySelector('.mode-btn.send')).toBeTruthy();
   });
 
   it('leaves Send where it was when Stop appears beside it', async () => {
@@ -352,7 +352,7 @@ describe('send/stop control styling', () => {
     });
     const field = container.querySelector('textarea')!;
     const send = container.querySelector<HTMLButtonElement>(
-      '.icon-btn.send:not([aria-label="Finish recording"])',
+      '.mode-btn.send:not([aria-label="Finish recording"])',
     )!;
     await fireEvent.input(field, { target: { value: 'one' } });
     await fireEvent.click(send);
@@ -376,7 +376,7 @@ describe('send/stop control styling', () => {
     await fireEvent.input(field, { target: { value: 'and another thing' } });
 
     const send = container.querySelector<HTMLButtonElement>(
-      '.icon-btn.send:not([aria-label="Finish recording"])',
+      '.mode-btn.send:not([aria-label="Finish recording"])',
     )!;
     expect(send.disabled).toBe(false);
     await fireEvent.click(send);
@@ -393,7 +393,7 @@ describe('send/stop control styling', () => {
     const field = container.querySelector('textarea')!;
     await fireEvent.input(field, { target: { value: 'second thought' } });
 
-    await fireEvent.click(container.querySelector('.icon-btn.stop')!);
+    await fireEvent.click(container.querySelector('.mode-btn.stop')!);
     expect(onCancel).toHaveBeenCalledTimes(1);
     expect(field.value).toBe('second thought');
 
@@ -411,7 +411,7 @@ describe('send/stop control styling', () => {
     await fireEvent.input(field, { target: { value: 'the eleventh' } });
 
     const send = container.querySelector<HTMLButtonElement>(
-      '.icon-btn.send:not([aria-label="Finish recording"])',
+      '.mode-btn.send:not([aria-label="Finish recording"])',
     )!;
     expect(send.disabled).toBe(true);
     expect(container.querySelector('.notice-row')?.textContent).toContain(
@@ -441,7 +441,7 @@ describe('send/stop control styling', () => {
 
     expect(container.querySelector('.notice-row')).toBeNull();
     const send = container.querySelector<HTMLButtonElement>(
-      '.icon-btn.send:not([aria-label="Finish recording"])',
+      '.mode-btn.send:not([aria-label="Finish recording"])',
     )!;
     expect(send.disabled).toBe(false);
     await fireEvent.click(send);

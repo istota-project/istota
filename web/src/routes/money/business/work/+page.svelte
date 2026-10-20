@@ -388,7 +388,7 @@
             ariaLabel="Period filter"
             widthChars={4}
           />
-          <Button variant="primary" onclick={openAdd}>Add entry</Button>
+          <Button variant="primary" class="add-entry" onclick={openAdd}>Add entry</Button>
           <KebabMenu
             items={workExportItems(periodFilter || undefined)}
             icon={Download}
@@ -513,7 +513,7 @@
 
   /* The one thing that does not give ground: a button truncated to "Add e…" is
      not a button, and it is the row's only action. */
-  .filters :global(.btn) {
+  .filters :global(.add-entry) {
     flex-shrink: 0;
   }
 

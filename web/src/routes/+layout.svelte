@@ -8,7 +8,15 @@
   import { Menu as MenuIcon, Sun, Moon } from '@lucide/svelte';
   import { getMe, AuthError, type User } from '$lib/api';
   import LogoutButton from '$lib/components/LogoutButton.svelte';
-  import { Icon, CountPill, Menu, LoadState, PageLoader, type MenuItem } from '$lib/components/ui';
+  import {
+    Button,
+    Icon,
+    CountPill,
+    Menu,
+    LoadState,
+    PageLoader,
+    type MenuItem,
+  } from '$lib/components/ui';
   import { NotificationBell } from '$lib/components/notifications';
   import { SearchButton, SearchDialog } from '$lib/components/search';
   import { theme, toggleTheme } from '$lib/stores/theme';
@@ -612,7 +620,9 @@
        ways a fresh one would not, and that is exactly when the prompt matters. -->
   <div class="update-toast" role="status">
     <span>A new version is available.</span>
-    <button type="button" onclick={() => location.reload()}>Reload</button>
+    <Button variant="primary" size="sm" class="toast-reload" onclick={() => location.reload()}
+      >Reload</Button
+    >
   </div>
 {/if}
 
@@ -649,14 +659,7 @@
   .update-toast span {
     text-wrap: balance;
   }
-  .update-toast button {
-    font: inherit;
-    border: none;
-    border-radius: var(--radius-pill);
-    padding: var(--space-1) var(--space-3);
-    background: var(--accent-blue);
-    color: var(--on-accent-fg);
-    cursor: pointer;
+  .update-toast :global(.toast-reload) {
     white-space: nowrap;
   }
 

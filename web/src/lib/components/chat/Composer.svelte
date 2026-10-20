@@ -188,7 +188,7 @@
   let fileInput: HTMLInputElement | undefined = $state();
   // Measured to derive the single-row field width — see wrapsAtSingleRowWidth.
   let rowEl: HTMLDivElement | undefined = $state();
-  let plusEl: HTMLButtonElement | undefined = $state();
+  let plusEl: HTMLElement | undefined = $state();
   let toolsEl: HTMLDivElement | undefined = $state();
   let wrapEl: HTMLDivElement | undefined = $state();
   let attachments = $state<ChatAttachment[]>([]);
@@ -1160,17 +1160,17 @@
 
   <div class="composer-row" class:multiline bind:this={rowEl}>
     {#snippet plusButton(props: Record<string, unknown>)}
-      <button
-        bind:this={plusEl}
+      <IconButton
+        bind:ref={plusEl}
         {...props}
-        class="icon-btn plus"
+        class="plus"
+        size="round"
+        tone="muted"
+        icon={Plus}
         onmousedown={keepFocus}
-        type="button"
-        aria-label="Attach file"
+        label="Attach file"
         title="Attach file"
-      >
-        <Plus />
-      </button>
+      />
     {/snippet}
     {#if pickersOffered}
       <Menu
@@ -1249,18 +1249,17 @@
     </div>
     <div class="tools" bind:this={toolsEl}>
       {#if recorder.recording}
-        <button
-          class="icon-btn"
+        <IconButton
+          size="round"
+          tone="muted"
+          icon={Trash2}
           onmousedown={keepFocus}
           onclick={() => recorder.cancel()}
-          type="button"
-          aria-label="Discard recording"
+          label="Discard recording"
           title="Discard recording"
-        >
-          <Trash2 />
-        </button>
+        />
         <button
-          class="icon-btn send"
+          class="mode-btn send"
           onmousedown={keepFocus}
           onclick={() => recorder.stop()}
           type="button"
@@ -1282,17 +1281,16 @@
              mount *between* mic and Send and displaced the mic by exactly this
              slot. -->
         {#if recorder.supported && !showStop}
-          <button
-            class="icon-btn"
+          <IconButton
+            size="round"
+            tone="muted"
+            icon={Mic}
             onmousedown={keepFocus}
             onclick={() => recorder.start()}
-            type="button"
             disabled={recorder.starting}
-            aria-label="Record voice message"
+            label="Record voice message"
             title="Record voice message"
-          >
-            <Mic />
-          </button>
+          />
         {/if}
         <!-- Two buttons, one meaning each, and Stop is the one that comes and
              goes. Sending flips `busy` synchronously inside the click handler,
@@ -1307,7 +1305,7 @@
              so it neither moves nor changes meaning mid-gesture. -->
         {#if showStop}
           <button
-            class="icon-btn stop"
+            class="mode-btn stop"
             onmousedown={keepFocus}
             onclick={() => onCancel?.()}
             type="button"
@@ -1318,7 +1316,7 @@
           </button>
         {/if}
         <button
-          class="icon-btn send"
+          class="mode-btn send"
           onmousedown={keepFocus}
           onclick={submit}
           type="button"
@@ -1378,7 +1376,7 @@
   /* Single line: [+] [text] [mic][send]. Once the text wraps it takes the full
 	   width on its own row and the controls fall underneath it — same elements,
 	   same handlers, just reordered. */
-  .plus {
+  .composer-row :global(.plus) {
     order: 0;
   }
   .ta-wrap {
@@ -1399,7 +1397,7 @@
     order: 0;
     flex-basis: 100%;
   }
-  .composer-row.multiline .plus {
+  .composer-row.multiline :global(.plus) {
     order: 1;
   }
   /* Both values live here, not just the active one: the wrap measurement reads
@@ -1471,7 +1469,10 @@
     }
   }
 
-  .icon-btn {
+  /* Send, Stop and Finish recording: the shape of `IconButton size="round"`,
+     drawn here because each one's fill is its mode (see the fill note below).
+     The plus, mic and discard are `IconButton size="round" tone="muted"`. */
+  .mode-btn {
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
@@ -1496,39 +1497,22 @@
   }
   /* Size the glyph in CSS rather than through lucide's `size` prop, which
 	   bakes a px number into the width/height attributes. */
-  .icon-btn :global(svg) {
+  .mode-btn :global(svg) {
     width: 1.25em;
     height: 1.25em;
   }
   /* Guarded, because iOS Safari synthesizes :hover on tap and leaves it applied
-     until a later tap displaces it — an unguarded hover fill is worn by the last
-     control the finger touched, for as long as it stays untouched.
-
-     This is the device half of the guard the message row uses, without its
-     gesture half (`.msg:not(.touch)`): a touchscreen laptop reports hover, so a
-     tap there still strands one. The send button carries the pair anyway, since
-     its guarded rule sets only `filter` and cannot contradict the mode. What
-     could still strand is the grey fill on the plus and mic — cosmetic, and it
-     would take plumbing a touch flag through this component to close. */
+     until a later tap displaces it. The filled controls brighten rather than
+     take a hover fill: a state may adjust a fill but never name it, so no
+     state can disagree with what the button is. The muted `IconButton`s beside
+     them carry the same guard on their own hover fill. */
   @media (hover: hover) {
-    /* The two exclusions are load-bearing, not tidiness: this rule outranks
-       `.icon-btn.send` and `.icon-btn.stop` by a class, so without them it
-       would grey out a filled control on hover — which is why a `.send:hover`
-       rule used to sit below re-asserting the blue, and that re-assertion is
-       what painted the *stop* button blue. Both filled controls need naming
-       now that they are two elements. See the fill note below. */
-    .icon-btn:not(.send):not(.stop):hover:not(:disabled) {
-      background: var(--surface-badge);
-      color: var(--accent-hover);
-    }
-    /* The filled controls brighten instead. A state may adjust a fill but
-       never name it, so no state can disagree with what the button is. */
-    .icon-btn.send:hover:not(:disabled),
-    .icon-btn.stop:hover {
+    .mode-btn.send:hover:not(:disabled),
+    .mode-btn.stop:hover {
       filter: brightness(1.12);
     }
   }
-  .icon-btn:disabled {
+  .mode-btn:disabled {
     opacity: 0.4;
     cursor: default;
   }
@@ -1545,12 +1529,12 @@
      decorating it, so easing it means the colour and the glyph state different
      things for the length of the ease — and a transition is also what invites
      the compositor promotion that leaves WebKit painting a stale layer. */
-  .icon-btn.send {
+  .mode-btn.send {
     background: var(--accent-blue);
     color: var(--on-accent-fg);
     transition: none;
   }
-  .icon-btn.send:disabled {
+  .mode-btn.send:disabled {
     background: var(--surface-badge);
     color: var(--text-muted);
     opacity: 1;
@@ -1559,7 +1543,7 @@
      stop — so it needs no `:disabled` variant, and nothing here can tie with
      one. A grey button under a stop glyph is the state this control is not
      allowed to be in; give it its own rule before ever disabling it. */
-  .icon-btn.stop {
+  .mode-btn.stop {
     background: var(--status-danger-fg);
     color: var(--on-accent-fg);
     transition: none;

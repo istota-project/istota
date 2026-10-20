@@ -195,7 +195,9 @@
     margin-block: 0;
   }
 
-  .ui-card > :global(.btn) {
+  /* A button or link placed straight in the card's column keeps its own width
+     rather than stretching across the card. */
+  .ui-card > :global(:where(button, a)) {
     align-self: flex-start;
   }
 
