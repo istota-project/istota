@@ -194,3 +194,32 @@ def test_a_kept_map_hands_the_signal_back_for_a_retry(db_path):
         wr._maybe_reload_for_signal()
 
     assert hash_token(tok) not in wr._token_map
+
+
+def test_deleting_a_user_revokes_their_row_tokens(db_path):
+    """The rows go with the profile, and the running receiver drops them on its next request."""
+    from istota import user_profiles
+
+    web_auth.upsert_identity(db_path, "alice", "alice@example.com", create_profile=True)
+    _, alice_tok = _mint(db_path, "alice", "app", DEVICE)
+    secrets_store.set_secret(db_path, "alice", "overland", "ingest_token", "alice-tok")
+    _, bob_tok = _mint(db_path, "bob")
+    # The user stays in config: a TOML-declared user outlives their profile row.
+    cfg = _make_config(db_path, {
+        "alice": UserConfig(display_name="Alice"),
+        "bob":   UserConfig(display_name="Bob"),
+    })
+    wr = _reload(cfg)
+    assert hash_token(alice_tok) in wr._token_map
+
+    assert user_profiles.delete_profile(db_path, "alice")
+
+    with db.get_db(db_path) as conn:
+        assert ingest_tokens.list_tokens(conn, "alice") == []
+        assert len(ingest_tokens.list_tokens(conn, "bob")) == 1
+    with patch.object(wr, "load_config", return_value=cfg):
+        wr._maybe_reload_for_signal()
+    assert hash_token(alice_tok) not in wr._token_map
+    assert hash_token("alice-tok") not in wr._token_map
+    assert secrets_store.get_secret(db_path, "alice", "overland", "ingest_token") is None
+    assert hash_token(bob_tok) in wr._token_map
