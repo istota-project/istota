@@ -564,9 +564,20 @@ def _reads_groups(func: ast.AST) -> bool:
     return False
 
 
-@functools.lru_cache(maxsize=None)
 def _parsed(root: Path) -> tuple:
-    # Parse once for the policy guard and its negative controls.
+    # Parse `src/` once for the policy guard. A control's planted tree is never
+    # cached: tmp paths are reused once a passed test's directory is removed.
+    if root == SRC:
+        return _parsed_src()
+    return _parse(root)
+
+
+@functools.lru_cache(maxsize=1)
+def _parsed_src() -> tuple:
+    return _parse(SRC)
+
+
+def _parse(root: Path) -> tuple:
     parsed = []
     for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))

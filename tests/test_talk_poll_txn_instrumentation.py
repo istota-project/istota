@@ -65,6 +65,7 @@ from istota.config import (
     Config,
     NextcloudConfig,
     SchedulerConfig,
+    SpeechGateConfig,
     TalkConfig,
     UserConfig,
 )
@@ -104,6 +105,10 @@ def config(db_path, tmp_path):
     )
     config.users = {"alice": UserConfig()}
     config.scheduler = SchedulerConfig()
+    # On the default classifier deployment `_classify_batch_ahead` fetches the
+    # roster before the results transaction opens, so the await this file
+    # measures becomes a cache hit and there is nothing left to measure.
+    config.speech_gate = SpeechGateConfig(mode="mention")
     return config
 
 

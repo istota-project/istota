@@ -217,6 +217,11 @@ class TestCollectionNeverRequiresDocker:
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 continue
+            # A script the tier copies into the container runs under its own
+            # main guard, which an import never enters.
+            if isinstance(node, ast.If) and ast.unparse(node.test) == "__name__ == '__main__'":
+                # Only the guarded body is exempt; an `else:` runs on import.
+                node = ast.Module(body=node.orelse, type_ignores=[])
             for inner in ast.walk(node):
                 if isinstance(inner, ast.Call):
                     name = ast.unparse(inner.func)
@@ -224,6 +229,23 @@ class TestCollectionNeverRequiresDocker:
                         offenders.append(f"line {inner.lineno}: {name}")
 
         assert not offenders, f"{module} shells out at import time: {offenders}"
+
+    def test_a_call_outside_the_main_guard_is_still_found(self, tmp_path, monkeypatch):
+        """The main-guard exemption is the guard's only hole; keep it that size."""
+        script = tmp_path / "script.py"
+        script.write_text(
+            "import subprocess\n"
+            "subprocess.run(['docker', 'info'])\n"
+            "if __name__ == '__main__':\n"
+            "    run()\n"
+            "else:\n"
+            "    subprocess.check_call(['docker', 'info'])\n"
+        )
+        monkeypatch.setattr(sys.modules[__name__], "IMAGE_TESTS", tmp_path)
+        with pytest.raises(AssertionError) as found:
+            self.test_no_module_level_subprocess_call("script.py")
+        assert "line 2: subprocess.run" in str(found.value)
+        assert "line 6: subprocess.check_call" in str(found.value)
 
 
 class TestPlatformResolution:

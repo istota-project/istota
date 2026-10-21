@@ -885,3 +885,12 @@ class TestTheDriverHeaderDescribesBothModes:
         own passes against a header that documents none of them.
         """
         assert "ISTOTA_LINUX_TIER_MODE=auto|native|container" in self._header()
+
+
+def test_the_console_script_shims_match_the_projects_scripts():
+    """The test image writes one shim per `[project.scripts]` entry; a list
+    that drifts leaves a new script missing or a renamed one raising KeyError."""
+    listed = re.search(r"for name in ([\w\s-]+?); do", DOCKERFILE.read_text())
+    assert listed, "the shim loop is gone from docker/test/Dockerfile"
+    scripts = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]["scripts"]
+    assert sorted(listed[1].split()) == sorted(scripts)

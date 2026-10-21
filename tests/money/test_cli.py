@@ -934,15 +934,15 @@ class TestInvoiceVoidRecord:
 
     @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_voiding_twice_says_when(self, mock_pdf, runner, tmp_path, invoicing_ctx):
-        from datetime import date as _date
-
         self._create(runner, tmp_path, invoicing_ctx)
-        _invoke(runner, ["invoice", "void", "INV-000001"], tmp_path=tmp_path, obj=invoicing_ctx)
+        voided = json.loads(_invoke(runner, ["invoice", "void", "INV-000001"],
+            tmp_path=tmp_path, obj=invoicing_ctx).output)
         result = _invoke(runner, ["invoice", "void", "INV-000001"],
             tmp_path=tmp_path, obj=invoicing_ctx)
         output = json.loads(result.output)
         assert output["status"] == "error"
-        assert output["error"].endswith(f"already voided on {_date.today().isoformat()}")
+        # The stored stamp is UTC; the local date differs from it near midnight.
+        assert output["error"].endswith(f"already voided on {voided['voided_at'][:10]}")
 
     @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_a_paid_voided_invoice_reports_it_was_paid(self, mock_pdf, runner, tmp_path, invoicing_ctx):

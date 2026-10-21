@@ -143,3 +143,23 @@ def test_the_routes_use_the_module_database(tmp_path):
     data_dir = resolve_for_user("alice", cfg).data_dir
     assert _counts(local) == {"work_entries": 1, "invoices": 1, "invoice_lines": 1}
     assert not (data_dir / "data" / "money.db").exists()
+
+
+def test_a_database_replaced_at_the_same_path_is_initialised_again(tmp_path):
+    """A memo keyed on the path alone said "done" for the replacement and left
+    it with no work tables (ISSUE-827: the Linux tier reuses a passed test's
+    tmp path, so the next parametrization's fresh money.db hit it)."""
+    from istota.money import work
+
+    data_dir = tmp_path / "money"
+    db_path = data_dir / "data" / "money.db"
+    work.add_work_entry(data_dir, "2026-01-02", "acme", "dev", qty=1, description="first")
+
+    held = tmp_path / "held.db"
+    db_path.rename(held)  # keeps the old inode alive, so the new file cannot reuse it
+    for sidecar in db_path.parent.glob("money.db-*"):
+        sidecar.unlink()
+    sqlite3.connect(db_path).close()
+
+    work.add_work_entry(data_dir, "2026-01-03", "acme", "dev", qty=1, description="second")
+    assert [e.description for e in work.load_work_entries(data_dir)] == ["second"]

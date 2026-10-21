@@ -106,6 +106,7 @@ class TestTreeBytes:
         assert du.first_level_dirs(bad) == []
         assert list(du.iter_tree(bad)) == []
 
+    @pytest.mark.requires_dac
     def test_an_unreadable_directory_is_reported_not_raised(self, tmp_path):
         locked = tmp_path / "locked"
         locked.mkdir()

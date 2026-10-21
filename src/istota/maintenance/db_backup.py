@@ -47,6 +47,7 @@ from datetime import date as _date
 from datetime import timedelta
 from pathlib import Path
 
+from istota.lib.atomic_write import write_bytes_atomic
 from istota.lib.workspace_marker import (
     FSTYPE_ENV, MARKER_NAME, marker_present, marker_required, undeclared_mount,
 )
@@ -285,12 +286,7 @@ def copy_config_files(config, date_str: str) -> Path | None:
         for source in _config_sources(config):
             if not source.is_file():
                 continue
-            tmp = dated / f".{source.name}.tmp"
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, _FILE_MODE)
-            with os.fdopen(fd, "wb") as out:
-                out.write(source.read_bytes())
-            os.chmod(tmp, _FILE_MODE)
-            os.replace(tmp, dated / source.name)
+            write_bytes_atomic(dated / source.name, source.read_bytes(), mode=_FILE_MODE)
     except OSError as exc:
         logger.error("db_backup config copy failed dir=%s err=%s", dated, exc)
         return None

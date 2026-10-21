@@ -1114,7 +1114,7 @@ run_local_layers() {
     after="$(env_get "$ENV_FILE" ISTOTA_IMAGE)"
     # A new image for daemon and web, or the browser's, which stack_up leaves
     # down on the app's VM until its layer exists.
-    if [ -n "$browser_built" ] && ! compose config --services 2>/dev/null | grep -qx browser; then
+    if [ -n "$browser_built" ] && ! compose config --services 2>/dev/null | grep -x browser >/dev/null; then
         browser_built=""
     fi
     if { [ "$after" != "$before" ] || [ -n "$browser_built" ]; } && [ -f "${CONFIG_DIR}/config.toml" ] \

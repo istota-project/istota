@@ -78,13 +78,10 @@ RUN uv sync --frozen --no-install-project --group dev --extra test
 # where the source arrives at run time (ISSUE-398).
 #
 # **The import path, and deliberately nothing else.** This writes no
-# `.dist-info` and no console scripts, so it is weaker than the `uv sync` a
-# deployment runs: `importlib.metadata.version("istota")` still raises here —
-# `cli._installed_version` is the fallback that exists for it — and
-# `istota-skill` is still absent from this image, so anything resolving the
-# package by console-script name rather than as
-# `[sys.executable, "-m", "istota.…"]` does not work in the tier and never did.
-# What it fixes is importability, which is the whole of what was broken.
+# `.dist-info`, so it is weaker than the `uv sync` a deployment runs:
+# `importlib.metadata.version("istota")` still raises here —
+# `cli._installed_version` is the fallback that exists for it. The console
+# scripts are written separately, below.
 #
 # Written by hand because the two halves happen at different times: `uv sync`
 # cannot install a project whose source is not in the build context, and the
@@ -125,6 +122,22 @@ assert str(target) in site.getsitepackages(), (target, site.getsitepackages()); 
 entry = target / '_istota_src.pth'; \
 entry.write_text('/src/src\n'); \
 assert entry.read_text() == '/src/src\n', entry"
+
+# The console scripts `[project.scripts]` names, as the shims an install would
+# write, because tests resolve `istota-skill` beside `sys.executable` and a
+# native task's Bash calls it by name (ISSUE-827). Each shim reads its target
+# from pyproject.toml at run time, through the same bind; the list of names is
+# fixed here and held to `[project.scripts]` by tests/test_linux_runner.py.
+RUN for name in istota istota-scheduler istota-skill; do \
+        printf '%s\n' '#!/venv/bin/python' \
+            'import sys, tomllib' \
+            "name = '${name}'" \
+            "target = tomllib.load(open('/src/pyproject.toml', 'rb'))['project']['scripts'][name]" \
+            "module, _, func = target.partition(':')" \
+            'sys.exit(getattr(__import__(module, fromlist=[func]), func)())' \
+            > "/venv/bin/${name}"; \
+        chmod 0755 "/venv/bin/${name}"; \
+    done
 
 # ruff is in [dependency-groups] dev as of ISSUE-301 and so already arrives in
 # /venv above. Keeping the tool install anyway is deliberate: /root/.local/bin

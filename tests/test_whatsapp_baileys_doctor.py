@@ -771,7 +771,9 @@ class TestThePairingRelayCheck:
         result = _run(cfg, "whatsapp.pairing_relay")
 
         assert result.status == doctor.OK
-        assert "0600 and private" in result.detail
+        # Root skips the ownership arm, so the check names the uid instead.
+        owner = "private" if os.geteuid() != 0 else f"owned by uid {os.geteuid()}"
+        assert f"0600 and {owner}" in result.detail
 
     def test_a_long_window_is_honoured_rather_than_a_fixed_number(self, tmp_path):
         """The staleness bound is the operator's `pairing_window_seconds`, so

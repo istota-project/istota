@@ -14,6 +14,7 @@ import tarfile
 
 from istota import db
 from istota.credentials import audit, kdbx_export
+from istota.lib.timestamps import iso_now
 from istota.notifications.resolvers import task_alert
 from istota.notifications.store import resolve_notification
 from istota.skills._loader import open_overlay_dir
@@ -197,7 +198,7 @@ def run_backup(config, user_id, *, today: date | None = None) -> BackupResult:
         previous = last_run(conn, user_id) or {}
         failures = int(previous.get("failures", 0)) + 1 if result.outcome == "error" else 0
         db.kv_set(conn, user_id, NAMESPACE, "last_run", json.dumps({
-            **asdict(result), "at": datetime.now(timezone.utc).isoformat(), "failures": failures,
+            **asdict(result), "at": iso_now(), "failures": failures,
         }))
         if summary:
             audit.record(conn, user_id, action="backup_export", actor="system",

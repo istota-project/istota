@@ -1609,7 +1609,10 @@ class TestBootstrapFiles:
     def test_terminal_setup_is_parsed_for_both_paths(self):
         """The server takes it as its own; the local install hands it to
         `istota-stack create`, whose default is the browser too (#732)."""
-        for mode in ("--server", "--local"):
+        # As root on Debian (the Linux tier's container) `--server` passes its
+        # own checks and starts installing, which this test must never do.
+        modes = ("--local",) if os.geteuid() == 0 else ("--server", "--local")
+        for mode in modes:
             # Parsed: the run gets as far as its own checks (root, the machine,
             # Lima, the tag) rather than refusing the flag.
             result = _run_installer_offline(mode, "--terminal-setup")

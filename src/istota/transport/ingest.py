@@ -366,7 +366,10 @@ def guest_prompt(label: str, host: str, text: str) -> str:
     )
 
 
-def classifier_refs(config, surface: str, surface_refs: Sequence[str]) -> set[str]:
+def classifier_refs(
+    config, surface: str, surface_refs: Sequence[str],
+    *, busy_timeout_ms: int | None = None,
+) -> set[str]:
     """The conversations among ``surface_refs`` whose room is on the classifier.
 
     For a batch pre-pass to drop the others before it fetches a roster for
@@ -374,13 +377,14 @@ def classifier_refs(config, surface: str, surface_refs: Sequence[str]) -> set[st
     then the room's effective mode), so the two cannot disagree; a read error
     keeps every ref on a classifier deployment, leaving `classify_ahead` to
     decide each one, and none on any other, where a roster fetch per
-    conversation would buy nothing on the common path.
+    conversation would buy nothing on the common path. A caller awaiting this
+    from an event loop passes its bounded ``busy_timeout_ms``.
     """
     refs = set(surface_refs)
     if not refs:
         return set()
     try:
-        with db.get_db(config.db_path) as conn:
+        with db.get_db(config.db_path, busy_timeout_ms=busy_timeout_ms) as conn:
             if not room_policy.classifier_in_use(conn, config.speech_gate.mode):
                 return set()
             on = set()

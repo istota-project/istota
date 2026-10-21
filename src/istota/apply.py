@@ -54,6 +54,7 @@ from typing import Callable
 
 from istota.config_editor.edits import diff_documents
 from istota.lib import toml_write
+from istota.lib.atomic_write import write_bytes_atomic
 
 EXIT_UNCHANGED = 0
 EXIT_ERROR = 1
@@ -337,21 +338,8 @@ def write_private(path: Path, text: str | bytes) -> None:
     A config can hold credentials, and a reader must never see half a file.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle, temporary = tempfile.mkstemp(prefix=".config.", dir=path.parent)
-    try:
-        if isinstance(text, bytes):
-            stream = os.fdopen(handle, "wb")
-        else:
-            stream = os.fdopen(handle, "w", encoding="utf-8")
-        with stream:
-            os.fchmod(stream.fileno(), 0o600)
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        Path(temporary).unlink(missing_ok=True)
-        raise
+    data = text if isinstance(text, bytes) else text.encode("utf-8")
+    write_bytes_atomic(path, data, mode=0o600, fsync=True)
 
 
 def _utc_now() -> datetime:
