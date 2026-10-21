@@ -948,8 +948,10 @@ def delete_profile(db_path: Path, user_id: str) -> bool:
     """Remove a profile row and the user's rows keyed on it. True if a profile row went.
 
     With it go the avatars, the WhatsApp binding, device tokens, quick note
-    keys and the managed-field record, and the account leaves the system
-    groups.
+    keys, location ingest tokens (with the legacy `overland` secret) and the
+    managed-field record, and the account
+    leaves the system groups. The location receiver is signalled to rebuild its
+    token map.
 
     The avatar delete rides this function's own connection, inside the same
     transaction. A *second* connection opened here would wait out the 30s busy
@@ -979,6 +981,15 @@ def delete_profile(db_path: Path, user_id: str) -> bool:
         # quick note idempotency keys name that user's files.
         conn.execute("DELETE FROM device_tokens WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM quick_note_keys WHERE user_id = ?", (user_id,))
+        # The same holds for location ingest tokens, per-device and the legacy
+        # shared secret, which would otherwise also come back to a user
+        # re-created under the same id.
+        conn.execute("DELETE FROM location_ingest_tokens WHERE user_id = ?", (user_id,))
+        from istota.credentials import store as secrets_store  # noqa: PLC0415
+
+        secrets_store.delete_secret(
+            db_path, user_id, "overland", "ingest_token", connection=conn,
+        )
         # A re-created user starts unlocked: the next `--managed` converge
         # records what it asserts again.
         set_managed_fields(conn, user_id, ())
@@ -987,7 +998,12 @@ def delete_profile(db_path: Path, user_id: str) -> bool:
         )
         from .groups.system import sync_account_membership
         sync_account_membership(conn, user_id, enabled=False)
-        return cur.rowcount > 0
+        removed = cur.rowcount > 0
+    from istota.location import ingest_signal  # noqa: PLC0415
+
+    # After the commit, so the receiver's rebuild cannot read the rows back.
+    ingest_signal.signal_reload(db_path)
+    return removed
 
 
 def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> None:
