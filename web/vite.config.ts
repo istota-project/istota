@@ -22,12 +22,14 @@ const DEV_PORT = 5173;
 // second runtime. Builds, `check` and tests always use the installed version.
 const minotDev = process.env.MINOT_DEV;
 const minotLib = minotDev ? path.resolve(minotDev, 'src/lib') : null;
-if (minotLib && !existsSync(minotLib)) {
-  throw new Error(`MINOT_DEV is set, but there is no src/lib at ${minotLib}`);
-}
 
 export default defineConfig(({ command }) => {
   const minot = command === 'serve' && minotDev && minotLib ? minotLib : null;
+  // Checked for the dev server only: a build never reads the alias, so a stale
+  // MINOT_DEV in the shell must not fail it.
+  if (minot && !existsSync(minot)) {
+    throw new Error(`MINOT_DEV is set, but there is no src/lib at ${minot}`);
+  }
   const server = useMock
     ? {}
     : {
