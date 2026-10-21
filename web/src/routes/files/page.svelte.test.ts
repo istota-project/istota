@@ -1350,6 +1350,54 @@ it('edits a text file in My files from its row and saves it', async () => {
   await waitFor(() => expect(api.getWorkspaceListing.mock.calls.length).toBe(loads + 1));
 });
 
+it('keeps the folder on screen while closing the editor refreshes it', async () => {
+  api.getWorkspaceTextFile.mockResolvedValue({
+    content: 'plan\n',
+    revision: 'rev-0',
+    exists: true,
+  });
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('link', { name: 'notes & drafts' }));
+  await openActions('plan #1.md');
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
+  await waitFor(() => expect(editorBox().value).toBe('plan\n'));
+  let finish!: (value: unknown) => void;
+  api.getWorkspaceListing.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+  const loads = api.getWorkspaceListing.mock.calls.length;
+  await fireEvent.click(screen.getAllByRole('button', { name: 'Close' }).at(-1)!);
+  await waitFor(() => expect(api.getWorkspaceListing.mock.calls.length).toBe(loads + 1));
+  expect(screen.queryByText('Loading folder…')).toBeNull();
+  expect(screen.getByText('plan #1.md')).toBeInTheDocument();
+  finish({
+    place: 'home',
+    path: 'notes & drafts',
+    entries: [entry('plan #1.md'), entry('later.md')],
+    truncated: false,
+    skipped_names: 0,
+  });
+  expect(await screen.findByText('later.md')).toBeInTheDocument();
+});
+
+it('keeps the folder when the refresh after closing the editor fails', async () => {
+  api.getWorkspaceTextFile.mockResolvedValue({
+    content: 'plan\n',
+    revision: 'rev-0',
+    exists: true,
+  });
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('link', { name: 'notes & drafts' }));
+  await openActions('plan #1.md');
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
+  await waitFor(() => expect(editorBox().value).toBe('plan\n'));
+  api.getWorkspaceListing.mockRejectedValueOnce(new Error('Folder not found.'));
+  const loads = api.getWorkspaceListing.mock.calls.length;
+  await fireEvent.click(screen.getAllByRole('button', { name: 'Close' }).at(-1)!);
+  await waitFor(() => expect(api.getWorkspaceListing.mock.calls.length).toBe(loads + 1));
+  await waitFor(() => expect(document.querySelector('.center-msg.error')).toBeNull());
+  expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  expect(screen.getByText('plan #1.md')).toBeInTheDocument();
+});
+
 it("shows the server's refusal when a file is not text", async () => {
   api.getWorkspaceTextFile.mockRejectedValue(new Error('Only text files can be edited here.'));
   render(Workspace);

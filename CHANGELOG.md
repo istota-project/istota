@@ -129,6 +129,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Closing the text editor on the Files page no longer makes the folder behind it disappear and load again from scratch. The listing stays on screen while it is re-read, and so it does after an upload or a new folder; a failed re-read is reported as a notice rather than replacing the folder.
 - Fields that suggest values as you type (the Wifi zone place search in Location settings, a briefing source's pickers, setup's model and welcome steps) now look like every other text field, in both themes, instead of the browser's own grey box.
 - The admin dashboard's task events view no longer shows a group room's task to an admin who is not in the group, matching the chat views. An admin can still stop such a task, from `!stop` or the web, so a runaway task stays within reach.
 - Stopping a task from the web, or removing its author from a group, now stops a running Claude Code task within a few seconds on the Docker stack. Before, the web container could only flag the task, and the task ran on until its current tool call finished, or to the end on the non-streaming path.

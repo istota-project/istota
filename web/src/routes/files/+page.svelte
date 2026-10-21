@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import { createDrawerClose } from '$lib/ui/drawerClose';
+  import { notifyError } from '$lib/stores/notices';
   import { base } from '$app/paths';
   import {
     Icon,
@@ -202,7 +203,7 @@
   }
   function closeTextEditor() {
     textEditorOpen = false;
-    if (selected) void loadFolder(selected);
+    void refreshFolder();
   }
   // The server's own refusal (not text, too large, a link) is what to show.
   function describeTextFileError(e: unknown): string | null {
@@ -303,7 +304,7 @@
     folderOpen = true;
   }
   async function refreshIfCurrent(path: string) {
-    if (active && selected?.place === 'home' && selected.path === path) await loadFolder(selected);
+    if (active && selected?.place === 'home' && selected.path === path) await refreshFolder();
   }
   async function createFolder() {
     await createWorkspaceFolder(folderPath, folderName.trim());
@@ -514,6 +515,28 @@
             : 'Could not load this folder.';
     } finally {
       if (current()) listingLoading = false;
+    }
+  }
+  // Re-reads the folder on screen after a change made from this page; the rows stay up meanwhile.
+  async function refreshFolder() {
+    const value = selected;
+    if (!value || !listing || listingLoading || value.place === 'drive') {
+      if (value) await loadFolder(value);
+      return;
+    }
+    const current = folderLoads.next();
+    try {
+      const result = await getWorkspaceListing(value.place, value.path);
+      if (!current()) return;
+      listing = result;
+      selected = { place: result.place, path: result.path };
+    } catch (e) {
+      if (current())
+        notifyError(
+          e instanceof Error && !(e instanceof TypeError)
+            ? e.message
+            : 'Could not refresh this folder.',
+        );
     }
   }
   async function load() {
