@@ -317,6 +317,7 @@ class TestTheRedirectAllowlist:
         import istota.webui.app as mod
 
         assert mod._post_login_target("settings") == "/istota/settings/connections"
+        assert mod._post_login_target("notes-new") == "/istota/notes/new/"
 
     @pytest.mark.parametrize("hostile", [
         "https://evil.example/",

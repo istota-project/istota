@@ -196,6 +196,24 @@ def validate_session_credential(db_path: Path, user_id: str, method: str, epoch:
     return identity
 
 
+def credential_still_valid(config, user_id: str, method: str | None, epoch: int | None) -> bool:
+    """Whether a credential recorded at enrolment is still live; a missing one fails closed.
+
+    For a row that outlives the web session it was made in (a push
+    registration, a device token): the session may have expired, but the
+    credential behind it must not have been revoked.
+    """
+    if method is None or epoch is None:
+        return False
+    if method == "none":
+        return config.web.has_method("none") and user_id == config.local_user_id
+    try:
+        validate_session_credential(config.db_path, user_id, method, epoch, config.web)
+        return True
+    except Exception:
+        return False
+
+
 def get_identity_by_email(db_path: Path, email: str) -> Identity | None:
     with get_db(db_path) as conn:
         return _identity(conn.execute("SELECT * FROM web_auth_identities WHERE email = ?", (normalize_email(email),)).fetchone())

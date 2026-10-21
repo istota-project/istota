@@ -337,6 +337,32 @@ describe('the root layout with a server that answered', () => {
     expect(readUser).not.toHaveBeenCalled();
     expect(screen.queryByText('Alice')).toBeNull();
   });
+
+  describe('where an expired session sends the browser', () => {
+    const original = Object.getOwnPropertyDescriptor(window, 'location')!;
+    let target: { href: string };
+
+    beforeEach(() => {
+      target = { href: '' };
+      Object.defineProperty(window, 'location', { value: target, configurable: true });
+    });
+    afterEach(() => Object.defineProperty(window, 'location', original));
+
+    it.each([
+      ['/notes/new/', '/login?next=notes-new'],
+      ['/notes/new', '/login?next=notes-new'],
+      ['/chat/', '/login'],
+      ['/notes/newer/', '/login'],
+    ])('from %s to %s', async (path, login) => {
+      page.url = new URL(`http://localhost${path}`);
+      const { AuthError } = await import('$lib/api');
+      getMe.mockRejectedValue(new AuthError());
+
+      render(Layout, { children });
+
+      await waitFor(() => expect(target.href).toBe(login));
+    });
+  });
 });
 
 describe('global search shortcuts', () => {
@@ -625,6 +651,25 @@ describe('native push lifecycle', () => {
     mounted.unmount();
     window.dispatchEvent(new Event('istotaPushOpen'));
     expect(plugin.consumePendingOpen).toHaveBeenCalledTimes(2);
+  });
+  it('releases the native action open listener at unmount', async () => {
+    useAgent('IstotaApp/0.13.0');
+    const actions = {
+      consumePendingOpen: vi.fn(async () => ({ open: null })),
+      status: vi.fn(async () => ({ deviceId: 'phone', scopes: [], tokenRejected: false })),
+      provision: vi.fn(async () => {}),
+      forget: vi.fn(async () => {}),
+    };
+    vi.stubGlobal('Capacitor', { Plugins: { IstotaActions: actions } });
+    getMe.mockResolvedValue(person());
+    const mounted = render(Layout, { children });
+    await screen.findByText('Alice');
+    await waitFor(() => expect(actions.consumePendingOpen).toHaveBeenCalledTimes(1));
+    window.dispatchEvent(new Event('istotaActionOpen'));
+    expect(actions.consumePendingOpen).toHaveBeenCalledTimes(2);
+    mounted.unmount();
+    window.dispatchEvent(new Event('istotaActionOpen'));
+    expect(actions.consumePendingOpen).toHaveBeenCalledTimes(2);
   });
   it('checks the push enrollment only after live authentication', async () => {
     const plugin = installPush();

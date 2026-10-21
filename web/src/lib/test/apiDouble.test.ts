@@ -75,6 +75,7 @@ describe('the $lib/api double', () => {
       'ConfigChangeError',
       'CredentialWriteError',
       'GroupApiError',
+      'QuickNoteError',
       'SetupApiError',
       'TextFileConflictError',
       'TextFileInvalidError',

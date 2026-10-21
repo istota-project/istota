@@ -964,6 +964,7 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     push_inbox_categories TEXT NOT NULL DEFAULT '{}',
     timezone_follow_location INTEGER NOT NULL DEFAULT 0, -- follow the GPS timezone on travel (opt-in; rewrites a user-chosen value)
     google_scopes TEXT NOT NULL DEFAULT '{}',            -- JSON object: Google service -> off|readonly|full (bounded by the operator's ceiling; {} = unset = the whole ceiling)
+    quick_notes_folder TEXT,                             -- folder below My files that quick notes are written to, no leading or trailing slash; NULL = unset
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -2769,6 +2770,39 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_location_ingest_tokens_device
     ON location_ingest_tokens(user_id, device_id) WHERE device_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_location_ingest_tokens_user
     ON location_ingest_tokens(user_id);
+
+-- Per-device bearer tokens for the shell's native actions, scoped by capability
+-- (istota.webui.device_tokens). Only the SHA-256 of a token is kept. `scopes` is
+-- space-separated and sorted. One row per (user_id, device_id): minting again
+-- replaces the token in place.
+CREATE TABLE IF NOT EXISTS device_tokens (
+    id INTEGER PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    token_tail TEXT NOT NULL,
+    scopes TEXT NOT NULL,
+    label TEXT,
+    -- The minting session's credential; a token whose credential was revoked
+    -- is refused, while the session's own expiry leaves it working.
+    auth_method TEXT,
+    auth_epoch INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at TEXT,
+    UNIQUE (user_id, device_id)
+);
+
+-- Idempotency keys for quick notes (istota.workspace.quick_notes). A key is
+-- claimed with `path` NULL before the file is written and given the file's
+-- path after, so a retried create replays rather than writing a second file.
+-- Rows older than 30 days are pruned on each create.
+CREATE TABLE IF NOT EXISTS quick_note_keys (
+    user_id TEXT NOT NULL,
+    client_note_id TEXT NOT NULL,
+    path TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, client_note_id)
+);
 
 -- Short-lived browser approvals; raw codes and verifiers are never persisted.
 CREATE TABLE IF NOT EXISTS web_mobile_auth_requests (

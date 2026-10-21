@@ -2061,6 +2061,58 @@ export function deleteLegacyIngestToken(): Promise<{ ok: boolean }> {
   return apiFetch('/location/devices/legacy', { method: 'DELETE' });
 }
 
+/** A capability a device token carries. `notes` lets the app save quick notes. */
+export type DeviceScope = 'notes';
+
+/**
+ * One phone's device token for native actions, as Settings → Devices lists it.
+ * Never the token itself; `token_tail` tells two rows apart. Separate from the
+ * location ingest tokens above, which a different process checks.
+ */
+export interface DeviceToken {
+  id: number;
+  /** The app's device UUID, upper-cased: the same id its location row carries. */
+  device_id: string;
+  label: string | null;
+  scopes: string[];
+  token_tail: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export interface CreatedDeviceToken {
+  id: number;
+  /** Returned once and never again; the server keeps only its hash. */
+  token: string;
+  scopes: string[];
+}
+
+export function listDevices(): Promise<{ devices: DeviceToken[] }> {
+  return apiFetch('/devices');
+}
+
+/**
+ * Mint this device's token, replacing any it had: the old token stops working
+ * the moment this answers. Refusals are `{error, code}`: `unknown_scope` (400),
+ * `notes_folder_unset` and `too_many_devices` (409).
+ */
+export function createDevice(req: {
+  device_id: string;
+  label?: string;
+  scopes: DeviceScope[];
+}): Promise<CreatedDeviceToken> {
+  return apiFetch('/devices', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+}
+
+/** Revoke one device's token from Settings. 404 for a row that is not the caller's. */
+export function deleteDevice(id: number): Promise<{ ok: boolean }> {
+  return apiFetch(`/devices/${id}`, { method: 'DELETE' });
+}
+
 // The basemap spec embeds the calling user's stored CARTO key in the tile URL,
 // so writing that key invalidates the cached spec. Without this, pasting a key
 // on /location/settings and navigating to /location is a client-side
@@ -2271,6 +2323,10 @@ export interface UserProfile {
   // `default` flag: a bare `talk` resolves per purpose, and each row says where
   // in its own surface label (ISSUE-475).
   talk_rooms?: TalkRoomOption[];
+  // Where a quick note is saved: a folder relative to My files (`Notes/Inbox`),
+  // null when unset. The folder need not exist yet; the first note creates it.
+  // A value the server cannot use is a 422 with `code: 'invalid_folder'`.
+  quick_notes_folder?: string | null;
 }
 
 export interface WebRoomOption {
@@ -6503,6 +6559,76 @@ async function putTextFile<T extends { revision: string }>(
   if (resp.status === 413 && typeof body.max_bytes === 'number')
     throw new Error(`Too long — the limit is ${Math.floor(body.max_bytes / 1024)} KB.`);
   throw new Error(await errorMessage(resp, body));
+}
+
+/** A quick note the server wrote. `path` is relative to My files. */
+export interface QuickNoteCreated {
+  path: string;
+  /** The file name, `Buy milk.md`. Fixed at creation. */
+  name: string;
+  /** Null on a replay whose file has since been moved or deleted. */
+  revision: string | null;
+  /** False when `client_note_id` replayed a note already written. */
+  created: boolean;
+}
+
+/**
+ * A quick note refusal with its stable `code`: `empty`, `too_large`,
+ * `notes_folder_unset`, `in_progress`, `outside_folder`, `invalid_folder`,
+ * `missing`, and the rest the server documents.
+ */
+export class QuickNoteError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'QuickNoteError';
+  }
+}
+
+async function quickNoteRequest<T>(method: 'POST' | 'PUT', payload: unknown): Promise<T> {
+  try {
+    return await apiFetch<T>('/workspace/notes', {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (e) {
+    if (e instanceof AuthError) throw e;
+    const status = (e as { status?: unknown }).status;
+    if (typeof status !== 'number') throw e;
+    const body = (e as { body?: { code?: unknown } | null }).body;
+    const code = typeof body?.code === 'string' ? body.code : '';
+    if (method === 'PUT' && code === 'conflict') throw new TextFileConflictError();
+    if (method === 'PUT' && code === 'locked') throw new TextFileLockedError();
+    throw new QuickNoteError(status, code, (e as Error).message);
+  }
+}
+
+/**
+ * Create a note in the quick notes folder. `clientNoteId` makes a retry after
+ * a lost response return the note already written instead of a second file.
+ */
+export function createQuickNote(content: string, clientNoteId?: string): Promise<QuickNoteCreated> {
+  return quickNoteRequest('POST', {
+    content,
+    ...(clientNoteId ? { client_note_id: clientNoteId } : {}),
+  });
+}
+
+/**
+ * Replace a quick note this editor created. A stale revision is a
+ * `TextFileConflictError`, a held lock a `TextFileLockedError`; the server
+ * never creates a file here.
+ */
+export function saveQuickNote(
+  path: string,
+  content: string,
+  revision: string,
+): Promise<{ revision: string }> {
+  return quickNoteRequest('PUT', { path, content, revision });
 }
 
 export interface GroupCapabilities {

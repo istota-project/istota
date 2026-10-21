@@ -6,22 +6,22 @@ token the in-app tracker minted for its own device id, unique per
 place. Kind `'code'` is a token shown once as a QR code or pasted into
 Overland, and each mint inserts a new row.
 
-The plaintext leaves `mint` once and is never stored. The tokens are 256-bit
-random values, so an unsalted SHA-256 is enough and lets the receiver look a
-presented token up by hash. The legacy shared `overland` / `ingest_token`
+The plaintext leaves `mint` once and is never stored. The token shape and its
+hash are `istota.lib.tokens`, shared with `istota.webui.device_tokens`; `hash_token`
+is re-exported here for the receiver and the tests. The legacy shared `overland` / `ingest_token`
 secret is not here; it stays in `secrets`.
 
 Separate from `istota.push.devices` on purpose: push rows belong to a web
 session and are deleted at logout, while an ingest token outlives sessions.
 """
 
-import hashlib
 import json
-import secrets
 import sqlite3
 from collections.abc import Iterable
 
 from istota.db import iso_utc_now
+from istota.lib.tokens import hash_token as hash_token
+from istota.lib.tokens import new_token
 
 MAX_TOKENS_PER_USER = 20
 KINDS = ("app", "code")
@@ -29,10 +29,6 @@ KINDS = ("app", "code")
 
 class TooManyDevices(Exception):
     """The user already holds `MAX_TOKENS_PER_USER` rows."""
-
-
-def hash_token(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def mint(
@@ -53,9 +49,7 @@ def mint(
     if device_id is not None:
         device_id = device_id.upper()
 
-    token = secrets.token_urlsafe(32)
-    token_hash = hash_token(token)
-    token_tail = token[-4:]
+    token, token_hash, token_tail = new_token()
     now = iso_utc_now()
 
     # The savepoint keeps the cap check and the write together, and a refusal

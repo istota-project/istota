@@ -2135,7 +2135,7 @@ def cmd_user_show(args):
 
 
 def cmd_user_remove(args):
-    """Remove a user_profiles row and the user's avatars. Nothing else."""
+    """Remove a user_profiles row and what `user_profiles.delete_profile` removes with it."""
     from . import user_profiles
 
     config = load_config(Path(args.config) if args.config else None)

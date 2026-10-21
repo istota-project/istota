@@ -19,10 +19,15 @@ from istota.transport import make_registry, parse_output_target
 
 
 def snapshot_profile(profile):
-    """Complete restorable fields; ownership, consent and enrollment stay local."""
-    return {"profile_mode": "update", "profile": {
-        name: deepcopy(getattr(profile, name)) for name in sorted(PROFILE_FIELDS)
-    }}
+    """Complete restorable fields; ownership, consent and enrollment stay local.
+
+    A plan cannot carry null, so an unset quick notes folder is written as the
+    '' that clears it.
+    """
+    fields = {name: deepcopy(getattr(profile, name)) for name in sorted(PROFILE_FIELDS)}
+    if fields["quick_notes_folder"] is None:
+        fields["quick_notes_folder"] = ""
+    return {"profile_mode": "update", "profile": fields}
 
 
 def _load_config(plan, context):
@@ -114,6 +119,14 @@ def _validate_profile(conn, config, user, fields, existing):
                     raise ValueError("unknown skill")
             elif name == "relay_delivery" and value not in user_profiles.RELAY_DELIVERY_VALUES:
                 raise ValueError("invalid relay preference")
+            elif name == "quick_notes_folder" and value and (
+                existing is None or value != existing.quick_notes_folder
+            ):
+                from istota.workspace.quick_notes import QuickNoteError, normalize_folder
+                try:
+                    normalize_folder(config, user, value)
+                except QuickNoteError:
+                    raise ValueError("invalid quick notes folder") from None
             elif name in {"log_channel", "alerts_channel"} and value:
                 if existing is None or value != getattr(existing, name):
                     validate_destination(conn, config, user, "talk:" + value)

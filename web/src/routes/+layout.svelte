@@ -31,6 +31,8 @@
   import { installKeyboardDismiss } from '$lib/platform/input';
   import { startPushBadgeSync } from '$lib/stores/pushBadge';
   import { startPushOpenHandling } from '$lib/platform/pushOpen';
+  import { startActionOpenHandling } from '$lib/platform/actionOpen';
+  import { syncDeviceActions } from '$lib/stores/deviceActions';
   import { refreshStaleEnrollment } from '$lib/platform/pushEnrollment';
   import { shellRunsServiceWorker } from '$lib/platform/native';
   import {
@@ -240,6 +242,7 @@
   const userLoads = latest();
   let stopPushBadge: (() => void) | undefined;
   let stopPushOpen: (() => void) | undefined;
+  let stopActionOpen: (() => void) | undefined;
   let pushEnrollmentChecked = false;
 
   /**
@@ -268,13 +271,25 @@
     stopNotificationPoll();
     stopPushBadge?.();
     stopPushOpen?.();
+    stopActionOpen?.();
     // The session is over, so the pointer that says whose cache to read before
     // the next one resolves goes with it (ISSUE-202). Whoever signs in next
     // writes their own on the first config read; until then a cold launch with
     // no connection reads nothing, which is the right answer when nobody is
     // signed in.
     forgetLastUserId();
-    window.location.href = `${base}/login`;
+    window.location.href = `${base}/login${postLoginQuery()}`;
+  }
+
+  /**
+   * The `?next=` key that brings the user back to this page after signing in.
+   * The server holds the table of keys; a page is listed here only when it
+   * can pick up where it left off (the note editor restores its draft).
+   */
+  function postLoginQuery(): string {
+    const path = page.url.pathname;
+    if (path === `${base}/notes/new` || path === `${base}/notes/new/`) return '?next=notes-new';
+    return '';
   }
 
   async function loadUser(): Promise<boolean> {
@@ -309,6 +324,8 @@
       startNotificationPoll();
       stopPushBadge ??= startPushBadgeSync();
       stopPushOpen ??= startPushOpenHandling();
+      stopActionOpen ??= startActionOpenHandling();
+      void syncDeviceActions();
       if (!pushEnrollmentChecked) {
         pushEnrollmentChecked = true;
         void refreshStaleEnrollment();
@@ -433,6 +450,7 @@
     stopNavUnreadPoll();
     stopPushBadge?.();
     stopPushOpen?.();
+    stopActionOpen?.();
   });
 
   function isActive(path: string): boolean {
@@ -611,6 +629,7 @@
           isActive('/health') ||
           isActive('/briefings') ||
           isActive('/admin') ||
+          isActive('/notes') ||
           isActive('/settings')}
       >
         {@render children()}

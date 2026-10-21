@@ -3397,6 +3397,180 @@ let mockLocationDeviceNextId = 2;
 const MOCK_LOCATION_DEVICE_CAP = 20;
 const MOCK_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Device tokens for native actions, as `GET /devices` lists them. */
+const mockDeviceTokens: Array<{
+  id: number;
+  device_id: string;
+  label: string | null;
+  scopes: string[];
+  token_tail: string;
+  created_at: string;
+  last_used_at: string | null;
+}> = [
+  {
+    id: 1,
+    device_id: '6F9619FF-8B86-D011-B42D-00C04FC964FF',
+    label: 'iPhone',
+    scopes: ['notes'],
+    token_tail: 'q7Lm',
+    created_at: new Date(Date.now() - 3 * 86400_000).toISOString(),
+    last_used_at: new Date(Date.now() - 2 * 3600_000).toISOString(),
+  },
+];
+
+// The profile handler's row, so the notes and device mocks see the folder it stores.
+let mockProfileRow: Record<string, unknown> = {};
+
+function mockNotesFolder(): string | null {
+  const folder = mockProfileRow.quick_notes_folder;
+  return typeof folder === 'string' && folder ? folder : null;
+}
+
+const MOCK_NOTES_FOLDER_UNSET = {
+  __status: 409,
+  error: 'Choose a quick notes folder first.',
+  code: 'notes_folder_unset',
+};
+
+function mockToken(): string {
+  return Array.from({ length: 43 }, () =>
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'.charAt(
+      Math.floor(Math.random() * 64),
+    ),
+  ).join('');
+}
+
+let mockDeviceTokenNextId = 2;
+
+const deviceTokensHandler: MockHandler = ({ url, method, body }) => {
+  const path = url.split('?')[0];
+  if (path === '/istota/api/devices' && method === 'GET') return { devices: mockDeviceTokens };
+  if (path === '/istota/api/devices' && method === 'POST') {
+    const req = (body ?? {}) as { device_id?: unknown; label?: unknown; scopes?: unknown };
+    if (typeof req.device_id !== 'string' || !MOCK_UUID.test(req.device_id)) {
+      return { __status: 400, error: 'device_id must be a UUID', code: 'invalid_body' };
+    }
+    const scopes = Array.isArray(req.scopes) ? req.scopes.filter((s) => typeof s === 'string') : [];
+    if (scopes.length === 0) {
+      return { __status: 400, error: 'scopes must be a non-empty list', code: 'invalid_scopes' };
+    }
+    const unknown = scopes.find((s) => s !== 'notes');
+    if (unknown)
+      return { __status: 400, error: `unknown scope: ${unknown}`, code: 'unknown_scope' };
+    if (scopes.includes('notes') && !mockNotesFolder()) return MOCK_NOTES_FOLDER_UNSET;
+    const deviceId = req.device_id.toUpperCase();
+    const token = mockToken();
+    const row = {
+      id: mockDeviceTokenNextId,
+      device_id: deviceId,
+      label: typeof req.label === 'string' && req.label.trim() ? req.label.trim() : 'iPhone',
+      scopes: [...new Set(scopes)].sort(),
+      token_tail: token.slice(-4),
+      created_at: new Date().toISOString(),
+      last_used_at: null,
+    };
+    const index = mockDeviceTokens.findIndex((d) => d.device_id === deviceId);
+    if (index >= 0) {
+      row.id = mockDeviceTokens[index].id;
+      mockDeviceTokens[index] = row;
+    } else {
+      mockDeviceTokenNextId += 1;
+      mockDeviceTokens.unshift(row);
+    }
+    return { __status: 201, id: row.id, token, scopes: row.scopes };
+  }
+  // The mock has no bearer to match, so a self-revocation removes nothing.
+  if (path === '/istota/api/devices/self' && method === 'DELETE') return { ok: true };
+  const m = path.match(/^\/istota\/api\/devices\/(\d+)$/);
+  if (m && method === 'DELETE') {
+    const index = mockDeviceTokens.findIndex((d) => d.id === Number(m[1]));
+    if (index < 0) return { __status: 404, detail: 'device not found' };
+    mockDeviceTokens.splice(index, 1);
+    return { ok: true };
+  }
+  return undefined;
+};
+
+/** Quick notes written through `/notes/new`, by path. Nothing reaches the mock workspace. */
+const mockQuickNotes = new Map<string, { content: string; revision: string }>();
+const mockQuickNoteKeys = new Map<string, string>();
+let mockQuickNoteRevision = 0;
+
+function mockNoteRevision(): string {
+  mockQuickNoteRevision += 1;
+  return `mock-rev-${mockQuickNoteRevision}`;
+}
+
+function mockNoteStem(content: string): string {
+  const first = content.split('\n').find((line) => line.trim()) ?? '';
+  const stem = first
+    .replace(/^\s*(?:#+|>|[-*+]|\d+[.)]|\[[ xX]\])\s+/, '')
+    .replace(/[/\\:*?"<>|]/g, '_')
+    .trim()
+    .slice(0, 60)
+    .trim();
+  if (/[\p{L}\p{N}]/u.test(stem)) return stem;
+  return new Date().toISOString().slice(0, 16).replace('T', ' ').replace(':', '.');
+}
+
+const quickNotesHandler: MockHandler = ({ url, method, body }) => {
+  if (url.split('?')[0] !== '/istota/api/workspace/notes') return undefined;
+  const req = (body ?? {}) as Record<string, unknown>;
+  if (method === 'POST') {
+    if (typeof req.content !== 'string') {
+      return { __status: 400, error: 'content is required', code: 'invalid_body' };
+    }
+    if (!req.content.trim()) return { __status: 422, error: 'The note is empty.', code: 'empty' };
+    const folder = mockNotesFolder();
+    if (!folder) return MOCK_NOTES_FOLDER_UNSET;
+    const key = typeof req.client_note_id === 'string' ? req.client_note_id : null;
+    const delivered = key ? mockQuickNoteKeys.get(key) : undefined;
+    if (delivered) {
+      const note = mockQuickNotes.get(delivered);
+      return {
+        path: delivered,
+        name: delivered.split('/').pop(),
+        revision: note?.revision ?? null,
+        created: false,
+      };
+    }
+    const stem = mockNoteStem(req.content);
+    let name = `${stem}.md`;
+    for (let n = 2; mockQuickNotes.has(`${folder}/${name}`); n += 1) name = `${stem} (${n}).md`;
+    const path = `${folder}/${name}`;
+    const revision = mockNoteRevision();
+    mockQuickNotes.set(path, { content: req.content, revision });
+    if (key) mockQuickNoteKeys.set(key, path);
+    return { __status: 201, path, name, revision, created: true };
+  }
+  if (method === 'PUT') {
+    if (typeof req.path !== 'string' || typeof req.content !== 'string') {
+      return {
+        __status: 400,
+        error: 'path, content and revision are required',
+        code: 'invalid_body',
+      };
+    }
+    const folder = mockNotesFolder();
+    if (!folder || req.path.split('/').slice(0, -1).join('/') !== folder) {
+      return {
+        __status: 403,
+        error: 'This note is not in your quick notes folder.',
+        code: 'outside_folder',
+      };
+    }
+    const note = mockQuickNotes.get(req.path);
+    if (!note) return { __status: 404, error: 'This note no longer exists.', code: 'missing' };
+    if (note.revision !== req.revision) {
+      return { __status: 409, error: 'This file changed since it was loaded.', code: 'conflict' };
+    }
+    note.content = req.content;
+    note.revision = mockNoteRevision();
+    return { revision: note.revision };
+  }
+  return undefined;
+};
+
 const locationDevicesHandler: MockHandler = ({ url, method, body }) => {
   const path = url.split('?')[0];
   if (!path.startsWith('/istota/api/location/devices')) return undefined;
@@ -8183,6 +8357,7 @@ const handlers: MockHandler[] = [
       briefing_email_html: true,
       timezone_follow_location: false,
       external_turn_display: 'collapsed',
+      quick_notes_folder: null,
       relay_delivery: '',
       relay_delivery_options: [
         { value: '', available: true },
@@ -8248,6 +8423,7 @@ const handlers: MockHandler[] = [
       },
       { type: 'karakeep', label: 'Karakeep bookmarks', needs_path: false, permissions: ['read'] },
     ];
+    mockProfileRow = mockProfile;
     return ({ url, method, body }: { url: string; method: string; body?: unknown }) => {
       if (url === '/istota/api/settings/profile' && method === 'GET') {
         return { profile: mockProfile };
@@ -9670,6 +9846,8 @@ const handlers: MockHandler[] = [
     };
   },
   locationDevicesHandler,
+  deviceTokensHandler,
+  quickNotesHandler,
 
   ({ url, method }) => {
     const path = url.split('?')[0];
