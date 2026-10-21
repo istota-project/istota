@@ -240,6 +240,7 @@ Not colors, but declared alongside them and read the same way: `--font-sans`, `-
 - `--surface-overlay` — chrome floating _over_ content: a feed card's title overlay, the fixed status badge, an autocomplete popover, jump-to-latest.
 - `--surface-reading` / `--text-reading` — a long-form reading pane (the chat transcript, the briefings reader) and its softened body text. The surface is card-colored in dark but pure white in light.
 - `--surface-reading-card` — a card inside a reading pane (a received mail, an external turn, the activity chip, a citation). Not `--surface-card`, which is the reading surface itself in dark, and not `--surface-badge`, the pill fill.
+- `--surface-stripe` — the shading on alternate table rows. Translucent, so one value reads on the base and the card surface alike. From a sibling app's copy of this design system, which stripes its tables; no istota table uses it yet.
 - `--border-hover` — one step stronger than `--border-default`, for the hover state of an interactive card or link-tile. Use it rather than a literal, or the hover affordance silently vanishes on white.
 
 For chrome that sits on a surface the theme does _not_ control: `--on-accent-fg` (text on a filled accent), `--on-scrim-fg` (text on a scrim that stays dark in both themes), `--scrim-pill-{bg,fg}` (a pill over media, which flips scrim direction), `--shimmer-tint`, `--shadow-overlay`. The first two are deliberately one value in both themes, like `--status-dot-*`.

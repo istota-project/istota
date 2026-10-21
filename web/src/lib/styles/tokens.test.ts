@@ -140,6 +140,22 @@ describe('theme parity', () => {
     for (const name of filters) expect(light, `${name} needs a light value`).toHaveProperty(name);
   });
 
+  it('carries the table stripe in the reusable sheet, translucent in both themes', () => {
+    // Ported from a sibling app's copy (its striped tables). Translucent rather
+    // than a grey step, so one value shades a row on the base and the card
+    // surface alike; a tint of the theme's own text colour, so it lightens in
+    // dark and darkens in light.
+    const reusableDark = declarations(REUSABLE, ':root');
+    const reusableLight = declarations(REUSABLE, ":root[data-theme='light']");
+    const alpha = (value: string) => Number(value.match(/,\s*([\d.]+)\)$/)?.[1]);
+    expect(reusableDark['--surface-stripe']).toMatch(/^rgba\(255, 255, 255, /);
+    expect(reusableLight['--surface-stripe']).toMatch(/^rgba\(0, 0, 0, /);
+    for (const value of [reusableDark['--surface-stripe'], reusableLight['--surface-stripe']]) {
+      expect(alpha(value)).toBeGreaterThan(0);
+      expect(alpha(value)).toBeLessThan(0.1);
+    }
+  });
+
   it('the light theme defines no token the dark theme lacks', () => {
     // A light-only token renders as nothing in dark, the same bug mirrored.
     expect(Object.keys(light).filter((name) => !(name in dark))).toEqual([]);

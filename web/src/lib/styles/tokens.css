@@ -51,6 +51,9 @@
 	   a mid grey on the white pane. About 11 levels off --surface-reading in
 	   both themes. */
   --surface-reading-card: #252525;
+  /* Alternating table-row shading. Translucent so it reads the same on the base
+	   and card surfaces. */
+  --surface-stripe: rgba(255, 255, 255, 0.03);
 
   /* Text */
   --text-primary: #e0e0e0;
@@ -443,6 +446,7 @@
 	   on the dark value. */
   --surface-media-placeholder: #f0f0f2;
   --surface-reading-card: #f4f4f5;
+  --surface-stripe: rgba(0, 0, 0, 0.03);
 
   /* Text */
   --text-primary: #1a1a1a;
