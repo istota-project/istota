@@ -236,6 +236,15 @@
       grid-template-rows: none;
     }
   }
+  /* One step roomier than Card's md padding at each of its breakpoints. */
+  .feature-grid > :global(.ui-card) {
+    padding: var(--space-6);
+  }
+  @media (max-width: 768px) {
+    .feature-grid > :global(.ui-card) {
+      padding: var(--space-4);
+    }
+  }
   /* A tile's title and description sit one step apart, not the card's gap. */
   .feature-grid :global(.feature-card) {
     gap: var(--space-1);
@@ -247,6 +256,9 @@
   @media (max-width: 640px) {
     .feature-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .feature-grid > :global(.ui-card) {
+      padding: var(--space-3);
     }
   }
   .feature-title {
