@@ -1,5 +1,6 @@
 import { base } from '$app/paths';
 import { goto } from '$app/navigation';
+import { chatRoomLink, isServerActionPath } from '$lib/api';
 import {
   actionsAvailable,
   consumeActionOpen,
@@ -30,11 +31,16 @@ function openPath(open: ActionOpen): string | null {
     const query = new URLSearchParams({ place: 'home', ...(folder ? { path: folder } : {}) });
     return `/files?${query}`;
   }
+  // The server resolves the token to the user's room, or lands on the chat
+  // page's default for a room that is gone or not theirs.
+  if (open.kind === 'room') return chatRoomLink(open.token) ?? '/chat';
   console.warn('[istota] Native action open has no known destination.');
   return null;
 }
 
-export function startActionOpenHandling(): () => void {
+export function startActionOpenHandling(
+  navigateServer: (path: string) => void = (path) => window.location.assign(path),
+): () => void {
   if (!actionsAvailable()) return () => {};
   let stopped = false;
   async function consume() {
@@ -42,7 +48,9 @@ export function startActionOpenHandling(): () => void {
       const open = await consumeActionOpen();
       if (stopped || !open) return;
       const path = openPath(open);
-      if (path) await goto(`${base}${path}`);
+      if (!path) return;
+      if (isServerActionPath(path)) navigateServer(`${base}${path}`);
+      else await goto(`${base}${path}`);
     } catch {
       console.warn('[istota] Could not open the pending native action.');
     }

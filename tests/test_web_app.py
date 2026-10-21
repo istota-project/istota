@@ -4413,6 +4413,33 @@ class TestProfileEndpoints:
         )).json()["profile"]
         assert p["unavailable_web_rooms"] == []
 
+    async def test_default_room_name_names_the_pinned_room(
+        self, tmp_path, client, app,
+    ):
+        """The iOS voice sheet's label: the room a recording would land in,
+        read without minting the pinned room's web view."""
+        from istota import db, user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.ensure_default_web_chat_room(conn, "alice")
+            db.register_room(conn, "conv-pin", "alice", origin="talk", name="crew")
+            db.add_room_member(conn, "conv-pin", "alice")
+        p = (await client.get(
+            "/istota/api/settings/profile", cookies=cookies,
+        )).json()["profile"]
+        assert p["default_room_name"] == "general"
+
+        user_profiles.update_profile(self._db_path, "alice", default_room="conv-pin")
+        p = (await client.get(
+            "/istota/api/settings/profile", cookies=cookies,
+        )).json()["profile"]
+        assert p["default_room_name"] == "crew"
+        with db.get_db(self._db_path) as conn:
+            assert "conv-pin" not in {h.token for h in db.list_web_chat_rooms(conn, "alice")}
+
     async def test_ignored_default_room_names_a_pin_that_has_gone_dead(
         self, tmp_path, client, app,
     ):

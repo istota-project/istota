@@ -4216,8 +4216,9 @@ def ensure_default_web_chat_room(
     # `general` while Talk delivered to the pinned room, which is the one thing
     # a surface-agnostic setting must not do. This is the entry point allowed to
     # provision, so it makes the view instead.
-    configured = configured_default_room(conn, user_id)
-    if configured is not None:
+    rung, found = _default_web_room_rung(conn, user_id)
+    if rung == "configured":
+        configured = found
         room = get_room(conn, configured)
         handle = ensure_web_chat_handle(
             conn, user_id, configured, room_display_name(room, None) or "Talk room",
@@ -4232,10 +4233,10 @@ def ensure_default_web_chat_room(
             handle = update_web_chat_room(conn, handle.id, archived=False) or handle
         undismiss_room(conn, configured, user_id)
         return handle
-    handle = default_web_room(conn, user_id)
-    if handle is not None:
-        return handle
-    for room in _default_room_candidates(conn, user_id):
+    if rung == "handle":
+        return found
+    if rung == "candidate":
+        room = found
         handle = ensure_web_chat_handle(
             conn, user_id, room.token, room.name or "Talk room",
         )
@@ -4248,6 +4249,46 @@ def ensure_default_web_chat_room(
             handle = update_web_chat_room(conn, handle.id, archived=False) or handle
         return handle
     return create_web_chat_room(conn, user_id, "general")
+
+
+def _default_web_room_rung(conn: sqlite3.Connection, user_id: str) -> tuple[str, object]:
+    """Which rung of `ensure_default_web_chat_room` answers, without writing.
+
+    ``("configured", token)``, ``("handle", WebChatRoom)``, ``("candidate",
+    Room)`` or ``("create", None)``. Split out so `default_web_chat_room_name`
+    reads the same ladder the provisioning entry point walks.
+    """
+    configured = configured_default_room(conn, user_id)
+    if configured is not None:
+        return "configured", configured
+    handle = default_web_room(conn, user_id)
+    if handle is not None:
+        return "handle", handle
+    for room in _default_room_candidates(conn, user_id):
+        return "candidate", room
+    return "create", None
+
+
+def default_web_chat_room_name(conn: sqlite3.Connection, user_id: str) -> str:
+    """The name of the room `ensure_default_web_chat_room` would return. Creates nothing.
+
+    A label for the iOS voice sheet, which shows where a recording will go
+    before it is sent. The room the voice route resolves at send time is the
+    one the recording goes to; this only names it in advance.
+    """
+    rung, found = _default_web_room_rung(conn, user_id)
+    if rung == "configured":
+        handle = None
+        for candidate in list_web_chat_rooms(conn, user_id, include_archived=True):
+            if candidate.token == found:
+                handle = candidate
+                break
+        return room_display_name(get_room(conn, found), handle) or "Talk room"
+    if rung == "handle":
+        return room_display_name(get_room(conn, found.token), found) or "general"
+    if rung == "candidate":
+        return found.name or "Talk room"
+    return "general"
 
 
 def default_web_room(
@@ -6418,10 +6459,17 @@ def add_message(
 
 
 def find_send_by_client_msg_id(
-    conn: sqlite3.Connection, room_token: str, client_msg_id: str
-) -> tuple[int, int | None, str | None] | None:
-    """``(message_id, task_id, sender)`` for a stored send under this key in
-    this room, or None.
+    conn: sqlite3.Connection, room_token: str | None, client_msg_id: str,
+    *, sender: str | None = None,
+) -> tuple[int, int | None, str | None, str] | None:
+    """``(message_id, task_id, sender, room_token)`` for a stored send under
+    this key in this room, or None.
+
+    With ``room_token`` None the lookup is ``sender``'s own sends in any room,
+    oldest first: a client whose destination room is the server's choice
+    (the voice route) retries into whatever room is current, so its replay
+    has to find the key wherever the first attempt landed. ``sender`` is
+    required then, since across rooms a key is only meaningful per author.
 
     ``task_id`` is None for a turn the room recorded without answering, and for
     one whose task retention has since deleted; the sender then comes off the
@@ -6442,18 +6490,28 @@ def find_send_by_client_msg_id(
     """
     if not client_msg_id:
         return None
-    row = conn.execute(
-        "SELECT m.id, t.id AS task_id, "
+    select = (
+        "SELECT m.id, m.room_token, t.id AS task_id, "
         "COALESCE(t.user_id, m.author_user_id) AS sender FROM messages m "
         "LEFT JOIN tasks t ON t.id = m.task_id "
-        "WHERE m.room_token = ? AND m.client_msg_id = ? "
-        "LIMIT 1",
-        (room_token, client_msg_id),
-    ).fetchone()
+    )
+    if room_token is not None:
+        row = conn.execute(
+            select + "WHERE m.room_token = ? AND m.client_msg_id = ? LIMIT 1",
+            (room_token, client_msg_id),
+        ).fetchone()
+    elif sender:
+        row = conn.execute(
+            select + "WHERE m.client_msg_id = ? "
+            "AND COALESCE(t.user_id, m.author_user_id) = ? ORDER BY m.id LIMIT 1",
+            (client_msg_id, sender),
+        ).fetchone()
+    else:
+        raise ValueError("a lookup across rooms needs a sender")
     if row is None:
         return None
     task_id = int(row["task_id"]) if row["task_id"] is not None else None
-    return int(row["id"]), task_id, row["sender"]
+    return int(row["id"]), task_id, row["sender"], row["room_token"]
 
 
 def find_confirmation_exchange(

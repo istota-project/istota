@@ -299,6 +299,7 @@ A **Browsers** page lists each live browser instance (user, slot, idle time) and
 | `/istota/api/chat/tasks/{id}/confirm` · `/cancel` | Confirm / cancel a chat task. Confirm takes an optional `{"room": <token>}`; a relay question, room post or guest proposal needs the private room showing its preview |
 | `/istota/chat/r/{room}` · `/istota/chat/r/{room}/t/{task}` | Deep link from a notification: redirects to that room (and task) for a member, else to the chat page |
 | `/istota/api/chat/attachments` | Attachment upload (multipart, one file per request) |
+| `/istota/api/chat/voice` | The iOS app's voice task: one recording (multipart `file` and `client_msg_id`) sent into the user's default room as an attachment-only message. Takes the session or a device token with the `voice` scope; a retry under the same key answers 200 with `replay: true` and stores nothing |
 | `/istota/api/notifications/count` | Bell badge: `{"open": N, "actionable": M}`. Plain SQL, no resolver pass — the layout polls it every 30s from every route |
 | `/istota/api/notifications` | The panel's rendered rows plus `total_open`; `?filter=` and `?limit=` |
 | `/istota/api/notifications/{id}/dismiss` | Close one row. Another user's row is a 404, never a 403 |

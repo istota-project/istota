@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Voice tasks from the iOS app.** The server now accepts a recording from the Istota iOS app (0.14.0 and later) and sends it into your default room as a voice message, which starts a task like any other. The app is given permission to do this automatically, and Settings → Devices lists it as "Voice tasks", where it can be revoked. Older apps and browsers are unchanged.
 - **Quick notes.** Settings → Preferences has a Quick notes folder, and New note (at `/notes/new/`, and in the installed web app's icon menu) opens an editor with nothing to fill in but the text. The note saves as you type, is named by its first line, and stays in the browser until the server has it, so going offline or being signed out loses nothing; signing back in returns you to the note.
 - **Zoom PDF pages.** In the file viewer a PDF page now zooms with a pinch, a double tap, Ctrl+wheel or a trackpad pinch, the `+`, `-` and `0` keys, or the zoom buttons, and the page is drawn again sharp at the new size. It works in the iOS app, where the page itself cannot zoom, and a new page now opens at its top.
 - **A static site at the root.** Set `SITE_DIR` in `host.env` to a directory of your own and the stack's nginx serves it read-only at `/` instead of redirecting to the web UI; `/istota/` and the webhooks are unchanged. Only nginx mounts it, and `istota-stack` refuses a directory that overlaps one the stack writes. See docs/deployment/running-the-stack.md.

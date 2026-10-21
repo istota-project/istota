@@ -540,3 +540,48 @@ class TestTheBackfillLeavesTalkAlone:
             assert conn.execute(
                 "SELECT 1 FROM _migration_state WHERE name = 'default_room_v1'"
             ).fetchone() is not None
+
+
+class TestTheDefaultRoomNameReadsTheSameLadder:
+    """`default_web_chat_room_name` labels the iOS voice sheet with the room the
+    voice route will resolve. Each rung is checked against what
+    `ensure_default_web_chat_room` then returns, and the name read writes nothing."""
+
+    def _handles(self, conn):
+        return conn.execute("SELECT COUNT(*) FROM web_chat_rooms").fetchone()[0]
+
+    def _assert_names_what_ensure_returns(self, conn, expected):
+        before = self._handles(conn)
+        assert db.default_web_chat_room_name(conn, "alice") == expected
+        assert self._handles(conn) == before
+        handle = db.ensure_default_web_chat_room(conn, "alice")
+        assert db.room_display_name(db.get_room(conn, handle.token), handle) == expected
+
+    def test_no_rooms_names_the_general_room_it_would_create(self, tmp_path):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            self._assert_names_what_ensure_returns(conn, "general")
+
+    def test_the_heuristic_handle(self, tmp_path):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            _own_room(conn, "alice", "room-first", "inbox")
+            _own_room(conn, "alice", "room-second", "later")
+            self._assert_names_what_ensure_returns(conn, "inbox")
+
+    def test_a_member_room_with_no_web_view_yet(self, tmp_path):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "conv-talk", "alice", origin="talk", name="crew")
+            db.add_room_member(conn, "conv-talk", "alice")
+            self._assert_names_what_ensure_returns(conn, "crew")
+
+    def test_the_configured_room_over_the_heuristic(self, tmp_path):
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            db.ensure_default_web_chat_room(conn, "alice")
+            db.register_room(conn, "conv-pinned", "alice", origin="talk", name="voice")
+            db.add_room_member(conn, "conv-pinned", "alice")
+        _set_default_room(config, "alice", "conv-pinned")
+        with db.get_db(config.db_path) as conn:
+            self._assert_names_what_ensure_returns(conn, "voice")
