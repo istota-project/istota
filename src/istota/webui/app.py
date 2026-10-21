@@ -4894,8 +4894,10 @@ def _room_snapshot(username: str) -> dict[str, dict]:
 
     Unread counts are deliberately NOT part of the snapshot: they change on
     every message, which is exactly what the `message` frames already carry.
+    Nor is `policy`: reading it can record a lost host, a write (ISSUE-819).
     """
     from istota import db
+    from istota.groups.rooms import managed_by as group_managed_by
     with db.get_db(
         _config.db_path, busy_timeout_ms=_ROOM_STREAM_BUSY_TIMEOUT_MS,
     ) as conn:
@@ -4944,6 +4946,10 @@ def _room_snapshot(username: str) -> dict[str, dict]:
                 # Per-user like `color`, and carried for the same reason: a
                 # thread listed or hidden in one tab has to reach the other.
                 "listed": handle.listed,
+                # The two plain reads of `_room_sharing`, so a group room made
+                # on another device shows its group without the 30s poll.
+                "shared": db.room_is_shared(conn, r.token),
+                "managed_by": group_managed_by(conn, r, username),
             }
     return out
 

@@ -448,6 +448,39 @@ class TestRoomSnapshotAndDelta:
         snap = mod._room_snapshot("alice")
         assert snap["web-alice-1"]["color"] == "teal"
 
+    def test_snapshot_carries_managed_by_and_shared_but_not_policy(self, tmp_path):
+        """ISSUE-819. The client adopts these from the frame, so a group room
+        made on another device locks its settings without waiting for the 30s
+        poll. `policy` stays out: reading it can record a lost host,
+        a write this read-only path must not make."""
+        import istota.webui.app as mod
+        config = _make_config(tmp_path)
+        _patch_app(config)
+        with db.get_db(config.db_path) as conn:
+            db.create_group(conn, "fam", kind="family", display_name="Fam",
+                            created_by="operator")
+            db.add_group_member(conn, "fam", "alice", role="owner", added_by="operator")
+            db.add_group_member(conn, "fam", "bob", added_by="operator")
+            token = db.create_web_chat_room(conn, "alice", "Planning").token
+            db.add_web_room_member(conn, token, "bob")
+            db.ensure_web_chat_handle(conn, "bob", token, "Planning")
+            plain = db.create_web_chat_room(conn, "alice", "Solo").token
+        before = mod._room_snapshot("bob")
+        assert before[token]["shared"] is True
+        assert before[token]["managed_by"] is None
+        assert "policy" not in before[token]
+        assert mod._room_snapshot("alice")[plain]["shared"] is False
+        with db.get_db(config.db_path) as conn:
+            db.set_room_group(conn, token, "fam")
+            db.set_room_membership_source(conn, token, "group")
+        after = mod._room_snapshot("bob")
+        assert after[token]["managed_by"]["group_id"] == "fam"
+        assert after[token]["managed_by"]["is_owner"] is False
+        assert mod._room_snapshot("alice")[token]["managed_by"]["is_owner"] is True
+        frames = mod._room_delta_frames(before, after)
+        assert [f for f in frames if f.get("action") == "upsert"
+                and f["room"]["managed_by"]["group_id"] == "fam"]
+
     def test_a_colour_change_produces_a_delta_frame(self, tmp_path):
         """The half the snapshot key exists for: `_room_delta_frames` compares
         whole dicts, so carrying the key is exactly what makes the change
