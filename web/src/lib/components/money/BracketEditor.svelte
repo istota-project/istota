@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { Button, EmptyState, IconButton, Input } from '$lib/components/ui';
+  import { Button, EmptyState, IconButton, Input } from '@minot/ui';
   import { Plus, X } from '@lucide/svelte';
 
   // A repeating threshold/rate row list. A flat state is one row, so it needs

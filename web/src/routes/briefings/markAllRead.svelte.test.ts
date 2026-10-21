@@ -13,7 +13,7 @@ import {
   briefingsRefreshNonce,
 } from '$lib/stores/briefings';
 import { navUnreadCounts, startNavUnreadPoll, stopNavUnreadPoll } from '$lib/stores/navUnread';
-import { clearNotices } from '$lib/stores/notices';
+import { clearNotices } from '@minot/ui/stores/notices';
 import Page from './+page.svelte';
 import Layout from './+layout.svelte';
 import HeaderSavePage from './headerSave.test.svelte';

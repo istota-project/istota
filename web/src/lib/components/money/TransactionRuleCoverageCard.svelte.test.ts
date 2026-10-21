@@ -8,7 +8,7 @@ vi.mock('$lib/money/api', () => ({
   getTransactionRuleCoverage: vi.fn(),
 }));
 
-vi.mock('$lib/stores/notices', () => ({
+vi.mock('@minot/ui/stores/notices', () => ({
   notifyError: vi.fn(),
   notifyInfo: vi.fn(),
   notifySuccess: vi.fn(),

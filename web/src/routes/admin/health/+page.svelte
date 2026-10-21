@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { getAdminDoctor, type DoctorCheck, type DoctorReport } from '$lib/api';
   import { waitForDoctorRun } from '$lib/doctorRun';
-  import { notifyError } from '$lib/stores/notices';
+  import { notifyError } from '@minot/ui/stores/notices';
   import {
     Alert,
     Badge,
@@ -12,7 +12,7 @@
     LoadState,
     StatusDot,
     Timestamp,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
 
   let report = $state<DoctorReport | null>(null);
   let loading = $state(true);

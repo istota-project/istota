@@ -1,4 +1,4 @@
-import type { SelectOption } from '$lib/components/ui';
+import type { SelectOption } from '@minot/ui';
 import type { TransactionRule } from './api';
 
 /**

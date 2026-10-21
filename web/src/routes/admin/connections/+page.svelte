@@ -15,16 +15,9 @@
     type AdminServarrConnection,
     type AdminWhatsAppConnection,
   } from '$lib/api';
-  import {
-    Alert,
-    Button,
-    ConfirmDialog,
-    Disclosure,
-    EmptyState,
-    LoadState,
-  } from '$lib/components/ui';
-  import { notifyError, notifyWarning } from '$lib/stores/notices';
-  import { latest } from '$lib/ui/latest';
+  import { Alert, Button, ConfirmDialog, Disclosure, EmptyState, LoadState } from '@minot/ui';
+  import { notifyError, notifyWarning } from '@minot/ui/stores/notices';
+  import { latest } from '@minot/ui/ui/latest';
   import { MessageCircle } from '@lucide/svelte';
   import ConnectionCard from './ConnectionCard.svelte';
   import NextcloudCard from './NextcloudCard.svelte';

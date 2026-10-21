@@ -1,7 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { page } from '$app/state';
-  import { HeaderNav, Select } from '$lib/components/ui';
+  import { HeaderNav, Select } from '@minot/ui';
   import {
     portfolioGroup,
     portfolioGroupBy,

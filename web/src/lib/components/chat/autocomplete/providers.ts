@@ -6,7 +6,7 @@
 import { fetchChatCommands, type ChatCommands, type SelectableBrain } from '$lib/api';
 import type { CompletionProvider, Suggestion } from './types';
 import { codeRanges, inCode, mentionText } from '$lib/mentions';
-import { latest } from '$lib/ui/latest';
+import { latest } from '@minot/ui/ui/latest';
 
 const EMPTY: ChatCommands = { commands: [], model_aliases: [], selectable_brains: [] };
 

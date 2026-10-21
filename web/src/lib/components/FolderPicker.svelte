@@ -21,8 +21,8 @@
     ListRow,
     LoadState,
     Modal,
-  } from '$lib/components/ui';
-  import { latest } from '$lib/ui/latest';
+  } from '@minot/ui';
+  import { latest } from '@minot/ui/ui/latest';
 
   interface Props {
     open: boolean;

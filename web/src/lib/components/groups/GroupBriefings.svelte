@@ -2,9 +2,9 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { Newspaper } from '@lucide/svelte';
-  import { Icon, Button, EmptyState, Card } from '$lib/components/ui';
+  import { Icon, Button, EmptyState, Card } from '@minot/ui';
   import { getGroupBriefings, type GroupBriefingDefinition } from '$lib/api';
-  import { formatDateTime } from '$lib/dateFormat';
+  import { formatDateTime } from '@minot/ui/dateFormat';
 
   // An index into Briefings, which owns reading, editing and delivery choices.
   let { groupId, canAuthor }: { groupId: string; canAuthor: boolean } = $props();

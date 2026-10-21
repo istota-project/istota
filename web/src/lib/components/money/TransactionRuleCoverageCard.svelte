@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { latest } from '$lib/ui/latest';
+  import { latest } from '@minot/ui/ui/latest';
   import { onMount } from 'svelte';
-  import { Badge, EmptyState, Select, Card, LoadState } from '$lib/components/ui';
+  import { Badge, EmptyState, Select, Card, LoadState } from '@minot/ui';
   import { getTransactionRuleCoverage, type RuleCoverageValue } from '$lib/money/api';
 
   // What recent imports actually carried, and where each value went. The list

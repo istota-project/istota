@@ -4,7 +4,7 @@
   import { AuthError, listDevices, type DevicesResponse } from '$lib/api';
   import { DeviceTokensCard, SettingsLayout } from '$lib/components/settings';
   import { getCurrentUser } from '$lib/userContext';
-  import { latest } from '$lib/ui/latest';
+  import { latest } from '@minot/ui/ui/latest';
   import { actionsStatus } from '$lib/platform/nativeActions';
 
   const identity = getCurrentUser();

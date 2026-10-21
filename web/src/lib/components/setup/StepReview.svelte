@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { SetupModelDefaults } from '$lib/api';
-  import { Button } from '$lib/components/ui';
+  import { Button } from '@minot/ui';
   import {
     BROWSER_PROFILE,
     applyFeatureDefaults,

@@ -15,7 +15,7 @@ vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
 
 import FeedCard from './FeedCard.svelte';
-import { currentNotice, clearNotices } from '$lib/stores/notices';
+import { currentNotice, clearNotices } from '@minot/ui/stores/notices';
 
 beforeEach(() => {
   api.updateEntryStarred.mockReset();

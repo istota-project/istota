@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { KEY_RE, KEY_HINT, type ServiceRow, type ServiceInput } from '$lib/money/api';
-  import { FormModal, Select, type SelectOption, Field, Input } from '$lib/components/ui';
+  import { FormModal, Select, type SelectOption, Field, Input } from '@minot/ui';
 
   /**
    * Create/edit form for a billable service.

@@ -17,7 +17,7 @@
     Checkbox,
     Select,
     Timestamp,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import GroupMembers from '$lib/components/groups/GroupMembers.svelte';
   import {
@@ -33,8 +33,8 @@
   } from '$lib/api';
   import { getCurrentUser } from '$lib/userContext';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
-  import { latest } from '$lib/ui/latest';
-  import { notifyError } from '$lib/stores/notices';
+  import { latest } from '@minot/ui/ui/latest';
+  import { notifyError } from '@minot/ui/stores/notices';
 
   const current = getCurrentUser();
   let groups = $state<AdminGroupSummary[]>([]);

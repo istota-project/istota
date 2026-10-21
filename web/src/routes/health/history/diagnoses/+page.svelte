@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import {
@@ -31,16 +31,16 @@
     Chip,
     LoadState,
     PageHeader,
-  } from '$lib/components/ui';
+    getShellScrollRoot,
+  } from '@minot/ui';
   import {
     encounterOptionLabel,
     linkableEncounterOptions,
     resolveById,
   } from '$lib/health/conditions';
   import DocumentList from '$lib/components/health/DocumentList.svelte';
-  import { getShellScrollRoot } from '$lib/components/ui/AppShell.svelte';
   import { Paperclip } from '@lucide/svelte';
-  import { formatDate, localDateISO } from '$lib/dateFormat';
+  import { formatDate, localDateISO } from '@minot/ui/dateFormat';
 
   const getScrollRoot = getShellScrollRoot();
 

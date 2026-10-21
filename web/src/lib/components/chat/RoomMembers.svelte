@@ -16,7 +16,7 @@
     type DirectoryUser,
     type RoomMembers,
   } from '$lib/api';
-  import { Button, Select, type SelectOption } from '$lib/components/ui';
+  import { Button, Select, type SelectOption } from '@minot/ui';
 
   interface Props {
     roomId: number;

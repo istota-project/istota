@@ -15,7 +15,7 @@
   } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { displayBalance } from '$lib/money/utils/accounts';
-  import { EmptyState, KebabMenu, LoadState, Pagination, Timestamp } from '$lib/components/ui';
+  import { EmptyState, KebabMenu, LoadState, Pagination, Timestamp } from '@minot/ui';
   import TransactionForm from '$lib/components/money/TransactionForm.svelte';
 
   const navigateToAccount = getTransactionNavigation();

@@ -21,12 +21,12 @@
     type KebabItem,
     Checkbox,
     Timestamp,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { chatFileUrl, nextcloudFileUrl, WORKSPACE_TEXT_EDIT_MAX_BYTES } from '$lib/api';
   import { formatBytes } from '$lib/format';
   import { fileIcon, mayBeText } from './filePresentation';
-  import { loadSetting, saveSetting } from '$lib/ui/persisted';
-  import { createTableSort } from '$lib/ui/tableSort.svelte';
+  import { loadSetting, saveSetting } from '@minot/ui/ui/persisted';
+  import { createTableSort } from '@minot/ui/ui/tableSort.svelte';
   import { viewer } from '$lib/fileViewer/store.svelte';
   let {
     listing = null,

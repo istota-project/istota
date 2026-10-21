@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import {
     getBusinessSettings,
     getClients,
@@ -25,7 +25,7 @@
     type BusinessDefaults,
   } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
-  import { notifyError } from '$lib/stores/notices';
+  import { notifyError } from '@minot/ui/stores/notices';
   import { SettingsLayout } from '$lib/components/settings';
   import {
     Button,
@@ -36,7 +36,7 @@
     LoadState,
     type KebabItem,
     Card,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import ClientForm from '$lib/components/money/ClientForm.svelte';
   import EntityForm from '$lib/components/money/EntityForm.svelte';
   import ServiceForm from '$lib/components/money/ServiceForm.svelte';
@@ -575,8 +575,8 @@
 
 <style>
   /* Shared .settings/.card/.field/.banner primitives live in
-	   web/src/lib/styles/settings.css and the tables in table.css (both
-	   imported by app.css). Only money-specific styling (kv, entity grid)
+	   minot's settings.css and the tables in its table.css (both in
+	   @minot/ui/styles.css). Only money-specific styling (kv, entity grid)
 	   stays. */
 
   .entity-grid .kv {

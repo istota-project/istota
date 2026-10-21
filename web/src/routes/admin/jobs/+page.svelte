@@ -20,10 +20,10 @@
     Card,
     Timestamp,
     Disclosure,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { ConfirmStepUpDialog } from '$lib/components/settings';
-  import { createConfirm } from '$lib/ui/confirm.svelte';
-  import { notifyError, notifySuccess, notifyWarning } from '$lib/stores/notices';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
+  import { notifyError, notifySuccess, notifyWarning } from '@minot/ui/stores/notices';
 
   type JobState = 'running' | 'disabled' | 'suspended';
 

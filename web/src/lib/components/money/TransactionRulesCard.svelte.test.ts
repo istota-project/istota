@@ -20,7 +20,7 @@ vi.mock('$lib/money/api', () => ({
 
 // The real notices store schedules auto-dismiss timers that outlive the test
 // environment and surface as post-teardown errors in whichever file runs next.
-vi.mock('$lib/stores/notices', () => ({
+vi.mock('@minot/ui/stores/notices', () => ({
   notifyError: vi.fn(),
   notifyInfo: vi.fn(),
   notifySuccess: vi.fn(),

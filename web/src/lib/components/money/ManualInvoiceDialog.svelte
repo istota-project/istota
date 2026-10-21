@@ -16,7 +16,7 @@
     Input,
     Select,
     type SelectOption,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { X } from '@lucide/svelte';
 
   interface Props {

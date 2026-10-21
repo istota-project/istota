@@ -23,42 +23,6 @@
   "src/lib/components/location/TripList.svelte": {
     "off-scale-space": 1
   },
-  "src/lib/components/ui/Badge.svelte": {
-    "off-scale-space": 1
-  },
-  "src/lib/components/ui/Button.svelte": {
-    "off-scale-space": 1
-  },
-  "src/lib/components/ui/CategoryGroup.svelte": {
-    "off-scale-space": 5
-  },
-  "src/lib/components/ui/Chip.svelte": {
-    "off-scale-space": 2
-  },
-  "src/lib/components/ui/ConfirmDialog.svelte": {
-    "off-scale-space": 1
-  },
-  "src/lib/components/ui/Field.svelte": {
-    "off-scale-space": 1
-  },
-  "src/lib/components/ui/IconButton.svelte": {
-    "off-scale-space": 1
-  },
-  "src/lib/components/ui/internal/NavLink.svelte": {
-    "off-scale-space": 1
-  },
-  "src/lib/components/ui/internal/NoticeDrawer.svelte": {
-    "off-scale-space": 2
-  },
-  "src/lib/components/ui/KebabMenu.svelte": {
-    "off-scale-space": 1
-  },
-  "src/lib/components/ui/Select.svelte": {
-    "off-scale-space": 2
-  },
-  "src/lib/styles/settings.css": {
-    "off-scale-space": 3
-  },
   "src/routes/+error.svelte": {
     "off-scale-space": 2
   },

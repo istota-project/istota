@@ -3,7 +3,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { onMount } from 'svelte';
-  import { onDocumentVisible } from '$lib/ui/visibility';
+  import { onDocumentVisible } from '@minot/ui/ui/visibility';
   import {
     createPlace,
     deletePlace,
@@ -38,10 +38,10 @@
     Chip,
     EmptyState,
     Timestamp,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { Cog, Pencil, X } from '@lucide/svelte';
-  import { formatMinutes } from '$lib/dateFormat';
+  import { formatMinutes } from '@minot/ui/dateFormat';
 
   let { children } = $props();
 

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Button, Icon } from '$lib/components/ui';
+  import { Button, Icon } from '@minot/ui';
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import { CircleAlert, House, Lock, RotateCw, SearchX, ServerCrash } from '@lucide/svelte';

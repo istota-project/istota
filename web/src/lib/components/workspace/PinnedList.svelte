@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { CategoryGroup, KebabMenu, ListRow, type KebabItem } from '$lib/components/ui';
+  import { CategoryGroup, KebabMenu, ListRow, type KebabItem } from '@minot/ui';
   import type { WorkspaceConfigFile, WorkspacePin, WorkspacePlace } from '$lib/api';
   import { viewer } from '$lib/fileViewer/store.svelte';
   import TaskReachIcon from './TaskReachIcon.svelte';

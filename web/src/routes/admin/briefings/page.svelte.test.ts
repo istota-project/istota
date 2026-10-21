@@ -7,7 +7,7 @@ await fillApiDouble(api);
 vi.mock('$app/paths', () => ({ base: '/istota' }));
 // The real store arms auto-dismiss timers that outlive the test.
 const notices = vi.hoisted(() => ({ notifyError: vi.fn(), notifySuccess: vi.fn() }));
-vi.mock('$lib/stores/notices', () => notices);
+vi.mock('@minot/ui/stores/notices', () => notices);
 import Page from './+page.svelte';
 
 const held = { at: '2026-10-10T09:30:00+00:00', by_label: 'Alice' };

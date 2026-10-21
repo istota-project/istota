@@ -27,7 +27,7 @@ const persisted = vi.hoisted(() => {
     }),
   };
 });
-vi.mock('$lib/ui/persisted', () => persisted);
+vi.mock('@minot/ui/ui/persisted', () => persisted);
 
 function room(id: number): ChatRoom {
   return {

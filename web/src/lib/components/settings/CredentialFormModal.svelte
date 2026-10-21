@@ -7,16 +7,8 @@
     updateLocalCredential,
     type CredentialSummary,
   } from '$lib/api';
-  import {
-    Field,
-    FormModal,
-    FormStack,
-    Input,
-    Checkbox,
-    SecretField,
-    Disclosure,
-  } from '$lib/components/ui';
-  import { notifySuccess } from '$lib/stores/notices';
+  import { Field, FormModal, FormStack, Input, Checkbox, SecretField, Disclosure } from '@minot/ui';
+  import { notifySuccess } from '@minot/ui/stores/notices';
   import CredentialAccessFields from './CredentialAccessFields.svelte';
 
   /**

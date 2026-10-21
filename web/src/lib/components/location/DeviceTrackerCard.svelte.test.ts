@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import DeviceTrackerCard from './DeviceTrackerCard.svelte';
-import { formatDateTime } from '$lib/dateFormat';
+import { formatDateTime } from '@minot/ui/dateFormat';
 import { encodeProvisioning } from '$lib/location/provisioning';
 import type { TrackerStatus } from '$lib/platform/nativeLocation';
 import type { Place } from '$lib/api';

@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { latest } from '$lib/ui/latest';
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { latest } from '@minot/ui/ui/latest';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import { onMount } from 'svelte';
   import {
     Alert,
@@ -13,8 +13,8 @@
     KebabMenu,
     Select,
     Card,
-  } from '$lib/components/ui';
-  import { notifyError, notifyInfo, notifySuccess } from '$lib/stores/notices';
+  } from '@minot/ui';
+  import { notifyError, notifyInfo, notifySuccess } from '@minot/ui/stores/notices';
   import {
     createTransactionRule,
     deleteTransactionRule,

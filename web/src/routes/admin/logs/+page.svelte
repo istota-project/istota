@@ -22,10 +22,10 @@
     LoadState,
     CopyButton,
     LoadMore,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { mergeRecords, trimBuffer } from '$lib/admin/logRecords';
-  import { notifyError } from '$lib/stores/notices';
-  import { latest } from '$lib/ui/latest';
+  import { notifyError } from '@minot/ui/stores/notices';
+  import { latest } from '@minot/ui/ui/latest';
 
   const PAGE = 200;
 

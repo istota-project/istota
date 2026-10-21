@@ -8,8 +8,8 @@
     KebabMenu,
     type KebabItem,
     Card,
-  } from '$lib/components/ui';
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  } from '@minot/ui';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import CardFormModal from './CardFormModal.svelte';
   let {
     cards,

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Check, TriangleAlert, X } from '@lucide/svelte';
-  import { Icon } from '$lib/components/ui';
+  import { Icon } from '@minot/ui';
   interface Line {
     key: string;
     ok: boolean;

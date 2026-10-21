@@ -11,12 +11,12 @@
     Select,
     TextArea,
     Checkbox,
-  } from '$lib/components/ui';
-  import ConfigSecretField from './SecretField.svelte';
+  } from '@minot/ui';
+  import ConfigSecretField from './ConfigSecretField.svelte';
   import FieldRow from './FieldRow.svelte';
   import TableEditor from './TableEditor.svelte';
   import { displayValue, formatValue, opFor } from './changeSet';
-  import { parseList, parseNumber } from '$lib/ui/parse';
+  import { parseList, parseNumber } from '@minot/ui/ui/parse';
   import { credentialStatus } from './credentialStatus';
 
   interface Props {

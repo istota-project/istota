@@ -1,7 +1,7 @@
 <script lang="ts">
   import { CornerDownRight, MessageSquare, FileText } from '@lucide/svelte';
   import type { SearchResultsData, SearchResultItem } from '$lib/stores/segments';
-  import { Icon, Chip, EmptyState } from '$lib/components/ui';
+  import { Icon, Chip, EmptyState } from '@minot/ui';
 
   let {
     data,

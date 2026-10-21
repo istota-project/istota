@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { SetupCheckResult } from '$lib/api';
-  import { Button, Field, Input, Alert, OptionCards, Select } from '$lib/components/ui';
+  import { Button, Field, Input, Alert, OptionCards, Select } from '@minot/ui';
   import SetupCheckResultLine from './SetupCheckResult.svelte';
   import { runSetupCheck, type SetupDraftStore } from './setupDraft.svelte';
 

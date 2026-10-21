@@ -8,7 +8,7 @@
     type GroupBriefingRun,
     type BriefingDelivery,
   } from '$lib/api';
-  import { Icon, LoadState, Timestamp } from '$lib/components/ui';
+  import { Icon, LoadState, Timestamp } from '@minot/ui';
   import type { GroupEditionSelection } from '$lib/stores/briefings';
   import BriefingEdition from './BriefingEdition.svelte';
   import { channelLabel } from './settings/briefingSettings';

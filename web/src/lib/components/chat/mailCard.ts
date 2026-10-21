@@ -3,7 +3,7 @@
  * stage 3). Every field comes from stored metadata or the stored body, never
  * from model text and never from a raw header read at render time.
  */
-import { formatDateTime } from '$lib/dateFormat';
+import { formatDateTime } from '@minot/ui/dateFormat';
 import type {
   MailAddress,
   MailAttachment,

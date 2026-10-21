@@ -12,7 +12,7 @@
 // looks like the web UI. `vite.render.config.ts` builds each entry into
 // `build-render/<name>.html`.
 
-import '$lib/styles/tokens.css';
+import '@minot/ui/tokens.css';
 import '$lib/styles/app-tokens.css';
 import './host.css';
 import { applyTheme } from '$lib/stores/theme';

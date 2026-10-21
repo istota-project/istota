@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getRoomGroup, putRoomGroup, type RoomGroupLink } from '$lib/api';
-  import { Select, type SelectOption } from '$lib/components/ui';
+  import { Select, type SelectOption } from '@minot/ui';
 
   interface Props {
     roomId: number;

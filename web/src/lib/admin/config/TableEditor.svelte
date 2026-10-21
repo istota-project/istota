@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import type { AdminConfigField, ConfigOp } from '$lib/api';
-  import { Field, TextArea } from '$lib/components/ui';
+  import { Field, TextArea } from '@minot/ui';
   import { SENTINEL } from './changeSet';
 
   interface Props {

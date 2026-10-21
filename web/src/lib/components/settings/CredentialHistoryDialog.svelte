@@ -7,7 +7,7 @@
     type CredentialHistory,
     type StepUpProof,
   } from '$lib/api';
-  import { Button, Modal, Timestamp } from '$lib/components/ui';
+  import { Button, Modal, Timestamp } from '@minot/ui';
   import StepUpDialog from './StepUpDialog.svelte';
   let {
     name,

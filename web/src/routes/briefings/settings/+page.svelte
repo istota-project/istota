@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
@@ -38,11 +38,11 @@
     Field,
     Checkbox,
     LoadState,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { SettingsLayout } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
-  import { notifyError } from '$lib/stores/notices';
+  import { notifyError } from '@minot/ui/stores/notices';
   import { getCurrentUser } from '$lib/userContext';
   import { MANAGED_BADGE, isManaged } from '$lib/settings/managed';
   import GroupBriefingEditor from '$lib/components/briefings/GroupBriefingEditor.svelte';

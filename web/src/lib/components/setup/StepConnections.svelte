@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { SetupCheckResult } from '$lib/api';
-  import { Button, Field, Input, SecretField } from '$lib/components/ui';
+  import { Button, Field, Input, SecretField } from '@minot/ui';
   import ConnectionCard from './ConnectionCard.svelte';
   import SetupCheckResultLine from './SetupCheckResult.svelte';
   import SetupMore from './SetupMore.svelte';

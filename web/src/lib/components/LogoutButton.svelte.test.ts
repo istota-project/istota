@@ -7,8 +7,8 @@ const app = vi.hoisted(() => ({
 }));
 vi.mock('$lib/platform/nativeConnection', () => app);
 const notices = vi.hoisted(() => ({ notifyError: vi.fn() }));
-vi.mock('$lib/stores/notices', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('$lib/stores/notices')>()),
+vi.mock('@minot/ui/stores/notices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@minot/ui/stores/notices')>()),
   notifyError: notices.notifyError,
 }));
 const lastUser = vi.hoisted(() => ({ forgetLastUserId: vi.fn() }));

@@ -12,7 +12,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "test": "vitest run",
-    "lint:design": "node scripts/design-lint.mjs",
+    "lint:design": "minot-lint",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
@@ -37,6 +37,7 @@
   },
   "dependencies": {
     "@lucide/svelte": "^1.49.0",
+    "@minot/ui": "0.2.0",
     "bits-ui": "^2.18.0",
     "chart.js": "^4.5.1",
     "highlight.js": "^11.11.1",

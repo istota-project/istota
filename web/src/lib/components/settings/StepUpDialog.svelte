@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { startStepUp, type StepUpAction, type StepUpMethod, type StepUpProof } from '$lib/api';
-  import { Button, ConfirmDialog, Field, Input } from '$lib/components/ui';
+  import { Button, ConfirmDialog, Field, Input } from '@minot/ui';
 
   /**
    * The step-up half (which methods the account has, starting a request,

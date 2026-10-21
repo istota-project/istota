@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { get } from 'svelte/store';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import type { FeedEntry } from '$lib/api';
-import { clearNotices, currentNotice } from '$lib/stores/notices';
+import { clearNotices, currentNotice } from '@minot/ui/stores/notices';
 import Fixture from './FeedReaderNavigationFixture.svelte';
 import FeedReader from './FeedReader.svelte';
 const api = vi.hoisted(() => ({}) as ApiDouble);

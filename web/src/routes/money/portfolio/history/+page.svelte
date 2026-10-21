@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import { page } from '$app/state';
   import { onDestroy, untrack } from 'svelte';
   import {
@@ -38,8 +38,8 @@
     KebabMenu,
     Modal,
     LoadState,
-  } from '$lib/components/ui';
-  import { notifyError, notifySuccess } from '$lib/stores/notices';
+  } from '@minot/ui';
+  import { notifyError, notifySuccess } from '@minot/ui/stores/notices';
   import { portfolioGroupBy, type PortfolioGroupBy } from '$lib/money/stores/portfolio';
 
   Chart.register(

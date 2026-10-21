@@ -30,7 +30,7 @@
  * using, a bare token would hand one person's half-written message to the
  * other.
  */
-import { loadSetting, saveSetting } from '$lib/ui/persisted';
+import { loadSetting, saveSetting } from '@minot/ui/ui/persisted';
 
 export const DRAFT_STORAGE_KEY = 'chat.drafts';
 

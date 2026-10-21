@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Button } from '$lib/components/ui';
+  import { Button } from '@minot/ui';
   import UserAvatar from '$lib/components/UserAvatar.svelte';
 
   let {

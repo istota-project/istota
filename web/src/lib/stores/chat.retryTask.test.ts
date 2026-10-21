@@ -14,7 +14,7 @@ const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
 
-vi.mock('$lib/ui/persisted', () => ({
+vi.mock('@minot/ui/ui/persisted', () => ({
   loadSetting: vi.fn(() => null),
   saveSetting: vi.fn(),
 }));
@@ -24,8 +24,8 @@ const notices = vi.hoisted(() => ({
   notifySuccess: vi.fn(),
   notifyWarning: vi.fn(),
 }));
-vi.mock('./notices', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('./notices')>()),
+vi.mock('@minot/ui/stores/notices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@minot/ui/stores/notices')>()),
   ...notices,
 }));
 

@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { blockAfter, readCascade } from './cascade';
 
 /**
- * The table family stays in table.css.
+ * The table family stays in minot's table.css. minot pins the family itself;
+ * this sweeps this app's files for a copy of it.
  *
  * Before it there were three copies of one `<table>` design — `.settings
  * .grid`, the health layout's `table.grid` and the bloodwork marker history —
@@ -79,55 +79,19 @@ const targetsTh = (selector: string): boolean => {
  */
 const HEADER_TYPE = new Set(['font-size', 'text-transform', 'letter-spacing']);
 
-/** The table family's own sheet, and markdown.css, which styles tables someone else wrote. */
-const OWNERS = new Set(['lib/styles/table.css', 'lib/styles/markdown.css']);
+/** markdown.css styles tables someone else wrote; the family's own sheet is minot's. */
+const OWNERS = new Set(['lib/styles/markdown.css']);
 
 const scanned = sourceFiles('.svelte', '.css')
   .map((path) => ({ file: rel(path), css: styleOf(path) }))
   .filter(({ file }) => !OWNERS.has(file));
 
-describe('table.css', () => {
-  const cascade = readCascade();
-
-  it('loads from app.css', () => {
-    expect(cascade).toContain('.table thead th {');
-  });
-
-  it('gives the column header the .micro-label type', () => {
-    const header = blockAfter(cascade, '.table thead th {');
-    expect(header).toContain('font-size: var(--text-xs)');
-    expect(header).toContain('font-weight: var(--weight-medium)');
-    expect(header).toContain('text-transform: uppercase');
-    expect(header).toContain('letter-spacing: var(--tracking-caps)');
-    expect(header).toContain('color: var(--text-dim)');
-  });
-
-  it('hovers an interactive row in the card surface and fills a selected one raised', () => {
-    // The table decision (Q9): hover is --surface-card, not --hover-bg, so the
-    // hovered row and the selected row stay two different looks.
-    expect(blockAfter(cascade, '.table--interactive tbody tr:hover {')).toContain(
-      'background: var(--surface-card)',
-    );
-    expect(blockAfter(cascade, '.table tbody tr.is-selected {')).toContain(
-      'background: var(--selected-bg)',
-    );
-  });
-
-  it('moves an on-card table one step off the card, hover and selection apart', () => {
-    expect(blockAfter(cascade, '.table--on-card.table--interactive tbody tr:hover {')).toContain(
-      'background: var(--hover-bg)',
-    );
-    expect(blockAfter(cascade, '.table--on-card tbody tr.is-selected:hover {')).toContain(
-      'background: var(--surface-badge)',
-    );
+describe('the table family in this app', () => {
+  it('draws the admin users table on a card, interactive', () => {
+    // minot pins what .table--on-card does; this pins the table that needs it.
     expect(readFileSync(join(SRC, 'routes/admin/users/+page.svelte'), 'utf8')).toMatch(
       /<table\s+class="[^"]*table--interactive table--on-card/,
     );
-  });
-
-  it('has two densities and no more', () => {
-    expect(blockAfter(cascade, '.table--dense {')).toContain('--table-cell-py: var(--space-1)');
-    expect(cascade).not.toMatch(/\.table--roomy\b/);
   });
 });
 

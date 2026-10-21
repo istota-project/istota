@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { readCascade, readLayer } from './cascade';
+import { readCascade } from './cascade';
 
 /**
- * The embed box, and the inline chat image drawn in it.
+ * The inline chat image, drawn in minot's embed box. The box itself (`.embed`
+ * and its two tokens) is minot's and minot's embed test pins it; this holds the
+ * chat image's half.
  *
  * Every embed in a reading column (an inline image, a location map, and any
  * later video or PDF page) is sized by one rule, `.embed` in primitives.css,
@@ -31,33 +33,12 @@ function ruleBody(css: string, selector: string): string | undefined {
   return css.slice(at, css.indexOf('}', at));
 }
 
-describe('embed box', () => {
-  it('is two fixed-size tokens, not a fraction of the viewport', () => {
-    const tokens = readLayer('tokens');
-    expect(tokens).toMatch(/--embed-max-width:\s*\d+px;/);
-    expect(tokens).toMatch(/--embed-max-height:\s*\d+px;/);
-  });
-
-  it('caps width by the column, the box, and the height cap through the ratio', () => {
-    const body = ruleBody(appCss, '.embed') ?? '';
-    expect(body).toMatch(
-      /max-width:\s*min\(\s*100%,\s*var\(--embed-max-width\),\s*calc\(var\(--embed-max-height\)\s*\*\s*var\(--embed-ratio,\s*1000\)\)\s*\)/,
-    );
-    expect(body).toMatch(/max-height:\s*var\(--embed-max-height\)/);
-    expect(body).not.toMatch(/vh\b/);
-  });
-
+describe('inline chat image and the embed box', () => {
   it('applies at every width, with no breakpoint of its own', () => {
+    // minot pins `.embed` itself; the chat image rides on it here.
     for (const m of appCss.matchAll(/@media[^{]*\{([\s\S]*?)\n\}/g)) {
-      expect(m[1]).not.toMatch(/\.embed\b|\.md-image\s*\{/);
+      expect(m[1]).not.toMatch(/\.md-image\s*\{/);
     }
-  });
-
-  it('gives shapeless content a default ratio it fills the column at', () => {
-    const body = ruleBody(appCss, '.embed-fixed') ?? '';
-    expect(body).toMatch(/--embed-ratio:\s*4 \/ 3/);
-    expect(body).toMatch(/width:\s*100%/);
-    expect(body).toMatch(/aspect-ratio:\s*var\(--embed-ratio\)/);
   });
 });
 

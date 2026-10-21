@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import { Button, Card } from '$lib/components/ui';
+  import { Button, Card } from '@minot/ui';
 
   interface Props {
     title: string;

@@ -1,27 +1,20 @@
-/* The stylesheet entry point: four layers, loaded in cascade order.
+/* The stylesheet entry point, loaded in cascade order.
 
-   1. tokens.css      the palette, scales and themes           reusable
-   2. primitives.css  reset, shared blocks, focus, layout      reusable
-   3. app-shell.css   this app's nav and page container        product-specific
-   4. markdown.css    rendered prose + highlight.js            optional
+   1. @minot/ui        the design system: tokens, the module sheets, the
+                       table family and the primitives, in the order the
+                       package fixes                                  shared
+   2. app-tokens.css   this app's own tokens and its aliases for minot's
+                       neutral ones                                   product-specific
+   3. app-shell.css    this app's nav and page container              product-specific
+   4. markdown.css     rendered prose + highlight.js                  optional
 
-   Layers 1 and 2 are the design system and name nothing about this product;
-   3 is what could not travel. Splitting them is what makes that line visible
-   — as one 1267-line file it was a matter of knowing which third you were in.
+   app-tokens.css declares custom properties and nothing else, so its place
+   decides no tie. Every other app layer comes after the whole package entry,
+   which is where it was before the split. Order is the whole contract of this
+   file: change it and ties that CSS resolves by document order resolve the
+   other way. */
 
-   The two module sheets sit between the reusable layers and the app's own,
-   which is where they were before the split and where their specificity
-   assumes they are. table.css comes after them: it travels with the reusable
-   layers, and loses ties to primitives.css the way the module sheets do. Order is the whole contract of this file: change it and
-   ties that CSS resolves by document order resolve the other way. */
-
-@import './lib/styles/tokens.css';
+@import '@minot/ui/styles.css';
 @import './lib/styles/app-tokens.css';
-
-@import './lib/styles/settings.css';
-@import './lib/styles/cards.css';
-@import './lib/styles/table.css';
-
-@import './lib/styles/primitives.css';
 @import './lib/styles/app-shell.css';
 @import './lib/styles/markdown.css';

@@ -1,11 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getHealthSettings, putHealthSettings, type HealthSettings } from '$lib/api';
-  import { Select, Card, Field, Input } from '$lib/components/ui';
+  import { Select, Card, Field, Input } from '@minot/ui';
   import { SettingsLayout } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { cmToFtIn, ftInToCm } from '$lib/health/units';
-  import { trackChanges } from '$lib/ui/draft.svelte';
+  import { trackChanges } from '@minot/ui/ui/draft.svelte';
 
   let loading = $state(true);
   let saving = $state(false);

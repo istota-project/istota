@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import { onMount } from 'svelte';
   import {
     Badge,
@@ -12,8 +12,8 @@
     Select,
     Card,
     LoadState,
-  } from '$lib/components/ui';
-  import { notifyError, notifyInfo, notifySuccess } from '$lib/stores/notices';
+  } from '@minot/ui';
+  import { notifyError, notifyInfo, notifySuccess } from '@minot/ui/stores/notices';
   import {
     ApiError,
     autoClassifyPortfolio,

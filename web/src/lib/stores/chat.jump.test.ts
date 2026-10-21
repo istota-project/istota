@@ -15,7 +15,7 @@ const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
 
-vi.mock('$lib/ui/persisted', () => ({
+vi.mock('@minot/ui/ui/persisted', () => ({
   loadSetting: vi.fn(() => null),
   saveSetting: vi.fn(),
 }));
@@ -60,7 +60,7 @@ function page(msgs: ChatHistory['messages'], over: Partial<ChatHistory> = {}): C
 // imports, notices included — so a statically imported `currentNotice` would be
 // a different singleton from the one chat writes to.
 async function freshNotices() {
-  return await import('./notices');
+  return await import('@minot/ui/stores/notices');
 }
 
 async function freshSession() {

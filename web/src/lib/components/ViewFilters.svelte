@@ -4,7 +4,7 @@
 
 <script lang="ts">
   import { Circle, Star } from '@lucide/svelte';
-  import { SidebarNav } from '$lib/components/ui';
+  import { SidebarNav } from '@minot/ui';
 
   interface Props {
     /** The view on screen, or null while a single item (a room, a feed) is. */

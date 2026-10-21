@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { SettingsLayout } from '$lib/components/settings';
-  import { Input, Select, Card, Field } from '$lib/components/ui';
+  import { Input, Select, Card, Field } from '@minot/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
-  import { notifyError, notifySuccess } from '$lib/stores/notices';
+  import { notifyError, notifySuccess } from '@minot/ui/stores/notices';
   import TaxDisclaimer from '$lib/components/money/TaxDisclaimer.svelte';
   import TaxRatesCard from '$lib/components/money/TaxRatesCard.svelte';
   import RateProvenanceLine from '$lib/components/money/RateProvenanceLine.svelte';

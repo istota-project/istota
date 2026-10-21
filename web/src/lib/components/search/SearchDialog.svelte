@@ -5,7 +5,7 @@
   import { createSearch } from '$lib/stores/search';
   import { hrefFor } from '$lib/search/links';
   import { viewer } from '$lib/fileViewer/store.svelte';
-  import { Button, Input, LoadMore, Modal, Select } from '$lib/components/ui';
+  import { Button, Input, LoadMore, Modal, Select } from '@minot/ui';
   import SearchResultRow from './SearchResultRow.svelte';
 
   let {

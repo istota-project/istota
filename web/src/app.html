@@ -39,7 +39,7 @@
       // Apply the saved theme and text scale, and the iOS app's viewport lock,
       // before first paint to avoid a flash
       // of the wrong theme / a reflow once the size lands. Mirrors
-      // lib/ui/persisted.ts (values are JSON-encoded).
+      // @minot/ui's ui/persisted (values are JSON-encoded).
       (function () {
         var root = document.documentElement;
         function read(key, fallback) {

@@ -9,7 +9,7 @@
 
 <script lang="ts">
   import type { StepUpAction, StepUpProof } from '$lib/api';
-  import { ConfirmDialog } from '$lib/components/ui';
+  import { ConfirmDialog } from '@minot/ui';
   import StepUpDialog from './StepUpDialog.svelte';
 
   /**

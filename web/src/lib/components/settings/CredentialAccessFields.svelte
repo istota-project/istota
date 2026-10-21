@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Field, FormStack, Select, Checkbox } from '$lib/components/ui';
+  import { Field, FormStack, Select, Checkbox } from '@minot/ui';
 
   /**
    * Who may use a credential: the room scope, scheduled tasks and the HTTP

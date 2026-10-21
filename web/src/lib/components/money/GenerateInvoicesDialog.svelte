@@ -9,7 +9,7 @@
     type GenerateInvoicesResponse,
     type GeneratedInvoice,
   } from '$lib/money/api';
-  import { Button, Field, Input, Modal, Select, type SelectOption } from '$lib/components/ui';
+  import { Button, Field, Input, Modal, Select, type SelectOption } from '@minot/ui';
   import { formatDecimal as formatAmount } from '$lib/format';
 
   interface Props {

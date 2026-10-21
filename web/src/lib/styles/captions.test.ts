@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { readCascade } from './cascade';
 
 /**
- * The supporting-text roles: `.caption`, `.muted`, `.description`, and their
- * uppercase sibling `.micro-label`.
+ * The app half of minot's captions test. The supporting-text roles —
+ * `.caption`, `.muted`, `.description` and their uppercase sibling
+ * `.micro-label` — are minot's, and minot pins the rules; this sweeps this
+ * app's own files for a page restating one or writing one out under a name of
+ * its own.
  *
  * All four existed everywhere and were named nowhere. "Small dim text" was
  * spelled `.hint` on four pages, `.meta` on five more and `.small` on two, and
@@ -26,18 +28,10 @@ import { readCascade } from './cascade';
  * distinct tokens that make them separate roles, and that no rule anywhere
  * else writes a role's typography out again under a name of its own.
  *
- * Same reasoning as contentFrame.test.ts and controlTier.test.ts.
+ * Same reasoning as contentFrame.test.ts.
  */
 
-const appCss = readCascade();
 const SRC = join(process.cwd(), 'src');
-
-/** The body of a top-level rule, by selector. */
-const ruleBody = (css: string, selector: string): string | undefined => {
-  const at = css.indexOf(`\n${selector} {`);
-  if (at === -1) return undefined;
-  return css.slice(at, css.indexOf('}', at));
-};
 
 /** Every file under src/ with one of the given extensions. */
 const sourceFiles = (...exts: string[]): string[] => {
@@ -178,19 +172,11 @@ const READING_SURFACE = [
   'lib/components/chat/Composer.svelte',
 ];
 
-/**
- * The column header, which writes the micro-label type because a `<th>` cannot
- * take a class from a stylesheet. The table family carries it once, in
- * table.css; tables.test.ts fails a component that writes it again.
- */
-const TABLE_HEADERS = ['lib/styles/table.css|.table thead th'];
-
-/** Where role copies may not be written: every stylesheet but the role's own. */
+/** Every stylesheet in this app; the roles' own sheet is minot's and not under src/. */
 const scanned = (): { file: string; css: string }[] => {
   const out: { file: string; css: string }[] = [];
   for (const f of sourceFiles('.svelte', '.css')) {
     const file = rel(f);
-    if (file === 'lib/styles/primitives.css' || file === 'lib/styles/tokens.css') continue;
     const source = readFileSync(f, 'utf8');
     out.push({ file, css: f.endsWith('.svelte') ? styleBlock(source) : source });
   }
@@ -211,74 +197,6 @@ const META_IS_LAYOUT = [
   'routes/health/history/encounter/+page.svelte',
   'routes/briefings/+page.svelte',
 ];
-
-describe('.caption', () => {
-  const body = ruleBody(appCss, '.caption');
-
-  it('is defined once, on the dim token at the small step', () => {
-    expect(body).toBeDefined();
-    // --text-dim (#666) rather than --text-muted (#888): these are two
-    // distinct steps, and the size going down with the colour is what makes
-    // this a caption rather than merely de-emphasized text.
-    expect(body).toContain('color: var(--text-dim)');
-    expect(body).toContain('font-size: var(--text-xs)');
-  });
-
-  it('is typography only', () => {
-    // The division .micro-label draws, for the reason it draws it: a hint
-    // under a field and a timestamp under a title want different space around
-    // them, and folding margins in is what produced the variants.
-    expect(body).not.toMatch(/^\s*(margin|padding|display)/m);
-  });
-});
-
-describe('.muted', () => {
-  const body = ruleBody(appCss, '.muted');
-
-  it('is defined once, and changes colour only', () => {
-    expect(body).toBeDefined();
-    expect(body).toContain('color: var(--text-muted)');
-    // No font-size: `.muted` de-emphasizes text *at whatever size it already
-    // is* — that is the whole difference from .caption. A size here would
-    // shrink every span it is dropped onto.
-    expect(body).not.toMatch(/font-size/);
-  });
-
-  it('is typography only', () => {
-    expect(body).not.toMatch(/^\s*(margin|padding|display)/m);
-  });
-
-  it('is one colour everywhere, with no scope redefining it', () => {
-    // settings.css used to restate it on --text-dim under `.settings`, so the
-    // same class was #666 on every settings and admin page and #888 everywhere
-    // else. The per-theme value is the token's, in tokens.css.
-    expect(stripComments(appCss)).not.toMatch(/[\w)\]-]\s+\.muted\s*\{/);
-  });
-});
-
-describe('.description', () => {
-  const body = ruleBody(appCss, '.description');
-
-  it('is defined once: the small step, on the muted token, at a reading measure', () => {
-    expect(body).toBeDefined();
-    // One step up from a caption in both size and colour, because it is read
-    // rather than glanced at: the line under a page, card or modal title.
-    expect(body).toContain('color: var(--text-muted)');
-    expect(body).toContain('font-size: var(--text-sm)');
-    expect(body).toContain('max-width: 60ch');
-  });
-
-  it('carries no spacing', () => {
-    expect(body).not.toMatch(/^\s*(margin|padding|display)/m);
-  });
-
-  it('replaced the settings-scoped .hint, so the settings sheet only places it', () => {
-    expect(stripComments(appCss)).not.toMatch(/\.settings \.hint\b/);
-    const placed = /\.settings :where\(\.description\)\s*\{([^}]*)\}/.exec(appCss);
-    expect(placed).not.toBeNull();
-    expect(placed![1]).not.toMatch(/(^|\s)(color|font-size)\s*:/);
-  });
-});
 
 describe('no page re-declares a role', () => {
   const files = sourceFiles('.svelte');
@@ -301,7 +219,7 @@ describe('no page re-declares a role', () => {
           if (/(^|\s)(color|font-size)\s*:/.test(body)) offenders.push(rel(f));
         }
       }
-      expect(offenders, `.${cls}'s typography belongs in app.css only`).toEqual([]);
+      expect(offenders, `.${cls}'s typography belongs to minot only`).toEqual([]);
     });
   }
 
@@ -385,20 +303,18 @@ describe('no rule writes a role out under another name', () => {
 
   const files = scanned();
 
-  it('scans the module sheets and the money shell as well as the components', () => {
+  it('scans the app sheets and the money shell as well as the components', () => {
     const names = files.map((f) => f.file);
-    expect(names).toContain('lib/styles/settings.css');
+    expect(names).toContain('lib/styles/app-shell.css');
     expect(names).toContain('lib/styles/moneyTable.css');
-    expect(names).not.toContain('lib/styles/primitives.css');
     expect(files.length).toBeGreaterThan(100);
   });
 
-  it('finds no copy outside primitives.css', () => {
+  it('finds no copy in this app', () => {
     const offenders: string[] = [];
     for (const { file, css } of files) {
       if (READING_SURFACE.includes(file)) continue;
       for (const copy of roleCopies(css)) {
-        if (TABLE_HEADERS.includes(`${file}|${copy.selector}`)) continue;
         offenders.push(`${file}: ${copy.selector} writes out .${copy.role}`);
       }
     }
@@ -408,15 +324,6 @@ describe('no rule writes a role out under another name', () => {
   it('holds no stale exemption', () => {
     // An entry that no longer matches anything would silently admit the next
     // copy written under the same selector.
-    for (const entry of TABLE_HEADERS) {
-      const [file, selector] = entry.split('|');
-      const found = files.find((f) => f.file === file);
-      expect(found, entry).toBeDefined();
-      expect(
-        roleCopies(found!.css).some((c) => c.selector === selector),
-        entry,
-      ).toBe(true);
-    }
     for (const file of READING_SURFACE) {
       expect(
         files.some((f) => f.file === file),
@@ -429,22 +336,10 @@ describe('no rule writes a role out under another name', () => {
 /**
  * The record list's header and group label are divs, so unlike a `th` they can
  * take `.micro-label` in markup — and do, rather than table.css writing the set
- * out a second time. Their rules carry a border, which the copy detector above
- * reads as a component, so this holds the split itself: no type in the rule,
- * the class on every element.
+ * out a second time. minot holds the rule half (no type in table.css); this
+ * holds the markup half over this app's pages.
  */
 describe('record headers take .micro-label', () => {
-  const table = stripComments(readFileSync(join(SRC, 'lib/styles/table.css'), 'utf8'));
-  const TYPE = /(^|\s)(color|font-size|font-weight|letter-spacing|text-transform)\s*:/;
-
-  for (const selector of ['.record-header', '.record-group']) {
-    it(`${selector} writes no type of its own`, () => {
-      const body = ruleBody(table, selector);
-      expect(body, `${selector} in table.css`).toBeDefined();
-      expect(body).not.toMatch(TYPE);
-    });
-  }
-
   it('every record header and group label in markup carries the class', () => {
     const offenders: string[] = [];
     for (const f of sourceFiles('.svelte')) {

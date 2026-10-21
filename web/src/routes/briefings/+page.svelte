@@ -22,7 +22,7 @@
   } from '$lib/stores/briefings';
   import GroupEdition from '$lib/components/briefings/GroupEdition.svelte';
   import BriefingEdition from '$lib/components/briefings/BriefingEdition.svelte';
-  import { Alert, Button, EmptyState, KebabMenu, LoadState } from '$lib/components/ui';
+  import { Alert, Button, EmptyState, KebabMenu, LoadState } from '@minot/ui';
 
   let groupTarget = $state<BriefingTarget | null>(null);
   $effect(() => {

@@ -66,22 +66,10 @@
 	   draws it (the nav wordmark, the dashboard welcome card). */
   --sigil-filter: none;
 
-  /* The card panes' cap (dashboard, briefings, groups, admin): wider than the
-     dashboard column because a pane holds a wall of cards rather than one
-     reading column. `px` for the same reason as --content-max. */
-  --card-pane-max: 1600px;
   /* The first-run setup page's column: one short form at a time. In `rem`,
-     unlike the caps above, because it bounds a form's line length rather than
+     unlike minot's width caps, because it bounds a form's line length rather than
      a screen, and a form should widen with its text. */
   --setup-max: 36rem;
-  /* The height of the app nav and of the page bar under it, border included. One
-     value for both bars and every width, so neither changes height across a
-     breakpoint and the two read as one band. A minimum: a bar whose content wraps
-     still grows. */
-  --app-bar-height: 2.6rem;
-  /* The label column of an `inline` Field, so a form of them lines up. Sized
-     for a typical label; a longer one wraps inside it rather than widening it. */
-  --field-label-width: 9rem;
 
   /* Chat row metrics: the message row's horizontal padding, the avatar column
 	   it opens with, the avatar inside that column, and the gap from that column to
@@ -104,18 +92,6 @@
 	   text-scale setting, which is the setting picked to make lines easier to
 	   follow. */
   --chat-body-max: 900px;
-
-  /* The amber unread asterisk, one size wherever it marks something unread
-     (nav, briefings archive, feeds sidebar): 0.7 of the nav's 0.85rem links. */
-  --unread-mark-size: 0.595rem;
-}
-
-/* A wide screen has room to spare beside a form, and a config key such as
-   `claude_code_oauth_token` wrapped at 9rem. */
-@media (min-width: 1024px) {
-  :root {
-    --field-label-width: 15rem;
-  }
 }
 
 /* Mobile: the avatar column is pure chrome, so it is what gives up width to the

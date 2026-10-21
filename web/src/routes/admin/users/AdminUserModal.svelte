@@ -25,13 +25,13 @@
     type SelectOption,
     Checkbox,
     Timestamp,
-  } from '$lib/components/ui';
-  import { changedFields } from '$lib/ui/changedFields';
-  import { formatList, parseList } from '$lib/ui/parse';
+  } from '@minot/ui';
+  import { changedFields } from '@minot/ui/ui/changedFields';
+  import { formatList, parseList } from '@minot/ui/ui/parse';
   import { ADMIN_MANAGED_BADGE, adminManagedHint } from '$lib/settings/managed';
   import { timezoneOptions } from '$lib/settings/timezones';
   import { signInStateLabel } from '$lib/admin/signInState';
-  import { notifySuccess } from '$lib/stores/notices';
+  import { notifySuccess } from '@minot/ui/stores/notices';
 
   /**
    * One user's settings, for an admin. Mounted for one open and unmounted on

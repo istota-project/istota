@@ -8,7 +8,7 @@
     WalletPolicyCard,
     WalletPurchasesCard,
   } from '$lib/components/settings';
-  import { Alert } from '$lib/components/ui';
+  import { Alert } from '@minot/ui';
   const identity = getCurrentUser();
   let data: WalletSettings | null = $state(null);
   let error = $state('');

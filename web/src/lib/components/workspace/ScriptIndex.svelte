@@ -1,14 +1,7 @@
 <script lang="ts">
   import IndexCaption from './IndexCaption.svelte';
   import type { WorkspaceScriptsIndex } from '$lib/api';
-  import {
-    EmptyState,
-    KebabMenu,
-    LoadState,
-    Alert,
-    type KebabItem,
-    Timestamp,
-  } from '$lib/components/ui';
+  import { EmptyState, KebabMenu, LoadState, Alert, type KebabItem, Timestamp } from '@minot/ui';
   import { brokenKind, scriptRefLabel, scriptUsage, type ScriptKind } from './scriptFiles';
 
   let {

@@ -17,7 +17,7 @@
     Input,
     SecretField,
     Select,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   let {
     account = null,
     allowSend,

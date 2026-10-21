@@ -44,7 +44,7 @@
  */
 import { get, writable, type Readable } from 'svelte/store';
 import { getChatConfig, type SendFailure } from '$lib/api';
-import { onDocumentVisible } from '$lib/ui/visibility';
+import { onDocumentVisible } from '@minot/ui/ui/visibility';
 
 /**
  * How long a probe may run before it counts as a gap.

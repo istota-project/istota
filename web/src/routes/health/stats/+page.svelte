@@ -41,8 +41,8 @@
     Select,
     ToggleGroup,
     LoadState,
-  } from '$lib/components/ui';
-  import { formatDate } from '$lib/dateFormat';
+  } from '@minot/ui';
+  import { formatDate } from '@minot/ui/dateFormat';
 
   Chart.register(
     LineController,

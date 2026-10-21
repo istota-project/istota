@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Button, EmptyState, Alert, Card, LoadMore, Timestamp } from '$lib/components/ui';
+  import { Button, EmptyState, Alert, Card, LoadMore, Timestamp } from '@minot/ui';
   import TextFileEditor from '$lib/components/TextFileEditor.svelte';
   import TextPreview from '$lib/components/viewer/TextPreview.svelte';
   import { formatBytes } from '$lib/format';

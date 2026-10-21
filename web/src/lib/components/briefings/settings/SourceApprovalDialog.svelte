@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { BriefingSourceApproval } from '$lib/api';
-  import { FormModal, type SelectOption, Field, Checkbox } from '$lib/components/ui';
+  import { FormModal, type SelectOption, Field, Checkbox } from '@minot/ui';
   import SourceConfigFields from '../SourceConfigFields.svelte';
   import { calendarDisclosure, channelLabel } from './briefingSettings';
 

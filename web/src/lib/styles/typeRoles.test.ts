@@ -1,38 +1,21 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { readLayer } from './cascade';
 
 /**
- * Headings, code, numbers and links: the type roles beside the supporting-text
- * ones in captions.test.ts.
- *
- * Before these existed a heading with no weight fell back to the browser's
- * bold 700, so the same page carried 700, 600 and 500 titles side by side;
- * nine page-title styles and eight card-title variants had grown from that.
- * Monospace was spelled out as five different stacks after `--font-mono` had
- * been added to end exactly that, and the small raised code chip was written
- * seven times.
- *
- * So these tests pin the classes in primitives.css, fail a component that sets
- * a weight on a bare heading without saying why, fail any monospace stack that
- * does not come through the token, and fail a page that restates one of the
- * new classes' typography rather than only placing it.
+ * The app half of minot's `typeRoles` test. The heading base, the title
+ * classes, `<code>`, `.mono`, `.code-chip`, `.num` and the link classes are
+ * minot's and are pinned there; what is left here is the sweep over this
+ * app's own files: no component sets a weight on a bare heading without
+ * saying why, no file writes a monospace stack except through `--font-mono`,
+ * and no page restates one of those classes' typography rather than placing
+ * it.
  */
 
-const primitives = readLayer('primitives');
 const SRC = join(process.cwd(), 'src');
 
 const stripComments = (css: string): string =>
   css.replace(/\/\*[\s\S]*?\*\//g, (m) => ' '.repeat(m.length));
-
-/** The body of a top-level rule in primitives.css, by its exact selector. */
-const ruleBody = (selector: string): string | undefined => {
-  const css = stripComments(primitives);
-  const at = css.indexOf(`\n${selector} {`);
-  if (at === -1) return undefined;
-  return css.slice(at, css.indexOf('}', at));
-};
 
 const sourceFiles = (...exts: string[]): string[] => {
   const out: string[] = [];
@@ -93,7 +76,7 @@ function rules(css: string): Rule[] {
  * Whether one selector's subject is a heading element with no class of its
  * own: `h2`, `.notes h2`, `:global(.card-body h3)`, `h1:first-child`.
  */
-export function subjectIsBareHeading(selector: string): boolean {
+function subjectIsBareHeading(selector: string): boolean {
   const unwrapped = selector.replace(/:global\(([^)]*)\)/g, '$1').trim();
   const compounds = unwrapped.split(/\s*[\s>+~]\s*/).filter(Boolean);
   const subject = compounds[compounds.length - 1] ?? '';
@@ -101,7 +84,7 @@ export function subjectIsBareHeading(selector: string): boolean {
 }
 
 /** Every rule that sets a weight on a bare heading with no reason given. */
-export function unexplainedHeadingWeights(css: string): string[] {
+function unexplainedHeadingWeights(css: string): string[] {
   const out: string[] = [];
   for (const rule of rules(css)) {
     if (!('font-weight' in rule.decls)) continue;
@@ -113,7 +96,7 @@ export function unexplainedHeadingWeights(css: string): string[] {
 }
 
 /** Every monospace font declaration that does not come through the token. */
-export function rawMonoStacks(source: string): string[] {
+function rawMonoStacks(source: string): string[] {
   const out: string[] = [];
   for (const m of stripComments(source).matchAll(/font(?:-family)?\s*:([^;'"`}]*)/g)) {
     const value = m[1];
@@ -121,52 +104,6 @@ export function rawMonoStacks(source: string): string[] {
   }
   return out;
 }
-
-describe('the heading base', () => {
-  it('starts every heading at semibold with no margin, weightless', () => {
-    const at = primitives.indexOf(':where(h1, h2, h3, h4)');
-    expect(at, 'no heading base in primitives.css').toBeGreaterThan(-1);
-    const body = primitives.slice(at, primitives.indexOf('}', at));
-    // Without it a heading with no weight renders at the browser's 700,
-    // which is how settings cards (700), modals (600) and health pages (500)
-    // came to disagree on the same role.
-    expect(body).toContain('font-weight: var(--weight-semibold)');
-    expect(body).toMatch(/margin: 0;/);
-  });
-
-  it('leaves rendered content its own heading rhythm', () => {
-    // A feed entry or a workspace document brings its own headings, which
-    // collapse onto their paragraphs with the margin taken away.
-    expect(primitives).toMatch(/:where\(h1, h2, h3, h4\):not\(:where\(\.prose, \.prose \*\)\)/);
-  });
-});
-
-describe('the title classes', () => {
-  const cases: [string, string, string][] = [
-    // Q10: the page title is the large step at semibold.
-    ['.title-page', 'var(--text-lg)', 'var(--weight-semibold)'],
-    ['.title-section', 'var(--text-base)', 'var(--weight-semibold)'],
-    // Q6: a card title sits a weight under the section title above it.
-    ['.title-card', 'var(--text-sm)', 'var(--weight-medium)'],
-  ];
-  for (const [selector, size, weight] of cases) {
-    it(`${selector} is ${size} at ${weight}, and typography only`, () => {
-      const body = ruleBody(selector);
-      expect(body, selector).toBeDefined();
-      expect(body).toContain(`font-size: ${size}`);
-      expect(body).toContain(`font-weight: ${weight}`);
-      expect(body).not.toMatch(/^\s*(margin|padding|display|color)/m);
-    });
-  }
-
-  it('steps down from page to section to card', () => {
-    const sizes = ['--text-lg', '--text-base', '--text-sm'].map((t) =>
-      parseFloat(new RegExp(`${t}:\\s*([\\d.]+)rem`).exec(readLayer('tokens'))![1]),
-    );
-    expect(sizes[0]).toBeGreaterThan(sizes[1]);
-    expect(sizes[1]).toBeGreaterThan(sizes[2]);
-  });
-});
 
 describe('heading weights', () => {
   describe('the detector', () => {
@@ -209,35 +146,7 @@ describe('heading weights', () => {
   });
 });
 
-describe('code and monospace', () => {
-  it('gives <code> the mono face a step under its text', () => {
-    const body = ruleBody('code');
-    expect(body).toBeDefined();
-    expect(body).toContain('font-family: var(--font-mono)');
-    expect(body).toContain('font-size: 0.9em');
-  });
-
-  it('.mono is the face alone', () => {
-    const body = ruleBody('.mono');
-    expect(body).toBeDefined();
-    expect(body).toContain('font-family: var(--font-mono)');
-    expect(body).not.toMatch(/font-size|color|background/);
-  });
-
-  it('.code-chip is the raised mono chip', () => {
-    const body = ruleBody('.code-chip');
-    expect(body).toBeDefined();
-    for (const decl of [
-      'font-family: var(--font-mono)',
-      'font-size: var(--text-xs)',
-      'background: var(--surface-raised)',
-      'padding: 0 var(--space-1)',
-      'border-radius: var(--radius-sm)',
-    ]) {
-      expect(body).toContain(decl);
-    }
-  });
-
+describe('monospace', () => {
   describe('the detector', () => {
     it('finds a raw stack in a declaration and in an inline style string', () => {
       expect(rawMonoStacks('.x { font-family: ui-monospace, monospace; }')).toEqual([
@@ -258,7 +167,7 @@ describe('code and monospace', () => {
     const offenders: string[] = [];
     for (const f of sourceFiles('.svelte', '.css', '.ts')) {
       const file = rel(f);
-      if (file === 'lib/styles/tokens.css' || file.endsWith('.test.ts')) continue;
+      if (file.endsWith('.test.ts')) continue;
       for (const stack of rawMonoStacks(readFileSync(f, 'utf8'))) {
         offenders.push(`${file}: ${stack}`);
       }
@@ -267,57 +176,7 @@ describe('code and monospace', () => {
   });
 });
 
-describe('.num', () => {
-  it('lines digits up and does nothing else', () => {
-    const body = ruleBody('.num');
-    expect(body).toBeDefined();
-    expect(body).toContain('font-variant-numeric: tabular-nums');
-    // The table family adds alignment on its own `.table .num`; here a count
-    // in a pill must not be pushed to one side.
-    expect(body).not.toMatch(/text-align|white-space/);
-  });
-});
-
-describe('the link classes', () => {
-  it('.link-action is a button drawn as a content link', () => {
-    const body = ruleBody('.link-action');
-    expect(body).toBeDefined();
-    for (const decl of [
-      'background: none',
-      'border: none',
-      'padding: 0',
-      'font: inherit',
-      // `font: inherit` resets the leading too, and the page's must win.
-      'line-height: inherit',
-      'color: var(--link)',
-      'cursor: pointer',
-    ]) {
-      expect(body).toContain(decl);
-    }
-  });
-
-  for (const [cls, colour] of [
-    ['.link-action', 'var(--link)'],
-    ['.link-quiet', 'var(--text-primary)'],
-    ['.link-muted', 'var(--text-muted)'],
-  ]) {
-    it(`${cls} keeps its colour on hover and shows the underline`, () => {
-      // The bare `a:hover` brightens a link to --accent-hover; these keep
-      // their colour and let the underline mark the state.
-      const hover = ruleBody(`${cls}:hover`);
-      expect(hover, `${cls}:hover`).toBeDefined();
-      expect(hover).toContain(`color: ${colour}`);
-      expect(hover).toContain('text-decoration: underline');
-    });
-  }
-
-  it('.link-quiet and .link-muted carry no underline at rest', () => {
-    expect(ruleBody('.link-quiet')).toContain('text-decoration: none');
-    expect(ruleBody('.link-muted')).toContain('text-decoration: none');
-  });
-});
-
-describe('no page restates the new classes', () => {
+describe('no page restates the type classes', () => {
   const owned: Record<string, RegExp> = {
     'title-page': /(^|\s)(font-size|font-weight)\s*:/,
     'title-section': /(^|\s)(font-size|font-weight)\s*:/,

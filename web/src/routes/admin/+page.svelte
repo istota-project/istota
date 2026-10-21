@@ -24,7 +24,7 @@
     Timestamp,
     StatusDot,
     Meter,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import UserAvatar from '$lib/components/UserAvatar.svelte';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { getCurrentUser } from '$lib/userContext';
@@ -38,8 +38,8 @@
     usageOriginTitle,
   } from '$lib/usageFormat';
   import { formatBytes } from '$lib/format';
-  import { formatDuration as formatIsoDuration } from '$lib/dateFormat';
-  import { usePolling } from '$lib/ui/polling.svelte';
+  import { formatDuration as formatIsoDuration } from '@minot/ui/dateFormat';
+  import { usePolling } from '@minot/ui/ui/polling.svelte';
 
   let stats: AdminStats | null = $state(null);
   let loading = $state(true);

@@ -17,7 +17,7 @@
     Input,
     TextArea,
     Disclosure,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
 
   /**
    * Create/edit form for an invoicing client.

@@ -2,9 +2,9 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import type { AdminServarrApp, AdminServarrConnection } from '$lib/api';
-  import { Badge, Button, Card, EmptyState, Alert, Timestamp } from '$lib/components/ui';
+  import { Badge, Button, Card, EmptyState, Alert, Timestamp } from '@minot/ui';
   import { waitForDoctorRun } from '$lib/doctorRun';
-  import { notifyError } from '$lib/stores/notices';
+  import { notifyError } from '@minot/ui/stores/notices';
   import { Clapperboard } from '@lucide/svelte';
   import CheckResult from './CheckResult.svelte';
   import ConnectionCard from './ConnectionCard.svelte';

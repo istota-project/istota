@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Bot } from '@lucide/svelte';
-  import { Icon, Badge } from '$lib/components/ui';
+  import { Icon, Badge } from '@minot/ui';
   import type { WorkspaceAccess } from '$lib/api';
   import { accessLabel, accessVariant, reachesTasks } from './reach';
   let { access }: { access: WorkspaceAccess } = $props();

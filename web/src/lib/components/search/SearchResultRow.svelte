@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { SearchHit } from '$lib/api';
   import { segments } from '$lib/search/highlight';
-  import { Badge, Timestamp } from '$lib/components/ui';
+  import { Badge, Timestamp } from '@minot/ui';
   let {
     hit,
     id,

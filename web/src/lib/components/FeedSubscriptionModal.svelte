@@ -9,7 +9,7 @@
 
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { Field, FormModal, Input, Select, type SelectOption } from '$lib/components/ui';
+  import { Field, FormModal, Input, Select, type SelectOption } from '@minot/ui';
 
   /**
    * Add or edit one feeds subscription. The two were near-identical modals on

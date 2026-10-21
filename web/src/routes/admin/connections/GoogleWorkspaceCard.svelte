@@ -1,7 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import type { AdminGoogleWorkspaceConnection } from '$lib/api';
-  import { Alert, Button } from '$lib/components/ui';
+  import { Alert, Button } from '@minot/ui';
   import { KeyRound } from '@lucide/svelte';
   import ConnectionCard from './ConnectionCard.svelte';
 

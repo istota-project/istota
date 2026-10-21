@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import { loadSetting, saveSetting } from '$lib/ui/persisted';
+import { loadSetting, saveSetting } from '@minot/ui/ui/persisted';
 
 export type Theme = 'light' | 'dark';
 

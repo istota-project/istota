@@ -16,7 +16,7 @@ import type {
   HealthDocument,
   Immunization,
 } from '$lib/api';
-import type { SelectOption } from '$lib/components/ui';
+import type { SelectOption } from '@minot/ui';
 import { conditionOptionLabel, encounterOptionLabel } from './conditions';
 
 // Lives in `$lib/format` now, because `/admin` needed it too and had grown a

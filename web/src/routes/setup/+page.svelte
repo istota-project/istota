@@ -13,7 +13,7 @@
     type SetupFinished,
     type SetupState,
   } from '$lib/api';
-  import { Button, Alert, PageLoading } from '$lib/components/ui';
+  import { Button, Alert, PageLoading } from '@minot/ui';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import SetupFrame from '$lib/components/setup/SetupFrame.svelte';
   import StepUnlock from '$lib/components/setup/StepUnlock.svelte';

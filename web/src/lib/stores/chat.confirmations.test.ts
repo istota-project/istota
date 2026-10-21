@@ -35,7 +35,7 @@ await fillApiDouble(api, {
 /** The rooms reconciler's own interval, restated from `chat.ts`. */
 const ROOMS_REFRESH_MS = 30000;
 
-vi.mock('$lib/ui/persisted', () => ({
+vi.mock('@minot/ui/ui/persisted', () => ({
   loadSetting: vi.fn(() => null),
   saveSetting: vi.fn(),
 }));
@@ -45,7 +45,7 @@ const notices = vi.hoisted(() => ({
   notifySuccess: vi.fn(),
   notifyWarning: vi.fn(),
 }));
-vi.mock('./notices', () => notices);
+vi.mock('@minot/ui/stores/notices', () => notices);
 
 function room(id: number): ChatRoom {
   return {

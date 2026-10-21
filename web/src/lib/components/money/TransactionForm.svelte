@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { TransactionRow } from '$lib/money/api';
-  import { FormModal, Field, Input, Select, type SelectOption } from '$lib/components/ui';
+  import { FormModal, Field, Input, Select, type SelectOption } from '@minot/ui';
 
   interface Props {
     txn: TransactionRow;

@@ -1,13 +1,13 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import { FileText, Play, Star, ExternalLink } from '@lucide/svelte';
-  import { Icon, Modal, IconButton, Button, Timestamp } from '$lib/components/ui';
+  import { Icon, Modal, IconButton, Button, Timestamp } from '@minot/ui';
   import MediaPreview from '$lib/components/viewer/MediaPreview.svelte';
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
   import { fileKind, inlineMedia, linkUrl, playerUrl, providerLabel } from '$lib/feeds/embed';
-  import { notifyError } from '$lib/stores/notices';
-  import { latest } from '$lib/ui/latest';
+  import { notifyError } from '@minot/ui/stores/notices';
+  import { latest } from '@minot/ui/ui/latest';
 
   let {
     entries = [],

@@ -23,7 +23,7 @@
     ToggleGroup,
     PageHeader,
     Spinner,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { confidenceVariant } from '$lib/health/status';
 
   type Mode = 'file' | 'paste';

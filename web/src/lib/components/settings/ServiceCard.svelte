@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import {
     Alert,
     Badge,
@@ -11,7 +11,7 @@
     Input,
     SecretField,
     type BadgeVariant,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { setSecret, deleteSecret, type ServiceCard as ServiceCardData } from '$lib/api';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
 

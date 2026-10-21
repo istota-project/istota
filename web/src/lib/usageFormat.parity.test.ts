@@ -22,7 +22,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { formatDuration } from '$lib/dateFormat';
+import { formatDuration } from '@minot/ui/dateFormat';
 import { formatContext, formatCost, formatNumber, formatResetIn } from '$lib/usageFormat';
 
 // [input, what usage_render.render_cost produces]

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { ChevronRight } from '@lucide/svelte';
-  import { EmptyState, Icon, LoadState } from '$lib/components/ui';
+  import { EmptyState, Icon, LoadState } from '@minot/ui';
   import { getAccounts, type AccountRow } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { selectedYear, transactionsUrl } from '$lib/money/stores/transactions';

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getCredentialActivity, type CredentialActivityRow } from '$lib/api';
-  import { Button, Card, Timestamp } from '$lib/components/ui';
+  import { Button, Card, Timestamp } from '@minot/ui';
   let rows: CredentialActivityRow[] = $state([]);
   let error = $state('');
   let busy = $state(false);

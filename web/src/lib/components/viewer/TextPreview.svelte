@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fileLinks } from '$lib/fileViewer/links';
   import hljs from 'highlight.js/lib/common';
-  import { TextArea, Disclosure } from '$lib/components/ui';
+  import { TextArea, Disclosure } from '@minot/ui';
   import { pinViewportZoom, releaseViewportZoom } from '$lib/zoomPin';
   import { renderDocument, renderUntrustedDocument } from '$lib/markdown';
   import {

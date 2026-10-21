@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { createConfirm } from '$lib/ui/confirm.svelte';
-  import { latest } from '$lib/ui/latest';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
+  import { latest } from '@minot/ui/ui/latest';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { onDestroy, onMount, untrack } from 'svelte';
-  import { createDrawerClose } from '$lib/ui/drawerClose';
+  import { createDrawerClose } from '@minot/ui/ui/drawerClose';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
@@ -35,11 +35,11 @@
     Select,
     ConfirmDialog,
     CountPill,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { LayoutGrid, List, Cog, CheckCheck } from '@lucide/svelte';
   import ViewFilters from '$lib/components/ViewFilters.svelte';
-  import { notifyError } from '$lib/stores/notices';
+  import { notifyError } from '@minot/ui/stores/notices';
   import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
 
   let { children } = $props();

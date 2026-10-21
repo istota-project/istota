@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Button, Input, Card, Field } from '$lib/components/ui';
+  import { Button, Input, Card, Field } from '@minot/ui';
   import BracketEditor from './BracketEditor.svelte';
   import RateProvenanceLine from './RateProvenanceLine.svelte';
   import type { RateProvenance, ResolvedField } from '$lib/money/api';

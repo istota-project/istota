@@ -18,9 +18,9 @@
     FormGrid,
     FormStack,
     Checkbox,
-  } from '$lib/components/ui';
-  import { createDraft } from '$lib/ui/draft.svelte';
-  import { notifyError } from '$lib/stores/notices';
+  } from '@minot/ui';
+  import { createDraft } from '@minot/ui/ui/draft.svelte';
+  import { notifyError } from '@minot/ui/stores/notices';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import BlockBuilder from '../BlockBuilder.svelte';

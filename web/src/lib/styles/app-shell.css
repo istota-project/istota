@@ -181,57 +181,6 @@ body:has(.app-content-fill) {
   overscroll-behavior: none;
 }
 
-/* A route's whole-pane status message — the loading placeholder, and the error
-   state that occupies the same slot. The loading placeholder is `PageLoading`,
-   which keeps this box empty and raises the fixed bar in the root layout: text
-   centred here moved each time the shell composed around it (ISSUE-752). An empty state is `EmptyState`, top-aligned. One rule so every module reads the
-   same: centered in the content area both ways, dim, small.
-
-   `flex: 1` rather than `min-height: 100%` is what does the vertical centering:
-   the pane it lands in is always a growing flex column (`.shell-main` and every
-   module frame below it), and a percentage height would instead measure the
-   *whole* pane and overflow it wherever a toolbar sits above the message. The
-   `min-height` is a floor for the few parents that size to their content.
-
-   `.error-msg` is the older, top-aligned pair of `.loading`; both survive for
-   in-card status lines that are not a pane state (an inline "Generating…", a
-   banner above a still-rendered layout). Reach for `.center-msg` for anything
-   that is the only thing on screen.
-
-   A load failure that replaces the whole pane is `.center-msg error`, never
-   `.error-msg` and never `.banner error` — the test for it is whether the
-   branch is the exclusive twin of the `.center-msg` loading state in the same
-   `{#if}` chain. It drifted three ways before anything checked: money read
-   0.85rem and top-aligned, health and admin read as a tinted full-width strip
-   at the top of the pane, and only feeds and location centered. The invariant
-   is held by `scripts/pane-error-state.test.ts`. */
-.center-msg {
-  flex: 1;
-  min-height: 8rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  padding: 2rem 1rem;
-  box-sizing: border-box;
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-}
-
-.center-msg.error {
-  color: var(--status-danger-fg);
-}
-
-/* While the settings frame holds nothing but the pane message, drop its own
-   padding: it is asymmetric (extra at the bottom, to keep the last card off the
-   screen edge), which would put the message a notch above the pane's centre
-   while every other section centres exactly. It lives here rather than in
-   settings.css because `.center-msg` is this app's class. Two classes, so it
-   outranks the frame's breakpoint paddings. */
-.settings:has(> .center-msg) {
-  padding: 0;
-}
-
 /* Inline loading / error states (in a card, above a rendered layout) */
 .loading,
 .error-msg {

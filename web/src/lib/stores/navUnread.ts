@@ -1,7 +1,7 @@
 import { get, writable, type Readable } from 'svelte/store';
 import { AuthError, getNavUnreadCounts, type NavUnreadCounts } from '$lib/api';
 import { online } from './connectivity';
-import { latest } from '$lib/ui/latest';
+import { latest } from '@minot/ui/ui/latest';
 
 type Counts = Omit<NavUnreadCounts, 'enabled'>;
 const empty: Counts = { chat: null, briefings: null, feeds: null };

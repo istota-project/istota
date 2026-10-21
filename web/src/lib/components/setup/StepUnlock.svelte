@@ -1,6 +1,6 @@
 <script lang="ts">
   import { unlockSetup, SetupApiError } from '$lib/api';
-  import { Button, Field, FormStack, Input, Disclosure } from '$lib/components/ui';
+  import { Button, Field, FormStack, Input, Disclosure } from '@minot/ui';
 
   interface Props {
     /** Under the field: why the last code was refused, the address's included. */

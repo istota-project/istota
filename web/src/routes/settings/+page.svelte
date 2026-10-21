@@ -1,11 +1,11 @@
 <script lang="ts">
   import { uploadAvatar, deleteAvatar, AVATAR_ACCEPT, AuthError } from '$lib/api';
-  import { AvatarPicker, Select, Card, Field, Checkbox, Input } from '$lib/components/ui';
+  import { AvatarPicker, Select, Card, Field, Checkbox, Input } from '@minot/ui';
   import UserAvatar from '$lib/components/UserAvatar.svelte';
   import { getCurrentUser } from '$lib/userContext';
   import { SecurityCard, SettingsLayout } from '$lib/components/settings';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
-  import { formatList, parseList } from '$lib/ui/parse';
+  import { formatList, parseList } from '@minot/ui/ui/parse';
   import { isManaged, managedBadge } from '$lib/settings/managed';
   import { timezoneOptions } from '$lib/settings/timezones';
 

@@ -11,10 +11,10 @@
     type BriefingTarget,
     type GroupBriefingDefinition,
   } from '$lib/api';
-  import { EmptyState, Card, Checkbox } from '$lib/components/ui';
+  import { EmptyState, Card, Checkbox } from '@minot/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
-  import { notifyError } from '$lib/stores/notices';
-  import { trackChanges } from '$lib/ui/draft.svelte';
+  import { notifyError } from '@minot/ui/stores/notices';
+  import { trackChanges } from '@minot/ui/ui/draft.svelte';
   import { channelLabel } from './settings/briefingSettings';
 
   // A member's own choices about group briefings: one row per group for every

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
@@ -17,7 +17,7 @@
     type DismissedCluster,
   } from '$lib/api';
   import { segmentTrips, type Trip } from '$lib/location-path';
-  import { localDateISO } from '$lib/dateFormat';
+  import { localDateISO } from '@minot/ui/dateFormat';
   import { elevationSummary } from '$lib/location-elevation';
   import {
     locationPlaces,
@@ -31,15 +31,8 @@
   import ElevationProfile from '$lib/components/location/ElevationProfile.svelte';
   import LocationMap from '$lib/components/location/LocationMap.svelte';
   import StopsPanel from '$lib/components/location/StopsPanel.svelte';
-  import {
-    Chip,
-    ConfirmDialog,
-    DateRangeFilter,
-    EmptyState,
-    Select,
-    LoadState,
-  } from '$lib/components/ui';
-  import { loadSetting, saveSetting } from '$lib/ui/persisted';
+  import { Chip, ConfirmDialog, DateRangeFilter, EmptyState, Select, LoadState } from '@minot/ui';
+  import { loadSetting, saveSetting } from '@minot/ui/ui/persisted';
 
   let pings: LocationPing[] = $state([]);
   let summary: DaySummary | null = $state(null);

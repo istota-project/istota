@@ -9,7 +9,7 @@
     type LocationSettingsInfo,
   } from '$lib/api';
   import { ServiceCard, SettingsLayout } from '$lib/components/settings';
-  import { Alert, Button, Card, CopyField } from '$lib/components/ui';
+  import { Alert, Button, Card, CopyField } from '@minot/ui';
   import QrCode from '$lib/components/location/QrCode.svelte';
   import DeviceTrackerCard from '$lib/components/location/DeviceTrackerCard.svelte';
   import LocationDevicesCard from '$lib/components/location/LocationDevicesCard.svelte';
@@ -172,7 +172,7 @@
 
 <style>
   /* Shared .settings/.card/.field/.banner primitives live in
-	   web/src/lib/styles/settings.css (imported by app.css). Only location-
+	   minot's settings.css (in @minot/ui/styles.css). Only location-
 	   specific styling (webhook URL display, kv list) stays. */
 
   .provision {

@@ -9,7 +9,7 @@
     type BriefingDocument,
     type BriefingPreviewResponse,
   } from '$lib/api';
-  import { Alert, Button, Modal, OptionCards, PageLoading } from '$lib/components/ui';
+  import { Alert, Button, Modal, OptionCards, PageLoading } from '@minot/ui';
   import BriefingEdition from './BriefingEdition.svelte';
 
   let {

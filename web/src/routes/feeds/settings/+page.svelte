@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ArrowDown, ArrowUp } from '@lucide/svelte';
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
@@ -34,14 +34,14 @@
     Input,
     Badge,
     Timestamp,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { ServiceCard, SettingsLayout } from '$lib/components/settings';
   import FeedSubscriptionModal, {
     type FeedDraft,
   } from '$lib/components/FeedSubscriptionModal.svelte';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
-  import { createDraft } from '$lib/ui/draft.svelte';
-  import { parseOptionalInt } from '$lib/ui/parse';
+  import { createDraft } from '@minot/ui/ui/draft.svelte';
+  import { parseOptionalInt } from '@minot/ui/ui/parse';
 
   let loading = $state(true);
   let saving = $state(false);
@@ -684,7 +684,7 @@
 
 <style>
   /* Shared .settings/.card/.field/.banner/.icon-btn primitives live in
-	   web/src/lib/styles/settings.css (imported by app.css). Only feeds-specific
+	   minot's settings.css (in @minot/ui/styles.css). Only feeds-specific
 	   styling (diagnostics, type pill, title cell, container queries) stays. */
 
   .diag-grid {

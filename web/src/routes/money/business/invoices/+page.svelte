@@ -26,15 +26,15 @@
     type KebabItem,
     SortHeader,
     LoadState,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import VoidInvoiceDialog from '$lib/components/money/VoidInvoiceDialog.svelte';
   import GenerateInvoicesDialog from '$lib/components/money/GenerateInvoicesDialog.svelte';
   import ManualInvoiceDialog from '$lib/components/money/ManualInvoiceDialog.svelte';
-  import { createTableSort, sortRows } from '$lib/ui/tableSort.svelte';
+  import { createTableSort, sortRows } from '@minot/ui/ui/tableSort.svelte';
   import { billingStatusVariant } from '$lib/money/status';
   import { workExportItems } from '$lib/money/workExport';
   import { Download } from '@lucide/svelte';
-  import { formatDate } from '$lib/dateFormat';
+  import { formatDate } from '@minot/ui/dateFormat';
   import { viewer } from '$lib/fileViewer/store.svelte';
   import { isPlainClick } from '$lib/fileViewer/links';
   import { formatDecimal as formatAmount } from '$lib/format';

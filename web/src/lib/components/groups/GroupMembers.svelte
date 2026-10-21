@@ -10,7 +10,7 @@
     KebabMenu,
     Badge,
     Checkbox,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import {
     getGroupUserOptions,

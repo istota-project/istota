@@ -25,8 +25,8 @@
     Input,
     PageHeader,
     Spinner,
-  } from '$lib/components/ui';
-  import { localDateISO } from '$lib/dateFormat';
+  } from '@minot/ui';
+  import { localDateISO } from '@minot/ui/dateFormat';
 
   const flagOptions = [
     { value: '', label: '—' },

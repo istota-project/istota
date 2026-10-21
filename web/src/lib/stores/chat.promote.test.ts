@@ -17,7 +17,7 @@ const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
 
-vi.mock('$lib/ui/persisted', () => ({
+vi.mock('@minot/ui/ui/persisted', () => ({
   loadSetting: vi.fn((_key: string, fallback: unknown) => fallback),
   saveSetting: vi.fn(),
 }));
@@ -46,7 +46,7 @@ async function freshSession() {
 // `vi.resetModules()` gives chat a fresh copy of notices, so a statically
 // imported `currentNotice` here would be a different singleton.
 async function freshNotices() {
-  return await import('./notices');
+  return await import('@minot/ui/stores/notices');
 }
 
 describe('chat store — promote / reconnect to Talk', () => {

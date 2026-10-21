@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { ServarrApp } from '$lib/api';
-  import { Button, Field, Input, Checkbox } from '$lib/components/ui';
-  import ConfigSecretField from './SecretField.svelte';
+  import { Button, Field, Input, Checkbox } from '@minot/ui';
+  import ConfigSecretField from './ConfigSecretField.svelte';
   import FieldRow from './FieldRow.svelte';
   import { credentialStatus } from './credentialStatus';
   import {

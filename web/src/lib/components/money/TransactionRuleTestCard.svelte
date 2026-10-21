@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { Alert, Badge, Button, Field, Input, Select, Card } from '$lib/components/ui';
+  import { Alert, Badge, Button, Field, Input, Select, Card } from '@minot/ui';
   import {
     ApiError,
     getLedgers,
@@ -11,7 +11,7 @@
     type TransactionRule,
   } from '$lib/money/api';
   import { KNOWN_SOURCES, ledgerScopeOptions, sourceScopeOptions } from '$lib/money/ruleScopes';
-  import { latest } from '$lib/ui/latest';
+  import { latest } from '@minot/ui/ui/latest';
 
   // Resolve a made-up transaction against the stored rules, and show the pass
   // rather than only its answer. A resolution alone cannot say why a rule did

@@ -7,7 +7,7 @@
    * envelope.
    */
   import { Mail, Smartphone, MessageCircle, MessagesCircle } from '@lucide/svelte';
-  import { Icon, type IconSize } from '$lib/components/ui';
+  import { Icon, type IconSize } from '@minot/ui';
 
   let {
     surface,

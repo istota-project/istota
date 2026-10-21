@@ -7,7 +7,7 @@
     type WalletCard,
     type WalletBilling,
   } from '$lib/api';
-  import { Alert, Field, FormModal, FormStack, Input } from '$lib/components/ui';
+  import { Alert, Field, FormModal, FormStack, Input } from '@minot/ui';
   let {
     card = null,
     onClose,

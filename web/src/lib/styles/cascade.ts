@@ -1,26 +1,28 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { createRequire } from 'node:module';
 
 /**
  * Reading the stylesheet the way the browser does, for the tests that assert
  * on it.
  *
- * `app.css` used to be one 1267-line file and every style test simply read it.
- * It is now an ordered list of `@import`s across four layers (tokens, the
- * app-agnostic primitives, this app's chrome, rendered markdown) plus the
- * three module sheets, so a test asking "does app.css floor the input size?"
- * has to ask the whole cascade instead of one file.
+ * `app.css` is an ordered list of `@import`s: `@minot/ui/styles.css` first,
+ * which is itself the design system's ordered entry (tokens, the module
+ * sheets, the table family, the primitives), then this app's own layers. A
+ * test asking "does the cascade floor the input size?" has to ask the whole
+ * cascade instead of one file.
  *
- * The import list is parsed out of the entry rather than restated here. That
- * matters more than it looks: the ORDER of those imports is the entire
- * contract of that file — ties that CSS resolves by document order resolve the
- * other way if it changes — so a copy here would be a second source of truth
- * for the one thing the split made load-bearing. Add a layer and these tests
- * see it with no edit.
+ * The import list is parsed out of the entry rather than restated here. The
+ * ORDER of those imports is the entire contract of that file — ties that CSS
+ * resolves by document order resolve the other way if it changes — so a copy
+ * here would be a second source of truth for the one thing that is
+ * load-bearing. Add a layer and these tests see it with no edit.
  *
- * Every reader takes the entry to start from, `app.css` by default, so the
- * same code reads the app's entry or a sheet that is itself an ordered list
- * of imports (the reusable layers' own entry, once they have one). An import
+ * A package import is resolved the way Node resolves it, through the
+ * package's `exports`, so the sheets read are the ones installed. minot has a
+ * reader of its own for its entry; this one reads the app's.
+ *
+ * Every reader takes the entry to start from, `app.css` by default. An import
  * whose target imports further sheets is expanded in place, in order, as the
  * browser does.
  */
@@ -29,6 +31,10 @@ const SRC = join(process.cwd(), 'src');
 
 /** The app's stylesheet entry, the default for every reader below. */
 export const APP_ENTRY = join(SRC, 'app.css');
+
+// Node's resolver, anchored at web/, reading the package's `exports`. Not
+// `import.meta.resolve`: vitest's module runner does not provide it.
+const resolvePackage = createRequire(join(process.cwd(), 'package.json')).resolve;
 
 const IMPORT = /@import\s+['"]([^'"]+)['"]\s*;/g;
 
@@ -47,14 +53,19 @@ function importsOf(path: string): string[] {
 export function layerPaths(entry: string = APP_ENTRY): string[] {
   const out: string[] = [];
   for (const spec of importsOf(entry)) {
-    if (!spec.startsWith('.')) {
-      throw new Error(`${entry}: cannot follow a non-relative import, ${spec}`);
-    }
-    const target = join(dirname(entry), spec);
+    const target = spec.startsWith('.') ? join(dirname(entry), spec) : resolvePackage(spec);
     if (importsOf(target).length > 0) out.push(...layerPaths(target));
     else out.push(target);
   }
   return out;
+}
+
+/**
+ * The installed source of a minot component, for a test asserting on where
+ * this app's own chrome meets one (the app nav against `ShellHeader`).
+ */
+export function minotComponentPath(name: string): string {
+  return join(dirname(resolvePackage('@minot/ui/AGENTS.md')), 'dist/components', `${name}.svelte`);
 }
 
 /** One layer by basename, e.g. `tokens` or `primitives`. */

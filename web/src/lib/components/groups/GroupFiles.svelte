@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { Folder } from '@lucide/svelte';
-  import { Icon, Button, EmptyState, Card, LoadState, Timestamp } from '$lib/components/ui';
+  import { Icon, Button, EmptyState, Card, LoadState, Timestamp } from '@minot/ui';
   import { getWorkspaceListing, getWorkspacePlaces, type WorkspaceEntry } from '$lib/api';
   import { viewer } from '$lib/fileViewer/store.svelte';
   import { fileIcon } from '$lib/components/workspace/filePresentation';

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { base } from '$app/paths';
-  import { Card, Field, Select } from '$lib/components/ui';
+  import { Card, Field, Select } from '@minot/ui';
   import PortfolioUpload from '../PortfolioUpload.svelte';
 
   // One entry per importer-registry source; adding a source is a new row here,

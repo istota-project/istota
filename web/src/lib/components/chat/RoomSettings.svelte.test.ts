@@ -34,7 +34,7 @@ vi.mock('$lib/components/chat/autocomplete/providers', () => ({
 }));
 
 const copyText = vi.hoisted(() => vi.fn(async () => true));
-vi.mock('$lib/clipboard', () => ({ copyText }));
+vi.mock('@minot/ui/clipboard', () => ({ copyText }));
 
 import RoomSettings from './RoomSettings.svelte';
 import {

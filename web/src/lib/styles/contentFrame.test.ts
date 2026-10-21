@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { readCascade, readLayer } from './cascade';
+import { readLayer } from './cascade';
 
 /**
  * `.content-frame` — the wide-dashboard content column: a cap, centred in
@@ -15,12 +15,12 @@ import { readCascade, readLayer } from './cascade';
  * the CSS parses: it is that the cap stays in ONE place, and that a module
  * adopting the column reads it rather than restating it.
  *
- * Same reasoning as controlTier.test.ts. A page that hardcodes its own
+ * The token and the class are minot's, and minot pins them; this file holds
+ * the adopters in this app. A page that hardcodes its own
  * max-width silently opts out of a shared column it looks like it belongs to,
  * and nothing about the rendered page says so.
  */
 
-const appCss = readCascade();
 const healthLayout = readFileSync(join(process.cwd(), 'src/routes/health/+layout.svelte'), 'utf8');
 const portfolioLayout = readFileSync(
   join(process.cwd(), 'src/routes/money/portfolio/+layout.svelte'),
@@ -84,23 +84,7 @@ const rootBlock = tokensCss.slice(tokensCss.indexOf(':root {'), tokensCss.indexO
 const tokenValue = (css: string, name: string): string | undefined =>
   css.match(new RegExp(`${name}:\\s*([^;]+);`))?.[1]?.trim();
 
-/** The body of a rule, by selector. */
-const ruleBody = (css: string, selector: string): string | undefined => {
-  const at = css.indexOf(`\n${selector} {`);
-  if (at === -1) return undefined;
-  return css.slice(at, css.indexOf('}', at));
-};
-
 describe('--content-max', () => {
-  it('is defined once, in px', () => {
-    const value = tokenValue(rootBlock, '--content-max');
-    // px rather than rem on purpose: this bounds the *screen* a layout may
-    // claim, not the type inside it. A rem cap would widen the column at the
-    // large text-scale setting — the setting picked to make lines easier to
-    // follow.
-    expect(value).toMatch(/^\d+px$/);
-  });
-
   it('is the only content cap — no module restates it', () => {
     // The failure this guards is a second module capping at its own number and
     // the two drifting apart, which is invisible until you put the two pages
@@ -111,33 +95,6 @@ describe('--content-max', () => {
         raw,
       );
     }
-  });
-});
-
-describe('.content-frame', () => {
-  const body = ruleBody(appCss, '.content-frame');
-
-  it('caps at the token and centres', () => {
-    expect(body).toBeDefined();
-    expect(body).toContain('max-width: var(--content-max)');
-    expect(body).toContain('margin-inline: auto');
-  });
-
-  it('is a growing flex column', () => {
-    // `.center-msg` centres itself with `flex: 1`, which needs an unbroken
-    // chain of growing flex columns up to `.shell-main` — inserting a plain
-    // block here would strand every framed page's loading and empty state at
-    // the top of the pane. `flex-basis: auto` and no shrink, so content taller
-    // than the pane still extends the scroll area.
-    expect(body).toContain('flex-direction: column');
-    expect(body).toMatch(/flex:\s*1\s+0\s+auto/);
-  });
-
-  it('carries no padding of its own', () => {
-    // Geometry only. Health pads the frame itself; the money pages pad their
-    // own sections, and a value baked in here would land on top of theirs.
-    // Spacing stays at the call site — the division `.micro-label` draws.
-    expect(body).not.toMatch(/^\s*padding/m);
   });
 });
 

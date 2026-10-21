@@ -11,7 +11,7 @@ const notices = vi.hoisted(() => ({
   notifySuccess: vi.fn(),
   notifyWarning: vi.fn(),
 }));
-vi.mock('$lib/stores/notices', () => notices);
+vi.mock('@minot/ui/stores/notices', () => notices);
 import Page from './+page.svelte';
 
 const job = (over: Record<string, unknown>) => ({

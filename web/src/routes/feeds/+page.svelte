@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
-  import { CardGrid, EmptyState, LoadMore, LoadState } from '$lib/components/ui';
+  import { CardGrid, EmptyState, LoadMore, LoadState, getShellScrollRoot } from '@minot/ui';
   import { onMount, onDestroy, tick } from 'svelte';
   import {
     getFeeds,
@@ -25,10 +25,9 @@
   import FeedCard from '$lib/components/FeedCard.svelte';
   import FeedReader from '$lib/components/FeedReader.svelte';
   import Lightbox from '$lib/components/Lightbox.svelte';
-  import { getShellScrollRoot } from '$lib/components/ui/AppShell.svelte';
-  import { notifyError } from '$lib/stores/notices';
-  import { isEditableTarget } from '$lib/ui/editableTarget';
-  import { latest } from '$lib/ui/latest';
+  import { notifyError } from '@minot/ui/stores/notices';
+  import { isEditableTarget } from '@minot/ui/ui/editableTarget';
+  import { latest } from '@minot/ui/ui/latest';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
 
   const getScrollRoot = getShellScrollRoot();

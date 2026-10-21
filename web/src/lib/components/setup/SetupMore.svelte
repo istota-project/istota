@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import { Disclosure } from '$lib/components/ui';
+  import { Disclosure } from '@minot/ui';
 
   interface Props {
     /** The disclosure's caption. */

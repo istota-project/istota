@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { ConfirmDialog } from '$lib/components/ui';
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { ConfirmDialog } from '@minot/ui';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import {
     deleteDocument,
     getDocument,

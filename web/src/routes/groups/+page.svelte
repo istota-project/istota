@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { createDrawerClose } from '$lib/ui/drawerClose';
+  import { createDrawerClose } from '@minot/ui/ui/drawerClose';
   import { base } from '$app/paths';
   import {
     AppShell,
@@ -13,11 +13,11 @@
     EmptyState,
     LoadState,
     Card,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { getGroups, getGroup, AuthError, type GroupSummary, type GroupDetail } from '$lib/api';
   import { getCurrentUser } from '$lib/userContext';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
-  import { latest } from '$lib/ui/latest';
+  import { latest } from '@minot/ui/ui/latest';
   import GroupNotebook from '$lib/components/groups/GroupNotebook.svelte';
   import GroupMembers from '$lib/components/groups/GroupMembers.svelte';
   import GroupRooms from '$lib/components/groups/GroupRooms.svelte';

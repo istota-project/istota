@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { LoadState, Timestamp } from '$lib/components/ui';
+  import { LoadState, Timestamp } from '@minot/ui';
   import { onMount, onDestroy } from 'svelte';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import {
@@ -21,12 +21,12 @@
     pickingPlace,
     requestNewPlace,
   } from '$lib/stores/location';
-  import { loadSetting, saveSetting } from '$lib/ui/persisted';
-  import { usePolling } from '$lib/ui/polling.svelte';
+  import { loadSetting, saveSetting } from '@minot/ui/ui/persisted';
+  import { usePolling } from '@minot/ui/ui/polling.svelte';
   import ElevationProfile from '$lib/components/location/ElevationProfile.svelte';
   import LocationMap from '$lib/components/location/LocationMap.svelte';
   import StopsPanel from '$lib/components/location/StopsPanel.svelte';
-  import { formatMinutes, localDateISO } from '$lib/dateFormat';
+  import { formatMinutes, localDateISO } from '@minot/ui/dateFormat';
 
   let requestedPlaceId = $state<number | null>(null);
   const urlSelection = createUrlSelection<{ place: number | null }>({

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { selectedYear } from '$lib/money/stores/transactions';
   import { accountFilter } from '$lib/money/stores/accounts';
-  import { Icon, Select, Input } from '$lib/components/ui';
+  import { Icon, Select, Input } from '@minot/ui';
   import { Search } from '@lucide/svelte';
 
   let { children } = $props();

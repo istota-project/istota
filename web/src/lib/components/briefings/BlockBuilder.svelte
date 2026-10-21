@@ -6,7 +6,7 @@
     EmailAccount,
   } from '$lib/api';
   import { deleteBriefingBlock, putBriefingBlock } from '$lib/api';
-  import { notifyError } from '$lib/stores/notices';
+  import { notifyError } from '@minot/ui/stores/notices';
   import {
     Icon,
     Button,
@@ -17,7 +17,7 @@
     Modal,
     type KebabItem,
     type SelectOption,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import {
     Bell,
     CalendarDays,
@@ -32,7 +32,7 @@
     TrendingUp,
     type LucideIcon,
   } from '@lucide/svelte';
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import BlockEditor from './BlockEditor.svelte';
   import BriefingPreview from './BriefingPreview.svelte';
   import { FEEDS_FAILED_MESSAGE, sourceKindLabel } from './settings/briefingSettings';

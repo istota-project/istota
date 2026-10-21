@@ -2,8 +2,8 @@
   import { onDestroy } from 'svelte';
   import { exportKeepass, type StepUpProof } from '$lib/api';
   import { downloadBlob, generateKeyfile } from '$lib/keepass';
-  import { formatDate } from '$lib/dateFormat';
-  import { Button, Field, Modal, Card, Checkbox, CopyButton } from '$lib/components/ui';
+  import { formatDate } from '@minot/ui/dateFormat';
+  import { Button, Field, Modal, Card, Checkbox, CopyButton } from '@minot/ui';
   import StepUpDialog from './StepUpDialog.svelte';
 
   let { onExported }: { onExported?: () => void } = $props();

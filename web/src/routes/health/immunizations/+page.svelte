@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import {
@@ -32,9 +32,9 @@
     PageHeader,
     Timestamp,
     Disclosure,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
-  import { localDateISO } from '$lib/dateFormat';
+  import { localDateISO } from '@minot/ui/dateFormat';
 
   let loading = $state(true);
   let error = $state('');
