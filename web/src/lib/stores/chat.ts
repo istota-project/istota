@@ -2337,6 +2337,10 @@ function createSession(): ChatSession {
         phone_group: fresh.phone_group ?? false,
         email_thread: fresh.email_thread ?? false,
         listed: fresh.listed ?? false,
+        // `in` rather than `??`: null is a room with its own roster, while a
+        // frame without the key (an older server) says nothing (ISSUE-819).
+        shared: 'shared' in fresh ? fresh.shared : next[idx].shared,
+        managed_by: 'managed_by' in fresh ? (fresh.managed_by ?? null) : next[idx].managed_by,
       };
       // Same invalidation the local save does, for a brain changed on another
       // surface: `!brain` on Talk, or this user's other device. The frame is

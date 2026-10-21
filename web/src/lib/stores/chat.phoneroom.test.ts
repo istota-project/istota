@@ -216,6 +216,39 @@ describe('chat store — phone rooms', () => {
     s.teardown();
   });
 
+  it('carries managed_by and shared through the room stream (ISSUE-819)', async () => {
+    const es = installFakeEventSource();
+    const plain = { ...room(1), origin: 'web', phone_surface: null, read_only: false };
+    api.getChatRooms.mockResolvedValue({ rooms: [{ ...plain, shared: false, managed_by: null }] });
+    const s = await freshSession();
+    await s.init();
+    const managed = {
+      group_id: 'fam',
+      display_name: 'Fam',
+      manage_url: '/istota/groups/?group=fam',
+      is_owner: false,
+    };
+    es.current!.emit('room', {
+      action: 'upsert',
+      room: { ...plain, shared: true, managed_by: managed },
+    });
+    expect(get(s.rooms)[0].managed_by).toEqual(managed);
+    expect(get(s.rooms)[0].shared).toBe(true);
+    // A frame without the keys (an older server) leaves the stored values.
+    es.current!.emit('room', { action: 'upsert', room: { ...plain, name: 'Planning' } });
+    expect(get(s.rooms)[0].name).toBe('Planning');
+    expect(get(s.rooms)[0].managed_by).toEqual(managed);
+    expect(get(s.rooms)[0].shared).toBe(true);
+    // An explicit null is a room whose membership is its own again.
+    es.current!.emit('room', {
+      action: 'upsert',
+      room: { ...plain, shared: false, managed_by: null },
+    });
+    expect(get(s.rooms)[0].managed_by).toBeNull();
+    expect(get(s.rooms)[0].shared).toBe(false);
+    s.teardown();
+  });
+
   it('carries the texted surface and the read-only flag', async () => {
     installFakeEventSource();
     const s = await freshSession();
