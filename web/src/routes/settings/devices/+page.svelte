@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import { base } from '$app/paths';
-  import { AuthError, listDevices, type DeviceToken } from '$lib/api';
+  import { AuthError, listDevices, type DevicesResponse } from '$lib/api';
   import { DeviceTokensCard, SettingsLayout } from '$lib/components/settings';
   import { getCurrentUser } from '$lib/userContext';
   import { latest } from '$lib/ui/latest';
@@ -10,7 +10,7 @@
   const identity = getCurrentUser();
   const user = $derived(identity.user);
 
-  let devices: DeviceToken[] | null = $state(null);
+  let devices: DevicesResponse | null = $state(null);
   let error = $state('');
   let loading = $state(true);
   let thisDeviceId: string | null = $state(null);
@@ -22,7 +22,7 @@
     try {
       const result = await listDevices();
       if (!current()) return;
-      devices = result.devices;
+      devices = result;
       error = '';
     } catch (e) {
       if (!current()) return;
@@ -48,7 +48,7 @@
 </script>
 
 <SettingsLayout
-  description="Phones that can save to your account on their own."
+  description="Phones and trackers that can save to your account on their own."
   {loading}
   error={devices ? error : ''}
   loadError={devices ? '' : error}
@@ -58,7 +58,7 @@
     <DeviceTokensCard {devices} {thisDeviceId} onChanged={refresh}>
       {#if user.features.location}
         <p class="caption">
-          Phones that send your location are listed in
+          Set up a phone or a tracker to send your location in
           <a href="{base}/location/settings">Location settings</a>.
         </p>
       {/if}

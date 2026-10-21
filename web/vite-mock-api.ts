@@ -3442,9 +3442,54 @@ function mockToken(): string {
 
 let mockDeviceTokenNextId = 2;
 
+/** `GET /devices` as the server builds it: one entry per phone, trackers beside them. */
+function mockPhones() {
+  type Part = { created_at: string; last_used_at: string | null };
+  const phones = new Map<string, Record<string, unknown>>();
+  const entry = (deviceId: string, label: string | null) => {
+    if (!phones.has(deviceId)) {
+      phones.set(deviceId, { device_id: deviceId, label, token: null, location: null });
+    }
+    return phones.get(deviceId)!;
+  };
+  for (const { device_id, label, ...token } of mockDeviceTokens) {
+    entry(device_id, label).token = token;
+  }
+  const trackers = [];
+  for (const { kind: _kind, device_id, ...location } of mockLocationDevices) {
+    if (device_id === null) trackers.push(location);
+    else entry(device_id, location.label).location = location;
+  }
+  const devices = [...phones.values()].map((phone) => {
+    const held = [phone.token, phone.location].filter(Boolean) as Part[];
+    const used = held.map((part) => part.last_used_at).filter((at): at is string => !!at);
+    return {
+      ...phone,
+      created_at: held.map((part) => part.created_at).sort()[0],
+      last_used_at: used.sort().at(-1) ?? null,
+    };
+  });
+  return {
+    devices,
+    location_trackers: trackers,
+    legacy_location_token: Boolean(mockSecrets.overland?.ingest_token),
+  };
+}
+
 const deviceTokensHandler: MockHandler = ({ url, method, body }) => {
   const path = url.split('?')[0];
-  if (path === '/istota/api/devices' && method === 'GET') return { devices: mockDeviceTokens };
+  if (path === '/istota/api/devices' && method === 'GET') return mockPhones();
+  const phone = path.match(/^\/istota\/api\/devices\/phones\/([^/]+)$/);
+  if (phone && method === 'DELETE') {
+    const deviceId = decodeURIComponent(phone[1]).toUpperCase();
+    if (!MOCK_UUID.test(deviceId)) return { __status: 400, detail: 'device_id must be a UUID' };
+    const tokenIndex = mockDeviceTokens.findIndex((d) => d.device_id === deviceId);
+    const locationIndex = mockLocationDevices.findIndex((d) => d.device_id === deviceId);
+    if (tokenIndex < 0 && locationIndex < 0) return { __status: 404, detail: 'device not found' };
+    if (tokenIndex >= 0) mockDeviceTokens.splice(tokenIndex, 1);
+    if (locationIndex >= 0) mockLocationDevices.splice(locationIndex, 1);
+    return { ok: true, token: tokenIndex >= 0, location: locationIndex >= 0 };
+  }
   if (path === '/istota/api/devices' && method === 'POST') {
     const req = (body ?? {}) as { device_id?: unknown; label?: unknown; scopes?: unknown };
     if (typeof req.device_id !== 'string' || !MOCK_UUID.test(req.device_id)) {
