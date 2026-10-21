@@ -37,7 +37,7 @@ from ._events import (
     make_stream_parser,
 )
 from istota.sandbox import cgroup as task_cgroup
-from istota.sandbox.peer_process import reporting_pid
+from istota.sandbox.peer_process import report_child_reaped, reporting_pid
 from istota.usage import telemetry as usage_types
 from istota.sandbox.process_group import kill_group_if_live
 from ._aliases import CANONICAL_ROLES, split_effort
@@ -1715,8 +1715,9 @@ class ClaudeCodeBrain:
         # the descendants of a pid `on_pid` registered (ISSUE-550) — without
         # it every skill call on this path is refused. The same callback
         # records `worker_pid`, so `!stop` reaches this path now as well.
+        # The reader also reports the reap, after the spawn report (ISSUE-823).
         with task_cgroup.placement(req.task_cgroup) as place_in_cgroup, \
-                reporting_pid(req.on_pid, place_in_cgroup) as preexec:
+                reporting_pid(req.on_pid, place_in_cgroup, report_reap=True) as preexec:
             result = subprocess.run(
                 cmd,
                 input=req.prompt,
@@ -2150,6 +2151,10 @@ class ClaudeCodeBrain:
             stdin_thread.join(timeout=5)
         finally:
             timer.cancel()
+
+        # After the timer is cancelled, so a slow write cannot turn a finished
+        # run into a timeout (ISSUE-823).
+        report_child_reaped(req.on_pid)
 
         actions_json = json.dumps(actions_descriptions) if actions_descriptions else None
         trace_json = json.dumps(execution_trace) if execution_trace else None

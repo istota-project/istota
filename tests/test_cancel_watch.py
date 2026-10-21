@@ -253,3 +253,121 @@ def test_a_pid_whose_holder_changed_is_not_signalled(tmp_path, monkeypatch):
     finally:
         holder.kill()
         holder.wait()
+
+
+# ISSUE-823: the row must not name a child the brain has already reaped. The
+# start-time pin above cannot tell a number reused before the watch first saw
+# it from the child itself, so the only closing move is an empty row.
+
+_QUICK = [sys.executable, "-c", "pass"]
+
+
+def _recording_req(config, task_id, tmp_path, seen):
+    req = _req(config, task_id, tmp_path)
+    record = req.on_pid
+
+    def _on_pid(pid):
+        seen.append(pid)
+        record(pid)
+
+    req.on_pid = _on_pid
+    return req
+
+
+def _stored_worker_pid(config, task_id):
+    with db.get_db(config.db_path) as conn:
+        return conn.execute(
+            "SELECT worker_pid FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()["worker_pid"]
+
+
+@pytest.mark.parametrize("path", sorted(_SPAWNS))
+def test_a_reaped_child_leaves_no_worker_pid(tmp_path, path):
+    config = _config(tmp_path)
+    task_id = _running_task(config)
+    seen = []
+
+    _SPAWNS[path](_QUICK, _recording_req(config, task_id, tmp_path, seen))
+
+    assert seen and seen[0] > 0, "the brain never reported its child"
+    assert _stored_worker_pid(config, task_id) is None
+
+
+@pytest.mark.parametrize("path", sorted(_SPAWNS))
+def test_a_cancel_after_the_reap_signals_nothing(tmp_path, monkeypatch, path):
+    from istota.sandbox import peer_process, process_group
+
+    monkeypatch.setattr(scheduler, "_CANCEL_POLL_SECONDS", 0.05)
+    # The case the pin cannot catch: the watch first sees the number once it
+    # already belongs to somebody else, so the start time it pins matches.
+    monkeypatch.setattr(peer_process, "start_time", lambda pid, **kw: 1)
+    signalled = []
+    monkeypatch.setattr(
+        process_group, "kill_process_group",
+        lambda pid, sig: signalled.append(pid) or "signalled",
+    )
+    config = _config(tmp_path)
+    task_id = _running_task(config)
+
+    with _task_heartbeat(config, task_id):
+        _SPAWNS[path](_QUICK, _req(config, task_id, tmp_path))
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "UPDATE tasks SET cancel_requested = 1 WHERE id = ?", (task_id,),
+            )
+            conn.commit()
+        time.sleep(0.5)  # ten polls
+
+    assert signalled == []
+
+
+def test_the_executor_callback_clears_the_row_on_a_reap(tmp_path, monkeypatch):
+    """A reap report is not a spawn: nothing is authorized or placed for it.
+
+    Placing pid 0 would write ``0`` to ``cgroup.procs``, which moves the
+    *writer* — the daemon — into the task's cgroup.
+    """
+    from pathlib import Path
+
+    from istota import executor
+
+    config = _config(tmp_path)
+    task_id = _running_task(config)
+    authorized, placed = [], []
+
+    class _Proxy:
+        def authorize_pid(self, pid):
+            authorized.append(pid)
+
+    monkeypatch.setattr(
+        executor.task_cgroup, "place", lambda pid, cg: placed.append(pid),
+    )
+    record = executor._record_worker_pid
+
+    record(config, task_id, 4242, proxies=(_Proxy(),), task_cg=Path("cg"))
+    assert _stored_worker_pid(config, task_id) == 4242
+
+    record(config, task_id, 0, proxies=(_Proxy(),), task_cg=Path("cg"))
+    assert _stored_worker_pid(config, task_id) is None
+    assert authorized == [4242]
+    assert placed == [4242]
+
+
+def test_the_non_streaming_reap_report_follows_the_spawn_report_on_one_thread(tmp_path):
+    """The reader that delivers the spawn report also sends the reap, so a
+    spawn write stuck behind the SQLite lock past the reader's join timeout
+    cannot land after the clear (review finding on ISSUE-823)."""
+    calls = []
+
+    def on_pid(pid):
+        calls.append((pid, threading.current_thread().name))
+
+    req = BrainRequest(
+        prompt="hi", allowed_tools=[], cwd=tmp_path, env={},
+        timeout_seconds=60, model="", effort="", on_pid=on_pid,
+    )
+    ClaudeCodeBrain._execute_simple_once(_QUICK, req)
+
+    assert [pid for pid, _ in calls][-1] == 0
+    assert len(calls) == 2 and calls[0][0] > 0
+    assert calls[0][1] == calls[1][1] == "pid-report"

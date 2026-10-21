@@ -526,7 +526,14 @@ class TestTheBrowserIsOnItsOwnNetwork:
 
     def test_the_browser_reaches_nothing_the_daemon_reaches(self, stack):
         targets = self._targets(stack)
-        from_daemon = _connect(stack, "daemon", [t for t in targets if not t.startswith("daemon:")])
+        # The lean stack's boot waits on the daemon alone, and web has no
+        # healthcheck, so its listener may still be coming up here.
+        deadline = time.monotonic() + 60
+        while True:
+            from_daemon = _connect(stack, "daemon", [t for t in targets if not t.startswith("daemon:")])
+            if set(from_daemon.values()) == {"reached"} or time.monotonic() > deadline:
+                break
+            time.sleep(1)
         assert set(from_daemon.values()) == {"reached"}, from_daemon
 
         from_browser = _connect(stack, "browser", targets)

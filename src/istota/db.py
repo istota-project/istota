@@ -10683,9 +10683,13 @@ def get_google_scopes(conn: sqlite3.Connection, user_id: str) -> list[str] | Non
 # ============================================================================
 
 
-def update_task_pid(conn: sqlite3.Connection, task_id: int, pid: int) -> None:
-    """Store the subprocess PID for a running task."""
-    conn.execute("UPDATE tasks SET worker_pid = ? WHERE id = ?", (pid, task_id))
+def update_task_pid(conn: sqlite3.Connection, task_id: int, pid: int | None) -> None:
+    """Store the subprocess PID for a running task; a falsy pid clears it.
+
+    The brains report 0 once they have reaped the child (ISSUE-823), and the
+    column holds NULL rather than 0 for "no process", as every other clear does.
+    """
+    conn.execute("UPDATE tasks SET worker_pid = ? WHERE id = ?", (pid or None, task_id))
     conn.commit()
 
 
