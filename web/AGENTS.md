@@ -111,7 +111,7 @@ Still their own buttons, because they are per-record forms rather than the page'
 
 `moneyTable.css` is not in the entry: the money layout imports it, so it stays on the money route chunk. `src/render/host.ts` imports `@minot/ui/tokens.css` and `app-tokens.css` alone for the render bundles.
 
-Tests read the cascade through `lib/styles/cascade.ts` (`readCascade()`, `readLayer('tokens')`), which parses the import list out of `app.css` and resolves the package entry through its `exports`, so the sheets read are the installed ones. `minotComponentPath(name)` is the installed source of a minot component, for a test that holds where this app's chrome meets one. Do not hardcode a layer path in a test.
+Tests read the cascade through `lib/styles/cascade.ts` (`readCascade()`, `readLayer('tokens')`), which parses the import list out of `app.css` and resolves the package entry through its `exports`, so the sheets read are the installed ones. Do not hardcode a layer path in a test.
 
 ## Page skeletons
 

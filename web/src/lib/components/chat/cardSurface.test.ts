@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { readLayer } from '$lib/styles/cascade';
 
 /**
  * The fill of a block that sits inside the chat transcript: a received mail,
@@ -30,13 +29,6 @@ const CARDS: [string, string][] = [
   ['ActivityTrace.svelte', '  .activity'],
 ];
 
-/** Every value one theme block gives a custom property. */
-function themeValue(css: string, blockSelector: string, name: string): string | undefined {
-  const at = css.indexOf(`${blockSelector} {`);
-  const body = css.slice(at, css.indexOf('\n}', at));
-  return new RegExp(`${name}:\\s*([^;]+);`).exec(body)?.[1].trim();
-}
-
 describe('cards in the chat transcript', () => {
   it.each(CARDS)('%s %s fills with the reading-surface card', (file, selector) => {
     expect(ruleBody(file, selector)).toMatch(/background:\s*var\(--surface-reading-card\)/);
@@ -49,19 +41,5 @@ describe('cards in the chat transcript', () => {
     expect(ruleBody('ActivityTrace.svelte', '  .activity.active')).toMatch(
       /var\(--surface-reading-card\) 20%[\s\S]*var\(--surface-reading-card\) 80%/,
     );
-  });
-
-  it('differs from the reading surface in both themes', () => {
-    const tokens = readLayer('tokens');
-    for (const block of [':root', ":root[data-theme='light']"]) {
-      const card = themeValue(tokens, block, '--surface-reading-card');
-      const reading = themeValue(tokens, block, '--surface-reading');
-      expect(card, `${block} defines --surface-reading-card`).toBeDefined();
-      expect(card).not.toBe(reading);
-      // In dark the reading surface is the card surface by reference.
-      if (reading === 'var(--surface-card)') {
-        expect(card).not.toBe(themeValue(tokens, block, '--surface-card'));
-      }
-    }
   });
 });

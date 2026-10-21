@@ -60,14 +60,6 @@ export function layerPaths(entry: string = APP_ENTRY): string[] {
   return out;
 }
 
-/**
- * The installed source of a minot component, for a test asserting on where
- * this app's own chrome meets one (the app nav against `ShellHeader`).
- */
-export function minotComponentPath(name: string): string {
-  return join(dirname(resolvePackage('@minot/ui/AGENTS.md')), 'dist/components', `${name}.svelte`);
-}
-
 /** One layer by basename, e.g. `tokens` or `primitives`. */
 export function readLayer(name: string, entry: string = APP_ENTRY): string {
   const path = layerPaths(entry).find((p) => p.endsWith(`/${name}.css`));
