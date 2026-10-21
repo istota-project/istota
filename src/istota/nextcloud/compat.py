@@ -16,6 +16,9 @@ best-effort — a Nextcloud hiccup must not fail daemon startup or wedge a
 They keep the historical ``None`` / ``False`` contract through this module. The
 wrappers below call this module's own ``ocs_*`` names on purpose, so a caller
 (or a test) patching ``istota.nextcloud.compat.ocs_get`` still intercepts them.
+The exception is the create in ``ocs_share_folder``, which goes through the
+raising ``shares.create_share`` (``_create_share`` here) because it has to tell
+a missing sharee from a real failure (ISSUE-829).
 """
 
 import logging
@@ -39,11 +42,19 @@ from istota.nextcloud._http import (
     ocs_headers as _ocs_headers,
     to_remote_path as _to_remote_path,
 )
-from istota.nextcloud.shares import relabel as _relabel_share
+from istota.nextcloud.shares import (
+    create_share as _create_share,
+    relabel as _relabel_share,
+    search_sharees as _search_sharees,
+)
 
 logger = logging.getLogger("istota.nextcloud.compat")
 
 _SHARES_PATH = "/apps/files_sharing/api/v1/shares"
+
+# (Nextcloud base URL, user id) pairs found to have no Nextcloud account, so
+# `ocs_share_folder` makes no OCS request for them again in this process.
+_NO_NEXTCLOUD_ACCOUNT: set[tuple[str, str]] = set()
 
 __all__ = [
     "OcsError",
@@ -243,9 +254,17 @@ def ocs_share_folder(config: Config, folder_path: str, user_id: str) -> bool:
     """Share a folder with a Nextcloud user (shareType=0, full permissions).
 
     Idempotent: checks existing shares first. True on success or already shared.
+
+    A user with no Nextcloud account (one reached only through chat surfaces)
+    is a legitimate setup: False, logged at debug, and remembered for the life
+    of the process so later calls make no OCS request.
     """
     if not _nc_configured(config):
         logger.warning("Cannot share folder: Nextcloud not configured")
+        return False
+
+    cache_key = (_nc_base_url(config), user_id)
+    if cache_key in _NO_NEXTCLOUD_ACCOUNT:
         return False
 
     existing = ocs_list_shares(config, path=folder_path, reshares=True)
@@ -255,16 +274,47 @@ def ocs_share_folder(config: Config, folder_path: str, user_id: str) -> bool:
                 logger.debug("Folder %s already shared with %s", folder_path, user_id)
                 return True
 
-    result = ocs_create_share(
-        config,
-        path=folder_path,
-        share_type=0,
-        share_with=user_id,
-        permissions=31,
-    )
-    if result is not None:
-        logger.info("Shared folder %s with user %s", folder_path, user_id)
-        return True
+    try:
+        _create_share(
+            config,
+            path=folder_path,
+            share_type=0,
+            share_with=user_id,
+            permissions=31,
+        )
+    except OcsError as e:
+        # Nextcloud answers 404 both for a sharee that does not exist and for a
+        # path that does not, in the server's language; the sharee lookup is
+        # what tells them apart, and it runs only on this failure.
+        if 404 in (e.http_status, e.ocs_status) and not _sharee_exists(config, user_id):
+            _NO_NEXTCLOUD_ACCOUNT.add(cache_key)
+            logger.debug(
+                "Not sharing %s: %s has no Nextcloud account", folder_path, user_id
+            )
+            return False
+        logger.warning(
+            "Failed to share folder %s with %s (HTTP %s, OCS %s): %s",
+            folder_path, user_id, e.http_status, e.ocs_status, e.message,
+        )
+        return False
 
-    logger.warning("Failed to share folder %s with %s", folder_path, user_id)
+    logger.info("Shared folder %s with user %s", folder_path, user_id)
+    return True
+
+
+def _sharee_exists(config: Config, user_id: str) -> bool:
+    """Whether Nextcloud's sharee search has an exact user match for ``user_id``.
+
+    True when the lookup itself fails, so an unreachable server is reported as
+    the share failure it is rather than taken for a missing account.
+    """
+    try:
+        data = _search_sharees(config, user_id)
+    except OcsError:
+        return True
+    exact = data.get("exact") if isinstance(data.get("exact"), dict) else {}
+    for entry in exact.get("users") or []:
+        value = entry.get("value") if isinstance(entry, dict) else None
+        if isinstance(value, dict) and str(value.get("shareWith", "")).casefold() == user_id.casefold():
+            return True
     return False

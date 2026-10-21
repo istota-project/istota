@@ -472,7 +472,7 @@ class TestOcsCreatePublicLink:
 
 
 class TestOcsShareFolder:
-    @patch("istota.nextcloud.compat.ocs_create_share")
+    @patch("istota.nextcloud.compat._create_share")
     @patch("istota.nextcloud.compat.ocs_list_shares")
     def test_creates_new_share(self, mock_list, mock_create, nc_config):
         from istota.nextcloud.compat import ocs_share_folder
@@ -486,7 +486,7 @@ class TestOcsShareFolder:
         assert mock_create.call_args.kwargs["share_with"] == "alice"
         assert mock_create.call_args.kwargs["permissions"] == 31
 
-    @patch("istota.nextcloud.compat.ocs_create_share")
+    @patch("istota.nextcloud.compat._create_share")
     @patch("istota.nextcloud.compat.ocs_list_shares")
     def test_already_shared(self, mock_list, mock_create, nc_config):
         from istota.nextcloud.compat import ocs_share_folder
@@ -499,7 +499,7 @@ class TestOcsShareFolder:
         assert result is True
         mock_create.assert_not_called()
 
-    @patch("istota.nextcloud.compat.ocs_create_share")
+    @patch("istota.nextcloud.compat._create_share")
     @patch("istota.nextcloud.compat.ocs_list_shares")
     def test_different_user_share(self, mock_list, mock_create, nc_config):
         from istota.nextcloud.compat import ocs_share_folder
@@ -513,18 +513,20 @@ class TestOcsShareFolder:
         assert result is True
         mock_create.assert_called_once()
 
-    @patch("istota.nextcloud.compat.ocs_create_share")
+    @patch("istota.nextcloud.compat._create_share")
     @patch("istota.nextcloud.compat.ocs_list_shares")
     def test_create_failure_returns_false(self, mock_list, mock_create, nc_config):
         from istota.nextcloud.compat import ocs_share_folder
 
+        from istota.nextcloud.compat import OcsError
+
         mock_list.return_value = []
-        mock_create.return_value = None
+        mock_create.side_effect = OcsError("Server error", 500, 996, "/shares")
 
         result = ocs_share_folder(nc_config, "/Users/alice/notes", "alice")
         assert result is False
 
-    @patch("istota.nextcloud.compat.ocs_create_share")
+    @patch("istota.nextcloud.compat._create_share")
     @patch("istota.nextcloud.compat.ocs_list_shares")
     def test_list_failure_still_tries_create(self, mock_list, mock_create, nc_config):
         from istota.nextcloud.compat import ocs_share_folder
@@ -540,3 +542,110 @@ class TestOcsShareFolder:
         from istota.nextcloud.compat import ocs_share_folder
         result = ocs_share_folder(empty_config, "/test", "alice")
         assert result is False
+
+
+def _ocs_response(http_status, ocs_status, data=None, message=""):
+    resp = MagicMock()
+    resp.status_code = http_status
+    resp.json.return_value = {
+        "ocs": {"meta": {"statuscode": ocs_status, "message": message}, "data": data}
+    }
+    return resp
+
+
+class TestOcsShareFolderSharee:
+    """ISSUE-829: a user with no Nextcloud account is a skip, not a failure."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        from istota.nextcloud import compat
+
+        compat._NO_NEXTCLOUD_ACCOUNT.clear()
+        yield
+        compat._NO_NEXTCLOUD_ACCOUNT.clear()
+
+    @staticmethod
+    def _get(sharee_users):
+        def get(url, **kwargs):
+            if url.endswith("/sharees"):
+                return _ocs_response(200, 200, {"exact": {"users": sharee_users}, "users": []})
+            return _ocs_response(200, 200, [])
+        return get
+
+    def test_missing_sharee_is_skipped_quietly_and_cached(self, nc_config, caplog):
+        from istota.nextcloud.compat import ocs_share_folder
+
+        not_found = _ocs_response(404, 404, [], "Please specify a valid account to share with")
+        with patch("istota.nextcloud._http.httpx.get", side_effect=self._get([])) as get, \
+             patch("istota.nextcloud._http.httpx.post", return_value=not_found) as post, \
+             caplog.at_level("DEBUG", logger="istota.nextcloud.compat"):
+            assert ocs_share_folder(nc_config, "/Users/carol/istota", "carol") is False
+            assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+            get.reset_mock()
+            post.reset_mock()
+            assert ocs_share_folder(nc_config, "/Users/carol/istota", "carol") is False
+            get.assert_not_called()
+            post.assert_not_called()
+
+    def test_404_for_an_existing_sharee_still_warns(self, nc_config, caplog):
+        from istota.nextcloud.compat import ocs_share_folder
+
+        not_found = _ocs_response(404, 404, [], "Wrong path, file/folder does not exist")
+        exists = [{"label": "Alice", "value": {"shareType": 0, "shareWith": "alice"}}]
+        with patch("istota.nextcloud._http.httpx.get", side_effect=self._get(exists)), \
+             patch("istota.nextcloud._http.httpx.post", return_value=not_found), \
+             caplog.at_level("WARNING", logger="istota.nextcloud.compat"):
+            assert ocs_share_folder(nc_config, "/Users/alice/gone", "alice") is False
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert "404" in warnings[0]
+        assert "Wrong path, file/folder does not exist" in warnings[0]
+
+    def test_failed_sharee_lookup_warns_and_caches_nothing(self, nc_config, caplog):
+        from istota.nextcloud import compat
+
+        not_found = _ocs_response(404, 404, [], "Wrong path, file/folder does not exist")
+
+        def get(url, **kwargs):
+            if url.endswith("/sharees"):
+                return _ocs_response(500, 996, [], "Internal error")
+            return _ocs_response(200, 200, [])
+
+        with patch("istota.nextcloud._http.httpx.get", side_effect=get), \
+             patch("istota.nextcloud._http.httpx.post", return_value=not_found), \
+             caplog.at_level("WARNING", logger="istota.nextcloud.compat"):
+            assert compat.ocs_share_folder(nc_config, "/Users/alice/notes", "alice") is False
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1 and "404" in warnings[0]
+        assert not compat._NO_NEXTCLOUD_ACCOUNT
+
+    def test_sharee_match_ignores_case(self, nc_config, caplog):
+        from istota.nextcloud import compat
+
+        not_found = _ocs_response(404, 404, [], "Wrong path, file/folder does not exist")
+        exists = [{"label": "Alice", "value": {"shareType": 0, "shareWith": "alice"}}]
+        with patch("istota.nextcloud._http.httpx.get", side_effect=self._get(exists)), \
+             patch("istota.nextcloud._http.httpx.post", return_value=not_found), \
+             caplog.at_level("WARNING", logger="istota.nextcloud.compat"):
+            assert compat.ocs_share_folder(nc_config, "/Users/Alice/gone", "Alice") is False
+
+        assert [r for r in caplog.records if r.levelname == "WARNING"]
+        assert not compat._NO_NEXTCLOUD_ACCOUNT
+
+    def test_other_failure_warns_with_status_and_message(self, nc_config, caplog):
+        from istota.nextcloud.compat import ocs_share_folder
+
+        forbidden = _ocs_response(403, 403, [], "Sharing is disabled")
+        with patch("istota.nextcloud._http.httpx.get", side_effect=self._get([])) as get, \
+             patch("istota.nextcloud._http.httpx.post", return_value=forbidden), \
+             caplog.at_level("WARNING", logger="istota.nextcloud.compat"):
+            assert ocs_share_folder(nc_config, "/Users/alice/notes", "alice") is False
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert "403" in warnings[0]
+        assert "Sharing is disabled" in warnings[0]
+        assert not any(c.args[0].endswith("/sharees") for c in get.call_args_list)

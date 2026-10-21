@@ -340,9 +340,10 @@ class TestTheOcsSharePath:
         assert get.call_args.kwargs["params"]["path"] == "/Shared Files/Users/alice/a.txt"
 
     def test_the_legacy_shim_maps_the_path_too(self):
-        """`storage.share_folder_with_user` goes through the shim, not through
-        `shares.py`, so a mapping applied only to the latter would leave the
-        one call the Docker shape makes on every boot still broken."""
+        """The shim's `ocs_list_shares` is still on the boot path
+        (`storage.share_folder_with_user`) and its `ocs_create_share` is the
+        nextcloud skill's, so a mapping applied only to `shares.py` would leave
+        both broken."""
         from istota.nextcloud.compat import ocs_create_share, ocs_list_shares
 
         with patch(
