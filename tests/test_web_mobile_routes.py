@@ -143,6 +143,15 @@ async def test_sign_in_pages_inside_the_app_sheet_drop_the_page_chrome(client, c
     assert in_app_sheet(await client.get(attempt["authorize_path"]))
 
 
+async def test_sign_in_pages_inside_the_app_sheet_do_not_zoom(client, configured):
+    """ISSUE-821: the sheet's UA cannot say, so the server locks the viewport."""
+    locked = f'<meta name="viewport" content="{configured._VIEWPORT_LOCKED}">'
+    assert locked not in (await client.get("/istota/login")).text
+    attempt, _, _ = await create(client)
+    await client.get(attempt["authorize_path"])
+    assert locked in (await client.get("/istota/login")).text
+
+
 async def test_a_browser_sign_in_keeps_the_full_page(client, configured, monkeypatch):
     monkeypatch.setattr(configured, "_LOGIN_FAILURE_SECONDS", 0)
     refused = await client.post("/istota/login/email", data={

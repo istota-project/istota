@@ -739,11 +739,12 @@ _LOGIN_PAGE_CSS = """
   --accent-blue: #2563b0;
   --glow: rgba(185, 116, 10, 0.07);
 }
-* { box-sizing: border-box; }
+* { box-sizing: border-box; touch-action: manipulation; }
 body {
   margin: 0;
   min-height: 100vh;
-  padding: 2rem 1.25rem;
+  padding: max(2rem, env(safe-area-inset-top)) max(1.25rem, env(safe-area-inset-right))
+    max(2rem, env(safe-area-inset-bottom)) max(1.25rem, env(safe-area-inset-left));
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -918,7 +919,8 @@ footer a:hover { color: var(--accent-amber); border-bottom-color: var(--accent-a
 body.in-app-sheet {
   min-height: 0;
   justify-content: flex-start;
-  padding: 1.5rem 1.25rem 2rem;
+  padding: 1.5rem max(1.25rem, env(safe-area-inset-right))
+    max(2rem, env(safe-area-inset-bottom)) max(1.25rem, env(safe-area-inset-left));
   background-image: none;
 }
 .in-app-sheet .card {
@@ -939,10 +941,19 @@ body.in-app-sheet {
 # string), so the login page matches the app the user is about to enter. Runs
 # before first paint — keep it in <head>.
 # No stored choice follows the OS, as the web UI's pre-paint script does.
+# In the iOS app's WebView it also locks the viewport, as app.html does
+# (ISSUE-821); the sign-in sheet's UA cannot say, so `_render_form_page` locks
+# that one server-side. nginx's starting page carries a copy of this script.
+_VIEWPORT_LOCKED = (
+    "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+)
 _LOGIN_PAGE_THEME_SCRIPT = (
     "try{var t=JSON.parse(localStorage.getItem('theme'));"
     "if(t==='light'||(t!=='dark'&&window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches))"
     "document.documentElement.setAttribute('data-theme','light')}catch(e){}"
+    r"if(/(?:^|\s)IstotaApp\//.test(navigator.userAgent)){"
+    "var v=document.querySelector('meta[name=\"viewport\"]');"
+    f"if(v)v.setAttribute('content','{_VIEWPORT_LOCKED}')}}"
 )
 
 # A cut-down `installKeyboardDismiss()` (web/src/lib/platform/input.ts), which
@@ -1156,17 +1167,20 @@ def _render_form_page(
     which advisories apply (ISSUE-569). `/admin` carries it instead.
 
     `sheet` is the iOS app's sign-in sheet (see `_in_app_sheet`): the sheet has
-    its own chrome showing the host, so the page drops its card, glow and footer.
+    its own chrome showing the host, so the page drops its card, glow and footer,
+    and locks the viewport (ISSUE-821). The sheet runs Safari's engine, which
+    may ignore the lock; `touch-action` still stops double-tap zoom there.
     """
     name = escape(bot_name)
     body_class = ' class="in-app-sheet"' if sheet else ""
+    viewport = _VIEWPORT_LOCKED if sheet else "width=device-width, initial-scale=1"
     footer = "" if sheet else (
         f'<footer>Running <a href="{ISTOTA_SITE_URL}" target="_blank" '
         'rel="noopener">Istota</a></footer>'
     )
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
-        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'<meta name="viewport" content="{viewport}">'
         f'<title>{escape(headline)} &middot; {name}</title>'
         '<link rel="icon" href="/istota/favicon.png">'
         f'<script>{_LOGIN_PAGE_THEME_SCRIPT}</script>'
