@@ -209,9 +209,18 @@ print(lean_image_tag())
 ')"
     echo
     echo "[control] run-contract: lean image ${lean_tag}"
+    # Built by the smoke tier's own run rather than a second copy of its build,
+    # which also proves the witnesses green on the unbroken image first.
     if ! docker image inspect "$lean_tag" >/dev/null 2>&1; then
-        echo "[control] not built yet — run \`uv run pytest -m smoke -n0 ${RUN_CONTRACT_TESTS}\` first." >&2
-        exit 2
+        echo "[control] not built yet — building it with the smoke tier's run-contract tests."
+        if ! uv run pytest -m smoke -n0 -q --no-header -p no:randomly "$RUN_CONTRACT_TESTS"; then
+            echo "[control] the run-contract tests fail on the unbroken lean image; no control can be read against that." >&2
+            exit 2
+        fi
+        if ! docker image inspect "$lean_tag" >/dev/null 2>&1; then
+            echo "[control] the smoke run passed but left no ${lean_tag}." >&2
+            exit 2
+        fi
     fi
     suffix="${lean_tag##*:}"
     scratch="$(mktemp -d)"
