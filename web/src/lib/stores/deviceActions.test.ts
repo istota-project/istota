@@ -30,7 +30,18 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       status: 201,
     });
   }
-  if (url === '/istota/api/devices') return new Response(JSON.stringify({ devices }));
+  if (url === '/istota/api/devices') {
+    // Shaped as the server groups them: one entry per phone, its device token and location row.
+    const phones = devices.map((row) => ({
+      device_id: row.device_id,
+      label: 'iPhone',
+      token: row.scopes ? { id: row.id, scopes: row.scopes } : null,
+      location: row.location ?? null,
+    }));
+    return new Response(
+      JSON.stringify({ devices: phones, location_trackers: [], legacy_location_token: false }),
+    );
+  }
   if (url.startsWith('/istota/api/devices/') && method === 'DELETE') {
     return new Response(JSON.stringify({ ok: true }));
   }
@@ -126,6 +137,21 @@ it('forgets the token and deletes this device row when the folder is cleared', a
   expect(calls('DELETE', '/istota/api/devices/4')).toHaveLength(0);
   expect(calls('POST', '/istota/api/devices')).toHaveLength(0);
   expect(plugin.provision).not.toHaveBeenCalled();
+});
+
+it('leaves a phone that only sends locations alone, and mints for it', async () => {
+  status.scopes = ['notes'];
+  devices = [{ id: 0, device_id: PHONE.toUpperCase(), location: { id: 9 } }];
+  await syncDeviceActions();
+  expect(calls('POST', '/istota/api/devices')).toHaveLength(1);
+
+  resetDeviceActions();
+  vi.clearAllMocks();
+  folder = null;
+  devices = [{ id: 0, device_id: PHONE.toUpperCase(), location: { id: 9 } }];
+  await syncDeviceActions();
+  expect(plugin.forget).toHaveBeenCalledTimes(1);
+  expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'DELETE')).toHaveLength(0);
 });
 
 it('does nothing when no folder is set and the shell holds nothing', async () => {

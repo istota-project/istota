@@ -37,7 +37,7 @@ export function syncDeviceActions(): Promise<void> {
 async function ownsDeviceRow(deviceId: string): Promise<boolean> {
   const { devices } = await listDevices();
   const wanted = deviceId.toUpperCase();
-  return devices.some((device) => device.device_id.toUpperCase() === wanted);
+  return devices.some((phone) => phone.token && phone.device_id.toUpperCase() === wanted);
 }
 
 function sameScopes(a: string[], b: string[]): boolean {
@@ -63,8 +63,11 @@ async function sync(): Promise<void> {
     provisionedFolder = null;
     const { devices } = await listDevices();
     const deviceId = status.deviceId.toUpperCase();
-    for (const device of devices) {
-      if (device.device_id.toUpperCase() === deviceId) await deleteDevice(device.id);
+    // The device token only: turning quick notes off leaves the tracker sending.
+    for (const phone of devices) {
+      if (phone.token && phone.device_id.toUpperCase() === deviceId) {
+        await deleteDevice(phone.token.id);
+      }
     }
     return;
   }

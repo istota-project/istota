@@ -115,9 +115,11 @@ async def test_mint_returns_the_token_once_and_a_remint_kills_the_old_one(client
     listed = await client.get(DEVICES, cookies=cookies)
     assert listed.status_code == 200
     [device] = listed.json()["devices"]
-    assert set(device) == {"id", "device_id", "label", "scopes", "token_tail", "created_at", "last_used_at"}
-    assert device["token_tail"] == body["token"][-4:]
-    assert device["scopes"] == ["notes"]
+    assert set(device) == {"device_id", "label", "token", "location", "created_at", "last_used_at"}
+    assert device["location"] is None
+    assert set(device["token"]) == {"id", "scopes", "token_tail", "created_at", "last_used_at"}
+    assert device["token"]["token_tail"] == body["token"][-4:]
+    assert device["token"]["scopes"] == ["notes"]
     assert body["token"] not in listed.text
     assert row["token_hash"] not in listed.text
 
@@ -409,3 +411,116 @@ async def test_deleting_a_user_removes_their_tokens_and_note_keys(client, config
         assert conn.execute("SELECT COUNT(*) FROM quick_note_keys WHERE user_id = 'alice'").fetchone()[0] == 0
     response = await client.post(NOTES, headers=_bearer(token), json={"content": "After deletion"})
     assert response.status_code == 401
+
+
+# --- one row per phone (#828) ------------------------------------------------
+
+PHONES = DEVICES + "/phones"
+OTHER = "00000000-0000-4000-8000-000000000001"
+
+
+def _mint_location(config, user_id="alice", kind="app", device_id=DEVICE, label="iPhone"):
+    from istota import db
+    from istota.location import ingest_tokens
+
+    with db.get_db(config.db_path) as conn:
+        return ingest_tokens.mint(conn, user_id, kind, device_id, label)
+
+
+def _location_rows(config, user_id="alice"):
+    from istota import db
+    from istota.location import ingest_tokens
+
+    with db.get_db(config.db_path) as conn:
+        return ingest_tokens.list_tokens(conn, user_id)
+
+
+def _touch(config, table, row_id, when):
+    from istota import db
+
+    with db.get_db(config.db_path) as conn:
+        conn.execute(f"UPDATE {table} SET last_used_at = ? WHERE id = ?", (when, row_id))
+
+
+async def test_a_phone_with_both_tokens_is_listed_once(client, config, monkeypatch):
+    from istota.credentials import store as secrets_store
+
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
+    token_id, token = _mint_direct(config)
+    location_id, location_token = _mint_location(config, device_id=DEVICE.lower())
+    _mint_location(config, device_id=OTHER)
+    code_id, code_token = _mint_location(config, kind="code", device_id=None, label="Overland")
+    _mint_location(config, user_id="bob", device_id=DEVICE)
+    secrets_store.set_secret(config.db_path, "alice", "overland", "ingest_token", "shared-secret")
+    _touch(config, "device_tokens", token_id, "2026-10-01T10:00:00Z")
+    _touch(config, "location_ingest_tokens", location_id, "2026-10-02T10:00:00Z")
+
+    cookies = await _login(client)
+    listed = await client.get(DEVICES, cookies=cookies)
+    assert listed.status_code == 200
+    body = listed.json()
+    by_id = {entry["device_id"]: entry for entry in body["devices"]}
+    assert set(by_id) == {DEVICE.upper(), OTHER.upper()}
+
+    phone = by_id[DEVICE.upper()]
+    assert phone["token"]["id"] == token_id
+    assert phone["location"]["id"] == location_id
+    assert phone["last_used_at"] == "2026-10-02T10:00:00Z"
+    assert by_id[OTHER.upper()]["token"] is None
+
+    [tracker] = body["location_trackers"]
+    assert tracker["id"] == code_id
+    assert tracker["label"] == "Overland"
+    assert body["legacy_location_token"] is True
+    for secret in (token, location_token, code_token, "shared-secret"):
+        assert secret not in listed.text
+
+
+async def test_revoking_a_phone_removes_both_tokens_and_signals_the_receiver(client, config):
+    from istota.location import ingest_signal
+
+    _, token = _mint_direct(config)
+    _mint_location(config)
+    _mint_direct(config, device_id=OTHER)
+    _mint_location(config, device_id=OTHER)
+    _mint_location(config, kind="code", device_id=None, label="QR code")
+    before = ingest_signal.reload_stamp(config.db_path)
+
+    cookies = await _login(client)
+    response = await client.delete(f"{PHONES}/{DEVICE.lower()}", cookies=cookies, headers=ORIGIN)
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "token": True, "location": True}
+    assert [row["device_id"] for row in _rows(config)] == [OTHER.upper()]
+    assert sorted(r["device_id"] or "" for r in _location_rows(config)) == ["", OTHER.upper()]
+    assert ingest_signal.reload_stamp(config.db_path) != before
+    note = await client.post(NOTES, headers=_bearer(token), json={"content": "Buy milk"})
+    assert note.status_code == 401
+
+
+async def test_a_phone_with_only_a_location_token_can_be_revoked(client, config):
+    _mint_location(config)
+    cookies = await _login(client)
+    response = await client.delete(f"{PHONES}/{DEVICE}", cookies=cookies, headers=ORIGIN)
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "token": False, "location": True}
+    assert _location_rows(config) == []
+
+
+async def test_revoking_a_phone_touches_no_other_users_tokens(client, config):
+    _mint_direct(config, user_id="alice")
+    _mint_location(config, user_id="alice")
+    cookies = await _login(client, "bob")
+    response = await client.delete(f"{PHONES}/{DEVICE}", cookies=cookies, headers=ORIGIN)
+    assert response.status_code == 404
+    assert len(_rows(config)) == 1
+    assert len(_location_rows(config)) == 1
+
+
+async def test_revoking_a_phone_needs_a_uuid_and_an_origin(client, config):
+    _mint_direct(config)
+    cookies = await _login(client)
+    bad = await client.delete(f"{PHONES}/not-a-uuid", cookies=cookies, headers=ORIGIN)
+    assert bad.status_code == 400
+    no_origin = await client.delete(f"{PHONES}/{DEVICE}", cookies=cookies)
+    assert no_origin.status_code == 403
+    assert len(_rows(config)) == 1

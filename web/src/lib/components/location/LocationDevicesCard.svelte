@@ -7,6 +7,7 @@
    * the server cannot tell which devices still hold it.
    */
   import { onMount } from 'svelte';
+  import { base } from '$app/paths';
   import {
     listLocationDevices,
     deleteLocationDevice,
@@ -152,6 +153,10 @@
       {/if}
     </ul>
   {/if}
+  <p class="caption">
+    To revoke everything a phone holds, quick notes included, use
+    <a href="{base}/settings/devices">Settings → Devices</a>.
+  </p>
 </Card>
 
 <ConfirmDialog
