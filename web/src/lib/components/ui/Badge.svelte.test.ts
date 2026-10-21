@@ -63,6 +63,16 @@ describe('Badge', () => {
     expect(badge).toHaveTextContent('Configured');
   });
 
+  it('puts its title on the pill itself, so no caller wraps it to get one', () => {
+    // A sibling app's fix: a `<span title>` around the badge became a flex item
+    // whose line box was the parent's, and the pill sat a few pixels high
+    // beside its unwrapped neighbour.
+    const { container } = render(Badge, { title: 'Voided on 3 May', children: text('Voided') });
+    const badge = container.querySelector('.badge')!;
+    expect(badge).toHaveAttribute('title', 'Voided on 3 May');
+    expect(container.querySelectorAll('[title]')).toHaveLength(1);
+  });
+
   it('puts an icon before the text and passes a placement class', () => {
     const icon = createRawSnippet(() => ({ render: () => '<svg data-testid="glyph"></svg>' }));
     const { container } = render(Badge, {

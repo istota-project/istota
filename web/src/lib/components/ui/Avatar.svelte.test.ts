@@ -35,86 +35,49 @@ const declarations = source
 const picture = (c: HTMLElement) => c.querySelector('img');
 const chip = (c: HTMLElement) => c.querySelector('.fallback');
 
-describe('Avatar: the URL it asks for', () => {
-  it('carries the content hash when the caller knows one', () => {
-    const { container } = render(Avatar, {
-      kind: 'user',
-      userId: 'alice',
-      version: 'ab12',
-      label: 'Alice',
-    });
+describe('Avatar: the picture it draws', () => {
+  it('draws the URL it is given', () => {
+    const { container } = render(Avatar, { src: '/pictures/alice.webp', label: 'Alice' });
 
-    expect(picture(container)?.getAttribute('src')).toBe('/api/avatars/user/alice?v=ab12');
+    expect(picture(container)?.getAttribute('src')).toBe('/pictures/alice.webp');
   });
 
-  it('asks without a version when the caller does not know one', () => {
-    // A third party's hash is in no payload the client holds (D13), so the
-    // request goes out bare and pays one conditional round trip per author.
-    const { container } = render(Avatar, { kind: 'user', userId: 'bob', label: 'Bob' });
+  it('draws the chip and asks for nothing without a URL', () => {
+    for (const src of [null, '', undefined]) {
+      const { container } = render(Avatar, { src, label: 'Istota' });
 
-    expect(picture(container)?.getAttribute('src')).toBe('/api/avatars/user/bob');
-  });
-
-  it('reads the bot icon off its own endpoint', () => {
-    const { container } = render(Avatar, { kind: 'bot', version: 'cd34', label: 'Istota' });
-
-    expect(picture(container)?.getAttribute('src')).toBe('/api/avatars/bot?v=cd34');
-  });
-
-  it('asks for nothing at all when the payload said there is no picture', () => {
-    // `null` is not "unknown": it is `/me` saying the hash is absent, which is
-    // every deployment that has never had an avatar. A request there would be a
-    // 404 per identity per page load.
-    const { container } = render(Avatar, {
-      kind: 'bot',
-      version: null,
-      label: 'Istota',
-    });
-
-    expect(picture(container)).toBeNull();
-    expect(chip(container)?.textContent?.trim()).toBe('I');
-  });
-
-  it('renders the chip rather than an unbuildable URL when a user avatar has no id', () => {
-    // `avatarUrl` throws on this pairing, so the guard has to be here: a user
-    // row whose author the server has not named yet (Stage 6) still renders.
-    const { container } = render(Avatar, { kind: 'user', version: 'ab12', label: 'Someone' });
-
-    expect(picture(container)).toBeNull();
-    expect(chip(container)?.textContent?.trim()).toBe('S');
+      expect(picture(container)).toBeNull();
+      expect(chip(container)?.textContent?.trim()).toBe('I');
+      cleanup();
+    }
   });
 });
 
 describe('Avatar: the fallback', () => {
-  it('takes over when the image fails, and gives way again when the version changes', async () => {
+  it('takes over when the image fails, and gives way again when the URL changes', async () => {
     // Both halves are reachable: a request aborted by navigation fires `error`
     // in Chrome and WebKit, and an upload made offline fails and then succeeds
     // — which is exactly the moment the Settings preview swaps to a new hash.
     // Without the reset the chip is one-way for the life of the component.
-    const { container, rerender } = render(Avatar, {
-      kind: 'user',
-      userId: 'alice',
-      version: 'v1',
-      label: 'Alice',
-    });
+    const { container, rerender } = render(Avatar, { src: '/alice?v=v1', label: 'Alice' });
 
     await fireEvent.error(picture(container)!);
     expect(picture(container)).toBeNull();
     expect(chip(container)?.textContent?.trim()).toBe('A');
 
-    await rerender({ kind: 'user', userId: 'alice', version: 'v2', label: 'Alice' });
+    await rerender({ src: '/alice?v=v2', label: 'Alice' });
 
-    expect(picture(container)?.getAttribute('src')).toBe('/api/avatars/user/alice?v=v2');
+    expect(picture(container)?.getAttribute('src')).toBe('/alice?v=v2');
   });
 
   it('marks the bot chip so it keeps the amber fill it has today', () => {
-    const { container } = render(Avatar, { kind: 'bot', version: null, label: 'Istota' });
+    const { container } = render(Avatar, { kind: 'bot', label: 'Istota' });
 
     expect(chip(container)?.classList.contains('bot')).toBe(true);
   });
 
   it('falls back to a question mark rather than nothing on a blank label', () => {
-    const { container } = render(Avatar, { kind: 'user', version: null, label: '   ' });
+    const { container } = render(Avatar, { label: '   ' });
 
     expect(chip(container)?.textContent?.trim()).toBe('?');
   });
@@ -148,38 +111,22 @@ describe('Avatar: the accessible name', () => {
     // Most call sites render the name beside the image, so repeating it is
     // noise. The two states have to agree, or a picture that fails to load
     // changes what a screen reader announces.
-    const { container: withImage } = render(Avatar, {
-      kind: 'user',
-      userId: 'alice',
-      version: 'ab12',
-      label: 'Alice',
-    });
+    const { container: withImage } = render(Avatar, { src: '/alice', label: 'Alice' });
     expect(picture(withImage)?.getAttribute('alt')).toBe('');
 
-    const { container: withChip } = render(Avatar, {
-      kind: 'user',
-      version: null,
-      label: 'Alice',
-    });
+    const { container: withChip } = render(Avatar, { label: 'Alice' });
     expect(chip(withChip)?.getAttribute('aria-hidden')).toBe('true');
   });
 
   it("carries the caller's alt on both states when one is given", () => {
     const { container: withImage } = render(Avatar, {
-      kind: 'user',
-      userId: 'alice',
-      version: 'ab12',
+      src: '/alice',
       label: 'Alice',
       alt: 'Alice',
     });
     expect(picture(withImage)?.getAttribute('alt')).toBe('Alice');
 
-    const { container: withChip } = render(Avatar, {
-      kind: 'user',
-      version: null,
-      label: 'Alice',
-      alt: 'Alice',
-    });
+    const { container: withChip } = render(Avatar, { label: 'Alice', alt: 'Alice' });
     expect(chip(withChip)?.getAttribute('aria-hidden')).toBeNull();
     expect(chip(withChip)?.getAttribute('aria-label')).toBe('Alice');
     expect(chip(withChip)?.getAttribute('role')).toBe('img');

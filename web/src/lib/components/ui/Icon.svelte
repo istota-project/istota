@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <!--
   One lucide glyph in a box sized by `--icon-*`. The glyph draws at 100% of
   the box, so it is sized in rem and follows the text-scale preference, where

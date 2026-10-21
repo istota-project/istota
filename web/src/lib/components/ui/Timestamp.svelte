@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <!--
   An instant as text, inside a `<time>` that carries it machine-readably and
   titles it with the absolute date and time. Every string comes from

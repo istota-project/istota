@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <!--
   A thin bar showing a quantity against a range: one fill, or a stack of
   segments sized against their total. `role="meter"`, named by `label`.

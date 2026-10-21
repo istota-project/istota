@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts" module>
   export type BadgeVariant = 'neutral' | 'danger' | 'warn' | 'success' | 'info' | 'partial';
 </script>
@@ -24,6 +26,9 @@
     icon?: Snippet;
     /** Placement only. */
     class?: string;
+    /** The tooltip, on the pill itself. Never wrap a badge in a `<span title>`:
+     *  in a flex row the wrapper's line box puts the pill a few pixels above
+     *  an unwrapped neighbour. */
     title?: string;
     children: Snippet;
   }

@@ -6,6 +6,20 @@
    tie. The parity rules tokens.test.ts holds apply to both sheets together. */
 
 :root {
+  /* Money direction: income and expense are the design system's signed pair
+	   under this app's names. Aliases only; the values are --signed-*'s. */
+  --money-income: var(--signed-pos);
+  --money-expense: var(--signed-neg);
+
+  /* The location map's current-position dot: live tracker green, and orange for
+	   a browser-geolocation fallback. Darker in light, where the bright green
+	   washes out on light tiles. */
+  --map-marker-live: #4aff7f;
+  --map-marker-browser: #ff9800;
+  /* MapLibre's control glyphs ship dark: lifted on the dark theme's control
+	   surface, untouched on light. */
+  --map-icon-filter: invert(0.8);
+
   /* The WhatsApp surface glyph in the room list, the chat header and a texted
 	   turn's provenance line (ISSUE-584). A brand cue, not a severity. */
   --accent-whatsapp: #5fd07a;
@@ -131,6 +145,15 @@
 }
 
 :root[data-theme='light'] {
+  /* Restated beside the light block's other colours, as tokens.css does for
+	   its aliases, so theme parity sees the pair. */
+  --money-income: var(--signed-pos);
+  --money-expense: var(--signed-neg);
+
+  --map-marker-live: #16a34a;
+  --map-marker-browser: #ea580c;
+  --map-icon-filter: none;
+
   --accent-whatsapp: #1c8043;
 
   /* Categorical chips. */

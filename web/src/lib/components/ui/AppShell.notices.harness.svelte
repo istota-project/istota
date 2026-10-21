@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   /* Minimal stand-in for a route: a shell with a header and some content, and
      nothing at all to do with notices — which is the point of the test. */

@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <!--
   The shared `.spinner` (primitives.css), with its label for a screen reader.
   Without a label it is decoration, for a spinner beside text that already says

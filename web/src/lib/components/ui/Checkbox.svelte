@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import { untrack, type Snippet } from 'svelte';
   import type { HTMLInputAttributes } from 'svelte/elements';

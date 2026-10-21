@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <!--
   The load, failure and empty states around something fetched, in one place.
   `scope="pane"` is the whole-pane chain `web/AGENTS.md` describes: `PageLoading`

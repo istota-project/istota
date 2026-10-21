@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import Field from './Field.svelte';
   import Input from './Input.svelte';
@@ -5,6 +7,7 @@
   import Select from './Select.svelte';
   import MultiSelect from './MultiSelect.svelte';
   import Checkbox from './Checkbox.svelte';
+  import AutocompleteInput from './AutocompleteInput.svelte';
 
   let {
     control,
@@ -15,7 +18,15 @@
     layout = 'stacked',
   }: {
     control:
-      'input' | 'adorned' | 'textarea' | 'select' | 'multiselect' | 'checkbox' | 'raw' | 'buttons';
+      | 'input'
+      | 'adorned'
+      | 'textarea'
+      | 'select'
+      | 'multiselect'
+      | 'checkbox'
+      | 'autocomplete'
+      | 'raw'
+      | 'buttons';
     description?: string;
     error?: string;
     required?: boolean;
@@ -58,6 +69,8 @@
     <MultiSelect bind:value={picks} {options} />
   {:else if control === 'checkbox'}
     <Checkbox bind:checked={on} />
+  {:else if control === 'autocomplete'}
+    <AutocompleteInput bind:value options={['Alpha', 'Beta']} />
   {:else if control === 'raw'}
     <input />
   {:else}

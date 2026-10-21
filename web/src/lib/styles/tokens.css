@@ -51,6 +51,9 @@
 	   a mid grey on the white pane. About 11 levels off --surface-reading in
 	   both themes. */
   --surface-reading-card: #252525;
+  /* Alternating table-row shading. Translucent so it reads the same on the base
+	   and card surfaces. */
+  --surface-stripe: rgba(255, 255, 255, 0.03);
 
   /* Text */
   --text-primary: #e0e0e0;
@@ -92,11 +95,6 @@
   /* A focused text field's border (primitives.css). The interactive accent in
 	   both themes; declared in each so a theme can tune it on its own. */
   --focus-field-border: var(--accent-blue);
-  /* The location map's current-position dot: live tracker green, and orange for
-	   a browser-geolocation fallback. Darker in light, where the bright green
-	   washes out on light tiles. */
-  --map-marker-live: #4aff7f;
-  --map-marker-browser: #ff9800;
   /* Links inside rendered body content — chat markdown, the briefings reader,
 	   feed entries. Amber, following the bot's accent. Kept as its own token
 	   rather than using --accent-amber directly so a link can be retuned without
@@ -153,11 +151,12 @@
   --status-dot-warn: #eb9a09;
   --status-dot-info: #2e8fe6;
 
-  /* Money direction — a signed-amount pair, NOT a severity. An expense is not
-	   an error and income is not a success, so these stay off the status scale
-	   even though the hues rhyme with it. */
-  --money-income: #4adbc0;
-  --money-expense: #d46ab5;
+  /* Signed direction — a signed-amount pair, NOT a severity. A negative amount
+	   is not an error and a positive one is not a success, so these stay off the
+	   status scale even though the hues rhyme with it. An app names its own
+	   pair (income and expense, profit and loss) as aliases of these. */
+  --signed-pos: #4adbc0;
+  --signed-neg: #d46ab5;
 
   /* Overlay + scrim chrome. These sit on a surface whose lightness the theme
 	   does NOT control — a filled accent button, a translucent scrim over a
@@ -194,10 +193,6 @@
 	   date filters that carried it each needed BOTH halves and each wrote them
 	   several hundred lines apart. */
   --calendar-icon-filter: invert(0.7);
-
-  /* The same again for MapLibre's control glyphs, which ship dark: lifted on
-	   the dark theme's control surface, untouched on light. */
-  --map-icon-filter: invert(0.8);
 
   /* Radii. --radius-sm is 4px at the unscaled root, matching the px literals it
 	   replaces, but stays in rem so it tracks the text-scale preference like the
@@ -443,6 +438,7 @@
 	   on the dark value. */
   --surface-media-placeholder: #f0f0f2;
   --surface-reading-card: #f4f4f5;
+  --surface-stripe: rgba(0, 0, 0, 0.03);
 
   /* Text */
   --text-primary: #1a1a1a;
@@ -464,8 +460,6 @@
   --accent-amber: #b9740a;
   --accent-blue: #2563b0;
   --focus-field-border: var(--accent-blue);
-  --map-marker-live: #16a34a;
-  --map-marker-browser: #ea580c;
   --link: var(--accent-amber);
   --hover-bg: var(--surface-raised);
   --hover-fg: var(--text-primary);
@@ -489,9 +483,9 @@
   --status-partial-fg: #7c3aed;
   --status-critical-bg: #b3261e;
 
-  /* Money direction */
-  --money-income: #0d8f7e;
-  --money-expense: #a3157e;
+  /* Signed direction */
+  --signed-pos: #0d8f7e;
+  --signed-neg: #a3157e;
 
   /* Overlay + scrim chrome. --on-accent-fg and --on-scrim-fg are deliberately
 	   NOT redefined: both sit on a surface this theme does not lighten. */
@@ -504,5 +498,4 @@
   --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.16);
   /* The glyph already ships dark, so on white it needs nothing done to it. */
   --calendar-icon-filter: none;
-  --map-icon-filter: none;
 }

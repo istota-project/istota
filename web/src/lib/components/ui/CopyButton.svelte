@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import { Copy } from '@lucide/svelte';
   import { copyText } from '$lib/clipboard';

@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <!--
   A notice drawn into the page, for a condition that lasts while the page is
   open: access lost, a managed setting, a file with problems. Two appearances

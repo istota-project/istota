@@ -1,6 +1,7 @@
 <script lang="ts">
   import { uploadAvatar, deleteAvatar, AVATAR_ACCEPT, AuthError } from '$lib/api';
-  import { Avatar, AvatarPicker, Select, Card, Field, Checkbox, Input } from '$lib/components/ui';
+  import { AvatarPicker, Select, Card, Field, Checkbox, Input } from '$lib/components/ui';
+  import UserAvatar from '$lib/components/UserAvatar.svelte';
   import { getCurrentUser } from '$lib/userContext';
   import { SecurityCard, SettingsLayout } from '$lib/components/settings';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
@@ -130,7 +131,7 @@
                  the author's name is on the row beside it, while here the
                  picture *is* the state being edited and the only other signal
                  is whether Remove exists. -->
-            <Avatar
+            <UserAvatar
               kind="user"
               userId={avatarIdentity?.userId}
               version={avatarVersion}

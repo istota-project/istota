@@ -1,30 +1,15 @@
-<script lang="ts">
-  import { avatarUrl } from '$lib/api';
+<svelte:options runes={true} />
 
+<script lang="ts">
   interface Props {
-    /** Which identity this is. Decides the fallback chip's fill and the URL. */
-    kind: 'user' | 'bot';
+    /** Which identity this is. Decides the fallback chip's fill. */
+    kind?: 'user' | 'bot';
     /**
-     * The istota user id, which is what the endpoint keys on. Without one a
-     * `user` avatar renders the chip rather than requesting a URL it cannot
-     * build — a supported state, not an omission: an external sender mirrored
-     * into a room is named by an email address with no account behind it.
+     * The picture's URL. Empty or `null` means there is none to ask for, and
+     * the initial chip renders without a request. The caller builds it; this
+     * primitive knows nothing about where pictures are served from.
      */
-    userId?: string;
-    /**
-     * Content hash, when the caller knows one.
-     *
-     * The three values mean three different things and the difference is a
-     * request each. A **string** is a hash the caller read off `/me`, so the
-     * URL carries `?v=` and the server answers `immutable` for the caller's own
-     * picture and for the bot icon — every later render in a transcript is a
-     * cache hit. **`null`** is `/me` saying there is no picture, so nothing is
-     * requested at all; without that distinction a deployment with no avatars
-     * would pay a 404 per identity per page load. **Absent** is "nobody told
-     * me", which is a third party: the request goes out bare and pays one
-     * conditional round trip per author per session (D13).
-     */
-    version?: string | null;
+    src?: string | null;
     /** Display name. Supplies the fallback initial. */
     label: string;
     /**
@@ -36,29 +21,17 @@
     alt?: string;
   }
 
-  let { kind, userId, version, label, alt = '' }: Props = $props();
+  let { kind = 'user', src = null, label, alt = '' }: Props = $props();
 
   const initial = $derived((label.trim()[0] ?? '?').toUpperCase());
-
-  const src = $derived.by(() => {
-    // Known to have no picture, so do not ask for one.
-    if (version === null) return '';
-    // `avatarUrl` throws on this pairing rather than building a URL with an
-    // empty last segment. A user whose id the client has not been given is an
-    // ordinary case here (an external sender's turn, and the viewer's own on
-    // an offline boot, where the id under a guess is the wrong person's), so
-    // it is answered with the chip rather than an exception in a render.
-    if (kind === 'user' && !userId) return '';
-    return avatarUrl(kind, userId, version);
-  });
 
   // One error path, not distinguished by cause: a 404, a stored image that
   // fails to decode and an offline boot from the cached identity all mean "no
   // picture", and the answer to all three is the initial chip.
   let failed = $state(false);
   $effect(() => {
-    // Keyed on the resolved URL. Without the reset the chip is one-way for the
-    // life of the component, and two sequences reach that: a request aborted by
+    // Keyed on the URL. Without the reset the chip is one-way for the life of
+    // the component, and two sequences reach that: a request aborted by
     // navigation fires `error` in Chrome and WebKit, and an upload made while
     // offline fails and is then re-tried — which is the moment the Settings
     // preview swaps to a new hash.

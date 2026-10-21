@@ -391,8 +391,8 @@
           </span>
           <span class="inv-date">{formatDate(inv.date)}</span>
           {#if voided}
-            <span class="inv-status" title={voidSummary(inv)}>
-              <Badge size="sm">Voided</Badge>
+            <span class="inv-status">
+              <Badge size="sm" title={voidSummary(inv)}>Voided</Badge>
             </span>
           {:else}
             <span class="inv-status"

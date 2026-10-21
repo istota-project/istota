@@ -47,8 +47,20 @@ describe('the token split', () => {
 
   it('keeps the product prefixes out of the reusable sheet', () => {
     const product =
-      /^\s*--(chat-|room-color-|category-|scrim-pill-|accent-whatsapp|sigil-filter|unread-mark-size|setup-max|app-bar-height|field-label-width|card-pane-max)/m;
+      /^\s*--(money-|map-|chat-|room-color-|category-|scrim-pill-|accent-whatsapp|sigil-filter|unread-mark-size|setup-max|app-bar-height|field-label-width|card-pane-max)/m;
     expect(REUSABLE).not.toMatch(product);
+  });
+
+  it("aliases the app's money pair to the reusable signed pair", () => {
+    // The values live once, in tokens.css, in both themes; the app's names
+    // only point at them.
+    for (const selector of [':root', ":root[data-theme='light']"]) {
+      const product = declarations(PRODUCT, selector);
+      expect(product['--money-income'], selector).toBe('var(--signed-pos)');
+      expect(product['--money-expense'], selector).toBe('var(--signed-neg)');
+    }
+    expect(declarations(REUSABLE, ':root')).toHaveProperty('--signed-pos');
+    expect(declarations(REUSABLE, ":root[data-theme='light']")).toHaveProperty('--signed-neg');
   });
 
   it('loads the app sheet straight after tokens.css', () => {
@@ -88,6 +100,7 @@ describe('theme parity', () => {
     '--text-',
     '--border-',
     '--accent',
+    '--signed-',
     '--money-',
     // The room-colour palette (ISSUE-433). Without this prefix the parity
     // check above simply does not see these tokens, which is the quiet failure
@@ -138,6 +151,22 @@ describe('theme parity', () => {
     expect(filters).toContain('--sigil-filter');
     expect(filters).toContain('--calendar-icon-filter');
     for (const name of filters) expect(light, `${name} needs a light value`).toHaveProperty(name);
+  });
+
+  it('carries the table stripe in the reusable sheet, translucent in both themes', () => {
+    // Ported from a sibling app's copy (its striped tables). Translucent rather
+    // than a grey step, so one value shades a row on the base and the card
+    // surface alike; a tint of the theme's own text colour, so it lightens in
+    // dark and darkens in light.
+    const reusableDark = declarations(REUSABLE, ':root');
+    const reusableLight = declarations(REUSABLE, ":root[data-theme='light']");
+    const alpha = (value: string) => Number(value.match(/,\s*([\d.]+)\)$/)?.[1]);
+    expect(reusableDark['--surface-stripe']).toMatch(/^rgba\(255, 255, 255, /);
+    expect(reusableLight['--surface-stripe']).toMatch(/^rgba\(0, 0, 0, /);
+    for (const value of [reusableDark['--surface-stripe'], reusableLight['--surface-stripe']]) {
+      expect(alpha(value)).toBeGreaterThan(0);
+      expect(alpha(value)).toBeLessThan(0.1);
+    }
   });
 
   it('the light theme defines no token the dark theme lacks', () => {

@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts" module>
   export type CardGridColumns = 1 | 2 | 3 | 4 | 5;
 </script>

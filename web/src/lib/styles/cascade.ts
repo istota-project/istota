@@ -11,30 +11,55 @@ import { join, dirname } from 'node:path';
  * three module sheets, so a test asking "does app.css floor the input size?"
  * has to ask the whole cascade instead of one file.
  *
- * The import list is parsed out of `app.css` rather than restated here. That
+ * The import list is parsed out of the entry rather than restated here. That
  * matters more than it looks: the ORDER of those imports is the entire
  * contract of that file — ties that CSS resolves by document order resolve the
  * other way if it changes — so a copy here would be a second source of truth
  * for the one thing the split made load-bearing. Add a layer and these tests
  * see it with no edit.
+ *
+ * Every reader takes the entry to start from, `app.css` by default, so the
+ * same code reads the app's entry or a sheet that is itself an ordered list
+ * of imports (the reusable layers' own entry, once they have one). An import
+ * whose target imports further sheets is expanded in place, in order, as the
+ * browser does.
  */
 
 const SRC = join(process.cwd(), 'src');
 
-/** The `@import` targets of app.css, in the order it declares them. */
-export function layerPaths(): string[] {
-  const entry = join(SRC, 'app.css');
-  const css = readFileSync(entry, 'utf8');
+/** The app's stylesheet entry, the default for every reader below. */
+export const APP_ENTRY = join(SRC, 'app.css');
+
+const IMPORT = /@import\s+['"]([^'"]+)['"]\s*;/g;
+
+function importsOf(path: string): string[] {
+  const source = stripComments(readFileSync(path, 'utf8'));
+  const imports = [...source.matchAll(IMPORT)].map((m) => m[1]);
+  // An entry is an import list and nothing else; a sheet holding both would
+  // lose its own rules when expanded, so it is refused rather than guessed at.
+  if (imports.length > 0 && source.replace(IMPORT, '').trim() !== '') {
+    throw new Error(`${path}: holds rules as well as imports`);
+  }
+  return imports;
+}
+
+/** The sheets `entry` loads, in the order it loads them, imports expanded. */
+export function layerPaths(entry: string = APP_ENTRY): string[] {
   const out: string[] = [];
-  for (const m of css.matchAll(/@import\s+['"]([^'"]+)['"]\s*;/g)) {
-    out.push(join(dirname(entry), m[1]));
+  for (const spec of importsOf(entry)) {
+    if (!spec.startsWith('.')) {
+      throw new Error(`${entry}: cannot follow a non-relative import, ${spec}`);
+    }
+    const target = join(dirname(entry), spec);
+    if (importsOf(target).length > 0) out.push(...layerPaths(target));
+    else out.push(target);
   }
   return out;
 }
 
 /** One layer by basename, e.g. `tokens` or `primitives`. */
-export function readLayer(name: string): string {
-  const path = layerPaths().find((p) => p.endsWith(`/${name}.css`));
+export function readLayer(name: string, entry: string = APP_ENTRY): string {
+  const path = layerPaths(entry).find((p) => p.endsWith(`/${name}.css`));
   if (!path) throw new Error(`no such stylesheet layer: ${name}.css`);
   return readFileSync(path, 'utf8');
 }
@@ -45,8 +70,8 @@ export function readLayer(name: string): string {
  * sheet overrides it. For a question about one layer specifically (is this
  * token declared on :root?), `readLayer` says so more precisely.
  */
-export function readCascade(): string {
-  return layerPaths()
+export function readCascade(entry: string = APP_ENTRY): string {
+  return layerPaths(entry)
     .map((p) => readFileSync(p, 'utf8'))
     .join('\n');
 }

@@ -1,9 +1,11 @@
+<svelte:options runes={true} />
+
 <script module lang="ts">
   let _acUid = 0;
 </script>
 
 <script lang="ts">
-  import { getFieldContext } from './fieldContext';
+  import Input from './Input.svelte';
 
   // A text input with a suggestion dropdown. The menu is position:fixed,
   // anchored to the input's live rect, so it matches the input's width, drops
@@ -58,11 +60,7 @@
 
   const menuId = `ac-menu-${(_acUid += 1)}`;
 
-  // Inside a Field the caption's `for` names this input.
-  const field = getFieldContext();
-  const owned = field?.claim('native', () => id) ?? false;
-
-  let inputEl = $state<HTMLInputElement | null>(null);
+  let inputEl = $state<HTMLInputElement | undefined>();
   let open = $state(false);
   let highlight = $state(-1);
   let menuStyle = $state('');
@@ -148,24 +146,23 @@
   });
 </script>
 
+<!-- Through `Input`, never a bare <input>: Field styles no raw control, so a bare
+     one arrived with the browser's own box, in a Field or out of one. -->
 <div class="ac-field">
-  <input
-    bind:this={inputEl}
-    id={id ?? (owned ? field?.controlId : undefined)}
+  <Input
+    bind:ref={inputEl}
+    {id}
     {placeholder}
     {disabled}
     {value}
-    class:mono={monospace}
-    type="text"
+    {invalid}
+    {monospace}
     autocomplete="off"
     role="combobox"
     aria-expanded={open}
     aria-controls={menuId}
     aria-autocomplete="list"
     aria-label={ariaLabel}
-    aria-invalid={invalid || (owned && field?.invalid) ? 'true' : undefined}
-    aria-describedby={owned ? field?.describedBy : undefined}
-    aria-required={(owned && field?.required) || undefined}
     oninput={onInput}
     onfocus={openMenu}
     onblur={onBlur}
@@ -229,15 +226,6 @@
     color: var(--text-secondary);
     font-size: var(--text-sm);
     cursor: pointer;
-  }
-
-  /* The field takes its appearance from its container (a Field, in practice),
-     so this is the one appearance declaration the component owns — and only
-     because the container has no way to know the value is monospace-shaped.
-     Deliberately font-family alone: anything else here would start competing
-     with the container's rules at a tie. */
-  .ac-field input.mono {
-    font-family: var(--font-mono);
   }
 
   .ac-option.mono {

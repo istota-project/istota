@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts" module>
   import { getContext, setContext } from 'svelte';
 

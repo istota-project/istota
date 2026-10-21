@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <!--
   Show and hide a block behind a summary line. A native <details>, so it works
   without script and opens on find-in-page; the one marker is a lucide

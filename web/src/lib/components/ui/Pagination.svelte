@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <!--
   Previous and Next over a list that is read a page at a time, with the page
   it is on between them. Nothing when there is only one page.

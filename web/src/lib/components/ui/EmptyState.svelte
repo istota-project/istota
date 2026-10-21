@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import Button from './Button.svelte';

@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import Modal from './Modal.svelte';
   import FormModal from './FormModal.svelte';
