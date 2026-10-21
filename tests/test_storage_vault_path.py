@@ -705,6 +705,7 @@ class TestTheFolderListing:
         _user_root(config, "alice")
         assert list_vault_files(config, "alice") == []
 
+    @pytest.mark.requires_dac
     def test_an_unreadable_folder_is_an_empty_list(self, tmp_path):
         config = _config(tmp_path, alice=UserConfig())
         folder = _vault_dir(config)

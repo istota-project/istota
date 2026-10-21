@@ -1642,6 +1642,7 @@ dev = [
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "ruff" },
+    { name = "werkzeug" },
 ]
 
 [package.metadata]
@@ -1749,6 +1750,7 @@ dev = [
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "ruff", specifier = "==0.16.4" },
+    { name = "werkzeug", specifier = ">=3.0.0" },
 ]
 
 [[package]]

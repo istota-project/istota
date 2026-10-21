@@ -1161,7 +1161,7 @@ watch_setup_page() {
     deadline=$((SECONDS + SETUP_PAGE_WAIT))
     while :; do
         answer="$(curl -fsS --max-time 5 "${base}/istota/api/setup/state" 2>/dev/null)" || answer=""
-        if printf '%s' "$answer" | grep -Eq '"phase": *"locked"'; then
+        if grep -Eq '"phase": *"locked"' <<<"$answer"; then
             # The app shows the page in its own window: one line it reads.
             if [ -n "$CREATE_IN_APP" ]; then
                 printf 'ISTOTA_SETUP_URL=%s\n' "$url"

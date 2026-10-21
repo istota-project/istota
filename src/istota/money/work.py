@@ -102,7 +102,10 @@ class WorkMutationResult:
 # =============================================================================
 
 _BOUND_DB_PATHS: dict[str, Path] = {}
-_INITIALISED: set[str] = set()
+# Keyed by path and holding the file identity the init saw, as
+# `config_store._INITIALISED` is: a path alone kept answering "done" for a
+# fresh money.db put back at the same path, which then had no work tables.
+_INITIALISED: dict[str, tuple[int, int]] = {}
 
 
 def _key(data_dir: Path) -> str:
@@ -125,13 +128,17 @@ def db_path_for(data_dir: Path) -> Path:
 
 def _init(path: Path) -> None:
     from istota.money import db  # noqa: PLC0415
+    from istota.money.config_store import _file_identity  # noqa: PLC0415
 
     key = os.path.abspath(path)
-    if key in _INITIALISED and path.exists():
+    identity = _file_identity(key)
+    if identity is not None and _INITIALISED.get(key) == identity:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     db.init_db(path)
-    _INITIALISED.add(key)
+    identity = _file_identity(key)
+    if identity is not None:
+        _INITIALISED[key] = identity
 
 
 def _store_record(conn: sqlite3.Connection) -> str | None:

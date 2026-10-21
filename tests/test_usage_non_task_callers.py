@@ -11,6 +11,7 @@ that is ownerless (the channel sleep-cycle pass). The other five follow the same
 shape and share the same writer.
 """
 
+import re
 from dataclasses import dataclass, field
 from unittest.mock import patch
 
@@ -196,7 +197,9 @@ def test_every_named_origin_is_reachable_from_its_module():
 
     for path, (origin, writer) in expected.items():
         source = (root / path).read_text()
-        assert f'origin="{origin}"' in source, f"{path} lost origin={origin}"
+        # The origin argument may pick between two literals (a shared block
+        # generated inside a task bills to the task); it must still name this one.
+        assert re.search(rf'origin=[^,\n]*"{origin}"', source), f"{path} lost origin={origin}"
         writer_source = (root / (writer or path)).read_text()
         assert "persist_brain_usage(" in writer_source, (
             f"{writer or path} lost its persist call"

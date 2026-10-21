@@ -2222,6 +2222,10 @@ class TestTheStandaloneConfigIsNeverWritten:
         assert "/tmp/nowhere" not in result.stdout
 
 
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="install.sh --local refuses root by design, and the Linux tier's container runs as root",
+)
 class TestInstallLocal:
     def test_it_installs_the_mac_scripts_and_runs_create(self, mac):
         result = subprocess.run(

@@ -117,7 +117,9 @@ def parent_env_probe(name: str) -> str:
     both.
     """
     return (
-        f'if grep -q "^{name}=" <<<"$(tr "\\0" "\\n" < /proc/$PPID/environ 2>/dev/null)"; '
+        # POSIX sh, and no `grep -q` in the pipe: the real call runs under
+        # pipefail, where an early exit SIGPIPEs `tr` and reads as absent.
+        f'if tr "\\0" "\\n" < /proc/$PPID/environ 2>/dev/null | grep "^{name}=" >/dev/null; '
         f'then echo "PARENT_ENV=PRESENT"; '
         f'else echo "PARENT_ENV=ABSENT"; fi; '
         f'echo "PARENT_CMD=[$(tr "\\0" " " < /proc/$PPID/cmdline 2>/dev/null)]"'

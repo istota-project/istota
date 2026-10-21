@@ -5,11 +5,9 @@ display and the docs. Everything here is pure: no DB, no network.
 """
 
 from pathlib import Path
-import re
 import tomllib
 
 import pytest
-import yaml
 
 from istota.credentials import google_scopes as gs
 
@@ -384,22 +382,16 @@ class TestContactsScopes:
         ) == []
 
 
-@pytest.mark.parametrize("example", ["toml", "ansible"])
-def test_documented_default_ceiling_matches_runtime(example):
+def test_documented_default_ceiling_matches_runtime():
+    """The role's commented example went with its legacy settings variables
+    (`f459d0cf5`); the config example is the one documented copy left."""
     from istota.config import GoogleWorkspaceConfig
 
     root = Path(__file__).resolve().parent.parent
-    if example == "toml":
-        text = (root / "config/config.example.toml").read_text()
-        block = text.split("# [google_workspace]\n", 1)[1].split("# ]", 1)[0]
-        uncommented = "\n".join(line.removeprefix("# ") for line in block.splitlines())
-        scopes = tomllib.loads(uncommented + "]\n")["scopes"]
-    else:
-        text = (root / "ansible/defaults/main.yml").read_text()
-        block = text.split("#   google_workspace:\n", 1)[1]
-        scopes_line = re.search(r"^#     scopes: (.+)$", block, re.MULTILINE)
-        assert scopes_line is not None
-        scopes = yaml.safe_load(scopes_line[1])
+    text = (root / "config/config.example.toml").read_text()
+    block = text.split("# [google_workspace]\n", 1)[1].split("# ]", 1)[0]
+    uncommented = "\n".join(line.removeprefix("# ") for line in block.splitlines())
+    scopes = tomllib.loads(uncommented + "]\n")["scopes"]
     assert scopes == GoogleWorkspaceConfig().scopes
 
 

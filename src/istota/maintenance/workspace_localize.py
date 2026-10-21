@@ -52,6 +52,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from istota.lib import toml_write
+from istota.lib.atomic_write import replace_at, write_bytes_atomic, write_text_atomic
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -440,13 +441,7 @@ def write_notes(source: Path, *, bot_dir_name: str, text: str) -> Notes:
         except FileExistsError:
             if not is_our_note(_read_small(bot_fd, NOTE_NAME)):
                 return f"a {NOTE_NAME} is already there; left as it is"
-            tmp = f".{NOTE_NAME}.{os.getpid()}"
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=bot_fd)
-            try:
-                os.write(fd, data)
-            finally:
-                os.close(fd)
-            os.replace(tmp, NOTE_NAME, src_dir_fd=bot_fd, dst_dir_fd=bot_fd)
+            replace_at(bot_fd, NOTE_NAME, data)
             return None
         try:
             os.write(fd, data)
@@ -483,9 +478,7 @@ def remove_notes(source: Path, *, bot_dir_name: str) -> Notes:
 
 def write_report(report: Report, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}")
-    tmp.write_text(json.dumps(report.to_dict(), indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    write_text_atomic(path, json.dumps(report.to_dict(), indent=2) + "\n")
 
 
 # --- the config ---------------------------------------------------------------
@@ -566,19 +559,7 @@ def localize_config(path: Path, workspace: str) -> bool:
         with os.fdopen(out, "wb") as handle:
             handle.write(raw)
             os.fchmod(handle.fileno(), mode)
-    tmp = path.with_name(f".{path.name}.localize.{os.getpid()}")
-    out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
-    try:
-        with os.fdopen(out, "wb") as handle:
-            handle.write(new.encode("utf-8"))
-            os.fchmod(handle.fileno(), mode)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
+    write_bytes_atomic(path, new.encode("utf-8"), mode=mode)
     return True
 
 

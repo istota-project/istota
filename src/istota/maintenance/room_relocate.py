@@ -112,6 +112,8 @@ PRESERVE_COLUMNS: dict[tuple[str, str], str] = {
     ("web_auth_tokens", "token_hash"): "authentication token digest",
     ("location_ingest_tokens", "token_hash"): "ingest token digest",
     ("location_ingest_tokens", "token_tail"): "ingest token display suffix",
+    ("device_tokens", "token_hash"): "device token digest",
+    ("device_tokens", "token_tail"): "device token display suffix",
     ("push_devices", "token"): "APNs device token",
     ("task_usage", "billed_input_tokens"): "model usage count",
     ("task_usage", "cache_read_tokens"): "model usage count",

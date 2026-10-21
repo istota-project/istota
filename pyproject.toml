@@ -346,11 +346,14 @@ dev = [
     #   either — so the script could not run at all.
     # certifi: `tests/test_task_env.py` reads the daemon's CA bundle path from
     #   it. It reached the venv only as an httpx transitive.
+    # werkzeug: `tests/test_group_briefing_research.py` serves its article
+    #   through `werkzeug.serving`. It reached the venv only as a flask one.
     "certifi>=2024.2.2",
     "jinja2>=3.1.0",
     "psutil>=5.9.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0.0",
+    "werkzeug>=3.0.0",
     # The linter `AGENTS.md` mandates, which until ISSUE-301 was installed
     # nowhere a developer works: not in this group, not in the `test` extra,
     # and `uvx` is not present either, so `ruff check` on a fresh clone was a

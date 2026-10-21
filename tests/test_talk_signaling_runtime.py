@@ -45,6 +45,7 @@ from istota.config import (
     Config,
     NextcloudConfig,
     SchedulerConfig,
+    SpeechGateConfig,
     TalkConfig,
     UserConfig,
 )
@@ -85,6 +86,10 @@ def config(tmp_path):
     )
     config.users = {"alice": UserConfig()}
     config.scheduler = SchedulerConfig()
+    # The classifier default fetches the roster before the results transaction
+    # (and reads its room list on a worker thread), which would take away the
+    # in-transaction await the drain below is scheduled into.
+    config.speech_gate = SpeechGateConfig(mode="mention")
 
     # A room the poll pass has nothing cold to do for: registered, bound,
     # cursor set, history cached. That keeps the room pass off the network so
@@ -434,3 +439,29 @@ class TestTheLockIsPerLoopAndAsync:
 
         with pytest.raises(RuntimeError):
             _db_lock.loop_db_lock()
+
+
+def test_the_classifier_pass_bounds_its_lock_wait_too(config, monkeypatch):
+    """`_classify_batch_ahead` runs on a classifier deployment before the
+    results transaction and reads each room's mode; the poll awaits that read,
+    so it takes the same bounded wait as the poll's own blocks (ISSUE-827)."""
+    from istota.transport.talk._db_lock import DB_BUSY_TIMEOUT_MS
+
+    config.speech_gate = SpeechGateConfig(mode="classifier")
+    monkeypatch.setattr(poller, "classify_ahead", lambda *_a, **_k: None)
+    opens = _Opens()
+    opens.install(monkeypatch)
+
+    class _Client:
+        async def get_participants(self, _token):
+            return [{"actorId": "alice"}, {"actorId": "bob"}]
+
+    message = {"id": 100, "actorId": "alice", "actorType": "users",
+               "message": "hello", "messageType": "comment",
+               "messageParameters": {}, "timestamp": 1700000000}
+    asyncio.run(poller._classify_batch_ahead(
+        config, _Client(), [("grp", [message])], {"grp": 2},
+    ))
+
+    assert opens.records, "the pass read no room modes; the check below is vacuous"
+    assert all(r["busy_timeout_ms"] == DB_BUSY_TIMEOUT_MS for r in opens.records)

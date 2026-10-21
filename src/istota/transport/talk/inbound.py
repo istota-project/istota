@@ -1611,6 +1611,7 @@ async def _classify_batch_ahead(
     # its own (ISSUE-640), and one opted out needs no roster fetch.
     on = await asyncio.to_thread(
         classifier_refs, config, "talk", [token for token, _m in results],
+        busy_timeout_ms=DB_BUSY_TIMEOUT_MS,
     )
     if not on:
         return {}

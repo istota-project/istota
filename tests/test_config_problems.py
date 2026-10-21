@@ -99,6 +99,8 @@ BAD_HOOK_VALUES: dict[str, object] = {
     "brain.fallback": 5,
     "brain.source_type_overrides": "scheduled",
     "brain.room_selectable": "native",
+    "email.imap_security": "ssl",
+    "email.smtp_security": "ssl",
 }
 
 

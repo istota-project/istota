@@ -16,6 +16,7 @@ invocation will. It parses locally and needs no daemon.
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import json
 import os
@@ -1121,6 +1122,19 @@ class TestTheWebdavPathTranslation:
             service.files("Users/testuser")
 
 
+def _module_pytestmark(path: Path) -> set[str]:
+    """The marks a module's `pytestmark` names, bare or in a list."""
+    marks = set()
+    for node in ast.parse(path.read_text()).body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets):
+            continue
+        values = node.value.elts if isinstance(node.value, (ast.List, ast.Tuple)) else [node.value]
+        marks.update(ast.unparse(v) for v in values)
+    return marks
+
+
 class TestTheMarker:
     def test_the_full_tier_is_deselected_by_default(self):
         """Otherwise `uv run pytest` boots six containers."""
@@ -1138,7 +1152,17 @@ class TestTheMarker:
         files = sorted((REPO / "tests" / "full").glob("test_*.py"))
         assert files, "no full tests found; this guard would pass vacuously"
         for path in files:
-            assert "pytestmark = pytest.mark.full" in path.read_text(), path
+            assert "pytest.mark.full" in _module_pytestmark(path), path
+
+    def test_a_list_form_marker_counts(self, tmp_path):
+        """`pytestmark = [pytest.mark.full, pytest.mark.profile(...)]` is how a
+        full test picks a profile; a text match on the bare form refused it."""
+        listed = tmp_path / "test_listed.py"
+        listed.write_text("import pytest\npytestmark = [pytest.mark.full, pytest.mark.profile('full')]\n")
+        unmarked = tmp_path / "test_unmarked.py"
+        unmarked.write_text("import pytest\npytestmark = [pytest.mark.profile('full')]\n")
+        assert "pytest.mark.full" in _module_pytestmark(listed)
+        assert "pytest.mark.full" not in _module_pytestmark(unmarked)
 
     def test_the_xdist_guard_covers_it(self):
         """Session-scoped fixtures are per-worker, so N workers would each bring

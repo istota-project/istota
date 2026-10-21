@@ -190,7 +190,8 @@ def test_one_failed_browser_connection_does_not_reset_a_healthy_driver(runtime, 
     alice = pool.acquire("alice")
     driver = chrome._pw
     driver._impl_obj._connection._transport = types.SimpleNamespace(
-        _proc=types.SimpleNamespace(returncode=None),
+        # No pid, so Linux's waitid probe is skipped and the flags decide.
+        _proc=types.SimpleNamespace(pid=None, returncode=None),
         on_error_future=types.SimpleNamespace(done=lambda: False),
     )
     context = alice.pw_context

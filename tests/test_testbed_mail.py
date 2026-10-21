@@ -25,6 +25,7 @@ from cryptography import x509
 from testbed import certs, profiles
 from testbed import stack as stack_support
 from testbed.services import gitlab, mail
+from tests.support.sleep_spy import sleep_spy
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -325,7 +326,7 @@ class TestTheFetchFindsItsOwnLiteral:
     ):
         """UID SEARCH lists a message delivered after SELECT; UID FETCH answers
         `OK [None]` for it until a NOOP brings it into the session's view."""
-        monkeypatch.setattr(mail.time, "sleep", lambda _s: None)
+        sleep_spy(monkeypatch, mail, record=False)
 
         class Stale:
             refreshed = False
