@@ -5240,9 +5240,19 @@ async def chat_room_stream(
 
 @api_router.get("/admin/tasks/{task_id}/events")
 async def admin_task_events(
-    task_id: int, since_seq: int = 0, _: dict = Depends(_require_admin),
+    task_id: int, since_seq: int = 0, user: dict = Depends(_require_admin),
 ):
-    """All events for a task — backs the admin in-flight task-detail view."""
+    """All events for a task — backs the admin in-flight task-detail view.
+
+    A group-room task is refused to an admin the group does not admit with the
+    chat routes' 404, the one an unknown task gets: being an admin grants no
+    group membership (ISSUE-824).
+    """
+    from fastapi import HTTPException
+    owner = await asyncio.to_thread(_task_owner, task_id)
+    if owner is None or await asyncio.to_thread(
+            _task_delivery_refused, task_id, user["username"]):
+        raise HTTPException(status_code=404, detail="task not found")
     events = await asyncio.to_thread(_load_task_events, task_id, since_seq)
     return {"events": events}
 
