@@ -201,4 +201,23 @@ describe('theme parity', () => {
       expect(new Set(values).size, `${label} has a duplicate room colour`).toBe(values.length);
     }
   });
+
+  it('keeps the Talk amber out of the room palette, in each theme', () => {
+    // `.room-origin.talk` spends amber in the same row to mean "mirrored to
+    // Nextcloud Talk", so a room tint in that colour reads as a surface
+    // binding. The amber is read from the same theme's block, never pinned:
+    // it differs per theme, and a literal stops matching when it is retuned.
+    for (const [label, blockValues] of [
+      ['dark', dark],
+      ['light', light],
+    ] as const) {
+      const amber = blockValues['--accent-amber'];
+      expect(amber, `no --accent-amber in ${label}`).toBeTruthy();
+      for (const c of ROOM_COLORS) {
+        expect(blockValues[`--room-color-${c}`].toLowerCase(), `${label} ${c}`).not.toBe(
+          amber.toLowerCase(),
+        );
+      }
+    }
+  });
 });
