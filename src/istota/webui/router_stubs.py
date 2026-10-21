@@ -42,7 +42,8 @@ seam through which an ``/istota/api`` route accepts a device token
 distinct closure per call, so the overridable key is ``session_or_device``
 itself, which every closure depends on: ``webui/app.py`` overrides that one
 callable, and ``tests/test_device_tokens.py`` enumerates the routes that reach
-it. Only ``POST /workspace/notes`` and ``DELETE /devices/self`` may.
+it. Only ``POST /workspace/notes``, ``POST /chat/voice`` and
+``DELETE /devices/self`` may.
 
 FastAPI only, no config and no DB, so a router can import it from anywhere in
 its own import block — two of the five sit after their module's imports because

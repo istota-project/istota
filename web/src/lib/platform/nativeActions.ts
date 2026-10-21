@@ -16,6 +16,8 @@
 import { shellAtLeast } from './native';
 
 export const SHELL_WITH_ACTIONS = '0.13.0';
+/** The first shell with the voice sheet, and so the first given the `voice` scope. */
+export const SHELL_WITH_VOICE = '0.14.0';
 
 export interface ActionsStatus {
   deviceId: string;
@@ -25,12 +27,17 @@ export interface ActionsStatus {
   tokenRejected: boolean;
   pendingNotes: number;
   failedNotes: number;
+  /** Voice recordings waiting to send, and those the server refused. 0 before 0.14.0. */
+  pendingVoice: number;
+  failedVoice: number;
 }
 
 export type ActionOpen =
   | { kind: 'notes-settings' }
   /** A path relative to My files: a saved note, or the folder it is in. */
-  | { kind: 'files'; path: string };
+  | { kind: 'files'; path: string }
+  /** The voice sheet's Open room: the room token the server sent the recording to. */
+  | { kind: 'room'; token: string };
 
 interface ActionsPlugin {
   status(): Promise<ActionsStatus>;
@@ -38,6 +45,7 @@ interface ActionsPlugin {
     token: string | null;
     scopes: string[];
     notesFolder: string | null;
+    voiceRoom: string | null;
   }): Promise<void>;
   forget(): Promise<void>;
   consumePendingOpen(): Promise<{ open: ActionOpen | null }>;
@@ -67,6 +75,8 @@ export async function actionsStatus(): Promise<ActionsStatus | null> {
       tokenRejected: status.tokenRejected === true,
       pendingNotes: Number(status.pendingNotes) || 0,
       failedNotes: Number(status.failedNotes) || 0,
+      pendingVoice: Number(status.pendingVoice) || 0,
+      failedVoice: Number(status.failedVoice) || 0,
     };
   } catch {
     console.warn('[istota] Could not read the native actions status.');
@@ -76,15 +86,17 @@ export async function actionsStatus(): Promise<ActionsStatus | null> {
 
 /**
  * Hand the shell its token. `token: null` keeps the token the shell already
- * holds and changes only the scopes and the folder label it shows.
+ * holds and changes only the scopes and the labels it shows: the notes folder
+ * and the voice sheet's room. A 0.13.0 shell ignores `voiceRoom`.
  */
 export async function provisionActions(
   token: string | null,
   scopes: string[],
   notesFolder: string | null,
+  voiceRoom: string | null = null,
 ): Promise<void> {
   try {
-    await actionsPlugin()?.provision({ token, scopes, notesFolder });
+    await actionsPlugin()?.provision({ token, scopes, notesFolder, voiceRoom });
   } catch {
     console.warn('[istota] Could not provision the native actions token.');
   }

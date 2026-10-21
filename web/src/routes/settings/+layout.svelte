@@ -131,7 +131,8 @@
       await updateProfile(patch);
       if (patch.push_chat_alerts !== undefined || patch.push_inbox_categories !== undefined)
         invalidateNotificationCounts();
-      if (patch.quick_notes_folder !== undefined) void syncDeviceActions();
+      if (patch.quick_notes_folder !== undefined || patch.default_room !== undefined)
+        void syncDeviceActions();
       await reload();
       info = 'Profile saved.';
     } catch (e) {

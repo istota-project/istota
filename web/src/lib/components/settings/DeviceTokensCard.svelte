@@ -3,11 +3,12 @@
    * Every phone that holds a credential for this account, one row each, and
    * the location trackers that name no phone.
    *
-   * A phone's row covers its device token (quick notes) and its location
-   * token, joined by the server on the device id, and Revoke removes both in
-   * one request. Overland and QR-code tokens and the shared token from before
-   * per-device tokens get their own card with a Remove each. `thisDeviceId`
-   * marks the phone the page is running on, when the app can say which one.
+   * A phone's row covers its device token (quick notes, voice tasks) and its
+   * location token, joined by the server on the device id, and Revoke removes
+   * both in one request. Overland and QR-code tokens and the shared token from
+   * before per-device tokens get their own card with a Remove each.
+   * `thisDeviceId` marks the phone the page is running on, when the app can
+   * say which one.
    */
   import {
     deleteLegacyIngestToken,
@@ -32,7 +33,11 @@
 
   let { devices, thisDeviceId = null, onChanged, children }: Props = $props();
 
-  const SCOPE_LABELS: Record<string, string> = { notes: 'Quick notes' };
+  const SCOPE_LABELS: Record<string, string> = { notes: 'Quick notes', voice: 'Voice tasks' };
+  const SCOPE_ACTIONS: Record<string, string> = {
+    notes: 'saving quick notes',
+    voice: 'sending voice tasks',
+  };
 
   function capabilities(phone: Phone): string[] {
     const names = (phone.token?.scopes ?? []).map((scope) => SCOPE_LABELS[scope] ?? scope);
@@ -57,7 +62,7 @@
 
   function stops(phone: Phone): string {
     const parts: string[] = [];
-    if (phone.token) parts.push('saving quick notes');
+    for (const scope of phone.token?.scopes ?? []) parts.push(SCOPE_ACTIONS[scope] ?? scope);
     if (phone.location) parts.push('sending locations');
     return parts.join(' and ');
   }
@@ -93,8 +98,8 @@
 >
   {#if devices.devices.length === 0}
     <EmptyState size="sm">
-      No devices yet. The Istota app adds the phone it runs on once a quick notes folder is set or
-      location tracking is turned on.
+      No devices yet. The Istota app adds the phone it runs on once it is set up for quick notes or
+      voice tasks, or location tracking is turned on.
     </EmptyState>
   {:else}
     <ul class="divided-list">

@@ -1,16 +1,19 @@
 import { createDevice, deleteDevice, getProfile, listDevices, type DeviceScope } from '$lib/api';
-import { deviceModel } from '$lib/platform/native';
+import { deviceModel, shellAtLeast } from '$lib/platform/native';
 import {
   actionsAvailable,
   actionsStatus,
   forgetActions,
   provisionActions,
+  SHELL_WITH_VOICE,
 } from '$lib/platform/nativeActions';
 
 /**
  * Keep the shell's device token in step with what the account wants it to do.
  *
- * Runs after a live `getMe` and again whenever `quick_notes_folder` changes.
+ * Runs after a live `getMe` and again whenever `quick_notes_folder` or
+ * `default_room` changes. A 0.14.0 shell always wants `voice`; `notes` only
+ * when a folder is set.
  * The web mints, the shell keeps: a token reaches the shell once and is never
  * read back, so "the token is fine" is judged from the scopes the shell reports,
  * whether its last send was refused, and whether this account has a row for the
@@ -19,10 +22,11 @@ import {
  * token. A failure is logged and swallowed; the next page load tries again.
  */
 
-// The shell's status does not report the folder label it holds, so this page
+// The shell's status does not report the labels it holds, so this page
 // remembers what it last told the shell. Unknown after a load, which costs one
 // label-only provision per page load.
-let provisionedFolder: { deviceId: string; folder: string | null } | null = null;
+let provisioned: { deviceId: string; folder: string | null; voiceRoom: string | null } | null =
+  null;
 let chain: Promise<void> = Promise.resolve();
 
 export function syncDeviceActions(): Promise<void> {
@@ -53,14 +57,17 @@ async function sync(): Promise<void> {
   if (!status) return;
   const { profile } = await getProfile();
   const folder = profile?.quick_notes_folder || null;
+  const voice = shellAtLeast(SHELL_WITH_VOICE);
+  const voiceRoom = voice ? profile?.default_room_name || null : null;
 
   const wanted: DeviceScope[] = [];
   if (folder) wanted.push('notes');
+  if (voice) wanted.push('voice');
 
   if (wanted.length === 0) {
     if (status.scopes.length === 0) return;
     await forgetActions();
-    provisionedFolder = null;
+    provisioned = null;
     const { devices } = await listDevices();
     const deviceId = status.deviceId.toUpperCase();
     // The device token only: turning quick notes off leaves the tracker sending.
@@ -74,15 +81,16 @@ async function sync(): Promise<void> {
 
   if (sameScopes(status.scopes, wanted) && !status.tokenRejected) {
     const known =
-      provisionedFolder !== null &&
-      provisionedFolder.deviceId === status.deviceId &&
-      provisionedFolder.folder === folder;
+      provisioned !== null &&
+      provisioned.deviceId === status.deviceId &&
+      provisioned.folder === folder &&
+      provisioned.voiceRoom === voiceRoom;
     if (known) return;
     // The shell keeps one token per connection, and the account signed in now
     // may not be the one that minted it. Without a row of ours it is not ours.
     if (await ownsDeviceRow(status.deviceId)) {
-      await provisionActions(null, wanted, folder);
-      provisionedFolder = { deviceId: status.deviceId, folder };
+      await provisionActions(null, wanted, folder, voiceRoom);
+      provisioned = { deviceId: status.deviceId, folder, voiceRoom };
       return;
     }
   }
@@ -92,12 +100,12 @@ async function sync(): Promise<void> {
     label: deviceModel(),
     scopes: wanted,
   });
-  await provisionActions(minted.token, minted.scopes, folder);
-  provisionedFolder = { deviceId: status.deviceId, folder };
+  await provisionActions(minted.token, minted.scopes, folder, voiceRoom);
+  provisioned = { deviceId: status.deviceId, folder, voiceRoom };
 }
 
 /** Forget what this page has told the shell. Tests reset between cases with it. */
 export function resetDeviceActions(): void {
-  provisionedFolder = null;
+  provisioned = null;
   chain = Promise.resolve();
 }

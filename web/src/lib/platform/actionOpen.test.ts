@@ -67,6 +67,26 @@ it.each([
   await vi.waitFor(() => expect(goto).toHaveBeenCalledWith('/istota/files?place=home'));
 });
 
+it("opens the voice sheet's room through the server deep link", async () => {
+  pending = { kind: 'room', token: 'abc_D-9' };
+  const navigate = vi.fn();
+  stop = startActionOpenHandling(navigate);
+  await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith('/istota/chat/r/abc_D-9'));
+  expect(goto).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['a token with a path separator', 'rm_x/t/5'],
+  ['an empty token', ''],
+  ['no token', undefined],
+])('opens the chat page default for a room open with %s', async (_label, token) => {
+  pending = { kind: 'room', token };
+  const navigate = vi.fn();
+  stop = startActionOpenHandling(navigate);
+  await vi.waitFor(() => expect(goto).toHaveBeenCalledWith('/istota/chat'));
+  expect(navigate).not.toHaveBeenCalled();
+});
+
 it('ignores an open of a kind it does not know', async () => {
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   pending = { kind: 'voice' };

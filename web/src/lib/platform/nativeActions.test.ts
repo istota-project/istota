@@ -14,6 +14,8 @@ const STATUS = {
   tokenRejected: false,
   pendingNotes: 2,
   failedNotes: 1,
+  pendingVoice: 0,
+  failedVoice: 0,
 };
 const plugin = {
   status: vi.fn(async () => STATUS),
@@ -65,12 +67,14 @@ it('uses the native contract on 0.13.0 and ignores event payloads', async () => 
     token: 'secret',
     scopes: ['notes'],
     notesFolder: 'Notes/Inbox',
+    voiceRoom: null,
   });
   await provisionActions(null, ['notes'], 'Notes/Other');
   expect(plugin.provision).toHaveBeenLastCalledWith({
     token: null,
     scopes: ['notes'],
     notesFolder: 'Notes/Other',
+    voiceRoom: null,
   });
   await forgetActions();
   expect(plugin.forget).toHaveBeenCalledTimes(1);
@@ -97,4 +101,33 @@ it('gives the empty answer when the plugin rejects', async () => {
   await expect(provisionActions('secret', ['notes'], null)).resolves.toBeUndefined();
   await expect(forgetActions()).resolves.toBeUndefined();
   warn.mockRestore();
+});
+
+it('reads the voice counts on 0.14.0 and passes the room label through', async () => {
+  shell('IstotaApp/0.14.0');
+  plugin.status.mockResolvedValueOnce({
+    ...STATUS,
+    scopes: ['notes', 'voice'],
+    pendingVoice: 3,
+    failedVoice: 1,
+  });
+  expect(await actionsStatus()).toEqual({
+    ...STATUS,
+    scopes: ['notes', 'voice'],
+    pendingVoice: 3,
+    failedVoice: 1,
+  });
+  await provisionActions(null, ['voice'], null, 'general');
+  expect(plugin.provision).toHaveBeenLastCalledWith({
+    token: null,
+    scopes: ['voice'],
+    notesFolder: null,
+    voiceRoom: 'general',
+  });
+});
+
+it('defaults the voice counts to 0 when a 0.13.0 shell does not report them', async () => {
+  const { pendingVoice: _p, failedVoice: _f, ...older } = STATUS;
+  plugin.status.mockResolvedValueOnce(older as typeof STATUS);
+  expect(await actionsStatus()).toEqual({ ...older, pendingVoice: 0, failedVoice: 0 });
 });
