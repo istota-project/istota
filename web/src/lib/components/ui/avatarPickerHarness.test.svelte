@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   /* AvatarPicker takes its picture as a snippet, which a test cannot pass
      through `render`'s props. The harness supplies a stand-in and forwards

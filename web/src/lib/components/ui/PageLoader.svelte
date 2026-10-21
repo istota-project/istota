@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <!--
   The app's one loading indicator: a thin bar fixed to the top edge of the
   viewport, up while any `PageLoading` is mounted. Fixed so it stays put while

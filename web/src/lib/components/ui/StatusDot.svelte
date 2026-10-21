@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <!--
   A live-status dot. It reads the saturated `--status-dot-*` family rather than
   the `-fg` tints: a dot carries no text, so it needs the chroma a tint cannot

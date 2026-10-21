@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import Icon from '../Icon.svelte';
   import { Info, CircleCheck, TriangleAlert, CircleAlert, X } from '@lucide/svelte';

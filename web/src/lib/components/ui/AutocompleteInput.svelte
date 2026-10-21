@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script module lang="ts">
   let _acUid = 0;
 </script>

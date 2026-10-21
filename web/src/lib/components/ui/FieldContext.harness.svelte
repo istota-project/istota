@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import Field from './Field.svelte';
   import Input from './Input.svelte';

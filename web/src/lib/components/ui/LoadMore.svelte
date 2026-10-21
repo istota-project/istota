@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <!--
   The next page of a list that loads in pages: a secondary button under it, or
   with `auto` a sentinel that loads as it scrolls into view (the feed grid).

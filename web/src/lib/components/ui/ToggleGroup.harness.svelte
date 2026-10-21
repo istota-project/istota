@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import { LayoutGrid, List } from '@lucide/svelte';
   import ToggleGroup from './ToggleGroup.svelte';

@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import Icon from './Icon.svelte';
   import { PanelLeft, PanelLeftClose } from '@lucide/svelte';

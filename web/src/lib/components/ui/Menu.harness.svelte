@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import Menu from './Menu.svelte';
   import type { MenuItem } from './Menu.svelte';

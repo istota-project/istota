@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <!--
   A page's own heading row inside its pane: an optional back link above the
   title, the title (`.title-page`) with an optional badge beside it, a

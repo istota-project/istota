@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script module lang="ts">
   import type { SortDirection } from '$lib/ui/tableSort.svelte';
 

@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts" module>
   export type BadgeVariant = 'neutral' | 'danger' | 'warn' | 'success' | 'info' | 'partial';
 </script>

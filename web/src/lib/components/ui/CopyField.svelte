@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import CopyButton from './CopyButton.svelte';
   import Field from './Field.svelte';

@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <!--
   A pane's loading state. It holds the pane's slot with an empty `.center-msg`
   and raises the one fixed loader in the root layout (`PageLoader`) while it is

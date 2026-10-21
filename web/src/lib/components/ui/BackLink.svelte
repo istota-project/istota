@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <!--
   A link back to the page above this one. Always an `<a>`, never a button
   calling `goto()`, so it keeps middle-click and the status-bar URL.

@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import { Modal, Button, type ViewerNavigation } from '$lib/components/ui';
   import Lightbox from '$lib/components/Lightbox.svelte';

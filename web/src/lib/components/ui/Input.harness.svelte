@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import Input from './Input.svelte';
   import TextArea from './TextArea.svelte';

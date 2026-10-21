@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import type { HTMLTextareaAttributes } from 'svelte/elements';
   import { getFieldContext, joinIds } from './fieldContext';
