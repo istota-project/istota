@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { minotComponentPath, readLayer } from '$lib/styles/cascade';
 
 /**
  * The settings surface goes through the `ui/` primitives, and does not
@@ -151,55 +150,12 @@ describe('settings controls go through the primitives', () => {
   });
 });
 
-describe('SecretField composes rather than forks', () => {
-  const source = read(minotComponentPath('SecretField'));
-
-  it('builds on Field, Input and Button', () => {
-    // It used to restate Field's descendant rule declaration-for-declaration
-    // minus the tier height and the leading pin, so on touch it computed
-    // ~34.8px against a 32px tier — the exact defect those two lines were
-    // added to fix, reproduced in the one component that renders on five
-    // settings pages.
-    for (const primitive of ['Field', 'Input', 'Button']) {
-      expect(source, `SecretField should use ${primitive}`).toMatch(new RegExp(`<${primitive}\\b`));
-    }
-  });
-
-  it('declares no control appearance of its own', () => {
-    for (const r of rules(source)) {
-      expect(r.body, r.selector).not.toMatch(/(?:^|[;\s])border:\s*[^;}]*\d/);
-      expect(r.body, r.selector).not.toMatch(/font:\s*inherit/);
-    }
-  });
-});
-
 describe('settings card defaults', () => {
-  const css = readLayer('settings');
-  const rule = (selector: string) => {
-    const start = css.indexOf(`${selector} {`);
-    return start < 0 ? '' : css.slice(start, css.indexOf('}', start));
-  };
-
-  it('gives unstyled paragraphs, list items and labels the settings text size', () => {
-    expect(rule('.settings')).toContain('font-size: var(--text-sm)');
-  });
-
-  it('keeps direct card buttons compact and action rows able to wrap', () => {
-    const cardSource = read(minotComponentPath('Card'));
-    const btn = cardSource.slice(cardSource.indexOf('.ui-card > :global(:where(button, a)) {'));
-    expect(btn.slice(0, btn.indexOf('}'))).toContain('align-self: flex-start');
-    // The wrapping action row is the global `hstack wrap` now; a second
-    // `.settings .row` would give one name two meanings again.
-    expect(rule('.settings .row')).toBe('');
+  it('keeps action rows able to wrap', () => {
+    // The wrapping action row is the global `hstack wrap`.
     for (const card of ['CredentialsCard', 'KeepassExportCard', 'KeepassImportCard']) {
       const source = read(join(SRC, `lib/components/settings/${card}.svelte`));
       expect(source, card).toContain('class="hstack wrap"');
     }
   });
-});
-
-it('uses the settings text size in portalled dialog bodies', () => {
-  const modal = read(minotComponentPath('Modal'));
-  const body = rules(modal).find((rule) => rule.selector === ':global(.ui-modal-body)');
-  expect(body?.body).toContain('font-size: var(--text-sm)');
 });

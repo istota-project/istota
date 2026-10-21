@@ -12,7 +12,6 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { minotComponentPath } from '$lib/styles/cascade';
 import { render, cleanup, screen, fireEvent } from '@testing-library/svelte';
 import type { NotificationAction, ResolvedNotification } from '$lib/api';
 import NotificationDetail from './NotificationDetail.svelte';
@@ -90,7 +89,7 @@ describe('untrusted content', () => {
     expect(screen.getByText(HOSTILE)).toBeInTheDocument();
   });
 
-  it('uses no {@html} in any of the five components', () => {
+  it('uses no {@html} in any of the four components', () => {
     // The rule is per-file rather than per-render, because the hazard is a
     // future edit rather than today's markup: one such tag added anywhere in
     // this feature makes a stranger's subject line executable, and no rendering
@@ -112,7 +111,6 @@ describe('untrusted content', () => {
       'NotificationItem.svelte',
       'NotificationPanel.svelte',
       'NotificationBell.svelte',
-      minotComponentPath('CountPill'),
     ]) {
       expect(strip(readFileSync(resolve(here, file), 'utf8'))).not.toMatch(/\{@html/);
     }

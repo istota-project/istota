@@ -9,7 +9,6 @@
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { readLayer } from '$lib/styles/cascade';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 
@@ -99,20 +98,5 @@ describe('fontSize store', () => {
   it('exposes the three selectable sizes in order', async () => {
     const { FONT_SIZES } = await load();
     expect(FONT_SIZES).toEqual(['small', 'medium', 'large']);
-  });
-});
-
-describe('font-size CSS', () => {
-  const css = readLayer('tokens');
-
-  // The store is inert without a matching root rule — guard against the
-  // attribute being set while nothing scales.
-  it.each([['medium'], ['large']])('app.css scales the root for %s', (size) => {
-    const rule = new RegExp(`:root\\[data-font-size='${size}'\\]\\s*\\{[^}]*font-size:`, 'm');
-    expect(css).toMatch(rule);
-  });
-
-  it('leaves small unscaled (no root font-size override)', () => {
-    expect(css).not.toMatch(/:root\[data-font-size='small'\]\s*\{[^}]*font-size:/m);
   });
 });

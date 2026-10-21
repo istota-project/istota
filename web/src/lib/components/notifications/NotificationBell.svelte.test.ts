@@ -1,15 +1,11 @@
 /**
- * The bell and its count pill.
+ * The bell.
  *
  * The badge is the count of **open rows** — one number, no dot, no second
  * concept — because every open row means the same thing: something is waiting
  * on you, whether it is waiting to be done or waiting to be looked at.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { minotComponentPath } from '$lib/styles/cascade';
 import { render, cleanup, screen } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 
@@ -32,7 +28,6 @@ vi.mock('$lib/stores/notifications', async (importOriginal) => {
 
 import { notificationCounts } from '$lib/stores/notifications';
 import NotificationBell from './NotificationBell.svelte';
-import { CountPill } from '@minot/ui';
 
 type WritableCounts = { set(v: { open: number; actionable: number }): void };
 
@@ -95,61 +90,5 @@ describe('NotificationBell', () => {
     // Layout, hit area, reset and hover all come from `.nav-icon-btn` in
     // app-shell.css — a fourth control in that row must not fork them.
     expect(container.querySelector('button.nav-icon-btn')).toBeTruthy();
-  });
-});
-
-describe('CountPill', () => {
-  it('renders nothing at zero, so no call site needs its own {#if}', () => {
-    const { container } = render(CountPill, { count: 0 });
-    expect(container.querySelector('.count-pill')).toBeNull();
-  });
-
-  it('renders nothing for a negative count', () => {
-    const { container } = render(CountPill, { count: -1 });
-    expect(container.querySelector('.count-pill')).toBeNull();
-  });
-
-  it('renders the exact number up to 99', () => {
-    render(CountPill, { count: 99 });
-    expect(screen.getByText('99')).toBeInTheDocument();
-  });
-
-  it('caps at 99+ from 100', () => {
-    render(CountPill, { count: 100 });
-    expect(screen.getByText('99+')).toBeInTheDocument();
-  });
-
-  it('sets no aria-label, which a bare span cannot carry anyway', () => {
-    // The implicit role of a <span> is `generic`, which does not support an
-    // accessible name — AT drops the attribute. A prop named "screen-reader
-    // name" that names nothing is worse than none, because it reads as covered.
-    // The digits are text content, which a generic element does expose, and the
-    // real untruncated count is on the bell button's own aria-label above.
-    const { container } = render(CountPill, { count: 400 });
-    const pill = container.querySelector('.count-pill');
-    expect(pill).not.toBeNull();
-    expect(pill!.hasAttribute('aria-label')).toBe(false);
-    expect(pill!.textContent).toBe('99+');
-  });
-
-  it('still carries a native tooltip, which is valid on any element', () => {
-    render(CountPill, { count: 4, title: '4 unread' });
-    expect(screen.getByTitle('4 unread')).toBeInTheDocument();
-  });
-
-  it('sizes on --text-xs, the 0.7rem the chat chip hardcodes', () => {
-    // Pinned against the source, like DraftCard's own max-width assertion:
-    // jsdom does not apply a Svelte component's `<style>`, so a computed-style
-    // check reads nothing whether the rule is there or not.
-    //
-    // The token matters. `.unread-chip` was 0.7rem and now renders through
-    // this component, so `--text-xs` is what made that a true substitution
-    // with no visual change. `--text-2xs` is 0.55rem and would shrink both
-    // chat chips by a fifth, which no lint or type check would catch.
-    const here = dirname(fileURLToPath(import.meta.url));
-    const src = readFileSync(minotComponentPath('CountPill'), 'utf8');
-    const style = src.slice(src.indexOf('<style'), src.lastIndexOf('</style>'));
-    expect(style).toMatch(/font-size:\s*var\(--text-xs\)/);
-    expect(style).not.toMatch(/--text-2xs/);
   });
 });

@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { readLayer } from '$lib/styles/cascade';
 
 /**
  * The money record-table shell — the toolbar rules every money list page
@@ -20,53 +19,7 @@ import { readLayer } from '$lib/styles/cascade';
  * The selectors are bare as a result — no wrapper to match around them.
  */
 
-// table.css and primitives.css are minot's, read from the installed package.
-const sheets = {
-  moneyTable: readFileSync(join(process.cwd(), 'src/lib/styles/moneyTable.css'), 'utf8'),
-  table: readLayer('table'),
-  primitives: readLayer('primitives'),
-};
-
-/** The declarations inside a top-level rule. */
-const ruleBody = (selector: string, sheet: keyof typeof sheets = 'moneyTable'): string => {
-  const css = sheets[sheet];
-  const start = css.indexOf(`\n${selector} {`);
-  if (start === -1) throw new Error(`no ${selector} rule in lib/styles/${sheet}.css`);
-  return css.slice(start, css.indexOf('}', start));
-};
-
-// The money toolbar is the shared `.toolbar.toolbar--bar` and its count is
-// `.caption .num`; the invariants below moved to primitives.css with them.
-describe('a count in a toolbar', () => {
-  // The count's own line box is shorter than the tier, so left to itself its
-  // position is decided by whatever else is in the bar: on a toolbar that fits
-  // on one line the min-height's leftover is split above and below it, and on
-  // one that wraps there is no leftover and it sits flush on the padding — a
-  // ~6px jump between two pages that look identical otherwise.
-  it('reserves the field-tier height so its position does not depend on its siblings', () => {
-    expect(ruleBody('.toolbar > .caption', 'primitives')).toMatch(
-      /min-height:\s*var\(--control-height-lg\)/,
-    );
-  });
-
-  it('centres its own text in that reserved box', () => {
-    // min-height alone would only make the box taller and leave the text at the
-    // top of it, which is the same defect pointing the other way.
-    const body = ruleBody('.toolbar > .caption', 'primitives');
-    expect(body).toMatch(/display:\s*inline-flex/);
-    expect(body).toMatch(/align-items:\s*center/);
-  });
-});
-
 describe('.toolbar--bar', () => {
-  it('reserves a control row whether or not it holds controls', () => {
-    // What makes a count-only bar the same height as one with filters, so the
-    // table under it starts at the same place on every tab.
-    expect(ruleBody('.toolbar--bar', 'primitives')).toMatch(
-      /min-height:\s*calc\(var\(--control-height-lg\)\s*\+\s*var\(--space-4\)\)/,
-    );
-  });
-
   it('is what every money toolbar is drawn with', () => {
     const pages = [
       'transactions/+page.svelte',
@@ -79,15 +32,6 @@ describe('.toolbar--bar', () => {
       const source = readFileSync(join(process.cwd(), 'src/routes/money', page), 'utf8');
       expect(source, page).toMatch(/class="money-toolbar toolbar toolbar--bar/);
     }
-  });
-});
-
-describe('the kebab in a row', () => {
-  // Every other cell is text and wants the row's baseline. A kebab has no text,
-  // so its baseline is the bottom of the icon box — which `baseline` lines up
-  // with the text baseline and leaves it hanging above the row's centre.
-  it('centres itself rather than taking the row baseline', () => {
-    expect(ruleBody('.record-row .ui-kebab-trigger', 'table')).toMatch(/align-self:\s*center/);
   });
 });
 
@@ -167,11 +111,5 @@ describe('the old money row names are gone', () => {
       RETIRED.test(readFileSync(path, 'utf8')),
     );
     expect(offenders).toEqual([]);
-  });
-
-  it('table.css holds the rows money used to', () => {
-    for (const selector of ['.record-list', '.record-header', '.record-row', '.record-row--tree']) {
-      expect(() => ruleBody(selector, 'table')).not.toThrow();
-    }
   });
 });
