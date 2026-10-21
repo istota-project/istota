@@ -1,4 +1,4 @@
-import { changedProfileFields } from './profilePatch';
+import { changedFields } from './changedFields';
 
 /**
  * Whether a form holds unsaved edits, by comparing what it holds now with a
@@ -15,7 +15,7 @@ export interface ChangeTracker<T> {
   mark(): void;
   /**
    * The fields of `of` (the tracked value when omitted) that differ from the
-   * saved snapshot, by `changedProfileFields`' rule: a structural compare,
+   * saved snapshot, by `changedFields`' rule: a structural compare,
    * field by field. Empty for a value that is not an object.
    */
   changed(of?: Partial<NonNullable<T>>): Partial<NonNullable<T>>;
@@ -50,7 +50,7 @@ export function trackChanges<T>(read: () => T): ChangeTracker<T> {
     changed(of) {
       const current = of ?? read();
       if (current === null || typeof current !== 'object') return {};
-      return changedProfileFields(current, snapshot) as Partial<NonNullable<T>>;
+      return changedFields(current, snapshot) as Partial<NonNullable<T>>;
     },
   };
 }

@@ -26,7 +26,7 @@
     Checkbox,
     Timestamp,
   } from '$lib/components/ui';
-  import { changedProfileFields } from '$lib/ui/profilePatch';
+  import { changedFields } from '$lib/ui/changedFields';
   import { formatList, parseList } from '$lib/ui/parse';
   import { ADMIN_MANAGED_BADGE, adminManagedHint } from '$lib/settings/managed';
   import { timezoneOptions } from '$lib/settings/timezones';
@@ -91,7 +91,7 @@
    *  a login save or a WhatsApp reset changes the stored record under an open
    *  form. */
   function adopt(next: AdminUserDetail, keepEdits: boolean) {
-    const pending = keepEdits && form ? changedProfileFields(form, snapshot) : {};
+    const pending = keepEdits && form ? changedFields(form, snapshot) : {};
     const stored = formFrom(next);
     // An address the server added (the login save's append) joins an unsaved
     // edit of the list rather than being overwritten by it.
@@ -132,7 +132,9 @@
     }
   });
 
-  const patch = $derived(form ? changedProfileFields(form, snapshot) : {});
+  // Only the changed fields go to the PATCH, so an untouched `timezone` cannot
+  // undo a travel update written since the form loaded (ISSUE-096).
+  const patch = $derived(form ? changedFields(form, snapshot) : {});
   const dirty = $derived(Object.keys(patch).length > 0);
   const storedLogin = $derived(detail?.identity?.email ?? '');
   const typedLogin = $derived(loginEmail.trim());
