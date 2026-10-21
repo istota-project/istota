@@ -131,6 +131,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A group room created in Chat now shows as the group's room to its other members as soon as it appears, with its settings locked and delete, guests and Talk hidden, rather than as an ordinary room until the next room list refresh up to 30 seconds later.
 - Removing a user now also removes the location tokens their phones and trackers used, and the location webhook stops accepting them at once. Before, those tokens kept posting locations for the removed account, and a user later created with the same name inherited them.
 - `istota init --relocate-rooms` no longer refuses on an install with iOS device tokens, whose two token columns the relocation did not know. The Talk poller's speech-gate check now waits at most two seconds for the database, like the rest of the poll, instead of thirty.
 - Closing the text editor on the Files page no longer makes the folder behind it disappear and load again from scratch. The listing stays on screen while it is re-read, and so it does after an upload or a new folder; a failed re-read is reported as a notice rather than replacing the folder.
