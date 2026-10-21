@@ -2065,19 +2065,42 @@ export function deleteLegacyIngestToken(): Promise<{ ok: boolean }> {
 export type DeviceScope = 'notes' | 'voice';
 
 /**
- * One phone's device token for native actions, as Settings → Devices lists it.
- * Never the token itself; `token_tail` tells two rows apart. Separate from the
- * location ingest tokens above, which a different process checks.
+ * One phone's device token for native actions. Never the token itself;
+ * `token_tail` tells two rows apart. Separate from the location ingest tokens
+ * above, which a different process checks.
  */
 export interface DeviceToken {
   id: number;
-  /** The app's device UUID, upper-cased: the same id its location row carries. */
-  device_id: string;
-  label: string | null;
   scopes: string[];
   token_tail: string;
   created_at: string;
   last_used_at: string | null;
+}
+
+/** A location token as a phone entry carries it: the `app` row for that device. */
+export type PhoneLocationToken = Omit<LocationDevice, 'kind' | 'device_id'>;
+
+/**
+ * One phone in Settings → Devices, with every token it holds. The server joins
+ * the device token and the location `app` row on the device id; either may be
+ * missing. `last_used_at` is the newer of the two.
+ */
+export interface Phone {
+  /** The app's device UUID, upper-cased. */
+  device_id: string;
+  label: string | null;
+  token: DeviceToken | null;
+  location: PhoneLocationToken | null;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export interface DevicesResponse {
+  devices: Phone[];
+  /** Location `code` tokens (Overland, a QR code), which name no device. */
+  location_trackers: PhoneLocationToken[];
+  /** Whether the shared location token from before per-device tokens still exists. */
+  legacy_location_token: boolean;
 }
 
 export interface CreatedDeviceToken {
@@ -2087,8 +2110,15 @@ export interface CreatedDeviceToken {
   scopes: string[];
 }
 
-export function listDevices(): Promise<{ devices: DeviceToken[] }> {
+export function listDevices(): Promise<DevicesResponse> {
   return apiFetch('/devices');
+}
+
+/** Revoke every token one phone holds, in one server transaction. */
+export function revokePhone(
+  deviceId: string,
+): Promise<{ ok: boolean; token: boolean; location: boolean }> {
+  return apiFetch(`/devices/phones/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
 }
 
 /**
@@ -2108,7 +2138,7 @@ export function createDevice(req: {
   });
 }
 
-/** Revoke one device's token from Settings. 404 for a row that is not the caller's. */
+/** Revoke one device token, leaving the phone's location token alone. 404 for a row that is not the caller's. */
 export function deleteDevice(id: number): Promise<{ ok: boolean }> {
   return apiFetch(`/devices/${id}`, { method: 'DELETE' });
 }

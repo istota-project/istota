@@ -178,6 +178,71 @@ def delete_by_hash(conn: sqlite3.Connection, token_hash: str) -> bool:
     return cursor.rowcount > 0
 
 
+def phones(conn: sqlite3.Connection, user_id: str) -> tuple[list[dict], list[dict]]:
+    """`(phones, location_trackers)`: every credential a user's devices hold, for Settings.
+
+    A phone is one device id with its device token and its location `'app'`
+    row, either of which may be missing; both tables store the id upper-cased,
+    so they match on it. `last_used_at` is the newer of the two. Location
+    `'code'` rows (Overland, a QR code) name no device and come back as the
+    second list. Never a hash.
+    """
+    from istota.location import ingest_tokens
+
+    entries: dict[str, dict] = {}
+
+    def entry(device_id: str, label: str | None) -> dict:
+        if device_id not in entries:
+            entries[device_id] = {"device_id": device_id, "label": label, "token": None, "location": None}
+        return entries[device_id]
+
+    for token in list_tokens(conn, user_id):
+        entry(token.device_id, token.label)["token"] = {
+            "id": token.id,
+            "scopes": sorted(token.scopes),
+            "token_tail": token.token_tail,
+            "created_at": token.created_at,
+            "last_used_at": token.last_used_at,
+        }
+
+    trackers = []
+    for row in ingest_tokens.list_tokens(conn, user_id):
+        location = {key: row[key] for key in ("id", "label", "token_tail", "created_at", "last_used_at")}
+        if row["device_id"] is None:
+            trackers.append(location)
+            continue
+        found = entry(row["device_id"], row["label"])
+        found["label"] = found["label"] or row["label"]
+        found["location"] = location
+
+    result = []
+    for found in entries.values():
+        held = [part for part in (found["token"], found["location"]) if part is not None]
+        used = [part["last_used_at"] for part in held if part["last_used_at"]]
+        found["created_at"] = min(part["created_at"] for part in held)
+        found["last_used_at"] = max(used) if used else None
+        result.append(found)
+    result.sort(key=lambda found: found["created_at"], reverse=True)
+    return result, trackers
+
+
+def revoke_phone(conn: sqlite3.Connection, user_id: str, device_id: str) -> tuple[bool, bool]:
+    """Delete the device token and the location row a phone holds, on the caller's transaction.
+
+    Returns `(token_deleted, location_deleted)`. The caller stamps the
+    location reload sentinel after its commit when the second is True; a
+    stamp inside the transaction would let a rebuild read the row back.
+    """
+    device_id = device_id.upper()
+    token = conn.execute(
+        "DELETE FROM device_tokens WHERE user_id = ? AND device_id = ?", (user_id, device_id),
+    )
+    location = conn.execute(
+        "DELETE FROM location_ingest_tokens WHERE user_id = ? AND device_id = ?", (user_id, device_id),
+    )
+    return token.rowcount > 0, location.rowcount > 0
+
+
 def authenticate(conn: sqlite3.Connection, plaintext: str) -> DeviceToken | None:
     """The row a presented token belongs to, or None.
 

@@ -18020,15 +18020,21 @@ def _device_label(value: object, default: str) -> str:
 
 def _location_devices_list(username: str) -> dict:
     from istota import db
-    from istota.credentials import store as secrets_store
     from istota.location import ingest_tokens
 
     with db.get_db(_config.db_path) as conn:
         devices = ingest_tokens.list_tokens(conn, username)
-        # `list_user_services` reads key names only: no decrypt, no `last_accessed_at` bump.
-        services = secrets_store.list_user_services(_config.db_path, username, connection=conn)
-    legacy = any(entry["key"] == "ingest_token" for entry in services.get("overland", []))
+        legacy = _legacy_location_token_exists(conn, username)
     return {"devices": devices, "legacy_token": legacy}
+
+
+def _legacy_location_token_exists(conn, username: str) -> bool:
+    """Whether the shared `overland` / `ingest_token` secret from before per-device tokens is stored."""
+    from istota.credentials import store as secrets_store
+
+    # `list_user_services` reads key names only: no decrypt, no `last_accessed_at` bump.
+    services = secrets_store.list_user_services(_config.db_path, username, connection=conn)
+    return any(entry["key"] == "ingest_token" for entry in services.get("overland", []))
 
 
 def _location_device_mint(username: str, kind: str, device_id: str | None, label: str) -> tuple[int, str]:
@@ -18190,18 +18196,6 @@ def _parse_device_mint(raw: bytes) -> tuple[str, str, list] | JSONResponse:
     return device_id, label, scopes
 
 
-def _device_row(token) -> dict:
-    return {
-        "id": token.id,
-        "device_id": token.device_id,
-        "label": token.label,
-        "scopes": sorted(token.scopes),
-        "token_tail": token.token_tail,
-        "created_at": token.created_at,
-        "last_used_at": token.last_used_at,
-    }
-
-
 def _require_session_or_device(request: Request) -> dict:
     """`router_stubs.session_or_device` for this app.
 
@@ -18245,11 +18239,26 @@ def _authenticate_device(presented: str):
     return token
 
 
-def _device_list(username: str) -> list[dict]:
+def _device_list(username: str) -> dict:
     from istota.webui import device_tokens
 
     with _db.get_db(_config.db_path) as conn:
-        return [_device_row(token) for token in device_tokens.list_tokens(conn, username)]
+        phones, trackers = device_tokens.phones(conn, username)
+        legacy = _legacy_location_token_exists(conn, username)
+    return {"devices": phones, "location_trackers": trackers, "legacy_location_token": legacy}
+
+
+def _device_revoke_phone(username: str, device_id: str) -> tuple[bool, bool]:
+    from istota.location import ingest_signal
+    from istota.webui import device_tokens
+
+    with _db.get_db(_config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        token, location = device_tokens.revoke_phone(conn, username, device_id)
+    if location:
+        # After the commit, so the receiver's rebuild cannot read the row back.
+        ingest_signal.signal_reload(_config.db_path)
+    return token, location
 
 
 def _device_mint(
@@ -18297,10 +18306,34 @@ def _device_delete_by_hash(token_hash: str) -> bool:
 
 @api_router.get("/devices")
 async def api_devices_list(user: dict = Depends(_require_api_auth)):
-    """The user's device tokens. Never the token or its hash; `token_tail` tells rows apart."""
+    """Every phone that holds a credential for this user, once each, plus location trackers.
+
+    A phone's device token and its location `'app'` token are joined on the
+    device id (`device_tokens.phones`). Location `'code'` tokens and the
+    legacy shared secret name no device and are listed beside them. Never a
+    token or its hash; `token_tail` tells rows apart.
+    """
     if not _config:
         raise HTTPException(503, "config not loaded")
-    return {"devices": await asyncio.to_thread(_device_list, user["username"])}
+    return await asyncio.to_thread(_device_list, user["username"])
+
+
+@api_router.delete("/devices/phones/{device_id}")
+async def api_devices_revoke_phone(device_id: str, request: Request, user: dict = Depends(_require_api_auth)):
+    """Revoke every token one phone holds, in one transaction. 404 when the caller has none for it."""
+    _verify_origin(request)
+    if not _config:
+        raise HTTPException(503, "config not loaded")
+    if not _LOCATION_DEVICE_ID.fullmatch(device_id):
+        raise HTTPException(400, "device_id must be a UUID")
+    token, location = await asyncio.to_thread(_device_revoke_phone, user["username"], device_id)
+    if not token and not location:
+        raise HTTPException(404, "device not found")
+    logger.info(
+        "devices: revoked a phone for user=%s (device token: %s, location token: %s)",
+        user["username"], token, location,
+    )
+    return {"ok": True, "token": token, "location": location}
 
 
 @api_router.post("/devices", status_code=201)
