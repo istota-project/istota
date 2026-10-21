@@ -334,7 +334,7 @@ Layers 1 and 2 are the design system: they name no page, no module and no produc
 
 `app-tokens.css` loads straight after `tokens.css` and, like it, declares custom properties and nothing else, so its place decides no tie. A token goes in one sheet, never both; `tokens.test.ts` fails a token declared twice and a product prefix back in `tokens.css`. A product name for a reusable value is an alias there (`--money-income: var(--signed-pos)`), restated in the light block as `tokens.css` restates its own aliases.
 
-Tests read the stylesheet through `lib/styles/cascade.ts` (`readCascade()` for "does a rule exist anywhere", `readLayer('tokens')` for "what does `:root` declare"), which parses the import list out of `app.css` rather than restating it. Do not hardcode a layer path in a test.
+Tests read the stylesheet through `lib/styles/cascade.ts` (`readCascade()` for "does a rule exist anywhere", `readLayer('tokens')` for "what does `:root` declare"), which parses the import list out of `app.css` rather than restating it. Each reader takes an optional entry (`app.css` by default) and expands an imported sheet that is itself an import list, so the same code reads the app's entry or the reusable layers' own. Do not hardcode a layer path in a test.
 
 **Small shared blocks live as globals in `lib/styles/primitives.css`** (loaded by `app.css`, see the layering above), because each had been written out verbatim in a dozen files. Use them; do not re-declare them. `redefined-primitive` fails a component rule written from one of these names at the top level (`.caption { … }`), as it does for the primitives' own classes; a page places one under its own container (`.form .caption`).
 
