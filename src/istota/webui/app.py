@@ -9947,11 +9947,17 @@ def _chat_create_web_task(
     reply_to_msg_id: int | None = None,
     relay_answer: str | None = None,
     about_room: str | None = None,
+    *,
+    report_replay: bool = False,
 ) -> tuple[str, int | None]:
     """Rate-limited web-task creation. Returns ``("ok", task_id)``,
     ``("recorded", message_id)`` when the speech gate stored the turn without
     answering it, ``("rate_limited", window_seconds)``,
     ``("reply_target_gone", 0)`` or ``("about_room_refused", 0)``.
+
+    With ``report_replay`` a send that resolved to an earlier turn under its
+    ``client_msg_id`` returns ``("replayed", (message_id, task_id))``, so a
+    caller that stored a file ahead of the write knows it was not taken.
 
     ``about_room`` links the turn to an email thread with no row to reply to
     (`private_replies.about_room_link`), checked here so the check and the
@@ -10112,6 +10118,8 @@ def _chat_create_web_task(
         )
     if result.gate_reason == "vetoed":
         return ("room_off", 0)
+    if report_replay and result.outcome == "replayed":
+        return ("replayed", (result.message_id, result.task_id))
     # A replay of a turn that was recorded unanswered has no task either.
     if result.task_id is None and result.message_id is not None:
         return ("recorded", result.message_id)
@@ -13425,15 +13433,44 @@ def _voice_default_room(username: str):
         return db.ensure_default_web_chat_room(conn, username)
 
 
-def _voice_own_send(username: str, token: str, client_msg_id: str) -> tuple[int, int | None] | None:
-    """``(message_id, task_id)`` of this sender's turn under the key in this room, or None."""
+def _voice_own_send(
+    username: str, client_msg_id: str, token: str | None = None,
+) -> tuple[str, int, int | None] | None:
+    """``(room_token, message_id, task_id)`` of this sender's turn under the key, or None.
+
+    With no ``token`` it looks in every room: the room is the server's choice
+    at send time, so a retry after the default moved must still find the
+    first attempt rather than store the audio again somewhere else.
+    """
     from istota import db
 
     with db.get_db(_config.db_path) as conn:
-        if not _is_own_replay(conn, token, client_msg_id, username):
+        if token is not None and not _is_own_replay(conn, token, client_msg_id, username):
             return None
-        message_id, task_id, _sender = db.find_send_by_client_msg_id(conn, token, client_msg_id)
-    return message_id, task_id
+        prior = db.find_send_by_client_msg_id(conn, token, client_msg_id, sender=username)
+    if prior is None or prior[2] != username:
+        return None
+    message_id, task_id, _sender, room_token = prior
+    return room_token, message_id, task_id
+
+
+def _voice_room_ref(token: str) -> dict:
+    """The response's room, named by the registry first (`db.room_display_name`)."""
+    from istota import db
+
+    with db.get_db(_config.db_path) as conn:
+        name = db.room_display_name(db.get_room(conn, token), db.get_web_chat_room_by_token(conn, token))
+    return {"token": token, "name": name or token}
+
+
+def _voice_discard(path: str) -> None:
+    """Remove audio stored for a send the write transaction did not take."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning("chat: could not remove an untaken voice recording", exc_info=True)
 
 
 def _voice_rate_limited(username: str) -> bool:
@@ -13463,10 +13500,12 @@ async def chat_voice_send(
 ):
     """Send one recording into the user's default room as an attachment-only message.
 
-    The replay check comes before anything is stored, so a retry under the
-    same ``client_msg_id`` answers 200 with the first send's ids and writes no
-    second copy of the audio. The room is the one the server resolves now;
-    the shell's label for it is display only. Takes ``request`` rather than an
+    The replay check comes before anything is stored and looks in all of
+    this user's rooms, so a retry under the same ``client_msg_id`` answers 200
+    with the first send's room and ids, even after the default moved, and
+    writes no second copy of the audio. Audio stored for a send the write
+    transaction then refuses or replays is removed. A new send goes to the
+    room the server resolves now; the shell's label for it is display only. Takes ``request`` rather than an
     ``UploadFile`` so the body is bounded before it is parsed.
     """
     if not _config:
@@ -13490,11 +13529,14 @@ async def chat_voice_send(
         return JSONResponse({"error": "the upload needs a file part", "code": "invalid_body"}, status_code=400)
 
     username = user["username"]
-    room = await asyncio.to_thread(_voice_default_room, username)
-    room_ref = {"token": room.token, "name": room.name}
-    prior = await asyncio.to_thread(_voice_own_send, username, room.token, client_msg_id)
+    prior = await asyncio.to_thread(_voice_own_send, username, client_msg_id)
     if prior is not None:
-        return {"room": room_ref, "message_id": prior[0], "task_id": prior[1], "replay": True}
+        prior_room, prior_message, prior_task = prior
+        return {
+            "room": await asyncio.to_thread(_voice_room_ref, prior_room),
+            "message_id": prior_message, "task_id": prior_task, "replay": True,
+        }
+    room = await asyncio.to_thread(_voice_default_room, username)
 
     refusal = await _room_write_refusal(room.token)
     if refusal is not None:
@@ -13526,8 +13568,11 @@ async def chat_voice_send(
     text = describe_attachment_only_message([path])
     outcome, value = await asyncio.to_thread(
         _chat_create_web_task, username, room.token, text, [path],
-        None, None, True, [name], client_msg_id,
+        None, None, True, [name], client_msg_id, report_replay=True,
     )
+    room_ref = await asyncio.to_thread(_voice_room_ref, room.token)
+    if outcome in ("rate_limited", "room_off", "replayed"):
+        await asyncio.to_thread(_voice_discard, path)
     if outcome == "rate_limited":
         return JSONResponse(
             {"error": "rate limit exceeded", "code": "rate_limited"},
@@ -13535,8 +13580,12 @@ async def chat_voice_send(
         )
     if outcome == "room_off":
         return JSONResponse({**_switched_off_body(), "code": "room_read_only"}, status_code=409)
-    sent = await asyncio.to_thread(_voice_own_send, username, room.token, client_msg_id)
-    message_id, task_id = sent if sent is not None else (None, None)
+    if outcome == "replayed":
+        # An overlapping request under the same key got its turn in first.
+        replayed_message, replayed_task = value
+        return {"room": room_ref, "message_id": replayed_message, "task_id": replayed_task, "replay": True}
+    sent = await asyncio.to_thread(_voice_own_send, username, client_msg_id, room.token)
+    message_id, task_id = sent[1:] if sent is not None else (None, None)
     if outcome == "recorded":
         await _mirror_web_turn_as_user(username, room.token, text, None, message_id=value)
     else:

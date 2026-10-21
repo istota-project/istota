@@ -857,7 +857,7 @@ def record_inbound(
         if client_msg_id:
             prior = db.find_send_by_client_msg_id(conn, room_token, client_msg_id)
             if prior is not None:
-                prior_message, prior_task, prior_sender = prior
+                prior_message, prior_task, prior_sender, _room = prior
                 if prior_sender == user_id:
                     logger.info(
                         "Replaying prior turn for client_msg_id (room=%s task=%s)",

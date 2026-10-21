@@ -6459,10 +6459,17 @@ def add_message(
 
 
 def find_send_by_client_msg_id(
-    conn: sqlite3.Connection, room_token: str, client_msg_id: str
-) -> tuple[int, int | None, str | None] | None:
-    """``(message_id, task_id, sender)`` for a stored send under this key in
-    this room, or None.
+    conn: sqlite3.Connection, room_token: str | None, client_msg_id: str,
+    *, sender: str | None = None,
+) -> tuple[int, int | None, str | None, str] | None:
+    """``(message_id, task_id, sender, room_token)`` for a stored send under
+    this key in this room, or None.
+
+    With ``room_token`` None the lookup is ``sender``'s own sends in any room,
+    oldest first: a client whose destination room is the server's choice
+    (the voice route) retries into whatever room is current, so its replay
+    has to find the key wherever the first attempt landed. ``sender`` is
+    required then, since across rooms a key is only meaningful per author.
 
     ``task_id`` is None for a turn the room recorded without answering, and for
     one whose task retention has since deleted; the sender then comes off the
@@ -6483,18 +6490,28 @@ def find_send_by_client_msg_id(
     """
     if not client_msg_id:
         return None
-    row = conn.execute(
-        "SELECT m.id, t.id AS task_id, "
+    select = (
+        "SELECT m.id, m.room_token, t.id AS task_id, "
         "COALESCE(t.user_id, m.author_user_id) AS sender FROM messages m "
         "LEFT JOIN tasks t ON t.id = m.task_id "
-        "WHERE m.room_token = ? AND m.client_msg_id = ? "
-        "LIMIT 1",
-        (room_token, client_msg_id),
-    ).fetchone()
+    )
+    if room_token is not None:
+        row = conn.execute(
+            select + "WHERE m.room_token = ? AND m.client_msg_id = ? LIMIT 1",
+            (room_token, client_msg_id),
+        ).fetchone()
+    elif sender:
+        row = conn.execute(
+            select + "WHERE m.client_msg_id = ? "
+            "AND COALESCE(t.user_id, m.author_user_id) = ? ORDER BY m.id LIMIT 1",
+            (client_msg_id, sender),
+        ).fetchone()
+    else:
+        raise ValueError("a lookup across rooms needs a sender")
     if row is None:
         return None
     task_id = int(row["task_id"]) if row["task_id"] is not None else None
-    return int(row["id"]), task_id, row["sender"]
+    return int(row["id"]), task_id, row["sender"], row["room_token"]
 
 
 def find_confirmation_exchange(

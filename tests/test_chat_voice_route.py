@@ -149,6 +149,102 @@ async def test_the_same_key_twice_is_one_message_one_task_one_file(client, confi
     assert len(_stored(config)) == 1
 
 
+async def test_a_retry_after_the_default_room_moved_replays_the_first_send(client, config):
+    from istota import user_profiles
+
+    token = _voice_token(config)
+    first = await _post(client, _bearer(token))
+    assert first.status_code == 201, first.text
+    moved = _web_room(config, "inbox")
+    user_profiles.update_profile(config.db_path, "alice", default_room=moved.token)
+    again = await _post(client, _bearer(token))
+    assert again.status_code == 200, again.text
+    assert again.json() == {**first.json(), "replay": True}
+    assert again.json()["room"]["token"] != moved.token
+    assert len(_user_turns(config)) == 1
+    assert len(_tasks(config)) == 1
+    assert len(_stored(config)) == 1
+
+
+async def test_another_users_key_in_another_room_is_not_a_replay(client, config):
+    bob = await _post(client, _bearer(_voice_token(config, user_id="bob")))
+    assert bob.status_code == 201, bob.text
+    alice = await _post(client, _bearer(_voice_token(config)))
+    assert alice.status_code == 201, alice.text
+    assert alice.json()["room"]["token"] != bob.json()["room"]["token"]
+    assert len(_user_turns(config)) == 1
+
+
+async def test_the_room_name_is_the_registry_name_after_a_rename(client, config):
+    from istota import db, user_profiles
+
+    room = _web_room(config, "general")
+    user_profiles.update_profile(config.db_path, "alice", default_room=room.token)
+    with db.get_db(config.db_path) as conn:
+        db.rename_room(conn, room.token, "Errands")
+        expected = db.default_web_chat_room_name(conn, "alice")
+    assert expected == "Errands"
+    token = _voice_token(config)
+    first = await _post(client, _bearer(token))
+    assert first.status_code == 201, first.text
+    assert first.json()["room"]["name"] == expected
+    again = await _post(client, _bearer(token))
+    assert again.json()["room"]["name"] == expected
+
+
+async def test_a_rate_limit_met_inside_the_write_removes_the_stored_audio(client, config, monkeypatch):
+    import istota.webui.app as mod
+
+    monkeypatch.setattr(mod, "_voice_rate_limited", lambda username: False)
+    monkeypatch.setattr(config.web.chat, "rate_limit_messages", 0)
+    response = await _post(client, _bearer(_voice_token(config)))
+    assert response.status_code == 429, response.text
+    assert response.json()["code"] == "rate_limited"
+    assert _stored(config) == []
+    assert _user_turns(config) == []
+
+
+async def test_a_room_switched_off_inside_the_write_removes_the_stored_audio(client, config, monkeypatch):
+    import istota.webui.app as mod
+    from istota import db, user_profiles
+
+    async def no_refusal(token, **kwargs):
+        return None
+
+    monkeypatch.setattr(mod, "_room_write_refusal", no_refusal)
+    room = _web_room(config, "general")
+    user_profiles.update_profile(config.db_path, "alice", default_room=room.token)
+    with db.get_db(config.db_path) as conn:
+        conn.execute(
+            "INSERT INTO room_policy (room_token, vetoed_at) VALUES (?, datetime('now'))", (room.token,),
+        )
+    response = await _post(client, _bearer(_voice_token(config)))
+    assert response.status_code == 409, response.text
+    assert _stored(config) == []
+
+
+async def test_an_overlapping_same_key_send_replays_and_removes_its_copy(client, config, monkeypatch):
+    import istota.webui.app as mod
+
+    token = _voice_token(config)
+    first = await _post(client, _bearer(token))
+    assert first.status_code == 201, first.text
+    real = mod._voice_own_send
+
+    # The first request's turn lands after this one's replay check: the check
+    # misses it, and only the write transaction sees the key.
+    def unseen_before_the_write(username, client_msg_id, token=None):
+        return None if token is None else real(username, client_msg_id, token)
+
+    monkeypatch.setattr(mod, "_voice_own_send", unseen_before_the_write)
+    again = await _post(client, _bearer(token))
+    assert again.status_code == 200, again.text
+    assert again.json() == {**first.json(), "replay": True}
+    assert len(_user_turns(config)) == 1
+    assert len(_tasks(config)) == 1
+    assert len(_stored(config)) == 1
+
+
 @pytest.mark.parametrize("key", [None, "", "short", "x" * 65, "has space-1234", "under_score-12"])
 async def test_a_missing_or_malformed_key_is_a_400(client, config, key):
     response = await _post(client, _bearer(_voice_token(config)), key=key)
