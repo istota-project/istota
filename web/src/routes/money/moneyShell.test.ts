@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { readLayer } from '$lib/styles/cascade';
 
 /**
  * The money record-table shell — the toolbar rules every money list page
@@ -19,12 +20,11 @@ import { join } from 'node:path';
  * The selectors are bare as a result — no wrapper to match around them.
  */
 
-const read = (sheet: string): string =>
-  readFileSync(join(process.cwd(), 'src/lib/styles', sheet), 'utf8');
+// table.css and primitives.css are minot's, read from the installed package.
 const sheets = {
-  moneyTable: read('moneyTable.css'),
-  table: read('table.css'),
-  primitives: read('primitives.css'),
+  moneyTable: readFileSync(join(process.cwd(), 'src/lib/styles/moneyTable.css'), 'utf8'),
+  table: readLayer('table'),
+  primitives: readLayer('primitives'),
 };
 
 /** The declarations inside a top-level rule. */
