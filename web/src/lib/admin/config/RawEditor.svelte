@@ -1,6 +1,6 @@
 <script lang="ts">
   import { base } from '$app/paths';
-  import { Alert, Button, Card, Field, TextArea } from '$lib/components/ui';
+  import { Alert, Button, Card, Field, TextArea } from '@minot/ui';
   import { SENTINEL } from './changeSet';
 
   interface Props {

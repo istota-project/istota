@@ -15,9 +15,9 @@
     Card,
     Field,
     TextArea,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
-  import { notifyError } from '$lib/stores/notices';
+  import { notifyError } from '@minot/ui/stores/notices';
   import { briefingSettingsUrl, channelLabel, derivedTitle, slugify } from './briefingSettings';
 
   let {

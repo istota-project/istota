@@ -1,7 +1,7 @@
 <script lang="ts">
   import IndexCaption from './IndexCaption.svelte';
   import { MessageSquare, Users } from '@lucide/svelte';
-  import { Icon, EmptyState } from '$lib/components/ui';
+  import { Icon, EmptyState } from '@minot/ui';
   import type { WorkspacePlace } from '$lib/api';
   import ReachBadge from './ReachBadge.svelte';
 

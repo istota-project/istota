@@ -80,7 +80,7 @@ const persisted = vi.hoisted(() => {
     }),
   };
 });
-vi.mock('$lib/ui/persisted', () => persisted);
+vi.mock('@minot/ui/ui/persisted', () => persisted);
 
 const notices = vi.hoisted(() => ({
   notify: vi.fn(),
@@ -88,7 +88,7 @@ const notices = vi.hoisted(() => ({
   notifySuccess: vi.fn(),
   notifyWarning: vi.fn(),
 }));
-vi.mock('$lib/stores/notices', () => notices);
+vi.mock('@minot/ui/stores/notices', () => notices);
 
 function room(id: number): ChatRoom {
   return {

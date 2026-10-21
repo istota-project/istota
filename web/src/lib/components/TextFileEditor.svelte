@@ -1,6 +1,6 @@
 <script lang="ts" generics="T extends TextFile">
   import type { Snippet } from 'svelte';
-  import { Modal, Button, TextArea } from '$lib/components/ui';
+  import { Modal, Button, TextArea } from '@minot/ui';
   import { pinViewportZoom, releaseViewportZoom } from '$lib/zoomPin';
   import { TextFileConflictError, TextFileInvalidError, TextFileLockedError } from '$lib/api';
   import type { TextFile } from './textFile';

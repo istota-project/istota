@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Icon } from '$lib/components/ui';
+  import { Icon } from '@minot/ui';
   import { Search } from '@lucide/svelte';
   let { onclick }: { onclick: () => void } = $props();
 </script>

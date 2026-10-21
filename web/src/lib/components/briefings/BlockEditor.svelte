@@ -22,8 +22,8 @@
     FormStack,
     Checkbox,
     Disclosure,
-  } from '$lib/components/ui';
-  import { createDraft } from '$lib/ui/draft.svelte';
+  } from '@minot/ui';
+  import { createDraft } from '@minot/ui/ui/draft.svelte';
   import SourceConfigFields from './SourceConfigFields.svelte';
   import BriefingPreview from './BriefingPreview.svelte';
   import { sourceKindLabel } from './settings/briefingSettings';

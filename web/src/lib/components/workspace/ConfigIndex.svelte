@@ -1,6 +1,6 @@
 <script lang="ts">
   import IndexCaption from './IndexCaption.svelte';
-  import { EmptyState, KebabMenu, type KebabItem, LoadState } from '$lib/components/ui';
+  import { EmptyState, KebabMenu, type KebabItem, LoadState } from '@minot/ui';
   import type { WorkspaceConfigFile } from '$lib/api';
   import { configFileDescription, configFileDetail, configFileLabel } from './configFiles';
 

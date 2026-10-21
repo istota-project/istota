@@ -29,9 +29,9 @@
     LoadState,
     Input,
     BackLink,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { X } from '@lucide/svelte';
-  import { formatDate } from '$lib/dateFormat';
+  import { formatDate } from '@minot/ui/dateFormat';
 
   // Read the panel id from ?id=… so the page is statically prerenderable
   // under adapter-static; the actual lookup happens client-side.

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, untrack } from 'svelte';
-  import { createDrawerClose } from '$lib/ui/drawerClose';
+  import { createDrawerClose } from '@minot/ui/ui/drawerClose';
   import { page } from '$app/state';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import { getAccounts, type AccountRow } from '$lib/money/api';
@@ -22,9 +22,9 @@
     SidebarToggle,
     Select,
     Input,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { Search } from '@lucide/svelte';
-  import { debounce } from '$lib/ui/debounce';
+  import { debounce } from '@minot/ui/ui/debounce';
 
   let { children } = $props();
 

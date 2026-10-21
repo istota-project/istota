@@ -5,7 +5,7 @@ import { __history } from '../../../../vitest-stubs/app-navigation';
 import Groups from './+page.svelte';
 import Layout from '../+layout.svelte';
 import { createRawSnippet } from 'svelte';
-import { formatDate } from '$lib/dateFormat';
+import { formatDate } from '@minot/ui/dateFormat';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 const identity = vi.hoisted(() => ({
@@ -16,8 +16,8 @@ const identity = vi.hoisted(() => ({
 vi.mock('$lib/api', () => api);
 vi.mock('$lib/userContext', () => ({ getCurrentUser: () => identity }));
 const notices = vi.hoisted(() => ({ notifyError: vi.fn() }));
-vi.mock('$lib/stores/notices', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('$lib/stores/notices')>()),
+vi.mock('@minot/ui/stores/notices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@minot/ui/stores/notices')>()),
   notifyError: notices.notifyError,
 }));
 await fillApiDouble(api);

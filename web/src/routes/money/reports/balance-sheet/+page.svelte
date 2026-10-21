@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { LoadState, Disclosure } from '$lib/components/ui';
+  import { LoadState, Disclosure } from '@minot/ui';
   import { goto } from '$app/navigation';
   import { getReport, type AccountRow } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';

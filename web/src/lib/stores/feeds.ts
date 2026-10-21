@@ -1,7 +1,7 @@
 import { writable } from 'svelte/store';
 import { getFeedCounts, type Feed, type FeedCounts } from '$lib/api';
-import { loadSetting, saveSetting } from '$lib/ui/persisted';
-import { latest } from '$lib/ui/latest';
+import { loadSetting, saveSetting } from '@minot/ui/ui/persisted';
+import { latest } from '@minot/ui/ui/latest';
 
 /** Shared feeds list, loaded once by the feeds layout. */
 export const feedsList = writable<Feed[]>([]);

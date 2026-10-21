@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Alert, LoadState } from '$lib/components/ui';
+  import { Alert, LoadState } from '@minot/ui';
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { getModuleServices, type ServiceCard as ServiceCardData } from '$lib/api';

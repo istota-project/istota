@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Icon, CategoryGroup, ListRow } from '$lib/components/ui';
+  import { Icon, CategoryGroup, ListRow } from '@minot/ui';
   import {
     BookOpen,
     FileCode,

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import Page from './+page.svelte';
-import { clearNotices, notices } from '$lib/stores/notices';
+import { clearNotices, notices } from '@minot/ui/stores/notices';
 
 vi.mock('$app/paths', () => ({ base: '/istota' }));
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));

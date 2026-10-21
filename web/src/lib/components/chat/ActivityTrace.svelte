@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Icon } from '$lib/components/ui';
+  import { Icon } from '@minot/ui';
   import { ChevronRight, ChevronDown, X } from '@lucide/svelte';
   import type { Segment } from '$lib/stores/segments';
 

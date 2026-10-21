@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { DaySummaryStop } from '$lib/api';
-  import { EmptyState } from '$lib/components/ui';
+  import { EmptyState } from '@minot/ui';
 
   interface Props {
     stops: DaySummaryStop[];

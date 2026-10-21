@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
@@ -34,11 +34,11 @@
     TextArea,
     LoadState,
     PageHeader,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { diagnosisStatusVariant } from '$lib/health/status';
   import { linkableConditionOptions } from '$lib/health/conditions';
   import DocumentList from '$lib/components/health/DocumentList.svelte';
-  import { formatDate } from '$lib/dateFormat';
+  import { formatDate } from '@minot/ui/dateFormat';
 
   let loading = $state(true);
   let error = $state('');

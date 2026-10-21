@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Button, Field, MultiSelect } from '$lib/components/ui';
+  import { Button, Field, MultiSelect } from '@minot/ui';
 
   interface Props {
     /** The allowlist the running process loaded. */

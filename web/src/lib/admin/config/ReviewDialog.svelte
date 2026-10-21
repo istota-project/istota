@@ -9,7 +9,7 @@
     type ConfigProblem,
     type StepUpProof,
   } from '$lib/api';
-  import { Alert, Badge, Button, ConfirmDialog, Modal } from '$lib/components/ui';
+  import { Alert, Badge, Button, ConfirmDialog, Modal } from '@minot/ui';
   import { StepUpDialog } from '$lib/components/settings';
   import DiffBlock from './DiffBlock.svelte';
 

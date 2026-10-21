@@ -1,7 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { cancelWalletPurchase, type WalletPurchase, type WalletSettings } from '$lib/api';
-  import { Badge, Button, EmptyState, Card, Timestamp } from '$lib/components/ui';
+  import { Badge, Button, EmptyState, Card, Timestamp } from '@minot/ui';
   let {
     purchases,
     precision,

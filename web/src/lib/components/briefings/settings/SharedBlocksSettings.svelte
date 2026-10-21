@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { X } from '@lucide/svelte';
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import {
     getSharedBlocks,
     putSharedBlock,
@@ -28,8 +28,8 @@
     TextArea,
     Badge,
     Timestamp,
-  } from '$lib/components/ui';
-  import { notifyError, notifyWarning } from '$lib/stores/notices';
+  } from '@minot/ui';
+  import { notifyError, notifyWarning } from '@minot/ui/stores/notices';
   import SourceConfigFields from '../SourceConfigFields.svelte';
   import { sourceKindLabel, uniqueName } from './briefingSettings';
 

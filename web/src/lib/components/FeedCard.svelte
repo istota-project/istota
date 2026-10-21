@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { Icon, Timestamp } from '$lib/components/ui';
+  import { Icon, Timestamp } from '@minot/ui';
   import { FileText, Play, Star } from '@lucide/svelte';
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
   import { fileKind, inlineMedia, linkUrl, playerUrl, providerLabel } from '$lib/feeds/embed';
 
   import { markReadDelay } from '$lib/stores/feeds';
-  import { notifyError } from '$lib/stores/notices';
+  import { notifyError } from '@minot/ui/stores/notices';
 
   let {
     entry,

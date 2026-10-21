@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Alert } from '$lib/components/ui';
+  import { Alert } from '@minot/ui';
   import {
     TAX_DISCLAIMER_GAPS,
     TAX_DISCLAIMER_LEAD,

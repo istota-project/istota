@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Field, Checkbox } from '$lib/components/ui';
+  import { Field, Checkbox } from '@minot/ui';
   import {
     applyFeatureDefaults,
     BROWSER_MEMORY_WARN_MIB,

@@ -21,7 +21,7 @@ const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
 
-vi.mock('$lib/ui/persisted', () => ({
+vi.mock('@minot/ui/ui/persisted', () => ({
   loadSetting: vi.fn(() => null),
   saveSetting: vi.fn(),
 }));
@@ -32,7 +32,7 @@ const notices = vi.hoisted(() => ({
   notifySuccess: vi.fn(),
   notifyWarning: vi.fn(),
 }));
-vi.mock('$lib/stores/notices', () => notices);
+vi.mock('@minot/ui/stores/notices', () => notices);
 
 function room(id: number): ChatRoom {
   return {

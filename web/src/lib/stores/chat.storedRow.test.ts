@@ -20,7 +20,7 @@ await fillApiDouble(api, {
   chatStreamUrl: vi.fn(() => '/task-stream'),
 });
 
-vi.mock('$lib/ui/persisted', () => ({
+vi.mock('@minot/ui/ui/persisted', () => ({
   loadSetting: vi.fn(() => null),
   saveSetting: vi.fn(),
 }));

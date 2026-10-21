@@ -1,7 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { page } from '$app/state';
-  import { HeaderNav } from '$lib/components/ui';
+  import { HeaderNav } from '@minot/ui';
 
   let { children } = $props();
 

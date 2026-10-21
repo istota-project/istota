@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Icon } from '$lib/components/ui';
+  import { Icon } from '@minot/ui';
   import { Bot } from '@lucide/svelte';
   import type { WorkspaceAccess } from '$lib/api';
   import { taskReachDescription, type TaskReachScope } from './reach';

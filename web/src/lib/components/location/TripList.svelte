@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Timestamp } from '$lib/components/ui';
+  import { Timestamp } from '@minot/ui';
   import type { Trip } from '$lib/location-path';
   import { ACTIVITY_COLORS, ACTIVITY_LABELS, DEFAULT_PATH_COLOR } from '$lib/location-constants';
 

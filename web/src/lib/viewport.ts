@@ -25,7 +25,7 @@
  * static gap, traded for a layout that does not move under the user mid-typing.
  */
 import { onKeyboardGeometry, shellAtLeast, shellVersion } from './platform/native';
-import { onDocumentVisible } from './ui/visibility';
+import { onDocumentVisible } from '@minot/ui/ui/visibility';
 
 const EDGES = ['top', 'bottom', 'left', 'right'] as const;
 

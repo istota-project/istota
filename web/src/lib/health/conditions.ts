@@ -9,7 +9,7 @@
  */
 
 import type { Diagnosis, Encounter } from '$lib/api';
-import type { SelectOption } from '$lib/components/ui';
+import type { SelectOption } from '@minot/ui';
 
 /** One condition as it reads in a link picker. */
 export function conditionOptionLabel(d: Diagnosis): string {

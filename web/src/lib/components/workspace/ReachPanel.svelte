@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Icon, Disclosure } from '$lib/components/ui';
+  import { Icon, Disclosure } from '@minot/ui';
   import { Bot } from '@lucide/svelte';
   import type { WorkspacePlace } from '$lib/api';
   import ReachBadge from './ReachBadge.svelte';

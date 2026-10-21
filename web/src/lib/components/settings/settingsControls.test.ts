@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { minotComponentPath, readLayer } from '$lib/styles/cascade';
 
 /**
  * The settings surface goes through the `ui/` primitives, and does not
@@ -151,7 +152,7 @@ describe('settings controls go through the primitives', () => {
 });
 
 describe('SecretField composes rather than forks', () => {
-  const source = read(join(SRC, 'lib/components/ui/SecretField.svelte'));
+  const source = read(minotComponentPath('SecretField'));
 
   it('builds on Field, Input and Button', () => {
     // It used to restate Field's descendant rule declaration-for-declaration
@@ -173,7 +174,7 @@ describe('SecretField composes rather than forks', () => {
 });
 
 describe('settings card defaults', () => {
-  const css = read(join(SRC, 'lib/styles/settings.css'));
+  const css = readLayer('settings');
   const rule = (selector: string) => {
     const start = css.indexOf(`${selector} {`);
     return start < 0 ? '' : css.slice(start, css.indexOf('}', start));
@@ -184,7 +185,7 @@ describe('settings card defaults', () => {
   });
 
   it('keeps direct card buttons compact and action rows able to wrap', () => {
-    const cardSource = read(join(SRC, 'lib/components/ui/Card.svelte'));
+    const cardSource = read(minotComponentPath('Card'));
     const btn = cardSource.slice(cardSource.indexOf('.ui-card > :global(:where(button, a)) {'));
     expect(btn.slice(0, btn.indexOf('}'))).toContain('align-self: flex-start');
     // The wrapping action row is the global `hstack wrap` now; a second
@@ -198,7 +199,7 @@ describe('settings card defaults', () => {
 });
 
 it('uses the settings text size in portalled dialog bodies', () => {
-  const modal = read(join(SRC, 'lib/components/ui/Modal.svelte'));
+  const modal = read(minotComponentPath('Modal'));
   const body = rules(modal).find((rule) => rule.selector === ':global(.ui-modal-body)');
   expect(body?.body).toContain('font-size: var(--text-sm)');
 });

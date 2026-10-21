@@ -1,8 +1,8 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { AuthError, saveWalletPolicy, type WalletPolicy, type WalletSettings } from '$lib/api';
-  import { Alert, Field, FormStack, Input, Select, Card, Checkbox } from '$lib/components/ui';
-  import { createDraft } from '$lib/ui/draft.svelte';
+  import { Alert, Field, FormStack, Input, Select, Card, Checkbox } from '@minot/ui';
+  import { createDraft } from '@minot/ui/ui/draft.svelte';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   let {
     policy,

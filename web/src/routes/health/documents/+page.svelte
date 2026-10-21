@@ -1,6 +1,6 @@
 <script lang="ts">
   import { X } from '@lucide/svelte';
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   /**
    * Every uploaded health document, and what it is attached to (ISSUE-423).
    *
@@ -54,7 +54,7 @@
     LoadState,
     PageHeader,
     Timestamp,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import {
     attachOptions,
     attachPoolNotice,
@@ -70,10 +70,10 @@
     truncationNotice,
     type TruncationFlags,
   } from '$lib/health/documents';
-  import { formatDate } from '$lib/dateFormat';
+  import { formatDate } from '@minot/ui/dateFormat';
   import { isPlainClick } from '$lib/fileViewer/links';
   import { viewer } from '$lib/fileViewer/store.svelte';
-  import { notifyError, notifyWarning } from '$lib/stores/notices';
+  import { notifyError, notifyWarning } from '@minot/ui/stores/notices';
 
   const entityTypes: SelectOption[] = [
     { value: 'encounter', label: 'Visit' },

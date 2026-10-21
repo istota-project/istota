@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { createDrawerClose } from '$lib/ui/drawerClose';
-  import { notifyError } from '$lib/stores/notices';
+  import { createDrawerClose } from '@minot/ui/ui/drawerClose';
+  import { notifyError } from '@minot/ui/stores/notices';
   import { base } from '$app/paths';
   import {
     Icon,
@@ -23,7 +23,7 @@
     Checkbox,
     LoadMore,
     Meter,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import {
     getWorkspacePins,
     putWorkspacePin,
@@ -69,8 +69,8 @@
   } from '$lib/components/workspace/indexViews';
   import { getCurrentUser } from '$lib/userContext';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
-  import { loadSetting, saveSetting } from '$lib/ui/persisted';
-  import { latest } from '$lib/ui/latest';
+  import { loadSetting, saveSetting } from '@minot/ui/ui/persisted';
+  import { latest } from '@minot/ui/ui/latest';
   import PlaceList from '$lib/components/workspace/PlaceList.svelte';
   import ReachPanel from '$lib/components/workspace/ReachPanel.svelte';
   import ReachBadge from '$lib/components/workspace/ReachBadge.svelte';

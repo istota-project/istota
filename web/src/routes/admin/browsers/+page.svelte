@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getAdminBrowsers, type AdminBrowsers } from '$lib/api';
-  import { Alert, Button, Card, Disclosure, LoadState, Timestamp } from '$lib/components/ui';
+  import { Alert, Button, Card, Disclosure, LoadState, Timestamp } from '@minot/ui';
 
   let report = $state<AdminBrowsers | null>(null);
   let loading = $state(true);

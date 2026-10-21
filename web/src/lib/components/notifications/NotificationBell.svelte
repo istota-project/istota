@@ -21,7 +21,7 @@
    */
   import { Bell } from '@lucide/svelte';
   import { notificationCounts } from '$lib/stores/notifications';
-  import { CountPill, Icon } from '$lib/components/ui';
+  import { CountPill, Icon } from '@minot/ui';
   import NotificationPanel from './NotificationPanel.svelte';
 
   const open = $derived($notificationCounts.open);

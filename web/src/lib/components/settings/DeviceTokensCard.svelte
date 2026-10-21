@@ -18,8 +18,8 @@
     type Phone,
     type PhoneLocationToken,
   } from '$lib/api';
-  import { Badge, Button, Card, ConfirmDialog, EmptyState, Timestamp } from '$lib/components/ui';
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { Badge, Button, Card, ConfirmDialog, EmptyState, Timestamp } from '@minot/ui';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import type { Snippet } from 'svelte';
 
   interface Props {

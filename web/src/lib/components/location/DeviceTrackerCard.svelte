@@ -22,7 +22,7 @@
     Card,
     Field,
     Timestamp,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import {
     trackerAvailable,
     scannerAvailable,

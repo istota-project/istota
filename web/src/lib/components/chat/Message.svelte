@@ -14,7 +14,7 @@
   } from '@lucide/svelte';
   import PhoneSurfaceIcon from './PhoneSurfaceIcon.svelte';
   import { chatFileUrl, type ExternalTurnDisplay } from '$lib/api';
-  import { copyText } from '$lib/clipboard';
+  import { copyText } from '@minot/ui/clipboard';
   import { renderMarkdown } from '$lib/markdown';
   import { findPlainMentions, type MentionTarget } from '$lib/mentions';
   import type { ChatMessage } from '$lib/stores/chat';
@@ -26,7 +26,7 @@
     renderGroups,
   } from '$lib/stores/segments';
   import { online } from '$lib/stores/connectivity';
-  import { Icon, Badge, Button, Chip, IconButton } from '$lib/components/ui';
+  import { Icon, Badge, Button, Chip, IconButton } from '@minot/ui';
   import UserAvatar from '$lib/components/UserAvatar.svelte';
   import ActivityTrace from './ActivityTrace.svelte';
   import ConfirmationCard from './ConfirmationCard.svelte';

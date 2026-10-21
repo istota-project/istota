@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { AutocompleteInput, Field, Input } from '$lib/components/ui';
+  import { AutocompleteInput, Field, Input } from '@minot/ui';
   import SetupMore from './SetupMore.svelte';
   import { DEFAULT_BOT_NAME, deriveUsername, type SetupDraftStore } from './setupDraft.svelte';
 

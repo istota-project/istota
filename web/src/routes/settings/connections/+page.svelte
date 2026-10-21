@@ -9,8 +9,8 @@
     type ServiceCard as ServiceCardData,
     type NextcloudTokenStatus,
   } from '$lib/api';
-  import { EmptyState, LoadState } from '$lib/components/ui';
-  import { notifyError } from '$lib/stores/notices';
+  import { EmptyState, LoadState } from '@minot/ui';
+  import { notifyError } from '@minot/ui/stores/notices';
   import { getCurrentUser } from '$lib/userContext';
   import {
     ServiceCard,

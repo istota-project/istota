@@ -42,7 +42,7 @@
  * two *people* sharing a profile, which is a correctness boundary; this is one
  * person with two tabs, which is not.
  */
-import { loadSetting, saveSetting } from '$lib/ui/persisted';
+import { loadSetting, saveSetting } from '@minot/ui/ui/persisted';
 import { MAX_DRAFT_CHARS } from './drafts';
 import type { ChatAttachment } from '$lib/api';
 import type { MessageReply } from './segments';

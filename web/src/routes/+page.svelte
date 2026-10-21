@@ -13,7 +13,7 @@
     Wallet,
   } from '@lucide/svelte';
   import { buildGreeting, noteSegments, type Greeting } from '$lib/greeting';
-  import { AppShell, Card, ShellHeader } from '$lib/components/ui';
+  import { AppShell, Card, ShellHeader } from '@minot/ui';
   import { getCurrentUser } from '$lib/userContext';
 
   /* The identity the root layout resolved, not a second `/me` of this page's

@@ -21,7 +21,7 @@ const notices = vi.hoisted(() => ({
   notifySuccess: vi.fn(),
   notifyWarning: vi.fn(),
 }));
-vi.mock('./notices', () => notices);
+vi.mock('@minot/ui/stores/notices', () => notices);
 
 type Store = typeof import('./notifications');
 

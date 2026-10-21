@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { EmptyState, Field, Input, Card, Checkbox, LoadState } from '$lib/components/ui';
+  import { EmptyState, Field, Input, Card, Checkbox, LoadState } from '@minot/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
-  import { notifyError, notifySuccess } from '$lib/stores/notices';
+  import { notifyError, notifySuccess } from '@minot/ui/stores/notices';
   import {
     getPortfolioAccounts,
     patchPortfolioAccount,

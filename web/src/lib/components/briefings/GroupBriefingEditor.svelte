@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import { untrack } from 'svelte';
   import { base } from '$app/paths';
   import {
@@ -47,13 +47,13 @@
     FormStack,
     Checkbox,
     TextArea,
-  } from '$lib/components/ui';
-  import { trackChanges } from '$lib/ui/draft.svelte';
+  } from '@minot/ui';
+  import { trackChanges } from '@minot/ui/ui/draft.svelte';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
-  import { notifyError, notifySuccess } from '$lib/stores/notices';
+  import { notifyError, notifySuccess } from '@minot/ui/stores/notices';
   import { getCurrentUser } from '$lib/userContext';
-  import { formatDateTime } from '$lib/dateFormat';
+  import { formatDateTime } from '@minot/ui/dateFormat';
   import BlockBuilder from './BlockBuilder.svelte';
   import BriefingEdition from './BriefingEdition.svelte';
   import SourceApprovalDialog from './settings/SourceApprovalDialog.svelte';

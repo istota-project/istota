@@ -14,9 +14,9 @@
     deleteLegacyIngestToken,
     type LocationDevice,
   } from '$lib/api';
-  import { Badge, Button, Card, ConfirmDialog, EmptyState, Timestamp } from '$lib/components/ui';
+  import { Badge, Button, Card, ConfirmDialog, EmptyState, Timestamp } from '@minot/ui';
   import { trackerAvailable, trackerStatus } from '$lib/platform/nativeLocation';
-  import { notifyError } from '$lib/stores/notices';
+  import { notifyError } from '@minot/ui/stores/notices';
 
   type Target = { kind: 'row'; id: number; label: string } | { kind: 'legacy' };
 

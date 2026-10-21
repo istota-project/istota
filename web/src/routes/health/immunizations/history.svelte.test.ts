@@ -3,8 +3,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, fireEvent, screen, within } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import type { Immunization } from '$lib/api';
-import { formatDate } from '$lib/dateFormat';
+import { formatDate } from '@minot/ui/dateFormat';
 import { base } from '$app/paths';
+import { readLayer } from '$lib/styles/cascade';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
@@ -31,7 +32,7 @@ const dose: Immunization = {
 };
 
 // jsdom has no layout, media-query or container-query evaluation. Apply the
-// real rules for each width here — the table family's (table.css, whose
+// real rules for each width here — the table family's (minot's table.css, whose
 // card layout this page uses) and the page's own; browser preview checks the
 // resulting geometry. `width` stands in for both the viewport and the
 // history table's own box, and a container query in rem is read at 16px.
@@ -40,7 +41,7 @@ function useStylesAt(width: number) {
   const styleOf = (path: string) =>
     readFileSync(path, 'utf8').split('<style>')[1].split('</style>')[0];
   const css = [
-    readFileSync('src/lib/styles/table.css', 'utf8'),
+    readLayer('table'),
     styleOf('src/routes/health/immunizations/+page.svelte'),
     styleOf('src/routes/health/+layout.svelte'),
   ]

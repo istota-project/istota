@@ -1,17 +1,13 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { layerPaths, readLayer } from './cascade';
 import { ROOM_COLORS } from '../roomColors';
 import { describe, expect, it } from 'vitest';
 
-// app.css is the token home, so the invariants that make the tokens usable have
-// to be asserted here rather than inferred from the pages that consume them.
-// Read from the project root: vitest serves this file over a vite-style URL, so
-// import.meta.url is not a file: URL here.
+// The app half of the token invariants. minot's own tokens.test.ts holds the
+// library sheet's (its scales, the z ladder, the control heights, the stripe);
+// this one holds the pair: minot's tokens.css as installed, plus this app's
+// app-tokens.css, which adds to both theme blocks. Parity is a property of the
+// pair, so it is checked over both.
 
-// The two token layers: tokens.css, the reusable half, and app-tokens.css, the
-// product's own. Parity is a property of the pair, since the app sheet adds to
-// both theme blocks; the other layers declare no tokens.
 const REUSABLE = readLayer('tokens');
 const PRODUCT = readLayer('app-tokens');
 
@@ -34,8 +30,13 @@ function block(selector: string): Record<string, string> {
 }
 
 describe('the token split', () => {
-  // The product tokens left tokens.css so the reusable sheet names no product
-  // surface. A token declared in both would make which value wins depend on
+  it('reads the reusable sheet from the installed package', () => {
+    expect(layerPaths().find((p) => p.endsWith('/tokens.css'))).toMatch(
+      /node_modules\/@minot\/ui\/dist\/styles\/tokens\.css$/,
+    );
+  });
+
+  // A token declared in both sheets would make which value wins depend on
   // import order, which is exactly what a token layer must never decide.
   it('declares no token in both sheets', () => {
     for (const selector of [':root', ":root[data-theme='light']"]) {
@@ -45,27 +46,29 @@ describe('the token split', () => {
     }
   });
 
-  it('keeps the product prefixes out of the reusable sheet', () => {
+  it("keeps this app's prefixes out of the library sheet", () => {
     const product =
-      /^\s*--(money-|map-|chat-|room-color-|category-|scrim-pill-|accent-whatsapp|sigil-filter|unread-mark-size|setup-max|app-bar-height|field-label-width|card-pane-max)/m;
+      /^\s*--(money-|map-|chat-|room-color-|category-|scrim-pill-|accent-whatsapp|sigil-filter|setup-max)/m;
     expect(REUSABLE).not.toMatch(product);
   });
 
-  it("aliases the app's money pair to the reusable signed pair", () => {
-    // The values live once, in tokens.css, in both themes; the app's names
-    // only point at them.
+  it("aliases the app's money pair to the library's signed pair", () => {
+    // The values live once, in minot's tokens.css, in both themes; the app's
+    // names only point at them.
     for (const selector of [':root', ":root[data-theme='light']"]) {
       const product = declarations(PRODUCT, selector);
       expect(product['--money-income'], selector).toBe('var(--signed-pos)');
       expect(product['--money-expense'], selector).toBe('var(--signed-neg)');
     }
     expect(declarations(REUSABLE, ':root')).toHaveProperty('--signed-pos');
+    expect(declarations(REUSABLE, ':root')).toHaveProperty('--signed-neg');
+    expect(declarations(REUSABLE, ":root[data-theme='light']")).toHaveProperty('--signed-pos');
     expect(declarations(REUSABLE, ":root[data-theme='light']")).toHaveProperty('--signed-neg');
   });
 
-  it('loads the app sheet straight after tokens.css', () => {
+  it('loads the app sheet straight after the whole library entry', () => {
     const order = layerPaths().map((path) => path.split('/').pop());
-    expect(order.indexOf('app-tokens.css')).toBe(order.indexOf('tokens.css') + 1);
+    expect(order.indexOf('app-tokens.css')).toBe(order.indexOf('primitives.css') + 1);
   });
 });
 
@@ -153,22 +156,6 @@ describe('theme parity', () => {
     for (const name of filters) expect(light, `${name} needs a light value`).toHaveProperty(name);
   });
 
-  it('carries the table stripe in the reusable sheet, translucent in both themes', () => {
-    // Ported from a sibling app's copy (its striped tables). Translucent rather
-    // than a grey step, so one value shades a row on the base and the card
-    // surface alike; a tint of the theme's own text colour, so it lightens in
-    // dark and darkens in light.
-    const reusableDark = declarations(REUSABLE, ':root');
-    const reusableLight = declarations(REUSABLE, ":root[data-theme='light']");
-    const alpha = (value: string) => Number(value.match(/,\s*([\d.]+)\)$/)?.[1]);
-    expect(reusableDark['--surface-stripe']).toMatch(/^rgba\(255, 255, 255, /);
-    expect(reusableLight['--surface-stripe']).toMatch(/^rgba\(0, 0, 0, /);
-    for (const value of [reusableDark['--surface-stripe'], reusableLight['--surface-stripe']]) {
-      expect(alpha(value)).toBeGreaterThan(0);
-      expect(alpha(value)).toBeLessThan(0.1);
-    }
-  });
-
   it('the light theme defines no token the dark theme lacks', () => {
     // A light-only token renders as nothing in dark, the same bug mirrored.
     expect(Object.keys(light).filter((name) => !(name in dark))).toEqual([]);
@@ -214,148 +201,23 @@ describe('theme parity', () => {
       expect(new Set(values).size, `${label} has a duplicate room colour`).toBe(values.length);
     }
   });
-});
 
-describe('control heights', () => {
-  // Button, Chip and the Select trigger each computed their own box out of a
-  // font size, a padding and (for Select) a border, and landed on four
-  // different answers — so a Select beside a Button sat ~2.6px short, by an
-  // amount that changed with the text-scale preference, since everything but
-  // the border is in rem.
-  it('defines both steps', () => {
-    expect(dark['--control-height-sm']).toBeDefined();
-    expect(dark['--control-height-md']).toBeDefined();
-  });
-
-  it('orders sm below md', () => {
-    const rem = (v: string) => Number(v.replace('rem', ''));
-    expect(rem(dark['--control-height-sm'])).toBeLessThan(rem(dark['--control-height-md']));
-  });
-
-  it('is in rem, so a control tracks the text-scale preference', () => {
-    // px here would reintroduce the original bug in the other direction: the
-    // box would stay put while the type inside it grew.
-    expect(dark['--control-height-sm']).toMatch(/rem$/);
-    expect(dark['--control-height-md']).toMatch(/rem$/);
-  });
-});
-
-describe('z-index scale', () => {
-  const z = (name: string) => {
-    const raw = dark[name];
-    expect(raw, `${name} is not defined`).toBeDefined();
-    return Number(raw);
-  };
-
-  it('is strictly ordered bottom to top', () => {
-    const ladder = [
-      '--z-sticky',
-      '--z-drawer-backdrop',
-      '--z-drawer',
-      '--z-notice',
-      '--z-modal',
-      '--z-modal-panel',
-      '--z-viewer',
-      '--z-viewer-control',
-      '--z-lightbox',
-      '--z-palette',
-      '--z-palette-panel',
-      '--z-popover',
-      '--z-toast',
-    ];
-    const values = ladder.map(z);
-    expect(values).toEqual([...values].sort((a, b) => a - b));
-    expect(new Set(values).size).toBe(values.length);
-  });
-
-  it('puts a popover above a dialog panel', () => {
-    // Not theoretical: every money form is a Select inside a Modal, and both
-    // portal to <body>, so the two values compete in the root stacking context.
-    expect(z('--z-popover')).toBeGreaterThan(z('--z-modal-panel'));
-  });
-
-  it('puts global search above readers and image viewers', () => {
-    expect(z('--z-palette')).toBeGreaterThan(z('--z-lightbox'));
-    expect(z('--z-palette-panel')).toBeGreaterThan(z('--z-palette'));
-  });
-
-  it('puts the lightbox above the reader it opens from', () => {
-    expect(z('--z-lightbox')).toBeGreaterThan(z('--z-viewer-control'));
-  });
-});
-
-describe('type and motion scales', () => {
-  const num = (name: string) => {
-    const raw = dark[name];
-    expect(raw, `${name} is not defined`).toBeDefined();
-    return Number.parseFloat(raw);
-  };
-  const ascending = (names: string[]) => {
-    const values = names.map(num);
-    expect(values).toEqual([...values].sort((a, b) => a - b));
-    expect(new Set(values).size, `${names.join(', ')} has a duplicate step`).toBe(values.length);
-  };
-
-  it('orders the weights regular to bold', () => {
-    ascending(['--weight-regular', '--weight-medium', '--weight-semibold', '--weight-bold']);
-  });
-
-  it('orders the leading none to relaxed, as unitless ratios', () => {
-    // Unitless so the leading follows the element's own font size: a length
-    // here would be computed once where it is declared and inherited
-    // unchanged by smaller text inside.
-    const names = [
-      '--leading-none',
-      '--leading-tight',
-      '--leading-snug',
-      '--leading-normal',
-      '--leading-relaxed',
-    ];
-    ascending(names);
-    for (const name of names) expect(dark[name]).toMatch(/^\d+(\.\d+)?$/);
-  });
-
-  it('orders the icon sizes, in rem', () => {
-    const names = ['--icon-xs', '--icon-sm', '--icon-md', '--icon-lg', '--icon-xl'];
-    ascending(names);
-    for (const name of names) expect(dark[name]).toMatch(/rem$/);
-  });
-
-  it('puts the fast duration below the slow one', () => {
-    expect(num('--duration-fast')).toBeLessThan(num('--duration-slow'));
-  });
-
-  it('puts the exit duration between the fast and the slow one', () => {
-    // An exit long enough to be seen leaving, still quicker than an entrance.
-    expect(num('--duration-exit')).toBeGreaterThanOrEqual(num('--duration-fast'));
-    expect(num('--duration-exit')).toBeLessThan(num('--duration-slow'));
-  });
-
-  it('has an exit curve beside the entrance one', () => {
-    expect(dark['--ease-accelerate']).toMatch(/^cubic-bezier\(/);
-  });
-
-  it('builds the fast transition from the duration and easing tokens', () => {
-    // So an animation written with var(--duration-fast) and a transition
-    // written with var(--transition-fast) cannot drift apart.
-    expect(dark['--transition-fast']).toBe('var(--duration-fast) var(--ease-standard)');
-  });
-
-  it('declares the non-colour families once, outside the theme blocks', () => {
-    // A weight, a leading or a duration that changed with the theme would be
-    // a layout shift on every theme switch.
-    const families = [
-      /^--weight-/,
-      /^--leading-/,
-      /^--tracking-/,
-      /^--duration-/,
-      /^--ease-/,
-      /^--icon-/,
-      /^--radius-round$/,
-      /^--disabled-opacity$/,
-    ];
-    const inFamily = (name: string) => families.some((re) => re.test(name));
-    expect(Object.keys(dark).filter(inFamily)).toHaveLength(23);
-    expect(Object.keys(light).filter(inFamily)).toEqual([]);
+  it('keeps the Talk amber out of the room palette, in each theme', () => {
+    // `.room-origin.talk` spends amber in the same row to mean "mirrored to
+    // Nextcloud Talk", so a room tint in that colour reads as a surface
+    // binding. The amber is read from the same theme's block, never pinned:
+    // it differs per theme, and a literal stops matching when it is retuned.
+    for (const [label, blockValues] of [
+      ['dark', dark],
+      ['light', light],
+    ] as const) {
+      const amber = blockValues['--accent-amber'];
+      expect(amber, `no --accent-amber in ${label}`).toBeTruthy();
+      for (const c of ROOM_COLORS) {
+        expect(blockValues[`--room-color-${c}`].toLowerCase(), `${label} ${c}`).not.toBe(
+          amber.toLowerCase(),
+        );
+      }
+    }
   });
 });

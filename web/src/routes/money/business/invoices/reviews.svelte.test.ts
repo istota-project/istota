@@ -2,7 +2,7 @@ import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import Page from './+page.svelte';
-import { formatDate } from '$lib/dateFormat';
+import { formatDate } from '@minot/ui/dateFormat';
 
 vi.mock('$app/paths', () => ({ base: '/istota' }));
 

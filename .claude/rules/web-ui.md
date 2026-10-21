@@ -12,7 +12,8 @@ each. This file is not a substitute for them, and deliberately does not restate
 them: it carries the **backend and admin-pane** side of the web UI. Web chat has
 its own file: `.claude/rules/web-chat.md`.
 
-Lives in `web/AGENTS.md`, not here: the component inventory, the semantic color
+Lives in `web/AGENTS.md` and the design system's own
+`web/node_modules/@minot/ui/AGENTS.md`, not here: the component inventory, the semantic color
 roles and what is deliberately not tokenized, the design-lint rules, the page
 skeletons and stylesheet layering, the shared primitives, the settings-page
 shape and the `HeaderSave` registry, the money record-table shell, the iOS shell

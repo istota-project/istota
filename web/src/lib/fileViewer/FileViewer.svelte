@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Modal, Button, IconButton, Timestamp } from '$lib/components/ui';
+  import { Modal, Button, IconButton, Timestamp } from '@minot/ui';
   import { Code, Download, ExternalLink, Eye } from '@lucide/svelte';
   import MediaPreview from '$lib/components/viewer/MediaPreview.svelte';
   import TextPreview from '$lib/components/viewer/TextPreview.svelte';
@@ -12,7 +12,7 @@
     type FilePreview,
   } from '$lib/api';
   import { formatBytes } from '$lib/format';
-  import type { DateFormatOptions } from '$lib/dateFormat';
+  import type { DateFormatOptions } from '@minot/ui/dateFormat';
   import { viewer, type FileSource } from './store.svelte';
   import PdfPreview from './PdfPreview.svelte';
   import { presentationFor } from './presentation';

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { latest } from '$lib/ui/latest';
+  import { latest } from '@minot/ui/ui/latest';
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import {
@@ -23,7 +23,7 @@
     PageHeader,
     Timestamp,
     Disclosure,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
 
   let name = $derived(page.url.searchParams.get('name') || '');

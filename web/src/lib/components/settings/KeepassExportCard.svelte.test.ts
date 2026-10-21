@@ -9,7 +9,7 @@ const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
 const copyText = vi.hoisted(() => vi.fn(async () => true));
-vi.mock('$lib/clipboard', () => ({ copyText }));
+vi.mock('@minot/ui/clipboard', () => ({ copyText }));
 import { startStepUp, exportKeepass } from '$lib/api';
 const password = 'fixture-export-password';
 const downloads: string[] = [];

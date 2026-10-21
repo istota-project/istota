@@ -6,7 +6,7 @@
     type CredentialBackupSettings,
     type StepUpProof,
   } from '$lib/api';
-  import { Button, Field, Input, Card, Timestamp } from '$lib/components/ui';
+  import { Button, Field, Input, Card, Timestamp } from '@minot/ui';
   import StepUpDialog from './StepUpDialog.svelte';
 
   let settings = $state<CredentialBackupSettings | null>(null);

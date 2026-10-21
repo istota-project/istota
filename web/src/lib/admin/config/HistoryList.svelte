@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { ConfigRequest, ConfigRequestStatus } from '$lib/api';
-  import { Badge, Button, Card, Disclosure } from '$lib/components/ui';
-  import { formatDateTime } from '$lib/dateFormat';
+  import { Badge, Button, Card, Disclosure } from '@minot/ui';
+  import { formatDateTime } from '@minot/ui/dateFormat';
   import DiffBlock from './DiffBlock.svelte';
 
   type BadgeVariant = 'neutral' | 'danger' | 'warn' | 'success' | 'info' | 'partial';

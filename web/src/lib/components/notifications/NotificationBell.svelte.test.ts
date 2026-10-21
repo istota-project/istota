@@ -9,6 +9,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { minotComponentPath } from '$lib/styles/cascade';
 import { render, cleanup, screen } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 
@@ -31,7 +32,7 @@ vi.mock('$lib/stores/notifications', async (importOriginal) => {
 
 import { notificationCounts } from '$lib/stores/notifications';
 import NotificationBell from './NotificationBell.svelte';
-import { CountPill } from '$lib/components/ui';
+import { CountPill } from '@minot/ui';
 
 type WritableCounts = { set(v: { open: number; actionable: number }): void };
 
@@ -146,7 +147,7 @@ describe('CountPill', () => {
     // with no visual change. `--text-2xs` is 0.55rem and would shrink both
     // chat chips by a fifth, which no lint or type check would catch.
     const here = dirname(fileURLToPath(import.meta.url));
-    const src = readFileSync(resolve(here, '../ui/CountPill.svelte'), 'utf8');
+    const src = readFileSync(minotComponentPath('CountPill'), 'utf8');
     const style = src.slice(src.indexOf('<style'), src.lastIndexOf('</style>'));
     expect(style).toMatch(/font-size:\s*var\(--text-xs\)/);
     expect(style).not.toMatch(/--text-2xs/);

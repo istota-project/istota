@@ -17,9 +17,9 @@
     Spinner,
     type BadgeVariant,
     type KebabItem,
-  } from '$lib/components/ui';
-  import { notifyError } from '$lib/stores/notices';
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  } from '@minot/ui';
+  import { notifyError } from '@minot/ui/stores/notices';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import { waitForMailAccountTest } from '$lib/mailAccountTest';
   import MailAccountFormModal from './MailAccountFormModal.svelte';
   let {

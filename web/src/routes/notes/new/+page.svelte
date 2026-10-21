@@ -28,12 +28,12 @@
     saveQuickNote,
     updateProfile,
   } from '$lib/api';
-  import { Alert, AppShell, Button, ShellHeader, TextArea } from '$lib/components/ui';
+  import { Alert, AppShell, Button, ShellHeader, TextArea } from '@minot/ui';
   import FolderPicker from '$lib/components/FolderPicker.svelte';
   import { getCurrentUser } from '$lib/userContext';
   import { syncDeviceActions } from '$lib/stores/deviceActions';
-  import { debounce } from '$lib/ui/debounce';
-  import { loadSetting, saveSetting } from '$lib/ui/persisted';
+  import { debounce } from '@minot/ui/ui/debounce';
+  import { loadSetting, saveSetting } from '@minot/ui/ui/persisted';
 
   const DRAFT_KEY = 'notes.newDraft';
   const IDLE_MS = 1500;

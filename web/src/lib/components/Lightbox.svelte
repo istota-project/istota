@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { Dialog } from 'bits-ui';
-  import { Icon, Button } from '$lib/components/ui';
+  import { Icon, Button } from '@minot/ui';
   import { ChevronLeft, ChevronRight } from '@lucide/svelte';
   import {
     FIT,

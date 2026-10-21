@@ -17,17 +17,9 @@
     type ConfigResource,
     type ServarrApp,
   } from '$lib/api';
-  import {
-    Button,
-    Card,
-    EmptyState,
-    Input,
-    Alert,
-    Disclosure,
-    LoadState,
-  } from '$lib/components/ui';
+  import { Button, Card, EmptyState, Input, Alert, Disclosure, LoadState } from '@minot/ui';
   import { getCurrentUser } from '$lib/userContext';
-  import { notifyWarning } from '$lib/stores/notices';
+  import { notifyWarning } from '@minot/ui/stores/notices';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import AdminsEditor from '$lib/admin/config/AdminsEditor.svelte';
   import FieldRow from '$lib/admin/config/FieldRow.svelte';
@@ -36,7 +28,7 @@
   import RawEditor from '$lib/admin/config/RawEditor.svelte';
   import RequestProgress from '$lib/admin/config/RequestProgress.svelte';
   import ReviewDialog from '$lib/admin/config/ReviewDialog.svelte';
-  import ConfigSecretField from '$lib/admin/config/SecretField.svelte';
+  import ConfigSecretField from '$lib/admin/config/ConfigSecretField.svelte';
   import ServarrAppsEditor from '$lib/admin/config/ServarrAppsEditor.svelte';
   import {
     appProblems,

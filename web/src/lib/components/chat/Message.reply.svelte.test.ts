@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import type { ChatMessage } from '$lib/stores/segments';
-import { clearNotices } from '$lib/stores/notices';
+import { clearNotices } from '@minot/ui/stores/notices';
 import Message from './Message.svelte';
 
 const source = readFileSync(

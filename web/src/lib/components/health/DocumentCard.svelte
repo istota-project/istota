@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { Badge, Card, KebabMenu, type KebabItem } from '$lib/components/ui';
+  import { Badge, Card, KebabMenu, type KebabItem } from '@minot/ui';
   import type { DocumentEntity, HealthDocument } from '$lib/api';
   import { documentName, openDocumentImage, formatBytes, mimeLabel } from '$lib/health/documents';
-  import { formatDate } from '$lib/dateFormat';
+  import { formatDate } from '@minot/ui/dateFormat';
 
   interface Props {
     doc: HealthDocument;

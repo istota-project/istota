@@ -7,7 +7,7 @@
     type InvoiceDetailItem,
     type VoidInvoiceResponse,
   } from '$lib/money/api';
-  import { Field, FormModal, Input, Checkbox } from '$lib/components/ui';
+  import { Field, FormModal, Input, Checkbox } from '@minot/ui';
   import { formatDecimal as formatAmount } from '$lib/format';
 
   interface Props {

@@ -42,7 +42,7 @@
     seenPairs,
     type NotificationFilter,
   } from '$lib/stores/notifications';
-  import { Alert, EmptyState, ToggleGroup } from '$lib/components/ui';
+  import { Alert, EmptyState, ToggleGroup } from '@minot/ui';
   import NotificationDetail from './NotificationDetail.svelte';
   import NotificationItem from './NotificationItem.svelte';
 

@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { BriefingArchiveItem, BriefingDocument, BriefingDocumentBlock } from '$lib/api';
-  import { CardGrid, HintPopover, Modal, Timestamp } from '$lib/components/ui';
+  import { CardGrid, HintPopover, Modal, Timestamp } from '@minot/ui';
   import { fileLinks } from '$lib/fileViewer/links';
   import { renderMarkdown } from '$lib/markdown';
   import BriefingBlockCard from './BriefingBlockCard.svelte';

@@ -20,8 +20,8 @@ await fillApiDouble(api);
 const doctorRun = vi.hoisted(() => ({ waitForDoctorRun: vi.fn() }));
 vi.mock('$lib/doctorRun', () => doctorRun);
 const notices = vi.hoisted(() => ({ notifyError: vi.fn() }));
-vi.mock('$lib/stores/notices', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('$lib/stores/notices')>()),
+vi.mock('@minot/ui/stores/notices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@minot/ui/stores/notices')>()),
   notifyError: notices.notifyError,
 }));
 vi.mock('$app/paths', () => ({ base: '/istota' }));

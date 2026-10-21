@@ -11,7 +11,7 @@
     Select,
     TextArea,
     type SelectOption,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
 
   interface Props {
     cluster?: DiscoveredCluster;

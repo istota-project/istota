@@ -9,7 +9,7 @@
     importGarminTracks,
     type GarminStatus,
   } from '$lib/api';
-  import { Alert, Button, Card, Field, Input, Timestamp } from '$lib/components/ui';
+  import { Alert, Button, Card, Field, Input, Timestamp } from '@minot/ui';
 
   let loading = $state(true);
   let busy = $state(false);

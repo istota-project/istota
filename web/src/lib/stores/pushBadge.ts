@@ -1,6 +1,6 @@
 import { pushAvailable, setBadge } from '$lib/platform/nativePush';
 import { notificationCounts } from './notifications';
-import { onDocumentVisible } from '$lib/ui/visibility';
+import { onDocumentVisible } from '@minot/ui/ui/visibility';
 
 /** Subscribe after authentication; an absent total is unknown, never zero. */
 export function startPushBadgeSync(): () => void {

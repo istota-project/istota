@@ -1,4 +1,4 @@
-import type { SelectOption } from '$lib/components/ui';
+import type { SelectOption } from '@minot/ui';
 
 /**
  * The full IANA timezone list from the browser (no hardcoded list, no extra

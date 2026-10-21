@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import { base } from '$app/paths';
-  import { Button, Card } from '$lib/components/ui';
+  import { Button, Card } from '@minot/ui';
   import SetupSteps from './SetupSteps.svelte';
   import type { SetupStepId, SetupStepList } from './setupDraft.svelte';
 

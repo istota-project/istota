@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { BriefingDocumentBlock } from '$lib/api';
   import { Maximize2, Settings2 } from '@lucide/svelte';
-  import { Card, HintPopover, IconButton } from '$lib/components/ui';
+  import { Card, HintPopover, IconButton } from '@minot/ui';
   import { fileLinks } from '$lib/fileViewer/links';
   import { renderMarkdown } from '$lib/markdown';
 

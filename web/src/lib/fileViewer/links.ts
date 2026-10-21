@@ -1,5 +1,5 @@
 import { CHAT_FILES_PREFIX } from '$lib/markdown';
-import { isPlainClick } from '$lib/ui/plainClick';
+import { isPlainClick } from '@minot/ui/ui/plainClick';
 import { viewer } from './store.svelte';
 
 export { isPlainClick };

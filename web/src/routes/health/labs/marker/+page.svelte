@@ -22,8 +22,8 @@
     type BiomarkerRef,
     type BiomarkerTrend,
   } from '$lib/api';
-  import { formatDate } from '$lib/dateFormat';
-  import { Alert, Badge, EmptyState, LoadState, PageHeader } from '$lib/components/ui';
+  import { formatDate } from '@minot/ui/dateFormat';
+  import { Alert, Badge, EmptyState, LoadState, PageHeader } from '@minot/ui';
 
   Chart.register(
     LineController,

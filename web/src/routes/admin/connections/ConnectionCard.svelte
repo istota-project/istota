@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Component, Snippet } from 'svelte';
-  import { Icon, Badge, Card } from '$lib/components/ui';
+  import { Icon, Badge, Card } from '@minot/ui';
 
   type BadgeVariant = 'success' | 'warn' | 'danger' | 'neutral' | 'info';
 

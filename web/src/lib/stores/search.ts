@@ -1,7 +1,7 @@
 import { get, writable } from 'svelte/store';
 import { search, type SearchGroup } from '$lib/api';
-import { loadSetting, saveSetting } from '$lib/ui/persisted';
-import { latest } from '$lib/ui/latest';
+import { loadSetting, saveSetting } from '@minot/ui/ui/persisted';
+import { latest } from '@minot/ui/ui/latest';
 
 const RECENTS_KEY = 'istota.search.recent';
 type Source = { source: string; label: string };

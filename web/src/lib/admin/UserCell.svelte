@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Badge } from '$lib/components/ui';
+  import { Badge } from '@minot/ui';
   import UserAvatar from '$lib/components/UserAvatar.svelte';
 
   let {

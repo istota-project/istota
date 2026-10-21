@@ -1,12 +1,9 @@
 import { afterAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { APP_ENTRY, layerPaths, readCascade, readLayer } from './cascade';
+import { APP_ENTRY, layerPaths, readCascade, readLayer, stripComments } from './cascade';
 
-// A consumer's entry that loads a library entry first, which is itself an
-// ordered list of sheets: the shape the app's entry takes once the reusable
-// layers ship as a package.
 const dir = mkdtempSync(join(tmpdir(), 'cascade-'));
 mkdirSync(join(dir, 'lib'));
 writeFileSync(join(dir, 'lib/index.css'), "@import './tokens.css';\n@import './primitives.css';\n");
@@ -18,17 +15,38 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 const names = (paths: string[]) => paths.map((path) => basename(path));
 
+describe("the app's entry", () => {
+  it('loads @minot/ui first, then the app layers', () => {
+    const imports = [
+      ...stripComments(readFileSync(APP_ENTRY, 'utf8')).matchAll(/@import\s+'([^']+)'/g),
+    ].map((m) => m[1]);
+    expect(imports[0]).toBe('@minot/ui/styles.css');
+    expect(imports.slice(1)).toEqual([
+      './lib/styles/app-tokens.css',
+      './lib/styles/app-shell.css',
+      './lib/styles/markdown.css',
+    ]);
+  });
+
+  it('expands the package entry into the installed sheets, in its order', () => {
+    const paths = layerPaths();
+    expect(names(paths)).toEqual([
+      'tokens.css',
+      'settings.css',
+      'cards.css',
+      'table.css',
+      'primitives.css',
+      'app-tokens.css',
+      'app-shell.css',
+      'markdown.css',
+    ]);
+    for (const path of paths.slice(0, 5)) {
+      expect(path).toMatch(/node_modules\/@minot\/ui\/dist\/styles\//);
+    }
+  });
+});
+
 describe('cascade', () => {
-  it("reads the app's own entry by default", () => {
-    const order = names(layerPaths());
-    expect(order[0]).toBe('tokens.css');
-    expect(order).toEqual(names(layerPaths(APP_ENTRY)));
-  });
-
-  it('reads a library entry on its own', () => {
-    expect(names(layerPaths(join(dir, 'lib/index.css')))).toEqual(['tokens.css', 'primitives.css']);
-  });
-
   it('expands an entry it imports in place, keeping the order', () => {
     expect(names(layerPaths(join(dir, 'app.css')))).toEqual([
       'tokens.css',
@@ -43,10 +61,10 @@ describe('cascade', () => {
     expect(readCascade(entry)).toMatch(/--a[\s\S]*\.b[\s\S]*\.c/);
   });
 
-  it('says so rather than guessing at a package import', () => {
+  it('resolves a package import through its exports', () => {
     const entry = join(dir, 'package.css');
-    writeFileSync(entry, "@import 'some-package/styles.css';\n");
-    expect(() => layerPaths(entry)).toThrow(/non-relative import/);
+    writeFileSync(entry, "@import '@minot/ui/tokens.css';\n");
+    expect(layerPaths(entry)[0]).toMatch(/node_modules\/@minot\/ui\/dist\/styles\/tokens\.css$/);
   });
 
   it('refuses an imported sheet that holds rules as well as imports', () => {

@@ -1,4 +1,4 @@
-import type { KebabItem } from '$lib/components/ui';
+import type { KebabItem } from '@minot/ui';
 import { workExportUrl } from './api';
 
 /**

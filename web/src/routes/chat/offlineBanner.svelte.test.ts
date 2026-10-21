@@ -58,7 +58,7 @@ vi.mock('$lib/stores/chat', async () => {
 
 import { getChatSession } from '$lib/stores/chat';
 import { online, noteTransport } from '$lib/stores/connectivity';
-import { notices, clearNotices } from '$lib/stores/notices';
+import { notices, clearNotices } from '@minot/ui/stores/notices';
 import Page from './+page.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 import type { User } from '$lib/api';

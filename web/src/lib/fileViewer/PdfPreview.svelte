@@ -4,7 +4,7 @@
   import { version } from 'pdfjs-dist/package.json';
   import type { PDFDocumentProxy, PDFDocumentLoadingTask, RenderTask } from 'pdfjs-dist';
   import { ZoomIn, ZoomOut } from '@lucide/svelte';
-  import { Button, IconButton } from '$lib/components/ui';
+  import { Button, IconButton } from '@minot/ui';
   import {
     DOUBLE_TAP_MS,
     DOUBLE_TAP_SCALE,

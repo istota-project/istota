@@ -13,7 +13,7 @@
     type CsvImportSummary,
     type HealthPanel,
   } from '$lib/api';
-  import { notifyError } from '$lib/stores/notices';
+  import { notifyError } from '@minot/ui/stores/notices';
   import {
     Alert,
     Badge,
@@ -24,7 +24,7 @@
     PageHeader,
     Timestamp,
     Disclosure,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
 
   let loading = $state(true);
   let error = $state('');

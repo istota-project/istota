@@ -8,9 +8,9 @@ Read `.claude/project-memory/MEMORY.md` at the start of each task, then open the
 
 ### UI patterns are required reading
 
-Before planning or changing any UI, read `web/AGENTS.md` from disk, even when working from the repository root or changing a backend response that affects the UI. It is the shared design guide, not an optional reference. Read it in bounded sections through the end; its component tables and later layout rules can exceed the instruction-loading or tool-output limit. Also read `.claude/rules/web-ui.md`, the relevant subsystem rules, and the memory note `feedback_web_alerts_follow_chat.md` when available.
+Before planning or changing any UI, read `web/node_modules/@minot/ui/AGENTS.md` (the design system) and `web/AGENTS.md` (this app's part of it) from disk, even when working from the repository root or changing a backend response that affects the UI. It is the shared design guide, not an optional reference. Read it in bounded sections through the end; its component tables and later layout rules can exceed the instruction-loading or tool-output limit. Also read `.claude/rules/web-ui.md`, the relevant subsystem rules, and the memory note `feedback_web_alerts_follow_chat.md` when available.
 
-- Start with `web/src/lib/components/ui/index.ts`, `web/src/lib/styles/tokens.css`, and the nearest sibling page. Reuse the existing primitives and page skeleton. Import UI components through `$lib/components/ui`.
+- Start with `web/node_modules/@minot/ui/dist/index.d.ts`, `web/node_modules/@minot/ui/dist/styles/tokens.css`, `web/src/lib/styles/app-tokens.css`, and the nearest sibling page. Reuse the existing primitives and page skeleton. Import UI components from `@minot/ui`. A change to one is made in minot and taken here as a release, never in this tree (`web/AGENTS.md` opens with the loop).
 - Use theme tokens and the spacing/type scales. Add new color tokens to both themes. Reuse shared styles rather than redefining primitives or adding per-page theme overrides.
 - Follow chat's feedback patterns: out-of-band action failures use `notifyError` / `notifyWarning`; lasting conditions use `Alert`. Field validation and failed sends stay beside their field or message. Do not invent ad-hoc error banners.
 - Use `Modal`, `ConfirmDialog`, and `EmptyState` for their existing roles. Use `copyText` for clipboard actions and the platform facade for native-shell behavior.
@@ -307,6 +307,8 @@ Full posture, with the reasoning and the shape-by-shape caveats, in `.claude/rul
 ## Code Style
 
 Indentation is **spaces, never tabs**, declared in `.editorconfig` at the repo root: Python is 4 spaces, everything under `web/` is 2 spaces. The frontend is formatted by prettier — run `npm run format` in `web/` before committing frontend changes (config in `web/.prettierrc.json`). Exceptions: `web/package-lock.json` (npm-generated) and `docker/devbox/etc/gitconfig` (git-idiomatic tabs).
+
+The web UI's design system is the `@minot/ui` package (its own repository, minot), pinned to an exact version in `web/package.json`; its design-language doc is `web/node_modules/@minot/ui/AGENTS.md`.
 
 Python is **linted but not formatted**. `ruff check` runs clean over the seven paths the command below names; the rule set is pinned in `[tool.ruff.lint]` to ruff's defaults (`E4`, `E7`, `E9`, `F`) with no formatting-adjacent rules. **Do not run `ruff format`**: it is not adopted, the hand formatting in the tree is the baseline, and a reformat would rewrite roughly 715 of 910 files and carry `git blame` with it. A deliberate unused import is marked `# noqa: F401` with the reason, not left to be pruned by the next `--fix` run.
 

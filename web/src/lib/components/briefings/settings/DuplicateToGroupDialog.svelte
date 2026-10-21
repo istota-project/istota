@@ -6,14 +6,7 @@
     type BriefingTarget,
     type GroupBriefingGeneration,
   } from '$lib/api';
-  import {
-    FormModal,
-    Alert,
-    OptionCards,
-    type OptionCard,
-    Field,
-    TextArea,
-  } from '$lib/components/ui';
+  import { FormModal, Alert, OptionCards, type OptionCard, Field, TextArea } from '@minot/ui';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import { briefingSettingsUrl, GROUP_SOURCE_KINDS } from './briefingSettings';
 

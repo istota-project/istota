@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { SecretField } from '$lib/components/ui';
+  import { SecretField } from '@minot/ui';
   import type { SetupDraftStore } from './setupDraft.svelte';
 
   interface Props {

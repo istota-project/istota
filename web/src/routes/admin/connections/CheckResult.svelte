@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Alert, Icon } from '$lib/components/ui';
+  import { Alert, Icon } from '@minot/ui';
   import type { AdminNextcloudCheck } from '$lib/api';
   import { CircleCheck } from '@lucide/svelte';
 

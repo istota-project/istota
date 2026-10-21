@@ -6,8 +6,8 @@
     type KeepassImportPreview,
     type KeepassImportItem,
   } from '$lib/api';
-  import { Button, Field, FormStack, Input, Card, Checkbox } from '$lib/components/ui';
-  import { latest } from '$lib/ui/latest';
+  import { Button, Field, FormStack, Input, Card, Checkbox } from '@minot/ui';
+  import { latest } from '@minot/ui/ui/latest';
 
   let { onImported }: { onImported?: () => void } = $props();
   let file: File | null = $state(null);

@@ -73,7 +73,7 @@ import { page } from '../../../../vitest-stubs/app-state.svelte';
 import { __history } from '../../../../vitest-stubs/app-navigation';
 import { viewer } from '$lib/fileViewer/store.svelte';
 import { get } from 'svelte/store';
-import { notices, clearNotices } from '$lib/stores/notices';
+import { notices, clearNotices } from '@minot/ui/stores/notices';
 
 afterEach(() => {
   cleanup();

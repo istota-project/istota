@@ -20,7 +20,7 @@ await fillApiDouble(api);
 // In-memory stand-in for localStorage so the selection round-trip (save on
 // select, read back on the next init) is exercised for real.
 const persisted = vi.hoisted(() => ({ map: new Map<string, unknown>() }));
-vi.mock('$lib/ui/persisted', () => ({
+vi.mock('@minot/ui/ui/persisted', () => ({
   loadSetting: vi.fn((key: string, fallback: unknown) =>
     persisted.map.has(key) ? persisted.map.get(key) : fallback,
   ),
@@ -74,7 +74,7 @@ async function freshSession() {
 // imports, notices included — so a statically imported `currentNotice` here
 // would be a different singleton from the one chat writes to.
 async function freshNotices() {
-  return await import('./notices');
+  return await import('@minot/ui/stores/notices');
 }
 
 describe('chat store — cross-room views + starring', () => {

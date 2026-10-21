@@ -40,7 +40,7 @@
    * thread. Rendering any of it as markup is the injection this whole feature
    * exists to make harder, not easier.
    */
-  import { Icon, Button } from '$lib/components/ui';
+  import { Icon, Button } from '@minot/ui';
   import { Mail } from '@lucide/svelte';
   import type { OutboundDraft } from '$lib/api';
 

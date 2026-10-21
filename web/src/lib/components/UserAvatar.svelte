@@ -1,6 +1,6 @@
 <script lang="ts">
   import { avatarUrl } from '$lib/api';
-  import { Avatar } from '$lib/components/ui';
+  import { Avatar } from '@minot/ui';
 
   interface Props {
     /** Which identity this is. Decides the fallback chip's fill and the URL. */

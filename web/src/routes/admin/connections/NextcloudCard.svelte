@@ -2,9 +2,9 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import type { AdminNextcloudConnection } from '$lib/api';
-  import { Alert, Button, Timestamp } from '$lib/components/ui';
+  import { Alert, Button, Timestamp } from '@minot/ui';
   import { waitForDoctorRun } from '$lib/doctorRun';
-  import { notifyError } from '$lib/stores/notices';
+  import { notifyError } from '@minot/ui/stores/notices';
   import { Cloud } from '@lucide/svelte';
   import CheckResult from './CheckResult.svelte';
   import ConnectionCard from './ConnectionCard.svelte';

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { Check } from '@lucide/svelte';
   import { onMount } from 'svelte';
-  import { Icon, Alert, Spinner } from '$lib/components/ui';
+  import { Icon, Alert, Spinner } from '@minot/ui';
   import {
     LONG_WAIT_MS,
     POLL_INTERVAL_MS,

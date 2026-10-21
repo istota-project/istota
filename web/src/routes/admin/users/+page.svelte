@@ -26,11 +26,11 @@
     LoadState,
     Card,
     Timestamp,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { signInStateLabel } from '$lib/admin/signInState';
-  import { createConfirm } from '$lib/ui/confirm.svelte';
-  import { notifyError } from '$lib/stores/notices';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
+  import { notifyError } from '@minot/ui/stores/notices';
   import AdminUserModal from './AdminUserModal.svelte';
 
   let view = $state<AdminUsers | null>(null);

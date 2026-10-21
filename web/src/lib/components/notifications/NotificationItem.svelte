@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Button, StatusDot, Timestamp } from '$lib/components/ui';
+  import { Button, StatusDot, Timestamp } from '@minot/ui';
   /**
    * One row in the notification panel.
    *

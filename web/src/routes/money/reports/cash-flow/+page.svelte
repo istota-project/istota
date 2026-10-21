@@ -12,7 +12,7 @@
     Tooltip,
     Legend,
   } from 'chart.js';
-  import { Card, EmptyState, StatTile, LoadState, Disclosure } from '$lib/components/ui';
+  import { Card, EmptyState, StatTile, LoadState, Disclosure } from '@minot/ui';
   import { getCashFlow, type CashFlowRow } from '$lib/money/api';
   import { directionColor, INCOME_COLOR, EXPENSE_COLOR } from '$lib/money/direction';
   import { selectedLedger } from '$lib/money/stores/ledger';

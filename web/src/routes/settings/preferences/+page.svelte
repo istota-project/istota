@@ -10,18 +10,18 @@
     Input,
     MultiSelect,
     ToggleGroup,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { SettingsLayout } from '$lib/components/settings';
   import FolderPicker from '$lib/components/FolderPicker.svelte';
   import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
   import { deviceModel, shellAtLeast, shellRunsServiceWorker } from '$lib/platform/native';
   import { appConnectionAvailable, openAppSettings } from '$lib/platform/nativeConnection';
-  import { notifyError } from '$lib/stores/notices';
+  import { notifyError } from '@minot/ui/stores/notices';
   import { clearOfflineData } from '$lib/offline/clear';
   import { fontSize, setFontSize, type FontSize } from '$lib/stores/fontSize';
   import { theme, setTheme, type Theme } from '$lib/stores/theme';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
-  import { formatList, parseList } from '$lib/ui/parse';
+  import { formatList, parseList } from '@minot/ui/ui/parse';
   import { isManaged, managedBadge } from '$lib/settings/managed';
 
   const settings = getUserSettings();

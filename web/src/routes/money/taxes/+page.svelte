@@ -17,11 +17,11 @@
     StatTile,
     LoadState,
     Disclosure,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import RateProvenanceLine from '$lib/components/money/RateProvenanceLine.svelte';
   import TaxDisclaimer from '$lib/components/money/TaxDisclaimer.svelte';
   import { formatDecimal } from '$lib/format';
-  import { debounce } from '$lib/ui/debounce';
+  import { debounce } from '@minot/ui/ui/debounce';
 
   let data = $state<TaxEstimateResponse | null>(null);
   let loading = $state(true);

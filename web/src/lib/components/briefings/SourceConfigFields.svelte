@@ -5,8 +5,8 @@
   // are advisory and never write the draft.
   import { onDestroy } from 'svelte';
   import { checkBriefingPath, getBriefingPathSuggestions, type EmailAccount } from '$lib/api';
-  import { debounce } from '$lib/ui/debounce';
-  import { latest } from '$lib/ui/latest';
+  import { debounce } from '@minot/ui/ui/debounce';
+  import { latest } from '@minot/ui/ui/latest';
   import { FEEDS_FAILED_MESSAGE } from './settings/briefingSettings';
   import {
     AutocompleteInput,
@@ -17,7 +17,7 @@
     Field,
     Checkbox,
     Chip,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
 
   interface Props {
     kind: string;

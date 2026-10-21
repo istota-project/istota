@@ -2,7 +2,7 @@
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import { selectedYear } from '$lib/money/stores/transactions';
-  import { HeaderNav, Select } from '$lib/components/ui';
+  import { HeaderNav, Select } from '@minot/ui';
 
   let { children } = $props();
 

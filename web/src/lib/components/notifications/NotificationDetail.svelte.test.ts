@@ -12,6 +12,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { minotComponentPath } from '$lib/styles/cascade';
 import { render, cleanup, screen, fireEvent } from '@testing-library/svelte';
 import type { NotificationAction, ResolvedNotification } from '$lib/api';
 import NotificationDetail from './NotificationDetail.svelte';
@@ -111,7 +112,7 @@ describe('untrusted content', () => {
       'NotificationItem.svelte',
       'NotificationPanel.svelte',
       'NotificationBell.svelte',
-      '../ui/CountPill.svelte',
+      minotComponentPath('CountPill'),
     ]) {
       expect(strip(readFileSync(resolve(here, file), 'utf8'))).not.toMatch(/\{@html/);
     }

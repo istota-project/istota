@@ -5,7 +5,7 @@ import { get } from 'svelte/store';
 import { tick } from 'svelte';
 import { selectedFeedId, markReadDelay } from '$lib/stores/feeds';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
-import { clearNotices, currentNotice } from '$lib/stores/notices';
+import { clearNotices, currentNotice } from '@minot/ui/stores/notices';
 import Page from './+page.svelte';
 import { __history } from '../../../vitest-stubs/app-navigation';
 import { page } from '../../../vitest-stubs/app-state.svelte';

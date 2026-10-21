@@ -6,9 +6,9 @@
     quantityFieldFor,
     type WorkEntrySavePayload,
   } from '$lib/money/workEntryPayload';
-  import { FormModal, Field, Input, Select, type SelectOption, Checkbox } from '$lib/components/ui';
+  import { FormModal, Field, Input, Select, type SelectOption, Checkbox } from '@minot/ui';
   import { formatDecimal } from '$lib/format';
-  import { localDateISO } from '$lib/dateFormat';
+  import { localDateISO } from '@minot/ui/dateFormat';
 
   interface Props {
     /** The entry being edited, or null when adding. */

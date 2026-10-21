@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { onDocumentVisible } from '$lib/ui/visibility';
-  import { latest } from '$lib/ui/latest';
+  import { onDocumentVisible } from '@minot/ui/ui/visibility';
+  import { latest } from '@minot/ui/ui/latest';
   import {
     AuthError,
     listPushDevices,
@@ -10,16 +10,7 @@
     listPushCategories,
     type PushCategory,
   } from '$lib/api';
-  import {
-    Alert,
-    Button,
-    EmptyState,
-    LoadState,
-    Select,
-    Card,
-    Field,
-    Checkbox,
-  } from '$lib/components/ui';
+  import { Alert, Button, EmptyState, LoadState, Select, Card, Field, Checkbox } from '@minot/ui';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
   import { isManaged, managedBadge } from '$lib/settings/managed';
   import { getCurrentUser } from '$lib/userContext';

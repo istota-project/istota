@@ -10,7 +10,7 @@ import { invalidateNavUnreadCounts } from './navUnread';
  * A single module-level instance is shared across the /chat surfaces.
  */
 import { get, writable, type Readable, type Writable } from 'svelte/store';
-import { notifyError, notifySuccess, notifyWarning } from './notices';
+import { notifyError, notifySuccess, notifyWarning } from '@minot/ui/stores/notices';
 import {
   AuthError,
   cancelChatTask,
@@ -55,7 +55,7 @@ import {
   uploadChatAttachment,
   UploadUnreachableError,
 } from '$lib/api';
-import { loadSetting, saveSetting } from '$lib/ui/persisted';
+import { loadSetting, saveSetting } from '@minot/ui/ui/persisted';
 import {
   dropQueue as dropStoredQueue,
   readAllQueues,
@@ -85,7 +85,7 @@ import { rememberLastUserId, seedUserId } from '$lib/offline/lastUser';
 import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
 import { isHiddenRoom, sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
 import { applyNotificationCounts, invalidateNotificationCounts } from '$lib/stores/notifications';
-import { latest } from '$lib/ui/latest';
+import { latest } from '@minot/ui/ui/latest';
 import {
   isKnownCommand,
   dropRoomCatalogue,

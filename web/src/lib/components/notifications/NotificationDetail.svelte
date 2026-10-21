@@ -24,7 +24,7 @@
     type NotificationAction,
     type ResolvedNotification,
   } from '$lib/api';
-  import { Alert, Button, Modal } from '$lib/components/ui';
+  import { Alert, Button, Modal } from '@minot/ui';
 
   interface Props {
     item: ResolvedNotification | null;

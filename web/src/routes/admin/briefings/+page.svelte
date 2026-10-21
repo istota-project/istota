@@ -23,11 +23,11 @@
     type KebabItem,
     Card,
     Timestamp,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { ConfirmStepUpDialog } from '$lib/components/settings';
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import { channelLabel, derivedTitle } from '$lib/components/briefings/settings/briefingSettings';
-  import { notifyError, notifySuccess } from '$lib/stores/notices';
+  import { notifyError, notifySuccess } from '@minot/ui/stores/notices';
 
   /** One row of either list, in the shape the table draws. */
   interface Row {

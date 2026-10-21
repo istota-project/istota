@@ -5,7 +5,7 @@
 // getters re-renders when the engine updates.
 
 import type { CompletionProvider, Suggestion, TriggerMatch } from './types';
-import { latest } from '$lib/ui/latest';
+import { latest } from '@minot/ui/ui/latest';
 
 export interface AcceptResult {
   text: string;

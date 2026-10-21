@@ -4,7 +4,7 @@ import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { page } from '../../../../vitest-stubs/app-state.svelte';
 import type { User } from '$lib/api';
 import { get } from 'svelte/store';
-import { currentNotice, clearNotices } from '$lib/stores/notices';
+import { currentNotice, clearNotices } from '@minot/ui/stores/notices';
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);

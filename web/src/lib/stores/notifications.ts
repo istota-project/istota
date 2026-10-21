@@ -33,9 +33,9 @@ import {
   type NotificationSeen,
   type ResolvedNotification,
 } from '$lib/api';
-import { notifyError } from './notices';
-import { onDocumentVisible } from '$lib/ui/visibility';
-import { latest } from '$lib/ui/latest';
+import { notifyError } from '@minot/ui/stores/notices';
+import { onDocumentVisible } from '@minot/ui/ui/visibility';
+import { latest } from '@minot/ui/ui/latest';
 
 export type NotificationFilter = 'all' | 'action';
 

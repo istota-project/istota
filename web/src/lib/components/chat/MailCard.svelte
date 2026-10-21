@@ -2,8 +2,8 @@
   import { Mail, Paperclip } from '@lucide/svelte';
   import { base } from '$app/paths';
   import { chatFileUrl } from '$lib/api';
-  import { copyText } from '$lib/clipboard';
-  import { Icon, KebabMenu, type KebabItem } from '$lib/components/ui';
+  import { copyText } from '@minot/ui/clipboard';
+  import { Icon, KebabMenu, type KebabItem } from '@minot/ui';
   import { renderUntrustedMarkdown } from '$lib/markdown';
   import {
     addressLabel,

@@ -63,7 +63,7 @@ if (!('hasPointerCapture' in Element.prototype)) {
 }
 
 // jsdom runs on an opaque origin, where `window.localStorage` is absent — so
-// anything reached through `lib/ui/persisted.ts` silently no-ops unless a test
+// anything reached through `@minot/ui/ui/persisted` silently no-ops unless a test
 // stands one up. `theme.test.ts` and `fontSize.test.ts` each carried their own
 // copy of this; it lives here once instead. (`chat.view.test.ts` is a
 // different approach, not a third copy — it mocks the `persisted` module

@@ -18,7 +18,7 @@
     type SelectOption,
     Card,
     Field,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { offSiteRoutesOpenInBrowser } from '$lib/platform/nativeConnection';
 

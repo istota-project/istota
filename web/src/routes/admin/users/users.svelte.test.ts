@@ -6,8 +6,8 @@ vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
 vi.mock('$app/paths', () => ({ base: '/istota' }));
 const notices = vi.hoisted(() => ({ notifyError: vi.fn() }));
-vi.mock('$lib/stores/notices', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('$lib/stores/notices')>()),
+vi.mock('@minot/ui/stores/notices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@minot/ui/stores/notices')>()),
   notifyError: notices.notifyError,
 }));
 import Page from './+page.svelte';

@@ -8,22 +8,14 @@
   import { Menu as MenuIcon, Sun, Moon } from '@lucide/svelte';
   import { getMe, AuthError, type User } from '$lib/api';
   import LogoutButton from '$lib/components/LogoutButton.svelte';
-  import {
-    Button,
-    Icon,
-    CountPill,
-    Menu,
-    LoadState,
-    PageLoader,
-    type MenuItem,
-  } from '$lib/components/ui';
+  import { Button, Icon, CountPill, Menu, LoadState, PageLoader, type MenuItem } from '@minot/ui';
   import { NotificationBell } from '$lib/components/notifications';
   import { SearchButton, SearchDialog } from '$lib/components/search';
   import { theme, toggleTheme } from '$lib/stores/theme';
-  import { clearNotices } from '$lib/stores/notices';
-  import { isEditableTarget } from '$lib/ui/editableTarget';
-  import { onDocumentVisible } from '$lib/ui/visibility';
-  import { latest } from '$lib/ui/latest';
+  import { clearNotices } from '@minot/ui/stores/notices';
+  import { isEditableTarget } from '@minot/ui/ui/editableTarget';
+  import { onDocumentVisible } from '@minot/ui/ui/visibility';
+  import { latest } from '@minot/ui/ui/latest';
   import { navUnreadCounts, startNavUnreadPoll, stopNavUnreadPoll } from '$lib/stores/navUnread';
   import { startNotificationPoll, stopNotificationPoll } from '$lib/stores/notifications';
   import { online, startConnectivity } from '$lib/stores/connectivity';

@@ -1,13 +1,6 @@
 <script lang="ts">
   import { getSetupModels, type SetupCheckResult, type SetupModelDefaults } from '$lib/api';
-  import {
-    AutocompleteInput,
-    Button,
-    Field,
-    Input,
-    OptionCards,
-    SecretField,
-  } from '$lib/components/ui';
+  import { AutocompleteInput, Button, Field, Input, OptionCards, SecretField } from '@minot/ui';
   import SetupCheckResultLine from './SetupCheckResult.svelte';
   import SetupMore from './SetupMore.svelte';
   import { runSetupCheck, type SetupDraftStore } from './setupDraft.svelte';

@@ -13,7 +13,7 @@
     FormStack,
     Input,
     Timestamp,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { createGroupRoom, getChatRooms, type ChatRoom, type GroupDetail } from '$lib/api';
 
   let {

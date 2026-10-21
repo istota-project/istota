@@ -30,7 +30,7 @@
  * (private mode, quota, storage disabled) is swallowed the same way and costs
  * the cold-launch paint rather than the load.
  */
-import { loadSetting, saveSetting } from '$lib/ui/persisted';
+import { loadSetting, saveSetting } from '@minot/ui/ui/persisted';
 import { shellAtLeast } from '$lib/platform/native';
 
 export const LAST_USER_KEY = 'chat.lastUserId';

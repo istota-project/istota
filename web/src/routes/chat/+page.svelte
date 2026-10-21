@@ -3,8 +3,8 @@
   import { get } from 'svelte/store';
   import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
   import { codeSpans, describeRoomOff } from '$lib/roomOff';
-  import { latest } from '$lib/ui/latest';
-  import { createDrawerClose } from '$lib/ui/drawerClose';
+  import { latest } from '@minot/ui/ui/latest';
+  import { createDrawerClose } from '@minot/ui/ui/drawerClose';
   import {
     Plus,
     MessageSquare,
@@ -34,7 +34,7 @@
     Button,
     CategoryGroup,
     Input,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import LoadingOctopus from '$lib/components/chat/LoadingOctopus.svelte';
   import { isHiddenRoom } from '$lib/stores/roomOrder';
   import { viewer } from '$lib/fileViewer/store.svelte';
@@ -54,7 +54,7 @@
   import { getChatSession } from '$lib/stores/chat';
   import type { RoomPatch } from '$lib/api';
   import { REPLY_EXCERPT_CHARS, isClientOnly, type MessageReply } from '$lib/stores/segments';
-  import { notifyError, notifyWarning, dismissNotice } from '$lib/stores/notices';
+  import { notifyError, notifyWarning, dismissNotice } from '@minot/ui/stores/notices';
   import { online } from '$lib/stores/connectivity';
   import { dropDraft } from '$lib/stores/drafts';
   import { dropQueue, MAX_QUEUED_PER_ROOM } from '$lib/stores/sendQueue';

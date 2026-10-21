@@ -27,7 +27,7 @@
     TextArea,
     LoadState,
     PageHeader,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import DocumentList from '$lib/components/health/DocumentList.svelte';
 
   const routeOptions: SelectOption[] = [

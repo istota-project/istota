@@ -27,9 +27,9 @@
     Modal,
     Card,
     CopyButton,
-  } from '$lib/components/ui';
-  import type { KebabItem } from '$lib/components/ui/KebabMenu.svelte';
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+    type KebabItem,
+  } from '@minot/ui';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import CredentialAccessFields from './CredentialAccessFields.svelte';
   import CredentialFormModal from './CredentialFormModal.svelte';
   import StepUpDialog from './StepUpDialog.svelte';

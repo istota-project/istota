@@ -1,7 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { AuthError, changePassword, type UserAuth } from '$lib/api';
-  import { Alert, Button, Input, Card, Field, FormStack } from '$lib/components/ui';
+  import { Alert, Button, Input, Card, Field, FormStack } from '@minot/ui';
 
   let { auth, onSignedOut }: { auth?: UserAuth; onSignedOut: () => void } = $props();
   let currentPassword = $state('');

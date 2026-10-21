@@ -9,7 +9,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { onDestroy, onMount } from 'svelte';
-  import { createDrawerClose } from '$lib/ui/drawerClose';
+  import { createDrawerClose } from '@minot/ui/ui/drawerClose';
   import { Collapsible } from 'bits-ui';
   import { getLedgers, checkLedger, AuthError } from '$lib/money/api';
   import { forgetLastUserId } from '$lib/offline/lastUser';
@@ -25,7 +25,7 @@
     SidebarNav,
     SidebarToggle,
     LoadState,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { MONEY_SETTINGS_SECTIONS } from '$lib/money/settingsSections';
   import { Cog } from '@lucide/svelte';

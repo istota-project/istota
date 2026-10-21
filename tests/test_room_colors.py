@@ -12,8 +12,9 @@ The CSS values themselves are deliberately *not* mirrored into either language.
 `location-constants.ts` holds hex because MapLibre paints in WebGL and cannot
 resolve `var(--token)`; nothing here has that problem, so `app-tokens.css`
 stays the single source of the colour values and the other two carry names
-only. The Talk amber they are compared with is a design-system token, in
-`tokens.css`.
+only. The check that no room colour is the Talk amber lives in
+`web/src/lib/styles/tokens.test.ts`, since `--accent-amber` is `@minot/ui`'s
+and is read from the installed package.
 """
 
 import re
@@ -24,7 +25,6 @@ import pytest
 from istota.rooms.colors import ROOM_COLORS
 
 _WEB = Path(__file__).resolve().parent.parent / "web" / "src" / "lib"
-_TOKENS = _WEB / "styles" / "tokens.css"
 _APP_TOKENS = _WEB / "styles" / "app-tokens.css"
 _TS = _WEB / "roomColors.ts"
 
@@ -65,24 +65,3 @@ class TestPaletteParity:
         assert len(ROOM_COLORS) >= 6
         for name in ROOM_COLORS:
             assert re.fullmatch(r"[a-z]+", name), name
-
-    @pytest.mark.parametrize("selector", [":root", ":root[data-theme='light']"])
-    def test_the_talk_amber_is_not_in_the_palette(self, selector):
-        """`.room-origin.talk` already spends amber in this exact row to mean
-        "mirrored to Nextcloud Talk". A room colour that reads as that glyph's
-        colour would make a user-chosen tint look like a surface binding.
-
-        Both themes, and the amber is **read out of the same theme's block**
-        rather than pinned as a literal: `--accent-amber` differs per theme, so a
-        one-theme literal leaves the other unguarded and silently stops
-        matching anything the day that token is retuned — passing while its
-        whole point is defeated, which is the drift this file exists to catch.
-        """
-        block = _css_block(_APP_TOKENS.read_text(), selector)
-        amber = re.search(
-            r"--accent-amber\s*:\s*([^;]+);", _css_block(_TOKENS.read_text(), selector)
-        )
-        assert amber, f"no --accent-amber in {selector} to compare against"
-        for name in ROOM_COLORS:
-            value = re.search(rf"--room-color-{name}\s*:\s*([^;]+);", block).group(1)
-            assert value.strip().lower() != amber.group(1).strip().lower()

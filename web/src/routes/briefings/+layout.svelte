@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { createConfirm } from '$lib/ui/confirm.svelte';
-  import { latest } from '$lib/ui/latest';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
+  import { latest } from '@minot/ui/ui/latest';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { onDestroy, onMount, untrack } from 'svelte';
-  import { createDrawerClose } from '$lib/ui/drawerClose';
+  import { createDrawerClose } from '@minot/ui/ui/drawerClose';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
@@ -49,7 +49,7 @@
     PageLoading,
     LoadMore,
     Timestamp,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { HeaderSave } from '$lib/components/settings';
   import {
     CheckCheck,
@@ -62,8 +62,8 @@
     Users,
   } from '@lucide/svelte';
   import { getCurrentUser } from '$lib/userContext';
-  import { notifyError } from '$lib/stores/notices';
-  import { formatDateTime } from '$lib/dateFormat';
+  import { notifyError } from '@minot/ui/stores/notices';
+  import { formatDateTime } from '@minot/ui/dateFormat';
   import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
 
   let { children } = $props();

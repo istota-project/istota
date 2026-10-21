@@ -8,8 +8,8 @@ vi.mock('$lib/api', () => api);
 // A failed CSV import is an action on a page still on screen: a notice, not the
 // pane's load failure, which used to replace the labs page with the message.
 const notices = vi.hoisted(() => ({ notifyError: vi.fn() }));
-vi.mock('$lib/stores/notices', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('$lib/stores/notices')>()),
+vi.mock('@minot/ui/stores/notices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@minot/ui/stores/notices')>()),
   notifyError: notices.notifyError,
 }));
 

@@ -27,7 +27,7 @@
     Trash2,
     X,
   } from '@lucide/svelte';
-  import { Icon, IconButton, Menu, type MenuItem } from '$lib/components/ui';
+  import { Icon, IconButton, Menu, type MenuItem } from '@minot/ui';
   import { pinViewportZoom, releaseViewportZoom } from '$lib/zoomPin';
   import {
     uploadChatAttachment,
@@ -55,8 +55,8 @@
     type Picked,
   } from '$lib/platform/nativePicker';
   import { readDraft, readDraftReply, writeDraft } from '$lib/stores/drafts';
-  import { debounce } from '$lib/ui/debounce';
-  import { latest } from '$lib/ui/latest';
+  import { debounce } from '@minot/ui/ui/debounce';
+  import { latest } from '@minot/ui/ui/latest';
   import type { MessageReply } from '$lib/stores/segments';
   import { online } from '$lib/stores/connectivity';
   import { putBlob, deleteBlob, hasHeadroom, MAX_PENDING_BLOB_BYTES } from '$lib/offline/db';

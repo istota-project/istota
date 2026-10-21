@@ -15,7 +15,7 @@
  */
 
 import type { AdminStatsUser } from '$lib/api';
-import { formatDuration } from '$lib/dateFormat';
+import { formatDuration } from '@minot/ui/dateFormat';
 
 export const COST_PLACEHOLDER = '—';
 

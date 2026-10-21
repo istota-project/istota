@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup } from '@testing-library/svelte';
 import type { ChatMessage, Segment } from '$lib/stores/segments';
 import { SUBSTANTIAL_TEXT_CHARS } from '$lib/stores/segments';
-import { clearNotices } from '$lib/stores/notices';
+import { clearNotices } from '@minot/ui/stores/notices';
 import Message from './Message.svelte';
 
 afterEach(() => {

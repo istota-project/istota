@@ -2,7 +2,7 @@
 // pane renders `.center-msg error`, the same box as the `.center-msg` loading
 // placeholder it stands in for.
 //
-// It is not in design-lint-rules.mjs because that lint is line-based, and the
+// It is not a minot-lint rule because that lint is line-based, and the
 // thing being checked spans a whole `{#if}` chain: the tell for "this error IS
 // the pane" is that its branch is the exclusive twin of the loading branch, not
 // anything visible on the line itself. A line-based rule cannot separate that

@@ -7,7 +7,7 @@
     type AdminConfigView,
     type ConfigRequest,
   } from '$lib/api';
-  import { Alert, Button, Card, Spinner } from '$lib/components/ui';
+  import { Alert, Button, Card, Spinner } from '@minot/ui';
   import {
     NOT_PICKED_UP_MS,
     POLL_MS,

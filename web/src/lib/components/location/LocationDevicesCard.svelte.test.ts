@@ -3,8 +3,8 @@ import { render, cleanup, fireEvent, screen, waitFor, within } from '@testing-li
 import { get } from 'svelte/store';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import type { LocationDevice } from '$lib/api';
-import { formatDate } from '$lib/dateFormat';
-import { clearNotices, currentNotice } from '$lib/stores/notices';
+import { formatDate } from '@minot/ui/dateFormat';
+import { clearNotices, currentNotice } from '@minot/ui/stores/notices';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);

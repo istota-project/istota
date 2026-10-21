@@ -8,7 +8,7 @@
     type EntityRow,
     type EntityInput,
   } from '$lib/money/api';
-  import { FormModal, Select, Field, Checkbox, Input, TextArea } from '$lib/components/ui';
+  import { FormModal, Select, Field, Checkbox, Input, TextArea } from '@minot/ui';
 
   /**
    * Create/edit form for a billing entity.

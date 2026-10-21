@@ -3,11 +3,11 @@
   import { syncDeviceActions } from '$lib/stores/deviceActions';
   import { onDestroy, onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { createDrawerClose } from '$lib/ui/drawerClose';
+  import { createDrawerClose } from '@minot/ui/ui/drawerClose';
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import { getProfile, getModules, updateProfile, type UserProfile } from '$lib/api';
-  import { createDraft } from '$lib/ui/draft.svelte';
+  import { createDraft } from '@minot/ui/ui/draft.svelte';
   import {
     AppShell,
     Icon,
@@ -16,10 +16,10 @@
     Sidebar,
     SidebarNav,
     SidebarToggle,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { getCurrentUser } from '$lib/userContext';
-  import { notifyInfo, notifySuccess, notifyWarning, notifyError } from '$lib/stores/notices';
+  import { notifyInfo, notifySuccess, notifyWarning, notifyError } from '@minot/ui/stores/notices';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { USER_SETTINGS_SECTIONS } from '$lib/settings/sections';
   import { appConnectionAvailable, openAppSettings } from '$lib/platform/nativeConnection';

@@ -27,13 +27,13 @@
     Chip,
     LoadState,
     PageHeader,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import {
     conditionOptionLabel,
     linkableConditionOptions,
     resolveById,
   } from '$lib/health/conditions';
-  import { formatDate, localDateISO } from '$lib/dateFormat';
+  import { formatDate, localDateISO } from '@minot/ui/dateFormat';
   import { severityVariant } from '$lib/health/status';
 
   // Suggested types — the server accepts any free-text encounter_type, so

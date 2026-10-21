@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { untrack } from 'svelte';
   import { addRoomMember } from '$lib/api';
@@ -22,7 +22,7 @@
     type SelectOption,
     Checkbox,
     CopyField,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import RoomMembers, { type AddRequest } from './RoomMembers.svelte';
   import RoomGroupLink from './RoomGroupLink.svelte';
   import { ROOM_COLORS, ROOM_COLOR_LABELS, roomColorVar } from '$lib/roomColors';

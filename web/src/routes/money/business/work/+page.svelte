@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { latest } from '$lib/ui/latest';
-  import { createConfirm } from '$lib/ui/confirm.svelte';
+  import { latest } from '@minot/ui/ui/latest';
+  import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import {
@@ -31,14 +31,14 @@
     SortHeader,
     Badge,
     LoadState,
-  } from '$lib/components/ui';
+  } from '@minot/ui';
   import WorkEntryForm from '$lib/components/money/WorkEntryForm.svelte';
   import VoidInvoiceDialog from '$lib/components/money/VoidInvoiceDialog.svelte';
   import GenerateInvoicesDialog from '$lib/components/money/GenerateInvoicesDialog.svelte';
-  import { formatDate } from '$lib/dateFormat';
+  import { formatDate } from '@minot/ui/dateFormat';
   import { formatDecimal as formatAmount } from '$lib/format';
-  import { notifyError } from '$lib/stores/notices';
-  import { createTableSort, sortRows } from '$lib/ui/tableSort.svelte';
+  import { notifyError } from '@minot/ui/stores/notices';
+  import { createTableSort, sortRows } from '@minot/ui/ui/tableSort.svelte';
   import { billingStatusVariant } from '$lib/money/status';
   import { workExportItems } from '$lib/money/workExport';
   import { Download } from '@lucide/svelte';

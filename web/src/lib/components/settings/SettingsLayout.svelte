@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Alert, LoadState, PageHeader } from '$lib/components/ui';
+  import { Alert, LoadState, PageHeader } from '@minot/ui';
   import type { Snippet } from 'svelte';
 
   interface Props {

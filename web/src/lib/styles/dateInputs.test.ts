@@ -1,40 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { readCascade, layerPaths } from './cascade';
 
 /**
- * iOS renders a date input with no value as *nothing* — there is no
- * `mm/dd/yyyy` hint the way desktop has one. `app.css` drops the platform
- * appearance on temporal inputs (the native control's intrinsic width ignored
- * `max-width` and overflowed cards on an iPhone), which means their box is
- * content-sized in both axes — so an unset date collapses to a blank sliver.
- * The vertical half of that was already caught and pinned with a `min-height`
- * on `::-webkit-date-and-time-value`; the horizontal half shipped, and the
- * health-history range filter rendered as two empty narrow boxes.
- *
- * These tests hold both halves: app.css floors the width without letting the
- * overflow back in, and no stylesheet re-declares `min-width` on a temporal
- * input, which is what defeated the floor the first time (a page rule outranks
- * a bare type selector, and one restated `min-width: 0`).
+ * The app half of minot's `dateInputs` test. minot's `primitives.css` floors
+ * the width of an empty temporal input, which iOS otherwise renders as a blank
+ * sliver; minot pins the floor. What is left here: no stylesheet in this app
+ * re-declares `min-width` on a temporal input, which is what defeated the
+ * floor the first time (a page rule outranks a bare type selector, and one
+ * restated `min-width: 0`).
  */
 
 const SRC = resolve(process.cwd(), 'src');
-const css = readCascade();
-const TOKEN_HOME = new Set(layerPaths());
 
 const TEMPORAL_TYPES = ['date', 'datetime-local', 'time', 'month', 'week'];
 
 function stripComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, '');
-}
-
-/** Body of the first rule whose selector list contains `needle`. */
-function ruleBodyContaining(source: string, needle: string): string | null {
-  for (const m of stripComments(source).matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    if (m[1].includes(needle)) return m[2];
-  }
-  return null;
 }
 
 function declaration(body: string, prop: string): string | null {
@@ -52,80 +34,9 @@ function stylesheets(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-const appearanceRule = ruleBodyContaining(css, `input[type='date']`);
-const valuePseudoRule = ruleBodyContaining(css, `::-webkit-date-and-time-value`);
-
-describe('app.css temporal input sizing', () => {
-  it('parses the rules it asserts on', () => {
-    expect(appearanceRule, 'no rule in app.css targets a date input').not.toBeNull();
-    expect(valuePseudoRule, 'no rule targets ::-webkit-date-and-time-value').not.toBeNull();
-    // The floor only matters because the appearance is dropped; if that ever
-    // goes away these assertions are guarding a rendering that no longer exists.
-    expect(declaration(appearanceRule!, 'appearance')).toBe('none');
-  });
-
-  it('covers every temporal input type in both rules', () => {
-    // A type left out of either selector list gets the collapse back on its own.
-    for (const type of TEMPORAL_TYPES) {
-      const selectors = stripComments(css);
-      expect(selectors, `${type} missing the appearance reset`).toContain(
-        `input[type='${type}'] {`.replace(' {', ''),
-      );
-      expect(selectors, `${type} missing the value pseudo-element rule`).toContain(
-        `input[type='${type}']::-webkit-date-and-time-value`,
-      );
-    }
-  });
-
-  it('floors the width instead of letting an empty input collapse', () => {
-    const minWidth = declaration(appearanceRule!, 'min-width');
-    expect(minWidth).not.toBeNull();
-    // `0` is the specific value that shipped the bug: it licenses the flex
-    // shrink that takes an empty, content-sized input down to its padding.
-    expect(minWidth).not.toMatch(/^0(px|rem|em|%)?$/);
-  });
-
-  it('caps that floor at the container so the overflow cannot return', () => {
-    // The reason this block exists is a date input overflowing a narrow card on
-    // iOS. A floor written as a bare length reintroduces exactly that wherever
-    // the container is narrower than the floor, so it has to be capped.
-    const minWidth = declaration(appearanceRule!, 'min-width')!;
-    expect(minWidth).toMatch(/min\(/);
-    expect(minWidth).toContain('100%');
-    expect(declaration(appearanceRule!, 'max-width')).toBe('100%');
-  });
-
-  it('keeps the height floor that the same collapse produced vertically', () => {
-    expect(declaration(valuePseudoRule!, 'min-height')).not.toBeNull();
-    expect(declaration(valuePseudoRule!, 'text-align')).toBe('left');
-  });
-
-  it('clips an over-wide value rather than letting it wrap', () => {
-    // The other half of dropping the platform appearance: iOS lays the value
-    // out as ordinary inline content, so a field narrower than the rendered
-    // date wraps it and the input — auto-height now — becomes two lines tall,
-    // breaking the single height every control in its row holds to. Both
-    // halves are needed: nowrap stops the wrap, overflow clips what nowrap
-    // then pushes past the edge.
-    expect(declaration(valuePseudoRule!, 'white-space')).toBe('nowrap');
-    expect(declaration(valuePseudoRule!, 'overflow')).toBe('hidden');
-  });
-
-  it('does not try to set overflow on the input itself', () => {
-    // A UA sheet sets it on a text control with `!important` (Blink resolves
-    // a date input to `clip` whatever the author writes), so a declaration
-    // there is dead code that reads like a working guard.
-    expect(declaration(appearanceRule!, 'overflow')).toBeNull();
-  });
-});
-
 describe('no stylesheet overrides the temporal input floor', () => {
   const offenders: string[] = [];
   for (const file of stylesheets(SRC)) {
-    // Every layer of the token home, not just app.css: the floor itself now
-    // lives in primitives.css, and scanning it would report the rule as its
-    // own override.
-    if (TOKEN_HOME.has(file)) continue;
     for (const m of stripComments(readFileSync(file, 'utf8')).matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
       const selector = m[1].replace(/\s+/g, ' ').trim();
       const targetsTemporal = TEMPORAL_TYPES.some((t) => selector.includes(`input[type='${t}']`));
@@ -138,10 +49,10 @@ describe('no stylesheet overrides the temporal input floor', () => {
     }
   }
 
-  it('leaves min-width to app.css', () => {
-    // Any page rule outranks app.css's bare type selector, so restating
-    // min-width here silently defeats the floor — which is how the
-    // health-history filter shipped as two blank boxes.
+  it('leaves min-width to the library', () => {
+    // Any page rule outranks the bare type selector, so restating min-width
+    // here silently defeats the floor — which is how the health-history
+    // filter shipped as two blank boxes.
     expect(offenders).toEqual([]);
   });
 });
