@@ -47,8 +47,20 @@ describe('the token split', () => {
 
   it('keeps the product prefixes out of the reusable sheet', () => {
     const product =
-      /^\s*--(chat-|room-color-|category-|scrim-pill-|accent-whatsapp|sigil-filter|unread-mark-size|setup-max|app-bar-height|field-label-width|card-pane-max)/m;
+      /^\s*--(money-|map-|chat-|room-color-|category-|scrim-pill-|accent-whatsapp|sigil-filter|unread-mark-size|setup-max|app-bar-height|field-label-width|card-pane-max)/m;
     expect(REUSABLE).not.toMatch(product);
+  });
+
+  it("aliases the app's money pair to the reusable signed pair", () => {
+    // The values live once, in tokens.css, in both themes; the app's names
+    // only point at them.
+    for (const selector of [':root', ":root[data-theme='light']"]) {
+      const product = declarations(PRODUCT, selector);
+      expect(product['--money-income'], selector).toBe('var(--signed-pos)');
+      expect(product['--money-expense'], selector).toBe('var(--signed-neg)');
+    }
+    expect(declarations(REUSABLE, ':root')).toHaveProperty('--signed-pos');
+    expect(declarations(REUSABLE, ":root[data-theme='light']")).toHaveProperty('--signed-neg');
   });
 
   it('loads the app sheet straight after tokens.css', () => {
@@ -88,6 +100,7 @@ describe('theme parity', () => {
     '--text-',
     '--border-',
     '--accent',
+    '--signed-',
     '--money-',
     // The room-colour palette (ISSUE-433). Without this prefix the parity
     // check above simply does not see these tokens, which is the quiet failure
