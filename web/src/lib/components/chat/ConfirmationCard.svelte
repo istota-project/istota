@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { Avatar, Button } from '$lib/components/ui';
+  import { Button } from '$lib/components/ui';
+  import UserAvatar from '$lib/components/UserAvatar.svelte';
 
   let {
     onConfirm,
@@ -32,7 +33,7 @@
 		     inherits, so putting it on `.confirm-card` would resize anything
 		     nested under it later. -->
     <span class="confirm-actor">
-      <Avatar kind="bot" version={botAvatar} label={botName} />
+      <UserAvatar kind="bot" version={botAvatar} label={botName} />
     </span>
     <span class="confirm-label">This action needs your confirmation.</span>
   </span>

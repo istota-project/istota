@@ -26,7 +26,8 @@
     renderGroups,
   } from '$lib/stores/segments';
   import { online } from '$lib/stores/connectivity';
-  import { Icon, Avatar, Badge, Button, Chip, IconButton } from '$lib/components/ui';
+  import { Icon, Badge, Button, Chip, IconButton } from '$lib/components/ui';
+  import UserAvatar from '$lib/components/UserAvatar.svelte';
   import ActivityTrace from './ActivityTrace.svelte';
   import ConfirmationCard from './ConfirmationCard.svelte';
   import DraftCard from './DraftCard.svelte';
@@ -83,7 +84,7 @@
     // has not confirmed the identity, and the row then falls back to the chip.
     userId?: string;
     // Content hashes for the two identities `/me` names, passed straight
-    // through to `Avatar`: a string builds an immutable URL, `null` says there
+    // through to `UserAvatar`: a string builds an immutable URL, `null` says there
     // is no picture and suppresses the request. `null` by default, so a caller
     // that knows nothing about avatars renders what it rendered before.
     userAvatar?: string | null;
@@ -216,7 +217,7 @@
   /* Whose picture the gutter asks for on a user row: the viewer's own id on
      their own turn, and the writer's on a co-member's. `undefined` on the bot
      row (the bot has no user id) and on an external sender's, whose name is an
-     email address with no account behind it — `Avatar` answers a missing id
+     email address with no account behind it — `UserAvatar` answers a missing id
      with the chip and issues no request, which is the whole handling of that
      case. Never the viewer's id as a stand-in for a missing one: that paints
      the reader's face on somebody else's words. */
@@ -790,7 +791,7 @@
     {@render starredLabel()}
     <div class="gutter">
       {#if botVoice}
-        <Avatar kind="bot" version={botAvatar} label={botName} />
+        <UserAvatar kind="bot" version={botAvatar} label={botName} />
       {:else}
         <span class="sys-mark" aria-hidden="true"><Info /></span>
       {/if}
@@ -922,7 +923,7 @@
     {@render starredLabel()}
     <div class="gutter">
       {#if !continuation}
-        <Avatar
+        <UserAvatar
           kind={isUser ? 'user' : 'bot'}
           userId={authorAvatarId}
           version={isUser ? (ownTurn ? userAvatar : undefined) : botAvatar}

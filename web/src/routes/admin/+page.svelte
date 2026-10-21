@@ -14,7 +14,6 @@
   } from '$lib/api';
   import {
     Alert,
-    Avatar,
     AvatarPicker,
     Badge,
     Card,
@@ -26,6 +25,7 @@
     StatusDot,
     Meter,
   } from '$lib/components/ui';
+  import UserAvatar from '$lib/components/UserAvatar.svelte';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { getCurrentUser } from '$lib/userContext';
   import {
@@ -359,7 +359,7 @@
         <Card title={identity.user.bot_name || 'Istota'} class="installation">
           {#snippet icon()}
             <span class="install-avatar">
-              <Avatar
+              <UserAvatar
                 kind="bot"
                 version={identity.user.avatars?.bot ?? null}
                 label={identity.user.bot_name || 'Istota'}
@@ -873,7 +873,7 @@
                 <!-- Named rather than decorative: here the picture is the thing
                    being edited, and the only other signal is whether Remove
                    exists. -->
-                <Avatar
+                <UserAvatar
                   kind="bot"
                   version={identity.user.avatars?.bot ?? null}
                   label={identity.user.bot_name || 'Istota'}

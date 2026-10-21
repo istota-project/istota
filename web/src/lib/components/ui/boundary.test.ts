@@ -24,12 +24,11 @@ const ALLOWED = [
 ];
 
 /**
- * Named exceptions, each with what removes it. `Avatar` builds its URL with
- * `$lib/api`'s `avatarUrl` until it takes a `src` prop (minot spec, stage 2).
+ * Named exceptions, each with what removes it. Empty: `Avatar` took a `src`
+ * prop and `UserAvatar` beside `ui/` builds the URL. A new entry needs a
+ * reason and a plan to take it off.
  */
-const EXCEPTIONS: Record<string, string[]> = {
-  'components/ui/Avatar.svelte': ['$lib/api'],
-};
+const EXCEPTIONS: Record<string, string[]> = {};
 
 function sources(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

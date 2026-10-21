@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { Avatar, Badge } from '$lib/components/ui';
+  import { Badge } from '$lib/components/ui';
+  import UserAvatar from '$lib/components/UserAvatar.svelte';
 
   let {
     userId,
@@ -14,7 +15,7 @@
 
 <span class="user-cell" title={userId}>
   <span class="user-face">
-    <Avatar kind="user" {userId} label={displayName || userId} />
+    <UserAvatar kind="user" {userId} label={displayName || userId} />
   </span>
   <span class="username">{displayName || userId}</span>
   {#if isAdmin}<Badge size="sm" class="admin-badge">admin</Badge>{/if}
