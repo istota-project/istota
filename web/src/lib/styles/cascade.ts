@@ -32,16 +32,26 @@ export const APP_ENTRY = join(SRC, 'app.css');
 
 const IMPORT = /@import\s+['"]([^'"]+)['"]\s*;/g;
 
+function importsOf(path: string): string[] {
+  const source = stripComments(readFileSync(path, 'utf8'));
+  const imports = [...source.matchAll(IMPORT)].map((m) => m[1]);
+  // An entry is an import list and nothing else; a sheet holding both would
+  // lose its own rules when expanded, so it is refused rather than guessed at.
+  if (imports.length > 0 && source.replace(IMPORT, '').trim() !== '') {
+    throw new Error(`${path}: holds rules as well as imports`);
+  }
+  return imports;
+}
+
 /** The sheets `entry` loads, in the order it loads them, imports expanded. */
 export function layerPaths(entry: string = APP_ENTRY): string[] {
   const out: string[] = [];
-  for (const m of readFileSync(entry, 'utf8').matchAll(IMPORT)) {
-    if (!m[1].startsWith('.')) {
-      throw new Error(`${entry}: cannot follow a non-relative import, ${m[1]}`);
+  for (const spec of importsOf(entry)) {
+    if (!spec.startsWith('.')) {
+      throw new Error(`${entry}: cannot follow a non-relative import, ${spec}`);
     }
-    const target = join(dirname(entry), m[1]);
-    const nested = [...readFileSync(target, 'utf8').matchAll(IMPORT)];
-    if (nested.length > 0) out.push(...layerPaths(target));
+    const target = join(dirname(entry), spec);
+    if (importsOf(target).length > 0) out.push(...layerPaths(target));
     else out.push(target);
   }
   return out;

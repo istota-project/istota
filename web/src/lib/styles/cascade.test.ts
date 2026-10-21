@@ -48,4 +48,16 @@ describe('cascade', () => {
     writeFileSync(entry, "@import 'some-package/styles.css';\n");
     expect(() => layerPaths(entry)).toThrow(/non-relative import/);
   });
+
+  it('refuses an imported sheet that holds rules as well as imports', () => {
+    writeFileSync(join(dir, 'mixed.css'), "@import './lib/tokens.css';\n.x { color: red; }\n");
+    writeFileSync(join(dir, 'mixed-entry.css'), "@import './mixed.css';\n");
+    expect(() => layerPaths(join(dir, 'mixed-entry.css'))).toThrow(/rules as well as imports/);
+  });
+
+  it('ignores an import that is commented out', () => {
+    writeFileSync(join(dir, 'commented.css'), "/* @import './gone.css'; */\n.y { color: red; }\n");
+    writeFileSync(join(dir, 'commented-entry.css'), "@import './commented.css';\n");
+    expect(names(layerPaths(join(dir, 'commented-entry.css')))).toEqual(['commented.css']);
+  });
 });
