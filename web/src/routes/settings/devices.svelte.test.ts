@@ -134,6 +134,17 @@ describe('Settings → Devices', () => {
     expect(screen.getAllByText('This device')).toHaveLength(1);
   });
 
+  it('names the voice scope, and says what revoking it stops', async () => {
+    store.devices = [{ ...device(1, PHONE, 'iPhone', 'ab12'), scopes: ['notes', 'voice'] }];
+    render(Harness, { component: Page, layout: SettingsLayout, user: person(false) });
+    expect(await screen.findByText(/Quick notes, Voice tasks · added/)).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Revoke iPhone ending ab12' }));
+    const dialog = within(await screen.findByRole('dialog'));
+    expect(
+      dialog.getByText(/iPhone stops saving quick notes and sending voice tasks/),
+    ).toBeInTheDocument();
+  });
+
   it('marks the phone the page runs on as this device', async () => {
     render(DeviceTokensCard, {
       devices: store.devices,

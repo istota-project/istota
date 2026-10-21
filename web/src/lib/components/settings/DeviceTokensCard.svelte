@@ -2,8 +2,8 @@
   /**
    * The phones that hold a device token for native actions, one row each.
    *
-   * Revoking a row stops that phone's native actions (today, saving quick
-   * notes from the app icon) on its next send; the app asks for a new token
+   * Revoking a row stops that phone's native actions (saving quick notes and
+   * sending voice tasks from the app icon) on its next send; the app asks for a new token
    * the next time it loads Istota with a session. `thisDeviceId` marks the
    * phone the page is running on, when the app can say which one that is.
    */
@@ -23,7 +23,11 @@
 
   let { devices, thisDeviceId = null, onChanged, children }: Props = $props();
 
-  const SCOPE_LABELS: Record<string, string> = { notes: 'Quick notes' };
+  const SCOPE_LABELS: Record<string, string> = { notes: 'Quick notes', voice: 'Voice tasks' };
+  const SCOPE_ACTIONS: Record<string, string> = {
+    notes: 'saving quick notes',
+    voice: 'sending voice tasks',
+  };
 
   function scopeText(scopes: string[]): string {
     return scopes.map((scope) => SCOPE_LABELS[scope] ?? scope).join(', ');
@@ -53,7 +57,8 @@
 >
   {#if devices.length === 0}
     <EmptyState size="sm">
-      No devices yet. The Istota app adds the phone it runs on once a quick notes folder is set.
+      No devices yet. The Istota app adds the phone it runs on once it is set up for quick notes or
+      voice tasks.
     </EmptyState>
   {:else}
     <ul class="divided-list">
@@ -90,7 +95,7 @@
   bind:open={revoke.open}
   title="Revoke device"
   message={revoke.target
-    ? `Are you sure? ${name(revoke.target)} stops saving quick notes until the app sets it up again.`
+    ? `Are you sure? ${name(revoke.target)} stops ${revoke.target.scopes.map((scope) => SCOPE_ACTIONS[scope] ?? scope).join(' and ')} until the app sets it up again.`
     : ''}
   confirmLabel="Revoke"
   busyLabel="Revoking…"

@@ -4216,8 +4216,9 @@ def ensure_default_web_chat_room(
     # `general` while Talk delivered to the pinned room, which is the one thing
     # a surface-agnostic setting must not do. This is the entry point allowed to
     # provision, so it makes the view instead.
-    configured = configured_default_room(conn, user_id)
-    if configured is not None:
+    rung, found = _default_web_room_rung(conn, user_id)
+    if rung == "configured":
+        configured = found
         room = get_room(conn, configured)
         handle = ensure_web_chat_handle(
             conn, user_id, configured, room_display_name(room, None) or "Talk room",
@@ -4232,10 +4233,10 @@ def ensure_default_web_chat_room(
             handle = update_web_chat_room(conn, handle.id, archived=False) or handle
         undismiss_room(conn, configured, user_id)
         return handle
-    handle = default_web_room(conn, user_id)
-    if handle is not None:
-        return handle
-    for room in _default_room_candidates(conn, user_id):
+    if rung == "handle":
+        return found
+    if rung == "candidate":
+        room = found
         handle = ensure_web_chat_handle(
             conn, user_id, room.token, room.name or "Talk room",
         )
@@ -4248,6 +4249,46 @@ def ensure_default_web_chat_room(
             handle = update_web_chat_room(conn, handle.id, archived=False) or handle
         return handle
     return create_web_chat_room(conn, user_id, "general")
+
+
+def _default_web_room_rung(conn: sqlite3.Connection, user_id: str) -> tuple[str, object]:
+    """Which rung of `ensure_default_web_chat_room` answers, without writing.
+
+    ``("configured", token)``, ``("handle", WebChatRoom)``, ``("candidate",
+    Room)`` or ``("create", None)``. Split out so `default_web_chat_room_name`
+    reads the same ladder the provisioning entry point walks.
+    """
+    configured = configured_default_room(conn, user_id)
+    if configured is not None:
+        return "configured", configured
+    handle = default_web_room(conn, user_id)
+    if handle is not None:
+        return "handle", handle
+    for room in _default_room_candidates(conn, user_id):
+        return "candidate", room
+    return "create", None
+
+
+def default_web_chat_room_name(conn: sqlite3.Connection, user_id: str) -> str:
+    """The name of the room `ensure_default_web_chat_room` would return. Creates nothing.
+
+    A label for the iOS voice sheet, which shows where a recording will go
+    before it is sent. The room the voice route resolves at send time is the
+    one the recording goes to; this only names it in advance.
+    """
+    rung, found = _default_web_room_rung(conn, user_id)
+    if rung == "configured":
+        handle = None
+        for candidate in list_web_chat_rooms(conn, user_id, include_archived=True):
+            if candidate.token == found:
+                handle = candidate
+                break
+        return room_display_name(get_room(conn, found), handle) or "Talk room"
+    if rung == "handle":
+        return room_display_name(get_room(conn, found.token), found) or "general"
+    if rung == "candidate":
+        return found.name or "Talk room"
+    return "general"
 
 
 def default_web_room(

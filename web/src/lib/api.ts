@@ -2061,8 +2061,8 @@ export function deleteLegacyIngestToken(): Promise<{ ok: boolean }> {
   return apiFetch('/location/devices/legacy', { method: 'DELETE' });
 }
 
-/** A capability a device token carries. `notes` lets the app save quick notes. */
-export type DeviceScope = 'notes';
+/** A capability a device token carries. `notes` saves quick notes, `voice` sends voice tasks. */
+export type DeviceScope = 'notes' | 'voice';
 
 /**
  * One phone's device token for native actions, as Settings → Devices lists it.
@@ -2318,6 +2318,10 @@ export interface UserProfile {
   // not choose (ISSUE-479). A pin that is merely hidden is not reported — the
   // next delivery un-hides the room.
   ignored_default_room?: string;
+  // Read-only: the name of the room a bare `web` delivery would land in now,
+  // read without creating it; null when the server could not say. The iOS
+  // voice sheet shows it as a label (`voiceRoom`).
+  default_room_name?: string | null;
   // Read-only: the Talk conversations a `talk:<token>` route can name — the two
   // the bot provisioned, then every Talk-bound room the user is in. No
   // `default` flag: a bare `talk` resolves per purpose, and each row says where
@@ -5484,6 +5488,15 @@ export function isSafeActionPath(path: string | null | undefined): path is strin
  *  client do a full navigation. */
 export function isServerActionPath(path: string | null | undefined): boolean {
   return isSafeActionPath(path) && path.startsWith('/chat/r/');
+}
+
+/** The deep link into a room by its token, or null for a token that cannot be
+ *  one. The server checks membership and lands on a fresh room list, or on the
+ *  bare chat page for a room the user is not in. */
+export function chatRoomLink(token: unknown): string | null {
+  if (typeof token !== 'string' || token === '' || token.includes('/')) return null;
+  const path = `/chat/r/${token}`;
+  return isSafeActionPath(path) ? path : null;
 }
 
 export function getNotificationCounts(): Promise<NotificationCounts> {

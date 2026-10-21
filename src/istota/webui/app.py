@@ -16802,6 +16802,24 @@ def _ignored_default_room_pin(user_id: str, token: str) -> str:
         return ""
 
 
+def _default_room_name(user_id: str) -> str | None:
+    """The name of the room a recording from the iOS voice sheet would land in.
+
+    A label the web hands the shell as `voiceRoom`. None when the database
+    cannot answer, so the sheet shows no room rather than a wrong one.
+    """
+    from istota import db
+
+    if _config is None or not _config.db_path:
+        return None
+    try:
+        with db.get_db(_config.db_path) as conn:
+            return db.default_web_chat_room_name(conn, user_id)
+    except Exception as e:
+        logger.warning("default room name lookup failed for user %s: %s", user_id, e)
+        return None
+
+
 def _validate_descriptor_rooms(descriptor: str, user_id: str) -> None:
     """Raise ValueError if a ``web:`` or ``talk:`` leaf names a room ``user_id``
     is not a member of.
@@ -17293,6 +17311,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "ignored_default_room": _ignored_default_room_pin(
             user["username"], profile.default_room,
         ),
+        "default_room_name": _default_room_name(user["username"]),
         "talk_rooms": _user_talk_rooms(user["username"]),
     }}
 

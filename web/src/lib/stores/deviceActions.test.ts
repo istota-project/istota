@@ -17,11 +17,14 @@ const plugin = {
   consumePendingOpen: vi.fn(async () => ({ open: null })),
 };
 let folder: string | null = 'Notes/Inbox';
+let roomName: string | null = 'general';
 let devices: Record<string, unknown>[] = [];
 const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   const method = init?.method ?? 'GET';
   if (url === '/istota/api/settings/profile') {
-    return new Response(JSON.stringify({ profile: { quick_notes_folder: folder } }));
+    return new Response(
+      JSON.stringify({ profile: { quick_notes_folder: folder, default_room_name: roomName } }),
+    );
   }
   if (url === '/istota/api/devices' && method === 'POST') {
     const body = JSON.parse(init!.body as string);
@@ -47,6 +50,7 @@ beforeEach(() => {
   status.scopes = [];
   status.tokenRejected = false;
   folder = 'Notes/Inbox';
+  roomName = 'general';
   devices = [];
   Object.defineProperty(navigator, 'userAgent', {
     value: 'Mozilla/5.0 (iPhone) IstotaApp/0.13.0',
@@ -73,6 +77,7 @@ it('mints a notes token and provisions it when the folder is set and the shell h
     token: 'minted-token',
     scopes: ['notes'],
     notesFolder: 'Notes/Inbox',
+    voiceRoom: null,
   });
 });
 
@@ -88,6 +93,7 @@ it('does not mint when the shell already holds the wanted scopes', async () => {
     token: null,
     scopes: ['notes'],
     notesFolder: 'Notes/Inbox',
+    voiceRoom: null,
   });
 });
 
@@ -102,6 +108,7 @@ it("mints again when the shell's token is not this account's", async () => {
     token: 'minted-token',
     scopes: ['notes'],
     notesFolder: 'Notes/Inbox',
+    voiceRoom: null,
   });
 });
 
@@ -146,6 +153,7 @@ it('changes only the label, keeping the token, when the folder changes', async (
     token: null,
     scopes: ['notes'],
     notesFolder: 'Notes/Other',
+    voiceRoom: null,
   });
 });
 
@@ -184,4 +192,66 @@ it('logs and swallows a failed mint', async () => {
   expect(plugin.provision).not.toHaveBeenCalled();
   expect(warn).toHaveBeenCalled();
   warn.mockRestore();
+});
+
+function onShell(version: string) {
+  Object.defineProperty(navigator, 'userAgent', {
+    value: `Mozilla/5.0 (iPhone) IstotaApp/${version}`,
+    configurable: true,
+  });
+}
+
+it('wants voice on a 0.14.0 shell and hands it the default room name', async () => {
+  onShell('0.14.0');
+  await syncDeviceActions();
+  const posts = calls('POST', '/istota/api/devices');
+  expect(JSON.parse(posts[0][1]!.body as string).scopes).toEqual(['notes', 'voice']);
+  expect(plugin.provision).toHaveBeenCalledWith({
+    token: 'minted-token',
+    scopes: ['notes', 'voice'],
+    notesFolder: 'Notes/Inbox',
+    voiceRoom: 'general',
+  });
+});
+
+it('mints a voice-only token on 0.14.0 when no folder is set', async () => {
+  onShell('0.14.0');
+  folder = null;
+  await syncDeviceActions();
+  expect(plugin.forget).not.toHaveBeenCalled();
+  expect(plugin.provision).toHaveBeenCalledWith({
+    token: 'minted-token',
+    scopes: ['voice'],
+    notesFolder: null,
+    voiceRoom: 'general',
+  });
+});
+
+it('never wants voice on a 0.13.0 shell, and sends it no room name', async () => {
+  roomName = 'crew';
+  await syncDeviceActions();
+  const posts = calls('POST', '/istota/api/devices');
+  expect(JSON.parse(posts[0][1]!.body as string).scopes).toEqual(['notes']);
+  expect(plugin.provision).toHaveBeenCalledWith(
+    expect.objectContaining({ scopes: ['notes'], voiceRoom: null }),
+  );
+});
+
+it('changes only the label, keeping the token, when the default room changes', async () => {
+  onShell('0.14.0');
+  status.scopes = ['notes', 'voice'];
+  devices = [{ id: 3, device_id: PHONE.toUpperCase(), scopes: ['notes', 'voice'] }];
+  await syncDeviceActions();
+  await syncDeviceActions();
+  expect(plugin.provision).toHaveBeenCalledTimes(1);
+  roomName = 'crew';
+  await syncDeviceActions();
+  expect(calls('POST', '/istota/api/devices')).toHaveLength(0);
+  expect(plugin.provision).toHaveBeenCalledTimes(2);
+  expect(plugin.provision).toHaveBeenLastCalledWith({
+    token: null,
+    scopes: ['notes', 'voice'],
+    notesFolder: 'Notes/Inbox',
+    voiceRoom: 'crew',
+  });
 });
