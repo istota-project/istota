@@ -727,3 +727,25 @@ class TestEncodeGuardsTheCallPath:
             assert server.failure is None
             ok = await _call(server, "Bash", {"command": "echo still-here"})
         assert "still-here" in _text(ok)
+
+
+class TestTheRecordedPidIsClearedOnReap:
+    async def test_aclose_reports_the_reap_after_the_server_is_gone(self, tmp_path):
+        """ISSUE-823: `worker_pid` must not outlive the process it names."""
+        seen = []
+        holder = {}
+
+        def on_pid(pid):
+            seen.append(pid)
+            if pid == 0:
+                holder["returncode"] = holder["server"]._proc.returncode
+
+        server = await start_tool_server(
+            hello=_hello(tmp_path), on_pid=on_pid, loop_abort=asyncio.Event(),
+        )
+        holder["server"] = server
+        await server.aclose()
+        await server.aclose()  # idempotent: one clear, not two
+
+        assert seen == [server.pid, 0]
+        assert holder["returncode"] is not None

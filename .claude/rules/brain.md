@@ -60,7 +60,7 @@ Prior versions are canonical id plus modifier (`claude-opus-4-7:high`). The ids 
 | `composed_system_prompt_path` | Istota's system half (`system_prompt.txt` in `{temp_dir}/.control/{user_id}/task_<id>/`). `None` for direct callers. Non-`None` is **required** (silent omission recreates ISSUE-375) and **absolute** (opened from two cwds). Survives the reroute's `dataclasses.replace`. |
 | `cli_settings_path` | `cli_settings.json` beside it, holding `claude_code.cli_settings_document()`, passed as `--settings <path>`. Same rules: absolute, required once set (the CLI fails a missing file with `Settings file not found`), carried across a reroute. Written for every brain, since a native task can reroute onto a CLI one. With no path, a tool run gets the same document inline. |
 | `on_progress` | `StreamEvent`s (tool, text, delta, result, context, thinking; `ToolEndEvent`/`ToolProgressEvent` native only), mapped and deduped by `executor_stream.TaskStreamAdapter`. Loop-based brains dispatch off their loop (ISSUE-111). Native suppresses the final turn's `TextEvent` unless it has no text. |
-| `cancel_check`, `on_pid` | Cancel poll; pid report. Native reports its tool server's bwrap pid. Required for skill-proxy peer auth (ISSUE-550). |
+| `cancel_check`, `on_pid` | Cancel poll; pid report. Native reports its tool server's bwrap pid. Required for skill-proxy peer auth (ISSUE-550). Every brain reports 0 once it has reaped the child (`report_child_reaped`), which clears `worker_pid` (ISSUE-823); a consumer must not treat 0 as a pid. |
 | `sandbox_wrap` | CLAUDE profile: the CLI's runtime state (`~/.claude` with `.credentials.json`, `settings.json`, `projects`/`debug`/`todos`) and the operator prompt bind. CLI brains only. |
 | `native_sandbox_wrap` | NATIVE profile: no Claude runtime, credential or operator prompt. **Two fields, not one plus a profile**: the reroute's `replace` names neither, so one field would carry CLAUDE into native on `claude_code -> native` (ISSUE-389). Held by `tests/test_brain_types.py`. The control directory is bound read-only under both profiles via `extra_ro_binds`, last. |
 | `fs_read_roots`, `fs_write_roots` | Native file-tool allowlist (NB-1) from `native_fs_roots`, only under effective sandboxing; `None` = unconfined. |
@@ -281,7 +281,7 @@ Hardening (`Specs/Done/claude-tmux-production-readiness.md`):
 **Known gaps**: hook discovery under bwrap is assumed (fallback: bwrap `--chdir`). `_TMUX_UNSUPPORTED_FLAGS` is empty; `--append-system-prompt-file` must never go in it, and a TUI rejection of it is a release blocker. Hook reliability, partial-flush and network isolation are validated only on the prod host.
 
 ## Adding a new brain
-Implement the protocol, add the kind to `make_brain()`, extend `BrainConfig`, update `executor._build_network_allowlist()`, report `on_pid` (else skill-proxy calls are refused), and test success, retry, cancel, timeout, oom and malformed output.
+Implement the protocol, add the kind to `make_brain()`, extend `BrainConfig`, update `executor._build_network_allowlist()`, report `on_pid` (else skill-proxy calls are refused) and `report_child_reaped` once the child is gone, and test success, retry, cancel, timeout, oom and malformed output.
 
 ## Task Event Streaming
 

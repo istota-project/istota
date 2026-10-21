@@ -420,10 +420,11 @@ def _task_cancel_watch(config: Config, task_id: int):
     rather than through the daemon-lock guard, and that also covers
     `istota run`. Each pid is signalled once; the thread stops with the attempt.
 
-    The row keeps a child's pid after the brain has reaped it (an API retry
-    backoff, an in-process `!stop`), so each pid is pinned to its start time
-    when first seen and signalled only while that still matches: a recycled
-    number is another process, and possibly another task's group.
+    Each brain clears the row once it has reaped its child (ISSUE-823), so the
+    row does not name a process that is gone. Each pid is also pinned to its
+    start time when first seen and signalled only while that still matches,
+    for the moment between a reap and the clear: a recycled number is another
+    process, and possibly another task's group.
     """
     from istota.sandbox import peer_process
 

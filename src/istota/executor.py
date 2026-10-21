@@ -464,6 +464,55 @@ def _cancelled(cancel_check: "Callable[[], bool] | None") -> bool:
         return False
 
 
+def _record_worker_pid(
+    config: Config,
+    task_id: int,
+    pid: int,
+    *,
+    proxies=(),
+    task_cg: Path | None = None,
+) -> None:
+    """The executor's ``BrainRequest.on_pid``: register a spawned child, or clear it.
+
+    A pid of 0 is the brain saying it has reaped the child it last reported
+    (ISSUE-823). That clears ``worker_pid`` and does nothing else: there is no
+    process to authorize, and placing pid 0 would write ``0`` to
+    ``cgroup.procs``, which moves the writer, the daemon, into the task's group.
+    """
+    if not pid:
+        try:
+            with db.get_db(config.db_path) as pid_conn:
+                db.update_task_pid(pid_conn, task_id, None)
+        except Exception:
+            pass  # non-critical
+        return
+    # Both proxies serve only this pid's descendants (ISSUE-550),
+    # so they hear first: a child can reach the socket before the DB
+    # write below returns, and the proxy's grace wait is bounded.
+    for proxy in proxies:
+        if proxy is not None:
+            proxy.authorize_pid(pid)
+    # Placement first, DB second. `update_task_pid` can block on the
+    # SQLite write lock, and the whole value of the cgroup is in the
+    # window before the child's own work starts.
+    #
+    # This is the after-the-fact form, and it only reaches the pid's own
+    # thread group — not the children it already forked (ISSUE-285). The
+    # brains that spawn their own subprocess place it from `preexec_fn`
+    # instead, off `req.task_cgroup`, and by the time they call back
+    # here the pid is already a member and this write is a no-op. What
+    # it is still load-bearing for is TmuxClaudeBrain, which reports a
+    # pane pid the tmux server spawned: there is no `preexec_fn` to
+    # reach, so containing the group leader is all that path can do.
+    if task_cg is not None:
+        task_cgroup.place(pid, task_cg)
+    try:
+        with db.get_db(config.db_path) as pid_conn:
+            db.update_task_pid(pid_conn, task_id, pid)
+    except Exception:
+        pass  # non-critical
+
+
 def _make_cancel_check(config: Config, task_id: int) -> "Callable[[], bool]":
     """The task's cancellation channel: one predicate, three consumers.
 
@@ -8731,32 +8780,10 @@ def execute_task(
             )
 
         def _on_pid(pid: int) -> None:
-            # Both proxies serve only this pid's descendants (ISSUE-550),
-            # so they hear first: a child can reach the socket before the DB
-            # write below returns, and the proxy's grace wait is bounded.
-            if _proxy_ctx is not None:
-                _proxy_ctx.authorize_pid(pid)
-            if _net_proxy_ctx is not None:
-                _net_proxy_ctx.authorize_pid(pid)
-            # Placement first, DB second. `update_task_pid` can block on the
-            # SQLite write lock, and the whole value of the cgroup is in the
-            # window before the child's own work starts.
-            #
-            # This is the after-the-fact form, and it only reaches the pid's own
-            # thread group — not the children it already forked (ISSUE-285). The
-            # brains that spawn their own subprocess place it from `preexec_fn`
-            # instead, off `req.task_cgroup`, and by the time they call back
-            # here the pid is already a member and this write is a no-op. What
-            # it is still load-bearing for is TmuxClaudeBrain, which reports a
-            # pane pid the tmux server spawned: there is no `preexec_fn` to
-            # reach, so containing the group leader is all that path can do.
-            if _task_cg is not None:
-                task_cgroup.place(pid, _task_cg)
-            try:
-                with db.get_db(config.db_path) as pid_conn:
-                    db.update_task_pid(pid_conn, task.id, pid)
-            except Exception:
-                pass  # non-critical
+            _record_worker_pid(
+                config, task.id, pid,
+                proxies=(_proxy_ctx, _net_proxy_ctx), task_cg=_task_cg,
+            )
 
         def _poll_steers() -> "list[str]":
             # Claim any pending mid-flight steers (`!steer`) for this task,

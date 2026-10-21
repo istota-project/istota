@@ -75,6 +75,7 @@ from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox import tool_server_protocol as proto
 from istota.agent.tools import AgentTool, ToolResult
 from istota.llm.types import ImageContent, TextContent, ToolSchema
+from istota.sandbox.peer_process import report_child_reaped
 from istota.sandbox.process_group import kill_group_if_live
 
 from .bash import BASH_SCHEMA
@@ -263,6 +264,8 @@ class RemoteToolServer:
         self._stderr = bytearray()
         self._stopping = False
         self._closed = False
+        # Set once the pid has been reported, so `aclose` can report the reap.
+        self._on_pid: Callable[[int], None] | None = None
         self._write_lock = asyncio.Lock()
         self.tools: list[str] = []
         # Set once, by whichever of the reader, the process watcher or a send
@@ -494,6 +497,9 @@ class RemoteToolServer:
                 task.cancel()
             with contextlib.suppress(Exception):
                 self._sock.close()
+            # Only once reaped, so a server the kill missed stays in reach.
+            if self._proc.returncode is not None:
+                report_child_reaped(self._on_pid)
         finally:
             # In a `finally`, so a cancellation partway through cannot leave
             # `_closed` True with the process still alive and every later call
@@ -721,6 +727,7 @@ async def start_tool_server(
             # used to record none at all, so every native task carried
             # `worker_pid` 0.
             on_pid(proc.pid)
+        server._on_pid = on_pid
     return server
 
 

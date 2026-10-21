@@ -53,6 +53,7 @@ from ._events import (
     ThinkingEvent,
     ToolUseEvent,
 )
+from ..sandbox.peer_process import report_child_reaped
 from ._types import BrainRequest, BrainResult
 from .claude_code import (
     API_RETRY_DELAY_SECONDS,
@@ -853,6 +854,10 @@ class TmuxClaudeBrain:
         tailer: _TranscriptTailer | None = None
         created_workdir = False
         session_dir: _SessionDir | None = None
+        # The pane is the tmux server's child: the pid is cleared once the
+        # session is killed, which SIGHUPs the pane ahead of the server's reap.
+        pid_reported = False
+        session_killed = False
         try:
             base_dir.mkdir(parents=True, exist_ok=True)
             # No exist_ok: a directory, file or link already at this name was
@@ -920,6 +925,7 @@ class TmuxClaudeBrain:
                         session,
                     )
                 else:
+                    pid_reported = True
                     try:
                         req.on_pid(pid)
                     except Exception:
@@ -935,6 +941,7 @@ class TmuxClaudeBrain:
                     "tmux_brain ready_timeout session=%s pane=%r", session, pane,
                 )
                 self._kill(session)
+                session_killed = True
                 outcome = "fallback"
                 return (
                     BrainResult(
@@ -963,6 +970,7 @@ class TmuxClaudeBrain:
             )
             wait_ms = int((time.monotonic() - wait_t0) * 1000)
             self._kill(session)
+            session_killed = True
 
             if status == "cancelled":
                 outcome = "cancelled"
@@ -1053,6 +1061,7 @@ class TmuxClaudeBrain:
         except Exception as e:
             logger.exception("TmuxClaudeBrain._run_session raised")
             self._kill(session)
+            session_killed = True
             outcome = "error"
             return (
                 BrainResult(
@@ -1061,6 +1070,8 @@ class TmuxClaudeBrain:
                 False,
             )
         finally:
+            if pid_reported and session_killed:
+                report_child_reaped(req.on_pid)
             if tailer is not None:
                 tailer.stop()
                 tailer.join(timeout=2.0)

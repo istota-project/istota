@@ -385,7 +385,8 @@ class TestTheRootIsRegistered:
         result = ClaudeCodeBrain()._execute_simple_once(
             ["sh", "-c", "echo $$"], _req(tmp_path, on_pid=seen.append),
         )
-        assert seen == [int(result.result_text)]
+        # Then 0 once `run` has reaped it, so `worker_pid` is cleared (ISSUE-823).
+        assert seen == [int(result.result_text), 0]
 
     def test_a_stop_on_the_non_streaming_path_reads_as_a_cancellation(
         self, tmp_path,
@@ -400,7 +401,8 @@ class TestTheRootIsRegistered:
         from .test_task_cgroup_placement import _req
 
         def stop_soon(pid):
-            threading.Timer(0.3, os.kill, (pid, signal.SIGTERM)).start()
+            if pid:  # 0 is the reap report, and `kill(0, …)` is our own group
+                threading.Timer(0.3, os.kill, (pid, signal.SIGTERM)).start()
 
         result = ClaudeCodeBrain()._execute_simple_once(
             ["sleep", "30"],

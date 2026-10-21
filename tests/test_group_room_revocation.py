@@ -824,6 +824,74 @@ class TestAnAdminOutsideTheGroup:
         assert resp.status_code == 200
         assert _task_row(config, task_id)["cancel_requested"] == 1
 
+    async def test_an_admin_outside_the_group_can_still_stop_a_task_by_id(self, config, room):
+        """`!stop <id>` keeps the admin exemption for a group-room task too
+        (ISSUE-824): the runaway-task case is why the exemption exists."""
+        from istota import commands
+
+        config.admin_users = {"carol"}
+        task_id = _task(config, room, "bob", status="running")
+        with db.get_db(config.db_path) as conn:
+            own = db.create_web_chat_room(conn, "carol", "Mine").token
+            ctx = commands.CommandContext(
+                config=config, conn=conn, user_id="carol", conversation_token=own,
+                surface="web", args=str(task_id),
+            )
+            reply = await commands.cmd_stop(ctx)
+        assert "isn't yours" not in str(reply)
+        assert _task_row(config, task_id)["cancel_requested"] == 1
+
+    @_needs_web
+    async def test_the_admin_task_events_view_follows_the_group(self, client, config, room):
+        """The dashboard's cross-user events view refuses a group-room task to
+        an admin outside the group, as the chat routes do (ISSUE-824)."""
+        from istota.events import EventWriter
+
+        config.admin_users = {"carol", "alice"}
+        task_id = _task(config, room, "bob", status="completed")
+        EventWriter(task_id, str(config.db_path)).emit(
+            "text_delta", {"text": "the private plan"})
+        carol = await _login(client, "carol")
+        resp = await client.get(f"/istota/api/admin/tasks/{task_id}/events", cookies=carol)
+        assert resp.status_code == 404
+        assert "the private plan" not in resp.text
+        chat = await client.get(f"/istota/api/chat/tasks/{task_id}/events", cookies=carol)
+        assert resp.json() == chat.json()
+        unknown = await client.get("/istota/api/admin/tasks/999999/events", cookies=carol)
+        assert (unknown.status_code, unknown.json()) == (404, resp.json())
+
+        alice = await _login(client, "alice")
+        resp = await client.get(f"/istota/api/admin/tasks/{task_id}/events", cookies=alice)
+        assert resp.status_code == 200
+        assert "the private plan" in resp.text
+
+    @_needs_web
+    async def test_the_admin_task_events_view_still_reads_a_personal_task(
+            self, client, config, room):
+        from istota.events import EventWriter
+
+        config.admin_users = {"carol"}
+        with db.get_db(config.db_path) as conn:
+            own = db.create_web_chat_room(conn, "bob", "Bob's").token
+        task_id = _task(config, own, "bob", status="completed")
+        EventWriter(task_id, str(config.db_path)).emit("text_delta", {"text": "hello"})
+        carol = await _login(client, "carol")
+        resp = await client.get(f"/istota/api/admin/tasks/{task_id}/events", cookies=carol)
+        assert resp.status_code == 200
+        assert len(resp.json()["events"]) == 1
+
+    @_needs_web
+    async def test_the_admin_task_events_view_refuses_a_removed_authors_task(
+            self, client, config, room):
+        """A task its room no longer delivers is unknown to every admin, the
+        group's own owner included."""
+        config.admin_users = {"alice"}
+        task_id = _task(config, room, "bob", status="completed")
+        _remove(config)
+        alice = await _login(client, "alice")
+        resp = await client.get(f"/istota/api/admin/tasks/{task_id}/events", cookies=alice)
+        assert resp.status_code == 404
+
     def test_an_admin_in_the_group_can_still_retry(self, config, room):
         from istota import commands
 

@@ -130,7 +130,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Fields that suggest values as you type (the Wifi zone place search in Location settings, a briefing source's pickers, setup's model and welcome steps) now look like every other text field, in both themes, instead of the browser's own grey box.
+- The admin dashboard's task events view no longer shows a group room's task to an admin who is not in the group, matching the chat views. An admin can still stop such a task, from `!stop` or the web, so a runaway task stays within reach.
 - Stopping a task from the web, or removing its author from a group, now stops a running Claude Code task within a few seconds on the Docker stack. Before, the web container could only flag the task, and the task ran on until its current tool call finished, or to the end on the non-streaming path.
+- A task no longer keeps the process id of a child it has already finished with, so stopping the task right after, for example during a retry wait, can no longer signal an unrelated process that was given the same number. Every brain now clears the recorded id when its child exits.
 - In the iOS app, once signed in, a quick double tap no longer zooms the page wherever it lands, and neither pinching nor focusing a field zooms it. In a mobile browser a double tap is also just a tap, and pinch-zoom still works.
 - When Money → Settings → Invoicing cannot load its business settings, a screen reader now hears the error once rather than three times. The Business defaults, Entities and Services cards still each show the failure with a Retry.
 - On a phone, the sidebar drawer now slides out when it closes instead of vanishing, and closing it no longer flashes the page. Tapping a room, a section or a list entry starts the slide before the new content draws, and tapping beside the drawer no longer greys the whole screen for a moment.

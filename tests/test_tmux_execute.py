@@ -173,9 +173,28 @@ class TestHappyPath:
         h = _Harness(monkeypatch, tmp_path, transcript=tr)
         seen = []
         h.brain.execute(_req(tmp_path, on_pid=seen.append))
-        assert seen == [4242]
+        assert seen == [4242, 0]
         # Startup network calls need authorization before Claude is launched.
         assert h.names().index("_pane_pid") < h.names().index("_launch_claude")
+
+    @pytest.mark.parametrize("ready", [True, False])
+    def test_the_pane_pid_is_cleared_once_the_session_is_killed(
+        self, monkeypatch, tmp_path, ready,
+    ):
+        """ISSUE-823: the row must not name a pane that is gone, on the
+        success path and on the ready-timeout teardown alike."""
+        tr = _write_transcript(tmp_path, [_assistant([{"type": "text", "text": "Hi"}])])
+        h = _Harness(monkeypatch, tmp_path, transcript=tr, ready=ready)
+
+        def on_pid(pid):
+            h.calls.append(("on_pid", (pid,), {}))
+
+        h.brain.execute(_req(tmp_path, on_pid=on_pid))
+        reports = [c[1][0] for c in h.calls if c[0] == "on_pid"]
+        assert reports == [4242, 0]
+        last_kill = max(i for i, c in enumerate(h.calls) if c[0] == "_kill")
+        clear = [i for i, c in enumerate(h.calls) if c == ("on_pid", (0,), {})][0]
+        assert last_kill < clear
 
     def test_on_progress_emits_whole_turn_events(self, monkeypatch, tmp_path):
         tr = _write_transcript(tmp_path, [
