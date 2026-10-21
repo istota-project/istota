@@ -290,6 +290,7 @@ def _may_carry_body(scope, headers) -> bool:
 # `tests/test_device_tokens.py` holds this equal to the routes themselves.
 DEVICE_TOKEN_ROUTES = frozenset({
     ("POST", "/istota/api/workspace/notes"),
+    ("POST", "/istota/api/chat/voice"),
     ("DELETE", "/istota/api/devices/self"),
 })
 
@@ -7234,7 +7235,7 @@ _PHONE_LABELS = {"sms": "SMS", "whatsapp": "WhatsApp"}
 _READ_ONLY_LABELS = {**_PHONE_LABELS, "email": "email"}
 
 
-def _read_only_refusal(surface: str, *, group: bool = False) -> JSONResponse:
+def _read_only_body(surface: str, *, group: bool = False) -> dict:
     label = _READ_ONLY_LABELS.get(surface, surface)
     if group:
         error = (f"This room is a {label} group and is read-only here; a message "
@@ -7243,7 +7244,37 @@ def _read_only_refusal(surface: str, *, group: bool = False) -> JSONResponse:
     else:
         error = (f"This room is the transcript of your {label} conversation "
                  f"and is read-only here. Reply by {label} instead.")
-    return JSONResponse({"error": error, "read_only": True}, status_code=409)
+    return {"error": error, "read_only": True}
+
+
+def _read_only_refusal(surface: str, *, group: bool = False) -> JSONResponse:
+    return JSONResponse(_read_only_body(surface, group=group), status_code=409)
+
+
+def _switched_off_body() -> dict:
+    from istota.rooms import veto as room_veto
+
+    return {"error": "This room is switched off and records nothing. A member "
+                     f"switches it back on with !{room_veto.command_word(_config)} on."}
+
+
+async def _room_write_refusal(token: str, *, switched_off: bool = True) -> dict | None:
+    """The 409 body a send into this room meets, or None when web may write there.
+
+    One rule for `chat_send_message` and `chat_voice_send`: a phone room is
+    answered by text, an email thread room is the mail thread itself, and a
+    room switched off records nothing. The chat send passes
+    ``switched_off=False`` and asks `_chat_room_off` later, because a member's
+    `!<bot> on` has to reach a room that is off.
+    """
+    phone = await asyncio.to_thread(_phone_room, token)
+    if phone is not None:
+        return _read_only_body(phone.surface, group=phone.group)
+    if await asyncio.to_thread(_email_thread_room, token):
+        return {"error": EMAIL_THREAD_READ_ONLY, "read_only": True}
+    if switched_off and await asyncio.to_thread(_chat_room_off, token):
+        return _switched_off_body()
+    return None
 
 
 def _chat_answer_confirmation(
@@ -12008,18 +12039,11 @@ async def chat_send_message(
         # Archived rooms are hidden in the UI; reject sends so they don't keep
         # spawning tasks and churning their channel memory behind your back.
         return JSONResponse({"error": "room is archived"}, status_code=409)
-    # Ahead of everything else, `!commands` and confirmation answers included:
-    # a phone room is answered by text, and web only reads it.
-    phone = await asyncio.to_thread(_phone_room, room.token)
-    if phone is not None:
-        return _read_only_refusal(phone.surface, group=phone.group)
-    # An email thread room is the mail thread itself: a web turn there would be
-    # answered in web and mailed to nobody. Covers a `!command` and a reply-to
-    # send too, since both arrive here.
-    if await asyncio.to_thread(_email_thread_room, room.token):
-        return JSONResponse(
-            {"error": EMAIL_THREAD_READ_ONLY, "read_only": True}, status_code=409,
-        )
+    # Ahead of everything else, `!commands`, confirmation answers and reply-to
+    # sends included: web only reads a phone room or an email thread room.
+    refusal = await _room_write_refusal(room.token, switched_off=False)
+    if refusal is not None:
+        return JSONResponse(refusal, status_code=409)
 
     data = await request.json()
     raw_text = data.get("text") if isinstance(data.get("text"), str) else ""
@@ -12113,11 +12137,7 @@ async def chat_send_message(
             return {"task_id": None, "inline_result": outcome.text,
                     "command_data": {"kind": "room_veto", "state": outcome.state}}
     if await asyncio.to_thread(_chat_room_off, room.token):
-        return JSONResponse(
-            {"error": "This room is switched off and records nothing. A member "
-                      f"switches it back on with !{room_veto.command_word(_config)} on."},
-            status_code=409,
-        )
+        return JSONResponse(_switched_off_body(), status_code=409)
 
     if text.startswith("!"):
         from istota import commands
@@ -13351,6 +13371,181 @@ async def chat_upload_attachment(
         "size": len(data),
         "workspace_path": resolved[0] if resolved else None,
     }
+
+
+# ---- Voice task from the shell's quick action ----
+#
+# One request uploads a recording and sends it into the user's default room,
+# so the shell never holds an uploaded path between two calls across a crash.
+# The one chat route a device token reaches (scope `voice`): it cannot read,
+# choose a room or carry text.
+
+# Stricter than the chat send's opaque bound: the shell always sends one, so
+# a missing or odd key is a client bug rather than an old client.
+_VOICE_CLIENT_MSG_ID = re.compile(r"[A-Za-z0-9-]{8,64}")
+# Room for the multipart boundaries and the key field around the audio.
+_VOICE_ENVELOPE_BYTES = 64 * 1024
+
+
+async def _voice_upload_parts(request: Request, limit: int) -> tuple[str | None, str | None, bytes | None]:
+    """``(client_msg_id, filename, audio)`` from a bounded multipart body; None for a missing part."""
+    from python_multipart.exceptions import FormParserError
+    from starlette.datastructures import UploadFile as UploadedPart
+    from starlette.formparsers import MultiPartException, MultiPartParser
+
+    if not request.headers.get("content-type", "").startswith("multipart/form-data"):
+        raise BodyError(400, "expected a multipart upload")
+    raw = await read_bounded_body(request, limit)
+
+    async def chunks():
+        yield raw
+
+    parser = MultiPartParser(request.headers, chunks(), max_files=1, max_fields=1)
+    try:
+        form = await parser.parse()
+    except (MultiPartException, FormParserError) as exc:
+        raise BodyError(400, "that upload is not a valid multipart body") from exc
+    try:
+        key = form.get("client_msg_id")
+        part = form.get("file")
+        audio = await part.read() if isinstance(part, UploadedPart) else None
+        return (
+            key if isinstance(key, str) else None,
+            part.filename if isinstance(part, UploadedPart) else None,
+            audio,
+        )
+    finally:
+        await form.close()
+
+
+def _voice_default_room(username: str):
+    from istota import db
+
+    with db.get_db(_config.db_path) as conn:
+        return db.ensure_default_web_chat_room(conn, username)
+
+
+def _voice_own_send(username: str, token: str, client_msg_id: str) -> tuple[int, int | None] | None:
+    """``(message_id, task_id)`` of this sender's turn under the key in this room, or None."""
+    from istota import db
+
+    with db.get_db(_config.db_path) as conn:
+        if not _is_own_replay(conn, token, client_msg_id, username):
+            return None
+        message_id, task_id, _sender = db.find_send_by_client_msg_id(conn, token, client_msg_id)
+    return message_id, task_id
+
+
+def _voice_rate_limited(username: str) -> bool:
+    """The chat send's limit, asked before the file is stored; `_chat_create_web_task` asks it again."""
+    from istota import db
+
+    chat = _config.web.chat
+    with db.get_db(_config.db_path) as conn:
+        recent = db.count_recent_web_sends(conn, username, chat.rate_limit_window_seconds)
+    return recent >= chat.rate_limit_messages
+
+
+def _voice_attachment_name(username: str, ext: str) -> str:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        zone = ZoneInfo(_config.resolve_user_timezone(username))
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = timezone.utc
+    return f"voice-{datetime.now(zone):%Y%m%d-%H%M%S}.{ext}"
+
+
+@api_router.post("/chat/voice")
+async def chat_voice_send(
+    request: Request,
+    user: dict = Depends(require_session_or_device("voice")),
+):
+    """Send one recording into the user's default room as an attachment-only message.
+
+    The replay check comes before anything is stored, so a retry under the
+    same ``client_msg_id`` answers 200 with the first send's ids and writes no
+    second copy of the audio. The room is the one the server resolves now;
+    the shell's label for it is display only. Takes ``request`` rather than an
+    ``UploadFile`` so the body is bounded before it is parsed.
+    """
+    if not _config:
+        raise HTTPException(503, "config not loaded")
+    from istota.lib.audio_sniff import AUDIO_EXTENSIONS
+    from istota.transport.ingest import describe_attachment_only_message
+    from istota.workspace.listing import ListingError
+
+    chat = _config.web.chat
+    max_bytes = chat.max_attachment_mb * 1024 * 1024
+    try:
+        client_msg_id, filename, audio = await _voice_upload_parts(request, max_bytes + _VOICE_ENVELOPE_BYTES)
+    except BodyError as exc:
+        return JSONResponse({"error": exc.message, "code": "invalid_body"}, status_code=exc.status)
+    if client_msg_id is None or not _VOICE_CLIENT_MSG_ID.fullmatch(client_msg_id):
+        return JSONResponse(
+            {"error": "client_msg_id must be 8 to 64 letters, digits or dashes", "code": "invalid_body"},
+            status_code=400,
+        )
+    if audio is None:
+        return JSONResponse({"error": "the upload needs a file part", "code": "invalid_body"}, status_code=400)
+
+    username = user["username"]
+    room = await asyncio.to_thread(_voice_default_room, username)
+    room_ref = {"token": room.token, "name": room.name}
+    prior = await asyncio.to_thread(_voice_own_send, username, room.token, client_msg_id)
+    if prior is not None:
+        return {"room": room_ref, "message_id": prior[0], "task_id": prior[1], "replay": True}
+
+    refusal = await _room_write_refusal(room.token)
+    if refusal is not None:
+        return JSONResponse({**refusal, "code": "room_read_only"}, status_code=409)
+    # Audio only, whatever else the composer may attach: a stolen token posts
+    # a recording and nothing else.
+    ext = filename_parts(filename or "")[1].lower().lstrip(".")
+    if ext not in AUDIO_EXTENSIONS or (chat.attachment_extensions and ext not in chat.attachment_extensions):
+        return JSONResponse(
+            {"error": f"file type .{ext} not allowed" if ext else "the file needs an audio extension",
+             "code": "file_type"},
+            status_code=400,
+        )
+    if len(audio) > max_bytes:
+        return JSONResponse(
+            {"error": f"file exceeds {chat.max_attachment_mb} MB", "code": "too_large"}, status_code=413,
+        )
+    if await asyncio.to_thread(_voice_rate_limited, username):
+        return JSONResponse(
+            {"error": "rate limit exceeded", "code": "rate_limited"},
+            status_code=429, headers={"Retry-After": str(chat.rate_limit_window_seconds)},
+        )
+
+    name = await asyncio.to_thread(_voice_attachment_name, username, ext)
+    try:
+        path = await asyncio.to_thread(_save_chat_attachment, username, name, audio)
+    except (OSError, ListingError):
+        return JSONResponse({"error": "attachment could not be saved", "code": "not_saved"}, status_code=400)
+    text = describe_attachment_only_message([path])
+    outcome, value = await asyncio.to_thread(
+        _chat_create_web_task, username, room.token, text, [path],
+        None, None, True, [name], client_msg_id,
+    )
+    if outcome == "rate_limited":
+        return JSONResponse(
+            {"error": "rate limit exceeded", "code": "rate_limited"},
+            status_code=429, headers={"Retry-After": str(value)},
+        )
+    if outcome == "room_off":
+        return JSONResponse({**_switched_off_body(), "code": "room_read_only"}, status_code=409)
+    sent = await asyncio.to_thread(_voice_own_send, username, room.token, client_msg_id)
+    message_id, task_id = sent if sent is not None else (None, None)
+    if outcome == "recorded":
+        await _mirror_web_turn_as_user(username, room.token, text, None, message_id=value)
+    else:
+        await _mirror_web_turn_as_user(username, room.token, text, task_id)
+    logger.info("chat: voice recording sent for user=%s (%s)", username, outcome)
+    return JSONResponse(
+        {"room": room_ref, "message_id": message_id, "task_id": task_id, "replay": False},
+        status_code=201,
+    )
 
 
 # ---- Chat file download (authenticated handover) ----
@@ -17895,7 +18090,7 @@ async def api_location_devices_delete(row_id: int, request: Request, user: dict 
 # --- device tokens for the shell's native actions ---------------------------
 #
 # A per-phone bearer scoped by capability (`istota.webui.device_tokens`). Minting
-# and listing are session routes; the token itself reaches only the two
+# and listing are session routes; the token itself reaches only the three
 # routes that depend on `router_stubs.require_session_or_device`.
 
 

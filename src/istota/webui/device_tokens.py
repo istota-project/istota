@@ -1,8 +1,9 @@
 """Per-device bearer tokens for the iOS shell's native actions, stored as hashes.
 
 One row per `(user_id, device_id)`, carrying a set of scopes. Each scope names
-a capability the shell may use without a web session; `notes` (a quick note
-from the home-screen action) is the first. A new native action adds a scope to
+a capability the shell may use without a web session: `notes` (a quick note
+from the home-screen action) and `voice` (a recording sent into the default
+room by `POST /chat/voice`). A new native action adds a scope to
 `KNOWN_SCOPES` rather than a credential of its own, so the user sees one row
 per phone in Settings. Minting again for a device replaces its token in place,
 so the old token is dead the moment the new one exists.
@@ -34,7 +35,7 @@ from istota.lib.tokens import hash_token, new_token
 
 logger = logging.getLogger(__name__)
 
-KNOWN_SCOPES = frozenset({"notes"})
+KNOWN_SCOPES = frozenset({"notes", "voice"})
 MAX_TOKENS_PER_USER = 20
 LAST_USED_INTERVAL_SECONDS = 60
 

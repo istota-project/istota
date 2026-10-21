@@ -3,7 +3,7 @@
 A device token is a per-phone bearer scoped by capability. These tests drive
 the real app, so the session, the origin check and the bearer dependency are
 the ones a request meets in production. The route-enumeration test is the
-guard against the token quietly gaining reach: exactly two routes accept it.
+guard against the token quietly gaining reach: exactly three routes accept it.
 """
 
 from unittest.mock import AsyncMock
@@ -133,7 +133,7 @@ async def test_mint_returns_the_token_once_and_a_remint_kills_the_old_one(client
 
 
 @pytest.mark.parametrize("scopes,code", [
-    (["notes", "voice"], "unknown_scope"),
+    (["notes", "calendar"], "unknown_scope"),
     ([], "invalid_scopes"),
     ("notes", "invalid_scopes"),
     ([5], "invalid_scopes"),
@@ -159,6 +159,15 @@ async def test_a_malformed_mint_body_is_a_400(client, config, body):
     assert response.status_code == 400
     assert response.json()["code"] == "invalid_body"
     assert _rows(config) == []
+
+
+async def test_voice_mints_with_no_precondition(client, config):
+    cookies = await _login(client, "bob")
+    response = await _mint(client, cookies, scopes=["voice"])
+    assert response.status_code == 201
+    assert response.json()["scopes"] == ["voice"]
+    [row] = _rows(config, "bob")
+    assert row["scopes"] == "voice"
 
 
 async def test_granting_notes_without_a_folder_is_a_409(client, config):
@@ -259,10 +268,7 @@ async def test_the_session_path_still_needs_the_origin(client, config):
     assert accepted.status_code == 201
 
 
-async def test_a_token_without_the_notes_scope_is_a_403(client, config, monkeypatch):
-    from istota.webui import device_tokens
-
-    monkeypatch.setattr(device_tokens, "KNOWN_SCOPES", frozenset({"notes", "voice"}))
+async def test_a_token_without_the_notes_scope_is_a_403(client, config):
     _, token = _mint_direct(config, scopes=("voice",))
     response = await client.post(NOTES, headers=_bearer(token), json={"content": "Buy milk"})
     assert response.status_code == 403
@@ -284,6 +290,7 @@ async def test_a_bad_bearer_is_a_401_even_beside_a_valid_session(client, config,
 @pytest.mark.parametrize("method,url,body", [
     ("POST", NOTES, {"content": "Buy milk"}),
     ("DELETE", DEVICES + "/self", None),
+    ("POST", "/istota/api/chat/voice", None),
 ])
 async def test_the_route_itself_refuses_a_bad_bearer_beside_a_valid_session(
     client, config, monkeypatch, method, url, body,
@@ -364,7 +371,7 @@ def _depends_on(dependant, target) -> bool:
     return False
 
 
-def test_exactly_two_routes_accept_a_device_token(app):
+def test_exactly_three_routes_accept_a_device_token(app):
     from fastapi.routing import APIRoute
 
     from istota.webui.router_stubs import session_or_device
@@ -374,7 +381,11 @@ def test_exactly_two_routes_accept_a_device_token(app):
         for route in app.routes if isinstance(route, APIRoute) and _depends_on(route.dependant, session_or_device)
         for method in route.methods
     )
-    assert reached == [("DELETE", "/istota/api/devices/self"), ("POST", "/istota/api/workspace/notes")]
+    assert reached == [
+        ("DELETE", "/istota/api/devices/self"),
+        ("POST", "/istota/api/chat/voice"),
+        ("POST", "/istota/api/workspace/notes"),
+    ]
     # The body guard lets a bearer through on exactly these, before the body is read.
     import istota.webui.app as mod
 
