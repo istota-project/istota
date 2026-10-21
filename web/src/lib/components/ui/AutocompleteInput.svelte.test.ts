@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import AutocompleteInput from './AutocompleteInput.svelte';
+import FieldContextHarness from './FieldContext.harness.svelte';
 
 afterEach(cleanup);
 
@@ -41,5 +42,28 @@ describe('AutocompleteInput', () => {
   it('leaves both unstyled when the prop is absent', () => {
     render(AutocompleteInput, { value: '', options, ariaLabel: 'File path' });
     expect(screen.getByRole('combobox', { name: 'File path' })).not.toHaveClass('mono');
+  });
+
+  it('draws its field as the Input primitive, so it has a box outside a Field', () => {
+    // Ported from a sibling app's copy: the field was a bare <input>, which no
+    // Field rule styles, so it arrived with the browser's own box.
+    render(AutocompleteInput, { value: '', options, ariaLabel: 'File path', invalid: true });
+    const input = screen.getByRole('combobox', { name: 'File path' });
+    expect(input).toHaveClass('ui-input');
+    expect(input).toHaveClass('invalid');
+    expect(input).toHaveAttribute('aria-invalid', 'true');
+  });
+
+  it('takes a Field caption, description and error through the Input it draws', () => {
+    render(FieldContextHarness, {
+      control: 'autocomplete',
+      description: 'Pick a place',
+      error: 'Not a place',
+      required: true,
+    });
+    const input = screen.getByRole('combobox', { name: 'Caption' });
+    expect(input).toHaveAccessibleDescription(/Pick a place/);
+    expect(input).toHaveAttribute('aria-invalid', 'true');
+    expect(input).toHaveAttribute('aria-required', 'true');
   });
 });

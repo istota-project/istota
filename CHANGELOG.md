@@ -129,6 +129,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fields that suggest values as you type (the Wifi zone place search in Location settings, a briefing source's pickers, setup's model and welcome steps) now look like every other text field, in both themes, instead of the browser's own grey box.
 - Stopping a task from the web, or removing its author from a group, now stops a running Claude Code task within a few seconds on the Docker stack. Before, the web container could only flag the task, and the task ran on until its current tool call finished, or to the end on the non-streaming path.
 - In the iOS app, once signed in, a quick double tap no longer zooms the page wherever it lands, and neither pinching nor focusing a field zooms it. In a mobile browser a double tap is also just a tap, and pinch-zoom still works.
 - When Money → Settings → Invoicing cannot load its business settings, a screen reader now hears the error once rather than three times. The Business defaults, Entities and Services cards still each show the failure with a Retry.
