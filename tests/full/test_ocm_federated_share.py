@@ -1,9 +1,15 @@
-"""A real Nextcloud offers a folder to istota over Open Cloud Mesh: the offer step.
+"""A real Nextcloud offers a folder to istota over Open Cloud Mesh: offer, accept, unshare.
 
 What the default suite cannot hold is whether a real Nextcloud 30 accepts
-istota's discovery document and posts an offer that `POST /ocm/shares` takes.
-Here the testbed's Nextcloud shares a folder with `testuser@istota.test` and
-the offer must arrive as a `pending` `shared_sources` row.
+istota's discovery document and posts an offer that `POST /ocm/shares` takes,
+whether its public WebDAV endpoint opens to the share secret and reports
+``oc:permissions`` as the accept reads them, and whether it posts
+``SHARE_UNSHARED`` to ``/ocm/notifications`` and deletes a share on
+``SHARE_DECLINED``. Here the testbed's Nextcloud shares folders with
+`testuser@istota.test`; each offer must arrive as a `pending`
+`shared_sources` row, accepting it through the web API must make it `active`
+with the right access and a local credential, and unsharing on Nextcloud, or
+removing it in istota, must end it.
 
 Nextcloud needs four things before it sends anything (the open-protocol-sharing
 spec, Stage 1, and its full-tier bullet), and this module's fixture sets each:
@@ -34,7 +40,7 @@ parses it and ignores it. Nextcloud caches a failed discovery for five minutes
 in APCu, so the fixture restarts Apache before the share.
 
 Discretionary: `uv run pytest -m full -n0 tests/full/test_ocm_federated_share.py`.
-The accept, read-write and unshare steps belong to Stages 7 and 8.
+The read-write step through the `shares` skill belongs to Stage 8.
 """
 
 from __future__ import annotations
@@ -197,3 +203,135 @@ def test_a_folder_shared_from_nextcloud_arrives_as_a_pending_offer(ocm_stack):
         "SELECT title FROM notifications WHERE user_id = 'testuser' AND source = 'shared_source'"
     )
     assert [n["title"] for n in notified] == ["A folder was shared with you"]
+
+
+# --------------------------------------------------------- accept and unshare
+
+API = "/istota/api"
+ACCEPT_WAIT_SECONDS = 60
+
+
+def _form_fields(page: str, action: str) -> dict[str, str]:
+    import re
+    from html import unescape
+
+    form = re.search(r'<form\b[^>]*action="' + re.escape(action) + r'"[^>]*>(.*?)</form>',
+                     page, re.S)
+    assert form is not None, f"Missing form: {action}"
+    return {name: unescape(value) for name, value
+            in re.findall(r'<input[^>]*name="([^"]+)"[^>]*value="([^"]*)"', form[1])}
+
+
+@pytest.fixture(scope="module")
+def web(ocm_stack):
+    """testuser signed in to the web app with an email identity, as a person accepts an offer.
+
+    `Origin` is `[site] hostname`, which `_verify_origin` checks on every
+    state-changing call; the client talks to the stack's own nginx.
+    """
+    import secrets
+
+    import httpx
+
+    from testbed.stack import CONTAINER_CONFIG
+
+    password = secrets.token_urlsafe(24)
+    added = subprocess.run(
+        ocm_stack.args + ["exec", "-T", "daemon", "istota-drop", "uv", "run", "istota", "-c",
+                          CONTAINER_CONFIG, "auth", "add", "testuser",
+                          "--email", "testuser@ocm.example.test", "--password-stdin"],
+        input=password + "\n", text=True, capture_output=True, timeout=120,
+    )
+    assert added.returncode == 0, added.stderr
+    port = ocm_stack.published_port("nginx", 80)
+    client = httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=60, trust_env=False,
+                          headers={"Origin": f"http://{SITE}"})
+    page = client.get("/istota/login")
+    assert page.status_code == 200, page.text
+    signed_in = client.post("/istota/login/email", data={
+        **_form_fields(page.text, "/istota/login/email"),
+        "email": "testuser@ocm.example.test", "password": password,
+    })
+    assert signed_in.status_code == 302, signed_in.text
+    yield client
+    client.close()
+
+
+def _share_folder(stack, permissions: int) -> tuple[str, int, dict]:
+    """A fresh folder shared from Nextcloud; its name, the Nextcloud share id, the offer row."""
+    nextcloud = stack.service("nextcloud")
+    owner = nextcloud.test_user
+    folder = f"OCM share {uuid.uuid4().hex[:8]}"
+    _body, status = nextcloud._dav(folder, user=owner, method="MKCOL")
+    assert status == 201, status
+    [row] = stack.probe.query("SELECT COALESCE(MAX(id), 0) AS mark FROM shared_sources")
+    shared = nextcloud._ocs(
+        "/ocs/v2.php/apps/files_sharing/api/v1/shares", user=owner, method="POST",
+        body={"path": f"/{folder}", "shareType": 6, "shareWith": f"testuser@{SITE}",
+              "permissions": permissions},
+        tolerate=(403, 404),
+    )
+    assert shared.status_code in (100, 200), (shared.status_code, shared.message)
+    deadline = time.monotonic() + OFFER_WAIT_SECONDS
+    offers = _offers_since(stack, row["mark"], folder)
+    while not offers and time.monotonic() < deadline:
+        time.sleep(2)
+        offers = _offers_since(stack, row["mark"], folder)
+    assert offers, "no offer reached istota:\n" + stack.logs(tail=40, service="nextcloud")
+    return folder, int(shared.data["id"]), offers[0]
+
+
+def _row(stack, source_id: int) -> dict:
+    [row] = stack.probe.query(
+        "SELECT state, access, last_reason FROM shared_sources WHERE id = ?", [source_id])
+    return row
+
+
+def _credential_names(stack, source_id: int) -> list[str]:
+    return [r["name"] for r in stack.probe.query(
+        "SELECT name FROM credential_bindings WHERE user_id = 'testuser' AND name = ?",
+        [f"ocm_share_{source_id}"])]
+
+
+def test_accepting_through_the_web_api_and_unsharing_on_nextcloud(ocm_stack, web):
+    nextcloud = ocm_stack.service("nextcloud")
+    _folder, share_id, offer = _share_folder(ocm_stack, permissions=31)
+
+    accepted = web.post(f"{API}/settings/sharing/folders/{offer['id']}/accept",
+                        json={"allow_scheduled": False})
+    assert accepted.status_code == 200, accepted.text
+    # The PROPFIND proved the secret and read oc:permissions; 31 is an edit share.
+    assert _row(ocm_stack, offer["id"])["state"] == "active"
+    assert _row(ocm_stack, offer["id"])["access"] == "write"
+    assert _credential_names(ocm_stack, offer["id"]) == [f"ocm_share_{offer['id']}"]
+    assert accepted.json()["notified"] is True
+
+    # Unsharing on Nextcloud posts SHARE_UNSHARED with the share's secret.
+    nextcloud._ocs(f"/ocs/v2.php/apps/files_sharing/api/v1/shares/{share_id}",
+                   user=nextcloud.test_user, method="DELETE")
+    deadline = time.monotonic() + ACCEPT_WAIT_SECONDS
+    while _row(ocm_stack, offer["id"])["state"] != "revoked" and time.monotonic() < deadline:
+        time.sleep(2)
+    revoked = _row(ocm_stack, offer["id"])
+    assert (revoked["state"], revoked["last_reason"]) == ("revoked", "remote_unshared"), (
+        "the unshare did not reach istota; Nextcloud logs:\n"
+        + ocm_stack.logs(tail=40, service="nextcloud"))
+    assert _credential_names(ocm_stack, offer["id"]) == []
+
+
+def test_a_read_share_is_accepted_read_only_and_removing_ends_it(ocm_stack, web):
+    _folder, share_id, offer = _share_folder(ocm_stack, permissions=1)
+    accepted = web.post(f"{API}/settings/sharing/folders/{offer['id']}/accept",
+                        json={"allow_scheduled": False})
+    assert accepted.status_code == 200, accepted.text
+    assert _row(ocm_stack, offer["id"])["access"] == "read"
+
+    removed = web.delete(f"{API}/settings/sharing/folders/{offer['id']}")
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["notified"] is True
+    assert _row(ocm_stack, offer["id"])["state"] == "revoked"
+    # Nextcloud deletes the share on SHARE_DECLINED: the owner's list no longer has it.
+    nextcloud = ocm_stack.service("nextcloud")
+    listed = nextcloud._ocs("/ocs/v2.php/apps/files_sharing/api/v1/shares",
+                            user=nextcloud.test_user)
+    assert all(int(s["id"]) != share_id for s in (listed.data or []))
