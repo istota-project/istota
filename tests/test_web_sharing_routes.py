@@ -310,7 +310,7 @@ def _state(config, source_id, user="alice"):  # noqa: F811
 
 
 async def test_accept_lists_the_share_and_never_returns_the_secret(  # noqa: F811
-        signed_client, config, ocm_sender, sandboxed):
+        signed_client, config, ocm_sender, sandboxed):  # noqa: F811
     config.sharing.ocm.enabled = True
     source_id = _offer_from(config, ocm_sender)
     # The bell's Accept posts to this same path with this same body.
@@ -356,7 +356,7 @@ async def test_a_secret_the_host_refuses_is_a_409(signed_client, config, ocm_sen
 
 
 async def test_an_unsandboxed_multi_user_stack_refuses_and_says_why(  # noqa: F811
-        signed_client, config, ocm_sender, monkeypatch):
+        signed_client, config, ocm_sender, monkeypatch):  # noqa: F811
     monkeypatch.setattr("istota.credentials.names.tasks_sandboxed", lambda _config: False)
     config.sharing.ocm.enabled = True
     source_id = _offer_from(config, ocm_sender)
