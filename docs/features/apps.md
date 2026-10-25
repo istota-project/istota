@@ -48,6 +48,19 @@ The read capabilities have limits of their own. `kv:read` never reaches a reserv
 
 An app reads them through the kit: `istota.kv.read(namespace, key)` and `istota.kv.readList(namespace, {prefix})`, `istota.files.listShared(folder, path)` and `istota.files.readShared(folder, path, {encoding})`, and `istota.calendar.list({from, to, calendar})`, where `calendar` names the calendar in a `calendar:read:<name>` capability and is left out for `calendar:read`. The namespace and folder are the ones the manifest names; for a folder you changed when granting it, the app still names its own and reads the one you chose.
 
+The `skill:` operations are these six, and no others:
+
+| Capability | Arguments | Answers |
+| --- | --- | --- |
+| `skill:markets.quote` | `symbols`, a list of 1 to 20 market symbols | `{quotes: [{symbol, name, price, change, change_percent, timestamp}]}`; a symbol that fails to fetch is left out |
+| `skill:health.trend` | `name` (a biomarker or one of its aliases), optional `since` and `until` as `YYYY-MM-DD` | `{name, display_name, unit, points: [{drawn_at, value, unit, flag}]}`, confirmed panels only |
+| `skill:location.current` | none | `{last_ping, current_visit}` |
+| `skill:location.places` | none | `{places: [{id, name, lat, lon, radius_meters, category, notes}]}` |
+| `skill:memory_search.facts` | optional `subject` and `predicate` | `{facts: [...], truncated}`, the facts Istota holds as current |
+| `skill:memory_search.timeline` | `subject` | `{subject, facts: [...], truncated}`, every fact about it, past ones included |
+
+An app calls one with `istota.skill(operation, args)`, such as `istota.skill('markets.quote', {symbols: ['AAPL']})`. An argument the operation does not take is refused. `health.trend` answers `not_found` when Health is off for you, and both `location.` operations when Location is; any of the six does when you or the operator turned its skill off. A health capability is shown under a warning on the approval screen.
+
 **Activity** in an app's menu lists its last 200 calls, with the capability, the operation and whether it was answered, and the errors its current version reported. A call's arguments are never stored, so Activity says what an app asked for, not which keys or files.
 
 There are no write capabilities on anything outside an app's own storage: an app cannot post to a room, send email, or write to your calendar, and it cannot ask Istota to do any of those things on its behalf.

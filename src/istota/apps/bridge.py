@@ -41,6 +41,7 @@ from zoneinfo import ZoneInfo
 
 from istota import db as framework_db
 from istota.apps import db as apps_db
+from istota.apps import skill_caps
 from istota.apps.capabilities import CapabilityError, parse_capability, split_capability
 from istota.apps.install import DATA, kv_namespace
 from istota.lib.du import tree_bytes
@@ -94,6 +95,7 @@ class CallContext:
     user_id: str
     app_id: str
     scope: object
+    capability: str = ""
 
 
 def _bad_args(message: str) -> BridgeError:
@@ -511,10 +513,39 @@ def _calendar_list(ctx: CallContext, args: dict) -> dict:
     }
 
 
+# -- skill:<skill>.<op> ---------------------------------------------------------
+#
+# One op, ``call``. The operation is the capability's own scope, and the
+# stored grant must name that same operation: a row rewritten to name another
+# one is refused rather than run under the first one's approval.
+
+
+def _skill_call(ctx: CallContext, args: dict) -> object:
+    requested = split_capability(ctx.capability).scope
+    scope = ctx.scope
+    if not isinstance(scope, str) or scope != requested:
+        raise BridgeError("not_granted", "This app has not been given that operation.")
+    try:
+        parse_capability(f"skill:{scope}", bot_dir=ctx.config.bot_dir_name)
+    except CapabilityError:
+        raise BridgeError("not_granted", "This app may not call that operation.") from None
+    cap = skill_caps.SKILL_CAPS[scope]
+    user = ctx.config.get_user(ctx.user_id)
+    disabled = set(ctx.config.disabled_skills) | set(user.disabled_skills if user else ())
+    if cap.skill in disabled:
+        raise BridgeError("not_found", f"The {cap.skill} skill is turned off for you.")
+    try:
+        values = skill_caps.check_args(cap.arg_schema, args)
+        return cap.handler(ctx.config, ctx.user_id, values)
+    except skill_caps.BadArgs as exc:
+        raise _bad_args(str(exc)) from None
+    except skill_caps.Unavailable as exc:
+        raise BridgeError("not_found", str(exc)) from None
+
+
 Handler = Callable[[CallContext, dict], object]
 
-#: ``(capability family, op)`` to its handler. Stage 15 adds the ``skill``
-#: operations.
+#: ``(capability family, op)`` to its handler.
 HANDLERS: dict[tuple[str, str], Handler] = {
     ("kv:own", "get"): _kv_get,
     ("kv:own", "set"): _kv_set,
@@ -529,6 +560,7 @@ HANDLERS: dict[tuple[str, str], Handler] = {
     ("files:read", "list"): _files_read_list,
     ("files:read", "read"): _files_read_read,
     ("calendar:read", "list"): _calendar_list,
+    ("skill", "call"): _skill_call,
 }
 
 
@@ -555,7 +587,9 @@ def _answer(config, user_id, conn, app, *, version, capability, op, args, when) 
             retry_after = max(1, math.ceil((oldest + RATE_WINDOW - when).total_seconds()))
         raise BridgeError("rate_limited", "This app is calling too often.", retry_after=retry_after)
 
-    return handler(CallContext(config, user_id, app["app_id"], grants[capability]), args)
+    return handler(
+        CallContext(config, user_id, app["app_id"], grants[capability], capability=capability), args,
+    )
 
 
 def _recorded_name(value: object) -> str:

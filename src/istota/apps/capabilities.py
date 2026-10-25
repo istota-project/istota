@@ -15,22 +15,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from istota.apps.skill_caps import SKILL_CAPS
 from istota.sandbox.confined import valid_part
 from istota.sandbox.kv_namespaces import is_reserved_namespace
 
 #: Written to ``app_grants`` for every version without asking.
 ALWAYS_GRANTED = ("kv:own", "files:own")
 
-#: The read-only skill operations an app may name. ``apps/skill_caps.py``
-#: (stage 15) supplies a handler for each, and its keys must equal this set.
-SKILL_OPERATIONS = frozenset({
-    "markets.quote",
-    "health.trend",
-    "location.current",
-    "location.places",
-    "memory_search.facts",
-    "memory_search.timeline",
-})
+#: The read-only skill operations an app may name: ``apps/skill_caps.py``'s
+#: table, which holds each one's arguments and handler.
+SKILL_OPERATIONS = frozenset(SKILL_CAPS)
 
 #: First segments of the user's tree no ``files:read`` scope may start with.
 #: The bot directory is added per call, since its name comes from config.
@@ -154,4 +148,7 @@ def describe(cap: Capability) -> str:
 
 def is_sensitive(cap: Capability) -> bool:
     """Whether the approval screen shows this one under a warning."""
-    return cap.name == "skill" and (cap.scope or "").startswith("health.")
+    if cap.name != "skill":
+        return False
+    skill_cap = SKILL_CAPS.get(cap.scope or "")
+    return skill_cap is not None and skill_cap.sensitive
