@@ -1281,10 +1281,12 @@ class WebChatConfig:
     """
     max_prompt_chars: int = 32000
     max_attachment_mb: int = 25
-    # `webm` is what MediaRecorder produces on Chrome/Firefox for the
-    # composer's voice-message button (iOS records audio/mp4, which we name
-    # `.m4a`). Audio lands as an ordinary attachment and is transcribed by
-    # `executor._pre_transcribe_attachments` on the way into the prompt.
+    # `weba` is what the composer's voice-message button names a Chrome/Firefox
+    # recording (audio/webm; iOS records audio/mp4, which we name `.m4a`). Not
+    # `webm`: Nextcloud maps that to video/webm and runs its movie previewer on
+    # every voice note (ISSUE-830). Audio lands as an ordinary attachment and
+    # is transcribed by `executor._pre_transcribe_attachments` on the way into
+    # the prompt.
     #
     # `heic` is what an iPhone photo actually is. The mobile shell's gallery
     # picker re-encodes to JPEG so one normally never arrives, but that is the
@@ -1293,7 +1295,7 @@ class WebChatConfig:
     # for its extension with no hint that the format was the problem.
     attachment_extensions: list[str] = field(default_factory=lambda: [
         "pdf", "png", "jpg", "jpeg", "heic", "webp", "gif", "txt", "md",
-        "csv", "wav", "mp3", "m4a", "ogg", "webm", "docx", "xlsx",
+        "csv", "wav", "mp3", "m4a", "ogg", "webm", "weba", "docx", "xlsx",
     ])
     rate_limit_messages: int = 30
     rate_limit_window_seconds: int = 300
@@ -1333,6 +1335,18 @@ class WebChatConfig:
     # active when [web] token_storage = "encrypted" and the web token key
     # is provisioned.
     talk_read_sync_interval: int = 60
+
+
+def admit_weba(extensions: list[str]) -> list[str]:
+    """A list naming `webm` admits `weba` too.
+
+    Web-chat recordings were renamed `.webm` → `.weba` (ISSUE-830), and an
+    operator list written before that would otherwise refuse every Chrome or
+    Firefox voice note.
+    """
+    if "webm" in extensions and "weba" not in extensions:
+        return [*extensions, "weba"]
+    return extensions
 
 
 @dataclass
@@ -4955,6 +4969,8 @@ def _map_document(data: dict, config: Config) -> list[str]:
     _apply_legacy_brain_defaults(data, config)
     _default_broker_to_boundary(data, config)
     _default_warn_on_missing_to_authserv_id(data, config)
+    # The walk sets fields after construction, so `__post_init__` saw the default.
+    config.web.chat.attachment_extensions = admit_weba(config.web.chat.attachment_extensions)
     return unknown
 
 

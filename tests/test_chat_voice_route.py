@@ -349,6 +349,25 @@ async def test_a_file_that_is_not_allowed_audio_is_a_400(client, config, filenam
     assert _user_turns(config) == []
 
 
+async def test_a_weba_recording_is_accepted_under_the_default_config(client, config):
+    """Chrome and Firefox recordings are named `.weba` (ISSUE-830)."""
+    ebml = b"\x1a\x45\xdf\xa3" + b"\x00" * 64
+    response = await _post(client, _bearer(_voice_token(config)), filename="recording.weba", data=ebml)
+    assert response.status_code == 201, response.text
+    [stored] = _stored(config)
+    assert stored.suffix == ".weba"
+
+
+async def test_an_allowlist_naming_webm_admits_weba(client, config, monkeypatch):
+    """An operator list written before `.weba` still takes the recorder's files."""
+    from istota.config import config_from_document
+
+    loaded = config_from_document({"web": {"chat": {"attachment_extensions": ["webm"]}}})
+    monkeypatch.setattr(config.web.chat, "attachment_extensions", loaded.web.chat.attachment_extensions)
+    response = await _post(client, _bearer(_voice_token(config)), filename="recording.weba")
+    assert response.status_code == 201, response.text
+
+
 async def test_an_audio_type_off_the_allowlist_is_a_400(client, config, monkeypatch):
     monkeypatch.setattr(config.web.chat, "attachment_extensions", ["webm"])
     response = await _post(client, _bearer(_voice_token(config)))

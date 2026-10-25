@@ -733,7 +733,7 @@ Knobs for the in-app web chat surface (the "Chat" tab). The surface is always en
 |---|---|---|
 | `max_prompt_chars` | `32000` | Max characters accepted per chat message |
 | `max_attachment_mb` | `25` | Max attachment size, in MB. Application default, and the binding limit on the stack, whose nginx allows 512M (see below) |
-| `attachment_extensions` | `pdf png jpg jpeg heic webp gif txt md csv wav mp3 m4a ogg webm docx xlsx` | Allowed attachment file extensions — images (including `heic`, what an iPhone photo is), documents, text, and the audio formats a voice message arrives in |
+| `attachment_extensions` | `pdf png jpg jpeg heic webp gif txt md csv wav mp3 m4a ogg webm weba docx xlsx` | Allowed attachment file extensions — images (including `heic`, what an iPhone photo is), documents, text, and the audio formats a voice message arrives in. A list naming `webm` also admits `weba`, the name a Chrome or Firefox voice recording is stored under |
 | `rate_limit_messages` | `30` | Messages allowed per user per window |
 | `rate_limit_window_seconds` | `300` | Rate-limit window (5 minutes) |
 | `sse_poll_interval_ms` | `200` | Server-side `task_events` poll cadence for the SSE stream |

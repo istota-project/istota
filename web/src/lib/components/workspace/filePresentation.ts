@@ -25,7 +25,10 @@ export function fileIcon(name: string, mime: string | null = null) {
     return FileImage;
   if (mime?.startsWith('video/') || ['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v'].includes(ext))
     return FileVideo;
-  if (mime?.startsWith('audio/') || ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac'].includes(ext))
+  if (
+    mime?.startsWith('audio/') ||
+    ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'weba'].includes(ext)
+  )
     return FileAudio;
   if (['zip', 'gz', 'tar', '7z', 'rar', 'bz2', 'xz'].includes(ext)) return FileArchive;
   if (

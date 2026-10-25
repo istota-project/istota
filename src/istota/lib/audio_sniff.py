@@ -45,7 +45,7 @@ __all__ = [
 
 
 AUDIO_EXTENSIONS: frozenset[str] = frozenset(
-    {"mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"}
+    {"mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "weba", "mp4", "aac", "wma"}
 )
 """Suffixes the executor pre-transcribes. Equal to whisper's `file_types`."""
 
@@ -61,11 +61,13 @@ EXTENSION_BY_MEDIA_TYPE: dict[str, str] = {
     "audio/mp4": "m4a",
     "audio/wav": "wav",
     "audio/flac": "flac",
-    "audio/webm": "webm",
+    "audio/webm": "weba",
 }
 """The suffix a sniffed file is given. Every value is in `AUDIO_EXTENSIONS`.
 
 `ogg` rather than `opus` for a voice note: the suffix names the container.
+`weba` rather than `webm`: Nextcloud maps `.webm` to video/webm and runs its
+movie previewer on the copy in the inbox (ISSUE-830).
 """
 
 # Enough for every signature here (the `ftyp` brand ends at 12, `WAVE` at 12),

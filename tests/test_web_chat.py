@@ -2391,18 +2391,18 @@ class TestChatAttachments:
 
     async def test_stored_name_keeps_the_uploaded_stem(self, chat_client):
         """The inbox is human-browsable: a voice message reads as
-        `voice-…-<rand>.webm`, not a bare UUID."""
+        `voice-…-<rand>.weba`, not a bare UUID."""
         import os
         cookies = await _login(chat_client, "alice")
         resp = await chat_client.post(
             "/istota/api/chat/attachments",
-            files={"file": ("voice-20260726-131512.webm", b"OggS", "audio/webm")},
+            files={"file": ("voice-20260726-131512.weba", b"OggS", "audio/webm")},
             cookies=cookies, headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 200
         stored = os.path.basename(resp.json()["path"])
         assert stored.startswith("voice-20260726-131512-")
-        assert stored.endswith(".webm")
+        assert stored.endswith(".weba")
 
     async def test_two_same_named_uploads_do_not_collide(self, chat_client):
         cookies = await _login(chat_client, "alice")

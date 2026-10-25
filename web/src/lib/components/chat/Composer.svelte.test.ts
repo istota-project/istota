@@ -152,12 +152,12 @@ beforeEach(() => {
     model_aliases: [],
   });
   upload.mockReset();
-  upload.mockResolvedValue({ path: 'inbox/voice.webm', name: 'voice.webm', size: 12 });
+  upload.mockResolvedValue({ path: 'inbox/voice.weba', name: 'voice.weba', size: 12 });
   chatConfig.mockReset();
   chatConfig.mockResolvedValue({
     max_prompt_chars: 32000,
     max_attachment_mb: 25,
-    attachment_extensions: ['jpg', 'jpeg', 'png', 'pdf', 'webm'],
+    attachment_extensions: ['jpg', 'jpeg', 'png', 'pdf', 'webm', 'weba'],
     client_poll_interval_ms: 1500,
   });
 });
@@ -918,7 +918,7 @@ describe('Composer voice message', () => {
     await tick();
 
     expect(upload).toHaveBeenCalledTimes(1);
-    expect((upload.mock.calls[0][0] as File).name).toMatch(/\.webm$/);
+    expect((upload.mock.calls[0][0] as File).name).toMatch(/\.weba$/);
     expect(container.querySelector('.rec-overlay')).toBeNull();
 
     // An audio-only message is sendable with no text at all.
@@ -928,7 +928,7 @@ describe('Composer voice message', () => {
     // chip can link at the file endpoint without a second round trip.
     expect(onSend).toHaveBeenCalledWith(
       '',
-      [{ path: 'inbox/voice.webm', name: 'voice.webm', size: 12 }],
+      [{ path: 'inbox/voice.weba', name: 'voice.weba', size: 12 }],
       null,
     );
   });

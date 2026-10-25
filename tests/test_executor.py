@@ -1781,6 +1781,15 @@ class TestPreTranscribeAttachments:
         assert mock_transcribe.call_args[0][0] == "/tmp/voice.mp3"
 
     @patch(_TRANSCRIBE_PATCH)
+    def test_a_weba_voice_note_is_transcribed(self, mock_transcribe):
+        """The web recorder names webm audio `.weba` (ISSUE-830); a suffix
+        missing from the screen is skipped in silence."""
+        mock_transcribe.return_value = {"status": "ok", "text": "water the plants"}
+        result = _pre_transcribe_attachments(["/tmp/voice.weba"], "[voice.weba]")
+        assert "water the plants" in result
+        assert mock_transcribe.call_count == 1
+
+    @patch(_TRANSCRIBE_PATCH)
     def test_the_task_identity_is_handed_to_the_runner(self, mock_transcribe, tmp_path):
         """The child is a skill CLI and its path argument is scoped.
 

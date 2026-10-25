@@ -33,6 +33,20 @@ class TestConfigDefaults:
         assert cfg.nextcloud.username == ""
         assert cfg.nextcloud.app_password == ""
 
+    def test_web_chat_allows_weba_by_default(self):
+        assert "weba" in Config().web.chat.attachment_extensions
+
+    def test_loaded_web_chat_list_naming_webm_also_allows_weba(self, tmp_path):
+        """ISSUE-830: the recorder's webm audio is named `.weba` now."""
+        path = tmp_path / "config.toml"
+        path.write_text('[web.chat]\nattachment_extensions = ["pdf", "webm"]\n')
+        assert load_config(path).web.chat.attachment_extensions == ["pdf", "webm", "weba"]
+
+    def test_loaded_web_chat_list_without_webm_is_left_alone(self, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text('[web.chat]\nattachment_extensions = ["pdf"]\n')
+        assert load_config(path).web.chat.attachment_extensions == ["pdf"]
+
     def test_default_talk_config(self):
         cfg = Config()
         assert cfg.talk.enabled is True

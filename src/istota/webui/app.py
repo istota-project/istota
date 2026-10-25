@@ -13343,7 +13343,7 @@ def _save_chat_attachment(username: str, filename: str, data: bytes) -> str:
     day = date.today().isoformat()
     dest_dir = _chat_attachment_dir(username, day)
     # Lead with the uploaded name so the inbox is browsable (a voice message
-    # reads as `voice-20260726-131512-a3f91c02.webm`, not a bare UUID), and
+    # reads as `voice-20260726-131512-a3f91c02.weba`, not a bare UUID), and
     # keep a random suffix so two same-named uploads in one day can't collide.
     stem = _attachment_stem(filename)
     suffix = uuid.uuid4().hex[:8] if stem else uuid.uuid4().hex
