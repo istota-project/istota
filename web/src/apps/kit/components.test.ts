@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 const KIT = join(process.cwd(), 'src', 'apps', 'kit');
 
@@ -152,6 +152,81 @@ describe('istota-form', () => {
     form.dispatchEvent(submit);
     expect(submit.defaultPrevented).toBe(true);
     expect(seen).toEqual([{ text: 'rain', tag: ['a', 'b'] }]);
+  });
+
+  // Chromium and Firefox fire no submit event in a frame sandboxed without
+  // allow-forms, which an app's frame always is. A capturing listener that
+  // stops every submit stands in for that here.
+  describe('in a frame that fires no submit event', () => {
+    const swallow = (event: Event) => event.stopImmediatePropagation();
+    beforeAll(() => window.addEventListener('submit', swallow, true));
+    afterAll(() => window.removeEventListener('submit', swallow, true));
+
+    function form(extra = '') {
+      const host = mount(`
+        <istota-form><form>
+          <label><span>Text</span><input name="text" value="rain"></label>
+          <label><span>Notes</span><textarea name="notes">wet</textarea></label>
+          ${extra}
+          <istota-button type="submit">Add</istota-button>
+        </form></istota-form>`);
+      const seen: unknown[] = [];
+      host
+        .querySelector('istota-form')!
+        .addEventListener('istota-submit', (event) => seen.push((event as CustomEvent).detail));
+      return { host, seen };
+    }
+
+    it('hands the values over from a click on the submit button', () => {
+      const { host, seen } = form();
+      host.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+      expect(seen).toEqual([{ text: 'rain', notes: 'wet' }]);
+    });
+
+    it('hands the values over from Enter in a text field, but not in a textarea', () => {
+      const { host, seen } = form();
+      const enter = () =>
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+      const inTextarea = enter();
+      host.querySelector('textarea')!.dispatchEvent(inTextarea);
+      expect(seen).toEqual([]);
+      expect(inTextarea.defaultPrevented).toBe(false);
+      const inInput = enter();
+      host.querySelector('input')!.dispatchEvent(inInput);
+      expect(inInput.defaultPrevented).toBe(true);
+      expect(seen).toEqual([{ text: 'rain', notes: 'wet' }]);
+    });
+
+    it('does not hand over a form that fails its own validation', () => {
+      const { host, seen } = form('<label><span>Due</span><input name="due" required></label>');
+      host.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+      expect(seen).toEqual([]);
+    });
+
+    it('ignores a plain button', () => {
+      const { host, seen } = form('<istota-button>Other</istota-button>');
+      host.querySelector<HTMLButtonElement>('button[type="button"]')!.click();
+      expect(seen).toEqual([]);
+    });
+  });
+
+  it('emits once where the native submit event does fire', () => {
+    const host = mount(`
+      <istota-form><form>
+        <input name="text" value="rain">
+        <button type="submit">Add</button>
+      </form></istota-form>`);
+    const seen: unknown[] = [];
+    host
+      .querySelector('istota-form')!
+      .addEventListener('istota-submit', (event) => seen.push((event as CustomEvent).detail));
+    host.querySelector('button')!.click();
+    host
+      .querySelector('input')!
+      .dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      );
+    expect(seen).toEqual([{ text: 'rain' }, { text: 'rain' }]);
   });
 });
 

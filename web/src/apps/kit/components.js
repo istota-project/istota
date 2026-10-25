@@ -134,23 +134,92 @@
     }
   }
 
+  // Input types where Enter submits the form, as the browser's implicit submission does.
+  const ENTER_SUBMITS = [
+    'text',
+    'search',
+    'url',
+    'tel',
+    'email',
+    'password',
+    'number',
+    'date',
+    'time',
+    'datetime-local',
+    'month',
+    'week',
+  ];
+
+  // Chromium and Firefox fire no submit event at all in a frame sandboxed
+  // without allow-forms, which an app's frame always is; WebKit does. So the
+  // form takes the two things that submit, a submit button's click and Enter in
+  // a field, itself, and cancels them, which also stops the native submit where
+  // it would have fired: one `istota-submit` either way. The submit listener
+  // stays for an app that calls `requestSubmit()` in a browser that fires it.
   class IstotaForm extends CompactElement {
     connectedCallback() {
       super.connectedCallback();
       this.addEventListener('submit', this.onSubmit);
+      this.addEventListener('click', this.onClick);
+      this.addEventListener('keydown', this.onKeyDown);
     }
 
     disconnectedCallback() {
       super.disconnectedCallback();
       this.removeEventListener('submit', this.onSubmit);
+      this.removeEventListener('click', this.onClick);
+      this.removeEventListener('keydown', this.onKeyDown);
     }
 
-    // The CSP's `form-action 'none'` refuses a real submission; hand the values over.
+    /** @param {Element | null | undefined} form */
+    ownForm(form) {
+      return form instanceof HTMLFormElement && this.contains(form) ? form : null;
+    }
+
     /** @param {Event} event */
     onSubmit = (event) => {
-      const form = event.target;
-      if (!(form instanceof HTMLFormElement)) return;
+      const form = this.ownForm(/** @type {Element} */ (event.target));
+      if (!form) return;
+      // The CSP's `form-action 'none'` refuses a real submission anyway.
       event.preventDefault();
+      this.emit(form);
+    };
+
+    /** @param {Event} event */
+    onClick = (event) => {
+      const target = /** @type {Element} */ (event.target);
+      const button = target instanceof Element ? target.closest('button, input') : null;
+      if (!(button instanceof HTMLButtonElement || button instanceof HTMLInputElement)) return;
+      if (button.type !== 'submit' || button.disabled) return;
+      const form = this.ownForm(button.form);
+      if (!form) return;
+      event.preventDefault();
+      this.submit(form);
+    };
+
+    /** @param {KeyboardEvent} event */
+    onKeyDown = (event) => {
+      if (event.key !== 'Enter' || event.isComposing || event.defaultPrevented) return;
+      const field = event.target;
+      if (!(field instanceof HTMLInputElement) || !ENTER_SUBMITS.includes(field.type)) return;
+      const form = this.ownForm(field.form);
+      if (!form) return;
+      event.preventDefault();
+      this.submit(form);
+    };
+
+    // The browser checks a form's constraints before it submits; so does this.
+    /** @param {HTMLFormElement} form */
+    submit(form) {
+      if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+      }
+      this.emit(form);
+    }
+
+    /** @param {HTMLFormElement} form */
+    emit(form) {
       /** @type {Record<string, FormDataEntryValue | FormDataEntryValue[]>} */
       const values = {};
       for (const [name, value] of new FormData(form)) {
@@ -160,7 +229,7 @@
         else values[name] = [seen, value];
       }
       this.dispatchEvent(new CustomEvent('istota-submit', { detail: values, bubbles: true }));
-    };
+    }
   }
 
   const FOCUSABLE =
