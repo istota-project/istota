@@ -9788,6 +9788,51 @@ def check_mail_account_isolation(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def check_sharing_ics_feeds(config: "Config", probe: bool) -> CheckResult:
+    """How the ICS feeds users shared with Istota are doing, as counts by state.
+
+    Never a URL, a host or a calendar's name: the address is a bearer secret
+    and the rest belongs to the user. WARNs when there are feeds and none of
+    them is answering, which points at the daemon's own egress (or a
+    `[sharing] private_hosts` entry) rather than at one provider.
+    """
+    name = "sharing.ics_feeds"
+    db_path = Path(config.db_path)
+    if not db_path.exists():
+        return CheckResult(name, SKIP, f"no framework database at {db_path}")
+    try:
+        conn = sqlite_util.connect_read_only(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT state, COUNT(*) FROM shared_sources WHERE kind = 'ics_feed'"
+                " GROUP BY state"
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - a check never raises
+        return CheckResult(
+            name, WARN, f"could not read the shared sources ({type(exc).__name__})",
+            remedy=(
+                "Check `runtime.framework_db`; a missing table means the "
+                "database has not been migrated, which `istota init` does."
+            ),
+        )
+    counts = {state: count for state, count in rows}
+    active, failing = counts.get("active", 0), counts.get("error", 0)
+    if not active and not failing:
+        return CheckResult(name, OK, "no calendar feeds are subscribed")
+    detail = f"{active} calendar feed(s) answering, {failing} failing"
+    if failing and not active:
+        return CheckResult(
+            name, WARN, detail + "; none is answering",
+            remedy=(
+                "Check that the daemon can reach the internet over https; a feed "
+                "on an internal host needs that host in `[sharing] private_hosts`."
+            ),
+        )
+    return CheckResult(name, OK, detail)
+
+
 def check_email_address_uniqueness(config: "Config", probe: bool) -> CheckResult:
     """Whether any email address is held by more than one user.
 
@@ -10150,6 +10195,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("talk.signaling_watchers", check_signaling_watchers),
     ("nextcloud.connection", check_nextcloud_connection),
     ("servarr.connection", check_servarr_connection),
+    ("sharing.ics_feeds", check_sharing_ics_feeds),
     ("sms.common", check_sms_common),
     ("sms.twilio", check_sms_twilio),
     ("sms.telnyx", check_sms_telnyx),
@@ -10298,6 +10344,8 @@ CHECK_SCOPES: dict[str, str] = {
     "nextcloud.connection": DEPLOYMENT,
     # Reaches the configured arr apps: an install's own stack.
     "servarr.connection": DEPLOYMENT,
+    # Reads the framework database: a fact about this install's users.
+    "sharing.ics_feeds": DEPLOYMENT,
     "sms.common": DEPLOYMENT,
     "sms.twilio": DEPLOYMENT,
     "sms.telnyx": DEPLOYMENT,
