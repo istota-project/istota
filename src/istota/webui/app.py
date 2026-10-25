@@ -15702,12 +15702,26 @@ def _sharing_listing(user_id: str) -> dict:
     from istota.credentials import store as secrets_store
     from istota.sharing import sources
 
+    from istota.sharing import events
+
     with db.get_db(_config.db_path) as conn:
         feeds = sources.sources_for_user(conn, user_id, kinds=("ics_feed",))
+        feed_link = events.token_info(conn, user_id)
+    profile = user_profiles.get_profile(_config.db_path, user_id)
+    delivery = profile.calendar_delivery if profile is not None else "invite"
     return {
         "feeds": [_shared_feed_dict(feed) for feed in feeds],
         "max_feeds": _config.sharing.ics_max_feeds_per_user,
         "can_add": secrets_store.secret_key_available(),
+        # Istota's own calendar. The feed link's token is shown once, when made.
+        "calendar": {
+            "delivery": delivery,
+            "effective_delivery": events.effective_delivery(_config, delivery),
+            "email_enabled": bool(_config.email.enabled),
+            "feed": feed_link,
+            "can_link": bool(_config.site.hostname),
+            "reachable_elsewhere": events.feed_reachable_elsewhere(_config),
+        },
     }
 
 
@@ -15796,6 +15810,85 @@ async def settings_sharing_feed_remove(ident: str, user: dict = Depends(_require
     if not removed:
         return _sharing_refusal(404, "not_found", "Calendar not found")
     return JSONResponse({"removed": True}, headers=_NO_STORE)
+
+
+def _issue_calendar_feed(user_id: str) -> str:
+    from istota import db
+    from istota.sharing import events
+
+    with db.get_db(_config.db_path) as conn:
+        token = events.issue_token(conn, user_id)
+        conn.commit()
+    return events.feed_url(_config, token)
+
+
+def _revoke_calendar_feed(user_id: str) -> bool:
+    from istota import db
+    from istota.sharing import events
+
+    with db.get_db(_config.db_path) as conn:
+        removed = events.revoke_token(conn, user_id)
+        conn.commit()
+    return removed
+
+
+@api_router.post("/settings/sharing/calendar-feed")
+async def settings_sharing_calendar_feed(user: dict = Depends(_require_api_auth),
+                                         _csrf: None = Depends(_verify_origin)):
+    """Make the user's Istota calendar feed link, or replace it; the URL is shown this once."""
+    if _config is None or not _config.db_path:
+        return _sharing_refusal(503, "unavailable", "Config not loaded")
+    if not _config.site.hostname:
+        return _sharing_refusal(503, "no_hostname", "This server has no public name to link to.")
+    try:
+        url = await asyncio.to_thread(_issue_calendar_feed, user["username"])
+    except Exception as exc:
+        logger.error("calendar feed link failed: %s", type(exc).__name__)
+        return _sharing_refusal(500, "error", "The feed link could not be made.")
+    return JSONResponse({"url": url}, status_code=201, headers=_NO_STORE)
+
+
+@api_router.delete("/settings/sharing/calendar-feed")
+async def settings_sharing_calendar_feed_remove(user: dict = Depends(_require_api_auth),
+                                                _csrf: None = Depends(_verify_origin)):
+    if _config is None or not _config.db_path:
+        return _sharing_refusal(503, "unavailable", "Config not loaded")
+    try:
+        removed = await asyncio.to_thread(_revoke_calendar_feed, user["username"])
+    except Exception as exc:
+        logger.error("calendar feed link removal failed: %s", type(exc).__name__)
+        return _sharing_refusal(500, "error", "The feed link could not be removed.")
+    if not removed:
+        return _sharing_refusal(404, "not_found", "There is no feed link.")
+    return JSONResponse({"removed": True}, headers=_NO_STORE)
+
+
+def _set_calendar_delivery(user_id: str, delivery: str) -> None:
+    user_profiles.ensure_profile(_config.db_path, user_id)
+    user_profiles.update_profile(_config.db_path, user_id, calendar_delivery=delivery)
+
+
+@api_router.put("/settings/sharing/delivery")
+async def settings_sharing_delivery(request: Request, user: dict = Depends(_require_api_auth),
+                                    _csrf: None = Depends(_verify_origin)):
+    """How events on Istota's calendar reach the user: ``invite`` or ``feed``."""
+    if _config is None or not _config.db_path:
+        return _sharing_refusal(503, "unavailable", "Config not loaded")
+    try:
+        body = json.loads(await read_bounded_body(request, 1024))
+    except BodyError as exc:
+        return _sharing_refusal(exc.status, "invalid_body", exc.message)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return _sharing_refusal(400, "invalid_body", "The request body is not JSON")
+    if (not isinstance(body, dict) or set(body) != {"delivery"}
+            or body["delivery"] not in user_profiles.CALENDAR_DELIVERY_VALUES):
+        return _sharing_refusal(400, "invalid_body", "The request needs a delivery of invite or feed")
+    try:
+        await asyncio.to_thread(_set_calendar_delivery, user["username"], body["delivery"])
+    except Exception as exc:
+        logger.error("calendar delivery update failed: %s", type(exc).__name__)
+        return _sharing_refusal(500, "error", "The choice could not be saved.")
+    return JSONResponse({"delivery": body["delivery"]}, headers=_NO_STORE)
 
 
 @api_router.get("/settings/credentials")
@@ -16597,6 +16690,9 @@ _PROFILE_FIELD_SPECS: dict[str, dict] = {
     },
     "relay_delivery":         {
         "type": "enum", "values": user_profiles.RELAY_DELIVERY_VALUES,
+    },
+    "calendar_delivery":      {
+        "type": "enum", "values": user_profiles.CALENDAR_DELIVERY_VALUES,
     },
     # A folder below My files, walked with no link followed; '' clears it.
     "quick_notes_folder":     {"type": "workspace_folder"},
@@ -18813,6 +18909,14 @@ from istota.briefings.admin_routes import step_up_gate as _admin_briefings_step_
 
 app.include_router(_admin_briefings_router, prefix="/istota/api", tags=["briefings"])
 app.dependency_overrides[_admin_briefings_step_up] = lambda: _require_step_up
+
+# The Istota calendar feed: a public route, its token the whole credential
+# (`sharing/feed_routes.py`). Before the static mount, which would take the path.
+from istota.sharing import feed_routes as _feed_routes
+
+app.include_router(_feed_routes.router)
+app.dependency_overrides[_feed_routes.current_config] = lambda: _config
+app.dependency_overrides[_feed_routes.client_address] = _client_ip
 
 # Serve SvelteKit build as static files (catch-all for SPA routing)
 if _STATIC_DIR.is_dir():

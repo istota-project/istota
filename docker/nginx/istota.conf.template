@@ -107,6 +107,21 @@ location = /istota/auth/set-password {
     proxy_set_header X-Forwarded-Proto $forwarded_proto;
 }
 
+# A user's Istota calendar feed (/istota/calendar/<token>.ics): the token in
+# the path is the feed's whole credential, so this path has no access log
+# either. Read by calendar apps with no session; no starting page, for the
+# reason set-password has none.
+location ^~ /istota/calendar/ {
+    access_log off;
+    client_max_body_size 1k;
+    proxy_pass http://$upstream_web;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $forwarded_proto;
+}
+
 # The web UI. The SvelteKit build is served under base /istota, so proxy_pass
 # carries no path component and the URI is kept. `absolute_redirect off` for the
 # reason given at /standalone-signaling/: `/istota` is what people type.

@@ -956,6 +956,7 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     outbound_approval TEXT NOT NULL DEFAULT '',          -- outbound email approval: '' = unset (follow [email] outbound_approval_floor) | off | untrusted | all
     external_turn_display TEXT NOT NULL DEFAULT 'collapsed', -- external-origin turn body in web chat: full | collapsed | hidden (the turn itself always renders)
     relay_delivery TEXT NOT NULL DEFAULT '',             -- where relay questions from other users reach this user: '' (asker's choice) | room | whatsapp | sms
+    calendar_delivery TEXT NOT NULL DEFAULT 'invite',    -- how events on Istota's calendar reach this user: invite | feed (feed whenever [email] is off)
     default_briefings INTEGER NOT NULL DEFAULT 1,        -- seed the shared [[default_briefings]] set into this user
     briefing_email_html INTEGER NOT NULL DEFAULT 1,      -- briefing email as multipart/alternative (HTML + plain) vs plain only
     show_nav_unread_badges INTEGER NOT NULL DEFAULT 0,
@@ -2859,4 +2860,39 @@ CREATE TABLE IF NOT EXISTS shared_feed_cache (
     etag TEXT,
     last_modified TEXT,
     fetched_at TEXT NOT NULL
+);
+
+-- Single events Istota organizes for a user (istota.sharing.events), written
+-- by the calendar skill's deferred ops and applied by the scheduler, which
+-- takes the user from the task and refuses a UID another user owns. Times are
+-- UTC (`...Z`), or dates for an all-day event. The feed at
+-- /istota/calendar/<token>.ics carries the confirmed ones.
+CREATE TABLE IF NOT EXISTS istota_events (
+    id INTEGER PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    uid TEXT NOT NULL UNIQUE,
+    sequence INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed', 'cancelled')),
+    summary TEXT NOT NULL,
+    description TEXT,
+    location TEXT,
+    dtstart TEXT NOT NULL,             -- UTC ISO 8601, or YYYY-MM-DD when all_day
+    dtend TEXT,
+    all_day INTEGER NOT NULL DEFAULT 0,
+    attendee_status TEXT,              -- last authenticated PARTSTAT
+    invite_status TEXT,                -- sent | send_failed | no_address | feed; NULL = no invitation yet
+    created_by_task INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    cancelled_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_istota_events_user ON istota_events(user_id, status);
+
+-- The bearer token of each user's Istota calendar feed, as its SHA-256 digest
+-- only. One live token per user; a reset replaces the row.
+CREATE TABLE IF NOT EXISTS calendar_feed_tokens (
+    user_id TEXT PRIMARY KEY,
+    token_sha256 TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at TEXT
 );

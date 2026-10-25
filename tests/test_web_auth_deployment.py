@@ -83,11 +83,41 @@ def test_nginx_negative_control(path, token_path):
         assert_nginx_suppression(broken)
 
 
+# The calendar feed carries its bearer token in the path, so every request line
+# under the prefix is a credential (sharing/feed_routes.py).
+TOKEN_PREFIXES = ("/istota/calendar/",)
+
+
+def assert_prefix_suppression(text):
+    for prefix in TOKEN_PREFIXES:
+        match = re.search(r"location\s+\^~\s+" + re.escape(prefix) + r"\s*\{([^}]+)\}", text)
+        assert match, f"missing token prefix location: {prefix}"
+        block = match.group(1)
+        assert "access_log off;" in block, f"token access logging enabled: {prefix}"
+        assert "proxy_pass http://$upstream_web;" in block
+        assert "error_page" not in block, f"an internal redirect would log the token: {prefix}"
+
+
+@pytest.mark.parametrize("path", NGINX)
+def test_nginx_feed_token_logs_suppressed(path):
+    text = nginx_render(path)
+    assert_prefix_suppression(text)
+    # nginx picks the prefix location for a feed URL, not /istota/'s.
+    assert "access_log off;" in nginx_location_for(text, "/istota/calendar/" + "A" * 43 + ".ics")
+    broken = text.replace("location ^~ /istota/calendar/ {\n    access_log off;",
+                          "location ^~ /istota/calendar/ {\n    access_log on;")
+    assert broken != text
+    with pytest.raises(AssertionError, match="token access logging enabled"):
+        assert_prefix_suppression(broken)
+
+
 def nginx_location_for(text, path):
     """The body of the location nginx picks for ``path``: exact, else longest prefix."""
     exact, prefixes = {}, {}
-    for match in re.finditer(r"^location\s+(=\s+)?(\S+)\s*\{(.*?)^\}", text, re.M | re.S):
-        (exact if match.group(1) else prefixes)[match.group(2)] = match.group(3)
+    # `^~` is a prefix that also stops the regex search; none of ours compete with one.
+    for match in re.finditer(r"^location\s+(=\s+|\^~\s+)?(\S+)\s*\{(.*?)^\}", text, re.M | re.S):
+        is_exact = (match.group(1) or "").startswith("=")
+        (exact if is_exact else prefixes)[match.group(2)] = match.group(3)
     if path in exact:
         return exact[path]
     best = max((p for p in prefixes if path.startswith(p)), key=len, default=None)

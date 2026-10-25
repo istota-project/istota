@@ -124,3 +124,91 @@ async def test_without_the_master_key_nothing_is_fetched(signed_client, feed_ser
 async def test_me_advertises_the_card(signed_client):
     me = await signed_client.get("/istota/api/me")
     assert me.json()["features"]["sharing"] is True
+
+
+# --- Istota's calendar: the feed link and the delivery choice ----------------
+
+FEED_LINK = f"{BASE}/calendar-feed"
+
+
+@pytest.fixture
+def fresh_feed_limits():
+    from istota.sharing import feed_routes
+
+    feed_routes.reset_limits()
+    yield
+    feed_routes.reset_limits()
+
+
+async def test_the_listing_describes_istotas_calendar(signed_client):
+    calendar = (await signed_client.get(BASE)).json()["calendar"]
+    assert calendar["delivery"] == "invite"
+    # The test config has no [email], so nothing can be sent and the feed is the route.
+    assert (calendar["effective_delivery"], calendar["email_enabled"]) == ("feed", False)
+    assert calendar["feed"] is None and calendar["reachable_elsewhere"] is True
+
+
+async def test_a_feed_link_is_shown_once_and_serves_the_feed(signed_client, fresh_feed_limits):
+    made = await signed_client.post(FEED_LINK, headers=ORIGIN)
+    assert made.status_code == 201, made.text
+    assert made.headers["cache-control"] == "no-store"
+    url = made.json()["url"]
+    assert url.startswith("https://example.com/istota/calendar/") and url.endswith(".ics")
+    token = url.rsplit("/", 1)[1].removesuffix(".ics")
+
+    listing = await signed_client.get(BASE)
+    assert token not in listing.text
+    assert listing.json()["calendar"]["feed"]["created_at"]
+
+    path = url.removeprefix("https://example.com")
+    served = await signed_client.get(path)
+    assert served.status_code == 200 and served.headers["content-type"].startswith("text/calendar")
+
+    reset = await signed_client.post(FEED_LINK, headers=ORIGIN)
+    assert reset.json()["url"] != url
+    assert (await signed_client.get(path)).status_code == 404
+
+
+async def test_removing_the_link_ends_the_feed(signed_client, fresh_feed_limits):
+    url = (await signed_client.post(FEED_LINK, headers=ORIGIN)).json()["url"]
+    removed = await signed_client.delete(FEED_LINK, headers=ORIGIN)
+    assert removed.status_code == 200
+    assert (await signed_client.get(url.removeprefix("https://example.com"))).status_code == 404
+    assert (await signed_client.delete(FEED_LINK, headers=ORIGIN)).status_code == 404
+
+
+async def test_the_feed_link_needs_the_origin_check(signed_client, config):  # noqa: F811
+    response = await signed_client.post(FEED_LINK, headers={"Origin": "https://evil.example"})
+    assert response.status_code == 403
+    with db.get_db(config.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM calendar_feed_tokens").fetchone()[0] == 0
+
+
+async def test_delivery_is_stored(signed_client, config):  # noqa: F811
+    from istota import user_profiles
+
+    response = await signed_client.put(f"{BASE}/delivery", json={"delivery": "feed"}, headers=ORIGIN)
+    assert response.status_code == 200, response.text
+    assert user_profiles.get_profile(config.db_path, "alice").calendar_delivery == "feed"
+    assert (await signed_client.get(BASE)).json()["calendar"]["delivery"] == "feed"
+
+
+@pytest.mark.parametrize("body", [
+    {"delivery": "both"}, {"delivery": "feed", "extra": 1}, {"mode": "feed"}, {"delivery": 1},
+], ids=["unknown", "extra-field", "wrong-field", "not-a-string"])
+async def test_a_bad_delivery_is_refused_and_echoes_nothing(signed_client, config, body):  # noqa: F811
+    from istota import user_profiles
+
+    response = await signed_client.put(f"{BASE}/delivery", json=body, headers=ORIGIN)
+    assert response.status_code == 400
+    assert "both" not in response.text
+    profile = user_profiles.get_profile(config.db_path, "alice")
+    assert profile is None or profile.calendar_delivery == "invite"
+
+
+async def test_a_feed_link_is_one_users(signed_client, fresh_feed_limits):
+    alices = (await signed_client.post(FEED_LINK, headers=ORIGIN)).json()["url"]
+    await login(signed_client, "bob")
+    assert (await signed_client.get(BASE)).json()["calendar"]["feed"] is None
+    assert (await signed_client.delete(FEED_LINK, headers=ORIGIN)).status_code == 404
+    assert (await signed_client.get(alices.removeprefix("https://example.com"))).status_code == 200
