@@ -639,6 +639,41 @@ class TestList:
         (data / "x.json").write_text("{}")
         assert client.get(f"{PREFIX}/").json()["drafts"] == []
 
+    def test_a_folder_holding_only_app_data_is_not_a_draft(self, config, apps_root, client):
+        data = apps_root / "tides" / "data"
+        data.mkdir(parents=True)
+        (data / "x.json").write_text("{}")
+        (apps_root / "empty").mkdir()
+        assert client.get(f"{PREFIX}/").json()["drafts"] == []
+
+        # A draft still being written, with no manifest yet, is offered.
+        (apps_root / "tides" / "index.html").write_text(INDEX)
+        body = client.get(f"{PREFIX}/").json()
+        assert body["drafts"] == [{"app_id": "tides", "name": None, "has_manifest": False, "state": "new"}]
+
+    def test_an_installed_starters_data_folder_is_not_offered_as_a_draft(self, config, apps_root, client, starter):
+        client.get(f"{PREFIX}/")
+        data = apps_root / "board" / "data"
+        data.mkdir(parents=True)
+        (data / "x.json").write_text("{}")
+        assert client.get(f"{PREFIX}/").json()["drafts"] == []
+
+        # Nor a full folder under its id: Review install would refuse it.
+        _draft(apps_root)
+        assert client.get(f"{PREFIX}/").json()["drafts"] == []
+        assert _create_pending(client).status_code == 409
+
+    def test_a_dismissed_starters_folder_is_not_offered_as_a_draft(self, config, apps_root, client, starter):
+        client.get(f"{PREFIX}/")
+        assert client.delete(f"{PREFIX}/board").status_code == 204
+        data = apps_root / "board" / "data"
+        data.mkdir(parents=True)
+        (data / "x.json").write_text("{}")
+        _draft(apps_root)
+        body = client.get(f"{PREFIX}/").json()
+        assert body["starter"] == [{"app_id": "board", "state": "dismissed"}]
+        assert body["drafts"] == []
+
     def test_a_draft_waiting_as_a_pending_install_shows_once_until_it_changes_again(self, config, apps_root, client):
         _draft(apps_root, app_id="tides", name="Tides")
         assert _create_pending(client, "tides").status_code == 201

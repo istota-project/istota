@@ -177,11 +177,22 @@ def _manifest_name(draft_fd: int) -> tuple[str | None, bool]:
     return flatten(name)[:40], True
 
 
+def _holds_draft_files(draft_fd: int) -> bool:
+    """Whether a folder holds anything but the app's own ``data/`` and ``preview/``."""
+    try:
+        with os.scandir(draft_fd) as scan:
+            return any(entry.name not in SKIPPED_TOP_LEVEL for entry in scan)
+    except OSError:
+        return False
+
+
 def list_drafts(config, user_id: str) -> list[DraftSummary]:
     """Each folder under the user's apps folder that is named like an app id, by id.
 
     Links and anything else are skipped without a word: listing is not the
-    review, and ``read_draft`` refuses them when it matters.
+    review, and ``read_draft`` refuses them when it matters. So is a folder
+    with no manifest that holds only ``data/``: an installed app's first
+    ``files:own`` write creates that, and it is no draft.
     """
     apps_fd = _apps_dir_fd(config, user_id)
     if apps_fd is None:
@@ -197,6 +208,8 @@ def list_drafts(config, user_id: str) -> list[DraftSummary]:
                 continue
             try:
                 title, has_manifest = _manifest_name(draft_fd)
+                if not has_manifest and not _holds_draft_files(draft_fd):
+                    continue
             finally:
                 os.close(draft_fd)
             drafts.append(DraftSummary(app_id=name, name=title, has_manifest=has_manifest))

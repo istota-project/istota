@@ -273,6 +273,13 @@ def _matches_source(files: dict[str, bytes], source: dict[str, str]) -> bool:
 def _draft_state(config, user_id: str, conn, summary, apps: dict, pending: dict) -> str | None:
     """``new`` or ``changed`` for a draft "All apps" should offer, else None."""
     app = apps.get(summary.app_id)
+    # A starter's id cannot be installed from a folder (Review install is a 409),
+    # and a dismissed one comes back through Reinstall, not as a draft.
+    if app is not None and app["origin"] == "starter":
+        return None
+    starter_state = apps_db.get_starter_state(conn, summary.app_id)
+    if app is None and starter_state is not None and starter_state["dismissed_at"] is not None:
+        return None
     try:
         files = read_draft(config, user_id, summary.app_id)
     except DraftError:
