@@ -20,7 +20,7 @@
   import { copyText } from '@minot/ui/clipboard';
   import { get } from 'svelte/store';
   import { callApp, reportAppError, type BridgeErrorCode } from '$lib/apps/api';
-  import { createBridge } from '$lib/apps/bridge';
+  import { createBridge, newFrameKey } from '$lib/apps/bridge';
   import { currentEnv, frameUrl, watchEnv, type AppEnv } from '$lib/apps/env';
   import { watchFrame } from '$lib/apps/frameWatch';
   import { online } from '$lib/stores/connectivity';
@@ -53,22 +53,28 @@
     frame.setAttribute('title', name);
     frame.setAttribute('referrerpolicy', 'no-referrer');
     frame.className = 'app-frame';
+    // One key per mount: the kit echoes it in its hello, and a page that
+    // navigates the frame before its first load never saw the fragment.
+    const key = newFrameKey();
 
-    const watch = watchFrame(
-      frame,
-      () => {
-        bridge.dispose();
-        frame.remove();
-        void reportAppError(id, ver, {
-          kind: 'navigated',
-          message: 'The app loaded a page other than its own.',
-        }).catch(() => {});
-        onNavigated?.();
-      },
-      () => bridge.connect(),
-    );
+    let gone = false;
+    function leave() {
+      if (gone) return;
+      gone = true;
+      bridge.dispose();
+      frame.remove();
+      void reportAppError(id, ver, {
+        kind: 'navigated',
+        message: 'The app loaded a page other than its own, or never answered the bridge.',
+      }).catch(() => {});
+      onNavigated?.();
+    }
+
+    const watch = watchFrame(frame, leave, () => bridge.connect());
 
     const bridge = createBridge({
+      nonce: key,
+      onUnresponsive: leave,
       frameWindow: () => frame.contentWindow,
       navigations: () => watch.navigations,
       online: () => get(online),
@@ -84,7 +90,7 @@
       bridge.postEnv(next);
     });
 
-    frame.src = frameUrl(id, ver, env);
+    frame.src = frameUrl(id, ver, env, key);
     host.append(frame);
 
     cleanup = () => {

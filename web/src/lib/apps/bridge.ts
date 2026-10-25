@@ -13,9 +13,16 @@
  *   grants until then. Instead `connect`, run on the frame's first `load`,
  *   posts one end of a `MessageChannel` to the frame (`'*'`, since an opaque
  *   origin cannot be named as a target), and every call, reply and `env`
- *   message after that travels on the channel. A document the frame navigated
- *   to never holds the other end, so it can neither call nor receive. The
- *   shell listens on no window for calls.
+ *   message after that travels on the channel. The shell listens on no window
+ *   for calls.
+ * - **The hello.** A page that navigates the frame before its first `load` is
+ *   the one that load belongs to, so it is handed the port. The key in the
+ *   frame's fragment (`env.frameUrl`), which the kit reads, strips and echoes
+ *   in one `hello`, tells the installed document from that page: nothing on
+ *   the port is answered or sent until the hello arrives, and a hello that
+ *   never comes within `HELLO_TIMEOUT_MS` is reported through `onUnresponsive`
+ *   so the shell can remove the frame. A page that never saw the fragment
+ *   cannot produce the key.
  * - **The shape check.** Anything that is not one of the kit's two request
  *   shapes is dropped without a reply.
  * - **Only the installed document.** After the frame has navigated, nothing
@@ -32,6 +39,24 @@ import type { AppErrorKind, BridgeFailure, CallOutcome } from './api';
 import type { AppEnv } from './env';
 
 export const PROTOCOL = 1;
+
+/** How long the installed document has to echo the fragment's key before the frame is suspect. */
+export const HELLO_TIMEOUT_MS = 4000;
+
+/**
+ * A one-time key for a frame's fragment, which the kit echoes in its `hello`.
+ *
+ * `crypto.randomUUID` is a secure-context API and the web UI is served over
+ * plain HTTP on some deployments, so a page that is not a secure context gets a
+ * key rather than a frame that never mounts.
+ */
+export function newFrameKey(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `key-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  }
+}
 
 /** Error reports forwarded per frame load; a looping app stops being heard after this. */
 export const ERROR_REPORTS_PER_LOAD = 20;
@@ -64,6 +89,12 @@ export type BridgeReply =
   | { istota: 1; id: number; ok: false; error: BridgeFailure };
 
 export interface BridgeOptions {
+  /** The one-time key in the frame's fragment, which the kit echoes in its `hello`. */
+  nonce: string;
+  /** Override `HELLO_TIMEOUT_MS` (tests shorten it). */
+  helloTimeoutMs?: number;
+  /** The frame never said hello: what loaded is not the installed document. */
+  onUnresponsive?: () => void;
   /** The frame's window: where `connect` posts the port, and nothing else. */
   frameWindow: () => Window | null;
   /** Loads after the first (`FrameWatch.navigations`). */
@@ -132,11 +163,19 @@ export interface Bridge {
 export function createBridge(options: BridgeOptions): Bridge {
   let disposed = false;
   let port: MessagePort | null = null;
+  let greeted = false;
+  let helloDeadline: ReturnType<typeof setTimeout> | null = null;
   let reportsAtLoad = -1;
   let reportsLeft = ERROR_REPORTS_PER_LOAD;
 
+  function clearDeadline() {
+    if (helloDeadline === null) return;
+    clearTimeout(helloDeadline);
+    helloDeadline = null;
+  }
+
   function post(message: unknown, askedAt: number) {
-    if (disposed || !port) return;
+    if (disposed || !port || !greeted) return;
     // The document that asked is still the one in the frame.
     if (options.navigations() !== askedAt) return;
     port.postMessage(message);
@@ -214,6 +253,15 @@ export function createBridge(options: BridgeOptions): Bridge {
     if (disposed) return;
     const askedAt = options.navigations();
     if (askedAt !== 0) return;
+    if (!greeted) {
+      // Only the installed document knows the key, so only its hello is taken.
+      if (!isPlainObject(data)) return;
+      if (data.istota !== PROTOCOL || data.kind !== 'hello' || data.k !== options.nonce) return;
+      greeted = true;
+      clearDeadline();
+      postEnv(options.env());
+      return;
+    }
     const request = parseRequest(data);
     if (!request) return;
     if (request.kind === 'call') void relayCall(request, askedAt);
@@ -233,12 +281,18 @@ export function createBridge(options: BridgeOptions): Bridge {
       port = channel.port1;
       port.onmessage = (event) => handle(event.data);
       target.postMessage({ istota: PROTOCOL, kind: 'port' }, '*', [channel.port2]);
-      // An env change before the port existed went nowhere.
-      postEnv(options.env());
+      // The installed document answers this with its hello; anything else in the
+      // frame is a page that did not come from the fragment the shell wrote.
+      helloDeadline = setTimeout(() => {
+        helloDeadline = null;
+        if (disposed || greeted) return;
+        options.onUnresponsive?.();
+      }, options.helloTimeoutMs ?? HELLO_TIMEOUT_MS);
     },
     postEnv,
     dispose() {
       disposed = true;
+      clearDeadline();
       port?.close();
     },
   };

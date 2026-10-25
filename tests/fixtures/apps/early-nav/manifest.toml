@@ -1,0 +1,5 @@
+id = "early-nav"
+name = "Escape tier early navigation"
+icon = "arrow-right"
+description = "Navigates the frame before its first load, proving the bridge's key keeps the page that lands from calling with the app's grants."
+capabilities = ["kv:own"]

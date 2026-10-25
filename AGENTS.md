@@ -24,6 +24,7 @@ This file is loaded into every session, so it stays an index: what exists, where
 
 Subsystems:
 
+- `apps.md` — user-written apps: the sandboxed frame and its CSP, the bridge with the fragment key and per-version grants, install/approve/rollback, the capability table, and the rules a change must keep
 - `brain.md` — Brain protocol + ClaudeCodeBrain + NativeBrain (in-process agent loop), plus per-room brain selection
 - `executor.md` — `execute_task()`, env mapping, prompt assembly, security
 - `prompts.md` — the two halves of a task prompt, and the control directory that hands them over
@@ -65,6 +66,7 @@ Boundaries and operations:
 
 ```
 src/istota/
+├── apps/                 # User-written apps as a module: _loader/db, manifest, capabilities, document, drafts, install, bridge, routes → apps.md
 ├── brain/                # Pluggable model invocation (Brain protocol)
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
 ├── skills/               # Self-contained skills (skill.md + optional CLI)
@@ -355,7 +357,7 @@ scripts/test-upgrade.sh          # the current image over an older release's sta
 scripts/test-vm.sh               # the stack on a VM provisioned by host/provision.sh, in Lima
 ```
 
-**The apps escape tier** is Playwright, not pytest, and needs only the browsers: `npm --prefix web run test:apps-escape` frames each fixture under `tests/fixtures/apps/` (built by the real `apps.document`) in Chromium, Firefox and WebKit around the real `src/lib/apps/bridge.ts`, and fails on any request the app frame makes after its own document. Its negative control is `scripts/test-apps-escape-negative-control.sh`, which serves the hostile fixture without its CSP and must go red. Rerun both after any change to the frame, its CSP, the kit's guard or the bridge. `web/tests-apps-escape/README.md` has the fixture contract.
+**The apps escape tier** is Playwright, not pytest, and needs only the browsers: `npm --prefix web run test:apps-escape` frames each fixture under `tests/fixtures/apps/` (built by the real `apps.document`) in Chromium, Firefox and WebKit around the real `src/lib/apps/bridge.ts`, and fails on anything the app frame reaches at the tier's second loopback origin (the recorder) after its own document, or on a navigation the shell did not catch. The recorder, not Playwright's request events, is the leak verdict: Chromium emits an event for a CSP-blocked request the network never saw. Its negative control is `scripts/test-apps-escape-negative-control.sh`, which serves the hostile fixture without its CSP and must go red. Rerun both after any change to the frame, its CSP, the kit's guard or the bridge. `web/tests-apps-escape/README.md` has the fixture contract.
 
 `image`, `smoke`, `full`, `testbed` and `vm` require `-n0`: their fixtures are session-scoped and build one tagged image or drive one VM. Before a release, add `-m full -n0`, `-m image -n0 --platform amd64` and `scripts/test-upgrade.sh --from-floor --shape volume`. Three tiers carry a negative control that must go red (`scripts/test-image-negative-control.sh`, `scripts/test-vm-negative-control.sh`, and the same broken image handed to the upgrade tier via `ISTOTA_IMAGE_TAG`); `scripts/test-stack-negative-control.sh` does the same for `istota-stack`'s release checks and its `setup --web` tests.
 

@@ -34,8 +34,16 @@ function connect(frame: HTMLIFrameElement): MessagePort {
   return ((call as unknown[])[2] as MessagePort[])[0];
 }
 
+/** The kit's first port message: the key it read from the frame's fragment. */
+function greet(frame: HTMLIFrameElement, port: MessagePort) {
+  const key = new URLSearchParams(new URL(frame.src).hash.slice(1)).get('k') ?? '';
+  port.postMessage({ istota: 1, kind: 'hello', k: key });
+}
+
 function fromFrame(frame: HTMLIFrameElement, data: unknown) {
-  connect(frame).postMessage(data);
+  const port = connect(frame);
+  greet(frame, port);
+  port.postMessage(data);
 }
 
 describe('AppFrame', () => {
@@ -57,6 +65,19 @@ describe('AppFrame', () => {
     expect(env.get('scale')).toMatch(/^(small|medium|large)$/);
     expect(env.get('shell')).toBe('web');
     expect(env.get('v')).toBe('1');
+    expect(env.get('k')).toBeTruthy();
+  });
+
+  it('gives each mounted frame its own fragment key', () => {
+    const first = render(AppFrame, { appId: 'board', version: 2, name: 'Board' });
+    const second = render(AppFrame, { appId: 'board', version: 2, name: 'Board' });
+    const key = (frame: HTMLElement) =>
+      new URLSearchParams(new URL(frameOf(frame).src).hash.slice(1)).get('k');
+    const a = key(first.container);
+    const b = key(second.container);
+    expect(a).toBeTruthy();
+    expect(b).toBeTruthy();
+    expect(a).not.toBe(b);
   });
 
   it('relays a call from its own frame to this app and version', async () => {
@@ -129,6 +150,27 @@ describe('AppFrame', () => {
       args: { text: 'hello' },
     });
     await waitFor(() => expect(clipboard.copyText).toHaveBeenCalledWith('hello'));
+  });
+
+  it('removes a frame whose document never answers the hello, and records it', () => {
+    vi.useFakeTimers();
+    const onNavigated = vi.fn();
+    const { container } = render(AppFrame, {
+      appId: 'board',
+      version: 2,
+      name: 'Board',
+      onNavigated,
+    });
+    const frame = frameOf(container);
+    frame.dispatchEvent(new Event('load'));
+    vi.advanceTimersByTime(4000);
+    expect(onNavigated).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('iframe')).toBeNull();
+    expect(api.reportAppError).toHaveBeenCalledWith('board', 2, {
+      kind: 'navigated',
+      message: expect.any(String),
+    });
+    vi.useRealTimers();
   });
 
   it('removes a frame that navigates itself and records it', async () => {

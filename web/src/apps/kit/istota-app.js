@@ -64,14 +64,28 @@
     return SCALES.includes(name) ? name : null;
   }
 
-  /** @returns {Env} */
-  function startingEnv() {
-    const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-    const theme = params.get('theme');
-    const shell = params.get('shell');
+  // The one-time key the shell put in the fragment, which the bridge's hello
+  // echoes. Read now, then the fragment is stripped: app code runs after this
+  // file, and a page this document navigates to never sees the URL at all, so
+  // neither can read the key back and hand it on.
+  const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const portKey = params.get('k') || '';
+  try {
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  } catch {
+    // A context that refuses this keeps the fragment in place; the hello still works.
+  }
+
+  /**
+   * @param {URLSearchParams} query
+   * @returns {Env}
+   */
+  function startingEnv(query) {
+    const theme = query.get('theme');
+    const shell = query.get('shell');
     return {
       theme: theme && THEMES.includes(theme) ? theme : 'dark',
-      scale: scaleOf(params.get('scale')) || 'medium',
+      scale: scaleOf(query.get('scale')) || 'medium',
       shell: shell && SHELLS.includes(shell) ? shell : 'web',
       visibility: document.visibilityState === 'hidden' ? 'hidden' : 'visible',
       online: true,
@@ -80,7 +94,7 @@
   }
 
   /** @type {Env} */
-  let env = startingEnv();
+  let env = startingEnv(params);
 
   // The attributes minot's tokens.css keys the theme and text scale on.
   function applyEnv() {
@@ -223,6 +237,8 @@
     window.removeEventListener('message', takePort);
     // Setting onmessage starts the port.
     port.onmessage = (message) => onMessage(message.data);
+    // The key first: the shell answers nothing until it has seen it.
+    port.postMessage({ istota: PROTOCOL, kind: 'hello', k: portKey });
     for (const message of queued.splice(0)) port.postMessage(message);
   }
   window.addEventListener('message', takePort);

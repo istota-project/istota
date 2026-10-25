@@ -63,8 +63,19 @@ function handOver(source: Window | null = window, data: unknown = { istota: 1, k
   return { channel, spy };
 }
 
-function sent(): Message[] {
+/** Everything the kit sent over the port, the hello first. */
+function raw(): Message[] {
   return posted ? posted.mock.calls.map((call) => call[0] as Message) : [];
+}
+
+/** The kit's calls and shell requests, without the one hello. */
+function sent(): Message[] {
+  return raw().filter((message) => message.kind !== 'hello');
+}
+
+/** The one key message the kit sends as soon as it takes the port. */
+function hellos(): Message[] {
+  return raw().filter((message) => message.kind === 'hello');
 }
 
 function last(): Message {
@@ -124,7 +135,9 @@ describe('the port', () => {
     const call = istota.kv.get('early');
     expect(windowPosted).not.toHaveBeenCalled();
     handOver();
-    expect(sent()).toEqual([
+    // The hello goes first, then the call that waited for the port.
+    expect(raw()).toEqual([
+      { istota: 1, kind: 'hello', k: '' },
       {
         istota: 1,
         id: expect.any(Number),
@@ -145,7 +158,8 @@ describe('the port', () => {
     expect(stranger.spy).not.toHaveBeenCalled();
     expect(kitPort).toBeNull();
     const parent = handOver();
-    expect(parent.spy).toHaveBeenCalledTimes(1);
+    // The hello, then the call that was waiting for a port.
+    expect(parent.spy).toHaveBeenCalledTimes(2);
   });
 
   it('takes no port from a message that is not the handoff', () => {
@@ -157,12 +171,12 @@ describe('the port', () => {
 
   it('ignores a second port', () => {
     istota = load();
-    const first = posted;
     const second = handOver();
     void istota.kv.get('k');
-    expect(first).toHaveBeenCalledTimes(1);
     expect(second.spy).not.toHaveBeenCalled();
     expect(second.channel.port2.onmessage).toBeNull();
+    expect(hellos()).toHaveLength(1);
+    expect(sent()).toHaveLength(1);
   });
 
   it('takes no environment posted on the window once it holds the port', () => {
@@ -174,6 +188,24 @@ describe('the port', () => {
       }),
     );
     expect(istota.env.theme).toBe('dark');
+  });
+});
+
+describe('the port key', () => {
+  it('sends the key from the fragment as its first port message', () => {
+    istota = load('#theme=dark&k=s3cret-key');
+    expect(raw()[0]).toEqual({ istota: 1, kind: 'hello', k: 's3cret-key' });
+  });
+
+  it('strips the fragment so app code cannot read the key back', () => {
+    istota = load('#theme=dark&k=s3cret-key');
+    expect(window.location.hash).toBe('');
+    expect(hellos()).toEqual([{ istota: 1, kind: 'hello', k: 's3cret-key' }]);
+  });
+
+  it('sends an empty key when the fragment has none', () => {
+    istota = load('#theme=dark');
+    expect(hellos()).toEqual([{ istota: 1, kind: 'hello', k: '' }]);
   });
 });
 

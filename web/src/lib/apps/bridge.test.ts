@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CallOutcome } from './api';
-import { createBridge, ERROR_REPORTS_PER_LOAD, parseRequest, type BridgeOptions } from './bridge';
+import {
+  createBridge,
+  ERROR_REPORTS_PER_LOAD,
+  newFrameKey,
+  parseRequest,
+  type BridgeOptions,
+} from './bridge';
 import type { AppEnv } from './env';
 
 const ENV: AppEnv = {
@@ -12,10 +18,13 @@ const ENV: AppEnv = {
   keyboard: false,
 };
 
+const NONCE = 'test-nonce';
+
 function harness(overrides: Partial<BridgeOptions> = {}) {
   const frameWindow = { postMessage: vi.fn() };
   const state = { navigations: 0, online: true };
   const options: BridgeOptions = {
+    nonce: NONCE,
     frameWindow: () => frameWindow as unknown as Window,
     navigations: () => state.navigations,
     online: () => state.online,
@@ -29,13 +38,20 @@ function harness(overrides: Partial<BridgeOptions> = {}) {
   // The frame's end of the channel, as the kit would hold it.
   let kitPort: MessagePort | null = null;
   const received: unknown[] = [];
-  function connect() {
+  /** The shell's handoff; `greet` posts the hello the kit sends back, as `connect` would. */
+  function connect({ greet = true } = {}) {
     bridge.connect();
     const handoff = frameWindow.postMessage.mock.calls.at(-1);
     if (!handoff) throw new Error('no port was posted');
     kitPort = (handoff[2] as MessagePort[])[0];
     kitPort.onmessage = (event) => received.push(event.data);
+    if (greet) hello();
     return handoff;
+  }
+  /** The kit's first port message, the key it read from the frame's fragment. */
+  function hello(k = NONCE) {
+    if (!kitPort) connect({ greet: false });
+    kitPort!.postMessage({ istota: 1, kind: 'hello', k });
   }
   function send(data: unknown) {
     if (!kitPort) connect();
@@ -48,7 +64,7 @@ function harness(overrides: Partial<BridgeOptions> = {}) {
   function replies() {
     return received.filter((m) => (m as { kind?: string }).kind !== 'env');
   }
-  return { bridge, options, frameWindow, state, connect, send, settle, received, replies };
+  return { bridge, options, frameWindow, state, connect, hello, send, settle, received, replies };
 }
 
 const LIST = { istota: 1, id: 7, kind: 'call', capability: 'kv:own', op: 'list', args: {} };
@@ -71,11 +87,83 @@ describe('the bridge', () => {
     expect(h.frameWindow.postMessage).not.toHaveBeenCalled();
   });
 
-  it('sends the current environment over the port when it connects', async () => {
+  it('sends the current environment over the port once the frame says hello', async () => {
     const h = harness();
     h.connect();
     await h.settle();
     expect(h.received).toEqual([{ istota: 1, kind: 'env', env: ENV }]);
+  });
+
+  it('sends nothing on the port until the hello arrives', async () => {
+    const h = harness();
+    h.connect({ greet: false });
+    await h.settle();
+    expect(h.received).toEqual([]);
+    h.hello();
+    await h.settle();
+    expect(h.received).toEqual([{ istota: 1, kind: 'env', env: ENV }]);
+  });
+
+  it('drops a call that arrives before the hello, and answers one after', async () => {
+    const h = harness();
+    h.connect({ greet: false });
+    h.send(LIST);
+    await h.settle();
+    expect(h.options.call).not.toHaveBeenCalled();
+    expect(h.replies()).toEqual([]);
+    h.hello();
+    h.send({ ...LIST, id: 8 });
+    await h.settle();
+    expect(h.options.call).toHaveBeenCalledTimes(1);
+    expect(h.replies()).toEqual([{ istota: 1, id: 8, ok: true, result: { items: [], total: 0 } }]);
+  });
+
+  it('refuses a hello with the wrong key, and takes the right one after it', async () => {
+    const h = harness();
+    h.connect({ greet: false });
+    h.hello('guessed');
+    h.send(LIST);
+    await h.settle();
+    expect(h.options.call).not.toHaveBeenCalled();
+    expect(h.replies()).toEqual([]);
+    h.hello();
+    h.send({ ...LIST, id: 9 });
+    await h.settle();
+    expect(h.options.call).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a later hello once it is greeted', async () => {
+    const h = harness();
+    h.connect();
+    h.hello('whatever');
+    await h.settle();
+    // One env, at the greeting; a second hello neither re-greets nor re-sends it.
+    expect(h.received).toEqual([{ istota: 1, kind: 'env', env: ENV }]);
+  });
+
+  it('calls onUnresponsive when a document never says hello', async () => {
+    const onUnresponsive = vi.fn();
+    const h = harness({ onUnresponsive, helloTimeoutMs: 20 });
+    h.connect({ greet: false });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(onUnresponsive).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays quiet when the hello arrives in time', async () => {
+    const onUnresponsive = vi.fn();
+    const h = harness({ onUnresponsive, helloTimeoutMs: 20 });
+    h.connect();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(onUnresponsive).not.toHaveBeenCalled();
+  });
+
+  it('stops the hello deadline once disposed', async () => {
+    const onUnresponsive = vi.fn();
+    const h = harness({ onUnresponsive, helloTimeoutMs: 20 });
+    h.connect({ greet: false });
+    h.bridge.dispose();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(onUnresponsive).not.toHaveBeenCalled();
   });
 
   it('takes nothing posted on the window, even from the frame, once the port exists', async () => {
@@ -241,6 +329,7 @@ describe('the bridge', () => {
   it('sends env changes over the port', async () => {
     const h = harness();
     h.connect();
+    await h.settle();
     h.bridge.postEnv({ ...ENV, theme: 'light' });
     await h.settle();
     expect(h.received).toEqual([
@@ -263,6 +352,21 @@ describe('the bridge', () => {
     h.send(LIST);
     await h.settle();
     expect(h.options.call).not.toHaveBeenCalled();
+  });
+});
+
+describe('newFrameKey', () => {
+  it('mints a distinct key, and still does where randomUUID is missing', () => {
+    const first = newFrameKey();
+    const second = newFrameKey();
+    expect(first).toBeTruthy();
+    expect(second).toBeTruthy();
+    expect(first).not.toBe(second);
+    const spy = vi.spyOn(crypto, 'randomUUID').mockImplementation(() => {
+      throw new TypeError('crypto.randomUUID is not a function');
+    });
+    expect(newFrameKey()).toMatch(/^key-/);
+    spy.mockRestore();
   });
 });
 

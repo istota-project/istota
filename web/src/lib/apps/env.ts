@@ -6,7 +6,11 @@
  * before first paint. Later changes go to the frame as `env` messages. The
  * names and values are the kit's: `theme=dark|light`, `scale=small|medium|large`,
  * `shell=web|ios`. `v` is the message protocol, which the kit carries as
- * `istota: 1`. The Mac app reports `web` (see the spec's Decisions).
+ * `istota: 1`. `k` is the bridge's one-time key: the kit reads it, strips the
+ * fragment and echoes it in its `hello`, and the bridge answers nothing until
+ * it sees that echo. A page the frame navigates to before its first `load` is
+ * handed the port but never the key, so it cannot use the bridge. The Mac app
+ * reports `web` (see the spec's Decisions).
  */
 import { get } from 'svelte/store';
 import { base } from '$app/paths';
@@ -48,24 +52,26 @@ export function currentEnv(keyboard = false): AppEnv {
   };
 }
 
-/** The fragment the kit reads before first paint: `theme=…&scale=…&shell=…&v=1`. */
-export function frameFragment(env: Pick<AppEnv, 'theme' | 'scale' | 'shell'>): string {
+/** The fragment: `theme=…&scale=…&shell=…&v=1&k=<one-time key>`. */
+export function frameFragment(env: Pick<AppEnv, 'theme' | 'scale' | 'shell'>, key: string): string {
   const params = new URLSearchParams({
     theme: env.theme,
     scale: env.scale,
     shell: env.shell,
     v: String(PROTOCOL),
+    k: key,
   });
   return params.toString();
 }
 
-/** The frame route for an installed version, with the starting environment. */
+/** The frame route for an installed version, with the starting environment and the bridge's key. */
 export function frameUrl(
   appId: string,
   version: number,
   env: Pick<AppEnv, 'theme' | 'scale' | 'shell'>,
+  key: string,
 ): string {
-  return `${base}/api/apps/${encodeURIComponent(appId)}/v/${version}/frame#${frameFragment(env)}`;
+  return `${base}/api/apps/${encodeURIComponent(appId)}/v/${version}/frame#${frameFragment(env, key)}`;
 }
 
 /** The message that tells a running frame the environment changed. */
