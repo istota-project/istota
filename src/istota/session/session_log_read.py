@@ -855,6 +855,10 @@ def digest(path: Path | str) -> dict:
                 "messages_dropped": record.get("messages_dropped"),
                 "tokens_before": record.get("tokens_before"),
                 "summary_chars": len(_as_str(record.get("summary"))),
+                # Tri-state: a transcript from before the field has no `ok`,
+                # and that is not a failure.
+                "ok": _as_bool_or_none(record.get("ok")),
+                "error": _as_str(record.get("error")) or None,
             })
         elif kind == "steer":
             steers += 1

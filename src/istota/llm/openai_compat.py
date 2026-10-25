@@ -193,6 +193,7 @@ class OpenAICompatibleProvider:
         max_tokens: int = 16384,
         reasoning_effort: str | None = None,
         render_tool_images: bool = False,
+        prompt_caching: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:
         body = self._build_chat_completion_request(
             system_prompt,
@@ -202,6 +203,7 @@ class OpenAICompatibleProvider:
             max_tokens,
             reasoning_effort=reasoning_effort,
             render_tool_images=render_tool_images,
+            prompt_caching=prompt_caching,
         )
         try:
             async with self._client.stream("POST", "/chat/completions", json=body) as resp:
@@ -236,8 +238,13 @@ class OpenAICompatibleProvider:
         max_tokens: int,
         reasoning_effort: str | None = None,
         render_tool_images: bool = False,
+        prompt_caching: bool | None = None,
     ) -> dict:
-        """Convert istota Message types to an OpenAI chat completions body."""
+        """Convert istota Message types to an OpenAI chat completions body.
+
+        ``prompt_caching`` overrides the provider's own setting for this one
+        request; ``None`` keeps it. A compaction summary passes ``False``.
+        """
         wire: list[dict] = []
         if system_prompt:
             wire.append({"role": "system", "content": system_prompt})
@@ -253,7 +260,8 @@ class OpenAICompatibleProvider:
 
         tools_wire = [self._tool_to_wire(t) for t in tools] if tools else None
 
-        if self._prompt_caching:
+        caching = self._prompt_caching if prompt_caching is None else prompt_caching
+        if caching:
             self._apply_cache_breakpoints(wire, tools_wire)
 
         body: dict = {

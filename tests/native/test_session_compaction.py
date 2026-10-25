@@ -187,15 +187,22 @@ def _to_llm(msgs):
 class _SummaryProvider:
     """Yields a single text completion for the compaction summary call."""
 
-    def __init__(self, text: str):
+    def __init__(self, text: str, usage: Usage | None = None):
         self._text = text
+        self._usage = usage or Usage()
         self.calls = 0
+        self.kwargs: list[dict] = []
 
-    async def stream(self, system_prompt, messages, tools, *, model="", max_tokens=16384):
+    async def stream(self, system_prompt, messages, tools, *, model="", max_tokens=16384, **kw):
         from istota.llm.provider import StreamDone
 
         self.calls += 1
-        yield StreamDone(message=AssistantMessage(content=[TextContent(text=self._text)]))
+        self.kwargs.append(kw)
+        yield StreamDone(
+            message=AssistantMessage(
+                content=[TextContent(text=self._text)], usage=self._usage
+            )
+        )
 
 
 class TestCompactMessages:
@@ -203,12 +210,60 @@ class TestCompactMessages:
     async def test_generates_summary_text(self):
         provider = _SummaryProvider("## Goal\nDo the thing")
         msgs = [_user("please do the thing"), _assistant("working")]
-        summary, details = await compact_messages(
-            msgs, None, None, provider, "m", _to_llm
-        )
-        assert "Goal" in summary
+        outcome = await compact_messages(msgs, None, None, provider, "m", _to_llm)
+        assert outcome.ok is True
+        assert outcome.error is None
+        assert "Goal" in outcome.summary
         assert provider.calls == 1
-        assert isinstance(details, CompactionDetails)
+        assert isinstance(outcome.details, CompactionDetails)
+
+    @pytest.mark.asyncio
+    async def test_the_summary_call_usage_is_returned(self):
+        provider = _SummaryProvider(
+            "summary", usage=Usage(input_tokens=900, output_tokens=60, cost_usd=0.002)
+        )
+        outcome = await compact_messages(
+            [_user("hi"), _assistant("hello")], None, None, provider, "m", _to_llm
+        )
+        assert outcome.usage.input_tokens == 900
+        assert outcome.usage.output_tokens == 60
+        assert outcome.usage.cost_usd == 0.002
+
+    @pytest.mark.asyncio
+    async def test_the_summary_call_asks_for_no_cache_breakpoints(self):
+        provider = _SummaryProvider("summary")
+        await compact_messages([_user("hi")], None, None, provider, "m", _to_llm)
+        assert provider.kwargs == [{"prompt_caching": False}]
+
+    @pytest.mark.asyncio
+    async def test_a_stream_error_is_not_ok_and_keeps_its_usage(self):
+        from istota.llm.provider import StreamError
+
+        class _RefusingProvider:
+            async def stream(self, *a, **k):
+                yield StreamError(
+                    message=AssistantMessage(
+                        stop_reason="error",
+                        error_message="HTTP 400: nope",
+                        usage=Usage(input_tokens=300),
+                    )
+                )
+
+        outcome = await compact_messages(
+            [_user("hi")], "earlier summary", None, _RefusingProvider(), "m", _to_llm
+        )
+        assert outcome.ok is False
+        assert outcome.error == "HTTP 400: nope"
+        assert outcome.summary == "earlier summary"
+        assert outcome.usage.input_tokens == 300
+
+    @pytest.mark.asyncio
+    async def test_an_empty_summary_is_a_failure(self):
+        outcome = await compact_messages(
+            [_user("hi")], None, None, _SummaryProvider("  \n"), "m", _to_llm
+        )
+        assert outcome.ok is False
+        assert "empty" in outcome.error
 
     @pytest.mark.asyncio
     async def test_tracks_file_operations_across_cycles(self):
@@ -223,24 +278,26 @@ class TestCompactMessages:
             ),
         ]
         prev = CompactionDetails(read_files=["/old.py"], modified_files=[])
-        _summary, details = await compact_messages(
-            msgs, "prev summary", prev, provider, "m", _to_llm
-        )
+        details = (
+            await compact_messages(msgs, "prev summary", prev, provider, "m", _to_llm)
+        ).details
         assert "/a.py" in details.read_files
         assert "/old.py" in details.read_files  # carried forward
         assert "/b.py" in details.modified_files
 
     @pytest.mark.asyncio
-    async def test_failure_returns_previous_summary(self):
+    async def test_failure_returns_previous_summary_and_is_not_ok(self):
         class _BoomProvider:
             async def stream(self, *a, **k):
                 raise RuntimeError("network down")
                 yield  # pragma: no cover
 
-        summary, _details = await compact_messages(
+        outcome = await compact_messages(
             [_user("hi")], "earlier summary", None, _BoomProvider(), "m", _to_llm
         )
-        assert summary == "earlier summary"
+        assert outcome.ok is False
+        assert outcome.error == "network down"
+        assert outcome.summary == "earlier summary"
 
     @pytest.mark.asyncio
     async def test_input_truncated_to_max_chars(self):
@@ -252,7 +309,7 @@ class TestCompactMessages:
             def __init__(self):
                 self.prompt = ""
 
-            async def stream(self, system_prompt, messages, tools, *, model="", max_tokens=16384):
+            async def stream(self, system_prompt, messages, tools, *, model="", max_tokens=16384, **kw):
                 self.prompt = messages[-1].content[0].text
                 yield StreamDone(message=AssistantMessage(content=[TextContent(text="S")]))
 
@@ -281,7 +338,7 @@ class TestImageLossNotice:
             def __init__(self):
                 self.prompt = ""
 
-            async def stream(self, system_prompt, messages, tools, *, model="", max_tokens=16384):
+            async def stream(self, system_prompt, messages, tools, *, model="", max_tokens=16384, **kw):
                 self.prompt = messages[-1].content[0].text
                 yield StreamDone(message=AssistantMessage(content=[TextContent(text="S")]))
 
@@ -304,7 +361,6 @@ class TestImageLossNotice:
         assert "AAAA" not in provider.prompt
 
     def test_a_tool_result_image_is_named_too(self):
-        from istota.session.compaction import _serialize_for_summary
 
         text = _serialize_for_summary(
             [
@@ -321,6 +377,72 @@ class TestImageLossNotice:
         assert "captured" in text
         assert "no longer in context" in text
         assert "CCCC" not in text
+
+
+class TestTheSummaryInputIsShapedPerMessage:
+    def test_one_giant_tool_result_is_capped_head_and_tail(self):
+        from istota.session.compaction import _SUMMARY_TOOL_RESULT_CHARS
+
+        big = "HEAD" + "x" * 50_000 + "TAIL"
+        text = _serialize_for_summary(
+            [
+                _user("find it"),
+                ToolResultMessage(
+                    tool_call_id="c1", tool_name="Bash", content=[TextContent(text=big)]
+                ),
+                _assistant("found it"),
+            ]
+        )
+        assert "HEAD" in text and "TAIL" in text
+        assert f"[{len(big) - _SUMMARY_TOOL_RESULT_CHARS} chars of tool output elided]" in text
+        assert len(text) < _SUMMARY_TOOL_RESULT_CHARS + 500
+        # The turns around it are untouched.
+        assert "find it" in text and "found it" in text
+
+    def test_a_short_tool_result_is_left_whole(self):
+        text = _serialize_for_summary(
+            [
+                ToolResultMessage(
+                    tool_call_id="c1", tool_name="Read", content=[TextContent(text="small")]
+                )
+            ]
+        )
+        assert text == "[tool_result Read]\nsmall"
+
+    @pytest.mark.asyncio
+    async def test_reasoning_never_reaches_the_summary_prompt(self):
+        # Through the native brain's real conversion, so the test does not rest
+        # on whether `_convert_to_llm` happens to drop thinking blocks.
+        from istota.brain.native import NativeBrain
+        from istota.config import NativeBrainConfig
+        from istota.llm.types import ThinkingContent
+
+        prompts: list[str] = []
+
+        class _RecordingProvider:
+            async def stream(self, system_prompt, messages, tools, **kw):
+                from istota.llm.provider import StreamDone
+
+                prompts.append(messages[-1].content[0].text)
+                yield StreamDone(message=AssistantMessage(content=[TextContent(text="S")]))
+
+        brain = NativeBrain(NativeBrainConfig(model="m"), provider=_RecordingProvider())
+        msgs = [
+            _user("question"),
+            AssistantMessage(
+                content=[
+                    ThinkingContent(thinking="SECRET-REASONING-77"),
+                    TextContent(text="the visible answer"),
+                ],
+                stop_reason="end_turn",
+            ),
+        ]
+        outcome = await compact_messages(
+            msgs, None, None, _RecordingProvider(), "m", brain._convert_to_llm
+        )
+        assert outcome.ok is True
+        assert "the visible answer" in prompts[0]
+        assert "SECRET-REASONING-77" not in prompts[0]
 
 
 class TestFindImageMessage:
@@ -792,3 +914,128 @@ class TestThePreSplitShapeLosesIt:
         # And after one cut the model runs on without it. That is the defect.
         assert SYSTEM_SENTINEL not in str(after["messages"])
         assert SYSTEM_SENTINEL not in after["system_prompt"]
+
+
+# --------------------------------------------------------------------------- #
+# A failed proactive summary never cuts
+# --------------------------------------------------------------------------- #
+
+
+def _bulky_turn(n: int) -> AssistantMessage:
+    """`_bulky_tool_turn`, with a distinct call per turn.
+
+    A run that compacts more than once repeats this turn, and identical calls
+    would feed loop detection rather than the compaction under test.
+    """
+    return AssistantMessage(
+        content=[
+            TextContent(text="z" * 20_000),
+            ToolCallContent(
+                id=f"c{n}",
+                name="Write",
+                arguments={"file_path": f"out{n}.txt", "content": "hi"},
+            ),
+        ],
+        usage=Usage(input_tokens=5000, output_tokens=10),
+        stop_reason="tool_use",
+    )
+
+
+def _failed_summary_turn() -> AssistantMessage:
+    # A permanent status, so the retrying provider hands it straight back
+    # rather than spending the backoff on it.
+    return AssistantMessage(
+        stop_reason="error", error_message="HTTP 400: summary request refused"
+    )
+
+
+@pytest.mark.usefixtures("_no_tool_server")
+class TestAFailedProactiveSummaryNeverCuts:
+    """The proactive path used to cut on a failed summary.
+
+    `compact_messages` handed back the previous summary (or `""`) on failure,
+    and `prepare_next_turn` replaced `ctx.messages[:cut]` with it all the same,
+    so the model lost the dropped turns and was never told. The overflow path
+    already refused to continue on an empty summary; this one did not.
+    """
+
+    def test_the_next_request_still_carries_the_uncut_context(self, tmp_path):
+        result, provider, records = _run_compacting_task(
+            tmp_path,
+            composed=_composed_file(tmp_path),
+            prompt=REQUEST_SENTINEL,
+            turns=[_bulky_turn(1), _failed_summary_turn(), _final_turn()],
+        )
+        assert result.success is True
+        (_first, after), _summary = _split_calls(provider)
+
+        # The initial request is still there, verbatim, and no summary stands
+        # in for it.
+        assert REQUEST_SENTINEL in str(after["messages"])
+        assert not any(
+            isinstance(m, CompactionSummaryMessage) for m in after["messages"]
+        )
+        cut = _assert_one_compaction(records, "proactive")
+        assert cut["ok"] is False
+        assert "summary request refused" in cut["error"]
+        assert cut["messages_dropped"] == 0
+
+    def test_two_failures_turn_proactive_compaction_off(self, tmp_path):
+        # Each bulky turn trips the threshold. The first two boundaries try a
+        # summary and fail; the third must not try at all. Had it tried, it
+        # would take the final turn as its summary and the run would then
+        # exhaust the script.
+        turns = [
+            _bulky_turn(1), _failed_summary_turn(),
+            _bulky_turn(2), _failed_summary_turn(),
+            _bulky_turn(3),
+            _final_turn(),
+        ]
+        result, provider, records = _run_compacting_task(
+            tmp_path,
+            composed=_composed_file(tmp_path),
+            prompt=REQUEST_SENTINEL,
+            turns=turns,
+        )
+        assert result.success is True, result.result_text
+        assert len(provider.calls) == 6
+        summaries = [c for c in provider.calls if not c["tools"]]
+        assert len(summaries) == 2
+        cuts = [r for r in records if r["type"] == "compaction"]
+        assert [c["ok"] for c in cuts] == [False, False]
+
+    def test_a_retry_after_one_failure_still_cuts(self, tmp_path):
+        result, provider, records = _run_compacting_task(
+            tmp_path,
+            composed=_composed_file(tmp_path),
+            prompt=REQUEST_SENTINEL,
+            turns=[
+                _bulky_turn(1), _failed_summary_turn(),
+                _bulky_turn(2), _summary_turn(),
+                _final_turn(),
+            ],
+        )
+        assert result.success is True, result.result_text
+        cuts = [r for r in records if r["type"] == "compaction"]
+        assert [c["ok"] for c in cuts] == [False, True]
+        assert REQUEST_SENTINEL not in str(provider.calls[-1]["messages"])
+
+    def test_the_summary_call_is_counted_in_the_task_usage(self, tmp_path):
+        summary = AssistantMessage(
+            content=[TextContent(text="## Goal\nwrite a file")],
+            usage=Usage(input_tokens=700, output_tokens=40),
+            stop_reason="end_turn",
+        )
+        result, _provider, records = _run_compacting_task(
+            tmp_path,
+            composed=_composed_file(tmp_path),
+            prompt=REQUEST_SENTINEL,
+            turns=[_bulky_tool_turn(), summary, _final_turn()],
+        )
+        # Two main turns (5010 and 25 tokens) plus the summary's 740.
+        assert result.usage.output_tokens == 10 + 5 + 40
+        assert result.usage.billed_input_tokens == 5000 + 20 + 700
+        cut = _assert_one_compaction(records, "proactive")
+        assert cut["ok"] is True
+        assert cut["usage"]["input_tokens"] == 700
+        assert cut["usage"]["output_tokens"] == 40

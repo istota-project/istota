@@ -432,7 +432,7 @@ class TestOverflowRecoveryKeepsTheImages:
             AssistantMessage(content=[TextContent(text="")], stop_reason="error"),
         ]
         provider = _SummaryProvider()
-        ctx, _summary, _details = await _build_recovery_context(
+        ctx, _outcome = await _build_recovery_context(
             transcript, "sys", None, None, None, provider, "m", _convert
         )
 
@@ -475,7 +475,7 @@ class TestOverflowRecoveryKeepsTheImages:
             AssistantMessage(content=[TextContent(text="")], stop_reason="error"),
         ]
         provider = _SummaryProvider()
-        ctx, _summary, _details = await _build_recovery_context(
+        ctx, _outcome = await _build_recovery_context(
             transcript, "sys", None, None, None, provider, "m", _convert,
             keep_recent_tokens=4,  # smaller than one image block's estimate
         )

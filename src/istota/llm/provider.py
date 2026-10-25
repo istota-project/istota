@@ -76,4 +76,5 @@ class LLMProvider(Protocol):
         max_tokens: int = 16384,
         reasoning_effort: str | None = None,
         render_tool_images: bool = False,
+        prompt_caching: bool | None = None,
     ) -> AsyncIterator[StreamEvent]: ...

@@ -64,6 +64,7 @@ class ReplayProvider:
         max_tokens: int = 16384,
         reasoning_effort: str | None = None,
         render_tool_images: bool = False,
+        prompt_caching: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:
         lines = read_fixture(self._path)
 
@@ -100,6 +101,7 @@ class RecordingProvider:
         max_tokens: int = 16384,
         reasoning_effort: str | None = None,
         render_tool_images: bool = False,
+        prompt_caching: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:
         body = self._inner._build_chat_completion_request(
             system_prompt,
@@ -109,6 +111,7 @@ class RecordingProvider:
             max_tokens,
             reasoning_effort=reasoning_effort,
             render_tool_images=render_tool_images,
+            prompt_caching=prompt_caching,
         )
         recorded: list[str] = []
         try:

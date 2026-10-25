@@ -81,6 +81,7 @@ from istota.llm.types import (
     UserMessage,
 )
 from istota.session.compaction import (
+    CompactionOutcome,
     compact_messages,
     derive_keep_recent_tokens,
     derive_reserve_tokens,
@@ -369,6 +370,11 @@ def _compaction_input_chars(window: int) -> int:
 # task may make before giving up and returning the overflow error. Bounded so a
 # genuinely too-large single turn can't thrash compaction forever.
 _MAX_OVERFLOW_RECOVERIES = 2
+
+# A failed proactive summary is retried at the next boundary still over the
+# threshold, once; after the second failure the attempt stops paying for a call
+# that keeps failing, and overflow recovery is the safety net.
+_MAX_PROACTIVE_COMPACTION_FAILURES = 2
 
 _RECOVERY_NUDGE = "[context was compacted; continue]"
 
@@ -757,7 +763,11 @@ class _RetryingProvider:
         max_tokens=16384,
         reasoning_effort=None,
         render_tool_images=False,
+        prompt_caching=None,
     ):
+        # Forwarded only when set, so a turn call reaches the inner provider
+        # with exactly the arguments it took before the override existed.
+        extra = {} if prompt_caching is None else {"prompt_caching": prompt_caching}
         attempt = 0
         while True:
             committed = False
@@ -771,6 +781,7 @@ class _RetryingProvider:
                 max_tokens=max_tokens,
                 reasoning_effort=reasoning_effort,
                 render_tool_images=render_tool_images,
+                **extra,
             ):
                 if isinstance(event, StreamError) and not committed:
                     pending_error = event
@@ -1291,6 +1302,16 @@ class NativeBrain:
         def _all_turns_costed() -> bool:
             return turns_accumulated > 0 and turns_costed == turns_accumulated
 
+        def _count_summary_usage(summary_usage) -> None:
+            # A compaction summary is a model call the turn loop never sees, so
+            # its spend is folded in here, failed calls included.
+            nonlocal turns_accumulated, turns_costed
+            if summary_usage.total_tokens > 0 or summary_usage.cost_usd is not None:
+                usage.add(summary_usage, get_model_info(model))
+                turns_accumulated += 1
+                if summary_usage.cost_usd is not None:
+                    turns_costed += 1
+
         # Live model-catalog enrichment (ISSUE-182). Populate the per-model
         # metadata catalog from OpenRouter before the loop resolves windows /
         # capabilities / prices. No-ops for a non-OpenRouter endpoint or when
@@ -1586,7 +1607,10 @@ class NativeBrain:
         turn_clock: dict = {"last": time.monotonic(), "recent": []}
 
         # --- compaction + turn-budget nudge via prepare_next_turn ---------
-        compaction_state = {"summary": None, "details": None}
+        # `failures` counts failed proactive summaries this attempt; at
+        # `_MAX_PROACTIVE_COMPACTION_FAILURES` the proactive path stops trying
+        # and the overflow path is the only compaction left.
+        compaction_state = {"summary": None, "details": None, "failures": 0}
         # Turn-budget nudge (ISSUE-187 defect 3). Only for tool-bearing tasks with
         # a cap — a text-only run (empty allowed_tools, e.g. the sleep cycle)
         # never sees it. ``fired`` tracks crossed thresholds so each surfaces once.
@@ -1650,7 +1674,10 @@ class NativeBrain:
             )
             tokens, _ = estimate_context_tokens(ctx.messages)
             compacted: list | None = None
-            if should_compact(tokens, window, reserve_tokens=reserve):
+            if (
+                compaction_state["failures"] < _MAX_PROACTIVE_COMPACTION_FAILURES
+                and should_compact(tokens, window, reserve_tokens=reserve)
+            ):
                 cut = find_cut_point(ctx.messages, keep_recent_tokens=keep_recent)
                 if cut > 0:
                     to_compact = ctx.messages[:cut]
@@ -1665,7 +1692,7 @@ class NativeBrain:
                     # floor for the case where there is nothing to pin; the pin
                     # is what keeps the capability itself.
                     pin, to_summarize = plan_image_pin(to_compact, keep_recent)
-                    summary, details = await compact_messages(
+                    outcome = await compact_messages(
                         to_summarize,
                         compaction_state["summary"],
                         compaction_state["details"],
@@ -1678,31 +1705,51 @@ class NativeBrain:
                         # Bound the summary input so the request can't overflow.
                         max_input_chars=_compaction_input_chars(window),
                     )
-                    compaction_state["summary"] = summary
-                    compaction_state["details"] = details
-                    stats["compactions"] += 1
+                    _count_summary_usage(outcome.usage)
+                    if outcome.ok:
+                        compaction_state["summary"] = outcome.summary
+                        compaction_state["details"] = outcome.details
+                        stats["compactions"] += 1
+                    else:
+                        # No cut: the next request goes out uncompacted, and a
+                        # real overflow then reaches the reactive path, which
+                        # fails cleanly when it cannot summarize either.
+                        compaction_state["failures"] += 1
+                        logger.warning(
+                            "native proactive compaction failed (%d/%d), "
+                            "context left uncut: %s",
+                            compaction_state["failures"],
+                            _MAX_PROACTIVE_COMPACTION_FAILURES,
+                            outcome.error,
+                        )
                     # The messages this dropped are already in the file above
                     # it, so the record does not repeat them. `trigger` is the
                     # whole diagnostic value: proactive is the system working,
                     # overflow (below) is it catching a miss.
                     log.compaction(
                         trigger="proactive",
-                        summary=summary,
+                        ok=outcome.ok,
+                        error=outcome.error,
+                        summary=outcome.summary if outcome.ok else None,
                         tokens_before=tokens,
-                        cut_index=cut,
-                        messages_dropped=len(to_compact),
-                        image_pinned=pin is not None,
-                        details=_details_dict(details),
+                        cut_index=cut if outcome.ok else None,
+                        messages_dropped=len(to_compact) if outcome.ok else 0,
+                        image_pinned=outcome.ok and pin is not None,
+                        details=_details_dict(outcome.details),
                         recovery_index=None,
+                        usage=_usage_dict(outcome.usage),
                     )
-                    summary_msg = CompactionSummaryMessage(
-                        summary=summary, tokens_before=tokens, details=details
-                    )
-                    compacted = (
-                        [pin, summary_msg, *remaining]
-                        if pin is not None
-                        else [summary_msg, *remaining]
-                    )
+                    if outcome.ok:
+                        summary_msg = CompactionSummaryMessage(
+                            summary=outcome.summary,
+                            tokens_before=tokens,
+                            details=outcome.details,
+                        )
+                        compacted = (
+                            [pin, summary_msg, *remaining]
+                            if pin is not None
+                            else [summary_msg, *remaining]
+                        )
 
             # Combine: a nudge injects into whichever message list is current
             # (compacted, or the unchanged context) as a trailing environment
@@ -1948,7 +1995,7 @@ class NativeBrain:
                 # Preserve the overflow error before clearing, so an unusable
                 # recovery can fail with the real cause instead of a wrong answer.
                 overflow_error = last_error_message
-                recovery_ctx, summary, details = await _build_recovery_context(
+                recovery_ctx, outcome = await _build_recovery_context(
                     transcript,
                     context.system_prompt,
                     context.tools,
@@ -1965,9 +2012,11 @@ class NativeBrain:
                     ),
                     max_input_chars=_compaction_input_chars(_rec_window),
                 )
-                stats["compactions"] += 1
-                # Written before the no-summary check below, deliberately: a
-                # recovery that produced nothing records `summary: null` and
+                _count_summary_usage(outcome.usage)
+                if outcome.ok:
+                    stats["compactions"] += 1
+                # Written before the `ok` check below, deliberately: a
+                # recovery that produced nothing records `ok: false` and
                 # then the run fails, and this record is what explains the
                 # failure.
                 #
@@ -1988,30 +2037,39 @@ class NativeBrain:
                 _added = [m for m in recovery_ctx.messages if id(m) not in {id(t) for t in transcript}]
                 log.compaction(
                     trigger="overflow",
+                    ok=outcome.ok,
+                    error=outcome.error,
                     recovery_index=recoveries,
-                    summary=summary or None,
+                    summary=outcome.summary if outcome.ok else None,
                     tokens_before=_estimated_tokens(transcript),
                     cut_index=None,
-                    messages_dropped=sum(1 for m in transcript if id(m) not in _kept),
-                    image_pinned=any(_carries_image(m) for m in _added),
-                    details=_details_dict(details),
+                    messages_dropped=(
+                        sum(1 for m in transcript if id(m) not in _kept)
+                        if outcome.ok else 0
+                    ),
+                    image_pinned=outcome.ok and any(_carries_image(m) for m in _added),
+                    details=_details_dict(outcome.details),
+                    usage=_usage_dict(outcome.usage),
                 )
-                # If compaction produced no summary (the summary request itself
-                # overflowed and there was no prior summary to fall back on),
-                # continuing would answer with the user's request gone from
-                # context — a confident non-answer. Fail with the overflow error
-                # instead (NB-10).
-                if not (summary and summary.strip()):
+                # If compaction failed (the summary request itself overflowed,
+                # or the endpoint refused it), continuing would answer with the
+                # dropped turns gone from context, the user's request among
+                # them — a confident non-answer. Fail with the overflow error
+                # instead (NB-10). A previous summary does not stand in: it
+                # predates everything the cut would now drop.
+                if not outcome.ok:
                     logger.warning(
-                        "native overflow recovery produced no summary; failing with overflow error"
+                        "native overflow recovery could not summarize (%s); "
+                        "failing with overflow error",
+                        outcome.error,
                     )
                     final_stop["reason"] = "error"
                     last_error_message = (
                         overflow_error or "context window exceeded and compaction failed"
                     )
                     break
-                compaction_state["summary"] = summary
-                compaction_state["details"] = details
+                compaction_state["summary"] = outcome.summary
+                compaction_state["details"] = outcome.details
                 # Clear the error markers so the post-continue re-check sees the
                 # continue's own outcome, not the prior overflow.
                 final_stop["reason"] = ""
@@ -2702,8 +2760,12 @@ async def _build_recovery_context(
     convert_to_llm,
     keep_recent_tokens: int = 20000,
     max_input_chars: int = 0,
-) -> tuple[AgentContext, str, object]:
+) -> tuple[AgentContext, CompactionOutcome]:
     """Force-compact ``transcript`` and return a context ready for continue.
+
+    The caller must check ``outcome.ok`` before continuing from the context: on
+    a failed summary it holds the previous summary, or none, in place of the
+    dropped turns.
 
     Ignores ``should_compact`` (this is the reactive safety net — the window was
     already exceeded). Falls back to ``_aggressive_cut`` when ``find_cut_point``
@@ -2725,19 +2787,21 @@ async def _build_recovery_context(
     # oversized set of blocks is dropped with the summary's loss notice rather
     # than carried into a request that just failed for length.
     pin, to_summarize = plan_image_pin(to_compact, keep_recent_tokens)
-    summary, details = await compact_messages(
+    outcome = await compact_messages(
         to_summarize, prev_summary, prev_details, provider, model, convert_to_llm,
         max_input_chars=max_input_chars,
     )
     messages: list = [
         *([pin] if pin is not None else []),
-        CompactionSummaryMessage(summary=summary, tokens_before=0, details=details),
+        CompactionSummaryMessage(
+            summary=outcome.summary, tokens_before=0, details=outcome.details
+        ),
         *remaining,
     ]
     if messages and getattr(messages[-1], "role", None) == "assistant":
         messages.append(UserMessage(content=[TextContent(text=_RECOVERY_NUDGE)]))
     ctx = AgentContext(system_prompt=system_prompt, messages=messages, tools=tools)
-    return ctx, summary, details
+    return ctx, outcome
 
 
 def _log_cache_telemetry(usage: TaskUsage) -> None:

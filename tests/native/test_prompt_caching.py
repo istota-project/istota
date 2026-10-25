@@ -181,3 +181,59 @@ class TestCacheWriteAccounting:
         usage = events[-1].message.usage
         assert usage.cache_read_tokens == 40
         assert usage.cache_write_tokens == 60
+
+
+class TestPerRequestOverride:
+    """A compaction summary is a one-off prompt: no cache write is ever read."""
+
+    def test_false_on_the_request_beats_a_caching_provider(self):
+        body = _provider(True)._build_chat_completion_request(
+            "sys", [_user("hi")], [], "m", 100, prompt_caching=False
+        )
+        assert _cache_control_blocks(body) == []
+
+    def test_none_on_the_request_keeps_the_provider_setting(self):
+        body = _provider(True)._build_chat_completion_request(
+            "sys", [_user("hi")], [], "m", 100, prompt_caching=None
+        )
+        assert _cache_control_blocks(body) != []
+
+    async def test_a_summary_request_on_the_wire_carries_no_cache_control(self):
+        # The real seam: compaction through the brain's retrying wrapper into
+        # a caching provider, with the request body read off the transport.
+        import json
+
+        import httpx
+
+        from istota.brain.native import _RetryingProvider
+        from istota.session.compaction import compact_messages
+
+        bodies: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(request.content))
+            sse = (
+                'data: {"choices":[{"delta":{"content":"## Goal\\nx"}}]}\n\n'
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+                '"usage":{"prompt_tokens":50,"completion_tokens":5}}\n\n'
+                "data: [DONE]\n\n"
+            )
+            return httpx.Response(200, text=sse)
+
+        p = _provider(True)
+        p._client = httpx.AsyncClient(
+            base_url="https://x/v1", transport=httpx.MockTransport(handler)
+        )
+        outcome = await compact_messages(
+            [_user("hello"), _user("again")],
+            None,
+            None,
+            _RetryingProvider(p, None),
+            "m",
+            lambda msgs: list(msgs),
+        )
+        await p.aclose()
+        assert outcome.ok is True
+        assert outcome.usage.input_tokens == 50
+        assert len(bodies) == 1
+        assert "cache_control" not in json.dumps(bodies[0])

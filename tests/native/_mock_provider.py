@@ -45,6 +45,7 @@ class MockProvider:
         max_tokens: int = 16384,
         reasoning_effort: str | None = None,
         render_tool_images: bool = False,
+        prompt_caching: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:
         self.calls.append(
             {
@@ -55,6 +56,7 @@ class MockProvider:
                 "max_tokens": max_tokens,
                 "reasoning_effort": reasoning_effort,
                 "render_tool_images": render_tool_images,
+                "prompt_caching": prompt_caching,
             }
         )
         if not self._turns:

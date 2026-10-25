@@ -603,8 +603,33 @@ class TestDigest:
         out = reader.digest(path)
         assert [c["trigger"] for c in out["compactions"]] == ["proactive", "overflow"]
         assert out["compactions"][1]["recovery_index"] == 1
+        # Written before `ok` existed: unknown, not failed.
+        assert out["compactions"][0]["ok"] is None
+        assert out["compactions"][0]["error"] is None
         assert out["steers"] == 1
         assert out["nudges"] == 1
+
+    def test_a_failed_compaction_is_described_as_failed(self, tmp_path):
+        path = write_log(
+            tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl",
+            [
+                _session(), _context(), _user(),
+                {"type": "compaction", "ts": "t", "trigger": "proactive",
+                 "ok": False, "error": "HTTP 400: refused", "summary": None,
+                 "messages_dropped": 0, "recovery_index": None,
+                 "usage": {"input_tokens": 300, "output_tokens": 0}},
+                {"type": "compaction", "ts": "t", "trigger": "proactive",
+                 "ok": True, "error": None, "summary": "## Goal",
+                 "messages_dropped": 7, "recovery_index": None},
+                _assistant(text="ok", stop_reason="end_turn"),
+                _result(),
+            ],
+        )
+        compactions = reader.digest(path)["compactions"]
+        assert [c["ok"] for c in compactions] == [False, True]
+        assert compactions[0]["error"] == "HTTP 400: refused"
+        assert compactions[0]["summary_chars"] == 0
+        assert compactions[1]["error"] is None
 
     def test_an_error_record_is_surfaced(self, tmp_path):
         path = write_log(
