@@ -262,6 +262,12 @@ class BrainRequest:
     # be joined to the right one of them. Every other brain ignores it.
     is_fallback: bool = False
 
+    # A per-request turn cap below the brain's own (an assignment wake's
+    # `per_wake_turns`). NativeBrain runs `min(config.max_turns, max_turns)`;
+    # the Claude Code brains have no turn limit to pass and ignore it. None
+    # leaves the brain's configured cap alone.
+    max_turns: int | None = None
+
     # ClaudeCodeBrain-specific: optional fallback file the model writes its
     # final result to when stream parsing fails. Other brains may ignore.
     result_file: Path | None = None

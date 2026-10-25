@@ -1001,6 +1001,15 @@ class NativeBrain:
             result.effort_used = req.effort
         return result
 
+    def _max_turns(self, req: BrainRequest) -> int:
+        """The turn cap for this request: the configured one, lowered by
+        ``req.max_turns`` when the request carries one (an assignment wake)."""
+        cap = self._config.max_turns
+        wanted = req.max_turns
+        if wanted is None or wanted <= 0:
+            return cap
+        return min(cap, wanted) if cap and cap > 0 else wanted
+
     def _execute_sync(self, req: BrainRequest) -> BrainResult:
         # The session log is built here rather than inside the async body so
         # that the `except` below — the one that catches everything
@@ -1328,7 +1337,7 @@ class NativeBrain:
                 "model": model,
                 "effort": effort,
                 "reasoning_effort": reasoning_effort,
-                "max_turns": self._config.max_turns,
+                "max_turns": self._max_turns(req),
                 "max_tokens": self._config.max_tokens,
                 "context_window": (
                     self._config.context_window or get_model_info(model).context_window
@@ -1583,7 +1592,7 @@ class NativeBrain:
         # never sees it. ``fired`` tracks crossed thresholds so each surfaces once.
         budget_nudge_on = (
             self._config.turn_budget_nudge
-            and bool(self._config.max_turns)
+            and bool(self._max_turns(req))
             and bool(req.allowed_tools)
         )
         budget_state: dict = {"fired": set()}
@@ -1603,7 +1612,7 @@ class NativeBrain:
             )
             picked = _pick_turn_budget_nudge(
                 turns,
-                self._config.max_turns,
+                self._max_turns(req),
                 self._config.turn_budget_nudge_early_percent,
                 self._config.turn_budget_nudge_remaining,
                 budget_state["fired"],
@@ -1615,7 +1624,7 @@ class NativeBrain:
             logger.debug(
                 "turn_budget_nudge fired remaining=%s phase=%s turns=%s/%s "
                 "by_clock=%s",
-                remaining, phase, turns, self._config.max_turns, by_clock,
+                remaining, phase, turns, self._max_turns(req), by_clock,
             )
             # The nudge is injected via prepare_next_turn's returned list, so it
             # never reaches `new_messages` and never emits `message_end`. Its
@@ -1625,7 +1634,7 @@ class NativeBrain:
                 phase=phase,
                 remaining=remaining,
                 turns=turns,
-                max_turns=self._config.max_turns,
+                max_turns=self._max_turns(req),
             )
             return _turn_budget_nudge_message(remaining, phase)
 
@@ -1708,7 +1717,7 @@ class NativeBrain:
             return PrepareNextTurnResult(messages=base)
 
         # --- stop conditions ----------------------------------------------
-        max_turns = self._config.max_turns
+        max_turns = self._max_turns(req)
 
         # A cancel must outrank every graceful stop (ISSUE-372/373). The loop
         # checks ``abort`` at the *top* of its inner iteration while stop
@@ -2520,7 +2529,7 @@ class NativeBrain:
         parts: list[tuple[str, str]] = []
         if req.allowed_tools:
             coding = CODING_SYSTEM_PROMPT
-            if self._config.turn_budget_nudge and self._config.max_turns:
+            if self._config.turn_budget_nudge and self._max_turns(req):
                 coding = f"{coding}\n\n- {_TURN_BUDGET_UPFRONT}"
             parts.append(("builtin", coding))
         # `encoding="utf-8"`, not the locale's. `read_text()` bare would decode
