@@ -8,7 +8,8 @@ change and never reads it back.
 
 Every `validate_*` function returns the normalized value or raises
 `CharterError(code, message)`, with `code` one of the CLI's error codes:
-`invalid_charter`, `invalid_validator`, `over_ceiling`, `deadline_passed`.
+`invalid_charter`, `invalid_validator`, `invalid_duration`, `over_ceiling`,
+`deadline_passed`, and `too_many_active` from `budget`.
 
 The assignment directory is `{bot_dir}/assignments/<slug>/` under
 `Config.workspace_root(user_id)`, created and written by descriptor through
@@ -65,6 +66,10 @@ SCRATCHPAD_SEED = (
 # A date-only deadline is the end of that day, so it renders back as the date.
 _END_OF_DAY_SUFFIX = "T23:59:59.999Z"
 _SLUG_DROP = re.compile(r"[^a-z0-9]+")
+_DURATION = re.compile(r"(\d{1,6})([mhd])")
+_DURATION_UNITS = {"m": 1, "h": 60, "d": 1440}
+_DURATION_MAX_MINUTES = 366 * 1440
+MODEL_MAX_CHARS = 100
 
 
 class CharterError(ValueError):
@@ -197,6 +202,42 @@ def validate_cadence(cfg: "AssignmentsConfig", minutes: object) -> int:
             f"the check-in interval must be at least {cfg.min_wake_interval_minutes} minutes",
         )
     return value
+
+
+def parse_duration_minutes(value: object) -> int:
+    """`Nm`, `Nh` or `Nd` as whole minutes; the inverse of `_duration`.
+
+    Raises `CharterError("invalid_duration")`. The tree's only other relative
+    parser, `skills/tasks.parse_since`, turns a window into a past timestamp
+    rather than a length, so it is not this.
+    """
+    match = _DURATION.fullmatch(str(value or "").strip().lower())
+    if match is None:
+        raise CharterError("invalid_duration", "a duration is a number with m, h or d, such as 30m, 6h or 2d")
+    minutes = int(match.group(1)) * _DURATION_UNITS[match.group(2)]
+    if minutes < 1 or minutes > _DURATION_MAX_MINUTES:
+        raise CharterError("invalid_duration", "a duration must be between 1 minute and 366 days")
+    return minutes
+
+
+def validate_model(value: object) -> str | None:
+    text = _one_line(value)
+    if not text:
+        return None
+    if len(text) > MODEL_MAX_CHARS:
+        raise CharterError("invalid_charter", f"the model name is longer than {MODEL_MAX_CHARS} characters")
+    return text
+
+
+def validate_effort(value: object) -> str | None:
+    from istota.brain._aliases import EFFORT_LEVELS
+
+    text = _one_line(value).lower()
+    if not text:
+        return None
+    if text not in EFFORT_LEVELS:
+        raise CharterError("invalid_charter", f"effort must be one of {', '.join(sorted(EFFORT_LEVELS))}")
+    return text
 
 
 def validate_item(text: object, kind: object, validator: object) -> tuple[str, dict[str, Any] | None]:
