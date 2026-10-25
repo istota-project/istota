@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Events on Istota's calendar can reach you as invitations instead. Istota mails each one to your own address, sends an update when it moves and a cancellation when it is removed, and records your accept or decline when your calendar answers; that answer starts no task. Invitations other people send you, in mail forwarded to Istota from the organizer's own address, can be read by tasks too. Recording answers needs `[email] authserv_id`, and `istota doctor` says so.
 - With `[sharing.ocm] enabled`, someone on a Nextcloud can share a folder with `<user>@<site hostname>`, and it shows as a waiting offer on the Shared with Istota card and in the bell. Istota checks the sending server and its signature first, and `istota doctor` says whether other servers can reach it.
 - You can accept or decline a shared folder on that card, and accept a single offer from the bell. Accepting checks the share opens, records whether it can be written, and lets scheduled jobs use it only if you tick that box. Removing it, or unsharing it on the Nextcloud side, cuts Istota's access off; offers left unanswered expire after two weeks.
+- Tasks can work in a folder you accepted: list it, download files into your workspace and, when the share allows editing, upload, create folders, move and delete. Istota asks your server what the share allows on every use, so a permission change there takes effect at once, and an unshared folder is removed on its next use.
 
 ## [0.47.0] - 2026-10-25
 
