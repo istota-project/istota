@@ -9795,11 +9795,19 @@ def check_sharing_ics_feeds(config: "Config", probe: bool) -> CheckResult:
     and the rest belongs to the user. WARNs when there are feeds and none of
     them is answering, which points at the daemon's own egress (or a
     `[sharing] private_hosts` entry) rather than at one provider.
+
+    Also WARNs when invitations for Istota's own calendar go out by mail and
+    `[email] authserv_id` is unset: the user's answers are then consumed and
+    never applied (`sharing.itip.apply_reply`). Counted over users who have
+    events and have not chosen the feed, so an install not using the calendar
+    is not told about it.
     """
     name = "sharing.ics_feeds"
     db_path = Path(config.db_path)
     if not db_path.exists():
         return CheckResult(name, SKIP, f"no framework database at {db_path}")
+    check_replies = bool(config.email.enabled) and not (config.email.authserv_id or "").strip()
+    inviting = 0
     try:
         conn = sqlite_util.connect_read_only(db_path)
         try:
@@ -9807,6 +9815,12 @@ def check_sharing_ics_feeds(config: "Config", probe: bool) -> CheckResult:
                 "SELECT state, COUNT(*) FROM shared_sources WHERE kind = 'ics_feed'"
                 " GROUP BY state"
             ).fetchall()
+            if check_replies:
+                inviting = conn.execute(
+                    "SELECT COUNT(DISTINCT e.user_id) FROM istota_events e"
+                    " LEFT JOIN user_profiles p ON p.user_id = e.user_id"
+                    " WHERE COALESCE(p.calendar_delivery, 'invite') != 'feed'"
+                ).fetchone()[0]
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 - a check never raises
@@ -9819,6 +9833,16 @@ def check_sharing_ics_feeds(config: "Config", probe: bool) -> CheckResult:
         )
     counts = {state: count for state, count in rows}
     active, failing = counts.get("active", 0), counts.get("error", 0)
+    if inviting:
+        return CheckResult(
+            name, WARN,
+            f"{inviting} user(s) get calendar invitations by mail, and `[email] authserv_id` "
+            "is not set, so their accept or decline is never recorded",
+            remedy=(
+                "Set `[email] authserv_id` to your mail server's authserv-id (the name "
+                "before the first `;` in the Authentication-Results it stamps)."
+            ),
+        )
     if not active and not failing:
         return CheckResult(name, OK, "no calendar feeds are subscribed")
     detail = f"{active} calendar feed(s) answering, {failing} failing"

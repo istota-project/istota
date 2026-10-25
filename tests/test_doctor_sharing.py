@@ -66,3 +66,50 @@ def test_an_unmigrated_database_warns_rather_than_raising(tmp_path):
     path = tmp_path / "old.db"
     sqlite3.connect(path).close()
     assert _check(path).status == doctor.WARN
+
+
+def _event(db_path, user="alice"):
+    from istota.sharing import events
+
+    config = Config(db_path=db_path)
+    with db.get_db(db_path) as conn:
+        task = db.get_task(conn, db.create_task(conn, "x", user, source_type="cli"))
+        events.apply_ops(conn, config, task, [events.upsert_op(
+            f"{user}-1@istota.example.org", create=True, fields={
+                "summary": "Private summary", "dtstart": "2026-11-02", "dtend": "2026-11-03",
+                "all_day": True})])
+        conn.commit()
+
+
+def _mail_config(db_path, *, authserv_id=""):
+    from istota.config import EmailConfig
+
+    return Config(db_path=db_path, email=EmailConfig(
+        enabled=True, bot_email="istota@example.org", authserv_id=authserv_id))
+
+
+def test_invitations_without_an_authserv_id_warn(db_path):
+    _event(db_path)
+    result = doctor.check_sharing_ics_feeds(_mail_config(db_path), False)
+    assert result.status == doctor.WARN
+    assert "authserv_id" in result.detail + (result.remedy or "")
+    assert "alice" not in result.detail and "Private" not in result.detail
+
+
+def test_invitations_with_an_authserv_id_are_ok(db_path):
+    _event(db_path)
+    result = doctor.check_sharing_ics_feeds(_mail_config(db_path, authserv_id="mx.example.org"), False)
+    assert result.status == doctor.OK
+
+
+def test_feed_delivery_needs_no_authserv_id(db_path):
+    from istota import user_profiles
+
+    _event(db_path)
+    user_profiles.ensure_profile(db_path, "alice")
+    user_profiles.update_profile(db_path, "alice", calendar_delivery="feed")
+    assert doctor.check_sharing_ics_feeds(_mail_config(db_path), False).status == doctor.OK
+
+
+def test_no_istota_events_needs_no_authserv_id(db_path):
+    assert doctor.check_sharing_ics_feeds(_mail_config(db_path), False).status == doctor.OK
