@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ROOM_COLORS } from './src/lib/roomColors';
-import type { AppsList } from './src/lib/apps/api';
+import type { AppDetail, AppsList } from './src/lib/apps/api';
 
 /**
  * The dev server's vault state, mutated by the two write routes below.
@@ -8007,7 +8007,7 @@ const mockApps: AppsList = {
   kit_built: true,
 };
 
-const appsHandler: MockHandler = ({ url, method }) => {
+const appsHandler: MockHandler = ({ url, method, body }) => {
   const path = url.split('?')[0];
   if (!path.startsWith('/istota/api/apps/') && path !== '/istota/api/apps') return undefined;
   if (method === 'GET' && (path === '/istota/api/apps/' || path === '/istota/api/apps'))
@@ -8059,8 +8059,141 @@ const appsHandler: MockHandler = ({ url, method }) => {
       });
     return { app_id: entry.app_id, status: 'installed' };
   }
+  const frame = path.match(/^\/istota\/api\/apps\/([^/]+)\/v\/(\d+)\/frame$/);
+  if (frame && method === 'GET') {
+    const app = mockApps.apps.find((a) => a.app_id === decodeURIComponent(frame[1]));
+    if (!app) return { __status: 404, error: 'app not found' };
+    if (app.current_version !== Number(frame[2]))
+      return { __status: 409, error: 'this version is not current; reload the app' };
+    return {
+      __raw: mockAppDocument(app.name),
+      __contentType: 'text/html; charset=utf-8',
+      __disposition: 'inline',
+      __headers: {
+        // The dev stand-in for the version's hashed policy: inline scripts are
+        // allowed wholesale here, since this document is built per request.
+        'Content-Security-Policy':
+          "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+          "connect-src 'none'; frame-ancestors 'self'; sandbox allow-scripts",
+        'Cache-Control': 'private, no-store',
+      },
+    };
+  }
+  const call = path.match(/^\/istota\/api\/apps\/([^/]+)\/v\/(\d+)\/call$/);
+  if (call && method === 'POST') return mockAppCall(decodeURIComponent(call[1]), body);
+  const errors = path.match(/^\/istota\/api\/apps\/([^/]+)\/v\/(\d+)\/errors$/);
+  if (errors && method === 'POST') return { __status: 204 };
+  const one = path.match(/^\/istota\/api\/apps\/([^/]+)\/?$/);
+  if (one && one[1] !== 'storage') {
+    const appId = decodeURIComponent(one[1]);
+    const app = mockApps.apps.find((a) => a.app_id === appId);
+    if (!app) return { __status: 404, error: 'app not found' };
+    if (method === 'GET') return mockAppDetail(app);
+    if (method === 'DELETE') {
+      mockApps.apps = mockApps.apps.filter((a) => a.app_id !== appId);
+      mockApps.pending = mockApps.pending.filter((p) => p.app_id !== appId);
+      mockAppKv.delete(appId);
+      const starter = mockApps.starter.find((s) => s.app_id === appId);
+      if (starter) starter.state = 'dismissed';
+      return { __status: 204 };
+    }
+  }
   return undefined;
 };
+
+function mockAppDetail(app: AppsList['apps'][number]): AppDetail {
+  const narrowest = app.narrowest ?? 'phone';
+  return {
+    app_id: app.app_id,
+    name: app.name,
+    icon: app.icon,
+    description: app.description,
+    origin: app.origin,
+    current_version: app.current_version ?? 1,
+    installed_at: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+    approved_at: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+    manifest: {
+      id: app.app_id,
+      name: app.name,
+      icon: app.icon,
+      entry: 'index.html',
+      description: app.description,
+      capabilities: ['kv:own', 'files:own'],
+      narrowest,
+      reason: '',
+    },
+    narrowest,
+    reason: '',
+    warnings: [],
+    pending_id: app.pending_id,
+    grants: [
+      { capability: 'kv:own', scope: null, description: 'Keep its own data.', sensitive: false },
+      {
+        capability: 'files:own',
+        scope: null,
+        description: 'Keep its own files.',
+        sensitive: false,
+      },
+    ],
+    ungranted: [],
+  };
+}
+
+/** Each mock app's `kv:own` namespace, so a dev frame's writes read back. */
+const mockAppKv = new Map<string, Map<string, unknown>>();
+
+function mockAppCall(appId: string, body: any): unknown {
+  if (!mockApps.apps.some((a) => a.app_id === appId))
+    return { __status: 404, error: { code: 'not_found', message: 'This app is not installed.' } };
+  const { capability, op, args = {} } = body ?? {};
+  if (capability !== 'kv:own')
+    return {
+      __status: 403,
+      error: { code: 'not_granted', message: `${capability} is not granted in the dev server.` },
+    };
+  const kv = mockAppKv.get(appId) ?? new Map<string, unknown>();
+  mockAppKv.set(appId, kv);
+  if (op === 'get') return { result: kv.has(args.key) ? kv.get(args.key) : null };
+  if (op === 'set') {
+    kv.set(String(args.key), args.value);
+    return { result: null };
+  }
+  if (op === 'delete') return { result: { deleted: kv.delete(String(args.key)) } };
+  if (op === 'list') {
+    const prefix = typeof args.prefix === 'string' ? args.prefix : '';
+    const items = [...kv.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([key, value]) => ({ key, value }));
+    return { result: { items, total: items.length } };
+  }
+  return { __status: 400, error: { code: 'bad_args', message: `kv:own has no op ${op}.` } };
+}
+
+/**
+ * A stand-in installed document: the real kit scripts (the stylesheet is
+ * built, so it is left out) and a page that counts its own visits through
+ * `kv:own`, shows the environment it was told about, and copies.
+ */
+function mockAppDocument(name: string): string {
+  const kit = (file: string) => readFileSync(resolve(__mockDir, 'src/apps/kit', file), 'utf8');
+  const page = `
+    (async () => {
+      const out = document.getElementById('out');
+      const visits = ((await istota.kv.get('visits')) || 0) + 1;
+      await istota.kv.set('visits', visits);
+      const show = () => {
+        out.textContent = 'Visits: ' + visits + '\\nEnvironment: ' + JSON.stringify(istota.env, null, 2);
+      };
+      show();
+      istota.on('env', show);
+      document.getElementById('copy').addEventListener('click', () => istota.copy('Copied from the dev app'));
+    })();`;
+  return `<!doctype html><html><head><meta charset="utf-8">
+<script>${kit('guard.js')}</script><script>${kit('istota-app.js')}</script>
+<script>${kit('components.js')}</script></head>
+<body><h1>${name}</h1><button id="copy">Copy</button><pre id="out"></pre>
+<script>${page}</script></body></html>`;
+}
 
 const workspaceHandler: MockHandler = ({ url, method, body }) => {
   const driveUrl = new URL(url, 'http://localhost');

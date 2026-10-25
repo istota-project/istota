@@ -133,7 +133,7 @@
           <h2 id="apps-installed" class="title-section">Installed</h2>
           <CardGrid>
             {#each list.apps as app (app.app_id)}
-              <AppCard {app} />
+              <AppCard {app} paneWidth={apps.paneWidth} />
             {/each}
           </CardGrid>
         </section>

@@ -8,6 +8,7 @@
   import { latest } from '@minot/ui/ui/latest';
   import {
     AppShell,
+    Badge,
     Icon,
     ListRow,
     ShellHeader,
@@ -17,7 +18,8 @@
   } from '@minot/ui';
   import { AuthError } from '$lib/api';
   import { appPath, getApps, type AppsList } from '$lib/apps/api';
-  import { setAppsList } from '$lib/apps/context';
+  import { setAppsList, type AppsHeader } from '$lib/apps/context';
+  import { fitsRange, observeWidth } from '$lib/apps/display';
   import { appIcon } from '$lib/apps/icons';
   import { getCurrentUser } from '$lib/userContext';
 
@@ -28,6 +30,10 @@
   let loading = $state(true);
   let error = $state('');
   let sidebarOpen = $state(false);
+  let pageHeader = $state<AppsHeader | null>(null);
+  let paneWidth = $state<number | null>(null);
+  let pane: HTMLDivElement;
+  onMount(() => observeWidth(pane, (width) => (paneWidth = width)));
   const drawer = createDrawerClose(
     () => sidebarOpen,
     () => (sidebarOpen = false),
@@ -68,7 +74,13 @@
     get error() {
       return error;
     },
+    get paneWidth() {
+      return paneWidth;
+    },
     reload,
+    setHeader(next) {
+      pageHeader = next;
+    },
   });
 
   onMount(() => void reload());
@@ -88,7 +100,7 @@
 <AppShell>
   {#snippet header()}
     <ShellHeader
-      title="Apps"
+      title={pageHeader?.title ?? 'Apps'}
       onTitleClick={() => (sidebarOpen = !sidebarOpen)}
       titleActionLabel="Toggle apps list"
     >
@@ -98,6 +110,9 @@
           label="Toggle apps list"
           onclick={() => (sidebarOpen = !sidebarOpen)}
         />
+      {/snippet}
+      {#snippet tools()}
+        {#if pageHeader?.tools}{@render pageHeader.tools()}{/if}
       {/snippet}
     </ShellHeader>
   {/snippet}
@@ -123,16 +138,35 @@
             <Icon icon={CircleArrowUp} size="xs" label="An install is waiting" />
           {/if}
         {/snippet}
+        {#snippet widerBadge()}
+          {#if !fitsRange(app.narrowest, paneWidth)}
+            <Badge size="sm" tone="subtle" uppercase={false}>Wider screen</Badge>
+          {/if}
+        {/snippet}
         <ListRow
           {href}
           active={appActive(app.app_id)}
           icon={rowIcon}
           mark={waitingMark}
+          badge={widerBadge}
           onclick={(event) => follow(event, href)}>{app.name}</ListRow
         >
       {/each}
     </Sidebar>
   {/snippet}
 
-  {@render children()}
+  <!-- The pane the section's pages render in, measured for the display ranges,
+       and a flex column so the app view's frame can fill it. -->
+  <div class="apps-pane" bind:this={pane}>
+    {@render children()}
+  </div>
 </AppShell>
+
+<style>
+  .apps-pane {
+    flex: 1 0 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+</style>

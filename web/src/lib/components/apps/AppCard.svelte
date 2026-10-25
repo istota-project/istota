@@ -5,9 +5,13 @@
   import { base } from '$app/paths';
   import { Badge, Button, Card, Icon } from '@minot/ui';
   import { appPath, type AppSummary } from '$lib/apps/api';
+  import { fitsRange } from '$lib/apps/display';
   import { appIcon } from '$lib/apps/icons';
 
-  let { app }: { app: AppSummary } = $props();
+  /** `paneWidth` is the section's measured pane, for the "Wider screen" badge. */
+  let { app, paneWidth = null }: { app: AppSummary; paneWidth?: number | null } = $props();
+
+  const tooNarrow = $derived(!fitsRange(app.narrowest, paneWidth));
 
   const asks = $derived(app.ungranted.length);
 </script>
@@ -20,6 +24,9 @@
     {/if}
     {#if app.pending_id}
       <Badge size="sm" variant="info" uppercase={false}>Update waiting</Badge>
+    {/if}
+    {#if tooNarrow}
+      <Badge size="sm" tone="subtle" uppercase={false}>Wider screen</Badge>
     {/if}
   {/snippet}
   {#snippet actions()}
