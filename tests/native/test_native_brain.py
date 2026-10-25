@@ -751,6 +751,26 @@ class TestErrorAndStops:
         # Only ran up to the cap, not all 20 scripted turns.
         assert len(provider.calls) <= 4
 
+    @pytest.mark.parametrize("configured, requested, expected_calls", [(10, 2, 2), (2, 10, 2)])
+    def test_a_request_turn_cap_lowers_the_configured_one_and_never_raises_it(
+        self, tmp_path, configured, requested, expected_calls,
+    ):
+        """An assignment wake's `per_wake_turns` (`BrainRequest.max_turns`):
+        the run stops at the lower of the two caps."""
+        turns = [
+            AssistantMessage(
+                content=[ToolCallContent(id=f"c{i}", name="Read", arguments={"file_path": "README"})],
+                stop_reason="tool_use",
+            )
+            for i in range(20)
+        ]
+        provider = MockProvider(turns)
+        req = _req("loop", tmp_path, tools=["Read"])
+        req.max_turns = requested
+        result = _brain(provider, max_turns=configured).execute(req)
+        assert result.stop_reason == "max_turns"
+        assert len(provider.calls) == expected_calls
+
     def test_max_turns_keeps_the_narration_it_was_capped_mid(self, tmp_path):
         """ISSUE-187 defects 1-2 must survive the ISSUE-211 final-turn rule.
 

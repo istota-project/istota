@@ -1071,6 +1071,27 @@ class PlaybooksConfig:
 
 
 @dataclass
+class AssignmentsConfig:
+    """`[assignments]`: goals Istota carries across days (`.claude/rules/assignments.md`).
+
+    The lane's worker caps, the deployment ceilings every charter is held to,
+    and the host's pause thresholds. The feature itself is gated by the
+    `skill_assignment` experimental flag, not by anything here.
+    """
+    max_workers: int = 2                      # instance-wide assignment lane
+    user_max_workers: int = 1                 # per-user share of the lane
+    max_active_per_user: int = 3              # non-terminal, non-draft assignments per user
+    max_cost_usd_per_assignment: float = 50.0
+    max_wakes_per_assignment: int = 500
+    min_wake_interval_minutes: int = 15       # floor between wakes
+    stall_wakes: int = 3                      # wakes with no progress signal before a pause
+    failure_wakes: int = 3                    # failed wakes in a row before a pause
+    budget_low_fraction: float = 0.75         # spend fraction that raises budget_low
+    scratchpad_prompt_chars: int = 24000
+    history_prompt_chars: int = 12000
+
+
+@dataclass
 class ReviewConfig:
     """`[developer.review]` — the code_review CLI's model, caps and budget.
 
@@ -2472,6 +2493,7 @@ class Config:
     brain: BrainConfig = field(default_factory=BrainConfig)
     memory_search: MemorySearchConfig = field(default_factory=MemorySearchConfig)
     playbooks: PlaybooksConfig = field(default_factory=PlaybooksConfig)
+    assignments: AssignmentsConfig = field(default_factory=AssignmentsConfig)
     sleep_cycle: SleepCycleConfig = field(default_factory=SleepCycleConfig)
     channel_sleep_cycle: ChannelSleepCycleConfig = field(default_factory=ChannelSleepCycleConfig)
     developer: DeveloperConfig = field(default_factory=DeveloperConfig)

@@ -18,6 +18,14 @@ if TYPE_CHECKING:
     from ..config import Config
 
 
+#: Source types whose result is delivered to no surface at all. An assignment
+#: wake's result is the wake row's summary; `resolve_delivery_plan` answers an
+#: empty plan for these whatever `output_target` says, and the delivery map
+#: below answers `NO_SURFACE` rather than falling through to `talk`.
+NO_DELIVERY_SOURCE_TYPES = frozenset({"assignment"})
+NO_SURFACE = "none"
+
+
 def _surface_for_source_type(source_type: str) -> str:
     """Map a task's ``source_type`` to the delivery surface name.
 
@@ -28,8 +36,12 @@ def _surface_for_source_type(source_type: str) -> str:
     destination, and ``WebTransport`` advertises no progress-ack. The transport's
     ``deliver`` is used only by the routing paths — alerts / log / notifications
     routed to ``web``). Everything else (talk, briefing, scheduled, subtask,
-    heartbeat, cli, istota_file, unknown) → ``"talk"``, the existing default.
+    heartbeat, cli, istota_file, unknown) → ``"talk"``, the existing default,
+    except a source type in ``NO_DELIVERY_SOURCE_TYPES``, which names no
+    surface (``NO_SURFACE``, which no transport registers).
     """
+    if source_type in NO_DELIVERY_SOURCE_TYPES:
+        return NO_SURFACE
     if source_type == "email":
         return "email"
     if source_type == "repl":

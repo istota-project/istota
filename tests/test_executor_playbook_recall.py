@@ -59,6 +59,21 @@ class TestRecallPlaybooks:
             assert _recall_playbooks(config, object(), _task(source_type="scheduled"), "the prompt") is None
             s.assert_not_called()
 
+    def test_an_assignment_wake_recalls_playbooks_though_automated(self, tmp_path):
+        """Assignments spec, Design section 8: a wake loads playbooks as a private
+        task does, with the charter's goal as the query."""
+        from istota.session.result import _is_automated_task
+
+        config = self._config(tmp_path)
+        wake = _task(source_type="assignment", conversation_token=None, assignment_id=7)
+        assert _is_automated_task(wake)
+        with patch(
+            "istota.memory.search.search", return_value=[_FakeResult("# Quotes\n1. ask three")],
+        ) as s:
+            out = _recall_playbooks(config, object(), wake, "Get three quotes.")
+        assert "ask three" in out
+        assert s.call_args.args[2] == "Get three quotes."
+
     def test_skip_memory_returns_none(self, tmp_path):
         config = self._config(tmp_path)
         with patch("istota.memory.search.search") as s:

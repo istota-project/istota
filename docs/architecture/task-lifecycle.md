@@ -137,13 +137,18 @@ The skills line is populated by reading `selected_skills` from the DB after task
 
 ## Data flow gotchas
 
-### Column visibility in get_task()
+### Adding a column to tasks
 
-The `get_task()` function uses an explicit column list in its SELECT, not `SELECT *`. When adding new columns to the tasks table, you must update three places:
+Every query that rebuilds a `Task` selects the shared `_TASK_COLUMNS` list, not `SELECT *`. A new column on `tasks` goes in six places:
 
-1. The `ALTER TABLE` migration in `_run_migrations()`
-2. The `_row_to_task()` mapping (with `in row.keys()` fallback)
-3. **The SELECT column list in `get_task()`** — easy to forget, and `_row_to_task` silently falls back to `None`
+1. The `CREATE TABLE tasks` statement in `schema.sql`
+2. The `_add_columns(conn, "tasks", …)` call in `_run_migrations()`, for an upgraded database
+3. `_TASK_COLUMNS`
+4. The `_row_to_task()` mapping
+5. The `Task` dataclass
+6. `create_task()`, when the column is set at creation
+
+`_row_to_task` reads `row["name"]` directly, so a column in the mapping but missing from `_TASK_COLUMNS` raises `IndexError` rather than reading as `None`.
 
 ### Skills are saved before execution, read after
 

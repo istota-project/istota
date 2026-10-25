@@ -162,6 +162,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     skill TEXT,
     skill_args TEXT,
 
+    -- The assignment this task is a wake of (`assignments.id`), set only on a
+    -- `source_type = 'assignment'` task. NULL on every other task.
+    assignment_id INTEGER,
+
     FOREIGN KEY (parent_task_id) REFERENCES tasks(id)
 );
 
@@ -179,6 +183,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(queue, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_queue_started ON tasks(queue, status, started_at, user_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_user_created ON tasks(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_assignment ON tasks(assignment_id);
 
 -- User resource permissions
 CREATE TABLE IF NOT EXISTS user_resources (
@@ -1950,13 +1955,15 @@ CREATE TABLE IF NOT EXISTS task_usage (
 
     rate_limit_type        TEXT,
     rate_limit_status      TEXT,
-    rate_limit_resets_at   INTEGER
+    rate_limit_resets_at   INTEGER,
+    assignment_id          INTEGER           -- a wake's assignment; outlives the task row
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_usage_created ON task_usage(created_at);
 CREATE INDEX IF NOT EXISTS idx_task_usage_user    ON task_usage(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_usage_task    ON task_usage(task_id);
 CREATE INDEX IF NOT EXISTS idx_task_usage_origin  ON task_usage(origin, created_at);
+CREATE INDEX IF NOT EXISTS idx_task_usage_assignment ON task_usage(assignment_id);
 -- Partial: non-task rows all carry task_id NULL and must not collide.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_usage_attempt
     ON task_usage(task_id, attempt_seq) WHERE task_id IS NOT NULL;
@@ -2088,7 +2095,7 @@ CREATE TABLE IF NOT EXISTS whatsapp_skill_requests (
     requester_user_id TEXT NOT NULL,
     origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     request_key TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase', 'recovery_fill', 'location_share')),
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase', 'recovery_fill', 'location_share', 'assignment_activation')),
     recipient_user_id TEXT NOT NULL,
     relay_id TEXT UNIQUE,
     text TEXT,
@@ -2917,4 +2924,131 @@ CREATE TABLE IF NOT EXISTS calendar_feed_tokens (
     token_sha256 TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     last_used_at TEXT
+);
+
+-- Assignments: goals Istota carries across days (.claude/rules/assignments.md).
+-- Every timestamp here is ISO-Z, matching task_usage; compare with `tasks`
+-- columns (datetime('now') format) only after converting one side. The
+-- ON DELETE CASCADE clauses are documentation: istota never sets
+-- PRAGMA foreign_keys=ON.
+CREATE TABLE IF NOT EXISTS assignments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    title TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    autonomy TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'draft'
+        CHECK (state IN ('draft','active','sleeping','waiting','paused','completed','abandoned')),
+    state_reason TEXT,
+    waiting_on TEXT,                          -- JSON list of inbox kinds
+    budget TEXT NOT NULL,                     -- JSON: max_cost_usd, max_wakes, per_wake_minutes, per_wake_turns
+    budget_low_sent INTEGER NOT NULL DEFAULT 0,
+    deadline TEXT,                            -- ISO-Z
+    cadence_minutes INTEGER NOT NULL DEFAULT 360,
+    auto_complete INTEGER NOT NULL DEFAULT 0,
+    model TEXT, effort TEXT, brain TEXT,
+    settings TEXT NOT NULL DEFAULT '{}',      -- experiment knobs, unused in core
+    dir_relpath TEXT NOT NULL,                -- relative to the bot dir: assignments/<slug>
+    next_wake_at TEXT,                        -- ISO-Z
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    activated_at TEXT,
+    closed_at TEXT,
+    UNIQUE (user_id, slug)
+);
+CREATE INDEX IF NOT EXISTS idx_assignments_due ON assignments(state, next_wake_at);
+
+CREATE TABLE IF NOT EXISTS assignment_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('mechanical','confirmed')),
+    validator TEXT,                           -- JSON, mechanical only, host-written
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','passing','failing','confirmed')),
+    checked_at TEXT, detail TEXT
+);
+
+CREATE TABLE IF NOT EXISTS assignment_frozen (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    value TEXT NOT NULL,
+    UNIQUE (assignment_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS assignment_wakes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    task_id INTEGER,                          -- dangles after task retention
+    kind TEXT NOT NULL DEFAULT 'work',
+    fired_by TEXT NOT NULL CHECK (fired_by IN ('time','inbox','deadline','manual')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    started_at TEXT, ended_at TEXT,
+    outcome TEXT,                             -- next|no_next_step|failed|cancelled|not_active|complete_proposed|complete_refused|completed
+    next_request TEXT,                        -- JSON from `assignment next`
+    complete_request TEXT,                    -- evidence from `assignment complete`
+    progress_note TEXT,                       -- `--progress`, not evidence
+    summary TEXT,
+    progress_signals TEXT NOT NULL DEFAULT '[]',
+    cost_usd REAL,                            -- copied from task_usage at finish, for the timeline
+    UNIQUE (assignment_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS assignment_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    wake_id INTEGER REFERENCES assignment_wakes(id) ON DELETE CASCADE,  -- NULL for the seed
+    phase TEXT NOT NULL CHECK (phase IN ('seed','before','after')),
+    sha256 TEXT NOT NULL,
+    content TEXT NOT NULL,
+    truncated INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE TABLE IF NOT EXISTS assignment_inbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,                       -- user_note|handoff_done|charter_change|scratchpad_changed|item_confirmed|budget_low|completion_rejected
+    trusted INTEGER NOT NULL DEFAULT 0,
+    payload TEXT NOT NULL,                    -- JSON
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    consumed_by_wake INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_assignment_inbox_open ON assignment_inbox(assignment_id, consumed_by_wake);
+
+CREATE TABLE IF NOT EXISTS assignment_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    wake_id INTEGER,
+    kind TEXT NOT NULL CHECK (kind IN ('handoff')),   -- question, approval, checkpoint come with the user-loop spec
+    text TEXT NOT NULL,
+    report_spec TEXT,
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','done')),
+    due_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    resolved_at TEXT, response TEXT
+);
+
+CREATE TABLE IF NOT EXISTS assignment_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    wake_id INTEGER,
+    target TEXT NOT NULL,
+    tried TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('ok','failed','partial')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_assignment_attempts_target ON assignment_attempts(assignment_id, target);
+
+CREATE TABLE IF NOT EXISTS assignment_events (           -- append-only audit
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    wake_id INTEGER,
+    kind TEXT NOT NULL,
+    actor TEXT NOT NULL CHECK (actor IN ('user','assignment','system')),
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );

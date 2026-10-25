@@ -58,6 +58,7 @@ _BODY_CHARS = 400
 # The stored title and body of a held room post (a `room post` or a guest
 # proposal), which is what a push carries: fixed words, never the preview.
 LOCATION_SHARE_TITLE = "Location sharing waiting for approval"
+ASSIGNMENT_ACTIVATION_TITLE = "Assignment waiting for approval"
 PURCHASE_TITLE = "Purchase waiting for approval"
 ROOM_POST_TITLE = "Room post awaiting approval"
 ROOM_POST_BODY = "Open your private chat with the bot to review and approve it."
@@ -241,6 +242,8 @@ def _relay_held_view(conn, row: "NotificationRow", task) -> "NotificationView":
         label = "this purchase"
     if request is not None and request["kind"] == "recovery_fill":
         label = "this recovery code"
+    if request is not None and request["kind"] == "assignment_activation":
+        label = "this assignment"
     preview = task.confirmation_prompt or ""
     lines = [line for line in preview.splitlines() if line.strip()]
     actions = []

@@ -47,6 +47,7 @@ Subsystems:
 - `wallet.md` — payment cards, purchase approval, private checkout fills and static-card limits
 - `money.md` — quarterly tax estimator, portfolio snapshots, classifications
 - `memory.md` — USER.md/CHANNEL.md/GROUP.md, per-skill overlays, knowledge graph, playbooks, sleep cycle
+- `assignments.md` — goals carried across days: the assignment tables, the `assignment_id` columns on `tasks` and `task_usage`, the store, the charter, lifecycle, caller and ledger, wake creation and the assignment lane, pickup (scratchpad snapshots and the wake prompt), the `assignment` skill, `[assignments]`, the `skill_assignment` flag
 
 Boundaries and operations:
 
@@ -68,6 +69,7 @@ Boundaries and operations:
 src/istota/
 ├── brain/                # Pluggable model invocation (Brain protocol)
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
+├── assignments/          # Goals Istota carries across days: store.py (row access), charter.py, validators.py, lifecycle.py (the one state writer), caller.py (user turn, wake or neither), budget.py (the ledger and ceilings), wakes.py (due wakes, the wake task, pickup, orphan reaping), scratchpad.py (snapshots, user edits, repair), prompt.py (the wake prompt) → assignments.md
 ├── skills/               # Self-contained skills (skill.md + optional CLI)
 │   └── _group_access.py  # The one gate for `kv --group` and `memory --group`: current member and in the task's resolved group set → memory.md
 ├── session/              # The native brain's application layer: compaction, results, transcripts
@@ -220,6 +222,7 @@ src/istota/
 │   ├── rclone_conf.py    # The VM's rclone remote for a Nextcloud account, and rclone's `obscure` without rclone → leaf-modules.md
 │   ├── llm_json.py       # The same, for a fence in *model* output; anchored closer, linear walk → leaf-modules.md
 │   ├── markdown_plain.py # Markdown flattened to the words a reader sees, for the iOS chat push preview → leaf-modules.md
+│   ├── markdown_headings.py # Headings in somebody else's text pushed below the section it sits under: skill overlays, the assignment charter → leaf-modules.md
 │   ├── text_match.py     # Literal query terms, FTS/LIKE matching and plain snippets → search.md
 │   ├── date_parse.py     # Loose date parsing for text a model or a person typed, validated → leaf-modules.md
 │   ├── filenames.py      # The one rule for turning a name somebody else chose into a filename → leaf-modules.md

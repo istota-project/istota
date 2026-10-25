@@ -303,6 +303,7 @@ def _register_all() -> None:
             "job_failure",
             "group_briefing",
             "shared_source",
+            "assignment",
         ):
             try:
                 module = importlib.import_module(

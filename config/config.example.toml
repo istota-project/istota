@@ -911,6 +911,19 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # retention_days = 90                  # 0 = keep forever; >0 = age-prune by last-use (recall refreshes it)
 # max_chars = 0                        # 0 = share the global max_memory_chars budget
 
+# [assignments]                        # Goals carried across days; needs the skill_assignment experimental flag
+# max_workers = 2                      # instance-wide assignment lane
+# user_max_workers = 1                 # assignment wakes one user may run at once
+# max_active_per_user = 3              # assignments past draft and not yet closed, per user
+# max_cost_usd_per_assignment = 50.0   # ceiling on any charter's cost budget
+# max_wakes_per_assignment = 500       # ceiling on any charter's wake budget
+# min_wake_interval_minutes = 15       # floor between two wakes of one assignment
+# stall_wakes = 3                      # wakes in a row with no progress before a pause
+# failure_wakes = 3                    # failed wakes in a row before a pause
+# budget_low_fraction = 0.75           # share of the budget spent that raises a budget_low notice
+# scratchpad_prompt_chars = 24000      # scratchpad cap in a wake's prompt
+# history_prompt_chars = 12000         # cap on earlier wake summaries in a wake's prompt
+
 # ============================================================================
 # Model alias registry [models.aliases] (operator override) — optional
 # ============================================================================
