@@ -135,6 +135,34 @@ export interface AppVersions {
   versions: AppVersion[];
 }
 
+/** One bridge call as Activity shows it: its arguments are never stored. */
+export interface AppCall {
+  id: number;
+  version: number;
+  capability: string;
+  op: string;
+  /** `ok`, or the error code it was answered with. */
+  status: string;
+  at: string;
+}
+
+export interface AppErrorReport {
+  id: number;
+  version: number;
+  kind: 'error' | 'rejection' | 'navigated' | 'shell';
+  /** The app's own words: render as text. */
+  message: string;
+  stack: string;
+  at: string;
+}
+
+export interface AppActivity {
+  app_id: string;
+  current_version: number;
+  calls: AppCall[];
+  errors: AppErrorReport[];
+}
+
 export interface AppStorage {
   app_id: string;
   name: string;
@@ -219,6 +247,10 @@ export function deletePending(appId: string, pendingId: string): Promise<void> {
 
 export function getVersions(appId: string): Promise<AppVersions> {
   return appsFetch(`/${seg(appId)}/versions`);
+}
+
+export function getActivity(appId: string): Promise<AppActivity> {
+  return appsFetch(`/${seg(appId)}/activity`);
 }
 
 export function makeCurrent(

@@ -18,6 +18,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ROOM_COLORS } from './src/lib/roomColors';
 import type {
+  AppCall,
   AppDetail,
   AppsList,
   AppVersion,
@@ -8100,7 +8101,10 @@ const appsHandler: MockHandler = ({ url, method, body }) => {
     };
   }
   const call = path.match(/^\/istota\/api\/apps\/([^/]+)\/v\/(\d+)\/call$/);
-  if (call && method === 'POST') return mockAppCall(decodeURIComponent(call[1]), body);
+  if (call && method === 'POST')
+    return mockAppCall(decodeURIComponent(call[1]), Number(call[2]), body);
+  const activity = path.match(/^\/istota\/api\/apps\/([^/]+)\/activity$/);
+  if (activity && method === 'GET') return mockActivity(decodeURIComponent(activity[1]));
   const errors = path.match(/^\/istota\/api\/apps\/([^/]+)\/v\/(\d+)\/errors$/);
   if (errors && method === 'POST') return { __status: 204 };
   if (method === 'GET' && path === '/istota/api/apps/storage') {
@@ -8436,7 +8440,42 @@ function mockPendingRoute(match: RegExpMatchArray, method: string, body: any): u
 /** Each mock app's `kv:own` namespace, so a dev frame's writes read back. */
 const mockAppKv = new Map<string, Map<string, unknown>>();
 
-function mockAppCall(appId: string, body: any): unknown {
+/** Each mock app's recorded calls, newest first, for Activity. */
+const mockAppCallLog = new Map<string, AppCall[]>();
+let mockAppCallId = 0;
+
+function mockAppCall(appId: string, version: number, body: any): unknown {
+  const answer = mockAnswerCall(appId, body) as { error?: { code?: string } };
+  const app = mockApps.apps.find((a) => a.app_id === appId);
+  if (app) {
+    const log = mockAppCallLog.get(appId) ?? [];
+    mockAppCallLog.set(appId, log);
+    mockAppCallId += 1;
+    log.unshift({
+      id: mockAppCallId,
+      version,
+      capability: String(body?.capability ?? ''),
+      op: String(body?.op ?? ''),
+      status: answer.error?.code ?? 'ok',
+      at: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
+    });
+    log.splice(200);
+  }
+  return answer;
+}
+
+function mockActivity(appId: string): unknown {
+  const app = mockApps.apps.find((a) => a.app_id === appId);
+  if (!app || app.current_version === null) return { __status: 404, error: 'app not found' };
+  return {
+    app_id: appId,
+    current_version: app.current_version,
+    calls: mockAppCallLog.get(appId) ?? [],
+    errors: [],
+  };
+}
+
+function mockAnswerCall(appId: string, body: any): unknown {
   if (!mockApps.apps.some((a) => a.app_id === appId))
     return { __status: 404, error: { code: 'not_found', message: 'This app is not installed.' } };
   const { capability, op, args = {} } = body ?? {};
