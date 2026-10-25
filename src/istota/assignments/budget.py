@@ -14,7 +14,8 @@ as zero; `max_wakes` still binds, so an unmeasured brain cannot run forever. A
 wake that ended `not_active` never reached a brain and is not counted.
 
 The pre-wake and post-wake enforcement steps that move state belong to `wakes`
-and `lifecycle`; this module only reads and checks.
+and `lifecycle`; this module only reads and checks (`check_before_wake` is the
+pre-wake check).
 """
 
 from __future__ import annotations
@@ -91,6 +92,11 @@ def is_spent(assignment: store.Assignment, spent: Totals) -> bool:
     max_cost = float(assignment.budget.get("max_cost_usd") or 0.0)
     max_wakes = int(assignment.budget.get("max_wakes") or 0)
     return spent.cost_usd >= max_cost or spent.wakes >= max_wakes
+
+
+def check_before_wake(conn: sqlite3.Connection, assignment: store.Assignment) -> bool:
+    """Whether the ledger leaves room for one more wake. The caller pauses on False."""
+    return not is_spent(assignment, totals(conn, assignment.id))
 
 
 def topped_up(

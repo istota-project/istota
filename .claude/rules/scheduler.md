@@ -25,7 +25,7 @@ paths:
 - `field` is authoritative, `interval()` derives from it. `None` = not a config field (`travel-timezone`, `status-write` = 60, `backup-stale-alert`). `__post_init__` refuses both or neither, since neither would silently mean "every tick".
 - A non-positive interval bypasses the clock (`backup-stale-alert`), so a backwards NTP step cannot skip it.
 - `enabled` carries `bool(interval)` so 0 means off.
-- `shared-blocks`, `scheduled-jobs`, `sleep-cycles`, `cleanup` read `briefing_check_interval` though not briefings. Known; own keys are an operator-visible config change.
+- `shared-blocks`, `scheduled-jobs`, `assignments`, `sleep-cycles`, `cleanup` read `briefing_check_interval` though not briefings. Known; own keys are an operator-visible config change.
 - `on_error` / `one_shot_on_error` differ because the paths differed: `check_briefings` / `check_scheduled_jobs` failures abort the one-shot pass; the daemon logs past them.
 - `phone-room-backfill` (literal 60 seconds, `background`) replays each minted SMS or WhatsApp room's pre-mint history and writes the `_room_backfill` marker once nothing on the room's aliases is unfinished. A marked room costs one indexed read per pass; a WhatsApp group room or a shared phone room is never marked and is re-checked every pass. Mechanism in `transport.md` ("Phone rooms").
 
@@ -92,7 +92,7 @@ Unconsumed files are warned about and left on disk (ISSUE-073). All reads and wr
 - Handler-level guards still protect later ops in the same file; `_process_deferred_user_alerts`'s except recovers by sending directly, so do not remove it.
 
 ## WorkerPool
-`dispatch()` runs the admission gate, then the fg cap, then the bg cap. `_workers` is locked and keyed `(user_id, queue_type, slot)`; per-user caps via `effective_user_max_fg_workers` / `_bg_`; spawns up to `min(per_user_cap, claimable_pending)`. `shutdown()` = request_stop + join 10s.
+`dispatch()` runs the admission gate, then the fg cap, then the bg cap, then the assignment lane (`[assignments] max_workers` / `user_max_workers`, `.claude/rules/assignments.md`); the last two share `_spawn_capped_workers`. `_workers` is locked and keyed `(user_id, queue_type, slot)`; per-user caps via `effective_user_max_fg_workers` / `_bg_`; spawns up to `min(per_user_cap, claimable_pending)`. `shutdown()` = request_stop + join 10s.
 
 ### Long-task slot reclassification (foreground only)
 

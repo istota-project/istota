@@ -28,7 +28,9 @@ change while the request is held cancels it (`cancel_held_activation`, from
 `edit_charter`), so an approval can never start a charter other than the one
 shown. There is no clean-turn release.
 
-The wake-side transitions are `wakes`'.
+The system's transitions around a wake (`wake_created`, `pause_for_budget`,
+`wake_ended`) are here too, so this module stays the one writer of the state;
+`wakes` decides when they happen and calls them inside its own transaction.
 """
 
 from __future__ import annotations
@@ -570,3 +572,68 @@ def complete_handoff(
         )
         store.insert_event(conn, assignment_id, kind="handoff_done", actor="user", payload={"action_id": action_id})
         return store.get_action(conn, assignment_id, action_id)
+
+
+# ---------------------------------------------------------------------------
+# The system's transitions around a wake
+# ---------------------------------------------------------------------------
+
+WAKEABLE_STATES = ("sleeping", "waiting")
+
+
+def _load_any(conn: sqlite3.Connection, assignment_id: int) -> store.Assignment:
+    assignment = store.get_assignment(conn, assignment_id)
+    if assignment is None:
+        raise TransitionError("not_found", "no such assignment")
+    return assignment
+
+
+def wake_created(
+    conn: sqlite3.Connection, assignment_id: int, *, wake_id: int, task_id: int, fired_by: str,
+) -> None:
+    """sleeping or waiting → active, once the wake row and its task exist."""
+    with write_transaction(conn):
+        assignment = _load_any(conn, assignment_id)
+        _require(assignment, WAKEABLE_STATES, "wake")
+        store.set_state(conn, assignment_id, "active")
+        store.update_assignment(conn, assignment_id, next_wake_at=None)
+        store.insert_event(
+            conn, assignment_id, kind="wake_created", actor="system", wake_id=wake_id,
+            payload={"from": assignment.state, "fired_by": fired_by, "task_id": task_id},
+        )
+
+
+def pause_for_budget(conn: sqlite3.Connection, assignment_id: int) -> store.Assignment:
+    """sleeping or waiting → paused (budget): the ledger has no room for another wake."""
+    with write_transaction(conn):
+        assignment = _load_any(conn, assignment_id)
+        _require(assignment, WAKEABLE_STATES, "pause")
+        store.set_state(conn, assignment_id, "paused", reason="budget")
+        store.update_assignment(conn, assignment_id, next_wake_at=None)
+        store.insert_event(
+            conn, assignment_id, kind="paused", actor="system",
+            payload={"from": assignment.state, "reason": "budget"},
+        )
+        return store.get_assignment(conn, assignment_id)
+
+
+def wake_ended(
+    conn: sqlite3.Connection, assignment_id: int, *, wake_id: int, next_wake_at: str,
+) -> bool:
+    """active → sleeping, due at `next_wake_at`.
+
+    Returns False and changes nothing when the assignment has left `active`
+    while the wake ran (the user paused or abandoned it), so the user's state
+    is kept.
+    """
+    with write_transaction(conn):
+        assignment = _load_any(conn, assignment_id)
+        if assignment.state != "active":
+            return False
+        store.set_state(conn, assignment_id, "sleeping")
+        store.update_assignment(conn, assignment_id, next_wake_at=next_wake_at)
+        store.insert_event(
+            conn, assignment_id, kind="wake_ended", actor="system", wake_id=wake_id,
+            payload={"next_wake_at": next_wake_at},
+        )
+        return True

@@ -25,7 +25,7 @@ A uniform seam over messaging surfaces. Inbound, a `Transport` normalizes messag
 
 ## Registry (`registry.py`)
 
-`make_registry(config)` does no I/O, so `send_notification` can build one on demand. Talk, email, sms, whatsapp register on `enabled`; the rest always, gated per user later. `_surface_for_source_type` is the **delivery** map: email, sms, whatsapp, repl, web map to themselves (web resolves to no push transport); everything else → `talk`.
+`make_registry(config)` does no I/O, so `send_notification` can build one on demand. Talk, email, sms, whatsapp register on `enabled`; the rest always, gated per user later. `_surface_for_source_type` is the **delivery** map: email, sms, whatsapp, repl, web map to themselves (web resolves to no push transport); a source type in `NO_DELIVERY_SOURCE_TYPES` (an assignment wake) maps to `none`, and `resolve_delivery_plan` gives it an empty plan; everything else → `talk`.
 
 ## The room model (`src/istota/rooms/surfaces.py`)
 

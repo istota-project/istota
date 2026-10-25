@@ -12620,6 +12620,14 @@ def get_users_with_pending_bg_queue_tasks(conn: sqlite3.Connection) -> list[str]
     return [row[0] for row in cursor.fetchall()]
 
 
+def get_users_with_pending_assignment_queue_tasks(conn: sqlite3.Connection) -> list[str]:
+    """Users with pending assignment wakes, longest-waiting first."""
+    cursor = conn.execute(
+        _PENDING_USERS_SQL.format(inline_only=_INLINE_ONLY_IN), ("assignment",),
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+
 def count_running_tasks(conn: sqlite3.Connection) -> int:
     """Count all tasks currently in the ``running`` state.
 

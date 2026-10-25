@@ -3563,7 +3563,7 @@ def _db_backup_summary(config) -> tuple[int, str | None]:
 _INTERACTIVE_SOURCES = frozenset(
     {"talk", "email", "istota_file", "cli", "web", "repl", "sms", "whatsapp"}
 )
-_AUTOMATED_SOURCES = frozenset({"scheduled", "briefing", "heartbeat", "subtask"})
+_AUTOMATED_SOURCES = frozenset({"scheduled", "briefing", "heartbeat", "subtask", "assignment"})
 
 
 def _classify_source(source_type: str | None) -> str:

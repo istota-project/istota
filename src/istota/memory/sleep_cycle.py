@@ -45,7 +45,7 @@ _MIN_TASK_BUDGET = 500
 
 # Source type classification for extraction quality
 INTERACTIVE_SOURCE_TYPES = frozenset({"talk", "email", "cli"})
-AUTOMATED_SOURCE_TYPES = frozenset({"cron", "briefing", "subtask"})
+AUTOMATED_SOURCE_TYPES = frozenset({"cron", "briefing", "subtask", "assignment"})
 
 # Suggested predicates with usage hints, shown in the extraction prompt.
 # Not enforced — freeform predicates are accepted and treated as multi-valued
