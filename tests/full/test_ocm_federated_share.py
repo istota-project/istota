@@ -39,8 +39,17 @@ Nextcloud refuses (it falls back to the legacy OCS share path, which answers
 parses it and ignores it. Nextcloud caches a failed discovery for five minutes
 in APCu, so the fixture restarts Apache before the share.
 
+**A task reads and writes the share** between the accept and the unshare: a
+scripted Bash turn runs `istota-skill shares ls`, `get` and `put` in a task
+for testuser, so the skill proxy spawns the CLI with the private credential
+channel, the channel serves `ocm_share_<id>` under the broker grant the accept
+created, and the CLI reaches Nextcloud's public WebDAV with it. The owner then
+lowers the share to read-only on Nextcloud, which sends istota nothing, and
+the next task's `shares ls` must record `access = read` from its own root
+PROPFIND. This is also the private channel's witness in a deployed sandbox:
+the lean stack has no shipped way to seed an accepted share.
+
 Discretionary: `uv run pytest -m full -n0 tests/full/test_ocm_federated_share.py`.
-The read-write step through the `shares` skill belongs to Stage 8.
 """
 
 from __future__ import annotations
@@ -293,9 +302,27 @@ def _credential_names(stack, source_id: int) -> list[str]:
         [f"ocm_share_{source_id}"])]
 
 
+TASK_WAIT_SECONDS = 180
+
+
+def _bash_task(stack, command: str, prompt: str) -> str:
+    """One scripted Bash turn in a task for testuser; the endpoint transcript after it."""
+    stack.script([
+        {"tool_calls": [{"id": "call-1", "name": "Bash", "arguments": {"command": command}}]},
+        {"text": "done with the shared folder"},
+    ])
+    task_id = stack.submit(prompt)
+    stack.probe.wait_for_task(status="completed", task_id=task_id, timeout=TASK_WAIT_SECONDS)
+    return stack.endpoint.transcript()
+
+
 def test_accepting_through_the_web_api_and_unsharing_on_nextcloud(ocm_stack, web):
     nextcloud = ocm_stack.service("nextcloud")
-    _folder, share_id, offer = _share_folder(ocm_stack, permissions=31)
+    folder, share_id, offer = _share_folder(ocm_stack, permissions=31)
+    marker = f"from-nextcloud-{uuid.uuid4().hex[:8]}"
+    _body, status = nextcloud._dav(f"{folder}/hello.txt", user=nextcloud.test_user,
+                                   method="PUT", body=marker.encode())
+    assert status in (201, 204), status
 
     accepted = web.post(f"{API}/settings/sharing/folders/{offer['id']}/accept",
                         json={"allow_scheduled": False})
@@ -305,6 +332,31 @@ def test_accepting_through_the_web_api_and_unsharing_on_nextcloud(ocm_stack, web
     assert _row(ocm_stack, offer["id"])["access"] == "write"
     assert _credential_names(ocm_stack, offer["id"]) == [f"ocm_share_{offer['id']}"]
     assert accepted.json()["notified"] is True
+
+    # A task reads and writes the share through the `shares` skill.
+    ref = f"share:{offer['id']}"
+    uploaded = f"from-istota-{uuid.uuid4().hex[:8]}"
+    transcript = _bash_task(ocm_stack, (
+        "set -eu\n"
+        'W="${ISTOTA_WORKSPACE_PATH:-/mnt/shared}/Users/testuser/ocm-shares"\n'
+        'mkdir -p "$W"\n'
+        f"istota-skill shares ls {ref}\n"
+        f'istota-skill shares get {ref}:hello.txt --dest "$W/in" --overwrite\n'
+        'cat "$W/in/hello.txt"; echo\n'
+        f'printf %s {uploaded} > "$W/up.txt"\n'
+        f'istota-skill shares put "$W/up.txt" --to {ref} --overwrite\n'
+    ), "read and write the shared folder")
+    assert marker in transcript, transcript[-4000:]
+    body, status = nextcloud._dav(f"{folder}/up.txt", user=nextcloud.test_user)
+    assert (status, body.decode()) == (200, uploaded), (status, transcript[-4000:])
+
+    # Lowering the share on Nextcloud sends istota nothing; the next call reads it.
+    lowered = nextcloud._ocs(f"/ocs/v2.php/apps/files_sharing/api/v1/shares/{share_id}",
+                             user=nextcloud.test_user, method="PUT", body={"permissions": 1})
+    assert lowered.status_code in (100, 200), (lowered.status_code, lowered.message)
+    assert _row(ocm_stack, offer["id"])["access"] == "write"
+    _bash_task(ocm_stack, f"istota-skill shares ls {ref}\n", "list the shared folder")
+    assert _row(ocm_stack, offer["id"])["access"] == "read"
 
     # Unsharing on Nextcloud posts SHARE_UNSHARED with the share's secret.
     nextcloud._ocs(f"/ocs/v2.php/apps/files_sharing/api/v1/shares/{share_id}",
