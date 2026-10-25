@@ -347,6 +347,17 @@ def set_grants(
     )
 
 
+def put_grant(
+    conn: sqlite3.Connection, app_id: str, version: int, capability: str, scope: object,
+) -> None:
+    """Grant one capability on a version, or replace its scope."""
+    conn.execute(
+        "INSERT OR REPLACE INTO app_grants (app_id, version, capability, scope_json)"
+        " VALUES (?, ?, ?, ?)",
+        (app_id, version, capability, _dumps(scope)),
+    )
+
+
 # -- pending installs ---------------------------------------------------------
 
 

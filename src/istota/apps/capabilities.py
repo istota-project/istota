@@ -107,6 +107,22 @@ def parse_capability(text: str, *, bot_dir: str) -> Capability:
     raise CapabilityError(f"{text}: unknown capability.")
 
 
+_SCOPED_FAMILIES = (("kv:read:", "kv:read"), ("files:read:", "files:read"),
+                    ("calendar:read:", "calendar:read"), ("skill:", "skill"))
+
+
+def split_capability(text: str) -> Capability:
+    """Family and scope of a capability ``parse_capability`` already accepted.
+
+    No checks: for text read back from a stored manifest, where the bot
+    directory the scope rules need is not to hand.
+    """
+    for prefix, name in _SCOPED_FAMILIES:
+        if text.startswith(prefix):
+            return Capability(name, text[len(prefix):])
+    return Capability(text)
+
+
 _SKILL_DESCRIPTIONS = {
     "markets.quote": "Look up market quotes for symbols it names",
     "health.trend": "Read your health records: biomarker trends",

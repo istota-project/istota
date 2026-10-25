@@ -11503,6 +11503,15 @@ def kv_delete(
     return cursor.rowcount > 0
 
 
+def kv_delete_namespace(conn: sqlite3.Connection, user_id: str, namespace: str) -> int:
+    """Delete every key in one of the user's namespaces. Returns the number removed."""
+    cursor = conn.execute(
+        "DELETE FROM istota_kv WHERE user_id = ? AND namespace = ?",
+        (user_id, namespace),
+    )
+    return cursor.rowcount
+
+
 def kv_list(
     conn: sqlite3.Connection, user_id: str, namespace: str
 ) -> list[dict]:

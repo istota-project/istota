@@ -72,7 +72,7 @@ def _read_manifest(directory: Path) -> dict:
     return manifest
 
 
-def _read_checked(directory: Path, relative: str, manifest: dict) -> str:
+def _read_checked_bytes(directory: Path, relative: str, manifest: dict) -> bytes:
     expected = manifest.get(relative)
     if not isinstance(expected, str):
         raise KitMissing("not_in_manifest", relative)
@@ -82,10 +82,36 @@ def _read_checked(directory: Path, relative: str, manifest: dict) -> str:
         raise KitMissing("no_file", relative) from exc
     if hashlib.sha256(data).hexdigest() != expected:
         raise KitMissing("digest_mismatch", relative)
+    return data
+
+
+def _read_checked(directory: Path, relative: str, manifest: dict) -> str:
+    data = _read_checked_bytes(directory, relative, manifest)
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise KitMissing("digest_mismatch", relative) from exc
+
+
+def load_starter_files(app_id: str) -> dict[str, bytes]:
+    """A starter app's folder from the apps build, as bytes by path relative to it.
+
+    Every file is one the build manifest lists under ``starter/<app_id>/`` and
+    is checked against its digest. Raises :class:`KitMissing` when the build
+    holds no such app or a file does not match. Not cached: it is read only
+    when starter apps are seeded.
+    """
+    directory = resolve_apps_dir()
+    manifest = _read_manifest(directory)
+    prefix = f"starter/{app_id}/"
+    files = {}
+    for relative in sorted(manifest):
+        if not relative.startswith(prefix):
+            continue
+        files[relative[len(prefix):]] = _read_checked_bytes(directory, relative, manifest)
+    if not files:
+        raise KitMissing("not_in_manifest", prefix)
+    return files
 
 
 def load_kit() -> Kit:
