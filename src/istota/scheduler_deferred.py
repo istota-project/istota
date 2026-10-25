@@ -431,6 +431,11 @@ def _process_deferred_istota_events(
     if report.applied:
         logger.info("Applied %d istota event op(s) for task %d", report.applied, task.id)
     path.unlink(missing_ok=True)
+    if report.invitations:
+        # After the commit, so no SMTP exchange runs under the write lock.
+        from istota.sharing import itip
+
+        itip.deliver_invitations(config, task.user_id, report.invitations)
     return report.applied
 
 

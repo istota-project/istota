@@ -2888,6 +2888,28 @@ CREATE TABLE IF NOT EXISTS istota_events (
 );
 CREATE INDEX IF NOT EXISTS idx_istota_events_user ON istota_events(user_id, status);
 
+-- Invitations other people sent a user, recorded from admitted, authenticated
+-- mail whose From is the ORGANIZER (istota.sharing.itip). Keyed on the
+-- authenticated sender, so a sender replaces only rows for events it
+-- organizes. Read by the calendar skill as `feed:invitations`, fenced.
+CREATE TABLE IF NOT EXISTS received_invitations (
+    id INTEGER PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    uid TEXT NOT NULL,
+    organizer TEXT NOT NULL,           -- the authenticated From address
+    sequence INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed', 'cancelled')),
+    summary TEXT,
+    description TEXT,
+    location TEXT,
+    dtstart TEXT,                      -- UTC `...Z`, a date when all_day, or floating local time
+    dtend TEXT,
+    all_day INTEGER NOT NULL DEFAULT 0,
+    message_id TEXT,
+    received_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, uid, organizer)
+);
+
 -- The bearer token of each user's Istota calendar feed, as its SHA-256 digest
 -- only. One live token per user; a reset replaces the row.
 CREATE TABLE IF NOT EXISTS calendar_feed_tokens (

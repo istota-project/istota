@@ -19,9 +19,9 @@ The feed (`render_feed`) is every confirmed event of one user as a
 once and stored as its SHA-256 digest; a user has at most one, and a reset
 replaces it. The feed carries every confirmed event whatever
 `calendar_delivery` says, so a user who switches from invitations to the feed
-loses nothing. Sending invitations is not here yet: an event applied under
-``invite`` delivery keeps ``invite_status`` NULL, meaning no invitation has
-been attempted.
+loses nothing. Under ``invite`` delivery `apply_ops` lists the UIDs owed an
+invitation in its report, and `sharing.itip.deliver_invitations` mails them
+after the apply commits; until then ``invite_status`` is NULL.
 """
 
 from __future__ import annotations
@@ -98,6 +98,9 @@ class ApplyReport:
     applied: int = 0
     refused: list[tuple[int, str]] = field(default_factory=list)
     dropped: int = 0
+    # UIDs owed an invitation under `invite` delivery, in first-touch order,
+    # for `sharing.itip.deliver_invitations` once the apply has committed.
+    invitations: list[str] = field(default_factory=list)
 
 
 def _from_row(row) -> IstotaEvent:
@@ -291,6 +294,8 @@ def apply_ops(conn: sqlite3.Connection, config, task, ops: list) -> ApplyReport:
     entries = list(ops) if isinstance(ops, list) else []
     report.dropped = max(len(entries) - cap, 0)
     delivery = effective_delivery(config, _stored_delivery(conn, task.user_id))
+    touched: list[str] = []
+    created_here: set[str] = set()
     for index, op in enumerate(entries[:cap]):
         conn.execute("SAVEPOINT istota_event")
         try:
@@ -303,14 +308,24 @@ def apply_ops(conn: sqlite3.Connection, config, task, ops: list) -> ApplyReport:
             report.refused.append((index, "uid_taken"))
         else:
             report.applied += 1
+            touched.append(op["uid"])
+            if op.get("op") == OP_UPSERT and op.get("create") is True:
+                created_here.add(op["uid"])
         finally:
             conn.execute("RELEASE istota_event")
+    if delivery == "invite":
+        for uid in dict.fromkeys(touched):
+            current = get_event(conn, task.user_id, uid)
+            # Created and cancelled in one task: the user never had it.
+            if current is None or (current.status == "cancelled" and uid in created_here):
+                continue
+            report.invitations.append(uid)
     return report
 
 
 # --- The feed --------------------------------------------------------------
 
-def _ical_time(value: str, all_day: bool):
+def ical_time(value: str, all_day: bool):
     if all_day:
         return date.fromisoformat(value)
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
@@ -340,9 +355,9 @@ def render_feed(conn: sqlite3.Connection, config, user_id: str) -> bytes:
         item.add("sequence", event.sequence)
         item.add("dtstamp", _stamp(event.updated_at))
         item.add("last-modified", _stamp(event.updated_at))
-        item.add("dtstart", _ical_time(event.dtstart, event.all_day))
+        item.add("dtstart", ical_time(event.dtstart, event.all_day))
         if event.dtend:
-            item.add("dtend", _ical_time(event.dtend, event.all_day))
+            item.add("dtend", ical_time(event.dtend, event.all_day))
         item.add("summary", event.summary)
         if event.location:
             item.add("location", event.location)
@@ -430,6 +445,7 @@ def feed_reachable_elsewhere(config) -> bool:
 
 
 def delete_for_user(conn: sqlite3.Connection, user_id: str) -> None:
-    """Remove the user's events and feed token, in the caller's transaction."""
+    """Remove the user's events, feed token and received invitations, in the caller's transaction."""
     conn.execute("DELETE FROM istota_events WHERE user_id = ?", (user_id,))
     conn.execute("DELETE FROM calendar_feed_tokens WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM received_invitations WHERE user_id = ?", (user_id,))

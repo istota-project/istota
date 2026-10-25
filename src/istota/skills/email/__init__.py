@@ -157,6 +157,10 @@ class Email:
     # lowercased address. `to` and `cc` hold addresses only, and the mail card
     # names people where the header did.
     display_names: dict[str, str] = field(default_factory=dict)
+    # Every `text/calendar` or `application/ics` part, inline or attached, as
+    # decoded bytes; bounded by `sharing.itip.MAX_PARTS` and `MAX_PART_BYTES`.
+    # The inbound iTIP intercept reads these, since the poller holds no raw message.
+    calendar_parts: tuple[bytes, ...] = ()
 
     @property
     def authentication_results_headers(self) -> tuple[str, ...]:
@@ -541,7 +545,40 @@ def _msg_to_email(msg) -> Email:
         # distinction explicit, and that needs every header rather than the first.
         authentication_results_all=_header_all(msg, "authentication-results"),
         display_names=display_names,
+        calendar_parts=_calendar_parts(getattr(msg, "obj", None)),
     )
+
+
+_CALENDAR_CONTENT_TYPES = ("text/calendar", "application/ics")
+
+
+def _calendar_parts(message) -> tuple[bytes, ...]:
+    """The message's calendar parts, in wire order, bounded in count and size.
+
+    A part over the size cap is skipped rather than cut, since a truncated
+    calendar does not parse. Never raises: a part that will not decode is skipped.
+    """
+    from istota.sharing.itip import MAX_PART_BYTES, MAX_PARTS
+
+    if message is None or not hasattr(message, "walk"):
+        return ()
+    found: list[bytes] = []
+    try:
+        for part in message.walk():
+            if part.is_multipart() or part.get_content_type() not in _CALENDAR_CONTENT_TYPES:
+                continue
+            try:
+                payload = part.get_payload(decode=True)
+            except Exception:  # noqa: BLE001 - a malformed part is skipped
+                continue
+            if not isinstance(payload, bytes) or not payload or len(payload) > MAX_PART_BYTES:
+                continue
+            found.append(payload)
+            if len(found) >= MAX_PARTS:
+                break
+    except Exception:  # noqa: BLE001 - walking a hostile structure must not lose the mail
+        logger.warning("Could not read the calendar parts of a message", exc_info=True)
+    return tuple(found)
 
 
 def fetch_emails_full(
@@ -824,8 +861,15 @@ def _set_body(
     *,
     content_type: str = "plain",
     html_body: str | None = None,
+    calendar: tuple[str, bytes] | None = None,
 ) -> None:
-    """Set the message body, going multipart/alternative when HTML is supplied.
+    """Set the message body, going multipart/alternative when HTML or a calendar is supplied.
+
+    ``calendar`` is ``(method, ics)``, an iMIP part (RFC 6047): it goes last in
+    the ``multipart/alternative`` as ``text/calendar; method=<method>``, which
+    must be the ``METHOD`` inside the calendar. The caller builds both from one
+    value (`sharing.itip`); here the method is only checked to be a bare token,
+    since it lands in a header parameter.
 
     With ``html_body`` the plain text is always the fallback part (a
     ``content_type`` of ``html`` would be meaningless there), so an HTML-capable
@@ -836,14 +880,30 @@ def _set_body(
     supplied" so the briefing renderer's failure signal degrades to plain
     rather than an empty HTML part.
     """
+    if calendar is not None:
+        method, ics = calendar
+        if not isinstance(method, str) or not _ITIP_METHOD_RE.fullmatch(method):
+            raise ValueError("calendar method must be an iTIP method name")
+        if not isinstance(ics, bytes):
+            raise ValueError("calendar must be bytes")
     if content_type == "html" and not html_body and body:
         html_body = body
         body = plain_part(body, content_type="html")
     if html_body:
         msg.set_content(body)
         msg.add_alternative(html_body, subtype="html")
+    elif calendar is not None:
+        msg.set_content(body)
+    else:
+        msg.set_content(body, subtype=content_type)
         return
-    msg.set_content(body, subtype=content_type)
+    if calendar is not None:
+        msg.add_alternative(
+            calendar[1].decode("utf-8"), subtype="calendar", params={"method": calendar[0]},
+        )
+
+
+_ITIP_METHOD_RE = re.compile(r"[A-Z]{1,16}")
 
 
 def _recipients(to: str, cc=None, bcc=None) -> list[str]:
@@ -877,8 +937,13 @@ def send_email(
     from_name: str = "",
     sent_folder: str = BOT_SENT_FOLDER,
     outcome: dict | None = None,
+    calendar: tuple[str, bytes] | None = None,
 ) -> str:
     """Send an email. Returns the generated Message-ID.
+
+    ``calendar`` is ``(method, ics)`` for an iMIP invitation: a
+    ``text/calendar; method=<method>`` part after the text (and HTML) parts of
+    a ``multipart/alternative``. See `_set_body`.
 
     ``cc`` / ``bcc`` may be a string or a list of addresses. ``attachments`` is
     a list of local file paths. ``reply_to`` sets the Reply-To header;
@@ -920,7 +985,7 @@ def send_email(
         msg["References"] = _sanitize_header(references)
     elif in_reply_to:
         msg["References"] = _sanitize_header(in_reply_to)
-    _set_body(msg, body, content_type=content_type, html_body=html_body)
+    _set_body(msg, body, content_type=content_type, html_body=html_body, calendar=calendar)
     if attachments:
         _attach_files(msg, attachments)
 

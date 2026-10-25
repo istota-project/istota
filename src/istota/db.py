@@ -1331,6 +1331,7 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     _migrate_shared_sources(conn)
     _migrate_shared_feed_cache(conn)
     _migrate_istota_events(conn)
+    _migrate_received_invitations(conn)
     _migrate_device_tokens(conn)
     _migrate_mobile_auth_requests(conn)
     _migrate_notifications_push_pending(conn)
@@ -9739,6 +9740,29 @@ def _migrate_istota_events(conn: sqlite3.Connection) -> None:
             token_sha256 TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             last_used_at TEXT
+        )
+    """)
+
+
+def _migrate_received_invitations(conn: sqlite3.Connection) -> None:
+    """Create the store of invitations other people sent a user. Pure DDL, kept in step with `schema.sql`."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS received_invitations (
+            id INTEGER PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            uid TEXT NOT NULL,
+            organizer TEXT NOT NULL,
+            sequence INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed', 'cancelled')),
+            summary TEXT,
+            description TEXT,
+            location TEXT,
+            dtstart TEXT,
+            dtend TEXT,
+            all_day INTEGER NOT NULL DEFAULT 0,
+            message_id TEXT,
+            received_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (user_id, uid, organizer)
         )
     """)
 
