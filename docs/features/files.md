@@ -20,11 +20,25 @@ Choose a folder to open it. The breadcrumbs return to its parents, and the addre
 
 Hidden files are off by default. Show hidden remembers your choice in this browser. Symbolic links are labelled and cannot be opened or followed. Other special entries, such as sockets, are also inert.
 
+A PDF in the viewer zooms with a pinch, a double tap, Ctrl+wheel or a trackpad pinch, the `+`, `-` and `0` keys, or the zoom buttons, and the page is redrawn sharp at the new size. This works in the iOS app too, where the page itself does not zoom.
+
 A large directory shows at most 2,000 entries and a notice. This is a slice of the directory's enumeration order, sorted with folders first; it is not necessarily the alphabetically first 2,000 entries. Entries whose names cannot be represented as text are skipped and counted below the listing. A folder that cannot be read shows an error and a Retry button.
 
 ## Adding files
 
 In My files, use Upload or drop files onto the listing. Files upload one at a time, with progress and any error beside each file. Uploads keep existing files: a repeated name gets a number. The default size limit is 100 MB per file. New folder creates a folder in the location shown in the dialog. Room folders, group folders, linked folders and Drive have no upload or new-folder controls.
+
+## Editing text files
+
+A text file in My files has Edit in its row menu, including a file made in the host folder on the Mac or uploaded. A file counts as text by the viewer's rule: valid UTF-8 with no NUL bytes, and at most 1 MB. Binary files, larger files and links stay view-only. Room folders, group folders, linked folders and Drive are not editable here.
+
+If the file changed since you opened it, in the host folder or by a task, the save is refused and your text stays in the editor. A file's permissions are kept, so a script stays executable, and a file written with Windows line endings is saved with them. Files in the bot's config folder open in the [configuration editor](#configuration-files) instead, which checks them before saving.
+
+## Quick notes
+
+New note, at `/istota/notes/new/` and in the installed web app's icon menu, opens an editor with no title field. Choose the folder first in Settings → Preferences → Quick notes; the folder is inside My files, and one that does not exist yet is created by the first note. With no folder set, the editor asks for one.
+
+The note saves as you type and when you press Done. It is a Markdown file named from its first line, with Markdown markers removed and cut to 60 characters; a note with no usable first line is named by the date and time. A repeated name gets a number. Until the server has the text, the draft stays in the browser, so going offline or being signed out loses nothing, and signing back in returns you to the note. If the note was changed, moved or deleted elsewhere, or the folder setting changed, saving stops and the editor offers Save as a new note. A note is limited to 256 KB.
 
 ## Configuration files
 
