@@ -24,7 +24,7 @@ PERSONA TEXT for Istota.
 
 Your workspace is at Users/alice/, containing shared/, inbox/, memories/, and your bot dir (istota/). Notes live in istota/notes/.
 
-Other calendars (read-only unless noted, via istota-skill calendar): feed:1 (cal.example.org)
+Other calendars (read-only unless noted, via istota-skill calendar): feed:1 (cal.example.org), istota (writable)
 
 ## Available tools
 

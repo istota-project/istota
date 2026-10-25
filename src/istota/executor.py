@@ -6921,6 +6921,7 @@ def build_prompt(
     channel_memory_shared: bool = False,
     skip_memory: bool = False,
     shared_calendars: "list[tuple[str, str]] | None" = None,
+    istota_calendar: str | None = None,
 ) -> ComposedPrompt:
     """Build a task's prompt, split by authority rather than by size.
 
@@ -7025,12 +7026,18 @@ def build_prompt(
 
     # Feeds the user shared with Istota by address (`sharing.ics`): ids and
     # hosts only. A feed's name is the provider's text, so it stays out of
-    # this half and is read fenced through `calendar calendars`.
-    if shared_calendars:
-        listed = ", ".join(
-            f"{_one_line(calendar_id)} ({_one_line(host)})"
-            for calendar_id, host in shared_calendars
-        )
+    # this half and is read fenced through `calendar calendars`. Then Istota's
+    # own calendar (`sharing.events`), when the caller found it in reach.
+    entries = [
+        f"{_one_line(calendar_id)} ({_one_line(host)})"
+        for calendar_id, host in (shared_calendars or [])
+    ]
+    if istota_calendar == "writable":
+        entries.append("istota (writable)")
+    elif istota_calendar:
+        entries.append("istota")
+    if entries:
+        listed = ", ".join(entries)
         resource_sections.append(
             "Other calendars (read-only unless noted, via istota-skill calendar): "
             f"{listed}"
@@ -8531,8 +8538,12 @@ def execute_task(
     # The feeds line is ambient: a member's turn in a shared room reaches the
     # feeds when it asks, but is not told about them unasked (ISSUE-576).
     shared_calendars = []
+    istota_calendar = None
     if "calendar" in cli_skill_names and "calendar" not in _withheld and not _ambient_off:
         shared_calendars = _discover_shared_calendars(config, task, conn, skill_index)
+        # Istota's own calendar (`sharing.events`) is always there; writable
+        # unless `[sharing] events_per_task` turned its writes off.
+        istota_calendar = "writable" if config.sharing.events_per_task > 0 else "read-only"
 
     # Build prompt
     # Detect confirmed tasks — pass their previous output as confirmation context
@@ -8558,6 +8569,7 @@ def execute_task(
         channel_memory_shared=_channel_shared,
         skip_memory=_skip_memory,
         shared_calendars=shared_calendars,
+        istota_calendar=istota_calendar,
         conn=conn,
         effective_prompt=effective_prompt,
         attachment_status=image_attachment_status(image_prep),

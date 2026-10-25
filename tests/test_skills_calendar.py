@@ -772,7 +772,8 @@ class TestSharedFeeds:
 
         with _no_caldav():
             result = cmd_calendars(build_parser().parse_args(["calendars"]))
-        assert result["calendar_count"] == 1
+        # The feed, then Istota's own calendar.
+        assert [c["kind"] for c in result["calendars"]] == ["feed", "istota"]
         feed = result["calendars"][0]
         assert (feed["calendar"], feed["host"], feed["writable"], feed["kind"]) == (
             feed_task.feed, "cal.example.org", False, "feed")
@@ -807,3 +808,122 @@ class TestSharedFeeds:
         monkeypatch.delenv("ISTOTA_TASK_ID")
         with pytest.raises(ValueError, match="Missing CalDAV credentials"):
             cmd_list(build_parser().parse_args(["list"]))
+
+
+# --- Istota's own calendar: `istota`, written through deferred ops ------------
+
+@pytest.fixture
+def istota_task(feed_task, monkeypatch, tmp_path):
+    """`feed_task` with a deferred directory and a site name, as a sandboxed task has."""
+    from istota.config import Config, SiteConfig
+
+    deferred = tmp_path / "deferred"
+    deferred.mkdir()
+    monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(deferred))
+    config = Config(db_path=feed_task.db_path, site=SiteConfig(hostname="bot.example.com:8443"))
+    monkeypatch.setattr("istota.config.load_config", lambda *a, **k: config)
+    feed_task.config = config
+    feed_task.op_file = deferred / f"task_{feed_task.task_id}_istota_events.json"
+    return feed_task
+
+
+def _ops(istota_task):
+    import json
+
+    return json.loads(istota_task.op_file.read_text()) if istota_task.op_file.exists() else []
+
+
+def _istota(argv):
+    args = build_parser().parse_args([argv[0], "--calendar", "istota", *argv[1:]])
+    with _no_caldav():
+        return _COMMANDS[argv[0]](args)
+
+
+@pytest.mark.skipif(not _has_icalendar, reason="icalendar not installed")
+class TestIstotaCalendar:
+    def test_create_queues_an_op_in_utc_with_no_caldav(self, istota_task):
+        result = _istota(["create", "--summary", "Tax review", "--start", "2026-10-29 14:00",
+                          "--end", "2026-10-29 16:00", "--tz", "Europe/Berlin"])
+        assert result["status"] == "ok" and result["calendar"] == "istota"
+        assert result["uid"].endswith("@bot.example.com")
+        (op,) = _ops(istota_task)
+        assert op["op"] == "istota_event_upsert" and op["create"] is True
+        assert (op["fields"]["dtstart"], op["fields"]["dtend"]) == (
+            "2026-10-29T13:00:00Z", "2026-10-29T15:00:00Z")
+
+    def test_a_timed_event_needs_a_timezone(self, istota_task):
+        result = _istota(["create", "--summary", "x", "--start", "2026-10-29 14:00",
+                          "--end", "2026-10-29 16:00"])
+        assert (result["status"], result["reason"]) == ("error", "tz_required")
+        assert _ops(istota_task) == []
+
+    def test_an_all_day_event_is_dates(self, istota_task):
+        _istota(["create", "--summary", "Holiday", "--all-day", "--start", "2026-11-02",
+                 "--end", "2026-11-03"])
+        (op,) = _ops(istota_task)
+        assert op["fields"] | {"summary": None} == {
+            "summary": None, "dtstart": "2026-11-02", "dtend": "2026-11-04", "all_day": True,
+            "location": None, "description": None}
+
+    def test_the_cap_is_kept_by_the_skill(self, istota_task):
+        istota_task.config.sharing.events_per_task = 2
+        results = [_istota(["create", "--summary", f"E{n}", "--all-day", "--start", "2026-11-02"])
+                   for n in range(3)]
+        assert [r["status"] for r in results] == ["ok", "ok", "error"]
+        assert results[2]["reason"] == "event_limit"
+        assert len(_ops(istota_task)) == 2
+
+    def test_update_and_delete_of_an_event_created_in_this_task(self, istota_task):
+        uid = _istota(["create", "--summary", "x", "--all-day", "--start", "2026-11-02"])["uid"]
+        assert _istota(["update", "--uid", uid, "--summary", "y"])["status"] == "ok"
+        assert _istota(["delete", "--uid", uid])["status"] == "ok"
+        assert [op["op"] for op in _ops(istota_task)] == [
+            "istota_event_upsert", "istota_event_upsert", "istota_event_cancel"]
+        assert _ops(istota_task)[1] == {"op": "istota_event_upsert", "uid": uid, "create": False,
+                                        "fields": {"summary": "y"}}
+
+    def test_another_users_event_cannot_be_changed(self, istota_task):
+        from istota import db
+        from istota.sharing import events
+
+        with db.get_db(istota_task.db_path) as conn:
+            bob_task = db.get_task(conn, db.create_task(conn, "x", "bob", source_type="cli"))
+            events.apply_ops(conn, istota_task.config, bob_task, [events.upsert_op(
+                "bob-1@bot.example.com", create=True, fields={
+                    "summary": "Bob's", "dtstart": "2026-11-02", "dtend": "2026-11-03", "all_day": True})])
+            conn.commit()
+        for argv in (["update", "--uid", "bob-1@bot.example.com", "--summary", "mine"],
+                     ["delete", "--uid", "bob-1@bot.example.com"]):
+            assert _istota(argv)["reason"] == "event_not_found"
+        assert _ops(istota_task) == []
+
+    def test_list_reads_the_applied_events(self, istota_task):
+        from istota import db
+        from istota.sharing import events
+
+        with db.get_db(istota_task.db_path) as conn:
+            task = db.get_task(conn, istota_task.task_id)
+            events.apply_ops(conn, istota_task.config, task, [events.upsert_op(
+                "a-1@bot.example.com", create=True, fields={
+                    "summary": "Tax review", "dtstart": "2026-10-26T13:00:00Z",
+                    "dtend": "2026-10-26T15:00:00Z", "all_day": False})])
+            conn.commit()
+        only = _istota(["list", "--date", "2026-10-26", "--tz", "UTC"])
+        assert [e["summary"] for e in only["events"]] == ["Tax review"]
+        assert only["events"][0]["start"] == "2026-10-26T13:00:00"
+        with _no_caldav():
+            merged = cmd_list(build_parser().parse_args(["list", "--date", "2026-10-26", "--tz", "UTC"]))
+        assert sorted(e["calendar"] for e in merged["events"]) == sorted(["istota", istota_task.feed])
+
+    def test_the_calendars_verb_lists_istota_writable(self, istota_task):
+        from istota.skills.calendar import cmd_calendars
+
+        with _no_caldav():
+            listed = cmd_calendars(build_parser().parse_args(["calendars"]))["calendars"]
+        istota = [c for c in listed if c["calendar"] == "istota"]
+        assert istota and istota[0]["writable"] is True
+
+    def test_a_withheld_calendar_scope_queues_nothing(self, istota_task, monkeypatch):
+        monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", "calendar")
+        result = _istota(["create", "--summary", "x", "--all-day", "--start", "2026-11-02"])
+        assert result["status"] == "error" and _ops(istota_task) == []
