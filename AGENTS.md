@@ -138,6 +138,7 @@ src/istota/
 │   ├── process_group.py  # `kill_process_group(pid, sig)`: signal a subprocess and its descendants; `signal_task_worker` only in the scheduler's process → sandbox.md
 │   ├── peer_process.py   # Who connected to a Unix socket, and whether they descend from a task's root → sandbox.md
 │   ├── forge_cli.py      # The `gh` / `glab` wrapper: deny policy + server-side token injection → sandbox.md
+│   ├── guarded_http.py   # HTTP to a host somebody else chose: a request pinned to a checked address, and a guarded send with per-hop redirect checks → sandbox.md
 │   └── net_guard.py      # Whether an address is public: the SSRF rule shared by WebFetch and the wordpress skill → leaf-modules.md
 ├── credentials/          # Secrets and the credential vault
 │   ├── store.py          # Encrypted credential store (Fernet via scrypt-derived key)
@@ -225,6 +226,7 @@ src/istota/
 │   ├── workspace_marker.py  # The `.istota-workspace` a host folder's workspace carries, and whether the host requires it → leaf-modules.md
 │   ├── dav_xml.py        # Hardened DAV multistatus parsing, principal hrefs and path segments, for CardDAV and the web sharing module → leaf-modules.md
 │   ├── url_redact.py     # A configured URL safe to print, userinfo replaced or removed: doctor, the admin cards and the servarr skill → leaf-modules.md
+│   ├── rate_limit.py     # A sliding-window hit counter per key, in bounded memory, for public routes with no table behind them → leaf-modules.md
 │   └── unix_connect.py   # Connecting to a Unix socket without following a symlink at its leaf → leaf-modules.md
 ├── briefings/            # Personal/group briefings — source grants, generation, edition/delivery ledger, reader/settings routes and migration → briefings.md
 ├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML, image_dedupe
