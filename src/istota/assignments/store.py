@@ -578,19 +578,7 @@ def insert_snapshot(
     return int(cursor.lastrowid)
 
 
-def latest_snapshot(
-    conn: sqlite3.Connection, assignment_id: int, *, phases: Iterable[str] | None = None,
-) -> Snapshot | None:
-    """The most recent snapshot, optionally restricted to some phases."""
-    sql = "SELECT * FROM assignment_snapshots WHERE assignment_id = ?"
-    params: list[Any] = [assignment_id]
-    if phases is not None:
-        phases = list(phases)
-        sql += f" AND phase IN ({_placeholders(phases)})"
-        params.extend(phases)
-    row = conn.execute(sql + " ORDER BY id DESC LIMIT 1", params).fetchone()
-    if row is None:
-        return None
+def _snapshot(row: sqlite3.Row) -> Snapshot:
     return Snapshot(
         id=row["id"],
         assignment_id=row["assignment_id"],
@@ -601,6 +589,36 @@ def latest_snapshot(
         truncated=bool(row["truncated"]),
         created_at=row["created_at"],
     )
+
+
+def wake_snapshot(conn: sqlite3.Connection, wake_id: int, phase: str) -> Snapshot | None:
+    """One wake's `before` or `after` snapshot."""
+    row = conn.execute(
+        "SELECT * FROM assignment_snapshots WHERE wake_id = ? AND phase = ? ORDER BY id DESC LIMIT 1",
+        (wake_id, phase),
+    ).fetchone()
+    return _snapshot(row) if row else None
+
+
+def latest_snapshot(
+    conn: sqlite3.Connection,
+    assignment_id: int,
+    *,
+    phases: Iterable[str] | None = None,
+    whole_only: bool = False,
+) -> Snapshot | None:
+    """The most recent snapshot, optionally restricted to some phases, or to
+    snapshots stored without truncation."""
+    sql = "SELECT * FROM assignment_snapshots WHERE assignment_id = ?"
+    params: list[Any] = [assignment_id]
+    if whole_only:
+        sql += " AND truncated = 0"
+    if phases is not None:
+        phases = list(phases)
+        sql += f" AND phase IN ({_placeholders(phases)})"
+        params.extend(phases)
+    row = conn.execute(sql + " ORDER BY id DESC LIMIT 1", params).fetchone()
+    return _snapshot(row) if row else None
 
 
 # ---------------------------------------------------------------------------

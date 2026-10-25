@@ -403,7 +403,11 @@ def charter_digest(conn: sqlite3.Connection, assignment_id: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _open_assignment_dir(config: "Config", assignment: store.Assignment) -> int | None:
+def open_assignment_dir(config: "Config", assignment: store.Assignment) -> int | None:
+    """A descriptor on the assignment directory, created if missing; None when refused.
+
+    Walked with no link followed from `Config.workspace_root`. The caller closes it.
+    """
     root = config.workspace_root(assignment.user_id)
     if root is None:
         logger.warning("assignment directory skipped: no workspace assignment_id=%s", assignment.id)
@@ -430,7 +434,7 @@ def create_directory(config: "Config", conn: sqlite3.Connection, assignment: sto
     made or a file not written; the DB state stands either way, and the next
     charter change rewrites `CHARTER.md`.
     """
-    dir_fd = _open_assignment_dir(config, assignment)
+    dir_fd = open_assignment_dir(config, assignment)
     if dir_fd is None:
         return False
     try:
@@ -457,7 +461,7 @@ def rewrite_charter_file(config: "Config", conn: sqlite3.Connection, assignment_
     if assignment is None:
         raise LookupError(f"no assignment {assignment_id}")
     rendered = render(assignment, store.list_items(conn, assignment_id), store.list_frozen(conn, assignment_id))
-    dir_fd = _open_assignment_dir(config, assignment)
+    dir_fd = open_assignment_dir(config, assignment)
     if dir_fd is not None:
         try:
             if not _write_charter_at(dir_fd, rendered):

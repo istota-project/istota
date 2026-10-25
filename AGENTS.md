@@ -46,7 +46,7 @@ Subsystems:
 - `wallet.md` — payment cards, purchase approval, private checkout fills and static-card limits
 - `money.md` — quarterly tax estimator, portfolio snapshots, classifications
 - `memory.md` — USER.md/CHANNEL.md/GROUP.md, per-skill overlays, knowledge graph, playbooks, sleep cycle
-- `assignments.md` — goals carried across days: the assignment tables, the `assignment_id` columns on `tasks` and `task_usage`, the store, the charter, lifecycle, caller and ledger, wake creation and the assignment lane, the `assignment` skill, `[assignments]`, the `skill_assignment` flag
+- `assignments.md` — goals carried across days: the assignment tables, the `assignment_id` columns on `tasks` and `task_usage`, the store, the charter, lifecycle, caller and ledger, wake creation and the assignment lane, pickup (scratchpad snapshots and the wake prompt), the `assignment` skill, `[assignments]`, the `skill_assignment` flag
 
 Boundaries and operations:
 
@@ -68,7 +68,7 @@ Boundaries and operations:
 src/istota/
 ├── brain/                # Pluggable model invocation (Brain protocol)
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
-├── assignments/          # Goals Istota carries across days: store.py (row access), charter.py, validators.py, lifecycle.py (the one state writer), caller.py (user turn, wake or neither), budget.py (the ledger and ceilings), wakes.py (due wakes, the wake task, orphan reaping) → assignments.md
+├── assignments/          # Goals Istota carries across days: store.py (row access), charter.py, validators.py, lifecycle.py (the one state writer), caller.py (user turn, wake or neither), budget.py (the ledger and ceilings), wakes.py (due wakes, the wake task, pickup, orphan reaping), scratchpad.py (snapshots, user edits, repair), prompt.py (the wake prompt) → assignments.md
 ├── skills/               # Self-contained skills (skill.md + optional CLI)
 │   └── _group_access.py  # The one gate for `kv --group` and `memory --group`: current member and in the task's resolved group set → memory.md
 ├── session/              # The native brain's application layer: compaction, results, transcripts

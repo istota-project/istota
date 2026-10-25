@@ -24,6 +24,9 @@ from istota import db
 from istota.assignments import store
 
 USER_TURN_SOURCES = ("web", "talk", "cli")
+#: Set in a wake's skill-proxy environment (`sandbox.task_env`); a default for
+#: the CLI's argument, checked against the task row.
+ASSIGNMENT_ID_VAR = "ISTOTA_ASSIGNMENT_ID"
 
 
 @dataclass(frozen=True)

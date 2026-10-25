@@ -44,7 +44,8 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from istota import db
-from istota.assignments import budget, lifecycle, store
+from istota.assignments import budget, charter, lifecycle, scratchpad, store
+from istota.assignments import prompt as assignment_prompt
 from istota.assignments.charter import iso_z
 from istota.relay.requests import write_transaction
 
@@ -58,6 +59,8 @@ SOURCE_TYPE = "assignment"
 QUEUE = "assignment"
 #: The task's stored prompt. The real prompt is built at pickup.
 WAKE_PROMPT = "[assignment wake]"
+#: How a wake turned away at pickup ends its task.
+NOT_ACTIVE_ERROR = "assignment_not_active"
 SUMMARY_MAX_CHARS = 4000
 
 #: The inbox kinds that end each wait. A proposed completion is answered by
@@ -263,6 +266,109 @@ def dispatch_due(
         if made is not None:
             created.append(made)
     return created
+
+
+# ---------------------------------------------------------------------------
+# Picking a wake up
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WakeStart:
+    """What `execute_task` runs a wake with."""
+
+    assignment: store.Assignment
+    wake: store.Wake
+    prompt: assignment_prompt.WakePrompt
+    #: The brain's timeout: `per_wake_minutes`, never past `task_timeout_minutes`.
+    timeout_seconds: int
+    #: `per_wake_turns`; the native brain applies its own cap below this.
+    max_turns: int
+
+
+def wake_limits(config: "Config", assignment: store.Assignment) -> tuple[int, int]:
+    """`(timeout_seconds, max_turns)` from the charter's per-wake budget."""
+    minutes = int(assignment.budget.get("per_wake_minutes") or charter.DEFAULT_PER_WAKE_MINUTES)
+    minutes = max(1, min(minutes, config.scheduler.task_timeout_minutes))
+    turns = int(assignment.budget.get("per_wake_turns") or charter.DEFAULT_PER_WAKE_TURNS)
+    return minutes * 60, max(1, turns)
+
+
+def _pickup_target(
+    conn: sqlite3.Connection, config: "Config", task: db.Task,
+) -> tuple[store.Assignment, store.Wake] | None:
+    """The assignment and open wake this task runs, or None when it must not run."""
+    if not feature_enabled(config) or task.assignment_id is None:
+        return None
+    assignment = store.get_assignment(conn, task.assignment_id, user_id=task.user_id)
+    wake = store.get_wake_by_task(conn, task.id)
+    if assignment is None or wake is None or wake.assignment_id != assignment.id:
+        return None
+    if assignment.state != "active" or wake.ended_at is not None:
+        return None
+    return assignment, wake
+
+
+def start_wake(config: "Config", task: db.Task, *, dry_run: bool = False) -> WakeStart | None:
+    """Pick a wake up (spec Design section 7): check, snapshot, claim, build.
+
+    None means the wake must not run: the assignment is not `active`, the flag
+    is off, or the task names no open wake of the user's. The wake is then
+    finished as `not_active` here, so it is not counted as a failure, and the
+    caller ends the task with `NOT_ACTIVE_ERROR`.
+
+    The scratchpad's `before` snapshot, the user-edit event and the inbox claim
+    are written once, in one transaction; a re-run of a wake already started
+    builds the prompt from what it claimed then. A dry run writes nothing and
+    renders the inbox as it stands.
+    """
+    now = datetime.now(timezone.utc)
+    with db.get_db(config.db_path) as conn:
+        if dry_run:
+            target = _pickup_target(conn, config, task)
+            if target is None:
+                return None
+            assignment, wake = target
+            state = scratchpad.read_file(config, assignment)
+            text = state.text if state.text is not None else scratchpad.restore_text(conn, assignment.id)
+            inbox = [
+                e for e in store.list_inbox(conn, assignment.id)
+                if e.consumed_by_wake in (None, wake.id)
+            ]
+        else:
+            with write_transaction(conn):
+                target = _pickup_target(conn, config, task)
+                if target is not None:
+                    assignment, wake = target
+                    if wake.started_at is None:
+                        text = scratchpad.begin(config, conn, assignment, wake).text
+                        store.consume_inbox(conn, assignment.id, wake.id)
+                        store.update_wake(conn, wake.id, started_at=iso_z(now))
+                        store.insert_event(
+                            conn, assignment.id, kind="wake_started", actor="system",
+                            wake_id=wake.id, payload={"task_id": task.id},
+                        )
+                    else:
+                        before = store.wake_snapshot(conn, wake.id, "before")
+                        text = before.content if before is not None else scratchpad.restore_text(
+                            conn, assignment.id,
+                        )
+            conn.commit()
+            if target is None:
+                logger.info("assignment wake task %s turned away: not active", task.id)
+                finish_wake(config, task, "not_active")
+                return None
+            wake = store.get_wake(conn, wake.id)
+            inbox = store.list_inbox(conn, assignment.id, consumed_by_wake=wake.id)
+
+        built = assignment_prompt.build(
+            conn, config, assignment, wake, scratchpad_text=text, inbox=inbox, now=now,
+        )
+    timeout_seconds, max_turns = wake_limits(config, assignment)
+    return WakeStart(
+        assignment=assignment, wake=wake, prompt=built,
+        timeout_seconds=timeout_seconds, max_turns=max_turns,
+    )
 
 
 # ---------------------------------------------------------------------------
