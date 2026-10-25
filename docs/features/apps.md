@@ -94,6 +94,34 @@ Board keeps everything in the key-value namespace `app.board`, and Istota writes
 
 When Istota reads these values back, they are fenced as untrusted, since the text in them may have been written by the app's code rather than typed by you.
 
+### Ledger of guesses
+
+Write down a prediction with a probability and the day it resolves. Once that day comes, Ledger lists the guess under "Ready to resolve" with **Happened** and **Didn't happen**. Each resolved guess goes into your Brier score and a calibration chart, which plots how often your guesses at each probability came true against the diagonal a perfectly calibrated forecaster would follow. A table under the chart gives the same numbers. In chat, "log that as a guess at 60%, resolving at the end of the month" has Istota add the guess for you.
+
+**Add guess** asks for the guess, a probability in percent and the date it resolves. A guess's **⋯** menu records or changes its outcome, reopens it, edits it or deletes it.
+
+Ledger needs only its own storage (`kv:own`), so it opens without asking anything.
+
+#### The `app.ledger` data layout
+
+Ledger keeps one key per guess in the key-value namespace `app.ledger`, and Istota writes the same keys through the `kv` skill:
+
+| Key | Value |
+| --- | --- |
+| `guess:<id>` | `{"id", "text", "p", "resolves_on", "outcome", "created_at", "resolved_at"}` |
+
+- `id` is the part of the key after `guess:`; the key wins if the two differ.
+- `text` is the prediction, as plain text.
+- `p` is the probability as a fraction from 0 to 1. A number above 1 and up to 100 is read as a percentage, so `60` means 60%.
+- `resolves_on` is a date, `YYYY-MM-DD`. A guess is ready to resolve from that day on, in your own time zone.
+- `outcome` is `true` (it happened), `false` (it did not), or `null` while it is open.
+- `created_at` and `resolved_at` are ISO 8601 times; `resolved_at` is `null` while the guess is open.
+- Only `text` is needed to add a guess. A guess with no `p` is listed but left out of the score, and one with no `resolves_on` is never ready to resolve until it gets one. Other fields a guess carries are kept.
+
+The Brier score is the mean of `(p - outcome)²` over resolved guesses that have a probability, with `outcome` counted as 1 or 0. Lower is better: 0 is perfect, and saying 50% every time scores 0.25. The calibration bins are tenths of probability (0–9%, 10–19%, up to 90–100%). For each bin the chart plots the bin's average probability against the share of its guesses that came true.
+
+As with Board, the values are fenced as untrusted when Istota reads them back.
+
 ## The house kit
 
 Every installed app gets Istota's tokens, a small client library and a set of components (list, table, form, button, dialog, chart). The kit applies your theme and text size before the first paint, keeps forms usable with the on-screen keyboard, and follows the same touch-target, type-size and layout rules as the rest of the interface. An app that does not use the kit still gets its sandbox and its permissions; the kit is what makes it look and feel like the rest of Istota.
