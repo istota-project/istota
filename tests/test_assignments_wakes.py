@@ -256,11 +256,13 @@ class TestTheDeadlineWake:
 
         assert [c.fired_by for c in _dispatch(config)] == ["deadline"]
 
-        # Back to sleeping as a finished wake would leave it: no second deadline wake.
+        # The deadline wake ends in a deadline pause; sleeping again (as after a
+        # resume), the same deadline does not fire a second wake.
         (wake,) = _wakes(config, assignment_id)
         wakes.finish_wake(config, None, "completed", wake_id=wake.id)
-        assert _get(config, assignment_id).state == "sleeping"
+        assert _get(config, assignment_id).state_reason == "deadline"
         with db.get_db(config.db_path) as conn:
+            store.set_state(conn, assignment_id, "sleeping")
             store.update_assignment(conn, assignment_id, next_wake_at=_iso(_now() + timedelta(hours=5)))
         assert _dispatch(config) == []
 
@@ -283,6 +285,7 @@ class TestTheDeadlineWake:
         (wake,) = _wakes(config, assignment_id)
         wakes.finish_wake(config, None, "completed", wake_id=wake.id)
         with db.get_db(config.db_path) as conn:
+            store.set_state(conn, assignment_id, "sleeping")
             store.update_assignment(
                 conn, assignment_id, deadline=_iso(_now() - timedelta(minutes=1)),
                 next_wake_at=_iso(_now() + timedelta(hours=5)),
@@ -663,7 +666,9 @@ class TestAWakeDeliversNothing:
             assert db.get_task(conn, made.task_id).status == "completed"
             assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
             assert conn.execute("SELECT COUNT(*) FROM notifications").fetchone()[0] == 0
-        assert _get(config, assignment_id).state == "active"
+            assert store.get_wake(conn, made.wake_id).summary == "Found two installers."
+        # The worker finished the wake itself: no reaper grace was waited out.
+        assert _get(config, assignment_id).state == "sleeping"
 
 
 # ---------------------------------------------------------------------------
@@ -742,3 +747,591 @@ def test_the_credential_broker_never_scopes_a_grant_to_a_wake():
 
     grant = {"scope_mode": "all", "rooms": [], "allow_scheduled": True}
     assert not _in_scope(grant, {"conversation_token": None}, False)
+
+
+# ---------------------------------------------------------------------------
+# Finishing a wake
+# ---------------------------------------------------------------------------
+#
+# Each case runs a wake the way the scheduler does: the gate creates it,
+# `start_wake` picks it up (scratchpad snapshot, inbox claim, deliverable
+# digests), the wake writes through `lifecycle`'s wake verbs and the files, the
+# task row is moved to its terminal status, and `finish_wake` ends it.
+
+CSV_CHECK = {"check": "csv_columns", "file": "quotes.csv", "columns": ["source", "price"], "min_rows": 2}
+GOOD_CSV = "source,price\nacme,1200\nbeta,1350\n"
+
+
+def _live(
+    config,
+    *,
+    items: tuple = (),
+    auto_complete: bool = False,
+    budget_fields: dict | None = None,
+    deadline: str | None = None,
+) -> int:
+    """A sleeping, due assignment with its directory and seed scratchpad."""
+    slug = f"f{int(_now().timestamp() * 1e6)}"
+    with db.get_db(config.db_path) as conn:
+        assignment_id = store.insert_assignment(
+            conn, user_id="alice", slug=slug, title="Heat pump quotes", goal="Get quotes",
+            budget=budget_fields or BUDGET, dir_relpath=charter.dir_relpath(slug),
+            auto_complete=auto_complete, deadline=deadline,
+        )
+        for text, kind, validator in items:
+            store.insert_item(conn, assignment_id, text=text, kind=kind, validator=validator)
+        store.set_state(conn, assignment_id, "sleeping")
+        store.update_assignment(conn, assignment_id, next_wake_at=_iso(_now() - timedelta(minutes=1)))
+        assert charter.create_directory(config, conn, store.get_assignment(conn, assignment_id))
+    return assignment_id
+
+
+def _file(config, assignment_id, name):
+    assignment = _get(config, assignment_id)
+    return (
+        config.workspace_root(assignment.user_id) / config.bot_dir_name
+        / assignment.dir_relpath / name
+    )
+
+
+def _start(config, assignment_id, *, now: datetime | None = None) -> wakes.CreatedWake:
+    """Let the gate create the next wake and pick it up as `execute_task` would."""
+    made = [c for c in _dispatch(config, now) if c.assignment_id == assignment_id]
+    assert len(made) == 1, made
+    with db.get_db(config.db_path) as conn:
+        task = db.get_task(conn, made[0].task_id)
+    assert wakes.start_wake(config, task) is not None
+    return made[0]
+
+
+def _end(config, made, *, status="completed", result="Did the work.", error=None) -> store.Wake:
+    with db.get_db(config.db_path) as conn:
+        conn.execute(
+            "UPDATE tasks SET status = ?, result = ?, error = ? WHERE id = ?",
+            (status, result, error, made.task_id),
+        )
+        task = db.get_task(conn, made.task_id)
+    assert wakes.finish_wake(config, task, status) is True
+    with db.get_db(config.db_path) as conn:
+        return store.get_wake(conn, made.wake_id)
+
+
+def _next(config, made, **kwargs):
+    with db.get_db(config.db_path) as conn:
+        return lifecycle.request_next(
+            conn, config.assignments, made.assignment_id, user_id="alice",
+            wake_id=made.wake_id, task_id=made.task_id, **kwargs,
+        )
+
+
+def _attempt(config, made, target, outcome):
+    with db.get_db(config.db_path) as conn:
+        lifecycle.add_attempt(
+            conn, made.assignment_id, user_id="alice", wake_id=made.wake_id, task_id=made.task_id,
+            target=target, tried="the web form", outcome=outcome,
+        )
+
+
+def _complete(config, made):
+    with db.get_db(config.db_path) as conn:
+        lifecycle.request_complete(
+            conn, made.assignment_id, user_id="alice", wake_id=made.wake_id, task_id=made.task_id,
+            evidence="quotes.csv has the rows",
+        )
+
+
+def _later() -> datetime:
+    """A gate tick past any cadence a test set, so the time rule fires."""
+    return _now() + timedelta(days=2)
+
+
+def _finished_event(config, assignment_id, wake_id) -> dict:
+    with db.get_db(config.db_path) as conn:
+        [event] = [e for e in store.list_events(conn, assignment_id)
+                   if e.kind == "wake_finished" and e.wake_id == wake_id]
+    return event.payload
+
+
+def _minutes_ahead(iso: str) -> float:
+    return (datetime.fromisoformat(iso.replace("Z", "+00:00")) - _now()).total_seconds() / 60
+
+
+class TestTheNextStep:
+    def test_no_next_is_the_default_sleep_at_the_cadence(self, config):
+        a = _live(config)
+        wake = _end(config, _start(config, a), result="Looked around.")
+
+        assert (wake.outcome, wake.summary, wake.progress_signals) == ("no_next_step", "Looked around.", [])
+        assert wake.ended_at is not None
+        after = _get(config, a)
+        assert after.state == "sleeping"
+        assert 355 < _minutes_ahead(after.next_wake_at) <= 360
+        assert _finished_event(config, a, wake.id)["state"] == "sleeping"
+
+    def test_next_in_sets_the_next_wake(self, config):
+        a = _live(config)
+        made = _start(config, a)
+        _next(config, made, mode="in", requested="2h", wake_at=_now() + timedelta(hours=2))
+
+        wake = _end(config, made)
+        assert wake.outcome == "next"
+        assert 115 < _minutes_ahead(_get(config, a).next_wake_at) <= 120
+
+    def test_a_time_inside_the_floor_from_the_wakes_end_is_moved_to_it(self, config):
+        a = _live(config)
+        made = _start(config, a)
+        with db.get_db(config.db_path) as conn:
+            store.update_wake(conn, made.wake_id, next_request={
+                "mode": "in", "requested": "15m", "wake_at": _iso(_now() - timedelta(minutes=30)),
+                "wait": None, "clamped": "floor", "recorded_at": _iso(_now() - timedelta(minutes=45)),
+            })
+
+        _end(config, made)
+        assert 14 < _minutes_ahead(_get(config, a).next_wake_at) <= 15
+
+    def test_next_wait_user_waits_on_the_user(self, config):
+        a = _live(config)
+        made = _start(config, a)
+        _next(config, made, mode="wait", requested="user", wait="user")
+
+        _end(config, made)
+        after = _get(config, a)
+        assert (after.state, after.waiting_on, after.next_wake_at) == ("waiting", ["user"], None)
+
+    def test_a_failed_wake_still_applies_its_next(self, config):
+        a = _live(config)
+        made = _start(config, a)
+        _next(config, made, mode="in", requested="2h", wake_at=_now() + timedelta(hours=2))
+
+        wake = _end(config, made, status="failed", result=None, error="brain timed out")
+        assert (wake.outcome, wake.summary) == ("failed", "brain timed out")
+        after = _get(config, a)
+        assert after.state == "sleeping"
+        assert 115 < _minutes_ahead(after.next_wake_at) <= 120
+
+    def test_a_pause_the_user_set_during_the_wake_is_kept_and_next_ignored(self, config):
+        a = _live(config)
+        made = _start(config, a)
+        _next(config, made, mode="in", requested="2h", wake_at=_now() + timedelta(hours=2))
+        with db.get_db(config.db_path) as conn:
+            lifecycle.pause(conn, a, user_id="alice")
+
+        wake = _end(config, made)
+        assert wake.outcome == "next"
+        after = _get(config, a)
+        assert (after.state, after.state_reason, after.next_wake_at) == ("paused", "user", None)
+
+    def test_abandon_during_the_wake_is_kept(self, config):
+        a = _live(config)
+        made = _start(config, a)
+        with db.get_db(config.db_path) as conn:
+            lifecycle.abandon(conn, a, user_id="alice")
+
+        _end(config, made)
+        assert _get(config, a).state == "abandoned"
+
+
+class TestTheScratchpadAtTheEnd:
+    def test_the_users_lines_the_wake_removed_are_put_back(self, config):
+        from istota.assignments import scratchpad
+
+        a = _live(config)
+        _end(config, _start(config, a, now=_later()))
+        pad = _file(config, a, charter.SCRATCHPAD_FILE)
+        pad.write_text(pad.read_text() + "Call installer B after 5pm.\n")
+
+        made = _start(config, a, now=_later())
+        pad.write_text(charter.SCRATCHPAD_SEED)  # the wake rewrote its notes
+        wake = _end(config, made)
+
+        text = pad.read_text()
+        assert scratchpad.KEPT_HEADING.format(seq=wake.seq) in text
+        assert "Call installer B after 5pm." in text
+        with db.get_db(config.db_path) as conn:
+            assert store.wake_snapshot(conn, made.wake_id, "after").content == text
+
+    def test_a_wake_that_never_started_takes_no_after_snapshot(self, config):
+        _live(config)
+        (made,) = _dispatch(config)
+        wake = _end(config, made, status="failed", result=None, error="assignment wake pickup failed")
+        assert wake.outcome == "failed"
+        with db.get_db(config.db_path) as conn:
+            assert store.wake_snapshot(conn, made.wake_id, "after") is None
+
+
+class TestValidatorsAndSignals:
+    def test_a_deliverable_that_passes_is_item_passing_and_deliverable_changed(self, config):
+        a = _live(config, items=(("Three quotes", "mechanical", CSV_CHECK),))
+        made = _start(config, a)
+        _file(config, a, "quotes.csv").write_text(GOOD_CSV)
+
+        wake = _end(config, made)
+        assert wake.progress_signals == ["item_passing", "deliverable_changed"]
+        with db.get_db(config.db_path) as conn:
+            [item] = store.list_items(conn, a)
+            [change] = [e for e in store.list_events(conn, a) if e.kind == "item_status"]
+        assert (item.status, item.checked_at is not None) == ("passing", True)
+        assert change.payload["to"] == "passing" and change.wake_id == made.wake_id
+
+    def test_a_changed_deliverable_that_still_fails_is_no_progress(self, config):
+        a = _live(config, items=(("Three quotes", "mechanical", CSV_CHECK),))
+        made = _start(config, a)
+        _file(config, a, "quotes.csv").write_text("source,price\nacme,1200\n")
+
+        wake = _end(config, made)
+        assert wake.progress_signals == []
+        with db.get_db(config.db_path) as conn:
+            [item] = store.list_items(conn, a)
+        assert item.status == "failing"
+
+    def test_a_passing_file_rewritten_and_still_passing_is_deliverable_changed(self, config):
+        a = _live(config, items=(("Three quotes", "mechanical", CSV_CHECK),))
+        _file(config, a, "quotes.csv").write_text(GOOD_CSV)
+        _end(config, _start(config, a, now=_later()))
+
+        made = _start(config, a, now=_later())
+        _file(config, a, "quotes.csv").write_text(GOOD_CSV + "gamma,1100\n")
+        assert _end(config, made).progress_signals == ["deliverable_changed"]
+
+    def test_the_users_input_counts(self, config):
+        a = _live(config, items=(("Picked an installer", "confirmed", None),))
+        with db.get_db(config.db_path) as conn:
+            lifecycle.add_note(conn, a, user_id="alice", text="Try the co-op first.")
+            [item] = store.list_items(conn, a)
+            lifecycle.confirm_item(conn, a, user_id="alice", item_id=item.id)
+
+        wake = _end(config, _start(config, a))
+        assert wake.progress_signals == ["item_confirmed", "user_input"]
+
+    def test_a_reported_handoff_counts(self, config):
+        a = _live(config)
+        made = _start(config, a)
+        with db.get_db(config.db_path) as conn:
+            action = lifecycle.add_handoff(
+                conn, a, user_id="alice", wake_id=made.wake_id, task_id=made.task_id,
+                step="photograph the furnace label", report="the photo",
+            )
+        _next(config, made, mode="wait", requested="user", wait="user")
+        _end(config, made)
+        with db.get_db(config.db_path) as conn:
+            lifecycle.complete_handoff(conn, a, user_id="alice", action_id=action.id, report="sent")
+
+        wake = _end(config, _start(config, a))
+        assert wake.progress_signals == ["user_input", "handoff_done"]
+
+    def test_a_new_attempt_outcome_counts_once(self, config):
+        a = _live(config)
+        made = _start(config, a, now=_later())
+        _attempt(config, made, "acme.example/quote", "failed")
+        assert _end(config, made).progress_signals == ["attempt_new_outcome"]
+
+        made = _start(config, a, now=_later())
+        _attempt(config, made, "acme.example/quote", "failed")
+        assert _end(config, made).progress_signals == []
+
+    def test_the_wakes_cost_is_copied_onto_its_row(self, config):
+        a = _live(config)
+        made = _start(config, a)
+        with db.get_db(config.db_path) as conn:
+            db.insert_task_usage(
+                conn, usage=BrainUsage(has_totals=True, cost_usd=0.41), task_id=made.task_id,
+                user_id="alice", source_type="assignment", assignment_id=a,
+            )
+        assert _end(config, made).cost_usd == pytest.approx(0.41)
+
+
+class TestPauses:
+    def test_three_wakes_without_progress_pause_it_as_stalled(self, config):
+        a = _live(config)
+        for _ in range(2):
+            _end(config, _start(config, a, now=_later()))
+            assert _get(config, a).state == "sleeping"
+        made = _start(config, a, now=_later())
+        _next(config, made, mode="in", requested="1h", wake_at=_now() + timedelta(hours=1))
+        _end(config, made)
+
+        after = _get(config, a)
+        assert (after.state, after.state_reason, after.next_wake_at) == ("paused", "stalled", None)
+        assert ["paused", "stalled"] in _finished_event(config, a, made.wake_id)["notices"]
+
+    def test_progress_breaks_a_stall(self, config):
+        a = _live(config)
+        for _ in range(2):
+            _end(config, _start(config, a, now=_later()))
+        with db.get_db(config.db_path) as conn:
+            lifecycle.add_note(conn, a, user_id="alice", text="Here is the address.")
+        _end(config, _start(config, a, now=_later()))
+        assert _get(config, a).state == "sleeping"
+
+    def test_three_failed_wakes_pause_it_with_the_last_error(self, config):
+        a = _live(config)
+        for n in range(3):
+            made = _start(config, a, now=_later())
+            _attempt(config, made, f"target-{n}", "ok")  # progress, so no stall
+            _end(config, made, status="failed", result=None, error=f"error {n}")
+
+        after = _get(config, a)
+        assert (after.state, after.state_reason) == ("paused", "failures")
+        with db.get_db(config.db_path) as conn:
+            [pause] = [e for e in store.list_events(conn, a) if e.kind == "paused"]
+        assert pause.payload["error"] == "error 2"
+
+    def test_a_cancelled_wake_does_not_count_toward_failures(self, config):
+        a = _live(config)
+        for n, status in enumerate(("failed", "cancelled", "failed")):
+            made = _start(config, a, now=_later())
+            _attempt(config, made, f"target-{n}", "ok")
+            _end(config, made, status=status, result=None, error="boom")
+        assert _get(config, a).state == "sleeping"
+
+        made = _start(config, a, now=_later())
+        _attempt(config, made, "target-last", "ok")
+        _end(config, made, status="failed", result=None, error="boom")
+        assert _get(config, a).state_reason == "failures"
+
+    def test_a_fourth_failure_on_one_target_pauses_it_for_thrash(self, config):
+        a = _live(config)
+        made = _start(config, a, now=_later())
+        for _ in range(3):
+            _attempt(config, made, "acme.example/quote", "failed")
+        _end(config, made)
+        assert _get(config, a).state == "sleeping"
+
+        made = _start(config, a, now=_later())
+        _attempt(config, made, "acme.example/quote", "failed")
+        _next(config, made, mode="in", requested="1h", wake_at=_now() + timedelta(hours=1))
+        _end(config, made)
+
+        after = _get(config, a)
+        assert (after.state, after.state_reason) == ("paused", "thrash")
+        with db.get_db(config.db_path) as conn:
+            [pause] = [e for e in store.list_events(conn, a) if e.kind == "paused"]
+        assert pause.payload["target"] == "acme.example/quote"
+
+    def test_an_ok_in_between_is_not_thrash(self, config):
+        a = _live(config)
+        made = _start(config, a, now=_later())
+        for outcome in ("failed", "failed", "ok", "failed"):
+            _attempt(config, made, "acme.example/quote", outcome)
+        _end(config, made)
+        assert _get(config, a).state == "sleeping"
+
+    def test_a_spent_budget_pauses_it_over_its_next(self, config):
+        a = _live(config, budget_fields={**BUDGET, "max_wakes": 1})
+        made = _start(config, a)
+        _next(config, made, mode="in", requested="1h", wake_at=_now() + timedelta(hours=1))
+        _end(config, made)
+
+        after = _get(config, a)
+        assert (after.state, after.state_reason) == ("paused", "budget")
+
+    def test_crossing_the_low_mark_raises_budget_low_once(self, config):
+        a = _live(config, budget_fields={**BUDGET, "max_cost_usd": 1.0})
+        made = _start(config, a, now=_later())
+        with db.get_db(config.db_path) as conn:
+            db.insert_task_usage(
+                conn, usage=BrainUsage(has_totals=True, cost_usd=0.8), task_id=made.task_id,
+                user_id="alice", source_type="assignment", assignment_id=a,
+            )
+        _end(config, made)
+        assert _get(config, a).budget_low_sent is True
+        assert ["budget_low", None] in _finished_event(config, a, made.wake_id)["notices"]
+
+        made = _start(config, a, now=_later())
+        _end(config, made)
+        with db.get_db(config.db_path) as conn:
+            lows = [e for e in store.list_inbox(conn, a) if e.kind == "budget_low"]
+        assert len(lows) == 1 and lows[0].trusted
+        assert lows[0].consumed_by_wake == made.wake_id
+
+    def test_the_deadline_wake_ends_in_a_deadline_pause(self, config):
+        a = _live(config, deadline=_iso(_now() - timedelta(minutes=5)))
+        made = _start(config, a)
+        assert made.fired_by == "deadline"
+        _end(config, made)
+
+        after = _get(config, a)
+        assert (after.state, after.state_reason) == ("paused", "deadline")
+
+
+class TestCompletion:
+    def test_a_failing_mechanical_item_refuses_it_and_next_applies(self, config):
+        a = _live(config, items=(("Three quotes", "mechanical", CSV_CHECK),))
+        made = _start(config, a)
+        _complete(config, made)
+        _next(config, made, mode="in", requested="2h", wake_at=_now() + timedelta(hours=2))
+
+        wake = _end(config, made)
+        assert wake.outcome == "complete_refused"
+        after = _get(config, a)
+        assert after.state == "sleeping"
+        assert 115 < _minutes_ahead(after.next_wake_at) <= 120
+        with db.get_db(config.db_path) as conn:
+            [refused] = [e for e in store.list_events(conn, a) if e.kind == "complete_refused"]
+            [item] = store.list_items(conn, a)
+        assert refused.payload["failing_items"] == [item.id]
+
+    def test_auto_complete_with_every_item_met_completes_it(self, config):
+        a = _live(config, items=(("Three quotes", "mechanical", CSV_CHECK),), auto_complete=True)
+        made = _start(config, a)
+        _file(config, a, "quotes.csv").write_text(GOOD_CSV)
+        _complete(config, made)
+
+        wake = _end(config, made)
+        assert wake.outcome == "completed"
+        after = _get(config, a)
+        assert (after.state, after.closed_at is not None) == ("completed", True)
+        assert ["closed", None] in _finished_event(config, a, made.wake_id)["notices"]
+
+    def test_an_open_confirmed_item_proposes_and_waits_then_close_completes(self, config):
+        a = _live(config, items=(
+            ("Three quotes", "mechanical", CSV_CHECK), ("Picked an installer", "confirmed", None),
+        ), auto_complete=True)
+        made = _start(config, a)
+        _file(config, a, "quotes.csv").write_text(GOOD_CSV)
+        _complete(config, made)
+
+        assert _end(config, made).outcome == "complete_proposed"
+        after = _get(config, a)
+        assert (after.state, after.waiting_on) == ("waiting", ["completion"])
+        assert ["completion", None] in _finished_event(config, a, made.wake_id)["notices"]
+        assert _dispatch(config, _later()) == []
+
+        with db.get_db(config.db_path) as conn:
+            lifecycle.close(conn, a, user_id="alice", completed=True)
+            items = store.list_items(conn, a)
+        assert _get(config, a).state == "completed"
+        assert [i.status for i in items] == ["passing", "confirmed"]
+
+    def test_rejecting_a_proposed_completion_wakes_it_with_what_is_missing(self, config):
+        a = _live(config, items=(("Picked an installer", "confirmed", None),))
+        made = _start(config, a)
+        _complete(config, made)
+        _end(config, made)
+        with db.get_db(config.db_path) as conn:
+            lifecycle.close(conn, a, user_id="alice", completed=False, missing="a fourth quote")
+
+        made = _start(config, a)
+        with db.get_db(config.db_path) as conn:
+            [event] = store.list_inbox(conn, a, consumed_by_wake=made.wake_id)
+        assert (event.kind, event.payload) == ("completion_rejected", {"missing": "a fourth quote"})
+
+    def test_a_proposed_completion_on_the_deadline_wake_is_not_paused(self, config):
+        a = _live(config, deadline=_iso(_now() - timedelta(minutes=5)))
+        made = _start(config, a)
+        _complete(config, made)
+        _end(config, made)
+        after = _get(config, a)
+        assert (after.state, after.waiting_on) == ("waiting", ["completion"])
+
+    def test_a_failed_wakes_completion_is_ignored(self, config):
+        a = _live(config, auto_complete=True)
+        made = _start(config, a)
+        _complete(config, made)
+
+        assert _end(config, made, status="failed", result=None, error="boom").outcome == "failed"
+        assert _get(config, a).state == "sleeping"
+        with db.get_db(config.db_path) as conn:
+            assert [e.kind for e in store.list_events(conn, a)].count("complete_ignored") == 1
+
+
+class TestFinishingIsSafe:
+    def test_a_turned_away_wake_is_finished_once(self, config):
+        a = _live(config)
+        (made,) = _dispatch(config)
+        with db.get_db(config.db_path) as conn:
+            lifecycle.pause(conn, a, user_id="alice")
+            task = db.get_task(conn, made.task_id)
+
+        assert wakes.start_wake(config, task) is None
+        assert wakes.finish_wake(config, task, "not_active") is False
+        with db.get_db(config.db_path) as conn:
+            assert store.get_wake(conn, made.wake_id).outcome == "not_active"
+        assert _get(config, a).state_reason == "user"
+
+    def test_a_finish_that_throws_ends_the_wake_and_pauses_for_failures(self, config):
+        a = _live(config)
+        made = _start(config, a)
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, made.task_id)
+        with patch.object(wakes, "_progress_signals", side_effect=RuntimeError("broken")):
+            assert wakes.finish_wake(config, task, "completed") is False
+
+        with db.get_db(config.db_path) as conn:
+            wake = store.get_wake(conn, made.wake_id)
+            kinds = [e.kind for e in store.list_events(conn, a)]
+        assert (wake.outcome, wake.ended_at is not None) == ("failed", True)
+        assert "finish_failed" in kinds and "wake_finished" not in kinds
+        after = _get(config, a)
+        assert (after.state, after.state_reason) == ("paused", "failures")
+
+
+# ---------------------------------------------------------------------------
+# The loop, through process_one_task
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def cli_env(config, monkeypatch):
+    """The skill CLI's environment, as the proxy gives a wake of alice's."""
+    config.admin_users = {"alice"}
+    monkeypatch.setattr("istota.config.load_config", lambda: config)
+    monkeypatch.setenv("ISTOTA_DB_PATH", str(config.db_path))
+    monkeypatch.setenv("ISTOTA_EXPERIMENTAL_FEATURES", FLAG)
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    monkeypatch.delenv("ISTOTA_WITHHELD_SCOPES", raising=False)
+    return monkeypatch
+
+
+class TestTheLoopThroughProcessOneTask:
+    def test_gate_worker_finish_and_the_next_tick(self, config, cli_env):
+        """Only `execute_task` is replaced: it picks the wake up as the
+        executor does, then does what a model would, through the real CLI."""
+        from istota.skills.assignment import main
+        from tests.support.skill_cli import run_skill_main
+
+        a = _live(config, items=(("Three quotes", "mechanical", CSV_CHECK),))
+
+        def fake_execute(task, config_, user_resources, **kwargs):
+            assert wakes.start_wake(config_, task) is not None
+            cli_env.setenv("ISTOTA_TASK_ID", str(task.id))
+            _file(config_, a, "quotes.csv").write_text("source,price\nacme,1200\n")
+            for argv in (
+                ["handoff", "photograph the furnace label", "--report", "the photo"],
+                ["attempt", "--target", "beta.example/form", "--tried", "the form", "--outcome", "failed"],
+                ["next", "--wait", "user", "--progress", "one quote in"],
+            ):
+                result = run_skill_main(main, argv)
+                assert result.exit_code == 0, result.envelope
+            return True, "One quote in; the label photo is with the user.", None, None
+
+        (first,) = _dispatch(config)
+        with patch("istota.scheduler.execute_task", side_effect=fake_execute), \
+             patch("istota.notifications.delivery.send_notification") as notify:
+            processed = sched.process_one_task(config, user_id="alice", queue="assignment")
+        assert processed == (first.task_id, True)
+        notify.assert_not_called()
+
+        with db.get_db(config.db_path) as conn:
+            wake = store.get_wake(conn, first.wake_id)
+            [item] = store.list_items(conn, a)
+            [action] = store.list_actions(conn, a, status="open")
+            assert store.wake_snapshot(conn, first.wake_id, "after") is not None
+            assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+        assert wake.outcome == "next"
+        assert wake.summary == "One quote in; the label photo is with the user."
+        assert wake.progress_note == "one quote in"
+        assert wake.progress_signals == ["attempt_new_outcome"]
+        assert (item.status, item.detail is not None) == ("failing", True)
+        after = _get(config, a)
+        assert (after.state, after.waiting_on) == ("waiting", ["user"])
+        assert ["handoff", action.id] in _finished_event(config, a, first.wake_id)["notices"]
+
+        # Nothing fires while it waits; the user's report back wakes it.
+        assert _dispatch(config, _later()) == []
+        with db.get_db(config.db_path) as conn:
+            lifecycle.complete_handoff(conn, a, user_id="alice", action_id=action.id, report="photo sent")
+        (second,) = _dispatch(config)
+        assert (second.assignment_id, second.fired_by) == (a, "inbox")
+        with db.get_db(config.db_path) as conn:
+            assert store.get_wake(conn, second.wake_id).seq == 2

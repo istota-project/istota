@@ -187,6 +187,7 @@ from istota.rooms.surfaces import (
     origin_surface_for_source_type,
 )
 from .transport.registry import (
+    NO_DELIVERY_SOURCE_TYPES,
     _surface_for_source_type,
     answer_is_stored_verbatim,
     result_event_payload,
@@ -3363,6 +3364,43 @@ def process_one_task(
     config: Config, dry_run: bool = False, user_id: str | None = None,
     queue: str | None = None,
 ) -> tuple[int, bool] | None:
+    """Claim and process one pending task; see `_process_one_task`.
+
+    An assignment wake's task is finished here once it has reached a terminal
+    status, after its status write has committed, so every terminal path of the
+    body below ends the wake through `assignments.wakes.finish_wake` without
+    each return having to. A task left pending, locked, running or parked is
+    not finished; the gate's `reap_orphans` ends its wake once it is terminal.
+    """
+    processed = _process_one_task(config, dry_run=dry_run, user_id=user_id, queue=queue)
+    if processed is not None and not dry_run:
+        _finish_assignment_wake(config, processed[0])
+    return processed
+
+
+def _finish_assignment_wake(config: Config, task_id: int) -> None:
+    """`finish_wake` for a terminal assignment task. Never raises."""
+    try:
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_id)
+        if task is None or task.source_type != "assignment":
+            return
+        if task.status not in ("completed", "failed", "cancelled"):
+            return
+        from .assignments import wakes as assignment_wakes
+
+        outcome = task.status
+        if task.status == "failed" and task.error == assignment_wakes.NOT_ACTIVE_ERROR:
+            outcome = "not_active"
+        assignment_wakes.finish_wake(config, task, outcome)
+    except Exception:
+        logger.exception("Task %d: finishing its assignment wake failed", task_id)
+
+
+def _process_one_task(
+    config: Config, dry_run: bool = False, user_id: str | None = None,
+    queue: str | None = None,
+) -> tuple[int, bool] | None:
     """
     Claim and process one pending task.
     Returns (task_id, success) or None if no tasks available.
@@ -4396,11 +4434,14 @@ def process_one_task(
                 # composer's boilerplate wrapped around mid-turn narration from
                 # a turn that broke, so repeated failures would seed recall with
                 # near-identical text that never answered anything (ISSUE-211).
+                # An assignment wake's answer is its wake row's summary and
+                # goes nowhere else, conversation recall included.
                 if (
                     config.memory_search.enabled
                     and config.memory_search.auto_index_conversations
                     and not task.heartbeat_silent
                     and not is_no_final_answer(result)
+                    and task.source_type not in NO_DELIVERY_SOURCE_TYPES
                 ):
                     try:
                         from .memory.sleep_cycle import speaker_labels
@@ -4662,7 +4703,10 @@ def process_one_task(
                     conn, task_id, "warn",
                     f"Task failed: API policy refusal (not retried): {result[:200]}",
                 )
-                _post_policy_refusal_alert(config, task, result)
+                # A wake's failure is recorded on its wake and counted by
+                # `finish_wake`, which owns what the user hears about it.
+                if task.source_type not in NO_DELIVERY_SOURCE_TYPES:
+                    _post_policy_refusal_alert(config, task, result)
                 if task.scheduled_job_id:
                     fail_count = db.increment_scheduled_job_failures(
                         conn, task.scheduled_job_id, result,

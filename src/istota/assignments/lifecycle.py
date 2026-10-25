@@ -30,7 +30,7 @@ change while the request is held cancels it (`cancel_held_activation`, from
 shown. There is no clean-turn release.
 
 The system's transitions around a wake (`wake_created`, `pause_for_budget`,
-`wake_ended`) are here too, so this module stays the one writer of the state;
+`wake_ended`, `wake_waits`, `pause_after_wake`, `complete_after_wake`) are here too, so this module stays the one writer of the state;
 `wakes` decides when they happen and calls them inside its own transaction.
 """
 
@@ -638,6 +638,69 @@ def wake_ended(
             conn, assignment_id, kind="wake_ended", actor="system", wake_id=wake_id,
             payload={"next_wake_at": next_wake_at},
         )
+        return True
+
+
+def wake_waits(
+    conn: sqlite3.Connection, assignment_id: int, *, wake_id: int, waiting_on: list[str],
+) -> bool:
+    """active → waiting on the named kinds. False, and nothing written, once
+    the assignment has left `active`."""
+    with write_transaction(conn):
+        assignment = _load_any(conn, assignment_id)
+        if assignment.state != "active":
+            return False
+        store.set_state(conn, assignment_id, "waiting", waiting_on=list(waiting_on))
+        store.update_assignment(conn, assignment_id, next_wake_at=None)
+        store.insert_event(
+            conn, assignment_id, kind="waiting", actor="system", wake_id=wake_id,
+            payload={"waiting_on": list(waiting_on)},
+        )
+        return True
+
+
+#: Why the host pauses an assignment after a wake (spec Design section 2).
+SYSTEM_PAUSE_REASONS = ("budget", "stalled", "failures", "thrash", "deadline")
+
+
+def pause_after_wake(
+    conn: sqlite3.Connection,
+    assignment_id: int,
+    *,
+    wake_id: int,
+    reason: str,
+    detail: dict[str, Any] | None = None,
+    from_states: tuple[str, ...] = ("active",),
+) -> bool:
+    """active → paused (`reason`). False, and nothing written, when the
+    assignment is in none of `from_states`: a pause or abandon the user set
+    while the wake ran is kept."""
+    if reason not in SYSTEM_PAUSE_REASONS:
+        raise ValueError(f"not a system pause reason: {reason}")
+    with write_transaction(conn):
+        assignment = _load_any(conn, assignment_id)
+        if assignment.state not in from_states:
+            return False
+        store.set_state(conn, assignment_id, "paused", reason=reason)
+        store.update_assignment(conn, assignment_id, next_wake_at=None)
+        store.insert_event(
+            conn, assignment_id, kind="paused", actor="system", wake_id=wake_id,
+            payload={"from": assignment.state, "reason": reason, **(detail or {})},
+        )
+        return True
+
+
+def complete_after_wake(conn: sqlite3.Connection, assignment_id: int, *, wake_id: int) -> bool:
+    """active → completed, when a wake's completion met every item and the
+    charter set `auto_complete`."""
+    with write_transaction(conn):
+        assignment = _load_any(conn, assignment_id)
+        if assignment.state != "active":
+            return False
+        now = db.iso_utc_now()
+        store.set_state(conn, assignment_id, "completed", reason="auto")
+        store.update_assignment(conn, assignment_id, next_wake_at=None, closed_at=now)
+        store.insert_event(conn, assignment_id, kind="completed", actor="system", wake_id=wake_id)
         return True
 
 

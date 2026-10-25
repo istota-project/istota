@@ -18,6 +18,7 @@ detail reaches the next wake's prompt and the user's notices.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -171,6 +172,45 @@ def _run(config: "Config", assignment: "Assignment", item: "Item") -> ItemResult
     if spec["present"]:
         return ItemResult("passing", "text found") if found else ItemResult("failing", "text not found")
     return ItemResult("failing", "text present") if found else ItemResult("passing", "text absent")
+
+
+def deliverable_digests(config: "Config", assignment: "Assignment", items) -> dict[str, str | None]:
+    """sha256 of every file a mechanical item checks, keyed by the spec's `file`.
+
+    None for a file that cannot be read as the checks read it. The host
+    compares these around a wake for the `deliverable_changed` signal. Never raises.
+    """
+    digests: dict[str, str | None] = {}
+    root = config.workspace_root(assignment.user_id)
+    dir_parts = (config.bot_dir_name, *assignment.dir_relpath.split("/"))
+    for item in items:
+        if item.kind != "mechanical" or item.validator is None:
+            continue
+        try:
+            file = parse_spec(item.validator)["file"]
+            if file in digests:
+                continue
+            digests[file] = None
+            if root is None:
+                continue
+            *sub_dirs, leaf = file_parts(file)
+            data, refusal = _read(root, (*dir_parts, *sub_dirs), leaf)
+            if refusal is None:
+                digests[file] = hashlib.sha256(data).hexdigest()
+        except Exception:
+            logger.warning(
+                "assignment deliverable digest failed assignment_id=%s item_id=%s",
+                assignment.id, item.id,
+            )
+    return digests
+
+
+def item_file(item: "Item") -> str | None:
+    """The file a mechanical item checks, or None."""
+    if item.kind != "mechanical" or not isinstance(item.validator, dict):
+        return None
+    file = item.validator.get("file")
+    return file if isinstance(file, str) else None
 
 
 def _read(root, dir_parts: tuple[str, ...], leaf: str) -> tuple[bytes | None, str | None]:

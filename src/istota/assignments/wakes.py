@@ -37,6 +37,7 @@ the wake row.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from dataclasses import dataclass
@@ -44,7 +45,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from istota import db
-from istota.assignments import budget, charter, lifecycle, scratchpad, store
+from istota.assignments import budget, charter, lifecycle, scratchpad, store, validators
 from istota.assignments import prompt as assignment_prompt
 from istota.assignments.charter import iso_z
 from istota.relay.requests import write_transaction
@@ -344,9 +345,14 @@ def start_wake(config: "Config", task: db.Task, *, dry_run: bool = False) -> Wak
                         text = scratchpad.begin(config, conn, assignment, wake).text
                         store.consume_inbox(conn, assignment.id, wake.id)
                         store.update_wake(conn, wake.id, started_at=iso_z(now))
+                        # The deliverables as the wake found them, for
+                        # finish_wake's `deliverable_changed` signal.
+                        digests = validators.deliverable_digests(
+                            config, assignment, store.list_items(conn, assignment.id),
+                        )
                         store.insert_event(
                             conn, assignment.id, kind="wake_started", actor="system",
-                            wake_id=wake.id, payload={"task_id": task.id},
+                            wake_id=wake.id, payload={"task_id": task.id, "deliverables": digests},
                         )
                     else:
                         before = store.wake_snapshot(conn, wake.id, "before")
@@ -410,6 +416,30 @@ def reap_orphans(conn: sqlite3.Connection, config: "Config") -> list[int]:
     return reaped
 
 
+#: Consumed inbox kinds that count as the user's input (spec Design section 11).
+USER_INPUT_KINDS = ("user_note", "handoff_done", "charter_change", "user_edit")
+#: Wake outcomes that are not a run of the wake at all, or that the user
+#: stopped: neither counts toward a stall or the failure pause.
+_UNCOUNTED_OUTCOMES = ("not_active", "cancelled")
+
+
+@dataclass(frozen=True)
+class Finished:
+    """What `finish_wake` decided for one wake."""
+
+    wake_id: int
+    assignment_id: int
+    outcome: str
+    signals: list[str]
+    #: The assignment's state once the wake ended.
+    state: str | None
+    #: `(kind, ref)` for every notice the user must see: `handoff` (action id),
+    #: `report` (event id), `budget_low`, `paused` (reason), `completion`,
+    #: `closed`. Recorded on the `wake_finished` event; the bell producers are
+    #: the notices stage's, and write these on this same transaction.
+    notices: list[tuple[str, object]]
+
+
 def finish_wake(
     config: "Config", task: db.Task | None, outcome: str, *, wake_id: int | None = None,
 ) -> bool:
@@ -417,38 +447,21 @@ def finish_wake(
 
     `outcome` is how the task ended: `completed`, `failed`, `cancelled`, or
     `not_active` for a wake turned away at pickup. The wake is named by
-    `wake_id`, or found from `task`. Records the end and returns an assignment
-    still `active` to `sleeping` at its cadence (`not_active`: due at once, so
-    turning the flag back on resumes it); a state the user set while the wake
-    ran is kept. Returns True when this call ended the wake, False when it was
-    already ended or not found.
+    `wake_id`, or found from `task`. Runs the spec's sequence (Design section
+    7, "After the task ends") in `_finish`. Returns True when this call ended
+    the wake, False when it was already ended, not found, or the finish failed;
+    a failed finish ends the wake `failed` and pauses the assignment
+    (`failures`), so it does not wake again on a broken path.
     """
     now = datetime.now(timezone.utc)
     try:
         with db.get_db(config.db_path) as conn:
             with write_transaction(conn):
-                wake = (
-                    store.get_wake(conn, wake_id) if wake_id is not None
-                    else store.get_wake_by_task(conn, task.id) if task is not None
-                    else None
-                )
+                wake = _wake_for(conn, task, wake_id)
                 if wake is None or wake.ended_at is not None:
                     return False
-                summary = (task.result or "")[:SUMMARY_MAX_CHARS] if task is not None else None
-                store.update_wake(
-                    conn, wake.id, ended_at=iso_z(now),
-                    outcome=_WAKE_OUTCOMES.get(outcome, "failed"),
-                    summary=summary or None,
-                )
-                assignment = store.get_assignment(conn, wake.assignment_id)
-                if assignment is not None:
-                    due = now if outcome == "not_active" else now + timedelta(
-                        minutes=assignment.cadence_minutes,
-                    )
-                    lifecycle.wake_ended(
-                        conn, assignment.id, wake_id=wake.id, next_wake_at=iso_z(due),
-                    )
-                return True
+                _finish(conn, config, wake, task, outcome, now)
+        return True
     except Exception:
         logger.exception("could not finish assignment wake %s (task %s)",
                          wake_id, getattr(task, "id", None))
@@ -456,21 +469,400 @@ def finish_wake(
         return False
 
 
+def _wake_for(conn: sqlite3.Connection, task: db.Task | None, wake_id: int | None) -> store.Wake | None:
+    if wake_id is not None:
+        return store.get_wake(conn, wake_id)
+    if task is not None:
+        return store.get_wake_by_task(conn, task.id)
+    return None
+
+
+def _summary(task: db.Task | None) -> str | None:
+    """The task's answer, or for a failed one its error, cut to the cap."""
+    if task is None:
+        return None
+    text = task.result or task.error or ""
+    return text[:SUMMARY_MAX_CHARS] or None
+
+
+def _finish(
+    conn: sqlite3.Connection,
+    config: "Config",
+    wake: store.Wake,
+    task: db.Task | None,
+    outcome: str,
+    now: datetime,
+) -> Finished:
+    """The finishing sequence, in the spec's order. Runs inside the caller's transaction."""
+    assignment = store.get_assignment(conn, wake.assignment_id)
+    if assignment is None or outcome == "not_active":
+        store.update_wake(conn, wake.id, ended_at=iso_z(now), outcome=_WAKE_OUTCOMES.get(outcome, "failed"),
+                          summary=_summary(task) if outcome != "not_active" else None)
+        if assignment is not None:
+            lifecycle.wake_ended(conn, assignment.id, wake_id=wake.id, next_wake_at=iso_z(now))
+        return Finished(wake.id, wake.assignment_id, _WAKE_OUTCOMES.get(outcome, "failed"), [],
+                        None, [])
+
+    cfg = config.assignments
+    task_outcome = outcome if outcome in _TASK_OUTCOMES else "failed"
+
+    # 1. The scratchpad. A wake that never started has no `before` snapshot,
+    # and an `after` taken now would swallow the user's edit as a baseline.
+    if wake.started_at is not None:
+        scratchpad.end(config, conn, assignment, wake)
+
+    # 2. Validators.
+    newly_passing = _run_validators(conn, config, assignment, wake, now)
+    items = store.list_items(conn, assignment.id)
+
+    # 3. Progress signals.
+    signals = _progress_signals(conn, config, assignment, wake, items, newly_passing)
+
+    # 4. Attempts: the thrash check.
+    thrash_target = _thrash_target(conn, assignment.id, wake.id)
+
+    # 5. The ledger, budget_low and the spent check.
+    notices: list[tuple[str, object]] = []
+    spent = budget.totals(conn, assignment.id)
+    if _raise_budget_low(conn, cfg, assignment, spent, wake.id):
+        notices.append(("budget_low", None))
+    budget_spent = budget.is_spent(assignment, spent)
+
+    # 6 and 7. Completion first, then the pauses, then `next` or the default.
+    completion = None
+    if wake.complete_request:
+        completion = _decide_completion(conn, assignment, wake, items, task_outcome)
+    pause = None
+    if completion not in ("completed", "proposed"):
+        pause = _decide_pause(
+            conn, cfg, assignment, wake, task, task_outcome, signals, thrash_target, budget_spent,
+        )
+
+    if completion == "completed":
+        wake_outcome = "completed"
+    elif completion == "proposed":
+        wake_outcome = "complete_proposed"
+    elif task_outcome != "completed":
+        wake_outcome = task_outcome
+    elif completion == "refused":
+        wake_outcome = "complete_refused"
+    else:
+        wake_outcome = "next" if wake.next_request else "no_next_step"
+
+    # 8. End the wake row.
+    store.update_wake(
+        conn, wake.id, ended_at=iso_z(now), outcome=wake_outcome, summary=_summary(task),
+        progress_signals=signals, cost_usd=_wake_cost(conn, assignment.id, wake.task_id),
+    )
+
+    if completion == "completed":
+        if lifecycle.complete_after_wake(conn, assignment.id, wake_id=wake.id):
+            notices.append(("closed", None))
+    elif completion == "proposed":
+        if lifecycle.wake_waits(conn, assignment.id, wake_id=wake.id, waiting_on=["completion"]):
+            notices.append(("completion", None))
+    elif pause is not None:
+        reason, detail = pause
+        if lifecycle.pause_after_wake(
+            conn, assignment.id, wake_id=wake.id, reason=reason, detail=detail,
+        ):
+            notices.append(("paused", reason))
+    else:
+        _apply_next(conn, config, assignment, wake, now)
+
+    # 9. Notices. What this wake handed off or reported is listed with them.
+    for event in store.list_events(conn, assignment.id):
+        if event.wake_id != wake.id or event.actor != "assignment":
+            continue
+        if event.kind == "handoff_created":
+            notices.append(("handoff", (event.payload or {}).get("action_id")))
+        elif event.kind == "report":
+            notices.append(("report", event.id))
+
+    after = store.get_assignment(conn, assignment.id)
+    state = after.state if after is not None else None
+    store.insert_event(
+        conn, assignment.id, kind="wake_finished", actor="system", wake_id=wake.id,
+        payload={
+            "task_outcome": task_outcome, "outcome": wake_outcome, "signals": signals,
+            "state": state, "notices": [list(n) for n in notices],
+        },
+    )
+    return Finished(wake.id, assignment.id, wake_outcome, signals, state, notices)
+
+
+def _run_validators(
+    conn: sqlite3.Connection, config: "Config", assignment: store.Assignment, wake: store.Wake,
+    now: datetime,
+) -> list[int]:
+    """Run every mechanical item and record it. Returns the ids that moved to `passing`."""
+    checked_at = iso_z(now)
+    newly_passing: list[int] = []
+    for item in store.list_items(conn, assignment.id):
+        if item.kind != "mechanical":
+            continue
+        result = validators.run_item(config, assignment, item)
+        store.set_item_status(conn, item.id, result.status, detail=result.detail, checked_at=checked_at)
+        if result.status != item.status:
+            store.insert_event(
+                conn, assignment.id, kind="item_status", actor="system", wake_id=wake.id,
+                payload={"item_id": item.id, "from": item.status, "to": result.status,
+                         "detail": result.detail},
+            )
+        if result.status == "passing" and item.status != "passing":
+            newly_passing.append(item.id)
+    return newly_passing
+
+
+def _progress_signals(
+    conn: sqlite3.Connection,
+    config: "Config",
+    assignment: store.Assignment,
+    wake: store.Wake,
+    items: list[store.Item],
+    newly_passing: list[int],
+) -> list[str]:
+    """The host-visible facts that say the wake moved the assignment (section 11).
+
+    Scratchpad edits and `--progress` never count.
+    """
+    signals: list[str] = []
+    if newly_passing:
+        signals.append("item_passing")
+    consumed = {event.kind for event in store.list_inbox(conn, assignment.id, consumed_by_wake=wake.id)}
+    if "item_confirmed" in consumed:
+        signals.append("item_confirmed")
+    if consumed & set(USER_INPUT_KINDS):
+        signals.append("user_input")
+    if "handoff_done" in consumed:
+        signals.append("handoff_done")
+    new_pair = conn.execute(
+        """
+        SELECT 1 FROM assignment_attempts a
+        WHERE a.assignment_id = ? AND a.wake_id = ?
+          AND NOT EXISTS (
+              SELECT 1 FROM assignment_attempts b
+              WHERE b.assignment_id = a.assignment_id AND b.target = a.target
+                AND b.outcome = a.outcome AND b.id < a.id
+          )
+        LIMIT 1
+        """,
+        (assignment.id, wake.id),
+    ).fetchone()
+    if new_pair is not None:
+        signals.append("attempt_new_outcome")
+    if _deliverable_changed(conn, config, assignment, wake, items):
+        signals.append("deliverable_changed")
+    return signals
+
+
+def _deliverable_changed(
+    conn: sqlite3.Connection,
+    config: "Config",
+    assignment: store.Assignment,
+    wake: store.Wake,
+    items: list[store.Item],
+) -> bool:
+    """A file a mechanical item names changed during the wake, and every item
+    checking that file now passes. Compared with the digests pickup recorded."""
+    row = conn.execute(
+        "SELECT payload FROM assignment_events WHERE wake_id = ? AND kind = 'wake_started'"
+        " ORDER BY id LIMIT 1",
+        (wake.id,),
+    ).fetchone()
+    if row is None:
+        return False
+    try:
+        before = json.loads(row[0]).get("deliverables")
+    except (TypeError, ValueError, AttributeError):
+        return False
+    if not isinstance(before, dict):
+        return False
+    after = validators.deliverable_digests(config, assignment, items)
+    for file, digest in after.items():
+        if digest is None or digest == before.get(file):
+            continue
+        checking = [item for item in items if validators.item_file(item) == file]
+        if checking and all(item.status == "passing" for item in checking):
+            return True
+    return False
+
+
+def _thrash_target(conn: sqlite3.Connection, assignment_id: int, wake_id: int) -> str | None:
+    """A target this wake failed on again after `THRASH_REPEATS` failures in a row."""
+    repeats = assignment_prompt.THRASH_REPEATS
+    targets = [
+        row[0] for row in conn.execute(
+            "SELECT DISTINCT target FROM assignment_attempts WHERE assignment_id = ? AND wake_id = ?"
+            " ORDER BY target",
+            (assignment_id, wake_id),
+        ).fetchall()
+    ]
+    for target in targets:
+        last = store.list_attempts(conn, assignment_id, target=target, limit=repeats + 1)
+        if (len(last) == repeats + 1 and last[0].wake_id == wake_id
+                and all(attempt.outcome == "failed" for attempt in last)):
+            return target
+    return None
+
+
+def _wake_cost(conn: sqlite3.Connection, assignment_id: int, task_id: int | None) -> float | None:
+    """What this wake's task spent, copied onto the wake row for the timeline."""
+    if task_id is None:
+        return None
+    row = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(cost_usd), 0.0) FROM task_usage"
+        " WHERE assignment_id = ? AND task_id = ?",
+        (assignment_id, task_id),
+    ).fetchone()
+    return float(row[1]) if row[0] else None
+
+
+def _raise_budget_low(
+    conn: sqlite3.Connection, cfg, assignment: store.Assignment, spent: budget.Totals, wake_id: int,
+) -> bool:
+    """The first crossing of `budget_low_fraction` of cost or wakes: a trusted
+    `budget_low` inbox event for the next wake, once until a top-up."""
+    if assignment.budget_low_sent or assignment.state in lifecycle.TERMINAL_STATES:
+        return False
+    max_cost = float(assignment.budget.get("max_cost_usd") or 0.0)
+    max_wakes = int(assignment.budget.get("max_wakes") or 0)
+    fraction = cfg.budget_low_fraction
+    crossed = (
+        (max_cost > 0 and spent.cost_usd >= fraction * max_cost)
+        or (max_wakes > 0 and spent.wakes >= fraction * max_wakes)
+    )
+    if not crossed:
+        return False
+    payload = {
+        "cost_usd": round(spent.cost_usd, 4), "max_cost_usd": max_cost,
+        "wakes": spent.wakes, "max_wakes": max_wakes,
+    }
+    store.insert_inbox_event(conn, assignment.id, kind="budget_low", trusted=True, payload=payload)
+    store.update_assignment(conn, assignment.id, budget_low_sent=True)
+    store.insert_event(
+        conn, assignment.id, kind="budget_low", actor="system", wake_id=wake_id, payload=payload,
+    )
+    return True
+
+
+def _decide_completion(
+    conn: sqlite3.Connection,
+    assignment: store.Assignment,
+    wake: store.Wake,
+    items: list[store.Item],
+    task_outcome: str,
+) -> str | None:
+    """`completed`, `proposed`, `refused`, or None when the request is not
+    weighed: a wake whose task failed or was stopped may have left its files
+    half-written, so its completion is recorded as ignored."""
+    if task_outcome != "completed":
+        store.insert_event(
+            conn, assignment.id, kind="complete_ignored", actor="system", wake_id=wake.id,
+            payload={"task_outcome": task_outcome},
+        )
+        return None
+    failing = [item.id for item in items if item.kind == "mechanical" and item.status != "passing"]
+    if failing:
+        store.insert_event(
+            conn, assignment.id, kind="complete_refused", actor="system", wake_id=wake.id,
+            payload={"failing_items": failing},
+        )
+        return "refused"
+    open_confirmed = [item for item in items if item.kind == "confirmed" and item.status != "confirmed"]
+    if assignment.auto_complete and not open_confirmed:
+        return "completed"
+    return "proposed"
+
+
+def _counted_wakes(conn: sqlite3.Connection, assignment_id: int, wake_id: int, limit: int) -> list[store.Wake]:
+    """The newest `limit` ended wakes before this one that count toward a pause."""
+    if limit <= 0:
+        return []
+    placeholders = ", ".join("?" for _ in _UNCOUNTED_OUTCOMES)
+    rows = conn.execute(
+        f"SELECT id FROM assignment_wakes WHERE assignment_id = ? AND id != ?"
+        f" AND ended_at IS NOT NULL AND COALESCE(outcome, '') NOT IN ({placeholders})"
+        f" ORDER BY seq DESC LIMIT ?",
+        (assignment_id, wake_id, *_UNCOUNTED_OUTCOMES, limit),
+    ).fetchall()
+    return [store.get_wake(conn, row[0]) for row in rows]
+
+
+def _decide_pause(
+    conn: sqlite3.Connection,
+    cfg,
+    assignment: store.Assignment,
+    wake: store.Wake,
+    task: db.Task | None,
+    task_outcome: str,
+    signals: list[str],
+    thrash_target: str | None,
+    budget_spent: bool,
+) -> tuple[str, dict] | None:
+    """The pause this wake ends in, if any, as `(reason, detail)`. A pause
+    overrides the wake's `next`."""
+    if budget_spent:
+        return "budget", {}
+    if thrash_target is not None:
+        return "thrash", {"target": thrash_target}
+    if task_outcome == "failed" and cfg.failure_wakes > 0:
+        earlier = _counted_wakes(conn, assignment.id, wake.id, cfg.failure_wakes - 1)
+        if len(earlier) == cfg.failure_wakes - 1 and all(w.outcome == "failed" for w in earlier):
+            error = (task.error or "") if task is not None else "the wake's task is gone"
+            return "failures", {"error": error[:500]}
+    if task_outcome != "cancelled" and not signals and cfg.stall_wakes > 0:
+        earlier = _counted_wakes(conn, assignment.id, wake.id, cfg.stall_wakes - 1)
+        if len(earlier) == cfg.stall_wakes - 1 and all(not w.progress_signals for w in earlier):
+            return "stalled", {"wake_ids": [wake.id, *[w.id for w in earlier]]}
+    if wake.fired_by == "deadline":
+        return "deadline", {}
+    return None
+
+
+def _apply_next(
+    conn: sqlite3.Connection, config: "Config", assignment: store.Assignment, wake: store.Wake,
+    now: datetime,
+) -> None:
+    """The wake's recorded `next`, or the default sleep for `cadence_minutes`.
+
+    A time was clamped when the wake asked; it is clamped again from now, the
+    wake's end, so the floor between wakes holds. A deadline still ahead caps it.
+    """
+    request = wake.next_request or {}
+    if request.get("mode") == "wait":
+        lifecycle.wake_waits(conn, assignment.id, wake_id=wake.id, waiting_on=[request.get("wait") or "user"])
+        return
+    wake_at = _parse(request.get("wake_at")) if request.get("mode") in ("in", "at") else None
+    if wake_at is None:
+        wake_at = now + timedelta(minutes=assignment.cadence_minutes)
+    floor = now + timedelta(minutes=config.assignments.min_wake_interval_minutes)
+    if wake_at < floor:
+        wake_at = floor
+    deadline = _parse(assignment.deadline)
+    if deadline is not None and now < deadline < wake_at:
+        wake_at = deadline
+    lifecycle.wake_ended(conn, assignment.id, wake_id=wake.id, next_wake_at=iso_z(wake_at))
+
+
 def _record_finish_failed(config: "Config", *, wake_id: int | None, task: db.Task | None) -> None:
-    """End the wake as failed and leave a `finish_failed` event, so the reaper
-    does not retry a broken finish every tick. Best-effort."""
+    """End the wake as failed, leave a `finish_failed` event and pause the
+    assignment (`failures`), so neither the reaper nor the gate retries a
+    broken finish every tick. Best-effort."""
     try:
         with db.get_db(config.db_path) as conn:
-            wake = (
-                store.get_wake(conn, wake_id) if wake_id is not None
-                else store.get_wake_by_task(conn, task.id) if task is not None
-                else None
-            )
-            if wake is None or wake.ended_at is not None:
-                return
-            store.update_wake(conn, wake.id, ended_at=db.iso_utc_now(), outcome="failed")
-            store.insert_event(
-                conn, wake.assignment_id, kind="finish_failed", actor="system", wake_id=wake.id,
-            )
+            with write_transaction(conn):
+                wake = _wake_for(conn, task, wake_id)
+                if wake is None or wake.ended_at is not None:
+                    return
+                store.update_wake(conn, wake.id, ended_at=db.iso_utc_now(), outcome="failed")
+                store.insert_event(
+                    conn, wake.assignment_id, kind="finish_failed", actor="system", wake_id=wake.id,
+                )
+                lifecycle.pause_after_wake(
+                    conn, wake.assignment_id, wake_id=wake.id, reason="failures",
+                    detail={"finish_failed": True},
+                    from_states=("active", "sleeping", "waiting"),
+                )
     except Exception:
         logger.exception("could not record the failed finish of assignment wake %s", wake_id)
