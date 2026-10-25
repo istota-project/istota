@@ -6042,11 +6042,29 @@ export interface SharedFeed {
   created_at: string | null;
 }
 
+export type CalendarDelivery = 'invite' | 'feed';
+
+/** Istota's own calendar: how its events reach the user, and the feed link's state. */
+export interface IstotaCalendarSettings {
+  delivery: CalendarDelivery;
+  /** What applies now: `feed` whenever the server sends no email. */
+  effective_delivery: CalendarDelivery;
+  email_enabled: boolean;
+  /** The feed link's dates, never the link; null when there is none. */
+  feed: { created_at: string; last_used_at: string | null } | null;
+  /** False when the server has no public name to put in a link. */
+  can_link: boolean;
+  /** False on a loopback name, where only this machine can read the feed. */
+  reachable_elsewhere: boolean;
+}
+
 export interface SharingSettings {
   feeds: SharedFeed[];
   max_feeds: number;
   /** False when the credential store is not configured, so no address can be stored. */
   can_add: boolean;
+  /** Absent on a server that predates Istota's own calendar. */
+  calendar?: IstotaCalendarSettings;
 }
 
 export function getSharing(): Promise<SharingSettings> {
@@ -6062,6 +6080,22 @@ export function addSharedFeed(url: string): Promise<{ feed: SharedFeed }> {
 }
 export function removeSharedFeed(id: number): Promise<{ removed: boolean }> {
   return apiFetch(`/settings/sharing/feeds/${id}`, { method: 'DELETE' });
+}
+/** Makes the Istota calendar feed link, or replaces it; the address is returned this once. */
+export function createCalendarFeedLink(): Promise<{ url: string }> {
+  return apiFetch('/settings/sharing/calendar-feed', { method: 'POST' });
+}
+export function removeCalendarFeedLink(): Promise<{ removed: boolean }> {
+  return apiFetch('/settings/sharing/calendar-feed', { method: 'DELETE' });
+}
+export function setCalendarDelivery(
+  delivery: CalendarDelivery,
+): Promise<{ delivery: CalendarDelivery }> {
+  return apiFetch('/settings/sharing/delivery', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ delivery }),
+  });
 }
 
 export interface KeepassImportItem {
