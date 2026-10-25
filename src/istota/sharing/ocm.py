@@ -687,11 +687,20 @@ _ACTION_MESSAGES = {
 
 
 class ShareActionRefused(Exception):
-    """A user's accept, decline or remove was refused; ``code`` says why, the text is fixed."""
+    """A user's accept, decline or remove was refused; ``code`` says why, the text is fixed.
 
-    def __init__(self, code: str, message: str | None = None) -> None:
+    From `share_access`, ``status`` is the share root's HTTP status when it
+    answered one, and ``reason`` the fixed code a source's ``last_reason``
+    takes (``http_<status>``, a guard code, ``invalid_response``), so the
+    ``shares`` skill can tell a revoked share from a failing server.
+    """
+
+    def __init__(self, code: str, message: str | None = None, *,
+                 status: int | None = None, reason: str | None = None) -> None:
         super().__init__(message or _ACTION_MESSAGES[code])
         self.code = code
+        self.status = status
+        self.reason = reason or code
 
 
 @dataclass(frozen=True)
@@ -746,19 +755,21 @@ def share_access(config, source, secret: str, *, resolve=None) -> str:
             )
         except guarded_http.GuardRefused as exc:
             logger.info("ocm share root refused source=%s code=%s", source.id, exc.code)
-            raise ShareActionRefused("share_unreachable") from None
-    if response.status_code in (401, 403, 404):
-        logger.info("ocm share root source=%s status=%s", source.id, response.status_code)
-        raise ShareActionRefused("share_unopened")
-    if response.status_code != 207:
-        logger.info("ocm share root source=%s status=%s", source.id, response.status_code)
-        raise ShareActionRefused("share_unreachable")
+            raise ShareActionRefused("share_unreachable", reason=exc.code) from None
+    status = response.status_code
+    if status in (401, 403, 404):
+        logger.info("ocm share root source=%s status=%s", source.id, status)
+        raise ShareActionRefused("share_unopened", status=status, reason=f"http_{status}")
+    if status != 207:
+        logger.info("ocm share root source=%s status=%s", source.id, status)
+        raise ShareActionRefused("share_unreachable", status=status, reason=f"http_{status}")
     try:
         rows = dav_xml.parse_multistatus(response.content)
     except dav_xml.DavXmlError:
-        raise ShareActionRefused("share_unreachable") from None
+        raise ShareActionRefused("share_unreachable", status=status,
+                                 reason="invalid_response") from None
     if not rows:
-        raise ShareActionRefused("share_unreachable")
+        raise ShareActionRefused("share_unreachable", status=status, reason="invalid_response")
     element = rows[0][1].get(_OC_PERMISSIONS)
     return _access_from(element.text if element is not None else None)
 
