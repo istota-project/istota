@@ -46,6 +46,7 @@ Subsystems:
 - `wallet.md` — payment cards, purchase approval, private checkout fills and static-card limits
 - `money.md` — quarterly tax estimator, portfolio snapshots, classifications
 - `memory.md` — USER.md/CHANNEL.md/GROUP.md, per-skill overlays, knowledge graph, playbooks, sleep cycle
+- `assignments.md` — goals carried across days: the assignment tables, the `assignment_id` columns on `tasks` and `task_usage`, the store, `[assignments]`, the `skill_assignment` flag
 
 Boundaries and operations:
 
@@ -67,6 +68,7 @@ Boundaries and operations:
 src/istota/
 ├── brain/                # Pluggable model invocation (Brain protocol)
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
+├── assignments/          # Goals Istota carries across days: store.py (row access for the assignment tables) → assignments.md
 ├── skills/               # Self-contained skills (skill.md + optional CLI)
 │   └── _group_access.py  # The one gate for `kv --group` and `memory --group`: current member and in the task's resolved group set → memory.md
 ├── session/              # The native brain's application layer: compaction, results, transcripts
