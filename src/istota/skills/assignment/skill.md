@@ -46,7 +46,7 @@ istota-skill assignment set heat-pump-quotes --cadence 12h
 
 A draft does nothing until the user approves it. When the user says to start it, run `istota-skill assignment activate <id>`. It answers `held` with the charter as `preview`; end your turn there, and the user is asked to approve that exact text. Approval starts the assignment, and the first wake follows shortly. Calling `activate` again after approval answers `approved`; say it has started. Any charter change while the approval is waiting cancels it, so run `activate` again after the change. `activate` refuses `deadline_passed` when the deadline is behind us, `too_many_active` at the deployment's limit, and `confirmation_pending` while another approval of the same assignment is waiting.
 
-The assignment's folder is `{BOT_DIR}/assignments/<slug>/` in the user's files. `CHARTER.md` there is generated from the record; editing it changes nothing. `SCRATCHPAD.md` holds the notes, and the user may edit it.
+The assignment's folder is `{BOT_DIR}/assignments/<slug>/` in the user's files. `CHARTER.md` there is generated from the record; editing it changes nothing. `SCRATCHPAD.md` holds the wakes' notes. A change to it made outside a wake is shown to the next wake as untrusted material, not as the user's words, so to steer an assignment the user leaves a `note`.
 
 ## Steering a running assignment
 

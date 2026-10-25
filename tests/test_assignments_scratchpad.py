@@ -1,4 +1,4 @@
-"""`assignments/scratchpad.py`: snapshots around a wake, the user's edits, repair.
+"""`assignments/scratchpad.py`: snapshots around a wake, outside changes, repair.
 
 Every case runs against a real assignment directory under a tmp workspace and
 a real framework DB; nothing below the module is patched.
@@ -61,7 +61,7 @@ class TestBegin:
         result = scratchpad.begin(config, conn, assignment, _wake(conn, assignment))
 
         assert result.text == charter.SCRATCHPAD_SEED
-        assert result.user_edit_event_id is None and result.restored is None
+        assert result.change_event_id is None and result.restored is None
         assert store.list_inbox(conn, assignment.id) == []
         seed = store.latest_snapshot(conn, assignment.id, phases=("seed",))
         assert seed is not None and seed.wake_id is None
@@ -69,7 +69,8 @@ class TestBegin:
         before = store.latest_snapshot(conn, assignment.id, phases=("before",))
         assert before.content == charter.SCRATCHPAD_SEED
 
-    def test_a_change_since_the_last_after_is_a_trusted_user_edit_with_a_diff(self, config, conn):
+    def test_a_change_since_the_last_after_is_an_untrusted_change_with_a_diff(self, config, conn):
+        """Any task of the user's can write the file, so a change is not the user's word."""
         assignment = _assignment(config, conn)
         first = _wake(conn, assignment)
         scratchpad.begin(config, conn, assignment, first)
@@ -85,13 +86,15 @@ class TestBegin:
 
         assert result.text == edited
         [event] = store.list_inbox(conn, assignment.id)
-        assert event.id == result.user_edit_event_id
-        assert event.kind == "user_edit" and event.trusted
+        assert event.id == result.change_event_id
+        assert event.kind == "scratchpad_changed" and not event.trusted
         assert "+Call installer B after 5pm." in event.payload["diff"]
         assert "SCRATCHPAD.md (after wake 1)" in event.payload["diff"]
-        assert event.payload["added"] == ["Call installer B after 5pm."]
-        [audit] = _events(conn, assignment, "user_edit")
-        assert audit.actor == "user"
+        assert set(event.payload) == {"diff", "cut"}
+        [audit] = _events(conn, assignment, "scratchpad_changed")
+        assert audit.actor == "system"
+        assert audit.payload["inbox_id"] == event.id
+        assert _events(conn, assignment, "user_edit") == []
 
     def test_a_long_diff_is_cut_with_a_marker(self, config, conn):
         assignment = _assignment(config, conn)
@@ -147,8 +150,9 @@ class TestBegin:
         if breakage == "symlink":
             assert (tmp_path / "elsewhere.md").read_text() == "someone else's file\n"
         if breakage == "empty":
-            [emptied] = _events(conn, assignment, "user_edit")
-            assert emptied.actor == "user" and emptied.payload == {"emptied": True}
+            [emptied] = _events(conn, assignment, "scratchpad_changed")
+            assert emptied.actor == "system" and emptied.payload == {"emptied": True}
+        assert _events(conn, assignment, "user_edit") == []
 
     def test_a_truncated_snapshot_is_never_restored_from(self, config, conn):
         assignment = _assignment(config, conn)
@@ -182,12 +186,12 @@ class TestSnapshots:
 
         result = scratchpad.begin(config, conn, assignment, _wake(conn, assignment))
 
-        assert result.user_edit_event_id is None
+        assert result.change_event_id is None
 
 
 class TestEnd:
-    def _user_edited_wake(self, config, conn):
-        """A wake whose begin read a user edit adding two lines."""
+    def _changed_wake(self, config, conn):
+        """A wake whose begin read an outside change adding two lines."""
         assignment = _assignment(config, conn)
         edited = charter.SCRATCHPAD_SEED + "\nUSER: the budget is firm.\nUSER: no gas units.\n"
         _path(config, assignment).write_text(edited)
@@ -196,35 +200,20 @@ class TestEnd:
         store.consume_inbox(conn, assignment.id, wake.id)
         return assignment, wake, edited
 
-    def test_user_lines_the_wake_removed_are_put_back(self, config, conn):
-        assignment, wake, _edited = self._user_edited_wake(config, conn)
-        _path(config, assignment).write_text(
-            charter.SCRATCHPAD_SEED + "\nUSER: no gas units.\nWake's own note.\n",
-        )
+    def test_lines_from_an_outside_change_the_wake_removed_stay_removed(self, config, conn):
+        assignment, wake, _edited = self._changed_wake(config, conn)
+        written = charter.SCRATCHPAD_SEED + "\nUSER: no gas units.\nWake's own note.\n"
+        _path(config, assignment).write_text(written)
 
         result = scratchpad.end(config, conn, assignment, wake)
 
-        assert result.kept_lines == ["USER: the budget is firm."]
-        on_disk = _path(config, assignment).read_text()
-        assert on_disk.endswith(
-            "## From the user (kept by Istota, wake 1)\n\nUSER: the budget is firm.\n",
-        )
-        assert "Wake's own note." in on_disk
-        after = store.wake_snapshot(conn, wake.id, "after")
-        assert after.content == on_disk
-
-    def test_nothing_is_appended_when_the_user_lines_stand(self, config, conn):
-        assignment, wake, edited = self._user_edited_wake(config, conn)
-        _path(config, assignment).write_text(edited + "Wake's own note.\n")
-
-        result = scratchpad.end(config, conn, assignment, wake)
-
-        assert result.kept_lines == []
-        assert "From the user" not in _path(config, assignment).read_text()
+        assert result.text == written
+        assert _path(config, assignment).read_text() == written
+        assert store.wake_snapshot(conn, wake.id, "after").content == written
         assert _events(conn, assignment, "user_lines_kept") == []
 
     def test_a_file_the_wake_broke_goes_back_to_its_before_text(self, config, conn):
-        assignment, wake, edited = self._user_edited_wake(config, conn)
+        assignment, wake, edited = self._changed_wake(config, conn)
         _path(config, assignment).write_text("")
 
         result = scratchpad.end(config, conn, assignment, wake)
@@ -233,12 +222,12 @@ class TestEnd:
         assert _path(config, assignment).read_text() == edited
         assert store.wake_snapshot(conn, wake.id, "after").content == edited
 
-    def test_the_next_begin_sees_no_edit_after_end(self, config, conn):
-        assignment, wake, _edited = self._user_edited_wake(config, conn)
+    def test_the_next_begin_sees_no_change_after_end(self, config, conn):
+        assignment, wake, _edited = self._changed_wake(config, conn)
         _path(config, assignment).write_text(charter.SCRATCHPAD_SEED + "\nWake's own note.\n")
         scratchpad.end(config, conn, assignment, wake)
         store.update_wake(conn, wake.id, ended_at=db.iso_utc_now())
 
         result = scratchpad.begin(config, conn, assignment, _wake(conn, assignment))
 
-        assert result.user_edit_event_id is None
+        assert result.change_event_id is None

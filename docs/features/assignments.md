@@ -1,6 +1,6 @@
 # Assignments
 
-An assignment is a goal the bot keeps working on across days until it is met, abandoned or out of budget. It works in short runs called wakes, keeps notes in a scratchpad you can read and edit, hands steps to you, and stops on its own. In chat you can call it a quest, an errand or a mission; commands, files and notices always say assignment.
+An assignment is a goal the bot keeps working on across days until it is met, abandoned or out of budget. It works in short runs called wakes, keeps notes in a scratchpad you can read, hands steps to you, and stops on its own. In chat you can call it a quest, an errand or a mission; commands, files and notices always say assignment.
 
 A single task already has compaction, `!steer`, `!stop`, retries and a turn limit. An assignment adds what a single task cannot hold: state that lives outside any one context window, a lifetime of days with no worker held while it waits, a budget across all its runs, steps that belong to you rather than the bot, and progress judged by the host from evidence the model cannot write.
 
@@ -54,7 +54,7 @@ A wake ends by asking for the next one: in some hours, at a time, or not until y
 
 Each assignment has a folder at `<bot folder>/assignments/<slug>/` in your files. `CHARTER.md` there is generated from the record; editing it changes nothing. `SCRATCHPAD.md` holds the bot's notes, with sections for what it is doing now, what is done, its thinking, what it rejected, problems and findings.
 
-You can edit the scratchpad. The next wake sees your edit as a diff from you, and lines you added are kept: if a wake deletes one, it is put back under a heading saying so. A scratchpad that is missing, emptied or unreadable is restored from the last good copy. Every version is kept in the database, so a bad line can be traced to the wake that wrote it. The better way to steer is a note, which the next wake reads as your words.
+To steer an assignment, leave it a note (`assignment note`), which the next wake reads as your words. Editing the scratchpad does not steer it. Any of your tasks can write that file, including one started by an email, a scheduled job or a turn in a shared room, so the bot cannot tell your change from theirs. The next wake is shown a change made outside a wake as untrusted material with its source unknown, never as your instruction, and a wake is free to remove those lines. A scratchpad that is missing, emptied or unreadable is restored from the last good copy. Every version is kept in the database, so a bad line can be traced to the wake that wrote it.
 
 ## Progress, pauses and completion
 

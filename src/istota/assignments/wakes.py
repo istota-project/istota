@@ -73,8 +73,8 @@ WAIT_WAKERS: dict[str, tuple[str, ...]] = {
 }
 
 #: The inbox kinds that pull a sleeping assignment's wake forward: what the
-#: user did since the last wake. `budget_low` and `user_edit` are written by the
-#: host around a wake and are read by the next one whenever it comes.
+#: user did since the last wake. `budget_low` and `scratchpad_changed` are written
+#: by the host around a wake and are read by the next one whenever it comes.
 PULL_FORWARD_KINDS = (
     "user_note", "handoff_done", "charter_change", "item_confirmed", "completion_rejected",
 )
@@ -430,7 +430,8 @@ def reap_orphans(conn: sqlite3.Connection, config: "Config") -> list[int]:
 
 
 #: Consumed inbox kinds that count as the user's input (spec Design section 11).
-USER_INPUT_KINDS = ("user_note", "handoff_done", "charter_change", "user_edit")
+#: Not `scratchpad_changed`: any task of the user's can write the file.
+USER_INPUT_KINDS = ("user_note", "handoff_done", "charter_change")
 #: Wake outcomes that are not a run of the wake at all, or that the user
 #: stopped: neither counts toward a stall or the failure pause.
 _UNCOUNTED_OUTCOMES = ("not_active", "cancelled")

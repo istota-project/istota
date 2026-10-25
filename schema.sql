@@ -2915,7 +2915,7 @@ CREATE TABLE IF NOT EXISTS assignment_snapshots (
 CREATE TABLE IF NOT EXISTS assignment_inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL,                       -- user_note|handoff_done|charter_change|user_edit|item_confirmed|budget_low|completion_rejected
+    kind TEXT NOT NULL,                       -- user_note|handoff_done|charter_change|scratchpad_changed|item_confirmed|budget_low|completion_rejected
     trusted INTEGER NOT NULL DEFAULT 0,
     payload TEXT NOT NULL,                    -- JSON
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),

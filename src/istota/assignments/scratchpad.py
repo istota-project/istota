@@ -1,19 +1,20 @@
-"""The scratchpad: snapshots around each wake, the user's edits, and repair.
+"""The scratchpad: snapshots around each wake, outside changes, and repair.
 
 `SCRATCHPAD.md` sits in the assignment directory, where a wake edits it with
-ordinary file tools and the user can annotate it. The history lives in
-`assignment_snapshots`, not beside the file, because a wake can write anything
-in its own directory and the history is the audit trail for injection.
+ordinary file tools. The history lives in `assignment_snapshots`, not beside
+the file, because a wake can write anything in its own directory and the
+history is the audit trail for injection.
 
 - `begin`, at pickup: the file is compared with the last `after` snapshot (or
-  the seed, before the first wake). A difference is the user's, recorded as a
-  trusted `user_edit` inbox event carrying a unified diff. A file that is
-  missing, empty, not UTF-8, over 1 MiB or not a regular file is restored from
-  the last whole snapshot. Then the `before` snapshot is stored.
-- `end`, when the wake finishes: lines the user added in earlier edits that
-  stood in the `before` snapshot and are gone from the file are appended under
-  a heading of their own, and the `after` snapshot is stored. The host cannot
-  see who made a change during a wake, so the rule is about content.
+  the seed, before the first wake). A difference is recorded as an untrusted
+  `scratchpad_changed` inbox event carrying a unified diff: any task of the
+  user's (an email turn, a cron job, a shared-room turn) can write the file,
+  so the host cannot say who made it. The user steers with `assignment note`.
+  A file that is missing, empty, not UTF-8, over 1 MiB or not a regular file
+  is restored from the last whole snapshot. Then the `before` snapshot is
+  stored.
+- `end`, when the wake finishes: a file the wake broke goes back to its
+  `before` text, and the `after` snapshot is stored.
 
 Every file access goes through a descriptor on the assignment directory
 (`charter.open_assignment_dir`), with no link followed at the leaf. Nothing
@@ -24,7 +25,6 @@ from __future__ import annotations
 
 import difflib
 import hashlib
-import json
 import logging
 import os
 import sqlite3
@@ -45,7 +45,6 @@ FILE_MAX_BYTES = 1024 * 1024
 SNAPSHOT_MAX_BYTES = 512 * 1024
 DIFF_MAX_CHARS = 8000
 DIFF_CUT_MARKER = "\n[diff cut: longer than 8,000 characters]\n"
-KEPT_HEADING = "## From the user (kept by Istota, wake {seq})"
 
 #: Why a file was not usable as it stood.
 MISSING = "missing"
@@ -68,14 +67,13 @@ class BeginResult:
     """What the wake starts from: the text in its `before` snapshot."""
 
     text: str
-    user_edit_event_id: int | None
+    change_event_id: int | None
     restored: str | None
 
 
 @dataclass(frozen=True)
 class EndResult:
     text: str
-    kept_lines: list[str]
     restored: str | None
 
 
@@ -221,10 +219,10 @@ def added_lines(before: str, after: str) -> list[str]:
 def begin(
     config: "Config", conn: sqlite3.Connection, assignment: store.Assignment, wake: store.Wake,
 ) -> BeginResult:
-    """Detect the user's edit or repair a broken file, then store `before`."""
+    """Record an outside change or repair a broken file, then store `before`."""
     base = baseline(conn, assignment.id)
     state = read_file(config, assignment)
-    edit_id: int | None = None
+    change_id: int | None = None
     restored: str | None = None
 
     if state.problem == UNAVAILABLE:
@@ -238,7 +236,7 @@ def begin(
     elif state.problem is not None:
         if state.problem == EMPTY:
             store.insert_event(
-                conn, assignment.id, kind="user_edit", actor="user", wake_id=wake.id,
+                conn, assignment.id, kind="scratchpad_changed", actor="system", wake_id=wake.id,
                 payload={"emptied": True},
             )
         text = restore_text(conn, assignment.id)
@@ -256,18 +254,21 @@ def begin(
                 base.content, text,
                 before_label=f"SCRATCHPAD.md ({label})", after_label="SCRATCHPAD.md (now)",
             )
-            added = added_lines(base.content, text)
-            edit_id = store.insert_inbox_event(
-                conn, assignment.id, kind="user_edit", trusted=True,
-                payload={"diff": diff, "cut": cut, "added": added},
+            change_id = store.insert_inbox_event(
+                conn, assignment.id, kind="scratchpad_changed", trusted=False,
+                payload={"diff": diff, "cut": cut},
             )
             store.insert_event(
-                conn, assignment.id, kind="user_edit", actor="user", wake_id=wake.id,
-                payload={"inbox_id": edit_id, "lines_added": len(added), "sha256": sha256(text)},
+                conn, assignment.id, kind="scratchpad_changed", actor="system", wake_id=wake.id,
+                payload={
+                    "inbox_id": change_id,
+                    "lines_added": len(added_lines(base.content, text)),
+                    "sha256": sha256(text),
+                },
             )
 
     store_snapshot(conn, assignment.id, phase="before", text=text, wake_id=wake.id)
-    return BeginResult(text=text, user_edit_event_id=edit_id, restored=restored)
+    return BeginResult(text=text, change_event_id=change_id, restored=restored)
 
 
 def _seq_of(conn: sqlite3.Connection, snapshot: store.Snapshot) -> int | str:
@@ -275,31 +276,10 @@ def _seq_of(conn: sqlite3.Connection, snapshot: store.Snapshot) -> int | str:
     return wake.seq if wake is not None else "?"
 
 
-def user_lines(conn: sqlite3.Connection, assignment_id: int, *, up_to_wake: int) -> list[str]:
-    """Every line the user added in an edit some wake up to `up_to_wake` read."""
-    rows = conn.execute(
-        "SELECT payload FROM assignment_inbox WHERE assignment_id = ? AND kind = 'user_edit'"
-        " AND trusted = 1 AND consumed_by_wake IS NOT NULL AND consumed_by_wake <= ? ORDER BY id",
-        (assignment_id, up_to_wake),
-    ).fetchall()
-    lines: list[str] = []
-    seen: set[str] = set()
-    for row in rows:
-        try:
-            payload = json.loads(row[0])
-        except (TypeError, ValueError):
-            continue
-        for line in payload.get("added") or []:
-            if isinstance(line, str) and line not in seen:
-                seen.add(line)
-                lines.append(line)
-    return lines
-
-
 def end(
     config: "Config", conn: sqlite3.Connection, assignment: store.Assignment, wake: store.Wake,
 ) -> EndResult:
-    """Put back the user's lines the wake removed, then store `after`."""
+    """Repair a file the wake broke, then store `after`."""
     before = store.wake_snapshot(conn, wake.id, "before")
     before_text = before.content if before is not None else restore_text(conn, assignment.id)
     state = read_file(config, assignment)
@@ -312,7 +292,7 @@ def end(
             payload={"phase": "end"},
         )
         store_snapshot(conn, assignment.id, phase="after", text=text, wake_id=wake.id)
-        return EndResult(text=text, kept_lines=[], restored=None)
+        return EndResult(text=text, restored=None)
     if state.problem is not None:
         # The wake broke the file; it goes back to what the wake started from.
         text = before_text if before is not None and not before.truncated else restore_text(conn, assignment.id)
@@ -325,20 +305,5 @@ def end(
     else:
         text = state.text
 
-    standing = set(before_text.splitlines())
-    present = set(text.splitlines())
-    missing = [
-        line for line in user_lines(conn, assignment.id, up_to_wake=wake.id)
-        if line in standing and line not in present
-    ]
-    if missing:
-        block = KEPT_HEADING.format(seq=wake.seq) + "\n\n" + "\n".join(missing) + "\n"
-        text = text.rstrip("\n") + "\n\n" + block
-        written = write_file(config, assignment, text)
-        store.insert_event(
-            conn, assignment.id, kind="user_lines_kept", actor="system", wake_id=wake.id,
-            payload={"lines": len(missing), "written": written},
-        )
-
     store_snapshot(conn, assignment.id, phase="after", text=text, wake_id=wake.id)
-    return EndResult(text=text, kept_lines=missing, restored=restored)
+    return EndResult(text=text, restored=restored)
