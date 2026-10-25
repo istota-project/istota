@@ -6,6 +6,8 @@ calendar name.
 
 from __future__ import annotations
 
+import pytest
+
 from istota import db, doctor
 from istota.config import Config
 from istota.sharing import sources
@@ -113,3 +115,79 @@ def test_feed_delivery_needs_no_authserv_id(db_path):
 
 def test_no_istota_events_needs_no_authserv_id(db_path):
     assert doctor.check_sharing_ics_feeds(_mail_config(db_path), False).status == doctor.OK
+
+
+# --- sharing.ocm ---------------------------------------------------------------
+
+
+def _ocm_config(db_path, *, hostname="bot.example.com", enabled=True, nextcloud_url=""):
+    from istota.config import NextcloudConfig, SharingConfig, SharingOcmConfig, SiteConfig
+
+    return Config(
+        db_path=db_path, site=SiteConfig(hostname=hostname),
+        nextcloud=NextcloudConfig(url=nextcloud_url),
+        sharing=SharingConfig(ocm=SharingOcmConfig(enabled=enabled)),
+    )
+
+
+def test_ocm_registered_with_a_deployment_scope():
+    assert "sharing.ocm" in dict(doctor.CHECKS)
+    assert doctor.CHECK_SCOPES["sharing.ocm"] == doctor.DEPLOYMENT
+
+
+def test_ocm_off_skips(db_path):
+    assert doctor.check_sharing_ocm(_ocm_config(db_path, enabled=False), False).status == doctor.SKIP
+
+
+def test_ocm_on_a_public_name_is_ok_without_a_probe(db_path, monkeypatch):
+    def refuse(url):
+        raise AssertionError("probe=False opened a socket")
+
+    monkeypatch.setattr(doctor, "_fetch_ocm_discovery", refuse)
+    assert doctor.check_sharing_ocm(_ocm_config(db_path), False).status == doctor.OK
+
+
+@pytest.mark.parametrize("hostname", ["", "localhost:8181", "127.0.0.1", "[::1]:8080"])
+def test_ocm_needs_a_name_another_server_can_reach(db_path, hostname):
+    result = doctor.check_sharing_ocm(_ocm_config(db_path, hostname=hostname), False)
+    assert result.status == doctor.FAIL and result.remedy
+
+
+def test_ocm_on_the_nextcloud_host_fails(db_path):
+    config = _ocm_config(db_path, nextcloud_url="https://bot.example.com/nextcloud")
+    assert doctor.check_sharing_ocm(config, False).status == doctor.FAIL
+
+
+def test_ocm_probe_wants_istotas_own_document(db_path, monkeypatch):
+    from istota.sharing import ocm
+
+    config = _ocm_config(db_path)
+    asked = []
+
+    def ours(url):
+        asked.append(url)
+        return 200, ocm.discovery_document(config)
+
+    monkeypatch.setattr(doctor, "_fetch_ocm_discovery", ours)
+    assert doctor.check_sharing_ocm(config, True).status == doctor.OK
+    assert asked == ["https://bot.example.com/ocm-provider/"]
+
+
+@pytest.mark.parametrize("answer", [
+    (200, {"apiVersion": "1.0-proposal1", "endPoint": "https://bot.example.com/ocm"}),
+    (200, {"apiVersion": "1.1.0", "endPoint": "", "provider": "Istota"}),
+    (404, None),
+    (200, None),
+], ids=["a-nextcloud-answers", "empty-endpoint", "404", "not-json"])
+def test_ocm_probe_fails_on_any_other_answer(db_path, monkeypatch, answer):
+    monkeypatch.setattr(doctor, "_fetch_ocm_discovery", lambda url: answer)
+    assert doctor.check_sharing_ocm(_ocm_config(db_path), True).status == doctor.FAIL
+
+
+def test_ocm_probe_that_cannot_connect_fails(db_path, monkeypatch):
+    def unreachable(url):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(doctor, "_fetch_ocm_discovery", unreachable)
+    result = doctor.check_sharing_ocm(_ocm_config(db_path), True)
+    assert result.status == doctor.FAIL and result.remedy
