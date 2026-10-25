@@ -76,6 +76,16 @@ def _errors(**kwargs):
 _SCRIPT = re.compile(r"<script\b[^>]*>(.*?)</script\s*>", re.S | re.I)
 
 
+KIT_TEXT = (
+    f"<script>{KIT.guard_js}</script>"
+    f"<script>{KIT.client_js}</script>"
+    f"<script>{KIT.components_js}</script>"
+    f"<style>{KIT.css}</style>"
+)
+# What may precede the guard: nothing that opens an element.
+_OPENING_PREFIX = re.compile(r"(?:\s|<!--.*?-->)*(?:<!doctype[^>]*>)?", re.S | re.I)
+
+
 def _inline_scripts(html: str) -> list[str]:
     return _SCRIPT.findall(html)
 
@@ -94,31 +104,42 @@ class TestInlining:
         html = _build().html.decode()
         assert "<main id=\"board\">A &amp B &copy</main>" in html
         assert "<script>console.log(1 < 2);</script>" in html
-        assert html.startswith("<!doctype html>\n<html lang=\"en\">\n<head>")
+        assert html.startswith(f"<!doctype html>{KIT_TEXT}\n<html lang=\"en\">\n<head>")
 
     def test_the_type_is_kept(self):
         index = INDEX.replace('<script src="./js/app.js">', '<script type="module" src="js/app.js">')
         assert f'<script type="module">{APP_JS}</script>' in _build(index).html.decode()
 
-    def test_the_kit_opens_head_in_order(self):
+    def test_the_kit_follows_the_doctype_in_order(self):
         html = _build().html.decode()
-        start = html.index("<head>") + len("<head>")
-        expected = (
-            f"<script>{KIT.guard_js}</script>"
-            f"<script>{KIT.client_js}</script>"
-            f"<script>{KIT.components_js}</script>"
-            f"<style>{KIT.css}</style>"
-        )
-        assert html[start:start + len(expected)] == expected
+        start = len("<!doctype html>")
+        assert html[start:start + len(KIT_TEXT)] == KIT_TEXT
 
-    def test_a_head_is_created_when_absent(self):
+    def test_the_kit_opens_a_document_with_no_doctype(self):
+        index = "<html><body><p>x</p></body></html>\n"
+        assert _build(index).html.decode() == KIT_TEXT + index
+
+    def test_a_document_with_no_head_gets_none_added(self):
         index = "<!doctype html>\n<html><body><p>x</p></body></html>\n"
-        html = _build(index).html.decode()
-        assert html.startswith(f"<!doctype html>\n<html><head><script>{KIT.guard_js}</script>")
+        assert _build(index).html.decode() == "<!doctype html>" + KIT_TEXT + index[len("<!doctype html>"):]
 
-    def test_a_head_is_created_with_no_html_tag(self):
-        html = _build("<p>x</p>\n").html.decode()
-        assert html.startswith(f"<head><script>{KIT.guard_js}</script>")
+    def test_a_comment_before_the_doctype_keeps_the_doctype_first(self):
+        index = "<!-- built by hand -->\n<!DOCTYPE html>\n<p>x</p>\n"
+        html = _build(index).html.decode()
+        assert html.startswith("<!-- built by hand -->\n<!DOCTYPE html>" + KIT_TEXT)
+
+    @pytest.mark.parametrize("index", [
+        '<!doctype html><script src="js/app.js"></script><head></head><body></body>',
+        '<!doctype html><html><body><template><head></head></template>'
+        '<script src="js/app.js"></script></body></html>',
+        '<p>x</p><!doctype html><script src="js/app.js"></script>',
+        '<template><!doctype html></template><script src="js/app.js"></script>',
+    ])
+    def test_the_guard_runs_first_and_inside_no_element(self, index):
+        html = _build(index).html.decode()
+        first = _SCRIPT.search(html)
+        assert first.group(1) == KIT.guard_js
+        assert _OPENING_PREFIX.fullmatch(html[:first.start()]), html[:first.start()]
 
     def test_the_source_is_the_files_as_read(self):
         built = _build()

@@ -8,7 +8,8 @@ is emitted as the user wrote it. The edits are
   file's text, inline;
 - resource hints, ``<meta http-equiv>``, ``<base>``, every other ``<link>``
   and every frame, object and embed tag removed;
-- the house kit inserted at the start of ``<head>``.
+- the house kit inserted straight after the doctype, or at the very start
+  when there is none, so its guard is the first script the browser runs.
 
 The CSP then pins the hash of each inline script exactly as emitted, so a
 script runs only if it is text the user approved. A script containing
@@ -46,6 +47,8 @@ _NAMESPACE_HOSTS = frozenset({"www.w3.org"})
 _NATIVE_DIALOG = re.compile(r"(?:\bwindow\s*\.\s*|(?<![\w$.]))(alert|confirm|prompt)\s*\(")
 _WIDTH = re.compile(r"(?<![-\w])(?:min-)?width\s*:\s*(\d+(?:\.\d+)?)px")
 _CSS_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+# All a browser lets precede a doctype that still counts as one.
+_BEFORE_DOCTYPE = re.compile(r"(?:[ \t\n\f\r\ufeff]|<!--.*?-->)*", re.S)
 PHONE_WIDTH = 320
 # Inlined, or removed, so their URLs are checked differently or not at all.
 _NOT_URL_CHECKED = FRAME_TAGS | {"script", "link", "base", "meta"}
@@ -339,25 +342,29 @@ class _Build:
         if "//" in srcset:
             self.errors.append(f"{INDEX}: <{tag.name} srcset> points outside the app.")
 
-    def head_insertion(self, tags: list[_Tag]) -> None:
+    def kit_insertion(self, tags: list[_Tag], index: str) -> None:
+        """The kit at the document's first insertion point, before any element can open.
+
+        The browser puts a script there in an implied head, and a following
+        ``<html>`` or ``<head>`` from the source merges into what is already
+        open, so no source markup can run first or wrap the guard.
+        """
         kit = (
             f"<script>{self.kit.guard_js}</script>"
             f"<script>{self.kit.client_js}</script>"
             f"<script>{self.kit.components_js}</script>"
             f"<style>{self.kit.css}</style>"
         )
-        for wanted in ("head", "html"):
-            for tag in tags:
-                if tag.kind == "start" and tag.name == wanted:
-                    text = kit if wanted == "head" else f"<head>{kit}</head>"
-                    self.edits.append((tag.end, tag.end, text))
-                    return
         position = 0
-        for tag in tags:
-            if tag.kind == "decl":
-                position = tag.end
-                break
-        self.edits.append((position, position, f"<head>{kit}</head>"))
+        first = tags[0] if tags else None
+        if (
+            first is not None
+            and first.kind == "decl"
+            and first.name.lower().startswith("doctype")
+            and _BEFORE_DOCTYPE.fullmatch(index[:first.start])
+        ):
+            position = first.end
+        self.edits.append((position, position, kit))
 
     def index(self, index: str) -> str:
         tags = _scan(index)
@@ -397,7 +404,7 @@ class _Build:
                     removed_frames.add(tag.name)
                     self.warn(f"{INDEX}: <{tag.name}> was removed; an app cannot embed other content.")
 
-        self.head_insertion(tags)
+        self.kit_insertion(tags, index)
         return _apply(index, self.edits)
 
     def scan_text_warnings(self, index: str) -> None:
