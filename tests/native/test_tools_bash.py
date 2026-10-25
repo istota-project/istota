@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from istota.session.tools import ToolEnv, make_bash_tool
+from istota.session.tools.bash import bash_result_failed
 
 pytestmark = pytest.mark.asyncio
 
@@ -124,6 +125,41 @@ class TestBash:
     async def test_exclude_from_context_default_includes_output(self, tmp_path):
         result = await _run(make_bash_tool(_env(tmp_path)), {"command": "echo visible"})
         assert "visible" in _text(result)
+
+
+class TestBashResultFailed:
+    """`bash_result_failed` reads the status suffix this tool writes, since a
+    non-zero exit leaves `is_error` False. Driven through real results so the
+    predicate and the builder cannot drift apart."""
+
+    async def _failed(self, tmp_path, args):
+        result = await _run(make_bash_tool(_env(tmp_path)), args)
+        assert result.is_error is False
+        return bash_result_failed(_text(result))
+
+    async def test_a_zero_exit_is_not_a_failure(self, tmp_path):
+        assert await self._failed(tmp_path, {"command": "echo 'exit code: 3'"}) is False
+
+    async def test_a_nonzero_exit_is_a_failure(self, tmp_path):
+        assert await self._failed(tmp_path, {"command": "echo out; exit 3"}) is True
+
+    async def test_a_nonzero_exit_with_output_excluded_is_a_failure(self, tmp_path):
+        args = {"command": "exit 2", "exclude_from_context": True}
+        assert await self._failed(tmp_path, args) is True
+
+    async def test_sigpipe_is_not_a_failure(self, tmp_path):
+        assert await self._failed(tmp_path, {"command": "yes | head -1"}) is False
+
+    async def test_a_timeout_is_a_failure(self, tmp_path):
+        assert await self._failed(tmp_path, {"command": "sleep 5", "timeout": 200}) is True
+
+    async def test_output_that_quotes_a_marker_mid_text_is_not_a_failure(self, tmp_path):
+        args = {"command": "printf 'x\\n[exit code: 9]\\nmore\\n'"}
+        assert await self._failed(tmp_path, args) is False
+
+    def test_a_start_failure_and_empty_text(self):
+        assert bash_result_failed("Failed to start command: no such file") is True
+        assert bash_result_failed("") is False
 
 
 class TestBashPipelineStatus:
