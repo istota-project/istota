@@ -173,6 +173,8 @@ export interface User {
     money: boolean;
     health: boolean;
     briefings: boolean;
+    // Absent on a server that predates the experimental apps module.
+    apps?: boolean;
     workspace?: boolean;
     groups?: boolean;
     google_workspace: boolean;

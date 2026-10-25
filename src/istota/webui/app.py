@@ -2252,6 +2252,13 @@ def _user_has_briefings(username: str) -> bool:
     return _config.is_module_enabled(username, "briefings")
 
 
+def _user_has_apps(username: str) -> bool:
+    """True if the experimental apps module is on for the user (flag, then opt-out)."""
+    if not _config:
+        return False
+    return _config.is_module_enabled(username, "apps")
+
+
 def _has_google_token(username: str) -> bool:
     """Check if a user has connected their Google account."""
     if not _config:
@@ -2422,6 +2429,7 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         "money": False,
         "health": False,
         "briefings": False,
+        "apps": False,
         "google_workspace": False,
         "google_workspace_enabled": False,
         "workspace": False,
@@ -2434,6 +2442,7 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         features["money"] = _user_has_money(username)
         features["health"] = _user_has_health(username)
         features["briefings"] = _user_has_briefings(username)
+        features["apps"] = _user_has_apps(username)
         features["google_workspace_enabled"] = _config.google_workspace.enabled
         features["workspace"] = _config.has_workspace
         if not is_admin:

@@ -94,7 +94,7 @@ src/istota/
 ├── tasks_file_poller.py  # TASKS.md monitoring
 ├── heartbeat.py          # Health-check system
 ├── cron_loader.py        # CRON.md → DB sync
-├── modules.py            # MODULE_NAMES (feeds, money, location, health, briefings) + EXPERIMENTAL_MODULES (empty)
+├── modules.py            # MODULE_NAMES (feeds, money, location, health, briefings, apps) + EXPERIMENTAL_MODULES (apps → module_apps)
 ├── experimental.py       # Operator feature-flag gate (`@requires_feature`, env helpers)
 ├── user_profiles.py      # Per-user profile store
 ├── user_briefings.py     # Per-user briefings store

@@ -920,6 +920,23 @@ class TestApiMe:
         data = resp.json()
         assert data["features"]["feeds"] is False
 
+    @pytest.mark.parametrize("flag,user,expected", [
+        (False, "alice", False),
+        (True, "alice", True),
+        (True, "bob", False),
+    ])
+    async def test_apps_feature_follows_the_flag(self, client, config, flag, user, expected):
+        import istota.webui.app as mod
+
+        if flag:
+            config.experimental.features = ["module_apps"]
+        config.users["bob"].disabled_modules = ["apps"]
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": user})
+        login = await client.get("/istota/callback", follow_redirects=False)
+        resp = await client.get("/istota/api/me", cookies=login.cookies)
+        assert resp.status_code == 200
+        assert resp.json()["features"]["apps"] is expected
+
     @pytest.mark.parametrize("mode,expected", [("local", True), ("none", False), ("nextcloud", True), ("drive", True), ("gmail", False)])
     async def test_workspace_feature(self, client, config, mode, expected):
         from istota import db

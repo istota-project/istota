@@ -24,7 +24,7 @@ import pytest
 from istota import module_loader
 from istota.config import Config, UserConfig
 
-MODULES = ["briefings", "feeds", "health", "location", "money"]
+MODULES = ["apps", "briefings", "feeds", "health", "location", "money"]
 
 
 def _loader(module: str):
@@ -34,12 +34,16 @@ def _loader(module: str):
 def _config(tmp_path: Path, *, users: dict[str, UserConfig], mount=True) -> Config:
     root = tmp_path / "mount"
     root.mkdir(exist_ok=True)
-    return Config(
+    cfg = Config(
         workspace_path=root if mount else None,
         users=users,
         bot_name="Istota",
         db_path=tmp_path / "no.db",  # not exercised — keeps best-effort paths quiet
     )
+    # Apps is experimental: on only behind its flag, so the shared refusals are
+    # asserted with the flag on, as for any other module.
+    cfg.experimental.features = ["module_apps"]
+    return cfg
 
 
 class TestEachModuleKeepsItsOwnError:
