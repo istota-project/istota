@@ -64,6 +64,36 @@ An app cannot reach the network: its document has no subresources, and the brows
 
 An app runs only while its page is open. There are no background jobs, no scheduled apps, and no offline apps: without the server the frame does not load. In the iOS app an app gets the phone layout, and no native capability reaches it.
 
+## Starter apps
+
+Some apps ship with Istota and are installed for every user who has Apps enabled, the first time they open the Apps section. They run under the same sandbox and permissions as any other app. A starter app that asks for more than its own storage asks on first open, marked "Shipped with Istota". If you uninstall one, it is not installed again and a new release does not bring it back; **Reinstall** on its card in "All apps" does. When a release changes a starter app, it is installed as the next version, and any capability the new version adds is asked for on next open.
+
+### Board
+
+Cards in columns, kept next to your conversations. Ask Istota in chat to "put the three apartment options on the board with rent and commute", and it writes the cards; you drag them between columns, strike them out, colour them and add notes; later, "which one did I end up favouring, and why?" has Istota read the board back.
+
+A card opens for editing when you tap or click it, and its **⋯** menu moves it up or down, to the top or bottom, or to another column, strikes it out, or deletes it. With a mouse you can drag a card from anywhere on it. On a touch screen, press and hold the grip at the card's left edge, then drag; a swipe anywhere else scrolls. On a phone the columns become one list with a column picker above it: a drag reorders the list, and the **⋯** menu moves a card to another column. A column's **⋯** menu renames it, moves it left or right, or deletes it once it is empty.
+
+Board needs only its own storage (`kv:own`), so it opens without asking anything.
+
+#### The `app.board` data layout
+
+Board keeps everything in the key-value namespace `app.board`, and Istota writes the same keys through the `kv` skill:
+
+| Key | Value |
+| --- | --- |
+| `columns` | `[{"id": "...", "title": "..."}]`, in display order |
+| `card:<id>` | `{"id", "column", "order", "title", "body", "struck", "color", "updated_at"}` |
+
+- `id` in a card is the part of the key after `card:`; the key wins if the two differ.
+- `column` is a column's `id`. A card whose column does not exist, or that has none, is shown in an "Unsorted" column until it is moved.
+- `order` is a number; cards sort by it within a column, lowest first. A card with no `order` sorts after the ordered ones, oldest `updated_at` first. Moving a card gives it an order between its new neighbours, so one move usually rewrites one key.
+- `title` and `body` are plain text. `struck` is `true` or `false`. `color` is one of `sky`, `coral`, `teal`, `plum` or `citron`, or `null`.
+- `updated_at` is an ISO 8601 time, set by Board on every change.
+- Only `title` is needed to add a card; Board fills in the rest when it next writes that card, and keeps any other fields a card carries.
+
+When Istota reads these values back, they are fenced as untrusted, since the text in them may have been written by the app's code rather than typed by you.
+
 ## The house kit
 
 Every installed app gets Istota's tokens, a small client library and a set of components (list, table, form, button, dialog, chart). The kit applies your theme and text size before the first paint, keeps forms usable with the on-screen keyboard, and follows the same touch-target, type-size and layout rules as the rest of the interface. An app that does not use the kit still gets its sandbox and its permissions; the kit is what makes it look and feel like the rest of Istota.

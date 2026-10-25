@@ -596,10 +596,14 @@ class TestTheMutatingRoutesCheckTheOrigin:
 
 
 class TestList:
-    def test_an_empty_install(self, config, client):
+    def test_an_empty_install_whose_build_has_no_starter_apps(self, config, client):
         resp = client.get(f"{PREFIX}/")
         assert resp.status_code == 200
-        assert resp.json() == {"apps": [], "pending": [], "drafts": [], "starter": [], "kit_built": True}
+        assert resp.json() == {
+            "apps": [], "pending": [], "drafts": [],
+            "starter": [{"app_id": app_id, "state": "unavailable"} for app_id in install.STARTER_APPS],
+            "kit_built": True,
+        }
 
     def test_with_the_module_off_it_is_404(self, config, client):
         config.users[USER].disabled_modules = ["apps"]

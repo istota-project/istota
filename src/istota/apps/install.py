@@ -45,8 +45,8 @@ from istota.sandbox.confined import open_dir
 logger = logging.getLogger(__name__)
 
 #: The starter apps every user with Apps enabled is given, by id. Each is a
-#: folder under ``starter/`` in the apps build. Empty until Board lands.
-STARTER_APPS: tuple[str, ...] = ()
+#: folder under ``starter/`` in the apps build, from ``web/src/apps/starter/``.
+STARTER_APPS: tuple[str, ...] = ("board",)
 
 ORIGINS = ("draft", "starter")
 MANIFEST = "manifest.toml"

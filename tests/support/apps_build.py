@@ -8,7 +8,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
+
+#: The starter apps' sources in the checkout, which the apps build copies.
+STARTER_SOURCE = Path(__file__).resolve().parents[2] / "web" / "src" / "apps" / "starter"
+
+# The same rule as `shipped()` in web/src/apps/build.ts, which is authoritative:
+# a starter folder's tests are not copied into the build.
+_TEST_FILE = re.compile(r"\.test\.[cm]?[jt]s$")
 
 KIT_FILES = {
     "kit/guard.js": "(() => { delete window.RTCPeerConnection; })();\n",
@@ -30,3 +38,15 @@ def write_build(directory: Path, starter: dict[str, dict[str, str]] | None = Non
         path.write_text(text, encoding="utf-8")
     manifest = {relative: hashlib.sha256(text.encode()).hexdigest() for relative, text in files.items()}
     (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def shipped_starter(app_id: str) -> dict[str, str]:
+    """The files the apps build ships for starter app ``app_id``, by path relative to its folder."""
+    folder = STARTER_SOURCE / app_id
+    files = {}
+    for path in sorted(folder.rglob("*")):
+        if path.is_file() and not _TEST_FILE.search(path.name):
+            files[path.relative_to(folder).as_posix()] = path.read_text(encoding="utf-8")
+    if not files:
+        raise FileNotFoundError(folder)
+    return files

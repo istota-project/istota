@@ -344,9 +344,9 @@ class TestStarterApps:
         kit.reset_cache()
         return apps_dir
 
-    def test_the_shipped_starter_set_is_empty_until_stage_12(self, config, conn):
-        assert install.STARTER_APPS == ()
-        assert install.ensure_starter_apps(config, USER, conn) == {}
+    def test_a_build_without_the_starter_apps_seeds_nothing(self, config, conn):
+        statuses = install.ensure_starter_apps(config, USER, conn)
+        assert statuses == {app_id: "unavailable" for app_id in install.STARTER_APPS}
         assert apps_db.list_apps(conn) == []
 
     def test_seeds_version_one_with_only_the_always_granted(self, config, conn, starters):
