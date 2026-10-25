@@ -1327,6 +1327,7 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     _migrate_location_ingest_tokens(conn)
     _migrate_quick_note_keys(conn)
     _migrate_shared_sources(conn)
+    _migrate_shared_feed_cache(conn)
     _migrate_device_tokens(conn)
     _migrate_mobile_auth_requests(conn)
     _migrate_notifications_push_pending(conn)
@@ -9688,6 +9689,19 @@ def _migrate_shared_sources(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_shared_sources_due"
         " ON shared_sources(kind, state, next_poll_at)"
     )
+
+
+def _migrate_shared_feed_cache(conn: sqlite3.Connection) -> None:
+    """Create the ICS feed cache table. Pure DDL, kept in step with `schema.sql`."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS shared_feed_cache (
+            source_id INTEGER PRIMARY KEY,
+            body BLOB NOT NULL,
+            etag TEXT,
+            last_modified TEXT,
+            fetched_at TEXT NOT NULL
+        )
+    """)
 
 
 def _migrate_device_tokens(conn: sqlite3.Connection) -> None:

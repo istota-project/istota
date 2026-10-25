@@ -1,7 +1,13 @@
-"""Calendar operations via CalDAV.
+"""Calendar operations: CalDAV calendars, and the ICS feeds a user shared with Istota.
+
+A CalDAV calendar is named by its URL and read over the bot account's
+credential. A feed is named ``feed:<id>``, is read-only, and is read from the
+cache the scheduler keeps (`sharing.ics`), never the network: the skill reads
+the framework database host-side, and every text field from a feed is fenced.
 
 Also provides a CLI for calendar operations from Claude Code:
-    python -m istota.skills.calendar list [--calendar URL] [--date today|tomorrow|DATE | --week] [--tz TZ]
+    python -m istota.skills.calendar list [--calendar URL|feed:ID] [--date today|tomorrow|DATE | --week] [--tz TZ]
+    python -m istota.skills.calendar calendars
     python -m istota.skills.calendar create --calendar URL --summary TEXT --start DATETIME [--end DATETIME]
     python -m istota.skills.calendar update --calendar URL --uid UID [--summary TEXT] [--start DT] [--end DT] [--all-day] ...
     python -m istota.skills.calendar delete --calendar URL --uid UID
@@ -603,10 +609,159 @@ def _get_date_range(args) -> tuple[datetime, datetime, str]:
     return start, end, args.date
 
 
+FEED_PREFIX = "feed:"
+FEED_LABEL = "calendar feed"
+
+
+def is_feed_calendar(calendar: str | None) -> bool:
+    """Whether ``--calendar`` names a feed rather than a CalDAV URL; no URL starts so."""
+    return bool(calendar) and calendar.strip().lower().startswith(FEED_PREFIX)
+
+
+@dataclass
+class SharedFeed:
+    calendar: str
+    host: str
+    name: str | None
+    state: str
+    last_reason: str | None
+    fetched_at: str | None
+    body: bytes | None
+
+
+def _caldav_configured() -> bool:
+    return all(os.environ.get(var) for var in ("CALDAV_URL", "CALDAV_USERNAME", "CALDAV_PASSWORD"))
+
+
+def _withheld_from_env() -> set[str]:
+    from istota.sandbox.host_paths import WITHHELD_SCOPES_VAR
+
+    raw = os.environ.get(WITHHELD_SCOPES_VAR, "")
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def shared_feeds(user_id: str) -> list[SharedFeed]:
+    """The feeds the calling task may read, with their cached bodies.
+
+    Through `sharing.sources.sources_for_task`, on the task's own row, so a
+    guest's turn and a task nobody asked in a shared room read none. No task
+    (an operator's shell) or a row for another user reads none either.
+    """
+    try:
+        task_id = int(os.environ.get("ISTOTA_TASK_ID", "") or 0)
+    except ValueError:
+        task_id = 0
+    if task_id <= 0 or "calendar" in _withheld_from_env():
+        return []
+
+    from pathlib import Path
+
+    from istota import db
+    from istota.config import load_config
+    from istota.sharing import ics, sources
+    from istota.skills._loader import load_skill_index
+
+    config = load_config()
+    db_path = Path(os.environ.get("ISTOTA_DB_PATH") or config.db_path)
+    if not db_path.exists():
+        return []
+    skill_index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+    with db.get_db(db_path) as conn:
+        task = db.get_task(conn, task_id)
+        if task is None or task.user_id != user_id:
+            return []
+        found = sources.sources_for_task(conn, task, kind="ics_feed", skill_index=skill_index)
+        return [
+            SharedFeed(
+                calendar=f"{FEED_PREFIX}{source.id}", host=source.remote_host,
+                name=source.extras.get("name"), state=source.state,
+                last_reason=source.last_reason,
+                fetched_at=ics.cache_times(conn, source.id),
+                body=ics.read_cached(conn, source.id),
+            )
+            for source in found
+        ]
+
+
+def _feed_event_dict(event, calendar: str) -> dict:
+    """A feed occurrence in `_event_to_dict`'s shape, its provider's text fenced."""
+    from istota.lib.untrusted import frame_untrusted
+
+    return {
+        "calendar": calendar,
+        "uid": event.uid,
+        "summary": frame_untrusted(event.summary, FEED_LABEL),
+        "start": event.start.isoformat(),
+        "end": event.end.isoformat(),
+        "location": frame_untrusted(event.location, FEED_LABEL) or None,
+        "description": frame_untrusted(event.description, FEED_LABEL) or None,
+        "all_day": event.all_day,
+        "timezone": event.timezone or "floating",
+        "read_only": True,
+    }
+
+
+def _feed_events(feeds: list[SharedFeed], start: datetime, end: datetime) -> tuple[list[dict], dict]:
+    """Every feed's occurrences in the window, against one shared cap."""
+    from istota.sharing import ics
+
+    events: list[dict] = []
+    notes: dict = {}
+    budget = ics.MAX_OCCURRENCES
+    truncated = []
+    for feed in feeds:
+        if feed.state == "error" or feed.body is None:
+            notes.setdefault("feed_errors", []).append({
+                "calendar": feed.calendar, "host": feed.host,
+                "reason": feed.last_reason or "not_fetched", "cached_at": feed.fetched_at,
+            })
+        if feed.body is None:
+            continue
+        found, cut = ics.expand(feed.body, start, end, limit=max(budget, 0))
+        budget -= len(found)
+        if cut:
+            truncated.append(feed.calendar)
+        events.extend(_feed_event_dict(event, feed.calendar) for event in found)
+    if truncated:
+        notes["truncated"] = True
+        notes["truncated_calendars"] = truncated
+        notes["occurrence_limit"] = ics.MAX_OCCURRENCES
+    return events, notes
+
+
+def _refuse_feed_write(calendar: str) -> dict | None:
+    if is_feed_calendar(calendar):
+        return {
+            "status": "error", "reason": "read_only_calendar",
+            "error": f"{calendar} is a calendar shared with Istota by its feed address; it is read-only",
+        }
+    return None
+
+
 def cmd_list(args) -> dict:
     """List calendar events."""
     start, end, label = _get_date_range(args)
     user_id = task_user_id()
+
+    if args.calendar and is_feed_calendar(args.calendar):
+        wanted = args.calendar.strip().lower()
+        feeds = [feed for feed in shared_feeds(user_id) if feed.calendar == wanted]
+        if not feeds:
+            raise CalendarNotFound(f"Calendar not found: {args.calendar}")
+        events, notes = _feed_events(feeds, start, end)
+        events.sort(key=lambda e: e["start"])
+        return {
+            "status": "ok", "calendar": wanted, "date": label,
+            "event_count": len(events), "events": events, **notes,
+        }
+
+    feeds = [] if args.calendar else shared_feeds(user_id)
+    if feeds and not _caldav_configured():
+        # A user with feeds and no CalDAV: the bot account's credential is
+        # not in this task, and nothing here asks for it.
+        events, notes = _feed_events(feeds, start, end)
+        events.sort(key=lambda e: e["start"])
+        return {"status": "ok", "date": label, "event_count": len(events), "events": events, **notes}
 
     # ISSUE-101: DAVClient owns urllib3 pools whose watchdog threads
     # leak unless close() is called.
@@ -624,12 +779,15 @@ def cmd_list(args) -> dict:
                 except Exception:
                     continue  # Skip calendars we can't read
 
+            feed_events, notes = _feed_events(feeds, start, end)
+            all_events.extend(feed_events)
             all_events.sort(key=lambda e: e["start"])
             return {
                 "status": "ok",
                 "date": label,
                 "event_count": len(all_events),
                 "events": all_events,
+                **notes,
             }
 
         calendar_url = resolve_owned_calendar(client, user_id, args.calendar)
@@ -644,8 +802,34 @@ def cmd_list(args) -> dict:
         }
 
 
+def cmd_calendars(args) -> dict:
+    """The calendars this task can read: CalDAV ones, then feeds."""
+    from istota.lib.untrusted import frame_untrusted
+
+    user_id = task_user_id()
+    calendars: list[dict] = []
+    if _caldav_configured():
+        # ISSUE-101: close DAVClient to drop the urllib3 watchdog thread.
+        with _get_client_from_env() as client:
+            for name, url, writable in get_calendars_for_user(client, user_id):
+                calendars.append({
+                    "calendar": url, "kind": "caldav", "name": name, "writable": writable,
+                })
+    for feed in shared_feeds(user_id):
+        calendars.append({
+            "calendar": feed.calendar, "kind": "feed", "host": feed.host,
+            "name": frame_untrusted(feed.name, FEED_LABEL) or None,
+            "writable": False, "state": feed.state, "last_reason": feed.last_reason,
+            "cached_at": feed.fetched_at,
+        })
+    return {"status": "ok", "calendar_count": len(calendars), "calendars": calendars}
+
+
 def cmd_create(args) -> dict:
     """Create a calendar event."""
+    refusal = _refuse_feed_write(args.calendar)
+    if refusal:
+        return refusal
     if args.all_day:
         start = _parse_all_day_date(args.start)
         inclusive_end = _parse_all_day_date(args.end) if args.end else start
@@ -688,6 +872,9 @@ def cmd_create(args) -> dict:
 
 def cmd_delete(args) -> dict:
     """Delete a calendar event."""
+    refusal = _refuse_feed_write(args.calendar)
+    if refusal:
+        return refusal
     user_id = task_user_id()
     # ISSUE-101: close DAVClient to drop the urllib3 watchdog thread.
     with _get_client_from_env() as client:
@@ -702,6 +889,9 @@ def cmd_delete(args) -> dict:
 
 def cmd_update(args) -> dict:
     """Update a calendar event."""
+    refusal = _refuse_feed_write(args.calendar)
+    if refusal:
+        return refusal
     kwargs: dict = {}
     if args.summary is not None:
         kwargs["summary"] = args.summary
@@ -761,7 +951,10 @@ def build_parser():
 
     # list
     p_list = sub.add_parser("list", aliases=["agenda"], help="List calendar events")
-    p_list.add_argument("--calendar", "-c", help="Calendar URL (omit to query all)")
+    p_list.add_argument(
+        "--calendar", "-c",
+        help="Calendar URL or feed:ID, as `calendars` lists them (omit to query all)",
+    )
     date_group = p_list.add_mutually_exclusive_group()
     date_group.add_argument(
         "--date", "-d", default="today",
@@ -772,6 +965,8 @@ def build_parser():
         help="Show events for the next 7 days"
     )
     p_list.add_argument("--tz", help="Timezone (e.g., America/Los_Angeles)")
+
+    sub.add_parser("calendars", help="List the calendars this task can read")
 
     # create
     p_create = sub.add_parser("create", help="Create a calendar event")
@@ -819,6 +1014,7 @@ def main(argv=None):
     commands = {
         "list": cmd_list,
         "agenda": cmd_list,  # alias — natural name an LLM reaches for
+        "calendars": cmd_calendars,
         "create": cmd_create,
         "delete": cmd_delete,
         "update": cmd_update,

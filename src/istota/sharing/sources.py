@@ -253,11 +253,96 @@ def sources_for_task(
     return sources_for_user(conn, task.user_id, kinds=(kind,))
 
 
+def due_sources(conn: sqlite3.Connection, kind: str, now: str, *, limit: int = 200) -> list[SharedSource]:
+    """Every user's reachable sources of ``kind`` whose ``next_poll_at`` has come.
+
+    The one cross-user read here, for the scheduler's poll; ``now`` is the
+    ISO 8601 UTC string the poll times are written in.
+    """
+    states = ", ".join("?" for _ in REACHABLE_STATES)
+    rows = conn.execute(
+        f"SELECT {_COLUMNS} FROM shared_sources WHERE kind = ? AND state IN ({states})"
+        " AND (next_poll_at IS NULL OR next_poll_at <= ?) ORDER BY next_poll_at, id LIMIT ?",
+        (_check_kind(kind), *REACHABLE_STATES, now, int(limit)),
+    ).fetchall()
+    return [_from_row(row) for row in rows]
+
+
+def set_poll_times(
+    conn: sqlite3.Connection,
+    source_id: int,
+    user_id: str,
+    *,
+    next_poll_at: str,
+    last_ok_at: str | None = None,
+) -> bool:
+    """Record when the source is next due, and when it last answered when it did."""
+    if last_ok_at is None:
+        cur = conn.execute(
+            "UPDATE shared_sources SET next_poll_at = ? WHERE id = ? AND user_id = ?",
+            (next_poll_at, source_id, user_id),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE shared_sources SET next_poll_at = ?, last_ok_at = ? WHERE id = ? AND user_id = ?",
+            (next_poll_at, last_ok_at, source_id, user_id),
+        )
+    return cur.rowcount > 0
+
+
+def set_details(
+    conn: sqlite3.Connection,
+    source_id: int,
+    user_id: str,
+    *,
+    remote_host: str | None = None,
+    extras: Mapping | None = None,
+) -> bool:
+    """Replace the display fields of the user's source; never a secret."""
+    current = get_source(conn, source_id, user_id)
+    if current is None:
+        return False
+    host = current.remote_host if remote_host is None else remote_host
+    if not isinstance(host, str) or not _HOST_RE.fullmatch(host):
+        raise ValueError("remote_host must be a host and optional port")
+    encoded = json.dumps(dict(current.extras if extras is None else extras), sort_keys=True)
+    if len(encoded.encode()) > _MAX_EXTRAS_BYTES:
+        raise ValueError("extras are too large")
+    conn.execute(
+        "UPDATE shared_sources SET remote_host = ?, extras = ?, updated_at = datetime('now')"
+        " WHERE id = ? AND user_id = ?",
+        (host, encoded, source_id, user_id),
+    )
+    return True
+
+
+def discover_shared_calendars(
+    conn: sqlite3.Connection,
+    task,
+    *,
+    skill_index: Mapping[str, object],
+) -> list[tuple[str, str]]:
+    """``(calendar_id, host)`` for each feed the task may read, for the prompt line.
+
+    Ids and hosts only: a calendar's name is the provider's text and is read
+    through the calendar skill, fenced. Kept apart from the executor's CalDAV
+    discovery, whose result decides whether the bot account's CalDAV
+    credential reaches the task (ISSUE-673).
+    """
+    return [
+        (f"feed:{source.id}", source.remote_host)
+        for source in sources_for_task(conn, task, kind="ics_feed", skill_index=skill_index)
+    ]
+
+
 def _remove_secrets(conn: sqlite3.Connection, source: SharedSource) -> None:
     for key in secret_keys(source.id):
         secrets_store.delete_secret(None, source.user_id, SECRET_SERVICE, key, connection=conn)
     if source.kind == "ocm_share":
         local_credentials.delete_in(conn, source.user_id, credential_name(source.id))
+    # A feed's cached body is the provider's content behind the secret, so it
+    # goes with the secret rather than outliving it.
+    conn.execute("DELETE FROM shared_feed_cache WHERE source_id = ?", (source.id,))
 
 
 def set_state(

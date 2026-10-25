@@ -10138,6 +10138,16 @@ def build_interval_gates(
     def _email_poll(now: float) -> None:
         _run_email_poll(config)
 
+    def _ics_poll(now: float) -> None:
+        from .sharing.ics import poll_due_feeds
+
+        report = poll_due_feeds(config)
+        if report.polled:
+            logger.info(
+                "ICS feeds polled=%d changed=%d unchanged=%d failed=%d",
+                report.polled, report.changed, report.unchanged, report.failed,
+            )
+
     def _shared_files(now: float) -> None:
         from .shared_file_organizer import discover_and_organize_shared_files
         organized = discover_and_organize_shared_files(config)
@@ -10412,6 +10422,18 @@ def build_interval_gates(
             one_shot=True,
             # `_run_email_poll` guards itself.
             one_shot_on_error=None,
+        ),
+        # ICS feeds users shared with Istota (`sharing.ics`). Network I/O to
+        # hosts users chose, so off the dispatch thread. Each feed carries its
+        # own `next_poll_at` (`[sharing] ics_poll_interval`, backed off on
+        # failure), so the gate only looks for due ones, once a minute; one
+        # indexed read when none is due. `poll_due_feeds` never raises.
+        IntervalGate(
+            name="sharing-ics-poll",
+            run=_ics_poll,
+            fixed_interval=60,
+            background=True,
+            overlap_expected=True,
         ),
         # Before the TASKS.md poll below, so the files are in place when it
         # walks them. Mount only: on a local workspace nothing a user shares

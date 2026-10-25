@@ -70,6 +70,10 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     ("sleep-cycles", "briefing_check_interval"),
     ("travel-timezone", None),
     ("email-poll", "email_poll_interval"),
+    # Added after the baseline extraction: ICS feeds (open-protocol sharing).
+    # Each feed carries its own next poll time from `[sharing]`, so the gate
+    # is a fixed one-minute look for due feeds.
+    ("sharing-ics-poll", None),
     ("shared-files", "shared_file_check_interval"),
     ("tasks-file-poll", "tasks_file_poll_interval"),
     ("cleanup", "briefing_check_interval"),
@@ -127,6 +131,7 @@ EXPECTED_BACKGROUND = {
     "sleep-cycles",
     "travel-timezone",
     "email-poll",
+    "sharing-ics-poll",
     "db-health",
     "doctor",
     "browser-instances",
@@ -146,6 +151,7 @@ EXPECTED_OVERLAP_EXPECTED = {
     "sleep-cycles",
     "travel-timezone",
     "email-poll",
+    "sharing-ics-poll",
     "heartbeats",
 }
 

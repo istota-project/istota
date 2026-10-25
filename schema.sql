@@ -2848,3 +2848,15 @@ CREATE TABLE IF NOT EXISTS shared_sources (
     UNIQUE (user_id, kind, remote_key)
 );
 CREATE INDEX IF NOT EXISTS idx_shared_sources_due ON shared_sources(kind, state, next_poll_at);
+
+-- The last good body of each ICS feed (istota.sharing.ics), filled by the
+-- scheduler's `sharing-ics-poll` gate and read by the calendar skill, so a task
+-- never makes the daemon fetch. Deleted with its source's secret when the
+-- source is declined, revoked or its user removed.
+CREATE TABLE IF NOT EXISTS shared_feed_cache (
+    source_id INTEGER PRIMARY KEY,
+    body BLOB NOT NULL,
+    etag TEXT,
+    last_modified TEXT,
+    fetched_at TEXT NOT NULL
+);
