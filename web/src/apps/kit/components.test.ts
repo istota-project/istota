@@ -98,6 +98,18 @@ describe('istota-button', () => {
     expect(element.querySelectorAll('button')).toHaveLength(1);
   });
 
+  // The kit is defined in the head, so a button in the body connects before
+  // the parser has added its label.
+  it('takes a label added after it connected, as the parser adds it', async () => {
+    const element = document.createElement('istota-button');
+    document.body.append(element);
+    element.append('Add guess');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const button = element.querySelector('button')!;
+    expect(button.textContent).toBe('Add guess');
+    expect([...element.childNodes]).toEqual([button]);
+  });
+
   it('falls back to secondary for an unknown variant', () => {
     const host = mount('<istota-button variant="loud">x</istota-button>');
     expect(host.querySelector('button')!.className).toBe('istota-btn istota-btn--secondary');

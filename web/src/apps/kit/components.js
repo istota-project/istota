@@ -56,11 +56,23 @@
     connectedCallback() {
       if (!this.button) {
         const button = document.createElement('button');
-        button.append(...this.childNodes);
         this.append(button);
         this.button = button;
+        this.adopt();
+        // The kit is defined in the head, so a button written in the body
+        // connects before the parser has added its label; whatever arrives
+        // beside the button goes into it.
+        new MutationObserver(() => this.adopt()).observe(this, { childList: true });
       }
       this.sync();
+    }
+
+    adopt() {
+      const button = this.button;
+      if (!button) return;
+      for (const node of [...this.childNodes]) {
+        if (node !== button) button.append(node);
+      }
     }
 
     attributeChangedCallback() {
