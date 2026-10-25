@@ -10,11 +10,12 @@ env: [{"var":"CALDAV_URL","from":"config","config_path":"caldav_url","when":"cal
 ---
 # Calendar Operations
 
-A task can reach three kinds of calendar:
+A task can reach four kinds of calendar:
 
 - **CalDAV calendars** the user shared with the bot's account, named by their URL. They can be read and, when shared with edit rights, written. Credentials for them are in the environment (`CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD`) only when the user owns at least one.
 - **Feeds** the user subscribed Istota to in Settings > Connections by a calendar's secret address (Google, iCloud, Fastmail or any other provider's ICS link), named `feed:<id>`. They are **read-only**: `create`, `update` and `delete` refuse them with `read_only_calendar`. Istota refreshes them every few minutes, so a change made in the user's calendar app can take that long to show. A feed cannot be added from a task; if the user wants one, tell them to add it in Settings > Connections.
-- **Istota's own calendar**, named `istota`: single events {BOT_NAME} organizes for the user. It works with no CalDAV at all. The user sees these events through the Istota calendar feed they subscribe to once in their calendar app (Settings > Connections has the link). Use it to put something on the user's calendar when they have no writable CalDAV calendar, or when they ask for it.
+- **Istota's own calendar**, named `istota`: single events {BOT_NAME} organizes for the user. It works with no CalDAV at all. Depending on the user's choice in Settings > Connections, each event reaches them as an invitation mailed to their own address (which they accept in their calendar app) or through the Istota calendar feed they subscribe to once. Use it to put something on the user's calendar when they have no writable CalDAV calendar, or when they ask for it.
+- **Invitations sent to the user by mail**, named `feed:invitations`: meetings other people invited the user to, in mail that reached {BOT_NAME} (forwarded or copied to it) from the organizer's own, authenticated address. Read-only. {BOT_NAME} never answers an invitation; the user accepts or declines in their own calendar app. Each event carries an `organizer`.
 
 ### Writing to `istota`
 
@@ -104,7 +105,7 @@ istota-skill calendar create --calendar istota \
 
 **`--calendar` takes one of the user's own calendars**, as listed in the prompt or by `calendars`. A calendar another user shared with the bot, or another user's feed, is refused as `Calendar not found`, the same answer as one that does not exist.
 
-`list` without `--calendar` reads every CalDAV calendar, every feed and Istota's own calendar (whose events carry `"calendar": "istota"` and are shown in `--tz`, else UTC). A feed event carries `"read_only": true` and its `feed:<id>` in `calendar`. When a feed's last refresh failed, the answer has `feed_errors` naming it and the reason, and the events are from the last copy that was read. Recurring feed events are expanded up to 2,000 occurrences per request; past that the answer says `"truncated": true`.
+`list` without `--calendar` reads every CalDAV calendar, every feed, Istota's own calendar (whose events carry `"calendar": "istota"` and are shown in `--tz`, else UTC) and `feed:invitations`. A feed event carries `"read_only": true` and its `feed:<id>` in `calendar`. When a feed's last refresh failed, the answer has `feed_errors` naming it and the reason, and the events are from the last copy that was read. Recurring feed events are expanded up to 2,000 occurrences per request; past that the answer says `"truncated": true`.
 
 The listed calendars are the ones the user has shared with the bot's account (`CALDAV_USERNAME`). To add another, or to give the bot write access to one listed as read-only, the user shares it from Settings > Connections or from their calendar app.
 

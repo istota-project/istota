@@ -7036,6 +7036,9 @@ def build_prompt(
         entries.append("istota (writable)")
     elif istota_calendar:
         entries.append("istota")
+    if istota_calendar:
+        # Invitations other people mailed the user (`sharing.itip`), behind the same gate.
+        entries.append("feed:invitations")
     if entries:
         listed = ", ".join(entries)
         resource_sections.append(

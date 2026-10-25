@@ -7,6 +7,9 @@ the framework database host-side, and every text field from a feed is fenced.
 Istota's own calendar is named ``istota`` (`sharing.events`): read from the
 database, and written by queuing a deferred op that the scheduler applies
 once the task succeeds, at most `[sharing] events_per_task` per task.
+``feed:invitations`` is the invitations other people mailed the user
+(`sharing.itip`, ``received_invitations``): read-only, behind the same gate,
+every text field and the organizer fenced.
 
 Also provides a CLI for calendar operations from Claude Code:
     python -m istota.skills.calendar list [--calendar URL|feed:ID] [--date today|tomorrow|DATE | --week] [--tz TZ]
@@ -859,6 +862,72 @@ def istota_events(user_id: str, start: datetime, end: datetime, tz: str | None) 
     return shown
 
 
+INVITATIONS_CALENDAR = "feed:invitations"
+
+
+def is_invitations_calendar(calendar: str | None) -> bool:
+    return bool(calendar) and calendar.strip().lower() == INVITATIONS_CALENDAR
+
+
+def _shown_received_time(value: str, all_day: bool, tz: str | None) -> datetime:
+    """A received time for the listing: a date, a UTC moment in ``tz``, or floating as written."""
+    if all_day:
+        return datetime.combine(date.fromisoformat(value), datetime.min.time())
+    if value.endswith("Z"):
+        return _shown_time(value, False, tz)
+    return datetime.fromisoformat(value).replace(tzinfo=None)
+
+
+def received_invitations(user_id: str, start: datetime, end: datetime, tz: str | None) -> list[dict] | None:
+    """Invitations other people sent the user (`sharing.itip`), in the window, fenced.
+
+    None where the calendar scope is not in reach, the gate Istota's own
+    calendar uses. Every text field and the organizer are third-party text.
+    """
+    reach = _istota_reach(user_id)
+    if reach is None:
+        return None
+    context, _task = reach
+
+    from istota import db
+    from istota.lib.untrusted import frame_untrusted
+    from istota.sharing import itip
+
+    def naive(moment: datetime) -> datetime:
+        if moment.tzinfo is None:
+            return moment
+        return moment.astimezone(ZoneInfo(tz) if tz else _UTC).replace(tzinfo=None)
+
+    window_start, window_end = naive(start), naive(end)
+    with db.get_db(context.db_path) as conn:
+        rows = itip.invitations_for_user(conn, user_id)
+    shown = []
+    for row in rows:
+        if not row.dtstart:
+            continue
+        try:
+            begins = _shown_received_time(row.dtstart, row.all_day, tz)
+            ends = _shown_received_time(row.dtend or row.dtstart, row.all_day, tz)
+        except ValueError:
+            continue
+        if begins >= window_end or (ends <= window_start and begins < window_start):
+            continue
+        shown.append({
+            "calendar": INVITATIONS_CALENDAR,
+            "uid": row.uid,
+            "summary": frame_untrusted(row.summary or "", FEED_LABEL),
+            "start": begins.isoformat(),
+            "end": ends.isoformat(),
+            "location": frame_untrusted(row.location, FEED_LABEL) or None,
+            "description": frame_untrusted(row.description, FEED_LABEL) or None,
+            "organizer": frame_untrusted(row.organizer, FEED_LABEL),
+            "all_day": row.all_day,
+            "timezone": "floating" if row.all_day or not row.dtstart.endswith("Z") else (tz or "UTC"),
+            "read_only": True,
+        })
+    return shown
+
+
 def _op_file(context: _TaskContext):
     from pathlib import Path
 
@@ -1052,6 +1121,14 @@ def cmd_list(args) -> dict:
         return {"status": "ok", "calendar": ISTOTA_CALENDAR, "date": label,
                 "event_count": len(found), "events": found}
 
+    if args.calendar and is_invitations_calendar(args.calendar):
+        found = received_invitations(user_id, start, end, args.tz)
+        if found is None:
+            raise CalendarNotFound(f"Calendar not found: {args.calendar}")
+        found.sort(key=lambda e: e["start"])
+        return {"status": "ok", "calendar": INVITATIONS_CALENDAR, "date": label,
+                "event_count": len(found), "events": found}
+
     if args.calendar and is_feed_calendar(args.calendar):
         wanted = args.calendar.strip().lower()
         feeds = [feed for feed in shared_feeds(user_id) if feed.calendar == wanted]
@@ -1066,9 +1143,13 @@ def cmd_list(args) -> dict:
 
     feeds = [] if args.calendar else shared_feeds(user_id)
     own = None if args.calendar else istota_events(user_id, start, end, args.tz)
+    received = None if args.calendar else received_invitations(user_id, start, end, args.tz)
+    if own is not None:
+        own = own + (received or [])
     if (feeds or own is not None) and not _caldav_configured():
         # No CalDAV in this task: the bot account's credential is not here,
-        # and nothing here asks for it. Feeds and Istota's own calendar only.
+        # and nothing here asks for it. Feeds, Istota's own calendar and the
+        # invitations it was sent only.
         events, notes = _feed_events(feeds, start, end)
         events.extend(own or [])
         events.sort(key=lambda e: e["start"])
@@ -1141,6 +1222,11 @@ def cmd_calendars(args) -> dict:
             "calendar": ISTOTA_CALENDAR, "kind": "istota",
             "name": f"{config.bot_name}'s calendar",
             "writable": config.sharing.events_per_task > 0,
+        })
+        calendars.append({
+            "calendar": INVITATIONS_CALENDAR, "kind": "invitations",
+            "name": "Invitations sent to you by mail",
+            "writable": False,
         })
     return {"status": "ok", "calendar_count": len(calendars), "calendars": calendars}
 

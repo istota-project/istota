@@ -1050,7 +1050,7 @@ def split_halves(rendered: str) -> tuple[str, str]:
 def test_a_shared_feed_is_named_by_id_and_host_in_the_system_half(tmp_path, monkeypatch):
     system, user = split_halves(assemble(CASES_BY_NAME["shared_calendar"], tmp_path, monkeypatch))
     lines = [line for line in system.splitlines() if line.startswith("Other calendars")]
-    assert len(lines) == 1 and lines[0].endswith(": feed:1 (cal.example.org), istota (writable)")
+    assert len(lines) == 1 and lines[0].endswith(": feed:1 (cal.example.org), istota (writable), feed:invitations")
     assert FEED_NAME_SENTINEL not in system + user
 
 
