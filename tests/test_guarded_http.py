@@ -48,6 +48,19 @@ class _Server:
                 })
                 if server.delay:
                     time.sleep(server.delay)
+                if self.path == "/drip":
+                    # One byte at a time, each inside the per-read timeout.
+                    self.send_response(200)
+                    self.send_header("Content-Length", "1000")
+                    self.end_headers()
+                    try:
+                        for _ in range(1000):
+                            self.wfile.write(b"x")
+                            self.wfile.flush()
+                            time.sleep(0.1)
+                    except OSError:
+                        pass
+                    return
                 status, headers, payload = server.routes.get(
                     self.path.split("?", 1)[0], (404, {}, b"missing"),
                 )
@@ -98,6 +111,7 @@ def _send(client, url, **kwargs):
     kwargs.setdefault("private_hosts", ["127.0.0.1"])
     kwargs.setdefault("max_bytes", 1024 * 1024)
     kwargs.setdefault("timeout", 5.0)
+    kwargs.setdefault("deadline_seconds", 10.0)
     return guarded_http.guarded_send(client, kwargs.pop("method", "GET"), url, **kwargs)
 
 
@@ -201,6 +215,15 @@ class TestTheBody:
             _send(client, server.url("/slow"), timeout=0.2)
         assert err.value.code == "timeout"
 
+    def test_a_dripped_body_stops_at_the_deadline(self, server, client):
+        # Every read arrives inside the 1 s per-read timeout; only the whole-call
+        # deadline can end it.
+        started = time.monotonic()
+        with pytest.raises(GuardRefused) as err:
+            _send(client, server.url("/drip"), timeout=1.0, deadline_seconds=0.5)
+        assert err.value.code == "timeout"
+        assert time.monotonic() - started < 3.0
+
     def test_the_refusal_carries_no_path_or_query(self, server, client):
         server.routes["/big"] = (200, {}, b"x" * 5000)
         with pytest.raises(GuardRefused) as err:
@@ -284,7 +307,7 @@ class TestHopRulesOnPublicNames:
         with _mock_client(handler) as c, pytest.raises(GuardRefused) as err:
             guarded_http.guarded_send(
                 c, "GET", "https://cal.example/feed", private_hosts=[], max_bytes=100,
-                max_redirects=3, timeout=5,
+                max_redirects=3, timeout=5, deadline_seconds=10,
                 resolve=self._resolve({"cal.example": [PUBLIC], "feeds.example": [PUBLIC]}),
             )
         assert err.value.code == "host_refused"
@@ -300,7 +323,7 @@ class TestHopRulesOnPublicNames:
         with _mock_client(handler) as c, pytest.raises(GuardRefused) as err:
             guarded_http.guarded_send(
                 c, "GET", "https://cal.example/feed", private_hosts=["nas.internal"],
-                max_bytes=100, max_redirects=3, timeout=5,
+                max_bytes=100, max_redirects=3, timeout=5, deadline_seconds=10,
                 resolve=self._resolve({"cal.example": [PUBLIC], "nas.internal": ["10.0.0.5"]}),
             )
         assert err.value.code == "host_refused"
@@ -318,7 +341,7 @@ class TestHopRulesOnPublicNames:
         with _mock_client(handler) as c:
             response = guarded_http.guarded_send(
                 c, "GET", "https://nas.internal/feed", private_hosts=["nas.internal"],
-                max_bytes=100, max_redirects=3, timeout=5,
+                max_bytes=100, max_redirects=3, timeout=5, deadline_seconds=10,
                 resolve=self._resolve({"nas.internal": ["10.0.0.5"]}),
             )
         assert response.content == b"ok"
@@ -331,7 +354,7 @@ class TestHopRulesOnPublicNames:
         with _mock_client(handler) as c, pytest.raises(GuardRefused) as err:
             guarded_http.guarded_send(
                 c, "GET", "https://cal.example/feed", private_hosts=[], max_bytes=100,
-                max_redirects=3, timeout=5,
+                max_redirects=3, timeout=5, deadline_seconds=10,
                 resolve=self._resolve({"cal.example": [PUBLIC], "cdn.example": [PUBLIC, "10.1.1.1"]}),
             )
         assert err.value.code == "host_refused"

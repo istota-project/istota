@@ -35,6 +35,7 @@ traffic; the TLS trust store still honours ``SSL_CERT_FILE``.
 from __future__ import annotations
 
 import base64
+import time
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -145,21 +146,30 @@ def _parse(url: str) -> tuple[str, str, int]:
     return scheme, net_guard.normal_host(parts.hostname), port or default_port(scheme)
 
 
-def _read_capped(response: httpx.Response, max_bytes: int) -> bytes:
+def _remaining(deadline: float) -> float:
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise GuardRefused("timeout")
+    return left
+
+
+def _read_capped(response: httpx.Response, max_bytes: int, deadline: float) -> bytes:
+    # A per-read timeout alone lets a server drip one byte inside it forever.
     buffer = bytearray()
     for chunk in response.iter_bytes():
         buffer.extend(chunk)
         if len(buffer) > max_bytes:
             raise GuardRefused("too_large")
+        _remaining(deadline)
     return bytes(buffer)
 
 
 def _send_pinned(client, method, url, addresses, *, headers, content, auth, timeout,
-                 max_bytes) -> httpx.Response:
+                 max_bytes, deadline) -> httpx.Response:
     last = "connection_failed"
     for address in addresses:
         request = pinned_request(method, url, address, headers=headers, content=content,
-                                 auth=auth, timeout=timeout)
+                                 auth=auth, timeout=min(timeout, _remaining(deadline)))
         try:
             response = client.send(request, stream=True, follow_redirects=False)
         except httpx.ConnectTimeout:
@@ -173,7 +183,7 @@ def _send_pinned(client, method, url, addresses, *, headers, content, auth, time
         except httpx.TransportError:
             raise GuardRefused("connection_failed") from None
         try:
-            body = _read_capped(response, max_bytes)
+            body = _read_capped(response, max_bytes, deadline)
         except httpx.TimeoutException:
             raise GuardRefused("timeout") from None
         except httpx.TransportError:
@@ -193,6 +203,7 @@ def guarded_send(
     private_hosts,
     max_bytes: int,
     timeout: float,
+    deadline_seconds: float,
     max_redirects: int = 0,
     auth: tuple[str, str] | None = None,
     headers: dict | None = None,
@@ -204,8 +215,11 @@ def guarded_send(
     A 3xx with a ``Location`` is followed while ``max_redirects`` allows,
     re-checked as a new request; past it, ``redirect_refused``. Any other
     answer, error statuses included, is returned for the caller to read.
+    ``timeout`` bounds each connect and read; ``deadline_seconds`` bounds the
+    whole call, every hop and the body included, and passing it is required.
     ``resolve`` replaces the system resolver, taking ``(host, port)``.
     """
+    deadline = time.monotonic() + deadline_seconds
     listed = net_guard.host_set(private_hosts)
     method = method.upper()
     origin = _parse(url)
@@ -230,6 +244,7 @@ def guarded_send(
         response = _send_pinned(
             client, method, url, addresses, headers=hop_headers, content=content,
             auth=auth if carry_auth else None, timeout=timeout, max_bytes=max_bytes,
+            deadline=deadline,
         )
         location = response.headers.get("location")
         if response.status_code not in _REDIRECT_STATUSES or not location:

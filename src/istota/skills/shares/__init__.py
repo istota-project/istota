@@ -61,6 +61,8 @@ MAX_TRANSFER_BYTES = 64 * 1024 * 1024
 LISTING_MAX_BYTES = 4 * 1024 * 1024
 REPLY_MAX_BYTES = 64 * 1024
 REQUEST_TIMEOUT_SECONDS = 60.0
+# Generous: a skill call moves whole files, and runs in its own process.
+REQUEST_DEADLINE_SECONDS = 600.0
 MAX_SEGMENT_CHARS = 255
 
 _REF = re.compile(r"\Ashare:([0-9]{1,18})(?::(.*))?\Z", re.DOTALL)
@@ -416,6 +418,7 @@ def _send(session: _Session, method: str, url: str, *, max_bytes: int = REPLY_MA
             session.client, method, url,
             private_hosts=session.context.config.sharing.private_hosts,
             max_bytes=max_bytes, timeout=REQUEST_TIMEOUT_SECONDS,
+            deadline_seconds=REQUEST_DEADLINE_SECONDS,
             auth=(session.secret.reveal(), ""), headers=headers, content=content,
         )
     except guarded_http.GuardRefused as exc:

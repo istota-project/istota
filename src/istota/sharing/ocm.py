@@ -43,8 +43,9 @@ with the held secret and reads its access from ``oc:permissions``, then in one
 transaction stores the secret as the local credential `sources.credential_name`
 bound to the sender, with its broker grant, and sets the row active. A
 re-offer of an active share replaces the credential's value the same way, and
-only once its own PROPFIND has succeeded, so a forged repeat cannot swap a
-live share. `decline`, `remove` and the scheduler's `expire_pending` take the
+only once its own PROPFIND has succeeded. Only a signed repeat is held at all
+(`_store`): a PROPFIND proves a secret opens something on the sender's host,
+not that it is the share the owner made. `decline`, `remove` and the scheduler's `expire_pending` take the
 row to ``declined`` or ``revoked``, which deletes every secret it held.
 
 **Telling the sender** (`notify_sender`) is an unsigned POST to the
@@ -87,6 +88,7 @@ PROVIDER = "Istota"
 OFFER_MAX_BYTES = 64 * 1024
 DISCOVERY_MAX_BYTES = 64 * 1024
 DISCOVERY_TIMEOUT_SECONDS = 5.0
+DISCOVERY_DEADLINE_SECONDS = 10.0
 STRING_MAX_CHARS = 255
 DATE_SKEW_SECONDS = 300
 
@@ -95,6 +97,9 @@ KIND = "ocm_share"
 # the legacy OCS path rather than here, so these bound a flood, not real use.
 ADDRESS_MAX_PER_MINUTE = 30
 SENDER_MAX_PER_MINUTE = 20
+# Every notification is checked against stored secrets before its sender is
+# known, and each check decrypts; this caps that work across all callers.
+SECRET_CHECKS_PER_MINUTE = 60
 WINDOW_SECONDS = 60
 
 # What the signature must cover, as Nextcloud 31 signs it.
@@ -206,15 +211,17 @@ def parse_cloud_id(raw: object) -> CloudId | None:
 _lock = threading.Lock()
 _address_window = SlidingWindow(WINDOW_SECONDS, ADDRESS_MAX_PER_MINUTE)
 _sender_window = SlidingWindow(WINDOW_SECONDS, SENDER_MAX_PER_MINUTE)
+_secret_check_window = SlidingWindow(WINDOW_SECONDS, SECRET_CHECKS_PER_MINUTE, max_keys=1)
 _discovery_window: SlidingWindow | None = None
 
 
 def reset_limits() -> None:
     """Forget every recorded hit; for tests."""
-    global _address_window, _sender_window, _discovery_window
+    global _address_window, _sender_window, _secret_check_window, _discovery_window
     with _lock:
         _address_window = SlidingWindow(WINDOW_SECONDS, ADDRESS_MAX_PER_MINUTE)
         _sender_window = SlidingWindow(WINDOW_SECONDS, SENDER_MAX_PER_MINUTE)
+        _secret_check_window = SlidingWindow(WINDOW_SECONDS, SECRET_CHECKS_PER_MINUTE, max_keys=1)
         _discovery_window = None
 
 
@@ -233,6 +240,12 @@ def _admit(config, address: str | None, sender_key: str, tick: float) -> bool:
         return False
     window = _discovery_limit(int(config.sharing.ocm.max_discovery_fetches_per_minute))
     return window.admit("discovery", tick)
+
+
+def _admit_secret_check(address: str | None, tick: float) -> bool:
+    if address is not None and not _address_window.admit(address, tick):
+        return False
+    return _secret_check_window.admit("secret_check", tick)
 
 
 # ----------------------------------------------------------------- signatures
@@ -442,6 +455,7 @@ def fetch_discovery(config, cloud: CloudId, *, resolve=None) -> dict | None:
                 private_hosts=config.sharing.private_hosts,
                 max_bytes=DISCOVERY_MAX_BYTES,
                 timeout=DISCOVERY_TIMEOUT_SECONDS,
+                deadline_seconds=DISCOVERY_DEADLINE_SECONDS,
                 max_redirects=0,
                 headers={"Accept": "application/json"},
                 resolve=resolve,
@@ -533,8 +547,14 @@ def _pending_count(conn: sqlite3.Connection, user_id: str) -> int:
 
 
 def _store(conn, config, user_id: str, cloud: CloudId, offer: _Offer, base: str,
-           share_path: str) -> str:
-    """Write the row and its held secret; the outcome, for the log and the bell."""
+           share_path: str, *, signed: bool) -> str:
+    """Write the row and its held secret; the outcome, for the log and the bell.
+
+    A repeat for a pending or live share replaces a secret only when the offer
+    was signed: unsigned, anyone holding a secret the same host accepts (their
+    own public link, say) could swap in a folder of their choosing, and the
+    accept-time PROPFIND would pass. Such a repeat changes nothing.
+    """
     from istota.credentials import store as secrets_store
     from istota.sharing import sources
 
@@ -565,6 +585,8 @@ def _store(conn, config, user_id: str, cloud: CloudId, offer: _Offer, base: str,
         sources.set_state(conn, existing.id, user_id, "pending")
         sources.set_details(conn, existing.id, user_id, extras=extras)
         key, outcome = str(existing.id), "reopened"
+    elif not signed:
+        return "repeat_unsigned"
     elif existing.state == "pending":
         sources.set_details(conn, existing.id, user_id, extras={**existing.extras, **extras})
         key, outcome = str(existing.id), "repeat"
@@ -645,8 +667,9 @@ def receive_share(
 
         try:
             conn.execute("BEGIN IMMEDIATE")
-            outcome = _store(conn, config, user_id, owner, offer, base, share_path)
-            if outcome != "declined":
+            outcome = _store(conn, config, user_id, owner, offer, base, share_path,
+                             signed=key_pem is not None)
+            if outcome not in ("declined", "repeat_unsigned"):
                 hand_to_daemon(conn, [shared_source.write(conn, user_id)])
             conn.commit()
         except BaseException:
@@ -664,6 +687,7 @@ def receive_share(
 
 PROPFIND_MAX_BYTES = 256 * 1024
 REMOTE_TIMEOUT_SECONDS = 10.0
+REMOTE_DEADLINE_SECONDS = 30.0
 _OC_PERMISSIONS = "{http://owncloud.org/ns}permissions"
 # `oc:permissions` letters that mean the share may be written: create (C),
 # create folders (K), write (W). An edit share reads RGDNVCK, a read share RG.
@@ -748,6 +772,7 @@ def share_access(config, source, secret: str, *, resolve=None) -> str:
                 private_hosts=config.sharing.private_hosts,
                 max_bytes=PROPFIND_MAX_BYTES,
                 timeout=REMOTE_TIMEOUT_SECONDS,
+                deadline_seconds=REMOTE_DEADLINE_SECONDS,
                 auth=(secret, ""),
                 headers={"Depth": "0", "Content-Type": "application/xml; charset=utf-8"},
                 content=_PROPFIND_BODY,
@@ -818,6 +843,7 @@ def notify_sender(config, source, notification_type: str, secret: str, *, resolv
                 private_hosts=config.sharing.private_hosts,
                 max_bytes=DISCOVERY_MAX_BYTES,
                 timeout=REMOTE_TIMEOUT_SECONDS,
+                deadline_seconds=REMOTE_DEADLINE_SECONDS,
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
                 content=body,
                 resolve=resolve,
@@ -1136,7 +1162,9 @@ def receive_notification(
     """Take one ``POST /ocm/notifications``; the answer to send. Commits its own write.
 
     In order: the body (400); the type (501 for anything not handled); the
-    secret against the named share's own (403, nothing changed); the rate
+    per-address and global limits on secret checks (429), since a check
+    decrypts stored secrets before the sender is known; the secret against
+    the named share's own (403, nothing changed); the sender and discovery
     limits (429); the sender's discovery document, and its signature where
     the document publishes a key (403); then the change.
     """
@@ -1148,11 +1176,14 @@ def receive_notification(
         note = _parse_notification(body)
         if note.kind not in _HANDLED_NOTIFICATIONS or note.resource_type != "file":
             raise _Refused(501, "not_implemented")
+        if not _admit_secret_check(client_address, time.monotonic()):
+            raise _Refused(429, "rate_limited")
         source = _matching_share(conn, note.provider_id, note.secret)
         if source is None:
             logger.info("ocm notification refused type=%s reason=secret_mismatch", note.kind)
             raise _Refused(403, "forbidden")
-        if not _admit(config, client_address, source.remote_host, time.monotonic()):
+        # The address was counted above.
+        if not _admit(config, None, source.remote_host, time.monotonic()):
             raise _Refused(429, "rate_limited")
         owner = parse_cloud_id(source.extras.get("owner"))
         if owner is None or owner.host != source.remote_host:

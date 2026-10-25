@@ -36,6 +36,7 @@ MAX_URL_CHARS = 2048
 NAME_MAX_CHARS = 120
 MAX_REDIRECTS = 3
 FETCH_TIMEOUT_SECONDS = 30.0
+FETCH_DEADLINE_SECONDS = 90.0
 MAX_OCCURRENCES = 2000
 # The longest an erroring feed waits between tries: a provider that is down
 # for a week is asked once a day, not every quarter hour.
@@ -185,6 +186,7 @@ def _fetch(config, url: str, *, etag: str | None = None, last_modified: str | No
                 private_hosts=config.sharing.private_hosts,
                 max_bytes=config.sharing.ics_max_bytes,
                 timeout=FETCH_TIMEOUT_SECONDS,
+                deadline_seconds=FETCH_DEADLINE_SECONDS,
                 max_redirects=MAX_REDIRECTS,
                 headers=headers,
             )

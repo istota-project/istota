@@ -275,6 +275,14 @@ def _receive(config, body, headers=None, **kwargs):
         return ocm.receive_share(conn, config, raw, headers or _headers(raw), **kwargs)
 
 
+def _receive_signed(config, sender, key, body):
+    """An offer from a sender that publishes ``key`` and signs with it."""
+    sender.public_key_pem = _pem(key)
+    sender.publish()
+    raw = json.dumps(body).encode()
+    return _receive(config, raw, _sign(key, raw, key_id=f"https://{sender.host}/ocm#signature"))
+
+
 WATCHED = {
     "shared_sources": "kind = 'ocm_share'",
     "secrets": "service = 'shared_source'",
@@ -725,29 +733,55 @@ class TestRepeatOffers:
             sources.set_state(conn, offer.id, "alice", state, reason="test_setup")
             conn.commit()
 
-    def test_a_pending_repeat_replaces_the_secret(self, config, sender):
-        offer = self._first(config, sender)
-        body = sender.offer()
-        body["protocol"]["options"]["sharedSecret"] = "second-secret"
-        assert _receive(config, body).status == 201
-        assert [(o.id, o.state) for o in _offers(config)] == [(offer.id, "pending")]
-        assert _read_secret(config, "alice", str(offer.id)) == "second-secret"
-
-    def test_an_active_repeat_holds_the_new_secret_apart(self, config, sender):
-        offer = self._first(config, sender)
+    def _make_active(self, config, offer):
         with db.get_db(config.db_path) as conn:
             secrets_store.delete_secret(None, "alice", sources.SECRET_SERVICE, str(offer.id),
                                         connection=conn)
             sources.set_state(conn, offer.id, "alice", "active")
             conn.commit()
+
+    def test_a_signed_pending_repeat_replaces_the_secret(self, config, sender, key):
+        offer = self._first(config, sender)
         body = sender.offer()
-        body["protocol"]["options"]["sharedSecret"] = "forged-or-fresh"
+        body["protocol"]["options"]["sharedSecret"] = "second-secret"
+        assert _receive_signed(config, sender, key, body).status == 201
+        assert [(o.id, o.state) for o in _offers(config)] == [(offer.id, "pending")]
+        assert _read_secret(config, "alice", str(offer.id)) == "second-secret"
+
+    def test_an_unsigned_pending_repeat_changes_nothing(self, config, sender):
+        # Unsigned, anyone with a secret the same host accepts could swap the offer.
+        offer = self._first(config, sender)
+        body = sender.offer(name="Swapped")
+        body["protocol"]["options"]["sharedSecret"] = "attacker-link-token"
+        mark = _watermark(config)
         assert _receive(config, body).status == 201
+        assert _read_secret(config, "alice", str(offer.id)) == SECRET
+        assert _offers(config)[0].extras["name"] == offer.extras["name"]
+        assert _written_since(config, mark) == NOTHING
+
+    def test_a_signed_active_repeat_holds_the_new_secret_apart(self, config, sender, key):
+        offer = self._first(config, sender)
+        self._make_active(config, offer)
+        body = sender.offer()
+        body["protocol"]["options"]["sharedSecret"] = "fresh-secret"
+        assert _receive_signed(config, sender, key, body).status == 201
         [after] = _offers(config)
         assert after.state == "active"
         assert after.extras.get("reoffer_pending") is True
-        assert _read_secret(config, "alice", f"{offer.id}:reoffer") == "forged-or-fresh"
+        assert _read_secret(config, "alice", f"{offer.id}:reoffer") == "fresh-secret"
         assert _read_secret(config, "alice", str(offer.id)) is None
+
+    def test_an_unsigned_active_repeat_changes_nothing(self, config, sender):
+        offer = self._first(config, sender)
+        self._make_active(config, offer)
+        body = sender.offer()
+        body["protocol"]["options"]["sharedSecret"] = "attacker-link-token"
+        mark = _watermark(config)
+        assert _receive(config, body).status == 201
+        [after] = _offers(config)
+        assert after.state == "active" and "reoffer_pending" not in after.extras
+        assert _read_secret(config, "alice", f"{offer.id}:reoffer") is None
+        assert _written_since(config, mark) == NOTHING
 
     def test_a_declined_repeat_is_answered_and_ignored(self, config, sender):
         offer = self._first(config, sender)
@@ -964,13 +998,18 @@ class TestAccept:
 
 
 class TestReoffer:
+    @pytest.fixture(autouse=True)
+    def _signing_key(self, key):
+        self.key = key
+
     def _active_with_reoffer(self, config, sender, new_secret):
         sender.server.dav_secrets = {SECRET}
         offer = _offered(config, sender)
         _accept(config, offer.id, allow_scheduled=True)
         body = sender.offer()
         body["protocol"]["options"]["sharedSecret"] = new_secret
-        assert _receive(config, body).status == 201
+        # Only a signing sender's repeat is held for re-acceptance.
+        assert _receive_signed(config, sender, self.key, body).status == 201
         assert _source(config, offer.id).extras.get("reoffer_pending") is True
         return offer
 
@@ -1110,6 +1149,20 @@ class TestNotifications:
         assert answer.status == 403
         assert _source(config, offer.id).state == "active"
         assert _credential(config, offer.id)["value"] == SECRET
+
+    def test_wrong_secret_floods_are_limited_before_any_secret_is_read(self, config, sender,
+                                                                      monkeypatch):
+        offer = self._active(config, sender)
+        reads = []
+        real = ocm._matching_share
+        monkeypatch.setattr(ocm, "_matching_share",
+                            lambda *a, **k: reads.append(1) or real(*a, **k))
+        answers = [_notify(config, _notification("SHARE_UNSHARED", secret="forged")).status
+                   for _ in range(ocm.SECRET_CHECKS_PER_MINUTE + 5)]
+        assert answers.count(403) == ocm.SECRET_CHECKS_PER_MINUTE
+        assert answers[-5:] == [429] * 5
+        assert len(reads) == ocm.SECRET_CHECKS_PER_MINUTE
+        assert _source(config, offer.id).state == "active"
 
     def test_unshared_with_the_right_secret_revokes_and_deletes_the_credential(self, config, sender):
         offer = self._active(config, sender)
