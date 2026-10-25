@@ -1680,8 +1680,9 @@ def _process_deferred_garmin_import(
     scheduler runs the import here, in the daemon process where
     ``ISTOTA_SECRET_KEY`` is in scope. The result is pushed back to the user
     on the ``alert`` route, which is where every other daemon-raised notice
-    goes and the only one the settings page can point at a room. User id
-    always comes from the task.
+    goes and the only one the settings page can point at a room. A
+    scheduled run sends only its failures (ISSUE-832). User id always comes
+    from the task.
     """
     loaded = _load_deferred_json(
         user_temp_dir, task.id, "garmin_import", expected_type=dict,
@@ -1737,8 +1738,24 @@ def _process_deferred_garmin_import(
         return 0
     except Exception as e:  # noqa: BLE001 — a bad import must not wedge the drain
         logger.warning("Deferred garmin import failed for task %d: %s", task.id, e)
+        detail = " ".join(str(e).split())[:200]
+        send_notification(
+            config, task.user_id,
+            f"🗺️ Garmin track import failed: {type(e).__name__}: {detail}",
+            purpose="alert",
+        )
         path.unlink(missing_ok=True)
         return 0
+
+    logger.info(
+        "Deferred garmin import task %d: inserted=%d activities=%d",
+        task.id, result.inserted_total, result.activities,
+    )
+    path.unlink(missing_ok=True)
+    # A scheduled import is quiet on success, as `silent_unless_action` is for
+    # a prompt job; that flag cannot reach this notice, sent after the task.
+    if task.source_type == "scheduled":
+        return result.inserted_total
 
     if result.activities:
         msg = (
@@ -1753,11 +1770,6 @@ def _process_deferred_garmin_import(
             f"{days_back} days."
         )
     send_notification(config, task.user_id, msg, purpose="alert")
-    logger.info(
-        "Deferred garmin import task %d: inserted=%d activities=%d",
-        task.id, result.inserted_total, result.activities,
-    )
-    path.unlink(missing_ok=True)
     return result.inserted_total
 
 

@@ -96,11 +96,25 @@ describe('createRecorder', () => {
     expect(onComplete).toHaveBeenCalledTimes(1);
     const file = onComplete.mock.calls[0][0] as File;
     expect(file).toBeInstanceOf(File);
-    expect(file.name).toMatch(/^voice-\d{8}-\d{6}\.webm$/);
+    // `.weba`, not `.webm`: Nextcloud maps `.webm` to video/webm and runs its
+    // movie previewer on an audio-only file (ISSUE-830).
+    expect(file.name).toMatch(/^voice-\d{8}-\d{6}\.weba$/);
     expect(rec.recording).toBe(false);
     // The mic is released, or the browser keeps showing its recording chip.
     expect(tracks.stopped).toBe(1);
   });
+
+  it.each([[['audio/webm']], [[]]])(
+    'names a webm recording .weba when the offered types are %j',
+    async (supported) => {
+      FakeMediaRecorder.supported = supported;
+      const onComplete = vi.fn();
+      const rec = createRecorder({ onComplete });
+      await rec.start();
+      rec.stop();
+      expect((onComplete.mock.calls[0][0] as File).name).toMatch(/\.weba$/);
+    },
+  );
 
   it('names an iOS recording .m4a — audio/mp4 is the only type Safari offers', async () => {
     FakeMediaRecorder.supported = ['audio/mp4'];

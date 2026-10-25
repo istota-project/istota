@@ -34,7 +34,7 @@ FIXTURE_HITS = [
     ("tone.m4a", "audio/mp4"),
     ("tone.wav", "audio/wav"),
     ("tone.flac", "audio/flac"),
-    ("tone.webm", "audio/webm"),
+    ("tone.weba", "audio/webm"),
 ]
 
 
