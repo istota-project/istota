@@ -166,7 +166,9 @@
 
 <Card
   title="Shared with Istota"
-  description="Calendars you subscribed Istota to by their address. Istota can read them and cannot change them."
+  description={settings?.ocm
+    ? 'Calendars you subscribed Istota to by their address, which it can read and not change, and folders you shared with it.'
+    : 'Calendars you subscribed Istota to by their address. Istota can read them and cannot change them.'}
 >
   {#snippet actions()}
     {#if settings}<Button
@@ -218,6 +220,32 @@
     {/if}
     {#if atLimit}
       <p class="caption">This server allows {settings.max_feeds} shared calendars per person.</p>
+    {/if}
+    {#if settings.ocm}
+      <h3>Shared folders</h3>
+      <p class="caption">
+        Share a folder with this address from your Nextcloud, or any server with federated sharing.
+        Istota cannot read a folder until you accept it.
+      </p>
+      <CopyField label="Federated sharing address" value={settings.ocm.federated_id} monospace />
+      {#if settings.ocm.pending.length === 0}
+        <EmptyState size="sm">No folder offers are waiting.</EmptyState>
+      {:else}
+        <ul class="divided-list" aria-label="Folder offers">
+          {#each settings.ocm.pending as offer (offer.id)}
+            <li class="shared-feed">
+              <div class="shared-feed-main">
+                <span>{offer.name || 'A folder'}</span>
+                <span class="caption"
+                  >from {offer.owner ? `${offer.owner} · ` : ''}{offer.host} · offered
+                  <Timestamp value={offer.created_at} format="relative" empty="just now" /></span
+                >
+              </div>
+              <Badge size="sm" variant="info">{offer.reoffer ? 'Offered again' : 'Waiting'}</Badge>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     {/if}
     {#if calendar}
       <h3>Istota's calendar</h3>

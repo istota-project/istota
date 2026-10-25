@@ -227,3 +227,50 @@ it('a server with no calendar section draws none', () => {
   mount(settings());
   expect(screen.queryByText("Istota's calendar")).toBeNull();
 });
+
+// --- Folders shared over OCM ---------------------------------------------------
+
+function withFolders(
+  pending: NonNullable<SharingSettings['ocm']>['pending'] = [],
+): SharingSettings {
+  return settings({ feeds: [], ocm: { federated_id: 'alice@bot.example.com', pending } });
+}
+
+const OFFER = {
+  id: 7,
+  name: 'Taxes 2026',
+  owner: 'carol@https://cloud.example.org',
+  host: 'cloud.example.org',
+  reoffer: false,
+  created_at: '2026-10-25T10:00:00Z',
+};
+
+it('shows the federated address to copy while OCM is on', () => {
+  mount(withFolders());
+  expect(screen.getByLabelText('Federated sharing address')).toHaveValue('alice@bot.example.com');
+  expect(screen.getByText('No folder offers are waiting.')).toBeInTheDocument();
+});
+
+it('hides the address while OCM is off', () => {
+  mount(settings({ ocm: null }));
+  expect(screen.queryByText('Shared folders')).toBeNull();
+  expect(screen.queryByLabelText('Federated sharing address')).toBeNull();
+});
+
+it('lists pending offers read-only, the sender words as text', () => {
+  mount(
+    withFolders([
+      OFFER,
+      { ...OFFER, id: 8, name: '<b>Plans</b>', owner: null, host: 'other.example', reoffer: true },
+    ]),
+  );
+  const list = screen.getByRole('list', { name: 'Folder offers' });
+  const rows = within(list).getAllByRole('listitem');
+  expect(rows[0]).toHaveTextContent('Taxes 2026');
+  expect(rows[0]).toHaveTextContent('from carol@https://cloud.example.org · cloud.example.org');
+  expect(rows[0]).toHaveTextContent('Waiting');
+  expect(rows[1]).toHaveTextContent('<b>Plans</b>');
+  expect(rows[1]).toHaveTextContent('Offered again');
+  expect(document.querySelector('b')).toBeNull();
+  expect(within(list).queryAllByRole('button')).toHaveLength(0);
+});

@@ -180,6 +180,8 @@ export interface User {
     admin: boolean;
     /** The "Shared with Istota" card; absent on a server that predates it. */
     sharing?: boolean;
+    /** Open Cloud Mesh folder shares are received on this server. */
+    sharing_ocm?: boolean;
   };
   // null when the operator hasn't enabled encrypted token storage.
   nextcloud_token?: NextcloudTokenStatus | null;
@@ -6058,6 +6060,24 @@ export interface IstotaCalendarSettings {
   reachable_elsewhere: boolean;
 }
 
+/** A folder someone offered to Istota over Open Cloud Mesh. Every field is the sender's words. */
+export interface SharedFolderOffer {
+  id: number;
+  name: string | null;
+  /** The owner's federated id, as the sender gave it. */
+  owner: string | null;
+  host: string;
+  /** True for a new offer of a folder that is already shared. */
+  reoffer: boolean;
+  created_at: string | null;
+}
+
+/** Folder shares over OCM: the address to share with, and the offers waiting. */
+export interface SharedFolderSettings {
+  federated_id: string;
+  pending: SharedFolderOffer[];
+}
+
 export interface SharingSettings {
   feeds: SharedFeed[];
   max_feeds: number;
@@ -6065,6 +6085,8 @@ export interface SharingSettings {
   can_add: boolean;
   /** Absent on a server that predates Istota's own calendar. */
   calendar?: IstotaCalendarSettings;
+  /** Null or absent while the server receives no folder shares. */
+  ocm?: SharedFolderSettings | null;
 }
 
 export function getSharing(): Promise<SharingSettings> {
