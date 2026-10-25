@@ -27,6 +27,13 @@ class AppsContext:
     workspace: Path
     db_path: Path
 
+    def ensure_dirs(self) -> None:
+        """Nothing to create: ``init_db`` makes the database's folder, and drafts are the user's.
+
+        Present because ``router_stubs.make_get_user_context`` calls it on
+        every request after the first.
+        """
+
 
 def resolve_for_user(
     user_id: str,

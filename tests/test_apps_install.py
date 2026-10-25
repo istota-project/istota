@@ -8,7 +8,6 @@ KV data lives in a real framework database.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 
 import pytest
@@ -20,15 +19,10 @@ from istota.apps.drafts import DraftNotFound
 from istota.apps.kit import KitMissing
 from istota.apps.manifest import ManifestError
 from istota.config import Config
+from tests.support.apps_build import KIT_FILES
+from tests.support.apps_build import write_build as _write_build
 
 USER = "alice"
-
-KIT_FILES = {
-    "kit/guard.js": "(() => { delete window.RTCPeerConnection; })();\n",
-    "kit/istota-app.js": "(() => { globalThis.istota = {}; })();\n",
-    "kit/components.js": "(() => {})();\n",
-    "kit/istota.css": ":root { --space-1: 0.25rem; }\n",
-}
 
 INDEX = "<!doctype html><html><head><title>x</title></head><body><p>v1</p></body></html>\n"
 
@@ -36,19 +30,6 @@ INDEX = "<!doctype html><html><head><title>x</title></head><body><p>v1</p></body
 def _manifest_text(app_id="board", capabilities=(), name="Board"):
     caps = ", ".join(f'"{c}"' for c in capabilities)
     return f'id = "{app_id}"\nname = "{name}"\nicon = "layout"\ncapabilities = [{caps}]\n'
-
-
-def _write_build(directory, starter=None):
-    files = dict(KIT_FILES)
-    for app_id, app_files in (starter or {}).items():
-        for relative, text in app_files.items():
-            files[f"starter/{app_id}/{relative}"] = text
-    for relative, text in files.items():
-        path = directory / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-    manifest = {relative: hashlib.sha256(text.encode()).hexdigest() for relative, text in files.items()}
-    (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
 
 @pytest.fixture

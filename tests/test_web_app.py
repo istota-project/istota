@@ -937,6 +937,24 @@ class TestApiMe:
         assert resp.status_code == 200
         assert resp.json()["features"]["apps"] is expected
 
+    async def test_the_apps_router_is_mounted_behind_the_session(self, client, config):
+        import istota.webui.app as mod
+
+        config.experimental.features = ["module_apps"]
+        frame = "/istota/api/apps/board/v/1/frame"
+        assert (await client.get(frame)).status_code == 401
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": "alice"})
+        login = await client.get("/istota/callback", follow_redirects=False)
+        resp = await client.get(frame, cookies=login.cookies)
+        assert resp.status_code == 404
+        assert resp.json() == {"error": "app not found"}
+        call = await client.post(
+            "/istota/api/apps/board/v/1/call", cookies=login.cookies,
+            json={"capability": "kv:own", "op": "get", "args": {"key": "a"}},
+        )
+        # No Origin header: the host's origin check, not the router's stub, answers.
+        assert call.status_code == 403
+
     @pytest.mark.parametrize("mode,expected", [("local", True), ("none", False), ("nextcloud", True), ("drive", True), ("gmail", False)])
     async def test_workspace_feature(self, client, config, mode, expected):
         from istota import db

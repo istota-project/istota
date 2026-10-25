@@ -18647,6 +18647,16 @@ app.include_router(_health_router, prefix="/istota/api/health", tags=["health"])
 app.dependency_overrides[_health_require_auth] = _require_api_auth
 app.dependency_overrides[_health_verify_origin] = _verify_origin
 
+# Apps web API (experimental, behind module_apps). Mounted unconditionally;
+# each route resolves the module per user and 404s when it is off.
+from istota.apps.routes import require_auth as _apps_require_auth
+from istota.apps.routes import router as _apps_router
+from istota.apps.routes import verify_origin as _apps_verify_origin
+
+app.include_router(_apps_router, prefix="/istota/api/apps", tags=["apps"])
+app.dependency_overrides[_apps_require_auth] = _require_api_auth
+app.dependency_overrides[_apps_verify_origin] = _verify_origin
+
 # Garmin auth API — module-agnostic (Garmin is a cross-module connected
 # service). Not gated on the health module: a health-opted-out user can
 # still connect Garmin for the location track importer.

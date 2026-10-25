@@ -11512,6 +11512,24 @@ def kv_delete_namespace(conn: sqlite3.Connection, user_id: str, namespace: str) 
     return cursor.rowcount
 
 
+def kv_namespace_bytes(
+    conn: sqlite3.Connection, user_id: str, namespace: str, *, excluding_key: str | None = None,
+) -> int:
+    """UTF-8 bytes of every key and value in one of the user's namespaces.
+
+    ``excluding_key`` leaves one row out, for measuring a namespace as it will
+    be once that key is replaced.
+    """
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(length(CAST(key AS BLOB)) + length(CAST(value AS BLOB))), 0) AS n
+        FROM istota_kv WHERE user_id = ? AND namespace = ? AND key IS NOT ?
+        """,
+        (user_id, namespace, excluding_key),
+    ).fetchone()
+    return int(row["n"])
+
+
 def kv_list(
     conn: sqlite3.Connection, user_id: str, namespace: str
 ) -> list[dict]:

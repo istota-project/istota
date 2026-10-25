@@ -465,13 +465,29 @@ def insert_call(
     conn.execute("DELETE FROM app_calls WHERE at < ?", (cutoff,))
 
 
+#: A call refused by the rate limit. Not counted against the limit, so an app
+#: that keeps calling while refused is answered again once its window clears.
+RATE_LIMITED = "rate_limited"
+
+
 def count_recent_calls(conn: sqlite3.Connection, app_id: str, since: datetime) -> int:
-    """Calls the app made at or after ``since``, across all its versions."""
+    """Calls the app made at or after ``since``, across all its versions, the refused ones left out."""
     row = conn.execute(
-        "SELECT COUNT(*) AS n FROM app_calls WHERE app_id = ? AND at >= ?",
-        (app_id, sqlite_timestamp(since)),
+        "SELECT COUNT(*) AS n FROM app_calls WHERE app_id = ? AND at >= ? AND status != ?",
+        (app_id, sqlite_timestamp(since), RATE_LIMITED),
     ).fetchone()
     return int(row["n"])
+
+
+def oldest_recent_call(conn: sqlite3.Connection, app_id: str, since: datetime) -> datetime | None:
+    """When the oldest call :func:`count_recent_calls` counts was made, in UTC."""
+    row = conn.execute(
+        "SELECT MIN(at) AS at FROM app_calls WHERE app_id = ? AND at >= ? AND status != ?",
+        (app_id, sqlite_timestamp(since), RATE_LIMITED),
+    ).fetchone()
+    if row["at"] is None:
+        return None
+    return datetime.strptime(row["at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
 
 
 def list_calls(conn: sqlite3.Connection, app_id: str, *, limit: int = 200) -> list[dict]:
