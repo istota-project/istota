@@ -302,6 +302,7 @@ def _register_all() -> None:
             "admin_cron_change",
             "job_failure",
             "group_briefing",
+            "assignment",
         ):
             try:
                 module = importlib.import_module(

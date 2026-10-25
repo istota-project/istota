@@ -22,6 +22,7 @@ _CATEGORY_LABELS = {
     "task_alert": "Task alerts",
     "group_briefing": "Group briefings",
     "invoice_match": "Invoice matches",
+    "assignment": "Assignments",
 }
 
 

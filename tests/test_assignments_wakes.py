@@ -1307,10 +1307,12 @@ class TestTheLoopThroughProcessOneTask:
 
         (first,) = _dispatch(config)
         with patch("istota.scheduler.execute_task", side_effect=fake_execute), \
-             patch("istota.notifications.delivery.send_notification") as notify:
+             patch("istota.notifications.delivery.send_notification", return_value=True) as notify:
             processed = sched.process_one_task(config, user_id="alice", queue="assignment")
         assert processed == (first.task_id, True)
-        notify.assert_not_called()
+        # One push, for the hand-off, carrying the title and not the step.
+        [call] = notify.call_args_list
+        assert "a step for you" in call.args[2] and "furnace" not in call.args[2]
 
         with db.get_db(config.db_path) as conn:
             wake = store.get_wake(conn, first.wake_id)
@@ -1326,11 +1328,17 @@ class TestTheLoopThroughProcessOneTask:
         after = _get(config, a)
         assert (after.state, after.waiting_on) == ("waiting", ["user"])
         assert ["handoff", action.id] in _finished_event(config, a, first.wake_id)["notices"]
+        bell_row = "SELECT state, body FROM notifications WHERE source = 'assignment' AND dedup_key = ?"
+        key = f"handoff:{a}:{action.id}"
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute(bell_row, (key,)).fetchone()
+        assert row["state"] == "open" and "furnace label" in row["body"]
 
         # Nothing fires while it waits; the user's report back wakes it.
         assert _dispatch(config, _later()) == []
         with db.get_db(config.db_path) as conn:
             lifecycle.complete_handoff(conn, a, user_id="alice", action_id=action.id, report="photo sent")
+            assert conn.execute(bell_row, (key,)).fetchone()["state"] == "resolved"
         (second,) = _dispatch(config)
         assert (second.assignment_id, second.fired_by) == (a, "inbox")
         with db.get_db(config.db_path) as conn:

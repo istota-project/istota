@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from istota import db
 from istota.assignments import budget, charter, store
+from istota.notifications.resolvers import assignment as notices
 from istota.relay.requests import write_transaction
 
 if TYPE_CHECKING:
@@ -374,6 +375,7 @@ def pause(conn: sqlite3.Connection, assignment_id: int, *, user_id: str) -> stor
         store.insert_event(
             conn, assignment_id, kind="paused", actor="user", payload={"from": assignment.state},
         )
+        notices.settle(conn, assignment_id)
         return store.get_assignment(conn, assignment_id)
 
 
@@ -399,6 +401,7 @@ def resume(
             conn, assignment_id, kind="resumed", actor="user",
             payload={"reason": assignment.state_reason},
         )
+        notices.settle(conn, assignment_id)
         return store.get_assignment(conn, assignment_id)
 
 
@@ -416,6 +419,7 @@ def abandon(
             conn, assignment_id, kind="abandoned", actor="user",
             payload={"from": assignment.state, "reason": clean},
         )
+        notices.settle(conn, assignment_id)
         return store.get_assignment(conn, assignment_id)
 
 
@@ -470,6 +474,7 @@ def topup(
             store.insert_event(
                 conn, assignment_id, kind="resumed", actor="user", payload={"reason": "budget"},
             )
+        notices.settle(conn, assignment_id)
         return store.get_assignment(conn, assignment_id)
 
 
@@ -500,6 +505,8 @@ def close(
             store.set_state(conn, assignment_id, "completed", reason="user")
             store.update_assignment(conn, assignment_id, next_wake_at=None, closed_at=now)
             store.insert_event(conn, assignment_id, kind="completed", actor="user")
+            # The bell row only, no alert delivery: the user is in the chat that closed it.
+            notices.write_notices(conn, assignment_id, [("closed", None)])
         else:
             text = _text(missing, "what is missing")
             store.insert_inbox_event(
@@ -508,6 +515,7 @@ def close(
             store.set_state(conn, assignment_id, "sleeping")
             store.update_assignment(conn, assignment_id, next_wake_at=now)
             store.insert_event(conn, assignment_id, kind="completion_rejected", actor="user")
+        notices.settle(conn, assignment_id)
         return store.get_assignment(conn, assignment_id)
 
 
@@ -573,6 +581,7 @@ def complete_handoff(
             payload={"action_id": action_id, "step": action.text, "report": clean},
         )
         store.insert_event(conn, assignment_id, kind="handoff_done", actor="user", payload={"action_id": action_id})
+        notices.settle(conn, assignment_id)
         return store.get_action(conn, assignment_id, action_id)
 
 

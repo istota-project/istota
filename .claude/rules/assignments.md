@@ -27,7 +27,7 @@ A core package, `src/istota/assignments/`, not a module in `MODULE_NAMES`: wakes
 | `prompt.py` | The wake prompt: the system half's `## Assignment` section and the user half. |
 | `skills/assignment/` | The CLI: the user-turn verbs, `activate`, `list` / `show`, and the wake verbs. |
 
-The bell resolver is added by a later stage of the same work.
+The bell source is `notifications/resolvers/assignment.py` (see "Notices" below).
 
 ## Wakes and the lane
 
@@ -46,7 +46,15 @@ The bell resolver is added by a later stage of the same work.
 - **Signals.** `item_passing`; `item_confirmed`, `user_input` (`user_note`, `handoff_done`, `charter_change`, `user_edit`) and `handoff_done` from the inbox events this wake consumed; `attempt_new_outcome` for a `(target, outcome)` pair with no earlier row; `deliverable_changed` when a file a mechanical item names differs from the digest pickup stored in the `wake_started` event (`validators.deliverable_digests`) and every item checking it passes.
 - **The decision**, first match wins. A completion request is weighed only when the task completed (a failed or stopped wake's files may be half-written; `complete_ignored`): any mechanical item not passing is `complete_refused` (an event naming the items) and the wake's `next` applies; otherwise `completed` when `auto_complete` and no confirmed item is open, else `waiting (completion)`. Then the pauses, each overriding `next`: `budget`, `thrash` (a target whose last `THRASH_REPEATS + 1` attempts all failed, the newest this wake's), `failures` (`failure_wakes` failed wakes in a row, the last error in the event), `stalled` (`stall_wakes` wakes with no signal), `deadline` (the deadline wake that did not complete or propose). A proposed completion is never paused. Wakes ending `not_active` or `cancelled` neither count toward nor break a stall or failure run. Otherwise `next`: `--wait user` is `waiting (user)`; a time is re-clamped from the wake's end to the floor and capped by a deadline still ahead; no `next` is `sleeping` at `cadence_minutes`.
 - **The user's state wins.** Every after-wake transition (`wake_ended`, `wake_waits`, `pause_after_wake`, `complete_after_wake`) changes nothing unless the assignment is still `active`, so a pause or abandon the user set while the wake ran is kept.
-- **Nothing reaches the user from here yet.** `Finished.notices` lists `(kind, ref)` for `handoff`, `report`, `budget_low`, `paused`, `completion` and `closed`, recorded on the `wake_finished` event; the bell producers write them on the same transaction (notices stage). A wake's answer is also kept out of conversation recall (`auto_index_conversations` skips `NO_DELIVERY_SOURCE_TYPES`), and a policy refusal on a wake posts no alert: the failure is the wake's to count.
+- **What reaches the user is a bell notice.** `Finished.notices` lists `(kind, ref)` for `handoff`, `report`, `budget_low`, `paused`, `completion` and `closed`, recorded on the `wake_finished` event and written to the bell on the same transaction; `finish_wake` delivers them after commit. A wake's answer is kept out of conversation recall (`auto_index_conversations` skips `NO_DELIVERY_SOURCE_TYPES`), and a policy refusal on a wake posts no alert: the failure is the wake's to count.
+
+## Notices
+
+`notifications/resolvers/assignment.py`, source `assignment`, push label "Assignments". Keys are `<kind>:<assignment id>`, plus `:<action id>` for `handoff` and `:<event id>` for `report`.
+
+- **Two close rules in one source.** `report` and `closed` close on being seen. `handoff`, `paused`, `completion` and `budget_low` stay until their condition clears; the source is `auto_resolve_on_seen` and names those four prefixes in `kept_until_dismissed`, which keeps them out of the seen close and the 14-day sweep. `is_open` is the one close predicate: a hand-off still open, a system pause still in place, a completion still waited on, `budget_low_sent` still set, none of them on a terminal assignment. `settle(conn, id)` runs it and resolves what cleared; lifecycle calls it inside `pause`, `resume`, `abandon`, `topup`, `close` and `complete_handoff`, and `_finish` calls it after the decision. The resolver running the same predicate is the backstop. A seen kind stays open on a terminal assignment, so a report from the last wake is not closed unread.
+- **Producers.** `_finish` writes every notice it lists; `dispatch_due` writes the pre-wake budget pause and delivers it after that assignment's commit; `_record_finish_failed` writes the `failures` pause; `close --completed` writes `closed` with no alert delivery, since the user is in the chat that closed it. A pause the user set is not a notice.
+- **What a push carries.** Titles name the assignment (user-set, flattened, 80 characters). Bodies may carry a wake's words (step, report, summaries, completion evidence, last error), flattened and capped at 500 characters, and stay in the bell: every result goes through `_common.pushing_only` with `PUSH_POINTER`, so the alert route never carries them.
 
 ## Pickup and the wake prompt
 

@@ -48,6 +48,7 @@ from istota import db
 from istota.assignments import budget, charter, lifecycle, scratchpad, store, validators
 from istota.assignments import prompt as assignment_prompt
 from istota.assignments.charter import iso_z
+from istota.notifications.resolvers import assignment as assignment_notices
 from istota.relay.requests import write_transaction
 
 if TYPE_CHECKING:
@@ -196,7 +197,10 @@ def _resolved_model_brain(
 
 def _dispatch_one(
     conn: sqlite3.Connection, config: "Config", assignment_id: int, now: datetime,
+    raised: list,
 ) -> CreatedWake | None:
+    """Decide one assignment and wake it. A budget pause's bell row goes into
+    `raised`, for the caller to deliver once this transaction has committed."""
     with write_transaction(conn):
         assignment = store.get_assignment(conn, assignment_id)
         if assignment is None:
@@ -210,6 +214,7 @@ def _dispatch_one(
             return None
         if not budget.check_before_wake(conn, assignment):
             lifecycle.pause_for_budget(conn, assignment_id)
+            raised.extend(assignment_notices.write_notices(conn, assignment_id, [("paused", "budget")]))
             logger.info("assignment %d paused: budget spent", assignment_id)
             return None
 
@@ -255,15 +260,19 @@ def dispatch_due(
             "SELECT id FROM assignments WHERE state IN ('sleeping', 'waiting') ORDER BY id",
         ).fetchall()
     ]
+    from istota.notifications.store import deliver_pending
+
     created: list[CreatedWake] = []
     for assignment_id in candidates:
+        raised: list = []
         try:
-            made = _dispatch_one(conn, config, assignment_id, moment)
+            made = _dispatch_one(conn, config, assignment_id, moment, raised)
             conn.commit()
         except Exception:
             conn.rollback()
             logger.exception("assignment %d: could not create its wake; skipped", assignment_id)
             continue
+        deliver_pending(config, raised)
         if made is not None:
             created.append(made)
     return created
@@ -435,9 +444,11 @@ class Finished:
     state: str | None
     #: `(kind, ref)` for every notice the user must see: `handoff` (action id),
     #: `report` (event id), `budget_low`, `paused` (reason), `completion`,
-    #: `closed`. Recorded on the `wake_finished` event; the bell producers are
-    #: the notices stage's, and write these on this same transaction.
+    #: `closed`. Recorded on the `wake_finished` event and written to the bell
+    #: on the same transaction.
     notices: list[tuple[str, object]]
+    #: The bell rows those notices wrote, for `deliver_pending` after commit.
+    raised: tuple = ()
 
 
 def finish_wake(
@@ -453,6 +464,8 @@ def finish_wake(
     a failed finish ends the wake `failed` and pauses the assignment
     (`failures`), so it does not wake again on a broken path.
     """
+    from istota.notifications.store import deliver_pending
+
     now = datetime.now(timezone.utc)
     try:
         with db.get_db(config.db_path) as conn:
@@ -460,7 +473,8 @@ def finish_wake(
                 wake = _wake_for(conn, task, wake_id)
                 if wake is None or wake.ended_at is not None:
                     return False
-                _finish(conn, config, wake, task, outcome, now)
+                finished = _finish(conn, config, wake, task, outcome, now)
+        deliver_pending(config, finished.raised)
         return True
     except Exception:
         logger.exception("could not finish assignment wake %s (task %s)",
@@ -588,7 +602,9 @@ def _finish(
             "state": state, "notices": [list(n) for n in notices],
         },
     )
-    return Finished(wake.id, assignment.id, wake_outcome, signals, state, notices)
+    raised = assignment_notices.write_notices(conn, assignment.id, notices)
+    assignment_notices.settle(conn, assignment.id)
+    return Finished(wake.id, assignment.id, wake_outcome, signals, state, notices, tuple(raised))
 
 
 def _run_validators(
@@ -849,6 +865,9 @@ def _record_finish_failed(config: "Config", *, wake_id: int | None, task: db.Tas
     """End the wake as failed, leave a `finish_failed` event and pause the
     assignment (`failures`), so neither the reaper nor the gate retries a
     broken finish every tick. Best-effort."""
+    from istota.notifications.store import deliver_pending
+
+    raised: list = []
     try:
         with db.get_db(config.db_path) as conn:
             with write_transaction(conn):
@@ -859,10 +878,14 @@ def _record_finish_failed(config: "Config", *, wake_id: int | None, task: db.Tas
                 store.insert_event(
                     conn, wake.assignment_id, kind="finish_failed", actor="system", wake_id=wake.id,
                 )
-                lifecycle.pause_after_wake(
+                if lifecycle.pause_after_wake(
                     conn, wake.assignment_id, wake_id=wake.id, reason="failures",
                     detail={"finish_failed": True},
                     from_states=("active", "sleeping", "waiting"),
-                )
+                ):
+                    raised = assignment_notices.write_notices(
+                        conn, wake.assignment_id, [("paused", "failures")],
+                    )
+        deliver_pending(config, raised)
     except Exception:
         logger.exception("could not record the failed finish of assignment wake %s", wake_id)
