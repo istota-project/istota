@@ -55,6 +55,7 @@ const sidebars: SidebarsConfig = {
         'features/servarr',
         'features/web-interface',
         'features/files',
+        'features/sharing',
         'features/search',
         'features/notifications',
         'features/relay',

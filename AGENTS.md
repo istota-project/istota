@@ -33,6 +33,7 @@ Subsystems:
 - `transport.md` — Transport seam over messaging surfaces (Talk, email, web chat, SMS and WhatsApp ship; Matrix designed-for), plus the room model, phone rooms (SMS and private WhatsApp: mint, transcript writes, backfill) and multiplayer rooms (speech gate, participants, host and guests, audience, epochs, shared-room delivery refusal)
 - `sms.md` — provider-neutral SMS surface, Twilio and Telnyx adapters, delivery states, switching, and the user's private SMS room
 - `whatsapp.md` — WhatsApp surface behind a provider seam: the common half (adapter-native identity, the one-send ledger, parked status, opt-out, the private chat's room), Meta's Cloud API adapter (signed webhook, 24-hour window, templates, cost controls) and the Baileys adapter (paired session, Node sidecar, QR pairing)
+- `sharing.md` — open-protocol sharing: ICS feeds, Istota's own calendar (invitations or a feed), Open Cloud Mesh folder shares (receiving, accept and decline, remote notifications), where each secret lives, the Files page's shared folders and the known gaps
 - `relay.md` — relay questions between users: destinations (room, WhatsApp, SMS), the recipient preference, clean-turn approval, per-surface answers and returns
 - `web-chat.md` — web chat surface: rooms, composer, drafts, send durability, message replies, room-event stream, read-only phone rooms
 - `web-ui.md` — web UI backend: route/endpoint map, admin Logs + Configuration panes, settings/module-services split
@@ -117,6 +118,7 @@ src/istota/
 │   └── provision.py      # Default Talk rooms (general/logs/alerts) for a user → leaf-modules.md
 ├── prompts/              # Loaders for the system half's standing instructions
 │   └── persona.py        # The operator persona at `{root}/PERSONA.md`: shipped digests, the conffile sync, the last good copy → prompts.md
+├── sharing/              # Shared with Istota over open protocols: sources (the `shared_sources` store and its reach), ics (feeds and their poll), events (Istota's calendar and its feed token), itip (invitations and replies), ocm and ocm_routes (Open Cloud Mesh), feed_routes (the public calendar feed) → sharing.md
 ├── relay/                # Relay questions between users: relays, destinations, requests (the `whatsapp_skill_requests` table) → relay.md
 ├── sandbox/              # A task's runtime and its boundaries → sandbox.md
 │   ├── task_env.py       # `build_task_runtime`: one task's env, the credential split, the proxies, the bind list → sandbox.md

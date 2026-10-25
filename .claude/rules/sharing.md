@@ -1,0 +1,71 @@
+---
+paths:
+  - "src/istota/sharing/**"
+  - "src/istota/skills/shares/**"
+  - "src/istota/skills/calendar/**"
+  - "src/istota/notifications/resolvers/shared_source.py"
+  - "web/src/lib/components/settings/SharingCard.svelte"
+---
+
+# Sharing with Istota
+
+Open protocols beside the bot-account share (`.claude/rules/web-ui.md`, "The Nextcloud connection card"), which stays: an ICS feed a user subscribes Istota to, Istota's own calendar (invitations or a feed), and Open Cloud Mesh folder shares. User docs: `docs/features/sharing.md`. The design is the open-protocol-sharing spec; its `## Decisions` section holds the rejected alternatives.
+
+## Shared sources
+
+`sharing/sources.py` is the `shared_sources` store: one row per ICS feed (`ics_feed`) or OCM share (`ocm_share`), keyed `UNIQUE (user_id, kind, remote_key)` (a feed's key is the SHA-256 of its normalized URL, a share's `<sender host>|<providerId>`). Every function takes the owner's `user_id` in the statement, so another user's id reads as absent. The two cross-user reads are named for their one caller each: `due_sources` (the poller) and `shares_for_provider` (`receive_notification`, which matches the secret afterwards).
+
+States: `pending` (an offer), `active`, `error` (reachable, last use failed), `declined`, `revoked`. A feed starts `active`, an offer `pending`; `_TRANSITIONS` is the whole lifecycle and anything else raises. **A move into `declined` or `revoked` deletes every secret in the same transaction** (`_remove_secrets`): the `shared_source` secrets `<id>` and `<id>:reoffer`, the `ocm_share_<id>` local credential and the feed's `shared_feed_cache` row. The row itself stays, so a repeat of the same resource is recognized: a removed feed added again reactivates, a revoked share offered again becomes `pending`, a declined one stays declined.
+
+**Where the secret lives follows who reads it.** A feed URL, and an OCM secret held while pending or re-offered, are `secrets` rows under service `shared_source`, read with `get_secret(touch=False)`; daemon-owned like `mail_account`, so not in `credentials/schema.py`. An accepted share's secret is a local credential `ocm_share_<id>` bound to `https://<sender host>`, because a skill reads it, and the private credential channel, the snapshot, the fetch budget, the broker grant and `vault_isolation_refusal` already enforce everything such a read needs. It shows in Settings > Credentials, the KeePass export and the backups, which was accepted. `ocm_share_` is in `credentials/local._RESERVED_PREFIXES`; only `sharing/ocm.py` passes `system_prefix="ocm_share_"`, so the user's edit form can change the grant and delete it, never the value or site.
+
+**Reach is ISSUE-576's, with no per-source room policy.** `sources_for_task(conn, task, *, kind, skill_index)` is the one task-side listing: nothing when the kind's scope (`calendar` for feeds, `shares` for shares, `KIND_SCOPE`) is withheld or the skill is not in the index. The system-half lines (`Other calendars ...`, `Shared folders ...`, ids and hosts only, through `executor._one_line`) are left out under `rooms.scopes.ambient_memory_off`, which is also true in any group-owned room; an email thread room keeps them. Third-party names never reach the system half.
+
+`user_profiles.delete_profile` calls `sources.delete_for_user` and `events.delete_for_user` on its own connection, so a deleted account leaves no row, secret, credential, cache, event, invitation or feed token.
+
+## Fetching
+
+Every daemon-side fetch to a host a user or a remote server chose goes through `sandbox/guarded_http.guarded_send` (`.claude/rules/sandbox.md`) with `[sharing] private_hosts` (exact names, `config._warn_malformed_private_hosts`). Failures become one fixed code in `last_reason` (`host_refused`, `too_large`, `redirect_refused`, `connection_failed`, `timeout`, `http_<status>`, `not_a_calendar`, `share_revoked`, `secret_missing`, `secret_unreadable`); response text, a URL's path or query and any secret never reach a log, a row or an exception.
+
+## ICS feeds
+
+`sharing/ics.py`. Added only in the web UI (`POST /settings/sharing/feeds`, body parsed by hand, since a 422 would echo the URL): one guarded fetch (`max_redirects=3`, `ics_max_bytes`), `icalendar` validation, then row, secret and cache in one transaction, capped by `ics_max_feeds_per_user` before the fetch and again under the write lock. No task verb adds one, because the URL would sit in tool-call arguments and transcripts. The `sharing-ics-poll` gate looks every minute for rows whose `next_poll_at` has come; each feed is polled every `ics_poll_interval` with conditional GET, backed off by `feeds/poller._backoff_interval` and `_rate_limit_interval`, and keeps its last good cache through failures. With no master key the poll does nothing, so a key outage cannot revoke every feed. Tasks read `shared_feed_cache`, never the network (the calendar skill, `.claude/rules/skills.md`). Feeds deliberately stay out of `executor.discover_calendars_for_task`, whose result gates the bot account's CalDAV credential (ISSUE-673).
+
+## Istota's calendar and its delivery
+
+`sharing/events.py`: `istota_events` rows (UTC, single events, UID `<uuid4>@<site host>`) written only by the deferred op file `task_<id>_istota_events.json` (`scheduler_deferred._process_deferred_istota_events`, `.claude/rules/scheduler.md`), user from the task, at most `[sharing] events_per_task` entries applied whatever the file says. `user_profiles.calendar_delivery` is `invite` (default) or `feed`, never both, since both shows each event twice; `[email] enabled = false` forces `feed`.
+
+The feed is `GET /istota/calendar/<token>.ics` (`sharing/feed_routes.py`): no session, the token stored as its SHA-256 digest (`calendar_feed_tokens`, one live per user), 404 for an unknown one, an ETag, and `lib/rate_limit.SlidingWindow` at 120 an hour per token and 600 per client address (a hosted calendar service polls many users from one address). nginx's `location ^~ /istota/calendar/` has `access_log off`, because the path is the token.
+
+Invitations (`sharing/itip.py`): one mail per UID per apply, through `mail/outbound_policy.recipients_require_hold` and `skills/email.send_email(..., calendar=(method, ics))`, the one daemon send path, sent after the apply's commit with no lock held. There is no retry: a failure records `invite_status = 'send_failed'` and a fixed-text `task_alert`; a user with no address gets `no_address` and one alert. Inbound, `Email.calendar_parts` carries every `text/calendar` or `application/ics` part (4 parts, 256 KiB each). A `METHOD:REPLY` for one of our UIDs is always consumed (`routing_method="itip_reply"`, no task) and applied only when `_answer_refusal` passes, the authenticated From is the owner's and the single ATTENDEE matches; without `[email] authserv_id` none is ever applied. A `REQUEST`/`CANCEL` admitted unheld, DMARC-passing and from its ORGANIZER is recorded in `received_invitations`, keyed on the authenticated sender; nothing is ever sent back.
+
+## OCM receiving
+
+`sharing/ocm.py` and `sharing/ocm_routes.py`, served on `[site] hostname` at the root (`/ocm-provider[/]`, `/.well-known/ocm`, `/ocm/shares`, `/ocm/notifications`). The router is always included and answers a plain 404 per request while `[sharing.ocm] enabled` is off; nginx always routes the paths. `load_config` refuses OCM when the site host is `[nextcloud] url`'s. These are the web app's only fully unauthenticated routes, so the order in `receive_share` is fixed and each step writes nothing on refusal: body shape (400), rate limits before any outbound request or user lookup (429), sender verification by its discovery document and, where it publishes a `publicKey`, a draft-cavage signature (403), recipient (one 404 body for an unknown host and an unknown user, after step 3), the WebDAV base from the verified discovery document only, then the store. Istota publishes no key and signs nothing: Nextcloud 31 stores a host's key on the first signed request and refuses unsigned ones from it afterwards, so signing is a one-way switch a later change must make for every request at once.
+
+A repeat offer for an `active` share never touches it: the new secret is held under `<id>:reoffer` and `extras.reoffer_pending` is set, so a forged repeat cannot swap or interrupt a live share. The bell row (`notifications/resolvers/shared_source.py`, dedup key `pending-offers`, one per user, object-backed on waiting offers) has fixed text with no sender word (#638), handed to the daemon with `hand_to_daemon` because the web process may not send (ISSUE-702).
+
+**Expected noise for operators**: after any answer but 201, Nextcloud retries on the legacy `/ocs-provider/` and `/ocs/v2.php/cloud/shares` with the secret in the form body; those stay 404 with no location, and the access log records only the path. A Nextcloud caches a discovery result 24 h after a success and 5 min after a failure.
+
+## Accept, decline, remove, notifications
+
+`accept` refuses under `vault_isolation_refusal` before any request, PROPFINDs the root with the held secret (the proof that the verified host accepts it; 401/403/404 leave it pending), reads `oc:permissions` (`C`, `K` or `W` is write; the offer's permission field is a placeholder), re-reads the row and secret under the write lock (`offer_changed` if a repeat replaced either), then creates or updates the local credential and sets `active` in one transaction, and posts `SHARE_ACCEPTED` after the commit. `decline` posts `SHARE_DECLINED`, which makes Nextcloud delete the share; declining a re-offer posts nothing, since that would delete the live share. `remove` revokes and posts `SHARE_DECLINED`. `expire_pending` declines pending rows `pending_days` after their last offer and posts nothing. The bell offers a `detail_only` Accept only when exactly one offer waits, never Decline, since a bell action cannot ask for confirmation.
+
+`POST /ocm/notifications` acts only on a constant-time secret match against the share's stored secret, then the same rate limits and sender verification: `SHARE_UNSHARED` revokes, `RESHARE_CHANGE_PERMISSION` re-reads `oc:permissions`, anything else is 501. Nextcloud sends no notification on a permission change, which is why the `shares` skill re-reads permissions on every invocation (`.claude/rules/skills.md`).
+
+## The Files page
+
+An `active` or `error` share is a `share:<id>` place (`workspace/places.py`): no root, `browsable` false, `remote: {host, access}` in the places payload and nothing else about it. `/list`, pins and `chat_files.servable_roots` refuse it through the checks they make for Talk. Reach is `skill` in a private room and on a member's turn when `shares` is advertised, `none` for a guest or an unasked task; the note names the host, access and place id. Browsing would put the share secret into web-process WebDAV calls and is later work.
+
+## Doctor
+
+`sharing.ics_feeds` and `sharing.ocm` are in `.claude/rules/doctor.md`.
+
+## Known gaps
+
+- A held re-offer of an active share never expires: `expire_pending` covers pending rows, and `reoffer_pending` carries no timestamp. It waits until the user accepts or declines it.
+- No bell row or push when a remote `SHARE_UNSHARED` or the `shares` skill revokes a share; the card shows it gone on the next load. The resolver is object-backed on waiting offers and would close such a row at once, so it needs resolver behaviour of its own.
+- An `error` share has no backoff: there is no poller for shares, so the next invocation retries; `error_count` still counts.
+- A share's `ls` path (`share:<id>:<path>`) carries the sharer's file name unfenced, since the model passes it back.
+- No provider-captured iTIP REPLY fixtures; the tests use ones built from RFC 6047 and RFC 5546.
+- `feeds/poller.py` and the heartbeat `url-health` check still fetch user-chosen URLs without `guarded_send` (the spec's open question 6).
