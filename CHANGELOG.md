@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.47.0] - 2026-10-25
+
 Briefings can now go to a whole group. A group owner drafts one with a prompt or the block editor, previews it, and each run produces one edition that reaches every member by email, Talk or ntfy, with personal sources used only after their owner approves. All users is a built-in group of every account, and the old default briefings move into it. The Istota iOS app gets push notifications for chat and the inbox with a badge, one-tap location tracking, voice tasks and quick notes, and opens the room a tapped alert came from.
 
 You can connect your own mail accounts and read one in a briefing. The money module keeps the work log and invoices in its database, generates and voids invoices from the web, and exports the work log. The new servarr skill and `!arr` request films, shows and albums. Admins get pages for every user's scheduled jobs and briefings, and see where each credential is kept. Text files in Files can be edited, PDFs zoom, and a shared location shows a map in web chat, Talk and WhatsApp. This release is 560 commits, against 66 in 0.46.0 and 53 in 0.45.0; the rest is web UI consistency, security fixes for links planted in the workspace, and fixes to mail and the admin pages.
@@ -3373,7 +3375,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://github.com/istota-project/istota/compare/v0.46.0...main
+[Unreleased]: https://github.com/istota-project/istota/compare/v0.47.0...main
+[0.47.0]: https://github.com/istota-project/istota/releases/tag/v0.47.0
 [0.46.0]: https://github.com/istota-project/istota/releases/tag/v0.46.0
 [0.45.0]: https://github.com/istota-project/istota/releases/tag/v0.45.0
 [0.44.0]: https://github.com/istota-project/istota/releases/tag/v0.44.0
