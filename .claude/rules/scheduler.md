@@ -71,7 +71,7 @@ Deliver results outside the DB context.
 
 Sandboxed tasks have no DB, so they and skill CLIs write JSON to the temp dir and the scheduler replays it after success only. Handlers live in `scheduler_deferred.py`. Identity always comes from the task, never the JSON.
 
-- `_process_deferred_subtasks`: admin-only (others deleted), `source_type="subtask"`, inherits `queue`.
+- `_process_deferred_subtasks`: admin-only (others deleted), `source_type="subtask"`, inherits `queue`. Refused for an `assignment` wake (file deleted, a `subtasks_refused` assignment event), since a child would carry no `assignment_id` and escape the budget.
 - `_process_retired_deferred_files`: deletes `_RETIRED_DEFERRED_SUFFIXES` files (`tracked_transactions`, ISSUE-427, fed dead framework tables). Runs first; must precede `_warn_unconsumed_deferred_files`. The suffix stays in `_KNOWN_DEFERRED_SUFFIXES` (purge still clears it) but not in the `expected name:` hint.
 - `_process_deferred_sent_emails`: `sent_emails` rows, which thread replies onto the bot's sends and mint their rooms (`threads.register_sent_thread`).
 - `_process_deferred_kg_ops`: commits per op.

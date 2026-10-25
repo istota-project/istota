@@ -235,6 +235,25 @@ def _process_deferred_subtasks(
         path.unlink(missing_ok=True)
         return 0
 
+    # A wake's children would run outside its queue with no assignment_id, so
+    # nothing they spend would reach the assignment's budget.
+    if task.source_type == "assignment":
+        logger.warning(
+            "Assignment wake task %d asked for %d deferred subtask(s); "
+            "a wake may not spawn subtasks, ignoring",
+            task.id, len(data),
+        )
+        path.unlink(missing_ok=True)
+        if task.assignment_id is not None:
+            from istota.assignments import store as assignment_store
+            with db.get_db(config.db_path) as conn:
+                assignment_store.insert_event(
+                    conn, task.assignment_id, kind="subtasks_refused", actor="system",
+                    payload={"task_id": task.id, "count": len(data)},
+                )
+                conn.commit()
+        return 0
+
     # `task.user_id` is pinned onto every subtask below and does not vary
     # across the loop, so an id `db.create_task` refuses fails all of them
     # identically — and would escape into `_drain_deferred_ops` (ISSUE-402),

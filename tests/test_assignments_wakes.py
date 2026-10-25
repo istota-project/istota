@@ -1378,3 +1378,30 @@ class TestTheLoopThroughProcessOneTask:
         assert (second.assignment_id, second.fired_by) == (a, "inbox")
         with db.get_db(config.db_path) as conn:
             assert store.get_wake(conn, second.wake_id).seq == 2
+
+
+class TestAWakeSpawnsNoSubtasks:
+    def test_deferred_subtasks_from_a_wake_are_refused_and_recorded(self, config, tmp_path):
+        import json
+
+        from istota.scheduler_deferred import _process_deferred_subtasks
+
+        a = _live(config)
+        made = _start(config, a)
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, made.task_id)
+        config.admin_users = {"alice"}
+        user_temp = tmp_path / "deferred"
+        user_temp.mkdir()
+        path = user_temp / f"task_{task.id}_subtasks.json"
+        path.write_text(json.dumps([{"prompt": "Go research quotes"}]))
+
+        assert _process_deferred_subtasks(config, task, user_temp) == 0
+
+        assert not path.exists()
+        with db.get_db(config.db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE parent_task_id = ?", (task.id,),
+            ).fetchone()[0] == 0
+            refused = [e for e in store.list_events(conn, a) if e.kind == "subtasks_refused"]
+        assert [e.payload for e in refused] == [{"task_id": task.id, "count": 1}]
