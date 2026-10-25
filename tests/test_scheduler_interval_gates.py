@@ -128,6 +128,7 @@ EXPECTED_BACKGROUND = {
     "whatsapp-requests",
     "room-notices",
     "phone-room-backfill",
+    "assignments",
     "sleep-cycles",
     "travel-timezone",
     "email-poll",
@@ -399,7 +400,9 @@ class TestTheEnablingConditions:
         on.experimental.features = ["skill_assignment"]
         assert gate.enabled(off) is False
         assert gate.enabled(on) is True
-        assert not gate.background
+        # Off the dispatch thread: it sends notices and touches the mount.
+        assert gate.background
+        assert not gate.overlap_expected
         assert not gate.one_shot
 
     def test_email_follows_the_email_switch(self):

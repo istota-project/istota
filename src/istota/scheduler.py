@@ -10501,12 +10501,15 @@ def build_interval_gates(
         # Assignment wakes: finish orphaned ones, then create the due ones.
         # Daemon only, not `one_shot`: the wake runs on the daemon's
         # assignment lane, and a single `istota run` pass is not where an
-        # unattended goal should start spending.
+        # unattended goal should start spending. Off the dispatch thread: a
+        # finish reads and writes the scratchpad and validated files on the
+        # mount, and both halves send bell notices (ISSUE-143).
         IntervalGate(
             name="assignments",
             run=_assignments,
             field="briefing_check_interval",  # mismatch: not a briefing
             enabled=lambda c: c.experimental.is_enabled("skill_assignment"),
+            background=True,
             on_error="Error checking assignments: %s",
         ),
         # Off the dispatch thread (ISSUE-144 Tier 2): extraction makes
