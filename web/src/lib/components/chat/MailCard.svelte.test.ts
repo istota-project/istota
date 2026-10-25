@@ -277,6 +277,26 @@ describe('an outgoing card', () => {
     expect(card().querySelector('a[href="https://example.com/menu"]')).toBeNull();
   });
 
+  // #831: a mail with an HTML part reads in the recipient's client as its links.
+  it('renders the sent body when an HTML part went out', () => {
+    render(MailCard, {
+      card: sentCard({ ...sent, markdown: true }, 'See [the menu](https://example.com/menu)'),
+    });
+    const link = card().querySelector('.mail-body.markdown a[href="https://example.com/menu"]');
+    expect(link?.textContent).toBe('the menu');
+    expect(text()).not.toContain('](');
+  });
+
+  it('names the host of a mislabelled link on a rendered sent body', () => {
+    render(MailCard, {
+      card: sentCard(
+        { ...sent, markdown: true },
+        'Log in at [https://bank.example](https://evil.example/x)',
+      ),
+    });
+    expect(text()).toContain('https://bank.example (evil.example)');
+  });
+
   it('copies the first recipient', async () => {
     const writeText = vi.fn(async () => {});
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });

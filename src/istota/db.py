@@ -6659,12 +6659,13 @@ def set_email_note(conn: sqlite3.Connection, message_id: int, parts: dict) -> No
 
 def settle_draft_mail(
     conn: sqlite3.Connection, room_token: str | None, draft_id: int, *,
-    state: str, body: str | None = None,
+    state: str, body: str | None = None, markdown: bool | None = None,
 ) -> None:
     """Move the card of a held draft to ``state`` once the draft is decided.
 
     ``body`` is what was finally mailed, recorded when it differs from the row
-    (an edited draft). A draft held outside an email thread room has no card,
+    (an edited draft), and ``markdown`` whether that is converted from an HTML
+    part, which an edit can change (#831). A draft held outside an email thread room has no card,
     and this does nothing. Filtered on the room so the read uses its index; the
     thread send files the draft under the room it stamps.
     """
@@ -6680,6 +6681,10 @@ def settle_draft_mail(
         mail["state"] = state
         if body is not None and mailed_body_differs(row["body"], body):
             mail["body"] = body
+        if markdown is not None:
+            mail.pop("markdown", None)
+            if markdown:
+                mail["markdown"] = True
         set_outgoing_mail(conn, row["id"], mail)
 
 

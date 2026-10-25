@@ -617,7 +617,7 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
     """
     from istota import db
     from istota.mail.support import get_email_config
-    from istota.skills.email import plain_part, send_email
+    from istota.skills.email import text_part_is_markdown, plain_part, send_email
 
     with db.get_db(config.db_path) as conn:
         current = conn.execute(
@@ -772,7 +772,9 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
 
     # What a plain-text reader of the mail sees, which is what both the
     # thread's room and the draft's card record (ISSUE-770).
-    sent_text = plain_part(draft.body, content_type="html" if draft.html else "plain")
+    content_type = "html" if draft.html else "plain"
+    sent_text = plain_part(draft.body, content_type=content_type)
+    markdown = text_part_is_markdown(draft.body, content_type=content_type)
 
     # Everything from here runs *after* the mail has left. A failure is no
     # longer a send failure, and must never be reported as one — hence the
@@ -792,12 +794,13 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
             # thread room for its mail would wait for a reply that never
             # arrives through istota.
             if account_id is None:
-                _record_provenance(conn, config, draft, message_id, sent_text)
+                _record_provenance(conn, config, draft, message_id, sent_text,
+                                   markdown=markdown)
             # The card on the room's row for this mail, if it has one
             # (ISSUE-612). Swallowed for the same reason: a view of the send.
             try:
                 db.settle_draft_mail(conn, draft.room_token, draft_id,
-                                     state="sent", body=sent_text)
+                                     state="sent", body=sent_text, markdown=markdown)
             except Exception as e:  # noqa: BLE001 — the card is not the send
                 logger.warning("released draft %d but could not update its card: %s",
                                draft_id, e)
@@ -819,7 +822,7 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
 
 def _record_provenance(
     conn: sqlite3.Connection, config: "Config", draft: OutboundDraft,
-    message_id: str, sent_text: str,
+    message_id: str, sent_text: str, *, markdown: bool = False,
 ) -> None:
     """The `sent_emails` row and thread room a released bot-box draft gets.
 
@@ -853,6 +856,7 @@ def _record_provenance(
             in_reply_to=draft.in_reply_to, references=draft.references,
             to=list(draft.to_addrs), cc=list(draft.cc_addrs),
             subject=draft.subject, body=sent_text, task_id=draft.task_id,
+            markdown=markdown,
         )
     except Exception as e:  # noqa: BLE001 — provenance is not the send
         # Losing this row costs reply routing on this thread, not the send,

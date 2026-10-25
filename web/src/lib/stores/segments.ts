@@ -287,6 +287,7 @@ export interface ChatMessage {
     subject?: string;
     state: 'sent' | 'held' | 'failed' | 'discarded';
     body?: string;
+    markdown?: boolean;
     labels?: Record<string, string>;
     notePath?: string;
     discuss?: MailDiscuss;

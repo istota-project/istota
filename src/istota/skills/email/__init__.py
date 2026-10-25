@@ -805,6 +805,19 @@ def plain_part(
     return body
 
 
+def text_part_is_markdown(
+    body: str, *, content_type: str = "plain", html_body: str | None = None,
+) -> bool:
+    """Whether the text part `plain_part` returns for these arguments is
+    markdown converted from the HTML part sent beside it.
+
+    A sent-mail record carries it so the web card renders that text the way the
+    recipient's client shows the HTML (#831). A caller's own ``html_body``
+    comes with its own plain text (a briefing's), which is not markdown.
+    """
+    return content_type == "html" and not html_body and bool(body)
+
+
 def _set_body(
     msg: EmailMessage,
     body: str,
@@ -2650,7 +2663,7 @@ def _record_sent_email_direct(
     task_id: str, message_id: str, to_addr: str, subject: str, *,
     to: list[str] | None = None, cc: list[str] | None = None,
     in_reply_to: str | None = None, references: str | None = None,
-    body: str | None = None,
+    body: str | None = None, markdown: bool = False,
 ) -> None:
     """Record the sent email straight into the framework DB.
 
@@ -2720,7 +2733,7 @@ def _record_sent_email_direct(
                 conn, app_config, user_id=task.user_id, message_id=message_id,
                 in_reply_to=in_reply_to, references=references,
                 to=to if to is not None else [to_addr], cc=cc or [],
-                subject=subject, body=body, task_id=task.id,
+                subject=subject, body=body, task_id=task.id, markdown=markdown,
             )
     except Exception as e:  # noqa: BLE001 — the send already happened
         logger.warning("sent-email tracking: direct write failed: %s", e)
@@ -2729,7 +2742,7 @@ def _record_sent_email_direct(
 def _write_deferred_sent_email(
     message_id: str, to_addr: str, subject: str, *,
     cc: list[str] | None = None, in_reply_to: str | None = None,
-    references: str | None = None, body: str | None = None,
+    references: str | None = None, body: str | None = None, markdown: bool = False,
 ) -> None:
     """Record a sent email so a reply can be threaded back to its task, and
     the mail lands in its thread's room.
@@ -2752,6 +2765,7 @@ def _write_deferred_sent_email(
         _record_sent_email_direct(
             task_id, message_id, recipients, subject, to=[to_addr], cc=cc,
             in_reply_to=in_reply_to, references=references, body=body,
+            markdown=markdown,
         )
         return
 
@@ -2770,6 +2784,8 @@ def _write_deferred_sent_email(
         "conversation_token": conversation_token,
         "user_id": user_id,
     }
+    if markdown:
+        entry["markdown"] = True
 
     path = Path(deferred_dir) / f"task_{task_id}_sent_emails.json"
     # Append to existing file if multiple sends in one task
@@ -3210,6 +3226,7 @@ def cmd_send(args):
     _record_sent(
         account, message_id, args.to, args.subject, cc=cc,
         body=plain_part(body, content_type=content_type),
+        markdown=text_part_is_markdown(body, content_type=content_type),
     )
 
     return {
@@ -3310,6 +3327,7 @@ def cmd_reply(args):
         account, message_id, to_addr, subject, cc=cc, in_reply_to=orig.message_id,
         references=references or None,
         body=plain_part(body, content_type=content_type),
+        markdown=text_part_is_markdown(body, content_type=content_type),
     )
     return {
         "status": "ok",

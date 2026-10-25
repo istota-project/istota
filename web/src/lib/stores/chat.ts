@@ -2809,6 +2809,7 @@ function createSession(): ChatSession {
       subject: m.mail.subject || undefined,
       state: m.mail.state,
       body: m.mail.body || undefined,
+      markdown: m.mail.markdown === true || undefined,
       labels: m.mail.labels ?? undefined,
       notePath: m.mail.note_path || undefined,
       discuss: m.mail.discuss ?? undefined,
