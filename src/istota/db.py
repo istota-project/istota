@@ -157,6 +157,9 @@ class Task:
     # a room edited while this task runs cannot change what it is, and copied by
     # retries and subtasks. Outranks `[brain.source_type_overrides]`.
     brain: str | None = None
+    #: The assignment this task is a wake of (`assignments.id`); None for
+    #: every task that is not `source_type = 'assignment'`.
+    assignment_id: int | None = None
     # The namespace `model` was resolved in, frozen at creation beside it
     # (ISSUE-420). `executor._pin_origin_namespace` prefers it to inferring one
     # from `brain` or from the lane, because neither inference can tell a pin
@@ -484,7 +487,11 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # recoverable.
         "guest_participant_id": "INTEGER",
         "audience": "TEXT",
+        # Assignments: the wake's assignment. No backfill; no older task was one.
+        "assignment_id": "INTEGER",
     })
+    # The same for a wake's spend, so the ledger outlives the task row.
+    _add_columns(conn, "task_usage", {"assignment_id": "INTEGER"})
 
     # Sent emails: carry the originating task's resolved Talk room so
     # thread-match follow-ups can deliver to the right channel without re-resolving.
@@ -1634,6 +1641,10 @@ def create_task(
     talk_delivery_token: str | None = None,
     skill: str | None = None,
     skill_args: str | None = None,
+    assignment_id: int | None = None,
+    # None leaves the column's own default (3). An assignment wake passes 1:
+    # the assignment's next wake is its retry.
+    max_attempts: int | None = None,
 ) -> int:
     """Create a new task and return its ID.
 
@@ -1654,6 +1665,8 @@ def create_task(
             f"create_task: user_id {user_id!r} cannot name a per-user directory; "
             "it must be a non-empty path component other than '.' or '..'."
         )
+    if max_attempts is not None and max_attempts < 1:
+        raise ValueError(f"create_task: max_attempts must be at least 1, not {max_attempts}")
     if source_type == "briefing" and briefing_name:
         from istota.briefings.group_migrate import require_personal_schedule
         require_personal_schedule(conn, user_id, briefing_name)
@@ -1677,8 +1690,12 @@ def create_task(
             )
             return existing
 
+    # max_attempts is named only when set, so the schema stays the one place
+    # its default is written.
+    extra_columns = ", max_attempts" if max_attempts is not None else ""
+    extra_values = (max_attempts,) if max_attempts is not None else ()
     cursor = conn.execute(
-        """
+        f"""
         INSERT INTO tasks (
             prompt, command, user_id, source_type, conversation_token,
             parent_task_id, is_group_chat, attachments, priority, scheduled_for,
@@ -1687,8 +1704,8 @@ def create_task(
             about_room_token, host_absent, declinable,
             heartbeat_silent, skip_log_channel, scheduled_job_id, briefing_name,
             queue, model, effort, brain, model_namespace,
-            talk_delivery_token, skill, skill_args
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            talk_delivery_token, skill, skill_args, assignment_id{extra_columns}
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{", ?" * len(extra_values)})
         RETURNING id
         """,
         (
@@ -1724,6 +1741,8 @@ def create_task(
             talk_delivery_token,
             skill,
             skill_args,
+            assignment_id,
+            *extra_values,
         ),
     )
     task_id = cursor.fetchone()[0]
@@ -1746,7 +1765,8 @@ _TASK_COLUMNS = (
     "reply_to_content, reply_to_message_id, "
     "guest_participant_id, audience, about_room_token, host_absent, declinable, heartbeat_silent, skip_log_channel, scheduled_job_id, "
     "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
-    "brain, model_namespace, talk_delivery_token, skill, skill_args, whatsapp_confirmation_request_id"
+    "brain, model_namespace, talk_delivery_token, skill, skill_args, whatsapp_confirmation_request_id, "
+    "assignment_id"
 )
 
 
@@ -1806,6 +1826,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         talk_delivery_token=row["talk_delivery_token"],
         skill=row["skill"],
         skill_args=row["skill_args"],
+        assignment_id=row["assignment_id"],
     )
 
 
@@ -13549,6 +13570,7 @@ def insert_task_usage(
     effort: str = "",
     stop_reason: str = "",
     success: bool = False,
+    assignment_id: int | None = None,
 ) -> int:
     """Write one usage row plus its per-model children. Returns the parent id.
 
@@ -13595,14 +13617,14 @@ def insert_task_usage(
             conn, usage=usage, task_id=task_id, origin=origin, user_id=user_id,
             source_type=source_type, brain_kind=brain_kind,
             is_fallback=is_fallback, model=model, effort=effort,
-            stop_reason=stop_reason, success=success,
+            stop_reason=stop_reason, success=success, assignment_id=assignment_id,
         )
     except sqlite3.Error:
         return _insert_task_usage_once(
             conn, usage=usage, task_id=task_id, origin=origin, user_id=user_id,
             source_type=source_type, brain_kind=brain_kind,
             is_fallback=is_fallback, model=model, effort=effort,
-            stop_reason=stop_reason, success=success,
+            stop_reason=stop_reason, success=success, assignment_id=assignment_id,
         )
 
 
@@ -13620,6 +13642,7 @@ def _insert_task_usage_once(
     effort: str,
     stop_reason: str,
     success: bool,
+    assignment_id: int | None,
 ) -> int:
     """One attempt at the write. See `insert_task_usage` for the reasoning."""
     savepoint = f"usage_{uuid.uuid4().hex[:12]}"
@@ -13635,7 +13658,8 @@ def _insert_task_usage_once(
                 turns, model_requests, subagent_requests, compacted_requests,
                 initial_context_tokens, peak_context_tokens, context_window,
                 duration_ms, duration_api_ms, service_tier, session_id,
-                rate_limit_type, rate_limit_status, rate_limit_resets_at
+                rate_limit_type, rate_limit_status, rate_limit_resets_at,
+                assignment_id
             )
             SELECT
                 ?, COALESCE(MAX(attempt_seq), 0) + 1, ?, ?, ?, ?,
@@ -13645,7 +13669,8 @@ def _insert_task_usage_once(
                 ?, ?, ?, ?,
                 ?, ?, ?,
                 ?, ?, ?, ?,
-                ?, ?, ?
+                ?, ?, ?,
+                ?
             FROM task_usage WHERE task_id IS NOT NULL AND task_id = ?
             """,
             (
@@ -13665,6 +13690,7 @@ def _insert_task_usage_once(
                 _rate_limit_field(usage, "rateLimitType"),
                 _rate_limit_field(usage, "status"),
                 _rate_limit_field(usage, "resetsAt", numeric=True),
+                assignment_id,
                 task_id,
             ),
         )

@@ -1518,6 +1518,7 @@ def persist_brain_usage(
     effort: str = "",
     stop_reason: str = "",
     success: bool = False,
+    assignment_id: int | None = None,
 ) -> None:
     """Record one brain attempt's token/cost usage. Best-effort throughout.
 
@@ -1563,6 +1564,7 @@ def persist_brain_usage(
                 brain_kind=brain_kind, task_id=task_id, source_type=source_type,
                 is_fallback=is_fallback, model=model, effort=effort,
                 stop_reason=stop_reason, success=success,
+                assignment_id=assignment_id,
             )
         else:
             with db.get_db(config.db_path) as usage_conn:
@@ -1571,7 +1573,7 @@ def persist_brain_usage(
                     brain_kind=brain_kind, task_id=task_id,
                     source_type=source_type, is_fallback=is_fallback,
                     model=model, effort=effort, stop_reason=stop_reason,
-                    success=success,
+                    success=success, assignment_id=assignment_id,
                 )
     except Exception:
         logger.warning(
@@ -1598,13 +1600,14 @@ def _persist_task_usage(
     effort: str = "",
     stop_reason: str = "",
     success: bool = False,
+    assignment_id: int | None = None,
 ) -> None:
     """The task-shaped wrapper over `persist_brain_usage`."""
     persist_brain_usage(
         config, conn, usage=usage, origin="task", user_id=user_id,
         brain_kind=brain_kind, task_id=task_id, source_type=source_type,
         is_fallback=is_fallback, model=model, effort=effort,
-        stop_reason=stop_reason, success=success,
+        stop_reason=stop_reason, success=success, assignment_id=assignment_id,
     )
 
 
@@ -9093,6 +9096,7 @@ def execute_task(
                 effort=_primary_usage_result.effort_used or req.effort,
                 stop_reason=_primary_usage_result.stop_reason,
                 success=_primary_usage_result.success,
+                assignment_id=task.assignment_id,
             )
         _persist_task_usage(
             config, conn, task.id, brain_result.usage,
@@ -9102,6 +9106,7 @@ def execute_task(
             model=brain_result.model_used,
             effort=brain_result.effort_used or _usage_effort,
             stop_reason=brain_result.stop_reason, success=brain_result.success,
+            assignment_id=task.assignment_id,
         )
 
         # CM-aware / terse-result composition: reconcile result_text with
