@@ -538,3 +538,455 @@ class TestErrorReports:
         assert self._post(client, {"kind": "error", "message": 3}).status_code == 400
         assert self._post(client, {"kind": "error", "message": "x" * 20_000}).status_code == 413
         assert self._post(client, {"kind": "error", "message": "x"}, version=9).status_code == 404
+
+
+# -- the management routes ----------------------------------------------------
+
+
+def _manifest_text(app_id="board", capabilities=(), name="Board"):
+    caps = ", ".join(f'"{c}"' for c in capabilities)
+    return f'id = "{app_id}"\nname = "{name}"\nicon = "layout"\ncapabilities = [{caps}]\n'
+
+
+def _draft(apps_root, *, app_id="board", capabilities=(), index=INDEX, name="Board"):
+    folder = apps_root / app_id
+    folder.mkdir(exist_ok=True)
+    (folder / "manifest.toml").write_text(_manifest_text(app_id, capabilities, name))
+    (folder / "index.html").write_text(index)
+    return folder
+
+
+def _create_pending(client, app_id="board"):
+    return client.post(f"{PREFIX}/drafts/{app_id}/pending")
+
+
+def _approve(client, pending_id, new=(), app_id="board"):
+    return client.post(
+        f"{PREFIX}/{app_id}/pending/{pending_id}/approve", json={"new_capabilities": list(new)},
+    )
+
+
+@pytest.fixture
+def starter(apps_dir, monkeypatch):
+    """`board` as the one starter app, asking for calendar:read beyond the two every app has."""
+    monkeypatch.setattr(install, "STARTER_APPS", ("board",))
+
+    def build(index=INDEX, capabilities=("calendar:read",)):
+        write_build(apps_dir, {"board": {
+            "manifest.toml": _manifest_text("board", capabilities), "index.html": index,
+        }})
+        kit.reset_cache()
+
+    build()
+    return build
+
+
+class TestTheMutatingRoutesCheckTheOrigin:
+    def test_every_route_but_a_read_takes_verify_origin(self):
+        def depends_on(dependant, target):
+            return any(d.call is target or depends_on(d, target) for d in dependant.dependencies)
+
+        checked = 0
+        for route in routes.router.routes:
+            if route.methods - {"HEAD"} == {"GET"}:
+                continue
+            checked += 1
+            assert depends_on(route.dependant, routes.verify_origin), route.path
+        assert checked >= 10
+
+
+class TestList:
+    def test_an_empty_install(self, config, client):
+        resp = client.get(f"{PREFIX}/")
+        assert resp.status_code == 200
+        assert resp.json() == {"apps": [], "pending": [], "drafts": [], "starter": [], "kit_built": True}
+
+    def test_with_the_module_off_it_is_404(self, config, client):
+        config.users[USER].disabled_modules = ["apps"]
+        assert client.get(f"{PREFIX}/").status_code == 404
+        assert client.get(f"{PREFIX}/storage").status_code == 404
+        assert _create_pending(client).status_code == 404
+
+    def test_lists_installed_apps_with_their_display_range_and_pending_mark(self, config, apps_root, client):
+        _install(config, apps_root, capabilities=["calendar:read"])
+        body = client.get(f"{PREFIX}/").json()
+        assert body["apps"] == [{
+            "app_id": "board", "name": "Board", "icon": "layout", "description": "",
+            "origin": "draft", "current_version": 1, "narrowest": "phone",
+            "pending_id": None, "ungranted": [],
+        }]
+        _draft(apps_root, index=INDEX.replace("v1", "v2"))
+        pending_id = _create_pending(client).json()["pending_id"]
+        body = client.get(f"{PREFIX}/").json()
+        assert body["apps"][0]["pending_id"] == pending_id
+        assert [(p["pending_id"], p["app_id"], p["name"]) for p in body["pending"]] == [(pending_id, "board", "Board")]
+
+    def test_drafts_are_listed_when_new_or_changed(self, config, apps_root, client):
+        _install(config, apps_root)
+        _draft(apps_root, app_id="tides", name="Tides")
+        body = client.get(f"{PREFIX}/").json()
+        assert body["drafts"] == [{"app_id": "tides", "name": "Tides", "has_manifest": True, "state": "new"}]
+
+        (apps_root / "board" / "index.html").write_text(INDEX.replace("v1", "v2"))
+        body = client.get(f"{PREFIX}/").json()
+        assert [(d["app_id"], d["state"]) for d in body["drafts"]] == [("board", "changed"), ("tides", "new")]
+
+    def test_a_file_the_build_never_read_does_not_mark_a_draft_changed(self, config, apps_root, client):
+        _install(config, apps_root)
+        (apps_root / "board" / "notes.txt").write_text("scratch")
+        data = apps_root / "board" / "data"
+        data.mkdir()
+        (data / "x.json").write_text("{}")
+        assert client.get(f"{PREFIX}/").json()["drafts"] == []
+
+    def test_a_draft_waiting_as_a_pending_install_shows_once_until_it_changes_again(self, config, apps_root, client):
+        _draft(apps_root, app_id="tides", name="Tides")
+        assert _create_pending(client, "tides").status_code == 201
+        body = client.get(f"{PREFIX}/").json()
+        assert body["drafts"] == []
+        assert [p["app_id"] for p in body["pending"]] == ["tides"]
+
+        (apps_root / "tides" / "index.html").write_text(INDEX.replace("v1", "v2"))
+        body = client.get(f"{PREFIX}/").json()
+        assert [(d["app_id"], d["state"]) for d in body["drafts"]] == [("tides", "new")]
+        assert [p["app_id"] for p in body["pending"]] == ["tides"]
+
+    def test_starter_apps_are_seeded_on_the_first_visit_per_process(self, config, client, starter):
+        body = client.get(f"{PREFIX}/").json()
+        assert body["starter"] == [{"app_id": "board", "state": "installed"}]
+        assert body["apps"][0]["origin"] == "starter"
+        assert body["apps"][0]["ungranted"] == ["calendar:read"]
+
+        # A new build is not looked at again by this process...
+        starter(index=INDEX.replace("v1", "v2"))
+        assert client.get(f"{PREFIX}/").json()["apps"][0]["current_version"] == 1
+        # ...but the next process upgrades it.
+        fresh = TestClient(_make_app(config))
+        assert fresh.get(f"{PREFIX}/").json()["apps"][0]["current_version"] == 2
+
+    def test_without_the_kit_starters_are_unavailable_and_seeded_once_it_is_built(self, config, client, starter, apps_dir):
+        (apps_dir / "manifest.json").unlink()
+        kit.reset_cache()
+        resp = client.get(f"{PREFIX}/")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["kit_built"] is False
+        assert body["apps"] == []
+        assert body["starter"] == [{"app_id": "board", "state": "unavailable"}]
+
+        starter()
+        body = client.get(f"{PREFIX}/").json()
+        assert body["kit_built"] is True
+        assert body["starter"] == [{"app_id": "board", "state": "installed"}]
+
+    def test_a_dismissed_starter_is_listed_and_can_be_reinstalled(self, config, client, starter):
+        client.get(f"{PREFIX}/")
+        assert client.delete(f"{PREFIX}/board").status_code == 204
+        body = client.get(f"{PREFIX}/").json()
+        assert body["apps"] == []
+        assert body["starter"] == [{"app_id": "board", "state": "dismissed"}]
+
+        resp = client.post(f"{PREFIX}/starter/board/reinstall")
+        assert resp.status_code == 200
+        assert resp.json() == {"app_id": "board", "status": "installed"}
+        assert client.get(f"{PREFIX}/").json()["starter"] == [{"app_id": "board", "state": "installed"}]
+
+    def test_reinstall_of_an_app_that_is_not_a_starter_is_404(self, config, client, starter):
+        assert client.post(f"{PREFIX}/starter/tides/reinstall").status_code == 404
+
+    def test_reinstall_without_the_kit_is_503(self, config, client, starter, apps_dir):
+        client.get(f"{PREFIX}/")
+        client.delete(f"{PREFIX}/board")
+        (apps_dir / "manifest.json").unlink()
+        kit.reset_cache()
+        resp = client.post(f"{PREFIX}/starter/board/reinstall")
+        assert resp.status_code == 503
+        assert resp.json()["error"] == "the apps kit is not built"
+
+
+class TestDetail:
+    def test_the_current_version_with_its_grants(self, config, client, starter):
+        client.get(f"{PREFIX}/")
+        body = client.get(f"{PREFIX}/board").json()
+        assert body["app_id"] == "board"
+        assert body["origin"] == "starter"
+        assert body["current_version"] == 1
+        assert body["manifest"]["capabilities"] == ["kv:own", "files:own", "calendar:read"]
+        assert body["narrowest"] == "phone"
+        assert body["pending_id"] is None
+        assert body["grants"] == [
+            {"capability": "files:own", "scope": None, "description": "Read and write files in its own data folder", "sensitive": False},
+            {"capability": "kv:own", "scope": None, "description": "Keep its own data", "sensitive": False},
+        ]
+        assert body["ungranted"] == [
+            {"capability": "calendar:read", "scope": None, "description": "Read events from all your calendars", "sensitive": False},
+        ]
+
+    def test_an_unknown_app_is_404(self, config, client):
+        assert client.get(f"{PREFIX}/ghost").status_code == 404
+        assert client.get(f"{PREFIX}/NOT_AN_ID").status_code == 404
+
+
+class TestPending:
+    def test_a_first_install_shows_everything_as_new_and_the_full_source(self, config, apps_root, client):
+        _draft(apps_root, capabilities=["calendar:read"], index=INDEX.replace("</body>", "<a>https://example.com/x</a></body>"))
+        resp = _create_pending(client)
+        assert resp.status_code == 201
+        pending_id = resp.json()["pending_id"]
+        assert resp.json()["app_id"] == "board"
+
+        body = client.get(f"{PREFIX}/board/pending/{pending_id}").json()
+        assert body["pending_id"] == pending_id
+        assert body["current_version"] is None
+        assert body["manifest"]["name"] == "Board"
+        assert body["narrowest"] == "phone" and body["reason"] == ""
+        assert [(c["capability"], c["new"], c["always_granted"]) for c in body["capabilities"]] == [
+            ("kv:own", False, True), ("files:own", False, True), ("calendar:read", True, False),
+        ]
+        assert body["new_capabilities"] == ["calendar:read"]
+        assert body["one_button"] is False
+        with _conn(config) as conn:
+            assert body["size"] == len(apps_db.get_pending(conn, pending_id)["document"])
+        assert any("example.com" in w for w in body["warnings"])
+        files = {f["path"]: f for f in body["diff"]}
+        assert set(files) == {"manifest.toml", "index.html"}
+        assert files["index.html"]["status"] == "added"
+        assert "+<!doctype html>" in files["index.html"]["diff"]
+
+    def test_a_second_version_shows_a_diff_against_the_current_one(self, config, apps_root, client):
+        _install(config, apps_root, capabilities=["calendar:read"])
+        _draft(apps_root, capabilities=["calendar:read"], index=INDEX.replace("v1", "v2"))
+        pending_id = _create_pending(client).json()["pending_id"]
+        body = client.get(f"{PREFIX}/board/pending/{pending_id}").json()
+        assert body["current_version"] == 1
+        assert body["new_capabilities"] == []
+        assert body["one_button"] is True
+        files = {f["path"]: f for f in body["diff"]}
+        assert files["manifest.toml"] == {"path": "manifest.toml", "status": "unchanged", "diff": ""}
+        assert files["index.html"]["status"] == "changed"
+        assert "-<!doctype html><html><head><title>x</title></head><body><p>v1</p></body></html>" in files["index.html"]["diff"]
+        assert "+<!doctype html><html><head><title>x</title></head><body><p>v2</p></body></html>" in files["index.html"]["diff"]
+
+        resp = _approve(client, pending_id)
+        assert resp.status_code == 200
+        assert resp.json() == {"app_id": "board", "version": 2}
+        assert client.get(f"{PREFIX}/board").json()["current_version"] == 2
+        assert client.get(f"{PREFIX}/board/pending/{pending_id}").status_code == 404
+
+    def test_a_file_removed_from_the_draft_shows_as_removed(self, config, apps_root, client):
+        (apps_root / "board").mkdir()
+        (apps_root / "board" / "app.js").write_text("console.log(1);\n")
+        _install(config, apps_root, index=INDEX.replace("</head>", '<script src="app.js"></script></head>'))
+        _draft(apps_root, index=INDEX)
+        pending_id = _create_pending(client).json()["pending_id"]
+        files = {f["path"]: f for f in client.get(f"{PREFIX}/board/pending/{pending_id}").json()["diff"]}
+        assert files["app.js"]["status"] == "removed"
+        assert "-console.log(1);" in files["app.js"]["diff"]
+
+    def test_approve_with_a_stale_list_is_409_and_changes_nothing(self, config, apps_root, client):
+        _draft(apps_root, capabilities=["calendar:read"])
+        pending_id = _create_pending(client).json()["pending_id"]
+        resp = _approve(client, pending_id, new=[])
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "stale"
+        assert resp.json()["new_capabilities"] == ["calendar:read"]
+        assert client.get(f"{PREFIX}/board").status_code == 404
+
+        assert _approve(client, pending_id, new=["calendar:read"]).json() == {"app_id": "board", "version": 1}
+        assert [g["capability"] for g in client.get(f"{PREFIX}/board").json()["grants"]] == [
+            "calendar:read", "files:own", "kv:own",
+        ]
+
+    def test_approve_with_a_malformed_body_is_400(self, config, apps_root, client):
+        _draft(apps_root)
+        pending_id = _create_pending(client).json()["pending_id"]
+        url = f"{PREFIX}/board/pending/{pending_id}/approve"
+        assert client.post(url, content=b"nope").status_code == 400
+        assert client.post(url, json={"new_capabilities": "kv:own"}).status_code == 400
+        assert client.get(f"{PREFIX}/board").status_code == 404
+
+    def test_a_replaced_pending_install_is_404_on_approve(self, config, apps_root, client):
+        _draft(apps_root)
+        first = _create_pending(client).json()["pending_id"]
+        second = _create_pending(client).json()["pending_id"]
+        assert first != second
+        resp = _approve(client, first)
+        assert resp.status_code == 404
+        assert "Reopen" in resp.json()["error"]
+        assert _approve(client, second).status_code == 200
+
+    def test_a_pending_install_is_only_reachable_under_its_own_app(self, config, apps_root, client):
+        _draft(apps_root)
+        _draft(apps_root, app_id="tides")
+        pending_id = _create_pending(client).json()["pending_id"]
+        assert client.get(f"{PREFIX}/tides/pending/{pending_id}").status_code == 404
+        assert _approve(client, pending_id, app_id="tides").status_code == 404
+        assert client.delete(f"{PREFIX}/tides/pending/{pending_id}").status_code == 404
+        assert client.get(f"{PREFIX}/board/pending/{pending_id}").status_code == 200
+
+    def test_delete_discards_it(self, config, apps_root, client):
+        _draft(apps_root)
+        pending_id = _create_pending(client).json()["pending_id"]
+        assert client.delete(f"{PREFIX}/board/pending/{pending_id}").status_code == 204
+        assert client.get(f"{PREFIX}/board/pending/{pending_id}").status_code == 404
+        assert client.delete(f"{PREFIX}/board/pending/{pending_id}").status_code == 404
+        assert (apps_root / "board" / "index.html").exists()
+
+    def test_no_such_draft_is_404(self, config, apps_root, client):
+        resp = _create_pending(client, "ghost")
+        assert resp.status_code == 404
+        assert "ghost" in resp.json()["error"]
+        assert _create_pending(client, "NOT_AN_ID").status_code == 404
+
+    def test_a_draft_that_does_not_validate_is_422_with_its_errors(self, config, apps_root, client):
+        folder = _draft(apps_root, app_id="tides")
+        (folder / "manifest.toml").write_text(_manifest_text("board"))
+        resp = _create_pending(client, "tides")
+        assert resp.status_code == 422
+        assert any("folder name" in e for e in resp.json()["errors"])
+
+        (folder / "manifest.toml").write_text(_manifest_text("tides"))
+        (folder / "index.html").write_text(INDEX.replace("</head>", '<script src="missing.js"></script></head>'))
+        resp = _create_pending(client, "tides")
+        assert resp.status_code == 422
+        assert any("missing.js" in e for e in resp.json()["errors"])
+
+    def test_a_draft_with_a_link_in_it_is_422(self, config, apps_root, client, tmp_path):
+        folder = _draft(apps_root)
+        (tmp_path / "outside.js").write_text("x")
+        (folder / "app.js").symlink_to(tmp_path / "outside.js")
+        resp = _create_pending(client)
+        assert resp.status_code == 422
+        assert any("link" in e for e in resp.json()["errors"])
+        with _conn(config) as conn:
+            assert apps_db.list_pending(conn) == []
+
+    def test_without_the_kit_it_is_503(self, config, apps_root, client, apps_dir):
+        _draft(apps_root)
+        (apps_dir / "manifest.json").unlink()
+        kit.reset_cache()
+        resp = _create_pending(client)
+        assert resp.status_code == 503
+        assert resp.json()["error"] == "the apps kit is not built"
+
+    def test_a_draft_may_not_take_the_id_of_an_installed_starter_app(self, config, apps_root, client, starter):
+        client.get(f"{PREFIX}/")
+        _draft(apps_root)
+        resp = _create_pending(client)
+        assert resp.status_code == 409
+        with _conn(config) as conn:
+            assert apps_db.list_pending(conn) == []
+
+
+class TestVersions:
+    def test_list_rollback_and_delete(self, config, apps_root, client):
+        _install(config, apps_root)
+        _install(config, apps_root, capabilities=["calendar:read"], index=INDEX.replace("v1", "v2"))
+        versions = client.get(f"{PREFIX}/board/versions").json()["versions"]
+        assert [(v["version"], v["current"]) for v in versions] == [(1, False), (2, True)]
+        assert versions[1]["capabilities"] == ["kv:own", "files:own", "calendar:read"]
+        assert versions[1]["grants"] == ["calendar:read", "files:own", "kv:own"]
+        assert versions[0]["grants"] == ["files:own", "kv:own"]
+        assert versions[0]["installed_at"] and versions[0]["approved_at"]
+
+        resp = client.post(f"{PREFIX}/board/versions/1/current")
+        assert resp.status_code == 200
+        assert resp.json() == {"app_id": "board", "current_version": 1}
+        detail = client.get(f"{PREFIX}/board").json()
+        assert detail["current_version"] == 1
+        assert [g["capability"] for g in detail["grants"]] == ["files:own", "kv:own"]
+
+        assert client.delete(f"{PREFIX}/board/versions/1").status_code == 409
+        assert client.delete(f"{PREFIX}/board/versions/2").status_code == 204
+        assert [v["version"] for v in client.get(f"{PREFIX}/board/versions").json()["versions"]] == [1]
+
+    def test_unknown_versions_and_apps_are_404(self, config, apps_root, client):
+        _install(config, apps_root)
+        assert client.get(f"{PREFIX}/ghost/versions").status_code == 404
+        assert client.post(f"{PREFIX}/board/versions/9/current").status_code == 404
+        assert client.delete(f"{PREFIX}/board/versions/9").status_code == 404
+        assert client.delete(f"{PREFIX}/ghost/versions/1").status_code == 404
+
+
+class TestGrants:
+    def test_the_first_open_screen_grants_what_the_manifest_asks_for(self, config, client, starter):
+        client.get(f"{PREFIX}/")
+        resp = client.post(f"{PREFIX}/board/grants", json={"capability": "calendar:read", "scope": None})
+        assert resp.status_code == 200
+        assert resp.json() == {"capability": "calendar:read", "scope": None}
+        assert client.get(f"{PREFIX}/board").json()["ungranted"] == []
+
+    def test_a_capability_the_manifest_does_not_ask_for_is_refused(self, config, client, starter):
+        client.get(f"{PREFIX}/")
+        resp = client.post(f"{PREFIX}/board/grants", json={"capability": "kv:read:notes", "scope": None})
+        assert resp.status_code == 422
+        with _conn(config) as conn:
+            assert "kv:read:notes" not in apps_db.get_grants(conn, "board", 1)
+
+    def test_a_files_read_folder_may_be_changed_but_not_to_a_denied_one(self, config, client, starter):
+        starter(capabilities=("files:read:notes",))
+        client.get(f"{PREFIX}/")
+        bad = client.post(f"{PREFIX}/board/grants", json={"capability": "files:read:notes", "scope": "memories"})
+        assert bad.status_code == 422
+        resp = client.post(f"{PREFIX}/board/grants", json={"capability": "files:read:notes", "scope": "aviation"})
+        assert resp.json() == {"capability": "files:read:notes", "scope": "aviation"}
+        with _conn(config) as conn:
+            assert apps_db.get_grants(conn, "board", 1)["files:read:notes"] == "aviation"
+
+    def test_a_malformed_body_and_an_unknown_app(self, config, client, starter):
+        client.get(f"{PREFIX}/")
+        assert client.post(f"{PREFIX}/board/grants", json={"capability": 3}).status_code == 400
+        assert client.post(f"{PREFIX}/board/grants", json={"capability": "calendar:read", "scope": 3}).status_code == 400
+        assert client.post(f"{PREFIX}/ghost/grants", json={"capability": "calendar:read"}).status_code == 404
+
+
+class TestUninstall:
+    def _seed_data(self, client):
+        assert _call(client, "kv:own", "set", {"key": "a", "value": 1}).status_code == 200
+        assert _call(client, "files:own", "write", {"path": "x.txt", "content": "x"}).status_code == 200
+
+    def test_keeps_the_data_by_default(self, config, apps_root, client):
+        _install(config, apps_root)
+        self._seed_data(client)
+        assert client.delete(f"{PREFIX}/board").status_code == 204
+        assert client.get(f"{PREFIX}/board").status_code == 404
+        with db.get_db(config.db_path) as conn:
+            assert db.kv_get(conn, USER, "app.board", "a") is not None
+        assert (_data_dir(config) / "x.txt").exists()
+        assert (apps_root / "board" / "manifest.toml").exists()
+
+    def test_deletes_the_data_when_asked(self, config, apps_root, client):
+        _install(config, apps_root)
+        self._seed_data(client)
+        assert client.delete(f"{PREFIX}/board?delete_data=1").status_code == 204
+        with db.get_db(config.db_path) as conn:
+            assert db.kv_get(conn, USER, "app.board", "a") is None
+        assert not _data_dir(config).exists()
+        assert (apps_root / "board" / "manifest.toml").exists()
+
+    def test_an_unknown_app_is_404(self, config, client):
+        assert client.delete(f"{PREFIX}/ghost").status_code == 404
+
+
+class TestStorage:
+    def test_reports_kv_and_data_bytes_per_app(self, config, apps_root, client):
+        _install(config, apps_root)
+        _install(config, apps_root, app_id="ledger")
+        _call(client, "kv:own", "set", {"key": "ab", "value": "xyz"})
+        _call(client, "files:own", "write", {"path": "x.txt", "content": "x" * 100})
+        body = client.get(f"{PREFIX}/storage").json()
+        by_id = {row["app_id"]: row for row in body["apps"]}
+        assert set(by_id) == {"board", "ledger"}
+        assert by_id["board"]["name"] == "Board"
+        assert by_id["board"]["kv_bytes"] == len("ab") + len('"xyz"')
+        assert by_id["board"]["data_bytes"] > 0
+        assert by_id["ledger"] == {"app_id": "ledger", "name": "Board", "kv_bytes": 0, "data_bytes": 0}
+
+    def test_a_data_folder_that_is_a_link_is_not_measured(self, config, apps_root, client, tmp_path):
+        _install(config, apps_root)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "big").write_bytes(b"x" * 10_000)
+        _data_dir(config).symlink_to(outside)
+        row = client.get(f"{PREFIX}/storage").json()["apps"][0]
+        assert row["data_bytes"] is None

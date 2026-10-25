@@ -291,6 +291,16 @@ def _data_bytes(root: Path, data: list[str]) -> int:
     return tree_bytes(root.joinpath(*data))
 
 
+def data_folder_bytes(config, user_id: str, app_id: str) -> int:
+    """What the ``files:own`` cap counts for the app's ``data/`` folder: 0 when there is none.
+
+    Raises :class:`BridgeError` (``bad_args`` or ``not_found``) when the folder
+    is a link, something else is in its way, or there is no workspace.
+    """
+    root, data = _data_root(CallContext(config=config, user_id=user_id, app_id=app_id, scope=None))
+    return _data_bytes(root, data)
+
+
 def _files_write(ctx: CallContext, args: dict) -> dict:
     parts = _path_parts(args)
     encoding = _encoding(args)

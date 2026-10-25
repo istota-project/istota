@@ -165,6 +165,11 @@ class TestParseManifest:
     def test_a_bad_id(self, app_id):
         assert _errors(VALID.replace('id = "board"', f'id = "{app_id}"'), folder=app_id or "x")
 
+    @pytest.mark.parametrize("app_id", ["storage", "drafts", "starter"])
+    def test_an_id_the_routes_use_is_reserved(self, app_id):
+        errors = _errors(VALID.replace('id = "board"', f'id = "{app_id}"'), folder=app_id)
+        assert any("reserved" in error for error in errors)
+
     def test_an_unknown_capability(self):
         errors = _errors(VALID.replace('"calendar:read"', '"shell:run"'))
         assert any("shell:run" in error for error in errors)

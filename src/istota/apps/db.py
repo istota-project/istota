@@ -422,9 +422,10 @@ def get_pending(conn: sqlite3.Connection, pending_id: str) -> dict | None:
 
 
 def list_pending(conn: sqlite3.Connection) -> list[dict]:
-    """Every pending install, without its document."""
+    """Every pending install, without its document, with the name its manifest gives."""
     rows = conn.execute(
         "SELECT pending_id, app_id, content_hash, origin, created_at,"
+        " json_extract(manifest_json, '$.name') AS name,"
         " length(document) AS size FROM app_pending ORDER BY app_id"
     ).fetchall()
     return [dict(r) for r in rows]

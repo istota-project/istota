@@ -14,6 +14,9 @@ from dataclasses import dataclass
 from istota.apps.capabilities import ALWAYS_GRANTED, Capability, CapabilityError, parse_capability
 
 APP_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
+#: First path segments of the apps routes (``GET /storage``, ``/drafts/...``,
+#: ``/starter/...``); an app with one of these ids would be shadowed by them.
+RESERVED_IDS = frozenset({"storage", "drafts", "starter"})
 ICON = re.compile(r"[a-z0-9-]{1,40}")
 DISPLAY_RANGES = ("phone", "tablet", "desktop")
 ENTRY = "index.html"
@@ -117,6 +120,8 @@ def parse_manifest(text: str, *, folder_name: str, bot_dir: str) -> Manifest:
                 "manifest.toml: id must be 1 to 40 lowercase letters, digits or dashes, "
                 "starting with a letter or digit."
             )
+        elif app_id in RESERVED_IDS:
+            errors.append(f"manifest.toml: id {app_id!r} is reserved; choose another.")
         elif app_id != folder_name:
             errors.append(f"manifest.toml: id {app_id!r} must equal the folder name {folder_name!r}.")
 
