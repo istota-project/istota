@@ -8,12 +8,14 @@
 // reading the getters re-renders as the timer ticks.
 
 /** Container types in preference order, with the extension we name the file.
- *  Chrome/Firefox produce webm/opus; iOS Safari only offers audio/mp4, which
- *  is an AAC-in-MP4 stream — `.m4a` is its correct audio-only extension and is
- *  already an allowed chat attachment type, so iOS needs no server change. */
+ *  Chrome/Firefox produce webm/opus, named `.weba` because Nextcloud maps
+ *  `.webm` to video and runs its movie previewer on it (ISSUE-830). iOS
+ *  Safari only offers audio/mp4, which is an AAC-in-MP4 stream — `.m4a` is
+ *  its correct audio-only extension and is already an allowed chat attachment
+ *  type, so iOS needs no server change. */
 const MIME_CANDIDATES: [string, string][] = [
-  ['audio/webm;codecs=opus', 'webm'],
-  ['audio/webm', 'webm'],
+  ['audio/webm;codecs=opus', 'weba'],
+  ['audio/webm', 'weba'],
   ['audio/mp4', 'm4a'],
   ['audio/ogg;codecs=opus', 'ogg'],
   ['audio/mpeg', 'mp3'],
@@ -29,8 +31,8 @@ function pickMime(): [string, string] | null {
     }
   }
   // A browser with MediaRecorder but no recognised type still records in its
-  // own default; let it, and name the file .webm.
-  return ['', 'webm'];
+  // own default; let it, and name the file .weba.
+  return ['', 'weba'];
 }
 
 /** True when recording is actually possible here. getUserMedia is undefined
@@ -76,7 +78,7 @@ export function createRecorder(opts: RecorderOptions): Recorder {
   let stream: MediaStream | null = null;
   let recorder: MediaRecorder | null = null;
   let chunks: Blob[] = [];
-  let ext = 'webm';
+  let ext = 'weba';
   let timer: ReturnType<typeof setInterval> | null = null;
   let startedAt = 0;
   let discard = false;
@@ -132,7 +134,7 @@ export function createRecorder(opts: RecorderOptions): Recorder {
     }
 
     const picked = pickMime();
-    ext = picked?.[1] ?? 'webm';
+    ext = picked?.[1] ?? 'weba';
     const mime = picked?.[0] ?? '';
     try {
       recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);

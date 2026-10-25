@@ -168,7 +168,7 @@ const MEDIA_EXTENSIONS = {
   'audio/aac': 'aac',
   'audio/wav': 'wav',
   'audio/flac': 'flac',
-  'audio/webm': 'webm',
+  'audio/webm': 'weba',
   'video/mp4': 'mp4',
 };
 const MEDIA_EXTENSION_FALLBACK = 'bin';

@@ -425,7 +425,7 @@
   const recorder = createRecorder({ onComplete: (file) => upload([file]) });
   onDestroy(() => recorder.dispose());
 
-  const AUDIO_EXT = new Set(['webm', 'm4a', 'mp3', 'ogg', 'wav', 'mp4', 'opus', 'aac']);
+  const AUDIO_EXT = new Set(['webm', 'weba', 'm4a', 'mp3', 'ogg', 'wav', 'mp4', 'opus', 'aac']);
   const isAudio = (name: string) => AUDIO_EXT.has(name.split('.').pop()?.toLowerCase() ?? '');
 
   // Prefix autocomplete. modelAliasProvider is ordered first so `!model <alias>`

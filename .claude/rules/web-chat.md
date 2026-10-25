@@ -43,7 +43,7 @@ Chat selection URLs are written by `createUrlSelection` in `routes/chat/+page.sv
 - **Every key path asks `wouldSend()` before consuming the key**, so a refused key writes its newline. Refusals: full queue (`MAX_QUEUED_PER_ROOM`, text stays), active recording, upload in flight, `canSend`. The button reads the same predicate. A running turn is not a refusal (ISSUE-238). `queueFull` is gated on `busy`.
 - **IME**: `isImeComposing` (`$lib/platform/input`, shared with the room-name field) plus a `compositionend` stamp within `IME_COMMIT_GRACE_MS` (WebKit fires it before the confirming keydown); hoisted to the top of `onKeydown`.
 - **Wrap is measured at the single-row width** (the live width oscillates): `wrapsAtSingleRowWidth` pins the wrapper's `flex-basis`; height after `await tick()`; re-evaluated on resize. Controls are `em`-sized with `font: inherit`.
-- **Voice**: `useRecorder.svelte.ts` feeds the normal upload; `executor._pre_transcribe_attachments` appends a transcript (needs `whisper`). The mic hides without `navigator.mediaDevices`.
+- **Voice**: `useRecorder.svelte.ts` feeds the normal upload, naming a webm recording `.weba`, since Nextcloud maps `.webm` to video and runs its movie previewer on it (ISSUE-830); `executor._pre_transcribe_attachments` appends a transcript (needs `whisper`). The mic hides without `navigator.mediaDevices`.
 
 ### Commands in a busy room
 

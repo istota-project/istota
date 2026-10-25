@@ -38,7 +38,7 @@ def classify(name: str, size: int, modified: str, head: bytes, *, truncated: boo
             kind = "audio" if extension in {"m4a", "m4b"} else "video"
             media_type = f"{kind}/mp4"
         elif audio_type == "audio/webm":
-            audio_names = (AUDIO_EXTENSIONS - {"webm", "mp4"}) | {"weba", "m4b"}
+            audio_names = (AUDIO_EXTENSIONS - {"webm", "mp4"}) | {"m4b"}
             kind = "audio" if extension in audio_names else "video"
             media_type = f"{kind}/webm"
         elif audio_type == "audio/ogg" and extension == "ogv":
