@@ -44,6 +44,12 @@ An app may request more, and you are asked for each:
 | `calendar:read`, `calendar:read:<name>` | Read your calendars, or one by name |
 | `skill:<skill>.<operation>` | One read-only operation from a fixed list |
 
+The read capabilities have limits of their own. `kv:read` never reaches a reserved namespace or another app's `app.` namespace. `files:read` never reaches your `{bot_dir}` folder, `memories`, or a hidden folder, and follows no link inside the folder it was given. `calendar:read` reads only calendars you own, from `from` to `to` (dates, or dates and times in your time zone, at most 366 days apart); a calendar named in the capability is looked up by its display name each time, so a renamed calendar stops being readable. Every check is made on the server, against the permission you granted, on each call.
+
+An app reads them through the kit: `istota.kv.read(namespace, key)` and `istota.kv.readList(namespace, {prefix})`, `istota.files.listShared(folder, path)` and `istota.files.readShared(folder, path, {encoding})`, and `istota.calendar.list({from, to, calendar})`, where `calendar` names the calendar in a `calendar:read:<name>` capability and is left out for `calendar:read`. The namespace and folder are the ones the manifest names; for a folder you changed when granting it, the app still names its own and reads the one you chose.
+
+**Activity** in an app's menu lists its last 200 calls, with the capability, the operation and whether it was answered, and the errors its current version reported. A call's arguments are never stored, so Activity says what an app asked for, not which keys or files.
+
 There are no write capabilities on anything outside an app's own storage: an app cannot post to a room, send email, or write to your calendar, and it cannot ask Istota to do any of those things on its behalf.
 
 Data an app writes into its namespace is treated as untrusted when Istota reads it back, the same as anything else written by something other than you.

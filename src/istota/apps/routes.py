@@ -42,6 +42,7 @@ from istota.apps.document import DocumentError
 from istota.apps.drafts import DraftError, DraftNotFound, list_drafts, read_draft
 from istota.apps.kit import KitMissing, load_kit
 from istota.apps.manifest import ManifestError
+from istota.lib.date_parse import iso_utc
 from istota.webui.request_guards import BodyError, read_bounded_body
 from istota.webui.router_stubs import (  # noqa: F401
     make_get_user_context,
@@ -679,6 +680,50 @@ async def api_apps_versions(app_id: str, ctx: AppsContext = Depends(get_user_con
                 })
         return {"app_id": app_id, "current_version": app["current_version"], "versions": versions}
 
+    body = await asyncio.to_thread(load)
+    if body is None:
+        return _not_found()
+    return body
+
+
+ACTIVITY_CALLS = 200
+
+
+@router.get("/{app_id}/activity")
+async def api_apps_activity(app_id: str, ctx: AppsContext = Depends(get_user_context)):
+    """The app's last calls, every version, and the error reports of its current version.
+
+    A call's arguments are not stored, so none are shown; an error's message
+    and stack are the app's own words and the page renders them as text.
+    """
+    def load() -> dict | None:
+        with apps_db.connect(ctx.db_path) as conn:
+            app = apps_db.get_app(conn, app_id)
+            if app is None or app["current_version"] is None:
+                return None
+            calls = apps_db.list_calls(conn, app_id, limit=ACTIVITY_CALLS)
+            errors = apps_db.list_errors(conn, app_id, app["current_version"])
+        return {
+            "app_id": app_id,
+            "current_version": app["current_version"],
+            "calls": [
+                {
+                    "id": row["id"], "version": row["version"], "capability": row["capability"],
+                    "op": row["op"], "status": row["status"], "at": iso_utc(row["at"]),
+                }
+                for row in calls
+            ],
+            "errors": [
+                {
+                    "id": row["id"], "version": row["version"], "kind": row["kind"],
+                    "message": row["message"], "stack": row["stack"], "at": iso_utc(row["at"]),
+                }
+                for row in errors
+            ],
+        }
+
+    if not _APP_ID.fullmatch(app_id):
+        return _not_found()
     body = await asyncio.to_thread(load)
     if body is None:
         return _not_found()

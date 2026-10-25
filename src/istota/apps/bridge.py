@@ -34,13 +34,14 @@ import math
 import os
 import stat
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 from istota import db as framework_db
 from istota.apps import db as apps_db
-from istota.apps.capabilities import split_capability
+from istota.apps.capabilities import CapabilityError, parse_capability, split_capability
 from istota.apps.install import DATA, kv_namespace
 from istota.lib.du import tree_bytes
 from istota.sandbox.confined import open_dir, open_or_create_dirs, open_regular_at, valid_part
@@ -118,11 +119,15 @@ def _decode_value(text: str) -> object:
         return text
 
 
-def _kv_get(ctx: CallContext, args: dict) -> object:
+def _kv_read_one(ctx: CallContext, namespace: str, args: dict) -> object:
     key = _key(args)
     with framework_db.get_db(ctx.config.db_path) as conn:
-        row = framework_db.kv_get(conn, ctx.user_id, kv_namespace(ctx.app_id), key)
+        row = framework_db.kv_get(conn, ctx.user_id, namespace, key)
     return None if row is None else _decode_value(row["value"])
+
+
+def _kv_get(ctx: CallContext, args: dict) -> object:
+    return _kv_read_one(ctx, kv_namespace(ctx.app_id), args)
 
 
 def _kv_set(ctx: CallContext, args: dict) -> None:
@@ -164,14 +169,14 @@ def _int_arg(args: dict, name: str, default: int, low: int, high: int) -> int:
     return value
 
 
-def _kv_list(ctx: CallContext, args: dict) -> dict:
+def _kv_list_of(ctx: CallContext, namespace: str, args: dict) -> dict:
     prefix = args.get("prefix", "")
     if not isinstance(prefix, str) or len(prefix) > KEY_MAX_CHARS:
         raise _bad_args("prefix must be a string.")
     offset = _int_arg(args, "offset", 0, 0, 10**9)
     limit = _int_arg(args, "limit", LIST_DEFAULT_LIMIT, 1, LIST_MAX_LIMIT)
     with framework_db.get_db(ctx.config.db_path) as conn:
-        rows = framework_db.kv_list(conn, ctx.user_id, kv_namespace(ctx.app_id))
+        rows = framework_db.kv_list(conn, ctx.user_id, namespace)
     matching = [row for row in rows if row["key"].startswith(prefix)]
     items = [
         {"key": row["key"], "value": _decode_value(row["value"])}
@@ -180,10 +185,18 @@ def _kv_list(ctx: CallContext, args: dict) -> dict:
     return {"items": items, "total": len(matching)}
 
 
+def _kv_list(ctx: CallContext, args: dict) -> dict:
+    return _kv_list_of(ctx, kv_namespace(ctx.app_id), args)
+
+
 # -- files:own ----------------------------------------------------------------
 
 
-def _path_parts(args: dict, *, allow_root: bool = False) -> list[str]:
+OWN_FOLDER = "the app's data folder"
+SHARED_FOLDER = "the folder this app may read"
+
+
+def _path_parts(args: dict, *, allow_root: bool = False, where: str = OWN_FOLDER) -> list[str]:
     path = args.get("path", "")
     if not isinstance(path, str) or len(path) > PATH_MAX_CHARS:
         raise _bad_args("path must be a string.")
@@ -195,7 +208,7 @@ def _path_parts(args: dict, *, allow_root: bool = False) -> list[str]:
     for part in parts:
         if not valid_part(part) or part.startswith(".") or any(ord(c) < 0x20 for c in part):
             raise _bad_args(
-                "path is relative to the app's data folder, with no empty, '.', '..' or hidden part."
+                f"path is relative to {where}, with no empty, '.', '..' or hidden part."
             )
     return parts
 
@@ -214,30 +227,29 @@ def _data_root(ctx: CallContext) -> tuple[Path, list[str]]:
     return root, [ctx.config.bot_dir_name, "apps", ctx.app_id, DATA]
 
 
-def _open_folder(root: Path, parts: list[str]) -> int | None:
+def _open_folder(root: Path, parts: list[str], *, where: str = OWN_FOLDER) -> int | None:
     """An fd on the folder, None when it does not exist, ``bad_args`` when something else is in the way."""
     try:
         fd = open_dir(root, *parts, raise_errors=True)
     except FileNotFoundError:
         return None
     except OSError:
-        raise _bad_args("A part of that path is not a folder in the app's data folder.") from None
+        raise _bad_args(f"A part of that path is not a folder in {where}.") from None
     if fd is None:
-        raise _bad_args("That path is not in the app's data folder.")
+        raise _bad_args(f"That path is not in {where}.")
     return fd
 
 
-def _files_list(ctx: CallContext, args: dict) -> dict:
-    parts = _path_parts(args, allow_root=True)
-    root, data = _data_root(ctx)
-    fd = _open_folder(root, data + parts)
+def _list_under(root: Path, base: list[str], parts: list[str], *, where: str) -> dict:
+    """The listing of ``base + parts``, every component walked with no link followed."""
+    fd = _open_folder(root, base + parts, where=where)
     if fd is None:
-        if not parts:
+        if not parts and where == OWN_FOLDER:
             return {"entries": [], "truncated": False}
         raise BridgeError("not_found", "No such folder.")
     os.close(fd)
     try:
-        listing = list_dir(root, data + parts)
+        listing = list_dir(root, base + parts)
     except ListingError as exc:
         raise BridgeError("not_found", exc.message) from None
     entries = [
@@ -247,12 +259,23 @@ def _files_list(ctx: CallContext, args: dict) -> dict:
     return {"entries": entries, "truncated": listing.truncated}
 
 
+def _files_list(ctx: CallContext, args: dict) -> dict:
+    parts = _path_parts(args, allow_root=True)
+    root, data = _data_root(ctx)
+    return _list_under(root, data, parts, where=OWN_FOLDER)
+
+
 def _files_read(ctx: CallContext, args: dict) -> str:
     parts = _path_parts(args)
     encoding = _encoding(args)
     root, data = _data_root(ctx)
+    return _read_under(root, data, parts, encoding, where=OWN_FOLDER)
+
+
+def _read_under(root: Path, base: list[str], parts: list[str], encoding: str, *, where: str) -> str:
+    """The file at ``base + parts``, opened by descriptor with no link followed."""
     *dirs, leaf = parts
-    dir_fd = _open_folder(root, data + dirs)
+    dir_fd = _open_folder(root, base + dirs, where=where)
     if dir_fd is None:
         raise BridgeError("not_found", "No such file.")
     try:
@@ -348,10 +371,150 @@ def _files_delete(ctx: CallContext, args: dict) -> dict:
     return {"deleted": True}
 
 
+# -- the reads: kv:read, files:read, calendar:read ------------------------------
+#
+# Each reads the scope stored in ``app_grants`` (``ctx.scope``), never the
+# capability text the call named, and checks it again against the rule
+# ``capabilities.parse_capability`` applied at install: the grant row is the
+# authority, and re-checking it means a row written some other way still
+# cannot reach a reserved namespace, another app's data or a denied folder.
+
+
+def _read_namespace(ctx: CallContext) -> str:
+    scope = ctx.scope
+    if not isinstance(scope, str) or not scope:
+        raise BridgeError("not_granted", "This app has not been given a store to read.")
+    try:
+        cap = parse_capability(f"kv:read:{scope}", bot_dir=ctx.config.bot_dir_name)
+    except CapabilityError:
+        raise BridgeError("not_granted", "This app may not read that store.") from None
+    return cap.scope
+
+
+def _kv_read_get(ctx: CallContext, args: dict) -> object:
+    return _kv_read_one(ctx, _read_namespace(ctx), args)
+
+
+def _kv_read_list(ctx: CallContext, args: dict) -> dict:
+    return _kv_list_of(ctx, _read_namespace(ctx), args)
+
+
+def _shared_folder(ctx: CallContext) -> tuple[Path, list[str]]:
+    scope = ctx.scope
+    if not isinstance(scope, str) or not scope:
+        raise BridgeError("not_granted", "This app has not been given a folder to read.")
+    try:
+        cap = parse_capability(f"files:read:{scope}", bot_dir=ctx.config.bot_dir_name)
+    except CapabilityError:
+        raise BridgeError("not_granted", "This app may not read that folder.") from None
+    root = ctx.config.workspace_root(ctx.user_id)
+    if root is None:
+        raise BridgeError("not_found", "There is no workspace to read files from.")
+    return root, cap.scope.split("/")
+
+
+def _files_read_list(ctx: CallContext, args: dict) -> dict:
+    parts = _path_parts(args, allow_root=True, where=SHARED_FOLDER)
+    root, base = _shared_folder(ctx)
+    return _list_under(root, base, parts, where=SHARED_FOLDER)
+
+
+def _files_read_read(ctx: CallContext, args: dict) -> str:
+    parts = _path_parts(args, where=SHARED_FOLDER)
+    encoding = _encoding(args)
+    root, base = _shared_folder(ctx)
+    return _read_under(root, base, parts, encoding, where=SHARED_FOLDER)
+
+
+CALENDAR_WINDOW_MAX = timedelta(days=366)
+CALENDAR_EVENTS_MAX = 2000
+CALDAV_TIMEOUT_SECONDS = 15
+NO_CALENDAR = "No calendar is connected."
+
+
+def _window_bound(args: dict, name: str, zone) -> datetime:
+    """``args[name]`` as an aware datetime: a date is its midnight, a naive time is in the user's zone."""
+    value = args.get(name)
+    if not isinstance(value, str) or not value or len(value) > 64:
+        raise _bad_args(f"{name} is an ISO 8601 date or date and time.")
+    try:
+        if len(value) == 10:
+            day = date.fromisoformat(value)
+            return datetime(day.year, day.month, day.day, tzinfo=zone)
+        when = datetime.fromisoformat(value)
+    except ValueError:
+        raise _bad_args(f"{name} is an ISO 8601 date or date and time.") from None
+    return when if when.tzinfo is not None else when.replace(tzinfo=zone)
+
+
+def _event_time(value: datetime, all_day: bool) -> str:
+    return value.date().isoformat() if all_day else value.isoformat()
+
+
+def _calendar_list(ctx: CallContext, args: dict) -> dict:
+    config = ctx.config
+    try:
+        zone = ZoneInfo(config.resolve_user_timezone(ctx.user_id))
+    except (ValueError, KeyError):
+        zone = timezone.utc
+    start = _window_bound(args, "from", zone)
+    end = _window_bound(args, "to", zone)
+    if end <= start:
+        raise _bad_args("to must be after from.")
+    if end - start > CALENDAR_WINDOW_MAX:
+        raise _bad_args(f"A calendar read covers at most {CALENDAR_WINDOW_MAX.days} days.")
+    named = ctx.scope
+    if named is not None and (not isinstance(named, str) or not named):
+        raise BridgeError("not_granted", "This app has not been given a calendar to read.")
+    if not config.caldav_url:
+        raise BridgeError("not_found", NO_CALENDAR)
+    try:
+        from istota.skills import calendar as calendar_skill
+    except ImportError:
+        raise BridgeError("not_found", NO_CALENDAR) from None
+
+    events = []
+    read = []
+    # The bot's account sees every calendar any user shared with it; only the
+    # user's own are theirs (ISSUE-673), matched by display name at call time.
+    with calendar_skill.get_caldav_client(
+        config.caldav_url, config.caldav_username, config.caldav_password,
+        timeout=CALDAV_TIMEOUT_SECONDS,
+    ) as client:
+        calendars = calendar_skill.owned_calendars(client, ctx.user_id)
+        if named is not None:
+            calendars = [(name, url) for name, url in calendars if name == named]
+            if not calendars:
+                raise BridgeError("not_found", f"You have no calendar named {named!r}.")
+        for name, url in calendars:
+            read.append(name)
+            for event in calendar_skill.get_events(client, url, start, end):
+                events.append((name, event))
+    events.sort(key=lambda pair: pair[1].start)
+    return {
+        "calendars": read,
+        "events": [
+            {
+                "uid": event.uid,
+                "calendar": name,
+                "summary": event.summary,
+                "start": _event_time(event.start, event.all_day),
+                "end": _event_time(event.end, event.all_day),
+                "all_day": event.all_day,
+                "timezone": event.timezone,
+                "location": event.location,
+                "description": event.description,
+            }
+            for name, event in events[:CALENDAR_EVENTS_MAX]
+        ],
+        "truncated": len(events) > CALENDAR_EVENTS_MAX,
+    }
+
+
 Handler = Callable[[CallContext, dict], object]
 
-#: ``(capability family, op)`` to its handler. Stage 14 adds the reads and
-#: stage 15 the ``skill`` operations.
+#: ``(capability family, op)`` to its handler. Stage 15 adds the ``skill``
+#: operations.
 HANDLERS: dict[tuple[str, str], Handler] = {
     ("kv:own", "get"): _kv_get,
     ("kv:own", "set"): _kv_set,
@@ -361,6 +524,11 @@ HANDLERS: dict[tuple[str, str], Handler] = {
     ("files:own", "read"): _files_read,
     ("files:own", "write"): _files_write,
     ("files:own", "delete"): _files_delete,
+    ("kv:read", "get"): _kv_read_get,
+    ("kv:read", "list"): _kv_read_list,
+    ("files:read", "list"): _files_read_list,
+    ("files:read", "read"): _files_read_read,
+    ("calendar:read", "list"): _calendar_list,
 }
 
 
