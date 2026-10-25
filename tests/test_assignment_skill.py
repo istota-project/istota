@@ -583,3 +583,269 @@ def test_durations_parse_both_ways():
             charter.parse_duration_minutes(bad)
         assert exc.value.code == "invalid_duration"
 
+
+# ---------------------------------------------------------------------------
+# The wake's verbs
+# ---------------------------------------------------------------------------
+
+
+def _open_wake(config, assignment_id, user_id="alice") -> tuple[int, int]:
+    """A running wake task of the assignment and its open wake row."""
+    _state(config, assignment_id, "active")
+    with db.get_db(config.db_path) as conn:
+        task_id = _running(conn, user_id=user_id, source_type="assignment", queue="assignment",
+                           assignment_id=assignment_id, max_attempts=1)
+        wake_id = store.insert_wake(conn, assignment_id, fired_by="time", task_id=task_id)
+    return task_id, wake_id
+
+
+@pytest.fixture
+def wake(config, turn, monkeypatch):
+    """Alice's assignment A, mid-wake, with the wake's environment set."""
+    a = _create("--deadline", "2099-12-01")["assignment"]["id"]
+    task_id, wake_id = _open_wake(config, a)
+    monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+    monkeypatch.setenv(caller.ASSIGNMENT_ID_VAR, str(a))
+    return {"assignment_id": a, "task_id": task_id, "wake_id": wake_id}
+
+
+def _wake_row(config, wake_id) -> store.Wake:
+    with db.get_db(config.db_path) as conn:
+        return store.get_wake(conn, wake_id)
+
+
+def _events(config, assignment_id, kind) -> list[store.Event]:
+    with db.get_db(config.db_path) as conn:
+        return [e for e in store.list_events(conn, assignment_id) if e.kind == kind]
+
+
+def _minutes_from_now(iso: str) -> float:
+    from datetime import datetime, timezone
+
+    moment = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    return (moment - datetime.now(timezone.utc)).total_seconds() / 60
+
+
+WAKE_VERBS = (
+    ("next", "--in", "6h"),
+    ("handoff", "photograph the furnace label", "--report", "the photo"),
+    ("report", "first quote in"),
+    ("attempt", "--target", "acme.example/quote", "--tried", "the web form", "--outcome", "failed"),
+    ("complete", "--evidence", "quotes.csv has three rows"),
+)
+
+
+class TestWakeScoping:
+    @pytest.mark.parametrize("argv", WAKE_VERBS, ids=[v[0] for v in WAKE_VERBS])
+    def test_a_user_turn_is_not_a_wake(self, config, turn, argv):
+        a = _create()["assignment"]["id"]
+        code, out = _run(*argv, "--assignment", str(a))
+        assert (code, out["error"]) == (1, "not_a_wake")
+
+    def test_another_task_of_the_user_is_not_a_wake(self, config, monkeypatch):
+        with db.get_db(config.db_path) as conn:
+            task_id = _running(conn, user_id="alice", source_type="scheduled")
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        assert _run("report", "x", "--assignment", "1")[1]["error"] == "not_a_wake"
+
+    @pytest.mark.parametrize("argv", WAKE_VERBS, ids=[v[0] for v in WAKE_VERBS])
+    def test_a_wake_of_a_cannot_write_to_b(self, config, turn, wake, monkeypatch, argv):
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(turn))
+        b = _create()["assignment"]["id"]
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(wake["task_id"]))
+        code, out = _run(*argv, "--assignment", str(b))
+        assert (code, out["error"]) == (1, "wrong_assignment")
+        # The environment variable is a default, not authority.
+        monkeypatch.setenv(caller.ASSIGNMENT_ID_VAR, str(b))
+        code, out = _run(*argv)
+        assert (code, out["error"]) == (1, "wrong_assignment")
+        with db.get_db(config.db_path) as conn:
+            assert store.list_actions(conn, b) == []
+            assert store.list_attempts(conn, b) == []
+        assert _events(config, b, "report") == []
+
+    def test_the_assignment_defaults_to_the_env_then_the_task_row(self, config, wake, monkeypatch):
+        assert _run("report", "one")[0] == 0
+        monkeypatch.delenv(caller.ASSIGNMENT_ID_VAR)
+        assert _run("report", "two")[0] == 0
+        slug = _get(config, wake["assignment_id"]).slug
+        assert _run("report", "three", "--assignment", slug)[0] == 0
+        texts = [e.payload["text"] for e in _events(config, wake["assignment_id"], "report")]
+        assert texts == ["one", "two", "three"]
+
+    def test_another_users_assignment_is_not_found(self, config, wake, monkeypatch):
+        bobs_turn = _web_turn(config, user_id="bob")
+        monkeypatch.setenv("ISTOTA_USER_ID", "bob")
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(bobs_turn))
+        bobs = _create()["assignment"]["id"]
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(wake["task_id"]))
+        assert _run("report", "x", "--assignment", str(bobs))[1]["error"] == "not_found"
+
+    def test_an_ended_wake_writes_nothing(self, config, wake):
+        with db.get_db(config.db_path) as conn:
+            store.update_wake(conn, wake["wake_id"], ended_at=db.iso_utc_now(), outcome="failed")
+        for argv in WAKE_VERBS:
+            code, out = _run(*argv)
+            assert (code, out["error"]) == (1, "not_a_wake"), argv
+        assert _wake_row(config, wake["wake_id"]).next_request is None
+
+    def test_a_wake_task_with_no_wake_row_is_not_a_wake(self, config, turn, monkeypatch):
+        a = _create()["assignment"]["id"]
+        with db.get_db(config.db_path) as conn:
+            task_id = _running(conn, user_id="alice", source_type="assignment",
+                               assignment_id=a, max_attempts=1)
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        assert _run("report", "x")[1]["error"] == "not_a_wake"
+
+
+class TestNext:
+    def test_in_records_the_request_on_the_wake_row(self, config, wake):
+        code, out = _run("next", "--in", "6h", "--progress", "two quotes in")
+        assert code == 0, out
+        row = _wake_row(config, wake["wake_id"])
+        request = row.next_request
+        assert (request["mode"], request["requested"], request["clamped"]) == ("in", "6h", None)
+        assert 355 < _minutes_from_now(request["wake_at"]) <= 360
+        assert row.progress_note == "two quotes in"
+        assert out["next"] == request
+        # A request, not a decision: the state and the wake's end are finish_wake's.
+        assert _get(config, wake["assignment_id"]).state == "active"
+        assert row.ended_at is None and row.outcome is None
+
+    def test_in_below_the_floor_is_clamped(self, config, wake):
+        _run("next", "--in", "1m")
+        request = _wake_row(config, wake["wake_id"]).next_request
+        floor = config.assignments.min_wake_interval_minutes
+        assert request["clamped"] == "floor"
+        assert floor - 1 < _minutes_from_now(request["wake_at"]) <= floor
+
+    def test_at_past_the_deadline_is_clamped_to_it(self, config, wake):
+        _run("next", "--at", "2100-06-01T09:00:00Z")
+        request = _wake_row(config, wake["wake_id"]).next_request
+        assert request["clamped"] == "deadline"
+        assert request["wake_at"] == _get(config, wake["assignment_id"]).deadline
+
+    def test_at_with_no_offset_is_the_users_timezone(self, config, wake):
+        _run("next", "--at", "2099-01-15T09:00")
+        request = _wake_row(config, wake["wake_id"]).next_request
+        assert (request["mode"], request["wake_at"]) == ("at", "2099-01-15T14:00:00.000Z")
+
+    def test_wait_user_and_the_last_call_wins(self, config, wake):
+        _run("next", "--in", "2h", "--progress", "first")
+        _run("next", "--wait", "user")
+        row = _wake_row(config, wake["wake_id"])
+        assert row.next_request["mode"] == "wait" and row.next_request["wait"] == "user"
+        assert row.next_request["wake_at"] is None
+        assert row.progress_note is None
+
+    @pytest.mark.parametrize("argv,code", [
+        (("next", "--in", "soon"), "invalid_duration"),
+        (("next", "--at", "tomorrow"), "invalid_input"),
+        (("next", "--at", "2099-01-15"), "invalid_input"),
+    ])
+    def test_bad_times(self, config, wake, argv, code):
+        assert _run(*argv)[1]["error"] == code
+        assert _wake_row(config, wake["wake_id"]).next_request is None
+
+    def test_one_of_in_at_or_wait_is_required(self, config, wake):
+        assert _run("next")[0] != 0
+        assert _run("next", "--in", "1h", "--wait", "user")[0] != 0
+
+
+class TestHandoffReportAttemptComplete:
+    def test_handoff_writes_an_open_action_and_an_event(self, config, wake):
+        code, out = _run("handoff", "photograph the furnace label", "--report", "the photo",
+                         "--due", "2099-02-01")
+        assert code == 0, out
+        with db.get_db(config.db_path) as conn:
+            (action,) = store.list_actions(conn, wake["assignment_id"])
+        assert (action.kind, action.status, action.wake_id) == ("handoff", "open", wake["wake_id"])
+        assert (action.text, action.report_spec) == ("photograph the furnace label", "the photo")
+        assert action.due_at == "2099-02-01T23:59:59.999Z"
+        assert out["handoff"]["id"] == action.id
+        (event,) = _events(config, wake["assignment_id"], "handoff_created")
+        assert (event.actor, event.wake_id, event.payload["action_id"]) == (
+            "assignment", wake["wake_id"], action.id,
+        )
+
+    def test_the_user_reports_a_wakes_handoff_done(self, config, turn, wake, monkeypatch):
+        action_id = _run("handoff", "call the insurer", "--report", "the reference")[1]["handoff"]["id"]
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(turn))
+        code, out = _run("handoff", "done", str(wake["assignment_id"]), str(action_id),
+                         "--report", "ref 88412")
+        assert code == 0, out
+        assert out["handoff"] == {"id": action_id, "status": "done"}
+        # The user's spelling from a wake is still a user-turn verb.
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(wake["task_id"]))
+        code, out = _run("handoff", "done", str(wake["assignment_id"]), str(action_id), "--report", "x")
+        assert out["error"] == "not_a_user_turn"
+
+    def test_a_quoted_step_starting_with_done_is_a_handoff(self, config, wake):
+        code, out = _run("handoff", "done 4 7", "--report", "x")
+        assert code == 0, out
+        with db.get_db(config.db_path) as conn:
+            assert [a.text for a in store.list_actions(conn, wake["assignment_id"])] == ["done 4 7"]
+
+    @pytest.mark.parametrize("argv,code", [
+        (("handoff", "  ", "--report", "x"), "invalid_input"),
+        (("handoff", "step", "--report", " "), "invalid_input"),
+        (("handoff", "step", "--report", "x", "--due", "2000-01-01"), "invalid_input"),
+        (("handoff", "step", "--report", "x", "--due", "soon"), "invalid_input"),
+        (("report", ""), "invalid_input"),
+        (("report", "x" * 5000), "invalid_input"),
+        (("attempt", "--target", "", "--tried", "x", "--outcome", "ok"), "invalid_input"),
+        (("complete", "--evidence", " "), "invalid_input"),
+    ])
+    def test_bad_input(self, config, wake, argv, code):
+        assert _run(*argv)[1]["error"] == code
+
+    def test_handoff_and_report_refused_once_the_assignment_is_closed(self, config, wake):
+        _state(config, wake["assignment_id"], "abandoned")
+        assert _run("handoff", "x", "--report", "y")[1]["error"] == "bad_state"
+        assert _run("report", "x")[1]["error"] == "bad_state"
+        # The wake's own record still lands, for finish_wake to read.
+        assert _run("next", "--in", "6h")[0] == 0
+        assert _run("attempt", "--target", "t", "--tried", "x", "--outcome", "ok")[0] == 0
+
+    def test_report_is_an_event_for_the_user(self, config, wake):
+        code, out = _run("report", "first written quote received")
+        assert code == 0, out
+        (event,) = _events(config, wake["assignment_id"], "report")
+        assert (event.actor, event.wake_id, event.payload) == (
+            "assignment", wake["wake_id"], {"text": "first written quote received"},
+        )
+        assert out["event_id"] == event.id
+
+    def test_attempt_rows_carry_the_wake(self, config, wake):
+        for outcome in ("failed", "partial"):
+            code, out = _run("attempt", "--target", "acme.example/quote", "--tried", "web form",
+                             "--outcome", outcome)
+            assert code == 0, out
+        with db.get_db(config.db_path) as conn:
+            rows = store.list_attempts(conn, wake["assignment_id"])
+        assert [(r.outcome, r.wake_id, r.target) for r in rows] == [
+            ("partial", wake["wake_id"], "acme.example/quote"),
+            ("failed", wake["wake_id"], "acme.example/quote"),
+        ]
+        assert _run("attempt", "--target", "t", "--tried", "x", "--outcome", "maybe")[0] == 2
+
+    def test_complete_records_the_evidence_and_the_last_call_wins(self, config, wake):
+        _run("complete", "--evidence", "first")
+        code, out = _run("complete", "--evidence", "quotes.csv has three rows")
+        assert code == 0, out
+        row = _wake_row(config, wake["wake_id"])
+        assert row.complete_request == "quotes.csv has three rows"
+        assert row.outcome is None
+        assert _get(config, wake["assignment_id"]).state == "active"
+        assert len(_events(config, wake["assignment_id"], "complete_requested")) == 2
+
+    def test_a_failing_wakes_writes_are_already_in_the_db(self, config, wake):
+        """Written directly, not deferred: nothing waits for the task to succeed."""
+        _run("next", "--wait", "user")
+        _run("handoff", "sign the form", "--report", "a photo of the signed page")
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE tasks SET status = 'failed' WHERE id = ?", (wake["task_id"],))
+            assert store.get_wake(conn, wake["wake_id"]).next_request["mode"] == "wait"
+            assert len(store.list_actions(conn, wake["assignment_id"], status="open")) == 1
+

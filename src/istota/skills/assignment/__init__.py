@@ -19,8 +19,15 @@ inside it.
 
 `activate` holds the rendered charter in the relay request ledger
 (`assignments.lifecycle.hold_activation`); the task parks on it and the user's
-approval of that exact preview starts the assignment. The wake-facing verbs
-are added by a later stage.
+approval of that exact preview starts the assignment.
+
+The wake verbs (`next`, `handoff "<step>"`, `report`, `attempt`, `complete`)
+need the caller to be a wake (`caller.Wake` with its wake row) and the named
+assignment to be that wake's own: `not_a_wake` otherwise, `wrong_assignment`
+for another assignment. `--assignment` defaults to `ISTOTA_ASSIGNMENT_ID`, then
+to the task row's assignment, and is always checked against the task row.
+`next` and `complete` are requests recorded on the wake row; `finish_wake`
+decides them.
 """
 
 from __future__ import annotations
@@ -28,7 +35,7 @@ from __future__ import annotations
 import argparse
 import os
 import sqlite3
-from datetime import timezone, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
@@ -517,6 +524,109 @@ def cmd_close(ctx: _Ctx, args) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Wake verbs
+# ---------------------------------------------------------------------------
+
+
+def _require_wake(ctx: _Ctx, ident: str | None):
+    """The calling wake, and the assignment the verb names, which must be its own.
+
+    The assignment defaults to `ISTOTA_ASSIGNMENT_ID`, then to the task row's;
+    either way it is checked against the task row, which is the authority.
+    """
+    from istota.assignments import caller
+
+    found = caller.classify(ctx.conn, task_id=os.environ.get("ISTOTA_TASK_ID"), user_id=ctx.user_id)
+    if not isinstance(found, caller.Wake) or found.wake_id is None:
+        raise Refusal("not_a_wake", "only a wake of an assignment can do this")
+    text = (ident or "").strip() or os.environ.get(caller.ASSIGNMENT_ID_VAR, "").strip()
+    assignment = _resolve(ctx, text or str(found.assignment_id))
+    if assignment.id != found.assignment_id:
+        raise Refusal("wrong_assignment", "this wake belongs to a different assignment")
+    return found, assignment
+
+
+def _wake_ids(ctx: _Ctx, found) -> dict:
+    return {"user_id": ctx.user_id, "wake_id": found.wake_id, "task_id": found.task_id}
+
+
+def cmd_next(ctx: _Ctx, args) -> dict:
+    from istota.assignments import charter, lifecycle
+
+    found, assignment = _require_wake(ctx, args.assignment)
+    now = datetime.now(timezone.utc)
+    wake_at = None
+    if args.in_ is not None:
+        mode, requested = "in", args.in_
+        wake_at = now + timedelta(minutes=charter.parse_duration_minutes(args.in_))
+    elif args.at is not None:
+        mode, requested = "at", args.at
+        try:
+            wake_at = charter.parse_time(args.at, tz=_user_tz(ctx))
+        except ValueError:
+            raise Refusal(
+                "invalid_input", "--at takes an ISO 8601 date and time, such as 2026-11-02T09:00",
+            ) from None
+    else:
+        mode, requested = "wait", args.wait
+    request = lifecycle.request_next(
+        ctx.conn, ctx.cfg, assignment.id, **_wake_ids(ctx, found), mode=mode, requested=requested,
+        wake_at=wake_at, wait=args.wait, progress=args.progress, now=now,
+    )
+    return _state_result(ctx, assignment, next=request)
+
+
+def cmd_handoff(ctx: _Ctx, args) -> dict:
+    from istota.assignments import charter, lifecycle
+
+    found, assignment = _require_wake(ctx, args.assignment)
+    due_at = None
+    if args.due is not None:
+        try:
+            due_at = charter.validate_deadline(args.due, tz=_user_tz(ctx))
+        except charter.CharterError as exc:
+            message = ("the due date is in the past" if exc.code == "deadline_passed"
+                       else "--due takes a date (YYYY-MM-DD) or an ISO 8601 time")
+            raise Refusal("invalid_input", message) from None
+    action = lifecycle.add_handoff(
+        ctx.conn, assignment.id, **_wake_ids(ctx, found), step=args.step, report=args.report,
+        due_at=due_at,
+    )
+    return _state_result(
+        ctx, assignment,
+        handoff={"id": action.id, "text": action.text, "report": action.report_spec,
+                 "due_at": action.due_at, "status": action.status},
+    )
+
+
+def cmd_report(ctx: _Ctx, args) -> dict:
+    from istota.assignments import lifecycle
+
+    found, assignment = _require_wake(ctx, args.assignment)
+    event_id = lifecycle.add_report(ctx.conn, assignment.id, **_wake_ids(ctx, found), text=args.text)
+    return _state_result(ctx, assignment, event_id=event_id)
+
+
+def cmd_attempt(ctx: _Ctx, args) -> dict:
+    from istota.assignments import lifecycle
+
+    found, assignment = _require_wake(ctx, args.assignment)
+    attempt_id = lifecycle.add_attempt(
+        ctx.conn, assignment.id, **_wake_ids(ctx, found), target=args.target, tried=args.tried,
+        outcome=args.outcome,
+    )
+    return _state_result(ctx, assignment, attempt_id=attempt_id)
+
+
+def cmd_complete(ctx: _Ctx, args) -> dict:
+    from istota.assignments import lifecycle
+
+    found, assignment = _require_wake(ctx, args.assignment)
+    lifecycle.request_complete(ctx.conn, assignment.id, **_wake_ids(ctx, found), evidence=args.evidence)
+    return _state_result(ctx, assignment, complete_requested=True)
+
+
+# ---------------------------------------------------------------------------
 # Read verbs
 # ---------------------------------------------------------------------------
 
@@ -589,6 +699,12 @@ def _add_charter_options(parser: argparse.ArgumentParser, *, required: bool) -> 
     parser.add_argument("--per-wake-turns", dest="per_wake_turns", type=int)
     parser.add_argument("--model")
     parser.add_argument("--effort")
+
+
+def _add_wake_assignment(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--assignment", help="The assignment's id or slug; defaults to the wake's own",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -667,12 +783,43 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("id")
     p.add_argument("text")
 
-    p_handoff = sub.add_parser("handoff", help="Hand-offs")
-    handoff_sub = p_handoff.add_subparsers(dest="handoff_command", required=True)
-    p = handoff_sub.add_parser("done", help="Report a hand-off done")
-    p.add_argument("id")
-    p.add_argument("action_id", type=int)
+    # Two verbs share the word: a wake's `handoff "<step>"` and the user's
+    # `handoff done <id> <action-id>`, told apart by shape in `_handoff_shape`.
+    p = sub.add_parser(
+        "handoff",
+        help='A wake hands a step to the user: handoff "<step>" --report "<what to bring back>"; '
+             "the user reports one done: handoff done <id> <action-id> --report ...",
+    )
+    p.add_argument("words", nargs="+", metavar="STEP")
     p.add_argument("--report", required=True)
+    p.add_argument("--due", help="YYYY-MM-DD, or an ISO 8601 time")
+    _add_wake_assignment(p)
+
+    p = sub.add_parser("next", help="A wake says when the assignment wakes next")
+    when = p.add_mutually_exclusive_group(required=True)
+    when.add_argument("--in", dest="in_", metavar="DURATION", help="30m, 6h, 2d")
+    when.add_argument("--at", help="An ISO 8601 time; no offset is the user's timezone")
+    when.add_argument("--wait", choices=["user"], help="Wait until the user acts")
+    p.add_argument("--progress", help="A note on progress; recorded, not evidence")
+    _add_wake_assignment(p)
+
+    p = sub.add_parser("report", help="A wake tells the user about a milestone")
+    p.add_argument("text")
+    _add_wake_assignment(p)
+
+    p = sub.add_parser("attempt", help="A wake records what it tried")
+    host_path(
+        p, "--target", mode=NOT_A_PATH, required=True,
+        note="a label the host counts repeats by and stores as text; nothing opens it",
+        help="What it was tried on: a URL, a file name, a reference",
+    )
+    p.add_argument("--tried", required=True)
+    p.add_argument("--outcome", required=True, choices=["ok", "failed", "partial"])
+    _add_wake_assignment(p)
+
+    p = sub.add_parser("complete", help="A wake proposes completion")
+    p.add_argument("--evidence", required=True)
+    _add_wake_assignment(p)
 
     p = sub.add_parser("close", help="Answer a proposed completion")
     p.add_argument("id")
@@ -707,15 +854,34 @@ COMMANDS = {
     "note": cmd_note,
     "handoff done": cmd_handoff_done,
     "close": cmd_close,
+    "next": cmd_next,
+    "handoff": cmd_handoff,
+    "report": cmd_report,
+    "attempt": cmd_attempt,
+    "complete": cmd_complete,
     "list": cmd_list,
     "show": cmd_show,
 }
 
 
+def _handoff_shape(args) -> str:
+    """`handoff done <id> <action-id>` as three separate words is the user's
+    verb; anything else is a wake's step. A quoted step is one word, so
+    `handoff "done 4 7"` stays a step."""
+    words = args.words
+    if len(words) == 3 and words[0] == "done" and words[2].isdigit():
+        args.id, args.action_id = words[1], int(words[2])
+        return "handoff done"
+    args.step = " ".join(words)
+    return "handoff"
+
+
 def _command_key(args) -> str:
-    nested = {"item": "item_command", "frozen": "frozen_command", "handoff": "handoff_command"}
+    nested = {"item": "item_command", "frozen": "frozen_command"}
     if args.command in nested:
         return f"{args.command} {getattr(args, nested[args.command])}"
+    if args.command == "handoff":
+        return _handoff_shape(args)
     return args.command
 
 

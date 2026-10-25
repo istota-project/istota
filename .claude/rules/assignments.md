@@ -25,9 +25,9 @@ A core package, `src/istota/assignments/`, not a module in `MODULE_NAMES`: wakes
 | `wakes.py` | `dispatch_due` (the `assignments` gate's body and the one creator of wakes), `start_wake` (pickup), `reap_orphans`, and `finish_wake`. |
 | `scratchpad.py` | Reading and repairing `SCRATCHPAD.md` by descriptor, the snapshots, diffs, `begin` (user-edit detection, repair, the `before` snapshot) and `end` (user lines kept, the `after` snapshot). |
 | `prompt.py` | The wake prompt: the system half's `## Assignment` section and the user half. |
-| `skills/assignment/` | The CLI: the user-turn verbs, `activate`, and `list` / `show`. |
+| `skills/assignment/` | The CLI: the user-turn verbs, `activate`, `list` / `show`, and the wake verbs. |
 
-The wake-facing verbs and the bell resolver are added by later stages of the same work, each named here as it lands.
+The bell resolver is added by a later stage of the same work.
 
 ## Wakes and the lane
 
@@ -61,6 +61,9 @@ Activation is the one approval, and it rides the relay request ledger (`whatsapp
 ## Who may write
 
 - **A user turn** (`caller.UserTurn`) is a running task of the user from `web`, `talk` or `cli`, with no guest, no other author on its stored turn (`rooms.scopes.written_by_someone_else`), no parent, scheduled job, command or skill, not a group chat, and, when it has a conversation token, a registered room only that user reads (`db.is_private_room_of` on the canonical token; an unregistered token is refused). Every verb that changes the charter, the state or the budget, or writes a trusted inbox event, needs one. A wake trying one gets `not_a_user_turn`.
+- **A wake** (`caller.Wake`, with its wake row) may use only the wake verbs, and only on its own assignment: anyone else gets `not_a_wake`, a wake naming another assignment `wrong_assignment`. `--assignment` defaults to `ISTOTA_ASSIGNMENT_ID`, then the task row's assignment, and is checked against the task row either way. Each write (`lifecycle.request_next`, `add_handoff`, `add_report`, `add_attempt`, `request_complete`) re-reads the wake in its transaction and refuses `not_a_wake` once it has ended. They go straight to the DB, not through deferred files, because a failed task's deferred files are purged and a failing wake's `next`, hand-offs and attempts must survive.
+- **A wake's verbs request, they do not decide.** `next` stores `{mode, requested, wake_at, wait, clamped, recorded_at}` in `assignment_wakes.next_request` (a later call replaces it, `--progress` with it), `wake_at` already clamped below by `min_wake_interval_minutes` from the call and above by the deadline; `complete` stores the evidence in `complete_request` and appends a `complete_requested` event. `finish_wake` applies both. `handoff` writes an open `assignment_actions` row with the wake id and a `handoff_created` event; `report` is a `report` event (actor `assignment`, payload `{text}`); those two events are what the notices hang off, and both verbs are refused on a completed or abandoned assignment. `attempt` writes an `assignment_attempts` row with the target's whitespace collapsed, so repeats count.
+- **`handoff` is two verbs by shape**: `handoff done <id> <action-id>` as three separate words is the user's; anything else, including a quoted `"done 4 7"`, is a wake's step.
 - **The CLI's gates come first**: the `skill_assignment` flag (`feature_disabled`), admin (`not_admin`), `_guard_skill`, and a refusal when the calling task has scopes withheld, since an assignment is the user's personal record. Then every lookup is scoped by `ISTOTA_USER_ID`.
 - **Refusals are raised, not printed.** Handlers raise `Refusal`, `TransitionError` or `CharterError`, and `run_skill_cli`'s `on_exception` turns them into `{"status": "error", "error": code, "message": ...}`, so a refused write rolls back with the connection. A successful write is committed before `CHARTER.md` is rewritten.
 - **A draft's charter edits write no inbox event**; after activation every edit that moves the render writes a trusted `charter_change` with both renders. `edit_charter` is the one place a charter changes, so it is where a held activation is cancelled.

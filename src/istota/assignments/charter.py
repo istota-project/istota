@@ -167,6 +167,20 @@ def iso_z(moment: datetime) -> str:
     return utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc.microsecond // 1000:03d}Z"
 
 
+def parse_time(value: object, *, tz: tzinfo = timezone.utc) -> datetime:
+    """An ISO 8601 date and time; one with no offset is read in `tz`.
+
+    Raises ValueError for anything else, a bare date included.
+    """
+    text = str(value or "").strip()
+    if len(text) <= 10:
+        raise ValueError("not a date and time")
+    moment = datetime.fromisoformat(text)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=tz)
+    return moment
+
+
 def validate_deadline(
     value: object, *, now: datetime | None = None, tz: tzinfo = timezone.utc,
 ) -> str:
@@ -180,9 +194,7 @@ def validate_deadline(
             stored = day.isoformat() + _END_OF_DAY_SUFFIX
             moment = datetime.fromisoformat(stored.replace("Z", "+00:00"))
         else:
-            moment = datetime.fromisoformat(text)
-            if moment.tzinfo is None:
-                moment = moment.replace(tzinfo=tz)
+            moment = parse_time(text, tz=tz)
             stored = iso_z(moment)
     except ValueError:
         raise CharterError(

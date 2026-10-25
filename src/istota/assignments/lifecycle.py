@@ -10,8 +10,9 @@ raises `TransitionError`.
 `TransitionError.code` is a CLI error code: `not_found` (the assignment, or an
 item or hand-off that is not this assignment's), `bad_state` (with the current
 state), `invalid_input` (an empty or overlong note or report),
-`deadline_passed` and `confirmation_pending` (from `hold_activation`), and the
-`CharterError` codes passed through from the checks.
+`deadline_passed` and `confirmation_pending` (from `hold_activation`),
+`not_a_wake` (a wake's write on a wake that is not this task's or has ended),
+and the `CharterError` codes passed through from the checks.
 
 Trusted inbox events are written here for what the user did after activation,
 so the next wake sees it. A draft has no wakes yet, and its charter is the
@@ -37,6 +38,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable
 
 from istota import db
@@ -637,3 +639,174 @@ def wake_ended(
             payload={"next_wake_at": next_wake_at},
         )
         return True
+
+
+# ---------------------------------------------------------------------------
+# A wake's requests
+# ---------------------------------------------------------------------------
+#
+# What a wake writes through its own verbs. None of it moves the state: `next`
+# and `complete` are requests on the wake row that `wakes.finish_wake` decides,
+# after the validators have run on the final files. Hand-offs, reports and
+# attempts are rows of their own. Each write re-reads the wake inside the
+# transaction and refuses `not_a_wake` unless it is this task's wake of this
+# assignment and has not ended, so a write cannot land on a finished wake.
+
+NEXT_WAITS = ("user",)
+ATTEMPT_OUTCOMES = ("ok", "failed", "partial")
+STEP_MAX_CHARS = 1000
+PROGRESS_MAX_CHARS = 1000
+TARGET_MAX_CHARS = 200
+TRIED_MAX_CHARS = 2000
+
+
+def _open_wake_of(
+    conn: sqlite3.Connection, assignment_id: int, *, user_id: str, wake_id: int, task_id: int,
+) -> tuple[store.Assignment, store.Wake]:
+    assignment = _load(conn, assignment_id, user_id)
+    wake = store.get_wake(conn, wake_id)
+    if (wake is None or wake.assignment_id != assignment_id or wake.task_id != task_id
+            or wake.ended_at is not None):
+        raise TransitionError("not_a_wake", "this task is not a running wake of that assignment")
+    return assignment, wake
+
+
+def request_next(
+    conn: sqlite3.Connection,
+    cfg: "AssignmentsConfig",
+    assignment_id: int,
+    *,
+    user_id: str,
+    wake_id: int,
+    task_id: int,
+    mode: str,
+    requested: str,
+    wake_at: datetime | None = None,
+    wait: str | None = None,
+    progress: object = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Record the wake's `next` on its row, replacing any earlier one.
+
+    `mode` is `in` or `at` with `wake_at`, or `wait` with `wait`. A time is
+    clamped below by `min_wake_interval_minutes` from now and above by the
+    deadline; `clamped` says which applied. Returns the stored request.
+    """
+    note = _text(progress, "the progress note", PROGRESS_MAX_CHARS) if progress is not None else None
+    now = now or datetime.now(timezone.utc)
+    with write_transaction(conn):
+        assignment, wake = _open_wake_of(
+            conn, assignment_id, user_id=user_id, wake_id=wake_id, task_id=task_id,
+        )
+        clamped = None
+        when: str | None = None
+        if mode == "wait":
+            if wait not in NEXT_WAITS:
+                raise TransitionError("invalid_input", f"--wait takes one of {', '.join(NEXT_WAITS)}")
+        elif mode in ("in", "at") and wake_at is not None:
+            floor = now + timedelta(minutes=cfg.min_wake_interval_minutes)
+            if wake_at < floor:
+                wake_at, clamped = floor, "floor"
+            if assignment.deadline:
+                deadline = datetime.fromisoformat(assignment.deadline.replace("Z", "+00:00"))
+                if wake_at > deadline:
+                    wake_at, clamped = deadline, "deadline"
+            when = charter.iso_z(wake_at)
+        else:
+            raise TransitionError("invalid_input", "next needs --in, --at or --wait")
+        request = {
+            "mode": mode, "requested": requested, "wake_at": when,
+            "wait": wait if mode == "wait" else None, "clamped": clamped,
+            "recorded_at": charter.iso_z(now),
+        }
+        store.update_wake(conn, wake.id, next_request=request, progress_note=note)
+        return request
+
+
+def add_handoff(
+    conn: sqlite3.Connection,
+    assignment_id: int,
+    *,
+    user_id: str,
+    wake_id: int,
+    task_id: int,
+    step: object,
+    report: object,
+    due_at: str | None = None,
+) -> store.Action:
+    """An open hand-off the wake gives the user, with what to report back.
+
+    The `handoff_created` audit row (actor `assignment`, the wake's id, the
+    action id) is what the notice for it hangs off.
+    """
+    clean_step = _text(step, "the step", STEP_MAX_CHARS)
+    clean_report = _text(report, "what to report back", STEP_MAX_CHARS)
+    with write_transaction(conn):
+        assignment, wake = _open_wake_of(
+            conn, assignment_id, user_id=user_id, wake_id=wake_id, task_id=task_id,
+        )
+        _require_live(assignment, "hand off a step of")
+        action_id = store.insert_action(
+            conn, assignment_id, text=clean_step, report_spec=clean_report, due_at=due_at,
+            wake_id=wake.id,
+        )
+        store.insert_event(
+            conn, assignment_id, kind="handoff_created", actor="assignment", wake_id=wake.id,
+            payload={"action_id": action_id},
+        )
+        return store.get_action(conn, assignment_id, action_id)
+
+
+def add_report(
+    conn: sqlite3.Connection, assignment_id: int, *, user_id: str, wake_id: int, task_id: int,
+    text: object,
+) -> int:
+    """A milestone the wake reports: a `report` audit row, which the user's notice reads."""
+    clean = _text(text, "the report")
+    with write_transaction(conn):
+        assignment, wake = _open_wake_of(
+            conn, assignment_id, user_id=user_id, wake_id=wake_id, task_id=task_id,
+        )
+        _require_live(assignment, "report on")
+        return store.insert_event(
+            conn, assignment_id, kind="report", actor="assignment", wake_id=wake.id,
+            payload={"text": clean},
+        )
+
+
+def add_attempt(
+    conn: sqlite3.Connection, assignment_id: int, *, user_id: str, wake_id: int, task_id: int,
+    target: object, tried: object, outcome: str,
+) -> int:
+    """One attempt row; the host counts repeats per target for the thrash check."""
+    clean_target = " ".join(_text(target, "the target", TARGET_MAX_CHARS).split())
+    clean_tried = _text(tried, "what was tried", TRIED_MAX_CHARS)
+    if outcome not in ATTEMPT_OUTCOMES:
+        raise TransitionError("invalid_input", f"the outcome is one of {', '.join(ATTEMPT_OUTCOMES)}")
+    with write_transaction(conn):
+        _, wake = _open_wake_of(
+            conn, assignment_id, user_id=user_id, wake_id=wake_id, task_id=task_id,
+        )
+        return store.insert_attempt(
+            conn, assignment_id, target=clean_target, tried=clean_tried, outcome=outcome,
+            wake_id=wake.id,
+        )
+
+
+def request_complete(
+    conn: sqlite3.Connection, assignment_id: int, *, user_id: str, wake_id: int, task_id: int,
+    evidence: object,
+) -> None:
+    """Record a proposed completion on the wake row, replacing any earlier one.
+
+    `finish_wake` decides it once the validators have run on the final files.
+    """
+    clean = _text(evidence, "the evidence")
+    with write_transaction(conn):
+        _, wake = _open_wake_of(
+            conn, assignment_id, user_id=user_id, wake_id=wake_id, task_id=task_id,
+        )
+        store.update_wake(conn, wake.id, complete_request=clean)
+        store.insert_event(
+            conn, assignment_id, kind="complete_requested", actor="assignment", wake_id=wake.id,
+        )
