@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Istota can read a calendar from any provider. Paste its secret iCal address under Settings > Connections > Shared with Istota, and tasks can list its events beside your other calendars; the calendar stays read-only and nothing else on that account is reachable.
+
 ## [0.47.0] - 2026-10-25
 
 Briefings can now go to a whole group. A group owner drafts one with a prompt or the block editor, previews it, and each run produces one edition that reaches every member by email, Talk or ntfy, with personal sources used only after their owner approves. All users is a built-in group of every account, and the old default briefings move into it. The Istota iOS app gets push notifications for chat and the inbox with a badge, one-tap location tracking, voice tasks and quick notes, and opens the room a tapped alert came from.

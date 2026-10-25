@@ -178,6 +178,8 @@ export interface User {
     google_workspace: boolean;
     google_workspace_enabled: boolean;
     admin: boolean;
+    /** The "Shared with Istota" card; absent on a server that predates it. */
+    sharing?: boolean;
   };
   // null when the operator hasn't enabled encrypted token storage.
   nextcloud_token?: NextcloudTokenStatus | null;
@@ -6025,6 +6027,41 @@ export function requestMailAccountTest(id: number): Promise<{ request_id: string
 /** An answered test is removed once read, so a second read of it is `unknown`. */
 export function getMailAccountTest(requestId: string): Promise<MailAccountTestState> {
   return apiFetch(`/settings/mail-accounts/test-requests/${encodeURIComponent(requestId)}`);
+}
+
+/** A calendar the user shared with Istota by its feed address. The address never comes back. */
+export interface SharedFeed {
+  id: number;
+  host: string;
+  /** The calendar's own name, from the provider; null when it has none. */
+  name: string | null;
+  state: 'active' | 'error';
+  /** A fixed reason code for the last failed refresh, such as `http_404`. */
+  last_reason: string | null;
+  last_ok_at: string | null;
+  created_at: string | null;
+}
+
+export interface SharingSettings {
+  feeds: SharedFeed[];
+  max_feeds: number;
+  /** False when the credential store is not configured, so no address can be stored. */
+  can_add: boolean;
+}
+
+export function getSharing(): Promise<SharingSettings> {
+  return apiFetch('/settings/sharing');
+}
+/** Fetches the address once on the server and stores it; a refusal carries a `reason`. */
+export function addSharedFeed(url: string): Promise<{ feed: SharedFeed }> {
+  return apiFetch('/settings/sharing/feeds', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+}
+export function removeSharedFeed(id: number): Promise<{ removed: boolean }> {
+  return apiFetch(`/settings/sharing/feeds/${id}`, { method: 'DELETE' });
 }
 
 export interface KeepassImportItem {

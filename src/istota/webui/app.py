@@ -2427,8 +2427,11 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         "workspace": False,
         "groups": is_admin,
         "admin": is_admin,
+        "sharing": False,
     }
     if _config:
+        # Calendar feeds have no switch of their own; the card needs the database.
+        features["sharing"] = bool(_config.db_path)
         features["feeds"] = _user_has_feeds(username)
         features["location"] = _user_has_location(username)
         features["money"] = _user_has_money(username)
@@ -15657,6 +15660,142 @@ async def settings_mail_account_test_state(request_id: str,
     except Exception as exc:
         logger.error("mail account test read failed: %s", type(exc).__name__)
         return _MailAccountRefusal(500, "The test could not be read").response()
+
+
+# --- Shared with Istota: ICS feeds (open-protocol sharing) -------------------
+#
+# A feed's address is a bearer secret: the body is parsed by hand (a declared
+# model's 422 would echo it), no answer carries it, and a refusal is a fixed
+# message per reason code. The one validating fetch runs in a worker thread
+# through `sharing.ics`, which goes through the guarded HTTP client.
+
+_FEED_REFUSALS = {
+    "invalid_url": "That is not a calendar address Istota can use.",
+    "host_refused": "Istota cannot reach that host.",
+    "not_a_calendar": "That address did not return a calendar.",
+    "too_large": "That calendar is too large.",
+    "redirect_refused": "That address redirects too many times.",
+    "connection_failed": "Istota could not connect to that host.",
+    "timeout": "That host did not answer in time.",
+    "too_many_feeds": "You have reached the limit of calendar feeds on this server.",
+}
+
+
+def _feed_refusal_message(code: str) -> str:
+    if code in _FEED_REFUSALS:
+        return _FEED_REFUSALS[code]
+    if code.startswith("http_"):
+        return "That address answered with an error."
+    return "The calendar could not be added."
+
+
+def _shared_feed_dict(source) -> dict:
+    return {
+        "id": source.id, "host": source.remote_host, "name": source.extras.get("name"),
+        "state": source.state, "last_reason": source.last_reason,
+        "last_ok_at": source.last_ok_at, "created_at": source.created_at,
+    }
+
+
+def _sharing_listing(user_id: str) -> dict:
+    from istota import db
+    from istota.credentials import store as secrets_store
+    from istota.sharing import sources
+
+    with db.get_db(_config.db_path) as conn:
+        feeds = sources.sources_for_user(conn, user_id, kinds=("ics_feed",))
+    return {
+        "feeds": [_shared_feed_dict(feed) for feed in feeds],
+        "max_feeds": _config.sharing.ics_max_feeds_per_user,
+        "can_add": secrets_store.secret_key_available(),
+    }
+
+
+def _add_shared_feed(user_id: str, url: str) -> dict:
+    from istota import db
+    from istota.sharing import ics, sources
+
+    with db.get_db(_config.db_path) as conn:
+        source_id = ics.add_feed(conn, _config, user_id, url)
+        conn.commit()
+        return _shared_feed_dict(sources.get_source(conn, source_id, user_id))
+
+
+def _remove_shared_feed(user_id: str, source_id: int) -> bool:
+    from istota import db
+    from istota.sharing import ics
+
+    with db.get_db(_config.db_path) as conn:
+        removed = ics.remove_feed(conn, user_id, source_id)
+        conn.commit()
+    return removed
+
+
+def _sharing_refusal(status: int, reason: str, detail: str, **extra) -> JSONResponse:
+    return JSONResponse({"detail": detail, "reason": reason, **extra},
+                        status_code=status, headers=_NO_STORE)
+
+
+@api_router.get("/settings/sharing")
+async def settings_sharing(user: dict = Depends(_require_api_auth)):
+    if _config is None or not _config.db_path:
+        return _sharing_refusal(503, "unavailable", "Config not loaded")
+    try:
+        listing = await asyncio.to_thread(_sharing_listing, user["username"])
+    except Exception as exc:
+        logger.error("shared sources read failed: %s", type(exc).__name__)
+        return _sharing_refusal(500, "error", "The shared calendars could not be loaded")
+    return JSONResponse(listing, headers=_NO_STORE)
+
+
+@api_router.post("/settings/sharing/feeds")
+async def settings_sharing_feed_add(request: Request, user: dict = Depends(_require_api_auth),
+                                    _csrf: None = Depends(_verify_origin)):
+    from istota.credentials import store as secrets_store
+    from istota.sharing import ics, sources
+
+    if _config is None or not _config.db_path:
+        return _sharing_refusal(503, "unavailable", "Config not loaded")
+    try:
+        raw = await read_bounded_body(request, 8 * 1024)
+        body = json.loads(raw)
+    except BodyError as exc:
+        return _sharing_refusal(exc.status, "invalid_body", exc.message)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return _sharing_refusal(400, "invalid_body", "The request body is not JSON")
+    if not isinstance(body, dict) or set(body) != {"url"} or not isinstance(body["url"], str):
+        return _sharing_refusal(400, "invalid_body", "The request needs a url and nothing else")
+    if not secrets_store.secret_key_available():
+        return _sharing_refusal(503, "unavailable", "The credential store is not configured")
+    try:
+        feed = await asyncio.to_thread(_add_shared_feed, user["username"], body["url"])
+    except sources.SourceExists as exc:
+        return _sharing_refusal(409, "already_subscribed",
+                                "You are already subscribed to that calendar.", id=exc.source_id)
+    except ics.FeedError as exc:
+        return _sharing_refusal(400, exc.code, _feed_refusal_message(exc.code))
+    except Exception as exc:
+        logger.error("shared feed add failed: %s", type(exc).__name__)
+        return _sharing_refusal(500, "error", "The calendar could not be added.")
+    return JSONResponse({"feed": feed}, status_code=201, headers=_NO_STORE)
+
+
+@api_router.delete("/settings/sharing/feeds/{ident}")
+async def settings_sharing_feed_remove(ident: str, user: dict = Depends(_require_api_auth),
+                                       _csrf: None = Depends(_verify_origin)):
+    if _config is None or not _config.db_path:
+        return _sharing_refusal(503, "unavailable", "Config not loaded")
+    # Parsed by hand, as `_mail_account_id` is: a validation error echoes the segment.
+    if not ident.isascii() or not ident.isdigit() or len(ident) > 18:
+        return _sharing_refusal(404, "not_found", "Calendar not found")
+    try:
+        removed = await asyncio.to_thread(_remove_shared_feed, user["username"], int(ident))
+    except Exception as exc:
+        logger.error("shared feed remove failed: %s", type(exc).__name__)
+        return _sharing_refusal(500, "error", "The calendar could not be removed.")
+    if not removed:
+        return _sharing_refusal(404, "not_found", "Calendar not found")
+    return JSONResponse({"removed": True}, headers=_NO_STORE)
 
 
 @api_router.get("/settings/credentials")
