@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Sequence
 
 from istota.assignments import budget, charter, scratchpad, store
+from istota.lib import markdown_headings
 from istota.lib.untrusted import frame_untrusted
 
 if TYPE_CHECKING:
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
 SECTION_HEADING = "## Assignment"
 CHARTER_HEADING = "### Charter (set by the user)"
 #: The charter's headings move down this many levels inside the section.
-CHARTER_DEMOTE = "###"
+CHARTER_DEMOTE = 3
 UNTRUSTED_LABEL = "assignment inbox"
 ATTEMPT_TARGETS_SHOWN = 30
 THRASH_REPEATS = 3
@@ -104,13 +105,9 @@ def _days_phrase(delta_seconds: float) -> str:
 
 
 def demote_headings(text: str) -> str:
-    """Every markdown heading line moved down three levels."""
-    lines = []
-    for line in text.splitlines():
-        if line.startswith("#"):
-            line = CHARTER_DEMOTE + line
-        lines.append(line)
-    return "\n".join(lines)
+    """Every markdown heading moved down `CHARTER_DEMOTE` levels, at most to 6,
+    so none can sit beside or above `CHARTER_HEADING`."""
+    return markdown_headings.demote_headings(text, lambda level: min(level + CHARTER_DEMOTE, 6))
 
 
 def fenced(text: str, info: str = "") -> str:

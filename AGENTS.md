@@ -219,6 +219,7 @@ src/istota/
 │   ├── rclone_conf.py    # The VM's rclone remote for a Nextcloud account, and rclone's `obscure` without rclone → leaf-modules.md
 │   ├── llm_json.py       # The same, for a fence in *model* output; anchored closer, linear walk → leaf-modules.md
 │   ├── markdown_plain.py # Markdown flattened to the words a reader sees, for the iOS chat push preview → leaf-modules.md
+│   ├── markdown_headings.py # Headings in somebody else's text pushed below the section it sits under: skill overlays, the assignment charter → leaf-modules.md
 │   ├── text_match.py     # Literal query terms, FTS/LIKE matching and plain snippets → search.md
 │   ├── date_parse.py     # Loose date parsing for text a model or a person typed, validated → leaf-modules.md
 │   ├── filenames.py      # The one rule for turning a name somebody else chose into a filename → leaf-modules.md
