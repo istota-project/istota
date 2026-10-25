@@ -35,11 +35,94 @@ from istota import db
 from istota.config import Config, SharingConfig, SharingOcmConfig, SiteConfig, UserConfig
 from istota.credentials import store as secrets_store
 from istota.sharing import ocm, sources
-from tests.test_sharing_ics import _Server
 
 SITE = "bot.example.com"
 SECRET = "synthetic-share-secret-7f3a"
 REPO = Path(__file__).resolve().parent.parent
+WEBDAV = "/public.php/webdav/"
+
+
+def _multistatus(permissions: str | None) -> bytes:
+    prop = f"<oc:permissions>{permissions}</oc:permissions>" if permissions is not None else ""
+    return (
+        '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">'
+        f"<d:response><d:href>{WEBDAV}</d:href><d:propstat><d:prop>{prop}</d:prop>"
+        "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"
+    ).encode()
+
+
+class _Server:
+    """A loopback Nextcloud double: discovery by GET, the share root by PROPFIND, notifications by POST.
+
+    ``routes`` answers a GET per path. The share root at `WEBDAV` answers a
+    PROPFIND only with Basic auth whose user is one of ``dav_secrets``, as
+    Nextcloud's public WebDAV endpoint does, and serves ``permissions`` as
+    ``oc:permissions``. Every request is recorded, its body included.
+    """
+
+    def __init__(self) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.routes: dict[str, tuple[int, dict, bytes]] = {}
+        self.received: list[dict] = []
+        self.dav_secrets: set[str] = set()
+        self.permissions: str | None = "RGDNVCK"
+        self.notification_status = 201
+        server = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _answer(self, status, payload=b"", extra=None):
+                self.send_response(status)
+                for key, value in (extra or {}).items():
+                    self.send_header(key, value)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def _record(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else b""
+                headers = {k.lower(): v for k, v in self.headers.items()}
+                server.received.append({"method": self.command, "path": self.path,
+                                        "headers": headers, "body": body})
+                return headers, body
+
+            def do_GET(self):
+                self._record()
+                status, extra, payload = server.routes.get(self.path, (404, {}, b"missing"))
+                self._answer(status, payload, extra)
+
+            def do_PROPFIND(self):
+                headers, _ = self._record()
+                if self.path != WEBDAV:
+                    return self._answer(404)
+                user = ""
+                scheme, _, encoded = (headers.get("authorization") or "").partition(" ")
+                if scheme.lower() == "basic":
+                    user = base64.b64decode(encoded).decode().partition(":")[0]
+                if user not in server.dav_secrets:
+                    return self._answer(401)
+                self._answer(207, _multistatus(server.permissions),
+                             {"Content-Type": "application/xml; charset=utf-8"})
+
+            def do_POST(self):
+                self._record()
+                if self.path != "/ocm/notifications":
+                    return self._answer(404)
+                self._answer(server.notification_status, b"[]",
+                             {"Content-Type": "application/json"})
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
 
 
 @pytest.fixture(autouse=True)
@@ -103,6 +186,15 @@ class Sender:
     @property
     def fetches(self) -> int:
         return sum(1 for r in self.server.received if r["path"] == "/ocm-provider/")
+
+    @property
+    def propfinds(self) -> list[dict]:
+        return [r for r in self.server.received if r["method"] == "PROPFIND"]
+
+    @property
+    def notifications(self) -> list[dict]:
+        return [json.loads(r["body"]) for r in self.server.received
+                if r["method"] == "POST" and r["path"] == "/ocm/notifications"]
 
     def offer(self, **overrides) -> dict:
         """The OCM 1.0 offer body Nextcloud sends, with this sender as owner."""
@@ -737,3 +829,353 @@ def test_nginx_proxies_the_four_ocm_locations_to_the_web_app():
         assert name in locations, name
         assert "proxy_pass http://$upstream_web;" in locations[name], name
         assert "proxy_set_header Host $http_host;" in locations[name], name
+
+
+# ------------------------------------------------- accepting and declining
+
+def _offered(config, sender, **overrides) -> sources.SharedSource:
+    """One pending offer from ``sender``, received through `receive_share`."""
+    assert _receive(config, sender.offer(**overrides)).status == 201
+    pid = overrides.get("providerId", 5)
+    [offer] = [o for o in _offers(config) if o.remote_key.endswith(f"|{pid}")]
+    return offer
+
+
+def _source(config, source_id, user="alice"):
+    with db.get_db(config.db_path) as conn:
+        return sources.get_source(conn, source_id, user)
+
+
+def _credential(config, source_id, user="alice"):
+    """The local credential's value, bound hosts and grant, or None."""
+    from istota.credentials.broker import bindings, grants
+    from istota.credentials.names import VAULT_ENTRY_SERVICE
+
+    name = sources.credential_name(source_id)
+    with db.get_db(config.db_path) as conn:
+        value = secrets_store.get_secret(None, user, VAULT_ENTRY_SERVICE, name, connection=conn,
+                                         touch=False)
+        if value is None:
+            return None
+        return {"value": value, "hosts": bindings.get_entry_binding(conn, user, name)["hosts"],
+                "grant": grants.get_grant(conn, user, name)}
+
+
+def _accept(config, source_id, user="alice", **kwargs):
+    kwargs.setdefault("sandboxed", True)
+    with db.get_db(config.db_path) as conn:
+        return ocm.accept(conn, config, source_id, user, **kwargs)
+
+
+def _decline(config, source_id, user="alice"):
+    with db.get_db(config.db_path) as conn:
+        return ocm.decline(conn, config, source_id, user)
+
+
+def _remove(config, source_id, user="alice"):
+    with db.get_db(config.db_path) as conn:
+        return ocm.remove(conn, config, source_id, user)
+
+
+class TestAccept:
+    def test_accept_creates_the_credential_and_grant_and_tells_the_sender(self, config, sender):
+        sender.server.dav_secrets = {SECRET}
+        offer = _offered(config, sender)
+        result = _accept(config, offer.id, allow_scheduled=True)
+        assert (result.state, result.access, result.notified) == ("active", "write", True)
+
+        after = _source(config, offer.id)
+        assert (after.state, after.access) == ("active", "write")
+        assert _read_secret(config, "alice", str(offer.id)) is None
+        cred = _credential(config, offer.id)
+        assert cred["value"] == SECRET
+        assert cred["hosts"] == [sender.host]
+        assert cred["grant"]["scope_mode"] == "all"
+        assert cred["grant"]["allow_scheduled"] is True
+
+        [propfind] = sender.propfinds
+        assert propfind["headers"]["depth"] == "0"
+        assert propfind["headers"]["authorization"] == "Basic " + base64.b64encode(
+            f"{SECRET}:".encode()).decode()
+        [note] = sender.notifications
+        assert note["notificationType"] == "SHARE_ACCEPTED"
+        assert note["resourceType"] == "file"
+        assert note["providerId"] == "5" and isinstance(note["providerId"], str)
+        assert note["notification"]["sharedSecret"] == SECRET
+        assert note["notification"]["message"]
+
+    def test_scheduled_use_is_off_by_default(self, config, sender):
+        sender.server.dav_secrets = {SECRET}
+        offer = _offered(config, sender)
+        _accept(config, offer.id)
+        assert _credential(config, offer.id)["grant"]["allow_scheduled"] is False
+
+    @pytest.mark.parametrize("permissions, access", [("RGDNVCK", "write"), ("RG", "read"),
+                                                     ("RGW", "write"), (None, "read")])
+    def test_access_comes_from_oc_permissions(self, config, sender, permissions, access):
+        sender.server.dav_secrets = {SECRET}
+        sender.server.permissions = permissions
+        offer = _offered(config, sender)
+        assert _accept(config, offer.id).access == access
+        assert _source(config, offer.id).access == access
+
+    def test_a_secret_the_host_refuses_leaves_the_offer_pending(self, config, sender):
+        sender.server.dav_secrets = {"some-other-secret"}
+        offer = _offered(config, sender)
+        with pytest.raises(ocm.ShareActionRefused) as refused:
+            _accept(config, offer.id)
+        assert refused.value.code == "share_unopened"
+        assert str(refused.value) == "This share could not be opened."
+        assert _source(config, offer.id).state == "pending"
+        assert _read_secret(config, "alice", str(offer.id)) == SECRET
+        assert _credential(config, offer.id) is None
+        assert sender.notifications == []
+
+    def test_an_unsandboxed_multi_user_install_refuses_before_any_request(self, config, sender):
+        from istota.credentials.names import VAULT_ISOLATION_REASON
+
+        config.users["bob"] = UserConfig()
+        sender.server.dav_secrets = {SECRET}
+        offer = _offered(config, sender)
+        with pytest.raises(ocm.ShareActionRefused) as refused:
+            _accept(config, offer.id, sandboxed=False)
+        assert refused.value.code == "isolation"
+        assert str(refused.value) == VAULT_ISOLATION_REASON
+        assert sender.propfinds == []
+        assert _source(config, offer.id).state == "pending"
+        assert _credential(config, offer.id) is None
+
+    def test_another_users_offer_is_not_found(self, config, sender):
+        config.users["bob"] = UserConfig()
+        sender.server.dav_secrets = {SECRET}
+        offer = _offered(config, sender)
+        with pytest.raises(ocm.ShareActionRefused) as refused:
+            _accept(config, offer.id, user="bob")
+        assert refused.value.code == "not_found"
+        assert sender.propfinds == []
+
+    def test_a_failed_notification_does_not_undo_the_accept(self, config, sender):
+        sender.server.dav_secrets = {SECRET}
+        sender.server.notification_status = 500
+        offer = _offered(config, sender)
+        result = _accept(config, offer.id)
+        assert (result.state, result.notified) == ("active", False)
+        assert _source(config, offer.id).state == "active"
+
+
+class TestReoffer:
+    def _active_with_reoffer(self, config, sender, new_secret):
+        sender.server.dav_secrets = {SECRET}
+        offer = _offered(config, sender)
+        _accept(config, offer.id, allow_scheduled=True)
+        body = sender.offer()
+        body["protocol"]["options"]["sharedSecret"] = new_secret
+        assert _receive(config, body).status == 201
+        assert _source(config, offer.id).extras.get("reoffer_pending") is True
+        return offer
+
+    def test_a_reoffer_replaces_the_credential_after_a_good_propfind(self, config, sender):
+        offer = self._active_with_reoffer(config, sender, "fresh-secret-2")
+        sender.server.dav_secrets = {"fresh-secret-2"}
+        sender.server.permissions = "RG"
+        result = _accept(config, offer.id)
+        assert (result.state, result.access) == ("active", "read")
+        after = _source(config, offer.id)
+        assert "reoffer_pending" not in after.extras
+        cred = _credential(config, offer.id)
+        assert cred["value"] == "fresh-secret-2"
+        # The grant is the user's: a re-offer keeps it.
+        assert cred["grant"]["allow_scheduled"] is True
+        assert _read_secret(config, "alice", f"{offer.id}:reoffer") is None
+
+    def test_a_forged_reoffer_changes_nothing(self, config, sender):
+        offer = self._active_with_reoffer(config, sender, "forged-secret")
+        with pytest.raises(ocm.ShareActionRefused) as refused:
+            _accept(config, offer.id)
+        assert refused.value.code == "share_unopened"
+        after = _source(config, offer.id)
+        assert after.state == "active" and after.extras.get("reoffer_pending") is True
+        assert _credential(config, offer.id)["value"] == SECRET
+        assert _read_secret(config, "alice", f"{offer.id}:reoffer") == "forged-secret"
+
+    def test_declining_a_reoffer_keeps_the_share_and_tells_nobody(self, config, sender):
+        offer = self._active_with_reoffer(config, sender, "forged-secret")
+        before = len(sender.notifications)
+        result = _decline(config, offer.id)
+        assert result.state == "active"
+        after = _source(config, offer.id)
+        assert after.state == "active" and "reoffer_pending" not in after.extras
+        assert _read_secret(config, "alice", f"{offer.id}:reoffer") is None
+        assert _credential(config, offer.id)["value"] == SECRET
+        assert len(sender.notifications) == before
+
+
+class TestDeclineAndRemove:
+    def test_decline_deletes_the_secret_and_tells_the_sender(self, config, sender):
+        offer = _offered(config, sender)
+        result = _decline(config, offer.id)
+        assert (result.state, result.notified) == ("declined", True)
+        assert _source(config, offer.id).state == "declined"
+        assert _read_secret(config, "alice", str(offer.id)) is None
+        [note] = sender.notifications
+        assert note["notificationType"] == "SHARE_DECLINED"
+        assert note["providerId"] == "5"
+        assert note["notification"]["sharedSecret"] == SECRET
+
+    def test_remove_revokes_deletes_the_credential_and_tells_the_sender(self, config, sender):
+        sender.server.dav_secrets = {SECRET}
+        offer = _offered(config, sender)
+        _accept(config, offer.id)
+        result = _remove(config, offer.id)
+        assert (result.state, result.notified) == ("revoked", True)
+        assert _source(config, offer.id).state == "revoked"
+        assert _credential(config, offer.id) is None
+        assert [n["notificationType"] for n in sender.notifications] == [
+            "SHARE_ACCEPTED", "SHARE_DECLINED"]
+        assert sender.notifications[-1]["notification"]["sharedSecret"] == SECRET
+
+    def test_remove_refuses_an_offer_and_decline_an_active_share(self, config, sender):
+        sender.server.dav_secrets = {SECRET}
+        offer = _offered(config, sender)
+        with pytest.raises(ocm.ShareActionRefused) as refused:
+            _remove(config, offer.id)
+        assert refused.value.code == "not_active"
+        _accept(config, offer.id)
+        with pytest.raises(ocm.ShareActionRefused) as refused:
+            _decline(config, offer.id)
+        assert refused.value.code == "not_waiting"
+
+
+class TestExpiry:
+    def test_an_old_pending_offer_is_declined_and_nothing_is_posted(self, config, sender):
+        from datetime import datetime, timedelta, timezone
+
+        old = _offered(config, sender)
+        fresh = _offered(config, sender, providerId=6)
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE shared_sources SET updated_at = datetime('now', '-15 days')"
+                         " WHERE id = ?", (old.id,))
+            conn.commit()
+        with db.get_db(config.db_path) as conn:
+            assert ocm.expire_pending(conn, config, datetime.now(timezone.utc)) == 1
+        expired = _source(config, old.id)
+        assert (expired.state, expired.last_reason) == ("declined", "expired")
+        assert _read_secret(config, "alice", str(old.id)) is None
+        assert _source(config, fresh.id).state == "pending"
+        assert sender.notifications == []
+        with db.get_db(config.db_path) as conn:
+            later = datetime.now(timezone.utc) + timedelta(days=15)
+            assert ocm.expire_pending(conn, config, later) == 1
+        assert _source(config, fresh.id).state == "declined"
+        assert sender.notifications == []
+
+    def test_the_scheduler_gate_expires_them(self, config, sender):
+        from istota.scheduler import build_interval_gates
+
+        old = _offered(config, sender)
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE shared_sources SET updated_at = datetime('now', '-15 days')"
+                         " WHERE id = ?", (old.id,))
+            conn.commit()
+        [gate] = [g for g in build_interval_gates(config) if g.name == "sharing-ocm-expire"]
+        gate.run(0.0)
+        assert _source(config, old.id).state == "declined"
+        assert sender.notifications == []
+
+
+# -------------------------------------------------------- remote notifications
+
+def _notification(notification_type, secret=SECRET, provider_id="5") -> dict:
+    return {"notificationType": notification_type, "resourceType": "file",
+            "providerId": provider_id,
+            "notification": {"sharedSecret": secret, "message": "Removed"}}
+
+
+def _notify(config, body, headers=None):
+    raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+    with db.get_db(config.db_path) as conn:
+        return ocm.receive_notification(conn, config, raw, headers or _headers(raw))
+
+
+class TestNotifications:
+    def _active(self, config, sender):
+        sender.server.dav_secrets = {SECRET}
+        offer = _offered(config, sender)
+        _accept(config, offer.id)
+        return offer
+
+    def test_unshared_with_a_wrong_secret_changes_nothing(self, config, sender):
+        offer = self._active(config, sender)
+        answer = _notify(config, _notification("SHARE_UNSHARED", secret="forged"))
+        assert answer.status == 403
+        assert _source(config, offer.id).state == "active"
+        assert _credential(config, offer.id)["value"] == SECRET
+
+    def test_unshared_with_the_right_secret_revokes_and_deletes_the_credential(self, config, sender):
+        offer = self._active(config, sender)
+        answer = _notify(config, _notification("SHARE_UNSHARED"))
+        assert answer.status == 201
+        after = _source(config, offer.id)
+        assert (after.state, after.last_reason) == ("revoked", "remote_unshared")
+        assert _credential(config, offer.id) is None
+
+    def test_unshared_for_a_pending_offer_revokes_it(self, config, sender):
+        offer = _offered(config, sender)
+        assert _notify(config, _notification("SHARE_UNSHARED")).status == 201
+        assert _source(config, offer.id).state == "revoked"
+        assert _read_secret(config, "alice", str(offer.id)) is None
+
+    def test_the_secret_must_belong_to_the_named_share(self, config, sender):
+        offer = self._active(config, sender)
+        assert _notify(config, _notification("SHARE_UNSHARED", provider_id="6")).status == 403
+        assert _source(config, offer.id).state == "active"
+
+    def test_a_signed_unshare_from_a_key_publishing_sender(self, config, sender, key):
+        offer = self._active(config, sender)
+        sender.public_key_pem = _pem(key)
+        sender.publish()
+        raw = json.dumps(_notification("SHARE_UNSHARED")).encode()
+        assert _notify(config, raw).status == 403
+        assert _source(config, offer.id).state == "active"
+        wrong_path = _sign(key, raw, key_id=f"https://{sender.host}/ocm#signature")
+        assert _notify(config, raw, wrong_path).status == 403
+        assert _source(config, offer.id).state == "active"
+        signed = _sign(key, raw, key_id=f"https://{sender.host}/ocm#signature",
+                       path="/ocm/notifications")
+        assert _notify(config, raw, signed).status == 201
+        assert _source(config, offer.id).state == "revoked"
+
+    def test_change_permission_rereads_oc_permissions(self, config, sender):
+        offer = self._active(config, sender)
+        assert _source(config, offer.id).access == "write"
+        sender.server.permissions = "RG"
+        assert _notify(config, _notification("RESHARE_CHANGE_PERMISSION")).status == 201
+        assert _source(config, offer.id).access == "read"
+
+    @pytest.mark.parametrize("notification_type", ["RESHARE_UNDO", "SHARE_ACCEPTED", "SOMETHING_NEW"])
+    def test_other_types_are_501_and_change_nothing(self, config, sender, notification_type):
+        offer = self._active(config, sender)
+        answer = _notify(config, _notification(notification_type))
+        assert answer.status == 501
+        assert _source(config, offer.id).state == "active"
+
+    @pytest.mark.parametrize("body", [
+        b"not json", b"[]", {"notificationType": "SHARE_UNSHARED"},
+        {**_notification("SHARE_UNSHARED"), "notification": "x"},
+        {**_notification("SHARE_UNSHARED"), "providerId": True},
+    ], ids=["not-json", "array", "no-secret", "notification-not-object", "provider-bool"])
+    def test_a_malformed_notification_is_400(self, config, sender, body):
+        offer = self._active(config, sender)
+        assert _notify(config, body).status == 400
+        assert _source(config, offer.id).state == "active"
+
+    def test_the_route(self, config, sender):
+        offer = self._active(config, sender)
+        with _ocm_client(config) as client:
+            forged = client.post("/ocm/notifications",
+                                 json=_notification("SHARE_UNSHARED", secret="x"))
+            real = client.post("/ocm/notifications", json=_notification("SHARE_UNSHARED"))
+        assert forged.status_code == 403
+        assert real.status_code == 201
+        assert real.headers["cache-control"] == "no-store"
+        assert _source(config, offer.id).state == "revoked"

@@ -268,6 +268,49 @@ def due_sources(conn: sqlite3.Connection, kind: str, now: str, *, limit: int = 2
     return [_from_row(row) for row in rows]
 
 
+def shares_for_provider(conn: sqlite3.Connection, provider_id: str, *, limit: int = 50) -> list[SharedSource]:
+    """Every user's OCM shares named ``<host>|<provider_id>`` that may still hold a secret.
+
+    The other cross-user read, for `sharing.ocm.receive_notification`: a
+    remote notification names a share by its provider id alone, and the
+    caller matches the secret it carries against each row's.
+    """
+    if not (isinstance(provider_id, str) and provider_id.isascii() and provider_id.isdigit()):
+        return []
+    rows = conn.execute(
+        f"SELECT {_COLUMNS} FROM shared_sources WHERE kind = 'ocm_share'"
+        " AND state IN ('pending', 'active', 'error') AND remote_key LIKE ? ORDER BY id LIMIT ?",
+        (f"%|{provider_id}", int(limit)),
+    ).fetchall()
+    return [_from_row(row) for row in rows if row["remote_key"].endswith(f"|{provider_id}")]
+
+
+def pending_since(conn: sqlite3.Connection, kind: str, cutoff: str) -> list[SharedSource]:
+    """Every user's ``pending`` sources of ``kind`` last offered at or before ``cutoff``.
+
+    ``cutoff`` is in the ``datetime('now')`` spelling ``updated_at`` is
+    written in (``YYYY-MM-DD HH:MM:SS``, UTC); for the pending-offer expiry.
+    """
+    rows = conn.execute(
+        f"SELECT {_COLUMNS} FROM shared_sources WHERE kind = ? AND state = 'pending'"
+        " AND updated_at <= ? ORDER BY id",
+        (_check_kind(kind), cutoff),
+    ).fetchall()
+    return [_from_row(row) for row in rows]
+
+
+def set_access(conn: sqlite3.Connection, source_id: int, user_id: str, access: str) -> bool:
+    """Record the access the provider reports for the user's source."""
+    if access not in ACCESS:
+        raise ValueError(f"unknown access {access!r}")
+    cur = conn.execute(
+        "UPDATE shared_sources SET access = ?, updated_at = datetime('now')"
+        " WHERE id = ? AND user_id = ?",
+        (access, source_id, user_id),
+    )
+    return cur.rowcount > 0
+
+
 def set_poll_times(
     conn: sqlite3.Connection,
     source_id: int,

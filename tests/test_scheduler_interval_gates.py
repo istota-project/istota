@@ -74,6 +74,9 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     # Each feed carries its own next poll time from `[sharing]`, so the gate
     # is a fixed one-minute look for due feeds.
     ("sharing-ics-poll", None),
+    # OCM folder offers left unanswered for `[sharing.ocm] pending_days`:
+    # an hourly look, since the window is days.
+    ("sharing-ocm-expire", None),
     ("shared-files", "shared_file_check_interval"),
     ("tasks-file-poll", "tasks_file_poll_interval"),
     ("cleanup", "briefing_check_interval"),

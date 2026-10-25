@@ -35,7 +35,31 @@ refusal answers the OCM error shape with fixed text and writes nothing:
 8. 201 with the user's display name.
 
 The offer proves only that the sender runs OCM. That the secret is real is
-proved at accept, by a PROPFIND with it against the verified host (Stage 7).
+proved at accept, by a PROPFIND with it against the verified host.
+
+**Accepting** (`accept`) refuses first on an unsandboxed multi-user install
+(`credentials.names.vault_isolation_refusal`), then PROPFINDs the share root
+with the held secret and reads its access from ``oc:permissions``, then in one
+transaction stores the secret as the local credential `sources.credential_name`
+bound to the sender, with its broker grant, and sets the row active. A
+re-offer of an active share replaces the credential's value the same way, and
+only once its own PROPFIND has succeeded, so a forged repeat cannot swap a
+live share. `decline`, `remove` and the scheduler's `expire_pending` take the
+row to ``declined`` or ``revoked``, which deletes every secret it held.
+
+**Telling the sender** (`notify_sender`) is an unsigned POST to the
+``endPoint`` its discovery document names, made after the commit; a failure is
+logged and undoes nothing. ``SHARE_DECLINED`` makes Nextcloud delete the
+share, so declining a re-offer of an active share sends nothing: it would end
+the live share too.
+
+**Remote notifications** (`receive_notification`) act only when the
+notification's ``sharedSecret`` is the named share's own, compared in constant
+time, and, where the sender's discovery document publishes a key, when its
+signature verifies. ``SHARE_UNSHARED`` revokes; ``RESHARE_CHANGE_PERMISSION``
+re-reads ``oc:permissions`` (Nextcloud never sends it to a recipient, so the
+``shares`` skill's own re-read is what keeps access current there); any other
+type is 501, ``RESHARE_UNDO`` included.
 """
 
 from __future__ import annotations
@@ -333,15 +357,15 @@ def _string(body: dict, name: str, *, required: bool = True) -> str:
     return value
 
 
-def _provider_id(value: object) -> str:
+def _provider_id(value: object, message: str = "invalid_offer") -> str:
     # A JSON number in offers, a string in notifications; stored as decimal.
     if isinstance(value, bool):
-        raise _Refused(400, "invalid_offer", "providerId")
+        raise _Refused(400, message, "providerId")
     if isinstance(value, int) and 0 <= value < 10 ** 18:
         return str(value)
     if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= 18:
         return str(int(value))
-    raise _Refused(400, "invalid_offer", "providerId")
+    raise _Refused(400, message, "providerId")
 
 
 @dataclass(frozen=True)
@@ -632,5 +656,527 @@ def receive_share(
         profile = config.users.get(user_id)
         name = (profile.display_name if profile is not None else "") or user_id
         return OcmAnswer(201, {"recipientDisplayName": name})
+    except _Refused as refused:
+        return refused.answer()
+
+
+# ------------------------------------------------------- the share's own root
+
+PROPFIND_MAX_BYTES = 256 * 1024
+REMOTE_TIMEOUT_SECONDS = 10.0
+_OC_PERMISSIONS = "{http://owncloud.org/ns}permissions"
+# `oc:permissions` letters that mean the share may be written: create (C),
+# create folders (K), write (W). An edit share reads RGDNVCK, a read share RG.
+_WRITE_LETTERS = frozenset("CKW")
+_PROPFIND_BODY = (
+    b'<?xml version="1.0" encoding="utf-8"?>'
+    b'<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">'
+    b"<d:prop><oc:permissions/></d:prop></d:propfind>"
+)
+
+_ACTION_MESSAGES = {
+    "not_found": "That folder share was not found.",
+    "not_waiting": "That folder offer is no longer waiting.",
+    "not_active": "That folder share is not active.",
+    "share_unopened": "This share could not be opened.",
+    "share_unreachable": "The sharing server could not be reached.",
+    "offer_changed": "The offer changed while it was being accepted. Try again.",
+    "credential_refused": "The share's credential could not be stored.",
+    "unavailable": "This server cannot store credentials until its credential store is set up.",
+}
+
+
+class ShareActionRefused(Exception):
+    """A user's accept, decline or remove was refused; ``code`` says why, the text is fixed."""
+
+    def __init__(self, code: str, message: str | None = None) -> None:
+        super().__init__(message or _ACTION_MESSAGES[code])
+        self.code = code
+
+
+@dataclass(frozen=True)
+class ActionResult:
+    source_id: int
+    state: str
+    access: str
+    notified: bool
+
+
+def share_root_url(source) -> str:
+    """The share root: the verified WebDAV base, and the share's path under it."""
+    from urllib.parse import quote
+
+    base = str(source.extras.get("webdav") or "")
+    if not base.endswith("/"):
+        raise ShareActionRefused("share_unreachable")
+    path = str(source.extras.get("share_path") or "")
+    if not path:
+        return base
+    return base + "/".join(quote(segment, safe="") for segment in path.split("/")) + "/"
+
+
+def _access_from(permissions: str | None) -> str:
+    return "write" if permissions and _WRITE_LETTERS & set(permissions) else "read"
+
+
+def share_access(config, source, secret: str, *, resolve=None) -> str:
+    """PROPFIND the share root with ``secret``; its access, ``read`` or ``write``.
+
+    The proof that the secret opens the share on the verified host:
+    `ShareActionRefused` ``share_unopened`` on a 401, 403 or 404, and
+    ``share_unreachable`` on anything else that is not a multistatus.
+    Nextcloud's public WebDAV endpoint takes the secret as the Basic user with
+    an empty password.
+    """
+    from istota.lib import dav_xml
+    from istota.sandbox import guarded_http
+
+    url = share_root_url(source)
+    with guarded_http.new_client(timeout=REMOTE_TIMEOUT_SECONDS) as client:
+        try:
+            response = guarded_http.guarded_send(
+                client, "PROPFIND", url,
+                private_hosts=config.sharing.private_hosts,
+                max_bytes=PROPFIND_MAX_BYTES,
+                timeout=REMOTE_TIMEOUT_SECONDS,
+                auth=(secret, ""),
+                headers={"Depth": "0", "Content-Type": "application/xml; charset=utf-8"},
+                content=_PROPFIND_BODY,
+                resolve=resolve,
+            )
+        except guarded_http.GuardRefused as exc:
+            logger.info("ocm share root refused source=%s code=%s", source.id, exc.code)
+            raise ShareActionRefused("share_unreachable") from None
+    if response.status_code in (401, 403, 404):
+        logger.info("ocm share root source=%s status=%s", source.id, response.status_code)
+        raise ShareActionRefused("share_unopened")
+    if response.status_code != 207:
+        logger.info("ocm share root source=%s status=%s", source.id, response.status_code)
+        raise ShareActionRefused("share_unreachable")
+    try:
+        rows = dav_xml.parse_multistatus(response.content)
+    except dav_xml.DavXmlError:
+        raise ShareActionRefused("share_unreachable") from None
+    if not rows:
+        raise ShareActionRefused("share_unreachable")
+    element = rows[0][1].get(_OC_PERMISSIONS)
+    return _access_from(element.text if element is not None else None)
+
+
+# -------------------------------------------------------- telling the sender
+
+_NOTIFICATION_MESSAGES = {
+    "SHARE_ACCEPTED": "Recipient accepted the share",
+    "SHARE_DECLINED": "Recipient declined the share",
+}
+
+
+def notify_sender(config, source, notification_type: str, secret: str, *, resolve=None) -> bool:
+    """POST ``notification_type`` to the sender's ``endPoint/notifications``; whether it took.
+
+    Unsigned: Istota signs nothing (see the module docstring). The endpoint
+    comes from the sender's discovery document, verified as at the offer.
+    Never raises; a failure is logged with the host and a code only.
+    """
+    from istota.sandbox import guarded_http
+
+    owner = parse_cloud_id(source.extras.get("owner"))
+    if owner is None or owner.host != source.remote_host:
+        logger.info("ocm notify source=%s type=%s skipped=no_owner", source.id, notification_type)
+        return False
+    try:
+        document = _verified_document(config, owner, fetch_discovery(config, owner, resolve=resolve))
+    except _Refused:
+        logger.info("ocm notify source=%s type=%s skipped=sender_unverified",
+                    source.id, notification_type)
+        return False
+    body = json.dumps({
+        "notificationType": notification_type,
+        "resourceType": "file",
+        "providerId": str(source.extras.get("provider_id") or source.remote_key.rpartition("|")[2]),
+        "notification": {
+            "sharedSecret": secret,
+            "message": _NOTIFICATION_MESSAGES.get(notification_type, notification_type),
+        },
+    }).encode()
+    url = document["endPoint"].rstrip("/") + "/notifications"
+    try:
+        with guarded_http.new_client(timeout=REMOTE_TIMEOUT_SECONDS) as client:
+            response = guarded_http.guarded_send(
+                client, "POST", url,
+                private_hosts=config.sharing.private_hosts,
+                max_bytes=DISCOVERY_MAX_BYTES,
+                timeout=REMOTE_TIMEOUT_SECONDS,
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                content=body,
+                resolve=resolve,
+            )
+    except guarded_http.GuardRefused as exc:
+        logger.info("ocm notify source=%s type=%s code=%s", source.id, notification_type, exc.code)
+        return False
+    except Exception as exc:  # noqa: BLE001 -- never raises; the type only
+        logger.warning("ocm notify source=%s type=%s failed: %s",
+                       source.id, notification_type, type(exc).__name__)
+        return False
+    ok = 200 <= response.status_code < 300
+    logger.info("ocm notify source=%s host=%s type=%s status=%s",
+                source.id, source.remote_host, notification_type, response.status_code)
+    return ok
+
+
+# ------------------------------------------------- the user's accept, decline
+
+def _waiting_key(source) -> str | None:
+    """The held secret's key while the user has something to answer, else None."""
+    if source.kind != KIND:
+        return None
+    if source.state == "pending":
+        return str(source.id)
+    if source.state in ("active", "error") and source.extras.get("reoffer_pending") is True:
+        return f"{source.id}:reoffer"
+    return None
+
+
+def _held_secret(conn, user_id: str, key: str) -> str | None:
+    from istota.credentials import store as secrets_store
+    from istota.sharing import sources
+
+    value = secrets_store.get_secret(None, user_id, sources.SECRET_SERVICE, key,
+                                     connection=conn, touch=False)
+    return value if isinstance(value, str) and value else None
+
+
+def _credential_value(conn, user_id: str, source_id: int) -> str | None:
+    from istota.credentials import store as secrets_store
+    from istota.credentials.names import VAULT_ENTRY_SERVICE
+    from istota.sharing import sources
+
+    value = secrets_store.get_secret(None, user_id, VAULT_ENTRY_SERVICE,
+                                     sources.credential_name(source_id),
+                                     connection=conn, touch=False)
+    return value if isinstance(value, str) and value else None
+
+
+def _owned_share(conn, source_id: int, user_id: str):
+    from istota.sharing import sources
+
+    source = sources.get_source(conn, source_id, user_id)
+    if source is None or source.kind != KIND:
+        raise ShareActionRefused("not_found")
+    return source
+
+
+def _store_credential(conn, user_id: str, source, secret: str, allow_scheduled: bool) -> None:
+    """Create the share's local credential, or replace a re-offered one's value."""
+    from istota.credentials import local
+    from istota.sharing import sources
+
+    name = sources.credential_name(source.id)
+    try:
+        if source.state != "pending" and local.is_local(conn, user_id, name):
+            # A re-offer: the value changes, the site and the user's grant stay.
+            fields = local.stored_fields(conn, user_id, name)
+            local.update(conn, user_id, name, value=secret, username=None, url=fields["url"],
+                         extra_hosts=fields["extra_hosts"], headers="", revealable=False,
+                         system_prefix="ocm_share_")
+        else:
+            local.create(
+                conn, user_id,
+                local.LocalCredential(name=name, value=secret, url=f"https://{source.remote_host}"),
+                access={"scope_mode": "all", "allow_scheduled": allow_scheduled},
+                system_prefix="ocm_share_",
+            )
+    except local.LocalCredentialError as exc:
+        logger.warning("ocm accept source=%s credential refused field=%s", source.id, exc.field)
+        raise ShareActionRefused("credential_refused") from None
+
+
+def accept(
+    conn: sqlite3.Connection,
+    config,
+    source_id: int,
+    user_id: str,
+    *,
+    allow_scheduled: bool = False,
+    sandboxed: bool | None = None,
+    resolve=None,
+) -> ActionResult:
+    """Accept the user's waiting offer, or the re-offer of an active share. Commits.
+
+    ``sandboxed`` is the daemon's published verdict in the web process
+    (`credentials.names.tasks_sandboxed`, the default). ``allow_scheduled``
+    is the accept dialog's checkbox, off unless the user ticks it; a
+    re-offer keeps the grant the share already has. Refusals are
+    `ShareActionRefused`; nothing is written before the PROPFIND succeeds.
+    """
+    from istota.credentials import names
+    from istota.credentials import store as secrets_store
+    from istota.sharing import sources
+
+    if type(allow_scheduled) is not bool:
+        raise ValueError("allow_scheduled must be true or false")
+    if sandboxed is None:
+        sandboxed = names.tasks_sandboxed(config)
+    refusal = names.vault_isolation_refusal(config, user_id, sandboxed=sandboxed)
+    if refusal is not None:
+        raise ShareActionRefused("isolation", refusal)
+    if not secrets_store.secret_key_available():
+        raise ShareActionRefused("unavailable")
+
+    source = _owned_share(conn, source_id, user_id)
+    key = _waiting_key(source)
+    secret = _held_secret(conn, user_id, key) if key is not None else None
+    if key is None or secret is None:
+        raise ShareActionRefused("not_waiting")
+    access = share_access(config, source, secret, resolve=resolve)
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        current = _owned_share(conn, source_id, user_id)
+        if _waiting_key(current) != key or _held_secret(conn, user_id, key) != secret:
+            raise ShareActionRefused("offer_changed")
+        _store_credential(conn, user_id, current, secret, allow_scheduled)
+        secrets_store.delete_secret(None, user_id, sources.SECRET_SERVICE, key, connection=conn)
+        if "reoffer_pending" in current.extras:
+            extras = {k: v for k, v in current.extras.items() if k != "reoffer_pending"}
+            sources.set_details(conn, source_id, user_id, extras=extras)
+        sources.set_access(conn, source_id, user_id, access)
+        if current.state != "active":
+            sources.set_state(conn, source_id, user_id, "active")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    after = sources.get_source(conn, source_id, user_id)
+    logger.info("ocm share accepted user=%s source=%s host=%s access=%s reoffer=%s",
+                user_id, source_id, after.remote_host, access, key.endswith(":reoffer"))
+    notified = notify_sender(config, after, "SHARE_ACCEPTED", secret, resolve=resolve)
+    return ActionResult(source_id, after.state, after.access, notified)
+
+
+def decline(conn: sqlite3.Connection, config, source_id: int, user_id: str, *,
+            resolve=None) -> ActionResult:
+    """Decline the user's waiting offer, or the re-offer of an active share. Commits.
+
+    A pending offer becomes ``declined``, its secret deleted, and the sender
+    is told (Nextcloud then deletes the share). A re-offer's held secret is
+    deleted and the active share stays as it is, with nothing sent: the
+    sender would read ``SHARE_DECLINED`` for that provider id as the end of
+    the live share.
+    """
+    from istota.credentials import store as secrets_store
+    from istota.sharing import sources
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        source = _owned_share(conn, source_id, user_id)
+        key = _waiting_key(source)
+        if key is None:
+            raise ShareActionRefused("not_waiting")
+        secret = _held_secret(conn, user_id, key)
+        if source.state == "pending":
+            sources.set_state(conn, source_id, user_id, "declined", reason="declined")
+        else:
+            secrets_store.delete_secret(None, user_id, sources.SECRET_SERVICE, key, connection=conn)
+            extras = {k: v for k, v in source.extras.items() if k != "reoffer_pending"}
+            sources.set_details(conn, source_id, user_id, extras=extras)
+            secret = None
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    after = sources.get_source(conn, source_id, user_id)
+    logger.info("ocm offer declined user=%s source=%s host=%s state=%s",
+                user_id, source_id, after.remote_host, after.state)
+    notified = (notify_sender(config, after, "SHARE_DECLINED", secret, resolve=resolve)
+                if secret else False)
+    return ActionResult(source_id, after.state, after.access, notified)
+
+
+def remove(conn: sqlite3.Connection, config, source_id: int, user_id: str, *,
+           resolve=None) -> ActionResult:
+    """Remove the user's active share: ``revoked``, the credential deleted, the sender told. Commits.
+
+    Nextcloud deletes a share on ``SHARE_DECLINED``, so this is in practice
+    a recipient-side unshare.
+    """
+    from istota.sharing import sources
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        source = _owned_share(conn, source_id, user_id)
+        if source.state not in ("active", "error"):
+            raise ShareActionRefused("not_active")
+        secret = _credential_value(conn, user_id, source_id)
+        sources.revoke(conn, source_id, user_id, reason="removed")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    after = sources.get_source(conn, source_id, user_id)
+    logger.info("ocm share removed user=%s source=%s host=%s", user_id, source_id, after.remote_host)
+    notified = (notify_sender(config, after, "SHARE_DECLINED", secret, resolve=resolve)
+                if secret else False)
+    return ActionResult(source_id, after.state, after.access, notified)
+
+
+def expire_pending(conn: sqlite3.Connection, config, now=None) -> int:
+    """Decline every offer left unanswered for ``[sharing.ocm] pending_days``; the count.
+
+    Posts nothing: an expired offer is not the user's answer. ``now`` is an
+    aware datetime (UTC now when None). One transaction per offer, so one
+    row's failure is logged and the rest still expire.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from istota.sharing import sources
+
+    moment = now or datetime.now(timezone.utc)
+    cutoff = (moment.astimezone(timezone.utc)
+              - timedelta(days=int(config.sharing.ocm.pending_days))).strftime("%Y-%m-%d %H:%M:%S")
+    expired = 0
+    for source in sources.pending_since(conn, KIND, cutoff):
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            current = sources.get_source(conn, source.id, source.user_id)
+            if current is not None and current.state == "pending" and current.updated_at <= cutoff:
+                sources.set_state(conn, source.id, source.user_id, "declined", reason="expired")
+                expired += 1
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001 -- one offer's failure leaves the rest
+            conn.rollback()
+            logger.warning("ocm expiry source=%s failed: %s", source.id, type(exc).__name__)
+    if expired:
+        logger.info("ocm offers expired count=%d", expired)
+    return expired
+
+
+# ------------------------------------------------------ remote notifications
+
+NOTIFICATION_MAX_BYTES = 64 * 1024
+_HANDLED_NOTIFICATIONS = ("SHARE_UNSHARED", "RESHARE_CHANGE_PERMISSION")
+
+
+@dataclass(frozen=True)
+class _Notification:
+    kind: str
+    resource_type: str
+    provider_id: str
+    secret: str
+
+
+def _parse_notification(raw: bytes) -> _Notification:
+    if len(raw) > NOTIFICATION_MAX_BYTES:
+        raise _Refused(400, "invalid_notification")
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        raise _Refused(400, "invalid_notification") from None
+    if not isinstance(body, dict):
+        raise _Refused(400, "invalid_notification")
+    kind = body.get("notificationType")
+    if not isinstance(kind, str) or not kind or len(kind) > 64:
+        raise _Refused(400, "invalid_notification", "notificationType")
+    resource_type = body.get("resourceType")
+    if not isinstance(resource_type, str) or len(resource_type) > 64:
+        raise _Refused(400, "invalid_notification", "resourceType")
+    provider_id = _provider_id(body.get("providerId"), "invalid_notification")
+    notification = body.get("notification")
+    if not isinstance(notification, dict):
+        raise _Refused(400, "invalid_notification", "notification")
+    secret = notification.get("sharedSecret")
+    if not isinstance(secret, str) or not secret or len(secret) > STRING_MAX_CHARS:
+        raise _Refused(400, "invalid_notification", "sharedSecret")
+    return _Notification(kind, resource_type, provider_id, secret)
+
+
+def _matching_share(conn, provider_id: str, secret: str):
+    """The share named ``provider_id`` whose own secret is ``secret``, or None.
+
+    Every candidate is compared, in constant time, so the answer does not
+    depend on which row matched.
+    """
+    import hmac
+
+    from istota.sharing import sources
+
+    found = None
+    given = secret.encode()
+    for source in sources.shares_for_provider(conn, provider_id):
+        if source.state == "pending":
+            stored = _held_secret(conn, source.user_id, str(source.id))
+        else:
+            stored = _credential_value(conn, source.user_id, source.id)
+        if stored is not None and hmac.compare_digest(stored.encode(), given) and found is None:
+            found = source
+    return found
+
+
+def receive_notification(
+    conn: sqlite3.Connection,
+    config,
+    body: bytes,
+    headers: Mapping[str, str],
+    *,
+    client_address: str | None = None,
+    now: float | None = None,
+    resolve=None,
+) -> OcmAnswer:
+    """Take one ``POST /ocm/notifications``; the answer to send. Commits its own write.
+
+    In order: the body (400); the type (501 for anything not handled); the
+    secret against the named share's own (403, nothing changed); the rate
+    limits (429); the sender's discovery document, and its signature where
+    the document publishes a key (403); then the change.
+    """
+    from istota.sharing import sources
+
+    try:
+        if not config.sharing.ocm.enabled:
+            return OcmAnswer(404, {"message": "not_found", "validationErrors": []})
+        note = _parse_notification(body)
+        if note.kind not in _HANDLED_NOTIFICATIONS or note.resource_type != "file":
+            raise _Refused(501, "not_implemented")
+        source = _matching_share(conn, note.provider_id, note.secret)
+        if source is None:
+            logger.info("ocm notification refused type=%s reason=secret_mismatch", note.kind)
+            raise _Refused(403, "forbidden")
+        if not _admit(config, client_address, source.remote_host, time.monotonic()):
+            raise _Refused(429, "rate_limited")
+        owner = parse_cloud_id(source.extras.get("owner"))
+        if owner is None or owner.host != source.remote_host:
+            raise _Refused(403, "forbidden")
+        document = _verified_document(config, owner, fetch_discovery(config, owner, resolve=resolve))
+        key_pem = _public_key(document)
+        if key_pem is not None:
+            refusal = verify_signature("POST", "/ocm/notifications", headers, body, key_pem,
+                                       owner.host, time.time() if now is None else now)
+            if refusal is not None:
+                logger.info("ocm notification refused source=%s reason=%s", source.id, refusal)
+                raise _Refused(403, "forbidden")
+
+        if note.kind == "SHARE_UNSHARED":
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                current = sources.get_source(conn, source.id, source.user_id)
+                if current is not None and current.state in ("pending", "active", "error"):
+                    sources.revoke(conn, source.id, source.user_id, reason="remote_unshared")
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+        elif source.state in ("active", "error"):
+            secret = _credential_value(conn, source.user_id, source.id)
+            try:
+                access = share_access(config, source, secret, resolve=resolve) if secret else None
+            except ShareActionRefused as refused:
+                logger.info("ocm permission re-read source=%s code=%s", source.id, refused.code)
+                access = None
+            if access is not None:
+                sources.set_access(conn, source.id, source.user_id, access)
+                conn.commit()
+        logger.info("ocm notification user=%s source=%s host=%s type=%s",
+                    source.user_id, source.id, source.remote_host, note.kind)
+        return OcmAnswer(201, [])
     except _Refused as refused:
         return refused.answer()

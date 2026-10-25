@@ -7,14 +7,14 @@ public routes; everything they do is in `sharing.ocm`.
 - ``GET /ocm-provider`` and ``/ocm-provider/`` (the path Nextcloud reads,
   both spellings answered, no redirect) and ``GET /.well-known/ocm`` (for
   other OCM servers) return the discovery document.
-- ``POST /ocm/shares`` takes an offer. The body is read through the bounded
-  reader, the offer handled in a worker thread, since it makes an outbound
-  request.
+- ``POST /ocm/shares`` takes an offer and ``POST /ocm/notifications`` a
+  remote notification. Each body is read through the bounded reader and
+  handled in a worker thread, since both make outbound requests.
 
 **Every route answers 404 while ``[sharing.ocm] enabled`` is off**, read per
 request, so a configuration reload that turns OCM off closes them at once.
 nginx proxies the four locations on every install; with OCM off this is what
-answers there. ``POST /ocm/notifications`` is not served yet.
+answers there.
 
 `current_config` and `client_address` are stubs `webui/app.py` overrides, so
 the router mounts on a bare app in tests.
@@ -82,11 +82,34 @@ def well_known_ocm(config=Depends(current_config)) -> JSONResponse:
     return _discovery(config)
 
 
-def _receive(config, body: bytes, headers: dict, address: str | None) -> ocm.OcmAnswer:
+def _receive(handler, config, body: bytes, headers: dict, address: str | None) -> ocm.OcmAnswer:
     from istota import db
 
     with db.get_db(config.db_path) as conn:
-        return ocm.receive_share(conn, config, body, headers, client_address=address)
+        return handler(conn, config, body, headers, client_address=address)
+
+
+async def _take(request: Request, config, address: str | None, handler, max_bytes: int,
+                invalid: str, what: str) -> JSONResponse:
+    from istota.webui.request_guards import BodyError, read_bounded_body
+
+    if not _enabled(config):
+        return _not_found()
+    try:
+        body = await read_bounded_body(request, max_bytes, require_length=False)
+    except BodyError as exc:
+        return JSONResponse(
+            {"message": invalid, "validationErrors": []},
+            status_code=400 if exc.status != 413 else 413, headers=_HEADERS,
+        )
+    headers = {key.lower(): value for key, value in request.headers.items()}
+    try:
+        answer = await asyncio.to_thread(_receive, handler, config, body, headers, address)
+    except Exception as exc:  # noqa: BLE001 — a sender gets a fixed 500, the log the type
+        logger.error("ocm %s failed: %s", what, type(exc).__name__)
+        return JSONResponse({"message": "server_error", "validationErrors": []},
+                            status_code=500, headers=_HEADERS)
+    return JSONResponse(answer.body, status_code=answer.status, headers=_HEADERS)
 
 
 @router.post("/ocm/shares", include_in_schema=False)
@@ -95,22 +118,15 @@ async def ocm_shares(
     config=Depends(current_config),
     address: str | None = Depends(client_address),
 ) -> JSONResponse:
-    from istota.webui.request_guards import BodyError, read_bounded_body
+    return await _take(request, config, address, ocm.receive_share, ocm.OFFER_MAX_BYTES,
+                       "invalid_offer", "offer")
 
-    if not _enabled(config):
-        return _not_found()
-    try:
-        body = await read_bounded_body(request, ocm.OFFER_MAX_BYTES, require_length=False)
-    except BodyError as exc:
-        return JSONResponse(
-            {"message": "invalid_offer", "validationErrors": []},
-            status_code=400 if exc.status != 413 else 413, headers=_HEADERS,
-        )
-    headers = {key.lower(): value for key, value in request.headers.items()}
-    try:
-        answer = await asyncio.to_thread(_receive, config, body, headers, address)
-    except Exception as exc:  # noqa: BLE001 — a sender gets a fixed 500, the log the type
-        logger.error("ocm offer failed: %s", type(exc).__name__)
-        return JSONResponse({"message": "server_error", "validationErrors": []},
-                            status_code=500, headers=_HEADERS)
-    return JSONResponse(answer.body, status_code=answer.status, headers=_HEADERS)
+
+@router.post("/ocm/notifications", include_in_schema=False)
+async def ocm_notifications(
+    request: Request,
+    config=Depends(current_config),
+    address: str | None = Depends(client_address),
+) -> JSONResponse:
+    return await _take(request, config, address, ocm.receive_notification,
+                       ocm.NOTIFICATION_MAX_BYTES, "invalid_notification", "notification")

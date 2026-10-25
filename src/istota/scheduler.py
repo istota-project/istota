@@ -10150,6 +10150,12 @@ def build_interval_gates(
                 report.polled, report.changed, report.unchanged, report.failed,
             )
 
+    def _ocm_expire(now: float) -> None:
+        from .sharing.ocm import expire_pending
+
+        with db.get_db(config.db_path) as conn:
+            expire_pending(conn, config)
+
     def _shared_files(now: float) -> None:
         from .shared_file_organizer import discover_and_organize_shared_files
         organized = discover_and_organize_shared_files(config)
@@ -10436,6 +10442,17 @@ def build_interval_gates(
             fixed_interval=60,
             background=True,
             overlap_expected=True,
+        ),
+        # OCM folder offers nobody answered within `[sharing.ocm] pending_days`
+        # (`sharing.ocm.expire_pending`): declined, their secrets deleted, and
+        # nothing sent to the sender. Database only, so on the loop thread;
+        # hourly, since the window is days. Runs with OCM off too, so offers
+        # held when it was turned off still lose their secrets.
+        IntervalGate(
+            name="sharing-ocm-expire",
+            run=_ocm_expire,
+            fixed_interval=3600,
+            on_error="Error expiring folder offers: %s",
         ),
         # Before the TASKS.md poll below, so the files are in place when it
         # walks them. Mount only: on a local workspace nothing a user shares
