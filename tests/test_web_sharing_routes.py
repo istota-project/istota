@@ -212,3 +212,53 @@ async def test_a_feed_link_is_one_users(signed_client, fresh_feed_limits):
     assert (await signed_client.get(BASE)).json()["calendar"]["feed"] is None
     assert (await signed_client.delete(FEED_LINK, headers=ORIGIN)).status_code == 404
     assert (await signed_client.get(alices.removeprefix("https://example.com"))).status_code == 200
+
+
+# --- Folder shares (OCM): the federated id and pending offers, read-only ------
+
+
+def _pending_offer(config, user="alice", **extras):  # noqa: F811
+    from istota.credentials import store as secrets_store
+
+    with db.get_db(config.db_path) as conn:
+        source_id = sources.create_source(
+            conn, user_id=user, kind="ocm_share", state="pending", remote_host="cloud.example.org",
+            remote_key="cloud.example.org|5",
+            extras={"name": "Taxes 2026", "owner": "carol@https://cloud.example.org",
+                    "webdav": "https://cloud.example.org/public.php/webdav/", **extras},
+        )
+        secrets_store.set_secret(None, user, sources.SECRET_SERVICE, str(source_id),
+                                 "synthetic-ocm-secret-99", connection=conn)
+        conn.commit()
+    return source_id
+
+
+async def test_no_ocm_section_while_ocm_is_off(signed_client, config):  # noqa: F811
+    _pending_offer(config)
+    listing = (await signed_client.get(BASE)).json()
+    assert listing.get("ocm") is None
+    me = await signed_client.get("/istota/api/me")
+    assert me.json()["features"]["sharing_ocm"] is False
+
+
+async def test_the_federated_id_and_pending_offers(signed_client, config):  # noqa: F811
+    config.sharing.ocm.enabled = True
+    source_id = _pending_offer(config)
+    response = await signed_client.get(BASE)
+    assert "synthetic-ocm-secret-99" not in response.text
+    assert "public.php" not in response.text
+    ocm = response.json()["ocm"]
+    assert ocm["federated_id"] == "alice@example.com"
+    [offer] = ocm["pending"]
+    assert offer == {
+        "id": source_id, "name": "Taxes 2026", "owner": "carol@https://cloud.example.org",
+        "host": "cloud.example.org", "reoffer": False, "created_at": offer["created_at"],
+    }
+    me = await signed_client.get("/istota/api/me")
+    assert me.json()["features"]["sharing_ocm"] is True
+
+
+async def test_another_users_offers_are_not_listed(signed_client, config):  # noqa: F811
+    config.sharing.ocm.enabled = True
+    _pending_offer(config, user="bob")
+    assert (await signed_client.get(BASE)).json()["ocm"]["pending"] == []

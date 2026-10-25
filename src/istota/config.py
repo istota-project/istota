@@ -5548,6 +5548,7 @@ def load_config(
     _validate_advisor_model(config)
     _validate_nextcloud_workspace(config)
     _validate_local_login(config)
+    _validate_sharing_ocm(config)
     _validate_sms(config)
     _validate_whatsapp(config)
     _validate_forge_clis(config)
@@ -5727,6 +5728,24 @@ def _validate_local_login(config: Config) -> None:
         raise ValueError(
             '[web] auth "local_code" needs [site] hostname to be localhost:<port>, '
             f"the address the Mac app opens; it is {config.site.hostname!r}"
+        )
+
+
+def _validate_sharing_ocm(config: Config) -> None:
+    """OCM is served on ``[site] hostname``, so not on the operator's Nextcloud host.
+
+    A proxied install sharing a hostname with the Nextcloud it fronts would
+    put istota's ``/ocm/`` and ``<user>@<host>`` ids over Nextcloud's own.
+    Hosts are compared without scheme, port or path.
+    """
+    if not config.sharing.ocm.enabled or not config.nextcloud.url or not config.site.hostname:
+        return
+    site_host = urlsplit(f"//{config.site.hostname.strip()}").hostname
+    nextcloud_host = urlsplit(config.nextcloud.url.strip()).hostname
+    if site_host and site_host == nextcloud_host:
+        raise ValueError(
+            "[sharing.ocm] enabled needs [site] hostname to be a host of istota's own; "
+            f"it is the host of [nextcloud] url ({site_host!r}), whose OCM it would shadow"
         )
 
 

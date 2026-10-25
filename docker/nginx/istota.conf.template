@@ -122,6 +122,55 @@ location ^~ /istota/calendar/ {
     proxy_set_header X-Forwarded-Proto $forwarded_proto;
 }
 
+# Open Cloud Mesh, served on this hostname (the stack serves no Nextcloud, so
+# nothing else owns these paths). Present on every install; with
+# `[sharing.ocm] enabled` off the web app answers 404 here. Nextcloud reads
+# /ocm-provider/ and posts offers to /ocm/shares; /.well-known/ocm is for other
+# OCM servers. After a refused offer Nextcloud retries on /ocs-provider/ and
+# /ocs/v2.php/cloud/shares, which stay 404 with no location of their own. No
+# starting page, for the reason set-password has none.
+location = /.well-known/ocm {
+    client_max_body_size 1k;
+    proxy_pass http://$upstream_web;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $forwarded_proto;
+}
+
+location = /ocm-provider {
+    client_max_body_size 1k;
+    proxy_pass http://$upstream_web;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $forwarded_proto;
+}
+
+location ^~ /ocm-provider/ {
+    client_max_body_size 1k;
+    proxy_pass http://$upstream_web;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $forwarded_proto;
+}
+
+# Above the app's own 64 KiB offer cap, so an oversized offer is answered by
+# the app in the OCM error shape rather than by nginx's HTML page.
+location ^~ /ocm/ {
+    client_max_body_size 128k;
+    proxy_pass http://$upstream_web;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $forwarded_proto;
+}
+
 # The web UI. The SvelteKit build is served under base /istota, so proxy_pass
 # carries no path component and the URI is kept. `absolute_redirect off` for the
 # reason given at /standalone-signaling/: `/istota` is what people type.

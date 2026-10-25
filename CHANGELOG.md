@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Istota can read a calendar from any provider. Paste its secret iCal address under Settings > Connections > Shared with Istota, and tasks can list its events beside your other calendars; the calendar stays read-only and nothing else on that account is reachable.
 - Istota has a calendar of its own. A task can put an event on it, move it or cancel it, and you see those events by subscribing once to a private feed address from Settings > Connections; it needs no CalDAV account.
 - Events on Istota's calendar can reach you as invitations instead. Istota mails each one to your own address, sends an update when it moves and a cancellation when it is removed, and records your accept or decline when your calendar answers; that answer starts no task. Invitations other people send you, in mail forwarded to Istota from the organizer's own address, can be read by tasks too. Recording answers needs `[email] authserv_id`, and `istota doctor` says so.
+- With `[sharing.ocm] enabled`, someone on a Nextcloud can share a folder with `<user>@<site hostname>`, and it shows as a waiting offer on the Shared with Istota card and in the bell. Istota checks the sending server and its signature first, and `istota doctor` says whether other servers can reach it.
 
 ## [0.47.0] - 2026-10-25
 

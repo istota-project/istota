@@ -2428,10 +2428,12 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         "groups": is_admin,
         "admin": is_admin,
         "sharing": False,
+        "sharing_ocm": False,
     }
     if _config:
         # Calendar feeds have no switch of their own; the card needs the database.
         features["sharing"] = bool(_config.db_path)
+        features["sharing_ocm"] = bool(_config.db_path) and bool(_config.sharing.ocm.enabled)
         features["feeds"] = _user_has_feeds(username)
         features["location"] = _user_has_location(username)
         features["money"] = _user_has_money(username)
@@ -15697,6 +15699,15 @@ def _shared_feed_dict(source) -> dict:
     }
 
 
+def _ocm_offer_dict(source) -> dict:
+    """An offer as the card shows it: the sender's words and host, never the WebDAV base."""
+    return {
+        "id": source.id, "name": source.extras.get("name"), "owner": source.extras.get("owner"),
+        "host": source.remote_host, "reoffer": source.state != "pending",
+        "created_at": source.created_at,
+    }
+
+
 def _sharing_listing(user_id: str) -> dict:
     from istota import db
     from istota.credentials import store as secrets_store
@@ -15704,9 +15715,18 @@ def _sharing_listing(user_id: str) -> dict:
 
     from istota.sharing import events
 
+    from istota.notifications.resolvers import shared_source
+
+    ocm = None
     with db.get_db(_config.db_path) as conn:
         feeds = sources.sources_for_user(conn, user_id, kinds=("ics_feed",))
         feed_link = events.token_info(conn, user_id)
+        if _config.sharing.ocm.enabled and _config.site.hostname:
+            # Read-only here: accepting and declining are their own routes.
+            ocm = {
+                "federated_id": f"{user_id}@{_config.site.hostname}",
+                "pending": [_ocm_offer_dict(offer) for offer in shared_source.waiting(conn, user_id)],
+            }
     profile = user_profiles.get_profile(_config.db_path, user_id)
     delivery = profile.calendar_delivery if profile is not None else "invite"
     return {
@@ -15722,6 +15742,9 @@ def _sharing_listing(user_id: str) -> dict:
             "can_link": bool(_config.site.hostname),
             "reachable_elsewhere": events.feed_reachable_elsewhere(_config),
         },
+        # Folders shared over OCM. Absent while OCM is off, so the card hides
+        # the federated id.
+        "ocm": ocm,
     }
 
 
@@ -18917,6 +18940,15 @@ from istota.sharing import feed_routes as _feed_routes
 app.include_router(_feed_routes.router)
 app.dependency_overrides[_feed_routes.current_config] = lambda: _config
 app.dependency_overrides[_feed_routes.client_address] = _client_ip
+
+# Open Cloud Mesh: discovery and offers at the root, unauthenticated
+# (`sharing/ocm_routes.py`). Always included; each route answers 404 while
+# `[sharing.ocm] enabled` is off, read per request so a reload closes them.
+from istota.sharing import ocm_routes as _ocm_routes
+
+app.include_router(_ocm_routes.router)
+app.dependency_overrides[_ocm_routes.current_config] = lambda: _config
+app.dependency_overrides[_ocm_routes.client_address] = _client_ip
 
 # Serve SvelteKit build as static files (catch-all for SPA routing)
 if _STATIC_DIR.is_dir():
