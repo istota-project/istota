@@ -845,8 +845,9 @@ def cmd_import_garmin_tracks(args):
         "queued": True,
         "message": f"Garmin track import queued (last {days_back} days). It runs "
                    "right after this task; new watch-recorded tracks will appear "
-                   "in your location history, and you'll get a notification with "
-                   "the result.",
+                   "in your location history. A scheduled import notifies only "
+                   "if it fails; otherwise you'll get a notification with the "
+                   "result.",
     }))
 
 

@@ -1349,6 +1349,125 @@ class TestDeferredGarminImport:
         sd._process_deferred_garmin_import(config, self._make_task(), user_dir)
         assert sent and "no new GPS activities" in sent[0]
 
+    @pytest.mark.parametrize("result", [
+        (42, 2, [{"inserted": 42}]),
+        (0, 0, []),
+    ])
+    def test_scheduled_success_sends_nothing(self, tmp_path, monkeypatch, result):
+        """The two daily CRON.md imports posted two routine alerts a day
+        (ISSUE-832); a scheduled run is quiet unless something went wrong."""
+        from istota import scheduler_deferred as sd
+        from istota.location import garmin_import as gi
+        import istota.notifications.delivery as notif
+
+        user_dir = self._write_op(tmp_path)
+        config = Config(temp_dir=tmp_path)
+        monkeypatch.setattr(
+            gi, "import_tracks",
+            lambda *a, **k: gi.ImportResult(False, *result),
+        )
+        sent = []
+        monkeypatch.setattr(
+            notif, "send_notification",
+            lambda cfg, uid, msg, **k: sent.append(msg) or True,
+        )
+        task = self._make_task()
+        task.source_type = "scheduled"
+
+        n = sd._process_deferred_garmin_import(config, task, user_dir)
+
+        assert n == result[0]
+        assert sent == []
+        assert not (user_dir / "task_7_garmin_import.json").exists()
+
+    @pytest.mark.parametrize("source_type", ["scheduled", "web"])
+    def test_unexpected_failure_alerts(self, tmp_path, monkeypatch, source_type):
+        """A broken import used to log a warning and say nothing to anyone."""
+        from istota import scheduler_deferred as sd
+        from istota.location import garmin_import as gi
+        import istota.notifications.delivery as notif
+
+        user_dir = self._write_op(tmp_path)
+        config = Config(temp_dir=tmp_path)
+
+        def boom(*a, **k):
+            raise ValueError("bad activity payload")
+
+        monkeypatch.setattr(gi, "import_tracks", boom)
+        sent = []
+        monkeypatch.setattr(
+            notif, "send_notification",
+            lambda cfg, uid, msg, **k: sent.append((msg, k)) or True,
+        )
+        task = self._make_task()
+        task.source_type = source_type
+
+        assert sd._process_deferred_garmin_import(config, task, user_dir) == 0
+
+        assert len(sent) == 1
+        msg, kwargs = sent[0]
+        assert "ValueError: bad activity payload" in msg
+        assert "Traceback" not in msg
+        assert kwargs["purpose"] == "alert"
+        assert not (user_dir / "task_7_garmin_import.json").exists()
+
+    def test_unexpected_failure_message_is_one_bounded_line(
+        self, tmp_path, monkeypatch,
+    ):
+        from istota import scheduler_deferred as sd
+        from istota.location import garmin_import as gi
+        import istota.notifications.delivery as notif
+
+        user_dir = self._write_op(tmp_path)
+        config = Config(temp_dir=tmp_path)
+
+        def boom(*a, **k):
+            raise RuntimeError("first line\nsecond line " + "x" * 1000)
+
+        monkeypatch.setattr(gi, "import_tracks", boom)
+        sent = []
+        monkeypatch.setattr(
+            notif, "send_notification",
+            lambda cfg, uid, msg, **k: sent.append(msg) or True,
+        )
+
+        sd._process_deferred_garmin_import(config, self._make_task(), user_dir)
+
+        assert "\n" not in sent[0]
+        assert "RuntimeError: first line second line" in sent[0]
+        assert len(sent[0]) < 300
+
+    @pytest.mark.parametrize("exc_name, phrase", [
+        ("GarminAuthError", "isn't connected"),
+        ("GarminRateLimited", "rate-limited"),
+    ])
+    def test_scheduled_known_errors_still_alert(
+        self, tmp_path, monkeypatch, exc_name, phrase,
+    ):
+        from istota import scheduler_deferred as sd
+        from istota.health import garmin as gm
+        from istota.location import garmin_import as gi
+        import istota.notifications.delivery as notif
+
+        user_dir = self._write_op(tmp_path)
+        config = Config(temp_dir=tmp_path)
+        exc = getattr(gm, exc_name)("nope")
+        monkeypatch.setattr(
+            gi, "import_tracks",
+            lambda *a, **k: (_ for _ in ()).throw(exc),
+        )
+        sent = []
+        monkeypatch.setattr(
+            notif, "send_notification",
+            lambda cfg, uid, msg, **k: sent.append(msg) or True,
+        )
+        task = self._make_task()
+        task.source_type = "scheduled"
+
+        sd._process_deferred_garmin_import(config, task, user_dir)
+
+        assert len(sent) == 1 and phrase in sent[0]
+
     def test_skips_when_location_disabled(self, tmp_path, monkeypatch):
         from istota import scheduler_deferred as sd
         from istota.location import garmin_import as gi

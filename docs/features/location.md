@@ -184,7 +184,7 @@ It authenticates through the shared Garmin connection (Settings → Connections;
 The importer core lives in `istota.location.garmin_import` (`import_tracks()`), shared by three access points:
 
 - **Web button** — "Import GPS tracks" on the Garmin card (Settings → Connections) calls `POST /istota/api/garmin/import-tracks` (gated on the location module), which runs the importer inline and reports how many points it added.
-- **Assistant / chat** — the `location import-garmin-tracks` skill subcommand. Because the sandbox can write `location.db` but not decrypt the Garmin tokens (the master key is stripped), a sandboxed call *delegates*: it writes a `task_<id>_garmin_import.json` deferred op and the scheduler runs the import in-process post-task, then notifies the user with the result. An operator shell that has `ISTOTA_SECRET_KEY` runs it directly instead.
+- **Assistant / chat** — the `location import-garmin-tracks` skill subcommand. Because the sandbox can write `location.db` but not decrypt the Garmin tokens (the master key is stripped), a sandboxed call *delegates*: it writes a `task_<id>_garmin_import.json` deferred op and the scheduler runs the import in-process post-task, then notifies the user with the result. An import run by a scheduled job notifies only when it fails. An operator shell that has `ISTOTA_SECRET_KEY` runs it directly instead.
 - **CLI / cron** — `scripts/import_garmin_tracks.py`, a thin wrapper over the same module (below).
 
 ```
