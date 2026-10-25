@@ -6920,6 +6920,7 @@ def build_prompt(
     group_memory: str | None = None,
     channel_memory_shared: bool = False,
     skip_memory: bool = False,
+    shared_calendars: "list[tuple[str, str]] | None" = None,
 ) -> ComposedPrompt:
     """Build a task's prompt, split by authority rather than by size.
 
@@ -7020,6 +7021,19 @@ def build_prompt(
         )
         resource_sections.append(
             f"Calendars (shared by {display_user_id}):\n{cal_list}"
+        )
+
+    # Feeds the user shared with Istota by address (`sharing.ics`): ids and
+    # hosts only. A feed's name is the provider's text, so it stays out of
+    # this half and is read fenced through `calendar calendars`.
+    if shared_calendars:
+        listed = ", ".join(
+            f"{_one_line(calendar_id)} ({_one_line(host)})"
+            for calendar_id, host in shared_calendars
+        )
+        resource_sections.append(
+            "Other calendars (read-only unless noted, via istota-skill calendar): "
+            f"{listed}"
         )
 
     resources_text = "\n\n".join(resource_sections)
@@ -7718,6 +7732,23 @@ def _task_withheld_scopes(
     return withheld
 
 
+def _discover_shared_calendars(
+    config: Config, task: db.Task, conn: "db.sqlite3.Connection | None", skill_index,
+) -> list[tuple[str, str]]:
+    """``sharing.sources.discover_shared_calendars``, best-effort: ``[]`` on any failure."""
+    from istota.sharing import sources as shared_sources
+
+    try:
+        with db.get_db_if_present(config.db_path, conn) as c:
+            if c is None:
+                return []
+            return shared_sources.discover_shared_calendars(c, task, skill_index=skill_index)
+    except Exception as exc:  # noqa: BLE001 — a missing line beats a failed task
+        logger.warning("shared calendar discovery failed for task %s: %s",
+                       task.id, type(exc).__name__)
+        return []
+
+
 def _ambient_memory_off(
     config: Config, task: db.Task, conn: "db.sqlite3.Connection | None",
 ) -> bool:
@@ -8268,9 +8299,10 @@ def execute_task(
     _selected_metas = [skill_index[n] for n in selected_skills if n in skill_index]
     # A shared room leaves the sender's ambient memory out of the prompt
     # (ISSUE-576); the memory skill is still there when they ask for it.
+    _ambient_off = _ambient_memory_off(config, task, conn)
     _skip_memory = (
         any(m.exclude_memory for m in _selected_metas) or "memory" in _withheld
-        or _ambient_memory_off(config, task, conn)
+        or _ambient_off
     )
     _skip_persona = any(m.exclude_persona for m in _selected_metas)
 
@@ -8496,6 +8528,12 @@ def execute_task(
         )
     )
 
+    # The feeds line is ambient: a member's turn in a shared room reaches the
+    # feeds when it asks, but is not told about them unasked (ISSUE-576).
+    shared_calendars = []
+    if "calendar" in cli_skill_names and "calendar" not in _withheld and not _ambient_off:
+        shared_calendars = _discover_shared_calendars(config, task, conn, skill_index)
+
     # Build prompt
     # Detect confirmed tasks — pass their previous output as confirmation context
     _confirmation_context = None
@@ -8519,6 +8557,7 @@ def execute_task(
         group_memory=group_memory,
         channel_memory_shared=_channel_shared,
         skip_memory=_skip_memory,
+        shared_calendars=shared_calendars,
         conn=conn,
         effective_prompt=effective_prompt,
         attachment_status=image_attachment_status(image_prep),

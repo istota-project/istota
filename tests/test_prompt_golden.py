@@ -289,8 +289,13 @@ SKILLS: dict[str, tuple[list[str], str]] = {
 }
 
 
-def _write_skills(bundled: Path) -> None:
-    for name, (extra, body) in SKILLS.items():
+#: Written only for a case that sets `Case.shared_feed`: a `calendar` skill in
+#: the shared catalogue would add a menu entry and a CLI line to every golden.
+CALENDAR_SKILL = {"calendar": ([], "CALENDAR BODY")}
+
+
+def _write_skills(bundled: Path, extra_skills: dict | None = None) -> None:
+    for name, (extra, body) in {**SKILLS, **(extra_skills or {})}.items():
         d = bundled / name
         d.mkdir(parents=True, exist_ok=True)
         front = [
@@ -456,6 +461,11 @@ class Case:
     #: card is the email one and the host's memory loads.
     email_thread: bool = False
     pins: bool = False
+    #: Seeds one ICS feed for the user (open-protocol sharing) and puts a
+    #: `calendar` skill in the catalogue, which the feeds line is gated on.
+    #: The feed's name is a sentinel that must render nowhere: names are the
+    #: provider's text and are read through the skill, fenced.
+    shared_feed: bool = False
 
 
 CASES: tuple[Case, ...] = (
@@ -609,6 +619,20 @@ CASES: tuple[Case, ...] = (
         memory=True,
         email_thread=True,
     ),
+    # A feed the user shared with Istota, against `base_nextcloud` plus the
+    # `calendar` skill: the `Other calendars` line in the system half, with the
+    # feed's id and host and not its name.
+    Case("shared_calendar", shared_feed=True),
+    # The same feed, on a member's turn in a shared room (`shared_room` plus the
+    # feed): the line is ambient, so it is absent, while the skill stays.
+    Case(
+        "shared_room_member",
+        source_type="web",
+        conversation_token="web-room",
+        room=("#weekly", "web"),
+        shared=True,
+        shared_feed=True,
+    ),
 )
 
 CASES_BY_NAME = {c.name: c for c in CASES}
@@ -619,7 +643,7 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
     skills_dir = config_dir / "skills"
     skills_dir.mkdir(parents=True, exist_ok=True)
     bundled = tmp_path / "bundled"
-    _write_skills(bundled)
+    _write_skills(bundled, CALENDAR_SKILL if case.shared_feed else None)
     if case.skills_changelog:
         (bundled / "CHANGELOG.md").write_text(SKILLS_CHANGELOG + "\n")
 
@@ -907,6 +931,24 @@ def _seed_room(config: Config, case: Case) -> None:
         conn.commit()
 
 
+#: A shared feed's name; must appear in no prompt.
+FEED_NAME_SENTINEL = "FEED_NAME_SENTINEL"
+
+
+def _seed_shared_feed(config: Config, case: Case) -> None:
+    if not case.shared_feed:
+        return
+    from istota.sharing import sources
+
+    with db.get_db(config.db_path) as conn:
+        sources.create_source(
+            conn, user_id=USER, kind="ics_feed", state="active",
+            remote_host="cal.example.org", remote_key="golden-feed",
+            extras={"name": FEED_NAME_SENTINEL},
+        )
+        conn.commit()
+
+
 #: In a group the case's user is not in; must appear in no prompt.
 NOT_MY_GROUP_SENTINEL = "NOT_MY_GROUP_SENTINEL"
 
@@ -964,6 +1006,7 @@ def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
     _seed_shared_credentials(config, case, monkeypatch)
     _seed_room(config, case)
     _seed_groups(config, case)
+    _seed_shared_feed(config, case)
     if case.pins:
         with db.get_db(config.db_path) as conn:
             db.add_pin(conn, USER, "workspace", "/Users/alice/notes/plan.md", "Plan")
@@ -1002,6 +1045,20 @@ def split_halves(rendered: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------- the test
+
+
+def test_a_shared_feed_is_named_by_id_and_host_in_the_system_half(tmp_path, monkeypatch):
+    system, user = split_halves(assemble(CASES_BY_NAME["shared_calendar"], tmp_path, monkeypatch))
+    lines = [line for line in system.splitlines() if line.startswith("Other calendars")]
+    assert len(lines) == 1 and lines[0].endswith(": feed:1 (cal.example.org)")
+    assert FEED_NAME_SENTINEL not in system + user
+
+
+def test_a_members_turn_in_a_shared_room_has_no_feeds_line(tmp_path, monkeypatch):
+    rendered = assemble(CASES_BY_NAME["shared_room_member"], tmp_path, monkeypatch)
+    assert "Other calendars" not in rendered
+    assert "istota-skill calendar" in rendered
+    assert FEED_NAME_SENTINEL not in rendered
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.name)
