@@ -205,6 +205,10 @@ def _dispatch_one(
         assignment = store.get_assignment(conn, assignment_id)
         if assignment is None:
             return None
+        # A wake still open (the user paused and resumed while it ran) owns the
+        # assignment until it ends; the next tick after that decides.
+        if store.open_wake(conn, assignment_id) is not None:
+            return None
         fired_by, floor = _decide(conn, config, assignment, now)
         if fired_by is None:
             if floor is not None:

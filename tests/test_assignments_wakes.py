@@ -931,6 +931,41 @@ class TestTheNextStep:
         assert _get(config, a).state == "abandoned"
 
 
+class TestPauseAndResumeDuringAWake:
+    def test_no_second_wake_while_the_first_is_open_and_one_after_it_ends(self, config):
+        a = _live(config)
+        made = _start(config, a)
+        with db.get_db(config.db_path) as conn:
+            lifecycle.pause(conn, a, user_id="alice")
+            lifecycle.resume(conn, config.assignments, a, user_id="alice")
+
+        assert _dispatch(config, _later()) == []
+        assert [w.id for w in _wakes(config, a)] == [made.wake_id]
+        assert _wakes(config, a)[0].ended_at is None
+
+        _end(config, made)
+        after = _get(config, a)
+        assert after.state == "sleeping"
+
+        created = _dispatch(config, _later())
+        assert [c.assignment_id for c in created] == [a]
+        assert len(_wakes(config, a)) == 2
+        assert _dispatch(config, _later()) == []
+
+    def test_an_earlier_wake_ending_leaves_a_later_wakes_state_alone(self, config):
+        a = _live(config)
+        first = _start(config, a)
+        with db.get_db(config.db_path) as conn:
+            # A later wake opened by some other route while the first is open.
+            later = store.insert_wake(conn, a, fired_by="time")
+
+        _end(config, first)
+        after = _get(config, a)
+        assert after.state == "active"
+        with db.get_db(config.db_path) as conn:
+            assert store.get_wake(conn, later).ended_at is None
+
+
 class TestTheScratchpadAtTheEnd:
     def test_the_users_lines_the_wake_removed_are_put_back(self, config):
         from istota.assignments import scratchpad

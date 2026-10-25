@@ -599,6 +599,17 @@ def _load_any(conn: sqlite3.Connection, assignment_id: int) -> store.Assignment:
     return assignment
 
 
+def _superseded(conn: sqlite3.Connection, assignment_id: int, wake_id: int) -> bool:
+    """Whether a later wake of this assignment exists, so the `active` state
+    belongs to it and an earlier wake ending must not move it."""
+    row = conn.execute(
+        "SELECT 1 FROM assignment_wakes WHERE assignment_id = ? AND seq >"
+        " (SELECT seq FROM assignment_wakes WHERE id = ?) LIMIT 1",
+        (assignment_id, wake_id),
+    ).fetchone()
+    return row is not None
+
+
 def wake_created(
     conn: sqlite3.Connection, assignment_id: int, *, wake_id: int, task_id: int, fired_by: str,
 ) -> None:
@@ -639,7 +650,7 @@ def wake_ended(
     """
     with write_transaction(conn):
         assignment = _load_any(conn, assignment_id)
-        if assignment.state != "active":
+        if assignment.state != "active" or _superseded(conn, assignment_id, wake_id):
             return False
         store.set_state(conn, assignment_id, "sleeping")
         store.update_assignment(conn, assignment_id, next_wake_at=next_wake_at)
@@ -657,7 +668,7 @@ def wake_waits(
     the assignment has left `active`."""
     with write_transaction(conn):
         assignment = _load_any(conn, assignment_id)
-        if assignment.state != "active":
+        if assignment.state != "active" or _superseded(conn, assignment_id, wake_id):
             return False
         store.set_state(conn, assignment_id, "waiting", waiting_on=list(waiting_on))
         store.update_assignment(conn, assignment_id, next_wake_at=None)
@@ -688,7 +699,7 @@ def pause_after_wake(
         raise ValueError(f"not a system pause reason: {reason}")
     with write_transaction(conn):
         assignment = _load_any(conn, assignment_id)
-        if assignment.state not in from_states:
+        if assignment.state not in from_states or _superseded(conn, assignment_id, wake_id):
             return False
         store.set_state(conn, assignment_id, "paused", reason=reason)
         store.update_assignment(conn, assignment_id, next_wake_at=None)
@@ -704,7 +715,7 @@ def complete_after_wake(conn: sqlite3.Connection, assignment_id: int, *, wake_id
     charter set `auto_complete`."""
     with write_transaction(conn):
         assignment = _load_any(conn, assignment_id)
-        if assignment.state != "active":
+        if assignment.state != "active" or _superseded(conn, assignment_id, wake_id):
             return False
         now = db.iso_utc_now()
         store.set_state(conn, assignment_id, "completed", reason="auto")
