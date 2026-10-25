@@ -42,6 +42,7 @@ const sidebars: SidebarsConfig = {
         'features/room-veto',
         'features/briefings',
         'features/scheduling',
+        'features/assignments',
         'features/heartbeat',
         'features/feeds',
         'features/money',

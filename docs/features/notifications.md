@@ -29,7 +29,7 @@ A row shows a severity dot, the title, how long ago it last changed, and `×N` w
 
 ## What raises a row
 
-Eight sources ship.
+These are the main sources.
 
 | Source | What it is | What you can do | Closes when |
 |---|---|---|---|
@@ -41,8 +41,9 @@ Eight sources ship.
 | `task_alert` | One-shot alerts: a task that failed, a mail throttle notice, a confirmation that timed out, a DMARC warning, a result that reached nobody, a private note with no private chat to go to, and the push for an email thread's note in a web-only private chat | Nothing; it clears itself once you have seen it | You open the panel with it visible |
 | `relay_question` | A [relay question](relay.md) another user asked you, waiting for your answer | Open, for a question in a room, which opens that room; the view shows the question | The relay is answered, expires, fails or is cancelled |
 | `message_relay` | A change to a relay question you asked: delivered, failed, answered, or an answer kept back | Nothing; `!relay show` has the detail | You open the panel with it visible, or the answer reaches you |
+| `assignment` | An [assignment](assignments.md) handed you a step, was paused, says it is done, is low on budget, reported progress, or completed | Nothing in-app; you answer in chat | A step, pause, proposed completion or budget notice when its condition clears; a report or "completed" notice when you see it |
 
-Six are **object-backed**: something outside the table changes and the row closes. `task_alert` and `message_relay` are **fire-and-forget** — nothing will ever close them, so they close when you see them.
+Six are **object-backed**: something outside the table changes and the row closes. `task_alert` and `message_relay` are **fire-and-forget** — nothing will ever close them, so they close when you see them. `assignment` is both, by kind: its step, pause, proposed-completion and budget notices are object-backed, and its progress reports and its "completed" notice close when seen.
 
 Three of these are worth spelling out because the obvious reading is wrong.
 

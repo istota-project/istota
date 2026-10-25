@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Assignments (experimental, admins only).** Behind the `skill_assignment` experimental feature, an admin can give the bot a goal in chat with a budget, done-when checks and an optional deadline, approve it once, and have it work on the goal over days in short runs, handing steps back and pausing itself when it stalls, keeps failing or runs out of budget. Steps, pauses, proposed completions and low budgets appear in the notifications bell. See docs/features/assignments.md.
+
+  **Upgrade note:** the first start rebuilds the approval-request table to allow the new activation approval, so this release owes a run of the upgrade tier before it ships.
+
 ### Changed
 
 - **Specs the bot drafts are ready for a coding agent.** A new spec has every section an implementer reads, including a survey of the existing code taken from the project's source, and its stages are one checklist line each. Specs drafted before this may lack those sections.
