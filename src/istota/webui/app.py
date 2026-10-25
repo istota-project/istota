@@ -15708,6 +15708,66 @@ def _ocm_offer_dict(source) -> dict:
     }
 
 
+def _ocm_share_dict(source) -> dict:
+    """An accepted folder share: its name and host, the access the provider reports."""
+    return {
+        "id": source.id, "name": source.extras.get("name"), "owner": source.extras.get("owner"),
+        "host": source.remote_host, "access": source.access, "state": source.state,
+        "last_reason": source.last_reason, "created_at": source.created_at,
+    }
+
+
+# How each refusal of an accept, decline or remove answers over HTTP; the
+# text is `sharing.ocm`'s fixed message.
+_OCM_ACTION_STATUS = {
+    "isolation": 403,
+    "not_found": 404,
+    "not_waiting": 409,
+    "not_active": 409,
+    "offer_changed": 409,
+    "share_unopened": 409,
+    "credential_refused": 409,
+    "share_unreachable": 502,
+    "unavailable": 503,
+}
+
+
+def _ocm_action(action: str, user_id: str, source_id: int, allow_scheduled: bool) -> dict:
+    from istota import db
+    from istota.credentials import names
+    from istota.sharing import ocm, sources
+
+    with db.get_db(_config.db_path) as conn:
+        if action == "accept":
+            result = ocm.accept(conn, _config, source_id, user_id, allow_scheduled=allow_scheduled,
+                                sandboxed=names.tasks_sandboxed(_config))
+        elif action == "decline":
+            result = ocm.decline(conn, _config, source_id, user_id)
+        else:
+            result = ocm.remove(conn, _config, source_id, user_id)
+        source = sources.get_source(conn, source_id, user_id)
+    return {"share": _ocm_share_dict(source), "notified": result.notified}
+
+
+async def _run_ocm_action(action: str, ident: str, user: dict, allow_scheduled: bool = False):
+    from istota.sharing import ocm
+
+    if _config is None or not _config.db_path:
+        return _sharing_refusal(503, "unavailable", "Config not loaded")
+    if not ident.isascii() or not ident.isdigit() or len(ident) > 18:
+        return _sharing_refusal(404, "not_found", "That folder share was not found.")
+    try:
+        body = await asyncio.to_thread(_ocm_action, action, user["username"], int(ident),
+                                       allow_scheduled)
+    except ocm.ShareActionRefused as refused:
+        return _sharing_refusal(_OCM_ACTION_STATUS.get(refused.code, 409), refused.code,
+                                str(refused))
+    except Exception as exc:
+        logger.error("folder share %s failed: %s", action, type(exc).__name__)
+        return _sharing_refusal(500, "error", "The folder share could not be changed.")
+    return JSONResponse(body, headers=_NO_STORE)
+
+
 def _sharing_listing(user_id: str) -> dict:
     from istota import db
     from istota.credentials import store as secrets_store
@@ -15721,11 +15781,18 @@ def _sharing_listing(user_id: str) -> dict:
     with db.get_db(_config.db_path) as conn:
         feeds = sources.sources_for_user(conn, user_id, kinds=("ics_feed",))
         feed_link = events.token_info(conn, user_id)
-        if _config.sharing.ocm.enabled and _config.site.hostname:
-            # Read-only here: accepting and declining are their own routes.
+        receiving = bool(_config.sharing.ocm.enabled and _config.site.hostname)
+        shares = sources.sources_for_user(conn, user_id, kinds=("ocm_share",))
+        # With OCM off the section stays while shares do, so they can still
+        # be removed; no new offer can arrive then, so none are listed.
+        if receiving or shares:
             ocm = {
-                "federated_id": f"{user_id}@{_config.site.hostname}",
-                "pending": [_ocm_offer_dict(offer) for offer in shared_source.waiting(conn, user_id)],
+                "enabled": receiving,
+                "federated_id": f"{user_id}@{_config.site.hostname}" if receiving else None,
+                "pending": ([_ocm_offer_dict(offer) for offer in shared_source.waiting(conn, user_id)]
+                            if receiving else []),
+                "shares": [_ocm_share_dict(share) for share in shares],
+                "accept_refusal": _web_vault_refusal(user_id),
             }
     profile = user_profiles.get_profile(_config.db_path, user_id)
     delivery = profile.calendar_delivery if profile is not None else "invite"
@@ -15912,6 +15979,40 @@ async def settings_sharing_delivery(request: Request, user: dict = Depends(_requ
         logger.error("calendar delivery update failed: %s", type(exc).__name__)
         return _sharing_refusal(500, "error", "The choice could not be saved.")
     return JSONResponse({"delivery": body["delivery"]}, headers=_NO_STORE)
+
+
+@api_router.post("/settings/sharing/folders/{ident}/accept")
+async def settings_sharing_folder_accept(ident: str, request: Request,
+                                         user: dict = Depends(_require_api_auth),
+                                         _csrf: None = Depends(_verify_origin)):
+    """Accept a folder offer, or a re-offer of an active share.
+
+    The body is ``{"allow_scheduled": bool}``, the accept dialog's checkbox,
+    parsed by hand. The PROPFIND and the sender's notification are outbound
+    HTTP from this process, not a message send, so they run here.
+    """
+    try:
+        body = json.loads(await read_bounded_body(request, 1024))
+    except BodyError as exc:
+        return _sharing_refusal(exc.status, "invalid_body", exc.message)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return _sharing_refusal(400, "invalid_body", "The request body is not JSON")
+    if (not isinstance(body, dict) or set(body) != {"allow_scheduled"}
+            or type(body["allow_scheduled"]) is not bool):
+        return _sharing_refusal(400, "invalid_body", "The request needs allow_scheduled and nothing else")
+    return await _run_ocm_action("accept", ident, user, body["allow_scheduled"])
+
+
+@api_router.post("/settings/sharing/folders/{ident}/decline")
+async def settings_sharing_folder_decline(ident: str, user: dict = Depends(_require_api_auth),
+                                          _csrf: None = Depends(_verify_origin)):
+    return await _run_ocm_action("decline", ident, user)
+
+
+@api_router.delete("/settings/sharing/folders/{ident}")
+async def settings_sharing_folder_remove(ident: str, user: dict = Depends(_require_api_auth),
+                                         _csrf: None = Depends(_verify_origin)):
+    return await _run_ocm_action("remove", ident, user)
 
 
 @api_router.get("/settings/credentials")

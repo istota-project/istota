@@ -262,3 +262,152 @@ async def test_another_users_offers_are_not_listed(signed_client, config):  # no
     config.sharing.ocm.enabled = True
     _pending_offer(config, user="bob")
     assert (await signed_client.get(BASE)).json()["ocm"]["pending"] == []
+
+
+# --- Accepting, declining and removing a folder share --------------------------
+
+FOLDERS = f"{BASE}/folders"
+OFFERED_VALUE = "synthetic-ocm-secret-99"
+
+
+@pytest.fixture
+def ocm_sender():
+    from tests.test_sharing_ocm import Sender
+
+    sender = Sender()
+    sender.server.dav_secrets = {OFFERED_VALUE}
+    yield sender
+    sender.close()
+
+
+@pytest.fixture
+def sandboxed(monkeypatch):
+    """The daemon's published verdict, as a stack whose tasks are confined reports it."""
+    monkeypatch.setattr("istota.credentials.names.tasks_sandboxed", lambda _config: True)
+
+
+def _offer_from(config, sender, user="alice"):  # noqa: F811
+    from istota.credentials import store as secrets_store
+
+    with db.get_db(config.db_path) as conn:
+        source_id = sources.create_source(
+            conn, user_id=user, kind="ocm_share", state="pending", remote_host=sender.host,
+            remote_key=f"{sender.host}|5",
+            extras={"name": "Taxes 2026", "owner": f"carol@http://{sender.host}",
+                    "shared_by": f"carol@http://{sender.host}", "provider_id": "5",
+                    "webdav": f"http://{sender.host}/public.php/webdav/", "share_path": ""},
+        )
+        secrets_store.set_secret(None, user, sources.SECRET_SERVICE, str(source_id), OFFERED_VALUE,
+                                 connection=conn)
+        conn.commit()
+    return source_id
+
+
+def _state(config, source_id, user="alice"):  # noqa: F811
+    with db.get_db(config.db_path) as conn:
+        source = sources.get_source(conn, source_id, user)
+    return (source.state, source.access)
+
+
+async def test_accept_lists_the_share_and_never_returns_the_secret(  # noqa: F811
+        signed_client, config, ocm_sender, sandboxed):
+    config.sharing.ocm.enabled = True
+    source_id = _offer_from(config, ocm_sender)
+    # The bell's Accept posts to this same path with this same body.
+    response = await signed_client.post(f"{FOLDERS}/{source_id}/accept",
+                                        json={"allow_scheduled": False}, headers=ORIGIN)
+    assert response.status_code == 200, response.text
+    assert OFFERED_VALUE not in response.text
+    assert response.json()["share"]["state"] == "active"
+    assert response.json()["notified"] is True
+    assert _state(config, source_id) == ("active", "write")
+
+    listing = await signed_client.get(BASE)
+    assert OFFERED_VALUE not in listing.text and "public.php" not in listing.text
+    ocm = listing.json()["ocm"]
+    assert ocm["pending"] == []
+    [share] = ocm["shares"]
+    assert (share["id"], share["access"], share["host"]) == (source_id, "write", ocm_sender.host)
+    assert ocm["accept_refusal"] is None
+
+
+@pytest.mark.parametrize("body", [{}, {"allow_scheduled": "yes"}, {"allow_scheduled": True, "x": 1}],
+                         ids=["empty", "not-bool", "extra"])
+async def test_accept_needs_exactly_the_checkbox(signed_client, config, ocm_sender, sandboxed,  # noqa: F811
+                                                 body):
+    config.sharing.ocm.enabled = True
+    source_id = _offer_from(config, ocm_sender)
+    response = await signed_client.post(f"{FOLDERS}/{source_id}/accept", json=body, headers=ORIGIN)
+    assert response.status_code == 400
+    assert _state(config, source_id) == ("pending", "read")
+    assert ocm_sender.propfinds == []
+
+
+async def test_a_secret_the_host_refuses_is_a_409(signed_client, config, ocm_sender, sandboxed):  # noqa: F811
+    config.sharing.ocm.enabled = True
+    ocm_sender.server.dav_secrets = set()
+    source_id = _offer_from(config, ocm_sender)
+    response = await signed_client.post(f"{FOLDERS}/{source_id}/accept",
+                                        json={"allow_scheduled": False}, headers=ORIGIN)
+    assert response.status_code == 409
+    assert response.json() == {"detail": "This share could not be opened.",
+                               "reason": "share_unopened"}
+    assert _state(config, source_id) == ("pending", "read")
+
+
+async def test_an_unsandboxed_multi_user_stack_refuses_and_says_why(  # noqa: F811
+        signed_client, config, ocm_sender, monkeypatch):
+    monkeypatch.setattr("istota.credentials.names.tasks_sandboxed", lambda _config: False)
+    config.sharing.ocm.enabled = True
+    source_id = _offer_from(config, ocm_sender)
+    response = await signed_client.post(f"{FOLDERS}/{source_id}/accept",
+                                        json={"allow_scheduled": False}, headers=ORIGIN)
+    assert response.status_code == 403
+    assert response.json()["reason"] == "isolation"
+    assert ocm_sender.propfinds == []
+    assert (await signed_client.get(BASE)).json()["ocm"]["accept_refusal"]
+
+
+async def test_decline_and_remove(signed_client, config, ocm_sender, sandboxed):  # noqa: F811
+    config.sharing.ocm.enabled = True
+    declined = _offer_from(config, ocm_sender)
+    response = await signed_client.post(f"{FOLDERS}/{declined}/decline", headers=ORIGIN)
+    assert response.status_code == 200
+    assert _state(config, declined)[0] == "declined"
+
+    with db.get_db(config.db_path) as conn:
+        conn.execute("DELETE FROM shared_sources")
+        conn.commit()
+    removed = _offer_from(config, ocm_sender)
+    await signed_client.post(f"{FOLDERS}/{removed}/accept", json={"allow_scheduled": False},
+                             headers=ORIGIN)
+    response = await signed_client.delete(f"{FOLDERS}/{removed}", headers=ORIGIN)
+    assert response.status_code == 200
+    assert _state(config, removed)[0] == "revoked"
+    assert [n["notificationType"] for n in ocm_sender.notifications] == [
+        "SHARE_DECLINED", "SHARE_ACCEPTED", "SHARE_DECLINED"]
+
+
+async def test_another_users_share_is_404(signed_client, config, ocm_sender, sandboxed):  # noqa: F811
+    config.sharing.ocm.enabled = True
+    source_id = _offer_from(config, ocm_sender, user="bob")
+    for method, path, body in (("POST", f"{FOLDERS}/{source_id}/accept", {"allow_scheduled": False}),
+                               ("POST", f"{FOLDERS}/{source_id}/decline", None),
+                               ("DELETE", f"{FOLDERS}/{source_id}", None),
+                               ("DELETE", f"{FOLDERS}/x7", None)):
+        response = await signed_client.request(method, path, json=body, headers=ORIGIN)
+        assert response.status_code == 404, path
+    assert _state(config, source_id, user="bob") == ("pending", "read")
+    assert ocm_sender.propfinds == []
+
+
+async def test_shares_stay_removable_with_ocm_off(signed_client, config, ocm_sender, sandboxed):  # noqa: F811
+    config.sharing.ocm.enabled = True
+    source_id = _offer_from(config, ocm_sender)
+    await signed_client.post(f"{FOLDERS}/{source_id}/accept", json={"allow_scheduled": False},
+                             headers=ORIGIN)
+    config.sharing.ocm.enabled = False
+    ocm = (await signed_client.get(BASE)).json()["ocm"]
+    assert (ocm["enabled"], ocm["federated_id"], ocm["pending"]) == (False, None, [])
+    assert [s["id"] for s in ocm["shares"]] == [source_id]
+    assert (await signed_client.delete(f"{FOLDERS}/{source_id}", headers=ORIGIN)).status_code == 200

@@ -79,14 +79,27 @@ class SharedSourceResolver:
         lines = [_line(offer) for offer in offers[:MAX_LISTED]]
         if len(offers) > MAX_LISTED:
             lines.append(f"and {len(offers) - MAX_LISTED} more")
+        review = NotificationAction(
+            id="review", label="Review", kind="default" if len(offers) == 1 else "primary",
+            method="LINK", href=LINK,
+        )
+        actions: tuple = (review,)
+        if len(offers) == 1:
+            # One offer: Accept beside the line naming it, in the detail view
+            # only, with scheduled use off as the card's dialog defaults it.
+            # Decline asks first, so it stays on the card Review opens.
+            accept = NotificationAction(
+                id="accept", label="Accept", kind="primary", method="POST",
+                endpoint=f"/settings/sharing/folders/{int(offers[0].id)}/accept",
+                detail_only=True, body={"allow_scheduled": False},
+            )
+            actions = (accept, review)
         return NotificationView(
             title=TITLE,
             body="\n".join(lines),
             severity="info",
             link=LINK,
-            actions=(NotificationAction(
-                id="review", label="Review", kind="primary", method="LINK", href=LINK,
-            ),),
+            actions=actions,
         )
 
 

@@ -119,6 +119,29 @@ def test_the_row_closes_when_no_offer_is_pending(config, sender):  # noqa: F811
     assert stored["state"] != "open"
 
 
+def test_one_offer_can_be_accepted_from_the_detail(config, sender):  # noqa: F811
+    _receive(config, _offer(sender))
+    [offer] = _offers(config)
+    [row], _ = _panel(config)
+    actions = {a.id: a for a in row.actions}
+    accept = actions["accept"]
+    assert (accept.method, accept.endpoint) == ("POST", f"/settings/sharing/folders/{offer.id}/accept")
+    assert accept.body == {"allow_scheduled": False}
+    assert accept.detail_only is True
+    assert FOLDER not in accept.label
+    assert notification_sources.SAFE_PATH_RE.fullmatch(accept.endpoint)
+    # Declining asks first, so it is on the card the Review link opens.
+    assert "decline" not in actions
+    assert actions["review"].method == "LINK"
+
+
+def test_several_offers_are_reviewed_on_the_card(config, sender):  # noqa: F811
+    _receive(config, _offer(sender, 5))
+    _receive(config, _offer(sender, 6))
+    [row], _ = _panel(config)
+    assert [a.id for a in row.actions] == ["review"]
+
+
 def test_a_re_offer_of_an_active_share_keeps_it_open(config, sender):  # noqa: F811
     _receive(config, _offer(sender))
     [offer] = _offers(config)
