@@ -960,8 +960,9 @@ def delete_profile(db_path: Path, user_id: str) -> bool:
     """Remove a profile row and the user's rows keyed on it. True if a profile row went.
 
     With it go the avatars, the WhatsApp binding, device tokens, quick note
-    keys, location ingest tokens (with the legacy `overland` secret) and the
-    managed-field record, and the account
+    keys, location ingest tokens (with the legacy `overland` secret), the
+    Istota calendar's events and feed token, the shared sources with their
+    secrets and credentials, and the managed-field record, and the account
     leaves the system groups. The location receiver is signalled to rebuild its
     token map.
 
@@ -1002,6 +1003,11 @@ def delete_profile(db_path: Path, user_id: str) -> bool:
         from istota.sharing import events as istota_events  # noqa: PLC0415
 
         istota_events.delete_for_user(conn, user_id)
+        # Shared sources hold bearer secrets: a feed's address, a held OCM
+        # secret and an accepted share's `ocm_share_<id>` credential.
+        from istota.sharing import sources as shared_sources  # noqa: PLC0415
+
+        shared_sources.delete_for_user(conn, user_id)
         from istota.credentials import store as secrets_store  # noqa: PLC0415
 
         secrets_store.delete_secret(

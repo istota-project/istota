@@ -257,6 +257,43 @@ class TestOwnership:
         assert sources.get_source(conn, theirs, "bob") is not None
         assert _secret(conn, "bob", str(theirs)) is not None
 
+    def test_deleting_the_profile_takes_every_source_secret_and_credential(self, conn, db_path):
+        from istota import user_profiles
+
+        user_profiles.ensure_profile(db_path, "alice")
+        active = _offer(conn, user="alice", key="cloud.example.org|41")
+        sources.set_state(conn, active, "alice", "active")
+        local_credentials.create(
+            conn, "alice",
+            LocalCredential(name=sources.credential_name(active), value="share-secret",
+                            url="https://cloud.example.org"),
+            system_prefix="ocm_share_",
+        )
+        held = _offer(conn, user="alice", key="cloud.example.org|42")
+        secrets_store.set_secret(None, "alice", sources.SECRET_SERVICE, str(held),
+                                 "held-secret", connection=conn)
+        feed = _feed(conn, user="alice")
+        secrets_store.set_secret(None, "alice", sources.SECRET_SERVICE, str(feed),
+                                 "https://cal.example.org/a.ics", connection=conn)
+        conn.execute("INSERT INTO shared_feed_cache (source_id, body, fetched_at)"
+                     " VALUES (?, ?, datetime('now'))", (feed, b"BEGIN:VCALENDAR"))
+        theirs = _feed(conn, user="bob")
+        secrets_store.set_secret(None, "bob", sources.SECRET_SERVICE, str(theirs),
+                                 "https://cal.example.org/b.ics", connection=conn)
+        conn.commit()
+
+        assert user_profiles.delete_profile(db_path, "alice") is True
+
+        assert conn.execute(
+            "SELECT COUNT(*) FROM shared_sources WHERE user_id = 'alice'").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM secrets WHERE user_id = 'alice' AND service IN (?, ?)",
+            (sources.SECRET_SERVICE, VAULT_ENTRY_SERVICE)).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM shared_feed_cache WHERE source_id = ?", (feed,)).fetchone()[0] == 0
+        assert sources.get_source(conn, theirs, "bob") is not None
+        assert _secret(conn, "bob", str(theirs)) is not None
+
 
 def _shared_room(conn) -> str:
     room = db.create_web_chat_room(conn, "alice", "Family")
