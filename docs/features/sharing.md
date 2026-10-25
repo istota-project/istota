@@ -44,7 +44,7 @@ On a local install the feed address names this computer, so only calendar apps o
 
 ## Invitations sent to Istota
 
-When someone sends the bot's address a meeting invitation, and the mail is not held by the untrusted-sender gate, Istota records it if the mail is authenticated and comes from the organizer. Tasks read these with `--calendar feed:invitations`. Istota never accepts or declines an invitation itself. Invitations that reach only your own mailbox are not seen unless you forward them to the bot.
+When someone sends the bot's address a meeting invitation, and the mail is not held by the untrusted-sender gate, Istota records it if the mail is authenticated and comes from the organizer. Tasks read these with `--calendar feed:invitations`. Istota never accepts or declines an invitation itself. Only mail the organizer sends to the bot's address directly (as To, Cc or Bcc) is recorded. A forwarded invitation is not, because its sender is you rather than the organizer, so ask the organizer to include the bot's address.
 
 ## Folders shared with Istota
 
