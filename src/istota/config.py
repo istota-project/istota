@@ -307,8 +307,45 @@ class MailAccountsConfig:
     private_hosts: list[str] = field(default_factory=list)
 
 
+@dataclass
+class SharingOcmConfig:
+    """Receiving Open Cloud Mesh folder shares (`[sharing.ocm]`).
+
+    Served on ``[site] hostname``, so federated ids are
+    ``<user_id>@<site hostname>``. Off by default: the routes it adds are the
+    web app's first fully unauthenticated public ones.
+    """
+    enabled: bool = False
+    max_pending_per_user: int = 20
+    pending_days: int = 14
+    max_discovery_fetches_per_minute: int = 30
+
+
+@dataclass
+class SharingConfig:
+    """What users share with Istota through open protocols (`[sharing]`).
+
+    ``private_hosts`` has ``[wordpress] private_hosts``'s meaning: exact names
+    a feed or a sharing server may reach on a private address, and the only
+    hosts plain http may reach. ``ics_poll_interval`` is clamped to at least
+    300 seconds. ``events_per_task`` caps the creates, updates and cancels on
+    Istota's own calendar in one task attempt; 0 turns those writes off.
+    """
+    private_hosts: list[str] = field(default_factory=list)
+    ics_poll_interval: int = 900
+    ics_max_bytes: int = 2 * 1024 * 1024
+    ics_max_feeds_per_user: int = 10
+    events_per_task: int = 10
+    ocm: SharingOcmConfig = field(default_factory=SharingOcmConfig)
+
+
+#: The floor `[sharing] ics_poll_interval` is clamped to: a provider's secret
+#: address is polled no more often than this.
+ICS_POLL_INTERVAL_MIN = 300
+
+
 # What a `private_hosts` entry (`[wordpress]`, `[servarr]`,
-# `[mail_accounts]`) may look like: a
+# `[mail_accounts]`, `[sharing]`) may look like: a
 # host name (with an optional trailing dot) or an IP literal. The skills match
 # entries by exact name, so a URL, a port or a wildcard matches nothing. The
 # Ansible role asserts with this same string.
@@ -2447,6 +2484,7 @@ class Config:
     devbox: DevboxConfig = field(default_factory=DevboxConfig)
     wordpress: WordPressConfig = field(default_factory=WordPressConfig)
     mail_accounts: MailAccountsConfig = field(default_factory=MailAccountsConfig)
+    sharing: SharingConfig = field(default_factory=SharingConfig)
     servarr: ServarrConfig = field(default_factory=ServarrConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     briefings: BriefingsModuleConfig = field(default_factory=BriefingsModuleConfig)
@@ -4466,6 +4504,27 @@ def _positive_float(raw: object, key: str) -> object:
     return value
 
 
+def _at_least(minimum: int) -> Hook:
+    """A hook for an integer with a floor: below it is raised to it, with a problem.
+
+    Clamped rather than kept at the default, because a value under the floor
+    says the operator wants it as low as it goes.
+    """
+    def hook(raw: object, key: str) -> object:
+        value = coerce_int(raw, key)
+        if value is _KEEP:
+            return _KEEP
+        if value < minimum:
+            report_problem(
+                "discarded", key_path(key),
+                "[config] %s=%s is below the minimum; using %d", key, Value(raw), minimum,
+            )
+            return minimum
+        return value
+
+    return hook
+
+
 def _positive_int(raw: object, key: str) -> object:
     """A duration or count where zero is not a smaller value but a different mode.
 
@@ -4791,6 +4850,16 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     # started, which reads as the arr being down.
     "servarr.lookup_timeout_seconds": _positive_int,
     "servarr.release_search_timeout_seconds": _positive_int,
+    # A provider's secret calendar address, polled once per interval per feed.
+    "sharing.ics_poll_interval": _at_least(ICS_POLL_INTERVAL_MIN),
+    # Zero bytes would refuse every feed as too large.
+    "sharing.ics_max_bytes": _positive_int,
+    # 0 is a mode in both: no feeds, and no writes to Istota's own calendar.
+    "sharing.ics_max_feeds_per_user": _non_negative_int,
+    "sharing.events_per_task": _non_negative_int,
+    "sharing.ocm.max_pending_per_user": _positive_int,
+    "sharing.ocm.pending_days": _positive_int,
+    "sharing.ocm.max_discovery_fetches_per_minute": _positive_int,
     "advisor_model": _advisor_model,
     # 0 means unlimited here, so a negative value cannot be clamped to 0 -- that
     # reads as the opposite of what someone typing one meant.
@@ -5494,12 +5563,14 @@ def load_config(
     _validate_room_selectable(config)
     _validate_wordpress_private_hosts(config)
     _warn_malformed_private_hosts("mail_accounts", config.mail_accounts.private_hosts, "account")
+    _warn_malformed_private_hosts("sharing", config.sharing.private_hosts, "shared source")
     _validate_servarr(config)
     _validate_claude_code_brain(config)
     _validate_configured_model_references(config)
     _validate_advisor_model(config)
     _validate_nextcloud_workspace(config)
     _validate_local_login(config)
+    _validate_sharing_ocm(config)
     _validate_sms(config)
     _validate_whatsapp(config)
     _validate_forge_clis(config)
@@ -5679,6 +5750,24 @@ def _validate_local_login(config: Config) -> None:
         raise ValueError(
             '[web] auth "local_code" needs [site] hostname to be localhost:<port>, '
             f"the address the Mac app opens; it is {config.site.hostname!r}"
+        )
+
+
+def _validate_sharing_ocm(config: Config) -> None:
+    """OCM is served on ``[site] hostname``, so not on the operator's Nextcloud host.
+
+    A proxied install sharing a hostname with the Nextcloud it fronts would
+    put istota's ``/ocm/`` and ``<user>@<host>`` ids over Nextcloud's own.
+    Hosts are compared without scheme, port or path.
+    """
+    if not config.sharing.ocm.enabled or not config.nextcloud.url or not config.site.hostname:
+        return
+    site_host = urlsplit(f"//{config.site.hostname.strip()}").hostname
+    nextcloud_host = urlsplit(config.nextcloud.url.strip()).hostname
+    if site_host and site_host == nextcloud_host:
+        raise ValueError(
+            "[sharing.ocm] enabled needs [site] hostname to be a host of istota's own; "
+            f"it is the host of [nextcloud] url ({site_host!r}), whose OCM it would shadow"
         )
 
 

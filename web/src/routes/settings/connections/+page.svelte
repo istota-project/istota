@@ -5,7 +5,9 @@
     AuthError,
     getMailAccounts,
     getSettingsServices,
+    getSharing,
     type MailAccountsSettings,
+    type SharingSettings,
     type ServiceCard as ServiceCardData,
     type NextcloudTokenStatus,
   } from '$lib/api';
@@ -19,6 +21,7 @@
     MailAccountsCard,
     NextcloudCard,
     SettingsLayout,
+    SharingCard,
   } from '$lib/components/settings';
 
   const identity = getCurrentUser();
@@ -87,9 +90,38 @@
     mailShown = true;
   }
 
+  // "Shared with Istota": the calendars the user subscribed Istota to. Shown
+  // whenever the server says it has the card; a failed reload keeps the list
+  // on screen and says so out of band, as the mail card does.
+  const sharingShown = $derived(identity.user.features.sharing === true);
+  let sharing: SharingSettings | null = $state(null);
+  let sharingError = $state('');
+
+  async function loadSharing() {
+    if (!sharingShown) return;
+    try {
+      sharing = await getSharing();
+      sharingError = '';
+    } catch (e) {
+      if (e instanceof AuthError) {
+        identity.expireSession();
+        return;
+      }
+      const message = (e as Error).message || 'The shared calendars could not be loaded.';
+      if (sharing) notifyError(message);
+      else sharingError = message;
+    }
+  }
+
+  function sharingFailed(e: unknown) {
+    if (e instanceof AuthError) identity.expireSession();
+    else notifyError((e as Error).message || 'The shared calendars could not be changed.');
+  }
+
   onMount(() => {
     void loadServices();
     void loadMail();
+    void loadSharing();
   });
 
   async function retryPane() {
@@ -151,7 +183,7 @@
       {/if}
     {/each}
 
-    {#if loaded && !ncToken && activeServices.length === 0 && !mailShown}
+    {#if loaded && !ncToken && activeServices.length === 0 && !mailShown && !sharingShown}
       <EmptyState>No connected services are available on this deployment.</EmptyState>
     {/if}
   </LoadState>
@@ -163,6 +195,16 @@
       onReload={loadMail}
       onSaved={loadMail}
       onError={mailFailed}
+    />
+  {/if}
+
+  {#if sharingShown}
+    <SharingCard
+      settings={sharing}
+      loadError={sharingError}
+      onReload={loadSharing}
+      onSaved={loadSharing}
+      onError={sharingFailed}
     />
   {/if}
 </SettingsLayout>

@@ -733,6 +733,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # Where relay questions from other users reach this user. '' means no
         # preference: the asker's choice, else the default room.
         "relay_delivery": "TEXT NOT NULL DEFAULT ''",
+        # How events on Istota's own calendar reach this user: invite | feed.
+        "calendar_delivery": "TEXT NOT NULL DEFAULT 'invite'",
         # Folder below My files that quick notes are written to. NULL is unset,
         # and a create then answers `notes_folder_unset`.
         "quick_notes_folder": "TEXT",
@@ -1333,6 +1335,10 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     _migrate_push_tables(conn)
     _migrate_location_ingest_tokens(conn)
     _migrate_quick_note_keys(conn)
+    _migrate_shared_sources(conn)
+    _migrate_shared_feed_cache(conn)
+    _migrate_istota_events(conn)
+    _migrate_received_invitations(conn)
     _migrate_device_tokens(conn)
     _migrate_mobile_auth_requests(conn)
     _migrate_notifications_push_pending(conn)
@@ -9680,6 +9686,105 @@ def _migrate_quick_note_keys(conn: sqlite3.Connection) -> None:
             path TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (user_id, client_note_id)
+        )
+    """)
+
+
+def _migrate_shared_sources(conn: sqlite3.Connection) -> None:
+    """Create the open-protocol shared sources table. Pure DDL, kept in step with `schema.sql`."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS shared_sources (
+            id INTEGER PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('ics_feed', 'ocm_share')),
+            state TEXT NOT NULL CHECK (state IN ('pending', 'active', 'declined', 'revoked', 'error')),
+            remote_host TEXT NOT NULL,
+            remote_key TEXT NOT NULL,
+            access TEXT NOT NULL DEFAULT 'read' CHECK (access IN ('read', 'write')),
+            extras TEXT,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            last_reason TEXT,
+            last_ok_at TEXT,
+            next_poll_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (user_id, kind, remote_key)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shared_sources_due"
+        " ON shared_sources(kind, state, next_poll_at)"
+    )
+
+
+def _migrate_shared_feed_cache(conn: sqlite3.Connection) -> None:
+    """Create the ICS feed cache table. Pure DDL, kept in step with `schema.sql`."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS shared_feed_cache (
+            source_id INTEGER PRIMARY KEY,
+            body BLOB NOT NULL,
+            etag TEXT,
+            last_modified TEXT,
+            fetched_at TEXT NOT NULL
+        )
+    """)
+
+
+def _migrate_istota_events(conn: sqlite3.Connection) -> None:
+    """Create Istota's own calendar and its feed tokens. Pure DDL, kept in step with `schema.sql`."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS istota_events (
+            id INTEGER PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            uid TEXT NOT NULL UNIQUE,
+            sequence INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed', 'cancelled')),
+            summary TEXT NOT NULL,
+            description TEXT,
+            location TEXT,
+            dtstart TEXT NOT NULL,
+            dtend TEXT,
+            all_day INTEGER NOT NULL DEFAULT 0,
+            attendee_status TEXT,
+            invite_status TEXT,
+            created_by_task INTEGER,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            cancelled_at TEXT
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_istota_events_user ON istota_events(user_id, status)"
+    )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS calendar_feed_tokens (
+            user_id TEXT PRIMARY KEY,
+            token_sha256 TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_used_at TEXT
+        )
+    """)
+
+
+def _migrate_received_invitations(conn: sqlite3.Connection) -> None:
+    """Create the store of invitations other people sent a user. Pure DDL, kept in step with `schema.sql`."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS received_invitations (
+            id INTEGER PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            uid TEXT NOT NULL,
+            organizer TEXT NOT NULL,
+            sequence INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed', 'cancelled')),
+            summary TEXT,
+            description TEXT,
+            location TEXT,
+            dtstart TEXT,
+            dtend TEXT,
+            all_day INTEGER NOT NULL DEFAULT 0,
+            message_id TEXT,
+            received_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (user_id, uid, organizer)
         )
     """)
 

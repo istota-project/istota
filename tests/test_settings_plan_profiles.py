@@ -88,7 +88,8 @@ def test_managed_and_seed_metadata_do_not_report_settings_changes(install):
 @pytest.mark.parametrize("profile", [
     {"timezone": "Unknown/Zone"}, {"max_foreground_workers": -1},
     {"disabled_skills": ["nonexistent-skill"]}, {"disabled_modules": ["nonexistent-module"]},
-    {"relay_delivery": "unsupported"}, {"routing": {"invalid-purpose": "email"}},
+    {"relay_delivery": "unsupported"}, {"calendar_delivery": "both"},
+    {"routing": {"invalid-purpose": "email"}},
     {"default_destination": "unknown_surface"},
 ])
 def test_invalid_later_user_refuses_the_whole_plan(install, profile):

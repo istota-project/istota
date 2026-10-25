@@ -1,7 +1,19 @@
-"""Calendar operations via CalDAV.
+"""Calendar operations: CalDAV calendars, and the ICS feeds a user shared with Istota.
+
+A CalDAV calendar is named by its URL and read over the bot account's
+credential. A feed is named ``feed:<id>``, is read-only, and is read from the
+cache the scheduler keeps (`sharing.ics`), never the network: the skill reads
+the framework database host-side, and every text field from a feed is fenced.
+Istota's own calendar is named ``istota`` (`sharing.events`): read from the
+database, and written by queuing a deferred op that the scheduler applies
+once the task succeeds, at most `[sharing] events_per_task` per task.
+``feed:invitations`` is the invitations other people mailed the user
+(`sharing.itip`, ``received_invitations``): read-only, behind the same gate,
+every text field and the organizer fenced.
 
 Also provides a CLI for calendar operations from Claude Code:
-    python -m istota.skills.calendar list [--calendar URL] [--date today|tomorrow|DATE | --week] [--tz TZ]
+    python -m istota.skills.calendar list [--calendar URL|feed:ID] [--date today|tomorrow|DATE | --week] [--tz TZ]
+    python -m istota.skills.calendar calendars
     python -m istota.skills.calendar create --calendar URL --summary TEXT --start DATETIME [--end DATETIME]
     python -m istota.skills.calendar update --calendar URL --uid UID [--summary TEXT] [--start DT] [--end DT] [--all-day] ...
     python -m istota.skills.calendar delete --calendar URL --uid UID
@@ -603,10 +615,545 @@ def _get_date_range(args) -> tuple[datetime, datetime, str]:
     return start, end, args.date
 
 
+FEED_PREFIX = "feed:"
+FEED_LABEL = "calendar feed"
+
+
+def is_feed_calendar(calendar: str | None) -> bool:
+    """Whether ``--calendar`` names a feed rather than a CalDAV URL; no URL starts so."""
+    return bool(calendar) and calendar.strip().lower().startswith(FEED_PREFIX)
+
+
+@dataclass
+class SharedFeed:
+    calendar: str
+    host: str
+    name: str | None
+    state: str
+    last_reason: str | None
+    fetched_at: str | None
+    body: bytes | None
+
+
+def _caldav_configured() -> bool:
+    return all(os.environ.get(var) for var in ("CALDAV_URL", "CALDAV_USERNAME", "CALDAV_PASSWORD"))
+
+
+def _withheld_from_env() -> set[str]:
+    from istota.sandbox.host_paths import WITHHELD_SCOPES_VAR
+
+    raw = os.environ.get(WITHHELD_SCOPES_VAR, "")
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+@dataclass
+class _TaskContext:
+    config: object
+    db_path: object
+    task_id: int
+    skill_index: dict
+
+
+def _task_context() -> _TaskContext | None:
+    """The calling task's config and database, or None where only CalDAV can be in reach.
+
+    None with no task (an operator's shell), with ``calendar`` in the
+    withheld scopes, or with no database. Each caller then reads the task's
+    own row and checks it is this user's (`_own_task`).
+    """
+    try:
+        task_id = int(os.environ.get("ISTOTA_TASK_ID", "") or 0)
+    except ValueError:
+        task_id = 0
+    if task_id <= 0 or "calendar" in _withheld_from_env():
+        return None
+
+    from pathlib import Path
+
+    from istota.config import load_config
+    from istota.skills._loader import load_skill_index
+
+    config = load_config()
+    db_path = Path(os.environ.get("ISTOTA_DB_PATH") or config.db_path)
+    if not db_path.exists():
+        return None
+    skill_index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+    return _TaskContext(config=config, db_path=db_path, task_id=task_id, skill_index=skill_index)
+
+
+def _own_task(conn, context: _TaskContext, user_id: str):
+    from istota import db
+
+    task = db.get_task(conn, context.task_id)
+    return task if task is not None and task.user_id == user_id else None
+
+
+def shared_feeds(user_id: str) -> list[SharedFeed]:
+    """The feeds the calling task may read, with their cached bodies.
+
+    Through `sharing.sources.sources_for_task`, on the task's own row, so a
+    guest's turn and a task nobody asked in a shared room read none. No task
+    (an operator's shell) or a row for another user reads none either.
+    """
+    context = _task_context()
+    if context is None:
+        return []
+
+    from istota import db
+    from istota.sharing import ics, sources
+
+    with db.get_db(context.db_path) as conn:
+        task = _own_task(conn, context, user_id)
+        if task is None:
+            return []
+        found = sources.sources_for_task(conn, task, kind="ics_feed", skill_index=context.skill_index)
+        return [
+            SharedFeed(
+                calendar=f"{FEED_PREFIX}{source.id}", host=source.remote_host,
+                name=source.extras.get("name"), state=source.state,
+                last_reason=source.last_reason,
+                fetched_at=ics.cache_times(conn, source.id),
+                body=ics.read_cached(conn, source.id),
+            )
+            for source in found
+        ]
+
+
+def _feed_event_dict(event, calendar: str) -> dict:
+    """A feed occurrence in `_event_to_dict`'s shape, its provider's text fenced."""
+    from istota.lib.untrusted import frame_untrusted
+
+    return {
+        "calendar": calendar,
+        "uid": event.uid,
+        "summary": frame_untrusted(event.summary, FEED_LABEL),
+        "start": event.start.isoformat(),
+        "end": event.end.isoformat(),
+        "location": frame_untrusted(event.location, FEED_LABEL) or None,
+        "description": frame_untrusted(event.description, FEED_LABEL) or None,
+        "all_day": event.all_day,
+        "timezone": event.timezone or "floating",
+        "read_only": True,
+    }
+
+
+def _feed_events(feeds: list[SharedFeed], start: datetime, end: datetime) -> tuple[list[dict], dict]:
+    """Every feed's occurrences in the window, against one shared cap."""
+    from istota.sharing import ics
+
+    events: list[dict] = []
+    notes: dict = {}
+    budget = ics.MAX_OCCURRENCES
+    truncated = []
+    for feed in feeds:
+        if feed.state == "error" or feed.body is None:
+            notes.setdefault("feed_errors", []).append({
+                "calendar": feed.calendar, "host": feed.host,
+                "reason": feed.last_reason or "not_fetched", "cached_at": feed.fetched_at,
+            })
+        if feed.body is None:
+            continue
+        found, cut = ics.expand(feed.body, start, end, limit=max(budget, 0))
+        budget -= len(found)
+        if cut:
+            truncated.append(feed.calendar)
+        events.extend(_feed_event_dict(event, feed.calendar) for event in found)
+    if truncated:
+        notes["truncated"] = True
+        notes["truncated_calendars"] = truncated
+        notes["occurrence_limit"] = ics.MAX_OCCURRENCES
+    return events, notes
+
+
+def _refuse_feed_write(calendar: str) -> dict | None:
+    if is_feed_calendar(calendar):
+        return {
+            "status": "error", "reason": "read_only_calendar",
+            "error": f"{calendar} is a calendar shared with Istota by its feed address; it is read-only",
+        }
+    return None
+
+
+ISTOTA_CALENDAR = "istota"
+
+
+def is_istota_calendar(calendar: str | None) -> bool:
+    return bool(calendar) and calendar.strip().lower() == ISTOTA_CALENDAR
+
+
+def _istota_refusal(reason: str, error: str) -> dict:
+    return {"status": "error", "reason": reason, "error": error}
+
+
+def _istota_reach(user_id: str):
+    """``(context, task)`` when this task may use Istota's calendar, else None.
+
+    The feeds' gate: the ``calendar`` scope, on the task's own row.
+    """
+    context = _task_context()
+    if context is None or "calendar" not in context.skill_index:
+        return None
+
+    from istota import db
+    from istota.rooms import scopes as room_scopes
+
+    with db.get_db(context.db_path) as conn:
+        task = _own_task(conn, context, user_id)
+        if task is None:
+            return None
+        if "calendar" in room_scopes.withheld_for_task(conn, task, skill_index=context.skill_index):
+            return None
+    return context, task
+
+
+_UTC = ZoneInfo("UTC")
+_UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _shown_time(value: str, all_day: bool, tz: str | None) -> datetime:
+    """A stored time as the listing shows it: a date at midnight, or the moment in ``tz`` (UTC without)."""
+    if all_day:
+        return datetime.combine(date.fromisoformat(value), datetime.min.time())
+    moment = datetime.strptime(value, _UTC_FORMAT).replace(tzinfo=_UTC)
+    if tz:
+        moment = moment.astimezone(ZoneInfo(tz))
+    return moment.replace(tzinfo=None)
+
+
+def istota_events(user_id: str, start: datetime, end: datetime, tz: str | None) -> list[dict] | None:
+    """Istota's own calendar's events in the window, or None where the calendar is not in reach."""
+    reach = _istota_reach(user_id)
+    if reach is None:
+        return None
+    context, _task = reach
+
+    from istota import db
+    from istota.sharing import events as istota_cal
+
+    window_start = start.astimezone(_UTC)
+    window_end = end.astimezone(_UTC)
+    first_day = start.date()
+    last_day = end.date()
+    with db.get_db(context.db_path) as conn:
+        rows = istota_cal.events_for_user(conn, user_id)
+    shown = []
+    for event in rows:
+        ends_at = event.dtend or event.dtstart
+        if event.all_day:
+            overlaps = (date.fromisoformat(event.dtstart) < last_day
+                        and date.fromisoformat(ends_at) > first_day)
+        else:
+            begins = datetime.strptime(event.dtstart, _UTC_FORMAT).replace(tzinfo=_UTC)
+            ends = datetime.strptime(ends_at, _UTC_FORMAT).replace(tzinfo=_UTC)
+            overlaps = begins < window_end and ends > window_start
+        if not overlaps:
+            continue
+        shown.append({
+            "calendar": ISTOTA_CALENDAR,
+            "uid": event.uid,
+            "summary": event.summary,
+            "start": _shown_time(event.dtstart, event.all_day, tz).isoformat(),
+            "end": _shown_time(ends_at, event.all_day, tz).isoformat(),
+            "location": event.location,
+            "description": event.description,
+            "all_day": event.all_day,
+            "timezone": "floating" if event.all_day else (tz or "UTC"),
+        })
+    return shown
+
+
+INVITATIONS_CALENDAR = "feed:invitations"
+
+
+def is_invitations_calendar(calendar: str | None) -> bool:
+    return bool(calendar) and calendar.strip().lower() == INVITATIONS_CALENDAR
+
+
+def _shown_received_time(value: str, all_day: bool, tz: str | None) -> datetime:
+    """A received time for the listing: a date, a UTC moment in ``tz``, or floating as written."""
+    if all_day:
+        return datetime.combine(date.fromisoformat(value), datetime.min.time())
+    if value.endswith("Z"):
+        return _shown_time(value, False, tz)
+    return datetime.fromisoformat(value).replace(tzinfo=None)
+
+
+def received_invitations(user_id: str, start: datetime, end: datetime, tz: str | None) -> list[dict] | None:
+    """Invitations other people sent the user (`sharing.itip`), in the window, fenced.
+
+    None where the calendar scope is not in reach, the gate Istota's own
+    calendar uses. Every text field and the organizer are third-party text.
+    """
+    reach = _istota_reach(user_id)
+    if reach is None:
+        return None
+    context, _task = reach
+
+    from istota import db
+    from istota.lib.untrusted import frame_untrusted
+    from istota.sharing import itip
+
+    def naive(moment: datetime) -> datetime:
+        if moment.tzinfo is None:
+            return moment
+        return moment.astimezone(ZoneInfo(tz) if tz else _UTC).replace(tzinfo=None)
+
+    window_start, window_end = naive(start), naive(end)
+    with db.get_db(context.db_path) as conn:
+        rows = itip.invitations_for_user(conn, user_id)
+    shown = []
+    for row in rows:
+        if not row.dtstart:
+            continue
+        try:
+            begins = _shown_received_time(row.dtstart, row.all_day, tz)
+            ends = _shown_received_time(row.dtend or row.dtstart, row.all_day, tz)
+        except ValueError:
+            continue
+        if begins >= window_end or (ends <= window_start and begins < window_start):
+            continue
+        shown.append({
+            "calendar": INVITATIONS_CALENDAR,
+            "uid": row.uid,
+            "summary": frame_untrusted(row.summary or "", FEED_LABEL),
+            "start": begins.isoformat(),
+            "end": ends.isoformat(),
+            "location": frame_untrusted(row.location, FEED_LABEL) or None,
+            "description": frame_untrusted(row.description, FEED_LABEL) or None,
+            "organizer": frame_untrusted(row.organizer, FEED_LABEL),
+            "all_day": row.all_day,
+            "timezone": "floating" if row.all_day or not row.dtstart.endswith("Z") else (tz or "UTC"),
+            "read_only": True,
+        })
+    return shown
+
+
+def _op_file(context: _TaskContext):
+    from pathlib import Path
+
+    from istota.sharing import events as istota_cal
+
+    deferred = os.environ.get("ISTOTA_DEFERRED_DIR", "")
+    if not deferred:
+        return None
+    return Path(deferred) / f"task_{context.task_id}_{istota_cal.DEFERRED_SUFFIX}.json"
+
+
+def _read_ops(path) -> list:
+    import json
+
+    if not path.exists():
+        return []
+    try:
+        ops = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeDecodeError, OSError, RecursionError):
+        return []
+    return ops if isinstance(ops, list) else []
+
+
+def _known_istota_event(conn, user_id: str, uid: str, ops: list) -> dict | None:
+    """An event's fields as this task leaves them: the stored row, then this task's queued ops."""
+    from istota.sharing import events as istota_cal
+
+    stored = istota_cal.get_event(conn, user_id, uid)
+    state = None
+    if stored is not None and stored.status == "confirmed":
+        state = {
+            "summary": stored.summary, "description": stored.description,
+            "location": stored.location, "dtstart": stored.dtstart, "dtend": stored.dtend,
+            "all_day": stored.all_day,
+        }
+    for op in ops:
+        if not isinstance(op, dict) or op.get("uid") != uid:
+            continue
+        if op.get("op") == istota_cal.OP_CANCEL:
+            state = None
+        elif op.get("op") == istota_cal.OP_UPSERT and isinstance(op.get("fields"), dict):
+            if op.get("create") is True:
+                state = dict(op["fields"])
+            elif state is not None:
+                state.update(op["fields"])
+    return state
+
+
+def _queue_istota_op(user_id: str, build) -> dict:
+    """Append one op to this task's ``istota_events`` file, within the cap.
+
+    ``build(conn, ops, config)`` returns the op or a refusal. The scheduler
+    applies the file after the task succeeds and counts the cap again there.
+    """
+    import json
+
+    from istota import db
+
+    reach = _istota_reach(user_id)
+    if reach is None:
+        return _istota_refusal("source_not_in_scope", "Istota's calendar is not available to this task")
+    context, _task = reach
+    path = _op_file(context)
+    if path is None:
+        return _istota_refusal("not_in_task", "Istota's calendar is written only from a task")
+    cap = max(int(context.config.sharing.events_per_task), 0)
+    ops = _read_ops(path)
+    if len(ops) >= cap:
+        return _istota_refusal(
+            "event_limit", f"This task has reached its limit of {cap} changes to Istota's calendar",
+        )
+    with db.get_db(context.db_path) as conn:
+        op = build(conn, ops, context.config)
+    if "status" in op:
+        return op
+    ops.append(op)
+    path.write_text(json.dumps(ops), encoding="utf-8")
+    return {"status": "ok", "calendar": ISTOTA_CALENDAR, "uid": op["uid"], "queued": True,
+            "note": "Saved to Istota's calendar when this task finishes."}
+
+
+def _istota_time(value: str, all_day: bool, tz: str | None, *, end: bool = False) -> str:
+    """A CLI time as the store keeps it: a date, or UTC. An all-day end is inclusive on the CLI."""
+    if all_day:
+        day = _parse_all_day_date(value)
+        return (day + timedelta(days=1)).isoformat() if end else day.isoformat()
+    moment = _parse_datetime(value).replace(tzinfo=ZoneInfo(tz))
+    return moment.astimezone(_UTC).strftime(_UTC_FORMAT)
+
+
+def _istota_create(args, user_id: str) -> dict:
+    from istota.sharing import events as istota_cal
+
+    if not args.all_day and args.end is None:
+        raise ValueError("Timed events require --end")
+    if not args.all_day and not args.tz:
+        return _istota_refusal("tz_required", "Pass --tz for a timed event on Istota's calendar")
+    fields = {
+        "summary": args.summary,
+        "description": args.description or None,
+        "location": args.location or None,
+        "dtstart": _istota_time(args.start, args.all_day, args.tz),
+        "dtend": _istota_time(args.end or args.start, args.all_day, args.tz, end=True),
+        "all_day": bool(args.all_day),
+    }
+    try:
+        istota_cal.check_fields(fields)
+    except istota_cal.EventError as exc:
+        return _istota_refusal(exc.code, "That event cannot be put on Istota's calendar")
+
+    def build(conn, ops, config):
+        return istota_cal.upsert_op(istota_cal.new_uid(config.site.hostname), create=True, fields=fields)
+
+    result = _queue_istota_op(user_id, build)
+    if result["status"] == "ok":
+        result.update({"summary": args.summary, "start": fields["dtstart"], "end": fields["dtend"],
+                       "all_day": bool(args.all_day)})
+    return result
+
+
+def _istota_update(args, user_id: str) -> dict:
+    from istota.sharing import events as istota_cal
+
+    changes: dict = {}
+    if args.summary is not None:
+        changes["summary"] = args.summary
+    if args.all_day and (args.start is not None or args.end is not None):
+        if args.start is None or args.end is None:
+            raise ValueError("An all-day update requires both --start and --end")
+        changes.update(dtstart=_istota_time(args.start, True, None),
+                       dtend=_istota_time(args.end, True, None, end=True), all_day=True)
+    elif args.start is not None or args.end is not None:
+        if not args.tz:
+            return _istota_refusal("tz_required", "Pass --tz for a timed event on Istota's calendar")
+        if args.start is not None:
+            changes["dtstart"] = _istota_time(args.start, False, args.tz)
+        if args.end is not None:
+            changes["dtend"] = _istota_time(args.end, False, args.tz)
+        changes["all_day"] = False
+    if args.clear_location:
+        changes["location"] = None
+    elif args.location is not None:
+        changes["location"] = args.location
+    if args.clear_description:
+        changes["description"] = None
+    elif args.description is not None:
+        changes["description"] = args.description
+    if not changes:
+        return {"status": "error", "error": "No fields to update. Provide at least one of --summary, --start, --end, --location, --description, --clear-location, --clear-description."}
+
+    def build(conn, ops, config):
+        current = _known_istota_event(conn, user_id, args.uid, ops)
+        if current is None:
+            return _istota_refusal("event_not_found", f"Event not found: {args.uid}")
+        try:
+            istota_cal.check_fields({**current, **changes})
+        except istota_cal.EventError as exc:
+            return _istota_refusal(exc.code, "That change cannot be made to the event")
+        return istota_cal.upsert_op(args.uid, create=False, fields=changes)
+
+    result = _queue_istota_op(user_id, build)
+    if result["status"] == "ok":
+        result["updated_fields"] = list(changes)
+    return result
+
+
+def _istota_delete(args, user_id: str) -> dict:
+    from istota.sharing import events as istota_cal
+
+    def build(conn, ops, config):
+        if _known_istota_event(conn, user_id, args.uid, ops) is None:
+            return _istota_refusal("event_not_found", f"Event not found: {args.uid}")
+        return istota_cal.cancel_op(args.uid)
+
+    result = _queue_istota_op(user_id, build)
+    if result["status"] == "ok":
+        result["deleted"] = True
+    return result
+
+
 def cmd_list(args) -> dict:
     """List calendar events."""
     start, end, label = _get_date_range(args)
     user_id = task_user_id()
+
+    if args.calendar and is_istota_calendar(args.calendar):
+        found = istota_events(user_id, start, end, args.tz)
+        if found is None:
+            raise CalendarNotFound(f"Calendar not found: {args.calendar}")
+        found.sort(key=lambda e: e["start"])
+        return {"status": "ok", "calendar": ISTOTA_CALENDAR, "date": label,
+                "event_count": len(found), "events": found}
+
+    if args.calendar and is_invitations_calendar(args.calendar):
+        found = received_invitations(user_id, start, end, args.tz)
+        if found is None:
+            raise CalendarNotFound(f"Calendar not found: {args.calendar}")
+        found.sort(key=lambda e: e["start"])
+        return {"status": "ok", "calendar": INVITATIONS_CALENDAR, "date": label,
+                "event_count": len(found), "events": found}
+
+    if args.calendar and is_feed_calendar(args.calendar):
+        wanted = args.calendar.strip().lower()
+        feeds = [feed for feed in shared_feeds(user_id) if feed.calendar == wanted]
+        if not feeds:
+            raise CalendarNotFound(f"Calendar not found: {args.calendar}")
+        events, notes = _feed_events(feeds, start, end)
+        events.sort(key=lambda e: e["start"])
+        return {
+            "status": "ok", "calendar": wanted, "date": label,
+            "event_count": len(events), "events": events, **notes,
+        }
+
+    feeds = [] if args.calendar else shared_feeds(user_id)
+    own = None if args.calendar else istota_events(user_id, start, end, args.tz)
+    received = None if args.calendar else received_invitations(user_id, start, end, args.tz)
+    if own is not None:
+        own = own + (received or [])
+    if (feeds or own is not None) and not _caldav_configured():
+        # No CalDAV in this task: the bot account's credential is not here,
+        # and nothing here asks for it. Feeds, Istota's own calendar and the
+        # invitations it was sent only.
+        events, notes = _feed_events(feeds, start, end)
+        events.extend(own or [])
+        events.sort(key=lambda e: e["start"])
+        return {"status": "ok", "date": label, "event_count": len(events), "events": events, **notes}
 
     # ISSUE-101: DAVClient owns urllib3 pools whose watchdog threads
     # leak unless close() is called.
@@ -624,12 +1171,16 @@ def cmd_list(args) -> dict:
                 except Exception:
                     continue  # Skip calendars we can't read
 
+            feed_events, notes = _feed_events(feeds, start, end)
+            all_events.extend(feed_events)
+            all_events.extend(own or [])
             all_events.sort(key=lambda e: e["start"])
             return {
                 "status": "ok",
                 "date": label,
                 "event_count": len(all_events),
                 "events": all_events,
+                **notes,
             }
 
         calendar_url = resolve_owned_calendar(client, user_id, args.calendar)
@@ -644,8 +1195,49 @@ def cmd_list(args) -> dict:
         }
 
 
+def cmd_calendars(args) -> dict:
+    """The calendars this task can read: CalDAV ones, then feeds."""
+    from istota.lib.untrusted import frame_untrusted
+
+    user_id = task_user_id()
+    calendars: list[dict] = []
+    if _caldav_configured():
+        # ISSUE-101: close DAVClient to drop the urllib3 watchdog thread.
+        with _get_client_from_env() as client:
+            for name, url, writable in get_calendars_for_user(client, user_id):
+                calendars.append({
+                    "calendar": url, "kind": "caldav", "name": name, "writable": writable,
+                })
+    for feed in shared_feeds(user_id):
+        calendars.append({
+            "calendar": feed.calendar, "kind": "feed", "host": feed.host,
+            "name": frame_untrusted(feed.name, FEED_LABEL) or None,
+            "writable": False, "state": feed.state, "last_reason": feed.last_reason,
+            "cached_at": feed.fetched_at,
+        })
+    reach = _istota_reach(user_id)
+    if reach is not None:
+        config = reach[0].config
+        calendars.append({
+            "calendar": ISTOTA_CALENDAR, "kind": "istota",
+            "name": f"{config.bot_name}'s calendar",
+            "writable": config.sharing.events_per_task > 0,
+        })
+        calendars.append({
+            "calendar": INVITATIONS_CALENDAR, "kind": "invitations",
+            "name": "Invitations sent to you by mail",
+            "writable": False,
+        })
+    return {"status": "ok", "calendar_count": len(calendars), "calendars": calendars}
+
+
 def cmd_create(args) -> dict:
     """Create a calendar event."""
+    refusal = _refuse_feed_write(args.calendar)
+    if refusal:
+        return refusal
+    if is_istota_calendar(args.calendar):
+        return _istota_create(args, task_user_id())
     if args.all_day:
         start = _parse_all_day_date(args.start)
         inclusive_end = _parse_all_day_date(args.end) if args.end else start
@@ -688,6 +1280,11 @@ def cmd_create(args) -> dict:
 
 def cmd_delete(args) -> dict:
     """Delete a calendar event."""
+    refusal = _refuse_feed_write(args.calendar)
+    if refusal:
+        return refusal
+    if is_istota_calendar(args.calendar):
+        return _istota_delete(args, task_user_id())
     user_id = task_user_id()
     # ISSUE-101: close DAVClient to drop the urllib3 watchdog thread.
     with _get_client_from_env() as client:
@@ -702,6 +1299,11 @@ def cmd_delete(args) -> dict:
 
 def cmd_update(args) -> dict:
     """Update a calendar event."""
+    refusal = _refuse_feed_write(args.calendar)
+    if refusal:
+        return refusal
+    if is_istota_calendar(args.calendar):
+        return _istota_update(args, task_user_id())
     kwargs: dict = {}
     if args.summary is not None:
         kwargs["summary"] = args.summary
@@ -761,7 +1363,10 @@ def build_parser():
 
     # list
     p_list = sub.add_parser("list", aliases=["agenda"], help="List calendar events")
-    p_list.add_argument("--calendar", "-c", help="Calendar URL (omit to query all)")
+    p_list.add_argument(
+        "--calendar", "-c",
+        help="Calendar URL, feed:ID or istota, as `calendars` lists them (omit to query all)",
+    )
     date_group = p_list.add_mutually_exclusive_group()
     date_group.add_argument(
         "--date", "-d", default="today",
@@ -773,9 +1378,11 @@ def build_parser():
     )
     p_list.add_argument("--tz", help="Timezone (e.g., America/Los_Angeles)")
 
+    sub.add_parser("calendars", help="List the calendars this task can read")
+
     # create
     p_create = sub.add_parser("create", help="Create a calendar event")
-    p_create.add_argument("--calendar", "-c", required=True, help="Calendar URL")
+    p_create.add_argument("--calendar", "-c", required=True, help="Calendar URL, or istota")
     p_create.add_argument("--summary", "-s", required=True, help="Event title")
     p_create.add_argument(
         "--start", required=True,
@@ -792,12 +1399,12 @@ def build_parser():
 
     # delete
     p_delete = sub.add_parser("delete", help="Delete a calendar event")
-    p_delete.add_argument("--calendar", "-c", required=True, help="Calendar URL")
+    p_delete.add_argument("--calendar", "-c", required=True, help="Calendar URL, or istota")
     p_delete.add_argument("--uid", required=True, help="Event UID to delete")
 
     # update
     p_update = sub.add_parser("update", help="Update a calendar event")
-    p_update.add_argument("--calendar", "-c", required=True, help="Calendar URL")
+    p_update.add_argument("--calendar", "-c", required=True, help="Calendar URL, or istota")
     p_update.add_argument("--uid", required=True, help="Event UID to update")
     p_update.add_argument("--summary", "-s", help="New event title")
     p_update.add_argument("--start", help="New start time (YYYY-MM-DD HH:MM)")
@@ -819,6 +1426,7 @@ def main(argv=None):
     commands = {
         "list": cmd_list,
         "agenda": cmd_list,  # alias — natural name an LLM reaches for
+        "calendars": cmd_calendars,
         "create": cmd_create,
         "delete": cmd_delete,
         "update": cmd_update,

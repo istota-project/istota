@@ -55,6 +55,7 @@ _KNOWN_DEFERRED_SUFFIXES = (
     "email_output",
     "health_ops",
     "garmin_import",
+    "istota_events",
 )
 
 # Suffixes the framework once consumed and no longer does. They stay in
@@ -401,6 +402,60 @@ def _process_deferred_subtasks(
         )
     path.unlink(missing_ok=True)
     return count
+
+
+def _process_deferred_istota_events(
+    config: Config, task: db.Task, user_temp_dir: Path,
+) -> int:
+    """Apply the task's queued events on Istota's own calendar (`sharing.events`).
+
+    The calendar skill writes ``istota_event_upsert`` and ``istota_event_cancel``
+    entries to ``task_<id>_istota_events.json``. `events.apply_ops` takes the
+    user from the task, refuses a UID another user owns and applies at most
+    ``[sharing] events_per_task`` entries, counting refused ones, so a file the
+    model wrote itself cannot exceed the cap the skill keeps. A task the
+    ``calendar`` scope is withheld from applies nothing: guests' and briefing
+    research's files never reach here, but a task nobody asked in a shared room
+    does.
+
+    Returns the number of entries applied.
+    """
+    loaded = _load_deferred_json(user_temp_dir, task.id, "istota_events")
+    if loaded is None:
+        return 0
+    path, data = loaded
+
+    from istota.rooms.scopes import withheld_for_task
+    from istota.sharing import events
+    from istota.skills._loader import load_skill_index
+
+    skill_index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+    with db.get_db(config.db_path) as conn:
+        if "calendar" in withheld_for_task(conn, task, skill_index=skill_index):
+            logger.warning(
+                "Task %d: the calendar scope is withheld, %d queued event op(s) dropped",
+                task.id, len(data),
+            )
+            path.unlink(missing_ok=True)
+            return 0
+        report = events.apply_ops(conn, config, task, data)
+        conn.commit()
+    for index, code in report.refused:
+        logger.warning("Task %d istota event op %d refused: %s", task.id, index, code)
+    if report.dropped:
+        logger.warning(
+            "Task %d hit the event limit (%d), %d op(s) dropped",
+            task.id, config.sharing.events_per_task, report.dropped,
+        )
+    if report.applied:
+        logger.info("Applied %d istota event op(s) for task %d", report.applied, task.id)
+    path.unlink(missing_ok=True)
+    if report.invitations:
+        # After the commit, so no SMTP exchange runs under the write lock.
+        from istota.sharing import itip
+
+        itip.deliver_invitations(config, task.user_id, report.invitations)
+    return report.applied
 
 
 def _process_retired_deferred_files(

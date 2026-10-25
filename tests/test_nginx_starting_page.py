@@ -58,8 +58,9 @@ def test_the_page_loads_nothing_from_elsewhere():
 # still web UI pages, and the Mac app opens /istota/auth/local before `web` is up.
 WEB_UI_LOCATIONS = {"/istota/", "/istota/auth/", "= /istota/login/email"}
 # Under /istota/ but not pages: the chat stream is an API, and set-password's
-# access log is off, which an internal redirect to the page would undo.
-NOT_WEB_UI_PAGES = {"/istota/api/chat/", "= /istota/auth/set-password"}
+# and the calendar feed's access logs are off, which an internal redirect to
+# the page would undo.
+NOT_WEB_UI_PAGES = {"/istota/api/chat/", "= /istota/auth/set-password", "^~ /istota/calendar/"}
 
 
 def test_only_the_web_ui_falls_back_to_the_page():
@@ -75,7 +76,7 @@ def test_every_web_ui_location_keeps_the_page_and_relative_redirects():
     """A new carve-out of /istota/ must say which of the two lists it is on."""
     locations = _locations(TEMPLATE.read_text())
     under = {name for name, body in locations.items()
-             if name.removeprefix("= ").startswith("/istota/") and "proxy_pass http://$upstream_web;" in body}
+             if name.removeprefix("= ").removeprefix("^~ ").startswith("/istota/") and "proxy_pass http://$upstream_web;" in body}
     assert under == WEB_UI_LOCATIONS | NOT_WEB_UI_PAGES
     for name in WEB_UI_LOCATIONS:
         assert "error_page 502 =503 /_istota_starting;" in locations[name], name

@@ -1491,6 +1491,7 @@ all = [
     { name = "pytesseract" },
     { name = "python-multipart" },
     { name = "pywa" },
+    { name = "recurring-ical-events" },
     { name = "sentence-transformers" },
     { name = "sqlite-vec" },
     { name = "starlette" },
@@ -1508,6 +1509,7 @@ all = [
 calendar = [
     { name = "caldav" },
     { name = "icalendar" },
+    { name = "recurring-ical-events" },
 ]
 contacts = [
     { name = "vobject" },
@@ -1538,6 +1540,7 @@ local = [
     { name = "imap-tools" },
     { name = "itsdangerous" },
     { name = "python-multipart" },
+    { name = "recurring-ical-events" },
     { name = "starlette" },
     { name = "uvicorn" },
     { name = "yfinance" },
@@ -1596,6 +1599,7 @@ test = [
     { name = "pytesseract" },
     { name = "python-multipart" },
     { name = "pywa" },
+    { name = "recurring-ical-events" },
     { name = "starlette" },
     { name = "telnyx", extra = ["webhooks"] },
     { name = "timezonefinder" },
@@ -1716,6 +1720,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
     { name = "python-multipart", marker = "extra == 'web'", specifier = ">=0.0.9" },
     { name = "pywa", marker = "extra == 'whatsapp'", specifier = ">=4.4,<5" },
+    { name = "recurring-ical-events", marker = "extra == 'calendar'", specifier = ">=3.0.0" },
     { name = "requests", specifier = ">=2.32.0" },
     { name = "segno", specifier = ">=1.6.0" },
     { name = "sentence-transformers", marker = "extra == 'memory-search'", specifier = ">=3.0.0" },

@@ -334,6 +334,30 @@ it('shows connection reach without requesting a directory listing', async () => 
   expect(screen.queryByRole('checkbox', { name: 'Show hidden' })).toBeNull();
 });
 
+it('lists a shared folder under its own group and never lists it', async () => {
+  const share: WorkspacePlace = {
+    ...home,
+    id: 'share:7',
+    kind: 'share',
+    label: 'Taxes 2026',
+    browsable: false,
+    view_root: null,
+    remote: { host: 'cloud.example.org', access: 'write' },
+    reach: { private: 'skill', shared_member: 'skill', restricted: 'none', note: null },
+  };
+  api.getWorkspacePlaces.mockResolvedValue({ places: [home, share], notes: [] });
+  render(Workspace);
+  await openSection('Shared folders');
+  const sidebar = await screen.findByRole('complementary');
+  await fireEvent.click(within(sidebar).getByRole('link', { name: 'Taxes 2026' }));
+  await screen.findByText(/A read-write folder shared from cloud\.example\.org\./);
+  expect(api.getWorkspaceListing).not.toHaveBeenCalledWith('share:7', expect.anything());
+  expect(screen.getByRole('link', { name: 'Connections' })).toHaveAttribute(
+    'href',
+    '/settings/connections',
+  );
+});
+
 it.each([
   ['room', '/Channels/sample'],
   ['group', '/Groups/team'],

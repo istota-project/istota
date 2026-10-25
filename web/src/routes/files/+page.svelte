@@ -272,7 +272,7 @@
     return entry ? taskReachNote(entry.access, botName, entry.scope) : null;
   }
   let parentView = $derived(indexViewForKind(place?.kind));
-  const sidebarKinds: string[] = ['linked', 'drive', 'nextcloud', 'talk'];
+  const sidebarKinds: string[] = ['linked', 'share', 'drive', 'nextcloud', 'talk'];
   let botCurrent = $derived<IndexView | 'home' | null>(
     view ?? (place?.kind === 'home' ? 'home' : indexViewForKind(place?.kind)),
   );
@@ -841,9 +841,18 @@
       >
         {#if !place.browsable}
           <div class="center-msg">
-            {place.kind === 'talk'
-              ? 'Talk attachments are available to tasks, but cannot be browsed here.'
-              : 'This connection is reached through a skill during a task.'}
+            {#if place.kind === 'share'}
+              <p>
+                {place.remote?.access === 'write' ? 'A read-write' : 'A read-only'} folder shared from
+                {place.remote?.host}. Tasks reach it through the shares skill; it cannot be browsed
+                here.
+              </p>
+              <Button variant="secondary" href={`${base}/settings/connections`}>Connections</Button>
+            {:else}
+              {place.kind === 'talk'
+                ? 'Talk attachments are available to tasks, but cannot be browsed here.'
+                : 'This connection is reached through a skill during a task.'}
+            {/if}
           </div>
         {:else if listingLoading}
           <PageLoading label="Loading folder…" />

@@ -178,6 +178,10 @@ export interface User {
     google_workspace: boolean;
     google_workspace_enabled: boolean;
     admin: boolean;
+    /** The "Shared with Istota" card; absent on a server that predates it. */
+    sharing?: boolean;
+    /** Open Cloud Mesh folder shares are received on this server. */
+    sharing_ocm?: boolean;
   };
   // null when the operator hasn't enabled encrypted token storage.
   nextcloud_token?: NextcloudTokenStatus | null;
@@ -6027,6 +6031,131 @@ export function getMailAccountTest(requestId: string): Promise<MailAccountTestSt
   return apiFetch(`/settings/mail-accounts/test-requests/${encodeURIComponent(requestId)}`);
 }
 
+/** A calendar the user shared with Istota by its feed address. The address never comes back. */
+export interface SharedFeed {
+  id: number;
+  host: string;
+  /** The calendar's own name, from the provider; null when it has none. */
+  name: string | null;
+  state: 'active' | 'error';
+  /** A fixed reason code for the last failed refresh, such as `http_404`. */
+  last_reason: string | null;
+  last_ok_at: string | null;
+  created_at: string | null;
+}
+
+export type CalendarDelivery = 'invite' | 'feed';
+
+/** Istota's own calendar: how its events reach the user, and the feed link's state. */
+export interface IstotaCalendarSettings {
+  delivery: CalendarDelivery;
+  /** What applies now: `feed` whenever the server sends no email. */
+  effective_delivery: CalendarDelivery;
+  email_enabled: boolean;
+  /** The feed link's dates, never the link; null when there is none. */
+  feed: { created_at: string; last_used_at: string | null } | null;
+  /** False when the server has no public name to put in a link. */
+  can_link: boolean;
+  /** False on a loopback name, where only this machine can read the feed. */
+  reachable_elsewhere: boolean;
+}
+
+/** A folder someone offered to Istota over Open Cloud Mesh. Every field is the sender's words. */
+export interface SharedFolderOffer {
+  id: number;
+  name: string | null;
+  /** The owner's federated id, as the sender gave it. */
+  owner: string | null;
+  host: string;
+  /** True for a new offer of a folder that is already shared. */
+  reoffer: boolean;
+  created_at: string | null;
+}
+
+/** A folder share the user accepted. Name and owner are the sender's words. */
+export interface SharedFolder {
+  id: number;
+  name: string | null;
+  owner: string | null;
+  host: string;
+  /** What the provider last said the share allows. */
+  access: 'read' | 'write';
+  state: 'active' | 'error';
+  last_reason: string | null;
+  created_at: string | null;
+}
+
+/** Folder shares over OCM: the address to share with, the offers waiting, the shares accepted. */
+export interface SharedFolderSettings {
+  /** False when the server stopped receiving shares; accepted ones stay removable. */
+  enabled?: boolean;
+  /** Null while the server receives no shares. */
+  federated_id: string | null;
+  pending: SharedFolderOffer[];
+  shares?: SharedFolder[];
+  /** Why accepting is refused here (an unsandboxed multi-user server), or null. */
+  accept_refusal?: string | null;
+}
+
+export interface SharingSettings {
+  feeds: SharedFeed[];
+  max_feeds: number;
+  /** False when the credential store is not configured, so no address can be stored. */
+  can_add: boolean;
+  /** Absent on a server that predates Istota's own calendar. */
+  calendar?: IstotaCalendarSettings;
+  /** Null or absent while the server receives no folder shares. */
+  ocm?: SharedFolderSettings | null;
+}
+
+export function getSharing(): Promise<SharingSettings> {
+  return apiFetch('/settings/sharing');
+}
+/** Fetches the address once on the server and stores it; a refusal carries a `reason`. */
+export function addSharedFeed(url: string): Promise<{ feed: SharedFeed }> {
+  return apiFetch('/settings/sharing/feeds', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+}
+export function removeSharedFeed(id: number): Promise<{ removed: boolean }> {
+  return apiFetch(`/settings/sharing/feeds/${id}`, { method: 'DELETE' });
+}
+/** Opens the share once to prove it, then stores it; a refusal carries a `reason`. */
+export function acceptSharedFolder(
+  id: number,
+  allowScheduled: boolean,
+): Promise<{ share: SharedFolder; notified: boolean }> {
+  return apiFetch(`/settings/sharing/folders/${id}/accept`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ allow_scheduled: allowScheduled }),
+  });
+}
+export function declineSharedFolder(id: number): Promise<{ notified: boolean }> {
+  return apiFetch(`/settings/sharing/folders/${id}/decline`, { method: 'POST' });
+}
+export function removeSharedFolder(id: number): Promise<{ notified: boolean }> {
+  return apiFetch(`/settings/sharing/folders/${id}`, { method: 'DELETE' });
+}
+/** Makes the Istota calendar feed link, or replaces it; the address is returned this once. */
+export function createCalendarFeedLink(): Promise<{ url: string }> {
+  return apiFetch('/settings/sharing/calendar-feed', { method: 'POST' });
+}
+export function removeCalendarFeedLink(): Promise<{ removed: boolean }> {
+  return apiFetch('/settings/sharing/calendar-feed', { method: 'DELETE' });
+}
+export function setCalendarDelivery(
+  delivery: CalendarDelivery,
+): Promise<{ delivery: CalendarDelivery }> {
+  return apiFetch('/settings/sharing/delivery', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ delivery }),
+  });
+}
+
 export interface KeepassImportItem {
   name: string;
   origin: 'entry' | 'generated';
@@ -6358,10 +6487,12 @@ export function finishSetup(): Promise<SetupFinished> {
 export type WorkspaceAccess = 'rw' | 'ro' | 'skill' | 'none' | 'conditional';
 export interface WorkspacePlace {
   id: string;
-  kind: 'home' | 'linked' | 'room' | 'group' | 'talk' | 'drive' | 'nextcloud';
+  kind: 'home' | 'linked' | 'room' | 'group' | 'talk' | 'drive' | 'nextcloud' | 'share';
   label: string;
   browsable: boolean;
   view_root: string | null;
+  /** A shared folder's provider host and last recorded access; `share` places only. */
+  remote?: { host: string; access: 'read' | 'write' };
   reach: {
     private: WorkspaceAccess;
     shared_member: WorkspaceAccess;

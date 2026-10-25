@@ -12,6 +12,7 @@ from istota.config import Config
 from istota.credentials.google_scopes import levels_from_scopes
 from istota.sandbox.host_paths import linked_resource_parts
 from istota.sandbox.user_scope import scoped_user_dir
+from istota.sharing import sources as shared_sources
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,9 @@ class Place:
     # root, with no link followed (ISSUE-782); every other place from `root`.
     anchor: Path | None = None
     walk: tuple[str, ...] = ()
+    # A shared folder's provider host and last recorded access; it has no root.
+    remote_host: str | None = None
+    remote_access: str | None = None
 
 
 def place_anchor(place: Place) -> tuple[Path, tuple[str, ...]]:
@@ -102,4 +106,13 @@ def list_places(config: Config, conn: sqlite3.Connection, user_id: str) -> list[
             places.append(Place("drive", "drive", "Google Drive", None, True, None))
     if config.nextcloud_enabled:
         places.append(Place("nextcloud", "nextcloud", "Nextcloud", None, True, None))
+    # An accepted OCM share is reached over WebDAV by the shares skill, with a
+    # secret the web process never sends, so it is listed and never browsed.
+    for source in shared_sources.sources_for_user(conn, user_id, kinds=("ocm_share",)):
+        name = source.extras.get("name")
+        # The sharer's own words: one line, and the host when there are none.
+        label = " ".join(name.split()) if isinstance(name, str) else ""
+        places.append(Place(f"share:{source.id}", "share", (label or source.remote_host)[:120],
+                            None, False, None,
+                            remote_host=source.remote_host, remote_access=source.access))
     return places

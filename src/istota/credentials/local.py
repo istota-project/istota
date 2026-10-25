@@ -21,7 +21,11 @@ from istota.lib.totp import TotpError, parse_user_input, to_uri
 SOURCE = "local"
 
 _SERVICE = secrets_vault.VAULT_ENTRY_SERVICE
-_RESERVED_PREFIXES = ("forge.", "generated_")
+_RESERVED_PREFIXES = ("forge.", "generated_", "ocm_share_")
+# Reserved names a system writer creates through this module, by passing the
+# prefix as `system_prefix`: an accepted OCM share's secret (`sharing/ocm.py`).
+# `forge.` and `generated_` have write paths of their own and are not here.
+_SYSTEM_PREFIXES = ("ocm_share_",)
 
 
 @dataclass(frozen=True)
@@ -56,12 +60,22 @@ def derived_names(name: str) -> tuple[str | None, str | None, str | None]:
     )
 
 
-def _check_name(name: object) -> tuple[str, str, str, str]:
+def _check_name(name: object, system_prefix: str | None = None) -> tuple[str, str, str, str]:
+    """A canonical, unreserved name and its three derived field names.
+
+    A reserved name passes only when it starts with ``system_prefix``, which
+    must be one of `_SYSTEM_PREFIXES`; no user-facing route passes one, so the
+    settings form can neither create nor edit such a credential by hand.
+    """
+    if system_prefix is not None and system_prefix not in _SYSTEM_PREFIXES:
+        raise ValueError(f"{system_prefix!r} is not a system credential prefix")
     if not isinstance(name, str) or not name:
         raise LocalCredentialError("name", "a name is required")
-    if name.startswith(_RESERVED_PREFIXES):
+    if name.startswith(_RESERVED_PREFIXES) and not (
+        system_prefix is not None and name.startswith(system_prefix)
+    ):
         raise LocalCredentialError(
-            "name", "names starting with generated_ or forge. are reserved"
+            "name", "names starting with generated_, forge. or ocm_share_ are reserved"
         )
     if secrets_vault.slug_name((name,)) != name:
         raise LocalCredentialError(
@@ -251,15 +265,17 @@ def _write_fields(conn, user_id, name, username_name, url_name, otp_name, *,
             secrets_store.delete_secret(None, user_id, _SERVICE, field_name, connection=conn, actor=actor)
 
 
-def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = None, actor: str = "system") -> dict:
+def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = None,
+           actor: str = "system", system_prefix: str | None = None) -> dict:
     """Store a new local credential and, with ``access``, its grant, in one transaction.
 
     ``conn`` is the caller's (``db.get_db``), and is put inside ``BEGIN
     IMMEDIATE`` here if the caller has not already done so; the caller's exit
-    commits or rolls back the whole of it.
+    commits or rolls back the whole of it. ``system_prefix`` admits a name
+    under that reserved prefix (`_check_name`).
     """
     _begin(conn)
-    name, username_name, url_name, otp_name = _check_name(cred.name)
+    name, username_name, url_name, otp_name = _check_name(cred.name, system_prefix)
     taken = _taken_names(conn, user_id)
     for candidate in (name, username_name, url_name, otp_name):
         if candidate in taken:
@@ -305,14 +321,17 @@ def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = N
 
 
 def update(conn, user_id: str, name: str, *, value: str | None, username: str | None, url: str,
-           extra_hosts: str, headers: str, revealable: bool, otp: str | None = None, actor: str = "system") -> dict:
+           extra_hosts: str, headers: str, revealable: bool, otp: str | None = None, actor: str = "system",
+           system_prefix: str | None = None) -> dict:
     """Replace a local credential's metadata, and its value unless ``value`` is ``None``.
 
     ``username=None`` keeps the stored username, which the edit form needs
     because it can never read it back. An empty username or URL deletes that
     row. Every field's binding is
     rewritten from the new inputs; a host change takes effect on the next
-    request.
+    request. A reserved name is editable only with its ``system_prefix``,
+    so the settings form cannot repoint or overwrite an OCM share's secret;
+    its grant and its deletion stay the user's.
     """
     _begin(conn)
     if not isinstance(name, str) or not is_local(conn, user_id, name):
@@ -320,7 +339,7 @@ def update(conn, user_id: str, name: str, *, value: str | None, username: str | 
             "name",
             "no editable credential has this name",
         )
-    _, username_name, url_name, otp_name = _check_name(name)
+    _, username_name, url_name, otp_name = _check_name(name, system_prefix)
     if value is not None:
         value = _check_text("value", value, required=True)
     if username is not None:
@@ -364,14 +383,24 @@ def delete(db_path: Path, user_id: str, name: str) -> bool:
     """
     with db.get_db(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        groups = _bindings.credential_groups(conn, user_id)
-        if name not in groups and not any(name in members for members in groups.values()):
-            return False
-        if not is_local(conn, user_id, name):
-            raise LocalCredentialError(
-                "name", "this credential was not added in Istota"
-            )
-        deleted = secrets_store.delete_secret(
-            db_path, user_id, _SERVICE, name, all_fields=True, connection=conn,
+        return delete_in(conn, user_id, name)
+
+
+def delete_in(conn, user_id: str, name: str) -> bool:
+    """`delete` on the caller's connection, inside the caller's transaction.
+
+    Opens ``BEGIN IMMEDIATE`` only when none is open, so a caller can delete
+    the credential and change its own rows in one commit (an OCM share's
+    revocation).
+    """
+    groups = _bindings.credential_groups(conn, user_id)
+    if name not in groups and not any(name in members for members in groups.values()):
+        return False
+    _begin(conn)
+    if not is_local(conn, user_id, name):
+        raise LocalCredentialError(
+            "name", "this credential was not added in Istota"
         )
-    return deleted
+    return secrets_store.delete_secret(
+        None, user_id, _SERVICE, name, all_fields=True, connection=conn,
+    )
