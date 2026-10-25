@@ -159,13 +159,22 @@ def _fence_group_value(value: object) -> str:
 # agent, and the two cannot be told apart, so every value is fenced (apps spec,
 # section 8). Per namespace rather than per store, unlike the group rule.
 APP_VALUE_LABEL = "app value"
+# App code chooses its keys too (up to 1024 characters), so a listing fences them.
+APP_KEY_LABEL = "app key"
 APP_NAMESPACE_PREFIX = "app."
 
 
-def _fence_app_value(value: object) -> str:
+def _fence_app_value(value: object, label: str = APP_VALUE_LABEL) -> str:
     """A decoded app value as fenced text: a string as itself, else its JSON."""
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-    return frame_untrusted(text, APP_VALUE_LABEL)
+    return frame_untrusted(text, label)
+
+
+def _key_fence(args, namespace: str):
+    """The fence a listed key goes through: only where values get the app fence."""
+    if _value_fence(args, namespace) is _fence_app_value:
+        return lambda key: _fence_app_value(key, APP_KEY_LABEL)
+    return None
 
 
 def _value_fence(args, namespace: str):
@@ -430,6 +439,10 @@ def cmd_list(args):
         for entry in entries:
             if "value" in entry:
                 entry["value"] = fence(entry["value"])
+    key_fence = _key_fence(args, args.namespace)
+    if key_fence is not None:
+        for entry in entries:
+            entry["key"] = key_fence(entry["key"])
     print(json.dumps({
         "status": "ok",
         "count": len(entries),
