@@ -3767,6 +3767,9 @@ export interface OutgoingMail {
   subject?: string;
   state: OutgoingMailState;
   body?: string;
+  // The body is markdown converted from the HTML part the mail went out with,
+  // which the recipient's client shows rendered (#831). Absent otherwise.
+  markdown?: boolean;
   // In a mail room: how to name an address other than by itself ("you" for
   // the viewer's own, the bot's name for the bot's), keyed lowercased.
   labels?: Record<string, string>;

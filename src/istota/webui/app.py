@@ -8816,6 +8816,8 @@ def _outgoing_mail_field(raw) -> dict | None:
     if isinstance(body, str) and body:
         out["body"] = (body if len(body) <= _MAIL_BODY_MAX_CHARS
                        else body[:_MAIL_BODY_MAX_CHARS].rstrip() + "…")
+    if mail.get("markdown") is True:
+        out["markdown"] = True
     return out
 
 

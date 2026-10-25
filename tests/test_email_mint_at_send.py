@@ -303,6 +303,50 @@ class TestAnHtmlMailIsRecordedAsItsText:
         rows = _messages(config, _room(config))
         assert len(rows) == 1
         self._assert_text(rows[0]["body"])
+        # The card renders the text as the HTML part a mail client shows (#831).
+        assert rows[0]["outgoing_mail"]["markdown"] is True
+
+    def test_an_html_send_to_the_users_own_address_lands_in_their_private_room(
+        self, config, task, deferred,
+    ):
+        from istota.transport.email import email_conversation_token
+
+        _poll(config, sender=HOST_ADDR, to=(BOT,), message_id="<p1@test.com>",
+              subject="Note to self")
+        _send(config, task, deferred, to=HOST_ADDR, body=_HTML, html=True)
+
+        token = _room(config, email_conversation_token(HOST))
+        (row,) = [m for m in _messages(config, token) if m["role"] == "assistant"]
+        self._assert_text(row["body"])
+        assert row["outgoing_mail"]["markdown"] is True
+
+    def test_a_separate_html_part_does_not_make_the_text_markdown(self):
+        """A briefing sends its own plain text beside its HTML: reading that as
+        markdown would turn a `---` line into a heading."""
+        from istota.skills.email import plain_part, text_part_is_markdown
+
+        plain = "Markets\n---\n> a note"
+        assert plain_part(plain, html_body="<p>Markets</p>") == plain
+        assert not text_part_is_markdown(plain, html_body="<p>Markets</p>")
+        assert not text_part_is_markdown("", content_type="html")
+        assert text_part_is_markdown(_HTML, content_type="html")
+
+    def test_a_plain_send_records_no_html_part(self, config, task, deferred):
+        _send(config, task, deferred, to=ANA, body="See [the menu](https://example.com/menu)")
+
+        (row,) = _messages(config, _room(config))
+        assert "markdown" not in row["outgoing_mail"]
+
+    def test_a_deferred_entry_claims_an_html_part_only_as_a_bool(self, config, task, deferred):
+        """The file is the task's to write: only the type the skill writes counts."""
+        (deferred / f"task_{task.id}_sent_emails.json").write_text(json.dumps([{
+            "message_id": SENT, "to_addr": ANA, "to": [ANA], "subject": "Saturday",
+            "body": "x", "markdown": "yes",
+        }]))
+        _process_deferred_sent_emails(config, task, deferred)
+
+        (row,) = _messages(config, _room(config))
+        assert "markdown" not in row["outgoing_mail"]
 
     def test_a_released_html_draft(self, config, task):
         with db.get_db(config.db_path) as conn:
@@ -319,6 +363,7 @@ class TestAnHtmlMailIsRecordedAsItsText:
         rows = _messages(config, _room(config))
         assert len(rows) == 1
         self._assert_text(rows[0]["body"])
+        assert rows[0]["outgoing_mail"]["markdown"] is True
 
     def test_a_held_html_reply_released_on_a_thread(self, config):
         """The held card's row is the text, and release must not put the
@@ -347,6 +392,32 @@ class TestAnHtmlMailIsRecordedAsItsText:
         card = [m for m in _messages(config, token) if m["role"] == "assistant"][0]
         assert card["outgoing_mail"]["state"] == "sent"
         assert "body" not in card["outgoing_mail"]
+        assert card["outgoing_mail"]["markdown"] is True
+
+    def test_a_held_reply_edited_to_plain_text_loses_the_flag(self, config):
+        task_ids = _poll(config, sender=ANA, to=("bot+carol@test.com",),
+                         message_id="<a11@ext.example>", subject="Question")
+        token = _room(config, "<a11@ext.example>")
+        with db.get_db(config.db_path) as conn:
+            draft_id = drafts.hold(
+                conn, user_id=HOST, task_id=task_ids[0], room_token=token,
+                to_addrs=[ANA], cc_addrs=[], bcc_addrs=[],
+                subject="Re: Question", body=_HTML, html=True,
+                in_reply_to="<a11@ext.example>", references="<a11@ext.example>",
+                attachments=[], origin_target=None, hold_reason="untrusted_recipient",
+            )
+            row = db.add_message(conn, token, role="assistant", body="x",
+                                 origin_surface="email", task_id=task_ids[0])
+            db.set_outgoing_mail(conn, row, {"to": [ANA], "cc": [], "subject": "Re: Question",
+                                             "state": "held", "draft_id": draft_id,
+                                             "markdown": True})
+            drafts.edit_body(conn, draft_id, "Plain now.", html=False)
+        with patch("istota.skills.email.send_email", return_value="<re-11@test.com>"):
+            drafts.release(config, draft_id)
+
+        card = [m for m in _messages(config, token) if m["role"] == "assistant"][0]
+        assert card["outgoing_mail"]["state"] == "sent"
+        assert "markdown" not in card["outgoing_mail"]
 
     @pytest.mark.asyncio
     async def test_an_html_answer_on_a_thread(self, config):
@@ -376,6 +447,40 @@ class TestAnHtmlMailIsRecordedAsItsText:
         self._assert_text(answer[0]["body"])
         assert answer[0]["outgoing_mail"]["state"] == "sent"
         assert "body" not in answer[0]["outgoing_mail"]
+        assert answer[0]["outgoing_mail"]["markdown"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_plain_answer_on_a_thread_records_no_html_part(self, config):
+        from istota.transport.email.outbound import deliver_email_result
+
+        task_ids = _poll(config, sender=ANA, to=("bot+carol@test.com",),
+                         message_id="<a10@ext.example>", subject="Question")
+        with db.get_db(config.db_path) as conn:
+            asked = db.get_task(conn, task_ids[0])
+        token = _room(config, "<a10@ext.example>")
+        with db.get_db(config.db_path) as conn:
+            db.add_message(conn, token, role="assistant", body="Yes.",
+                           origin_surface="email", task_id=asked.id)
+        with patch("istota.transport.email.outbound.reply_to_email",
+                   return_value="<re-10@test.com>"):
+            assert await deliver_email_result(
+                config, asked, json.dumps({"subject": "", "body": "Yes.", "format": "text"}),
+            )
+
+        (answer,) = [m for m in _messages(config, token) if m["role"] == "assistant"]
+        assert answer["outgoing_mail"]["state"] == "sent"
+        assert "markdown" not in answer["outgoing_mail"]
+
+    def test_the_web_card_carries_the_flag(self, config, task, deferred):
+        pytest.importorskip("fastapi")
+        from istota.webui import app as web_app
+
+        _send(config, task, deferred, to=ANA, body=_HTML, html=True)
+        with db.get_db(config.db_path) as conn:
+            raw = conn.execute("SELECT outgoing_mail FROM messages").fetchone()[0]
+        assert web_app._outgoing_mail_field(raw)["markdown"] is True
+        stray = json.dumps({**json.loads(raw), "markdown": "yes"})
+        assert "markdown" not in web_app._outgoing_mail_field(stray)
 
 
 class TestRegisteringIsBounded:

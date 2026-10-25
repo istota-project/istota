@@ -55,8 +55,10 @@
   // Headers are the stored metadata, so a card with none offers none.
   const hasHeaders = $derived(incoming && !card.fallback);
   // A received body is read as markdown, so an HTML mail's converted links and
-  // quotes render. A sent one stays as typed: it was mailed as plain text.
-  const bodyHtml = $derived(incoming ? renderUntrustedMarkdown(card.body) : '');
+  // quotes render. A sent one renders only when its text was converted from the
+  // HTML part it went out with (#831); otherwise it stays as typed, as mailed.
+  const rendered = $derived(incoming || !!card.markdown);
+  const bodyHtml = $derived(rendered ? renderUntrustedMarkdown(card.body) : '');
   const restHtml = $derived(incoming ? renderUntrustedMarkdown(card.rest) : '');
 
   const menu = $derived.by(() => {
@@ -181,7 +183,7 @@
       </div>
     {/if}
     {#if card.body}
-      {#if incoming}
+      {#if rendered}
         <div class="mail-body markdown">{@html bodyHtml}</div>
       {:else}
         <div class="mail-body mail-plain">{card.body}</div>

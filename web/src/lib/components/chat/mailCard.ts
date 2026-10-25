@@ -41,6 +41,8 @@ export interface MailCardData {
   messageId?: string;
   inReplyTo?: string;
   state?: OutgoingMailState;
+  // An outgoing body converted from the mail's HTML part: it renders as markdown.
+  markdown?: boolean;
 }
 
 export function receivedCard(mail: ReceivedMail): MailCardData {
@@ -86,6 +88,7 @@ export function sentCard(
     discuss: mail.discuss,
     fallback: true,
     state: mail.state,
+    markdown: mail.markdown,
   };
 }
 

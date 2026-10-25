@@ -335,9 +335,11 @@ def _addresses(values) -> list[tuple[str, str]]:
 
 def record_sent_mail(
     conn, room_token: str, *, to, cc=(), subject: str | None, body: str | None,
+    markdown: bool = False,
 ) -> int:
     """The bot's mail as a row of its thread's room, with its outgoing-mail
     card (ISSUE-612's shape), so the transcript starts with what was sent.
+    ``markdown`` marks a body converted from the mail's HTML part (#831).
 
     Not tied to the task that sent it: that task ran in another room, and
     tying the row to it would pair its turn into this room's history and show
@@ -346,12 +348,15 @@ def record_sent_mail(
     message_id = db.add_message(
         conn, room_token, role="assistant", body=body or "", origin_surface=SURFACE,
     )
-    db.set_outgoing_mail(conn, message_id, {
+    mail = {
         "to": [address for address, _ in _addresses(to)],
         "cc": [address for address, _ in _addresses(cc)],
         "subject": (subject or "")[:_MAIL_SUBJECT_MAX],
         "state": "sent",
-    })
+    }
+    if markdown:
+        mail["markdown"] = True
+    db.set_outgoing_mail(conn, message_id, mail)
     return message_id
 
 
@@ -359,7 +364,7 @@ def register_sent_thread(
     conn, config: "Config", *, user_id: str, message_id: str | None,
     in_reply_to: str | None = None, references: str | None = None,
     to=(), cc=(), subject: str | None = None, body: str | None = None,
-    task_id: int | None = None,
+    task_id: int | None = None, markdown: bool = False,
 ) -> ThreadRoom | None:
     """Put a mail the bot sent for ``user_id`` into its thread's room.
 
@@ -390,6 +395,7 @@ def register_sent_thread(
             ids=SimpleNamespace(message_id=message_id, in_reply_to=in_reply_to,
                                 references=references),
             to=to, cc=cc, subject=subject, body=body, task_id=task_id,
+            markdown=markdown,
         )
         conn.execute(f"RELEASE {savepoint}")
         return room
@@ -437,7 +443,7 @@ def _stored_for_someone_else(conn, ids: list[str], user_id: str) -> bool:
 
 def _record_in_private_room(
     conn, *, user_id: str, task_id: int | None, to, cc,
-    subject: str | None, body: str | None,
+    subject: str | None, body: str | None, markdown: bool = False,
 ) -> None:
     """Mail the bot sent to the user alone, as a row of their private email
     room once it exists, like a push into a phone room. Never mints. Not when
@@ -450,12 +456,14 @@ def _record_in_private_room(
         return
     if task_id is not None and db.get_turn_message_id(conn, room, task_id) is not None:
         return
-    record_sent_mail(conn, room, to=to, cc=cc, subject=subject, body=body)
+    record_sent_mail(conn, room, to=to, cc=cc, subject=subject, body=body,
+                     markdown=markdown)
 
 
 def _register_sent_thread(
     conn, config: "Config", *, user_id: str, ids, to, cc,
     subject: str | None, body: str | None, task_id: int | None = None,
+    markdown: bool = False,
 ) -> ThreadRoom | None:
     root_ids = thread_message_ids(ids)
     owner = config.users.get(user_id)
@@ -481,12 +489,14 @@ def _register_sent_thread(
     if not any(address not in owned for address, _ in people):
         if people:
             _record_in_private_room(conn, user_id=user_id, task_id=task_id,
-                                    to=to, cc=cc, subject=subject, body=body)
+                                    to=to, cc=cc, subject=subject, body=body,
+                                    markdown=markdown)
         return None
     room = _mint(conn, config, owner_user_id=user_id, root=root_ids[0],
                  subject=subject, people=people)
     if room is not None:
-        record_sent_mail(conn, room.token, to=to, cc=cc, subject=subject, body=body)
+        record_sent_mail(conn, room.token, to=to, cc=cc, subject=subject, body=body,
+                         markdown=markdown)
     return room
 
 

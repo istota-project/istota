@@ -21,7 +21,7 @@ from istota.mail.support import get_email_config
 from istota.lib.llm_json import find_fenced_block
 from istota.notifications.resolvers import outbound_draft as draft_source
 from istota.notifications.store import RaiseResult, deliver_pending
-from ...skills.email import plain_part, reply_to_email, send_email
+from ...skills.email import text_part_is_markdown, plain_part, reply_to_email, send_email
 from . import threads as email_threads
 
 # NOTE: the briefing skill's body helpers (``strip_markdown`` /
@@ -439,11 +439,12 @@ def _record_sent_email(
     to: list[str] | None = None,
     cc: list[str] | None = None,
     body: str | None = None,
+    markdown: bool = False,
 ) -> None:
     """Record an outbound email for thread matching, and put it in its
     thread's room (non-critical). ``to`` and ``cc`` are the recipients
     ``to_addr`` joins (``to`` defaults to ``to_addr`` itself); ``body`` is
-    what was mailed."""
+    what was mailed, and ``markdown`` whether it is converted from an HTML part."""
     from .. import routing
 
     try:
@@ -465,7 +466,7 @@ def _record_sent_email(
                 conn, config, user_id=task.user_id, message_id=message_id,
                 in_reply_to=in_reply_to, references=references,
                 to=to if to is not None else [to_addr], cc=cc or [],
-                subject=subject, body=body, task_id=task.id,
+                subject=subject, body=body, task_id=task.id, markdown=markdown,
             )
     except Exception as e:
         logger.warning("Failed to record sent email for task %d: %s", task.id, e)
@@ -519,6 +520,7 @@ _MAIL_SUBJECT_MAX_CHARS = 200
 def _stamp_thread_mail(
     config: "Config", message_id: int | None, plan: "email_threads.ReplyAll", *,
     subject: str, body: str, state: str, draft_id: int | None = None,
+    markdown: bool = False,
 ) -> None:
     """Record on the room's row what became of the mail it sent (ISSUE-612).
 
@@ -531,6 +533,8 @@ def _stamp_thread_mail(
             "subject": (subject or "")[:_MAIL_SUBJECT_MAX_CHARS], "state": state}
     if draft_id is not None:
         mail["draft_id"] = draft_id
+    if markdown:
+        mail["markdown"] = True
     try:
         with db.get_db(config.db_path) as conn:
             row = conn.execute("SELECT body FROM messages WHERE id = ?",
@@ -564,6 +568,7 @@ async def _send_thread_reply(
     mail into the thread carries it, a held draft included (ISSUE-605).
     """
     mailed = plain_part(body, content_type=content_type, html_body=html_body)
+    markdown = text_part_is_markdown(body, content_type=content_type, html_body=html_body)
     if content_type == "plain":
         try:
             with db.get_db(config.db_path) as conn:
@@ -585,7 +590,8 @@ async def _send_thread_reply(
         )
     def stamp(state: str, draft: int | None = None) -> None:
         _stamp_thread_mail(config, message_id, plan, subject=held_subject,
-                           body=mailed, state=state, draft_id=draft)
+                           body=mailed, state=state, draft_id=draft,
+                           markdown=markdown)
 
     if not may_send:
         if draft_id is None:
@@ -612,7 +618,7 @@ async def _send_thread_reply(
     _record_sent_email(
         config, task, sent_message_id, to_addr=", ".join([plan.to, *plan.cc]),
         subject=subject, in_reply_to=plan.in_reply_to, references=plan.references,
-        to=[plan.to], cc=list(plan.cc), body=mailed,
+        to=[plan.to], cc=list(plan.cc), body=mailed, markdown=markdown,
     )
     return True
 
@@ -849,6 +855,8 @@ async def deliver_email_result(
             subject=subject,
             to=[user_config.email_addresses[0]],
             body=plain_part(body_text, content_type=content_type, html_body=html_body),
+            markdown=text_part_is_markdown(body_text, content_type=content_type,
+                                   html_body=html_body),
         )
         return True
     except Exception as e:

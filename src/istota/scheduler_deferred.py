@@ -493,6 +493,7 @@ def _process_deferred_sent_emails(
                     to=to, cc=_str_list(entry.get("cc")),
                     subject=_str_or_none(entry.get("subject")),
                     body=_str_or_none(entry.get("body")), task_id=task.id,
+                    markdown=entry.get("markdown") is True,
                 )
             except Exception as e:
                 logger.warning(
