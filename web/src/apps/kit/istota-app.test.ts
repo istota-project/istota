@@ -25,6 +25,7 @@ type Istota = {
   calendar: {
     list(options: Record<string, unknown>): Promise<unknown>;
   };
+  skill(operation: string, args?: Record<string, unknown>): Promise<unknown>;
   env: Record<string, unknown>;
   on(event: string, fn: (env: Record<string, unknown>) => void): () => void;
   copy(text: string): Promise<unknown>;
@@ -264,6 +265,15 @@ describe('calls', () => {
       ['files:read:notes/aviation', 'read', { path: 'weather.md', encoding: 'base64' }],
       ['calendar:read', 'list', { from: '2026-11-01', to: '2026-11-08' }],
       ['calendar:read:Home', 'list', { from: '2026-11-01', to: '2026-11-08' }],
+    ]);
+  });
+
+  it('names a skill operation as its capability, with the one op call', () => {
+    void istota.skill('markets.quote', { symbols: ['AAPL'] });
+    void istota.skill('location.places');
+    expect(sent().map((m) => [m.capability, m.op, m.args])).toEqual([
+      ['skill:markets.quote', 'call', { symbols: ['AAPL'] }],
+      ['skill:location.places', 'call', {}],
     ]);
   });
 

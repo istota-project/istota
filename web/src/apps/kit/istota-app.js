@@ -346,10 +346,19 @@
       call(name ? `calendar:read:${name}` : 'calendar:read', 'list', { from, to }),
   });
 
+  /**
+   * One allowlisted read-only operation, under `skill:<operation>`, such as
+   * `istota.skill('markets.quote', {symbols: ['AAPL']})`.
+   * @param {string} operation
+   * @param {Record<string, unknown>} [args]
+   */
+  const skill = (operation, args = {}) => call(`skill:${operation}`, 'call', { ...args });
+
   const api = {
     kv,
     files,
     calendar,
+    skill,
     get env() {
       return { ...env };
     },
