@@ -29,6 +29,17 @@ describe('watchFrame', () => {
     expect(watch.navigations).toBe(2);
   });
 
+  it('calls the first-load handler once, on the first load only', () => {
+    const frame = document.createElement('iframe');
+    const onFirstLoad = vi.fn();
+    watchFrame(frame, () => {}, onFirstLoad);
+    load(frame);
+    expect(onFirstLoad).toHaveBeenCalledTimes(1);
+    load(frame);
+    load(frame);
+    expect(onFirstLoad).toHaveBeenCalledTimes(1);
+  });
+
   it('stops counting once disposed', () => {
     const frame = document.createElement('iframe');
     const onNavigated = vi.fn();

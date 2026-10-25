@@ -7,9 +7,9 @@
  * the frame went somewhere else. The data has left by then, so the defence is
  * the record and the frame's removal, not prevention.
  *
- * The bridge reads `navigations` before each reply: a reply is posted to
- * whatever document is in the frame, so one asked for by the installed
- * document must not reach the page it navigated to.
+ * The first `load` is also when the bridge hands the installed document its
+ * port (`onFirstLoad`), and the bridge answers nothing once `navigations`
+ * has moved.
  *
  * No Svelte imports: the escape tier's shell page (stage 11) imports this file
  * and `bridge.ts` as they are.
@@ -22,13 +22,21 @@ export interface FrameWatch {
   dispose(): void;
 }
 
-export function watchFrame(frame: HTMLIFrameElement, onNavigated: () => void): FrameWatch {
+export function watchFrame(
+  frame: HTMLIFrameElement,
+  onNavigated: () => void,
+  onFirstLoad?: () => void,
+): FrameWatch {
   let loads = 0;
   let fired = false;
 
   function onLoad() {
     loads += 1;
-    if (loads > 1 && !fired) {
+    if (loads === 1) {
+      onFirstLoad?.();
+      return;
+    }
+    if (!fired) {
       fired = true;
       onNavigated();
     }

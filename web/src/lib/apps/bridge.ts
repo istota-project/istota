@@ -6,19 +6,21 @@
  * checks every call against the installed version's grants. What the relay
  * holds is narrower and still load-bearing:
  *
- * - **The source check.** A message is taken only when `event.source` is the
- *   frame's own window. An opaque-origin frame's `event.origin` is `"null"`, so
- *   the origin says nothing about who sent it.
+ * - **The port.** The bridge is bound to the installed document, not to the
+ *   frame's window. The window is the same object across a navigation, and a
+ *   page the frame navigated to controls when its own `load` fires, so a check
+ *   on `event.source` and a load count would let that page call with the app's
+ *   grants until then. Instead `connect`, run on the frame's first `load`,
+ *   posts one end of a `MessageChannel` to the frame (`'*'`, since an opaque
+ *   origin cannot be named as a target), and every call, reply and `env`
+ *   message after that travels on the channel. A document the frame navigated
+ *   to never holds the other end, so it can neither call nor receive. The
+ *   shell listens on no window for calls.
  * - **The shape check.** Anything that is not one of the kit's two request
  *   shapes is dropped without a reply.
  * - **Only the installed document.** After the frame has navigated, nothing
- *   from it is answered and nothing is sent to it.
- * - **The reply guard.** Replies go out with `postMessage(msg, '*')`, since an
- *   opaque origin cannot be named as a target, so they reach whatever document
- *   is in the frame. The navigation count is read when a request arrives and
- *   again immediately before its reply; if it moved, the reply is dropped. A
- *   race remains between that check and the post, and it can only deliver data
- *   the app was already granted.
+ *   from the port is answered and nothing is sent on it; the page also
+ *   removes the frame and disposes the bridge.
  * - **Shell calls** (`env`, `copy`, `error`) are answered here and reach no
  *   data. None of them can be widened into a capability.
  *
@@ -62,7 +64,7 @@ export type BridgeReply =
   | { istota: 1; id: number; ok: false; error: BridgeFailure };
 
 export interface BridgeOptions {
-  /** The frame's window: the only source a message is taken from. */
+  /** The frame's window: where `connect` posts the port, and nothing else. */
   frameWindow: () => Window | null;
   /** Loads after the first (`FrameWatch.navigations`). */
   navigations: () => number;
@@ -116,28 +118,28 @@ function clip(value: unknown): string {
 }
 
 export interface Bridge {
-  /** Handle one `message` event; exposed for tests and the escape tier's page. */
-  handle(event: MessageEvent): void;
+  /**
+   * Hand the installed document its port. Call once, on the frame's first
+   * `load`; a second call, or one after a navigation, does nothing.
+   */
+  connect(): void;
   /** Tell the frame the environment changed. */
   postEnv(env: AppEnv): void;
-  /** Listen on `target` (the shell page's window). Returns the cleanup. */
-  attach(target: Window): () => void;
-  /** Drop every reply still in flight. */
+  /** Close the port and drop every reply still in flight. */
   dispose(): void;
 }
 
 export function createBridge(options: BridgeOptions): Bridge {
   let disposed = false;
+  let port: MessagePort | null = null;
   let reportsAtLoad = -1;
   let reportsLeft = ERROR_REPORTS_PER_LOAD;
 
   function post(message: unknown, askedAt: number) {
-    if (disposed) return;
-    // The reply guard: the document that asked is still the one in the frame.
+    if (disposed || !port) return;
+    // The document that asked is still the one in the frame.
     if (options.navigations() !== askedAt) return;
-    const target = options.frameWindow();
-    if (!target) return;
-    target.postMessage(message, '*');
+    port.postMessage(message);
   }
 
   function reply(id: number, askedAt: number, result: unknown) {
@@ -208,34 +210,36 @@ export function createBridge(options: BridgeOptions): Bridge {
     reply(request.id, askedAt, null);
   }
 
-  function handle(event: MessageEvent) {
+  function handle(data: unknown) {
     if (disposed) return;
-    const frame = options.frameWindow();
-    if (!frame || event.source !== frame) return;
-    // The frame's window stays the same object across a navigation, so a page
-    // the app navigated to would pass the source check. Only the installed
-    // document is answered.
     const askedAt = options.navigations();
     if (askedAt !== 0) return;
-    const request = parseRequest(event.data);
+    const request = parseRequest(data);
     if (!request) return;
     if (request.kind === 'call') void relayCall(request, askedAt);
     else void answerShell(request, askedAt);
   }
 
+  function postEnv(env: AppEnv) {
+    post({ istota: PROTOCOL, kind: 'env', env: { ...env } }, 0);
+  }
+
   return {
-    handle,
-    postEnv(env) {
-      if (options.navigations() !== 0) return;
-      post({ istota: PROTOCOL, kind: 'env', env: { ...env } }, options.navigations());
+    connect() {
+      if (disposed || port || options.navigations() !== 0) return;
+      const target = options.frameWindow();
+      if (!target) return;
+      const channel = new MessageChannel();
+      port = channel.port1;
+      port.onmessage = (event) => handle(event.data);
+      target.postMessage({ istota: PROTOCOL, kind: 'port' }, '*', [channel.port2]);
+      // An env change before the port existed went nowhere.
+      postEnv(options.env());
     },
-    attach(target) {
-      const listener = (event: MessageEvent) => handle(event);
-      target.addEventListener('message', listener);
-      return () => target.removeEventListener('message', listener);
-    },
+    postEnv,
     dispose() {
       disposed = true;
+      port?.close();
     },
   };
 }

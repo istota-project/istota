@@ -27,10 +27,15 @@ type Istota = {
 
 const SOURCE = readFileSync(join(KIT, 'istota-app.js'), 'utf8');
 const listeners: Array<[string, EventListener]> = [];
+const channels: MessageChannel[] = [];
+/** The kit's end of the channel: what the kit sends on it is recorded here. */
 let posted: MockInstance;
+let windowPosted: MockInstance;
+let kitPort: MessagePort | null;
 let istota: Istota;
 
-function load(hash = ''): Istota {
+/** Run the kit; `port: false` leaves it waiting for the shell's port. */
+function load(hash = '', { port = true } = {}): Istota {
   window.history.replaceState(null, '', `/frame${hash}`);
   const add = window.addEventListener.bind(window);
   const spy = vi
@@ -41,11 +46,25 @@ function load(hash = ''): Istota {
     });
   new Function(SOURCE)();
   spy.mockRestore();
+  if (port) handOver();
   return (globalThis as unknown as { istota: Istota }).istota;
 }
 
+/** The shell's port handoff, as `bridge.connect` posts it; jsdom's top window is its own parent. */
+function handOver(source: Window | null = window, data: unknown = { istota: 1, kind: 'port' }) {
+  const channel = new MessageChannel();
+  channels.push(channel);
+  const spy = vi.spyOn(channel.port2, 'postMessage');
+  window.dispatchEvent(new MessageEvent('message', { data, source, ports: [channel.port2] }));
+  if (!kitPort && channel.port2.onmessage) {
+    kitPort = channel.port2;
+    posted = spy;
+  }
+  return { channel, spy };
+}
+
 function sent(): Message[] {
-  return posted.mock.calls.map((call) => call[0] as Message);
+  return posted ? posted.mock.calls.map((call) => call[0] as Message) : [];
 }
 
 function last(): Message {
@@ -53,18 +72,26 @@ function last(): Message {
   return all[all.length - 1];
 }
 
-function reply(data: unknown, source: Window | null = window): void {
-  window.dispatchEvent(new MessageEvent('message', { data, source }));
+/** A message from the shell on the port, delivered synchronously. */
+function reply(data: unknown): void {
+  if (!kitPort?.onmessage) throw new Error('the kit holds no port');
+  kitPort.onmessage(new MessageEvent('message', { data }));
 }
 
 beforeEach(() => {
-  posted = vi.spyOn(window, 'postMessage').mockImplementation(() => {});
+  kitPort = null;
+  posted = undefined as unknown as MockInstance;
+  windowPosted = vi.spyOn(window, 'postMessage').mockImplementation(() => {});
   document.documentElement.removeAttribute('data-theme');
   document.documentElement.removeAttribute('data-font-size');
 });
 
 afterEach(() => {
   for (const [type, fn] of listeners.splice(0)) window.removeEventListener(type, fn);
+  for (const channel of channels.splice(0)) {
+    channel.port1.close();
+    channel.port2.close();
+  }
   delete (globalThis as unknown as { istota?: Istota }).istota;
   document.querySelectorAll('.istota-notice').forEach((node) => node.remove());
   vi.useRealTimers();
@@ -88,6 +115,65 @@ describe('the starting environment', () => {
   it('starts visible, online and with no keyboard', () => {
     istota = load();
     expect(istota.env).toMatchObject({ visibility: 'visible', online: true, keyboard: false });
+  });
+});
+
+describe('the port', () => {
+  it('queues a call made before the port arrives and sends it once it does', async () => {
+    istota = load('', { port: false });
+    const call = istota.kv.get('early');
+    expect(windowPosted).not.toHaveBeenCalled();
+    handOver();
+    expect(sent()).toEqual([
+      {
+        istota: 1,
+        id: expect.any(Number),
+        kind: 'call',
+        capability: 'kv:own',
+        op: 'get',
+        args: { key: 'early' },
+      },
+    ]);
+    reply({ istota: 1, id: last().id, ok: true, result: 'E' });
+    await expect(call).resolves.toBe('E');
+  });
+
+  it('takes the port only from the parent window', () => {
+    istota = load('', { port: false });
+    void istota.kv.get('k');
+    const stranger = handOver(null);
+    expect(stranger.spy).not.toHaveBeenCalled();
+    expect(kitPort).toBeNull();
+    const parent = handOver();
+    expect(parent.spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes no port from a message that is not the handoff', () => {
+    istota = load('', { port: false });
+    void istota.kv.get('k');
+    handOver(window, { istota: 1, kind: 'env', env: {} });
+    expect(kitPort).toBeNull();
+  });
+
+  it('ignores a second port', () => {
+    istota = load();
+    const first = posted;
+    const second = handOver();
+    void istota.kv.get('k');
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second.spy).not.toHaveBeenCalled();
+    expect(second.channel.port2.onmessage).toBeNull();
+  });
+
+  it('takes no environment posted on the window once it holds the port', () => {
+    istota = load('#theme=dark');
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        data: { istota: 1, kind: 'env', env: { theme: 'light' } },
+        source: window,
+      }),
+    );
+    expect(istota.env.theme).toBe('dark');
   });
 });
 
@@ -124,9 +210,10 @@ describe('calls', () => {
     expect(messages[6].args).toEqual({ path: 'y.txt', content: 'hi', encoding: 'utf8' });
   });
 
-  it('posts to the parent with the wildcard target an opaque origin needs', () => {
+  it('sends over the port and never posts on a window', () => {
     void istota.kv.get('a');
-    expect(posted.mock.calls[0][1]).toBe('*');
+    expect(sent()).toHaveLength(1);
+    expect(windowPosted).not.toHaveBeenCalled();
   });
 
   it('resolves with the result of the matching reply', async () => {
@@ -189,11 +276,16 @@ describe('calls', () => {
     await expect(settled).resolves.toMatchObject({ code: 'timeout' });
   });
 
-  it('drops a reply from any window other than the parent', async () => {
+  it('takes no reply posted on the window, even from the parent', async () => {
     vi.useFakeTimers();
     const call = istota.kv.get('k');
     const settled = call.catch((e: unknown) => e);
-    reply({ istota: 1, id: last().id, ok: true, result: 'forged' }, null);
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        data: { istota: 1, id: last().id, ok: true, result: 'forged' },
+        source: window,
+      }),
+    );
     vi.advanceTimersByTime(15_000);
     await expect(settled).resolves.toMatchObject({ code: 'timeout' });
   });

@@ -1,14 +1,20 @@
-// The client library: `window.istota`, a thin wrapper over postMessage to the
-// shell that frames the app. The shell relays data calls to the server, which
-// checks each against the installed version's grants; this file enforces
+// The client library: `window.istota`, a thin wrapper over a MessagePort to
+// the shell that frames the app. The shell relays data calls to the server,
+// which checks each against the installed version's grants; this file enforces
 // nothing. It runs after the guard and before any app code.
+//
+// On the frame's first load the shell posts {istota: 1, kind: 'port'} to this
+// window with one end of a MessageChannel. The first such message from the
+// parent window is taken and every later one ignored; calls made before it
+// arrives wait in a queue. Everything else travels on that port, so a page the
+// frame navigates to, which never holds it, can neither call nor be answered.
 //
 // Frame to shell:  {istota: 1, id, kind: 'call', capability, op, args}
 //                  {istota: 1, id, kind: 'shell', op, args}
 // Shell to frame:  {istota: 1, id, ok: true, result}
 //                  {istota: 1, id, ok: false, error: {code, message}}
 //                  {istota: 1, kind: 'env', env}
-// Anything else, or anything not from the parent window, is dropped.
+// Anything else is dropped.
 (() => {
   const PROTOCOL = 1;
   const TIMEOUT_MS = 15000;
@@ -111,6 +117,16 @@
   /** @type {Map<number, {resolve: (value: unknown) => void, reject: (error: IstotaError) => void, timer: ReturnType<typeof setTimeout>}>} */
   const pending = new Map();
   let nextId = 1;
+  /** @type {MessagePort | null} */
+  let port = null;
+  /** @type {Array<Record<string, unknown>>} */
+  const queued = [];
+
+  /** @param {Record<string, unknown>} message */
+  function send(message) {
+    if (port) port.postMessage(message);
+    else queued.push(message);
+  }
 
   /** @param {string} code */
   function showNotice(code) {
@@ -138,7 +154,7 @@
         reject(new IstotaError('timeout', 'The app got no answer in time.'));
       }, TIMEOUT_MS);
       pending.set(id, { resolve, reject, timer });
-      window.parent.postMessage({ istota: PROTOCOL, id, ...fields }, '*');
+      send({ istota: PROTOCOL, id, ...fields });
     });
   }
 
@@ -194,10 +210,22 @@
     );
   }
 
-  window.addEventListener('message', (event) => {
-    if (event.source !== window.parent) return;
-    onMessage(event.data);
-  });
+  /** @param {MessageEvent} event */
+  function takePort(event) {
+    if (port || event.source !== window.parent) return;
+    const data = event.data;
+    if (!data || typeof data !== 'object' || data.istota !== PROTOCOL || data.kind !== 'port') {
+      return;
+    }
+    const given = event.ports && event.ports[0];
+    if (!given) return;
+    port = given;
+    window.removeEventListener('message', takePort);
+    // Setting onmessage starts the port.
+    port.onmessage = (message) => onMessage(message.data);
+    for (const message of queued.splice(0)) port.postMessage(message);
+  }
+  window.addEventListener('message', takePort);
 
   /** @param {unknown} value */
   function clip(value) {

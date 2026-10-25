@@ -23,8 +23,19 @@ function frameOf(container: HTMLElement): HTMLIFrameElement {
   return frame;
 }
 
+/** Load the frame's document and take the port the shell hands it, as the kit would. */
+function connect(frame: HTMLIFrameElement): MessagePort {
+  const handoff = vi.spyOn(frame.contentWindow!, 'postMessage');
+  frame.dispatchEvent(new Event('load'));
+  const call = handoff.mock.calls.at(-1);
+  if (!call) throw new Error('no port was handed to the frame');
+  expect(call[0]).toEqual({ istota: 1, kind: 'port' });
+  expect(call[1]).toBe('*');
+  return ((call as unknown[])[2] as MessagePort[])[0];
+}
+
 function fromFrame(frame: HTMLIFrameElement, data: unknown) {
-  window.dispatchEvent(new MessageEvent('message', { data, source: frame.contentWindow }));
+  connect(frame).postMessage(data);
 }
 
 describe('AppFrame', () => {
@@ -66,6 +77,34 @@ describe('AppFrame', () => {
         args: { key: 'k' },
       }),
     );
+  });
+
+  it('hands the port only on the first load', () => {
+    const { container } = render(AppFrame, { appId: 'board', version: 2, name: 'Board' });
+    const frame = frameOf(container);
+    const handoff = vi.spyOn(frame.contentWindow!, 'postMessage');
+    expect(handoff).not.toHaveBeenCalled();
+    frame.dispatchEvent(new Event('load'));
+    expect(handoff).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes no call posted on the window, even from its own frame, once the port exists', async () => {
+    const { container } = render(AppFrame, { appId: 'board', version: 2, name: 'Board' });
+    const frame = frameOf(container);
+    const port = connect(frame);
+    const replies: unknown[] = [];
+    port.onmessage = (event) => replies.push(event.data);
+    const handoff = vi.spyOn(frame.contentWindow!, 'postMessage');
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        data: { istota: 1, id: 1, kind: 'call', capability: 'kv:own', op: 'get', args: {} },
+        source: frame.contentWindow,
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(api.callApp).not.toHaveBeenCalled();
+    expect(handoff).not.toHaveBeenCalled();
+    expect(replies.filter((m) => (m as { kind?: string }).kind !== 'env')).toEqual([]);
   });
 
   it('ignores the same message from another window', async () => {

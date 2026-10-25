@@ -26,26 +26,68 @@ function harness(overrides: Partial<BridgeOptions> = {}) {
     ...overrides,
   };
   const bridge = createBridge(options);
-  function send(data: unknown, source: unknown = frameWindow) {
-    bridge.handle({ data, source } as unknown as MessageEvent);
+  // The frame's end of the channel, as the kit would hold it.
+  let kitPort: MessagePort | null = null;
+  const received: unknown[] = [];
+  function connect() {
+    bridge.connect();
+    const handoff = frameWindow.postMessage.mock.calls.at(-1);
+    if (!handoff) throw new Error('no port was posted');
+    kitPort = (handoff[2] as MessagePort[])[0];
+    kitPort.onmessage = (event) => received.push(event.data);
+    return handoff;
+  }
+  function send(data: unknown) {
+    if (!kitPort) connect();
+    kitPort!.postMessage(data);
   }
   async function settle() {
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
   }
-  return { bridge, options, frameWindow, state, send, settle };
+  /** What reached the kit over the port, less the env sent on connect. */
+  function replies() {
+    return received.filter((m) => (m as { kind?: string }).kind !== 'env');
+  }
+  return { bridge, options, frameWindow, state, connect, send, settle, received, replies };
 }
 
 const LIST = { istota: 1, id: 7, kind: 'call', capability: 'kv:own', op: 'list', args: {} };
 
 describe('the bridge', () => {
-  it('drops a message from any window but the frame', async () => {
+  it('hands the frame one port, with the wildcard target an opaque origin needs', () => {
     const h = harness();
-    h.send(LIST, { postMessage: vi.fn() });
-    h.send(LIST, null);
-    h.send(LIST, window);
+    const [message, target, transfer] = h.connect();
+    expect(message).toEqual({ istota: 1, kind: 'port' });
+    expect(target).toBe('*');
+    expect(transfer).toHaveLength(1);
+    h.bridge.connect();
+    expect(h.frameWindow.postMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('hands no port to a frame that has navigated', () => {
+    const h = harness();
+    h.state.navigations = 1;
+    h.bridge.connect();
+    expect(h.frameWindow.postMessage).not.toHaveBeenCalled();
+  });
+
+  it('sends the current environment over the port when it connects', async () => {
+    const h = harness();
+    h.connect();
+    await h.settle();
+    expect(h.received).toEqual([{ istota: 1, kind: 'env', env: ENV }]);
+  });
+
+  it('takes nothing posted on the window, even from the frame, once the port exists', async () => {
+    const h = harness();
+    h.connect();
+    window.dispatchEvent(
+      new MessageEvent('message', { data: LIST, source: h.frameWindow as unknown as Window }),
+    );
     await h.settle();
     expect(h.options.call).not.toHaveBeenCalled();
-    expect(h.frameWindow.postMessage).not.toHaveBeenCalled();
+    expect(h.replies()).toEqual([]);
+    expect(h.frameWindow.postMessage).toHaveBeenCalledTimes(1);
   });
 
   it('drops malformed messages without a reply', async () => {
@@ -68,10 +110,10 @@ describe('the bridge', () => {
     for (const data of bad) h.send(data);
     await h.settle();
     expect(h.options.call).not.toHaveBeenCalled();
-    expect(h.frameWindow.postMessage).not.toHaveBeenCalled();
+    expect(h.replies()).toEqual([]);
   });
 
-  it('routes a call to the server and posts its reply to the frame', async () => {
+  it('routes a call to the server and replies on the port only', async () => {
     const h = harness();
     h.send({ ...LIST, args: { prefix: 'card:' } });
     await h.settle();
@@ -80,10 +122,9 @@ describe('the bridge', () => {
       op: 'list',
       args: { prefix: 'card:' },
     });
-    expect(h.frameWindow.postMessage).toHaveBeenCalledWith(
-      { istota: 1, id: 7, ok: true, result: { items: [], total: 0 } },
-      '*',
-    );
+    expect(h.replies()).toEqual([{ istota: 1, id: 7, ok: true, result: { items: [], total: 0 } }]);
+    // The port handoff is the only thing ever posted to the frame's window.
+    expect(h.frameWindow.postMessage).toHaveBeenCalledTimes(1);
   });
 
   it('passes a refusal through with its code and tells the page', async () => {
@@ -97,10 +138,9 @@ describe('the bridge', () => {
     });
     h.send(LIST);
     await h.settle();
-    expect(h.frameWindow.postMessage).toHaveBeenCalledWith(
+    expect(h.replies()).toEqual([
       { istota: 1, id: 7, ok: false, error: { code: 'not_granted', message: 'Not granted.' } },
-      '*',
-    );
+    ]);
     expect(onCallFailed).toHaveBeenCalledWith('not_granted');
   });
 
@@ -114,18 +154,20 @@ describe('the bridge', () => {
     h.state.navigations = 1;
     answer({ ok: true, result: 'secret' });
     await h.settle();
-    expect(h.frameWindow.postMessage).not.toHaveBeenCalled();
+    expect(h.replies()).toEqual([]);
   });
 
   it('answers nothing once the frame has navigated', async () => {
     const h = harness();
+    h.connect();
+    await h.settle();
     h.state.navigations = 1;
     h.send(LIST);
     h.send({ istota: 1, id: 2, kind: 'shell', op: 'env', args: {} });
     h.bridge.postEnv(ENV);
     await h.settle();
     expect(h.options.call).not.toHaveBeenCalled();
-    expect(h.frameWindow.postMessage).not.toHaveBeenCalled();
+    expect(h.received).toHaveLength(1);
   });
 
   it('fails a call made offline without a request', async () => {
@@ -134,10 +176,9 @@ describe('the bridge', () => {
     h.send(LIST);
     await h.settle();
     expect(h.options.call).not.toHaveBeenCalled();
-    expect(h.frameWindow.postMessage).toHaveBeenCalledWith(
+    expect(h.replies()).toEqual([
       { istota: 1, id: 7, ok: false, error: { code: 'offline', message: 'You are offline.' } },
-      '*',
-    );
+    ]);
   });
 
   it('answers the env shell call itself', async () => {
@@ -145,10 +186,7 @@ describe('the bridge', () => {
     h.send({ istota: 1, id: 3, kind: 'shell', op: 'env', args: {} });
     await h.settle();
     expect(h.options.call).not.toHaveBeenCalled();
-    expect(h.frameWindow.postMessage).toHaveBeenCalledWith(
-      { istota: 1, id: 3, ok: true, result: ENV },
-      '*',
-    );
+    expect(h.replies()).toEqual([{ istota: 1, id: 3, ok: true, result: ENV }]);
   });
 
   it('answers copy through the clipboard helper, and refuses anything but a string', async () => {
@@ -159,17 +197,13 @@ describe('the bridge', () => {
     expect(h.options.copy).toHaveBeenCalledTimes(1);
     expect(h.options.copy).toHaveBeenCalledWith('hello');
     expect(h.options.call).not.toHaveBeenCalled();
-    expect(h.frameWindow.postMessage).toHaveBeenCalledWith(
-      { istota: 1, id: 4, ok: true, result: null },
-      '*',
-    );
-    expect(h.frameWindow.postMessage).toHaveBeenCalledWith(
+    expect(h.replies()).toContainEqual({ istota: 1, id: 4, ok: true, result: null });
+    expect(h.replies()).toContainEqual(
       expect.objectContaining({
         id: 5,
         ok: false,
         error: expect.objectContaining({ code: 'bad_args' }),
       }),
-      '*',
     );
   });
 
@@ -204,37 +238,31 @@ describe('the bridge', () => {
     expect(h.options.report).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'error' }));
   });
 
-  it('sends env changes to the frame', () => {
+  it('sends env changes over the port', async () => {
     const h = harness();
+    h.connect();
     h.bridge.postEnv({ ...ENV, theme: 'light' });
-    expect(h.frameWindow.postMessage).toHaveBeenCalledWith(
+    await h.settle();
+    expect(h.received).toEqual([
+      { istota: 1, kind: 'env', env: ENV },
       { istota: 1, kind: 'env', env: { ...ENV, theme: 'light' } },
-      '*',
-    );
+    ]);
+    expect(h.frameWindow.postMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends nothing before the port exists', () => {
+    const h = harness();
+    h.bridge.postEnv(ENV);
+    expect(h.frameWindow.postMessage).not.toHaveBeenCalled();
   });
 
   it('replies to nothing after dispose', async () => {
     const h = harness();
+    h.connect();
     h.bridge.dispose();
     h.send(LIST);
     await h.settle();
     expect(h.options.call).not.toHaveBeenCalled();
-  });
-
-  it('listens on the window it is attached to', async () => {
-    const h = harness();
-    const target = new EventTarget() as unknown as Window;
-    const stop = h.bridge.attach(target);
-    const event = new Event('message') as MessageEvent;
-    Object.defineProperty(event, 'data', { value: LIST });
-    Object.defineProperty(event, 'source', { value: h.frameWindow });
-    target.dispatchEvent(event);
-    await h.settle();
-    expect(h.options.call).toHaveBeenCalledTimes(1);
-    stop();
-    target.dispatchEvent(event);
-    await h.settle();
-    expect(h.options.call).toHaveBeenCalledTimes(1);
   });
 });
 

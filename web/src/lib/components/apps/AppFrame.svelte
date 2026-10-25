@@ -11,7 +11,8 @@
      session, and none of the popup, download or top-navigation flags. The
      element is built here rather than in markup so the sandbox attribute and
      the load watch are both in place before `src` is set; the first `load` is
-     then the installed document's, and any later one is a navigation.
+     then the installed document's, and hands it the bridge's port, and any
+     later one is a navigation.
 
      Reload is the parent's: it remounts this component, which builds a new
      frame and a new bridge, so no counter carries over. */
@@ -53,15 +54,19 @@
     frame.setAttribute('referrerpolicy', 'no-referrer');
     frame.className = 'app-frame';
 
-    const watch = watchFrame(frame, () => {
-      bridge.dispose();
-      frame.remove();
-      void reportAppError(id, ver, {
-        kind: 'navigated',
-        message: 'The app loaded a page other than its own.',
-      }).catch(() => {});
-      onNavigated?.();
-    });
+    const watch = watchFrame(
+      frame,
+      () => {
+        bridge.dispose();
+        frame.remove();
+        void reportAppError(id, ver, {
+          kind: 'navigated',
+          message: 'The app loaded a page other than its own.',
+        }).catch(() => {});
+        onNavigated?.();
+      },
+      () => bridge.connect(),
+    );
 
     const bridge = createBridge({
       frameWindow: () => frame.contentWindow,
@@ -74,7 +79,6 @@
       onCallFailed: (code) => onCallFailed?.(code),
       onCallThrew: (error) => onCallThrew?.(error),
     });
-    const detach = bridge.attach(window);
     const stopEnv = watchEnv((next) => {
       env = next;
       bridge.postEnv(next);
@@ -85,7 +89,6 @@
 
     cleanup = () => {
       stopEnv();
-      detach();
       bridge.dispose();
       watch.dispose();
       frame.remove();
