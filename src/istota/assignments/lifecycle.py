@@ -138,6 +138,7 @@ def edit_charter(
     mutate: Callable[[store.Assignment], Any],
     event: str,
     event_payload: dict[str, Any] | None = None,
+    by_task_id: int | None = None,
 ) -> tuple[store.Assignment, Any]:
     """Apply one charter change, and tell the next wake about it.
 
@@ -146,7 +147,8 @@ def edit_charter(
     After activation the before and after renders go into a trusted
     `charter_change` inbox event; nothing is written when the render did not
     move. Every change, a draft's included, is the one place a held
-    activation request is cancelled (Stage 4).
+    activation request is cancelled (Stage 4). `by_task_id` is the turn
+    making the change, whose own hold is closed without stopping it.
     """
     with write_transaction(conn):
         assignment = _load(conn, assignment_id, user_id)
@@ -157,7 +159,7 @@ def edit_charter(
         except charter.CharterError as exc:
             raise _charter_error(exc) from None
         after = charter.render_current(conn, assignment_id)
-        cancel_held_activation(conn, assignment_id, reason="charter_changed")
+        cancel_held_activation(conn, assignment_id, reason="charter_changed", by_task_id=by_task_id)
         payload = dict(event_payload or {})
         store.insert_event(conn, assignment_id, kind=event, actor="user", payload=payload)
         if assignment.state != "draft" and before != after:
@@ -336,26 +338,36 @@ def activate_from_request(
         return {"status": "approved", "assignment_id": assignment_id}
 
 
-def cancel_held_activation(conn: sqlite3.Connection, assignment_id: int, *, reason: str) -> int:
+#: The close code of a hold cancelled by its own turn's later charter edit.
+#: The scheduler does not stop a turn whose hold closed with it.
+CANCELLED_BY_OWN_TURN = "charter_changed_in_turn"
+
+
+def cancel_held_activation(
+    conn: sqlite3.Connection, assignment_id: int, *, reason: str, by_task_id: int | None = None,
+) -> int:
     """Cancel any held activation of this assignment, and the task parked on it.
 
     Through the ledger's own close (`relay.relays.close_task_questions`), so
     the parked task is released the way every other closed hold releases it.
-    Returns how many were cancelled.
+    A hold whose origin is `by_task_id`, the turn making the change, closes
+    alone as `CANCELLED_BY_OWN_TURN`: that turn is still running and finishes
+    with its reply. Returns how many were cancelled.
     """
     from istota.relay.relays import close_task_questions
 
     with write_transaction(conn):
         rows = conn.execute(_ACTIVATIONS_SQL + " AND state = 'held'", (assignment_id,)).fetchall()
         for row in rows:
-            if row["origin_task_id"] is not None:
+            own_turn = by_task_id is not None and row["origin_task_id"] == by_task_id
+            if row["origin_task_id"] is not None and not own_turn:
                 close_task_questions(conn, row["origin_task_id"], reason=reason)
             else:
                 conn.execute(
                     "UPDATE whatsapp_skill_requests SET state = 'cancelled', error_code = ?,"
                     " closed_at = datetime('now'), updated_at = datetime('now')"
                     " WHERE id = ? AND state = 'held'",
-                    (reason, row["id"]),
+                    (CANCELLED_BY_OWN_TURN if own_turn else reason, row["id"]),
                 )
         return len(rows)
 
@@ -455,6 +467,7 @@ def topup(
     user_id: str,
     usd: float | None = None,
     wakes: int | None = None,
+    by_task_id: int | None = None,
 ) -> store.Assignment:
     """Raise the cost or wake cap. A budget pause that is no longer spent → sleeping, due now."""
 
@@ -465,7 +478,7 @@ def topup(
     with write_transaction(conn):
         assignment, _ = edit_charter(
             conn, assignment_id, user_id=user_id, mutate=mutate, event="topped_up",
-            event_payload={"usd": usd, "wakes": wakes},
+            event_payload={"usd": usd, "wakes": wakes}, by_task_id=by_task_id,
         )
         if (assignment.state == "paused" and assignment.state_reason == "budget"
                 and not budget.is_spent(assignment, budget.totals(conn, assignment_id))):

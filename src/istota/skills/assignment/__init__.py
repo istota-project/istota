@@ -147,6 +147,12 @@ def _require_user_turn(ctx: _Ctx) -> None:
         )
 
 
+def _task_id() -> int | None:
+    """The calling task, which `_require_user_turn` has already checked."""
+    value = os.environ.get("ISTOTA_TASK_ID")
+    return int(value) if value and value.isdigit() else None
+
+
 def _user_tz(ctx: _Ctx) -> tzinfo:
     from zoneinfo import ZoneInfo
 
@@ -305,7 +311,7 @@ def cmd_set(ctx: _Ctx, args) -> dict:
         return sorted(fields)
 
     updated, changed = lifecycle.edit_charter(
-        ctx.conn, assignment.id, user_id=ctx.user_id, mutate=mutate, event="charter_set",
+        ctx.conn, assignment.id, user_id=ctx.user_id, mutate=mutate, by_task_id=_task_id(), event="charter_set",
     )
     return _changed(ctx, updated, changed=changed)
 
@@ -344,7 +350,7 @@ def cmd_item_add(ctx: _Ctx, args) -> dict:
         return store.insert_item(ctx.conn, current.id, text=text, kind=args.kind, validator=spec)
 
     updated, item_id = lifecycle.edit_charter(
-        ctx.conn, assignment.id, user_id=ctx.user_id, mutate=mutate, event="item_added",
+        ctx.conn, assignment.id, user_id=ctx.user_id, mutate=mutate, by_task_id=_task_id(), event="item_added",
         event_payload={"kind": args.kind},
     )
     return _changed(ctx, updated, item_id=item_id)
@@ -361,7 +367,7 @@ def cmd_item_remove(ctx: _Ctx, args) -> dict:
             raise lifecycle.TransitionError("not_found", "no such item on this assignment")
 
     updated, _ = lifecycle.edit_charter(
-        ctx.conn, assignment.id, user_id=ctx.user_id, mutate=mutate, event="item_removed",
+        ctx.conn, assignment.id, user_id=ctx.user_id, mutate=mutate, by_task_id=_task_id(), event="item_removed",
         event_payload={"item_id": args.item_id},
     )
     return _changed(ctx, updated, removed_item_id=args.item_id)
@@ -392,7 +398,7 @@ def cmd_frozen_add(ctx: _Ctx, args) -> dict:
             ) from None
 
     updated, frozen_id = lifecycle.edit_charter(
-        ctx.conn, assignment.id, user_id=ctx.user_id, mutate=mutate, event="frozen_added",
+        ctx.conn, assignment.id, user_id=ctx.user_id, mutate=mutate, by_task_id=_task_id(), event="frozen_added",
         event_payload={"name": name},
     )
     return _changed(ctx, updated, frozen_id=frozen_id)
@@ -409,7 +415,7 @@ def cmd_frozen_remove(ctx: _Ctx, args) -> dict:
             raise lifecycle.TransitionError("not_found", "no such frozen commitment on this assignment")
 
     updated, _ = lifecycle.edit_charter(
-        ctx.conn, assignment.id, user_id=ctx.user_id, mutate=mutate, event="frozen_removed",
+        ctx.conn, assignment.id, user_id=ctx.user_id, mutate=mutate, by_task_id=_task_id(), event="frozen_removed",
         event_payload={"frozen_id": args.frozen_id},
     )
     return _changed(ctx, updated, removed_frozen_id=args.frozen_id)
@@ -487,6 +493,7 @@ def cmd_topup(ctx: _Ctx, args) -> dict:
     assignment = _resolve(ctx, args.id)
     updated = lifecycle.topup(
         ctx.conn, ctx.cfg, assignment.id, user_id=ctx.user_id, usd=args.usd, wakes=args.wakes,
+        by_task_id=_task_id(),
     )
     return _changed(ctx, updated)
 

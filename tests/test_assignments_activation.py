@@ -359,6 +359,61 @@ def test_the_scheduler_cancels_a_task_whose_request_was_cancelled(config, monkey
     assert _assignment(config, assignment_id).state == "draft"
 
 
+def test_a_turn_that_activates_then_edits_the_charter_completes_with_its_reply(config, monkeypatch):
+    """Its own `set` cancels its own hold; the turn itself is not stopped."""
+    from istota.scheduler import process_one_task
+
+    monkeypatch.setattr("istota.notifications.delivery.send_notification", lambda *a, **k: True)
+    assignment_id = _draft(config, monkeypatch)
+    with db.get_db(config.db_path) as conn:
+        room = db.register_room(conn, None, "alice", origin="web").token
+        task_id = db.create_task(conn, prompt="go", user_id="alice", source_type="web",
+                                 conversation_token=room)
+
+    def execute(*args, **kwargs):
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        code, out = _run("activate", str(assignment_id))
+        assert code == 0 and out["status"] == "held", out
+        code, out = _run("set", str(assignment_id), "--goal", "Four written quotes.")
+        assert code == 0, out
+        return True, "Changed the goal; activate it again when you are ready.", None, None
+
+    with patch("istota.scheduler.execute_task", side_effect=execute):
+        assert process_one_task(config) == (task_id, True)
+    task = _task(config, task_id)
+    assert task.status == "completed"
+    assert task.result == "Changed the goal; activate it again when you are ready."
+    with db.get_db(config.db_path) as conn:
+        (request,) = conn.execute(
+            "SELECT state FROM whatsapp_skill_requests WHERE origin_task_id = ?", (task_id,),
+        ).fetchall()
+    assert request["state"] == "cancelled"
+    assert _assignment(config, assignment_id).state == "draft"
+
+
+def test_another_turns_charter_edit_still_stops_the_held_turn(config, monkeypatch):
+    from istota.scheduler import process_one_task
+
+    monkeypatch.setattr("istota.notifications.delivery.send_notification", lambda *a, **k: True)
+    assignment_id = _draft(config, monkeypatch)
+    with db.get_db(config.db_path) as conn:
+        room = db.register_room(conn, None, "alice", origin="web").token
+        task_id = db.create_task(conn, prompt="go", user_id="alice", source_type="web",
+                                 conversation_token=room)
+
+    def execute(*args, **kwargs):
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        _, out = _run("activate", str(assignment_id))
+        _web_turn(config, monkeypatch)
+        code, edited = _run("set", str(assignment_id), "--goal", "Four written quotes.")
+        assert code == 0, edited
+        return True, json.dumps(out), None, None
+
+    with patch("istota.scheduler.execute_task", side_effect=execute):
+        assert process_one_task(config) == (task_id, False)
+    assert _task(config, task_id).status == "cancelled"
+
+
 # ---------------------------------------------------------------------------
 # The CHECK rebuild
 # ---------------------------------------------------------------------------

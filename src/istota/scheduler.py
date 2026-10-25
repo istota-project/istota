@@ -3858,10 +3858,14 @@ def _process_one_task(
         if relay_question is None:
             # A stopped request's preview remains private after its hold ends.
             # An activation whose charter changed before the park is stopped too.
+            # A hold this turn's own later charter edit closed does not stop it.
+            from istota.assignments.lifecycle import CANCELLED_BY_OWN_TURN
             stopped_location = conn.execute(
                 "SELECT * FROM whatsapp_skill_requests WHERE origin_task_id=? "
                 "AND kind IN (?, ?) AND state IN ('cancelled','expired','failed') "
-                "ORDER BY rowid DESC LIMIT 1", (task_id, *_STOPPABLE_AUTHORIZATION_KINDS),
+                "AND COALESCE(error_code, '') != ? "
+                "ORDER BY rowid DESC LIMIT 1",
+                (task_id, *_STOPPABLE_AUTHORIZATION_KINDS, CANCELLED_BY_OWN_TURN),
             ).fetchone()
             if stopped_location is not None:
                 relay_question = dict(stopped_location)
