@@ -71,6 +71,27 @@ async def test_nextcloud_workspace_has_the_talk_attachments_place(client, config
     assert response.status_code == 404
 
 
+async def test_an_accepted_share_is_listed_and_never_browsed(client, config):
+    from istota.sharing import sources
+    with db.get_db(config.db_path) as conn:
+        source_id = sources.create_source(
+            conn, user_id="alice", kind="ocm_share", state="pending",
+            remote_host="cloud.example.org", remote_key="cloud.example.org|41", access="read",
+            extras={"name": "Taxes 2026", "webdav": "https://cloud.example.org/public.php/webdav/"},
+        )
+        sources.set_state(conn, source_id, "alice", "active")
+        conn.commit()
+    response = await client.get("/workspace/places")
+    share = next(p for p in response.json()["places"] if p["id"] == f"share:{source_id}")
+    assert share["kind"] == "share" and share["label"] == "Taxes 2026"
+    assert share["browsable"] is False and share["view_root"] is None
+    assert share["remote"] == {"host": "cloud.example.org", "access": "read"}
+    assert share["reach"]["restricted"] == "none"
+    assert "webdav" not in response.text
+    response = await client.get("/workspace/list", params={"place": f"share:{source_id}", "path": ""})
+    assert response.status_code == 404
+
+
 @pytest.mark.parametrize("place,path", [("unknown", ""), ("talk", ""), ("home", "../bob"), ("home", "notes/../"), ("home", "bad\0name")])
 async def test_refused_list(client, place, path):
     response = await client.get("/workspace/list", params={"place": place, "path": path})

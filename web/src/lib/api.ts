@@ -6487,10 +6487,12 @@ export function finishSetup(): Promise<SetupFinished> {
 export type WorkspaceAccess = 'rw' | 'ro' | 'skill' | 'none' | 'conditional';
 export interface WorkspacePlace {
   id: string;
-  kind: 'home' | 'linked' | 'room' | 'group' | 'talk' | 'drive' | 'nextcloud';
+  kind: 'home' | 'linked' | 'room' | 'group' | 'talk' | 'drive' | 'nextcloud' | 'share';
   label: string;
   browsable: boolean;
   view_root: string | null;
+  /** A shared folder's provider host and last recorded access; `share` places only. */
+  remote?: { host: string; access: 'read' | 'write' };
   reach: {
     private: WorkspaceAccess;
     shared_member: WorkspaceAccess;
