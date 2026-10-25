@@ -378,6 +378,24 @@ def discover_shared_calendars(
     ]
 
 
+def discover_shared_folders(
+    conn: sqlite3.Connection,
+    task,
+    *,
+    skill_index: Mapping[str, object],
+) -> list[tuple[str, str, str]]:
+    """``(share_id, host, access)`` for each OCM share the task may reach, for the prompt line.
+
+    Ids, hosts and access only: a folder's name is the sharer's text and is
+    read through the ``shares`` skill, fenced. ``access`` is the last one
+    recorded; the skill re-reads it from the provider on every call.
+    """
+    return [
+        (f"share:{source.id}", source.remote_host, source.access)
+        for source in sources_for_task(conn, task, kind="ocm_share", skill_index=skill_index)
+    ]
+
+
 def _remove_secrets(conn: sqlite3.Connection, source: SharedSource) -> None:
     for key in secret_keys(source.id):
         secrets_store.delete_secret(None, source.user_id, SECRET_SERVICE, key, connection=conn)

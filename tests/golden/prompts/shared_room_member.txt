@@ -47,6 +47,7 @@ You have access to:
   - `istota-skill notes` — the notes skill
   - `istota-skill operator` — the operator skill
   - `istota-skill rooms` — the rooms skill
+  - `istota-skill shares` — the shares skill
   - `istota-skill triage` — the triage skill
 - Available skills (load on demand). These skills are relevant to this task but their full instructions are NOT included below. Before using one, run `istota-skill skills show <name>` to load its documentation:
   - calendar: the calendar skill
@@ -55,6 +56,7 @@ You have access to:
   - nextcloud: the nextcloud skill
   - operator: the operator skill
   - rooms: the rooms skill
+  - shares: the shares skill
 - Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.
 
 ## Important rules
@@ -83,7 +85,7 @@ You have access to:
 WEB GUIDELINES for alice.
 
 
-## Skills Reference (v: 189953be8510)
+## Skills Reference (v: 1b6323ecce8b)
 
 ### Notes
 

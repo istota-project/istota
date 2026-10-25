@@ -6922,6 +6922,7 @@ def build_prompt(
     skip_memory: bool = False,
     shared_calendars: "list[tuple[str, str]] | None" = None,
     istota_calendar: str | None = None,
+    shared_folders: "list[tuple[str, str, str]] | None" = None,
 ) -> ComposedPrompt:
     """Build a task's prompt, split by authority rather than by size.
 
@@ -7044,6 +7045,19 @@ def build_prompt(
         resource_sections.append(
             "Other calendars (read-only unless noted, via istota-skill calendar): "
             f"{listed}"
+        )
+
+    # Folders the user shared with Istota over OCM (`sharing.ocm`): ids, hosts
+    # and access only; a folder's name is the sharer's text, read fenced
+    # through `shares list`.
+    folders = [
+        f"{_one_line(share_id)} ({_one_line(host)}, "
+        f"{'read-write' if access == 'write' else 'read-only'})"
+        for share_id, host, access in (shared_folders or [])
+    ]
+    if folders:
+        resource_sections.append(
+            "Shared folders (via istota-skill shares): " + ", ".join(folders)
         )
 
     resources_text = "\n\n".join(resource_sections)
@@ -7742,20 +7756,26 @@ def _task_withheld_scopes(
     return withheld
 
 
-def _discover_shared_calendars(
+def _discover_shared(
     config: Config, task: db.Task, conn: "db.sqlite3.Connection | None", skill_index,
-) -> list[tuple[str, str]]:
-    """``sharing.sources.discover_shared_calendars``, best-effort: ``[]`` on any failure."""
+    *, kind: str,
+) -> list[tuple]:
+    """``sharing.sources.discover_shared_calendars`` or ``discover_shared_folders``
+    (``kind`` ``calendars`` or ``folders``), best-effort: ``[]`` on any failure."""
     from istota.sharing import sources as shared_sources
 
+    discover = {
+        "calendars": shared_sources.discover_shared_calendars,
+        "folders": shared_sources.discover_shared_folders,
+    }[kind]
     try:
         with db.get_db_if_present(config.db_path, conn) as c:
             if c is None:
                 return []
-            return shared_sources.discover_shared_calendars(c, task, skill_index=skill_index)
+            return discover(c, task, skill_index=skill_index)
     except Exception as exc:  # noqa: BLE001 — a missing line beats a failed task
-        logger.warning("shared calendar discovery failed for task %s: %s",
-                       task.id, type(exc).__name__)
+        logger.warning("shared %s discovery failed for task %s: %s",
+                       kind, task.id, type(exc).__name__)
         return []
 
 
@@ -8543,10 +8563,14 @@ def execute_task(
     shared_calendars = []
     istota_calendar = None
     if "calendar" in cli_skill_names and "calendar" not in _withheld and not _ambient_off:
-        shared_calendars = _discover_shared_calendars(config, task, conn, skill_index)
+        shared_calendars = _discover_shared(config, task, conn, skill_index, kind="calendars")
         # Istota's own calendar (`sharing.events`) is always there; writable
         # unless `[sharing] events_per_task` turned its writes off.
         istota_calendar = "writable" if config.sharing.events_per_task > 0 else "read-only"
+    # Accepted folder shares (`sharing.ocm`), ambient on the same terms.
+    shared_folders = []
+    if "shares" in cli_skill_names and "shares" not in _withheld and not _ambient_off:
+        shared_folders = _discover_shared(config, task, conn, skill_index, kind="folders")
 
     # Build prompt
     # Detect confirmed tasks — pass their previous output as confirmation context
@@ -8573,6 +8597,7 @@ def execute_task(
         skip_memory=_skip_memory,
         shared_calendars=shared_calendars,
         istota_calendar=istota_calendar,
+        shared_folders=shared_folders,
         conn=conn,
         effective_prompt=effective_prompt,
         attachment_status=image_attachment_status(image_prep),
