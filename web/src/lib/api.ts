@@ -105,6 +105,9 @@ async function apiFetch<T>(path: string, init?: RequestInit, timeoutMs = 0): Pro
         body: detail as unknown,
       });
     }
+    // A delete that succeeded has nothing to say; reading a body it never
+    // sent would turn the success into a parse error.
+    if (resp.status === 204) return undefined as T;
     try {
       // **Awaited**, so the read happens inside this `try` and ahead of the
       // `finally` below. `return resp.json()` cleared the timer on the headers
@@ -5577,7 +5580,9 @@ export async function runNotificationAction(
   });
 }
 
-export { AuthError };
+// `apiFetch` is shared with the per-module clients (`$lib/apps/api`), so a
+// module's fetchers get the same transport reporting and error body.
+export { AuthError, apiFetch };
 
 export interface CredentialGrant {
   scope_mode: 'all' | 'rooms';
