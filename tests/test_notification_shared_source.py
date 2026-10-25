@@ -18,7 +18,7 @@ from istota.notifications import store
 from istota.notifications.resolvers import shared_source
 from istota.sharing import sources
 from tests.test_sharing_ocm import (  # noqa: F401 -- shared fixtures
-    Sender, _offers, _receive, config, fresh_limits, secret_key_env, sender,
+    Sender, _offers, _receive, _receive_signed, config, fresh_limits, key, secret_key_env, sender,
 )
 
 FOLDER = "Confidential Merger Plans"
@@ -142,13 +142,14 @@ def test_several_offers_are_reviewed_on_the_card(config, sender):  # noqa: F811
     assert [a.id for a in row.actions] == ["review"]
 
 
-def test_a_re_offer_of_an_active_share_keeps_it_open(config, sender):  # noqa: F811
+def test_a_re_offer_of_an_active_share_keeps_it_open(config, sender, key):  # noqa: F811
     _receive(config, _offer(sender))
     [offer] = _offers(config)
     with db.get_db(config.db_path) as conn:
         sources.set_state(conn, offer.id, "alice", "active")
         conn.commit()
     assert _panel(config)[0] == []
-    _receive(config, _offer(sender))
+    # Only a signing sender's repeat is held for re-acceptance.
+    _receive_signed(config, sender, key, _offer(sender))
     [row], _ = _panel(config)
     assert FOLDER in row.body
