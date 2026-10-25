@@ -1,0 +1,442 @@
+/* The house kit's stylesheet, inlined into every installed app document.
+
+   The tokens are minot's and the app's own, both themes, imported here so an
+   app reads the same names as the shell; client library sets `data-theme` and
+   `data-font-size` on <html> from the frame's environment. What the kit holds
+   an app to: text controls at 16px or more, touch targets at minot's floor on
+   a coarse pointer, no double-tap zoom, no scroll chaining out of the frame,
+   and the components' phone layouts (`data-compact`, minot's sm step). */
+
+@import '@minot/ui/tokens.css';
+@import '../../lib/styles/app-tokens.css';
+
+/* Chart series, in a fixed order: the room palette, which has a value per
+   theme. Five, then they repeat; a sixth series belongs in a second chart. */
+:root {
+  --istota-series-0: var(--room-color-sky);
+  --istota-series-1: var(--room-color-coral);
+  --istota-series-2: var(--room-color-teal);
+  --istota-series-3: var(--room-color-plum);
+  --istota-series-4: var(--room-color-citron);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:where(*) {
+  touch-action: manipulation;
+}
+
+html {
+  overscroll-behavior: contain;
+  background: var(--surface-base);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  line-height: var(--leading-normal);
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  padding: var(--space-3);
+  overscroll-behavior: contain;
+  font-size: var(--text-base);
+}
+
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* iOS zooms on focusing a text control under 16px, and minot's --text-base is
+   under it; the frame has no zoom pin, so the floor holds at every width. */
+input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']),
+select,
+textarea {
+  font: inherit;
+  font-size: max(16px, var(--text-base));
+  line-height: var(--leading-tight);
+  min-height: var(--control-height-lg);
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  max-width: 100%;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--focus-field-border);
+}
+
+a {
+  color: var(--link);
+}
+
+/* The in-frame notice the client library shows for stale_version and offline. */
+.istota-notice {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-notice);
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--status-warn-bg);
+  color: var(--status-warn-fg);
+  font-size: var(--text-sm);
+}
+
+/* istota-button */
+istota-button {
+  display: inline-flex;
+}
+
+.istota-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: var(--control-height-md);
+  padding: var(--space-1) var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--leading-tight);
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition-fast);
+}
+
+.istota-btn:disabled {
+  opacity: var(--disabled-opacity);
+  cursor: not-allowed;
+}
+
+.istota-btn--primary {
+  background: var(--accent);
+  color: var(--surface-base);
+}
+
+.istota-btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.istota-btn--secondary {
+  background: var(--surface-raised);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  color: var(--text-primary);
+}
+
+.istota-btn--secondary:hover:not(:disabled) {
+  background: var(--border-default);
+}
+
+.istota-btn--danger {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--status-danger-fg);
+  color: var(--status-danger-fg);
+}
+
+.istota-btn--danger:hover:not(:disabled) {
+  background: var(--status-danger-bg);
+}
+
+@media (pointer: coarse) {
+  .istota-btn {
+    min-height: max(var(--control-height-lg), var(--touch-min));
+    min-width: var(--touch-min);
+  }
+}
+
+/* istota-list: rows of label and trailing parts; the trailing parts wrap
+   under the label on a phone rather than squeezing it. */
+istota-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-card);
+}
+
+istota-list > * {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+istota-list > *:last-child {
+  border-bottom: none;
+}
+
+istota-list[data-compact] > * {
+  flex-wrap: wrap;
+}
+
+/* istota-table: a plain table at width, one card per row on a phone with each
+   cell named by its column header (`data-label`, set by the component). */
+istota-table {
+  display: block;
+  overflow-x: auto;
+}
+
+istota-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+istota-table th {
+  text-align: left;
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-default);
+}
+
+istota-table th,
+istota-table td {
+  padding: var(--space-2) var(--space-3);
+}
+
+istota-table td {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+istota-table[data-compact] thead {
+  display: none;
+}
+
+istota-table[data-compact] table,
+istota-table[data-compact] tbody,
+istota-table[data-compact] tr {
+  display: block;
+}
+
+istota-table[data-compact] tr {
+  margin-bottom: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-card);
+}
+
+istota-table[data-compact] td {
+  display: grid;
+  grid-template-columns: minmax(6rem, 40%) 1fr;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+  border-bottom: none;
+}
+
+istota-table[data-compact] td::before {
+  content: attr(data-label);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+/* istota-form: a label column beside the controls at width, stacked on a
+   phone. A field is `<label><span>Name</span><input></label>`. */
+istota-form {
+  display: block;
+}
+
+istota-form form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+istota-form label {
+  display: grid;
+  grid-template-columns: minmax(8rem, 30%) 1fr;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+istota-form[data-compact] label {
+  grid-template-columns: 1fr;
+  gap: var(--space-1);
+}
+
+/* istota-dialog: shown only while `open`. */
+istota-dialog {
+  display: none;
+}
+
+istota-dialog[open] {
+  display: block;
+}
+
+.istota-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  background: var(--scrim-bg);
+}
+
+.istota-dialog-panel {
+  position: fixed;
+  z-index: var(--z-modal-panel);
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(28rem, calc(100% - 2 * var(--space-4)));
+  max-height: calc(100% - 2 * var(--space-4));
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-lg);
+}
+
+.istota-dialog-title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+}
+
+.istota-dialog-message {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.istota-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* istota-chart: thin marks, a recessive grid, text in text tokens and colour
+   only on the marks. SVG labels are px on purpose: they do not scale. */
+istota-chart {
+  display: block;
+}
+
+.istota-chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.istota-chart-grid {
+  stroke: var(--border-subtle);
+  stroke-width: 1px;
+}
+
+.istota-chart-axis {
+  stroke: var(--border-default);
+  stroke-width: 1px;
+}
+
+.istota-chart-tick {
+  fill: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+}
+
+.istota-chart-line {
+  fill: none;
+  stroke-width: 2px;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.istota-chart-dot {
+  stroke: var(--surface-base);
+  stroke-width: 2px;
+}
+
+.istota-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+
+.istota-chart-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.istota-chart-swatch {
+  width: var(--space-2);
+  height: var(--space-2);
+  border-radius: var(--radius-round);
+}
+
+istota-chart[data-compact] .istota-chart-legend {
+  flex-direction: column;
+}
+
+.istota-chart-line.istota-series-0 {
+  stroke: var(--istota-series-0);
+}
+.istota-chart-line.istota-series-1 {
+  stroke: var(--istota-series-1);
+}
+.istota-chart-line.istota-series-2 {
+  stroke: var(--istota-series-2);
+}
+.istota-chart-line.istota-series-3 {
+  stroke: var(--istota-series-3);
+}
+.istota-chart-line.istota-series-4 {
+  stroke: var(--istota-series-4);
+}
+
+.istota-chart-dot.istota-series-0,
+.istota-chart-bar.istota-series-0,
+.istota-chart-swatch.istota-series-0 {
+  fill: var(--istota-series-0);
+  background: var(--istota-series-0);
+}
+.istota-chart-dot.istota-series-1,
+.istota-chart-bar.istota-series-1,
+.istota-chart-swatch.istota-series-1 {
+  fill: var(--istota-series-1);
+  background: var(--istota-series-1);
+}
+.istota-chart-dot.istota-series-2,
+.istota-chart-bar.istota-series-2,
+.istota-chart-swatch.istota-series-2 {
+  fill: var(--istota-series-2);
+  background: var(--istota-series-2);
+}
+.istota-chart-dot.istota-series-3,
+.istota-chart-bar.istota-series-3,
+.istota-chart-swatch.istota-series-3 {
+  fill: var(--istota-series-3);
+  background: var(--istota-series-3);
+}
+.istota-chart-dot.istota-series-4,
+.istota-chart-bar.istota-series-4,
+.istota-chart-swatch.istota-series-4 {
+  fill: var(--istota-series-4);
+  background: var(--istota-series-4);
+}
