@@ -249,6 +249,79 @@ export function reinstallStarter(appId: string): Promise<{ app_id: string; statu
   return post(`/starter/${seg(appId)}/reinstall`);
 }
 
+/** The codes a bridge call can fail with: the kit's `IstotaError.code`. */
+export const BRIDGE_ERROR_CODES = [
+  'not_granted',
+  'bad_args',
+  'quota',
+  'rate_limited',
+  'stale_version',
+  'not_found',
+  'offline',
+  'timeout',
+  'internal',
+] as const;
+export type BridgeErrorCode = (typeof BRIDGE_ERROR_CODES)[number];
+
+export interface BridgeFailure {
+  code: BridgeErrorCode;
+  message: string;
+}
+
+export type CallOutcome = { ok: true; result: unknown } | { ok: false; error: BridgeFailure };
+
+function bridgeCode(value: unknown): BridgeErrorCode {
+  return (BRIDGE_ERROR_CODES as readonly unknown[]).includes(value)
+    ? (value as BridgeErrorCode)
+    : 'internal';
+}
+
+/**
+ * One data call from an app frame, made by the shell page with the user's
+ * session. The server checks the version, the grant and its scope, and the
+ * rate; a refusal comes back as its typed code rather than a throw, since the
+ * bridge hands it to the frame as it is. An expired session still throws the
+ * shared `AuthError`. A request that reached no server reads as `offline`.
+ */
+export async function callApp(
+  appId: string,
+  version: number,
+  call: { capability: string; op: string; args: Record<string, unknown> },
+): Promise<CallOutcome> {
+  try {
+    const answer = await post<{ result?: unknown }>(`/${seg(appId)}/v/${version}/call`, call);
+    return { ok: true, result: answer?.result ?? null };
+  } catch (e) {
+    if (e instanceof AuthError) throw e;
+    if (!(e instanceof AppsApiError)) {
+      return { ok: false, error: { code: 'offline', message: 'Could not reach the server.' } };
+    }
+    const error = (e.body as { error?: { code?: unknown; message?: unknown } } | null)?.error;
+    return {
+      ok: false,
+      error: {
+        code: bridgeCode(error?.code),
+        message: typeof error?.message === 'string' ? error.message : '',
+      },
+    };
+  }
+}
+
+export type AppErrorKind = 'error' | 'rejection' | 'navigated' | 'shell';
+
+/** Record an error report against a version: one the app sent, or a navigation the shell saw. */
+export function reportAppError(
+  appId: string,
+  version: number,
+  report: { kind: AppErrorKind; message: string; stack?: string },
+): Promise<void> {
+  return post(`/${seg(appId)}/v/${version}/errors`, {
+    kind: report.kind,
+    message: report.message,
+    stack: report.stack ?? '',
+  });
+}
+
 /** Where the approval screen for a pending install lives. */
 export function installPath(appId: string, pendingId: string): string {
   return `/apps/${seg(appId)}/install/${seg(pendingId)}/`;

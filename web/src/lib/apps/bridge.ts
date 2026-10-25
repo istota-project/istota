@@ -1,0 +1,241 @@
+/**
+ * The shell's half of the app bridge: the relay between an app frame and the
+ * server.
+ *
+ * The shell is not the enforcement point; the server's call route is, and it
+ * checks every call against the installed version's grants. What the relay
+ * holds is narrower and still load-bearing:
+ *
+ * - **The source check.** A message is taken only when `event.source` is the
+ *   frame's own window. An opaque-origin frame's `event.origin` is `"null"`, so
+ *   the origin says nothing about who sent it.
+ * - **The shape check.** Anything that is not one of the kit's two request
+ *   shapes is dropped without a reply.
+ * - **Only the installed document.** After the frame has navigated, nothing
+ *   from it is answered and nothing is sent to it.
+ * - **The reply guard.** Replies go out with `postMessage(msg, '*')`, since an
+ *   opaque origin cannot be named as a target, so they reach whatever document
+ *   is in the frame. The navigation count is read when a request arrives and
+ *   again immediately before its reply; if it moved, the reply is dropped. A
+ *   race remains between that check and the post, and it can only deliver data
+ *   the app was already granted.
+ * - **Shell calls** (`env`, `copy`, `error`) are answered here and reach no
+ *   data. None of them can be widened into a capability.
+ *
+ * The network, the clipboard and the error route come in as functions, so this
+ * file imports nothing from the app: the escape tier's shell page (stage 11)
+ * loads it as it is, beside `frameWatch.ts`.
+ */
+import type { AppErrorKind, BridgeFailure, CallOutcome } from './api';
+import type { AppEnv } from './env';
+
+export const PROTOCOL = 1;
+
+/** Error reports forwarded per frame load; a looping app stops being heard after this. */
+export const ERROR_REPORTS_PER_LOAD = 20;
+const REPORT_TEXT_MAX = 4096;
+/** The longest capability or op name relayed. The server holds the real rule. */
+const NAME_MAX = 200;
+const COPY_MAX = 1_000_000;
+
+export interface CallRequest {
+  istota: 1;
+  id: number;
+  kind: 'call';
+  capability: string;
+  op: string;
+  args: Record<string, unknown>;
+}
+
+export interface ShellRequest {
+  istota: 1;
+  id: number;
+  kind: 'shell';
+  op: 'env' | 'copy' | 'error';
+  args: Record<string, unknown>;
+}
+
+export type BridgeRequest = CallRequest | ShellRequest;
+
+export type BridgeReply =
+  | { istota: 1; id: number; ok: true; result: unknown }
+  | { istota: 1; id: number; ok: false; error: BridgeFailure };
+
+export interface BridgeOptions {
+  /** The frame's window: the only source a message is taken from. */
+  frameWindow: () => Window | null;
+  /** Loads after the first (`FrameWatch.navigations`). */
+  navigations: () => number;
+  online: () => boolean;
+  env: () => AppEnv;
+  /** Relay a data call to the server (`api.callApp` for this app and version). */
+  call: (request: {
+    capability: string;
+    op: string;
+    args: Record<string, unknown>;
+  }) => Promise<CallOutcome>;
+  copy: (text: string) => Promise<boolean>;
+  report: (report: { kind: AppErrorKind; message: string; stack: string }) => Promise<void>;
+  /** Told about a call's failure, so the page can act on `not_found` or a lost session. */
+  onCallFailed?: (code: BridgeFailure['code']) => void;
+  /** The call threw rather than answering: an expired session. */
+  onCallThrew?: (error: unknown) => void;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function isName(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= NAME_MAX;
+}
+
+/** One of the kit's two request shapes, or null for anything else. */
+export function parseRequest(data: unknown): BridgeRequest | null {
+  if (!isPlainObject(data)) return null;
+  if (data.istota !== PROTOCOL) return null;
+  const id = data.id;
+  if (typeof id !== 'number' || !Number.isSafeInteger(id) || id < 0) return null;
+  const args = data.args === undefined ? {} : data.args;
+  if (!isPlainObject(args)) return null;
+  if (data.kind === 'call') {
+    if (!isName(data.capability) || !isName(data.op)) return null;
+    return { istota: PROTOCOL, id, kind: 'call', capability: data.capability, op: data.op, args };
+  }
+  if (data.kind === 'shell') {
+    if (data.op !== 'env' && data.op !== 'copy' && data.op !== 'error') return null;
+    return { istota: PROTOCOL, id, kind: 'shell', op: data.op, args };
+  }
+  return null;
+}
+
+function clip(value: unknown): string {
+  return typeof value === 'string' ? value.slice(0, REPORT_TEXT_MAX) : '';
+}
+
+export interface Bridge {
+  /** Handle one `message` event; exposed for tests and the escape tier's page. */
+  handle(event: MessageEvent): void;
+  /** Tell the frame the environment changed. */
+  postEnv(env: AppEnv): void;
+  /** Listen on `target` (the shell page's window). Returns the cleanup. */
+  attach(target: Window): () => void;
+  /** Drop every reply still in flight. */
+  dispose(): void;
+}
+
+export function createBridge(options: BridgeOptions): Bridge {
+  let disposed = false;
+  let reportsAtLoad = -1;
+  let reportsLeft = ERROR_REPORTS_PER_LOAD;
+
+  function post(message: unknown, askedAt: number) {
+    if (disposed) return;
+    // The reply guard: the document that asked is still the one in the frame.
+    if (options.navigations() !== askedAt) return;
+    const target = options.frameWindow();
+    if (!target) return;
+    target.postMessage(message, '*');
+  }
+
+  function reply(id: number, askedAt: number, result: unknown) {
+    const message: BridgeReply = { istota: PROTOCOL, id, ok: true, result: result ?? null };
+    post(message, askedAt);
+  }
+
+  function fail(id: number, askedAt: number, error: BridgeFailure) {
+    const message: BridgeReply = { istota: PROTOCOL, id, ok: false, error };
+    post(message, askedAt);
+  }
+
+  async function relayCall(request: CallRequest, askedAt: number) {
+    if (!options.online()) {
+      fail(request.id, askedAt, { code: 'offline', message: 'You are offline.' });
+      return;
+    }
+    let outcome: CallOutcome;
+    try {
+      outcome = await options.call({
+        capability: request.capability,
+        op: request.op,
+        args: request.args,
+      });
+    } catch (e) {
+      options.onCallThrew?.(e);
+      fail(request.id, askedAt, { code: 'internal', message: 'The call could not be made.' });
+      return;
+    }
+    if (outcome.ok) {
+      reply(request.id, askedAt, outcome.result);
+      return;
+    }
+    options.onCallFailed?.(outcome.error.code);
+    fail(request.id, askedAt, outcome.error);
+  }
+
+  async function answerShell(request: ShellRequest, askedAt: number) {
+    if (request.op === 'env') {
+      reply(request.id, askedAt, { ...options.env() });
+      return;
+    }
+    if (request.op === 'copy') {
+      const text = request.args.text;
+      if (typeof text !== 'string' || text.length > COPY_MAX) {
+        fail(request.id, askedAt, { code: 'bad_args', message: 'copy takes one string.' });
+        return;
+      }
+      const copied = await options.copy(text).catch(() => false);
+      if (copied) reply(request.id, askedAt, null);
+      else fail(request.id, askedAt, { code: 'internal', message: 'Could not copy.' });
+      return;
+    }
+    // An error report from the app's own `error` or `unhandledrejection`.
+    const kind = request.args.kind === 'rejection' ? 'rejection' : 'error';
+    if (reportsAtLoad !== askedAt) {
+      reportsAtLoad = askedAt;
+      reportsLeft = ERROR_REPORTS_PER_LOAD;
+    }
+    if (reportsLeft <= 0) {
+      reply(request.id, askedAt, null);
+      return;
+    }
+    reportsLeft -= 1;
+    await options
+      .report({ kind, message: clip(request.args.message), stack: clip(request.args.stack) })
+      .catch(() => {});
+    reply(request.id, askedAt, null);
+  }
+
+  function handle(event: MessageEvent) {
+    if (disposed) return;
+    const frame = options.frameWindow();
+    if (!frame || event.source !== frame) return;
+    // The frame's window stays the same object across a navigation, so a page
+    // the app navigated to would pass the source check. Only the installed
+    // document is answered.
+    const askedAt = options.navigations();
+    if (askedAt !== 0) return;
+    const request = parseRequest(event.data);
+    if (!request) return;
+    if (request.kind === 'call') void relayCall(request, askedAt);
+    else void answerShell(request, askedAt);
+  }
+
+  return {
+    handle,
+    postEnv(env) {
+      if (options.navigations() !== 0) return;
+      post({ istota: PROTOCOL, kind: 'env', env: { ...env } }, options.navigations());
+    },
+    attach(target) {
+      const listener = (event: MessageEvent) => handle(event);
+      target.addEventListener('message', listener);
+      return () => target.removeEventListener('message', listener);
+    },
+    dispose() {
+      disposed = true;
+    },
+  };
+}
