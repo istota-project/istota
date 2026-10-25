@@ -1326,6 +1326,7 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     _migrate_push_tables(conn)
     _migrate_location_ingest_tokens(conn)
     _migrate_quick_note_keys(conn)
+    _migrate_shared_sources(conn)
     _migrate_device_tokens(conn)
     _migrate_mobile_auth_requests(conn)
     _migrate_notifications_push_pending(conn)
@@ -9660,6 +9661,33 @@ def _migrate_quick_note_keys(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (user_id, client_note_id)
         )
     """)
+
+
+def _migrate_shared_sources(conn: sqlite3.Connection) -> None:
+    """Create the open-protocol shared sources table. Pure DDL, kept in step with `schema.sql`."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS shared_sources (
+            id INTEGER PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('ics_feed', 'ocm_share')),
+            state TEXT NOT NULL CHECK (state IN ('pending', 'active', 'declined', 'revoked', 'error')),
+            remote_host TEXT NOT NULL,
+            remote_key TEXT NOT NULL,
+            access TEXT NOT NULL DEFAULT 'read' CHECK (access IN ('read', 'write')),
+            extras TEXT,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            last_reason TEXT,
+            last_ok_at TEXT,
+            next_poll_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (user_id, kind, remote_key)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shared_sources_due"
+        " ON shared_sources(kind, state, next_poll_at)"
+    )
 
 
 def _migrate_device_tokens(conn: sqlite3.Connection) -> None:

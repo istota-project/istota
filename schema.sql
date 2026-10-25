@@ -2822,3 +2822,29 @@ CREATE TABLE IF NOT EXISTS web_mobile_auth_requests (
 CREATE INDEX IF NOT EXISTS idx_web_mobile_auth_expiry ON web_mobile_auth_requests(expires_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_web_mobile_auth_code ON web_mobile_auth_requests(code_digest);
 CREATE INDEX IF NOT EXISTS idx_web_mobile_auth_source ON web_mobile_auth_requests(source, expires_at);
+
+-- Things a user shared with Istota through an open protocol
+-- (istota.sharing.sources): an ICS feed or an OCM folder share. The bearer
+-- secret is never here: an ICS address or a held OCM secret is a `secrets`
+-- row under service `shared_source`, an accepted share's secret the local
+-- credential `ocm_share_<id>`. `declined` and `revoked` rows keep their
+-- identity columns and lose the secret, so a repeat of the same remote
+-- resource is recognised rather than duplicated.
+CREATE TABLE IF NOT EXISTS shared_sources (
+    id INTEGER PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('ics_feed', 'ocm_share')),
+    state TEXT NOT NULL CHECK (state IN ('pending', 'active', 'declined', 'revoked', 'error')),
+    remote_host TEXT NOT NULL,         -- host[:port], for display and binding
+    remote_key TEXT NOT NULL,          -- ics: sha256 of the normalized URL; ocm: '<sender host>|<providerId>'
+    access TEXT NOT NULL DEFAULT 'read' CHECK (access IN ('read', 'write')),
+    extras TEXT,                       -- JSON, never a secret
+    error_count INTEGER NOT NULL DEFAULT 0,
+    last_reason TEXT,                  -- a fixed reason code, never response text
+    last_ok_at TEXT,
+    next_poll_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, kind, remote_key)
+);
+CREATE INDEX IF NOT EXISTS idx_shared_sources_due ON shared_sources(kind, state, next_poll_at);
