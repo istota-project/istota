@@ -4,7 +4,7 @@
   import Layout from './+layout.svelte';
   import Wallet from './wallet/+page.svelte';
   setCurrentUser({
-    user: { username: 'alice', features: { money: true } } as User,
+    user: { username: 'alice', features: { money: true, apps: true } } as User,
     live: true,
     reload: async () => true,
     expireSession: () => {},

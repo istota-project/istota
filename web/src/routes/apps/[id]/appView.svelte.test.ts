@@ -8,6 +8,7 @@ const apps = vi.hoisted(() => ({
   getApps: vi.fn(),
   getApp: vi.fn(),
   uninstallApp: vi.fn(async () => {}),
+  grantCapability: vi.fn(async () => ({ capability: '', scope: null })),
   callApp: vi.fn(async () => ({ ok: true as const, result: null })),
   reportAppError: vi.fn(async () => {}),
 }));
@@ -245,5 +246,77 @@ describe('the app view', () => {
     apps.getApp.mockRejectedValue(new AppsApiError(404, 'app not found'));
     render(Harness);
     expect(await screen.findByText('This app is not installed.')).toBeTruthy();
+  });
+
+  describe('the first open of a starter app that asks for more', () => {
+    const READ_NOTES = {
+      capability: 'files:read:notes',
+      scope: 'notes',
+      description: 'Read your files in notes',
+      sensitive: false,
+    };
+
+    function recall(overrides: Partial<AppDetail> = {}): AppDetail {
+      return detail({ app_id: 'recall', name: 'Recall', ungranted: [READ_NOTES], ...overrides });
+    }
+
+    beforeEach(() => {
+      page.url = new URL('http://localhost/apps/recall/');
+      page.params = { id: 'recall' };
+      apps.getApp.mockResolvedValue(recall());
+    });
+
+    it('asks before the frame loads, marked as shipped with Istota', async () => {
+      render(Harness);
+      expect(await screen.findByRole('heading', { name: 'Recall asks for more' })).toBeTruthy();
+      expect(screen.getByText('Shipped with Istota')).toBeTruthy();
+      expect(screen.getByText('Read your files in notes')).toBeTruthy();
+      expect((screen.getByLabelText('Folder') as HTMLInputElement).value).toBe('notes');
+      expect(document.querySelector('iframe')).toBeNull();
+    });
+
+    it('opens with only what is granted on Not now', async () => {
+      render(Harness);
+      await fireEvent.click(await screen.findByRole('button', { name: 'Not now' }));
+      await frame();
+      expect(apps.grantCapability).not.toHaveBeenCalled();
+    });
+
+    it('grants with the folder the user chose, then opens', async () => {
+      render(Harness);
+      const folder = await screen.findByLabelText('Folder');
+      await fireEvent.input(folder, { target: { value: ' notes/aviation ' } });
+      apps.getApp.mockResolvedValue(
+        recall({ ungranted: [], grants: [{ ...READ_NOTES, scope: 'notes/aviation' }] }),
+      );
+      await fireEvent.click(screen.getByRole('button', { name: 'Allow' }));
+      await waitFor(() =>
+        expect(apps.grantCapability).toHaveBeenCalledWith(
+          'recall',
+          'files:read:notes',
+          'notes/aviation',
+        ),
+      );
+      await frame();
+    });
+
+    it('shows a refused folder under its field and stays', async () => {
+      const { AppsApiError } = await import('$lib/apps/api');
+      apps.grantCapability.mockRejectedValueOnce(
+        new AppsApiError(422, 'files:read:memories: that folder cannot be granted.'),
+      );
+      render(Harness);
+      await fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
+      expect(await screen.findByText(/that folder cannot be granted/)).toBeTruthy();
+      expect(document.querySelector('iframe')).toBeNull();
+      expect(apps.getApp).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not ask for an app installed through the approval screen', async () => {
+      apps.getApp.mockResolvedValue(recall({ origin: 'draft' }));
+      render(Harness);
+      await frame();
+      expect(screen.queryByText('Recall asks for more')).toBeNull();
+    });
   });
 });

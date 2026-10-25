@@ -17,7 +17,13 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ROOM_COLORS } from './src/lib/roomColors';
-import type { AppDetail, AppsList } from './src/lib/apps/api';
+import type {
+  AppDetail,
+  AppsList,
+  AppVersion,
+  CapabilityRow,
+  PendingInstall,
+} from './src/lib/apps/api';
 
 /**
  * The dev server's vault state, mutated by the two write routes below.
@@ -7957,10 +7963,12 @@ function mockConfigFiles(path: string, method: string, body: any) {
   };
 }
 // ---- Apps (the apps-foundation spec) ----
-// Two installed apps (a starter app and one installed from a draft with an
-// update waiting), two drafts and a starter app the user uninstalled, so every
-// group in "All apps" renders. The draft `broken` fails validation, to show
-// errors on its card. Set `mockApps.kit_built = false` to see the kit alert.
+// Three installed apps (two starter apps, one of them asking for a folder on
+// first open, and one installed from a draft with an update waiting that asks
+// for something new), two drafts and a starter app the user uninstalled, so
+// every group in "All apps" and both approval shapes render. The draft
+// `broken` fails validation, to show errors on its card. Set
+// `mockApps.kit_built = false` to see the kit alert.
 const mockApps: AppsList = {
   apps: [
     {
@@ -7973,6 +7981,17 @@ const mockApps: AppsList = {
       narrowest: 'phone',
       pending_id: null,
       ungranted: [],
+    },
+    {
+      app_id: 'recall',
+      name: 'Recall',
+      icon: 'book',
+      description: 'Spaced repetition over your own notes.',
+      origin: 'starter',
+      current_version: 1,
+      narrowest: 'phone',
+      pending_id: null,
+      ungranted: ['files:read:notes'],
     },
     {
       app_id: 'tides',
@@ -8002,6 +8021,7 @@ const mockApps: AppsList = {
   ],
   starter: [
     { app_id: 'board', state: 'installed' },
+    { app_id: 'recall', state: 'installed' },
     { app_id: 'ledger', state: 'dismissed' },
   ],
   kit_built: true,
@@ -8083,6 +8103,44 @@ const appsHandler: MockHandler = ({ url, method, body }) => {
   if (call && method === 'POST') return mockAppCall(decodeURIComponent(call[1]), body);
   const errors = path.match(/^\/istota\/api\/apps\/([^/]+)\/v\/(\d+)\/errors$/);
   if (errors && method === 'POST') return { __status: 204 };
+  if (method === 'GET' && path === '/istota/api/apps/storage') {
+    return {
+      apps: mockApps.apps.map((app, i) => ({
+        app_id: app.app_id,
+        name: app.name,
+        kv_bytes: [...(mockAppKv.get(app.app_id)?.entries() ?? [])].reduce(
+          (n, [k, v]) => n + k.length + JSON.stringify(v).length,
+          0,
+        ),
+        // One app's data folder is a link in the dev server, to show "Not measured".
+        data_bytes: i === 1 ? null : 4096 * (i + 1),
+      })),
+    };
+  }
+  const pending = path.match(/^\/istota\/api\/apps\/([^/]+)\/pending\/([^/]+)(\/approve)?$/);
+  if (pending) return mockPendingRoute(pending, method, body);
+  const versions = path.match(/^\/istota\/api\/apps\/([^/]+)\/versions(?:\/(\d+)(\/current)?)?$/);
+  if (versions) return mockVersionsRoute(versions, method);
+  const grants = path.match(/^\/istota\/api\/apps\/([^/]+)\/grants$/);
+  if (grants && method === 'POST') {
+    const app = mockApps.apps.find((a) => a.app_id === decodeURIComponent(grants[1]));
+    if (!app) return { __status: 404, error: 'app not found' };
+    const capability = String(body?.capability ?? '');
+    if (!app.ungranted.includes(capability) && !mockGrantsOf(app).has(capability))
+      return { __status: 422, error: `${app.app_id} does not ask for ${capability}.` };
+    let scope = mockSplit(capability).scope;
+    if (typeof body?.scope === 'string' && body.scope !== scope) {
+      if (!capability.startsWith('files:read:'))
+        return { __status: 422, error: `The scope of ${capability} cannot be changed.` };
+      const first = body.scope.split('/')[0];
+      if (!body.scope || first === 'Istota' || first === 'memories' || first.startsWith('.'))
+        return { __status: 422, error: `files:read:${body.scope}: that folder cannot be granted.` };
+      scope = body.scope;
+    }
+    mockGrantsOf(app).set(capability, scope);
+    app.ungranted = app.ungranted.filter((c) => c !== capability);
+    return { capability, scope };
+  }
   const one = path.match(/^\/istota\/api\/apps\/([^/]+)\/?$/);
   if (one && one[1] !== 'storage') {
     const appId = decodeURIComponent(one[1]);
@@ -8093,6 +8151,7 @@ const appsHandler: MockHandler = ({ url, method, body }) => {
       mockApps.apps = mockApps.apps.filter((a) => a.app_id !== appId);
       mockApps.pending = mockApps.pending.filter((p) => p.app_id !== appId);
       mockAppKv.delete(appId);
+      mockAppVersions.delete(appId);
       const starter = mockApps.starter.find((s) => s.app_id === appId);
       if (starter) starter.state = 'dismissed';
       return { __status: 204 };
@@ -8126,17 +8185,252 @@ function mockAppDetail(app: AppsList['apps'][number]): AppDetail {
     reason: '',
     warnings: [],
     pending_id: app.pending_id,
-    grants: [
-      { capability: 'kv:own', scope: null, description: 'Keep its own data.', sensitive: false },
-      {
-        capability: 'files:own',
-        scope: null,
-        description: 'Keep its own files.',
-        sensitive: false,
-      },
-    ],
-    ungranted: [],
+    grants: [...mockGrantsOf(app).entries()].map(([cap, scope]) => mockCapRow(cap, scope)),
+    ungranted: app.ungranted.map((cap) => mockCapRow(cap, mockSplit(cap).scope)),
   };
+}
+
+/** A capability's family and qualifier, as `apps.capabilities.split_capability` reads it. */
+function mockSplit(text: string): { name: string; scope: string | null } {
+  if (text.startsWith('skill:')) return { name: 'skill', scope: text.slice(6) };
+  for (const name of ['kv:read', 'files:read', 'calendar:read']) {
+    if (text === name) return { name, scope: null };
+    if (text.startsWith(`${name}:`)) return { name, scope: text.slice(name.length + 1) };
+  }
+  return { name: text, scope: null };
+}
+
+/** The dev stand-in for `apps.capabilities.describe` and `is_sensitive`. */
+function mockCapRow(text: string, scope: string | null): CapabilityRow {
+  const { name } = mockSplit(text);
+  const description =
+    name === 'kv:own'
+      ? 'Keep its own data'
+      : name === 'files:own'
+        ? 'Read and write files in its own data folder'
+        : name === 'files:read'
+          ? `Read your files in ${scope}`
+          : name === 'kv:read'
+            ? `Read your data in the '${scope}' store`
+            : name === 'calendar:read'
+              ? scope
+                ? `Read events from your calendar '${scope}'`
+                : 'Read events from all your calendars'
+              : scope === 'health.trend'
+                ? 'Read how one of your health measures has changed over time'
+                : `Use ${scope}`;
+  return {
+    capability: text,
+    scope,
+    description,
+    sensitive: name === 'skill' && (scope ?? '').startsWith('health.'),
+  };
+}
+
+const MOCK_OWN = ['kv:own', 'files:own'];
+
+/** Each mock app's versions, oldest first; the grants are per version, as the server keeps them. */
+type MockVersion = Omit<AppVersion, 'current' | 'grants'> & { scopes: Map<string, string | null> };
+const mockAppVersions = new Map<string, MockVersion[]>();
+
+function mockVersionsOf(app: AppsList['apps'][number]) {
+  let rows = mockAppVersions.get(app.app_id);
+  if (!rows) {
+    rows = [];
+    const current = app.current_version ?? 1;
+    for (let v = 1; v <= current; v++) {
+      const asks = [...MOCK_OWN, ...(v === current ? app.ungranted : [])];
+      rows.push({
+        version: v,
+        installed_at: new Date(Date.now() - (current - v + 1) * 4 * 86_400_000).toISOString(),
+        approved_at:
+          app.origin === 'starter'
+            ? null
+            : new Date(Date.now() - (current - v + 1) * 4 * 86_400_000).toISOString(),
+        narrowest: app.narrowest ?? 'phone',
+        capabilities: asks,
+        scopes: new Map(MOCK_OWN.map((c) => [c, null])),
+      });
+    }
+    mockAppVersions.set(app.app_id, rows);
+  }
+  return rows;
+}
+
+function mockGrantsOf(app: AppsList['apps'][number]): Map<string, string | null> {
+  const row = mockVersionsOf(app).find((v) => v.version === app.current_version);
+  return row ? row.scopes : new Map();
+}
+
+function mockVersionsRoute(match: RegExpMatchArray, method: string): unknown {
+  const app = mockApps.apps.find((a) => a.app_id === decodeURIComponent(match[1]));
+  if (!app) return { __status: 404, error: 'app not found' };
+  const rows = mockVersionsOf(app);
+  const strip = () =>
+    rows.map(({ scopes, ...row }) => ({
+      ...row,
+      current: row.version === app.current_version,
+      grants: [...scopes.keys()],
+    }));
+  if (!match[2] && method === 'GET')
+    return { app_id: app.app_id, current_version: app.current_version, versions: strip() };
+  const version = Number(match[2]);
+  if (!rows.some((r) => r.version === version))
+    return { __status: 404, error: `There is no version ${version} of ${app.app_id}.` };
+  if (match[3] && method === 'POST') {
+    app.current_version = version;
+    const row = rows.find((r) => r.version === version)!;
+    app.ungranted = row.capabilities.filter((c) => !row.scopes.has(c));
+    return { app_id: app.app_id, current_version: version };
+  }
+  if (!match[3] && method === 'DELETE') {
+    if (version === app.current_version)
+      return {
+        __status: 409,
+        error: 'The current version cannot be deleted. Make another current first.',
+      };
+    mockAppVersions.set(
+      app.app_id,
+      rows.filter((r) => r.version !== version),
+    );
+    return { __status: 204 };
+  }
+  return undefined;
+}
+
+/** What a mock pending install asks for: Tides' update widens to calendars and health. */
+function mockPendingAsks(appId: string): string[] {
+  if (appId === 'tides') return [...MOCK_OWN, 'calendar:read', 'skill:health.trend'];
+  return [...MOCK_OWN];
+}
+
+function mockPendingInstall(row: AppsList['pending'][number]): PendingInstall {
+  const app = mockApps.apps.find((a) => a.app_id === row.app_id);
+  const current = app ? mockVersionsOf(app).find((v) => v.version === app.current_version) : null;
+  const asks = mockPendingAsks(row.app_id);
+  const fresh = asks.filter((c) => !MOCK_OWN.includes(c) && !current?.scopes.has(c));
+  const html = `<!doctype html>\n<html>\n<head><title>${row.name}</title></head>\n<body>\n<main id="app"></main>\n<script src="app.js"></script>\n</body>\n</html>\n`;
+  const js = "const app = document.getElementById('app');\napp.textContent = 'Hello';\n";
+  const asAdded = (text: string) =>
+    text
+      .split('\n')
+      .filter((l, i, all) => i < all.length - 1 || l)
+      .map((l) => `+${l}`)
+      .join('\n') + '\n';
+  return {
+    pending_id: row.pending_id,
+    app_id: row.app_id,
+    origin: row.origin,
+    created_at: row.created_at,
+    manifest: {
+      id: row.app_id,
+      name: row.name,
+      icon: app?.icon ?? 'app-window',
+      entry: 'index.html',
+      description: app?.description ?? '',
+      capabilities: asks,
+      narrowest: 'phone',
+      reason: '',
+    },
+    narrowest: 'phone',
+    reason: '',
+    current_version: app?.current_version ?? null,
+    capabilities: asks.map((cap) => ({
+      ...mockCapRow(cap, mockSplit(cap).scope),
+      new: fresh.includes(cap),
+      always_granted: MOCK_OWN.includes(cap),
+    })),
+    new_capabilities: fresh,
+    one_button: fresh.length === 0,
+    size: row.size,
+    warnings:
+      row.app_id === 'tides'
+        ? ['app.js: confirm( shows no dialog in the iOS app; use istota-dialog.']
+        : [],
+    diff: current
+      ? [
+          {
+            path: 'app.js',
+            status: 'changed',
+            diff: "--- a/app.js\n+++ b/app.js\n@@ -1,2 +1,3 @@\n const app = document.getElementById('app');\n-app.textContent = 'Hello';\n+app.textContent = 'High water at 14:05';\n+if (confirm('Show tomorrow too?')) app.dataset.days = '2';\n",
+          },
+          { path: 'index.html', status: 'unchanged', diff: '' },
+          {
+            path: 'manifest.toml',
+            status: 'changed',
+            diff: '--- a/manifest.toml\n+++ b/manifest.toml\n@@ -2 +2 @@\n-capabilities = []\n+capabilities = ["calendar:read", "skill:health.trend"]\n',
+          },
+        ]
+      : [
+          { path: 'index.html', status: 'added', diff: asAdded(html) },
+          { path: 'app.js', status: 'added', diff: asAdded(js) },
+        ],
+  };
+}
+
+function mockPendingRoute(match: RegExpMatchArray, method: string, body: any): unknown {
+  const appId = decodeURIComponent(match[1]);
+  const row = mockApps.pending.find(
+    (p) => p.pending_id === decodeURIComponent(match[2]) && p.app_id === appId,
+  );
+  const gone = {
+    __status: 404,
+    error: "That install is no longer waiting. Reopen it from the app's folder.",
+  };
+  if (!row) return gone;
+  if (!match[3] && method === 'GET') return mockPendingInstall(row);
+  if (!match[3] && method === 'DELETE') {
+    mockApps.pending = mockApps.pending.filter((p) => p !== row);
+    const app = mockApps.apps.find((a) => a.app_id === appId);
+    if (app) app.pending_id = null;
+    return { __status: 204 };
+  }
+  if (!(match[3] && method === 'POST')) return undefined;
+  const shown = mockPendingInstall(row);
+  const ack: unknown = body?.new_capabilities;
+  if (!Array.isArray(ack)) return { __status: 400, error: 'new_capabilities is a list' };
+  const same =
+    ack.length === shown.new_capabilities.length &&
+    shown.new_capabilities.every((c) => ack.includes(c));
+  if (!same)
+    return {
+      __status: 409,
+      error: 'stale',
+      message: 'What this install asks for changed. Review it again.',
+      new_capabilities: shown.new_capabilities,
+    };
+  let app = mockApps.apps.find((a) => a.app_id === appId);
+  if (!app) {
+    app = {
+      app_id: appId,
+      name: row.name,
+      icon: 'app-window',
+      description: '',
+      origin: 'draft',
+      current_version: 0,
+      narrowest: 'phone',
+      pending_id: null,
+      ungranted: [],
+    };
+    mockApps.apps.push(app);
+    mockAppVersions.set(appId, []);
+  }
+  const rows = mockVersionsOf(app);
+  const version = (rows.at(-1)?.version ?? 0) + 1;
+  rows.push({
+    version,
+    installed_at: new Date().toISOString(),
+    approved_at: new Date().toISOString(),
+    narrowest: 'phone',
+    capabilities: shown.manifest.capabilities,
+    scopes: new Map(shown.manifest.capabilities.map((c) => [c, mockSplit(c).scope])),
+  });
+  app.current_version = version;
+  app.pending_id = null;
+  app.ungranted = [];
+  mockApps.pending = mockApps.pending.filter((p) => p !== row);
+  mockApps.drafts = mockApps.drafts.filter((d) => d.app_id !== appId);
+  return { app_id: appId, version };
 }
 
 /** Each mock app's `kv:own` namespace, so a dev frame's writes read back. */

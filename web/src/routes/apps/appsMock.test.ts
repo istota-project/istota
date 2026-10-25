@@ -89,3 +89,58 @@ it('serves an app view: detail, a sandboxed frame, kv:own calls and uninstall', 
   expect((await request('DELETE', '/apps/board')).status).toBe(204);
   expect((await request('GET', '/apps/board')).status).toBe(404);
 });
+
+it('serves the approval screen, approves against the shown list, and rolls back', async () => {
+  const request = mockServer();
+  const shown = await request('GET', '/apps/tides/pending/mock-pending-tides');
+  expect(shown.status).toBe(200);
+  expect(shown.body.one_button).toBe(false);
+  expect(shown.body.new_capabilities).toEqual(['calendar:read', 'skill:health.trend']);
+  expect(shown.body.capabilities.some((c: { sensitive: boolean }) => c.sensitive)).toBe(true);
+
+  const stale = await request('POST', '/apps/tides/pending/mock-pending-tides/approve', {
+    new_capabilities: ['calendar:read'],
+  });
+  expect(stale.status).toBe(409);
+  expect(stale.body.error).toBe('stale');
+
+  const approved = await request('POST', '/apps/tides/pending/mock-pending-tides/approve', {
+    new_capabilities: shown.body.new_capabilities,
+  });
+  expect(approved.body).toEqual({ app_id: 'tides', version: 3 });
+  expect((await request('GET', '/apps/tides/pending/mock-pending-tides')).status).toBe(404);
+
+  const versions = await request('GET', '/apps/tides/versions');
+  expect(versions.body.versions.map((v: { version: number }) => v.version)).toEqual([1, 2, 3]);
+  expect((await request('DELETE', '/apps/tides/versions/3')).status).toBe(409);
+  await request('POST', '/apps/tides/versions/2/current');
+  expect((await request('GET', '/apps/tides')).body.current_version).toBe(2);
+  expect((await request('DELETE', '/apps/tides/versions/3')).status).toBe(204);
+});
+
+it('grants a starter app its folder on first open, and reports storage', async () => {
+  const request = mockServer();
+  const before = await request('GET', '/apps/recall');
+  expect(before.body.ungranted.map((c: { capability: string }) => c.capability)).toEqual([
+    'files:read:notes',
+  ]);
+  const refused = await request('POST', '/apps/recall/grants', {
+    capability: 'files:read:notes',
+    scope: 'memories',
+  });
+  expect(refused.status).toBe(422);
+  const granted = await request('POST', '/apps/recall/grants', {
+    capability: 'files:read:notes',
+    scope: 'notes/aviation',
+  });
+  expect(granted.body).toEqual({ capability: 'files:read:notes', scope: 'notes/aviation' });
+  const after = await request('GET', '/apps/recall');
+  expect(after.body.ungranted).toEqual([]);
+  expect(after.body.grants).toContainEqual(
+    expect.objectContaining({ capability: 'files:read:notes', scope: 'notes/aviation' }),
+  );
+
+  const storage = await request('GET', '/apps/storage');
+  expect(storage.body.apps.length).toBeGreaterThan(0);
+  expect(storage.body.apps[0]).toHaveProperty('kv_bytes');
+});

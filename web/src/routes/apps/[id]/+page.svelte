@@ -3,8 +3,9 @@
 
      Before the frame loads, three things can stand in for it: the offline
      state (the frame needs the server to load and to answer), the display
-     range's "made for a wider screen" with Open anyway, and, from stage 10, the
-     first-open capability screen for a starter app. Once the frame is running
+     range's "made for a wider screen" with Open anyway, and the first-open
+     capability screen for a starter app that asks for something not granted
+     yet (`FirstOpenPermissions`). Once the frame is running
      it is never torn down by the pane shrinking or the connection dropping,
      since that would lose what the user has not saved; an `Alert` says so
      instead, and a call made offline fails in the frame with `offline`.
@@ -41,6 +42,7 @@
   import { getAppsList } from '$lib/apps/context';
   import { fitsRange, rangeLabel } from '$lib/apps/display';
   import AppFrame from '$lib/components/apps/AppFrame.svelte';
+  import FirstOpenPermissions from '$lib/components/apps/FirstOpenPermissions.svelte';
   import { online } from '$lib/stores/connectivity';
   import { getCurrentUser } from '$lib/userContext';
 
@@ -58,6 +60,8 @@
   let started = $state(false);
   let openAnyway = $state(false);
   let navigated = $state(false);
+  /** "Not now" on the first-open screen: this open goes ahead with what is granted. */
+  let notNow = $state(false);
   let uninstallOpen = $state(false);
   let deleteData = $state(false);
 
@@ -96,14 +100,19 @@
     started = false;
     openAnyway = false;
     navigated = false;
+    notNow = false;
     untrack(() => void load(id));
   });
 
   const fits = $derived(!detail || fitsRange(detail.narrowest, apps.paneWidth));
-  /* Stage 10's first-open capability screen goes before the frame: a starter
-     app with `detail.ungranted` asks for them there. Until it lands the app
-     opens with what it has been granted, as "Not now" would. */
-  const ready = $derived(!!detail && !navigated && (fits || openAnyway) && $online);
+  /* A starter app is installed without an approval, so what it asks for
+     beyond its own data is asked on open, before the frame loads. An app
+     installed through the approval screen was granted everything it asked for
+     there, so it never lands here. */
+  const asking = $derived(
+    !!detail && detail.origin === 'starter' && detail.ungranted.length > 0 && !notNow,
+  );
+  const ready = $derived(!!detail && !navigated && !asking && (fits || openAnyway) && $online);
 
   $effect(() => {
     if (ready) started = true;
@@ -218,6 +227,15 @@
       <EmptyState title="You are offline">
         {detail.name} opens when the connection is back.
       </EmptyState>
+    {:else if asking}
+      {#key detail.app_id}
+        <FirstOpenPermissions
+          {detail}
+          onGranted={() => void load(appId)}
+          onNotNow={() => (notNow = true)}
+          onExpired={() => identity.expireSession()}
+        />
+      {/key}
     {:else if !fits}
       <EmptyState
         title="Made for a wider screen"
