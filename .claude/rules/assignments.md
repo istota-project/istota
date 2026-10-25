@@ -19,8 +19,23 @@ A core package, `src/istota/assignments/`, not a module in `MODULE_NAMES`: wakes
 | `store.py` | Row access for every assignment table. Plain functions on the caller's connection; commits nothing, decides nothing. |
 | `charter.py` | Validating charter fields (`CharterError(code, message)`), the slug, `render`, `charter_digest`, the assignment directory with its seed `SCRATCHPAD.md`, and the `CHARTER.md` writer. |
 | `validators.py` | The validator menu (`file_parses`, `csv_columns`, literal `contains`), `parse_spec`, and `run_item`, which never raises. |
+| `lifecycle.py` | The one writer of `assignments.state`: one function per transition, each inside `relay.requests.write_transaction` with the source state re-read and checked (`TransitionError(code, message, state)`), each appending an `assignment_events` row. Also the user's other writes: `edit_charter`, notes, item confirmation, hand-off reports, `topup`, `close`. |
+| `caller.py` | `classify(conn, task_id=, user_id=)`: `UserTurn`, `Wake(assignment_id, wake_id)` or `Other`, from the task row. |
+| `budget.py` | The ledger (`totals`), `remaining`, `is_spent`, `topped_up` and the `max_active_per_user` count. |
+| `skills/assignment/` | The CLI: the user-turn verbs and `list` / `show`. |
 
-The modules for the scratchpad, budget, lifecycle, wakes, prompt and caller, the `assignment` skill and the bell resolver are added by later stages of the same work, each named here as it lands.
+The modules for the scratchpad, wakes and prompt, the wake-facing verbs, activation and the bell resolver are added by later stages of the same work, each named here as it lands.
+
+## Who may write
+
+- **A user turn** (`caller.UserTurn`) is a running task of the user from `web`, `talk` or `cli`, with no guest, no other author on its stored turn (`rooms.scopes.written_by_someone_else`), no parent, scheduled job, command or skill, not a group chat, and, when it has a conversation token, a registered room only that user reads (`db.is_private_room_of` on the canonical token; an unregistered token is refused). Every verb that changes the charter, the state or the budget, or writes a trusted inbox event, needs one. A wake trying one gets `not_a_user_turn`.
+- **The CLI's gates come first**: the `skill_assignment` flag (`feature_disabled`), admin (`not_admin`), `_guard_skill`, and a refusal when the calling task has scopes withheld, since an assignment is the user's personal record. Then every lookup is scoped by `ISTOTA_USER_ID`.
+- **Refusals are raised, not printed.** Handlers raise `Refusal`, `TransitionError` or `CharterError`, and `run_skill_cli`'s `on_exception` turns them into `{"status": "error", "error": code, "message": ...}`, so a refused write rolls back with the connection. A successful write is committed before `CHARTER.md` is rewritten.
+- **A draft's charter edits write no inbox event**; after activation every edit that moves the render writes a trusted `charter_change` with both renders. `edit_charter` is the one place a charter changes, so it is where Stage 4 cancels a held activation.
+
+## The ledger
+
+`budget.totals` sums `task_usage.cost_usd` by `assignment_id`. That column is `NOT NULL DEFAULT 0.0`, so "unmeasured" is read elsewhere: a finished wake (outcome other than `not_active`) is unmeasured when no usage row for its task has `has_totals = 1`, which covers a brain that writes no row and a run that ended before a result frame. Its cost counts as zero; `max_wakes` still binds. `task_usage` is pruned at `scheduler.usage_retention_days` (180), so an assignment older than that reads a smaller ledger.
 
 ## The tables
 
