@@ -1,6 +1,8 @@
 # Skills Changelog
 
 ## 2026-10-25
+- New `assignment` skill, for admins on a deployment that turned on the `skill_assignment` feature: a goal carried across days in short runs called wakes, with a budget, done-when checks and hand-offs to the user. The user may call it a quest. Draft the charter with `create`, `item add` and `set`, show the user the rendered charter each call returns, and run `activate` only when they say to start; the user approves that exact text
+- Only the user's own turn in their private chat may change an assignment. Elsewhere those verbs answer `not_a_user_turn`; tell the user to say it there
 - `spec`: a new spec uses the full skeleton, with every heading spelled as given: `Affected files & interfaces`, `Existing code this builds on`, `Data & config changes`, `Behaviour`, `Test strategy` and `Decisions & rejected alternatives` sit between `Design` and `Stages`. The coding agent that implements a spec reads these sections by name, so a missing one leaves it guessing
 - Read the project's source through `developer` before writing the file and survey sections. If you could not, say so in the survey and add an open question
 - Stages are one `- [ ] Stage N — name: what. Verified by …` line each, with no cap: split work that needs more. An implementation run refuses a spec while anything is under `## Open questions`, so fold an answered question into the spec and delete it

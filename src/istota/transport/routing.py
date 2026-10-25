@@ -1385,7 +1385,14 @@ def resolve_delivery_plan(
     dropped (logged at
     WARNING) when its surface is unregistered or its user-level channel resolves
     to ``None``. Never raises into the caller.
+
+    A source type in ``registry.NO_DELIVERY_SOURCE_TYPES`` (an assignment
+    wake) gets an empty plan, explicit target or not.
     """
+    from .registry import NO_DELIVERY_SOURCE_TYPES
+
+    if task.source_type in NO_DELIVERY_SOURCE_TYPES:
+        return []
     spec = task.output_target
     plan = parse_output_target(spec, task_id=task.id)
     if not plan and (spec is None or not spec.strip()):

@@ -67,6 +67,7 @@ Prior versions are canonical id plus modifier (`claude-opus-4-7:high`). The ids 
 | `fs_write_denied_roots` | RO carve-outs: the task control dir always (checked ahead of `ToolEnv`'s unconfined return, so it guards unconfined shapes), plus `{user_temp_dir}/.developer` when confined. `[]` not `None`; write path only (`_in_denied`). Confined, the control dir is also a read root. |
 | `images` | `(path, media_type, display_name)`, never bytes, from `executor.prepare_image_attachments`. |
 | `is_fallback` | Set only by `executor._run_fallback`; goes to the session-log header (ISSUE-378). |
+| `max_turns` | A per-request turn cap, set for an assignment wake (`per_wake_turns`). `NativeBrain._max_turns` runs `min(config.max_turns, max_turns)` everywhere it read the configured cap; the Claude Code brains ignore it. `None` leaves the brain's cap. |
 
 Also `cwd`, `timeout_seconds`, `streaming`, `result_file`.
 

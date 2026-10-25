@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 if TYPE_CHECKING:
     import sqlite3
 
+    from .assignments.prompt import WakePrompt as AssignmentWakePrompt
     from .brain import BrainResult
 
 from . import db
@@ -1518,6 +1519,7 @@ def persist_brain_usage(
     effort: str = "",
     stop_reason: str = "",
     success: bool = False,
+    assignment_id: int | None = None,
 ) -> None:
     """Record one brain attempt's token/cost usage. Best-effort throughout.
 
@@ -1563,6 +1565,7 @@ def persist_brain_usage(
                 brain_kind=brain_kind, task_id=task_id, source_type=source_type,
                 is_fallback=is_fallback, model=model, effort=effort,
                 stop_reason=stop_reason, success=success,
+                assignment_id=assignment_id,
             )
         else:
             with db.get_db(config.db_path) as usage_conn:
@@ -1571,7 +1574,7 @@ def persist_brain_usage(
                     brain_kind=brain_kind, task_id=task_id,
                     source_type=source_type, is_fallback=is_fallback,
                     model=model, effort=effort, stop_reason=stop_reason,
-                    success=success,
+                    success=success, assignment_id=assignment_id,
                 )
     except Exception:
         logger.warning(
@@ -1598,13 +1601,14 @@ def _persist_task_usage(
     effort: str = "",
     stop_reason: str = "",
     success: bool = False,
+    assignment_id: int | None = None,
 ) -> None:
     """The task-shaped wrapper over `persist_brain_usage`."""
     persist_brain_usage(
         config, conn, usage=usage, origin="task", user_id=user_id,
         brain_kind=brain_kind, task_id=task_id, source_type=source_type,
         is_fallback=is_fallback, model=model, effort=effort,
-        stop_reason=stop_reason, success=success,
+        stop_reason=stop_reason, success=success, assignment_id=assignment_id,
     )
 
 
@@ -5962,7 +5966,9 @@ def _recall_playbooks(
     """
     if not config.playbooks.enabled:
         return None
-    if skip_memory or _is_automated_task(task):
+    # An assignment wake is automated but loads playbooks as a private task
+    # does (assignments spec, Design section 8).
+    if skip_memory or (_is_automated_task(task) and task.source_type != "assignment"):
         return None
 
     try:
@@ -6920,6 +6926,7 @@ def build_prompt(
     group_memory: str | None = None,
     channel_memory_shared: bool = False,
     skip_memory: bool = False,
+    assignment_prompt: "AssignmentWakePrompt | None" = None,
 ) -> ComposedPrompt:
     """Build a task's prompt, split by authority rather than by size.
 
@@ -6962,6 +6969,11 @@ def build_prompt(
     retrieval passes, and a field read in five places is how those drift apart.
     ``None`` falls back to ``task.prompt``, which is what every caller outside
     ``execute_task`` passes.
+
+    ``assignment_prompt`` is an assignment wake's material
+    (`assignments.prompt.WakePrompt`): the guidelines and the charter become
+    the system half's ``## Assignment`` section after the persona, in place of
+    ``## Response format``, and the wake's sections replace the request.
 
     ``attachment_status`` maps an attachment path to the one-phrase status
     shown after it: ``VISION_PREPARED``, or the reason it was left out.
@@ -7046,7 +7058,12 @@ def build_prompt(
     # Load channel-specific guidelines
     channel_guidelines = load_channel_guidelines(config, task.source_type, task.user_id)
     channel_section = ""
-    if channel_guidelines:
+    assignment_section = ""
+    if assignment_prompt is not None:
+        from istota.assignments.prompt import system_section as assignment_system_section
+
+        assignment_section = "\n" + assignment_system_section(assignment_prompt, channel_guidelines)
+    elif channel_guidelines:
         channel_section = f"\n\n## Response format ({task.source_type})\n\n{channel_guidelines}\n"
 
     # Build attachments section if present
@@ -7501,7 +7518,7 @@ Source: {display_source}
 Output target: {display_output_target}{per_user_email_line}
 {db_path_line}
 {privileges_line}
-{emissaries_section}{persona_section}
+{emissaries_section}{persona_section}{assignment_section}
 ## User's accessible resources
 
 {resources_text}
@@ -7564,10 +7581,13 @@ You have access to:
     user = "".join(
         block.strip("\n") + "\n\n" for block in user_blocks if block.strip()
     )
-    user += (
-        "## User's request\n\n"
-        f"{reply_quote_section}{effective_prompt or task.prompt}{attachments_text}\n"
-    )
+    if assignment_prompt is not None:
+        user += assignment_prompt.user
+    else:
+        user += (
+            "## User's request\n\n"
+            f"{reply_quote_section}{effective_prompt or task.prompt}{attachments_text}\n"
+        )
 
     return ComposedPrompt(system=system, user=user)
 
@@ -7963,6 +7983,22 @@ def execute_task(
             logger.error("Task %s: %s", task.id, msg)
             return False, msg, None, None
 
+    # An assignment wake is picked up here, at the same point: the assignment
+    # is checked, the scratchpad snapshotted, the inbox claimed and the wake's
+    # prompt material built (`assignments.wakes.start_wake`). A wake whose
+    # assignment is no longer active ends here, already finished as such.
+    wake_start = None
+    if task.source_type == "assignment":
+        from .assignments import wakes as assignment_wakes
+
+        try:
+            wake_start = assignment_wakes.start_wake(config, task, dry_run=dry_run)
+        except Exception:
+            logger.exception("Task %s: assignment wake pickup failed", task.id)
+            return False, "assignment wake pickup failed", None, None
+        if wake_start is None:
+            return False, assignment_wakes.NOT_ACTIVE_ERROR, None, None
+
     # The cancellation channel, built once. Both pre-brain passes below poll it
     # and the brain gets the same callable: `scheduler.task_timeout_minutes`
     # covers neither of them, and `BrainRequest.cancel_check` is not in play
@@ -8074,6 +8110,9 @@ def execute_task(
     retrieval_query = (
         f"{task.prompt}\n\n{_ocr_query}".strip() if _ocr_query else task.prompt
     )
+    if wake_start is not None:
+        # A wake's stored prompt is a placeholder; recall keys on the goal.
+        retrieval_query = wake_start.prompt.recall_query
 
     # Select and load relevant skills
     from .skills._loader import (
@@ -8533,6 +8572,7 @@ def execute_task(
             and not _withheld
             and secrets_vault.has_shared_credentials(config.db_path, task.user_id)
         ),
+        assignment_prompt=wake_start.prompt if wake_start is not None else None,
     )
 
     # The two halves travel apart from here. `req.prompt` is the user half; the
@@ -8920,7 +8960,13 @@ def execute_task(
             source_type=task.source_type or "",
             conversation_token=task.conversation_token or "",
             is_group_chat=bool(task.is_group_chat),
-            timeout_seconds=config.scheduler.task_timeout_minutes * 60,
+            # An assignment wake runs to its charter's per-wake budget, clamped
+            # to the task timeout, and carries its turn cap (native only).
+            timeout_seconds=(
+                wake_start.timeout_seconds if wake_start is not None
+                else config.scheduler.task_timeout_minutes * 60
+            ),
+            max_turns=wake_start.max_turns if wake_start is not None else None,
             # The task's own pin, or nothing. Never a deployment default: the
             # top-level `config.model` was claude_code's own, and substituting
             # it here shadowed every other brain's (ISSUE-418). An empty value
@@ -9093,6 +9139,7 @@ def execute_task(
                 effort=_primary_usage_result.effort_used or req.effort,
                 stop_reason=_primary_usage_result.stop_reason,
                 success=_primary_usage_result.success,
+                assignment_id=task.assignment_id,
             )
         _persist_task_usage(
             config, conn, task.id, brain_result.usage,
@@ -9102,6 +9149,7 @@ def execute_task(
             model=brain_result.model_used,
             effort=brain_result.effort_used or _usage_effort,
             stop_reason=brain_result.stop_reason, success=brain_result.success,
+            assignment_id=task.assignment_id,
         )
 
         # CM-aware / terse-result composition: reconcile result_text with

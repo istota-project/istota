@@ -37,6 +37,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 | `schedules` | schedule, recurring, cron, daily, weekly | doc-only |
 | `tasks` | subtask, queue, background, later | yes -- status, recent, transcript (admin-only; read your own task state and finished transcripts, queue subtasks) |
 | `bookmarks` | bookmark, bookmarks, karakeep, saved, reading list, favourited, favorite | yes -- search, list, add, tags, etc. |
+| `assignment` | assignment, quest, errand, mission | yes -- create, set, item, frozen, activate, pause, resume, abandon, wake, topup, note, handoff, close, list, show, and the wake verbs next, report, attempt, complete. Admin-only, behind the `skill_assignment` experimental feature. See [assignments](../features/assignments.md) |
 
 ## Information
 

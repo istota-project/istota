@@ -25,7 +25,7 @@ paths:
 - `field` is authoritative, `interval()` derives from it. `None` = not a config field (`travel-timezone`, `status-write` = 60, `backup-stale-alert`). `__post_init__` refuses both or neither, since neither would silently mean "every tick".
 - A non-positive interval bypasses the clock (`backup-stale-alert`), so a backwards NTP step cannot skip it.
 - `enabled` carries `bool(interval)` so 0 means off.
-- `shared-blocks`, `scheduled-jobs`, `sleep-cycles`, `cleanup` read `briefing_check_interval` though not briefings. Known; own keys are an operator-visible config change.
+- `shared-blocks`, `scheduled-jobs`, `assignments`, `sleep-cycles`, `cleanup` read `briefing_check_interval` though not briefings. Known; own keys are an operator-visible config change.
 - `on_error` / `one_shot_on_error` differ because the paths differed: `check_briefings` / `check_scheduled_jobs` failures abort the one-shot pass; the daemon logs past them.
 - `phone-room-backfill` (literal 60 seconds, `background`) replays each minted SMS or WhatsApp room's pre-mint history and writes the `_room_backfill` marker once nothing on the room's aliases is unfinished. A marked room costs one indexed read per pass; a WhatsApp group room or a shared phone room is never marked and is re-checked every pass. Mechanism in `transport.md` ("Phone rooms").
 
@@ -71,7 +71,7 @@ Deliver results outside the DB context.
 
 Sandboxed tasks have no DB, so they and skill CLIs write JSON to the temp dir and the scheduler replays it after success only. Handlers live in `scheduler_deferred.py`. Identity always comes from the task, never the JSON.
 
-- `_process_deferred_subtasks`: admin-only (others deleted), `source_type="subtask"`, inherits `queue`.
+- `_process_deferred_subtasks`: admin-only (others deleted), `source_type="subtask"`, inherits `queue`. Refused for an `assignment` wake (file deleted, a `subtasks_refused` assignment event), since a child would carry no `assignment_id` and escape the budget.
 - `_process_retired_deferred_files`: deletes `_RETIRED_DEFERRED_SUFFIXES` files (`tracked_transactions`, ISSUE-427, fed dead framework tables). Runs first; must precede `_warn_unconsumed_deferred_files`. The suffix stays in `_KNOWN_DEFERRED_SUFFIXES` (purge still clears it) but not in the `expected name:` hint.
 - `_process_deferred_sent_emails`: `sent_emails` rows, which thread replies onto the bot's sends and mint their rooms (`threads.register_sent_thread`).
 - `_process_deferred_kg_ops`: commits per op.
@@ -92,7 +92,7 @@ Unconsumed files are warned about and left on disk (ISSUE-073). All reads and wr
 - Handler-level guards still protect later ops in the same file; `_process_deferred_user_alerts`'s except recovers by sending directly, so do not remove it.
 
 ## WorkerPool
-`dispatch()` runs the admission gate, then the fg cap, then the bg cap. `_workers` is locked and keyed `(user_id, queue_type, slot)`; per-user caps via `effective_user_max_fg_workers` / `_bg_`; spawns up to `min(per_user_cap, claimable_pending)`. `shutdown()` = request_stop + join 10s.
+`dispatch()` runs the admission gate, then the fg cap, then the bg cap, then the assignment lane (`[assignments] max_workers` / `user_max_workers`, `.claude/rules/assignments.md`); the last two share `_spawn_capped_workers`. `_workers` is locked and keyed `(user_id, queue_type, slot)`; per-user caps via `effective_user_max_fg_workers` / `_bg_`; spawns up to `min(per_user_cap, claimable_pending)`. `shutdown()` = request_stop + join 10s.
 
 ### Long-task slot reclassification (foreground only)
 

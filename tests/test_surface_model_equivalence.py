@@ -231,7 +231,7 @@ SITES = (
     Site(
         name="scheduler store_turn_message gate",
         module="istota.scheduler",
-        function="process_one_task",
+        function="_process_one_task",
         # `task.source_type` unguarded here, where the confirmation gate below
         # spells `or ""`. The column is nullable, so None reaches both; the
         # tuple answers False for it and so does the mapping.
@@ -243,7 +243,7 @@ SITES = (
     Site(
         name="scheduler confirmation mirror gate",
         module="istota.scheduler",
-        function="process_one_task",
+        function="_process_one_task",
         # The one site asking the *view* question — "does this task's own origin
         # surface show it the question itself?" — rather than the ownership one,
         # and the only place the two axes could ever diverge. Read negated at

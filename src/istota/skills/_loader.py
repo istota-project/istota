@@ -23,6 +23,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from istota.lib.markdown_headings import demote_headings
 from istota.sandbox.confined import open_dir as open_overlay_dir  # noqa: F401 - re-exported for its callers
 
 from ._types import EnvSpec, SkillMeta
@@ -831,74 +832,6 @@ OVERLAY_PREAMBLE = (
     "skill's instructions above, wherever the two conflict."
 )
 
-_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-
-#: A level-1 or level-2 ATX heading, in every form CommonMark accepts one: up to
-#: three leading spaces, and a space, a tab or the end of the line after the
-#: hashes. Matching the bare ``"## "`` prefix instead let five spellings through
-#: — ``" ## x"``, ``"  ## x"``, ``"   ## x"``, ``"##\tx"`` and a bare ``"##"`` —
-#: each of which is a real heading and so a real way out of the section. Level 1
-#: is included because it escapes strictly harder than level 2: it closes the
-#: whole ``## Skills Reference`` block rather than one skill's ``### ``.
-_SHALLOW_HEADING_RE = re.compile(r"^ {0,3}#{1,2}(?=[ \t]|$)")
-
-
-#: A setext underline: ``Text`` on one line and ``===`` or ``---`` under it is a
-#: level-1 or level-2 heading, and the most compact way to write one.
-_SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
-
-#: First characters that mean the line above an underline is not a paragraph,
-#: so the pair is a list item plus a thematic break rather than a heading.
-_NOT_PARAGRAPH_START = ("#", "-", "*", "+", ">", "|", "=", "`", "~")
-
-
-def _is_setext_paragraph(line: str) -> bool:
-    """Whether ``line`` could be the text half of a setext heading."""
-    if not line.strip():
-        return False
-    if line[:1] in (" ", "\t"):
-        return False
-    return line[:1] not in _NOT_PARAGRAPH_START
-
-
-def _closed_fence_lines(lines: list[str]) -> set[int]:
-    """Indices of lines inside a code fence that is actually *closed*.
-
-    An unterminated fence is not treated as one, and that is the whole reason
-    this is a separate pass. Exempting it would hand a hand-edited overlay a way
-    to switch the demotion off for everything after a single stray ``` line —
-    and since the fence runs on past the end of the overlay, the level-2 heading
-    it protects then sits as a sibling of ``## Skills Reference`` and swallows
-    every skill rendered after it. The exemption exists to protect a sample, and
-    there is no sample without a closing fence.
-
-    Fence matching follows CommonMark on the three points that decide the
-    pairing: the closer uses the same character as the opener, it is at least as
-    long, and it carries no info string. That last one matters here — treating
-    `````python`` as a closer would end the block early and rewrite a
-    ``## `` that really is inside the user's sample, which is the one thing the
-    exemption exists to avoid.
-    """
-    fenced: set[int] = set()
-    open_at: int | None = None
-    opener = ""
-    for i, line in enumerate(lines):
-        m = _FENCE_RE.match(line)
-        if m is None:
-            continue
-        run = m.group(1)
-        if open_at is None:
-            open_at, opener = i, run
-        elif (
-            run[0] == opener[0]
-            and len(run) >= len(opener)
-            and not line[m.end():].strip()
-        ):
-            fenced.update(range(open_at, i + 1))
-            open_at = None
-    return fenced
-
-
 def _demote_overlay_headings(text: str) -> str:
     """Push a level-1 or level-2 heading in an overlay down to level 4.
 
@@ -912,7 +845,7 @@ def _demote_overlay_headings(text: str) -> str:
     Closed fenced blocks are skipped. A ``## `` inside one is a sample — an
     overlay for the notes skill quite plausibly carries a markdown template —
     and rewriting it would corrupt the user's own text. An *unclosed* fence
-    earns no such exemption; see ``_closed_fence_lines``.
+    earns no such exemption; see ``lib.markdown_headings.closed_fence_lines``.
 
     Setext headings are demoted too — ``My Rules`` with ``---`` under it is a
     level-2 heading and the most compact way to write one, which makes it the
@@ -924,24 +857,7 @@ def _demote_overlay_headings(text: str) -> str:
     Leading indentation is dropped along with the demotion, since the point is
     that what comes out cannot be read as a heading above level 4.
     """
-    lines = text.split("\n")
-    fenced = _closed_fence_lines(lines)
-    out: list[str] = []
-    for i, line in enumerate(lines):
-        if i not in fenced:
-            m = _SHALLOW_HEADING_RE.match(line)
-            if m is not None:
-                out.append("####" + line[m.end():])
-                continue
-            if (
-                _SETEXT_UNDERLINE_RE.match(line)
-                and out
-                and (i - 1) not in fenced
-                and _is_setext_paragraph(out[-1])
-            ):
-                out[-1] = "#### " + out[-1].strip()
-        out.append(line)
-    return "\n".join(out)
+    return demote_headings(text, lambda _level: 4, max_level=2)
 
 
 def _denylist_key(skill_name: str) -> str:
