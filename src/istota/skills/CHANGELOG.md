@@ -1,5 +1,10 @@
 # Skills Changelog
 
+## 2026-10-25
+- `spec`: a new spec uses the full skeleton, with every heading spelled as given: `Affected files & interfaces`, `Existing code this builds on`, `Data & config changes`, `Behaviour`, `Test strategy` and `Decisions & rejected alternatives` sit between `Design` and `Stages`. The coding agent that implements a spec reads these sections by name, so a missing one leaves it guessing
+- Read the project's source through `developer` before writing the file and survey sections. If you could not, say so in the survey and add an open question
+- Stages are one `- [ ] Stage N — name: what. Verified by …` line each, with no cap: split work that needs more. An implementation run refuses a spec while anything is under `## Open questions`, so fold an answered question into the spec and delete it
+
 ## 2026-10-16
 - New `servarr` skill: request films, shows and albums and check the download stack through the operator's Sonarr, Radarr, Lidarr and Prowlarr. Run `istota-skill servarr apps` first: it sends nothing and says this user's tier and what it allows. Admins get every verb; requesters may search, add with the stack's defaults, and follow the queue and their requests
 - `search` first, then `add` by the id it returned, never by title. When several results could be the one the user means, ask. A whole-artist add answers `confirmation_required`; pass `--confirmed` only after the user agrees in the conversation
