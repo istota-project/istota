@@ -28,6 +28,7 @@ from istota.brain.native import NativeBrain
 from istota.config import NativeBrainConfig, SessionLogConfig
 from istota.session.session_log_read import read_records, record_text
 from istota.session.tools import ToolEnv, build_default_tools
+from istota.session.tools.bash import bash_result_failed
 from istota.usage.telemetry import cache_hit_rate
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -123,6 +124,37 @@ def _with_python(text: str) -> str:
     return text.replace(PYTHON_PLACEHOLDER, sys.executable)
 
 
+def _prompt_text(text: str) -> str:
+    # The model sees a bare `python`, never sys.executable: that path names
+    # this checkout, and a model handed it took the checkout for the project
+    # and ran istota's own suite into the case timeout.
+    return text.replace(PYTHON_PLACEHOLDER, "python")
+
+
+def _shim_dir(workdir: Path) -> Path:
+    return workdir.parent / "bin"
+
+
+def _write_python_shim(workdir: Path) -> None:
+    # A wrapper, not a symlink: a symlinked venv interpreter looks for
+    # pyvenv.cfg beside the link and loses the venv's packages.
+    bin_dir = _shim_dir(workdir)
+    bin_dir.mkdir(exist_ok=True)
+    shim = bin_dir / "python"
+    shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    shim.chmod(0o755)
+
+
+def _path_outside_checkout() -> str:
+    root = Path(__file__).resolve().parents[3]
+    kept = [
+        entry
+        for entry in os.environ.get("PATH", "/usr/bin:/bin").split(os.pathsep)
+        if entry and not Path(entry).resolve().is_relative_to(root)
+    ]
+    return os.pathsep.join(kept)
+
+
 def prepare_workdir(case: EvalCase, workdir: Path) -> None:
     """Copy the fixture into ``workdir``, then apply the case's own setup.
 
@@ -136,6 +168,7 @@ def prepare_workdir(case: EvalCase, workdir: Path) -> None:
         path.write_bytes(data.replace(b"\n", b"\r\n"))
     if case.generate is not None:
         case.generate(workdir)
+    _write_python_shim(workdir)
 
 
 def task_env(workdir: Path) -> dict[str, str]:
@@ -145,7 +178,7 @@ def task_env(workdir: Path) -> dict[str, str]:
     daemon's", and here that is the test process holding the API key.
     """
     return {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PATH": os.pathsep.join([str(_shim_dir(workdir)), _path_outside_checkout()]),
         "HOME": str(workdir),
         "LANG": "C.UTF-8",
         "TMPDIR": str(workdir.parent / "tmp"),
@@ -200,7 +233,10 @@ def metrics_from_log(path: Path, success_marker: str | None) -> dict:
             if not isinstance(message, dict) or message.get("role") != "tool_result":
                 continue
             out["tool_calls"] += 1
-            if message.get("is_error"):
+            failed = bool(message.get("is_error")) or (
+                message.get("tool_name") == "Bash" and bash_result_failed(record_text(record))
+            )
+            if failed:
                 out["tool_errors"] += 1
                 errors_so_far += 1
                 if message.get("tool_name") == "Edit":
@@ -276,7 +312,7 @@ def run_case(
 
     env = task_env(workdir)
     req = BrainRequest(
-        prompt=_with_python(case.prompt),
+        prompt=_prompt_text(case.prompt),
         allowed_tools=core_tool_names(),
         cwd=workdir.resolve(),
         env=env,

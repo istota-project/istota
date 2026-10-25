@@ -8,6 +8,7 @@ every metric the report carries.
 """
 
 import json
+import subprocess
 import sys
 
 from istota.config import NativeBrainConfig
@@ -167,6 +168,36 @@ class TestRunCaseMetrics:
                 "sys.exit(0 if pathlib.Path('notes.txt').exists() else 3)"]
         result = self._run(tmp_path, check_fn=None, check_argv=argv)
         assert result.passed is True
+
+    def test_a_failed_bash_command_counts_as_a_tool_error(self, tmp_path):
+        bash_args = json.dumps({"command": "echo nope; exit 1"})
+        call = {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_bash", "function": {"name": "Bash", "arguments": bash_args}},
+        ]}}]}
+        done = {"choices": [{"delta": {}, "finish_reason": "tool_calls"}],
+                "usage": _usage(1000, 50, 0, 0.001)}
+        first = tmp_path / "sse" / "bash.jsonl"
+        second = tmp_path / "sse" / "answer.jsonl"
+        write_fixture(first, [f"data: {json.dumps(call)}", f"data: {json.dumps(done)}", "data: [DONE]"])
+        write_fixture(second, _answer_turn())
+        provider = _Sequence([ReplayProvider(first), ReplayProvider(second)])
+        result = runner.run_case(_case(tmp_path), _config(), tmp_path / "repo", provider=provider)
+        assert result.tool_calls == 1
+        assert result.tool_errors == 1
+        assert result.edit_failures == 0
+
+    def test_the_model_never_sees_this_checkout(self, tmp_path):
+        checkout = str(runner.Path(runner.__file__).resolve().parents[3])
+        assert checkout not in runner._prompt_text(f"run {runner.PYTHON_PLACEHOLDER} -m pytest")
+        workdir = tmp_path / "repo"
+        runner.prepare_workdir(_case(tmp_path), workdir)
+        env = runner.task_env(workdir)
+        assert checkout not in env["PATH"]
+        out = subprocess.run(
+            ["python", "-c", "import pytest; print('ok')"],
+            cwd=workdir, env=env, capture_output=True, text=True,
+        )
+        assert out.stdout.strip() == "ok", out.stderr
 
     def test_the_sse_tee_records_every_call_replayably(self, tmp_path):
         provider = _replay(tmp_path)
