@@ -289,6 +289,17 @@
     delete: (key) => call('kv:own', 'delete', { key }),
     /** @param {{prefix?: string, offset?: number, limit?: number}} [options] */
     list: (options = {}) => call('kv:own', 'list', { ...options }),
+    /**
+     * Another of the user's namespaces, under `kv:read:<namespace>`.
+     * @param {string} namespace
+     * @param {string} key
+     */
+    read: (namespace, key) => call(`kv:read:${namespace}`, 'get', { key }),
+    /**
+     * @param {string} namespace
+     * @param {{prefix?: string, offset?: number, limit?: number}} [options]
+     */
+    readList: (namespace, options = {}) => call(`kv:read:${namespace}`, 'list', { ...options }),
   });
 
   const files = Object.freeze({
@@ -308,11 +319,37 @@
       call('files:own', 'write', { path, content, encoding }),
     /** @param {string} path */
     delete: (path) => call('files:own', 'delete', { path }),
+    /**
+     * A folder of the user's files, under `files:read:<folder>` as the
+     * manifest names it; the server reads the folder the user granted.
+     * @param {string} folder
+     * @param {string} [path] relative to that folder
+     */
+    listShared: (folder, path = '') => call(`files:read:${folder}`, 'list', { path }),
+    /**
+     * @param {string} folder
+     * @param {string} path
+     * @param {{encoding?: 'utf8' | 'base64'}} [options]
+     */
+    readShared: (folder, path, { encoding = 'utf8' } = {}) =>
+      call(`files:read:${folder}`, 'read', { path, encoding }),
+  });
+
+  const calendar = Object.freeze({
+    /**
+     * Events from `from` to `to` (ISO dates, or dates and times). `calendar`
+     * names the calendar of a `calendar:read:<name>` capability; leave it out
+     * under `calendar:read`, which reads every calendar the user owns.
+     * @param {{from: string, to: string, calendar?: string}} options
+     */
+    list: ({ from, to, calendar: name } = /** @type {any} */ ({})) =>
+      call(name ? `calendar:read:${name}` : 'calendar:read', 'list', { from, to }),
   });
 
   const api = {
     kv,
     files,
+    calendar,
     get env() {
       return { ...env };
     },

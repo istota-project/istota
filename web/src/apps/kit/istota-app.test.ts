@@ -11,12 +11,19 @@ type Istota = {
     set(key: string, value: unknown): Promise<unknown>;
     delete(key: string): Promise<unknown>;
     list(options?: Record<string, unknown>): Promise<unknown>;
+    read(namespace: string, key: string): Promise<unknown>;
+    readList(namespace: string, options?: Record<string, unknown>): Promise<unknown>;
   };
   files: {
     list(path?: string): Promise<unknown>;
     read(path: string, options?: Record<string, unknown>): Promise<unknown>;
     write(path: string, content: string, options?: Record<string, unknown>): Promise<unknown>;
     delete(path: string): Promise<unknown>;
+    listShared(folder: string, path?: string): Promise<unknown>;
+    readShared(folder: string, path: string, options?: Record<string, unknown>): Promise<unknown>;
+  };
+  calendar: {
+    list(options: Record<string, unknown>): Promise<unknown>;
   };
   env: Record<string, unknown>;
   on(event: string, fn: (env: Record<string, unknown>) => void): () => void;
@@ -240,6 +247,24 @@ describe('calls', () => {
     expect(messages[3].args).toEqual({ prefix: 'card:', limit: 10 });
     expect(messages[5].args).toEqual({ path: 'x.txt', encoding: 'base64' });
     expect(messages[6].args).toEqual({ path: 'y.txt', content: 'hi', encoding: 'utf8' });
+  });
+
+  it('names the read capabilities by their scope', () => {
+    void istota.kv.read('notes', 'today');
+    void istota.kv.readList('notes', { prefix: 'day:' });
+    void istota.files.listShared('notes/aviation');
+    void istota.files.readShared('notes/aviation', 'weather.md', { encoding: 'base64' });
+    void istota.calendar.list({ from: '2026-11-01', to: '2026-11-08' });
+    void istota.calendar.list({ from: '2026-11-01', to: '2026-11-08', calendar: 'Home' });
+    const messages = sent();
+    expect(messages.map((m) => [m.capability, m.op, m.args])).toEqual([
+      ['kv:read:notes', 'get', { key: 'today' }],
+      ['kv:read:notes', 'list', { prefix: 'day:' }],
+      ['files:read:notes/aviation', 'list', { path: '' }],
+      ['files:read:notes/aviation', 'read', { path: 'weather.md', encoding: 'base64' }],
+      ['calendar:read', 'list', { from: '2026-11-01', to: '2026-11-08' }],
+      ['calendar:read:Home', 'list', { from: '2026-11-01', to: '2026-11-08' }],
+    ]);
   });
 
   it('sends over the port and never posts on a window', () => {
