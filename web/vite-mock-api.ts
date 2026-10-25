@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ROOM_COLORS } from './src/lib/roomColors';
+import type { AppsList } from './src/lib/apps/api';
 
 /**
  * The dev server's vault state, mutated by the two write routes below.
@@ -433,6 +434,7 @@ const user = {
     chat: true,
     briefings: true,
     workspace: true,
+    apps: true,
     groups: true,
     feeds: true,
     location: true,
@@ -7954,6 +7956,112 @@ function mockConfigFiles(path: string, method: string, body: any) {
     ...(name === 'CRON.md' ? { applies: 'next_sync' } : {}),
   };
 }
+// ---- Apps (the apps-foundation spec) ----
+// Two installed apps (a starter app and one installed from a draft with an
+// update waiting), two drafts and a starter app the user uninstalled, so every
+// group in "All apps" renders. The draft `broken` fails validation, to show
+// errors on its card. Set `mockApps.kit_built = false` to see the kit alert.
+const mockApps: AppsList = {
+  apps: [
+    {
+      app_id: 'board',
+      name: 'Board',
+      icon: 'kanban',
+      description: 'Cards and columns that live next to a conversation.',
+      origin: 'starter',
+      current_version: 1,
+      narrowest: 'phone',
+      pending_id: null,
+      ungranted: [],
+    },
+    {
+      app_id: 'tides',
+      name: 'Tides',
+      icon: 'chart-line',
+      description: 'High and low water for the places you sail from.',
+      origin: 'draft',
+      current_version: 2,
+      narrowest: 'phone',
+      pending_id: 'mock-pending-tides',
+      ungranted: [],
+    },
+  ],
+  pending: [
+    {
+      pending_id: 'mock-pending-tides',
+      app_id: 'tides',
+      name: 'Tides',
+      origin: 'draft',
+      size: 61_440,
+      created_at: new Date(Date.now() - 20 * 60_000).toISOString(),
+    },
+  ],
+  drafts: [
+    { app_id: 'packing', name: 'Packing list', has_manifest: true, state: 'new' },
+    { app_id: 'broken', name: 'Broken', has_manifest: true, state: 'new' },
+  ],
+  starter: [
+    { app_id: 'board', state: 'installed' },
+    { app_id: 'ledger', state: 'dismissed' },
+  ],
+  kit_built: true,
+};
+
+const appsHandler: MockHandler = ({ url, method }) => {
+  const path = url.split('?')[0];
+  if (!path.startsWith('/istota/api/apps/') && path !== '/istota/api/apps') return undefined;
+  if (method === 'GET' && (path === '/istota/api/apps/' || path === '/istota/api/apps'))
+    return mockApps;
+  const draft = path.match(/^\/istota\/api\/apps\/drafts\/([^/]+)\/pending$/);
+  if (draft && method === 'POST') {
+    const appId = decodeURIComponent(draft[1]);
+    const found = mockApps.drafts.find((d) => d.app_id === appId);
+    if (!found) return { __status: 404, error: `There is no app folder named ${appId}.` };
+    if (!mockApps.kit_built) return { __status: 503, error: 'the apps kit is not built' };
+    if (appId === 'broken')
+      return {
+        __status: 422,
+        errors: [
+          'manifest.toml: id "brokn" must equal the folder name "broken".',
+          'index.html references app.js, which is not in the folder.',
+        ],
+      };
+    const pendingId = `mock-pending-${appId}`;
+    mockApps.pending = mockApps.pending.filter((p) => p.app_id !== appId);
+    mockApps.pending.push({
+      pending_id: pendingId,
+      app_id: appId,
+      name: found.name || appId,
+      origin: 'draft',
+      size: 24_576,
+      created_at: new Date().toISOString(),
+    });
+    return { __status: 201, pending_id: pendingId, app_id: appId };
+  }
+  const starter = path.match(/^\/istota\/api\/apps\/starter\/([^/]+)\/reinstall$/);
+  if (starter && method === 'POST') {
+    const entry = mockApps.starter.find((s) => s.app_id === decodeURIComponent(starter[1]));
+    if (!entry) return { __status: 404, error: 'That is not an app that ships with Istota.' };
+    if (!mockApps.kit_built) return { __status: 503, error: 'the apps kit is not built' };
+    entry.state = 'installed';
+    const name = entry.app_id.charAt(0).toUpperCase() + entry.app_id.slice(1);
+    if (!mockApps.apps.some((a) => a.app_id === entry.app_id))
+      mockApps.apps.push({
+        app_id: entry.app_id,
+        name,
+        icon: 'scale',
+        description: '',
+        origin: 'starter',
+        current_version: 1,
+        narrowest: 'phone',
+        pending_id: null,
+        ungranted: [],
+      });
+    return { app_id: entry.app_id, status: 'installed' };
+  }
+  return undefined;
+};
+
 const workspaceHandler: MockHandler = ({ url, method, body }) => {
   const driveUrl = new URL(url, 'http://localhost');
   if (driveUrl.pathname === '/istota/api/workspace/pins') {
@@ -8132,6 +8240,7 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
 
 const handlers: MockHandler[] = [
   setupHandler,
+  appsHandler,
   workspaceHandler,
   searchHandler,
   ({ url, method, body }) => mockWalletRoutes(url, method, body),
