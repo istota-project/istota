@@ -17,8 +17,10 @@ A core package, `src/istota/assignments/`, not a module in `MODULE_NAMES`: wakes
 | Module | Holds |
 |---|---|
 | `store.py` | Row access for every assignment table. Plain functions on the caller's connection; commits nothing, decides nothing. |
+| `charter.py` | Validating charter fields (`CharterError(code, message)`), the slug, `render`, `charter_digest`, the assignment directory with its seed `SCRATCHPAD.md`, and the `CHARTER.md` writer. |
+| `validators.py` | The validator menu (`file_parses`, `csv_columns`, literal `contains`), `parse_spec`, and `run_item`, which never raises. |
 
-The modules for the charter, validators, scratchpad, budget, lifecycle, wakes, prompt and caller, the `assignment` skill and the bell resolver are added by later stages of the same work, each named here as it lands.
+The modules for the scratchpad, budget, lifecycle, wakes, prompt and caller, the `assignment` skill and the bell resolver are added by later stages of the same work, each named here as it lands.
 
 ## The tables
 
@@ -45,6 +47,13 @@ Every timestamp in these tables is ISO-Z (`db.iso_utc_now()`), like `task_usage`
 - **One writer of `assignments.state`.** `store.set_state` writes `state`, `state_reason` and `waiting_on` together, and only `lifecycle` calls it. `store.update_assignment` refuses `state` and every identity column with `ValueError`, so a stray state write fails loudly instead of skipping the transition checks.
 - **Lookups by id can be scoped by owner.** `get_assignment(conn, id, user_id=...)` returns `None` for another user's assignment. Every CLI path must pass the user, so that another user's id reads as not found.
 - **No policy in the store.** Which transitions are legal, who may change the charter and when a wake is due are decided in `lifecycle`, `caller` and `wakes`.
+
+## The charter and its files
+
+- **The rows are the charter; `CHARTER.md` is a view.** `charter.render` is the one renderer, used for the activation preview, `CHARTER.md` and the wake's system section, so what the user approves is the text they read. `charter_digest` is the sha256 of that render, which includes the state line, so compute it the same way at hold time and at approval. The host writes `CHARTER.md` (`rewrite_charter_file`) after every charter change and never reads it.
+- **A date-only deadline is the end of that day in UTC** (`T23:59:59.999Z`), and renders back as the bare date. A time with no offset is read in the timezone the caller passes.
+- **The directory is `{bot_dir}/assignments/<slug>/`**, made with `confined.open_or_create_dirs` from `Config.workspace_root(user_id)` and written by descriptor through `storage.write_regular_file`. A link at any component is refused. A failed write leaves the DB as it is and is logged.
+- **Validators read files a wake wrote, in the daemon.** Every open goes through `confined` from the workspace root with no link followed, under a 1 MiB cap. `contains` is a literal substring, never a regex, because `re` has no timeout. `parse_spec` runs again on the stored spec before each check, so a row written some other way cannot widen what a check opens. Details are host text and never quote the file.
 
 ## Config
 
