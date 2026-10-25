@@ -9,7 +9,8 @@ raises `TransitionError`.
 
 `TransitionError.code` is a CLI error code: `not_found` (the assignment, or an
 item or hand-off that is not this assignment's), `bad_state` (with the current
-state), `invalid_input` (an empty or overlong note or report), and the
+state), `invalid_input` (an empty or overlong note or report),
+`deadline_passed` and `confirmation_pending` (from `hold_activation`), and the
 `CharterError` codes passed through from the checks.
 
 Trusted inbox events are written here for what the user did after activation,
@@ -17,12 +18,22 @@ so the next wake sees it. A draft has no wakes yet, and its charter is the
 whole context of the first one, so a draft's charter edits write no
 `charter_change` event.
 
-The approval of an activation is Stage 4's (`activate_from_request`), and the
-wake-side transitions are `wakes`'.
+**Activation is the one approval.** `hold_activation` stores the rendered
+charter as an `assignment_activation` request in the relay request ledger, the
+task parks on it through the scheduler's authorization branch, and
+`relay.requests.approve_request` calls `activate_from_request` when the user
+approves that exact preview. The request's `destination` carries the
+`charter_digest` taken at hold time; approval recomputes it, and any charter
+change while the request is held cancels it (`cancel_held_activation`, from
+`edit_charter`), so an approval can never start a charter other than the one
+shown. There is no clean-turn release.
+
+The wake-side transitions are `wakes`'.
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -141,6 +152,7 @@ def edit_charter(
         except charter.CharterError as exc:
             raise _charter_error(exc) from None
         after = charter.render_current(conn, assignment_id)
+        cancel_held_activation(conn, assignment_id, reason="charter_changed")
         payload = dict(event_payload or {})
         store.insert_event(conn, assignment_id, kind=event, actor="user", payload=payload)
         if assignment.state != "draft" and before != after:
@@ -149,6 +161,198 @@ def edit_charter(
                 payload={"before": before, "after": after},
             )
         return store.get_assignment(conn, assignment_id), result
+
+
+# ---------------------------------------------------------------------------
+# Activation
+# ---------------------------------------------------------------------------
+
+ACTIVATION_KIND = "assignment_activation"
+ACTIVATION_PREAMBLE = (
+    "Start this assignment? Once approved it runs on its own, wake after wake, "
+    "and spends up to the budget below."
+)
+
+_ACTIVATIONS_SQL = (
+    "SELECT * FROM whatsapp_skill_requests WHERE kind = 'assignment_activation'"
+    " AND json_extract(destination, '$.assignment_id') = ?"
+)
+
+
+def _deadline_passed(assignment: store.Assignment) -> bool:
+    return bool(assignment.deadline) and assignment.deadline <= db.iso_utc_now()
+
+
+def hold_activation(
+    conn: sqlite3.Connection,
+    cfg: "AssignmentsConfig",
+    assignment_id: int,
+    *,
+    user_id: str,
+    task_id: int,
+) -> dict[str, Any]:
+    """Hold the rendered charter for the user's approval. Returns the request row.
+
+    A call from a task that already holds or had approved this assignment's
+    activation returns that request, so the confirmed re-run calling
+    `activate` again is told it is done. Raises `TransitionError` for the
+    assignment's own refusals and `relay.requests.RequestError` for the
+    ledger's (`confirmation_pending`, `task_unavailable`).
+    """
+    from istota.relay.requests import _store_request
+
+    with write_transaction(conn):
+        assignment = _load(conn, assignment_id, user_id)
+        mine = conn.execute(
+            _ACTIVATIONS_SQL + " AND requester_user_id = ? AND origin_task_id = ? ORDER BY rowid DESC",
+            (assignment_id, user_id, task_id),
+        ).fetchall()
+        if mine and mine[0]["state"] in ("held", "approved"):
+            return dict(mine[0])
+        _require(assignment, ("draft",), "activate")
+        if _deadline_passed(assignment):
+            raise TransitionError("deadline_passed", "the deadline has passed; set a new one first")
+        try:
+            budget.check_active_limit(conn, cfg, user_id, assignment_id)
+        except charter.CharterError as exc:
+            raise _charter_error(exc) from None
+        if conn.execute(_ACTIVATIONS_SQL + " AND state = 'held'", (assignment_id,)).fetchone():
+            raise TransitionError(
+                "confirmation_pending",
+                "an activation of this assignment is already waiting for approval; "
+                "approve or decline that one",
+            )
+        task = db.get_task(conn, task_id)
+        if task is None:
+            raise TransitionError("not_a_user_turn", "the calling task is gone")
+        rendered = charter.render_current(conn, assignment_id)
+        digest = charter.charter_digest(conn, assignment_id)
+        preview = f"{ACTIVATION_PREAMBLE}\n\n{rendered}"
+        summary = f"Activate assignment {assignment_id}"
+        row = _store_request(
+            conn, actor_user_id=user_id, task_id=task_id,
+            # Numbered per task, so a turn whose earlier hold was cancelled by a
+            # charter change can hold the new charter under a fresh key.
+            request_key=f"assignment-{assignment_id}-{len(mine) + 1}",
+            kind=ACTIVATION_KIND, recipient_user_id=user_id, text=summary,
+            service_body=summary, template_body=None, provider="assignment",
+            binding_fingerprint=digest, preview=preview,
+            origin={"surface": task.source_type, "room_token": task.conversation_token},
+            destination={"assignment_id": assignment_id, "charter_digest": digest},
+        )
+        store.insert_event(
+            conn, assignment_id, kind="activation_held", actor="user", payload={"request_id": row["id"]},
+        )
+        return row
+
+
+def activate_from_request(
+    conn: sqlite3.Connection,
+    config,
+    *,
+    request_id: str,
+    preview_digest: str,
+    actor_user_id: str,
+) -> dict[str, Any]:
+    """draft → sleeping, due now, on the approval of a held activation.
+
+    Called by `relay.requests.approve_request` inside its write transaction,
+    after it has matched the parked task, the request and the preview digest.
+    Raises `RequestError("confirmation_unavailable")` for a request that is not
+    this user's held activation. When the assignment has moved since the hold
+    (no longer a draft, the charter re-rendered differently, the deadline
+    passed, the active ceiling reached), the request closes as `failed` with
+    that code and the parked task is cancelled; that is returned rather than
+    raised, so the caller's savepoint keeps the close.
+    """
+    from istota.relay.requests import RequestError, text_hash
+
+    with write_transaction(conn):
+        row = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id = ?", (request_id,)).fetchone()
+        if (row is None or row["kind"] != ACTIVATION_KIND or row["state"] != "held"
+                or row["requester_user_id"] != actor_user_id
+                or row["recipient_user_id"] != actor_user_id
+                or row["preview_digest"] != preview_digest
+                or text_hash(row["preview"] or "") != preview_digest):
+            raise RequestError("confirmation_unavailable")
+        try:
+            destination = json.loads(row["destination"] or "{}")
+        except ValueError:
+            destination = {}
+        assignment_id = destination.get("assignment_id")
+        held_digest = destination.get("charter_digest")
+        if type(assignment_id) is not int or not isinstance(held_digest, str):
+            raise RequestError("confirmation_unavailable")
+
+        assignment = store.get_assignment(conn, assignment_id, user_id=actor_user_id)
+        code = None
+        if assignment is None:
+            code = "not_found"
+        elif config is None:
+            code = "assignment_unavailable"
+        elif assignment.state != "draft":
+            code = "bad_state"
+        elif charter.charter_digest(conn, assignment_id) != held_digest:
+            code = "charter_changed"
+        elif _deadline_passed(assignment):
+            code = "deadline_passed"
+        else:
+            try:
+                budget.check_active_limit(conn, config.assignments, actor_user_id, assignment_id)
+            except charter.CharterError as exc:
+                code = exc.code
+        if code is not None:
+            conn.execute(
+                "UPDATE whatsapp_skill_requests SET state = 'failed', error_code = ?,"
+                " closed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+                (code, request_id),
+            )
+            if row["origin_task_id"] is not None:
+                db.cancel_task(conn, row["origin_task_id"])
+            if assignment is not None:
+                store.insert_event(
+                    conn, assignment_id, kind="activation_refused", actor="system",
+                    payload={"request_id": request_id, "reason": code},
+                )
+            return {"error": code}
+
+        now = db.iso_utc_now()
+        store.set_state(conn, assignment_id, "sleeping")
+        store.update_assignment(conn, assignment_id, next_wake_at=now, activated_at=now)
+        store.insert_event(
+            conn, assignment_id, kind="activated", actor="user", payload={"request_id": request_id},
+        )
+        conn.execute(
+            "UPDATE whatsapp_skill_requests SET state = 'approved', approved_digest = ?,"
+            " approved_at = datetime('now'), closed_at = datetime('now'), updated_at = datetime('now')"
+            " WHERE id = ?",
+            (preview_digest, request_id),
+        )
+        return {"status": "approved", "assignment_id": assignment_id}
+
+
+def cancel_held_activation(conn: sqlite3.Connection, assignment_id: int, *, reason: str) -> int:
+    """Cancel any held activation of this assignment, and the task parked on it.
+
+    Through the ledger's own close (`relay.relays.close_task_questions`), so
+    the parked task is released the way every other closed hold releases it.
+    Returns how many were cancelled.
+    """
+    from istota.relay.relays import close_task_questions
+
+    with write_transaction(conn):
+        rows = conn.execute(_ACTIVATIONS_SQL + " AND state = 'held'", (assignment_id,)).fetchall()
+        for row in rows:
+            if row["origin_task_id"] is not None:
+                close_task_questions(conn, row["origin_task_id"], reason=reason)
+            else:
+                conn.execute(
+                    "UPDATE whatsapp_skill_requests SET state = 'cancelled', error_code = ?,"
+                    " closed_at = datetime('now'), updated_at = datetime('now')"
+                    " WHERE id = ? AND state = 'held'",
+                    (reason, row["id"]),
+                )
+        return len(rows)
 
 
 # ---------------------------------------------------------------------------

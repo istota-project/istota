@@ -177,6 +177,8 @@ def describe(conn, task: db.Task) -> str:
             return "a recovery code awaiting approval"
         if row is not None and row["kind"] == "location_share":
             return "location sharing awaiting approval"
+        if row is not None and row["kind"] == "assignment_activation":
+            return "an assignment awaiting approval"
         if row is not None and row["kind"] == "purchase":
             return "a purchase awaiting approval"
         if row is not None and row["kind"] == "room_post":
@@ -226,6 +228,9 @@ def describe_title(conn, task: db.Task) -> str:
     if row["kind"] == "location_share":
         from istota.notifications.resolvers.confirmation import LOCATION_SHARE_TITLE
         return LOCATION_SHARE_TITLE
+    if row["kind"] == "assignment_activation":
+        from istota.notifications.resolvers.confirmation import ASSIGNMENT_ACTIVATION_TITLE
+        return ASSIGNMENT_ACTIVATION_TITLE
     if row["kind"] == "purchase":
         from istota.notifications.resolvers.confirmation import PURCHASE_TITLE
         return PURCHASE_TITLE

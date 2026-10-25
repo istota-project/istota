@@ -16,7 +16,7 @@ Every command is `istota-skill assignment <verb>` and answers one JSON object. A
 
 ## Who may do what
 
-The charter (title, goal, what you may do without asking, done-when items, frozen commitments, budget, deadline, check-in interval) belongs to the user. Only the user's own turn in their private web or Talk chat may change it, or pause, resume, wake, top up, abandon, close, leave a note or report a hand-off done. Anywhere else (email, a scheduled job, a shared room, a wake) those verbs answer `not_a_user_turn`. Do not try to work round that: tell the user to say it in their own chat.
+The charter (title, goal, what you may do without asking, done-when items, frozen commitments, budget, deadline, check-in interval) belongs to the user. Only the user's own turn in their private web or Talk chat may change it, or activate, pause, resume, wake, top up, abandon, close, leave a note or report a hand-off done. Anywhere else (email, a scheduled job, a shared room, a wake) those verbs answer `not_a_user_turn`. Do not try to work round that: tell the user to say it in their own chat.
 
 `list` and `show` work from any task of the user.
 
@@ -44,7 +44,7 @@ istota-skill assignment set heat-pump-quotes --cadence 12h
 - The autonomy clause names actions and recipients ("may email the installers on the approved list"), not general latitude ("do whatever is needed"). Ask the user to narrow a vague one.
 - `item remove <id> <item-id>` and `frozen remove <id> <frozen-id>` take the ids `show` lists.
 
-A draft does nothing until the user approves it. Approval is not available yet; say so if the user asks to start one.
+A draft does nothing until the user approves it. When the user says to start it, run `istota-skill assignment activate <id>`. It answers `held` with the charter as `preview`; end your turn there, and the user is asked to approve that exact text. Approval starts the assignment, and the first wake follows shortly. Calling `activate` again after approval answers `approved`; say it has started. Any charter change while the approval is waiting cancels it, so run `activate` again after the change. `activate` refuses `deadline_passed` when the deadline is behind us, `too_many_active` at the deployment's limit, and `confirmation_pending` while another approval of the same assignment is waiting.
 
 The assignment's folder is `{BOT_DIR}/assignments/<slug>/` in the user's files. `CHARTER.md` there is generated from the record; editing it changes nothing. `SCRATCHPAD.md` holds the notes, and the user may edit it.
 

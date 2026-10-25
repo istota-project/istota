@@ -78,6 +78,13 @@ _host_pressure_unavailable_warned = False
 # flood (a `* * * * *` cron aging out 130+ backed-up runs).
 _AUTOMATED_SOURCE_TYPES = frozenset({"scheduled", "briefing", "heartbeat", "subtask"})
 
+# Request kinds that park their task on the stored preview itself rather than
+# on the model's answer. The stoppable ones can be closed by something else
+# (a stop, a charter change) between the hold and the park, so the park
+# re-reads the request under the writer lock and cancels the task if it closed.
+_AUTHORIZATION_KINDS = ("purchase", "recovery_fill", "location_share", "assignment_activation")
+_STOPPABLE_AUTHORIZATION_KINDS = ("location_share", "assignment_activation")
+
 # How long a per-message deletion stays in the ledger the room stream tails.
 _MESSAGE_DELETION_RETENTION_DAYS = 30
 
@@ -3785,14 +3792,15 @@ def process_one_task(
         relay_question = held_question(conn, task_id)
         if relay_question is None:
             # A stopped request's preview remains private after its hold ends.
+            # An activation whose charter changed before the park is stopped too.
             stopped_location = conn.execute(
                 "SELECT * FROM whatsapp_skill_requests WHERE origin_task_id=? "
-                "AND kind='location_share' AND state IN ('cancelled','expired','failed') "
-                "ORDER BY rowid DESC LIMIT 1", (task_id,),
+                "AND kind IN (?, ?) AND state IN ('cancelled','expired','failed') "
+                "ORDER BY rowid DESC LIMIT 1", (task_id, *_STOPPABLE_AUTHORIZATION_KINDS),
             ).fetchone()
             if stopped_location is not None:
                 relay_question = dict(stopped_location)
-    authorization_question = relay_question if relay_question and relay_question["kind"] in ("purchase", "recovery_fill", "location_share") else None
+    authorization_question = relay_question if relay_question and relay_question["kind"] in _AUTHORIZATION_KINDS else None
     if authorization_question and not success and not dry_run:
         from istota.relay.relays import close_task_questions
         with db.get_db(config.db_path) as conn:
@@ -4037,7 +4045,8 @@ def process_one_task(
                 # A relay or authorization question held on this answer goes too.
                 from istota.relay.relays import close_task_questions
                 close_task_questions(conn, task_id, reason="attempt_failed")
-        if not dry_run and authorization_question and authorization_question["kind"] == "location_share":
+        if (not dry_run and authorization_question
+                and authorization_question["kind"] in _STOPPABLE_AUTHORIZATION_KINDS):
             from istota.relay.requests import write_transaction
             # Keep this lock through parking so stop cannot race the state check.
             with write_transaction(conn):
@@ -4217,6 +4226,7 @@ def process_one_task(
                 if authorization_question is not None:
                     _park_title = (confirmation_source.RECOVERY_FILL_TITLE if authorization_question["kind"] == "recovery_fill"
                                    else confirmation_source.LOCATION_SHARE_TITLE if authorization_question["kind"] == "location_share"
+                                   else confirmation_source.ASSIGNMENT_ACTIVATION_TITLE if authorization_question["kind"] == "assignment_activation"
                                    else confirmation_source.PURCHASE_TITLE)
                     _park_body = (confirmation_source.PARK_BELL_BODY if bell_only
                                   else confirmation_source.PARK_BODY)

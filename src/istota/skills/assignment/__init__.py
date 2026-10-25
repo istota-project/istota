@@ -17,7 +17,10 @@ built by `run_skill_cli`'s `on_exception` from the three refusal types, so a
 refused write rolls back with the connection rather than being printed from
 inside it.
 
-The approval (`activate`) and the wake-facing verbs are added by later stages.
+`activate` holds the rendered charter in the relay request ledger
+(`assignments.lifecycle.hold_activation`); the task parks on it and the user's
+approval of that exact preview starts the assignment. The wake-facing verbs
+are added by a later stage.
 """
 
 from __future__ import annotations
@@ -60,10 +63,19 @@ def _envelope(code: str, message: str, **extra: Any) -> dict:
     return envelope
 
 
+_LEDGER_MESSAGES = {
+    "confirmation_pending": "this turn is already waiting on another approval; finish that first",
+    "task_unavailable": "the calling task is not running",
+}
+
+
 def _on_exception(exc: BaseException) -> dict:
     from istota.assignments.charter import CharterError
     from istota.assignments.lifecycle import TransitionError
+    from istota.relay.requests import RequestError
 
+    if isinstance(exc, RequestError):
+        return _envelope(str(exc), _LEDGER_MESSAGES.get(str(exc), "the approval could not be held"))
     if isinstance(exc, Refusal):
         return _envelope(exc.code, exc.message, **exc.extra)
     if isinstance(exc, TransitionError):
@@ -406,6 +418,27 @@ def _state_result(ctx: _Ctx, assignment, **extra: Any) -> dict:
     return {"status": "ok", "assignment": _summary(assignment), **extra}
 
 
+def cmd_activate(ctx: _Ctx, args) -> dict:
+    """Hold the rendered charter for the user's approval; the task parks on it."""
+    from istota.assignments import lifecycle, store
+
+    _require_user_turn(ctx)
+    assignment = _resolve(ctx, args.id)
+    row = lifecycle.hold_activation(
+        ctx.conn, ctx.cfg, assignment.id, user_id=ctx.user_id,
+        task_id=int(os.environ["ISTOTA_TASK_ID"]),
+    )
+    ctx.conn.commit()
+    current = store.get_assignment(ctx.conn, assignment.id)
+    result = {
+        "status": row["state"], "request_id": row["id"],
+        "needs_confirmation": row["state"] == "held", "assignment": _summary(current),
+    }
+    if row["state"] == "held":
+        result["preview"] = row["preview"]
+    return result
+
+
 def cmd_pause(ctx: _Ctx, args) -> dict:
     from istota.assignments import lifecycle
 
@@ -614,6 +647,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("id")
     p.add_argument("frozen_id", type=int)
 
+    p = sub.add_parser("activate", help="Ask the user to approve the charter and start it")
+    p.add_argument("id")
+
     for name in ("pause", "resume", "wake"):
         p = sub.add_parser(name)
         p.add_argument("id")
@@ -662,6 +698,7 @@ COMMANDS = {
     "item confirm": cmd_item_confirm,
     "frozen add": cmd_frozen_add,
     "frozen remove": cmd_frozen_remove,
+    "activate": cmd_activate,
     "pause": cmd_pause,
     "resume": cmd_resume,
     "abandon": cmd_abandon,

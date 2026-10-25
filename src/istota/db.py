@@ -1356,6 +1356,7 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     _migrate_skill_request_purchase_kind(conn)
     _rebuild_skill_request_kinds(conn, "recovery_fill")
     _rebuild_skill_request_kinds(conn, "location_share")
+    _rebuild_skill_request_kinds(conn, "assignment_activation")
     # And then the inbox's one-shot seed, which needs that table to exist. It
     # takes a transaction of its own, so it commits whatever the migrations
     # above left open first (ISSUE-261); nothing after it depends on the
@@ -8332,7 +8333,7 @@ _SKILL_REQUESTS_DDL = """CREATE TABLE whatsapp_skill_requests_rebuild (
     requester_user_id TEXT NOT NULL,
     origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     request_key TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase', 'recovery_fill', 'location_share')),
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase', 'recovery_fill', 'location_share', 'assignment_activation')),
     recipient_user_id TEXT NOT NULL,
     relay_id TEXT UNIQUE,
     text TEXT,

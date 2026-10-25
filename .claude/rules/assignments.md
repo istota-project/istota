@@ -22,16 +22,27 @@ A core package, `src/istota/assignments/`, not a module in `MODULE_NAMES`: wakes
 | `lifecycle.py` | The one writer of `assignments.state`: one function per transition, each inside `relay.requests.write_transaction` with the source state re-read and checked (`TransitionError(code, message, state)`), each appending an `assignment_events` row. Also the user's other writes: `edit_charter`, notes, item confirmation, hand-off reports, `topup`, `close`. |
 | `caller.py` | `classify(conn, task_id=, user_id=)`: `UserTurn`, `Wake(assignment_id, wake_id)` or `Other`, from the task row. |
 | `budget.py` | The ledger (`totals`), `remaining`, `is_spent`, `topped_up` and the `max_active_per_user` count. |
-| `skills/assignment/` | The CLI: the user-turn verbs and `list` / `show`. |
+| `skills/assignment/` | The CLI: the user-turn verbs, `activate`, and `list` / `show`. |
 
-The modules for the scratchpad, wakes and prompt, the wake-facing verbs, activation and the bell resolver are added by later stages of the same work, each named here as it lands.
+The modules for the scratchpad, wakes and prompt, the wake-facing verbs and the bell resolver are added by later stages of the same work, each named here as it lands.
+
+## Activation
+
+Activation is the one approval, and it rides the relay request ledger (`whatsapp_skill_requests`, `.claude/rules/relay.md`) as kind `assignment_activation`, following `location_share`. No second hold table.
+
+- **Hold.** `lifecycle.hold_activation`, from `activate` in a user turn, refuses anything but a draft (`bad_state`), a passed deadline (`deadline_passed`), the active ceiling (`too_many_active`) and a second held activation of the same assignment in another task (`confirmation_pending`). It stores the request through `relay.requests._store_request` with `preview` the fixed `ACTIVATION_PREAMBLE` plus `charter.render`, and `destination = {"assignment_id", "charter_digest"}`, the digest taken in draft. The key is `assignment-<id>-<n>`, numbered per task, so a turn whose hold a charter change cancelled can hold again. A call from a task already holding or approved for this assignment returns that row, so the confirmed re-run calling `activate` again answers `approved`.
+- **Park.** The scheduler's authorization branch (`scheduler._AUTHORIZATION_KINDS`) parks the task on the stored preview, not the model's answer, with the bell title `ASSIGNMENT_ACTIVATION_TITLE`. Like `location_share` it is in `_STOPPABLE_AUTHORIZATION_KINDS`: the park re-reads the request under the writer lock and cancels the task when it closed in between. No clean-turn release.
+- **Approve.** `relay.requests.approve_request` calls `lifecycle.activate_from_request` after matching task, request and preview digest. It recomputes `charter_digest` and re-checks draft, deadline and ceiling; any miss closes the request `failed` with that code (`charter_changed`, `bad_state`, `deadline_passed`, `too_many_active`, `not_found`, `assignment_unavailable` with no config) and cancels the parked task, returned rather than raised so the approval savepoint keeps the close. Success is draft → sleeping, `next_wake_at` and `activated_at` now, an `activated` event, the request `approved`. The task then re-runs as every approved authorization does.
+- **Cancel.** `edit_charter` calls `cancel_held_activation` on every charter change, which closes the held request and its parked task through `relay.relays.close_task_questions`. Abandon does not cancel it; the approval then fails `bad_state`.
+- **Known gap.** `CHARTER.md` still shows the state line `draft` after approval until the next charter change rewrites it: the approval runs inside the confirmation's write transaction, where no file is written.
+- **Migration.** The `kind` CHECK is widened by `db._rebuild_skill_request_kinds(conn, "assignment_activation")`; `_SKILL_REQUESTS_DDL` is held equal to `schema.sql` by `tests/test_whatsapp_requests.py`. A table rebuild, so the upgrade tier (`scripts/test-upgrade.sh`) is owed before a release.
 
 ## Who may write
 
 - **A user turn** (`caller.UserTurn`) is a running task of the user from `web`, `talk` or `cli`, with no guest, no other author on its stored turn (`rooms.scopes.written_by_someone_else`), no parent, scheduled job, command or skill, not a group chat, and, when it has a conversation token, a registered room only that user reads (`db.is_private_room_of` on the canonical token; an unregistered token is refused). Every verb that changes the charter, the state or the budget, or writes a trusted inbox event, needs one. A wake trying one gets `not_a_user_turn`.
 - **The CLI's gates come first**: the `skill_assignment` flag (`feature_disabled`), admin (`not_admin`), `_guard_skill`, and a refusal when the calling task has scopes withheld, since an assignment is the user's personal record. Then every lookup is scoped by `ISTOTA_USER_ID`.
 - **Refusals are raised, not printed.** Handlers raise `Refusal`, `TransitionError` or `CharterError`, and `run_skill_cli`'s `on_exception` turns them into `{"status": "error", "error": code, "message": ...}`, so a refused write rolls back with the connection. A successful write is committed before `CHARTER.md` is rewritten.
-- **A draft's charter edits write no inbox event**; after activation every edit that moves the render writes a trusted `charter_change` with both renders. `edit_charter` is the one place a charter changes, so it is where Stage 4 cancels a held activation.
+- **A draft's charter edits write no inbox event**; after activation every edit that moves the render writes a trusted `charter_change` with both renders. `edit_charter` is the one place a charter changes, so it is where a held activation is cancelled.
 
 ## The ledger
 
