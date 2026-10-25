@@ -6072,10 +6072,29 @@ export interface SharedFolderOffer {
   created_at: string | null;
 }
 
-/** Folder shares over OCM: the address to share with, and the offers waiting. */
+/** A folder share the user accepted. Name and owner are the sender's words. */
+export interface SharedFolder {
+  id: number;
+  name: string | null;
+  owner: string | null;
+  host: string;
+  /** What the provider last said the share allows. */
+  access: 'read' | 'write';
+  state: 'active' | 'error';
+  last_reason: string | null;
+  created_at: string | null;
+}
+
+/** Folder shares over OCM: the address to share with, the offers waiting, the shares accepted. */
 export interface SharedFolderSettings {
-  federated_id: string;
+  /** False when the server stopped receiving shares; accepted ones stay removable. */
+  enabled?: boolean;
+  /** Null while the server receives no shares. */
+  federated_id: string | null;
   pending: SharedFolderOffer[];
+  shares?: SharedFolder[];
+  /** Why accepting is refused here (an unsandboxed multi-user server), or null. */
+  accept_refusal?: string | null;
 }
 
 export interface SharingSettings {
@@ -6102,6 +6121,23 @@ export function addSharedFeed(url: string): Promise<{ feed: SharedFeed }> {
 }
 export function removeSharedFeed(id: number): Promise<{ removed: boolean }> {
   return apiFetch(`/settings/sharing/feeds/${id}`, { method: 'DELETE' });
+}
+/** Opens the share once to prove it, then stores it; a refusal carries a `reason`. */
+export function acceptSharedFolder(
+  id: number,
+  allowScheduled: boolean,
+): Promise<{ share: SharedFolder; notified: boolean }> {
+  return apiFetch(`/settings/sharing/folders/${id}/accept`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ allow_scheduled: allowScheduled }),
+  });
+}
+export function declineSharedFolder(id: number): Promise<{ notified: boolean }> {
+  return apiFetch(`/settings/sharing/folders/${id}/decline`, { method: 'POST' });
+}
+export function removeSharedFolder(id: number): Promise<{ notified: boolean }> {
+  return apiFetch(`/settings/sharing/folders/${id}`, { method: 'DELETE' });
 }
 /** Makes the Istota calendar feed link, or replaces it; the address is returned this once. */
 export function createCalendarFeedLink(): Promise<{ url: string }> {

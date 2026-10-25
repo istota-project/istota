@@ -8,10 +8,13 @@ await fillApiDouble(api);
 import SharingCard from './SharingCard.svelte';
 import {
   AuthError,
+  acceptSharedFolder,
   addSharedFeed,
   createCalendarFeedLink,
+  declineSharedFolder,
   removeCalendarFeedLink,
   removeSharedFeed,
+  removeSharedFolder,
   type SharedFeed,
   type SharingSettings,
 } from '$lib/api';
@@ -257,7 +260,7 @@ it('hides the address while OCM is off', () => {
   expect(screen.queryByLabelText('Federated sharing address')).toBeNull();
 });
 
-it('lists pending offers read-only, the sender words as text', () => {
+it('lists pending offers, the sender words as text', () => {
   mount(
     withFolders([
       OFFER,
@@ -272,5 +275,105 @@ it('lists pending offers read-only, the sender words as text', () => {
   expect(rows[1]).toHaveTextContent('<b>Plans</b>');
   expect(rows[1]).toHaveTextContent('Offered again');
   expect(document.querySelector('b')).toBeNull();
-  expect(within(list).queryAllByRole('button')).toHaveLength(0);
+  expect(within(rows[0]).getByRole('button', { name: 'Accept Taxes 2026' })).toBeEnabled();
+  expect(within(rows[0]).getByRole('button', { name: 'Decline Taxes 2026' })).toBeInTheDocument();
+});
+
+const SHARE = {
+  id: 7,
+  name: 'Taxes 2026',
+  owner: 'carol@https://cloud.example.org',
+  host: 'cloud.example.org',
+  access: 'write' as const,
+  state: 'active' as const,
+  last_reason: null,
+  created_at: '2026-10-25T10:00:00Z',
+};
+
+it('accepts with scheduled use off unless ticked, then reloads', async () => {
+  vi.mocked(acceptSharedFolder).mockResolvedValue({ share: SHARE, notified: true });
+  const props = mount(withFolders([OFFER]));
+  await fireEvent.click(screen.getByRole('button', { name: 'Accept Taxes 2026' }));
+  const dialog = await screen.findByRole('dialog');
+  const box = within(dialog).getByRole('checkbox', { name: 'Let scheduled jobs use it' });
+  expect(box).not.toBeChecked();
+  await fireEvent.click(within(dialog).getByRole('button', { name: 'Accept' }));
+  await waitFor(() => expect(props.onSaved).toHaveBeenCalledOnce());
+  expect(acceptSharedFolder).toHaveBeenCalledWith(7, false);
+
+  cleanup();
+  vi.clearAllMocks();
+  vi.mocked(acceptSharedFolder).mockResolvedValue({ share: SHARE, notified: true });
+  mount(withFolders([OFFER]));
+  await fireEvent.click(screen.getByRole('button', { name: 'Accept Taxes 2026' }));
+  const again = await screen.findByRole('dialog');
+  await fireEvent.click(within(again).getByRole('checkbox', { name: 'Let scheduled jobs use it' }));
+  await fireEvent.click(within(again).getByRole('button', { name: 'Accept' }));
+  await waitFor(() => expect(acceptSharedFolder).toHaveBeenCalledWith(7, true));
+});
+
+it('keeps a refused accept in the dialog and says why', async () => {
+  vi.mocked(acceptSharedFolder).mockRejectedValueOnce(new Error('This share could not be opened.'));
+  const props = mount(withFolders([OFFER]));
+  await fireEvent.click(screen.getByRole('button', { name: 'Accept Taxes 2026' }));
+  const dialog = await screen.findByRole('dialog');
+  await fireEvent.click(within(dialog).getByRole('button', { name: 'Accept' }));
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+    'This share could not be opened.',
+  );
+  expect(props.onSaved).not.toHaveBeenCalled();
+});
+
+it('declines only after confirming', async () => {
+  vi.mocked(declineSharedFolder).mockResolvedValue({ notified: true });
+  const props = mount(withFolders([OFFER]));
+  await fireEvent.click(screen.getByRole('button', { name: 'Decline Taxes 2026' }));
+  const dialog = await screen.findByRole('dialog');
+  expect(dialog).toHaveTextContent('Are you sure you want to decline Taxes 2026?');
+  expect(declineSharedFolder).not.toHaveBeenCalled();
+  await fireEvent.click(within(dialog).getByRole('button', { name: 'Decline' }));
+  await waitFor(() => expect(props.onSaved).toHaveBeenCalledOnce());
+  expect(declineSharedFolder).toHaveBeenCalledWith(7);
+});
+
+it('says why accepting is unavailable, and disables it', () => {
+  const data = withFolders([OFFER]);
+  data.ocm!.accept_refusal = 'Credentials need a sandboxed server here.';
+  mount(data);
+  expect(screen.getByText('Credentials need a sandboxed server here.')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Accept Taxes 2026' })).toBeDisabled();
+});
+
+it('lists accepted shares and removes one after confirming', async () => {
+  vi.mocked(removeSharedFolder).mockResolvedValue({ notified: true });
+  const data = withFolders([]);
+  data.ocm!.shares = [SHARE, { ...SHARE, id: 8, name: '<i>Old</i>', access: 'read' }];
+  const props = mount(data);
+  expect(screen.queryByText('No folder offers are waiting.')).toBeNull();
+  const rows = within(screen.getByRole('list', { name: 'Shared folders' })).getAllByRole(
+    'listitem',
+  );
+  expect(rows[0]).toHaveTextContent('share:7 · cloud.example.org · read and write');
+  expect(rows[1]).toHaveTextContent('<i>Old</i>');
+  expect(rows[1]).toHaveTextContent('read only');
+  expect(document.querySelector('i')).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Actions for Taxes 2026' }));
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove' }));
+  const dialog = await screen.findByRole('dialog');
+  expect(dialog).toHaveTextContent('Are you sure you want to remove Taxes 2026?');
+  await fireEvent.click(within(dialog).getByRole('button', { name: 'Remove' }));
+  await waitFor(() => expect(props.onSaved).toHaveBeenCalledOnce());
+  expect(removeSharedFolder).toHaveBeenCalledWith(7);
+});
+
+it('with sharing off, keeps the shares removable and drops the address', () => {
+  mount(
+    settings({
+      feeds: [],
+      ocm: { enabled: false, federated_id: null, pending: [], shares: [SHARE] },
+    }),
+  );
+  expect(screen.queryByLabelText('Federated sharing address')).toBeNull();
+  expect(screen.getByText(/no longer receives folder shares/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Actions for Taxes 2026' })).toBeInTheDocument();
 });

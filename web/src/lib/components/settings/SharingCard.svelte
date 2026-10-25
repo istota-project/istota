@@ -1,13 +1,18 @@
 <script lang="ts">
   import {
     AuthError,
+    acceptSharedFolder,
     addSharedFeed,
     createCalendarFeedLink,
+    declineSharedFolder,
     removeCalendarFeedLink,
     removeSharedFeed,
+    removeSharedFolder,
     setCalendarDelivery,
     type CalendarDelivery,
     type SharedFeed,
+    type SharedFolder,
+    type SharedFolderOffer,
     type SharingSettings,
   } from '$lib/api';
   import {
@@ -15,6 +20,7 @@
     Badge,
     Button,
     Card,
+    Checkbox,
     ConfirmDialog,
     CopyField,
     EmptyState,
@@ -107,6 +113,69 @@
 
   function menu(feed: SharedFeed): KebabItem[] {
     return [{ label: 'Remove', danger: true, onSelect: () => removing.ask(feed) }];
+  }
+
+  // Folders shared over OCM. Accepting opens the share once on the server to
+  // prove it; declining and removing tell the sender, so both ask first.
+  const ocm = $derived(settings?.ocm ?? null);
+  const folderShares = $derived(ocm?.shares ?? []);
+  let accepting = $state<SharedFolderOffer | null>(null);
+  let acceptOpen = $state(false);
+  let allowScheduled = $state(false);
+  const declining = createConfirm<SharedFolderOffer>();
+  const removingFolder = createConfirm<SharedFolder>();
+
+  function folderName(item: { name: string | null }): string {
+    return item.name || 'A folder';
+  }
+
+  function openAccept(offer: SharedFolderOffer) {
+    accepting = offer;
+    allowScheduled = false;
+    acceptOpen = true;
+  }
+
+  // A refusal rejects into the dialog, which stays open to say so; an expired
+  // session goes to onError.
+  async function folderAction(run: () => Promise<unknown>, close?: () => void) {
+    try {
+      await run();
+    } catch (e) {
+      if (e instanceof AuthError) {
+        close?.();
+        onError(e);
+        return;
+      }
+      throw e;
+    }
+    onSaved();
+  }
+
+  async function acceptOffer() {
+    const offer = accepting;
+    if (!offer) return;
+    await folderAction(
+      () => acceptSharedFolder(offer.id, allowScheduled),
+      () => (acceptOpen = false),
+    );
+  }
+
+  async function declineOffer() {
+    const offer = declining.target;
+    if (!offer) return;
+    await folderAction(
+      () => declineSharedFolder(offer.id),
+      () => declining.cancel(),
+    );
+  }
+
+  async function removeFolder() {
+    const share = removingFolder.target;
+    if (!share) return;
+    await folderAction(
+      () => removeSharedFolder(share.id),
+      () => removingFolder.cancel(),
+    );
   }
 
   // Istota's own calendar. The feed address is shown once, when it is made;
@@ -221,27 +290,83 @@
     {#if atLimit}
       <p class="caption">This server allows {settings.max_feeds} shared calendars per person.</p>
     {/if}
-    {#if settings.ocm}
+    {#if ocm}
       <h3>Shared folders</h3>
-      <p class="caption">
-        Share a folder with this address from your Nextcloud, or any server with federated sharing.
-        Istota cannot read a folder until you accept it.
-      </p>
-      <CopyField label="Federated sharing address" value={settings.ocm.federated_id} monospace />
-      {#if settings.ocm.pending.length === 0}
-        <EmptyState size="sm">No folder offers are waiting.</EmptyState>
+      {#if ocm.federated_id}
+        <p class="caption">
+          Share a folder with this address from your Nextcloud, or any server with federated
+          sharing. Istota cannot read a folder until you accept it.
+        </p>
+        <CopyField label="Federated sharing address" value={ocm.federated_id} monospace />
       {:else}
+        <Alert appearance="inline" variant="info"
+          >This server no longer receives folder shares, so Istota does not hear when one of these
+          folders is unshared. Remove a share here once you stop using it.</Alert
+        >
+      {/if}
+      {#if ocm.accept_refusal && ocm.pending.length > 0}
+        <Alert appearance="inline" variant="warn">{ocm.accept_refusal}</Alert>
+      {/if}
+      {#if ocm.pending.length === 0 && folderShares.length === 0}
+        <EmptyState size="sm">No folder offers are waiting.</EmptyState>
+      {/if}
+      {#if ocm.pending.length > 0}
         <ul class="divided-list" aria-label="Folder offers">
-          {#each settings.ocm.pending as offer (offer.id)}
+          {#each ocm.pending as offer (offer.id)}
             <li class="shared-feed">
               <div class="shared-feed-main">
-                <span>{offer.name || 'A folder'}</span>
+                <span>{folderName(offer)}</span>
                 <span class="caption"
                   >from {offer.owner ? `${offer.owner} · ` : ''}{offer.host} · offered
                   <Timestamp value={offer.created_at} format="relative" empty="just now" /></span
                 >
               </div>
               <Badge size="sm" variant="info">{offer.reoffer ? 'Offered again' : 'Waiting'}</Badge>
+              <div class="feed-actions">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={!!ocm.accept_refusal}
+                  ariaLabel="Accept {folderName(offer)}"
+                  onclick={() => openAccept(offer)}>Accept</Button
+                >
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  ariaLabel="Decline {folderName(offer)}"
+                  onclick={() => declining.ask(offer)}>Decline</Button
+                >
+              </div>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      {#if folderShares.length > 0}
+        <ul class="divided-list" aria-label="Shared folders">
+          {#each folderShares as share (share.id)}
+            <li class="shared-feed">
+              <div class="shared-feed-main">
+                <span>{folderName(share)}</span>
+                <span class="caption"
+                  ><span class="mono">share:{share.id}</span> · {share.host} · {share.access ===
+                  'write'
+                    ? 'read and write'
+                    : 'read only'}</span
+                >
+              </div>
+              <Badge size="sm" variant={share.state === 'error' ? 'warn' : 'success'}
+                >{share.state === 'error' ? 'Not reachable' : 'Active'}</Badge
+              >
+              <KebabMenu
+                items={[
+                  {
+                    label: 'Remove',
+                    danger: true,
+                    onSelect: () => removingFolder.ask(share),
+                  },
+                ]}
+                ariaLabel="Actions for {folderName(share)}"
+              />
             </li>
           {/each}
         </ul>
@@ -359,6 +484,53 @@
     />
   </Field>
 </FormModal>
+
+<FormModal
+  bind:open={acceptOpen}
+  title="Accept a shared folder"
+  submitLabel="Accept"
+  busyLabel="Opening…"
+  onSubmit={acceptOffer}
+  onCancel={() => (acceptOpen = false)}
+>
+  {#if accepting}
+    <p>
+      Istota opens {folderName(accepting)} from {accepting.host} once now to check the share. Then your
+      tasks can read it, and change it if the share allows that.
+    </p>
+  {/if}
+  <Checkbox
+    bind:checked={allowScheduled}
+    label="Let scheduled jobs use it"
+    description="When this is off, only tasks you start can reach the folder; scheduled jobs and briefings cannot. You can change it later under Credentials."
+  />
+</FormModal>
+
+<ConfirmDialog
+  bind:open={declining.open}
+  title="Decline folder"
+  message={declining.target
+    ? declining.target.reoffer
+      ? `Are you sure you want to decline the new offer of ${folderName(declining.target)}? The folder stays shared as it is now.`
+      : `Are you sure you want to decline ${folderName(declining.target)}? Istota tells ${declining.target.host}, and the owner has to share it again before Istota can reach it.`
+    : ''}
+  confirmLabel="Decline"
+  confirmVariant="danger"
+  busyLabel="Declining…"
+  onConfirm={declineOffer}
+/>
+
+<ConfirmDialog
+  bind:open={removingFolder.open}
+  title="Remove folder"
+  message={removingFolder.target
+    ? `Are you sure you want to remove ${folderName(removingFolder.target)}? Istota forgets its link and tells ${removingFolder.target.host}, which ends the share.`
+    : ''}
+  confirmLabel="Remove"
+  confirmVariant="danger"
+  busyLabel="Removing…"
+  onConfirm={removeFolder}
+/>
 
 <ConfirmDialog
   bind:open={removing.open}
