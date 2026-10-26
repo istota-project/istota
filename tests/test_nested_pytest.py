@@ -22,13 +22,15 @@ from tests.support.drift import source_of
 
 TESTS_DIR = nested_pytest.REPO / "tests"
 
-#: Modules allowed to spawn pytest without the helper, and why. Empty, and
-#: that is the finding rather than the starting point: the one candidate,
-#: `tests/test_drift_selection.py`, needs a cacheprovider its child's testmon
-#: session reads the `lf` option from — which is now a parameter rather than a
-#: reason to stand outside. An entry here is a decision on the record; it is
-#: not a place to park a module somebody did not want to convert.
-EXEMPT: set[str] = set()
+#: Modules allowed to spawn pytest without the helper, and why, keyed by path
+#: under `tests/`. An entry here is a decision on the record; it is not a place
+#: to park a module somebody did not want to convert.
+#:
+#: `live/native_eval/cases.py` grades a fixture repository the model edited,
+#: not this repo's conftest, and its runner reads a check that raises as a
+#: failed case. The helper's `pytest.fail` is a `BaseException`, so a timeout
+#: there would abort the whole eval run instead of failing one case.
+EXEMPT: set[str] = {"live/native_eval/cases.py"}
 
 #: The spelling every nested pytest in this tree uses.
 #:
@@ -58,7 +60,7 @@ def nested_pytest_modules() -> list[str]:
     helper = Path(nested_pytest.__file__).resolve()
     found = []
     for path in sorted(TESTS_DIR.rglob("*.py")):
-        if path.resolve() == helper or path.name in EXEMPT:
+        if path.resolve() == helper or path.relative_to(TESTS_DIR).as_posix() in EXEMPT:
             continue
         if SPAWN in path.read_text(encoding="utf-8"):
             found.append(path)
