@@ -177,8 +177,6 @@ A new build is surfaced, not forced: the root layout watches SvelteKit's `update
 
 **Render bundles are a second build.** `src/render/<name>/main.ts` entries are built by `vite.render.config.ts` into self-contained `build-render/<name>.html` files the daemon sends to the browser service to turn into an image (the location share map for Talk and WhatsApp). They are not routes and the web never serves them. An entry calls `registerRenderer` from `src/render/host.ts` and mounts app components with `mount`; it makes no API call, since everything it draws arrives in the payload. The contract is in `.claude/rules/leaf-modules.md` under `browser/document_render.py`.
 
-**The apps build is a third.** `vite.apps.config.ts` writes `build-apps/`: the house kit from `src/apps/kit/` (the three scripts copied verbatim, `istota.css` built so its imports of minot's tokens and `app-tokens.css` are inlined), the starter apps from `src/apps/starter/` without their tests, and `manifest.json` with each file's sha256. The daemon reads it through `istota.apps.kit` (`ISTOTA_WEB_APPS_DIR` in the image) and inlines the kit into every app document it builds; the web never serves it. The kit's scripts are classic scripts, each one IIFE, because they run before an app's own code; `src/apps/build.ts` refuses a kit file holding `</script`, `<!--` or `</style`, since the document builder will not escape them.
-
 `static/` holds the manifest and the four icons. Manifest paths stay **relative** and head links go through `%sveltekit.assets%`, because the whole app is served under the `/istota` base and at varying route depths.
 
 ## Checks

@@ -103,18 +103,11 @@ function isStandalone(): boolean {
   );
 }
 
-/**
- * Whether the keyboard gate should read focus as a text field. A field inside
- * an app frame leaves the frame element as this document's `activeElement`, so
- * an app frame counts as one: the app's own fields are what it is for. Any
- * other iframe (a feed's video player) does not.
- */
-export function isTextEntryFocused(): boolean {
+function isTextEntryFocused(): boolean {
   const el = document.activeElement as HTMLElement | null;
   if (!el) return false;
   const tag = el.tagName;
-  if (tag === 'IFRAME') return el.hasAttribute('data-istota-app-frame');
-  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable === true;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
 }
 
 /**

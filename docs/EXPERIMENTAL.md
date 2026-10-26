@@ -27,10 +27,6 @@ Money skill — `lots` subcommand (open lots for a security). Rough because the 
 
 Money skill — `wash-sales` subcommand (IRS wash-sale violation detector). Encodes US-only IRS rules (30-day window, substantially identical securities). Graduation: when the wash-sale detector is either generalised across jurisdictions or explicitly scoped to US filers with a fail-loud check, and has test coverage against historical broker data.
 
-### `module_apps`
-
-The Apps module: single pages that run in a sandboxed frame in the web UI and reach Istota's data only through a bridge with per-version permissions. Off by default while it is built out; with the flag on, `/me` reports `features.apps` for every user who has not disabled the module, and the `[apps]` block sets its storage and call caps. Graduation: when the frame's escape tier is green in all three browsers and the device matrix has been run.
-
 ## Adding a new flag
 
 1. Add an entry to `KNOWN_FEATURES` in `src/istota/experimental.py`.

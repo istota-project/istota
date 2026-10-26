@@ -208,8 +208,7 @@ def _format_query_time(timestamp: datetime | None, tz_str: str | None) -> str | 
 SUMMARY_SYMBOLS = ["^GSPC", "^IXIC", "^DJI", "^VIX", "GC=F", "CL=F", "^TNX"]
 
 
-def quote_to_dict(q: MarketQuote) -> dict:
-    """A quote as JSON: the CLI's output and the apps bridge's `markets.quote` result."""
+def _quote_to_dict(q: MarketQuote) -> dict:
     d = asdict(q)
     d["timestamp"] = q.timestamp.isoformat() if q.timestamp else None
     return d
@@ -217,12 +216,12 @@ def quote_to_dict(q: MarketQuote) -> dict:
 
 def cmd_quote(args: argparse.Namespace) -> None:
     quotes = get_quotes(args.symbols)
-    print(json.dumps([quote_to_dict(q) for q in quotes], indent=2))
+    print(json.dumps([_quote_to_dict(q) for q in quotes], indent=2))
 
 
 def cmd_summary(args: argparse.Namespace) -> None:
     quotes = get_quotes(SUMMARY_SYMBOLS)
-    print(json.dumps([quote_to_dict(q) for q in quotes], indent=2))
+    print(json.dumps([_quote_to_dict(q) for q in quotes], indent=2))
 
 
 def cmd_finviz(args: argparse.Namespace) -> None:

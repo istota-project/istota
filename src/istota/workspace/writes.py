@@ -132,43 +132,6 @@ def write_new_file(
     return name
 
 
-def replace_file(root: Path, parts: list[str], name: str, data: bytes) -> None:
-    """Write ``data`` at ``name`` in the pinned folder, replacing any regular file there.
-
-    The bytes go to a dot-prefixed staging file first and are renamed over the
-    name, so a reader sees the old file or the new one, never a part. The
-    rename replaces a link at the name rather than following it; a folder at
-    the name raises ``IsADirectoryError``. ``name`` is used as given, so the
-    caller has already refused anything ``valid_part`` would.
-    """
-    if not valid_part(name):
-        raise ValueError("invalid file name")
-    dir_fd = open_dir(root, *parts, raise_mount_errors=True)
-    if dir_fd is None:
-        raise ListingError(404, "Folder not found.")
-    try:
-        try:
-            if stat.S_ISDIR(os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode):
-                raise IsADirectoryError(errno.EISDIR, "Is a directory", name)
-        except FileNotFoundError:
-            pass
-        staging = f".{secrets.token_hex(8)}.staging"
-        fd = os.open(
-            staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o644, dir_fd=dir_fd,
-        )
-        try:
-            _write_chunks(fd, [data], len(data), sync=True)
-            os.rename(staging, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-        finally:
-            try:
-                os.unlink(staging, dir_fd=dir_fd)
-            except FileNotFoundError:
-                pass
-    finally:
-        os.close(dir_fd)
-
-
 def make_folder(root: Path, parts: list[str], name: str) -> str:
     fd = open_dir(root, *parts, raise_mount_errors=True)
     if fd is None:

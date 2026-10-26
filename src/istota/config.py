@@ -2454,22 +2454,6 @@ class MoneyModuleConfig:
 
 
 @dataclass
-class AppsConfig:
-    """Fixed storage and call caps for the experimental Apps module (``[apps]``).
-
-    Every value is a positive integer: zero would refuse every install, write or
-    call rather than lift a cap. No per-app override exists.
-    """
-    bundle_max_bytes: int = 2_000_000
-    kv_max_bytes: int = 5_000_000
-    kv_value_max_bytes: int = 262_144
-    files_max_bytes: int = 50_000_000
-    calls_per_minute: int = 120
-    calls_retention_days: int = 30
-    errors_per_version: int = 50
-
-
-@dataclass
 class ModelsConfig:
     """Operator-controlled model alias registry (``[models.aliases]``).
 
@@ -2554,7 +2538,6 @@ class Config:
     health: HealthModuleConfig = field(default_factory=HealthModuleConfig)
     feeds: FeedsModuleConfig = field(default_factory=FeedsModuleConfig)
     money: MoneyModuleConfig = field(default_factory=MoneyModuleConfig)
-    apps: AppsConfig = field(default_factory=AppsConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
     memory_search: MemorySearchConfig = field(default_factory=MemorySearchConfig)
     playbooks: PlaybooksConfig = field(default_factory=PlaybooksConfig)
@@ -4934,13 +4917,6 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     # 0 means unlimited here, so a negative value cannot be clamped to 0 -- that
     # reads as the opposite of what someone typing one meant.
     "health.max_document_bytes": _non_negative_int,
-    "apps.bundle_max_bytes": _positive_int,
-    "apps.kv_max_bytes": _positive_int,
-    "apps.kv_value_max_bytes": _positive_int,
-    "apps.files_max_bytes": _positive_int,
-    "apps.calls_per_minute": _positive_int,
-    "apps.calls_retention_days": _positive_int,
-    "apps.errors_per_version": _positive_int,
     # Same rule, and here the wrong direction is a security one: 0 is unlimited,
     # so clamping a negative value to it would remove the cap on shared-credential
     # fetches rather than tighten it. `_non_negative_int` keeps the shipped 10.

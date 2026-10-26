@@ -1,9 +1,0 @@
-id = "board"
-name = "Board"
-icon = "kanban"
-entry = "index.html"
-description = "Cards in columns, next to your conversations. Istota can put cards on the board and read it back."
-capabilities = ["kv:own"]
-
-[display]
-narrowest = "phone"

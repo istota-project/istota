@@ -404,10 +404,6 @@ scripts/test-upgrade.sh --from v0.38.0 --shape volume   # reproduce a specific r
 
 The assertion is not "reproduces ISSUE-263". `resolve_real_bin`'s fallback to the image's own binary directory is what makes such an upgrade clean, so that criterion is unreachable against current code — the fix working, not a gap in the test. What is asserted is that no check fails, and that `developer.forge_config_drift` reports `WARN` naming both the stale configured path and the resolved one. That warning is the signal ISSUE-263 never had.
 
-## The apps escape tier
-
-`npm --prefix web run test:apps-escape` is a Playwright tier for the apps module's frame (install the browsers once with `npx --prefix web playwright install chromium firefox webkit`). Global setup builds the kit and each fixture under `tests/fixtures/apps/` with `scripts/apps-escape-fixture.py`, which runs the real document builder, and a small Vite server frames each one in Chromium, Firefox and WebKit around the real `src/lib/apps/bridge.ts` and `frameWatch.ts`. A second loopback origin (`recorder.mjs`) logs every request and WebSocket upgrade the fixtures attempt: a test fails when the app frame reaches the recorder after its own document, opens a page, or navigates without the shell removing it. The recorder rather than Playwright's request events is the leak verdict, because Chromium emits an event for a CSP-blocked XHR or image the network never saw; only a navigation emits one in all three browsers. `scripts/test-apps-escape-negative-control.sh` serves the hostile fixture without its CSP and exits 0 only when that goes red in all three browsers. The fixture contract and reporting convention are in `web/tests-apps-escape/README.md`. Like the other discretionary tiers it is not part of `npm run test`.
-
 ## The frontend suite
 
 `web/` is checked independently of Python — a change touching only one half need

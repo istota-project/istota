@@ -1515,17 +1515,6 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # max_document_bytes = 26214400   # 25 MiB. 0 = unlimited, for a scanner that
                                   # produces genuinely large files
 
-# Apps module (experimental: add "module_apps" to [experimental] features).
-# Fixed caps, all positive integers; there is no per-app override.
-# [apps]
-# bundle_max_bytes = 2000000      # an installed app's built document, kit included
-# kv_max_bytes = 5000000          # one app's KV namespace, keys plus values
-# kv_value_max_bytes = 262144     # one KV value an app writes
-# files_max_bytes = 50000000      # an app's data/ folder
-# calls_per_minute = 120          # bridge calls per app, per user
-# calls_retention_days = 30       # how long the bridge call log is kept
-# errors_per_version = 50         # newest error reports kept per app version
-
 # Feeds module. Every RSS or Atom fetch must reach a public address; list the
 # exact host names of feeds served on your own network.
 # [feeds]

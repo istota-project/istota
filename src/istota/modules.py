@@ -25,11 +25,9 @@ from __future__ import annotations
 import importlib.util
 
 
-MODULE_NAMES: frozenset[str] = frozenset(
-    {"feeds", "money", "location", "health", "briefings", "apps"}
-)
+MODULE_NAMES: frozenset[str] = frozenset({"feeds", "money", "location", "health", "briefings"})
 
-EXPERIMENTAL_MODULES: dict[str, str] = {"apps": "module_apps"}
+EXPERIMENTAL_MODULES: dict[str, str] = {}
 
 # Modules whose functionality needs an optional install extra. When the extra
 # isn't installed the module is treated as *unavailable* — hidden from the web
