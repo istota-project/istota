@@ -64,6 +64,14 @@ def _doc(auth: str | None = None, **sections) -> Config:
     return config_from_document(sections)
 
 
+def _set_anthropic_key(config: Config, key: str) -> None:
+    """Set the anthropic provider's key on a loaded config, specs included."""
+    from istota.config import LoaderMap
+
+    config.providers["anthropic"].api_key = key
+    config.brain.provider_specs = LoaderMap(providers.build_providers(config))
+
+
 def _with_key(auth: str | None = "api_key", base_url: str | None = None, **sections) -> Config:
     table = {"api_key": KEY}
     if base_url:
@@ -451,6 +459,171 @@ class TestTheCredentialsFile:
         assert sync_credentials_file("subscription", OAUTH, home=str(tmp_path)) == "written"
         assert remove_stale_credentials_file(str(tmp_path)) is True
         assert remove_stale_credentials_file(str(tmp_path)) is False
+
+
+class TestTheCredentialsBind:
+    """`.credentials.json` is bound only under "subscription", for a task and
+    for `build_daemon_sandbox`; the tmux key directory only for a CLAUDE wrap
+    under "api_key"."""
+
+    @pytest.fixture
+    def world(self, tmp_path, monkeypatch, make_task):
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude" / ".credentials.json").write_text("{}")
+        monkeypatch.setenv("HOME", str(home))
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+        keys = tmp_path / "temp" / ".cli-keys" / "alice" / "task_1"
+        keys.mkdir(parents=True)
+        config = Config(db_path=tmp_path / "db" / "istota.db", temp_dir=tmp_path / "temp")
+        return config, make_task(id=1, user_id="alice"), user_temp, keys
+
+    def _reasons(self, world, mode, profile, key_dir=None):
+        from istota.sandbox.plan import SandboxProfile, build_mount_plan
+
+        config, task, user_temp, _keys = world
+        plan = build_mount_plan(
+            config, task, True, [], user_temp, profile=getattr(SandboxProfile, profile),
+            cli_auth_mode=mode, cli_key_dir=key_dir,
+        )
+        return {m.reason for m in plan.mounts}
+
+    def test_subscription_binds_the_file(self, world):
+        assert "claude_credentials" in self._reasons(world, "subscription", "CLAUDE")
+
+    @pytest.mark.parametrize("mode", ["api_key", None])
+    def test_any_other_mode_does_not(self, world, mode):
+        assert "claude_credentials" not in self._reasons(world, mode, "CLAUDE")
+
+    def test_the_key_directory_is_bound_under_api_key_for_claude_only(self, world):
+        keys = world[3]
+        assert "claude_cli_key" in self._reasons(world, "api_key", "CLAUDE", keys)
+        assert "claude_cli_key" not in self._reasons(world, "api_key", "NATIVE", keys)
+        assert "claude_cli_key" not in self._reasons(world, "subscription", "CLAUDE", keys)
+
+    def test_the_daemon_sandbox_passes_its_mode(self, world, monkeypatch):
+        from istota import executor
+
+        config, _task, _user_temp, _keys = world
+        config.security.sandbox_enabled = True
+        seen = {}
+
+        def fake(cmd, *a, **kw):
+            seen.update(kw)
+            return cmd
+
+        monkeypatch.setattr(executor, "build_bwrap_cmd", fake)
+        box = executor.build_daemon_sandbox(config, "alice", cli_auth_mode="api_key")
+        box.wrap(["claude"])
+        assert seen["cli_auth_mode"] == "api_key"
+
+
+class TestTheDoctorCheck:
+    """`models.cli_auth`: the mode and where it came from, the stale file,
+    the legacy variable, and the API-key-source backstop."""
+
+    def _check(self, config):
+        from istota.doctor import run_checks
+
+        return run_checks(config, only=("models.cli_auth",))[0]
+
+    def _config(self, tmp_path, monkeypatch, auth=None, **env):
+        home = tmp_path / "home"
+        home.mkdir(exist_ok=True)
+        monkeypatch.setenv("HOME", str(home))
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        config = _doc(auth)
+        config.db_path = tmp_path / "istota.db"
+        from istota import db
+
+        db.init_db(config.db_path)
+        resolve_process_auth(config, dict(os.environ))
+        return config, home
+
+    def test_a_written_mode_is_ok(self, tmp_path, monkeypatch):
+        config, _home = self._config(tmp_path, monkeypatch, "subscription", CLAUDE_CODE_OAUTH_TOKEN=OAUTH)
+        result = self._check(config)
+        assert result.status == "ok"
+        assert "subscription" in result.detail and "written" in result.detail
+        assert OAUTH not in result.detail
+
+    def test_a_derived_mode_names_the_setting_to_write(self, tmp_path, monkeypatch):
+        config, _home = self._config(tmp_path, monkeypatch, None, CLAUDE_CODE_OAUTH_TOKEN=OAUTH)
+        result = self._check(config)
+        assert result.status == "ok"
+        assert "derived" in result.detail and "[brain.claude_code] auth" in result.detail
+
+    def test_no_credential_fails_while_a_cli_brain_runs(self, tmp_path, monkeypatch):
+        config, _home = self._config(tmp_path, monkeypatch, None)
+        result = self._check(config)
+        assert result.status == "fail"
+        assert "[brain.claude_code] auth" in (result.remedy or "")
+
+    def test_a_native_only_deployment_skips(self, tmp_path, monkeypatch):
+        config, _home = self._config(tmp_path, monkeypatch, None)
+        config.brain.kind = "native"
+        config.brain.native.provider = "openrouter"
+        assert self._check(config).status == "skip"
+
+    def test_a_credentials_file_under_api_key_fails(self, tmp_path, monkeypatch):
+        config, home = self._config(tmp_path, monkeypatch, "api_key")
+        _set_anthropic_key(config, KEY)
+        (home / ".claude").mkdir()
+        (home / ".claude" / ".credentials.json").write_text("{}")
+        result = self._check(config)
+        assert result.status == "fail"
+        assert ".credentials.json" in result.detail
+
+    def test_the_legacy_variable_is_named_with_its_move(self, tmp_path, monkeypatch):
+        config, _home = self._config(tmp_path, monkeypatch, None, ANTHROPIC_API_KEY=KEY)
+        _set_anthropic_key(config, KEY)
+        result = self._check(config)
+        assert result.status == "warn"
+        assert "istota_provider_anthropic_api_key" in result.detail
+        assert KEY not in result.detail
+
+    def test_an_ignored_variable_is_noted(self, tmp_path, monkeypatch):
+        config, _home = self._config(
+            tmp_path, monkeypatch, "subscription",
+            CLAUDE_CODE_OAUTH_TOKEN=OAUTH, ANTHROPIC_BASE_URL="http://elsewhere",
+        )
+        result = self._check(config)
+        assert "ANTHROPIC_BASE_URL" in result.detail and "ignored" in result.detail
+
+    def test_the_backstop_logs_once_an_hour_and_fails_the_check(self, tmp_path, monkeypatch, caplog):
+        from istota import executor
+        from istota.usage.telemetry import BrainUsage, COST_BASIS_API
+
+        config, _home = self._config(tmp_path, monkeypatch, "subscription", CLAUDE_CODE_OAUTH_TOKEN=OAUTH)
+        monkeypatch.setattr(executor, "_api_key_source_logged_at", None)
+        usage = BrainUsage(cost_basis=COST_BASIS_API, has_totals=True)
+        with caplog.at_level(logging.ERROR, logger="istota.executor"):
+            for _ in range(3):
+                executor.persist_brain_usage(
+                    config, None, usage=usage, origin="task", user_id="alice",
+                    brain_kind="claude_code", task_id=1,
+                )
+        assert len([r for r in caplog.records if "API key" in r.getMessage()]) == 1
+        result = self._check(config)
+        assert result.status == "fail"
+        assert "API key" in result.detail
+
+    def test_the_backstop_is_quiet_under_api_key(self, tmp_path, monkeypatch, caplog):
+        from istota import executor
+        from istota.usage.telemetry import BrainUsage, COST_BASIS_API
+
+        config, _home = self._config(tmp_path, monkeypatch, "api_key")
+        _set_anthropic_key(config, KEY)
+        monkeypatch.setattr(executor, "_api_key_source_logged_at", None)
+        with caplog.at_level(logging.ERROR, logger="istota.executor"):
+            executor.persist_brain_usage(
+                config, None, usage=BrainUsage(cost_basis=COST_BASIS_API, has_totals=True),
+                origin="task", user_id="alice", brain_kind="claude_code", task_id=1,
+            )
+        assert not [r for r in caplog.records if "API key" in r.getMessage()]
+        assert self._check(config).status == "ok"
 
 
 class TestTheAllowlist:

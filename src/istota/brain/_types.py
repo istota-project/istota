@@ -142,6 +142,13 @@ class BrainRequest:
     # nothing from it; it is carried so a reroute onto a CLI brain keeps it.
     cli_settings_path: Path | None = None
 
+    # The tmux brain's per-attempt directory for the key its `apiKeyHelper`
+    # reads under `[brain.claude_code] auth = "api_key"`
+    # (`{temp_dir}/.cli-keys/{user_id}/task_{id}`, set by the executor). The
+    # CLAUDE wrap binds it read-only; the NATIVE wrap never does. Nothing else
+    # writes there.
+    cli_key_dir: Path | None = None
+
     # Whether the brain should stream events for progress callbacks. When
     # False, the brain may pick a faster non-streaming path if it has one.
     streaming: bool = True

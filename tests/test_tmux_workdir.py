@@ -218,7 +218,7 @@ class TestThePromptNeverTouchesTheWorkdir:
 
         monkeypatch.setattr(mod.subprocess, "run", fake_run)
         TmuxClaudeBrain()._load_buffer("istota-s", "hello\nworld")
-        assert seen["argv"] == ["tmux", "load-buffer", "-b", "istota-s", "-"]
+        assert seen["argv"] == ["tmux", "-u", "-L", "istota", "load-buffer", "-b", "istota-s", "-"]
         assert seen["input"] == "hello\nworld"
 
 

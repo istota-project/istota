@@ -59,7 +59,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Collection, Iterable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -632,9 +632,157 @@ def _legacy_native_sources(config: "Config") -> list:
         except Exception:  # noqa: BLE001 - an unreadable file names no legacy source
             document = {}
     try:
-        return legacy_provider_sources_in_use(document, os.environ)
+        # The CLI's legacy key is `models.cli_auth`'s to report, not native's.
+        return [row for row in legacy_provider_sources_in_use(document, os.environ) if not row.provider]
     except Exception:  # noqa: BLE001
         return []
+
+
+#: Variables the CLI would read if they reached it, none of which any CLI env
+#: carries from the daemon's environment now: set, they are ignored.
+_IGNORED_CLI_VARIABLES = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
+
+#: How long an API-key source seen under "subscription" keeps the check red.
+_API_KEY_SOURCE_WINDOW = timedelta(hours=24)
+
+
+def check_cli_auth(config: "Config", probe: bool) -> CheckResult:
+    """How the `claude` CLI authenticates (`[brain.claude_code] auth`).
+
+    OK names the mode and whether it was written or derived from the
+    environment, with the setting to write for a derived one. FAIL when a CLI
+    brain is reachable with no credential at all, when
+    `~/.claude/.credentials.json` exists under "api_key" (a token beside an API
+    key), and when the API-key-source backstop recorded the CLI billing an API
+    key under "subscription". WARN while the legacy `ANTHROPIC_API_KEY` is what
+    supplies the key, naming the file to move it to. Names only, never a
+    value; reads the environment, one file's existence and one `shared_kv` row.
+    """
+    from .llm.providers import (
+        LEGACY_CLI_API_KEY,
+        OAUTH_TOKEN_VARIABLE,
+        anthropic_spec,
+        cli_unconfigured_reason,
+        process_cli_auth,
+    )
+    from .sandbox.claude_runtime_env import credentials_file_path
+
+    name = "models.cli_auth"
+    reachable = _reachable_kinds(config)
+    if not reachable & _CLI_BRAIN_KINDS:
+        return CheckResult(
+            name, SKIP,
+            f"no task on this deployment runs the claude CLI (reachable: {', '.join(sorted(reachable)) or 'none'})",
+        )
+    mode = process_cli_auth(config)
+    written = getattr(config.brain.claude_code, "auth", "") in ("subscription", "api_key")
+    notes: list[str] = []
+    for variable in _IGNORED_CLI_VARIABLES:
+        if os.environ.get(variable):
+            notes.append(f"{variable} is set and ignored by the CLI")
+    if mode != "api_key" and os.environ.get(LEGACY_CLI_API_KEY):
+        notes.append(f"{LEGACY_CLI_API_KEY} is set and ignored by the CLI")
+    note = f"; {'; '.join(notes)}" if notes else ""
+
+    reason = cli_unconfigured_reason(config, mode)
+    if reason is not None:
+        return CheckResult(
+            name, FAIL, f"the claude CLI cannot run: {reason}{note}",
+            remedy=(
+                'Set [brain.claude_code] auth = "subscription" with the token in the '
+                'claude_code_oauth_token secret file, or "api_key" with the key in '
+                "istota_provider_anthropic_api_key."
+            ),
+        )
+    stale = credentials_file_path()
+    if mode == "api_key" and (stale.exists() or stale.is_symlink()):
+        return CheckResult(
+            name, FAIL,
+            f'{stale} exists under [brain.claude_code] auth = "api_key"; a subscription '
+            f"token sits beside the API key{note}",
+            remedy="Remove it: `istota cli-auth sync-credentials-file`, or restart the daemon.",
+        )
+    seen = _api_key_source_seen(config)
+    if mode == "subscription" and seen is not None:
+        return CheckResult(
+            name, FAIL,
+            f'the claude CLI reported an API key as its credential at {seen} under '
+            f'[brain.claude_code] auth = "subscription", so some path put an API key in '
+            f"front of it and the plan is not what is billed{note}",
+            remedy=(
+                "Find what sets ANTHROPIC_API_KEY or an apiKeyHelper for the CLI "
+                "(a settings.json, the environment of an older release) and remove it."
+            ),
+        )
+    if mode == "api_key" and not written and os.environ.get(LEGACY_CLI_API_KEY):
+        spec = anthropic_spec(config)
+        from_legacy = spec is not None and not os.environ.get("ISTOTA_PROVIDER_ANTHROPIC_API_KEY")
+        if from_legacy:
+            return CheckResult(
+                name, WARN,
+                f"{LEGACY_CLI_API_KEY} is read for one release as the anthropic provider's "
+                "key and makes the CLI mode api_key; move it to the "
+                "istota_provider_anthropic_api_key secret file and write "
+                f'[brain.claude_code] auth = "api_key"{note}',
+                remedy=(
+                    "Put the key in istota_provider_anthropic_api_key (or "
+                    'ISTOTA_PROVIDER_ANTHROPIC_API_KEY), set [brain.claude_code] auth = "api_key", '
+                    "and empty the anthropic_api_key file."
+                ),
+            )
+    if written:
+        source = "written in [brain.claude_code] auth"
+    elif mode == "subscription":
+        source = (
+            f"derived from {OAUTH_TOKEN_VARIABLE} in the environment; write "
+            '[brain.claude_code] auth = "subscription" to fix it'
+        )
+    else:
+        source = 'derived from the environment; write [brain.claude_code] auth = "api_key" to fix it'
+    if mode == "api_key":
+        spec = anthropic_spec(config)
+        if spec is not None and not spec.inference_key:
+            return CheckResult(
+                name, WARN,
+                f'auth = "api_key" ({source}) and the anthropic provider has no key, so '
+                f"only a user's own key authenticates the CLI{note}",
+                remedy="Put the key in the istota_provider_anthropic_api_key secret file.",
+            )
+    return CheckResult(name, OK, f"auth = {mode!r}, {source}{note}")
+
+
+def _api_key_source_seen(config: "Config") -> str | None:
+    """When the backstop last recorded an API-key source, if inside the window."""
+    from .executor import API_KEY_SOURCE_KV_KEY, CLI_AUTH_KV_NAMESPACE
+
+    try:
+        import sqlite3
+
+        from .lib.sqlite_util import connect_read_only
+
+        path = getattr(config, "db_path", None)
+        if not path or not Path(path).is_file():
+            return None
+        conn = connect_read_only(path)
+        try:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT updated_at FROM shared_kv WHERE namespace = ? AND key = ?",
+                (CLI_AUTH_KV_NAMESPACE, API_KEY_SOURCE_KV_KEY),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - a check never raises
+        return None
+    if row is None:
+        return None
+    try:
+        seen = datetime.fromisoformat(str(row["updated_at"]).replace(" ", "T")).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    if datetime.now(timezone.utc) - seen > _API_KEY_SOURCE_WINDOW:
+        return None
+    return seen.strftime("%Y-%m-%d %H:%M UTC")
 
 
 def check_native_brain(config: "Config", probe: bool) -> CheckResult:
@@ -10300,6 +10448,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.gitleaks", check_gitleaks),
     ("runtime.gws", check_gws),
     ("runtime.native_brain", check_native_brain),
+    ("models.cli_auth", check_cli_auth),
     ("runtime.pdf_tools", check_pdf_tools),
     ("runtime.framework_db", check_framework_db),
     ("runtime.task_failure_rate", check_task_failure_rate),
@@ -10410,6 +10559,7 @@ CHECK_SCOPES: dict[str, str] = {
     # per-user arm reads the install's own secrets table. A bare `docker run`
     # has neither and would report a missing key about nothing.
     "runtime.native_brain": DEPLOYMENT,
+    "models.cli_auth": DEPLOYMENT,
     "runtime.pdf_tools": IMAGE,
     "runtime.framework_db": DEPLOYMENT,
     # Deployment, not image: it queries the `tasks` table of an install's own

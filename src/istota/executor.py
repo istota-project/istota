@@ -1156,6 +1156,7 @@ def build_daemon_sandbox(
     *,
     extra_ro_binds: Iterable[Path] | None = None,
     withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
+    cli_auth_mode: object = None,
 ) -> DaemonSandbox:
     """Bubblewrap for a model call that has no task behind it (ISSUE-397).
 
@@ -1255,9 +1256,15 @@ def build_daemon_sandbox(
     set of single characters, non-empty (so some binds drop) and missing
     every real scope name (so the workspace stays bound).
 
+    ``cli_auth_mode`` is the `claude` CLI's auth mode for the call, which
+    decides whether `~/.claude/.credentials.json` is bound; ``None`` takes the
+    mode this process resolved (`llm.providers.process_cli_auth`).
+
     Never raises; a failure to read the user's resources costs the resource
     binds, not the wrap.
     """
+    if cli_auth_mode is None:
+        cli_auth_mode = process_cli_auth(config)
     root, work_dir = _daemon_dirs(config, user_id)
     if isinstance(withheld_scopes, str):
         logger.error(
@@ -1318,7 +1325,7 @@ def build_daemon_sandbox(
         return build_bwrap_cmd(
             raw_cmd, config, task, is_admin, user_resources, work_dir,
             extra_ro_binds=binds, profile=SandboxProfile.CLAUDE,
-            withheld_scopes=withheld,
+            withheld_scopes=withheld, cli_auth_mode=cli_auth_mode,
         )
 
     return DaemonSandbox(_wrap, work_dir, scratch=scratch)
@@ -1561,6 +1568,7 @@ def persist_brain_usage(
     """
     if usage is None:
         return
+    _note_api_key_source(config, conn, usage=usage, brain_kind=brain_kind)
     logger.info(
         "brain_usage origin=%s task_id=%s brain=%s model=%s billed_input=%d "
         "cache_read=%d cache_write=%d output=%d cost=%s basis=%s",
@@ -1592,6 +1600,43 @@ def persist_brain_usage(
             "failed to persist usage (origin=%s task=%s) — spend not recorded",
             origin, task_id, exc_info=True,
         )
+
+
+#: Where the backstop records an API-key source seen under "subscription",
+#: read by doctor's `models.cli_auth`. A reserved (`_`) namespace.
+CLI_AUTH_KV_NAMESPACE = "_cli_auth"
+API_KEY_SOURCE_KV_KEY = "api_key_source_seen"
+_API_KEY_SOURCE_LOG_SECONDS = 3600
+_api_key_source_logged_at: float | None = None
+
+
+def _note_api_key_source(config: Config, conn, *, usage, brain_kind: str) -> None:
+    """The backstop: the CLI reported an API key as its credential (cost basis
+    `api`) while `[brain.claude_code] auth = "subscription"`, so some path put a
+    key in front of it. Logged at ERROR once an hour and recorded for doctor.
+    `claude_code` only: tmux reports no usage. Never raises."""
+    global _api_key_source_logged_at
+    from .usage.telemetry import COST_BASIS_API
+
+    try:
+        if brain_kind != "claude_code" or usage.cost_basis != COST_BASIS_API:
+            return
+        if process_cli_auth(config) != "subscription":
+            return
+        now = time.monotonic()
+        if _api_key_source_logged_at is None or now - _api_key_source_logged_at >= _API_KEY_SOURCE_LOG_SECONDS:
+            _api_key_source_logged_at = now
+            logger.error(
+                "The claude CLI billed an API key while [brain.claude_code] auth = "
+                '"subscription": something put an API key in front of it'
+            )
+        if conn is not None:
+            db.shared_kv_set(conn, CLI_AUTH_KV_NAMESPACE, API_KEY_SOURCE_KV_KEY, "api", "executor")
+        elif config.db_path:
+            with db.get_db(config.db_path) as own:
+                db.shared_kv_set(own, CLI_AUTH_KV_NAMESPACE, API_KEY_SOURCE_KV_KEY, "api", "executor")
+    except Exception:  # noqa: BLE001 - telemetry never fails a task
+        logger.debug("api key source backstop could not record", exc_info=True)
 
 
 def _insert_usage_row(conn, **kwargs) -> None:
@@ -3894,6 +3939,20 @@ def _build_network_allowlist(
 # --- Manifest-derived credential / authorization helpers (Phase 3) ---
 
 
+def _usable_specs(meta) -> list:  # noqa: ANN001
+    """A manifest's env specs minus any naming a model credential.
+
+    The manifest loader already drops those (`skills._loader._parse_env_specs`),
+    and `build_skill_env` refuses them; the derivations below read
+    `meta.env_specs` directly, so they skip them too, or a sensitive spec named
+    after a model credential would split the CLI's own credential out of the
+    task env and hand it to that skill.
+    """
+    from .skills._env import model_credential_spec  # noqa: PLC0415
+
+    return [spec for spec in meta.env_specs if not model_credential_spec(spec)]
+
+
 def derive_credential_set(skill_index: dict) -> frozenset[str]:
     """All sensitive env-var names declared by any skill manifest.
 
@@ -3906,7 +3965,7 @@ def derive_credential_set(skill_index: dict) -> frozenset[str]:
     return frozenset(
         spec.var
         for meta in skill_index.values()
-        for spec in meta.env_specs
+        for spec in _usable_specs(meta)
         if spec.sensitive and spec.var
     )
 
@@ -3944,7 +4003,7 @@ def derive_proxy_only_set(skill_index: dict) -> frozenset[str]:
     return frozenset(
         spec.var
         for meta in skill_index.values()
-        for spec in meta.env_specs
+        for spec in _usable_specs(meta)
         if spec.proxy_only and spec.var
     ) | _EXECUTOR_PROXY_ONLY_VARS
 
@@ -4001,7 +4060,7 @@ def derive_authorized_skills(
     for name, meta in skill_index.items():
         if name in authorized:
             continue
-        sensitive_specs = [s for s in meta.env_specs if s.sensitive]
+        sensitive_specs = [s for s in _usable_specs(meta) if s.sensitive]
         if not sensitive_specs:
             continue
         for spec in sensitive_specs:
@@ -4032,7 +4091,7 @@ def derive_skill_credential_map(
         meta = skill_index.get(skill)
         if not meta:
             continue
-        creds = {s.var for s in meta.env_specs if s.sensitive and s.var}
+        creds = {s.var for s in _usable_specs(meta) if s.sensitive and s.var}
         if creds:
             result[skill] = creds
     return result
@@ -5015,6 +5074,30 @@ def custom_system_prompt_path(config: Config) -> Path | None:
     return Path(os.path.abspath(path))
 
 
+#: `build_bwrap_cmd`'s default for ``cli_auth_mode``: this process's mode.
+_MODE_FROM_PROCESS = object()
+
+#: The root of the tmux brain's per-attempt key directories, a sibling of
+#: `.control` under the temp root, which no sandbox binds.
+CLI_KEY_DIR_NAME = ".cli-keys"
+
+
+def cli_key_dir_for_task(config: Config, task: db.Task) -> Path | None:
+    """`{temp_dir}/.cli-keys/{user_id}/task_{id}`, or None for an id that
+    cannot name its own directory or a process not under "api_key"."""
+    from .sandbox.user_scope import is_scopable_user_id
+
+    if process_cli_auth(config) != "api_key":
+        return None
+    if not is_scopable_user_id(task.user_id) or task.user_id.casefold() == CLI_KEY_DIR_NAME:
+        return None
+    try:
+        task_id = int(task.id)
+    except (TypeError, ValueError):
+        return None
+    return Path(config.temp_dir) / CLI_KEY_DIR_NAME / task.user_id / f"task_{task_id}"
+
+
 def build_bwrap_cmd(
     cmd: list[str],
     config: Config,
@@ -5032,6 +5115,8 @@ def build_bwrap_cmd(
     withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
     group_ids: "list[str] | None" = None,
     sandbox_env: dict[str, str] | None = None,
+    cli_auth_mode: object = _MODE_FROM_PROCESS,
+    cli_key_dir: Path | None = None,
 ) -> list[str]:
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
@@ -5066,6 +5151,12 @@ def build_bwrap_cmd(
         workspace_dir=workspace_dir,
         withheld_scopes=withheld_scopes,
         group_ids=group_ids,
+        # The CLI's credentials file follows the auth mode. Unless a caller
+        # names one, it is the mode this process resolved.
+        cli_auth_mode=(
+            process_cli_auth(config) if cli_auth_mode is _MODE_FROM_PROCESS else cli_auth_mode
+        ),
+        cli_key_dir=cli_key_dir,
     )
     return render_bwrap_argv(
         plan, cmd, net_proxy_sock=net_proxy_sock, user_temp_dir=user_temp_dir,
@@ -8878,6 +8969,11 @@ def execute_task(
         # mounts to NativeBrain on the shipped `claude_code -> native` reroute.
         # Everything else about the two is identical, which is why the plan is
         # built once and the profile is the only argument that differs.
+        #
+        # The tmux brain's key directory under "api_key" is named here and
+        # created by that brain alone; the plan binds it only for the CLAUDE
+        # profile, and only when it exists at wrap time.
+        _cli_key_dir = cli_key_dir_for_task(config, task)
         def _build_wrap(sandbox_profile: SandboxProfile):
             def _wrap(raw_cmd: list[str]) -> list[str]:
                 if not config.security.sandbox_enabled:
@@ -8898,6 +8994,7 @@ def execute_task(
                     withheld_scopes=_withheld,
                     group_ids=task_group_ids,
                     sandbox_env=_runtime.sandbox_env,
+                    cli_key_dir=_cli_key_dir,
                 )
 
             return _wrap
@@ -9111,6 +9208,7 @@ def execute_task(
             # construction — see the `.resolve()` at the write above.
             composed_system_prompt_path=system_prompt_file,
             cli_settings_path=cli_settings_file,
+            cli_key_dir=_cli_key_dir,
             # The prepared images, as paths and media types — never bytes. Each
             # brain converts at the last moment, so nothing large reaches a task
             # row or a log line and the executor learns no provider wire format.

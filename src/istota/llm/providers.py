@@ -546,11 +546,14 @@ def model_caller_env(
     out: dict[str, str] = {}
     if mode in CLI_AUTH_MODES:
         out[CLI_AUTH_VARIABLE] = mode
-    if cli_reviewer and mode == "subscription":
+    if cli_reviewer and mode != "api_key":
         source = os.environ if env is None else env
         token = (source.get(OAUTH_TOKEN_VARIABLE) or "").strip()
-        if token:
+        if token and mode == "subscription":
             out[OAUTH_TOKEN_VARIABLE] = token
+        # A CLI reviewer outside "api_key" authenticates with the token alone,
+        # so it is handed no provider key it would not use.
+        return out
     spec = _spec(config, provider_id) if provider_id else None
     if spec is None:
         return out
