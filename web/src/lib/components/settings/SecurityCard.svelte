@@ -34,12 +34,12 @@
   }
 </script>
 
-{#if auth?.method === 'email'}
+{#if auth?.can_change_password || auth?.can_set_password}
   <Card
     title="Security"
     description={auth.can_change_password
       ? 'Changing your password signs you out of every session, including this tab.'
-      : 'You sign in with an email link. To set a password, request a reset link using your login email below.'}
+      : 'Your account has no password yet. To set one, request a password link using your login email below.'}
   >
     <Field label="Login email">
       <Input type="email" value={auth.email ?? ''} autocomplete="username" readonly />

@@ -142,6 +142,8 @@ export interface UserAuth {
   method: 'email' | 'nextcloud' | 'none';
   email: string | null;
   can_change_password: boolean;
+  // No password yet: Settings offers a link to set one.
+  can_set_password: boolean;
 }
 
 export async function changePassword(

@@ -176,7 +176,8 @@ async def test_email_login_uses_live_profile_and_rotates_session(client, configu
     me = await client.get("/istota/api/me")
     assert me.status_code == 200
     assert me.json()["username"] == "alice"
-    assert me.json()["auth"] == {"method": "email", "email": "alice@example.com", "can_change_password": True}
+    assert me.json()["auth"] == {"method": "email", "email": "alice@example.com",
+                                     "can_change_password": True, "can_set_password": False}
 
 
 @pytest.mark.parametrize("method,mutation", [
@@ -409,7 +410,8 @@ async def test_password_work_is_bounded_off_event_loop(client, configured, monke
     assert peak == 4
 
 
-@pytest.mark.parametrize("method,password_set", [("email", True), ("email", False), ("nextcloud", True)])
+@pytest.mark.parametrize("method", ["email", "nextcloud"])
+@pytest.mark.parametrize("password_set", [True, False])
 async def test_me_reports_password_capability(client, configured, method, password_set):
     if not password_set:
         web_auth.clear_password(configured._config.db_path, "alice")
@@ -418,8 +420,23 @@ async def test_me_reports_password_capability(client, configured, method, passwo
                                     "auth": {"method": method, "epoch": identity.credential_epoch}})
     response = await client.get("/istota/api/me")
     assert response.status_code == 200
+    # A Nextcloud session holds the same identity, so it gets the card too.
     assert response.json()["auth"] == {"method": method, "email": "alice@example.com",
-                                       "can_change_password": method == "email" and password_set}
+                                       "can_change_password": password_set,
+                                       "can_set_password": not password_set}
+
+
+@pytest.mark.parametrize("case", ["no-identity", "email-login-off"])
+async def test_me_offers_no_password_without_email_login(client, configured, case):
+    if case == "no-identity":
+        web_auth.delete_identity(configured._config.db_path, "alice")
+    else:
+        configured._config.web.auth = ["nextcloud"]
+    assert (await client.get("/istota/callback")).status_code == 302
+    response = await client.get("/istota/api/me")
+    assert response.status_code == 200
+    auth = response.json()["auth"]
+    assert auth["can_change_password"] is False and auth["can_set_password"] is False
 
 
 async def test_callback_database_failure_does_not_mint_session(client, configured, monkeypatch):
@@ -721,15 +738,34 @@ async def test_account_password_revokes_both_clients(client, configured):
         assert (await other.get("/istota/api/me")).status_code == 401
 
 
-@pytest.mark.parametrize("case", ["anonymous", "nextcloud", "origin", "passwordless", "disabled-method", "policy", "malformed"])
+async def test_account_password_from_a_nextcloud_session(client, configured):
+    assert (await client.get("/istota/callback")).status_code == 302
+    path = configured._config.db_path
+    before = web_auth.get_identity(path, "alice")
+    payload = {"current_password": PASSWORD, "new_password": PASSWORD + " changed"}
+    response = await client.post("/istota/api/account/password", json=payload,
+                                 headers={"Origin": "https://example.com"})
+    assert response.status_code == 200
+    after = web_auth.get_identity(path, "alice")
+    assert after.credential_epoch > before.credential_epoch
+    assert web_auth.verify_password(payload["new_password"], after.password_hash)[0]
+    assert (await client.get("/istota/api/me")).status_code == 401
+
+
+@pytest.mark.parametrize("case", ["anonymous", "nextcloud-no-identity", "origin", "passwordless",
+                                  "nextcloud-passwordless", "disabled-method", "policy", "malformed"])
 async def test_account_password_guards(client, configured, case):
-    if case == "passwordless":
+    if case == "nextcloud-no-identity":
+        web_auth.delete_identity(configured._config.db_path, "alice")
+        await client.get("/istota/callback")
+    elif case == "nextcloud-passwordless":
+        web_auth.clear_password(configured._config.db_path, "alice")
+        await client.get("/istota/callback")
+    elif case == "passwordless":
         web_auth.clear_password(configured._config.db_path, "alice")
         identity = web_auth.get_identity(configured._config.db_path, "alice")
         set_session(client, configured, {"user": {"username": "alice"},
                     "auth": {"method": "email", "epoch": identity.credential_epoch}})
-    elif case == "nextcloud":
-        await client.get("/istota/callback")
     elif case != "anonymous":
         await sign_in(client)
     if case == "disabled-method":
@@ -741,8 +777,9 @@ async def test_account_password_guards(client, configured, case):
         headers={} if case == "origin" else {"Origin": "https://example.com"})
     # A session whose method was switched off is no session: the API's body
     # guard answers 401 before the route's own 404 for a disabled method.
-    expected = {"anonymous": 401, "nextcloud": 403, "origin": 403, "passwordless": 400,
-                "disabled-method": 401, "policy": 400, "malformed": 400}
+    expected = {"anonymous": 401, "nextcloud-no-identity": 403, "origin": 403,
+                "passwordless": 400, "nextcloud-passwordless": 400, "disabled-method": 401,
+                "policy": 400, "malformed": 400}
     assert response.status_code == expected[case]
     assert web_auth.get_identity(configured._config.db_path, "alice") == before
 
