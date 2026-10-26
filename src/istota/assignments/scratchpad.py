@@ -19,6 +19,12 @@ history is the audit trail for injection.
 Every file access goes through a descriptor on the assignment directory
 (`charter.open_assignment_dir`), with no link followed at the leaf. Nothing
 here commits; the caller owns the transaction.
+
+`begin` and `end` touch no file (ISSUE-833): they run under the framework DB's
+writer lock, and a read on the mount can stall, so the caller reads the file
+with `read_file` before the transaction opens and passes the state in. A
+restore they choose comes back as `rewrite`, which the caller writes with
+`write_restored` after commit.
 """
 
 from __future__ import annotations
@@ -69,12 +75,16 @@ class BeginResult:
     text: str
     change_event_id: int | None
     restored: str | None
+    #: The text to write back after commit, when the file was not usable.
+    rewrite: str | None = None
 
 
 @dataclass(frozen=True)
 class EndResult:
     text: str
     restored: str | None
+    #: The text to write back after commit, when the wake broke the file.
+    rewrite: str | None = None
 
 
 def sha256(text: str) -> str:
@@ -217,13 +227,15 @@ def added_lines(before: str, after: str) -> list[str]:
 
 
 def begin(
-    config: "Config", conn: sqlite3.Connection, assignment: store.Assignment, wake: store.Wake,
+    conn: sqlite3.Connection, assignment: store.Assignment, wake: store.Wake, state: FileState,
 ) -> BeginResult:
-    """Record an outside change or repair a broken file, then store `before`."""
+    """Record an outside change or choose a repair for a broken file, then
+    store `before`. `state` is `read_file`'s answer, read before the caller's
+    transaction opened."""
     base = baseline(conn, assignment.id)
-    state = read_file(config, assignment)
     change_id: int | None = None
     restored: str | None = None
+    rewrite: str | None = None
 
     if state.problem == UNAVAILABLE:
         # Nothing to compare and nowhere to write; the wake starts from the
@@ -240,11 +252,11 @@ def begin(
                 payload={"emptied": True},
             )
         text = restore_text(conn, assignment.id)
-        written = write_file(config, assignment, text)
+        rewrite = text
         restored = state.problem
         store.insert_event(
             conn, assignment.id, kind="scratchpad_restored", actor="system", wake_id=wake.id,
-            payload={"reason": state.problem, "phase": "begin", "written": written},
+            payload={"reason": state.problem, "phase": "begin"},
         )
     else:
         text = state.text
@@ -268,7 +280,7 @@ def begin(
             )
 
     store_snapshot(conn, assignment.id, phase="before", text=text, wake_id=wake.id)
-    return BeginResult(text=text, change_event_id=change_id, restored=restored)
+    return BeginResult(text=text, change_event_id=change_id, restored=restored, rewrite=rewrite)
 
 
 def _seq_of(conn: sqlite3.Connection, snapshot: store.Snapshot) -> int | str:
@@ -277,13 +289,14 @@ def _seq_of(conn: sqlite3.Connection, snapshot: store.Snapshot) -> int | str:
 
 
 def end(
-    config: "Config", conn: sqlite3.Connection, assignment: store.Assignment, wake: store.Wake,
+    conn: sqlite3.Connection, assignment: store.Assignment, wake: store.Wake, state: FileState,
 ) -> EndResult:
-    """Repair a file the wake broke, then store `after`."""
+    """Choose a repair for a file the wake broke, then store `after`. `state` is
+    `read_file`'s answer, read before the caller's transaction opened."""
     before = store.wake_snapshot(conn, wake.id, "before")
     before_text = before.content if before is not None else restore_text(conn, assignment.id)
-    state = read_file(config, assignment)
     restored: str | None = None
+    rewrite: str | None = None
 
     if state.problem == UNAVAILABLE:
         text = before_text
@@ -297,13 +310,42 @@ def end(
         # The wake broke the file; it goes back to what the wake started from.
         text = before_text if before is not None and not before.truncated else restore_text(conn, assignment.id)
         restored = state.problem
-        written = write_file(config, assignment, text)
+        rewrite = text
         store.insert_event(
             conn, assignment.id, kind="scratchpad_restored", actor="system", wake_id=wake.id,
-            payload={"reason": state.problem, "phase": "end", "written": written},
+            payload={"reason": state.problem, "phase": "end"},
         )
     else:
         text = state.text
 
     store_snapshot(conn, assignment.id, phase="after", text=text, wake_id=wake.id)
-    return EndResult(text=text, restored=restored)
+    return EndResult(text=text, restored=restored, rewrite=rewrite)
+
+
+def write_restored(
+    config: "Config", conn: sqlite3.Connection, assignment: store.Assignment, wake_id: int,
+    text: str, *, phase: str,
+) -> bool:
+    """Write the text `begin` or `end` chose back to the file, after the
+    caller's commit. A write that does not land is a `scratchpad_restore_failed`
+    event, committed here; the next `begin` finds the file still broken and
+    chooses again. Never raises."""
+    from istota.relay.requests import write_transaction
+
+    try:
+        if write_file(config, assignment, text):
+            return True
+    except Exception:
+        logger.exception("scratchpad restore failed assignment_id=%s wake_id=%s", assignment.id, wake_id)
+    logger.warning("scratchpad not restored assignment_id=%s wake_id=%s phase=%s", assignment.id, wake_id, phase)
+    try:
+        with write_transaction(conn):
+            store.insert_event(
+                conn, assignment.id, kind="scratchpad_restore_failed", actor="system", wake_id=wake_id,
+                payload={"phase": phase},
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("could not record the failed scratchpad restore assignment_id=%s", assignment.id)
+    return False

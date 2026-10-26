@@ -55,10 +55,25 @@ def _events(conn, assignment, kind):
     return [e for e in store.list_events(conn, assignment.id) if e.kind == kind]
 
 
+def _begin(config, conn, assignment, wake):
+    """`begin` as pickup runs it: the file read first, a chosen restore written after."""
+    result = scratchpad.begin(conn, assignment, wake, scratchpad.read_file(config, assignment))
+    if result.rewrite is not None:
+        scratchpad.write_restored(config, conn, assignment, wake.id, result.rewrite, phase="begin")
+    return result
+
+
+def _end(config, conn, assignment, wake):
+    result = scratchpad.end(conn, assignment, wake, scratchpad.read_file(config, assignment))
+    if result.rewrite is not None:
+        scratchpad.write_restored(config, conn, assignment, wake.id, result.rewrite, phase="end")
+    return result
+
+
 class TestBegin:
     def test_an_untouched_seed_is_no_edit_and_writes_the_seed_baseline(self, config, conn):
         assignment = _assignment(config, conn)
-        result = scratchpad.begin(config, conn, assignment, _wake(conn, assignment))
+        result = _begin(config, conn, assignment, _wake(conn, assignment))
 
         assert result.text == charter.SCRATCHPAD_SEED
         assert result.change_event_id is None and result.restored is None
@@ -73,7 +88,7 @@ class TestBegin:
         """Any task of the user's can write the file, so a change is not the user's word."""
         assignment = _assignment(config, conn)
         first = _wake(conn, assignment)
-        scratchpad.begin(config, conn, assignment, first)
+        _begin(config, conn, assignment, first)
         scratchpad.store_snapshot(
             conn, assignment.id, phase="after", text=charter.SCRATCHPAD_SEED, wake_id=first.id,
         )
@@ -82,7 +97,7 @@ class TestBegin:
         _path(config, assignment).write_text(edited)
 
         second = _wake(conn, assignment)
-        result = scratchpad.begin(config, conn, assignment, second)
+        result = _begin(config, conn, assignment, second)
 
         assert result.text == edited
         [event] = store.list_inbox(conn, assignment.id)
@@ -99,7 +114,7 @@ class TestBegin:
     def test_a_long_diff_is_cut_with_a_marker(self, config, conn):
         assignment = _assignment(config, conn)
         _path(config, assignment).write_text(charter.SCRATCHPAD_SEED + "x" * 20000 + "\n")
-        scratchpad.begin(config, conn, assignment, _wake(conn, assignment))
+        _begin(config, conn, assignment, _wake(conn, assignment))
 
         [event] = store.list_inbox(conn, assignment.id)
         assert event.payload["cut"] is True
@@ -138,14 +153,14 @@ class TestBegin:
             path.unlink()
             os.symlink(outside, path)
 
-        result = scratchpad.begin(config, conn, assignment, _wake(conn, assignment))
+        result = _begin(config, conn, assignment, _wake(conn, assignment))
 
         assert result.restored == reason
         assert result.text == good
         assert not path.is_symlink()
         assert path.read_text() == good
         [event] = _events(conn, assignment, "scratchpad_restored")
-        assert event.payload == {"reason": reason, "phase": "begin", "written": True}
+        assert event.payload == {"reason": reason, "phase": "begin"}
         assert store.list_inbox(conn, assignment.id) == []
         if breakage == "symlink":
             assert (tmp_path / "elsewhere.md").read_text() == "someone else's file\n"
@@ -161,9 +176,42 @@ class TestBegin:
         scratchpad.store_snapshot(conn, assignment.id, phase="after", text=huge, wake_id=first.id)
         _path(config, assignment).unlink()
 
-        result = scratchpad.begin(config, conn, assignment, _wake(conn, assignment))
+        result = _begin(config, conn, assignment, _wake(conn, assignment))
 
         assert result.text == charter.SCRATCHPAD_SEED
+
+
+class TestNoFileAccessInsideTheTransaction:
+    """ISSUE-833: `begin` and `end` run under the writer lock, so they take the
+    file's state as read and hand a restore back instead of writing it."""
+
+    def test_begin_and_end_touch_no_file(self, config, conn, monkeypatch):
+        assignment = _assignment(config, conn)
+        broken = scratchpad.FileState(None, scratchpad.EMPTY)
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("file access inside the transaction")
+
+        monkeypatch.setattr(scratchpad, "read_file", refuse)
+        monkeypatch.setattr(scratchpad, "write_file", refuse)
+        wake = _wake(conn, assignment)
+        begun = scratchpad.begin(conn, assignment, wake, broken)
+        ended = scratchpad.end(conn, assignment, wake, broken)
+
+        assert begun.rewrite == charter.SCRATCHPAD_SEED
+        assert ended.rewrite == charter.SCRATCHPAD_SEED
+
+    def test_a_restore_that_does_not_land_is_recorded(self, config, conn, monkeypatch):
+        assignment = _assignment(config, conn)
+        wake = _wake(conn, assignment)
+        conn.commit()
+        monkeypatch.setattr(scratchpad, "write_file", lambda *a, **k: False)
+
+        assert scratchpad.write_restored(
+            config, conn, assignment, wake.id, charter.SCRATCHPAD_SEED, phase="end",
+        ) is False
+        [event] = _events(conn, assignment, "scratchpad_restore_failed")
+        assert (event.wake_id, event.payload) == (wake.id, {"phase": "end"})
 
 
 class TestSnapshots:
@@ -184,7 +232,7 @@ class TestSnapshots:
         scratchpad.store_snapshot(conn, assignment.id, phase="after", text=text, wake_id=first.id)
         _path(config, assignment).write_text(text)
 
-        result = scratchpad.begin(config, conn, assignment, _wake(conn, assignment))
+        result = _begin(config, conn, assignment, _wake(conn, assignment))
 
         assert result.change_event_id is None
 
@@ -196,7 +244,7 @@ class TestEnd:
         edited = charter.SCRATCHPAD_SEED + "\nUSER: the budget is firm.\nUSER: no gas units.\n"
         _path(config, assignment).write_text(edited)
         wake = _wake(conn, assignment)
-        scratchpad.begin(config, conn, assignment, wake)
+        _begin(config, conn, assignment, wake)
         store.consume_inbox(conn, assignment.id, wake.id)
         return assignment, wake, edited
 
@@ -205,7 +253,7 @@ class TestEnd:
         written = charter.SCRATCHPAD_SEED + "\nUSER: no gas units.\nWake's own note.\n"
         _path(config, assignment).write_text(written)
 
-        result = scratchpad.end(config, conn, assignment, wake)
+        result = _end(config, conn, assignment, wake)
 
         assert result.text == written
         assert _path(config, assignment).read_text() == written
@@ -216,7 +264,7 @@ class TestEnd:
         assignment, wake, edited = self._changed_wake(config, conn)
         _path(config, assignment).write_text("")
 
-        result = scratchpad.end(config, conn, assignment, wake)
+        result = _end(config, conn, assignment, wake)
 
         assert result.restored == scratchpad.EMPTY
         assert _path(config, assignment).read_text() == edited
@@ -225,9 +273,9 @@ class TestEnd:
     def test_the_next_begin_sees_no_change_after_end(self, config, conn):
         assignment, wake, _edited = self._changed_wake(config, conn)
         _path(config, assignment).write_text(charter.SCRATCHPAD_SEED + "\nWake's own note.\n")
-        scratchpad.end(config, conn, assignment, wake)
+        _end(config, conn, assignment, wake)
         store.update_wake(conn, wake.id, ended_at=db.iso_utc_now())
 
-        result = scratchpad.begin(config, conn, assignment, _wake(conn, assignment))
+        result = _begin(config, conn, assignment, _wake(conn, assignment))
 
         assert result.change_event_id is None
