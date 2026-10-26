@@ -203,6 +203,17 @@ class TestToolWire:
         monkeypatch.setattr(catalog, "_OVERRIDES", {})
         assert "strict" not in _body(provider)["tools"][0]["function"]
 
+    def test_the_default_config_sends_nothing_strict_without_the_catalog_flag(self, monkeypatch):
+        from istota.config import NativeBrainConfig
+
+        monkeypatch.setattr(catalog, "_OVERRIDES", {})
+        monkeypatch.setattr(catalog, "_FETCHED", {})
+        config = NativeBrainConfig(api_key="k")
+        provider = make_provider(config)
+        assert provider.strict_tool_schemas == "auto"
+        body = provider._build_chat_completion_request("sys", [], _tools(), config.model, 100)
+        assert "strict" not in body["tools"][0]["function"]
+
     def test_an_unhandled_tool_goes_non_strict_and_the_others_stay_strict(self):
         odd = ToolSchema(
             name="Odd",
@@ -225,7 +236,7 @@ class TestToolWire:
     def test_make_provider_passes_the_mode(self):
         cfg = SimpleNamespace(api_key="k", base_url="https://x/v1", strict_tool_schemas="on")
         assert make_provider(cfg).strict_tool_schemas == "on"
-        assert make_provider(SimpleNamespace(api_key="k")).strict_tool_schemas == "off"
+        assert make_provider(SimpleNamespace(api_key="k")).strict_tool_schemas == "auto"
 
     def test_carries_strict_tools(self):
         assert carries_strict_tools(_tools(), "m", "on") is True

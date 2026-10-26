@@ -2100,8 +2100,9 @@ class NativeBrainConfig:
     # Whether tool definitions go out with `"strict": true` (constrained
     # argument sampling): "off", "auto" (when the model's
     # supports_structured_outputs is true) or "on". A refused request gets one
-    # re-issue without, and strict is off for the rest of the attempt.
-    strict_tool_schemas: str = "off"
+    # re-issue without, and strict is off for the rest of the attempt. "auto"
+    # since the round's stage 8 evals: fewer failed edits on the weaker model.
+    strict_tool_schemas: str = "auto"
     # Daemon-side WebFetch tool ([brain.native.web_fetch]). Enabled by default
     # with safe caps; the tool is native-only (added to build_default_tools).
     web_fetch: WebFetchConfig = field(default_factory=WebFetchConfig)
@@ -2127,8 +2128,9 @@ class NativeBrainConfig:
     # Tool-failure nudge: once per attempt, after this many tool calls in a row
     # have failed (an error result, or a Bash command that exited non-zero),
     # the loop tells the model so and steers it off the failing approach.
-    # 0 turns it off.
-    tool_failure_nudge_after: int = 4
+    # 0 (the default) turns it off: the round's stage 8 evals showed no fewer
+    # failed calls with it on, so it ships off until a run shows otherwise.
+    tool_failure_nudge_after: int = 0
     # Soft wall-clock deadline (ISSUE-373). The three limits governing a native
     # run — `max_turns`, `scheduler.task_timeout_minutes` and the nudge ladder —
     # are all sized against a brain that answers in a couple of seconds. On a

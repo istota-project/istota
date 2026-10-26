@@ -124,6 +124,6 @@ def make_provider(config):
             # An unknown value warns in the provider and runs as "5m".
             prompt_cache_ttl=getattr(config, "prompt_cache_ttl", "5m"),
             # An unknown value warns in the provider and runs as "off".
-            strict_tool_schemas=getattr(config, "strict_tool_schemas", "off"),
+            strict_tool_schemas=getattr(config, "strict_tool_schemas", "auto"),
         )
     raise ValueError(f"Unknown provider: {kind!r}")

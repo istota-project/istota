@@ -183,7 +183,13 @@ Over `openai_compat` only.
 - **Caching**: `_apply_cache_breakpoints`; on by default only for `api.anthropic.com` unless `prompt_caching_explicit`.
 - **Cost**: provider-reported cost wins (OpenRouter only, `_parse_reported_cost`); `cost_usd` None -> catalog, `0.0` -> a real free turn.
 - **Model catalog (ISSUE-182)**: `llm.catalog.get_model_info` = `model_overrides` > fetched OpenRouter > `_DEFAULT` (200k, zero price); no bundled file. `_ensure_fetched_catalog` fetches only for `openrouter.ai`, disk-cached, never fatal, once per process per TTL.
-- **Overflow recovery**: <=2 force-compacts + `run_agent_loop_continue` under the shared deadline.
+- **Overflow recovery**: <=2 force-compacts + `run_agent_loop_continue` under the shared deadline; a recovery summary that fails (`CompactionOutcome.ok` false) fails the attempt.
+- **Compaction failure never cuts**: a failed proactive summary leaves `ctx.messages` alone, logs a `compaction` record with `ok=false`, and is retried at a later boundary; after `_MAX_PROACTIVE_COMPACTION_FAILURES` (2) the proactive path is off for the attempt and overflow recovery is the safety net. Summary calls count in `TaskUsage` and go out with `prompt_caching=False`.
+- **Background compaction** (`compaction_background`, default off; `compaction_background_tokens`, 0 = `derive_background_tokens`): starts the summary in a task below the blocking threshold and places it at a later boundary when the prefix is still in place by identity, else discards it as stale (`placed=false`, usage still counted). Cancelled and awaited on every loop exit. Stage 8 of the pi 1.x round kept it off: it made the primary eval model slower.
+- **Reasoning replay** (`reasoning_replay`, default `auto`): `auto` sends stored `reasoning_details` back within the attempt, `on` adds plain-string reasoning under its `source_field`, `off` sends none. Never crosses attempts or compaction summaries. Encrypted items are logged as `{type, length, sha256}`.
+- **Re-issue without a feature**: a 400 naming reasoning (`is_reasoning_rejection`) or a strict schema (`is_strict_schema_rejection`) is re-sent once without that feature, which stays off for the attempt (`_REISSUABLE_FEATURES`, `_reissue_once_without` on the retrying provider; one mechanism for both). Logged once and recorded as an `error` record (`reasoning_rejected` / `strict_rejected`).
+- **Cache affinity and TTL**: one random `uuid4().hex` per attempt goes out as `prompt_cache_key` when that tri-state resolves on (unset = on for `openrouter.ai` and `api.openai.com`, off elsewhere including `api.anthropic.com`). `prompt_cache_ttl` `"5m"` (default) or `"1h"`; a 1h write is priced at 2x input when no cost is reported. Stage 8 kept 5m: both eval providers cache implicitly and ignore `ttl`.
+- **Strict tool schemas** (`strict_tool_schemas`, default `auto`): `strictify_schema` closes objects, requires every property and makes optionals nullable, or returns `None` and that tool goes non-strict; `agent/coercion.py` drops a `None` for an originally optional key. `auto` follows `ModelInfo.supports_structured_outputs` (OpenRouter `supported_parameters` or `model_overrides`), so a catalog without the flag, including the static default for `api.anthropic.com`, sends nothing strict. Default moved to `auto` in stage 8: fewer failed edits on the weaker model, no pass loss.
 - **Bash**: runs `bash -o pipefail -c` via `sandbox.shell_exec.shell_argv` (ISSUE-307); 141 carries `SIGPIPE_NOTE`. CLI brains get pipefail via `SHELLOPTS=pipefail` from `build_clean_env` (ISSUE-321); not `BASH_ENV`, which names a file to source.
 
 ### Claude runtime credential (ISSUE-390, ISSUE-409)
@@ -213,6 +219,10 @@ Native, gated on `turn_budget_nudge`, a `max_turns`, and tools.
 - **Wall clock (ISSUE-373)**: `_turns_left_by_clock` uses the median of the last `_LATENCY_WINDOW` (5) latencies, needing `_LATENCY_SAMPLES_MIN` (3) (median so one long build cannot spend the ladder). Budget `min(max_turns, turns + turns_left_by_clock)` toward the soft deadline; no estimate = unchanged.
 - `_extract_system_prompt` adds one non-numeric pacing line (a number would anchor).
 - Injected via `prepare_next_turn` (`_next_budget_nudge`) into `ctx.messages` only, not `new_messages`; wire role user, framed by `_TURN_BUDGET_FRAME`.
+
+### Tool-failure nudge
+
+`tool_failure_nudge_after` (default 0 = off). A failure is `is_error` or, for Bash, `bash_result_failed` on the result text (Bash leaves `is_error` False on a non-zero exit). `tool_health` counts consecutive failures across tools and survives overflow recovery; `_next_failure_nudge` fires once per attempt at the threshold, beside and after the budget nudge, never while aborted, tool-bearing tasks only. Its breakdown names the first word of failing Bash commands. Writes a `nudge` record with `phase="tool_failure"`. Stage 8 of the pi 1.x round shipped it off: the same number of failed calls before the first success with it on as off.
 
 ### The soft deadline (ISSUE-373)
 

@@ -19,9 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Longer prompt caching for the native brain.** On OpenRouter and OpenAI, each task attempt now tags its requests with a random cache key so they reach the same cache. An operator can also keep cached prompts for an hour instead of five minutes, which helps tasks with long tool runs; the cost estimate charges the higher one-hour write price.
 
-- **Strict tool schemas for the native brain, opt-in.** An operator can have tool definitions sent strict, so a model that supports structured outputs is held to each tool's argument schema instead of having malformed arguments repaired afterwards. It is off by default; `auto` turns it on only for models that support it. If the endpoint refuses it, the step is re-sent once without.
+- **Strict tool schemas for the native brain.** Tool definitions are sent strict to models that support structured outputs, so the model is held to each tool's argument schema instead of having malformed arguments repaired afterwards. This is the `auto` default, chosen after evals showed fewer failed edits; `off` turns it off. If the endpoint refuses it, the step is re-sent once without.
 
-- **The native brain is told when its tool calls keep failing.** After several failed tool calls in a row, the model gets one notice naming what failed and is told to try another approach or finish with what it has, instead of retrying the same broken sources. On by default; an operator can change the count or turn it off.
+- **The native brain can be told when its tool calls keep failing (opt-in).** After several failed tool calls in a row, the model gets one notice naming what failed and is told to try another approach or finish with what it has, instead of retrying the same broken sources. Off by default, because evals showed no fewer failed calls with it on; an operator turns it on with `tool_failure_nudge_after`.
 
 ### Changed
 

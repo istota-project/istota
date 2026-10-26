@@ -195,6 +195,13 @@ class TestFiring:
         )
         assert _wire_notices(provider) == [[]] * len(provider.calls)
 
+    def test_off_by_default(self, tmp_path):
+        assert NativeBrainConfig().tool_failure_nudge_after == 0
+        turns = [_bash(i, f"ls ./missing-{i}") for i in range(6)] + [_final()]
+        provider = MockProvider(turns)
+        _brain(provider).execute(_req("go", tmp_path, tools=["Bash"]))
+        assert _wire_notices(provider) == [[]] * len(provider.calls)
+
     def test_text_only_run_never_sees_it(self, tmp_path):
         provider = MockProvider([_final()])
         _brain(provider, tool_failure_nudge_after=1).execute(_req("summarize", tmp_path))
