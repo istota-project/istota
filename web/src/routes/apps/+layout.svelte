@@ -89,7 +89,7 @@
   const onIndex = $derived(page.url.pathname === indexPath || page.url.pathname === `${base}/apps`);
 
   function appActive(appId: string): boolean {
-    return page.url.pathname.startsWith(`${base}${appPath(appId)}`);
+    return !onIndex && page.url.searchParams.get('id') === appId;
   }
 
   function follow(event: MouseEvent, href: string) {

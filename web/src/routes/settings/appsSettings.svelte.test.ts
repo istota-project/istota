@@ -147,7 +147,7 @@ describe('Settings → Apps', () => {
     expect(recall.getByText('Not measured')).toBeTruthy();
     expect(recall.getByRole('link', { name: 'Versions of Recall' })).toHaveAttribute(
       'href',
-      '/apps/recall/versions/',
+      '/apps/versions/?id=recall',
     );
   });
 

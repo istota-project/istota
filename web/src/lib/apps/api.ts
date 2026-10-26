@@ -354,12 +354,23 @@ export function reportAppError(
   });
 }
 
+// The app pages take the app in the query, not the path: the frontend is
+// prerendered with no SPA fallback, so a page per app id cannot exist.
+
 /** Where the approval screen for a pending install lives. */
 export function installPath(appId: string, pendingId: string): string {
-  return `/apps/${seg(appId)}/install/${seg(pendingId)}/`;
+  return `/apps/install/?id=${seg(appId)}&pending=${seg(pendingId)}`;
 }
 
 /** Where an installed app opens. */
 export function appPath(appId: string): string {
-  return `/apps/${seg(appId)}/`;
+  return `/apps/open/?id=${seg(appId)}`;
+}
+
+export function versionsPath(appId: string): string {
+  return `/apps/versions/?id=${seg(appId)}`;
+}
+
+export function activityPath(appId: string): string {
+  return `/apps/activity/?id=${seg(appId)}`;
 }

@@ -13,7 +13,7 @@
   import { notifySuccess } from '@minot/ui/stores/notices';
   import { AuthError } from '$lib/api';
   import {
-    appPath,
+    versionsPath,
     getApp,
     getApps,
     getAppStorage,
@@ -120,7 +120,7 @@
             <Button
               size="sm"
               variant="secondary"
-              href="{base}{appPath(detail.app_id)}versions/"
+              href="{base}{versionsPath(detail.app_id)}"
               ariaLabel="Versions of {detail.name}">Versions</Button
             >
             <Button

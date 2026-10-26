@@ -4,7 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, within } from '@testing-library/svelte';
-import { page } from '../../../../../vitest-stubs/app-state.svelte';
+import { page } from '../../../../vitest-stubs/app-state.svelte';
 import { AppsApiError, type AppActivity, type AppsList } from '$lib/apps/api';
 
 const apps = vi.hoisted(() => ({
@@ -89,8 +89,7 @@ function activity(): AppActivity {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  page.url = new URL('http://localhost/apps/tides/activity/');
-  page.params = { id: 'tides' };
+  page.url = new URL('http://localhost/apps/activity/?id=tides');
   apps.getApps.mockResolvedValue(LIST);
   apps.getActivity.mockResolvedValue(activity());
 });
@@ -116,7 +115,7 @@ describe('Activity', () => {
     expect(within(rows[2]).getByText('1')).toBeTruthy();
     expect(screen.getByRole('link', { name: /Back to Tides/ })).toHaveAttribute(
       'href',
-      '/apps/tides/',
+      '/apps/open/?id=tides',
     );
   });
 

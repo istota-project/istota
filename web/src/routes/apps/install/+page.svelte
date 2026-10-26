@@ -37,8 +37,8 @@
   const apps = getAppsList();
   const identity = getCurrentUser();
 
-  const appId = $derived(page.params.id ?? '');
-  const pendingId = $derived(page.params.pending ?? '');
+  const appId = $derived(page.url.searchParams.get('id') ?? '');
+  const pendingId = $derived(page.url.searchParams.get('pending') ?? '');
 
   let data = $state<PendingInstall | null>(null);
   let loading = $state(true);

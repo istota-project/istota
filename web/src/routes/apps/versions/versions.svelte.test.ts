@@ -4,7 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
-import { page } from '../../../../../vitest-stubs/app-state.svelte';
+import { page } from '../../../../vitest-stubs/app-state.svelte';
 import type { AppsList, AppVersions } from '$lib/apps/api';
 
 const apps = vi.hoisted(() => ({
@@ -75,8 +75,7 @@ function versions(): AppVersions {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  page.url = new URL('http://localhost/apps/tides/versions/');
-  page.params = { id: 'tides' };
+  page.url = new URL('http://localhost/apps/versions/?id=tides');
   apps.getApps.mockResolvedValue(LIST);
   apps.getVersions.mockResolvedValue(versions());
 });
@@ -102,7 +101,7 @@ describe('Versions', () => {
     expect(within(card('Version 1')).getByText('Only its own data and files.')).toBeTruthy();
     expect(screen.getByRole('link', { name: /Back to Tides/ })).toHaveAttribute(
       'href',
-      '/apps/tides/',
+      '/apps/open/?id=tides',
     );
   });
 

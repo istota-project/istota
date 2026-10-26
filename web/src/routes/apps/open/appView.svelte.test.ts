@@ -114,8 +114,7 @@ beforeEach(() => {
   paneWidth = 1200;
   vi.stubGlobal('ResizeObserver', FakeResizeObserver);
   online().set(true);
-  page.url = new URL('http://localhost/apps/board/');
-  page.params = { id: 'board' };
+  page.url = new URL('http://localhost/apps/open/?id=board');
   apps.getApps.mockResolvedValue(list());
   apps.getApp.mockImplementation(async (id: string) =>
     id === 'map' ? detail({ ...MAP, reason: 'A graph worth reading needs the width.' }) : detail(),
@@ -127,8 +126,7 @@ afterEach(() => {
 });
 
 function openMap() {
-  page.url = new URL('http://localhost/apps/map/');
-  page.params = { id: 'map' };
+  page.url = new URL('http://localhost/apps/open/?id=map');
 }
 
 async function frame(): Promise<HTMLIFrameElement> {
@@ -156,7 +154,7 @@ describe('the app view', () => {
     expect(items).toEqual(['Permissions', 'Versions', 'Activity', 'Reload', 'Uninstall']);
     expect(screen.getByRole('menuitem', { name: 'Versions' })).toHaveAttribute(
       'href',
-      '/apps/board/versions/',
+      '/apps/versions/?id=board',
     );
   });
 
@@ -168,7 +166,7 @@ describe('the app view', () => {
     await fireEvent.keyDown(screen.getByLabelText('Board actions'), { key: 'Enter' });
     expect(await screen.findByRole('menuitem', { name: 'Review update' })).toHaveAttribute(
       'href',
-      '/apps/board/install/p-2/',
+      '/apps/install/?id=board&pending=p-2',
     );
   });
 
@@ -197,8 +195,7 @@ describe('the app view', () => {
     apps.getApps.mockResolvedValue({ ...list(), apps: [summary(), summary(memoryMap)] });
     apps.getApp.mockResolvedValue(detail({ ...memoryMap, reason: value('reason') }));
     paneWidth = 375;
-    page.url = new URL('http://localhost/apps/memory-map/');
-    page.params = { id: 'memory-map' };
+    page.url = new URL('http://localhost/apps/open/?id=memory-map');
     render(Harness);
     expect(await screen.findByText('Made for a wider screen')).toBeTruthy();
     const message = screen.getByText(/Memory map is made for a desktop-width screen\./);
@@ -284,8 +281,7 @@ describe('the app view', () => {
     }
 
     beforeEach(() => {
-      page.url = new URL('http://localhost/apps/recall/');
-      page.params = { id: 'recall' };
+      page.url = new URL('http://localhost/apps/open/?id=recall');
       apps.getApp.mockResolvedValue(recall());
     });
 
