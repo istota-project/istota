@@ -97,9 +97,11 @@ On the VM, `istota-stack apply settings.json --secrets-file private-settings.jso
 The [management role](../deployment/ansible.md) takes the same plan as `istota_plan`. `--format ansible` writes the snapshot as a `group_vars` file setting that variable, so it goes into the estate's inventory, encrypted, with nothing to edit:
 
 ```bash
-ssh vm sudo istota snapshot --format ansible \
-  | ansible-vault encrypt --output inventory/group_vars/istota/istota_plan.json -
+plan=$(ssh vm sudo istota snapshot --format ansible) \
+  && printf '%s\n' "$plan" | ansible-vault encrypt --output inventory/group_vars/istota/istota_plan.json -
 ```
+
+The snapshot goes into a variable first because a failed snapshot writes nothing to stdout, and piping it straight into `ansible-vault encrypt` would replace the inventory's plan with an encrypted empty file.
 
 Credentials are set beside it:
 

@@ -54,11 +54,13 @@ The application settings are one plan, `istota_plan`. The variables the role too
 `istota_plan` is an `istota apply` plan as a mapping, with the CLI's own field names ([Declarative settings](../docs/configuration/declarative-settings.md)). A snapshot of a running install is one, and `--format ansible` writes it as a `group_vars` file that sets `istota_plan`, so it goes into the inventory as it is:
 
 ```sh
-ssh vm sudo istota snapshot --format ansible \
-  | ansible-vault encrypt --output inventory/group_vars/istota/istota_plan.json -
+plan=$(ssh vm sudo istota snapshot --format ansible) \
+  && printf '%s\n' "$plan" | ansible-vault encrypt --output inventory/group_vars/istota/istota_plan.json -
 ```
 
-Run that again whenever the VM's settings should become the inventory's. The output holds no credential values; it does hold names, addresses and paths, which is why it goes in the vault. The snapshot writes the same bytes when nothing changed, so the file changes in git only when a setting did. The play applies the inventory's copy, so a setting changed in the web UI since the last snapshot is put back by the next play; take a snapshot first when the VM is the source of truth. `ansible-playbook --check` after a snapshot shows no drift.
+The snapshot goes into a variable first because a failed snapshot writes nothing to stdout, and piping it straight into `ansible-vault encrypt` would replace the inventory's plan with an encrypted empty file.
+
+Run that again whenever the VM's settings should become the inventory's. The output holds no credential values; it does hold names, addresses and paths, which is why it goes in the vault. The snapshot writes the same bytes when nothing changed, but `ansible-vault encrypt` salts each run, so the encrypted file changes in git every time; compare with `ansible-vault view` to see whether a setting did. The play applies the inventory's copy, so a setting changed in the web UI since the last snapshot is put back by the next play; take a snapshot first when the VM is the source of truth. `ansible-playbook --check` after a snapshot shows no drift.
 
 ```yaml
 istota_plan_secrets:

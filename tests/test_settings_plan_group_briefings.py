@@ -314,3 +314,37 @@ def test_exclusion_keeps_source_grant_and_all_users_admin_exception(install):
         assert resolve_source_grant(conn, install[1], current, "file")["id"] == grant["id"]
         group = reconcile_all_users(conn, install[1])
     assert execute(install, [definition(group_id=group["group_id"], excluded_user_ids=["bob"])], actor="admin").exit_code == 2
+
+
+def blocks_definition():
+    return definition(generation_mode="blocks", generation={"version": 1, "blocks": [
+        {"title": "Quotes", "directive": "", "sources": [{"id": "quotes", "kind": "markets", "config": {}}]},
+        {"title": "Notes", "sources": [{"id": "notebook", "kind": "group_memory", "config": {}}]},
+    ]})
+
+
+def test_empty_block_directive_snapshots_and_applies_unchanged(install):
+    assert execute(install, [blocks_definition()]).exit_code == 2
+    document, _ = snapshot.gather(install[0])
+    blocks = document["group_briefings"][0]["generation"]["blocks"]
+    assert [block["directive"] for block in blocks] == ["", ""]
+    assert execute(install, document["group_briefings"]).exit_code == 0
+
+
+def test_stored_null_directive_snapshots_and_applies_unchanged(install):
+    # A definition saved while the store still wrote null for an empty directive.
+    assert execute(install, [blocks_definition()]).exit_code == 2
+    with db.get_db(install[1].db_path) as conn:
+        row = conn.execute("SELECT id, generation_json FROM group_briefing_configs").fetchone()
+        generation = json.loads(row["generation_json"])
+        for block in generation["blocks"]:
+            block["directive"] = None
+        conn.execute("UPDATE group_briefing_configs SET generation_json=? WHERE id=?",
+                     (json.dumps(generation), row["id"]))
+    document, _ = snapshot.gather(install[0])
+    assert [block["directive"] for block in document["group_briefings"][0]["generation"]["blocks"]] == ["", ""]
+    assert execute(install, document["group_briefings"]).exit_code == 0
+    with db.get_db(install[1].db_path) as conn:
+        assert store.list_definitions(conn, "team")[0]["revision"] == 1
+    _, operations = preview(install, [{"group_id": "team", "name": "daily", "title": "Renamed"}])
+    assert [change["path"] for change in operations[0].changes] == [["title"]]

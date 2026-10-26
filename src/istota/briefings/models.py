@@ -435,8 +435,7 @@ def normalize_group_generation(mode: str, raw: dict) -> dict:
             if not isinstance(options, dict):
                 raise ValueError("block options must be an object")
             directive = block.get("directive")
-            if directive is not None:
-                directive = _group_text(directive, "block directive") or None
+            directive = "" if directive is None else _group_text(directive, "block directive")
             result["blocks"].append({
                 "title": _group_text(block.get("title"), "block title", required=True, limit=200),
                 "directive": directive, "render_mode": render_mode, "options": options, "sources": sources,
