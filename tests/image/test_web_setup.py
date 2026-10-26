@@ -180,7 +180,7 @@ def web_setup(istota_image, tmp_path_factory) -> WebSetupRun:
             secrets_dir=shipped.secrets_dir,
         )
         for name in ("config/config.toml", "config/admins", ".env", "host.env",
-                     "secrets/istota_brain_native_api_key", "setup-done"):
+                     "secrets/istota_provider_anthropic_api_key", "setup-done"):
             path = vm / name
             run.files[name] = path.read_text() if path.is_file() else "<missing>"
 
@@ -269,7 +269,8 @@ class TestFinish:
         assert web_setup.files["setup-done"] == ""
 
     def test_the_credentials_went_to_secret_files(self, web_setup):
-        assert web_setup.files["secrets/istota_brain_native_api_key"] == NATIVE_KEY
+        # The page's default provider is anthropic, whose key file this is.
+        assert web_setup.files["secrets/istota_provider_anthropic_api_key"] == NATIVE_KEY
 
     def test_it_staged_the_env_files(self, web_setup):
         assert "INGRESS=local" in web_setup.files["host.env"].splitlines(), web_setup.files["host.env"]

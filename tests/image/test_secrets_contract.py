@@ -62,13 +62,13 @@ def secrets_boot(istota_image, tmp_path_factory) -> SecretsBoot:
     ]
     with boot_shipped_stack(
         istota_image.tag, work,
-        setup_env={"ISTOTA_BRAIN_NATIVE_API_KEY": native_key},
+        setup_env={"ISTOTA_PROVIDER_ANTHROPIC_API_KEY": native_key},
         # Read only by the negative control's overlay.
         env_values={"ISTOTA_ROW12_LEAKED_VALUE": native_key},
         overlays=overlays, project_prefix="istota-row12",
     ) as stack:
         session_key = (stack.secrets_dir / "istota_web_session_secret_key").read_text()
-        assert (stack.secrets_dir / "istota_brain_native_api_key").read_text() == native_key
+        assert (stack.secrets_dir / "istota_provider_anthropic_api_key").read_text() == native_key
 
         def run(*argv: str) -> str:
             result = stack.exec(*argv, timeout=60)
@@ -110,7 +110,7 @@ class TestTheCredentialsAreFilesNotEnvironment:
         would pass the inspect assertion by carrying no credential at all."""
         lines = secrets_boot.daemon_env.splitlines()
 
-        assert f"ISTOTA_BRAIN_NATIVE_API_KEY={secrets_boot.native_key}" in lines
+        assert f"ISTOTA_PROVIDER_ANTHROPIC_API_KEY={secrets_boot.native_key}" in lines
         assert f"ISTOTA_WEB_SESSION_SECRET_KEY={secrets_boot.session_key}" in lines
 
     def test_the_config_holds_none_of_them(self, secrets_boot):

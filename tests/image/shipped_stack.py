@@ -141,7 +141,7 @@ def boot_shipped_stack(
         setup = compose([
             *setup_args, "-v", f"{vm}:/vm", "--entrypoint", "istota-drop", "daemon",
             "istota", "setup", "--yes", "--vm-dir", "/vm", "--user", "alice",
-            "--brain", "native", "--native-model", "scripted-test-model",
+            "--brain", "native", "--native-provider", "anthropic", "--native-model", "scripted-test-model",
         ], extra_env={"ISTOTA_CONFIG_READ_ONLY": "false"})
         assert setup.returncode == 0, setup.stdout + setup.stderr
         assert (config_dir / "config.toml").is_file(), "setup wrote no config into the config directory"
