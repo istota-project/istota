@@ -400,6 +400,101 @@ def default_enabled_patterns(config) -> list[str]:  # noqa: ANN001
     return patterns
 
 
+def enabled_patterns(config) -> list[str]:  # noqa: ANN001
+    """``[models] enabled`` when set (``[]`` included), else the default."""
+    configured = getattr(getattr(config, "models", None), "enabled", None)
+    if configured is None:
+        return default_enabled_patterns(config)
+    return [p for p in configured if isinstance(p, str)]
+
+
+# --- a person's selection, and what is stored ---------------------------------
+
+#: How many candidates a refusal shown to a person lists.
+SHOWN_CANDIDATES = 5
+
+
+def resolve_for_person(
+    selection: str,
+    config,  # noqa: ANN001
+    *,
+    kind: str | None,
+    is_admin: bool,
+    allow_patterns: bool = False,
+    catalogue: Catalogue | None = None,
+) -> Resolution | ResolveError:
+    """A selection a person made for a room, a job or one task.
+
+    An admin selects from the whole catalogue; anyone else from the enabled
+    set (D9). ``kind`` is the brain that will run it. Patterns are for chat
+    commands only (D10), so every other caller leaves ``allow_patterns`` off.
+    A task needs tool calling, so a model without it is refused.
+    """
+    return resolve_selection(
+        selection, catalogue,
+        for_brain=kind,
+        enabled_only=not is_admin,
+        enabled=None if is_admin else enabled_patterns(config),
+        providers=config_providers(config),
+        native_provider=native_provider_id(config),
+        allow_patterns=allow_patterns,
+        needs_tools=True,
+    )
+
+
+def stored_selection(resolution: Resolution) -> str:
+    """What a room or a ``!model`` turn stores for a resolved selection: the
+    alias name for an alias, else the ref it matched (a bare id or a pattern
+    is stored as its ref). Never carries ``:effort``; effort is its own field."""
+    if resolution.source == "alias" and resolution.alias:
+        return resolution.alias
+    return resolution.ref
+
+
+def describe_resolve_error(error: ResolveError) -> str:
+    """One line for a person: the refusal and up to five candidates."""
+    text = error.message
+    shown = error.candidates[:SHOWN_CANDIDATES]
+    if shown:
+        text += ". Did you mean " + ", ".join(f"`{c}`" for c in shown)
+        if len(error.candidates) > len(shown):
+            text += f" (and {len(error.candidates) - len(shown)} more)"
+        text += "?"
+    return text
+
+
+def selection_for_task(config, selection: str | None, *, kind: str | None) -> tuple[str, str | None]:  # noqa: ANN001
+    """``(model, effort)`` a task row records for a stored selection (D6).
+
+    An alias or ref resolves now, so ``tasks.model`` names the ref that ran
+    and an alias change reaches the next task. What does not resolve to a ref
+    is kept as written, because the brains stay lenient: an alias meaning the
+    brain's own model, an id the catalogue does not list, a ref the brain
+    cannot run (the executor's crossing rule decides that one). ``effort`` is
+    the effort the selection itself carries (``opus:high``, an alias's), or
+    ``None``. No enabled-set check: what is stored was bounded when it was
+    set, and an admin's pin runs for every member (D9). Never raises.
+    """
+    raw = (selection or "").strip() if isinstance(selection, str) else ""
+    if not raw:
+        return "", None
+    try:
+        resolved = resolve_selection(
+            raw,
+            for_brain=kind,
+            providers=config_providers(config),
+            native_provider=native_provider_id(config),
+        )
+    except Exception:  # noqa: BLE001 - task creation must not fail on a lookup
+        return raw, None
+    if isinstance(resolved, Resolution) and not resolved.brain_default:
+        return resolved.ref, resolved.effort_requested
+    base, effort = split_effort(raw)
+    if isinstance(resolved, Resolution):
+        return base, resolved.effort_requested
+    return raw, None
+
+
 # --- effort ------------------------------------------------------------------
 
 #: Effort levels, lowest first: the order clamping walks.
@@ -527,7 +622,12 @@ __all__ = [
     "config_providers",
     "effort_wire_value",
     "default_enabled_patterns",
+    "describe_resolve_error",
+    "enabled_patterns",
     "enabled_refs",
+    "resolve_for_person",
+    "selection_for_task",
+    "stored_selection",
     "latest_in_family",
     "native_provider_id",
     "preferred_provider",

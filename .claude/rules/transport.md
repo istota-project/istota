@@ -169,7 +169,7 @@ A user's SMS thread and private WhatsApp chat each own one room, minted on the f
 
 **Who wrote a row.** `messages.author_user_id` or the pre-sanitized `author_label`, one or neither (owner); readers test the label first. Resolved at write time by `transport.ingest.resolve_author`, or `db.author_for_email_task` without a `Config` (pass `email_addresses`; the DB fallback misses TOML-only addresses). Every user-row writer sets it.
 
-**Per-room defaults.** `record_inbound` fills `model`/`effort` (inline `!model` wins as a unit) and `brain` from the room inside the `room_surface` guard, so email continuations, cron, heartbeat, briefing and skill tasks do not take them. New per-room defaults go in that block; hoisting `existing` out of the guard reverses ISSUE-136. Set via `!room` or the room-settings PATCH.
+**Per-room defaults.** `record_inbound` fills `model`/`effort` (inline `!model` wins as a unit) and `brain` from the room inside the `room_surface` guard, then resolves the model selection on the task's brain (`ingest._selection_for_task`), so the task records the ref and an alias's effort where none was set, so email continuations, cron, heartbeat, briefing and skill tasks do not take them. New per-room defaults go in that block; hoisting `existing` out of the guard reverses ISSUE-136. Set via `!room` or the room-settings PATCH.
 
 ## Talk inbound over the signaling event stream (`[talk.signaling]`)
 

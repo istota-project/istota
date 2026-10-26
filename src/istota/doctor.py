@@ -1100,9 +1100,21 @@ def check_models_catalogue(config: "Config", probe: bool) -> CheckResult:
         warns.extend(model_warns)
         remedies.append("Point each alias at a current model, or name a current model where one is written.")
 
-    from .brain._resolve import default_enabled_patterns, enabled_refs
+    from .brain._resolve import enabled_patterns, enabled_refs, unmatched_patterns
 
-    enabled_count = len(enabled_refs(catalogue, default_enabled_patterns(config)))
+    patterns = enabled_patterns(config)
+    if getattr(config.models, "enabled", None) is not None:
+        unmatched = unmatched_patterns(catalogue, patterns)
+        if unmatched:
+            warns.append(
+                "[models] enabled names patterns that match no model: "
+                + ", ".join(repr(p) for p in unmatched[:10])
+            )
+            remedies.append(
+                "Correct or remove those [models] enabled entries; a pattern is a glob "
+                "over provider/id refs (`!models` as an admin lists them)."
+            )
+    enabled_count = len(enabled_refs(catalogue, patterns))
     model_count = len(catalogue.refs())
     summary = f"{len(specs)} providers, {model_count} models, {enabled_count} enabled"
     summary += f", oldest cache {_cache_age(max(ages))}" if ages else ", no discovery cache"

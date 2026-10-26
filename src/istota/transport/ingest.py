@@ -560,6 +560,22 @@ def _live_pin_namespace(config, conn, room_token: str, source_type: str) -> str 
         return None
 
 
+def _selection_for_task(config, model: str, *, source_type, brain) -> tuple[str, str | None]:
+    """``(model, effort)`` for the task row, resolved on the brain that will
+    run it (`brain._resolve.selection_for_task`). Never raises: a failure
+    keeps the stored value, which the brain resolves leniently as before."""
+    try:
+        from ..brain import resolve_brain_kind
+        from ..brain._resolve import selection_for_task
+
+        override = brain if isinstance(brain, str) and brain else None
+        kind = resolve_brain_kind(source_type or "", config.brain, override=override).kind
+        return selection_for_task(config, model, kind=kind)
+    except Exception:  # noqa: BLE001 — a model lookup must not fail an inbound
+        logger.debug("record_inbound: could not resolve the selection", exc_info=True)
+        return model, None
+
+
 def record_inbound(
     conn,
     config: "Config",
@@ -850,6 +866,16 @@ def record_inbound(
         # to the room cannot change a task already running.
         if brain is None and existing is not None:
             brain = existing.brain
+
+        # The room stores what was selected (an alias or a ref); the task
+        # records what that resolves to now, so an alias change reaches the
+        # next turn and a task row says which model ran (D6).
+        if model:
+            model, selection_effort = _selection_for_task(
+                config, model, source_type=source_type, brain=brain,
+            )
+            if effort is None and selection_effort:
+                effort = selection_effort
 
         # 2b. Idempotent replay. Checked after the room is resolved (the key is
         #     scoped to a room, so the same key in two rooms is two messages)

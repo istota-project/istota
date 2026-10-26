@@ -1038,8 +1038,17 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # read from the file at each fetch and is in no environment. Empty is the
 # stack's secret file, /run/secrets/istota_anthropic_listing_key. Create the key
 # in an Anthropic Console workspace with a spend limit of zero.
+#
+# enabled: what a non-admin may pick with !model, !room model, the room
+# settings and a CRON.md job. Globs over provider/id refs, case-insensitive;
+# an entry may carry :effort, which is the effort offered with that model and
+# does not narrow the match. An admin picks from the whole catalogue, and an
+# alias is always selectable. Unset, it is anthropic/* plus native's own model
+# when native has a provider. A deprecated model is matched only by an entry
+# naming it exactly. `istota doctor` warns about a pattern matching nothing.
 # [models]
 # anthropic_listing_key_file = ""
+# enabled = ["anthropic/*", "openrouter/z-ai/glm-5*"]
 
 # ============================================================================
 # Model alias registry [models.aliases] (operator override) — optional

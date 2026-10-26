@@ -9725,11 +9725,26 @@ def resolve_pinned_model_effort(
     """
     raw_base, raw_effort = split_effort(model)
     try:
-        row_brain = make_brain(
-            resolve_brain_kind(
-                source_type, app_config.brain, override=(pinned_brain or None),
-            )
+        row_config = resolve_brain_kind(
+            source_type, app_config.brain, override=(pinned_brain or None),
         )
+        # The one resolver first, so the task records the ref that runs (D6);
+        # what it cannot place falls to the brain's own lenient resolution.
+        from istota.brain._resolve import (
+            Resolution,
+            config_providers,
+            native_provider_id,
+            resolve_selection,
+        )
+
+        resolved = resolve_selection(
+            model, for_brain=row_config.kind,
+            providers=config_providers(app_config),
+            native_provider=native_provider_id(app_config),
+        )
+        if isinstance(resolved, Resolution) and not resolved.brain_default:
+            return resolved.ref, effort or (resolved.effort_requested or "")
+        row_brain = make_brain(row_config)
         pair = row_brain.resolve_alias(model)
         if pair:
             effort = effort or (pair[1] or "")

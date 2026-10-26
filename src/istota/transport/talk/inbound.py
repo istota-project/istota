@@ -1913,6 +1913,8 @@ async def _process_poll_results(
                             "talk",
                         )),
                         has_attachments=bool(attachments),
+                        config=config,
+                        user_id=actor_id,
                     )
                 else:
                     prefix = ModelPrefixOutcome(matched=False, content=content)

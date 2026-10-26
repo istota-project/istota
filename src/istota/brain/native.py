@@ -1284,6 +1284,7 @@ class NativeBrain:
                 model_used=req.model or self._config.model,
             )
         else:
+            self._install_catalog_caches(req)
             routed, wire = self._route(req.model)
             own_wire = self._wire_id(req.model) if req.model else req.model
             if own_wire != req.model:
@@ -1439,11 +1440,15 @@ class NativeBrain:
             return None
 
     async def _ensure_fetched_catalog(self, req: BrainRequest) -> None:
+        self._install_catalog_caches(req)
+
+    def _install_catalog_caches(self, req: BrainRequest) -> None:
         """Install the discovered model lists from their caches.
 
         Reads only: the scheduler's ``model-catalogue`` gate fetches (D11), so
         a task never waits on a provider's ``/models``. One stat per cache file
-        when nothing changed. Never raises into task execution.
+        when nothing changed. Never raises into task execution. Also called
+        before routing, which reads the same lists.
         """
         data_dir = self._catalog_cache_dir(req)
         if data_dir is None:

@@ -1087,7 +1087,7 @@ class TestPollTalkConversations:
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, result[0])
             assert task.prompt == "draft a spec for X"
-            assert task.model == OPUS
+            assert task.model == f"anthropic/{OPUS}"
             assert task.effort == "high"
 
     @pytest.mark.asyncio

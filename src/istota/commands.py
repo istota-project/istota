@@ -28,6 +28,7 @@ from .brain import (
     resolve_brain_kind,
     room_selectable_kinds,
 )
+from .brain._aliases import split_effort
 from .memory import search as memory_search_mod
 from istota.sandbox.process_group import signal_task_worker
 from .config import Config
@@ -205,27 +206,74 @@ class ModelPrefix:
     effort: str | None
     remainder: str
     unknown_alias: str | None = None
+    # Why the selection was refused, for a person: set beside `unknown_alias`
+    # when the resolver gave a reason (not enabled, ambiguous, not runnable).
+    refusal: str | None = None
 
 
-def parse_model_prefix(content: str, brain: Brain) -> ModelPrefix | None:
-    """Parse a `!model <alias> <prompt>` prefix using ``brain`` for alias lookup.
+def parse_model_prefix(
+    content: str, brain: Brain, *, config: Config | None = None, user_id: str | None = None,
+) -> ModelPrefix | None:
+    """Parse a `!model <selection> <prompt>` prefix.
 
     Returns None when `content` is not a `!model` prefix at all (so the
-    caller's normal command-dispatch path runs unchanged). The active
-    brain owns the alias namespace, so this parser is pure syntax and
-    delegates resolution.
+    caller's normal command-dispatch path runs unchanged). With ``config``,
+    the selection is a person's (`brain._resolve.resolve_for_person`): an
+    admin picks from the whole catalogue, anyone else from `[models]
+    enabled`, aliases are open to both, and a pattern is accepted. The model
+    returned is what the task stores, an alias name or a ref, which
+    `record_inbound` resolves at task creation. Without ``config`` the
+    brain's own alias table answers, as before.
     """
     stripped = content.strip()
     match = _MODEL_PREFIX_RE.match(stripped)
     if not match:
         return None
-    alias = (match.group(1) or "").lower()
+    raw = (match.group(1) or "").strip()
+    alias = raw.lower()
     remainder = match.group(2).strip()
-    resolved = brain.resolve_alias(alias) if alias else None
+    if not alias:
+        return ModelPrefix(model=None, effort=None, remainder=remainder, unknown_alias=alias)
+    if config is not None:
+        return _person_model_prefix(raw, remainder, brain, config, user_id)
+    resolved = brain.resolve_alias(alias)
     if resolved is None:
         return ModelPrefix(model=None, effort=None, remainder=remainder, unknown_alias=alias)
     model, effort = resolved
     return ModelPrefix(model=model, effort=effort, remainder=remainder)
+
+
+def _person_model_prefix(
+    raw: str, remainder: str, brain: Brain, config: Config, user_id: str | None,
+) -> ModelPrefix:
+    from .brain._resolve import (
+        DEFAULT_ALIAS,
+        ResolveError,
+        describe_resolve_error,
+        resolve_for_person,
+        stored_selection,
+    )
+
+    base, suffix_effort = split_effort(raw)
+    if base.lower() == DEFAULT_ALIAS:
+        # `!model default`: the brain's own model, escaping the room's pin.
+        return ModelPrefix(model=None, effort=suffix_effort, remainder=remainder)
+    resolved = resolve_for_person(
+        raw, config,
+        kind=getattr(brain, "kind", None),
+        is_admin=bool(user_id) and config.is_admin(user_id),
+        allow_patterns=True,
+    )
+    if isinstance(resolved, ResolveError):
+        return ModelPrefix(
+            model=None, effort=None, remainder=remainder,
+            unknown_alias=raw.lower(), refusal=describe_resolve_error(resolved),
+        )
+    return ModelPrefix(
+        model=stored_selection(resolved),
+        effort=resolved.effort_requested,
+        remainder=remainder,
+    )
 
 
 def model_prefix_usage(brain: Brain) -> str:
@@ -255,13 +303,21 @@ class ModelPrefixOutcome:
 
 def resolve_model_prefix(
     content: str, brain: Brain, *, has_attachments: bool = False,
+    config: Config | None = None, user_id: str | None = None,
 ) -> ModelPrefixOutcome:
-    """Apply the shared `!model <alias> <prompt>` rule across surfaces."""
-    prefix = parse_model_prefix(content, brain)
+    """Apply the shared `!model <selection> <prompt>` rule across surfaces.
+
+    Pass ``config`` and the sender's ``user_id`` so the selection is bounded
+    by who is choosing (see `parse_model_prefix`).
+    """
+    prefix = parse_model_prefix(content, brain, config=config, user_id=user_id)
     if prefix is None:
         return ModelPrefixOutcome(matched=False, content=content)
     if prefix.unknown_alias is not None:
-        return ModelPrefixOutcome(matched=True, content=content, usage=model_prefix_usage(brain))
+        usage = model_prefix_usage(brain)
+        if prefix.refusal:
+            usage = f"{prefix.refusal}\n{usage}"
+        return ModelPrefixOutcome(matched=True, content=content, usage=usage)
     # "!model opus" with no prompt is only meaningful when there's an attachment
     # to act on; otherwise there's nothing to do — show usage.
     if not prefix.remainder.strip() and not has_attachments:
@@ -1233,12 +1289,31 @@ def _ctx_brain(ctx: CommandContext):
     return brain_for_room(ctx.config, ctx.conn, _room_token(ctx), ctx.surface)
 
 
-@command("models", "List available model aliases (and what they resolve to)")
+#: How many models `!models all <provider>` lists before it says how many more.
+_MODELS_LIST_CAP = 200
+
+
+@command(
+    "models",
+    "List the model aliases and the models you can pick, by provider "
+    "(admins: `!models all <provider>` for a provider's whole list)",
+)
 async def cmd_models(ctx: CommandContext):
-    lines = ["**Model aliases**", "", "Use `!model <alias> <prompt>` to override the model for a single task.", ""]
     # The room's own brain, not the deployment default: offering a room names it
     # cannot run is the same defect as writing one, one step earlier.
-    for alias, model, effort in make_brain(_ctx_brain(ctx)).list_aliases():
+    room_brain_config = _ctx_brain(ctx)
+    brain = make_brain(room_brain_config)
+    is_admin = ctx.config.is_admin(ctx.user_id)
+    args = ctx.args.strip().split()
+    if args and args[0].lower() == "all":
+        if not is_admin:
+            return "Only an admin can list a provider's whole model list. `!models` shows what you can pick."
+        if len(args) < 2:
+            return "Usage: `!models all <provider>`."
+        return _models_all(ctx.config, room_brain_config.kind, args[1].lower())
+
+    lines = ["**Model aliases**", "", "Use `!model <name> <prompt>` to override the model for a single task.", ""]
+    for alias, model, effort in brain.list_aliases():
         if model is None:
             target = "(no override — use default)"
         elif effort:
@@ -1246,11 +1321,78 @@ async def cmd_models(ctx: CommandContext):
         else:
             target = f"`{model}`"
         lines.append(f"- `{alias}` → {target}")
+    lines.extend(_models_by_provider(ctx.config, room_brain_config.kind, is_admin))
     lines.append("")
     lines.append(
         "Append `:low|:medium|:high|:xhigh|:max` to any name to set effort, "
         "e.g. `!model opus:high`."
     )
+    return "\n".join(lines)
+
+
+def _runnable_models(config: Config, kind: str) -> list:
+    """The catalogue's current models the brain ``kind`` can run, in order."""
+    from .brain._resolve import config_providers, native_provider_id
+    from .llm.catalog import current_catalogue
+    from .llm.providers import brain_can_run
+
+    providers = config_providers(config)
+    native = native_provider_id(config)
+    return [
+        info for info in current_catalogue().models()
+        if not info.deprecated
+        and brain_can_run(kind, info.ref, providers, native_provider=native)
+    ]
+
+
+def _models_by_provider(config: Config, kind: str, is_admin: bool) -> list[str]:
+    """`!models`' model section: the viewer's set, grouped by provider.
+
+    A non-admin sees the enabled models the room's brain can run. An admin
+    sees the enabled ones too, marked, and a count of the rest per provider
+    with the command that lists them (D9).
+    """
+    from .brain._resolve import enabled_patterns, enabled_refs
+    from .llm.catalog import current_catalogue
+
+    enabled = set(enabled_refs(current_catalogue(), enabled_patterns(config)))
+    groups: dict[str, list] = {}
+    for info in _runnable_models(config, kind):
+        groups.setdefault(info.provider, []).append(info)
+    lines: list[str] = []
+    for provider in sorted(groups):
+        picked = [i for i in groups[provider] if i.ref in enabled]
+        others = len(groups[provider]) - len(picked)
+        if not picked and not (is_admin and others):
+            continue
+        lines += ["", f"**{provider}**"]
+        for info in picked:
+            label = f" ({info.name})" if info.name and info.name != info.id else ""
+            mark = " · enabled" if is_admin else ""
+            lines.append(f"- `{info.ref}`{label}{mark}")
+        if is_admin and others:
+            lines.append(f"- {others} more: `!models all {provider}`")
+    if not lines:
+        return ["", "No models to pick beyond the aliases."]
+    return ["", "**Models**", *lines]
+
+
+def _models_all(config: Config, kind: str, provider: str) -> str:
+    """`!models all <provider>`, for an admin: every current model of it."""
+    from .brain._resolve import enabled_patterns, enabled_refs
+    from .llm.catalog import current_catalogue
+
+    enabled = set(enabled_refs(current_catalogue(), enabled_patterns(config)))
+    models = [i for i in _runnable_models(config, kind) if i.provider == provider]
+    if not models:
+        return f"No models of `{provider}` that this room's brain can run."
+    models.sort(key=lambda i: (i.ref not in enabled, i.ref))
+    lines = [f"**{provider}** ({len(models)} models)", ""]
+    for info in models[:_MODELS_LIST_CAP]:
+        mark = " · enabled" if info.ref in enabled else ""
+        lines.append(f"- `{info.ref}`{mark}")
+    if len(models) > _MODELS_LIST_CAP:
+        lines.append(f"- and {len(models) - _MODELS_LIST_CAP} more")
     return "\n".join(lines)
 
 
@@ -1579,7 +1721,7 @@ async def cmd_room(ctx: CommandContext):
             return refusal
 
     if sub == "model":
-        alias = rest.lower()
+        alias = rest.strip()
         # Resolved through the *room's* brain. A room pinned to a brain in
         # another model namespace must not have an id it cannot run written into
         # its standing default — that is not one bad turn, it is every turn in
@@ -1598,33 +1740,50 @@ async def cmd_room(ctx: CommandContext):
                 "Usage: `!room model <alias>` (or `default` to clear). "
                 f"Aliases: {', '.join(f'`{a}`' for a in aliases)}."
             )
-        if alias == "default":
+        if alias.lower() == "default":
             # The reserved `default` keyword always clears the room's model +
             # effort, independent of any operator override that may have given
             # the `default` alias a concrete resolution.
             db.set_room_model_effort(conn, token, None, None)
             return "Room model reset — this room now uses the instance default."
-        resolved = room_brain.resolve_alias(alias)
-        if resolved is None:
+        # The selection is the sender's: an admin picks from the whole
+        # catalogue, anyone else from `[models] enabled` (D9). What is stored
+        # is the alias or the ref it matched, resolved again at each task (D6).
+        from .brain._resolve import (
+            ResolveError,
+            describe_resolve_error,
+            resolve_for_person,
+            stored_selection,
+        )
+
+        resolved = resolve_for_person(
+            alias, config,
+            kind=getattr(room_brain, "kind", None),
+            is_admin=config.is_admin(ctx.user_id),
+            allow_patterns=True,
+        )
+        if isinstance(resolved, ResolveError):
             return (
-                f"Unknown model alias `{alias}`. "
-                f"Aliases: {', '.join(f'`{a}`' for a in aliases)}."
+                f"{describe_resolve_error(resolved)} "
+                f"Aliases: {', '.join(f'`{a}`' for a in aliases)}. "
+                "`!models` lists what you can pick."
             )
-        model, effort = resolved
-        if model is None:
-            # `!room model default` — a full reset of the model dimension,
-            # effort included.
+        if resolved.brain_default and resolved.alias == "default":
             db.set_room_model_effort(conn, token, None, None)
             return "Room model reset — this room now uses the instance default."
-        if effort is not None:
-            # An effort-bearing alias (e.g. `opus-high`) is an explicit
-            # both-pick, so it sets effort too.
+        model = stored_selection(resolved)
+        typed_effort = split_effort(alias)[1]
+        if typed_effort is not None:
+            # A `:effort` on the selection is an explicit both-pick, so it
+            # sets effort too.
             db.set_room_model_effort(
-                conn, token, model, effort, namespace=room_namespace,
+                conn, token, model, typed_effort, namespace=room_namespace,
             )
+            effort = typed_effort
         else:
-            # A plain model alias leaves any separately-set `!room effort` intact
-            # (the two knobs are orthogonal).
+            # A plain selection leaves any separately-set `!room effort` intact
+            # (the two knobs are orthogonal); an alias's own effort applies at
+            # each task while the room sets none.
             db.set_room_model(conn, token, model, namespace=room_namespace)
             effort = db.get_room(conn, token).effort
         return _describe_room_default(model, effort)

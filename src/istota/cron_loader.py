@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import tomli
@@ -147,8 +147,18 @@ def fj_brain_or_none(job: "CronJob", is_admin: bool) -> str | None:
     return job.brain
 
 
-def _validate_model(name: str, user_id: str, model: str, config=None, pinned_brain: str = "") -> None:
-    """Warn on suspicious model names; never reject.
+def _validate_model(
+    name: str, user_id: str, model: str, config=None, pinned_brain: str = "",
+    errors: list[str] | None = None,
+) -> bool:
+    """Whether the job keeps its ``model``; warns on a suspicious one.
+
+    The job's owner chooses, so the rule is a person's (D9): an admin may
+    name any model and an unresolvable one is only warned about, as before,
+    since the brain sends it as written. A non-admin's model must resolve
+    to an alias or to a model in ``[models] enabled`` that the job's brain
+    runs; otherwise the field is dropped, like a non-admin's ``brain``, and
+    the job runs on the brain's default. No patterns in a file (D10).
 
     Select the scheduled brain's namespace without constructing its runtime
     client. A malformed endpoint must not abort loading the whole CRON.md file.
@@ -160,12 +170,37 @@ def _validate_model(name: str, user_id: str, model: str, config=None, pinned_bra
             "Job '%s' (user %s): model %r contains whitespace — likely a typo",
             name, user_id, model,
         )
-        return
+        return True
 
     brain_config = config.brain if config is not None else BrainConfig()
     resolved_config = resolve_brain_kind(
         "scheduled", brain_config, override=pinned_brain or None,
     )
+    is_admin = config is None or config.is_admin(user_id)
+    if config is not None:
+        from .brain._resolve import ResolveError, describe_resolve_error, resolve_for_person
+
+        try:
+            resolved = resolve_for_person(
+                model, config, kind=resolved_config.kind, is_admin=is_admin,
+            )
+        except Exception:  # noqa: BLE001 — one job's model must not stop the file
+            logger.debug("cron model resolution failed", exc_info=True)
+            resolved = None
+        if isinstance(resolved, ResolveError) and not is_admin:
+            reason = describe_resolve_error(resolved)
+            logger.warning(
+                "Job '%s' (user %s): dropping model %r: %s", name, user_id, model, reason,
+            )
+            if errors is not None:
+                errors.append(
+                    f"Job '{name}': model {model!r} is not one you can pick ({reason}); "
+                    "the job runs on the default model"
+                )
+            return False
+        if resolved is not None and not isinstance(resolved, ResolveError):
+            return True
+
     if resolved_config.kind == "native":
         from .brain.native import NativeBrain
 
@@ -175,12 +210,13 @@ def _validate_model(name: str, user_id: str, model: str, config=None, pinned_bra
 
         valid = ClaudeCodeBrain().is_valid_model_reference(model)
     if valid:
-        return
+        return True
 
     logger.warning(
         "Job '%s' (user %s): invalid model reference %r for %s — likely a typo",
         name, user_id, model, resolved_config.kind,
     )
+    return True
 
 
 def _validate_effort(name: str, user_id: str, effort: str) -> None:
@@ -348,6 +384,10 @@ class CronJob:
     # no publish. Gated on is_shared_kv_writer at write time (admin-only).
     publish_shared_kv: str = ""
     publish_shared_kv_trusted: bool = False
+    # Set at parse when the owner may not pick ``model`` (a non-admin naming a
+    # model outside `[models] enabled`). The file keeps the field, so a rewrite
+    # never deletes what the user wrote; the sync stores no model for it.
+    model_refused: bool = field(default=False, compare=False)
 
 
 @dataclass
@@ -711,11 +751,11 @@ def _parse_jobs(
         brain = _str_field(name, user_id, "brain", j.get("brain", ""), errors)
         if brain:
             _validate_brain(name, user_id, brain)
-        if model:
-            _validate_model(
-                name, user_id, model, config,
-                brain if config.is_admin(user_id) else "",
-            )
+        model_refused = bool(model) and not _validate_model(
+            name, user_id, model, config,
+            brain if config.is_admin(user_id) else "",
+            errors,
+        )
         target = _str_field(name, user_id, "target", j.get("target", ""), errors)
         if target:
             _validate_target(name, user_id, target)
@@ -754,6 +794,7 @@ def _parse_jobs(
             publish_shared_kv_trusted=_coerce_bool(
                 name, user_id, "publish_shared_kv_trusted",
                 j.get("publish_shared_kv_trusted", False), False, errors),
+            model_refused=model_refused,
         )
         if config is not None and fj_is_disallowed_command(job, config.is_admin(user_id)):
             errors.append(
@@ -1236,7 +1277,7 @@ def _file_owned_values(
         "silent_unless_action": 1 if fj.silent_unless_action else 0,
         "skip_log_channel": 1 if fj.skip_log_channel else 0,
         "once": 1 if fj.once else 0,
-        "model": fj.model or None,
+        "model": None if fj.model_refused else (fj.model or None),
         "effort": fj.effort or None,
         # Already gated by `fj_brain_or_none` at the call site — a non-admin's
         # pin arrives here as None and is written as NULL like any other

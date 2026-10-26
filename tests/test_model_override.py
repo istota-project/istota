@@ -211,7 +211,7 @@ class TestSchedulerPropagatesModel:
             db_path, config, name="feed-digest", prompt="Run feed digest",
             model="claude-sonnet-4-6",
         )
-        assert task.model == "claude-sonnet-4-6"
+        assert task.model == "anthropic/claude-sonnet-4-6"  # the task records the ref (D6)
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +436,7 @@ class TestSchedulerPropagatesEffort:
         task = _fire_one_job(
             db_path, config, model="claude-sonnet-4-6", effort="low",
         )
-        assert task.model == "claude-sonnet-4-6"
+        assert task.model == "anthropic/claude-sonnet-4-6"
         assert task.effort == "low"
 
 
@@ -765,7 +765,7 @@ class TestSchedulerPropagatesBrain:
             room_selectable=[],
         ))
         task = _fire_one_job(db_path, config, brain="native", model="smart")
-        assert task.model == OPUS
+        assert task.model == f"anthropic/{OPUS}"
         assert task.model != NATIVE_MODEL
 
 
@@ -828,7 +828,7 @@ class TestSchedulerResolvesTheModelThroughTheJobsBrain:
         """
         config = _dispatch_config(db_path, BrainConfig(kind="claude_code"))
         task = _fire_one_job(db_path, config, model="opus:high")
-        assert task.model == OPUS
+        assert task.model == f"anthropic/{OPUS}"
         assert task.effort == "high", (
             "resolve_model_name discards the effort half of the pair; "
             "resolve_alias keeps it"
@@ -847,7 +847,7 @@ class TestSchedulerResolvesTheModelThroughTheJobsBrain:
         """
         config = _dispatch_config(db_path, BrainConfig(kind="claude_code"))
         task = _fire_one_job(db_path, config, model="opus:high", effort="low")
-        assert task.model == OPUS
+        assert task.model == f"anthropic/{OPUS}"
         assert task.effort == "low"
 
     def test_an_alias_that_resolves_only_an_effort_still_carries_it(
@@ -953,7 +953,7 @@ class TestSchedulerResolvesTheModelThroughTheJobsBrain:
         assert len(created) == 2, "the sibling job is not collateral"
         with db.get_db(db_path) as conn:
             tasks = [db.get_task(conn, t) for t in created]
-        assert sorted(t.model for t in tasks) == [OPUS, OPUS]
+        assert sorted(t.model for t in tasks) == [f"anthropic/{OPUS}"] * 2
         # Neither row carries a pin: `5` coerces to `"5"`, which names no known
         # kind and so is never admitted. The guard being pinned here is that the
         # coercion happens at all — without it the `.strip()` raises and the

@@ -236,7 +236,8 @@ class TestTheTaskCarriesItFromTheRoom:
             _token, task_id = _inbound.room_token, _inbound.task_id
             task = db.get_task(conn, task_id)
         assert task.brain == "native"
-        assert task.model == "claude-opus-5"
+        # A stored bare id is recorded on the task as the ref it names.
+        assert task.model == "anthropic/claude-opus-5"
         assert task.model_namespace == "anthropic"
 
     async def test_the_whole_chain_keeps_the_users_model(self, db_path, tmp_path):
@@ -258,9 +259,10 @@ class TestTheTaskCarriesItFromTheRoom:
             )
             _token, task_id = _inbound.room_token, _inbound.task_id
             task = db.get_task(conn, task_id)
-        assert _request_model(
-            task, config, make_brain(BrainConfig(kind="claude_code")),
-        ) == chosen
+        cli = make_brain(BrainConfig(kind="claude_code"))
+        # The room stores the alias; the request carries what it names.
+        assert chosen == "smart"
+        assert _request_model(task, config, cli) == cli.resolve_model_name(chosen)
 
     def test_a_room_with_no_recorded_namespace_is_unchanged(
         self, db_path, tmp_path,

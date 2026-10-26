@@ -7061,33 +7061,67 @@ def _pin_namespace_for_room(conn, room_token: str) -> str | None:
         return None
 
 
-def _room_model_allowed(brain_config, model: str) -> bool:
-    """Whether `model` may be written as a room's default under `brain_config`.
+def _room_stored_model(room_token: str) -> str | None:
+    """`rooms.model` for a canonical token, or None. Never raises."""
+    from istota import db
 
-    Accepted: any id the brain's alias table targets, or an id the brain's own
-    `resolve_alias` passes through unchanged as a canonical id. The second half
-    is what `!room model` has always accepted (#548) — without it the PATCH
-    could only write ids some alias happened to point at, so a deployment
-    default no alias targeted could not be pinned from web at all while Talk
-    pinned it fine. A value carrying an effort modifier resolves to something
-    other than itself and is refused; effort is its own field on the PATCH.
+    try:
+        with db.get_db(_config.db_path) as conn:
+            room = db.get_room(conn, room_token)
+    except Exception:  # noqa: BLE001 — an unread value is judged like a new one
+        logger.debug("room_stored_model: read failed", exc_info=True)
+        return None
+    return getattr(room, "model", None) if room is not None else None
+
+
+def _room_model_selection(brain_config, model: str, *, is_admin: bool):
+    """`model` as a room's default under `brain_config`: what to store, or why not.
+
+    Returns ``(stored, None)`` or ``(None, refusal)``, where ``refusal`` is
+    ``{"error", "code", "candidates"}``. Through the one resolver
+    (`brain._resolve.resolve_for_person`): an alias, a `provider/id` ref or a
+    bare id one provider lists, runnable on the room's brain, with tool
+    calling, and for a non-admin within `[models] enabled` (D9). No patterns:
+    the settings pick from a list. What is stored is the alias or the ref
+    (D6). A value carrying an effort modifier is refused; effort is its own
+    field on the PATCH.
 
     `brain_config` is **required**, and is the *room's* own resolved brain
-    (`_brain_for_room_token`). It used to be implicit and was the deployment
-    default, which let the PATCH accept an anthropic id for a room pinned to a
-    brain in another namespace — the same defect `!room model` had. Every caller
-    of this validator is a writer of `rooms.model`, so there is no caller for
-    whom the deployment default is the right answer, and an optional parameter
-    would be a path nothing exercises and the wrong one if somebody took it.
+    (`_brain_for_room_token`), or the incoming one when the body moves the
+    brain too: a room must never be handed a model its own brain cannot run.
     """
+    from istota.brain._aliases import split_effort
+    from istota.brain._resolve import (
+        ResolveError,
+        describe_resolve_error,
+        resolve_for_person,
+        stored_selection,
+    )
+
+    if split_effort(model)[1] is not None:
+        return None, {
+            "error": "set effort with the effort field, not on the model",
+            "code": "unknown", "candidates": [],
+        }
     try:
-        brain = make_brain(brain_config)
-        if any(target == model for _alias, target, _effort in brain.list_aliases()):
-            return True
-        return brain.resolve_alias(model) == (model, None)
-    except Exception:  # noqa: BLE001 — validation degrades to "reject all" safely
-        logger.warning("room_model_allowed: brain aliases unavailable", exc_info=True)
-        return False
+        resolved = resolve_for_person(
+            model, _config, kind=getattr(brain_config, "kind", None), is_admin=is_admin,
+        )
+    except Exception:  # noqa: BLE001 — validation degrades to "reject" safely
+        logger.warning("room_model_selection: resolution failed", exc_info=True)
+        return None, {"error": "unknown model", "code": "unknown", "candidates": []}
+    if isinstance(resolved, ResolveError):
+        return None, {
+            "error": describe_resolve_error(resolved),
+            "code": resolved.code,
+            "candidates": list(resolved.candidates),
+        }
+    if resolved.brain_default and resolved.alias == "default":
+        return None, {
+            "error": "clear the model to use the brain's default",
+            "code": "unknown", "candidates": [],
+        }
+    return stored_selection(resolved), None
 
 
 def _chat_list_rooms(username: str) -> list[dict]:
@@ -11090,8 +11124,17 @@ async def chat_update_room(
                 model_brain = await asyncio.to_thread(
                     _brain_for_room_token, room.token, "web",
                 )
-            if not _room_model_allowed(model_brain, model):
-                return JSONResponse({"error": "unknown model"}, status_code=400)
+            # A value the room already holds is not judged again: the settings
+            # send back what they loaded, and an admin's pin outside a
+            # member's set must not stop that member saving another field.
+            current = await asyncio.to_thread(_room_stored_model, room.token)
+            if model != current:
+                stored, refusal = _room_model_selection(
+                    model_brain, model, is_admin=_config.is_admin(user["username"]),
+                )
+                if refusal is not None:
+                    return JSONResponse(refusal, status_code=422)
+                model = stored
     try:
         updated = await asyncio.to_thread(
             _chat_update_room, user["username"], room_id, name, archived, model,
@@ -12212,6 +12255,7 @@ async def chat_send_message(
         ))
         prefix = commands.resolve_model_prefix(
             text, brain, has_attachments=bool(attachments),
+            config=_config, user_id=username,
         )
         if prefix.usage is not None:
             return {"task_id": None, "inline_result": prefix.usage}

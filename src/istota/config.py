@@ -2570,6 +2570,11 @@ class ModelsConfig:
     # each time and nothing else does, so no `Config` holds the value.
     # Empty is the stack's secret file, `DEFAULT_ANTHROPIC_LISTING_KEY_FILE`.
     anthropic_listing_key_file: str = ""
+    # `[models] enabled`: glob patterns over `provider/id` refs naming what a
+    # non-admin may pick (an admin picks from the whole catalogue). `None` is
+    # unset, which is `brain._resolve.default_enabled_patterns`; `[]` is a
+    # deliberate "aliases only".
+    enabled: list[str] | None = None
 
 
 #: Where compose mounts the model-listing key on the daemon.
@@ -5222,6 +5227,32 @@ def providers_for_native(native: "NativeBrainConfig") -> tuple[dict, str]:
     return build_providers(config), config.brain.native.provider
 
 
+def _models_enabled(raw) -> list[str] | None:  # noqa: ANN001
+    """``[models] enabled`` as a list of non-empty pattern strings.
+
+    Not a list keeps the default (``None``); an entry that is not a non-empty
+    string is dropped. Each refusal is a ``discarded`` problem. Whether a
+    pattern matches anything is doctor's question (D20), not the loader's.
+    """
+    if not isinstance(raw, list):
+        report_problem(
+            "discarded", ("models", "enabled"),
+            "[config] models.enabled must be a list of patterns, got %s; keeping the default",
+            type(raw).__name__,
+        )
+        return None
+    patterns: list[str] = []
+    for index, entry in enumerate(raw):
+        if isinstance(entry, str) and entry.strip():
+            patterns.append(entry.strip())
+            continue
+        report_problem(
+            "discarded", ("models", "enabled", str(index)),
+            "[config] models.enabled entry %d is not a pattern string; ignoring it", index,
+        )
+    return patterns
+
+
 def _settle_model_overrides(data: dict, config: Config) -> None:
     """`[models.overrides]`: per-field patches keyed by `provider/id`."""
     models = data.get("models") if isinstance(data.get("models"), dict) else {}
@@ -5903,6 +5934,8 @@ def load_config(
                 "[config] models.anthropic_listing_key_file must be a path string; "
                 "keeping the default",
             )
+        if "enabled" in models_section:
+            config.models.enabled = _models_enabled(models_section["enabled"])
 
     if "experimental" in data:
         exp = data["experimental"]

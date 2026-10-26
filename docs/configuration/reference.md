@@ -410,6 +410,19 @@ Substitutes credential placeholders in authentication headers, for hosts a crede
 
 There is no `[skills]` config section. Skill disclosure is single-axis (a skill is either eager or a menu entry the model loads on demand) with no config knobs. A stale `[skills]` block only logs a warning at load time.
 
+## `[models] enabled`
+
+Which models a non-admin may pick with `!model`, `!room model`, the room settings and a `model` in their `CRON.md`. A list of glob patterns over `provider/id` references, matched case-insensitively:
+
+```toml
+[models]
+enabled = ["anthropic/*", "openrouter/z-ai/glm-5*", "openrouter/moonshotai/kimi-k2*:high"]
+```
+
+An entry may end in `:effort`, the effort offered when that model is picked; it does not narrow the match. A deprecated model is matched only by an entry naming it exactly. Unset, the list is `anthropic/*` plus `<native's provider>/<[brain.native] model>` when native has a provider, which is what non-admins could run before the setting existed. `enabled = []` leaves non-admins the aliases only.
+
+An admin picks from the whole catalogue, and an alias is always selectable by anyone, because the operator wrote it. The list bounds who may *set* a selection, not what runs: a room an admin pinned to a model outside it keeps running that model for every member's turn. A room or job stores the alias or the `provider/id` reference it was given (a bare id or a chat pattern is stored as the reference it matched) and resolves it when each task is created, so an alias change reaches it. `istota doctor`'s `models.catalogue` check warns about a pattern that matches no model.
+
 ## `[models.aliases]`
 
 The operator-visible model alias registry — one table holding **both** the portable tiers and the provider shortcuts, overlaying the code-shipped defaults (`brain.claude_code.DEFAULT_ALIASES`). Used by `!model <name> <prompt>` in Talk/web and by internal subsystems (`fast` for triage/classification, `general` for sleep cycle, `smart` is user-facing only).
