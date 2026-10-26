@@ -425,17 +425,19 @@ An admin picks from the whole catalogue, and an alias is always selectable by an
 
 ## `[models.aliases]`
 
-The operator-visible model alias registry — one table holding **both** the portable tiers and the provider shortcuts, overlaying the code-shipped defaults (`brain.claude_code.DEFAULT_ALIASES`). Used by `!model <name> <prompt>` in Talk/web and by internal subsystems (`fast` for triage/classification, `general` for sleep cycle, `smart` is user-facing only).
+The operator-visible model alias registry — one table holding **both** the portable tiers and the provider shortcuts, overlaying the shipped defaults, which name families rather than model ids. Used by `!model <name> <prompt>` in Talk/web and by internal subsystems (`fast` for triage/classification, `general` for sleep cycle, `smart` is user-facing only).
 
 Shipped defaults (base names, no baked effort):
 
 | Alias | Default target |
 |---|---|
-| `fast` | Haiku |
-| `general` | Sonnet |
-| `smart` | Opus |
-| `opus` / `sonnet` / `haiku` | current-latest of each |
+| `fast` | `haiku` |
+| `general` | `sonnet` |
+| `smart` | `opus` |
+| `opus` / `sonnet` / `haiku` | the newest current model of that family in the catalogue |
 | `default` | no override (brain/config default) |
+
+A family follows the catalogue (see [Models and providers](models.md)), so a new Anthropic model reaches the tiers when the catalogue lists it, and `!models` shows what each resolves to today. On the native brain an unremapped tier means `[brain.native] model`. Each alias may also take an effort-only table (`[models.aliases.general] anthropic = { effort = "medium" }`) that keeps the target and changes the effort.
 
 Effort is an orthogonal **`:effort` modifier** appended to any reference (`opus:high`, `smart:low`, `opus:xhigh`) — never baked into a name. An alias override is **per model namespace** so one definition covers every brain family: `anthropic` = the CLI brains (`claude_code` / `tmux_claude`), `openai_compat` = native. Two forms, both accepted:
 

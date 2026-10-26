@@ -20,7 +20,7 @@ kind = "native"
 
 [brain.native]
 provider = "anthropic"                     # required: anthropic, openrouter, or your own
-model = "claude-sonnet-4-6"                # explicit id at that provider
+model = "<model id>"                       # an id the provider lists
 effort = ""                                # default reasoning effort (see below)
 max_turns = 100                            # hard cap on assistant turns per task
 max_tokens = 16384                         # per-completion output cap
@@ -57,8 +57,9 @@ Before providers, native's endpoint and key lived in `[brain.native]` (`base_url
 
 ### Model id format
 
-- `openai_compat` needs an **explicit** model id (e.g. `claude-sonnet-4-6`). It does not understand role aliases (`smart`) or Claude-CLI short names (`opus`).
-- The `claude_code` brain (default) keeps Claude Code's aliasing — `opus` resolves to the latest Opus. The native brain does not; map role names with `[models.aliases]` if you want them.
+- `[brain.native] model` is an id the provider lists, sent as written. `!models all <provider>` (admins) lists them, and [Models and providers](models.md) explains where the lists come from.
+- The tiers (`fast`, `general`, `smart`) mean `[brain.native] model` on native unless `[models.aliases]` remaps them under `openai_compat`. The family shortcuts (`opus`, `sonnet`, `haiku`) name Anthropic models, which native runs only through an `anthropic` provider with a key.
+- A room or job may name a model of another provider as `provider/id`, and native sends that request to that provider with that provider's key.
 
 ### OpenRouter
 
@@ -70,7 +71,7 @@ kind = "native"
 
 [brain.native]
 provider = "openrouter"
-model = "anthropic/claude-sonnet-4"   # OpenRouter ids are slash-namespaced: <vendor>/<model>
+model = "z-ai/glm-5.3-flash"         # OpenRouter ids are slash-namespaced: <vendor>/<model>
 
 [providers.openrouter]
 prompt_caching = true                 # REQUIRED for OpenRouter — see below
@@ -82,7 +83,7 @@ ISTOTA_PROVIDER_OPENROUTER_API_KEY=sk-or-v1-...
 
 Two things to get right:
 
-- **Model id.** OpenRouter uses slash-namespaced ids (`anthropic/claude-sonnet-4`, `openai/gpt-4o`, `google/gemini-2.5-pro`). Because `openai_compat` does no aliasing (above), paste the id exactly as OpenRouter lists it on its models page — a bare `claude-sonnet-4-6` will not resolve there.
+- **Model id.** OpenRouter uses slash-namespaced ids (`z-ai/glm-5.3-flash`, `openai/gpt-4o`). The id goes to OpenRouter as written, so use one from its list (`!models all openrouter` once the list has been fetched) — an Anthropic id without OpenRouter's `anthropic/` prefix and dotted version will not resolve there.
 - **Prompt caching must be explicit.** The kind default turns caching on only for an `anthropic` provider. For `openrouter` it is **off**, so set `prompt_caching = true` on `[providers.openrouter]` to get `cache_control` breakpoints on caching-capable models routed through OpenRouter.
 
 ## Gradual rollout
@@ -95,7 +96,7 @@ kind = "claude_code"
 
 [brain.native]
 provider = "anthropic"
-model = "claude-sonnet-4-6"
+model = "<model id>"            # e.g. from `!models all anthropic`
 
 [brain.source_type_overrides]
 scheduled = "native"
@@ -131,7 +132,7 @@ The native harness ships its own daemon-side `WebFetch` tool. It runs in the dae
 | `fallback_on_transient` | `true` | Also reroute a persistent `transient_api_error` |
 | `fallback_cooldown_seconds` | `900` | Skip an unavailable primary at most this long before retrying it; a usage limit against a Claude subscription instead ends at the quota's own reset (floor 60s). 0 disables |
 
-The same availability breaker is what the nightly sleep cycle consults before deciding to run at all. Pin `istota_brain_native_model` whenever native is either primary *or* fallback — an empty model id 400s on failover, which is the worst moment to discover it.
+The same availability breaker is what the nightly sleep cycle consults before deciding to run at all. Set `[brain.native] model` whenever native is either primary *or* fallback — an empty model id 400s on failover, which is the worst moment to discover it.
 
 Key handling:
 
@@ -174,7 +175,7 @@ Bubblewrap is Linux-only, so on a Mac dev box run with the sandbox off. Keep a g
 kind = "native"
 [brain.native]
 provider = "anthropic"
-model = "claude-sonnet-4-6"
+model = "<model id>"            # e.g. from `!models all anthropic`
 
 [security]
 sandbox_enabled = false        # bwrap is Linux-only
@@ -229,7 +230,7 @@ It diffs result text (similarity + unified diff), tool-call sequence, and native
 
 - **Cost telemetry.** Every brain attempt writes a row to `task_usage` (plus one `task_usage_models` row per model where the brain reports a split), and a greppable `brain_usage …` INFO line so a figure survives a failed database write. Cost prefers the provider's own reported figure (OpenRouter returns real charged cost); otherwise it falls back to the model catalog's per-mtok prices — which, for an OpenRouter deployment, are the live-fetched real prices, and otherwise 0.0. That distinction is recorded rather than lost: a row's `cost_basis` is `api` only when every accumulated turn reported a cost, and `estimated` when the catalog was used, because the catalog prices an unknown model at zero and a fabricated 0.0 must not be read as real spend. Native rows carry `totals_source = 'derived'` and NULL context columns — the native loop does not track per-request prompt sizes. `claude_code` is no longer the opaque one: it reports a full breakdown, a per-model split with each model's context window, and a cost figure, all captured off the stream.
 - **Per-user API keys.** Beyond the provider's own key, each user can have their own key for a provider in the encrypted secrets table: `istota secret ensure -u <user> -s provider_keys -k <provider id> -v <key>`. In that user's tasks a request to that provider carries it; internal calls (the speech gate, conversation triage) keep the deployment's key. This is operator-provisioned only (the CLI): a user can hold a key for a provider the deployment has, never add an endpoint. `istota init` moves the old `native_brain`/`api_key` rows to `provider_keys/<native's provider>` once.
-- **Reasoning effort.** `[brain.native] effort` (`low` / `medium` / `high` / `xhigh` / `max`, default empty) sets a default reasoning budget; per-task overrides (e.g. `!model opus:high`, `[models.aliases]`) win. It is sent as the OpenAI-compatible `reasoning_effort` field **only** when the target model is thinking-capable (`supports_thinking`, resolved from the live-fetched OpenRouter catalog or a `model_overrides` entry) — for a non-reasoning endpoint it is dropped silently so the request never 400s. `xhigh` and `max` fold to `high` on the wire (the compat field exposes no finer knob); the original tier still tracks on the task row. Extended-thinking output is parsed but excluded from the visible result.
+- **Reasoning effort.** `[brain.native] effort` (`low` / `medium` / `high` / `xhigh` / `max`, default empty) sets a default reasoning budget; per-task overrides (e.g. `!model smart:high`, `[models.aliases]`) win. The brain clamps it to what the model supports before sending it as `reasoning_effort`: none for a model without reasoning (so a non-reasoning endpoint never gets the field), `xhigh` and `max` only where the model's catalogue entry maps them (else `high`), and the entry's wire value where it has one. The requested level stays on the task row, and the task's trace notes the clamp. Extended-thinking output is parsed but excluded from the visible result.
 - **Prompt caching.** `[brain.native] prompt_caching` adds `cache_control` breakpoints covering the tool definitions, the system message, the first user message, and a rolling breakpoint on the latest message each turn (up to Anthropic's 4-breakpoint cap), which is what produces cross-turn cache hits. **The default comes from the provider's kind:** on for `anthropic`, off for the others. Set it on the provider's table to force either way — a plain-OpenAI, LM Studio, Ollama, or vLLM endpoint that doesn't understand the extension needs `prompt_caching = false`. A per-task cache hit-rate line is logged at task end (`native cache hit_rate=… read=… input=…`).
 - **Cache key and lifetime.** `prompt_cache_key` sends a random key per task attempt as the `prompt_cache_key` body field, so the attempt's requests reach one cache. It is derived like `prompt_caching`: unset means on for an `openrouter` provider and for an `openai_compat` provider on `api.openai.com`, and off everywhere else, `anthropic` included. `prompt_cache_ttl` is `"5m"` (default) or `"1h"`; a 1h write is priced at twice input when the provider reports no cost. The evals kept 5m because the two eval providers (DeepSeek and GLM through OpenRouter) cache implicitly and ignore the field, so the TTL changed nothing there. An endpoint that honours `cache_control`, such as Anthropic, is where `"1h"` can matter.
 - **Reasoning replay.** `reasoning_replay = "auto"` (default) sends the structured `reasoning_details` a model returned back on later turns of the same attempt; `"on"` also sends plain reasoning text, `"off"` sends none. Reasoning never crosses attempts and is not carried into compaction summaries. On the default `api.anthropic.com` endpoint no `reasoning_details` come back, so the request is unchanged.
@@ -241,7 +242,6 @@ It diffs result text (similarity + unified diff), tool-call sequence, and native
 - **Background compaction.** `compaction_background = true` (default `false`) starts the summary in the background `compaction_background_tokens` below the blocking threshold (0 derives an eighth of the window, at most 32768) and swaps it in at a later turn boundary, if the summarized turns are still in place. It stays off because the primary eval model was slower with it on; the weaker model was faster, which is worth a re-measure with more runs.
 - **Model lists.** The daemon fetches each provider's model list in the background, never inside a task: a `model-catalogue` check every 15 minutes refreshes a provider whose list is older than its `discover_ttl_hours`, and at a first start the providers with no list yet are fetched together within ten seconds before any task runs. Each list is cached in `model-catalogue/<provider>.json` beside the database, and the native brain and the web process only read those files. A failed fetch keeps the previous list; a model that drops out of a provider's list stays known for seven days. The built-in `openrouter` provider is fetched only when native uses it or it has a key, an operator's own provider whenever `discover` is on, and Anthropic's own list only when the model-listing key file holds a key. `istota doctor` reports each provider's list as `models.catalogue`.
 - **Image tool results.** A tool result carrying image content renders as a follow-up `role:"user"` block on vision-capable models (`supports_vision`); on a no-vision model the image is dropped with a text note so the request still validates.
-- **Model ids.** `openai_compat` needs explicit ids and does not translate Anthropic aliases — `opus` is sent verbatim, not turned into the current Claude Opus id (that mapping belongs to the `claude_code` brain). Map role names per deployment with `[models.aliases]` if you want `fast`/`general`/`smart` under native.
 - **Cancellation / `!stop`.** Works on both brains. The native brain bridges the scheduler's cancel poll into an `asyncio.Event` threaded through the loop, tools, and retry backoff. A failing cancel poll (e.g. transient SQLite lock) is tolerated rather than silently disabling `!stop`.
 - **Task timeout.** The native loop runs under a wall-clock deadline of `scheduler.task_timeout_minutes` (30 by default). On expiry it signals abort (killing any in-flight bash subprocess at the next poll), waits a short grace, then hard-cancels, and returns `stop_reason="timeout"`. This matches `claude_code` and prevents a runaway loop from outliving the scheduler's stuck-task reclaim (which would otherwise double-execute the task). `max_turns` is a second, coarser backstop, and it does **not** take the same split: `max_turns` defaults to 100. It was 200 for a while, on the argument that the cap is a loop backstop rather than a budget, and `52a136a1` put it back — at 200 on a slow fallback brain the wall clock arrives long before the turn budget, so the run ends on the stop that discards the model's work rather than the one that delivers it (ISSUE-373). It stays at 100 until the two backstops are sized against each other. `0` disables the cap entirely and leaves the clock as the only backstop.
 - **Context management.** The native brain owns compaction (runs in `prepare_next_turn`, file-operation aware across cycles). `claude_code` delegates it to Claude Code. The two are independent.
