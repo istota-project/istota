@@ -883,7 +883,18 @@ let mockChatTaskSeq = 1000;
     ['Images', ['image.png', 'image.jpg', 'image.gif', 'image.webp']],
     ['Audio and video', ['tone.mp3', 'tone.wav', 'voice.ogg', 'tone.webm', 'clip.mp4']],
     ['PDF documents', ['document.pdf', 'scanned.pdf', 'cjk-cmap.pdf']],
-    ['Text and source', ['note.md', 'note.txt', 'source.html', 'drawing.svg', 'binary.bin']],
+    [
+      'Text and source',
+      [
+        'note.md',
+        'note.txt',
+        'orders.csv',
+        'readings.tsv',
+        'source.html',
+        'drawing.svg',
+        'binary.bin',
+      ],
+    ],
   ] as const;
   for (const [index, [label, names]] of viewerAttachments.entries()) {
     const id = 214 + index;
@@ -5613,7 +5624,68 @@ const VIEWER_TEXT: Record<string, string> = {
     '#!/bin/sh\n# Prune read feed entries older than 90 days.\nistota-skill feeds prune --days 90\n',
   'scratch.py': 'print("scratch")\n',
   'monthly_review.md': '# Monthly review\n\nLook back over the last month.\n',
+  'orders.csv': mockOrdersCsv(),
+  'readings.tsv':
+    'date\tsystolic\tdiastolic\tpulse\tnote\n' +
+    '2026-10-01\t118\t76\t62\tmorning\n' +
+    '2026-10-02\t121\t79\t65\t\n' +
+    '2026-10-03\t116\t74\t60\tafter a run, "felt fine"\n',
 };
+/* A wide CSV for the file viewer's table: quoted commas, an embedded newline,
+ * doubled quotes, a ragged row and enough rows to scroll both ways. */
+function mockOrdersCsv(): string {
+  const header = [
+    'order_id',
+    'placed_at',
+    'customer',
+    'email',
+    'city',
+    'country',
+    'item',
+    'quantity',
+    'unit_price',
+    'total',
+    'status',
+    'carrier',
+    'tracking',
+    'notes',
+  ];
+  const cities = ['Springfield', 'Riverton', 'Lakeside', 'Hill Valley', 'Fairview'];
+  const items = ['Desk lamp', 'Notebook, A5 (pack of 3)', 'USB-C cable', 'Kettle', 'Plant pot'];
+  const statuses = ['shipped', 'pending', 'delivered', 'refunded'];
+  const quote = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  const rows = [header.join(',')];
+  for (let i = 1; i <= 80; i++) {
+    const quantity = (i % 4) + 1;
+    const price = 4.5 + (i % 7) * 3.25;
+    const notes =
+      i === 3
+        ? 'Leave at the "blue" door'
+        : i === 5
+          ? 'Two lines:\nring twice'
+          : i % 9 === 0
+            ? 'A long note that runs well past the width of its column so the cell has to cut it off and show the rest on hover'
+            : '';
+    const row = [
+      `A-${1000 + i}`,
+      `2026-10-${String((i % 28) + 1).padStart(2, '0')} 09:${String(i % 60).padStart(2, '0')}`,
+      `Customer ${i}`,
+      `customer${i}@example.com`,
+      cities[i % cities.length],
+      'Exampleland',
+      items[i % items.length],
+      String(quantity),
+      price.toFixed(2),
+      (price * quantity).toFixed(2),
+      statuses[i % statuses.length],
+      i % 2 ? 'Acme Post' : 'Example Freight',
+      `TRK${String(i * 7919).padStart(10, '0')}`,
+      notes,
+    ];
+    rows.push((i === 7 ? row.slice(0, 6) : row).map(quote).join(','));
+  }
+  return rows.join('\n') + '\n';
+}
 /* The Scripts index for the Files page. Paths are relative to
  * `scripts_view_path`; VIEWER_TEXT holds a body for each, keyed by name. */
 const mockScriptsIndex = {
@@ -6612,6 +6684,8 @@ const workspaceTree: Record<string, WorkspaceEntry[]> = {
     { ...workspaceEntry('recording.mp3'), size: 3_400_000 },
     { ...workspaceEntry('backup.zip'), size: 1_800_000 },
     workspaceEntry('note.md'),
+    workspaceEntry('orders.csv'),
+    workspaceEntry('readings.tsv'),
     workspaceEntry('outside-link', 'link'),
     workspaceEntry('task-socket', 'other'),
   ],
