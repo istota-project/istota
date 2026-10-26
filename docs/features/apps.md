@@ -141,6 +141,30 @@ The Brier score is the mean of `(p - outcome)²` over resolved guesses that have
 
 As with Board, the values are fenced as untrusted when Istota reads them back.
 
+### Recall
+
+Spaced-repetition review over your own notes. In chat, "make cards from my aviation weather notes" has Istota read the notes and write a card for each thing worth remembering. Recall shows the cards due today one at a time: the question first, then **Show answer**, then how well you remembered it (**Again**, **Hard**, **Good** or **Easy**, each with the interval it would give). When you answer **Again**, Recall shows the paragraph of the note the card came from before moving on. Once the day's cards are done it says when the next one is due. **Add card** writes a card by hand, and a card's **⋯** menu starts its schedule over or deletes it.
+
+Recall asks on first open to read a folder of your files, `notes` unless you change it on that screen. It reads only that folder, and only to show a missed card's paragraph; the server checks every read against the folder you granted, not the one the manifest names. Choose **Not now** and Recall still reviews, but cannot show the paragraph until you allow it from **Permissions**.
+
+#### The `app.recall` data layout
+
+| Key | Value |
+| --- | --- |
+| `card:<id>` | `{"id", "q", "a", "source_path", "source_anchor", "created_at"}` |
+| `review:<id>` | `{"due", "interval", "ease", "reps", "lapses", "history"}` |
+
+- `id` is the part of the key after `card:` or `review:`; a card and its review share it, and the key wins if the value says otherwise.
+- `q` and `a` are the question and answer as plain text. Only `q` is needed.
+- `source_path` is the note's path in your files, such as `notes/aviation/weather.md`. Recall reads it inside the folder it was granted, trying the path as written and then without each leading folder in turn, so `notes/aviation/weather.md` is found as `aviation/weather.md` when `notes` is the folder granted. A path with an empty, `.`, `..` or hidden part is not read.
+- `source_anchor` is a heading or a phrase from the paragraph, matched without regard to case, spacing or `#` marks. The first paragraph holding it is shown; a heading is shown with the paragraph under it. With no anchor, Recall names the note and shows nothing from it.
+- `created_at` is an ISO 8601 time. New cards are reviewed oldest first, after the cards already due.
+- Istota writes cards and leaves `review:` keys to Recall. A card with no review is new and is due today.
+
+The review state is SM-2. A grade of 3 or more (Hard, Good, Easy are 3, 4 and 5) passes: the first interval is one day, the second six, and each after that is the last interval times the card's ease. Again is 1: the card starts over at one day and `lapses` goes up. The ease starts at 2.5, moves by `0.1 - (5 - q)(0.08 + (5 - q) × 0.02)` on every answer and never drops below 1.3. `due` is a date, `YYYY-MM-DD`, in your own time zone; `history` holds the newest 100 answers as `{"on", "grade", "interval"}`.
+
+As with Board, the values are fenced as untrusted when Istota reads them back.
+
 ## The house kit
 
 Every installed app gets Istota's tokens, a small client library and a set of components (list, table, form, button, dialog, chart). The kit applies your theme and text size before the first paint, keeps forms usable with the on-screen keyboard, and follows the same touch-target, type-size and layout rules as the rest of the interface. An app that does not use the kit still gets its sandbox and its permissions; the kit is what makes it look and feel like the rest of Istota.

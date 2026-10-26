@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 #: The starter apps every user with Apps enabled is given, by id. Each is a
 #: folder under ``starter/`` in the apps build, from ``web/src/apps/starter/``.
-STARTER_APPS: tuple[str, ...] = ("board", "ledger")
+STARTER_APPS: tuple[str, ...] = ("board", "ledger", "recall")
 
 ORIGINS = ("draft", "starter")
 MANIFEST = "manifest.toml"
