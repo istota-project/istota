@@ -437,9 +437,9 @@ Shipped defaults (base names, no baked effort):
 | `opus` / `sonnet` / `haiku` | the newest current model of that family in the catalogue |
 | `default` | no override (brain/config default) |
 
-A family follows the catalogue (see [Models and providers](models.md)), so a new Anthropic model reaches the tiers when the catalogue lists it, and `!models` shows what each resolves to today. On the native brain an unremapped tier means `[brain.native] model`. Each alias may also take an effort-only table (`[models.aliases.general] anthropic = { effort = "medium" }`) that keeps the target and changes the effort.
+A family follows the catalogue (see [Models and providers](models.md)), so a new Anthropic model reaches the tiers when the catalogue lists it, and `!models` shows what each resolves to today. On the native brain an unremapped tier means the room's provider's default model (`[brain.native] model` on native's default provider, `[providers.<id>] default_model` on another). Each alias may also take an effort-only table (`[models.aliases.general] anthropic = { effort = "medium" }`) that keeps the target and changes the effort.
 
-Effort is an orthogonal **`:effort` modifier** appended to any reference (`opus:high`, `smart:low`, `opus:xhigh`) — never baked into a name. An alias override is **per model namespace** so one definition covers every brain family: `anthropic` = the CLI brains (`claude_code` / `tmux_claude`), `openai_compat` = native. Two forms, both accepted:
+Effort is an orthogonal **`:effort` modifier** appended to any reference (`opus:high`, `smart:low`, `opus:xhigh`) — never baked into a name. An alias override is **per provider** so one definition covers every room: `anthropic` = the CLI brains (`claude_code` / `tmux_claude`) and a native room on `anthropic`, any other provider id = a native room on that provider. The old `openai_compat` key is read, for one release, as native's default provider, ahead of that provider's own key. An alias with no target for a room's provider cannot be picked there and never resolves into another provider. Two forms, both accepted:
 
 ```toml
 # Flat (namespace-agnostic, resolved by whichever brain runs the task):
@@ -447,17 +447,17 @@ Effort is an orthogonal **`:effort` modifier** appended to any reference (`opus:
 smart = "claude-opus-4-6:high"   # pin smart to Opus 4.6, effort high
 deep  = "opus:max"               # a custom alias
 
-# Per-namespace (define once, correct on every brain):
+# Per-provider (define once, correct in every room):
 [models.aliases.smart]
-anthropic     = "opus:high"                                          # CLI brains
-openai_compat = { model = "anthropic/claude-opus-4.8", effort = "high" }  # native endpoint slug
+anthropic  = "opus:high"                                             # CLI brains
+openrouter = { model = "anthropic/claude-opus-4.8", effort = "high" }  # a native room on openrouter
 [models.aliases.general]
-anthropic     = "claude-sonnet-5"
-openai_compat = "anthropic/claude-sonnet-4.6"                        # bare string = no effort
+anthropic  = "claude-sonnet-5"
+openrouter = "anthropic/claude-sonnet-4.6"                           # bare string = no effort
 [models.aliases.deep]
-anthropic     = "opus:max"
-openai_compat = "anthropic/claude-opus-4.8"
-portable      = true                                                # a cross-brain custom tier
+anthropic  = "opus:max"
+openrouter = "anthropic/claude-opus-4.8"
+portable   = true                                                   # a cross-brain custom tier
 ```
 
 Alias targets **carry effort**: a `:effort` modifier on the target (`opus:high` → high) or an explicit `effort =` on a per-namespace table reaches the wire (explicit wins). An alias uses one form (TOML: a key can't be both a string and a table); a per-namespace table missing the active brain's key falls to that brain's code default. A custom alias is a non-portable pin unless flagged `portable = true` (then it re-resolves across the cross-brain fallback boundary like the built-in tiers). Invalid *anthropic* targets (neither a known alias nor a versioned canonical Claude ID) are warned at config-load time via `Brain.validate_alias_override`; `openai_compat` slugs are sent verbatim (no alias table to validate against).
@@ -477,7 +477,7 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 | `fallback_on_transient` | `true` | Also reroute a persistent `transient_api_error` |
 | `fallback_cooldown_seconds` | `900` | Skip an unavailable primary at most this long before retrying it; a usage limit against a Claude subscription instead ends at the quota's own reset (floor 60s). 0 disables |
 
-`[brain.native]` (used when `kind = "native"`, when it is the `fallback`, or when a `source_type_overrides` entry routes to it): `provider` (the id of a `[providers.<id>]` record; no default, so a native brain without one is unavailable), `providers` (the other providers native may send a request to, opt-in; default empty, meaning `provider` alone; see [Models and providers](models.md#which-providers-a-brain-reaches)), `model` (explicit id at that provider), `effort`, `model_overrides`, `extra_headers`, `context_window`, `max_turns`, `max_tokens`, `prompt_caching`, `compaction_reserve_tokens`, `compaction_keep_recent_tokens`, `bash_spill_full_output`, `turn_budget_nudge`, `turn_budget_nudge_early_percent`, `turn_budget_nudge_remaining`, `soft_deadline_percent`, `model_catalog_fetch`, `model_catalog_cache_ttl_hours`, plus the nested `[brain.native.web_fetch]` SSRF-policy block. `base_url`, `api_key`, `extra_headers`, the wire settings and `model_catalog_*` are legacy, read for one release as native's provider's fields. The endpoint and its key are a provider's: `[providers.<id>]` takes `kind` (`anthropic`, `openrouter`, `openai_compat`), `base_url`, `api_key` (or `ISTOTA_PROVIDER_<ID>_API_KEY`), `extra_headers` (or `ISTOTA_PROVIDER_<ID>_EXTRA_HEADERS`, a JSON object that replaces the table), `prompt_caching`, `prompt_cache_key`, `prompt_cache_ttl`, `strict_tool_schemas`, `reasoning_replay`, a `[providers.<id>.compat]` table, `discover`, `discover_ttl_hours` and `models`. `anthropic` and `openrouter` are built in. `[models.overrides."<provider>/<id>"]` patches one model's catalogue fields. Full annotations in the [native brain runbook](native-brain.md).
+`[brain.native]` (used when `kind = "native"`, when it is the `fallback`, or when a `source_type_overrides` entry routes to it): `provider` (the id of a `[providers.<id>]` record; no default, so a native brain without one is unavailable), `providers` (the other providers a native room or job may run on, opt-in; default empty, meaning `provider` alone; an admin picks one per room or job, see [Models and providers](models.md#a-rooms-provider)), `model` (explicit id at that provider), `effort`, `model_overrides`, `extra_headers`, `context_window`, `max_turns`, `max_tokens`, `prompt_caching`, `compaction_reserve_tokens`, `compaction_keep_recent_tokens`, `bash_spill_full_output`, `turn_budget_nudge`, `turn_budget_nudge_early_percent`, `turn_budget_nudge_remaining`, `soft_deadline_percent`, `model_catalog_fetch`, `model_catalog_cache_ttl_hours`, plus the nested `[brain.native.web_fetch]` SSRF-policy block. `base_url`, `api_key`, `extra_headers`, the wire settings and `model_catalog_*` are legacy, read for one release as native's provider's fields. The endpoint and its key are a provider's: `[providers.<id>]` takes `kind` (`anthropic`, `openrouter`, `openai_compat`), `base_url`, `api_key` (or `ISTOTA_PROVIDER_<ID>_API_KEY`), `extra_headers` (or `ISTOTA_PROVIDER_<ID>_EXTRA_HEADERS`, a JSON object that replaces the table), `prompt_caching`, `prompt_cache_key`, `prompt_cache_ttl`, `strict_tool_schemas`, `reasoning_replay`, a `[providers.<id>.compat]` table, `discover`, `discover_ttl_hours`, `models` and `default_model` (what a native room on that provider runs with no model of its own; native's default provider uses `[brain.native] model`). `anthropic` and `openrouter` are built in. `[models.overrides."<provider>/<id>"]` patches one model's catalogue fields. Full annotations in the [native brain runbook](native-brain.md).
 
 `soft_deadline_percent` (default `90`) stops the loop at that share of `[scheduler] task_timeout_minutes`, on a stop that keeps the model's partial work. The hard clock discards that work and `max_turns` delivers it, and on a slow brain the clock is what arrives first; the remaining slack still covers a turn that hangs. `0` or `100` and above disables it.
 

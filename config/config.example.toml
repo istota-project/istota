@@ -110,16 +110,15 @@ features = []
 # provider = "openrouter"                    # a [providers.<id>] id: anthropic,
 #                                            #   openrouter or your own. Unset, the
 #                                            #   native brain is unavailable.
-# providers = []                             # the providers native may send a
-#                                            #   request to, opt-in: a ref of a
-#                                            #   listed provider (`openrouter/...`)
-#                                            #   runs there with its key. `provider`
-#                                            #   is always one of them; empty means
-#                                            #   it alone. A key held for the CLI
-#                                            #   does not add `anthropic`. Listing
-#                                            #   `anthropic` beside `openrouter`
-#                                            #   makes `anthropic/...` ambiguous;
-#                                            #   it is read as OpenRouter's id.
+# providers = []                             # the providers a native room or job
+#                                            #   may run on, opt-in. An admin picks
+#                                            #   one per room (`!room provider`, the
+#                                            #   room settings) or per job (CRON.md
+#                                            #   `provider`), and it is billed to that
+#                                            #   provider's key. `provider` is always
+#                                            #   one of them; empty means it alone. A
+#                                            #   key held for the CLI does not add
+#                                            #   `anthropic`.
 # model ="z-ai/glm-5.3-flash"               # an id that provider lists (`!models all
 #                                            #   <provider>`). The tiers (fast,
 #                                            #   general, smart) mean this model on
@@ -1023,6 +1022,9 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #      discover = true               # the daemon lists the provider's models in the background
 #      discover_ttl_hours = 24
 #      models = [ { id = "qwen3-32b", context_window = 32768, supports_thinking = true } ]
+#      default_model = "qwen3-32b"   # what a native room on this provider runs with no
+#                                    #   model of its own; native's default provider uses
+#                                    #   [brain.native] model instead
 #
 # What the endpoint accepts. Omitted, each takes the kind's default: caching on
 # for anthropic; prompt_cache_key on for openrouter and for api.openai.com;
@@ -1081,18 +1083,22 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #      smart = "claude-opus-4-7:high"   # rebind "smart" to Opus 4.7, effort high
 #      deep  = "opus:max"               # a custom alias for deep-thinking tasks
 #
-# Per-namespace form: one value for the CLI brains (anthropic) and one for the
-# native endpoint (openai_compat), so a fallback across them stays correct.
+# Per-provider form: one target per provider, keyed by its id. `anthropic` is
+# the CLI brains' (and native's on the anthropic provider); any other id is a
+# native room's on that provider. A room whose provider has no target for an
+# alias cannot use it: the alias never resolves into another provider. The old
+# `openai_compat` key is read, for one release, as native's default provider.
 #      [models.aliases.smart]
-#      anthropic     = "opus:high"                                   # CLI brains (claude_code / tmux_claude)
-#      openai_compat = { model = "anthropic/claude-opus-4.8", effort = "high" }  # native
+#      anthropic  = "opus:high"                                      # CLI brains (claude_code / tmux_claude)
+#      openrouter = { model = "anthropic/claude-opus-4.8", effort = "high" }  # native on openrouter
 #      [models.aliases.general]
-#      anthropic     = "claude-sonnet-5"
-#      openai_compat = "anthropic/claude-sonnet-4.6"                 # bare string = no effort
+#      anthropic  = "claude-sonnet-5"
+#      openrouter = "anthropic/claude-sonnet-4.6"                    # bare string = no effort
+#      local      = "qwen3-32b"                                      # native on your own provider
 #      [models.aliases.deep]
-#      anthropic     = "opus:max"
-#      openai_compat = "anthropic/claude-opus-4.8"
-#      portable      = true                                          # a cross-brain custom tier
+#      anthropic  = "opus:max"
+#      openrouter = "anthropic/claude-opus-4.8"
+#      portable   = true                                             # a cross-brain custom tier
 #
 # Effort only: keep the alias's own target and change its effort, without
 # naming a model.

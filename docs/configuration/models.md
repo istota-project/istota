@@ -50,13 +50,25 @@ provider = "openrouter"
 providers = ["local"]              # opt-in; `provider` is always included
 ```
 
-A model of a provider native reaches runs on that provider with its key: `local/qwen3-32b` above goes to `local`, and `openrouter/...` or an OpenRouter id goes to OpenRouter. A value naming a provider native does not reach is never sent to that provider. It is read as an id of the default provider when that provider lists it, and is otherwise refused when a room, a job or `!model` sets it. An `anthropic` key held for the `claude` CLI does not make Anthropic a native provider: on an OpenRouter-native install, `anthropic/claude-opus-...` is OpenRouter's id and is billed by OpenRouter, whether or not OpenRouter's model list has been fetched. Rooms and the picker offer only the models of the providers the room's brain reaches.
+An `anthropic` key held for the `claude` CLI does not make Anthropic a native provider: on an OpenRouter-native install that does not list it, `anthropic/claude-opus-...` is OpenRouter's id and is billed by OpenRouter, whether or not OpenRouter's model list has been fetched.
 
-Listing `anthropic` beside an `openrouter` default leaves one ambiguity: OpenRouter's ids for Anthropic's models are spelled `anthropic/<model>`, the same as Anthropic's own references. Until the provider is stored apart from the model, such a value is read as OpenRouter's id, and `istota doctor`'s `models.catalogue` check warns about the pair.
+### A room's provider
+
+A native room or scheduled job runs on one provider, stored beside its model: the room's own when it has one, else `[brain.native] provider`. Its model is an id of that provider (or an alias), so a task is never sent to a provider because of how its model is spelled. Choosing the provider is admin-only, because it decides whose key is billed, and only the providers `[brain.native] providers` lists are offered:
+
+- `!room provider <id>` in the room, or `!room provider default` to go back to native's default. `!room` shows the room's provider.
+- The Provider select in the web room settings, shown to an admin on a native room. The model list below it is that provider's.
+- `provider = "<id>"` on a CRON.md job. A non-admin's is dropped when the file is read, as a non-admin's `brain` is.
+
+An admin's `provider/id` in `!room model`, the room settings, `!model` or a CRON.md `model` is split into the two: `!room model local/qwen3-32b` moves the room to `local` and stores `qwen3-32b`. Anyone else picks a model within the room's provider; naming another provider's model is refused. A room moved to another provider keeps its model only if that provider has it, and a move that would leave the room with neither a model nor the provider's default model is refused.
+
+Each provider's default model is `[providers.<id>] default_model`, what a room on it runs with no model of its own. Native's default provider uses `[brain.native] model`. A tier (`fast`, `general`, `smart`) with no target for the room's provider means that provider's default model too.
+
+A room or job pinned to a provider the list no longer holds runs on native's default provider, with a warning in the log, and doctor's `models.catalogue` names each such room and job. The pin comes back into force if the provider is listed again. A room whose brain moves to `claude_code` or `tmux_claude` loses its provider, since the CLI brains run on `anthropic` alone.
 
 ### A user's own key
 
-A user may hold their own key for a deployment provider: `istota secret ensure -u <user> -s provider_keys -k <provider id>`. In that user's tasks, a request to that provider carries their key instead of the deployment's: native's default provider, or a provider `[brain.native] providers` lists when the task's model names it. Requests to other providers still carry the deployment's keys, and so do internal calls made for the operator (the speech gate, conversation triage, the sleep cycle, briefings). Under `auth = "api_key"`, a user's `anthropic` key also reaches the `claude` CLI in their own tasks. A user cannot add an endpoint, only a key for one the deployment has. `istota init` moved the old per-user native keys (`native_brain`/`api_key`) to `provider_keys/<native's provider>` once.
+A user may hold their own key for a deployment provider: `istota secret ensure -u <user> -s provider_keys -k <provider id>`. In that user's tasks, a request to that provider carries their key instead of the deployment's: native's default provider, or the listed provider the task runs on. Requests to other providers still carry the deployment's keys, and so do internal calls made for the operator (the speech gate, conversation triage, the sleep cycle, briefings). Under `auth = "api_key"`, a user's `anthropic` key also reaches the `claude` CLI in their own tasks. A user cannot add an endpoint, only a key for one the deployment has. `istota init` moved the old per-user native keys (`native_brain`/`api_key`) to `provider_keys/<native's provider>` once.
 
 ## How the claude CLI authenticates
 
@@ -122,7 +134,8 @@ Leave the file empty to use the shipped list alone.
 
 A selection is an alias or a model:
 
-- **Aliases.** The tiers `fast`, `general` and `smart` (shipped as `haiku`, `sonnet` and `opus`), the family shortcuts `opus`, `sonnet` and `haiku`, `default`, and any you add in `[models.aliases]` ([reference](reference.md#modelsaliases)). A family is the newest current model of that family in the catalogue, so a new Anthropic model reaches the tiers when the catalogue lists it. On the native brain an unremapped tier means `[brain.native] model`.
+- **Aliases.** The tiers `fast`, `general` and `smart` (shipped as `haiku`, `sonnet` and `opus`), the family shortcuts `opus`, `sonnet` and `haiku`, `default`, and any you add in `[models.aliases]` ([reference](reference.md#modelsaliases)). A family is the newest current model of that family in the catalogue, so a new Anthropic model reaches the tiers when the catalogue lists it. On the native brain an unremapped tier means the room's provider's default model.
+- **Per-provider targets.** `[models.aliases.<name>.<provider id>]` gives an alias a target on one provider. `anthropic` is the CLI brains' (and a native room's on `anthropic`); any other id is a native room's on that provider. An alias with no target for a room's provider cannot be picked there and never resolves into another provider. The old `openai_compat` key is read, for one release, as native's default provider.
 - **A reference**, `provider/id`. A bare id also works where only one provider lists it; where several do, the brain's own provider is preferred, and otherwise the choice is refused with the candidates listed.
 - **A pattern**, a fragment of an id or name, in `!model` and `!room model` only. Never in a config file or CRON.md, where a later catalogue refresh would change what it means.
 
@@ -143,7 +156,9 @@ The bound is on who may set a selection, not on what runs: a room an admin set t
 
 ### What is stored
 
-A room or a job stores what was picked, an alias name or a reference, and it is resolved when each task is created. A room set to `smart` therefore moves to the next Opus on its next task after the catalogue lists one, and a room set to an exact reference stays on that model. The task row records the reference it resolved to, except for a portable alias (the tiers, and an alias marked `portable = true`), whose name it keeps so that a fallback to another brain resolves it there; the model that ran is recorded for every task. On a fallback between brains, an exact reference the other brain cannot reach is dropped, the fallback runs its own default model, and the answer says so. Rooms set before this release hold bare ids, which still resolve to the same model.
+A room or a job stores what was picked, an alias name or a model id, and its provider beside it; both are resolved when each task is created, within that provider only. A room set to `smart` therefore moves to the next Opus on its next task after the catalogue lists one, and a room set to an exact model stays on it. The task copies the provider and records the id it resolved to, except for a portable alias (the tiers, and an alias marked `portable = true`), whose name it keeps so that a fallback to another brain resolves it there; the model that ran is recorded for every task. A retry or a subtask keeps the task's provider.
+
+A fallback between brains always changes provider. An exact model crosses only to a brain that reaches the provider it ran on (a `claude_code` model to native when `[brain.native] providers` lists `anthropic`), and is otherwise dropped: the fallback runs its own default model, and the answer says so. A portable alias is resolved again on the fallback brain, on the room's native provider when the fallback is native and the room has one. Rooms and jobs set before this release have no provider, which means the brain's default provider, so they run where they ran.
 
 ### Effort
 
@@ -151,7 +166,7 @@ Effort is clamped to what the chosen model supports, on every brain. A model wit
 
 ### The admin configuration page
 
-Every config field that names a model (`[brain.claude_code] model`, `[brain.tmux] model`, `advisor_model`, `[brain.native] model`, the triage, speech-gate, sleep-cycle and review models) is set on the admin configuration page from two lists, a source and a model from that source, with an effort list where the field takes one. `[models] enabled` and `[models.aliases]` have editors of their own. A value the catalogue does not know is kept and shown as such, so saving another field never changes it, and "Other…" accepts an id a provider has not listed yet.
+Every config field that names a model (`[brain.claude_code] model`, `[brain.tmux] model`, `advisor_model`, `[brain.native] model`, the triage, speech-gate, sleep-cycle and review models) is set on the admin configuration page from two lists, a source and a model from that source, with an effort list where the field takes one. `[brain.native] model` offers native's default provider alone, since another provider's default is its own `default_model`; the internal models offer `anthropic` and the providers `[brain.native] providers` lists. `[models] enabled` and `[models.aliases]` have editors of their own. A value the catalogue does not know is kept and shown as such, so saving another field never changes it, and "Other…" accepts an id a provider has not listed yet.
 
 `istota apply` and the page's preview check every model field the document sets. A field naming a provider that is not configured is refused, on the fields that only Anthropic models fill (the two CLI brains' `model` and `advisor_model`). Everywhere else, including `[brain.native] model`, whose OpenRouter ids contain a slash, a value that does not resolve is a warning: an id a provider lists but istota has not fetched yet is still a valid choice.
 
@@ -177,4 +192,6 @@ The release after this one stops reading the old settings and drops the three ol
 
 ### Rolling back
 
-The release before this one reads neither `[providers]` nor a provider id in `[brain.native] provider`: it ignores the first and its native brain fails on the second, and its CLI brains do not read `[brain.claude_code] auth`. To roll back across this release, restore `config.toml.pre-providers` (or the copy `istota apply --backup` kept) before starting the older release. The old secret files still hold their values, so nothing else is needed.
+This release adds a provider column to rooms, scheduled jobs and tasks, and stamps the database schema 2. A release from before it refuses to start on that database (`istota init` exits 3, and `istota-stack rollback` checks first and stays put), because it would ignore every stored provider and send those rooms' models to native's default provider, billed to another key. There is no rolling back across this release without restoring a database backup taken before the upgrade.
+
+For an install moved from before providers, the release before that one reads neither `[providers]` nor a provider id in `[brain.native] provider`: it ignores the first and its native brain fails on the second, and its CLI brains do not read `[brain.claude_code] auth`. To roll back across this release, restore `config.toml.pre-providers` (or the copy `istota apply --backup` kept) before starting the older release. The old secret files still hold their values, so nothing else is needed.

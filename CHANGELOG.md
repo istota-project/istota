@@ -32,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **One model catalogue for every brain.** Istota ships a list of Anthropic's models and fetches each provider's list in the background, so a new model can be picked without an istota release. An admin can pick any listed model in chat, the room settings and the admin configuration page, which now chooses every model field from lists. See docs/configuration/models.md.
 
-- **Providers.** OpenRouter, Anthropic and endpoints of your own are configured side by side as providers, each with its own key. The native brain sends each request to the provider of the model it runs, among its default provider and those listed in `[brain.native] providers`, and a user can hold their own key for a provider.
+- **Providers.** OpenRouter, Anthropic and endpoints of your own are configured side by side as providers, each with its own key. A native room or job runs on its default provider or on one listed in `[brain.native] providers`, and a user can hold their own key for a provider.
+
+- **An admin chooses a native room's provider.** `!room provider`, the room settings and a CRON.md job's `provider` set which listed provider a native room or job runs on, and so whose key is billed; the model picker then lists that provider's models. The provider is stored beside the model, so a model spelled like another provider's reference is never sent there. **Upgrade note:** rooms and jobs from before keep their default provider, and the database moves to schema 2, so a rollback across this release is refused unless you restore a database backup from before the upgrade.
 
 - **A native room reaches only the providers listed for native.** An `anthropic` key held for the `claude` CLI no longer lets native rooms run Anthropic models; list `anthropic` in `[brain.native] providers` for that, and on an OpenRouter-native room an `anthropic/...` model is OpenRouter's and billed by OpenRouter.
 
