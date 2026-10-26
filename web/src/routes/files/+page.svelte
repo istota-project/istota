@@ -840,7 +840,7 @@
         onFiles={enqueue}
       >
         {#if !place.browsable}
-          <div class="center-msg">
+          <div class="center-msg" class:stacked={place.kind === 'share'}>
             {#if place.kind === 'share'}
               <p>
                 {place.remote?.access === 'write' ? 'A read-write' : 'A read-only'} folder shared from
@@ -857,7 +857,7 @@
         {:else if listingLoading}
           <PageLoading label="Loading folder…" />
         {:else if listingError}
-          <div class="center-msg error">
+          <div class="center-msg error stacked">
             {#if (place.kind === 'drive' || place.kind === 'nextcloud') && needsConnection(listingError)}
               <p>{listingError === 'drive_not_granted' ? 'Drive access is off' : listingError}</p>
               <Button variant="secondary" href={`${base}/settings/connections`}>Connections</Button>
@@ -1003,6 +1003,13 @@
     gap: var(--space-2);
     padding: var(--space-2) 0;
     font-size: var(--text-sm);
+  }
+  .center-msg.stacked {
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+  .center-msg.stacked p {
+    margin: 0;
   }
   .upload-name {
     display: flex;
