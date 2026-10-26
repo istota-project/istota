@@ -61,9 +61,17 @@ class TaskUsage:
     turns: int = 0
 
     def add(
-        self, usage: Usage, info: ModelInfo, cache_write_multiplier: float | None = None
+        self,
+        usage: Usage,
+        info: ModelInfo,
+        cache_write_multiplier: float | None = None,
+        *,
+        count_turn: bool = True,
     ) -> None:
         """Fold one turn's usage in.
+
+        ``count_turn=False`` adds the spend without a turn: a compaction
+        summary call is part of the turn it happened in (ISSUE-845).
 
         Cost prefers the provider's reported figure (``usage.cost_usd``,
         e.g. OpenRouter's real charged cost including markup) when present;
@@ -78,7 +86,8 @@ class TaskUsage:
             self.cost_usd += usage.cost_usd
         else:
             self.cost_usd += price_usage(usage, info, cache_write_multiplier)
-        self.turns += 1
+        if count_turn:
+            self.turns += 1
 
     def merge(self, other: "TaskUsage") -> None:
         """Roll a sub-agent's accumulated usage into this one."""

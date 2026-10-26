@@ -950,6 +950,29 @@ class TestTheSystemHalfSurvivesACut:
             assert SYSTEM_SENTINEL in call["system_prompt"]
         assert SYSTEM_SENTINEL not in str(main[-1]["messages"])
 
+    def test_the_overflow_recovery_summary_adds_its_spend_but_not_a_turn(
+        self, tmp_path
+    ):
+        overflow = AssistantMessage(
+            stop_reason="error", error_message="API Error: 400 context length exceeded"
+        )
+        summary = AssistantMessage(
+            content=[TextContent(text="## Goal\nwrite a file")],
+            usage=Usage(input_tokens=700, output_tokens=40),
+            stop_reason="end_turn",
+        )
+        result, _provider, records = _run_compacting_task(
+            tmp_path,
+            composed=_composed_file(tmp_path),
+            prompt=REQUEST_SENTINEL,
+            turns=[overflow, summary, _final_turn()],
+        )
+        _assert_one_compaction(records, "overflow")
+        assert result.usage.output_tokens == 5 + 40
+        # The overflowed request reported no usage, so the final turn is the
+        # only one in the task usage; the summary adds none (ISSUE-845).
+        assert result.usage.turns == 1
+
     def test_the_session_log_records_one_context_across_a_compacting_run(
         self, tmp_path
     ):
@@ -1102,7 +1125,9 @@ class TestAFailedProactiveSummaryNeverCuts:
         assert [c["ok"] for c in cuts] == [False, True]
         assert REQUEST_SENTINEL not in str(provider.calls[-1]["messages"])
 
-    def test_the_summary_call_is_counted_in_the_task_usage(self, tmp_path):
+    def test_the_summary_call_adds_its_spend_but_not_a_turn(self, tmp_path):
+        # A compaction is part of the turn it happened in (ISSUE-845), so the
+        # persisted `turns` agrees with the session log's loop-turn count.
         summary = AssistantMessage(
             content=[TextContent(text="## Goal\nwrite a file")],
             usage=Usage(input_tokens=700, output_tokens=40),
@@ -1117,6 +1142,9 @@ class TestAFailedProactiveSummaryNeverCuts:
         # Two main turns (5010 and 25 tokens) plus the summary's 740.
         assert result.usage.output_tokens == 10 + 5 + 40
         assert result.usage.billed_input_tokens == 5000 + 20 + 700
+        assert result.usage.turns == 2
+        (final,) = [r for r in records if r["type"] == "result"]
+        assert final["turns"] == result.usage.turns
         cut = _assert_one_compaction(records, "proactive")
         assert cut["ok"] is True
         assert cut["usage"]["input_tokens"] == 700

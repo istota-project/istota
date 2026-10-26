@@ -333,8 +333,11 @@ class TestStartAndPlace:
         assert record["messages_dropped"] == 1
         assert record["summary"] == "## Goal\nwrite files"
         assert record["usage"]["input_tokens"] == 700
-        # The summary's spend is in the task usage.
+        # The summary's spend is in the task usage, but not a turn (ISSUE-845).
         assert result.usage.output_tokens == 10 + 10 + 5 + 40
+        assert result.usage.turns == 3
+        (final,) = [r for r in records if r["type"] == "result"]
+        assert final["turns"] == result.usage.turns
 
     def test_off_means_no_summary_below_the_blocking_threshold(self, tmp_path):
         provider = _GatedProvider(

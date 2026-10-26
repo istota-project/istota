@@ -52,6 +52,15 @@ class TestTaskUsage:
         assert tu.cache_read_tokens == 3
         assert tu.turns == 2
 
+    def test_add_without_a_turn_keeps_the_tokens(self):
+        info = ModelInfo(id="m", context_window=200_000, max_output_tokens=16384)
+        tu = TaskUsage()
+        tu.add(Usage(input_tokens=10, output_tokens=5), info)
+        tu.add(Usage(input_tokens=700, output_tokens=40), info, count_turn=False)
+        assert tu.input_tokens == 710
+        assert tu.output_tokens == 45
+        assert tu.turns == 1
+
     def test_add_accumulates_cost(self):
         info = ModelInfo(
             id="m",
