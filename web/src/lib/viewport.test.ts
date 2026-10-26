@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { installViewportGuard } from './viewport';
+import { installViewportGuard, isTextEntryFocused } from './viewport';
 
 /**
  * The guard exists to survive soft-keyboard transitions, so the cases worth
@@ -425,5 +425,41 @@ describe('installViewportGuard in the native shell', () => {
     expect(kbHeight()).toBe('');
     window.dispatchEvent(nativeShellEvent('keyboardWillShow', 336));
     expect(kbHeight()).toBe('');
+  });
+});
+
+describe('isTextEntryFocused', () => {
+  afterEach(() => {
+    document.body.replaceChildren();
+  });
+
+  function focusFrame(attrs: Record<string, string>): HTMLIFrameElement {
+    const frame = document.createElement('iframe');
+    for (const [name, value] of Object.entries(attrs)) frame.setAttribute(name, value);
+    document.body.append(frame);
+    frame.focus();
+    return frame;
+  }
+
+  it('counts a focused app frame as a text field', () => {
+    const frame = focusFrame({ 'data-istota-app-frame': '' });
+    expect(document.activeElement).toBe(frame);
+    expect(isTextEntryFocused()).toBe(true);
+  });
+
+  it('does not count any other frame', () => {
+    const frame = focusFrame({ title: 'A video' });
+    expect(document.activeElement).toBe(frame);
+    expect(isTextEntryFocused()).toBe(false);
+  });
+
+  it('still counts an input and not a button', () => {
+    const input = document.createElement('input');
+    const button = document.createElement('button');
+    document.body.append(input, button);
+    input.focus();
+    expect(isTextEntryFocused()).toBe(true);
+    button.focus();
+    expect(isTextEntryFocused()).toBe(false);
   });
 });
