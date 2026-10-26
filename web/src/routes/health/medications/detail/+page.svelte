@@ -33,6 +33,7 @@
   } from '@minot/ui';
   import { createDraft } from '@minot/ui/ui/draft.svelte';
   import { formatDate } from '@minot/ui/dateFormat';
+  import { notifyError } from '@minot/ui/stores/notices';
   import DocumentList from '$lib/components/health/DocumentList.svelte';
 
   /** The record as the form holds it: every text field a string, '' for none. */
@@ -201,7 +202,12 @@
 
   async function remove() {
     if (!medication) return;
-    await deleteMedication(medication.id);
+    try {
+      await deleteMedication(medication.id);
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : 'Failed to delete medication');
+      return;
+    }
     await goto(`${base}/health/medications`);
   }
 

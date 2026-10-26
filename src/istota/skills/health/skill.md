@@ -249,7 +249,7 @@ One list covers prescriptions, over-the-counter drugs and supplements. `--catego
 |---|---|
 | "I'm taking 20mg atorvastatin daily" | `medications --name atorvastatin`, then `add-medication Atorvastatin --category prescription --dose 20 --dose-unit mg --frequency daily --route oral` |
 | "Started vitamin D, 5000 IU" | `add-medication "Vitamin D3" --category supplement --dose 5000 --dose-unit IU --frequency daily --start-date <today>` |
-| "Stopped the statin last week" | `medications --name statin` (or by generic name), then `stop-medication <id> --date <date a week ago>` |
+| "Stopped the statin last week" | `medications`, pick the statin from the list by name or generic name (`--name` matches a whole name, not part of one), then `stop-medication <id> --date <date a week ago>` |
 | "Doctor doubled my dose to 40mg" | `stop-medication <old_id>`, then `add-medication Atorvastatin --dose 40 --dose-unit mg ... --start-date <today>` |
 | "What am I taking?" | `medications` |
 | "What was I on when my LDL dropped in March?" | `trend LDL`, then `medications --status all --since 2026-02-01 --until 2026-03-31` |

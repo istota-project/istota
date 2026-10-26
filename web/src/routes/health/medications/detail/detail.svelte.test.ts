@@ -14,6 +14,12 @@ vi.mock('$app/navigation', async (importOriginal) => ({
   goto: nav.goto,
 }));
 
+const notices = vi.hoisted(() => ({ notifyError: vi.fn() }));
+vi.mock('@minot/ui/stores/notices', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  ...notices,
+}));
+
 import Page from './+page.svelte';
 
 function med(overrides: Partial<Medication> = {}): Medication {
@@ -162,5 +168,16 @@ describe('medication detail', () => {
     await waitFor(() =>
       expect(nav.goto).toHaveBeenCalledWith(expect.stringMatching(/\/health\/medications$/)),
     );
+  });
+
+  it('reports a failed delete and stays on the page', async () => {
+    api.deleteMedication.mockRejectedValue(new Error('medication not found'));
+    render(Page);
+    await screen.findByLabelText('Name');
+    await fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    const dialog = await screen.findByRole('dialog');
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(notices.notifyError).toHaveBeenCalledWith('medication not found'));
+    expect(nav.goto).not.toHaveBeenCalled();
   });
 });

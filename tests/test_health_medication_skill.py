@@ -207,29 +207,59 @@ class TestDeferredMode:
         assert out["active_with_same_name"] == [first]
 
     def test_update_defers_and_maps_empty_to_null(self, deferred):
-        _, env, ops_file = deferred
-        _run(["update-medication", "5", "--dose", "40", "--end-date", "",
+        db_path, env, ops_file = deferred
+        mid = _seed(db_path, name="Metformin")
+        _run(["update-medication", str(mid), "--dose", "40", "--end-date", "",
               "--active", "yes"], env)
         op = _ops(ops_file)[0]
         assert op == {
-            "op": "update_medication", "medication_id": 5,
+            "op": "update_medication", "medication_id": mid,
             "dose": "40", "end_date": None, "active": True,
         }
 
     def test_stop_without_date_writes_today(self, deferred):
-        _, env, ops_file = deferred
+        db_path, env, ops_file = deferred
+        mid = _seed(db_path, name="Metformin")
         before = date.today().isoformat()
-        _run(["stop-medication", "3"], env)
+        _run(["stop-medication", str(mid)], env)
         after = date.today().isoformat()
         op = _ops(ops_file)[0]
         assert op["op"] == "discontinue_medication"
-        assert op["medication_id"] == 3
+        assert op["medication_id"] == mid
         assert op["end_date"] in {before, after}
 
     def test_delete_defers(self, deferred):
+        db_path, env, ops_file = deferred
+        mid = _seed(db_path, name="Metformin")
+        _run(["delete-medication", str(mid)], env)
+        assert _ops(ops_file) == [{"op": "delete_medication", "medication_id": mid}]
+
+    @pytest.mark.parametrize("verb", [
+        ["stop-medication", "999"],
+        ["update-medication", "999", "--dose", "40"],
+        ["delete-medication", "999"],
+    ])
+    def test_a_missing_row_fails_before_deferring(self, deferred, verb):
         _, env, ops_file = deferred
-        _run(["delete-medication", "4"], env)
-        assert _ops(ops_file) == [{"op": "delete_medication", "medication_id": 4}]
+        out = _run(verb, env, expect_success=False)
+        assert "medication 999 not found" in out["error"]
+        assert not ops_file.exists()
+
+    def test_an_unknown_encounter_fails_before_deferring(self, deferred):
+        db_path, env, ops_file = deferred
+        out = _run(["add-medication", "X", "--encounter-id", "999"], env,
+                   expect_success=False)
+        assert "encounter 999 not found" in out["error"]
+        mid = _seed(db_path, name="Metformin")
+        out = _run(["update-medication", str(mid), "--encounter-id", "999"], env,
+                   expect_success=False)
+        assert "encounter 999 not found" in out["error"]
+        assert not ops_file.exists()
+
+    def test_an_empty_text_field_is_omitted_on_add(self, deferred):
+        _, env, ops_file = deferred
+        _run(["add-medication", "X", "--dose", ""], env)
+        assert "dose" not in _ops(ops_file)[0]
 
 
 def _replay(db_path: Path, deferred_dir: Path, ops: list[dict], task_id: int = 99) -> int:

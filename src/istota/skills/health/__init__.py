@@ -1644,15 +1644,27 @@ def _check_medication_range(start_date: str | None, end_date: str | None) -> Non
 
 
 def _stored_medication(medication_id: int):
-    """The row as stored now, or None. Read-only; used to check a date
-    against the stored start before a write is deferred."""
+    """The row as stored now; fails when there is none, so a deferred
+    write never reports ok for a row the replay cannot find."""
     from istota.health import db as health_db
 
     conn = _connect()
     try:
-        return health_db.get_medication(conn, medication_id)
+        row = health_db.get_medication(conn, medication_id)
     finally:
         conn.close()
+    if row is None:
+        _fail(f"medication {medication_id} not found")
+    return row
+
+
+def _check_encounter_exists(conn, encounter_id: int | None) -> None:
+    """The FK is enforced, so a replay naming no encounter would drop the
+    whole write after the CLI had reported ok."""
+    from istota.health import db as health_db
+
+    if encounter_id is not None and health_db.get_encounter(conn, encounter_id) is None:
+        _fail(f"encounter {encounter_id} not found")
 
 
 def cmd_medications(args: argparse.Namespace) -> None:
@@ -1720,7 +1732,7 @@ def cmd_add_medication(args: argparse.Namespace) -> None:
     }
     for k in _MEDICATION_TEXT_FIELDS:
         v = getattr(args, k)
-        if v is not None:
+        if v:
             op[k] = v
     if start_date is not None:
         op["start_date"] = start_date
@@ -1734,6 +1746,7 @@ def cmd_add_medication(args: argparse.Namespace) -> None:
     # Read before the write so a direct insert does not match itself.
     conn = _connect()
     try:
+        _check_encounter_exists(conn, args.encounter_id)
         same_name = [m.id for m in health_db.active_medications_named(conn, name)]
     finally:
         conn.close()
@@ -1789,12 +1802,17 @@ def cmd_update_medication(args: argparse.Namespace) -> None:
     if not updates:
         _fail("no fields to update")
 
-    if "start_date" in updates or "end_date" in updates:
-        stored = _stored_medication(args.id)
-        _check_medication_range(
-            updates.get("start_date", stored.start_date if stored else None),
-            updates.get("end_date", stored.end_date if stored else None),
-        )
+    stored = _stored_medication(args.id)
+    _check_medication_range(
+        updates.get("start_date", stored.start_date),
+        updates.get("end_date", stored.end_date),
+    )
+    if updates.get("encounter_id") is not None:
+        conn = _connect()
+        try:
+            _check_encounter_exists(conn, updates["encounter_id"])
+        finally:
+            conn.close()
 
     op = {"op": "update_medication", "medication_id": args.id, **updates}
     if _defer_op(op):
@@ -1823,8 +1841,7 @@ def cmd_stop_medication(args: argparse.Namespace) -> None:
 
     end_date = _medication_date_arg("date", args.date) or _date.today().isoformat()
     stored = _stored_medication(args.id)
-    if stored is not None:
-        _check_medication_range(stored.start_date, end_date)
+    _check_medication_range(stored.start_date, end_date)
     op = {
         "op": "discontinue_medication",
         "medication_id": args.id,
@@ -1848,6 +1865,7 @@ def cmd_stop_medication(args: argparse.Namespace) -> None:
 
 
 def cmd_delete_medication(args: argparse.Namespace) -> None:
+    _stored_medication(args.id)
     op = {"op": "delete_medication", "medication_id": args.id}
     if _defer_op(op):
         _emit({"status": "ok", "deferred": True, "op": op})

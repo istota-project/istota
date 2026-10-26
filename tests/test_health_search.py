@@ -116,6 +116,14 @@ def test_medication_found_by_generic_name_and_dated_by_creation(config):
     assert hit.date
 
 
+def test_a_db_without_the_medications_table_still_searches_the_rest(config):
+    with populate(config) as conn:
+        insert(conn, "immunizations", {"name": "Falcon", "date_given": "2026-01-02"})
+        conn.execute("DROP TABLE medications")
+        conn.commit()
+    assert [h.kind for h in search(config, "falcon").hits] == ["health_immunization"]
+
+
 def test_reference_tables_are_not_searchable(config):
     with populate(config) as conn:
         conn.execute("INSERT INTO biomarker_refs(name, display_name, category, default_unit) VALUES ('falcon', 'Falcon', 'other', 'u')")
