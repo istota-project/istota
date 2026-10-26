@@ -146,6 +146,20 @@ describe('the app view', () => {
     expect(screen.getByRole('heading', { level: 1, name: 'Board' })).toBeTruthy();
   });
 
+  it('gives another app opened in the same view a frame of its own', async () => {
+    render(Harness);
+    const board = await frame();
+    let answer: (value: AppDetail) => void = () => {};
+    apps.getApp.mockImplementation(() => new Promise<AppDetail>((resolve) => (answer = resolve)));
+    page.url = new URL('http://localhost/apps/open/?id=ledger');
+    // Until the ledger's detail arrives nothing is framed, Board's least of all.
+    await waitFor(() => expect(document.querySelector('iframe')).toBeNull());
+    answer(detail({ app_id: 'ledger', name: 'Ledger', current_version: 5 }));
+    const ledger = await frame();
+    expect(ledger).not.toBe(board);
+    expect(new URL(ledger.src).pathname).toBe('/api/apps/ledger/v/5/frame');
+  });
+
   it('offers Permissions, Versions, Activity, Reload and Uninstall in the kebab', async () => {
     render(Harness);
     await frame();

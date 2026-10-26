@@ -71,7 +71,9 @@
 
   async function load(id: string) {
     const current = loads.next();
-    loading = !detail || detail.app_id !== id;
+    // Another app's detail would start its frame under this app's id.
+    if (detail && detail.app_id !== id) detail = null;
+    loading = !detail;
     try {
       const next = await getApp(id);
       if (!current()) return;
@@ -213,7 +215,7 @@
             </Alert>
           </div>
         {/if}
-        {#key frameKey}
+        {#key `${frameKey}:${detail.app_id}:${detail.current_version}`}
           <AppFrame
             appId={detail.app_id}
             version={detail.current_version}
