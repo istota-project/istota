@@ -3,8 +3,10 @@
 This runs host-side, spawned by the skill proxy outside the sandbox, with the
 daemon's network and nothing confining its egress. The URL and the key come
 from the same operator-written table (`[servarr.apps.<app>]`), so there is no
-vault binding to check, unlike `skills/wordpress/client.py`, of which this is a
-reduced copy. Every request passes, in order:
+vault binding to check, unlike `skills/wordpress/client.py`. Both build their
+requests with `sandbox.guarded_http.pinned_request` and check addresses with
+`sandbox.net_guard.checked_addresses`; the send loop and its retry rules are
+this client's own. Every request passes, in order:
 
 1. **A fixed target.** The URL is the configured base, the app's API prefix and
    a path of fixed lowercase segments with at most one trailing id; anything
@@ -47,7 +49,7 @@ import httpx
 
 from istota import __version__
 from istota.lib.untrusted import frame_untrusted
-from istota.sandbox import net_guard
+from istota.sandbox import guarded_http, net_guard
 from istota.sandbox.net_guard import ip_is_public, resolve_host
 from istota.skills._cli import error_envelope
 
@@ -147,10 +149,6 @@ def mbid(value) -> str:
     return text
 
 
-def _default_port(scheme: str) -> int:
-    return 443 if scheme == "https" else 80
-
-
 def private_set(hosts) -> frozenset:
     """``[servarr] private_hosts`` as the exact, lowercased names guard 2 matches."""
     return net_guard.host_set(hosts)
@@ -202,12 +200,6 @@ def config_problem(app: str, base_url: str, private_hosts) -> str:
     return ""
 
 
-def _host_header(host: str, port: int, scheme: str) -> str:
-    """The Host header, brackets on IPv6, the port only when not the default."""
-    name = f"[{host}]" if ":" in host else host
-    return name if port == _default_port(scheme) else f"{name}:{port}"
-
-
 class ArrClient:
     """One app of the connection, for one CLI run."""
 
@@ -238,12 +230,7 @@ class ArrClient:
         self._failure: ServarrError | None = None
         self._version_error: ServarrError | None = None
         self.version: str | None = None
-        # `verify` is built with trust_env=True on its own: that reads only
-        # SSL_CERT_FILE / SSL_CERT_DIR, while the client's trust_env=False keeps
-        # proxy variables out. httpx couples the two otherwise.
-        verify = True if transport is not None else httpx.create_ssl_context(trust_env=True)
-        self._http = httpx.Client(transport=transport, trust_env=False, follow_redirects=False,
-                                  verify=verify, timeout=LOCAL_TIMEOUT)
+        self._http = guarded_http.new_client(timeout=LOCAL_TIMEOUT, transport=transport)
 
     def __repr__(self) -> str:
         return f"ArrClient({self.app})"
@@ -264,12 +251,11 @@ class ArrClient:
                               "config_invalid")
         parts = urlsplit(self.base_url)
         scheme = parts.scheme.lower()
-        return (scheme, parts.netloc, parts.hostname, parts.port or _default_port(scheme),
+        return (scheme, parts.netloc, parts.hostname, parts.port or guarded_http.default_port(scheme),
                 parts.path.rstrip("/"))
 
     def _checked_addresses(self, scheme: str, host: str, port: int) -> list[str]:
         name = net_guard.normal_host(host)
-        listed = name in self._private
         if plain_http_refused(scheme, name, self._private):
             raise self._error(
                 f"{self.app} is configured over plain HTTP to {name}, which is not in "
@@ -277,22 +263,22 @@ class ArrClient:
                 f"nothing was sent.",
                 "host_refused",
             )
-        addresses = net_guard.host_addresses(host, port, resolve=self._resolve)
+        addresses, refused = net_guard.checked_addresses(
+            host, port, private_hosts=self._private, resolve=self._resolve,
+        )
+        if refused is not None:
+            raise self._error(
+                f"{name} resolves to a private or reserved address ({refused}). Only "
+                f"a host the operator lists in [servarr] private_hosts may; nothing "
+                f"was sent.",
+                "host_refused",
+            )
         if not addresses:
             failure = self._error(f"Could not resolve {name} for {self.app}; nothing was sent.",
                                   "connection_failed")
             self._failure = failure
             raise failure
-        if not listed:
-            address = net_guard.first_non_public(addresses)
-            if address is not None:
-                raise self._error(
-                    f"{name} resolves to a private or reserved address ({address}). Only "
-                    f"a host the operator lists in [servarr] private_hosts may; nothing "
-                    f"was sent.",
-                    "host_refused",
-                )
-        return [str(a) for a in addresses]
+        return addresses
 
     # -- guard 6: the deadline -----------------------------------------------
 
@@ -438,23 +424,13 @@ class ArrClient:
 
     def _build(self, method, url, scheme, host, port, address, params, body,
                timeout) -> httpx.Request:
-        target = httpx.URL(url, params=params).copy_with(host=address, port=port)
         headers = {
-            "Host": _host_header(host, port, scheme),
             "X-Api-Key": self._key,
             "Accept": "application/json",
             "User-Agent": USER_AGENT,
         }
-        if body is None:
-            request = httpx.Request(method, target, headers=headers)
-        else:
-            request = httpx.Request(method, target, headers=headers, json=body)
-        extensions = dict(request.extensions or {})
-        if scheme == "https":
-            extensions["sni_hostname"] = host
-        extensions["timeout"] = httpx.Timeout(timeout).as_dict()
-        request.extensions = extensions
-        return request
+        return guarded_http.pinned_request(method, url, address, headers=headers, json=body,
+                                           params=params, timeout=timeout)
 
     def _send(self, request: httpx.Request) -> tuple[httpx.Response, bytes]:
         response = self._http.send(request, stream=True)

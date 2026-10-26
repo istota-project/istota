@@ -76,7 +76,14 @@ _host_pressure_unavailable_warned = False
 # suppress the "A task you submitted was cancelled" notice when these age out —
 # notifying their output channel turns one wedged worker into a notification
 # flood (a `* * * * *` cron aging out 130+ backed-up runs).
-_AUTOMATED_SOURCE_TYPES = frozenset({"scheduled", "briefing", "heartbeat", "subtask"})
+_AUTOMATED_SOURCE_TYPES = frozenset({"scheduled", "briefing", "heartbeat", "subtask", "assignment"})
+
+# Request kinds that park their task on the stored preview itself rather than
+# on the model's answer. The stoppable ones can be closed by something else
+# (a stop, a charter change) between the hold and the park, so the park
+# re-reads the request under the writer lock and cancels the task if it closed.
+_AUTHORIZATION_KINDS = ("purchase", "recovery_fill", "location_share", "assignment_activation")
+_STOPPABLE_AUTHORIZATION_KINDS = ("location_share", "assignment_activation")
 
 # How long a per-message deletion stays in the ledger the room stream tails.
 _MESSAGE_DELETION_RETENTION_DAYS = 30
@@ -180,6 +187,7 @@ from istota.rooms.surfaces import (
     origin_surface_for_source_type,
 )
 from .transport.registry import (
+    NO_DELIVERY_SOURCE_TYPES,
     _surface_for_source_type,
     answer_is_stored_verbatim,
     result_event_payload,
@@ -199,6 +207,7 @@ from .scheduler_deferred import (  # noqa: F401  -- re-exported for back-compat
     _load_deferred_json,
     _process_deferred_garmin_import,
     _process_deferred_health_ops,
+    _process_deferred_istota_events,
     _process_deferred_kg_ops,
     _process_deferred_kv_ops,
     _process_deferred_sent_emails,
@@ -2158,8 +2167,9 @@ class WorkerPool:
         Concurrency control, in the order it binds:
         1. Instance-level fg cap: max_foreground_workers — a *hard* ceiling on
            foreground threads, which the long allowance below never raises
-        2. Instance-level bg cap: max_background_workers
-        3. Per-user caps: effective_user_max_fg_workers / effective_user_max_bg_workers
+        2. Instance-level bg cap: max_background_workers, and for the
+           assignment lane `[assignments] max_workers`
+        3. Per-user caps (the assignment lane's is `[assignments] user_max_workers`): effective_user_max_fg_workers / effective_user_max_bg_workers
         4. Per-user long allowance (C1, foreground only): a running task past
            `long_task_threshold_minutes` stops counting against (3), which
            raises that user's thread ceiling to `user_fg_cap +
@@ -2195,6 +2205,7 @@ class WorkerPool:
             with db.get_db(self.config.db_path, busy_timeout_ms=timeout_ms) as conn:
                 fg_users = db.get_users_with_pending_fg_queue_tasks(conn)
                 bg_users = db.get_users_with_pending_bg_queue_tasks(conn)
+                asg_users = db.get_users_with_pending_assignment_queue_tasks(conn)
                 # Pre-fetch *claimable* task counts for users that may need multiple
                 # workers. Claimable (not raw pending) so a follow-up gated behind an
                 # active task in the same room counts as 0 — dispatch won't spawn a
@@ -2203,6 +2214,7 @@ class WorkerPool:
                 # legitimate parallelism is unaffected.
                 fg_pending = {uid: db.count_claimable_tasks_for_user_queue(conn, uid, "foreground") for uid in fg_users}
                 bg_pending = {uid: db.count_claimable_tasks_for_user_queue(conn, uid, "background") for uid in bg_users}
+                asg_pending = {uid: db.count_claimable_tasks_for_user_queue(conn, uid, "assignment") for uid in asg_users}
                 # One extra grouped query, joining the same pre-lock scan: the
                 # per-user count of foreground tasks that have demonstrated
                 # they are not interactive (C1). Skipped entirely when the
@@ -2293,26 +2305,50 @@ class WorkerPool:
                     to_spawn -= 1
 
             # Phase 2: background workers
-            active_bg = sum(1 for (_, qt, _) in self._workers if qt == "background")
-            for user_id in bg_users:
-                if active_bg >= bg_cap:
+            self._spawn_capped_workers(
+                "background", bg_users, bg_pending, bg_cap,
+                self.config.effective_user_max_bg_workers,
+            )
+
+            # Phase 3: assignment wakes, their own lane so a wake never takes a
+            # briefing's or a cron job's slot. Not gated on the flag: a wake
+            # queued before it went off must still reach pickup, which ends it.
+            self._spawn_capped_workers(
+                "assignment", asg_users, asg_pending,
+                self.config.assignments.max_workers,
+                lambda _uid: self.config.assignments.user_max_workers,
+            )
+
+    def _spawn_capped_workers(
+        self,
+        queue_type: str,
+        users: "list[str]",
+        pending: "dict[str, int]",
+        instance_cap: int,
+        user_cap_for: "Callable[[str], int]",
+    ) -> None:
+        """Spawn workers on one queue up to an instance cap and a per-user cap.
+
+        The background and assignment phases. Caller holds ``self._lock``.
+        """
+        active = sum(1 for (_, qt, _) in self._workers if qt == queue_type)
+        for user_id in users:
+            if active >= instance_cap:
+                break
+            user_cap = user_cap_for(user_id)
+            existing_slots = {s for (uid, qt, s) in self._workers if uid == user_id and qt == queue_type}
+            to_spawn = min(user_cap - len(existing_slots), pending.get(user_id, 0))
+            available = (s for s in range(user_cap) if s not in existing_slots)
+            for slot in available:
+                if to_spawn <= 0 or active >= instance_cap:
                     break
-                user_bg_cap = self.config.effective_user_max_bg_workers(user_id)
-                existing_slots = {s for (uid, qt, s) in self._workers if uid == user_id and qt == "background"}
-                user_bg_active = len(existing_slots)
-                pending = bg_pending.get(user_id, 0)
-                to_spawn = min(user_bg_cap - user_bg_active, pending)
-                available = (s for s in range(user_bg_cap) if s not in existing_slots)
-                for slot in available:
-                    if to_spawn <= 0 or active_bg >= bg_cap:
-                        break
-                    key = (user_id, "background", slot)
-                    worker = UserWorker(user_id, self.config, self, queue_type="background", slot=slot)
-                    self._workers[key] = worker
-                    worker.start()
-                    logger.info("Spawned background worker for user %s (slot %d)", user_id, slot)
-                    active_bg += 1
-                    to_spawn -= 1
+                key = (user_id, queue_type, slot)
+                worker = UserWorker(user_id, self.config, self, queue_type=queue_type, slot=slot)
+                self._workers[key] = worker
+                worker.start()
+                logger.info("Spawned %s worker for user %s (slot %d)", queue_type, user_id, slot)
+                active += 1
+                to_spawn -= 1
 
     def _retire_surplus_foreground_workers(
         self, fg_threads: "dict[str, int]", discounts: "dict[str, int]"
@@ -3001,6 +3037,7 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
         ("kg_ops", _process_deferred_kg_ops),
         ("health_ops", _process_deferred_health_ops),
         ("garmin_import", _process_deferred_garmin_import),
+        ("istota_events", _process_deferred_istota_events),
         ("user_alerts", _process_deferred_user_alerts),
         ("email_output", _deliver_deferred_email_output),
     )
@@ -3326,6 +3363,43 @@ def _remove_once_job_from_cron_md(config: Config, user_id: str, job_name: str) -
 
 
 def process_one_task(
+    config: Config, dry_run: bool = False, user_id: str | None = None,
+    queue: str | None = None,
+) -> tuple[int, bool] | None:
+    """Claim and process one pending task; see `_process_one_task`.
+
+    An assignment wake's task is finished here once it has reached a terminal
+    status, after its status write has committed, so every terminal path of the
+    body below ends the wake through `assignments.wakes.finish_wake` without
+    each return having to. A task left pending, locked, running or parked is
+    not finished; the gate's `reap_orphans` ends its wake once it is terminal.
+    """
+    processed = _process_one_task(config, dry_run=dry_run, user_id=user_id, queue=queue)
+    if processed is not None and not dry_run:
+        _finish_assignment_wake(config, processed[0])
+    return processed
+
+
+def _finish_assignment_wake(config: Config, task_id: int) -> None:
+    """`finish_wake` for a terminal assignment task. Never raises."""
+    try:
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_id)
+        if task is None or task.source_type != "assignment":
+            return
+        if task.status not in ("completed", "failed", "cancelled"):
+            return
+        from .assignments import wakes as assignment_wakes
+
+        outcome = task.status
+        if task.status == "failed" and task.error == assignment_wakes.NOT_ACTIVE_ERROR:
+            outcome = "not_active"
+        assignment_wakes.finish_wake(config, task, outcome)
+    except Exception:
+        logger.exception("Task %d: finishing its assignment wake failed", task_id)
+
+
+def _process_one_task(
     config: Config, dry_run: bool = False, user_id: str | None = None,
     queue: str | None = None,
 ) -> tuple[int, bool] | None:
@@ -3785,14 +3859,19 @@ def process_one_task(
         relay_question = held_question(conn, task_id)
         if relay_question is None:
             # A stopped request's preview remains private after its hold ends.
+            # An activation whose charter changed before the park is stopped too.
+            # A hold this turn's own later charter edit closed does not stop it.
+            from istota.assignments.lifecycle import CANCELLED_BY_OWN_TURN
             stopped_location = conn.execute(
                 "SELECT * FROM whatsapp_skill_requests WHERE origin_task_id=? "
-                "AND kind='location_share' AND state IN ('cancelled','expired','failed') "
-                "ORDER BY rowid DESC LIMIT 1", (task_id,),
+                "AND kind IN (?, ?) AND state IN ('cancelled','expired','failed') "
+                "AND COALESCE(error_code, '') != ? "
+                "ORDER BY rowid DESC LIMIT 1",
+                (task_id, *_STOPPABLE_AUTHORIZATION_KINDS, CANCELLED_BY_OWN_TURN),
             ).fetchone()
             if stopped_location is not None:
                 relay_question = dict(stopped_location)
-    authorization_question = relay_question if relay_question and relay_question["kind"] in ("purchase", "recovery_fill", "location_share") else None
+    authorization_question = relay_question if relay_question and relay_question["kind"] in _AUTHORIZATION_KINDS else None
     if authorization_question and not success and not dry_run:
         from istota.relay.relays import close_task_questions
         with db.get_db(config.db_path) as conn:
@@ -4037,7 +4116,8 @@ def process_one_task(
                 # A relay or authorization question held on this answer goes too.
                 from istota.relay.relays import close_task_questions
                 close_task_questions(conn, task_id, reason="attempt_failed")
-        if not dry_run and authorization_question and authorization_question["kind"] == "location_share":
+        if (not dry_run and authorization_question
+                and authorization_question["kind"] in _STOPPABLE_AUTHORIZATION_KINDS):
             from istota.relay.requests import write_transaction
             # Keep this lock through parking so stop cannot race the state check.
             with write_transaction(conn):
@@ -4217,6 +4297,7 @@ def process_one_task(
                 if authorization_question is not None:
                     _park_title = (confirmation_source.RECOVERY_FILL_TITLE if authorization_question["kind"] == "recovery_fill"
                                    else confirmation_source.LOCATION_SHARE_TITLE if authorization_question["kind"] == "location_share"
+                                   else confirmation_source.ASSIGNMENT_ACTIVATION_TITLE if authorization_question["kind"] == "assignment_activation"
                                    else confirmation_source.PURCHASE_TITLE)
                     _park_body = (confirmation_source.PARK_BELL_BODY if bell_only
                                   else confirmation_source.PARK_BODY)
@@ -4359,11 +4440,14 @@ def process_one_task(
                 # composer's boilerplate wrapped around mid-turn narration from
                 # a turn that broke, so repeated failures would seed recall with
                 # near-identical text that never answered anything (ISSUE-211).
+                # An assignment wake's answer is its wake row's summary and
+                # goes nowhere else, conversation recall included.
                 if (
                     config.memory_search.enabled
                     and config.memory_search.auto_index_conversations
                     and not task.heartbeat_silent
                     and not is_no_final_answer(result)
+                    and task.source_type not in NO_DELIVERY_SOURCE_TYPES
                 ):
                     try:
                         from .memory.sleep_cycle import speaker_labels
@@ -4625,7 +4709,10 @@ def process_one_task(
                     conn, task_id, "warn",
                     f"Task failed: API policy refusal (not retried): {result[:200]}",
                 )
-                _post_policy_refusal_alert(config, task, result)
+                # A wake's failure is recorded on its wake and counted by
+                # `finish_wake`, which owns what the user hears about it.
+                if task.source_type not in NO_DELIVERY_SOURCE_TYPES:
+                    _post_policy_refusal_alert(config, task, result)
                 if task.scheduled_job_id:
                     fail_count = db.increment_scheduled_job_failures(
                         conn, task.scheduled_job_id, result,
@@ -8028,7 +8115,7 @@ def _emit_host_pressure_breadcrumb() -> None:
 
 
 def _claimable_backlog(config: Config) -> int:
-    """Total claimable tasks across both queues, or 0 if it cannot be read.
+    """Total claimable tasks across the three queues, or 0 if it cannot be read.
 
     The signal that survives the admission gate. `active_count` does not: a shut
     gate drains the pool within `worker_idle_timeout`, so "no workers" stops
@@ -8046,6 +8133,7 @@ def _claimable_backlog(config: Config) -> int:
             for users, queue in (
                 (db.get_users_with_pending_fg_queue_tasks(conn), "foreground"),
                 (db.get_users_with_pending_bg_queue_tasks(conn), "background"),
+                (db.get_users_with_pending_assignment_queue_tasks(conn), "assignment"),
             ):
                 for user_id in users:
                     total += db.count_claimable_tasks_for_user_queue(
@@ -9588,44 +9676,68 @@ def _resolve_job_model_effort(job, app_config, pinned_brain, job_effort):
     no handler at all, would abandon the rest of its single pass. The raw values
     are the fallback because the executor resolves again as defence in depth.
     """
-    raw_base, raw_effort = split_effort(job.model)
+    return resolve_pinned_model_effort(
+        app_config,
+        source_type="scheduled",
+        model=job.model,
+        effort=job_effort,
+        pinned_brain=pinned_brain,
+        label=f"Scheduled job '{job.name}' (user: {job.user_id})",
+        warn_key=f"cron_model:{job.id}",
+    )
+
+
+def resolve_pinned_model_effort(
+    app_config: Config,
+    *,
+    source_type: str,
+    model: str,
+    effort: str,
+    pinned_brain: str,
+    label: str,
+    warn_key: str,
+) -> tuple[str, str]:
+    """``(model, effort)`` for a task created from a stored row, resolved by
+    the brain that will run it. ``_resolve_job_model_effort`` states the rules;
+    an assignment's wake (`assignments.wakes`) is the second caller.
+
+    ``warn_key`` must be built from the row id, never from a model-writable
+    value: ``_warned_keys`` is process-global with no eviction. Never raises.
+    """
+    raw_base, raw_effort = split_effort(model)
     try:
-        job_brain = make_brain(
+        row_brain = make_brain(
             resolve_brain_kind(
-                "scheduled", app_config.brain, override=(pinned_brain or None),
+                source_type, app_config.brain, override=(pinned_brain or None),
             )
         )
-        pair = job_brain.resolve_alias(job.model)
+        pair = row_brain.resolve_alias(model)
         if pair:
-            job_effort = job_effort or (pair[1] or "")
+            effort = effort or (pair[1] or "")
         if pair and pair[0]:
-            return pair[0], job_effort
-        job_model = job_brain.resolve_model_name(job.model)
+            return pair[0], effort
+        resolved = row_brain.resolve_model_name(model)
     except Exception as e:
         logger.error(
-            "Scheduled job '%s' (user: %s): could not resolve model %r against "
-            "its own brain (%s); passing it through unresolved",
-            job.name, job.user_id, job.model, e,
+            "%s: could not resolve model %r against its own brain (%s); "
+            "passing it through unresolved",
+            label, model, e,
         )
-        return job.model, job_effort
-    if job_model == raw_base:
+        return model, effort
+    if resolved == raw_base:
         # Nothing in the alias table recognised the name, so the base passes
         # through — legitimate for a brain that does no aliasing, which is why
         # the wording says what will happen rather than calling it an error. A
         # `:effort` modifier on such a name is dropped, matching
         # `_resolve_crossing_model_effort`'s fallback, and saying so is the
-        # whole reason this warns. Keyed on the row id: `_warned_keys` is a
-        # process-global set with no eviction and `job.name` / `job.model` are
-        # both model-writable through the `schedules` skill, so keying on those
-        # is one durable entry per value anyone cares to write.
+        # whole reason this warns.
         _warn_once(
-            f"cron_model:{job.id}",
-            f"Scheduled job '{job.name}' (user: {job.user_id}): model "
-            f"{job.model!r} resolved to nothing on this job's brain; using "
-            f"{job_model!r} as written"
+            warn_key,
+            f"{label}: model {model!r} resolved to nothing on its brain; using "
+            f"{resolved!r} as written"
             + (f" and dropping the ':{raw_effort}' modifier" if raw_effort else ""),
         )
-    return job_model, job_effort
+    return resolved, effort
 
 
 def _create_scheduled_job_task(
@@ -10129,6 +10241,19 @@ def build_interval_gates(
             if scheduled_tasks:
                 logger.info("Queued %d scheduled job(s)", len(scheduled_tasks))
 
+    def _assignments(now: float) -> None:
+        # Orphans first, so an assignment whose wake ended with no one to finish
+        # it is back to `sleeping` before the due scan reads it.
+        from .assignments import wakes
+
+        with db.get_db(config.db_path) as conn:
+            reaped = wakes.reap_orphans(conn, config)
+            created = wakes.dispatch_due(conn, config)
+        if reaped:
+            logger.info("Finished %d orphaned assignment wake(s)", len(reaped))
+        if created:
+            logger.info("Queued %d assignment wake(s)", len(created))
+
     def _sleep_cycles(now: float) -> None:
         _run_sleep_cycles(config)
 
@@ -10137,6 +10262,22 @@ def build_interval_gates(
 
     def _email_poll(now: float) -> None:
         _run_email_poll(config)
+
+    def _ics_poll(now: float) -> None:
+        from .sharing.ics import poll_due_feeds
+
+        report = poll_due_feeds(config)
+        if report.polled:
+            logger.info(
+                "ICS feeds polled=%d changed=%d unchanged=%d failed=%d",
+                report.polled, report.changed, report.unchanged, report.failed,
+            )
+
+    def _ocm_expire(now: float) -> None:
+        from .sharing.ocm import expire_pending
+
+        with db.get_db(config.db_path) as conn:
+            expire_pending(conn, config)
 
     def _shared_files(now: float) -> None:
         from .shared_file_organizer import discover_and_organize_shared_files
@@ -10165,7 +10306,14 @@ def build_interval_gates(
                 db.count_pending_tasks_for_user_queue(conn, uid, "background")
                 for uid in db.get_users_with_pending_bg_queue_tasks(conn)
             )
-        write_status(config, pool.active_count, fg_pending, bg_pending)
+            assignment_pending = sum(
+                db.count_pending_tasks_for_user_queue(conn, uid, "assignment")
+                for uid in db.get_users_with_pending_assignment_queue_tasks(conn)
+            )
+        write_status(
+            config, pool.active_count, fg_pending, bg_pending,
+            pending_assignment=assignment_pending,
+        )
 
     def _db_health(now: float) -> None:
         check_db_health(config)
@@ -10304,14 +10452,14 @@ def build_interval_gates(
             one_shot_on_error=None,
         ),
         # ------------------------------------------------------------------
-        # KNOWN MISMATCH, preserved deliberately. These four read
+        # KNOWN MISMATCH, preserved deliberately. These five read
         # `briefing_check_interval` and none of them is a briefing: shared
-        # blocks, scheduled jobs, the sleep-cycle poll and the cleanup sweep.
-        # Giving each its own key is an operator-visible config change across
-        # `config.py`, `config.example.toml`, the Ansible template and the
-        # Docker render, so it is its own piece of work. The point of the table
-        # is that the mismatch is four visible rows instead of four `if`
-        # statements 300 lines apart. Do not "fix" it here.
+        # blocks, scheduled jobs, assignment wakes, the sleep-cycle poll and
+        # the cleanup sweep. Giving each its own key is an operator-visible
+        # config change across `config.py`, `config.example.toml`, the Ansible
+        # template and the Docker render, so it is its own piece of work. The
+        # point of the table is that the mismatch is visible rows instead of
+        # `if` statements 300 lines apart. Do not "fix" it here.
         # ------------------------------------------------------------------
         IntervalGate(
             name="shared-blocks",
@@ -10368,6 +10516,20 @@ def build_interval_gates(
             # Bare in `run_scheduler` today, like the briefing sweep above.
             one_shot_on_error=None,
         ),
+        # Assignment wakes: finish orphaned ones, then create the due ones.
+        # Daemon only, not `one_shot`: the wake runs on the daemon's
+        # assignment lane, and a single `istota run` pass is not where an
+        # unattended goal should start spending. Off the dispatch thread: a
+        # finish reads and writes the scratchpad and validated files on the
+        # mount, and both halves send bell notices (ISSUE-143).
+        IntervalGate(
+            name="assignments",
+            run=_assignments,
+            field="briefing_check_interval",  # mismatch: not a briefing
+            enabled=lambda c: c.experimental.is_enabled("skill_assignment"),
+            background=True,
+            on_error="Error checking assignments: %s",
+        ),
         # Off the dispatch thread (ISSUE-144 Tier 2): extraction makes
         # synchronous per-user LLM calls and can take minutes. This interval is
         # only the *poll* cadence — each check's own cron decides whether to do
@@ -10412,6 +10574,29 @@ def build_interval_gates(
             one_shot=True,
             # `_run_email_poll` guards itself.
             one_shot_on_error=None,
+        ),
+        # ICS feeds users shared with Istota (`sharing.ics`). Network I/O to
+        # hosts users chose, so off the dispatch thread. Each feed carries its
+        # own `next_poll_at` (`[sharing] ics_poll_interval`, backed off on
+        # failure), so the gate only looks for due ones, once a minute; one
+        # indexed read when none is due. `poll_due_feeds` never raises.
+        IntervalGate(
+            name="sharing-ics-poll",
+            run=_ics_poll,
+            fixed_interval=60,
+            background=True,
+            overlap_expected=True,
+        ),
+        # OCM folder offers nobody answered within `[sharing.ocm] pending_days`
+        # (`sharing.ocm.expire_pending`): declined, their secrets deleted, and
+        # nothing sent to the sender. Database only, so on the loop thread;
+        # hourly, since the window is days. Runs with OCM off too, so offers
+        # held when it was turned off still lose their secrets.
+        IntervalGate(
+            name="sharing-ocm-expire",
+            run=_ocm_expire,
+            fixed_interval=3600,
+            on_error="Error expiring folder offers: %s",
         ),
         # Before the TASKS.md poll below, so the files are in place when it
         # walks them. Mount only: on a local workspace nothing a user shares

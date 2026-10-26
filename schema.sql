@@ -162,6 +162,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     skill TEXT,
     skill_args TEXT,
 
+    -- The assignment this task is a wake of (`assignments.id`), set only on a
+    -- `source_type = 'assignment'` task. NULL on every other task.
+    assignment_id INTEGER,
+
     FOREIGN KEY (parent_task_id) REFERENCES tasks(id)
 );
 
@@ -179,6 +183,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(queue, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_queue_started ON tasks(queue, status, started_at, user_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_user_created ON tasks(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_assignment ON tasks(assignment_id);
 
 -- User resource permissions
 CREATE TABLE IF NOT EXISTS user_resources (
@@ -956,6 +961,7 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     outbound_approval TEXT NOT NULL DEFAULT '',          -- outbound email approval: '' = unset (follow [email] outbound_approval_floor) | off | untrusted | all
     external_turn_display TEXT NOT NULL DEFAULT 'collapsed', -- external-origin turn body in web chat: full | collapsed | hidden (the turn itself always renders)
     relay_delivery TEXT NOT NULL DEFAULT '',             -- where relay questions from other users reach this user: '' (asker's choice) | room | whatsapp | sms
+    calendar_delivery TEXT NOT NULL DEFAULT 'invite',    -- how events on Istota's calendar reach this user: invite | feed (feed whenever [email] is off)
     default_briefings INTEGER NOT NULL DEFAULT 1,        -- seed the shared [[default_briefings]] set into this user
     briefing_email_html INTEGER NOT NULL DEFAULT 1,      -- briefing email as multipart/alternative (HTML + plain) vs plain only
     show_nav_unread_badges INTEGER NOT NULL DEFAULT 0,
@@ -1949,13 +1955,15 @@ CREATE TABLE IF NOT EXISTS task_usage (
 
     rate_limit_type        TEXT,
     rate_limit_status      TEXT,
-    rate_limit_resets_at   INTEGER
+    rate_limit_resets_at   INTEGER,
+    assignment_id          INTEGER           -- a wake's assignment; outlives the task row
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_usage_created ON task_usage(created_at);
 CREATE INDEX IF NOT EXISTS idx_task_usage_user    ON task_usage(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_usage_task    ON task_usage(task_id);
 CREATE INDEX IF NOT EXISTS idx_task_usage_origin  ON task_usage(origin, created_at);
+CREATE INDEX IF NOT EXISTS idx_task_usage_assignment ON task_usage(assignment_id);
 -- Partial: non-task rows all carry task_id NULL and must not collide.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_usage_attempt
     ON task_usage(task_id, attempt_seq) WHERE task_id IS NOT NULL;
@@ -2087,7 +2095,7 @@ CREATE TABLE IF NOT EXISTS whatsapp_skill_requests (
     requester_user_id TEXT NOT NULL,
     origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     request_key TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase', 'recovery_fill', 'location_share')),
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase', 'recovery_fill', 'location_share', 'assignment_activation')),
     recipient_user_id TEXT NOT NULL,
     relay_id TEXT UNIQUE,
     text TEXT,
@@ -2822,3 +2830,225 @@ CREATE TABLE IF NOT EXISTS web_mobile_auth_requests (
 CREATE INDEX IF NOT EXISTS idx_web_mobile_auth_expiry ON web_mobile_auth_requests(expires_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_web_mobile_auth_code ON web_mobile_auth_requests(code_digest);
 CREATE INDEX IF NOT EXISTS idx_web_mobile_auth_source ON web_mobile_auth_requests(source, expires_at);
+
+-- Things a user shared with Istota through an open protocol
+-- (istota.sharing.sources): an ICS feed or an OCM folder share. The bearer
+-- secret is never here: an ICS address or a held OCM secret is a `secrets`
+-- row under service `shared_source`, an accepted share's secret the local
+-- credential `ocm_share_<id>`. `declined` and `revoked` rows keep their
+-- identity columns and lose the secret, so a repeat of the same remote
+-- resource is recognised rather than duplicated.
+CREATE TABLE IF NOT EXISTS shared_sources (
+    id INTEGER PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('ics_feed', 'ocm_share')),
+    state TEXT NOT NULL CHECK (state IN ('pending', 'active', 'declined', 'revoked', 'error')),
+    remote_host TEXT NOT NULL,         -- host[:port], for display and binding
+    remote_key TEXT NOT NULL,          -- ics: sha256 of the normalized URL; ocm: '<sender host>|<providerId>'
+    access TEXT NOT NULL DEFAULT 'read' CHECK (access IN ('read', 'write')),
+    extras TEXT,                       -- JSON, never a secret
+    error_count INTEGER NOT NULL DEFAULT 0,
+    last_reason TEXT,                  -- a fixed reason code, never response text
+    last_ok_at TEXT,
+    next_poll_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, kind, remote_key)
+);
+CREATE INDEX IF NOT EXISTS idx_shared_sources_due ON shared_sources(kind, state, next_poll_at);
+
+-- The last good body of each ICS feed (istota.sharing.ics), filled by the
+-- scheduler's `sharing-ics-poll` gate and read by the calendar skill, so a task
+-- never makes the daemon fetch. Deleted with its source's secret when the
+-- source is declined, revoked or its user removed.
+CREATE TABLE IF NOT EXISTS shared_feed_cache (
+    source_id INTEGER PRIMARY KEY,
+    body BLOB NOT NULL,
+    etag TEXT,
+    last_modified TEXT,
+    fetched_at TEXT NOT NULL
+);
+
+-- Single events Istota organizes for a user (istota.sharing.events), written
+-- by the calendar skill's deferred ops and applied by the scheduler, which
+-- takes the user from the task and refuses a UID another user owns. Times are
+-- UTC (`...Z`), or dates for an all-day event. The feed at
+-- /istota/calendar/<token>.ics carries the confirmed ones.
+CREATE TABLE IF NOT EXISTS istota_events (
+    id INTEGER PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    uid TEXT NOT NULL UNIQUE,
+    sequence INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed', 'cancelled')),
+    summary TEXT NOT NULL,
+    description TEXT,
+    location TEXT,
+    dtstart TEXT NOT NULL,             -- UTC ISO 8601, or YYYY-MM-DD when all_day
+    dtend TEXT,
+    all_day INTEGER NOT NULL DEFAULT 0,
+    attendee_status TEXT,              -- last authenticated PARTSTAT
+    invite_status TEXT,                -- sent | send_failed | no_address | feed; NULL = no invitation yet
+    created_by_task INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    cancelled_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_istota_events_user ON istota_events(user_id, status);
+
+-- Invitations other people sent a user, recorded from admitted, authenticated
+-- mail whose From is the ORGANIZER (istota.sharing.itip). Keyed on the
+-- authenticated sender, so a sender replaces only rows for events it
+-- organizes. Read by the calendar skill as `feed:invitations`, fenced.
+CREATE TABLE IF NOT EXISTS received_invitations (
+    id INTEGER PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    uid TEXT NOT NULL,
+    organizer TEXT NOT NULL,           -- the authenticated From address
+    sequence INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed', 'cancelled')),
+    summary TEXT,
+    description TEXT,
+    location TEXT,
+    dtstart TEXT,                      -- UTC `...Z`, a date when all_day, or floating local time
+    dtend TEXT,
+    all_day INTEGER NOT NULL DEFAULT 0,
+    message_id TEXT,
+    received_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, uid, organizer)
+);
+
+-- The bearer token of each user's Istota calendar feed, as its SHA-256 digest
+-- only. One live token per user; a reset replaces the row.
+CREATE TABLE IF NOT EXISTS calendar_feed_tokens (
+    user_id TEXT PRIMARY KEY,
+    token_sha256 TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at TEXT
+);
+
+-- Assignments: goals Istota carries across days (.claude/rules/assignments.md).
+-- Every timestamp here is ISO-Z, matching task_usage; compare with `tasks`
+-- columns (datetime('now') format) only after converting one side. The
+-- ON DELETE CASCADE clauses are documentation: istota never sets
+-- PRAGMA foreign_keys=ON.
+CREATE TABLE IF NOT EXISTS assignments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    title TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    autonomy TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'draft'
+        CHECK (state IN ('draft','active','sleeping','waiting','paused','completed','abandoned')),
+    state_reason TEXT,
+    waiting_on TEXT,                          -- JSON list of inbox kinds
+    budget TEXT NOT NULL,                     -- JSON: max_cost_usd, max_wakes, per_wake_minutes, per_wake_turns
+    budget_low_sent INTEGER NOT NULL DEFAULT 0,
+    deadline TEXT,                            -- ISO-Z
+    cadence_minutes INTEGER NOT NULL DEFAULT 360,
+    auto_complete INTEGER NOT NULL DEFAULT 0,
+    model TEXT, effort TEXT, brain TEXT,
+    settings TEXT NOT NULL DEFAULT '{}',      -- experiment knobs, unused in core
+    dir_relpath TEXT NOT NULL,                -- relative to the bot dir: assignments/<slug>
+    next_wake_at TEXT,                        -- ISO-Z
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    activated_at TEXT,
+    closed_at TEXT,
+    UNIQUE (user_id, slug)
+);
+CREATE INDEX IF NOT EXISTS idx_assignments_due ON assignments(state, next_wake_at);
+
+CREATE TABLE IF NOT EXISTS assignment_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('mechanical','confirmed')),
+    validator TEXT,                           -- JSON, mechanical only, host-written
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','passing','failing','confirmed')),
+    checked_at TEXT, detail TEXT
+);
+
+CREATE TABLE IF NOT EXISTS assignment_frozen (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    value TEXT NOT NULL,
+    UNIQUE (assignment_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS assignment_wakes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    task_id INTEGER,                          -- dangles after task retention
+    kind TEXT NOT NULL DEFAULT 'work',
+    fired_by TEXT NOT NULL CHECK (fired_by IN ('time','inbox','deadline','manual')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    started_at TEXT, ended_at TEXT,
+    outcome TEXT,                             -- next|no_next_step|failed|cancelled|not_active|complete_proposed|complete_refused|completed
+    next_request TEXT,                        -- JSON from `assignment next`
+    complete_request TEXT,                    -- evidence from `assignment complete`
+    progress_note TEXT,                       -- `--progress`, not evidence
+    summary TEXT,
+    progress_signals TEXT NOT NULL DEFAULT '[]',
+    cost_usd REAL,                            -- copied from task_usage at finish, for the timeline
+    UNIQUE (assignment_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS assignment_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    wake_id INTEGER REFERENCES assignment_wakes(id) ON DELETE CASCADE,  -- NULL for the seed
+    phase TEXT NOT NULL CHECK (phase IN ('seed','before','after')),
+    sha256 TEXT NOT NULL,
+    content TEXT NOT NULL,
+    truncated INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE TABLE IF NOT EXISTS assignment_inbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,                       -- user_note|handoff_done|charter_change|scratchpad_changed|item_confirmed|budget_low|completion_rejected
+    trusted INTEGER NOT NULL DEFAULT 0,
+    payload TEXT NOT NULL,                    -- JSON
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    consumed_by_wake INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_assignment_inbox_open ON assignment_inbox(assignment_id, consumed_by_wake);
+
+CREATE TABLE IF NOT EXISTS assignment_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    wake_id INTEGER,
+    kind TEXT NOT NULL CHECK (kind IN ('handoff')),   -- question, approval, checkpoint come with the user-loop spec
+    text TEXT NOT NULL,
+    report_spec TEXT,
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','done')),
+    due_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    resolved_at TEXT, response TEXT
+);
+
+CREATE TABLE IF NOT EXISTS assignment_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    wake_id INTEGER,
+    target TEXT NOT NULL,
+    tried TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('ok','failed','partial')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_assignment_attempts_target ON assignment_attempts(assignment_id, target);
+
+CREATE TABLE IF NOT EXISTS assignment_events (           -- append-only audit
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    wake_id INTEGER,
+    kind TEXT NOT NULL,
+    actor TEXT NOT NULL CHECK (actor IN ('user','assignment','system')),
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);

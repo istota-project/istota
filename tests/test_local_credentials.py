@@ -424,3 +424,97 @@ class TestSetSecretOnACallersConnection:
             conn.execute("BEGIN IMMEDIATE")
             secrets_store.set_secret(db_path, "alice", "svc", "k", VALUE, connection=conn)
         assert secrets_store.get_secret(db_path, "alice", "svc", "k") == VALUE
+
+
+class TestTheOcmSharePrefix:
+    """`ocm_share_` names belong to accepted OCM shares, written by `sharing/ocm.py` only."""
+
+    SHARE = LocalCredential(name="ocm_share_3", value=VALUE, url="https://cloud.example.org")
+
+    def _create_share(self, db_path, **kwargs):
+        with db.get_db(db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return local_credentials.create(conn, "alice", self.SHARE, **kwargs)
+
+    def test_a_hand_made_ocm_share_name_is_refused(self, db_path):
+        with pytest.raises(LocalCredentialError) as err:
+            _create(db_path, self.SHARE)
+        assert err.value.field == "name"
+        assert "reserved" in str(err.value)
+        assert _counts(db_path) == (0, 0, 0)
+
+    def test_the_system_prefix_admits_it(self, db_path):
+        result = self._create_share(db_path, access=ALL_ROOMS, system_prefix="ocm_share_")
+        assert result["name"] == "ocm_share_3"
+        assert _entry(db_path, "ocm_share_3") == VALUE
+        assert _grant(db_path, "ocm_share_3") is not None
+
+    @pytest.mark.parametrize("name", ["forge.gitlab", "generated_mail"])
+    def test_the_system_prefix_admits_no_other_reserved_name(self, db_path, name):
+        with db.get_db(db_path) as conn, pytest.raises(LocalCredentialError):
+            conn.execute("BEGIN IMMEDIATE")
+            local_credentials.create(conn, "alice", LocalCredential(name=name, value=VALUE),
+                                     system_prefix="ocm_share_")
+
+    @pytest.mark.parametrize("prefix", ["forge.", "generated_", "ocm_"])
+    def test_only_the_ocm_share_prefix_is_a_system_prefix(self, db_path, prefix):
+        with db.get_db(db_path) as conn, pytest.raises(ValueError):
+            conn.execute("BEGIN IMMEDIATE")
+            local_credentials.create(conn, "alice", self.SHARE, system_prefix=prefix)
+
+    def test_the_settings_edit_cannot_change_the_value_or_site(self, db_path):
+        self._create_share(db_path, access=ALL_ROOMS, system_prefix="ocm_share_")
+        with pytest.raises(LocalCredentialError) as err:
+            _update(db_path, "ocm_share_3", value=NEW_VALUE, url="https://elsewhere.example")
+        assert err.value.field == "name"
+        assert _entry(db_path, "ocm_share_3") == VALUE
+
+    def test_the_system_prefix_lets_the_share_replace_its_value(self, db_path):
+        self._create_share(db_path, access=ALL_ROOMS, system_prefix="ocm_share_")
+        _update(db_path, "ocm_share_3", value=NEW_VALUE, url="https://cloud.example.org",
+                system_prefix="ocm_share_")
+        assert _entry(db_path, "ocm_share_3") == NEW_VALUE
+        assert _grant(db_path, "ocm_share_3") is not None
+
+    def test_the_user_can_still_delete_it(self, db_path):
+        self._create_share(db_path, access=ALL_ROOMS, system_prefix="ocm_share_")
+        assert local_credentials.delete(db_path, "alice", "ocm_share_3") is True
+        assert _counts(db_path) == (0, 0, 0)
+
+
+class TestDeleteIn:
+    """The connection form of `delete`, so a caller's transaction holds it."""
+
+    def test_it_deletes_inside_the_callers_transaction_and_rolls_back_with_it(self, db_path):
+        _create(db_path, LocalCredential(name="api_key", value=VALUE, url="api.example.com"),
+                access=ALL_ROOMS)
+        with db.get_db(db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            assert local_credentials.delete_in(conn, "alice", "api_key") is True
+            assert conn.execute(
+                "SELECT COUNT(*) FROM secrets WHERE key='api_key'"
+            ).fetchone()[0] == 0
+            conn.rollback()
+        assert _entry(db_path, "api_key") == VALUE
+        assert _grant(db_path, "api_key") is not None
+
+    def test_it_commits_with_the_caller(self, db_path):
+        _create(db_path, LocalCredential(name="api_key", value=VALUE, url="api.example.com"),
+                access=ALL_ROOMS)
+        with db.get_db(db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            local_credentials.delete_in(conn, "alice", "api_key")
+        assert _counts(db_path) == (0, 0, 0)
+
+    def test_a_missing_name_is_false(self, db_path):
+        with db.get_db(db_path) as conn:
+            assert local_credentials.delete_in(conn, "alice", "nothing_here") is False
+
+    def test_a_name_another_source_owns_is_refused(self, db_path):
+        secrets_store.set_secret(
+            db_path, "alice", VAULT_ENTRY_SERVICE, "generated_mail", "made-here",
+            binding=bindings.parse_binding("https://mail.example.com", {}, [], source="generated"),
+        )
+        with db.get_db(db_path) as conn, pytest.raises(LocalCredentialError):
+            local_credentials.delete_in(conn, "alice", "generated_mail")
+        assert _entry(db_path, "generated_mail") == "made-here"

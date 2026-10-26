@@ -25,10 +25,13 @@ REQUEST_KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 #: room writing to its principal privately (the name predates ISSUE-608 and is
 #: kept to avoid a CHECK rebuild), `room_post` a private-room task's post into
 #: a shared room, held for the member's approval.
-KINDS = ("self_send", "relay_question", "side_whisper", "room_post", "purchase", "recovery_fill", "location_share")
+KINDS = ("self_send", "relay_question", "side_whisper", "room_post", "purchase", "recovery_fill",
+         "location_share", "assignment_activation")
 ROOM_KINDS = ("side_whisper", "room_post")
-_SELF_KINDS = ("self_send", "side_whisper", "room_post", "purchase", "recovery_fill", "location_share")
-_HELD_KINDS = ("relay_question", "room_post", "purchase", "recovery_fill", "location_share")
+_SELF_KINDS = ("self_send", "side_whisper", "room_post", "purchase", "recovery_fill", "location_share",
+               "assignment_activation")
+_HELD_KINDS = ("relay_question", "room_post", "purchase", "recovery_fill", "location_share",
+               "assignment_activation")
 
 
 class RequestError(ValueError):
@@ -808,6 +811,11 @@ def approve_request(conn, *, task, request_id: str, preview_digest: str, config=
                 conn, config, grant_id=destination.get("grant_id"), request_id=request_id,
                 preview_digest=preview_digest, actor_user_id=task.user_id, now=datetime.now(timezone.utc),
             )
+        elif row["kind"] == "assignment_activation":
+            from istota.assignments.lifecycle import activate_from_request
+
+            activate_from_request(conn, config, request_id=request_id,
+                                  preview_digest=preview_digest, actor_user_id=task.user_id)
         elif row["kind"] == "recovery_fill":
             from istota.credentials import recovery_fill
             destination = json.loads(row["destination"] or "{}")

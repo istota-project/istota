@@ -250,6 +250,16 @@ CASES: dict[tuple[str, str, str], Case] = {
         main="istota.skills.transcribe",
         patch=("istota.skills.transcribe", "cmd_ocr"),
     ),
+    ("shares", "get", "dest"): Case(
+        argv=lambda p: ["get", "share:1:notes.txt", "--dest", p],
+        main="istota.skills.shares",
+        patch=("istota.skills.shares.COMMANDS", "get"),
+    ),
+    ("shares", "put", "sources"): Case(
+        argv=lambda p: ["put", p, "--to", "share:1"],
+        main="istota.skills.shares",
+        patch=("istota.skills.shares.COMMANDS", "put"),
+    ),
     ("whisper", "transcribe", "audio_path"): Case(
         argv=lambda p: ["transcribe", p],
         main="istota.skills.whisper.cli",

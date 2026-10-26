@@ -9788,6 +9788,150 @@ def check_mail_account_isolation(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def check_sharing_ics_feeds(config: "Config", probe: bool) -> CheckResult:
+    """How the ICS feeds users shared with Istota are doing, as counts by state.
+
+    Never a URL, a host or a calendar's name: the address is a bearer secret
+    and the rest belongs to the user. WARNs when there are feeds and none of
+    them is answering, which points at the daemon's own egress (or a
+    `[sharing] private_hosts` entry) rather than at one provider.
+
+    Also WARNs when invitations for Istota's own calendar go out by mail and
+    `[email] authserv_id` is unset: the user's answers are then consumed and
+    never applied (`sharing.itip.apply_reply`). Counted over users who have
+    events and have not chosen the feed, so an install not using the calendar
+    is not told about it.
+    """
+    name = "sharing.ics_feeds"
+    db_path = Path(config.db_path)
+    if not db_path.exists():
+        return CheckResult(name, SKIP, f"no framework database at {db_path}")
+    check_replies = bool(config.email.enabled) and not (config.email.authserv_id or "").strip()
+    inviting = 0
+    try:
+        conn = sqlite_util.connect_read_only(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT state, COUNT(*) FROM shared_sources WHERE kind = 'ics_feed'"
+                " GROUP BY state"
+            ).fetchall()
+            if check_replies:
+                inviting = conn.execute(
+                    "SELECT COUNT(DISTINCT e.user_id) FROM istota_events e"
+                    " LEFT JOIN user_profiles p ON p.user_id = e.user_id"
+                    " WHERE COALESCE(p.calendar_delivery, 'invite') != 'feed'"
+                ).fetchone()[0]
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - a check never raises
+        return CheckResult(
+            name, WARN, f"could not read the shared sources ({type(exc).__name__})",
+            remedy=(
+                "Check `runtime.framework_db`; a missing table means the "
+                "database has not been migrated, which `istota init` does."
+            ),
+        )
+    counts = {state: count for state, count in rows}
+    active, failing = counts.get("active", 0), counts.get("error", 0)
+    if inviting:
+        return CheckResult(
+            name, WARN,
+            f"{inviting} user(s) get calendar invitations by mail, and `[email] authserv_id` "
+            "is not set, so their accept or decline is never recorded",
+            remedy=(
+                "Set `[email] authserv_id` to your mail server's authserv-id (the name "
+                "before the first `;` in the Authentication-Results it stamps)."
+            ),
+        )
+    if not active and not failing:
+        return CheckResult(name, OK, "no calendar feeds are subscribed")
+    detail = f"{active} calendar feed(s) answering, {failing} failing"
+    if failing and not active:
+        return CheckResult(
+            name, WARN, detail + "; none is answering",
+            remedy=(
+                "Check that the daemon can reach the internet over https; a feed "
+                "on an internal host needs that host in `[sharing] private_hosts`."
+            ),
+        )
+    return CheckResult(name, OK, detail)
+
+
+def _fetch_ocm_discovery(url: str) -> tuple[int, dict | None]:
+    """GET istota's own discovery document from outside: the status and the JSON object, if any."""
+    import httpx
+
+    response = httpx.get(url, timeout=10.0, follow_redirects=False,
+                         headers={"Accept": "application/json"})
+    try:
+        document = response.json()
+    except ValueError:
+        document = None
+    return response.status_code, document if isinstance(document, dict) else None
+
+
+def check_sharing_ocm(config: "Config", probe: bool) -> CheckResult:
+    """Whether a remote server can reach istota's OCM receiver.
+
+    SKIPs while `[sharing.ocm] enabled` is off. FAILs when `[site] hostname`
+    is unset or a loopback name (the `local` ingress, which no remote server
+    can reach), or is the host of `[nextcloud] url`, whose OCM it would
+    shadow. Under `probe=True` it fetches `https://<site hostname>/ocm-provider/`,
+    the path Nextcloud reads, and FAILs unless the answer is istota's own
+    document, so an nginx or proxy in front that answers something else is
+    caught. A probe failure names the exception type only.
+    """
+    from urllib.parse import urlsplit
+
+    name = "sharing.ocm"
+    if not config.sharing.ocm.enabled:
+        return CheckResult(name, SKIP, "OCM receiving is off")
+    hostname = (config.site.hostname or "").strip()
+    if not hostname:
+        return CheckResult(
+            name, FAIL, "OCM receiving is on and `[site] hostname` is not set",
+            remedy="Set `[site] hostname` to the public name istota is served on.",
+        )
+    host = urlsplit(f"//{hostname}").hostname or ""
+    if host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost"):
+        return CheckResult(
+            name, FAIL,
+            f"`[site] hostname` is {hostname}, which no remote server can reach",
+            remedy=(
+                "OCM needs both servers to reach each other over https; turn "
+                "`[sharing.ocm] enabled` off on a local install."
+            ),
+        )
+    if config.nextcloud.url and host == urlsplit(config.nextcloud.url).hostname:
+        return CheckResult(
+            name, FAIL, "`[site] hostname` is the host of `[nextcloud] url`",
+            remedy="Serve istota on a host of its own, or turn `[sharing.ocm] enabled` off.",
+        )
+    url = f"https://{hostname}/ocm-provider/"
+    if not probe:
+        return CheckResult(name, OK, f"served at {url} (not fetched)")
+    from istota.sharing import ocm
+
+    expected = ocm.discovery_document(config)
+    try:
+        status, document = _fetch_ocm_discovery(url)
+    except Exception as exc:  # noqa: BLE001 - a check never raises
+        return CheckResult(
+            name, FAIL, f"could not fetch {url} ({type(exc).__name__})",
+            remedy="Check DNS and the certificate for `[site] hostname`, and that nginx is up.",
+        )
+    if status != 200 or document is None or document.get("endPoint") != expected["endPoint"] \
+            or document.get("provider") != expected["provider"] or not document.get("apiVersion"):
+        return CheckResult(
+            name, FAIL, f"{url} did not answer with istota's discovery document (HTTP {status})",
+            remedy=(
+                "Something in front of istota answers that path; route `/ocm-provider/`, "
+                "`/.well-known/ocm` and `/ocm/` to the stack's nginx."
+            ),
+        )
+    return CheckResult(name, OK, f"{url} answers with istota's discovery document")
+
+
 def check_email_address_uniqueness(config: "Config", probe: bool) -> CheckResult:
     """Whether any email address is held by more than one user.
 
@@ -10150,6 +10294,8 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("talk.signaling_watchers", check_signaling_watchers),
     ("nextcloud.connection", check_nextcloud_connection),
     ("servarr.connection", check_servarr_connection),
+    ("sharing.ics_feeds", check_sharing_ics_feeds),
+    ("sharing.ocm", check_sharing_ocm),
     ("sms.common", check_sms_common),
     ("sms.twilio", check_sms_twilio),
     ("sms.telnyx", check_sms_telnyx),
@@ -10298,6 +10444,9 @@ CHECK_SCOPES: dict[str, str] = {
     "nextcloud.connection": DEPLOYMENT,
     # Reaches the configured arr apps: an install's own stack.
     "servarr.connection": DEPLOYMENT,
+    # Reads the framework database: a fact about this install's users.
+    "sharing.ics_feeds": DEPLOYMENT,
+    "sharing.ocm": DEPLOYMENT,
     "sms.common": DEPLOYMENT,
     "sms.twilio": DEPLOYMENT,
     "sms.telnyx": DEPLOYMENT,

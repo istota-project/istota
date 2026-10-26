@@ -155,10 +155,16 @@ def shim_path(user_temp_dir):
 class ProxyError(Exception):
     """A refusal from the proxy, or a socket that would not answer.
 
-    Carries the message to print and nothing else — the caller decides the exit
-    code, because a refused name and an unreachable socket are different
-    answers to the operator.
+    Carries the message to print — the caller decides the exit code, because a
+    refused name and an unreachable socket are different answers to the
+    operator — and, for a refusal the proxy answered, its ``reason`` code
+    (``vault_credential_not_present``, ``credential_not_granted``, ...), so a
+    host-side caller can branch on the code rather than on the text.
     """
+
+    def __init__(self, message: str = "", reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def _request(
@@ -215,7 +221,8 @@ def _request(
     if not isinstance(reply, dict):
         raise ProxyError("the credential proxy answered unparseably")
     if "error" in reply:
-        raise ProxyError(str(reply["error"]))
+        reason = reply.get("reason")
+        raise ProxyError(str(reply["error"]), reason if isinstance(reason, str) else None)
     return reply
 
 

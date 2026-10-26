@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from istota.feeds import db as feeds_db
+from istota.feeds import poller
 from istota.feeds.cli import cli
 from istota.feeds.workspace import synthesize_feeds_context
 
@@ -277,8 +278,7 @@ class TestPoll:
         def stub_get(*a, **kw):
             return StubResp()
 
-        import httpx
-        monkeypatch.setattr(httpx, "get", stub_get)
+        monkeypatch.setattr(poller, "_guarded_get", stub_get)
 
         r = _invoke(ctx, ["poll"])
         out = json.loads(r.output)
@@ -302,8 +302,7 @@ class TestPoll:
             text = sample_rss.decode()
             headers = {"ETag": "abc"}
 
-        import httpx
-        monkeypatch.setattr(httpx, "get", lambda *a, **kw: StubResp())
+        monkeypatch.setattr(poller, "_guarded_get", lambda *a, **kw: StubResp())
 
         r = _invoke(ctx, ["run-scheduled"])
         out = json.loads(r.output)
@@ -336,7 +335,7 @@ class TestPoll:
                 raise httpx.ConnectError("boom")
             return OkResp()
 
-        monkeypatch.setattr(httpx, "get", stub_get)
+        monkeypatch.setattr(poller, "_guarded_get", stub_get)
 
         r = _invoke(ctx, ["poll"])
         out = json.loads(r.output)
@@ -396,8 +395,7 @@ class TestPoll:
             status_code = 429
             headers = {"Retry-After": "120"}
 
-        import httpx
-        monkeypatch.setattr(httpx, "get", lambda *a, **kw: _Resp())
+        monkeypatch.setattr(poller, "_guarded_get", lambda *a, **kw: _Resp())
 
         runner = CliRunner()
         r = runner.invoke(cli, ["run-scheduled"], obj=ctx, standalone_mode=False)
@@ -426,9 +424,8 @@ class TestPoll:
             text = "<rss version='2.0'><channel><title>t</title></channel></rss>"
             content = text.encode()
 
-        import httpx
         monkeypatch.setattr(
-            httpx, "get",
+            poller, "_guarded_get",
             lambda url, *a, **kw: _Throttled() if "throttled" in url else _Empty(),
         )
 
@@ -452,7 +449,7 @@ class TestPoll:
         def stub_get(*a, **kw):
             raise httpx.ConnectError("network down")
 
-        monkeypatch.setattr(httpx, "get", stub_get)
+        monkeypatch.setattr(poller, "_guarded_get", stub_get)
 
         runner = CliRunner()
         r = runner.invoke(cli, ["run-scheduled"], obj=ctx, standalone_mode=False)

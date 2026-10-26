@@ -19,7 +19,10 @@ def init_status_writer() -> None:
     _daemon_start_time = time.time()
 
 
-def write_status(config: Config, active_workers: int, pending_fg: int, pending_bg: int) -> None:
+def write_status(
+    config: Config, active_workers: int, pending_fg: int, pending_bg: int,
+    *, pending_assignment: int = 0,
+) -> None:
     """Write a JSON status file to the bot user's Nextcloud storage via WebDAV.
 
     The NC app reads ``status.json`` from the root of the bot user's file tree
@@ -54,6 +57,7 @@ def write_status(config: Config, active_workers: int, pending_fg: int, pending_b
         "queue": {
             "pending_foreground": pending_fg,
             "pending_background": pending_bg,
+            "pending_assignment": pending_assignment,
         },
         "users_configured": len(config.users),
         "updated_at": int(now),

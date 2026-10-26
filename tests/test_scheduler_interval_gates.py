@@ -67,9 +67,18 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     ("notification-handoff", None),
     ("briefing-triggers", "tasks_file_poll_interval"),
     ("scheduled-jobs", "briefing_check_interval"),
+    # Added after the baseline extraction: assignment wakes (assignments spec).
+    ("assignments", "briefing_check_interval"),
     ("sleep-cycles", "briefing_check_interval"),
     ("travel-timezone", None),
     ("email-poll", "email_poll_interval"),
+    # Added after the baseline extraction: ICS feeds (open-protocol sharing).
+    # Each feed carries its own next poll time from `[sharing]`, so the gate
+    # is a fixed one-minute look for due feeds.
+    ("sharing-ics-poll", None),
+    # OCM folder offers left unanswered for `[sharing.ocm] pending_days`:
+    # an hourly look, since the window is days.
+    ("sharing-ocm-expire", None),
     ("shared-files", "shared_file_check_interval"),
     ("tasks-file-poll", "tasks_file_poll_interval"),
     ("cleanup", "briefing_check_interval"),
@@ -104,12 +113,14 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     ("push-dispatch", None),
 ]
 
-# The four that read a briefing key for something that is not a briefing. Named
+# The ones that read a briefing key for something that is not a briefing. Named
 # here rather than merely tolerated, so a reader meeting the table knows the
-# mismatch is a preserved fact and not an accident of the extraction.
+# mismatch is a preserved fact and not an accident of the extraction. The
+# `assignments` gate joined later; the spec puts it on the same interval.
 KNOWN_FIELD_MISMATCHES = {
     "shared-blocks",
     "scheduled-jobs",
+    "assignments",
     "sleep-cycles",
     "cleanup",
 }
@@ -124,9 +135,11 @@ EXPECTED_BACKGROUND = {
     "whatsapp-requests",
     "room-notices",
     "phone-room-backfill",
+    "assignments",
     "sleep-cycles",
     "travel-timezone",
     "email-poll",
+    "sharing-ics-poll",
     "db-health",
     "doctor",
     "browser-instances",
@@ -146,6 +159,7 @@ EXPECTED_OVERLAP_EXPECTED = {
     "sleep-cycles",
     "travel-timezone",
     "email-poll",
+    "sharing-ics-poll",
     "heartbeats",
 }
 
@@ -188,7 +202,7 @@ class TestTheFieldBindings:
         """
         assert [(g.name, g.field) for g in _gates()] == EXPECTED_BINDINGS
 
-    def test_exactly_four_gates_read_the_briefing_interval_for_something_else(self):
+    def test_only_the_named_gates_read_the_briefing_interval_for_something_else(self):
         briefing_readers = {
             g.name for g in _gates() if g.field == "briefing_check_interval"
         }
@@ -387,6 +401,18 @@ class TestTheEnablingConditions:
         on.location.enabled = True
         assert gate.enabled(off) is False
         assert gate.enabled(on) is True
+
+    def test_assignments_follow_the_experimental_flag(self):
+        gate = _by_name()["assignments"]
+        off = Config()
+        on = Config()
+        on.experimental.features = ["skill_assignment"]
+        assert gate.enabled(off) is False
+        assert gate.enabled(on) is True
+        # Off the dispatch thread: it sends notices and touches the mount.
+        assert gate.background
+        assert not gate.overlap_expected
+        assert not gate.one_shot
 
     def test_email_follows_the_email_switch(self):
         gate = _by_name()["email-poll"]
@@ -1133,7 +1159,8 @@ class TestTheBodiesCloseOverTheDaemonsState:
         monkeypatch.setattr(
             status_writer,
             "write_status",
-            lambda config, active, fg, bg: seen.append((active, fg, bg)),
+            lambda config, active, fg, bg, *, pending_assignment: seen.append(
+                (active, fg, bg, pending_assignment)),
         )
 
         class _Pool:
@@ -1141,7 +1168,7 @@ class TestTheBodiesCloseOverTheDaemonsState:
 
         config, gates = self._table(tmp_path, pool=_Pool())
         self._row(gates, "status-write").run(1.0)
-        assert seen == [(3, 0, 0)]
+        assert seen == [(3, 0, 0, 0)]
 
     def test_a_body_resolves_its_module_global_at_call_time(
         self, tmp_path, monkeypatch

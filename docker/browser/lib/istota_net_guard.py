@@ -8,8 +8,11 @@ the `wordpress` and `servarr` skill CLIs. Each resolves the host, refuses the
 request if *any* resolved address is non-public unless the operator listed
 the exact name, and connects to the address it checked. The resolver
 (`resolve_host`, `host_addresses`), the listed-name rule (`normal_host`,
-`host_set`) and the check (`first_non_public`) are here so the three host-side
-callers share one copy; each keeps its own error vocabulary.
+`host_set`), the check (`first_non_public`) and the three composed
+(`checked_addresses`) are here so the host-side callers share one copy; each
+keeps its own error vocabulary. The HTTP half, a request pinned to a checked
+address and a guarded send, is `sandbox/guarded_http.py`, which imports httpx
+and so cannot live in this leaf.
 
 Lifted out of `web_fetch` rather than imported from it, because importing that
 module from a skill pulls in the native tool package (about fifty modules), and
@@ -151,3 +154,24 @@ def first_non_public(addresses, extra_blocked=()):
         if not ip_is_public(address, extra_blocked):
             return address
     return None
+
+
+def checked_addresses(host, port: int, *, private_hosts, resolve=None) -> tuple[list, object]:
+    """The rule each host-side caller applies before connecting, composed once.
+
+    ``(addresses, None)`` when every address ``host`` resolves to is public, or
+    the exact name is in ``private_hosts``: the addresses as strings, in
+    resolver order, which is what the caller connects to. ``([], address)``
+    when ``address`` is the first non-public one and the name is not listed.
+    ``([], None)`` when nothing resolved. The two empty answers stay apart
+    because the callers word them differently: an unreachable host, and a
+    refused one.
+    """
+    addresses = host_addresses(host, port, resolve=resolve)
+    if not addresses:
+        return [], None
+    if normal_host(host) not in host_set(private_hosts):
+        refused = first_non_public(addresses)
+        if refused is not None:
+            return [], refused
+    return [str(address) for address in addresses], None

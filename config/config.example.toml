@@ -911,6 +911,19 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # retention_days = 90                  # 0 = keep forever; >0 = age-prune by last-use (recall refreshes it)
 # max_chars = 0                        # 0 = share the global max_memory_chars budget
 
+# [assignments]                        # Goals carried across days; needs the skill_assignment experimental flag
+# max_workers = 2                      # instance-wide assignment lane
+# user_max_workers = 1                 # assignment wakes one user may run at once
+# max_active_per_user = 3              # assignments past draft and not yet closed, per user
+# max_cost_usd_per_assignment = 50.0   # ceiling on any charter's cost budget
+# max_wakes_per_assignment = 500       # ceiling on any charter's wake budget
+# min_wake_interval_minutes = 15       # floor between two wakes of one assignment
+# stall_wakes = 3                      # wakes in a row with no progress before a pause
+# failure_wakes = 3                    # failed wakes in a row before a pause
+# budget_low_fraction = 0.75           # share of the budget spent that raises a budget_low notice
+# scratchpad_prompt_chars = 24000      # scratchpad cap in a wake's prompt
+# history_prompt_chars = 12000         # cap on earlier wake summaries in a wake's prompt
+
 # ============================================================================
 # Model alias registry [models.aliases] (operator override) — optional
 # ============================================================================
@@ -1230,6 +1243,29 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #                                 #   must resolve to a public one
 
 # ============================================================================
+# Shared with Istota: calendar feeds and federated folder shares
+# ============================================================================
+# Users subscribe Istota to a calendar's secret ICS address in Settings >
+# Connections, and share a folder from their own Nextcloud with
+# <user_id>@<site hostname> when [sharing.ocm] is on.
+# [sharing]
+# private_hosts = []              # exact host names a feed or sharing server
+#                                 #   may reach on a private address; also the
+#                                 #   only hosts reachable over plain http
+# ics_poll_interval = 900         # seconds between polls of one feed (min 300)
+# ics_max_bytes = 2097152         # largest feed body read
+# ics_max_feeds_per_user = 10
+# events_per_task = 10            # writes to Istota's own calendar per task
+#                                 #   attempt; 0 turns those writes off
+#
+# [sharing.ocm]
+# enabled = false                 # receive Open Cloud Mesh folder shares on
+#                                 #   [site] hostname
+# max_pending_per_user = 20       # offers waiting for an answer, per user
+# pending_days = 14               # an unanswered offer is declined after this
+# max_discovery_fetches_per_minute = 30  # across every sender
+
+# ============================================================================
 # Servarr skill: Sonarr, Radarr, Lidarr and Prowlarr (docs/features/servarr.md)
 # ============================================================================
 # One install-wide connection per app. Admins get every verb; users listed in
@@ -1449,6 +1485,12 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # calls_per_minute = 120          # bridge calls per app, per user
 # calls_retention_days = 30       # how long the bridge call log is kept
 # errors_per_version = 50         # newest error reports kept per app version
+
+# Feeds module. Every RSS or Atom fetch must reach a public address; list the
+# exact host names of feeds served on your own network.
+# [feeds]
+# private_hosts = []              # exact host names a feed may reach on a
+#                                 #   private address
 
 # User configuration
 # Map Nextcloud usernames to their settings
