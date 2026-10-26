@@ -7240,6 +7240,7 @@ def _alias_efforts(brain_config, alias: str) -> list[str] | None:
         Resolution,
         config_providers,
         native_provider_id,
+        native_reach_ids,
         resolve_selection,
         supported_efforts,
     )
@@ -7250,6 +7251,7 @@ def _alias_efforts(brain_config, alias: str) -> list[str] | None:
             for_brain=brain_config.kind,
             providers=config_providers(_config),
             native_provider=native_provider_id(_config),
+            native_reach=native_reach_ids(_config),
         )
     except Exception:  # noqa: BLE001 — an unknown answer, never a failed list
         return None

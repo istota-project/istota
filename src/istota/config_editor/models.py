@@ -62,6 +62,7 @@ def _model_problems(document: dict, config: Any) -> list[dict]:
         Resolution,
         config_providers,
         native_provider_id,
+        native_reach_ids,
         preferred_provider,
         resolve_selection,
     )
@@ -100,6 +101,7 @@ def _model_problems(document: dict, config: Any) -> list[dict]:
         resolved = resolve_selection(
             value, catalogue, aliases=aliases, for_brain=kind,
             providers=providers, native_provider=native_id,
+            native_reach=native_reach_ids(config),
         )
         if isinstance(resolved, Resolution):
             continue

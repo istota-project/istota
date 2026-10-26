@@ -478,8 +478,9 @@ class TestModelAliasesFollowTheRoom:
 
 
 def _provider_config(tmp_path, *, admins):
-    """A web config whose native brain runs on Anthropic with keys for both
-    built-in providers, so OpenRouter models are runnable on native."""
+    """A web config whose native brain runs on Anthropic and lists OpenRouter
+    in `[brain.native] providers`, with keys for both built-in providers, so
+    OpenRouter models are runnable on native."""
     from istota.config import config_from_document
 
     config = _make_config(tmp_path)
@@ -488,7 +489,10 @@ def _provider_config(tmp_path, *, admins):
         "brain": {
             "kind": "native",
             "room_selectable": ["native", "claude_code"],
-            "native": {"provider": "anthropic", "model": "claude-sonnet-5-5"},
+            "native": {
+                "provider": "anthropic", "providers": ["openrouter"],
+                "model": "claude-sonnet-5-5",
+            },
         },
         "providers": {
             "anthropic": {"api_key": "anthropic-test-key"},

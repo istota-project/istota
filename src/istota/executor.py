@@ -1706,15 +1706,16 @@ def _with_user_provider_key(brain_config, config: Config, user_id: str, model: s
     The provider key rule applied per user (D16): a request to provider P in
     user U's task carries U's ``provider_keys/<P>`` secret when U has one, and
     the deployment's key otherwise. The providers are native's own and, when
-    ``model`` is a ref of another configured provider, that one, since native
-    routes such a request there (D4). A failed lookup keeps the deployment's
-    key, so a missing secret never blocks the task. Returns a copy; never
-    mutates. Internal operator calls (triage, the speech gate) never come
-    through here.
+    ``model`` is a ref of another provider `[brain.native] providers` lists,
+    that one, since native routes such a request there (D4). A failed lookup
+    keeps the deployment's key, so a missing secret never blocks the task.
+    Returns a copy; never mutates. Internal operator calls (triage, the
+    speech gate) never come through here.
     """
     import dataclasses
 
     from .brain import native_provider_spec, native_providers
+    from .brain._resolve import native_reach_ids
     from .llm.providers import user_provider_key, with_user_key
 
     spec = native_provider_spec(brain_config)
@@ -1723,7 +1724,7 @@ def _with_user_provider_key(brain_config, config: Config, user_id: str, model: s
     specs = native_providers(brain_config)
     wanted = [spec.id]
     head, sep, _tail = (model or "").strip().partition("/")
-    if sep and head in specs and head != spec.id:
+    if sep and head in specs and head != spec.id and head in native_reach_ids(brain_config):
         wanted.append(head)
     keys = {pid: user_provider_key(config, user_id, pid) for pid in wanted}
     keys = {pid: key for pid, key in keys.items() if key}
@@ -1778,27 +1779,36 @@ def _native_with_model(native_config, model: str):
 def _pin_as_ref(raw: str, config, origin_namespace):
     """The ``Resolution`` of a pin written as a qualified reference, or ``None``.
 
-    Only a ref carries its provider across a brain boundary. A value the
-    origin's own provider lists as a bare id is that provider's id, not a ref
-    (an OpenRouter id such as ``anthropic/claude-opus-5`` on a native brain
-    that uses OpenRouter), so it keeps the namespace rules below, as every
-    stored bare value does. Never raises.
+    Only a ref carries its provider across a brain boundary. It is read on
+    the origin's brain, so a value the origin's own provider lists as a bare
+    id is that provider's id, not a ref (an OpenRouter id such as
+    ``anthropic/claude-opus-5`` on a native brain that uses OpenRouter), and
+    a ref of a provider the origin does not reach is not read as one, cached
+    list or not. Either keeps the namespace rules below, as every stored bare
+    value does. Never raises.
     """
     from .brain._resolve import (
+        BRAIN_NAMESPACES,
         Resolution,
         config_providers,
-        preferred_provider,
+        native_provider_id,
+        native_reach_ids,
         resolve_selection,
     )
 
     if "/" not in raw:
         return None
+    origin_kind = "native" if origin_namespace == BRAIN_NAMESPACES["native"] else (
+        "claude_code" if origin_namespace == BRAIN_NAMESPACES["claude_code"] else None
+    )
     try:
         resolved = resolve_selection(
             raw,
             use_aliases=False,
-            prefer_provider=preferred_provider(origin_namespace, config),
+            for_brain=origin_kind,
             providers=config_providers(config),
+            native_provider=native_provider_id(config),
+            native_reach=native_reach_ids(config),
         )
     except Exception:  # noqa: BLE001 - a crossing read must not raise into a request build
         logger.debug("pin resolution failed for %r", raw, exc_info=True)
@@ -1858,15 +1868,17 @@ def _resolve_crossing_model_effort(
     ref = _pin_as_ref(raw, config, origin_namespace) if crossing else None
     if ref is not None:
         # A qualified reference carries its provider, so the question is
-        # whether the target brain can run that provider's model, not whether
-        # the namespaces match: `anthropic/...` survives a claude_code ->
-        # native fallback when native's provider is `anthropic`.
-        from .brain._resolve import config_providers, native_provider_id
+        # whether the target brain reaches that provider, not whether the
+        # namespaces match: `anthropic/...` survives a claude_code -> native
+        # fallback only when `[brain.native] providers` lists `anthropic`.
+        # An exact pin the target cannot reach is dropped, never carried to
+        # another provider.
+        from .brain._resolve import config_providers, native_provider_id, native_reach_ids
         from .llm.providers import brain_can_run
 
         if brain_can_run(
             getattr(target_brain, "kind", None), ref.ref, config_providers(config),
-            native_provider=native_provider_id(config),
+            native_provider=native_provider_id(config), native_reach=native_reach_ids(config),
         ):
             pair = target_brain.resolve_alias(raw)
             if pair and pair[0]:

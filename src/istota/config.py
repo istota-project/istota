@@ -2087,6 +2087,9 @@ class NativeBrainConfig:
       ``"openrouter"`` or an operator's own). No default: a native brain with
       no provider is unavailable rather than quietly billing a service (D18).
       The old value ``"openai_compat"`` (a wire protocol) reads as unset.
+    - ``providers`` — the providers native may send a request to, opt-in;
+      ``provider`` is always one of them. A key held for a provider (the CLI's
+      ``anthropic`` key) does not add it.
     - ``model`` — explicit model id (``openai_compat`` does no aliasing).
     - ``base_url`` / ``api_key`` / ``extra_headers``, the wire settings and
       ``model_catalog_*`` — legacy: read for one release through
@@ -2100,6 +2103,10 @@ class NativeBrainConfig:
     """
 
     provider: str = ""  # a [providers.<id>] id; no default (D18)
+    # The providers native may send a request to (opt-in): `provider` is always
+    # one of them, so empty means `provider` alone. An `anthropic` key held for
+    # the CLI does not put `anthropic` here.
+    providers: list[str] = field(default_factory=list)
     model: str = ""
     effort: str = ""  # native-brain default effort: low/medium/high/xhigh/max (empty = none)
     base_url: str = ""  # legacy: [providers.<id>] base_url (LEGACY_PROVIDER_SOURCES)

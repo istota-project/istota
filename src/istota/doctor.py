@@ -915,6 +915,7 @@ def _configured_model_findings(config: "Config", catalogue) -> tuple[list[str], 
         ResolveError,
         config_providers,
         native_provider_id,
+        native_reach_ids,
         preferred_provider,
         resolve_selection,
     )
@@ -928,8 +929,21 @@ def _configured_model_findings(config: "Config", catalogue) -> tuple[list[str], 
         aliases = parse_alias_overrides(config.models.aliases, log=False)
         providers = config_providers(config)
         native_id = native_provider_id(config)
+        reach = native_reach_ids(config)
     except Exception:  # noqa: BLE001 - a doctor check never raises
         return fails, warns
+
+    from .llm.providers import provider_kinds
+
+    kinds = provider_kinds(providers)
+    reach_kinds = {kinds.get(pid) for pid in reach}
+    if "openrouter" in reach_kinds and "anthropic" in reach_kinds:
+        # Residual until the provider is stored apart from the model id.
+        warns.append(
+            f"[brain.native] providers reaches both {', '.join(reach)}: an "
+            "`anthropic/...` model value is ambiguous between OpenRouter's id and "
+            "Anthropic's own model, and is read as OpenRouter's"
+        )
 
     for label, value, kind in _model_fields_to_check(config):
         if kind == "native" and not native_id:
@@ -938,6 +952,7 @@ def _configured_model_findings(config: "Config", catalogue) -> tuple[list[str], 
         resolved = resolve_selection(
             value, catalogue, aliases=aliases, for_brain=kind,
             providers=providers, native_provider=native_id,
+            native_reach=native_reach_ids(config),
         )
         if isinstance(resolved, Resolution):
             continue

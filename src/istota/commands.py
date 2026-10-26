@@ -1332,16 +1332,17 @@ async def cmd_models(ctx: CommandContext):
 
 def runnable_models(config: Config, kind: str) -> list:
     """The catalogue's current models the brain ``kind`` can run, in order."""
-    from .brain._resolve import config_providers, native_provider_id
+    from .brain._resolve import config_providers, native_provider_id, native_reach_ids
     from .llm.catalog import current_catalogue
     from .llm.providers import brain_can_run
 
     providers = config_providers(config)
     native = native_provider_id(config)
+    reach = native_reach_ids(config)
     return [
         info for info in current_catalogue().models()
         if not info.deprecated
-        and brain_can_run(kind, info.ref, providers, native_provider=native)
+        and brain_can_run(kind, info.ref, providers, native_provider=native, native_reach=reach)
     ]
 
 

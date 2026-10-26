@@ -205,7 +205,8 @@ def native_provider_spec(brain_config: BrainConfig):
 
 
 def native_providers(brain_config: BrainConfig) -> dict:
-    """Every provider record native may send a request to, by id (D4).
+    """Every configured provider record, by id: native routes a request to
+    one of them when `[brain.native] providers` lists it (D4).
 
     ``BrainConfig.provider_specs`` where ``load_config`` filled it, else the
     built-ins plus what ``[brain.native]``'s legacy fields imply.

@@ -1041,9 +1041,10 @@ class NativeBrain:
             spec = _spec_from_native_config(config)
         self._spec = spec
         # Every configured provider, by id, so a request for another
-        # provider's ref goes to that provider with its key (D4). `route` is
-        # off on the brain a routed request runs on, so a wire id that itself
-        # reads as a ref is never routed a second time.
+        # provider's ref goes to that provider with its key (D4), when
+        # `[brain.native] providers` lists it. `route` is off on the brain a
+        # routed request runs on, so a wire id that itself reads as a ref is
+        # never routed a second time.
         self._providers = dict(providers or {})
         if spec is not None:
             self._providers.setdefault(spec.id, spec)
@@ -1070,10 +1071,11 @@ class NativeBrain:
     # fail — so explicit ids pass through as written and only operator
     # [models.aliases] overrides and the tiers resolve. The resolver
     # (``brain._resolve``) is asked about refs: ``<native's provider>/<id>``
-    # goes to the wire as ``<id>``. A ref or bare id of another provider is
-    # sent as written, as it always was, and the catalogue is asked by that
-    # wire id, so a bare Claude id on native keeps the metadata (and so the
-    # wire features) it had.
+    # goes to the wire as ``<id>``. A ref of another provider that
+    # `[brain.native] providers` lists is routed there (`_route`); anything
+    # else is sent as written, as it always was, and the catalogue is asked
+    # by that wire id, so a bare Claude id on native keeps the metadata (and
+    # so the wire features) it had.
 
     @property
     def _provider_id(self) -> str | None:
@@ -1093,17 +1095,27 @@ class NativeBrain:
             return resolved.info.id
         return name
 
+    def _reach(self) -> tuple[str, ...]:
+        """`[brain.native] providers`, this brain's own provider first."""
+        own = self._provider_id
+        if not own:
+            return ()
+        out = [own]
+        for provider_id in getattr(self._config, "providers", None) or ():
+            if isinstance(provider_id, str) and provider_id.strip() and provider_id.strip() not in out:
+                out.append(provider_id.strip())
+        return tuple(out)
+
     def _route(self, model: str):
         """``(spec, wire id)`` when ``model`` is a ref of another provider
-        native can run, else ``(None, model)``.
+        `[brain.native] providers` lists, else ``(None, model)``.
 
         Only a ref the catalogue holds is routed, read the way the resolver
         reads it: native's own provider is asked for the whole string first,
         so an OpenRouter id such as ``anthropic/claude-opus-5`` stays
-        OpenRouter's when OpenRouter lists it. ``brain_can_run`` decides
-        whether the other provider is reachable (an `openai_compat` provider,
-        or one holding a key, the user's own included once the executor has
-        overlaid it). Never raises.
+        OpenRouter's when OpenRouter lists it, and a provider off the list is
+        never read as a ref at all, cached list or not. A key held for a
+        provider does not put it on the list. Never raises.
         """
         own = self._provider_id
         if not self._route_requests or not own or not model:
@@ -1111,13 +1123,14 @@ class NativeBrain:
         head, sep, tail = model.partition("/")
         if not sep or not tail or head == own:
             return None, model
+        reach = self._reach()
         spec = self._providers.get(head)
-        if spec is None:
+        if spec is None or head not in reach:
             return None, model
         try:
             resolved = resolve_selection(
                 model, use_aliases=False, for_brain="native",
-                native_provider=own, providers=self._providers,
+                native_provider=own, native_reach=reach, providers=self._providers,
             )
         except Exception:  # noqa: BLE001 - routing falls back to native's own provider
             logger.debug("native routing lookup failed for %r", model, exc_info=True)

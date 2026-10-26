@@ -110,7 +110,17 @@ features = []
 # provider = "openrouter"                    # a [providers.<id>] id: anthropic,
 #                                            #   openrouter or your own. Unset, the
 #                                            #   native brain is unavailable.
-# model = "z-ai/glm-5.3-flash"               # an id that provider lists (`!models all
+# providers = []                             # the providers native may send a
+#                                            #   request to, opt-in: a ref of a
+#                                            #   listed provider (`openrouter/...`)
+#                                            #   runs there with its key. `provider`
+#                                            #   is always one of them; empty means
+#                                            #   it alone. A key held for the CLI
+#                                            #   does not add `anthropic`. Listing
+#                                            #   `anthropic` beside `openrouter`
+#                                            #   makes `anthropic/...` ambiguous;
+#                                            #   it is read as OpenRouter's id.
+# model ="z-ai/glm-5.3-flash"               # an id that provider lists (`!models all
 #                                            #   <provider>`). The tiers (fast,
 #                                            #   general, smart) mean this model on
 #                                            #   native unless [models.aliases] remaps them.

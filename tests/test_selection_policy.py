@@ -4,7 +4,9 @@
 whole catalogue (D9). Aliases are open to both. The bound is on setting a
 selection, not on running one, so an admin's pin outside the set runs for
 every member. A room stores the alias or the ref it was given and the task
-records the ref it resolves to at creation (D6).
+records the ref it resolves to at creation (D6), except a portable alias,
+which it keeps. Native runs on Anthropic here and lists OpenRouter in
+`[brain.native] providers`, so OpenRouter's models are offered and routed.
 
 Each surface is driven as a pair, admin and non-admin, so a refusal cannot
 pass against a writer that refuses everything. The integration test at the
@@ -45,13 +47,16 @@ OUTSIDE = "openrouter/moonshotai/kimi-k2.6"
 
 
 def _brain_and_providers():
-    """`[brain]` (native on Anthropic, room-selectable) and `[providers]` with
-    keys for both built-ins."""
+    """`[brain]` (native on Anthropic reaching OpenRouter, room-selectable)
+    and `[providers]` with keys for both built-ins."""
     doc = {
         "brain": {
             "kind": "native",
             "room_selectable": ["native"],
-            "native": {"provider": "anthropic", "model": "claude-sonnet-5-5"},
+            "native": {
+                "provider": "anthropic", "providers": ["openrouter"],
+                "model": "claude-sonnet-5-5",
+            },
         },
         "providers": {
             "anthropic": {"api_key": "anthropic-test-key"},
@@ -156,15 +161,20 @@ class TestAPersonsSelection:
         from istota.brain._roles import set_alias_overrides
 
         config = _config(tmp_path)
-        model, _effort = selection_for_task(config, "smart", kind="claude_code")
+        model, _effort = selection_for_task(config, "opus", kind="claude_code")
         assert model.startswith("anthropic/claude-opus-")
-        set_alias_overrides({"smart": {"anthropic": "sonnet:high"}})
+        set_alias_overrides({"deep": {"anthropic": "sonnet:high"}})
         try:
-            model, effort = selection_for_task(config, "smart", kind="claude_code")
+            model, effort = selection_for_task(config, "deep", kind="claude_code")
         finally:
             set_alias_overrides({})
         assert model.startswith("anthropic/claude-sonnet-")
         assert effort == "high"
+
+    def test_a_portable_alias_is_kept_by_name(self, tmp_path):
+        # So a fallback to a brain on another provider re-resolves it there.
+        config = _config(tmp_path)
+        assert selection_for_task(config, "smart", kind="claude_code") == ("smart", None)
 
 
 def _ctx(config, conn, args, user_id, token="room1"):
@@ -338,7 +348,8 @@ class _ToolServer:
 @pytest.mark.asyncio
 async def test_a_web_room_pick_reaches_the_provider_it_names(tmp_path):
     """An admin pins an OpenRouter model in a native room from the web
-    settings; the next turn's task records the ref and the request goes to
+    settings (native on Anthropic, OpenRouter listed in `[brain.native]
+    providers`); the next turn's task records the ref and the request goes to
     OpenRouter with its key, its own id and the effort the model supports.
 
     `execute_task(dry_run=True)` returns once the prompt is rendered and builds

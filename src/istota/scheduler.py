@@ -9733,7 +9733,9 @@ def resolve_pinned_model_effort(
         from istota.brain._resolve import (
             Resolution,
             config_providers,
+            is_portable_selection,
             native_provider_id,
+            native_reach_ids,
             resolve_selection,
         )
 
@@ -9741,7 +9743,14 @@ def resolve_pinned_model_effort(
             model, for_brain=row_config.kind,
             providers=config_providers(app_config),
             native_provider=native_provider_id(app_config),
+            native_reach=native_reach_ids(app_config),
         )
+        if isinstance(resolved, Resolution) and resolved.alias and is_portable_selection(
+            app_config, resolved.alias,
+        ):
+            # Kept by name, so a fallback to a brain on another provider
+            # re-resolves it there; the model that ran is `tasks.model_used`.
+            return resolved.alias, effort or (resolved.effort_requested or "")
         if isinstance(resolved, Resolution) and not resolved.brain_default:
             return resolved.ref, effort or (resolved.effort_requested or "")
         row_brain = make_brain(row_config)

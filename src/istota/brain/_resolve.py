@@ -20,14 +20,29 @@ Order, after splitting a trailing ``:effort`` with ``split_effort``:
    ``anthropic/claude-opus-5`` is OpenRouter's own id on a native brain that
    uses OpenRouter, not a reference to the built-in ``anthropic`` provider.
 3. **Qualified reference**: the first ``/`` segment names a configured
-   provider and the rest is that provider's id. A ref the provider does not
-   list falls through to step 4 before it is refused.
+   provider and the rest is that provider's id. With ``for_brain``, only a
+   provider the brain reaches is read this way (see below). A ref the
+   provider does not list falls through to step 4 before it is refused.
 4. **Bare id**: an exact, case-insensitive match on ``id`` across providers.
    Several matches prefer the brain's provider, then refuse as ambiguous.
 5. **Pattern** (``allow_patterns`` only): a case-insensitive substring of
-   ``id`` or ``name``. Matches narrow to the preferred provider when it has
-   any; one family (or one model) picks the undated, newest one; anything
-   wider refuses as ambiguous and lists candidates.
+   ``id`` or ``name``, over the models ``for_brain`` can run when it is
+   given. Matches narrow to the preferred provider when it has any; one
+   family (or one model) picks the undated, newest one; anything wider
+   refuses as ambiguous and lists candidates.
+
+What a brain reaches is ``llm.providers.brain_can_run``: the CLI brains the
+`anthropic` provider, native the providers `[brain.native] providers` lists
+(its default provider always among them). With ``for_brain``, step 3 reads a
+ref only for a provider the brain reaches, so a value naming another provider
+is the default provider's id when it lists it (step 2) and is refused
+otherwise. That holds without a discovery cache: ``anthropic/claude-opus-5``
+on an OpenRouter-native brain that does not list `anthropic` is never the
+`anthropic` provider's, so it never bills Anthropic. When native's default
+provider is an `openrouter` one and `anthropic` is listed too, the string is
+ambiguous; until the provider is stored apart from the id, an
+``anthropic/...`` value is read as OpenRouter's (its ``vendor/model`` space
+can hold it), and doctor's ``models.catalogue`` warns about the pair.
 
 Then the refusals: ``model_not_runnable`` (``for_brain`` cannot run the
 ref), ``model_not_enabled`` (``enabled_only`` and the ref is outside the
@@ -168,8 +183,10 @@ def _rank(info: ModelInfo) -> tuple:
 
 def _model_step(
     base: str, selection: str, effort, catalogue, *, kinds, prefer, allow_patterns, pool,
+    reaches=None,
 ) -> Resolution | ResolveError:
-    """Steps 2 to 5 for a base with no alias meaning."""
+    """Steps 2 to 5 for a base with no alias meaning. ``reaches(provider)``
+    says whether step 3 may read a ref of that provider; ``None`` reads any."""
     index = _index(catalogue)
     lowered = base.lower()
 
@@ -179,7 +196,8 @@ def _model_step(
                 return Resolution(ref=info.ref, info=info, effort_requested=effort, source="id")
 
     head, sep, tail = base.partition("/")
-    if sep and tail and head in kinds:
+    reachable = reaches is None or reaches(head)
+    if sep and tail and head in kinds and reachable:
         info = index["by_ref"].get(lowered)
         if info is not None:
             return Resolution(ref=info.ref, info=info, effort_requested=effort, source="ref")
@@ -199,6 +217,12 @@ def _model_step(
         )
 
     if sep and tail and head in kinds:
+        if not reachable:
+            return _error(
+                "model_not_runnable", selection,
+                f"{base!r} does not run on this brain: {prefer or 'its provider'!r} lists no "
+                f"such id, and it is not read as a {head!r} model here", effort=effort,
+            )
         return _error("unknown", selection, f"provider {head!r} lists no model {tail!r}", effort=effort)
 
     if allow_patterns:
@@ -225,6 +249,7 @@ def _model_step(
 
 def _alias_step(
     name: str, selection: str, effort, catalogue, *, aliases, namespace, kinds, prefer,
+    reaches=None,
 ) -> Resolution | ResolveError | None:
     """Step 1. ``None`` when ``name`` is no alias in ``namespace``."""
     target = aliases.target(name, namespace) if aliases is not None else None
@@ -247,12 +272,12 @@ def _alias_step(
         chosen_effort = effort or target.effort or target_effort
         inner = _alias_step(
             target_base.lower(), selection, chosen_effort, catalogue,
-            aliases=None, namespace=namespace, kinds=kinds, prefer=prefer,
+            aliases=None, namespace=namespace, kinds=kinds, prefer=prefer, reaches=reaches,
         )
         if inner is None:
             inner = _model_step(
                 target_base, selection, chosen_effort, catalogue,
-                kinds=kinds, prefer=prefer, allow_patterns=False, pool=(),
+                kinds=kinds, prefer=prefer, allow_patterns=False, pool=(), reaches=reaches,
             )
         if isinstance(inner, ResolveError):
             return _error(
@@ -292,6 +317,7 @@ def resolve_selection(
     prefer_provider: str | None = None,
     providers: Mapping[str, object] | None = None,
     native_provider: str | None = None,
+    native_reach: Iterable[str] | None = None,
     use_aliases: bool = True,
     allow_patterns: bool = False,
     needs_tools: bool = False,
@@ -303,6 +329,7 @@ def resolve_selection(
     preferred provider defaults to the brain's (``anthropic`` for the CLI
     brains, ``native_provider`` for native). ``providers`` is the configured
     providers (``id -> spec``, config or kind); the built-ins are always in it.
+    ``native_reach`` is `[brain.native] providers` (``native_reach_ids``).
     ``enabled`` is the glob list ``enabled_only`` checks against. Never raises.
     """
     text = (selection or "").strip() if isinstance(selection, str) else ""
@@ -319,6 +346,26 @@ def resolve_selection(
         elif for_brain == "native":
             prefer_provider = native_provider
 
+    native_reach = tuple(native_reach or ())
+
+    def _runs(ref: str) -> bool:
+        return brain_can_run(
+            for_brain, ref, providers, native_provider=native_provider, native_reach=native_reach,
+        )
+
+    reaches = None
+    if for_brain:
+        def reaches(provider_id: str) -> bool:
+            if not _runs(f"{provider_id}/-"):
+                return False
+            # An `anthropic/...` value on an OpenRouter-default native brain is
+            # OpenRouter's id even with `anthropic` listed (see the docstring).
+            return not (
+                for_brain == "native" and provider_id != prefer_provider
+                and kinds.get(prefer_provider or "") == "openrouter"
+                and kinds.get(provider_id) == "anthropic"
+            )
+
     base, effort = split_effort(text)
     enabled_set: frozenset[str] | None = None
     if enabled_only:
@@ -329,19 +376,23 @@ def resolve_selection(
         result = _alias_step(
             base.lower(), text, effort, catalogue,
             aliases=aliases, namespace=namespace, kinds=kinds, prefer=prefer_provider,
+            reaches=reaches,
         )
     if result is None:
         pool = _index(catalogue)["models"]
         if enabled_set is not None:
             pool = tuple(m for m in pool if m.ref in enabled_set)
+        if for_brain:
+            pool = tuple(m for m in pool if _runs(m.ref))
         result = _model_step(
             base, text, effort, catalogue,
             kinds=kinds, prefer=prefer_provider, allow_patterns=allow_patterns, pool=pool,
+            reaches=reaches,
         )
     if isinstance(result, ResolveError) or result.brain_default:
         return result
 
-    if for_brain and not brain_can_run(for_brain, result.ref, providers, native_provider=native_provider):
+    if for_brain and not _runs(result.ref):
         return _error(
             "model_not_runnable", text, f"the {for_brain} brain cannot run {result.ref}",
             effort=result.effort_requested,
@@ -437,6 +488,7 @@ def resolve_for_person(
         enabled=None if is_admin else enabled_patterns(config),
         providers=config_providers(config),
         native_provider=native_provider_id(config),
+        native_reach=native_reach_ids(config),
         allow_patterns=allow_patterns,
         needs_tools=True,
     )
@@ -467,13 +519,18 @@ def selection_for_task(config, selection: str | None, *, kind: str | None) -> tu
     """``(model, effort)`` a task row records for a stored selection (D6).
 
     An alias or ref resolves now, so ``tasks.model`` names the ref that ran
-    and an alias change reaches the next task. What does not resolve to a ref
-    is kept as written, because the brains stay lenient: an alias meaning the
-    brain's own model, an id the catalogue does not list, a ref the brain
-    cannot run (the executor's crossing rule decides that one). ``effort`` is
-    the effort the selection itself carries (``opus:high``, an alias's), or
-    ``None``. No enabled-set check: what is stored was bounded when it was
-    set, and an admin's pin runs for every member (D9). Never raises.
+    and an alias change reaches the next task. A portable alias (the tiers,
+    and any ``portable = true``) is the exception: its name is kept, because
+    a fallback to a brain on another provider re-resolves it there, which a
+    ref would stop. The model that ran is still recorded, as
+    ``tasks.model_used`` and the usage row's ``model``. What does not resolve
+    to a ref is kept as written, because the brains stay lenient: an alias
+    meaning the brain's own model, an id the catalogue does not list, a ref
+    the brain cannot run (native sends it to its default provider as written).
+    ``effort`` is the effort the selection itself carries (``opus:high``, an
+    alias's), or ``None``. No enabled-set check: what is stored was bounded
+    when it was set, and an admin's pin runs for every member (D9). Never
+    raises.
     """
     raw = (selection or "").strip() if isinstance(selection, str) else ""
     if not raw:
@@ -484,15 +541,28 @@ def selection_for_task(config, selection: str | None, *, kind: str | None) -> tu
             for_brain=kind,
             providers=config_providers(config),
             native_provider=native_provider_id(config),
+            native_reach=native_reach_ids(config),
         )
     except Exception:  # noqa: BLE001 - task creation must not fail on a lookup
         return raw, None
+    if isinstance(resolved, Resolution) and resolved.alias and is_portable_selection(config, resolved.alias):
+        return resolved.alias, resolved.effort_requested
     if isinstance(resolved, Resolution) and not resolved.brain_default:
         return resolved.ref, resolved.effort_requested
     base, effort = split_effort(raw)
     if isinstance(resolved, Resolution):
         return base, resolved.effort_requested
     return raw, None
+
+
+def is_portable_selection(config, alias: str) -> bool:  # noqa: ANN001
+    """Whether ``alias`` is a portable intent for ``config``: a tier, or an
+    operator alias marked ``portable = true``."""
+    from ._aliases import is_portable_alias
+    from ._roles import parse_alias_overrides
+
+    raw = getattr(getattr(config, "models", None), "aliases", None)
+    return is_portable_alias(alias, parse_alias_overrides(raw, log=False).portable_names())
 
 
 # --- effort ------------------------------------------------------------------
@@ -594,6 +664,22 @@ def native_provider_id(config) -> str | None:  # noqa: ANN001
     return spec.id if spec is not None else None
 
 
+def native_reach_ids(config) -> tuple[str, ...]:  # noqa: ANN001
+    """`[brain.native] providers`, native's default provider first: the
+    providers native may send a request to. Empty when native has no
+    provider. Never raises."""
+    default = native_provider_id(config)
+    if not default:
+        return ()
+    brain = getattr(config, "brain", config)
+    listed = getattr(getattr(brain, "native", None), "providers", None) or ()
+    out = [default]
+    for provider_id in listed:
+        if isinstance(provider_id, str) and provider_id.strip() and provider_id.strip() not in out:
+            out.append(provider_id.strip())
+    return tuple(out)
+
+
 def config_providers(config) -> Mapping[str, object]:  # noqa: ANN001
     """The configured providers of ``config`` (a `Config` or a `BrainConfig`)."""
     providers = getattr(config, "providers", None)
@@ -628,6 +714,7 @@ __all__ = [
     "effort_wire_value",
     "default_enabled_patterns",
     "describe_resolve_error",
+    "is_portable_selection",
     "enabled_patterns",
     "enabled_refs",
     "resolve_for_person",
@@ -635,6 +722,7 @@ __all__ = [
     "stored_selection",
     "latest_in_family",
     "native_provider_id",
+    "native_reach_ids",
     "preferred_provider",
     "resolve_selection",
     "unmatched_patterns",

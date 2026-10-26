@@ -40,9 +40,23 @@ The `kind` decides what the endpoint is sent: cache breakpoints by default for `
 - On the stack, the built-in providers' keys and headers are secret files: `istota_provider_anthropic_api_key`, `istota_provider_anthropic_extra_headers`, `istota_provider_openrouter_api_key` and `istota_provider_openrouter_extra_headers`. `istota setup` writes them, and the web configuration page moves an edited key into its file.
 - A provider of your own keeps its key inline in `config.toml` (mode 0600, owned by the daemon's user, shown redacted in the admin configuration page), because the stack's secret files have fixed names.
 
+### Which providers a brain reaches
+
+A provider existing, or holding a key, does not let a brain use it. The `claude_code` and `tmux_claude` brains reach the `anthropic` provider only. The native brain reaches its default provider, `[brain.native] provider`, and any provider listed in `[brain.native] providers`:
+
+```toml
+[brain.native]
+provider = "openrouter"
+providers = ["local"]              # opt-in; `provider` is always included
+```
+
+A model of a provider native reaches runs on that provider with its key: `local/qwen3-32b` above goes to `local`, and `openrouter/...` or an OpenRouter id goes to OpenRouter. A value naming a provider native does not reach is never sent to that provider. It is read as an id of the default provider when that provider lists it, and is otherwise refused when a room, a job or `!model` sets it. An `anthropic` key held for the `claude` CLI does not make Anthropic a native provider: on an OpenRouter-native install, `anthropic/claude-opus-...` is OpenRouter's id and is billed by OpenRouter, whether or not OpenRouter's model list has been fetched. Rooms and the picker offer only the models of the providers the room's brain reaches.
+
+Listing `anthropic` beside an `openrouter` default leaves one ambiguity: OpenRouter's ids for Anthropic's models are spelled `anthropic/<model>`, the same as Anthropic's own references. Until the provider is stored apart from the model, such a value is read as OpenRouter's id, and `istota doctor`'s `models.catalogue` check warns about the pair.
+
 ### A user's own key
 
-A user may hold their own key for a deployment provider: `istota secret ensure -u <user> -s provider_keys -k <provider id>`. In that user's tasks, a request to that provider carries their key instead of the deployment's. Requests to other providers still carry the deployment's keys, and so do internal calls made for the operator (the speech gate, conversation triage, the sleep cycle, briefings). Under `auth = "api_key"`, a user's `anthropic` key also reaches the `claude` CLI in their own tasks. A user cannot add an endpoint, only a key for one the deployment has. `istota init` moved the old per-user native keys (`native_brain`/`api_key`) to `provider_keys/<native's provider>` once.
+A user may hold their own key for a deployment provider: `istota secret ensure -u <user> -s provider_keys -k <provider id>`. In that user's tasks, a request to that provider carries their key instead of the deployment's: native's default provider, or a provider `[brain.native] providers` lists when the task's model names it. Requests to other providers still carry the deployment's keys, and so do internal calls made for the operator (the speech gate, conversation triage, the sleep cycle, briefings). Under `auth = "api_key"`, a user's `anthropic` key also reaches the `claude` CLI in their own tasks. A user cannot add an endpoint, only a key for one the deployment has. `istota init` moved the old per-user native keys (`native_brain`/`api_key`) to `provider_keys/<native's provider>` once.
 
 ## How the claude CLI authenticates
 
@@ -129,7 +143,7 @@ The bound is on who may set a selection, not on what runs: a room an admin set t
 
 ### What is stored
 
-A room or a job stores what was picked, an alias name or a reference, and it is resolved when each task is created. A room set to `smart` therefore moves to the next Opus on its next task after the catalogue lists one, and a room set to an exact reference stays on that model. The task row records the reference that ran. Rooms set before this release hold bare ids, which still resolve to the same model.
+A room or a job stores what was picked, an alias name or a reference, and it is resolved when each task is created. A room set to `smart` therefore moves to the next Opus on its next task after the catalogue lists one, and a room set to an exact reference stays on that model. The task row records the reference it resolved to, except for a portable alias (the tiers, and an alias marked `portable = true`), whose name it keeps so that a fallback to another brain resolves it there; the model that ran is recorded for every task. On a fallback between brains, an exact reference the other brain cannot reach is dropped, the fallback runs its own default model, and the answer says so. Rooms set before this release hold bare ids, which still resolve to the same model.
 
 ### Effort
 

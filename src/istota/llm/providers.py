@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -600,45 +600,36 @@ def provider_kinds(providers: Mapping[str, object] | None) -> dict[str, str]:
 
 def brain_can_run(
     kind: str, ref: str, providers: Mapping[str, object] | None = None,
-    *, native_provider: str | None = None,
+    *, native_provider: str | None = None, native_reach: Iterable[str] | None = None,
 ) -> bool:
     """Whether brain ``kind`` can run the model ``ref`` (``provider/id``).
 
     The CLI brains run only the `anthropic` provider's models, because the
-    `claude` CLI talks only to Anthropic. Native picks its provider per
-    request from the ref (D4), so it runs the models of the provider
-    `[brain.native] provider` names (``native_provider``, key or not, as
-    before), of any `openai_compat` provider (a local server may need no key),
-    and of an `openrouter` or `anthropic` provider that holds a deployment
-    key. A model-listing key never counts: it is not in a provider record. A
-    user's own key is not consulted here, so a provider only they hold a key
-    for is not runnable at selection. A ref naming no configured provider runs
-    nowhere. Never raises.
+    `claude` CLI talks only to Anthropic. Native runs the models of the
+    providers `[brain.native] providers` lists (``native_reach``) and of its
+    default provider (``native_provider``, always one of them), key or not;
+    native routes a request to the provider its ref names (D4). A key held
+    for a provider never adds it: the `anthropic` key the CLI uses does not
+    make Anthropic a native provider. A ref naming no configured provider
+    runs nowhere. Never raises.
     """
     if not isinstance(ref, str) or "/" not in ref:
         return False
     provider_id = ref.split("/", 1)[0]
-    kinds = provider_kinds(providers)
-    if provider_id not in kinds:
+    if provider_id not in provider_kinds(providers):
         return False
     if kind in ("claude_code", "tmux_claude"):
         return provider_id == CLI_PROVIDER
     if kind == "native":
-        if native_provider and provider_id == native_provider:
-            return True
-        if kinds[provider_id] == "openai_compat":
-            return True
-        return _has_deployment_key((providers or {}).get(provider_id))
+        if not native_provider:
+            return False
+        return provider_id == native_provider or provider_id in set(native_reach or ())
     return False
-
-
-def _has_deployment_key(value: object) -> bool:
-    """Whether a provider record (a `ProviderSpec` or `ProviderConfig`) holds
-    an inference key. A bare kind string, or nothing, holds none."""
-    if value is None or isinstance(value, str):
+    provider_id = ref.split("/", 1)[0]
+    if provider_id not in provider_kinds(providers):
         return False
-    key = getattr(value, "inference_key", None)
-    if isinstance(key, InferenceKey):
-        return bool(key)
-    api_key = getattr(value, "api_key", None)
-    return isinstance(api_key, str) and bool(api_key.strip())
+    if kind in ("claude_code", "tmux_claude"):
+        return provider_id == CLI_PROVIDER
+    if kind == "native":
+        return bool(native_provider) and provider_id == native_provider
+    return False

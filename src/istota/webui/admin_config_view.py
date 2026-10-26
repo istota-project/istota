@@ -440,7 +440,7 @@ def _model_sources(config: "Config", sources: str) -> list[str]:
     `anthropic` is the CLI brains'; `native` is every provider the native brain
     can run (`llm.providers.brain_can_run`); `any` is both.
     """
-    from istota.brain._resolve import config_providers, native_provider_id
+    from istota.brain._resolve import config_providers, native_provider_id, native_reach_ids
     from istota.llm.catalog import SHIPPED_PROVIDER
     from istota.llm.providers import brain_can_run
 
@@ -457,6 +457,7 @@ def _model_sources(config: "Config", sources: str) -> list[str]:
             for provider_id in sorted(providers, key=lambda p: (p != native_id, p)):
                 if provider_id not in found and brain_can_run(
                     "native", f"{provider_id}/-", providers, native_provider=native_id,
+                    native_reach=native_reach_ids(config),
                 ):
                     found.append(provider_id)
     return found
