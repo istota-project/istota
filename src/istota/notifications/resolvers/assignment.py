@@ -88,7 +88,7 @@ _STATUS_NOTE = {
     "budget_low": "Clears when the budget is topped up or the assignment ends.",
 }
 _PAUSE_TEXT = {
-    "budget": "Its budget is spent. Top it up in chat to resume it.",
+    "budget": "Its budget is spent, or too little is left for another wake. Top it up in chat to resume it, or close or abandon it.",
     "stalled": "Its last wakes made no progress that could be measured. Resume it, change the charter, or abandon it.",
     "failures": "Its last wakes failed. Resume it once the cause is fixed, or abandon it.",
     "thrash": "It kept failing on the same step. Resume it with a note on another approach, or abandon it.",

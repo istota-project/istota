@@ -466,6 +466,56 @@ class TestStateVerbs:
             assert [i.status for i in store.list_items(conn, a)] == ["confirmed"]
 
 
+class TestTheUsersDoneNeedsNoWake:
+    """ISSUE-853, through the CLI."""
+
+    def test_a_handoff_report_says_a_wake_is_due(self, config, turn):
+        a = _create()["assignment"]["id"]
+        _state(config, a, "waiting", waiting_on=["user"])
+        with db.get_db(config.db_path) as conn:
+            action = store.insert_action(conn, a, text="Read the table", report_spec="usable?")
+        assert _run("show", str(a))[1]["wake_due"] is None
+        code, out = _run("handoff", "done", str(a), str(action), "--report", "usable as is")
+        assert code == 0
+        assert out["wake_due"] == "inbox"
+        assert _run("show", str(a))[1]["wake_due"] == "inbox"
+
+    def test_confirming_the_last_item_completes_it(self, config, turn):
+        a = _create()["assignment"]["id"]
+        confirmed = _run("item", "add", str(a), "--text", "usable", "--kind", "confirmed")[1]["item_id"]
+        _state(config, a, "waiting", waiting_on=["user"])
+        code, out = _run("item", "confirm", str(a), str(confirmed))
+        assert code == 0
+        assert out["assignment"]["state"] == "completed"
+        assert out["wake_due"] is None
+        assert _inbox(config, a) == []
+
+    def test_a_topup_under_the_floor_says_it_is_still_paused(self, config, turn):
+        a = _create("--budget-usd", "1")["assignment"]["id"]
+        _state(config, a, "paused", reason="budget")
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(conn, prompt="[assignment wake]", user_id="alice", assignment_id=a)
+            wake = store.insert_wake(conn, a, fired_by="time", task_id=task_id)
+            store.update_wake(conn, wake, ended_at="2026-10-26T00:00:00Z", outcome="no_next_step")
+            _usage(conn, task_id=task_id, assignment_id=a, cost=0.94)
+        code, out = _run("topup", str(a), "--usd", "0.5")
+        assert code == 0
+        assert out["assignment"]["state"] == "paused"
+        assert out["still_paused"]["cheapest_wake_usd"] == pytest.approx(0.94)
+        assert out["still_paused"]["remaining"]["cost_usd"] == pytest.approx(0.56)
+
+    def test_close_completed_with_no_proposal_names_what_fails(self, config, turn):
+        a = _create()["assignment"]["id"]
+        mechanical = _run("item", "add", str(a), "--text", "m", "--kind", "mechanical",
+                          "--check", "contains", "--file", "a.md", "--text-match", "done")[1]["item_id"]
+        _state(config, a, "sleeping")
+        code, out = _run("close", str(a), "--completed")
+        assert code == 1
+        assert out["error"] == "not_met"
+        assert str(mechanical) in out["message"]
+        assert _get(config, a).state == "sleeping"
+
+
 # ---------------------------------------------------------------------------
 # Read verbs and the ledger
 # ---------------------------------------------------------------------------

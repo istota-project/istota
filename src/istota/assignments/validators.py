@@ -139,6 +139,23 @@ def run_item(config: "Config", assignment: "Assignment", item: "Item") -> ItemRe
         return ItemResult("failing", "validator error")
 
 
+def run_mechanical(config: "Config", assignment: "Assignment", items) -> dict[int, ItemResult]:
+    """Every mechanical item's result, keyed by item id. Reads files, so the
+    caller holds no write transaction while it runs."""
+    return {item.id: run_item(config, assignment, item) for item in items if item.kind == "mechanical"}
+
+
+def items_key(items) -> tuple:
+    """What a file read depends on in the done-when list: the mechanical items
+    and their checks, not their status. A write transaction compares it with
+    the list it reads, so results taken before it opened are not applied to a
+    list that changed in between."""
+    return tuple(
+        (item.id, json.dumps(item.validator, sort_keys=True))
+        for item in items if item.kind == "mechanical"
+    )
+
+
 def _run(config: "Config", assignment: "Assignment", item: "Item") -> ItemResult:
     if item.kind != "mechanical" or item.validator is None:
         return ItemResult("failing", "not a mechanical item")
