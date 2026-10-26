@@ -156,7 +156,7 @@ def test_invalid_desired_job_refuses_entire_plan(install, fields):
 
 @pytest.mark.parametrize("fields", [
     {"command": "echo hello"}, {"prompt": "Review", "brain": "native"},
-    {"prompt": "Review", "publish_shared_kv": "daily"},
+    {"prompt": "Review", "publish_shared_kv": "daily"}, {"prompt": "Review", "provider": "openrouter"},
 ])
 def test_user_authority_is_not_the_operator_authority(install, fields, monkeypatch, tmp_path):
     admins = tmp_path / "other-admins"
