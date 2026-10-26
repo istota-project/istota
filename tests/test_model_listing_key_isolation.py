@@ -264,6 +264,20 @@ def test_a_manifest_naming_the_listing_key_or_a_provider_is_refused():
     assert [s.var for s in specs] == ["KEPT"]
 
 
+def test_a_manifest_naming_native_s_legacy_key_fields_is_refused():
+    # `[brain.native] api_key` and `extra_headers` still hold a provider key
+    # through the legacy transition table.
+    from istota.skills._loader import _parse_env_specs
+
+    specs = _parse_env_specs([
+        {"var": "LEGACY_KEY", "from": "config", "config_path": "brain.native.api_key"},
+        {"var": "LEGACY_HEADERS", "from": "config", "config_path": "brain.native.extra_headers"},
+        {"var": "ONE_HEADER", "from": "config", "config_path": "brain.native.extra_headers.Authorization"},
+        {"var": "KEPT", "from": "config", "config_path": "brain.native.model"},
+    ])
+    assert [s.var for s in specs] == ["KEPT"]
+
+
 # --- the discovery fetch (Stage 4) ---------------------------------------------
 
 

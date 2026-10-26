@@ -171,14 +171,16 @@ def model_credential_spec(spec) -> bool:  # noqa: ANN001
     """Whether a manifest `env:` entry would hand out a model credential: its
     variable is one (`llm.providers.is_model_credential_name`), or its
     `config_path` reads a provider, the model-listing key file or the CLI's
-    auth mode. Such an entry is refused, the rest of the skill kept."""
+    auth mode, or native's legacy key fields, which still hold a provider key
+    for one release. Such an entry is refused, the rest of the skill kept."""
     from istota.llm.providers import is_model_credential_name
 
     if is_model_credential_name(spec.var):
         return True
     path = (spec.config_path or "").strip()
-    return path.startswith("providers.") or path in (
+    return path.startswith(("providers.", "brain.native.extra_headers.")) or path in (
         "models.anthropic_listing_key_file", "brain.claude_code.auth",
+        "brain.native.api_key", "brain.native.extra_headers",
     )
 
 
