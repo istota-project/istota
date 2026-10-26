@@ -49,6 +49,7 @@ import statistics
 import threading
 import time
 import uuid
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlparse
@@ -100,7 +101,7 @@ from istota.session.compaction import (
     plan_image_pin,
     should_compact,
 )
-from istota.session.loop_detection import detect_repeated_tool_calls
+from istota.session.loop_detection import _result_text, detect_repeated_tool_calls
 from istota.session.messages import CompactionSummaryMessage
 from istota.session.retry import classify_error, extract_status_code
 from istota.session.session_log import (
@@ -508,6 +509,53 @@ def _turn_budget_nudge_message(remaining: int, phase: str) -> UserMessage:
             f"Start wrapping up — if you can't finish, summarize what you have "
             f"and deliver a partial answer now"
         )
+    return UserMessage(content=[TextContent(text=_TURN_BUDGET_FRAME.format(body=body))])
+
+
+# How many failing Bash commands the tool-health notice names by first word.
+_FAILURE_NUDGE_COMMANDS_SHOWN = 3
+
+
+def _tool_failed(tool_name: str, result: ToolResultMessage | None, is_error: bool) -> bool:
+    """Whether one tool result counts as a failure for the tool-health notice.
+
+    Bash leaves ``is_error`` unset on a non-zero exit, so its status suffix is
+    read through ``bash_result_failed``, the one parser of that suffix.
+    """
+    if is_error:
+        return True
+    if tool_name == "Bash" and result is not None:
+        # Lazy, as the module's other `session.tools` imports are.
+        from istota.session.tools.bash import bash_result_failed
+
+        return bash_result_failed(_result_text(result))
+    return False
+
+
+def _failure_breakdown(failed_names: Counter, failed_commands: list[str]) -> str:
+    """``Bash ×4 (curl, python3), WebFetch ×1``, most frequent tool first."""
+    parts = []
+    for name, count in failed_names.most_common():
+        part = f"{name} ×{count}"
+        if name == "Bash" and failed_commands:
+            part += f" ({', '.join(failed_commands)})"
+        parts.append(part)
+    return ", ".join(parts)
+
+
+def _tool_failure_nudge_message(
+    failures: int, breakdown: str, turns_since_success: int | None
+) -> UserMessage:
+    if turns_since_success is None:
+        worked = "No tool call in this run has worked yet"
+    else:
+        worked = f"The last one that worked was {turns_since_success} turns ago"
+    body = (
+        f"tool-health notice. Your last {failures} tool calls failed "
+        f"({breakdown}). {worked}. Stop retrying what is failing: skip that "
+        f"source, try a different approach, or finish with what you have. Do "
+        f"not debug the tools themselves"
+    )
     return UserMessage(content=[TextContent(text=_TURN_BUDGET_FRAME.format(body=body))])
 
 
@@ -1660,6 +1708,7 @@ class NativeBrain:
                 inv = _tool_invocation(event.tool_name, event.args)
                 if inv:
                     entry["raw"] = inv
+                    tool_commands[event.tool_call_id] = inv
                 # Held until this turn's turn_end so the trace keeps document
                 # order (text the model wrote, then the tools it went on to
                 # call). Progress emission below stays live and unbuffered.
@@ -1669,6 +1718,7 @@ class NativeBrain:
                     req, _tool_use_event(event.tool_name, desc, event.tool_call_id, event.args)
                 )
             elif event.type == "tool_execution_end":
+                _record_tool_health(event)
                 await self._emit_progress(
                     req,
                     _tool_end_event(
@@ -1773,6 +1823,38 @@ class NativeBrain:
         # Rolling turn latency, for converting the time budget into a turn
         # budget. Written by the turn_end handler above, read by the nudge.
         turn_clock: dict = {"last": time.monotonic(), "recent": []}
+        # Tool-failure accounting for the tool-health notice. Attempt-scoped
+        # like `turn_clock`, so an overflow-recovery continue carries it on.
+        # `turn_of_last_success` is None until a tool call has worked.
+        tool_health: dict = {
+            "consecutive_failures": 0,
+            "turn_of_last_success": None,
+            "failed_names": Counter(),
+            "failed_commands": [],
+            "fired": False,
+        }
+        # A Bash call's command, by call id, from its start event: the end
+        # event carries the result but not the arguments.
+        tool_commands: dict[str, str] = {}
+
+        def _record_tool_health(event: AgentEvent) -> None:
+            command = tool_commands.pop(event.tool_call_id, "")
+            if not _tool_failed(event.tool_name, event.result, event.is_error):
+                tool_health["consecutive_failures"] = 0
+                tool_health["failed_names"].clear()
+                tool_health["failed_commands"].clear()
+                tool_health["turn_of_last_success"] = stats["turns"]
+                return
+            tool_health["consecutive_failures"] += 1
+            tool_health["failed_names"][event.tool_name] += 1
+            first_word = command.split(maxsplit=1)[0] if command.strip() else ""
+            shown = tool_health["failed_commands"]
+            if (
+                first_word
+                and first_word not in shown
+                and len(shown) < _FAILURE_NUDGE_COMMANDS_SHOWN
+            ):
+                shown.append(first_word)
 
         # --- compaction + turn-budget nudge via prepare_next_turn ---------
         # `failures` counts failed proactive summaries this attempt; at
@@ -1954,10 +2036,46 @@ class NativeBrain:
             )
             return _turn_budget_nudge_message(remaining, phase)
 
+        failure_nudge_after = self._config.tool_failure_nudge_after
+        failure_nudge_on = failure_nudge_after > 0 and bool(req.allowed_tools)
+
+        def _next_failure_nudge(new_messages) -> UserMessage | None:
+            """The tool-health notice, once per attempt, or None.
+
+            Declines while a cancel is pending, as the stop conditions do: the
+            loop's own abort check should end the run, not one more turn.
+            """
+            if not failure_nudge_on or tool_health["fired"] or abort.is_set():
+                return None
+            failures = tool_health["consecutive_failures"]
+            if failures < failure_nudge_after:
+                return None
+            tool_health["fired"] = True
+            breakdown = _failure_breakdown(
+                tool_health["failed_names"], tool_health["failed_commands"]
+            )
+            last_success = tool_health["turn_of_last_success"]
+            since = None if last_success is None else stats["turns"] - last_success
+            logger.info(
+                "tool_failure_nudge fired consecutive_failures=%d breakdown=%s",
+                failures, breakdown,
+            )
+            log.nudge(
+                phase="tool_failure",
+                consecutive_failures=failures,
+                breakdown=breakdown,
+            )
+            return _tool_failure_nudge_message(failures, breakdown, since)
+
         async def prepare_next_turn(ctx: AgentContext, new_messages):
             from istota.agent.types import PrepareNextTurnResult
 
-            nudge = _next_budget_nudge(new_messages)
+            # Budget first, then tool health, when both fire on one boundary.
+            nudges = [
+                n
+                for n in (_next_budget_nudge(new_messages), _next_failure_nudge(new_messages))
+                if n is not None
+            ]
             info = get_model_info(model)
             window = self._config.context_window or info.context_window
             reserve = self._config.compaction_reserve_tokens or derive_reserve_tokens(window)
@@ -2080,12 +2198,12 @@ class NativeBrain:
             # (compacted, or the unchanged context) as a trailing environment
             # note. Injecting via the returned list keeps it out of new_messages
             # (invisible to the trace + turn count) — purely model-facing.
-            if nudge is None:
+            if not nudges:
                 if compacted is None:
                     return None
                 return PrepareNextTurnResult(messages=compacted)
             base = compacted if compacted is not None else list(ctx.messages)
-            base.append(nudge)
+            base.extend(nudges)
             return PrepareNextTurnResult(messages=base)
 
         # --- stop conditions ----------------------------------------------

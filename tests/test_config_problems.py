@@ -70,6 +70,7 @@ BAD_HOOK_VALUES: dict[str, object] = {
     "brain.native.reasoning_replay": "always",
     "brain.native.prompt_cache_ttl": "24h",
     "brain.native.strict_tool_schemas": "always",
+    "brain.native.tool_failure_nudge_after": -1,
     "developer.container": {"exec_socket_dir": "relative/dir"},
     "developer.forge_cli_extra_denied": 5,
     "developer.forge_cli_permit": 5,

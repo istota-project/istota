@@ -2124,6 +2124,11 @@ class NativeBrainConfig:
     turn_budget_nudge: bool = True
     turn_budget_nudge_early_percent: int = 50
     turn_budget_nudge_remaining: list[int] = field(default_factory=lambda: [15, 5])
+    # Tool-failure nudge: once per attempt, after this many tool calls in a row
+    # have failed (an error result, or a Bash command that exited non-zero),
+    # the loop tells the model so and steers it off the failing approach.
+    # 0 turns it off.
+    tool_failure_nudge_after: int = 4
     # Soft wall-clock deadline (ISSUE-373). The three limits governing a native
     # run — `max_turns`, `scheduler.task_timeout_minutes` and the nudge ladder —
     # are all sized against a brain that answers in a couple of seconds. On a
@@ -4755,6 +4760,8 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     "brain.native.reasoning_replay": _one_of(*REASONING_REPLAY_MODES),
     "brain.native.prompt_cache_ttl": _one_of(*PROMPT_CACHE_TTLS),
     "brain.native.strict_tool_schemas": _one_of(*STRICT_TOOL_SCHEMA_MODES),
+    # 0 is the off switch, so only a negative count is refused.
+    "brain.native.tool_failure_nudge_after": _non_negative_int,
     # Normalised from three historical spellings, and the retired `backend` key
     # is warned about rather than ignored -- an operator who wrote
     # `backend = "none"` to keep builds off the container had that honoured

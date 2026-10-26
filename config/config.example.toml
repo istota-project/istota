@@ -167,6 +167,10 @@ features = []
 #                                            #   loop estimates the turns the remaining time has
 #                                            #   room for and uses whichever budget is scarcer, so
 #                                            #   the notices stay reachable on a slow brain.
+# tool_failure_nudge_after = 4               # after this many failed tool calls in a row (an
+#                                            #   error result, or a Bash command that exited
+#                                            #   non-zero), tell the model once to stop retrying
+#                                            #   what fails and change approach. 0 disables.
 # soft_deadline_percent = 90                 # stop the loop at this % of scheduler.task_timeout_
 #                                            #   minutes, keeping the model's partial work.
 #                                            #   0 or >= 100 disables.
