@@ -67,8 +67,12 @@ DROP_WORKSPACE_MOUNT = 'del(.mounts[] | select(.mountPoint == "/srv/mount/host-f
 #: The first admin every mode's setup names, and the devbox users.
 USER = "admin"
 SECOND_DEVBOX_USER = "bob"
+#: The scripted endpoint as an operator's own provider, as the testbed names it.
+NATIVE_PROVIDER = "scripted"
 #: The placeholder the native brain sends; the scripted endpoint checks nothing.
 NATIVE_KEY = "vmtier-native-key-placeholder"
+#: Where `istota setup` reads the provider's key from.
+NATIVE_KEY_ENV = {"ISTOTA_PROVIDER_SCRIPTED_API_KEY": NATIVE_KEY}
 DOMAIN = "istota.test"
 
 #: Proxied ingress: a bridge in the VM with an upstream and an outsider, each a
@@ -603,6 +607,7 @@ class Mode:
 def common_args(model_url: str) -> list[str]:
     return [
         "--yes", "--force", "--brain", "native",
+        "--native-provider", NATIVE_PROVIDER, "--native-provider-kind", "openai_compat",
         "--native-base-url", model_url, "--native-model", "scripted-test-model",
         "--user", USER, "--user-email", f"{USER}@example.test",
         "--no-money", "--no-health", "--no-feeds", "--no-briefings",
@@ -864,7 +869,7 @@ def role_vars(vm: Vm, release: Release, mode: Mode) -> dict:
 
     from istota import setup_wizard
 
-    credentials = {"ISTOTA_BRAIN_NATIVE_API_KEY": NATIVE_KEY, **mode.setup_env}
+    credentials = {**NATIVE_KEY_ENV, **mode.setup_env}
     # Only the mode's credentials: a key exported in the developer's shell
     # under a name the wizard reads must not reach the VM.
     scrubbed = {name.upper(): "" for name in setup_wizard.SECRET_NAMES}
@@ -1006,7 +1011,7 @@ def ensure_mode(vm: Vm, release: Release, mode: Mode, *, prepare=None) -> RoleRu
             pass
     vm.run(f"rm -f {MODE_FILE}; systemctl stop istota-stack.service || true", timeout=600)
     args = " ".join(shlex.quote(a) for a in mode.setup_args)
-    vm.run(f"istota-stack setup {args}", env={"ISTOTA_BRAIN_NATIVE_API_KEY": NATIVE_KEY, **mode.setup_env},
+    vm.run(f"istota-stack setup {args}", env={**NATIVE_KEY_ENV, **mode.setup_env},
            timeout=900)
     if mode.host_env:
         env_file_set(vm, f"{STACK}/host.env", mode.host_env)
