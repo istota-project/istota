@@ -1589,6 +1589,10 @@ class NativeBrain:
                 # Whether requests carried a key, never the key itself.
                 "prompt_cache_key": cache_affinity_key is not None,
                 "prompt_cache_ttl": prompt_cache_ttl,
+                # The mode (`auto`/`on`/`off`), read like `prompt_caching`.
+                "reasoning_replay": getattr(
+                    self._provider, "reasoning_replay", self._config.reasoning_replay
+                ),
                 # Resolved for this model, so an `auto` run says what it sent.
                 "strict_tool_schemas": bool(req.allowed_tools)
                 and strict_tools_enabled(
