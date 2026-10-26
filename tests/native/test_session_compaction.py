@@ -187,9 +187,10 @@ def _to_llm(msgs):
 class _SummaryProvider:
     """Yields a single text completion for the compaction summary call."""
 
-    def __init__(self, text: str, usage: Usage | None = None):
+    def __init__(self, text: str, usage: Usage | None = None, stop_reason: str = "end_turn"):
         self._text = text
         self._usage = usage or Usage()
+        self._stop_reason = stop_reason
         self.calls = 0
         self.kwargs: list[dict] = []
 
@@ -200,7 +201,9 @@ class _SummaryProvider:
         self.kwargs.append(kw)
         yield StreamDone(
             message=AssistantMessage(
-                content=[TextContent(text=self._text)], usage=self._usage
+                content=[TextContent(text=self._text)],
+                usage=self._usage,
+                stop_reason=self._stop_reason,
             )
         )
 
@@ -291,6 +294,21 @@ class TestCompactMessages:
         )
         assert outcome.ok is False
         assert "empty" in outcome.error
+
+    @pytest.mark.asyncio
+    async def test_a_summary_cut_at_the_output_cap_is_a_failure(self):
+        provider = _SummaryProvider(
+            "## Goal\nCollect words\n\n## Collected Results\n- part_01: amber",
+            usage=Usage(output_tokens=16384),
+            stop_reason="max_tokens",
+        )
+        outcome = await compact_messages(
+            [_user("hi")], "earlier summary", None, provider, "m", _to_llm
+        )
+        assert outcome.ok is False
+        assert "output token cap" in outcome.error
+        assert outcome.summary == "earlier summary"
+        assert outcome.usage.output_tokens == 16384
 
     @pytest.mark.asyncio
     async def test_tracks_file_operations_across_cycles(self):
