@@ -429,6 +429,23 @@ export interface AdminStatsJob {
   last_error: string | null;
 }
 
+/** A provider on the admin Models card. Never carries a key or a full URL. */
+export interface AdminModelProvider {
+  id: string;
+  kind: string;
+  /** The base URL's host. */
+  host: string;
+  /** Whether the daemon fetches its model list. */
+  discovers: boolean;
+  /** When that list was last fetched, ISO 8601 UTC, or null. */
+  discovered_at: string | null;
+  last_error: string | null;
+  /** Current models the catalogue holds for it. */
+  models: number;
+  /** How many of those `[models] enabled` admits. */
+  enabled: number;
+}
+
 export interface AdminStats {
   system: {
     version: string;
@@ -491,6 +508,8 @@ export interface AdminStats {
      * the kinds this build can construct). Absent when the operator has listed
      * none, which is the shipped default. */
     room_selectable?: string[];
+    /** One row per configured provider, from the discovery caches. */
+    providers?: AdminModelProvider[];
     error?: string;
   };
   brain_status?: {
@@ -3984,6 +4003,38 @@ export interface ChatModelAlias {
   alias: string;
   target: string | null;
   effort: string | null;
+  /** The effort levels the alias's model takes, lowest first; `[]` for a
+   *  model without reasoning, null (or absent, from an older server) when
+   *  that is not known. */
+  efforts?: string[] | null;
+}
+
+/** One model the room picker may offer this viewer, from the catalogue. */
+export interface ChatModel {
+  /** `provider/id`: what a pick stores. */
+  ref: string;
+  name: string;
+  provider: string;
+  family: string | null;
+  reasoning: boolean;
+  /** The effort levels it takes, lowest first; empty without reasoning. */
+  efforts: string[];
+  context_window: number;
+  input: string[];
+  /** USD per million tokens, or null where no price is known. */
+  price: { input: number; output: number } | null;
+  /** In `[models] enabled`. Only an admin is sent models where this is false. */
+  enabled: boolean;
+}
+
+/** What the picker makes of a room's stored model, for this viewer. */
+export interface ChatRoomModel {
+  value: string;
+  /** `set_by_admin`: outside the viewer's set, and still runs for every
+   *  member. `unavailable`: does not resolve on the room's brain. */
+  status: 'listed' | 'set_by_admin' | 'unavailable';
+  ref: string | null;
+  efforts: string[] | null;
 }
 
 /** A hidden command alias: `dispatch` resolves `alias` to `target` before it
@@ -4011,6 +4062,12 @@ export interface ChatCommands {
   commands: ChatCommand[];
   command_aliases?: ChatCommandAlias[];
   model_aliases: ChatModelAlias[];
+  /** The models this viewer may pick on the scoped brain: the whole catalogue
+   *  for an admin, the enabled set otherwise. Grouped by provider, enabled
+   *  first. Optional so a client built against an older server type-checks. */
+  models?: ChatModel[];
+  /** Sent with `room_id` when the room stores a model. */
+  room_model?: ChatRoomModel;
   /** The canonical id an unpinned room runs, resolved through its brain.
    *  `null` when the brain names none and the backend picks its own. */
   default_model?: string | null;

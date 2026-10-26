@@ -1623,6 +1623,63 @@ function mockRoomShared(id: number): boolean {
   return mockRoomMembersOf(id).length > 1 || mockRoomsWithGuests.has(id);
 }
 
+// The room picker's model list (`/chat/commands` `models`). Model ids follow
+// the shipped catalogue's shape; the OpenRouter ones stand in for a discovered
+// list, the last of them outside `[models] enabled`.
+const MOCK_BASE_EFFORTS = ['low', 'medium', 'high'];
+const MOCK_OPUS_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+function mockPickerModel(
+  provider: string,
+  id: string,
+  name: string,
+  efforts: string[],
+  enabled: boolean,
+) {
+  return {
+    ref: `${provider}/${id}`,
+    name,
+    provider,
+    family: null,
+    reasoning: efforts.length > 0,
+    efforts,
+    context_window: 200000,
+    input: ['text'],
+    price: null,
+    enabled,
+  };
+}
+
+const MOCK_PICKER_MODELS = [
+  mockPickerModel('anthropic', 'claude-haiku-5-5', 'Claude Haiku 5.5', MOCK_BASE_EFFORTS, true),
+  mockPickerModel('anthropic', 'claude-opus-5-5', 'Claude Opus 5.5', MOCK_OPUS_EFFORTS, true),
+  mockPickerModel('anthropic', 'claude-sonnet-5-5', 'Claude Sonnet 5.5', MOCK_BASE_EFFORTS, true),
+  mockPickerModel('openrouter', 'moonshotai/kimi-k2.6', 'Kimi K2.6', MOCK_BASE_EFFORTS, true),
+  mockPickerModel('openrouter', 'z-ai/glm-5', 'GLM 5', [], true),
+  mockPickerModel('openrouter', 'vendor/model-x', 'Model X', MOCK_BASE_EFFORTS, false),
+];
+
+const MOCK_ALIAS_NAMES = ['fast', 'general', 'smart', 'opus', 'sonnet', 'haiku'];
+
+/** `room_model` for a room whose stored model the picker's list does not hold:
+ *  unavailable, as the server says of a pin its brain can no longer run. */
+function mockRoomModel(roomId: string | null) {
+  const room = roomId ? mockChatRooms.find((r) => r.id === Number(roomId)) : undefined;
+  if (!room?.model) return {};
+  const listed = MOCK_PICKER_MODELS.find((m) => m.ref === room.model);
+  if (listed || MOCK_ALIAS_NAMES.includes(room.model)) {
+    return {
+      room_model: {
+        value: room.model,
+        status: 'listed',
+        ref: listed?.ref ?? null,
+        efforts: listed?.efforts ?? null,
+      },
+    };
+  }
+  return { room_model: { value: room.model, status: 'unavailable', ref: null, efforts: null } };
+}
+
 function mockSettingsRefusal(id: number): string | null {
   const groupRoom = mockChatRooms.find((r) => r.id === id && r.group_id);
   if (groupRoom) return mockGroupRoomOwnerRefusal(groupRoom);
@@ -1762,14 +1819,27 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
         { alias: 'yes', target: 'confirm' },
       ],
       model_aliases: [
-        { alias: 'fast', target: 'claude-haiku-4-5', effort: null },
-        { alias: 'general', target: 'claude-sonnet-4-6', effort: null },
-        { alias: 'smart', target: 'claude-opus-4-8', effort: null },
-        { alias: 'opus', target: 'claude-opus-4-8', effort: null },
-        { alias: 'opus-high', target: 'claude-opus-4-8', effort: 'high' },
-        { alias: 'sonnet', target: 'claude-sonnet-4-6', effort: null },
-        { alias: 'haiku', target: 'claude-haiku-4-5', effort: null },
+        { alias: 'fast', target: 'claude-haiku-5-5', effort: null, efforts: MOCK_BASE_EFFORTS },
+        {
+          alias: 'general',
+          target: 'claude-sonnet-5-5',
+          effort: null,
+          efforts: MOCK_BASE_EFFORTS,
+        },
+        { alias: 'smart', target: 'claude-opus-5-5', effort: null, efforts: MOCK_OPUS_EFFORTS },
+        { alias: 'opus', target: 'claude-opus-5-5', effort: null, efforts: MOCK_OPUS_EFFORTS },
+        {
+          alias: 'sonnet',
+          target: 'claude-sonnet-5-5',
+          effort: null,
+          efforts: MOCK_BASE_EFFORTS,
+        },
+        { alias: 'haiku', target: 'claude-haiku-5-5', effort: null, efforts: MOCK_BASE_EFFORTS },
       ],
+      // The dev user is an admin, so the list mixes enabled models with the
+      // rest of a discovered OpenRouter list, the way the picker sees it there.
+      models: MOCK_PICKER_MODELS,
+      ...mockRoomModel(new URL(`http://x${url}`).searchParams.get('room_id')),
     };
   }
 
@@ -2099,8 +2169,28 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
     }
     if (body?.name != null) room.name = String(body.name).slice(0, 80);
     if (body?.archived != null) room.archived = !!body.archived;
-    if ('model' in (body ?? {}))
-      room.model = (String(body.model || '').trim() || null) as string | null;
+    if ('model' in (body ?? {})) {
+      const model = String(body.model || '').trim();
+      // The server's 422 for a model it cannot resolve, judged only on a new
+      // value, so the picker's refusal state shows on the dev server.
+      const known =
+        !model ||
+        model === room.model ||
+        MOCK_ALIAS_NAMES.includes(model) ||
+        MOCK_PICKER_MODELS.some((m) => m.ref === model);
+      if (!known) {
+        const needle = model.toLowerCase().split('/').pop() ?? '';
+        return {
+          __status: 422,
+          error: `no model named \`${model}\``,
+          code: 'unknown',
+          candidates: MOCK_PICKER_MODELS.filter((m) => needle && m.ref.includes(needle)).map(
+            (m) => m.ref,
+          ),
+        };
+      }
+      room.model = (model || null) as string | null;
+    }
     if ('effort' in (body ?? {}))
       room.effort = (String(body.effort || '').trim() || null) as string | null;
     // Same key-presence contract the server applies, and validated against the
@@ -2758,8 +2848,30 @@ const mockAdminStats = {
       { role: 'smart', resolved: 'claude-opus-4-8' },
     ],
     endpoint: 'https://api.anthropic.com/v1',
-    provider: 'openai_compat',
+    provider: 'anthropic',
     source_type_overrides: { scheduled: 'native', heartbeat: 'native' },
+    providers: [
+      {
+        id: 'anthropic',
+        kind: 'anthropic',
+        host: 'api.anthropic.com',
+        discovers: true,
+        discovered_at: new Date(Date.now() - 40 * 60_000).toISOString(),
+        last_error: null,
+        models: 9,
+        enabled: 9,
+      },
+      {
+        id: 'openrouter',
+        kind: 'openrouter',
+        host: 'openrouter.ai',
+        discovers: true,
+        discovered_at: new Date(Date.now() - 26 * 3600_000).toISOString(),
+        last_error: 'HTTP 503',
+        models: 342,
+        enabled: 2,
+      },
+    ],
   },
 } satisfies AdminStats;
 

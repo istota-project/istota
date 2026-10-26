@@ -20,6 +20,7 @@
     Input,
     Select,
     type SelectOption,
+    AutocompleteInput,
     Checkbox,
     CopyField,
   } from '@minot/ui';
@@ -27,12 +28,21 @@
   import RoomGroupLink from './RoomGroupLink.svelte';
   import { ROOM_COLORS, ROOM_COLOR_LABELS, roomColorVar } from '$lib/roomColors';
   import {
-    getBaseModelChoices,
-    getDefaultModel,
     getBrainNamespaces,
     getInheritedBrain,
+    getRoomModelChoices,
     getSelectableBrains,
   } from '$lib/components/chat/autocomplete/providers';
+  import {
+    effortOptions,
+    effortsFor,
+    filterOptions,
+    pickerOptions,
+    refusalMessage,
+    valueOf,
+    type ModelChoices,
+    type ModelRefusal,
+  } from './modelPicker';
 
   interface Props {
     open?: boolean;
@@ -47,6 +57,8 @@
     onMembersChanged?: () => void;
     /** The viewer left the room from the members pane. */
     onLeft?: () => void;
+    /** The server refused the last model saved (422), shown beside the field. */
+    modelRefusal?: ModelRefusal | null;
   }
 
   let {
@@ -59,6 +71,7 @@
     userId,
     onMembersChanged,
     onLeft,
+    modelRefusal = null,
   }: Props = $props();
 
   // In a shared room the name, model, effort, brain and the Talk conversation
@@ -135,59 +148,50 @@
     (speechModeValue || room.policy?.deployment_speech_mode) === 'classifier',
   );
 
-  // Model + effort defaults for this room (canonical values, shared Talk+web).
-  // "" is the "instance default" sentinel (cleared on the backend as null).
-  const EFFORT_OPTIONS: SelectOption[] = [
-    { value: '', label: 'Default effort' },
-    { value: 'low', label: 'low' },
-    { value: 'medium', label: 'medium' },
-    { value: 'high', label: 'high' },
-    { value: 'xhigh', label: 'xhigh' },
-    { value: 'max', label: 'max' },
-  ];
-  let modelOptions = $state<SelectOption[]>([{ value: '', label: 'Default model' }]);
-  let modelValue = $state(untrack(() => room.model ?? ''));
+  // Model + effort defaults for this room (shared Talk+web). The model field
+  // holds an alias or a `provider/id` ref; "" is the brain's default, sent as
+  // null. A filterable field rather than a select, because a discovered
+  // OpenRouter list runs to hundreds of models.
+  let choices = $state<ModelChoices>({
+    aliases: [],
+    models: [],
+    defaultModel: null,
+    roomModel: null,
+  });
+  let modelText = $state(untrack(() => room.model ?? ''));
   let effortValue = $state(untrack(() => room.effort ?? ''));
+  const modelOptions = $derived(pickerOptions(choices));
+  const modelLabels = $derived(modelOptions.map((o) => o.label));
+  const modelFilter = $derived(filterOptions(modelOptions, room.model ?? null));
+  const modelValue = $derived(valueOf(modelOptions, modelText));
+  const effortSelectOptions = $derived<SelectOption[]>(
+    effortOptions(effortsFor(modelOptions, choices.roomModel, modelValue), effortValue),
+  );
+  // What the server said about the stored pin, while the field still holds it.
+  const pinStatus = $derived(
+    choices.roomModel && modelValue === choices.roomModel.value ? choices.roomModel.status : null,
+  );
 
-  // Base model choices (dedup + provider-alias-preferred labels) shared with
-  // the room header badge, so the dropdown and the badge name a model the same.
-  // Scoped to the brain that would have to run the model, so a room on another
-  // model namespace is not offered ids it cannot run — which the PATCH would
-  // reject anyway.
-  //
-  // That brain is the one **selected in this modal**, not the one the room
-  // still holds (ISSUE-417). The room keeps its old brain until the save lands,
-  // so keying on it offered the outgoing brain's models for a change the user
-  // had already made — which is why the select used to be disabled on a
-  // crossing change with "pick a new one after saving". Reading `brainValue`
-  // inside the effect is what subscribes it, so switching the brain refetches.
+  // A refusal is about the value that was sent; editing the field takes it down.
+  let refusedValue = $state<string | null>(null);
   $effect(() => {
-    // Both captured, and the result dropped if either has moved on: the fetch
-    // is per room *and* per pending brain now, so a stale resolution would
-    // otherwise paint one selection's aliases under another.
+    if (modelRefusal) refusedValue = untrack(() => modelValue);
+  });
+  const shownRefusal = $derived(modelRefusal && refusedValue === modelValue ? modelRefusal : null);
+
+  // The choices are scoped to the brain that would have to run the model, which
+  // is the one **selected in this modal**, not the one the room still holds
+  // (ISSUE-417): the room keeps its old brain until the save lands. Reading
+  // `brainValue` inside the effect is what subscribes it, so switching the
+  // brain refetches.
+  $effect(() => {
+    // Both captured, and the result dropped if either has moved on: a stale
+    // resolution would otherwise paint one selection's models under another.
     const forRoom = room.id;
     const forBrain = brainValue;
-    Promise.all([
-      getBaseModelChoices(forRoom, forBrain || undefined),
-      getDefaultModel(forRoom, forBrain || undefined),
-    ]).then(([choices, defaultModel]) => {
+    getRoomModelChoices(forRoom, forBrain || undefined).then((c) => {
       if (room.id !== forRoom || brainValue !== forBrain) return;
-      // Show the canonical model id in parens next to the alias, so the pick
-      // is unambiguous (e.g. `opus (claude-opus-4-8)`). The default names its
-      // id too: without it the picker could not show the default had moved
-      // past every alias (#548).
-      // A pin no alias targets any more (the previous release, or an id set
-      // with `!room model`) stays listed under its own id, so the select shows
-      // what the room runs rather than a value it does not offer. Not for a
-      // crossing brain, which clears the pin below.
-      const pin = room.model;
-      const keepPin =
-        pin && !choices.some((c) => c.value === pin) && !untrack(() => crossesNamespace);
-      modelOptions = [
-        { value: '', label: defaultModel ? `Default model (${defaultModel})` : 'Default model' },
-        ...choices.map((c) => ({ value: c.value, label: `${c.label} (${c.value})` })),
-        ...(keepPin ? [{ value: pin, label: pin }] : []),
-      ];
+      choices = c;
     });
   });
 
@@ -198,7 +202,7 @@
   $effect(() => {
     if (!crossesNamespace) return;
     untrack(() => {
-      if (modelValue) modelValue = '';
+      if (modelText) modelText = '';
       if (effortValue) effortValue = '';
     });
   });
@@ -333,7 +337,7 @@
       colorValue = paletteValue(room.color);
       listedValue = !!room.listed;
       notificationsValue = room.push_notifications ?? 'default';
-      modelValue = room.model ?? '';
+      modelText = room.model ?? '';
       effortValue = room.effort ?? '';
       brainValue = room.brain ?? '';
       guestReplyValue = room.policy?.guest_reply ?? 'direct';
@@ -441,7 +445,10 @@
 </script>
 
 {#snippet modelNote()}
-  {#if crossesNamespace}
+  {#if pinStatus === 'set_by_admin'}
+    Set by an admin: this model is outside the ones you can pick, and it runs for everyone here. You
+    can replace it with one of yours.
+  {:else if crossesNamespace}
     Now listing the models the new brain can run — the one this room had reads model names
     differently and has been cleared. Pick a new one here, or leave it on
     <em>Default model</em> to use that brain's own.
@@ -587,21 +594,42 @@
       </Field>
     {/if}
 
-    <Field label="Model" description={modelNote}>
-      <Select
-        value={modelValue}
-        options={modelOptions}
-        onValueChange={(v) => (modelValue = v)}
+    <Field
+      label="Model"
+      description={modelNote}
+      warning={pinStatus === 'unavailable'
+        ? "This room's brain can no longer run this model. Pick another, or clear the field for the default."
+        : undefined}
+      error={shownRefusal ? refusalMessage(shownRefusal) : undefined}
+    >
+      <AutocompleteInput
+        bind:value={modelText}
+        options={modelLabels}
+        filter={modelFilter}
+        limit={500}
+        onSelect={(label) => (modelText = valueOf(modelOptions, label))}
+        placeholder={choices.defaultModel
+          ? `Default model (${choices.defaultModel})`
+          : 'Default model'}
         ariaLabel="Room model default"
         disabled={locked}
-        fullWidth
       />
     </Field>
+    {#if shownRefusal && shownRefusal.candidates.length}
+      <p class="caption candidates">
+        Did you mean:
+        {#each shownRefusal.candidates.slice(0, 5) as candidate (candidate)}
+          <button type="button" class="link-action" onclick={() => (modelText = candidate)}
+            >{candidate}</button
+          >
+        {/each}
+      </p>
+    {/if}
 
     <Field label="Effort">
       <Select
         value={effortValue}
-        options={EFFORT_OPTIONS}
+        options={effortSelectOptions}
         onValueChange={(v) => (effortValue = v)}
         ariaLabel="Room effort default"
         disabled={locked}
@@ -832,6 +860,13 @@
 
   .talk-on {
     color: var(--text-muted);
+  }
+
+  .candidates {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin: 0;
   }
 
   .locked-note {

@@ -509,6 +509,36 @@
                 </div>
               </div>
             {/if}
+
+            {#if m.providers && m.providers.length > 0}
+              <div class="overrides">
+                <div class="cell-label micro-label">Providers</div>
+                <ul class="list-reset divided-list providers">
+                  {#each m.providers as p (p.id)}
+                    <li class="provider-row">
+                      <div class="hstack wrap">
+                        <code>{p.id}</code>
+                        <Badge size="sm" tone="subtle">{p.kind}</Badge>
+                        {#if p.host}<span class="caption">{p.host}</span>{/if}
+                      </div>
+                      <div class="caption">
+                        {p.models} model{p.models === 1 ? '' : 's'}, {p.enabled} enabled ·
+                        {#if !p.discovers}
+                          list not fetched
+                        {:else if p.discovered_at}
+                          fetched <Timestamp value={p.discovered_at} format="relative" />
+                        {:else}
+                          not fetched yet
+                        {/if}
+                      </div>
+                      {#if p.last_error}
+                        <div class="caption provider-error">Last fetch failed: {p.last_error}</div>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              </div>
+            {/if}
           </Card>
         {/if}
 
@@ -1216,6 +1246,16 @@
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-1);
+  }
+
+  .provider-row {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .provider-error {
+    color: var(--status-danger-fg);
   }
 
   .overrides {

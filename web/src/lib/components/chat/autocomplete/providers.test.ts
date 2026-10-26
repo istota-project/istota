@@ -10,7 +10,7 @@ import { fetchChatCommands } from '$lib/api';
 import {
   commandProvider,
   dropRoomCatalogue,
-  getBaseModelChoices,
+  getRoomModelChoices,
   getBrainNamespaces,
   getInheritedBrain,
   getSelectableBrains,
@@ -154,32 +154,44 @@ describe('modelAliasProvider', () => {
   });
 });
 
-describe('getBaseModelChoices', () => {
-  it('one choice per distinct model, provider-shortcut label preferred', async () => {
-    const choices = await getBaseModelChoices();
-    // smart + opus both map to claude-opus-4-8 → deduped, labeled 'opus'.
-    expect(choices).toEqual([
-      { value: 'claude-opus-4-8', label: 'opus' },
-      { value: 'claude-sonnet-5', label: 'sonnet' },
-      { value: 'claude-haiku-4-5', label: 'haiku' },
-    ]);
-    expect(fetchChatCommands).toHaveBeenCalledWith();
-  });
+/** The alias targets a room's choices carry: enough to tell two catalogues apart. */
+async function targetsOf(roomId: number): Promise<(string | null)[]> {
+  return (await getRoomModelChoices(roomId)).aliases.map((a) => a.target);
+}
 
-  it('lists an alias that carries a default effort', async () => {
-    // An operator override such as `general = { model, effort = "medium" }`
-    // is the only alias naming its model; dropping it hid the model entirely.
+describe('getRoomModelChoices', () => {
+  it('hands over the models, the default and the room pin as sent', async () => {
+    const model = {
+      ref: 'openrouter/vendor/m',
+      name: 'M',
+      provider: 'openrouter',
+      family: null,
+      reasoning: true,
+      efforts: ['low', 'medium', 'high'],
+      context_window: 1000,
+      input: ['text'],
+      price: null,
+      enabled: false,
+    };
+    const roomModel = { value: 'gone/m', status: 'unavailable', ref: null, efforts: null };
     (fetchChatCommands as ReturnType<typeof vi.fn>).mockResolvedValue({
       ...CATALOGUE,
-      model_aliases: [
-        { alias: 'general', target: 'claude-sonnet-5-5', effort: 'medium' },
-        { alias: 'sonnet', target: 'claude-sonnet-5', effort: null },
-      ],
+      models: [model],
+      default_model: 'claude-opus-5-5',
+      room_model: roomModel,
     });
-    expect(await getBaseModelChoices()).toEqual([
-      { value: 'claude-sonnet-5-5', label: 'general' },
-      { value: 'claude-sonnet-5', label: 'sonnet' },
-    ]);
+    const choices = await getRoomModelChoices(7, 'native');
+    expect(fetchChatCommands).toHaveBeenCalledWith(7, 'native');
+    expect(choices.models).toEqual([model]);
+    expect(choices.defaultModel).toBe('claude-opus-5-5');
+    expect(choices.roomModel).toEqual(roomModel);
+    expect(choices.aliases).toEqual(CATALOGUE.model_aliases);
+  });
+
+  it('reads an older server, which sends no models, as an empty list', async () => {
+    const choices = await getRoomModelChoices(7);
+    expect(choices.models).toEqual([]);
+    expect(choices.roomModel).toBeNull();
   });
 
   it('asks for one room at a time and caches per room', async () => {
@@ -192,12 +204,12 @@ describe('getBaseModelChoices', () => {
     (fetchChatCommands as ReturnType<typeof vi.fn>).mockImplementation(async (roomId?: number) =>
       roomId === 7 ? native : CATALOGUE,
     );
-    expect(await getBaseModelChoices(7)).toEqual([{ value: 'endpoint/m', label: 'fast' }]);
+    expect(await targetsOf(7)).toEqual(['endpoint/m']);
     // The control: a different room on the same session gets its own answer,
     // so the cache is keyed rather than shared.
-    expect((await getBaseModelChoices(8)).map((c) => c.value)).toContain('claude-opus-4-8');
+    expect(await targetsOf(8)).toContain('claude-opus-4-8');
     const before = (fetchChatCommands as ReturnType<typeof vi.fn>).mock.calls.length;
-    await getBaseModelChoices(7);
+    await targetsOf(7);
     expect((fetchChatCommands as ReturnType<typeof vi.fn>).mock.calls.length).toBe(before);
   });
 
@@ -214,9 +226,9 @@ describe('getBaseModelChoices', () => {
         model_aliases: [{ alias: 'fast', target: 'endpoint/m', effort: null }],
       };
     });
-    expect((await getBaseModelChoices(7)).map((c) => c.value)).toContain('claude-opus-4-8');
+    expect(await targetsOf(7)).toContain('claude-opus-4-8');
     fail = false;
-    expect(await getBaseModelChoices(7)).toEqual([{ value: 'endpoint/m', label: 'fast' }]);
+    expect(await targetsOf(7)).toEqual(['endpoint/m']);
   });
 
   it('refetches a room whose catalogue was dropped', async () => {
@@ -230,12 +242,12 @@ describe('getBaseModelChoices', () => {
     (fetchChatCommands as ReturnType<typeof vi.fn>).mockImplementation(async (roomId?: number) =>
       roomId === 7 ? current : CATALOGUE,
     );
-    expect((await getBaseModelChoices(7)).map((c) => c.value)).toContain('claude-opus-4-8');
+    expect(await targetsOf(7)).toContain('claude-opus-4-8');
     current = native;
     // The control: without the drop the stale list is still what comes back.
-    expect((await getBaseModelChoices(7)).map((c) => c.value)).toContain('claude-opus-4-8');
+    expect(await targetsOf(7)).toContain('claude-opus-4-8');
     dropRoomCatalogue(7);
-    expect(await getBaseModelChoices(7)).toEqual([{ value: 'endpoint/m', label: 'fast' }]);
+    expect(await targetsOf(7)).toEqual(['endpoint/m']);
   });
 });
 

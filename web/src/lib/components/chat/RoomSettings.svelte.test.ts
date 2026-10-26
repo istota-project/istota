@@ -26,8 +26,12 @@ await fillApiDouble(api, {
 // brain cases below reprogram per test; the default is the shipped deployment,
 // where the operator has listed no selectable kinds.
 vi.mock('$lib/components/chat/autocomplete/providers', () => ({
-  getBaseModelChoices: vi.fn(async () => []),
-  getDefaultModel: vi.fn(async () => null),
+  getRoomModelChoices: vi.fn(async () => ({
+    aliases: [],
+    models: [],
+    defaultModel: null,
+    roomModel: null,
+  })),
   getSelectableBrains: vi.fn(async () => []),
   getBrainNamespaces: vi.fn(async () => ({})),
   getInheritedBrain: vi.fn(async () => null),
@@ -38,13 +42,54 @@ vi.mock('@minot/ui/clipboard', () => ({ copyText }));
 
 import RoomSettings from './RoomSettings.svelte';
 import {
-  getBaseModelChoices,
   getBrainNamespaces,
-  getDefaultModel,
   getInheritedBrain,
+  getRoomModelChoices,
   getSelectableBrains,
 } from './autocomplete/providers';
-import type { ChatRoom, RoomPatch, SelectableBrain } from '$lib/api';
+import type { ModelChoices } from './modelPicker';
+import type { ChatModel, ChatRoom, RoomPatch, SelectableBrain } from '$lib/api';
+
+/** A model as `/chat/commands` sends it, enabled and taking the base levels. */
+function pickable(ref: string, overrides: Partial<ChatModel> = {}): ChatModel {
+  const provider = ref.split('/')[0];
+  return {
+    ref,
+    name: ref.slice(provider.length + 1),
+    provider,
+    family: null,
+    reasoning: true,
+    efforts: ['low', 'medium', 'high'],
+    context_window: 200000,
+    input: ['text'],
+    price: null,
+    enabled: true,
+    ...overrides,
+  };
+}
+
+/** The picker's choices: these models, no aliases, unless overridden. */
+function catalogue(refs: string[] = [], overrides: Partial<ModelChoices> = {}): ModelChoices {
+  return {
+    aliases: [],
+    models: refs.map((r) => pickable(r)),
+    defaultModel: null,
+    roomModel: null,
+    ...overrides,
+  };
+}
+
+/** The model field: an `AutocompleteInput`, so a combobox. */
+function modelField(): HTMLInputElement {
+  return screen.getByRole('combobox', { name: 'Room model default' }) as HTMLInputElement;
+}
+
+/** Open the model menu and choose an option by its label. */
+async function chooseModel(label: string) {
+  await fireEvent.focus(modelField());
+  const option = screen.getByRole('option', { name: label });
+  await fireEvent.mouseDown(option);
+}
 
 function room(overrides: Partial<ChatRoom> = {}): ChatRoom {
   return {
@@ -216,7 +261,7 @@ describe('RoomSettings — Talk state', () => {
 // agreeing with it rather than deciding anything.
 describe('RoomSettings — brain', () => {
   const brains = vi.mocked(getSelectableBrains);
-  const models = vi.mocked(getBaseModelChoices);
+  const models = vi.mocked(getRoomModelChoices);
   const namespaces = vi.mocked(getBrainNamespaces);
   const inherited = vi.mocked(getInheritedBrain);
 
@@ -234,13 +279,12 @@ describe('RoomSettings — brain', () => {
   afterEach(() => {
     for (const m of [brains, models, namespaces, inherited]) m.mockReset();
     brains.mockResolvedValue([]);
-    models.mockResolvedValue([]);
+    models.mockResolvedValue(catalogue());
     namespaces.mockResolvedValue({});
     inherited.mockResolvedValue(null);
   });
 
   const BRAIN = 'Room brain';
-  const MODEL = 'Room model default';
   const EFFORT = 'Room effort default';
   const CROSSING_NOTE = /listing the models the new brain can run/i;
 
@@ -251,7 +295,7 @@ describe('RoomSettings — brain', () => {
     await mountSettled(room());
     expect(screen.queryByRole('button', { name: BRAIN })).toBeNull();
     // The control: the model select, which is not gated, is still there.
-    expect(screen.getByRole('button', { name: MODEL })).toBeTruthy();
+    expect(modelField()).toBeTruthy();
   });
 
   it('renders the control once kinds are offered', async () => {
@@ -278,7 +322,7 @@ describe('RoomSettings — brain', () => {
     // leaving the server to infer it. Same end state as the server's own
     // clearing rule, arrived at by saying so.
     offer([CLAUDE, NATIVE]);
-    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+    models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
     const onSave = vi.fn();
     await mountSettled(room({ brain: 'claude_code', model: 'claude-opus-5' }), onSave);
     await pick(BRAIN, 'Native');
@@ -294,7 +338,7 @@ describe('RoomSettings — brain', () => {
     // The backend leaves an absent key untouched, so a room with nothing
     // stored must not grow a redundant `model: null`.
     offer([CLAUDE, NATIVE]);
-    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+    models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
     const onSave = vi.fn();
     await mountSettled(room({ brain: 'claude_code' }), onSave);
     await pick(BRAIN, 'Native');
@@ -318,9 +362,9 @@ describe('RoomSettings — brain', () => {
     // in one save (ISSUE-417) — the control stays live and says what it is
     // listing.
     offer([CLAUDE, NATIVE]);
-    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+    models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
     await mountSettled(room({ brain: 'claude_code', model: 'claude-opus-5' }));
-    const model = () => screen.getByRole('button', { name: MODEL }) as HTMLButtonElement;
+    const model = () => modelField();
     const effort = () => screen.getByRole('button', { name: EFFORT }) as HTMLButtonElement;
     expect(model().disabled).toBe(false);
     expect(screen.queryByText(CROSSING_NOTE)).toBeNull();
@@ -336,7 +380,7 @@ describe('RoomSettings — brain', () => {
     // The room still holds its old brain until the save lands, so `room_id`
     // alone would offer the outgoing brain's list for a change already made.
     offer([CLAUDE, NATIVE]);
-    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+    models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
     await mountSettled(room({ id: 7, brain: 'claude_code' }));
     models.mockClear();
     await pick(BRAIN, 'Native');
@@ -346,38 +390,31 @@ describe('RoomSettings — brain', () => {
   it('names the model an unpinned room runs', async () => {
     // #548: a bare "Default model" hid that the default had moved past every
     // alias the list offered.
-    const defaultModel = vi.mocked(getDefaultModel);
-    defaultModel.mockResolvedValue('claude-opus-5-5');
-    try {
-      models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
-      await mountSettled(room({ brain: 'claude_code' }));
-      expect(screen.getByRole('button', { name: MODEL })).toHaveTextContent(
-        'Default model (claude-opus-5-5)',
-      );
-      expect(defaultModel).toHaveBeenCalledWith(1, undefined);
-    } finally {
-      defaultModel.mockReset();
-      defaultModel.mockResolvedValue(null);
-    }
+    models.mockResolvedValue(
+      catalogue(['anthropic/claude-opus-5'], { defaultModel: 'claude-opus-5-5' }),
+    );
+    await mountSettled(room({ brain: 'claude_code' }));
+    expect(modelField().placeholder).toBe('Default model (claude-opus-5-5)');
+    expect(modelField().value).toBe('');
+    expect(models).toHaveBeenCalledWith(1, 'claude_code');
   });
 
-  it('keeps listing a pin no alias targets any more', async () => {
-    // A room pinned to the previous Opus before the aliases moved on still
-    // runs it; the select has to say so rather than show an unlisted value.
-    models.mockResolvedValue([{ value: 'claude-opus-5-5', label: 'opus' }]);
+  it('shows a stored pin the list does not hold as it is', async () => {
+    // A room pinned to a bare id from before refs (or an admin's pick) still
+    // runs it; the field shows what the room runs, not a blank.
+    models.mockResolvedValue(catalogue(['anthropic/claude-opus-5-5']));
     await mountSettled(room({ brain: 'claude_code', model: 'claude-opus-5' }));
-    expect(screen.getByRole('button', { name: MODEL })).toHaveTextContent('claude-opus-5');
-    expect(screen.getByRole('button', { name: MODEL })).not.toHaveTextContent('opus (');
+    expect(modelField().value).toBe('claude-opus-5');
   });
 
   it('resets a stale pin to the brain default as the list changes', async () => {
-    // The select must not go on showing an id the new list does not hold.
+    // The field must not go on showing an id the new brain cannot run.
     offer([CLAUDE, NATIVE]);
-    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
-    await mountSettled(room({ brain: 'claude_code', model: 'claude-opus-5' }));
-    expect(screen.getByRole('button', { name: MODEL })).toHaveTextContent('opus (claude-opus-5)');
+    models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
+    await mountSettled(room({ brain: 'claude_code', model: 'anthropic/claude-opus-5' }));
+    expect(modelField().value).toBe('anthropic/claude-opus-5');
     await pick(BRAIN, 'Native');
-    expect(screen.getByRole('button', { name: MODEL })).toHaveTextContent('Default model');
+    expect(modelField().value).toBe('');
   });
 
   it('leaves the model select alone for a move inside one namespace', async () => {
@@ -385,10 +422,10 @@ describe('RoomSettings — brain', () => {
     // that disables on any brain change at all. `claude_code` and `tmux_claude`
     // share the anthropic namespace, so the pin survives the move.
     offer([CLAUDE, TMUX]);
-    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+    models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
     await mountSettled(room({ brain: 'claude_code', model: 'claude-opus-5' }));
     await pick(BRAIN, 'Tmux Claude');
-    const model = screen.getByRole('button', { name: MODEL }) as HTMLButtonElement;
+    const model = modelField();
     expect(model.disabled).toBe(false);
     expect(screen.queryByText(CROSSING_NOTE)).toBeNull();
   });
@@ -403,17 +440,17 @@ describe('RoomSettings — brain', () => {
     // server resolves an absent pin through `resolve_brain_kind` to the
     // deployment's real namespace, so anthropic to anthropic clears nothing.
     offer([CLAUDE, TMUX], CLAUDE);
-    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+    models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
     await mountSettled(room({ brain: null, model: 'claude-opus-5' }));
     await pick(BRAIN, 'Claude Code');
-    const model = screen.getByRole('button', { name: MODEL }) as HTMLButtonElement;
+    const model = modelField();
     expect(model.disabled).toBe(false);
     expect(screen.queryByText(CROSSING_NOTE)).toBeNull();
   });
 
   it('reads an unpinned room moving out of the inherited namespace as crossing', async () => {
     offer([CLAUDE, NATIVE], CLAUDE);
-    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+    models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
     await mountSettled(room({ brain: null, model: 'claude-opus-5' }));
     await pick(BRAIN, 'Native');
     expect(screen.getByText(CROSSING_NOTE)).toBeTruthy();
@@ -423,16 +460,16 @@ describe('RoomSettings — brain', () => {
     // The same question asked in the other direction: `brainValue` is now the
     // empty sentinel, and reading *that* as unknown locked every clear.
     offer([CLAUDE, NATIVE], CLAUDE);
-    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+    models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
     await mountSettled(room({ brain: 'claude_code', model: 'claude-opus-5' }));
     await pick(BRAIN, 'Default brain');
-    const model = screen.getByRole('button', { name: MODEL }) as HTMLButtonElement;
+    const model = modelField();
     expect(model.disabled).toBe(false);
   });
 
   it('reads a clear whose inherited brain is elsewhere as crossing', async () => {
     offer([CLAUDE, NATIVE], NATIVE);
-    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+    models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
     await mountSettled(room({ brain: 'claude_code', model: 'claude-opus-5' }));
     await pick(BRAIN, 'Default brain');
     expect(screen.getByText(CROSSING_NOTE)).toBeTruthy();
@@ -442,10 +479,10 @@ describe('RoomSettings — brain', () => {
     // `tmux_claude` is not on the menu, and the server still resolves it — so
     // moving to `claude_code` stays inside anthropic and keeps the pin.
     offer([CLAUDE, NATIVE], CLAUDE);
-    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+    models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
     await mountSettled(room({ brain: 'tmux_claude', model: 'claude-opus-5' }));
     await pick(BRAIN, 'Claude Code');
-    const model = screen.getByRole('button', { name: MODEL }) as HTMLButtonElement;
+    const model = modelField();
     expect(model.disabled).toBe(false);
   });
 
@@ -454,7 +491,7 @@ describe('RoomSettings — brain', () => {
     // build does not know has no namespace anywhere, and the server clears a
     // pin whose portability it could not establish.
     offer([CLAUDE, NATIVE], CLAUDE);
-    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+    models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
     await mountSettled(room({ brain: 'ghost_brain', model: 'claude-opus-5' }));
     await pick(BRAIN, 'Claude Code');
     expect(screen.getByText(CROSSING_NOTE)).toBeTruthy();
@@ -466,10 +503,10 @@ describe('RoomSettings — brain', () => {
     // crossing effect resets it rather than sending an id the server would
     // refuse.
     offer([CLAUDE, NATIVE]);
-    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+    models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
     const onSave = vi.fn();
     await mountSettled(room({ brain: 'claude_code' }), onSave);
-    await pick(MODEL, 'opus (claude-opus-5)');
+    await chooseModel('anthropic/claude-opus-5');
     await pick(BRAIN, 'Native');
     await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(onSave.mock.calls[0][0] as RoomPatch).toEqual({ brain: 'native' });
@@ -479,12 +516,13 @@ describe('RoomSettings — brain', () => {
     // The control for the two above: nothing about the lock may cost an
     // ordinary model edit in a room whose brain is not being touched.
     offer([CLAUDE, NATIVE]);
-    models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+    models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
     const onSave = vi.fn();
     await mountSettled(room({ brain: 'claude_code' }), onSave);
-    await pick(MODEL, 'opus (claude-opus-5)');
+    await chooseModel('anthropic/claude-opus-5');
+    expect(modelField().value).toBe('anthropic/claude-opus-5');
     await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    expect(onSave.mock.calls[0][0] as RoomPatch).toEqual({ model: 'claude-opus-5' });
+    expect(onSave.mock.calls[0][0] as RoomPatch).toEqual({ model: 'anthropic/claude-opus-5' });
   });
 
   it('re-seeds the control when the modal is reused for another room', async () => {
@@ -503,21 +541,22 @@ describe('RoomSettings — brain', () => {
     // aliases into another's dropdown — which before the scoping was harmless
     // by construction, since every room got the same list.
     offer([CLAUDE, NATIVE]);
-    let releaseFirst!: (v: { value: string; label: string }[]) => void;
+    let releaseFirst!: (v: ModelChoices) => void;
     models.mockImplementation((roomId?: number) => {
       if (roomId === 1) return new Promise((res) => (releaseFirst = res));
-      return Promise.resolve([{ value: 'endpoint/m', label: 'fast' }]);
+      return Promise.resolve(catalogue(['openrouter/endpoint/m']));
     });
     const { rerender } = mount(room({ id: 1 }));
     await rerender({ room: room({ id: 2 }) });
     await Promise.resolve();
     await Promise.resolve();
     // Room 1's fetch lands late, naming a model room 2 cannot run.
-    releaseFirst([{ value: 'claude-opus-5', label: 'opus' }]);
+    releaseFirst(catalogue(['anthropic/claude-opus-5']));
     await Promise.resolve();
     await Promise.resolve();
-    await pick(MODEL, 'fast (endpoint/m)');
-    expect(screen.queryByText('opus (claude-opus-5)')).toBeNull();
+    await fireEvent.focus(modelField());
+    expect(screen.getByRole('option', { name: 'openrouter/endpoint/m' })).toBeTruthy();
+    expect(screen.queryByRole('option', { name: 'anthropic/claude-opus-5' })).toBeNull();
   });
 
   it("asks for this room's own model choices", async () => {
@@ -529,6 +568,117 @@ describe('RoomSettings — brain', () => {
     // `undefined` for the brain: the room's own is what scopes an unedited
     // modal, and the pending-selection override is the crossing case above.
     expect(models).toHaveBeenCalledWith(7, undefined);
+  });
+});
+
+// The picker over the catalogue (model-catalogue Stage 8): a filterable field
+// fed by `/chat/commands` `models`, with the effort select following the model.
+describe('RoomSettings — model picker', () => {
+  const models = vi.mocked(getRoomModelChoices);
+  afterEach(() => {
+    models.mockReset();
+    models.mockResolvedValue(catalogue());
+  });
+
+  const ADMIN_LIST = catalogue([], {
+    aliases: [{ alias: 'smart', target: 'claude-opus-5-5', effort: null, efforts: ['low', 'max'] }],
+    models: [
+      pickable('anthropic/claude-opus-5-5'),
+      pickable('openrouter/moonshotai/kimi-k2.6'),
+      pickable('openrouter/vendor/plain', { enabled: false, reasoning: false, efforts: [] }),
+    ],
+  });
+
+  const optionNames = () => screen.getAllByRole('option').map((o) => (o.textContent ?? '').trim());
+
+  it('lists the aliases, then each provider, the enabled models marked', async () => {
+    models.mockResolvedValue(ADMIN_LIST);
+    await mountSettled(room());
+    await fireEvent.focus(modelField());
+    expect(optionNames()).toEqual([
+      'smart → claude-opus-5-5',
+      'anthropic/claude-opus-5-5 · enabled',
+      'openrouter/moonshotai/kimi-k2.6 · enabled',
+      'openrouter/vendor/plain',
+    ]);
+  });
+
+  it('filters the list as the field is typed in', async () => {
+    models.mockResolvedValue(ADMIN_LIST);
+    await mountSettled(room());
+    await fireEvent.input(modelField(), { target: { value: 'kimi' } });
+    expect(optionNames()).toEqual(['openrouter/moonshotai/kimi-k2.6 · enabled']);
+  });
+
+  it("offers only the chosen model's effort levels", async () => {
+    models.mockResolvedValue(ADMIN_LIST);
+    await mountSettled(room());
+    await chooseModel('smart → claude-opus-5-5');
+    expect(modelField().value).toBe('smart');
+    await pick('Room effort default', 'max');
+    expect(screen.getByRole('button', { name: 'Room effort default' })).toHaveTextContent('max');
+    await chooseModel('openrouter/vendor/plain');
+    // A model without reasoning takes no level; the stored pick stays shown,
+    // marked, rather than the select showing a value it does not offer.
+    const effort = screen.getByRole('button', { name: 'Room effort default' });
+    expect(effort).toHaveTextContent('max (this model takes no effort)');
+  });
+
+  it('says a stored pin the room can no longer run is unavailable', async () => {
+    models.mockResolvedValue(
+      catalogue(['anthropic/claude-opus-5-5'], {
+        roomModel: { value: 'openrouter/gone/m', status: 'unavailable', ref: null, efforts: null },
+      }),
+    );
+    await mountSettled(room({ model: 'openrouter/gone/m' }));
+    expect(modelField().value).toBe('openrouter/gone/m');
+    expect(screen.getByText(/can no longer run this model/)).toBeTruthy();
+    // Picking another takes the warning down.
+    await chooseModel('anthropic/claude-opus-5-5');
+    expect(screen.queryByText(/can no longer run this model/)).toBeNull();
+  });
+
+  it("says an admin's pin outside the member's set was set by an admin", async () => {
+    models.mockResolvedValue(
+      catalogue(['anthropic/claude-opus-5-5'], {
+        roomModel: {
+          value: 'openrouter/moonshotai/kimi-k2.6',
+          status: 'set_by_admin',
+          ref: 'openrouter/moonshotai/kimi-k2.6',
+          efforts: ['low', 'medium', 'high'],
+        },
+      }),
+    );
+    const onSave = vi.fn();
+    await mountSettled(room({ model: 'openrouter/moonshotai/kimi-k2.6' }), onSave);
+    expect(screen.getByText(/Set by an admin/)).toBeTruthy();
+    // Saving another field leaves the pin alone: no model key is sent.
+    await fireEvent.input(screen.getByPlaceholderText('Room name'), {
+      target: { value: 'renamed' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(onSave.mock.calls[0][0] as RoomPatch).toEqual({ name: 'renamed' });
+  });
+
+  it("shows the server's refusal beside the field, with its candidates to pick", async () => {
+    models.mockResolvedValue(ADMIN_LIST);
+    const onSave = vi.fn();
+    const { rerender } = await mountSettled(room(), onSave);
+    await fireEvent.input(modelField(), { target: { value: 'kimi' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(onSave.mock.calls[0][0] as RoomPatch).toEqual({ model: 'kimi' });
+    await rerender({
+      modelRefusal: {
+        error: 'no model named `kimi`',
+        code: 'ambiguous',
+        candidates: ['openrouter/moonshotai/kimi-k2.6', 'openrouter/other/kimi'],
+      },
+    });
+    expect(screen.getByText('More than one model matches that name.')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'openrouter/moonshotai/kimi-k2.6' }));
+    expect(modelField().value).toBe('openrouter/moonshotai/kimi-k2.6');
+    // The refusal was about the value sent; a new one takes it down.
+    expect(screen.queryByText('More than one model matches that name.')).toBeNull();
   });
 });
 
@@ -635,7 +785,7 @@ describe('RoomSettings — a shared room another member hosts', () => {
     expect(screen.getByText(REFUSAL)).toBeTruthy();
     const name = screen.getByPlaceholderText('Room name') as HTMLInputElement;
     expect(name.readOnly).toBe(true);
-    const model = screen.getByRole('button', { name: 'Room model default' }) as HTMLButtonElement;
+    const model = modelField();
     expect(model.disabled).toBe(true);
     const guests = screen.getByRole('button', {
       name: 'How guests are answered',
@@ -1000,7 +1150,7 @@ describe('RoomSettings — personal notifications', () => {
       }),
       onSave,
     );
-    expect(screen.getByRole('button', { name: 'Room model default' })).toBeDisabled();
+    expect(modelField()).toBeDisabled();
     expect(screen.getByRole('button', { name: NOTIFICATIONS })).not.toBeDisabled();
     await pick(NOTIFICATIONS, 'Use account default');
     await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -1123,7 +1273,7 @@ describe('RoomSettings — a group-owned room', () => {
     expect(screen.getByText(/Only an owner of Team/)).toBeTruthy();
     const name = screen.getByPlaceholderText('Room name') as HTMLInputElement;
     expect(name.readOnly).toBe(true);
-    const model = screen.getByRole('button', { name: 'Room model default' }) as HTMLButtonElement;
+    const model = modelField();
     expect(model.disabled).toBe(true);
     await fireEvent.input(name, { target: { value: 'renamed' } });
     const tint = screen.getAllByRole('radio').find((r) => (r as HTMLInputElement).value !== '');

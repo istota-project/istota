@@ -4,6 +4,7 @@
 // mentionProvider drives `@name`, fed by the open room's members from the page.
 
 import { fetchChatCommands, type ChatCommands, type SelectableBrain } from '$lib/api';
+import type { ModelChoices } from '../modelPicker';
 import type { CompletionProvider, Suggestion } from './types';
 import { codeRanges, inCode, mentionText } from '$lib/mentions';
 import { latest } from '@minot/ui/ui/latest';
@@ -230,47 +231,27 @@ export async function getInheritedBrain(): Promise<SelectableBrain | null> {
   return b;
 }
 
-/** Base model choices for the room-default picker: one `{value: canonical id,
- *  label: alias}` per distinct model. An alias's `effort` is its default effort,
- *  not a variant, so it does not hide the alias: effort is the picker's own
- *  control. When several aliases map to one model, a provider
- *  alias (its name appears in the canonical id, e.g. `opus` in `claude-opus-4-8`)
- *  is preferred over a role alias like `smart`, so the label reads naturally.
- *  The room header badge and the settings dropdown both consume this, so they
- *  never disagree on how a model is named. Insertion order = first-seen.
+/** Everything the room-settings model picker offers, from one catalogue read:
+ *  the aliases, the viewer's models (the whole catalogue for an admin, the
+ *  enabled set otherwise, grouped by provider), what an unpinned room runs,
+ *  and what to make of the room's stored model.
  *
- *  `roomId` scopes the list to that room's own brain (D5 Rule 2: a surface that
- *  offers a model name lists the aliases of the brain that would have to run
- *  it). Omit it for the deployment default.
- *
- *  `brain` overrides that with a kind the caller is *considering* — the room
- *  still holds its old brain until the save lands, so the settings modal passes
- *  its pending selection and offers that brain's models (ISSUE-417). */
-export async function getBaseModelChoices(
-  roomId?: number,
-  brain?: string,
-): Promise<{ value: string; label: string }[]> {
-  const catalogue =
-    roomId === undefined ? await loadCatalogue() : await loadRoomCatalogue(roomId, brain);
-  const labelByTarget = new Map<string, string>();
-  for (const a of catalogue.model_aliases ?? []) {
-    if (!a.target) continue;
-    const cur = labelByTarget.get(a.target);
-    if (cur === undefined) labelByTarget.set(a.target, a.alias);
-    else if (!a.target.includes(cur) && a.target.includes(a.alias)) {
-      labelByTarget.set(a.target, a.alias);
-    }
-  }
-  return [...labelByTarget].map(([value, label]) => ({ value, label }));
-}
-
-/** The model an unpinned room runs, for labelling the picker's "Default model"
- *  option. Same scoping as `getBaseModelChoices`, and read off the same cached
- *  catalogue, so the two never describe different brains. */
-export async function getDefaultModel(roomId?: number, brain?: string): Promise<string | null> {
-  const catalogue =
-    roomId === undefined ? await loadCatalogue() : await loadRoomCatalogue(roomId, brain);
-  return catalogue.default_model ?? null;
+ *  Scoped to the room's own brain (D5 Rule 2: a surface that offers a model
+ *  name lists what the brain that would run it can run). `brain` overrides that
+ *  with a kind the caller is *considering*: the room holds its old brain until
+ *  the save lands, so the settings modal passes its pending selection
+ *  (ISSUE-417). Defensive about the shape, since an older server sends no
+ *  `models`. */
+export async function getRoomModelChoices(roomId: number, brain?: string): Promise<ModelChoices> {
+  const catalogue = await loadRoomCatalogue(roomId, brain);
+  return {
+    aliases: Array.isArray(catalogue.model_aliases) ? catalogue.model_aliases : [],
+    models: Array.isArray(catalogue.models)
+      ? catalogue.models.filter((m) => typeof m?.ref === 'string')
+      : [],
+    defaultModel: catalogue.default_model ?? null,
+    roomModel: catalogue.room_model ?? null,
+  };
 }
 
 /** Prefix matches first, then substring matches; input order preserved within
