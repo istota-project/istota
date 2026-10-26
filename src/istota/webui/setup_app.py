@@ -849,11 +849,11 @@ def create_setup_app(
                 "models": {
                     "anthropic": {
                         "base_url": setup_wizard.DEFAULT_ANTHROPIC_BASE_URL,
-                        "model": setup_wizard.DEFAULT_ANTHROPIC_MODEL,
+                        "model": setup_wizard.default_anthropic_model(),
                     },
                     "openrouter": {
                         "base_url": setup_wizard.DEFAULT_OPENROUTER_BASE_URL,
-                        "model": setup_wizard.DEFAULT_OPENROUTER_MODEL,
+                        "model": setup_wizard.default_openrouter_model(),
                     },
                 },
             },

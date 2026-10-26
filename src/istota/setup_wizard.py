@@ -36,10 +36,36 @@ logger = logging.getLogger("istota.setup")
 
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
-DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-#: The same model as `DEFAULT_ANTHROPIC_MODEL`, by OpenRouter's name for it.
-DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.6"
+
+
+def default_anthropic_model() -> str:
+    """The native brain's suggested model on Anthropic: the newest current
+    Sonnet in the shipped catalogue, so a catalogue refresh moves it."""
+    from istota.llm.catalog import latest_shipped_id  # noqa: PLC0415
+
+    return latest_shipped_id("sonnet")
+
+
+def default_openrouter_model() -> str:
+    """The same model as `default_anthropic_model`, by OpenRouter's name for it.
+
+    OpenRouter writes the version with a dot (`claude-sonnet-5-5` is
+    `anthropic/claude-sonnet-5.5`). When the process's catalogue has an
+    OpenRouter list, the spelling it lists wins; setup usually has none, and
+    then the dotted form is the answer.
+    """
+    import re  # noqa: PLC0415
+
+    from istota.llm.catalog import current_catalogue  # noqa: PLC0415
+
+    anthropic_id = default_anthropic_model()
+    dotted = "anthropic/" + re.sub(r"-(\d+)-(\d+)$", r"-\1.\2", anthropic_id)
+    listed = {info.id for info in current_catalogue().models("openrouter")}
+    for candidate in (dotted, "anthropic/" + anthropic_id):
+        if candidate in listed:
+            return candidate
+    return dotted
 
 
 # Reduced from web/static/octopus-sigil.webp; no image assets needed at runtime.
@@ -2002,10 +2028,11 @@ def collect_container_answers(
             # pre-provider config did.
             a.native_base_url = (flag("native_base_url") or a.native_base_url).strip()
         _refuse_on(a, "native_provider", "native_provider_kind", "native_base_url")
-        a.native_model = text(
-            "native_model", "Model id", a.native_model or (DEFAULT_ANTHROPIC_MODEL if interactive else ""),
-        )
         provider_id, _kind, _url = native_provider_choice(a)
+        suggested = ""
+        if interactive:
+            suggested = default_openrouter_model() if provider_id == "openrouter" else default_anthropic_model()
+        a.native_model = text("native_model", "Model id", a.native_model or suggested)
         key_name = provider_key_variable(provider_id).lower() if provider_id else "istota_brain_native_api_key"
         # The provider's own variable first, then the legacy one a pre-provider
         # environment holds (`config.LEGACY_PROVIDER_SOURCES`).
