@@ -156,6 +156,19 @@ class TestDirectMode:
         assert [m["name"] for m in out["medications"]] == ["Current"]
 
 
+class TestHistorySummary:
+    def test_summary_lists_the_current_regimen_in_order(self, ready):
+        db_path, env = ready
+        sup = _seed(db_path, name="Vitamin D3", category="supplement")
+        otc = _seed(db_path, name="Loratadine", category="otc")
+        rx_b = _seed(db_path, name="metformin")
+        rx_a = _seed(db_path, name="Atorvastatin")
+        _seed(db_path, name="Amoxicillin", active=False)
+        summary = _run(["history-summary"], env)
+        assert [m["id"] for m in summary["medications"]] == [rx_a, rx_b, otc, sup]
+        assert summary["medications"][0]["name"] == "Atorvastatin"
+
+
 class TestDeferredMode:
     def test_add_defers_with_dedup_key_and_agent_source(self, deferred):
         _, env, ops_file = deferred

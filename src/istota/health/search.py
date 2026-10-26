@@ -19,6 +19,8 @@ _TABLES = (
      "name", "icd10", "health_diagnosis", "/health/history/diagnoses/"),
     ("immunizations", ["name", "product_name", "manufacturer", "facility", "notes"], "date_given",
      "name", "COALESCE(product_name, facility)", "health_immunization", "/health/immunizations/detail/"),
+    ("medications", ["name", "generic_name", "reason", "prescriber", "notes"], "COALESCE(start_date, created_at)",
+     "name", "generic_name", "health_medication", "/health/medications/detail/"),
 )
 
 

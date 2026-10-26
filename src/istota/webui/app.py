@@ -4317,6 +4317,7 @@ _MODULE_DB_STATS: tuple[_ModuleDbStats, ...] = (
             ("biomarkers_total", "SELECT COUNT(*) AS n FROM biomarkers"),
             ("encounters_total", "SELECT COUNT(*) AS n FROM encounters"),
             ("immunizations_total", "SELECT COUNT(*) AS n FROM immunizations"),
+            ("medications_total", "SELECT COUNT(*) AS n FROM medications"),
         ),
         timestamp_field="last_update",
         timestamp_queries=(

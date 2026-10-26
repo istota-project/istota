@@ -2185,8 +2185,9 @@ async def api_history_summary(
     ctx: HealthContext = Depends(get_user_context),
 ):
     """New-doctor packet: active conditions, chronic conditions,
-    recent encounters (last 12 months), and last 5 procedures in the last
-    5 years (older procedures aren't clinically useful for a packet)."""
+    recent encounters (last 12 months), last 5 procedures in the last
+    5 years (older procedures aren't clinically useful for a packet), and
+    the current medication regimen."""
     from datetime import timedelta
 
     today = datetime.now(timezone.utc).date()
@@ -2206,9 +2207,10 @@ async def api_history_summary(
                 since=five_years_ago,
                 limit=5,
             )
-        return active, chronic, recent_encounters, recent_procedures
+            regimen = health_db.current_regimen(conn)
+        return active, chronic, recent_encounters, recent_procedures, regimen
 
-    active, chronic, recent, procedures = await asyncio.to_thread(_query)
+    active, chronic, recent, procedures, regimen = await asyncio.to_thread(_query)
     # Immunizations: include up-to-date routine entries (compact list) and
     # any overdue / series_incomplete actions.
     def _imm_query():
@@ -2240,6 +2242,7 @@ async def api_history_summary(
         "chronic_diagnoses": [_diagnosis_to_dict(d) for d in chronic],
         "recent_encounters": [_encounter_to_dict(e) for e in recent],
         "recent_procedures": [_encounter_to_dict(e) for e in procedures],
+        "medications": [medication_to_dict(m) for m in regimen],
         "immunizations": {
             "up_to_date": [_coverage_to_dict(c) for c in imm_up],
             "action_needed": [_coverage_to_dict(c) for c in imm_action],

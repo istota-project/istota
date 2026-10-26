@@ -13552,11 +13552,21 @@ const handlers: MockHandler[] = [
           .filter((e) => e.encounter_type === 'procedure' && e.encounter_date >= fiveYearsAgo)
           .sort((a, b) => b.encounter_date.localeCompare(a.encounter_date))
           .slice(0, 5);
+        const categoryOrder = ['prescription', 'otc', 'supplement'];
+        const regimen = medications
+          .filter((m) => m.active)
+          .sort(
+            (a, b) =>
+              categoryOrder.indexOf(a.category) - categoryOrder.indexOf(b.category) ||
+              a.name.toLowerCase().localeCompare(b.name.toLowerCase()) ||
+              a.id - b.id,
+          );
         return {
           active_diagnoses: active,
           chronic_diagnoses: chronic,
           recent_encounters: recent,
           recent_procedures: procs,
+          medications: regimen.map(medicationDict),
         };
       }
 

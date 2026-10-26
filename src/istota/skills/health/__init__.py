@@ -1458,6 +1458,7 @@ def cmd_history_summary(args: argparse.Namespace) -> None:
         procedures = health_db.list_encounters(
             conn, encounter_type="procedure", limit=5,
         )
+        regimen = health_db.current_regimen(conn)
     finally:
         conn.close()
     _emit({
@@ -1465,6 +1466,7 @@ def cmd_history_summary(args: argparse.Namespace) -> None:
         "chronic_diagnoses": [_diagnosis_to_dict(d) for d in chronic],
         "recent_encounters": [_encounter_to_dict(e) for e in recent],
         "recent_procedures": [_encounter_to_dict(e) for e in procedures],
+        "medications": [_medication_to_dict(m) for m in regimen],
     })
 
 

@@ -54,6 +54,9 @@ TABLES = {
     "immunizations": (["name", "product_name", "manufacturer", "facility", "notes"],
                       {"name": "Vaccine", "date_given": "2026-01-02"},
                       "health_immunization", "/health/immunizations/detail/"),
+    "medications": (["name", "generic_name", "reason", "prescriber", "notes"],
+                    {"name": "Medication", "start_date": "2026-01-01"},
+                    "health_medication", "/health/medications/detail/"),
 }
 
 
@@ -91,13 +94,26 @@ async def test_merge_dates_marker_dedupe_scope_and_fallback(config):
     assert result.hits[0].link["params"] == {"name": "marker"}
     second = search(config, "falcon", limit=3, offset=3)
     assert [h.kind for h in second.hits] == ["health_encounter", "health_diagnosis", "health_immunization"]
-    assert not second.has_more
-    assert len(search(config, "50%").hits) == 5
+    assert second.has_more
+    third = search(config, "falcon", limit=3, offset=6)
+    assert [h.kind for h in third.hits] == ["health_medication"]
+    assert not third.has_more
+    assert len(search(config, "50%").hits) == 6
     assert len(search(config, "marker").hits) == 1
     assert search(config, "bob").hits == []
     group = (await run_search(config, "alice", "falcon absent", sources=["health"]))["groups"][0]
     assert group["relaxed"] and group["error"] is None
     assert len(group["results"]) == 5
+
+
+def test_medication_found_by_generic_name_and_dated_by_creation(config):
+    with populate(config) as conn:
+        db.insert_medication(conn, name="Lipitor", generic_name="Atorvastatin", dose="20")
+        conn.commit()
+    hit = search(config, "atorvastatin").hits[0]
+    assert (hit.kind, hit.title, hit.subtitle) == ("health_medication", "Lipitor", "Atorvastatin")
+    assert hit.link == {"type": "route", "path": "/health/medications/detail/", "params": {"id": "1"}}
+    assert hit.date
 
 
 def test_reference_tables_are_not_searchable(config):

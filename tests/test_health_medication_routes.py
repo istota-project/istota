@@ -309,3 +309,19 @@ class TestLifecycle:
         assert [m["id"] for m in stopped.json()["medications"]] == [old]
         active = client.get(f"{BASE}/medications")
         assert [m["id"] for m in active.json()["medications"]] == [kept]
+
+
+class TestHistorySummary:
+    def test_summary_lists_the_current_regimen_in_order(self, client):
+        sup = _create(client, name="Vitamin D3", category="supplement")
+        otc = _create(client, name="Loratadine", category="otc")
+        rx_b = _create(client, name="metformin")
+        rx_a = _create(client, name="Atorvastatin")
+        stopped = _create(client, name="Amoxicillin")
+        client.post(f"{BASE}/medications/{stopped}/discontinue", json={"end_date": "2026-04-02"})
+        summary = client.get(f"{BASE}/history/summary").json()
+        assert [m["id"] for m in summary["medications"]] == [rx_a, rx_b, otc, sup]
+        assert summary["medications"][0]["active"] is True
+
+    def test_empty_regimen(self, client):
+        assert client.get(f"{BASE}/history/summary").json()["medications"] == []

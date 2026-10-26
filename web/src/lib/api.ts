@@ -2628,6 +2628,7 @@ export interface HistorySummary {
   chronic_diagnoses: Diagnosis[];
   recent_encounters: Encounter[];
   recent_procedures: Encounter[];
+  medications: Medication[];
 }
 
 async function healthFetch<T>(path: string, init?: RequestInit): Promise<T> {
