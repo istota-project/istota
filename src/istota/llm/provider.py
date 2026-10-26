@@ -77,4 +77,5 @@ class LLMProvider(Protocol):
         reasoning_effort: str | None = None,
         render_tool_images: bool = False,
         prompt_caching: bool | None = None,
+        reasoning_replay: str | None = None,
     ) -> AsyncIterator[StreamEvent]: ...

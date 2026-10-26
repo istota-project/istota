@@ -65,6 +65,7 @@ class ReplayProvider:
         reasoning_effort: str | None = None,
         render_tool_images: bool = False,
         prompt_caching: bool | None = None,
+        reasoning_replay: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         lines = read_fixture(self._path)
 
@@ -91,6 +92,10 @@ class RecordingProvider:
         self._inner = inner
         self._path = Path(fixture_path)
 
+    @property
+    def reasoning_replay(self) -> str:
+        return self._inner.reasoning_replay
+
     async def stream(
         self,
         system_prompt: str,
@@ -102,6 +107,7 @@ class RecordingProvider:
         reasoning_effort: str | None = None,
         render_tool_images: bool = False,
         prompt_caching: bool | None = None,
+        reasoning_replay: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         body = self._inner._build_chat_completion_request(
             system_prompt,
@@ -112,6 +118,7 @@ class RecordingProvider:
             reasoning_effort=reasoning_effort,
             render_tool_images=render_tool_images,
             prompt_caching=prompt_caching,
+            reasoning_replay=reasoning_replay,
         )
         recorded: list[str] = []
         try:

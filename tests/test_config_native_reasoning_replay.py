@@ -1,0 +1,32 @@
+"""``[brain.native] reasoning_replay``: a closed vocabulary with a safe default."""
+
+from istota.config import NativeBrainConfig, config_from_document
+from istota.config_mapper import collect_problems
+from istota.llm.types import REASONING_REPLAY_MODES
+
+
+def _native(raw: dict):
+    with collect_problems() as problems:
+        config = config_from_document({"brain": {"native": raw}})
+    return config.brain.native, problems
+
+
+def test_the_default_is_auto():
+    assert NativeBrainConfig().reasoning_replay == "auto"
+    native, problems = _native({})
+    assert native.reasoning_replay == "auto"
+    assert problems == []
+
+
+def test_each_mode_loads():
+    for mode in REASONING_REPLAY_MODES:
+        native, problems = _native({"reasoning_replay": mode})
+        assert native.reasoning_replay == mode
+        assert problems == []
+
+
+def test_an_unknown_mode_warns_and_keeps_the_default():
+    native, problems = _native({"reasoning_replay": "always"})
+    assert native.reasoning_replay == "auto"
+    assert [p["path"] for p in problems] == [("brain", "native", "reasoning_replay")]
+    assert problems[0]["kind"] == "discarded"

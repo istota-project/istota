@@ -142,7 +142,14 @@ features = []
 # compaction_background_tokens = 0           # how far below the blocking threshold the
 #                                            #   background summary starts. 0 derives it:
 #                                            #   an eighth of the window, at most 32768.
-# model_catalog_fetch = true                 # when base_url is OpenRouter, fetch its
+# reasoning_replay = "auto"                  # send a turn's reasoning back on later turns of
+#                                            #   the same attempt. "auto": structured
+#                                            #   reasoning_details only (OpenRouter); "on":
+#                                            #   plain reasoning text as well; "off": never.
+#                                            #   A request the endpoint refuses is re-sent
+#                                            #   once without, and replay stays off for the
+#                                            #   rest of the attempt.
+# model_catalog_fetch = true                # when base_url is OpenRouter, fetch its
 #                                            #   public model list once/process for real
 #                                            #   window / capabilities / prices (self-
 #                                            #   updating; disk-cached). No effect for a

@@ -218,6 +218,44 @@ class TestSerializeText:
         # Not a drop for anything else.
         assert serialize_content(TextContent(text="kept"), policy)["text"] == "kept"
 
+    def test_plain_thinking_keeps_its_old_shape(self):
+        assert serialize_content(ThinkingContent(thinking="hm"), POLICY) == {
+            "type": "thinking",
+            "thinking": "hm",
+        }
+
+    def test_an_encrypted_reasoning_item_is_logged_as_metadata_only(self):
+        payload = "c2VjcmV0LXJlYXNvbmluZy1wYXlsb2Fk" * 50
+        block = ThinkingContent(
+            thinking="visible",
+            source_field="reasoning",
+            details=[
+                {"type": "reasoning.text", "text": "visible", "index": 0, "signature": "sig"},
+                {"type": "reasoning.encrypted", "data": payload, "index": 1, "format": "x"},
+            ],
+        )
+        out = serialize_content(block, POLICY)
+        assert out["source_field"] == "reasoning"
+        assert out["details"][0] == {
+            "type": "reasoning.text",
+            "text": "visible",
+            "index": 0,
+            "signature": "sig",
+        }
+        assert out["details"][1] == {
+            "type": "reasoning.encrypted",
+            "length": len(payload),
+            "sha256": hashlib.sha256(payload.encode()).hexdigest(),
+        }
+        assert payload not in json.dumps(out)
+
+    def test_reasoning_item_text_is_capped_like_any_text(self):
+        block = ThinkingContent(
+            details=[{"type": "reasoning.text", "text": "z" * 500, "index": 0}]
+        )
+        out = serialize_content(block, SessionLogPolicy(max_content_chars=100))
+        assert len(out["details"][0]["text"]) < 500
+
 
 class TestSerializeImage:
     def test_an_image_is_a_descriptor_and_never_carries_its_bytes(self):

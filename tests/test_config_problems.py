@@ -67,6 +67,7 @@ BAD_HOOK_VALUES: dict[str, object] = {
     "web.token_storage": "plain",
     "nextcloud.sharing.calendars": "read-only",
     "nextcloud.sharing.contacts": "rw",
+    "brain.native.reasoning_replay": "always",
     "developer.container": {"exec_socket_dir": "relative/dir"},
     "developer.forge_cli_extra_denied": 5,
     "developer.forge_cli_permit": 5,

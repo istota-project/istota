@@ -485,6 +485,31 @@ def _image_descriptor(block: ImageContent) -> dict:
     return descriptor
 
 
+def _reasoning_detail_descriptor(item: Any, policy: "SessionLogPolicy") -> dict:
+    """One ``reasoning_details`` item for the log.
+
+    An encrypted item is identity and size, never its payload, on the image
+    pattern: the payload is opaque to a reader and can be large. Any other
+    item keeps its fields, with string values capped like any text.
+    """
+    if not isinstance(item, dict):
+        return {"type": "unknown", "unrecognized": True}
+    if item.get("type") == "reasoning.encrypted":
+        data = item.get("data")
+        raw = data.encode("utf-8", "backslashreplace") if isinstance(data, str) else b""
+        return {
+            "type": "reasoning.encrypted",
+            "length": len(data) if isinstance(data, str) else 0,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    out: dict = {}
+    for key, value in item.items():
+        if isinstance(value, str):
+            value = _cap_text(value, policy.max_content_chars)[0]
+        out[key] = value
+    return out
+
+
 def _cap_arguments(arguments: Any, limit: int) -> Any:
     """The arguments dict, or an honest marker where it is over the cap.
 
@@ -524,6 +549,12 @@ def serialize_content(block: Content, policy: SessionLogPolicy) -> dict | None:
         if truncated:
             record["truncated"] = True
             record["chars_total"] = total
+        if block.source_field:
+            record["source_field"] = block.source_field
+        if block.details:
+            record["details"] = [
+                _reasoning_detail_descriptor(item, policy) for item in block.details
+            ]
         return record
 
     if isinstance(block, TextContent):
@@ -837,6 +868,20 @@ class SessionLogWriter:
             message, _, _ = _cap_text(str(exc), self._policy.max_content_chars)
             tb, _, _ = _cap_text(formatted, self._policy.max_content_chars)
             return {"kind": type(exc).__name__, "message": message, "traceback": tb}
+
+        self._record("error", build)
+
+    def error_event(self, kind: str, message: str) -> None:
+        """An ``error`` record for a failure the run handled, with no exception.
+
+        Same shape as :meth:`error` minus the traceback, so a reader counting
+        errors by ``kind`` sees both. Today: a refused reasoning replay
+        (``reasoning_rejected``).
+        """
+
+        def build() -> dict:
+            text, _, _ = _cap_text(str(message), self._policy.max_content_chars)
+            return {"kind": str(kind), "message": text}
 
         self._record("error", build)
 

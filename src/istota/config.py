@@ -29,6 +29,7 @@ from .config_mapper import (
     report_problem,
     report_unknown,
 )
+from istota.llm.types import REASONING_REPLAY_MODES
 from istota.mail.outbound_policy import VALID_POLICIES as OUTBOUND_APPROVAL_POLICIES
 from istota.sandbox.user_scope import paths_overlap, scoped_user_dir
 from istota.webui.map_basemap import provider_names as map_provider_names
@@ -2079,6 +2080,11 @@ class NativeBrainConfig:
     # ``True``/``False`` always wins, whether it came from the TOML or was set
     # directly on the dataclass.
     prompt_caching: bool | None = None
+    # Whether an assistant turn's reasoning is sent back on later turns of the
+    # same attempt: "auto" (structured reasoning_details only), "on" (plain
+    # reasoning too) or "off". An endpoint that refuses it gets one re-issue
+    # without, and replay is off for the rest of the attempt.
+    reasoning_replay: str = "auto"
     # Daemon-side WebFetch tool ([brain.native.web_fetch]). Enabled by default
     # with safe caps; the tool is native-only (added to build_default_tools).
     web_fetch: WebFetchConfig = field(default_factory=WebFetchConfig)
@@ -4729,6 +4735,7 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     "web.token_storage": _one_of(*WEB_TOKEN_STORAGE_MODES),
     "nextcloud.sharing.calendars": _one_of(*NEXTCLOUD_SHARING_LEVELS, fallback="off"),
     "nextcloud.sharing.contacts": _one_of(*NEXTCLOUD_SHARING_LEVELS, fallback="off"),
+    "brain.native.reasoning_replay": _one_of(*REASONING_REPLAY_MODES),
     # Normalised from three historical spellings, and the retired `backend` key
     # is warned about rather than ignored -- an operator who wrote
     # `backend = "none"` to keep builds off the container had that honoured

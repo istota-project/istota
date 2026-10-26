@@ -107,5 +107,7 @@ def make_provider(config):
             base_url=base_url,
             extra_headers=extra_headers,
             prompt_caching=caching,
+            # An unknown value warns in the provider and runs as "auto".
+            reasoning_replay=getattr(config, "reasoning_replay", "auto"),
         )
     raise ValueError(f"Unknown provider: {kind!r}")

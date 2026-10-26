@@ -48,6 +48,7 @@ import re
 import statistics
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -65,6 +66,7 @@ from istota.agent.types import (
 )
 from istota.llm import make_provider
 from istota.llm.catalog import get_model_info
+from istota.llm.openai_compat import is_reasoning_rejection, replays_reasoning
 from istota.llm.provider import (
     StreamDone,
     StreamError,
@@ -759,6 +761,42 @@ def _drain_one_steer(buffer: list) -> list:
     return [UserMessage(content=[TextContent(text=_STEER_FRAME.format(text=text))])]
 
 
+@dataclasses.dataclass(frozen=True)
+class _ReissuableFeature:
+    """A request feature an endpoint may refuse, which can be dropped instead.
+
+    ``stream_kwarg``/``off_value`` is how one request is sent without it;
+    ``is_rejection`` reads the refusal off the error text; ``carried`` says
+    whether the refused request had the feature at all, so a refusal that
+    only looks like one is not re-sent. ``name`` keys the attempt's disabled
+    set and the session log's ``<name>_rejected`` error record.
+    """
+
+    name: str
+    stream_kwarg: str
+    off_value: object
+    is_rejection: Callable[[str], bool]
+    carried: Callable[[object, list, list], bool]
+
+
+def _carries_replayed_reasoning(inner, messages, tools) -> bool:
+    # A provider that does not say how it replays (a test double) replays none.
+    return replays_reasoning(messages, getattr(inner, "reasoning_replay", "off"))
+
+
+# Features re-sent once without on refusal, then off for the attempt. Stage 6
+# of the pi 1.x round adds strict tool schemas here.
+_REISSUABLE_FEATURES: tuple[_ReissuableFeature, ...] = (
+    _ReissuableFeature(
+        name="reasoning",
+        stream_kwarg="reasoning_replay",
+        off_value="off",
+        is_rejection=is_reasoning_rejection,
+        carried=_carries_replayed_reasoning,
+    ),
+)
+
+
 class _RetryingProvider:
     """Wrap a provider with turn-level retry on *immediate* transient errors.
 
@@ -772,11 +810,53 @@ class _RetryingProvider:
     Putting retry here — at single-completion granularity — keeps it correct for
     multi-turn tasks: re-issuing one request never replays already-executed
     tools. ``abort`` makes the backoff sleep interruptible.
+
+    It also owns the one-shot re-issue for a refused feature
+    (:meth:`_reissue_once_without`). One instance lives for one attempt, so
+    "off for the rest of the attempt" is this instance's disabled set.
+    ``on_feature_disabled(name, error_message)`` is told once per feature.
     """
 
-    def __init__(self, inner, abort: asyncio.Event | None):
+    def __init__(
+        self,
+        inner,
+        abort: asyncio.Event | None,
+        on_feature_disabled: Callable[[str, str], None] | None = None,
+    ):
         self._inner = inner
         self._abort = abort
+        self._on_feature_disabled = on_feature_disabled
+        self._disabled_features: set[str] = set()
+
+    def _reissue_once_without(self, error_message: str, messages, tools) -> bool:
+        """Turn off the feature this refusal names, if the request carried it.
+
+        True means the caller should send the request again at once: the
+        feature is now in the disabled set, so the next request goes without
+        it, and every later one in the attempt too. Each feature is turned off
+        at most once, which is what bounds the re-issue to one.
+        """
+        for feature in _REISSUABLE_FEATURES:
+            if feature.name in self._disabled_features:
+                continue
+            if not feature.is_rejection(error_message):
+                continue
+            if not feature.carried(self._inner, messages, tools):
+                continue
+            self._disabled_features.add(feature.name)
+            logger.warning(
+                "native provider refused %s; re-sending without it, and it is off "
+                "for the rest of this attempt: %s",
+                feature.name,
+                error_message[:200],
+            )
+            if self._on_feature_disabled is not None:
+                try:
+                    self._on_feature_disabled(feature.name, error_message)
+                except Exception:  # noqa: BLE001 — a log hook must not fail a turn
+                    logger.debug("on_feature_disabled raised", exc_info=True)
+            return True
+        return False
 
     async def stream(
         self,
@@ -790,11 +870,14 @@ class _RetryingProvider:
         render_tool_images=False,
         prompt_caching=None,
     ):
-        # Forwarded only when set, so a turn call reaches the inner provider
-        # with exactly the arguments it took before the override existed.
-        extra = {} if prompt_caching is None else {"prompt_caching": prompt_caching}
         attempt = 0
         while True:
+            # Forwarded only when set, so a turn call reaches the inner provider
+            # with exactly the arguments it took before the override existed.
+            extra = {} if prompt_caching is None else {"prompt_caching": prompt_caching}
+            for feature in _REISSUABLE_FEATURES:
+                if feature.name in self._disabled_features:
+                    extra[feature.stream_kwarg] = feature.off_value
             committed = False
             pending_error: StreamError | None = None
 
@@ -823,6 +906,11 @@ class _RetryingProvider:
 
             if pending_error is None:
                 return
+
+            if self._reissue_once_without(
+                pending_error.message.error_message or "", messages, tools
+            ):
+                continue
 
             cls = classify_error(pending_error.message.error_message or "")
             if not cls.retryable or attempt >= _API_RETRY_MAX_ATTEMPTS:
@@ -1311,7 +1399,13 @@ class NativeBrain:
             return drained
 
         model = req.model or self._config.model
-        provider = _RetryingProvider(self._provider, abort)
+        provider = _RetryingProvider(
+            self._provider,
+            abort,
+            on_feature_disabled=lambda name, message: log.error_event(
+                f"{name}_rejected", message
+            ),
+        )
         usage = TaskUsage()
         # Cost provenance, for the usage row's `cost_basis`. `TaskUsage.add`
         # decides per turn whether to take the provider's reported cost or fall

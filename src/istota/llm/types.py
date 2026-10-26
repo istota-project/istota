@@ -40,6 +40,19 @@ class ToolCallContent:
 class ThinkingContent:
     type: Literal["thinking"] = "thinking"
     thinking: str = ""
+    # The endpoint's structured reasoning (OpenRouter ``reasoning_details``),
+    # coalesced, kept verbatim so it can be sent back on a later turn. Encrypted
+    # items carry no readable text, so ``thinking`` can be empty beside them.
+    details: list[dict] | None = None
+    # Which delta field ``thinking`` was read from: ``reasoning_content``,
+    # ``reasoning`` or ``reasoning_details``. Empty when unknown.
+    source_field: str = ""
+
+
+# ``[brain.native] reasoning_replay``: whether an assistant turn's reasoning is
+# sent back. ``auto`` sends structured ``details`` only; ``on`` also sends plain
+# reasoning under its ``source_field``; ``off`` sends none.
+REASONING_REPLAY_MODES = ("auto", "on", "off")
 
 
 Content = TextContent | ImageContent | ToolCallContent | ThinkingContent

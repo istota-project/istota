@@ -11,6 +11,7 @@ errors and connection errors are encoded as a single ``StreamError`` event.
 import json
 import logging
 import math
+import re
 from collections.abc import AsyncIterator
 
 import httpx
@@ -24,6 +25,7 @@ from .provider import (
     ToolCallDelta,
 )
 from .types import (
+    REASONING_REPLAY_MODES,
     AssistantMessage,
     ImageContent,
     Message,
@@ -111,6 +113,104 @@ def _parse_reported_cost(usage_raw: dict) -> float | None:
     return value
 
 
+# The plain-string reasoning delta fields, in the order they are read.
+_PLAIN_REASONING_FIELDS = ("reasoning_content", "reasoning")
+
+# String fields of a ``reasoning_details`` item that stream in pieces.
+_DETAIL_STRING_FIELDS = ("text", "summary", "data")
+
+# Readable reasoning in a ``reasoning_details`` item, by item type. Encrypted
+# items carry ``data``, which is not.
+_DETAIL_READABLE_FIELD = {"reasoning.text": "text", "reasoning.summary": "summary"}
+
+
+def coalesce_reasoning_details(items: list) -> list[dict]:
+    """Merge streamed ``reasoning_details`` fragments into whole items.
+
+    Consecutive items sharing ``type`` and ``index`` are one item streamed in
+    pieces: their ``text``, ``summary`` and ``data`` are concatenated, the
+    other fields come from the first piece, and ``signature`` is the last
+    non-empty one (it arrives with the final piece). Checked against the
+    recorded OpenRouter stream, which sends one ``reasoning.text`` item per
+    chunk at index 0.
+    """
+    merged: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        last = merged[-1] if merged else None
+        if (
+            last is not None
+            and last.get("type") == item.get("type")
+            and last.get("index") == item.get("index")
+        ):
+            for key in _DETAIL_STRING_FIELDS:
+                piece = item.get(key)
+                if isinstance(piece, str) and piece:
+                    last[key] = (last.get(key) or "") + piece
+            signature = item.get("signature")
+            if signature:
+                last["signature"] = signature
+            continue
+        merged.append(dict(item))
+    return merged
+
+
+def _readable_detail_text(item: dict) -> str:
+    field = _DETAIL_READABLE_FIELD.get(item.get("type"))
+    value = item.get(field) if field else None
+    return value if isinstance(value, str) else ""
+
+
+def _reasoning_wire_fields(msg: Message, mode: str) -> dict:
+    """What an assistant turn sends back of its reasoning, under ``mode``.
+
+    ``auto`` sends structured ``reasoning_details`` verbatim and nothing else:
+    plain-string replay is model-specific. ``on`` also sends plain reasoning
+    under the field it arrived in. Details win over the plain text where both
+    exist, since the text is a copy of what the details hold.
+    """
+    if mode not in ("auto", "on"):
+        return {}
+    blocks = [c for c in msg.content if isinstance(c, ThinkingContent)]
+    details = [item for block in blocks for item in (block.details or [])]
+    if details:
+        return {"reasoning_details": details}
+    if mode == "on":
+        for block in blocks:
+            if block.thinking and block.source_field in _PLAIN_REASONING_FIELDS:
+                text = "".join(
+                    b.thinking for b in blocks if b.source_field == block.source_field
+                )
+                return {block.source_field: text}
+    return {}
+
+
+def replays_reasoning(messages: list[Message], mode: str) -> bool:
+    """Whether a request built from ``messages`` carries reasoning back."""
+    for msg in messages:
+        if getattr(msg, "role", "") == "assistant" and _reasoning_wire_fields(msg, mode):
+            return True
+    return False
+
+
+_REASONING_REJECTION_RE = re.compile(r"reasoning|thinking|signature", re.IGNORECASE)
+_REASONING_EFFORT_RE = re.compile(r"reasoning[_ ]effort", re.IGNORECASE)
+
+
+def is_reasoning_rejection(error_message: str) -> bool:
+    """A 400 that names reasoning, thinking or a signature.
+
+    What an endpoint answers when it refuses replayed reasoning. A message
+    naming only ``reasoning_effort`` is about a different field and does not
+    count. Read off the ``HTTP 400`` this provider stamps into every error.
+    """
+    text = error_message or ""
+    if not re.search(r"\bHTTP 400\b", text):
+        return False
+    return bool(_REASONING_REJECTION_RE.search(_REASONING_EFFORT_RE.sub("", text)))
+
+
 def _tool_delta_index(tc: dict, tool_acc: dict, id_to_index: dict) -> int:
     """Resolve the accumulator slot for a streamed tool_call delta (NB-16).
 
@@ -141,6 +241,7 @@ class OpenAICompatibleProvider:
         timeout: float = 300.0,
         extra_headers: dict[str, str] | None = None,
         prompt_caching: bool = False,
+        reasoning_replay: str = "auto",
     ):
         headers = {
             "authorization": f"Bearer {api_key}",
@@ -154,6 +255,23 @@ class OpenAICompatibleProvider:
         # Opt-in: add Anthropic/OpenRouter cache_control breakpoints. Off by
         # default so a plain-OpenAI / local endpoint never sees the extension.
         self._prompt_caching = prompt_caching
+        if reasoning_replay not in REASONING_REPLAY_MODES:
+            logger.warning(
+                "reasoning_replay=%r is not one of %s; using 'auto'",
+                reasoning_replay,
+                "/".join(REASONING_REPLAY_MODES),
+            )
+            reasoning_replay = "auto"
+        self._reasoning_replay = reasoning_replay
+
+    @property
+    def reasoning_replay(self) -> str:
+        """Which reasoning an assistant turn sends back (``auto``/``on``/``off``).
+
+        Read by ``NativeBrain``'s retrying wrapper to tell whether a refused
+        request carried reasoning, before it re-issues one without.
+        """
+        return self._reasoning_replay
 
     @property
     def prompt_caching(self) -> bool:
@@ -194,6 +312,7 @@ class OpenAICompatibleProvider:
         reasoning_effort: str | None = None,
         render_tool_images: bool = False,
         prompt_caching: bool | None = None,
+        reasoning_replay: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         body = self._build_chat_completion_request(
             system_prompt,
@@ -204,6 +323,7 @@ class OpenAICompatibleProvider:
             reasoning_effort=reasoning_effort,
             render_tool_images=render_tool_images,
             prompt_caching=prompt_caching,
+            reasoning_replay=reasoning_replay,
         )
         try:
             async with self._client.stream("POST", "/chat/completions", json=body) as resp:
@@ -239,17 +359,21 @@ class OpenAICompatibleProvider:
         reasoning_effort: str | None = None,
         render_tool_images: bool = False,
         prompt_caching: bool | None = None,
+        reasoning_replay: str | None = None,
     ) -> dict:
         """Convert istota Message types to an OpenAI chat completions body.
 
         ``prompt_caching`` overrides the provider's own setting for this one
         request; ``None`` keeps it. A compaction summary passes ``False``.
+        ``reasoning_replay`` is the same, and a refused replay is re-sent with
+        ``"off"``.
         """
+        replay = self._reasoning_replay if reasoning_replay is None else reasoning_replay
         wire: list[dict] = []
         if system_prompt:
             wire.append({"role": "system", "content": system_prompt})
         for msg in messages:
-            wire.append(self._message_to_wire(msg))
+            wire.append(self._message_to_wire(msg, replay))
             # A tool result carrying image content can't ride in the
             # ``role:"tool"`` message on most endpoints; Anthropic's compat layer
             # honors a follow-up ``role:"user"`` block instead. Inject it right
@@ -296,7 +420,7 @@ class OpenAICompatibleProvider:
         return body
 
     @staticmethod
-    def _message_to_wire(msg: Message) -> dict:
+    def _message_to_wire(msg: Message, reasoning_replay: str = "off") -> dict:
         role = getattr(msg, "role", "user")
         if role == "tool_result":
             return {
@@ -321,6 +445,7 @@ class OpenAICompatibleProvider:
             ]
             if tool_calls:
                 wire["tool_calls"] = tool_calls
+            wire.update(_reasoning_wire_fields(msg, reasoning_replay))
             return wire
 
         # user message
@@ -489,6 +614,10 @@ class OpenAICompatibleProvider:
         # endpoints: ``reasoning``). Captured for message fidelity but never
         # emitted as a TextDelta — it must not land in result_text or progress.
         thinking_parts: list[str] = []
+        # Structured reasoning (`reasoning_details`), kept for replay, and the
+        # plain field the text came from, if any.
+        detail_items: list = []
+        plain_field = ""
         # index -> {"id", "name", "args"}
         tool_acc: dict[int, dict] = {}
         # NB-16: some endpoints omit ``index``. Track id→slot and a running
@@ -546,8 +675,24 @@ class OpenAICompatibleProvider:
             choice = choices[0]
             delta = choice.get("delta") or {}
 
-            reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-            if isinstance(reasoning, str) and reasoning:
+            # OpenRouter sends each chunk's reasoning twice, as `reasoning` and
+            # inside `reasoning_details`, so the text comes from one of them:
+            # the plain field when the chunk has one, else the details.
+            details = delta.get("reasoning_details")
+            if isinstance(details, list):
+                detail_items.extend(details)
+            reasoning = None
+            for field_name in _PLAIN_REASONING_FIELDS:
+                value = delta.get(field_name)
+                if isinstance(value, str) and value:
+                    reasoning = value
+                    plain_field = plain_field or field_name
+                    break
+            if reasoning is None and isinstance(details, list):
+                reasoning = "".join(
+                    _readable_detail_text(item) for item in details if isinstance(item, dict)
+                )
+            if reasoning:
                 # Accumulate for StreamDone message fidelity (assembled into a
                 # ThinkingContent block, excluded from result_text) AND stream it
                 # live so the executor can surface reasoning on stream surfaces.
@@ -596,9 +741,18 @@ class OpenAICompatibleProvider:
             )
             return
 
+        details = coalesce_reasoning_details(detail_items)
+        source_field = plain_field or ("reasoning_details" if details else "")
         yield StreamDone(
             message=self._assemble_message(
-                text_parts, thinking_parts, tool_acc, finish_reason, usage_raw, model
+                text_parts,
+                thinking_parts,
+                tool_acc,
+                finish_reason,
+                usage_raw,
+                model,
+                details=details or None,
+                source_field=source_field,
             )
         )
 
@@ -610,14 +764,18 @@ class OpenAICompatibleProvider:
         finish_reason: str | None,
         usage_raw: dict | None,
         model: str,
+        details: list[dict] | None = None,
+        source_field: str = "",
     ) -> AssistantMessage:
         content: list = []
         thinking = "".join(thinking_parts)
-        if thinking:
+        if thinking or details:
             # Thinking precedes the visible answer in the assembled message so a
             # future surface can render it in order. AssistantMessage.text
             # filters to TextContent, so this never leaks into the result.
-            content.append(ThinkingContent(thinking=thinking))
+            content.append(
+                ThinkingContent(thinking=thinking, details=details, source_field=source_field)
+            )
         joined = "".join(text_parts)
         if joined:
             content.append(TextContent(text=joined))

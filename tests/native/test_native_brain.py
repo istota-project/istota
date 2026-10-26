@@ -1433,6 +1433,163 @@ class TestCacheTelemetry:
         assert "hit_rate=0" in line
 
 
+class _ScriptedHttp:
+    """Stands in for the provider's httpx client: one scripted response per
+    request, and every request body kept, so a test reads the real wire."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.bodies: list[dict] = []
+
+    def stream(self, method, url, json=None, **kw):
+        self.bodies.append(json)
+        status, lines = self._responses.pop(0)
+        return _ScriptedResponse(status, lines)
+
+    async def aclose(self):
+        pass
+
+
+class _ScriptedResponse:
+    def __init__(self, status, lines):
+        self.status_code = status
+        self._lines = lines
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def aread(self):
+        return "\n".join(self._lines).encode()
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+
+def _sse_chunk(delta: dict, finish: str | None = None) -> str:
+    return "data: " + json.dumps({"choices": [{"delta": delta, "finish_reason": finish}]})
+
+
+def _reasoned_read(call_id: str, path: Path) -> tuple[int, list[str]]:
+    """A 200 turn with encrypted reasoning and one Read call, as OpenRouter
+    streams it."""
+    return 200, [
+        _sse_chunk(
+            {"reasoning_details": [{"type": "reasoning.encrypted", "data": "ZW5j", "index": 0}]}
+        ),
+        _sse_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": call_id,
+                        "function": {
+                            "name": "Read",
+                            "arguments": json.dumps({"file_path": str(path)}),
+                        },
+                    }
+                ]
+            }
+        ),
+        _sse_chunk({}, "tool_calls"),
+        "data: [DONE]",
+    ]
+
+
+_TEXT_TURN = (200, [_sse_chunk({"content": "done"}), _sse_chunk({}, "stop"), "data: [DONE]"])
+
+
+def _assistant_wires(body: dict) -> list[dict]:
+    return [m for m in body["messages"] if m["role"] == "assistant"]
+
+
+class TestReasoningRejectionReissue:
+    """Stage 4: a refused reasoning replay is re-sent once without it, and
+    replay stays off for the rest of the attempt."""
+
+    def _run(self, tmp_path, responses):
+        from istota.config import SessionLogConfig
+        from istota.llm.openai_compat import OpenAICompatibleProvider
+
+        notes = tmp_path / "notes.txt"
+        notes.write_text("hello\n")
+        http = _ScriptedHttp(
+            [r(notes) if callable(r) else r for r in responses]
+        )
+        provider = OpenAICompatibleProvider(
+            api_key="k", base_url="https://openrouter.ai/api/v1", reasoning_replay="auto"
+        )
+        provider._client = http
+        logs = tmp_path / "logs"
+        brain = NativeBrain(
+            NativeBrainConfig(
+                model="claude-sonnet-4-6",
+                session_log=SessionLogConfig(enabled=True, dir=str(logs)),
+            ),
+            provider=provider,
+        )
+        req = _req("read the notes", tmp_path, tools=["Read"])
+        req.task_id = 91
+        req.user_id = "alice"
+        result = brain.execute(req)
+        files = sorted((logs / "alice").glob("*.jsonl"))
+        records = [json.loads(line) for line in files[0].read_text().splitlines() if line]
+        return result, http.bodies, records
+
+    def test_rejected_then_reissued_without_reasoning_then_off_for_the_attempt(
+        self, tmp_path, caplog
+    ):
+        rejection = (
+            400,
+            ['{"error":{"message":"reasoning_details: invalid signature for block 0"}}'],
+        )
+        caplog.set_level("WARNING", logger="istota.brain.native")
+        result, bodies, records = self._run(
+            tmp_path,
+            [
+                lambda p: _reasoned_read("c1", p),
+                rejection,
+                lambda p: _reasoned_read("c2", p),
+                _TEXT_TURN,
+            ],
+        )
+        assert result.success is True
+        assert result.result_text == "done"
+        assert len(bodies) == 4
+
+        # The second request replayed the first turn's reasoning and was refused.
+        refused = _assistant_wires(bodies[1])
+        assert refused[0]["reasoning_details"] == [
+            {"type": "reasoning.encrypted", "data": "ZW5j", "index": 0}
+        ]
+        # The re-issue is the same request without it.
+        reissued = bodies[2]
+        assert [m.get("tool_call_id") for m in reissued["messages"]] == [
+            m.get("tool_call_id") for m in bodies[1]["messages"]
+        ]
+        assert all("reasoning_details" not in m for m in _assistant_wires(reissued))
+        # Off for the rest of the attempt, though turn two carried reasoning too.
+        later = _assistant_wires(bodies[3])
+        assert len(later) == 2
+        assert all("reasoning_details" not in m for m in later)
+
+        errors = [r for r in records if r["type"] == "error"]
+        assert [e["kind"] for e in errors] == ["reasoning_rejected"]
+        assert "invalid signature" in errors[0]["message"]
+        warnings = [r for r in caplog.records if "reasoning" in r.getMessage()]
+        assert len(warnings) == 1
+
+    def test_a_rejection_with_nothing_replayed_is_not_reissued(self, tmp_path):
+        rejection = (400, ['{"error":{"message":"thinking is not supported"}}'])
+        result, bodies, records = self._run(tmp_path, [rejection])
+        assert len(bodies) == 1
+        assert result.success is False
+        assert not [r for r in records if r["type"] == "error" and r.get("kind") == "reasoning_rejected"]
+
+
 class TestFactory:
     def test_make_brain_native(self):
         cfg = BrainConfig(kind="native", native=NativeBrainConfig(model="claude-sonnet-4-6"))
