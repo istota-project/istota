@@ -39,7 +39,7 @@ Defaults live in `[brain.claude_code]`, `[brain.tmux]`, `[brain.native]` `model`
 
 `[models.aliases]` takes a flat string, a per-namespace table (`anthropic = "opus:high"`, `openai_compat = {model, effort}`), and `portable = true`. Validation warns only. `[models.roles]` is not read.
 
-ClaudeCodeBrain constants (bare `opus`/`sonnet`/`haiku` always mean these):
+ClaudeCodeBrain constants (bare `opus`/`sonnet`/`haiku` always mean these), computed at import as the newest non-deprecated model of each family in the shipped catalogue `src/istota/llm/data/anthropic.json`, which `scripts/update-anthropic-catalog.py` regenerates from models.dev plus `anthropic_overrides.json` (`--check` gates `scripts/release.sh`):
 - `OPUS = "claude-opus-5-5"`
 - `SONNET = "claude-sonnet-5-5"`
 - `HAIKU = "claude-haiku-5-5"`
@@ -182,7 +182,7 @@ Over `openai_compat` only.
 - **Effort**: `reasoning_effort`, gated on `supports_thinking`; `xhigh`/`max` -> `high` at the wire.
 - **Caching**: `_apply_cache_breakpoints`; on by default only for `api.anthropic.com` unless `prompt_caching_explicit`.
 - **Cost**: provider-reported cost wins (OpenRouter only, `_parse_reported_cost`); `cost_usd` None -> catalog, `0.0` -> a real free turn.
-- **Model catalog (ISSUE-182)**: `llm.catalog.get_model_info` = `model_overrides` > fetched OpenRouter > `_DEFAULT` (200k, zero price); no bundled file. `_ensure_fetched_catalog` fetches only for `openrouter.ai`, disk-cached, never fatal, once per process per TTL.
+- **Model catalog**: `llm.catalog.get_model_info` reads an immutable `Catalogue` snapshot: `model_overrides` > fetched OpenRouter > the shipped Anthropic file > `_DEFAULT` (200k, zero price). The shipped file is reached by ref (`anthropic/<id>`) only, so a bare Claude id on native still gets `_DEFAULT` until a provider owns bare ids. `price_usage` applies `price_tiers`. `_ensure_fetched_catalog` fetches only for `openrouter.ai`, disk-cached, never fatal, once per process per TTL.
 - **Overflow recovery**: <=2 force-compacts + `run_agent_loop_continue` under the shared deadline; a recovery summary that fails (`CompactionOutcome.ok` false) fails the attempt.
 - **Compaction failure never cuts**: a failed proactive summary leaves `ctx.messages` alone, logs a `compaction` record with `ok=false`, and is retried at a later boundary (a summary stopped at `max_tokens` counts as failed, as in pi); after `_MAX_PROACTIVE_COMPACTION_FAILURES` (2) the proactive path is off for the attempt and overflow recovery is the safety net. Summary calls count in `TaskUsage` and go out with `prompt_caching=False`.
 - **Background compaction** (`compaction_background`, default off; `compaction_background_tokens`, 0 = `derive_background_tokens`): starts the summary in a task below the blocking threshold and places it at a later boundary when the prefix is still in place by identity, else discards it as stale (`placed=false`, usage still counted). Cancelled and awaited on every loop exit. Stage 8 of the pi 1.x round kept it off: it made the primary eval model slower.

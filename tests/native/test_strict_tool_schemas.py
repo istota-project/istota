@@ -135,12 +135,12 @@ class TestModes:
         assert strict_tools_enabled("nonsense", "m") is False
 
     def test_auto_follows_the_model_capability(self, monkeypatch):
-        monkeypatch.setattr(catalog, "_OVERRIDES", {"yes/m": {"supports_structured_outputs": True}})
+        catalog.set_model_overrides({"yes/m": {"supports_structured_outputs": True}})
         assert strict_tools_enabled("auto", "yes/m") is True
         assert strict_tools_enabled("auto", "no/m") is False
 
     def test_model_overrides_can_set_the_flag(self, monkeypatch):
-        monkeypatch.setattr(catalog, "_OVERRIDES", {})
+        catalog.set_model_overrides({})
         catalog.set_model_overrides({"x/y": {"supports_structured_outputs": True}})
         try:
             assert catalog.get_model_info("x/y").supports_structured_outputs is True
@@ -197,17 +197,17 @@ class TestToolWire:
         assert "strict" not in fn
 
     def test_auto_reads_the_request_model(self, monkeypatch):
-        monkeypatch.setattr(catalog, "_OVERRIDES", {"m": {"supports_structured_outputs": True}})
+        catalog.set_model_overrides({"m": {"supports_structured_outputs": True}})
         provider = OpenAICompatibleProvider(api_key="k", strict_tool_schemas="auto")
         assert _body(provider)["tools"][0]["function"]["strict"] is True
-        monkeypatch.setattr(catalog, "_OVERRIDES", {})
+        catalog.set_model_overrides({})
         assert "strict" not in _body(provider)["tools"][0]["function"]
 
     def test_the_default_config_sends_nothing_strict_without_the_catalog_flag(self, monkeypatch):
         from istota.config import NativeBrainConfig
 
-        monkeypatch.setattr(catalog, "_OVERRIDES", {})
-        monkeypatch.setattr(catalog, "_FETCHED", {})
+        catalog.set_model_overrides({})
+        catalog.set_fetched_catalog(None)
         config = NativeBrainConfig(api_key="k")
         provider = make_provider(config)
         assert provider.strict_tool_schemas == "auto"

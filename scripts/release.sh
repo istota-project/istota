@@ -13,16 +13,22 @@
 # on the version heading as `## [0.7.0] - DATE (Name)`, which both extractors
 # already tolerate, and from there into the tag subject and the release title.
 #
-# Usage: scripts/release.sh 0.7.0 [--codename "Name"] [--no-announcement]
+# The shipped Anthropic model catalogue must be current before a tag: the
+# release runs `scripts/update-anthropic-catalog.py --check` and refuses on a
+# stale file. A models.dev outage only warns. --skip-catalog-check bypasses it.
+#
+# Usage: scripts/release.sh 0.7.0 [--codename "Name"] [--no-announcement] [--skip-catalog-check]
 
 set -euo pipefail
 
 REQUIRE_ANNOUNCEMENT=1
+CHECK_CATALOG=1
 NEW=""
 CODENAME=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-announcement) REQUIRE_ANNOUNCEMENT=0 ;;
+    --skip-catalog-check) CHECK_CATALOG=0 ;;
     --codename)
       [ $# -ge 2 ] || { echo "--codename needs a name" >&2; exit 1; }
       CODENAME="$2"; shift ;;
@@ -57,6 +63,20 @@ fi
 if [ "$(git config gpg.format)" != "ssh" ] || [ -z "$(git config user.signingkey)" ]; then
   echo "release tags are signed with an SSH key: set gpg.format=ssh and user.signingkey" >&2
   exit 1
+fi
+if [ "$CHECK_CATALOG" = 1 ]; then
+  set +e
+  uv run scripts/update-anthropic-catalog.py --check
+  catalog_status=$?
+  set -e
+  case "$catalog_status" in
+    0) ;;
+    2)
+      echo "the Anthropic model catalogue is out of date: run uv run scripts/update-anthropic-catalog.py, review and commit it (or pass --skip-catalog-check)" >&2
+      exit 1 ;;
+    *)
+      echo "warning: could not check the Anthropic model catalogue (exit $catalog_status); releasing with the committed file" >&2 ;;
+  esac
 fi
 if ! grep -q '^## \[Unreleased\]$' CHANGELOG.md; then
   echo "no [Unreleased] section in CHANGELOG.md" >&2

@@ -583,7 +583,8 @@ def _reset_process_globals():
     that, and each one has been observed producing a failure:
 
     1. The ``[models.aliases]`` table (``brain._roles``) and
-    2. the per-model capability overrides (``llm.catalog._OVERRIDES``).
+    2. the per-model capability overrides (the override layer of
+       ``llm.catalog``'s ``Catalogue`` snapshot).
 
        Both are installed as a **side effect of ``load_config``** (``config.py``,
        at the end of the parse), so the leak is not confined to tests that reach
@@ -622,7 +623,7 @@ def _reset_process_globals():
 
     def _clear():
         set_alias_overrides({})
-        catalog_mod._OVERRIDES = {}
+        catalog_mod.set_model_overrides({})
         reset_availability_breaker()
 
     _clear()

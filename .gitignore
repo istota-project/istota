@@ -47,6 +47,7 @@ data/
 !src/istota/feeds/data/
 !src/istota/money/data/
 !src/istota/health/data/
+!src/istota/llm/data/
 config/config.toml
 config/config.dev.toml
 /tmp/istota/

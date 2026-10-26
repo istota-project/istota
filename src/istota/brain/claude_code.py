@@ -39,6 +39,7 @@ from ._events import (
 from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox.peer_process import report_child_reaped, reporting_pid
 from istota.usage import telemetry as usage_types
+from istota.llm.catalog import latest_shipped_id
 from istota.sandbox.process_group import kill_group_if_live
 from ._aliases import CANONICAL_ROLES, split_effort
 from ._roles import get_alias_override_target, get_alias_overrides
@@ -1069,18 +1070,22 @@ def build_claude_cli_flags(
 # its own module; consumers never reach in here directly — they go through
 # Brain.resolve_alias / Brain.resolve_model_name.
 #
-# Versioning: bare aliases like ``opus`` always resolve to a *specific*
-# version constant (``OPUS``) so a model release can't
-# silently re-route us. A model release bumps the constant in one place and
-# ripples through every alias + role that points at it. Prior versions are NOT
-# enumerated as aliases — an operator who needs one types the canonical id with
-# an optional ``:effort`` modifier (``claude-opus-4-7:high``), which resolves via
-# the canonical passthrough below.
+# Versioning: bare aliases like ``opus`` resolve to a *specific* version
+# constant (``OPUS``), read once at import from the shipped Anthropic catalogue
+# (``llm/data/anthropic.json``): the newest non-deprecated model of that family.
+# A model release is a regenerated data file, never an edit here. Prior
+# versions are NOT enumerated as aliases — an operator who needs one types the
+# canonical id with an optional ``:effort`` modifier (``claude-opus-4-7:high``),
+# which resolves via the canonical passthrough below.
 # ---------------------------------------------------------------------------
 
-OPUS: str = "claude-opus-5-5"
-SONNET: str = "claude-sonnet-5-5"
-HAIKU: str = "claude-haiku-5-5"
+OPUS: str = latest_shipped_id("opus")
+SONNET: str = latest_shipped_id("sonnet")
+HAIKU: str = latest_shipped_id("haiku")
+
+# Each portable tier names a family, not an id.
+_TIER_FAMILIES: dict[str, str] = {"fast": "haiku", "general": "sonnet", "smart": "opus"}
+_FAMILY_LATEST: dict[str, str] = {"opus": OPUS, "sonnet": SONNET, "haiku": HAIKU}
 
 # The unified alias registry for *this brain* — the code-shipped floor. Maps a
 # base alias name → ``(model_id, default_effort)`` in the Anthropic namespace.
@@ -1094,9 +1099,9 @@ DEFAULT_ALIASES: dict[str, tuple[str | None, str | None]] = {
     # Portable tiers (CANONICAL_ROLES) — code-floor efforts stay None; every
     # brain must map every canonical role (enforced by the role-contract test),
     # so a portable intent survives the cross-provider fallback.
-    "fast":    (HAIKU, None),
-    "general": (SONNET, None),
-    "smart":   (OPUS, None),
+    "fast":    (_FAMILY_LATEST[_TIER_FAMILIES["fast"]], None),
+    "general": (_FAMILY_LATEST[_TIER_FAMILIES["general"]], None),
+    "smart":   (_FAMILY_LATEST[_TIER_FAMILIES["smart"]], None),
     # Provider shortcuts (pins) — base names, no effort variants.
     "opus":    (OPUS, None),
     "sonnet":  (SONNET, None),

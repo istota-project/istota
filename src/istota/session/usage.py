@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from istota.llm.catalog import ModelInfo
+from istota.llm.catalog import ModelInfo, PriceTier
 from istota.llm.types import Usage
 
 
@@ -38,15 +38,26 @@ def price_usage(
 
     ``cache_write_multiplier``, when set, prices a cache write as that multiple
     of the input price instead of the catalog's write price.
+
+    When the model has price tiers, the highest tier whose threshold the
+    request's total input (cached tokens included) exceeds prices the whole
+    request.
     """
+    prices: ModelInfo | PriceTier = info
+    total_input = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+    for tier in info.price_tiers:
+        if total_input <= tier.input_tokens_above:
+            continue
+        if prices is info or tier.input_tokens_above > prices.input_tokens_above:
+            prices = tier
     if cache_write_multiplier is None:
-        write_price = info.cache_write_price_per_mtok
+        write_price = prices.cache_write_price_per_mtok
     else:
-        write_price = info.input_price_per_mtok * cache_write_multiplier
+        write_price = prices.input_price_per_mtok * cache_write_multiplier
     return (
-        usage.input_tokens / 1_000_000 * info.input_price_per_mtok
-        + usage.output_tokens / 1_000_000 * info.output_price_per_mtok
-        + usage.cache_read_tokens / 1_000_000 * info.cache_read_price_per_mtok
+        usage.input_tokens / 1_000_000 * prices.input_price_per_mtok
+        + usage.output_tokens / 1_000_000 * prices.output_price_per_mtok
+        + usage.cache_read_tokens / 1_000_000 * prices.cache_read_price_per_mtok
         + usage.cache_write_tokens / 1_000_000 * write_price
     )
 

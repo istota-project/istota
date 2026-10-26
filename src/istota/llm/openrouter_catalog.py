@@ -22,7 +22,7 @@ import logging
 from dataclasses import asdict
 from pathlib import Path
 
-from .catalog import ModelInfo
+from .catalog import ModelInfo, model_info_from_dict
 
 logger = logging.getLogger("istota.llm.openrouter_catalog")
 
@@ -118,6 +118,7 @@ def _parse_one(entry: dict) -> ModelInfo | None:
         supports_vision=supports_vision,
         supports_thinking=supports_thinking,
         supports_structured_outputs=supports_structured_outputs,
+        price_source="discovered",
     )
 
 
@@ -195,14 +196,11 @@ def _entries_from_json(models: dict) -> dict[str, ModelInfo]:
     out: dict[str, ModelInfo] = {}
     if not isinstance(models, dict):
         return out
-    valid_fields = set(ModelInfo.__dataclass_fields__)
     for mid, raw in models.items():
         if not isinstance(mid, str) or not isinstance(raw, dict):
             continue
         try:
-            clean = {k: v for k, v in raw.items() if k in valid_fields}
-            clean["id"] = mid
-            out[mid] = ModelInfo(**clean)
+            out[mid] = model_info_from_dict({**raw, "id": mid})
         except Exception:  # noqa: BLE001 — skip a corrupt entry
             logger.debug("cached model entry parse raised; skipping %r", mid, exc_info=True)
     return out
