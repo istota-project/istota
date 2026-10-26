@@ -11502,6 +11502,12 @@ const handlers: MockHandler[] = [
               label = `${record.encounter_date} · ${record.reason || record.encounter_type}`;
           } else if (link.entity_type === 'diagnosis') {
             label = diagnoses.find((row) => row.id === link.entity_id)?.name ?? label;
+          } else if (link.entity_type === 'medication') {
+            const record = medications.find((row) => row.id === link.entity_id);
+            if (record)
+              label = record.dose
+                ? `${record.name} ${record.dose}${record.dose_unit ?? ''}`
+                : record.name;
           } else {
             label = immunizations.find((row) => row.id === link.entity_id)?.name ?? label;
           }
@@ -12454,7 +12460,7 @@ const handlers: MockHandler[] = [
         }
         const entityType = body?.entity_type;
         const entityId = Number(body?.entity_id);
-        if (!['encounter', 'diagnosis', 'immunization'].includes(entityType)) {
+        if (!['encounter', 'diagnosis', 'immunization', 'medication'].includes(entityType)) {
           return { error: `unknown entity type: ${entityType}`, __status: 400 };
         }
         const exists = documentLinks.some(

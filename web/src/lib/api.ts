@@ -3367,7 +3367,7 @@ export async function deleteMedication(id: number): Promise<{ status: string }> 
 
 // ---- Documents -----------------------------------------------------------
 
-export type DocumentEntity = 'encounter' | 'diagnosis' | 'immunization';
+export type DocumentEntity = 'encounter' | 'diagnosis' | 'immunization' | 'medication';
 
 export interface HealthDocument {
   id: number;
