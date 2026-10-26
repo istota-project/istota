@@ -93,6 +93,7 @@ def resolve_for_user(
         db_path=module_loader.resolve_module_db_path(
             istota_config, user_id, MODULE,
         ),
+        private_hosts=istota_config.feeds.private_hosts,
     )
 
 

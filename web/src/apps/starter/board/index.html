@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Board</title>
+    <link rel="stylesheet" href="board.css" />
+  </head>
+  <body>
+    <header class="board-bar">
+      <h1 class="board-heading">Board</h1>
+      <label class="board-picker" hidden>
+        <span class="board-hidden">Column</span>
+        <select id="column-picker"></select>
+      </label>
+      <div class="board-tools">
+        <istota-button id="add-column">Add column</istota-button>
+        <istota-button id="refresh">Refresh</istota-button>
+      </div>
+    </header>
+    <p id="status" class="board-status" role="status"></p>
+    <div id="empty" class="board-empty" hidden>
+      <p>The board is empty.</p>
+      <p>Add a column to start, or ask Istota in chat to put some cards on the board.</p>
+    </div>
+    <div id="board" class="board" aria-busy="true"></div>
+    <script src="board-model.js"></script>
+    <script src="board.js"></script>
+  </body>
+</html>

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ledger of guesses</title>
+    <link rel="stylesheet" href="ledger.css" />
+  </head>
+  <body>
+    <header class="ledger-bar">
+      <h1 class="ledger-heading">Ledger of guesses</h1>
+      <div class="ledger-tools">
+        <istota-button id="add" variant="primary">Add guess</istota-button>
+        <istota-button id="refresh">Refresh</istota-button>
+      </div>
+    </header>
+    <p id="status" class="ledger-status" role="status"></p>
+    <div id="empty" class="ledger-empty" hidden>
+      <p>No guesses yet.</p>
+      <p>Add one with a probability and a date it resolves, or ask Istota in chat to log one.</p>
+    </div>
+    <section id="due-section" class="ledger-section" aria-labelledby="due-heading" hidden>
+      <h2 id="due-heading" class="ledger-section-title">Ready to resolve</h2>
+      <p class="ledger-note">Their day has come. Did they happen?</p>
+      <istota-list id="due"></istota-list>
+    </section>
+    <section id="open-section" class="ledger-section" aria-labelledby="open-heading" hidden>
+      <h2 id="open-heading" class="ledger-section-title">Open</h2>
+      <istota-list id="open"></istota-list>
+    </section>
+    <section id="score-section" class="ledger-section" aria-labelledby="score-heading" hidden>
+      <h2 id="score-heading" class="ledger-section-title">Calibration</h2>
+      <p id="score" class="ledger-note"></p>
+      <istota-chart
+        id="chart"
+        type="line"
+        height="260"
+        label="Calibration: the share of guesses that came true at each probability"
+      ></istota-chart>
+      <istota-table>
+        <table>
+          <thead>
+            <tr>
+              <th>Guessed</th>
+              <th>Guesses</th>
+              <th>Came true</th>
+            </tr>
+          </thead>
+          <tbody id="bins"></tbody>
+        </table>
+      </istota-table>
+    </section>
+    <section id="resolved-section" class="ledger-section" aria-labelledby="resolved-heading" hidden>
+      <h2 id="resolved-heading" class="ledger-section-title">Resolved</h2>
+      <istota-list id="resolved"></istota-list>
+    </section>
+    <script src="ledger-model.js"></script>
+    <script src="ledger.js"></script>
+  </body>
+</html>

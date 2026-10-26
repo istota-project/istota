@@ -256,3 +256,21 @@ def run_skill_cli(
 
     if not handlers_print and is_error(result):
         sys.exit(1)
+
+
+def run_skill_main(main: Callable[[], Any]) -> NoReturn:
+    """Every skill `__main__.py`: drop config-document warnings, then exit with `main()`.
+
+    A skill process configures no logging, so Python's last-resort handler
+    wrote each `load_config` warning about the document to stderr, where the
+    model reads it under the result and nobody can act on it (ISSUE-839).
+    `config_mapper` is stdlib-only, so importing it here costs nothing.
+
+    `sys.exit(main())` rather than a bare call, so a `main` that returns an
+    exit code (`ntfy`) has it passed on; identical for every `main` that exits
+    itself.
+    """
+    from istota.config_mapper import drop_logged_problem_warnings
+
+    drop_logged_problem_warnings()
+    sys.exit(main())

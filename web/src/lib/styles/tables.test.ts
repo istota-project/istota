@@ -79,8 +79,11 @@ const targetsTh = (selector: string): boolean => {
  */
 const HEADER_TYPE = new Set(['font-size', 'text-transform', 'letter-spacing']);
 
-/** markdown.css styles tables someone else wrote; the family's own sheet is minot's. */
-const OWNERS = new Set(['lib/styles/markdown.css']);
+/**
+ * markdown.css styles tables someone else wrote; the family's own sheet is minot's.
+ * The apps kit styles a separate document that never loads table.css.
+ */
+const OWNERS = new Set(['lib/styles/markdown.css', 'apps/kit/istota.css']);
 
 const scanned = sourceFiles('.svelte', '.css')
   .map((path) => ({ file: rel(path), css: styleOf(path) }))

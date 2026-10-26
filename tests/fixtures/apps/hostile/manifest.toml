@@ -1,0 +1,5 @@
+id = "hostile"
+name = "Escape tier hostile"
+icon = "bug"
+description = "The escape tier's adversarial fixture. It tries every known way out of its frame, reports each attempt, then navigates itself away with data in the URL."
+capabilities = ["kv:own"]

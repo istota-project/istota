@@ -119,6 +119,8 @@ def _validate_profile(conn, config, user, fields, existing):
                     raise ValueError("unknown skill")
             elif name == "relay_delivery" and value not in user_profiles.RELAY_DELIVERY_VALUES:
                 raise ValueError("invalid relay preference")
+            elif name == "calendar_delivery" and value not in user_profiles.CALENDAR_DELIVERY_VALUES:
+                raise ValueError("invalid calendar delivery")
             elif name == "quick_notes_folder" and value and (
                 existing is None or value != existing.quick_notes_folder
             ):

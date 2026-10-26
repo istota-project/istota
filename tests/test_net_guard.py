@@ -92,3 +92,44 @@ class TestOneCopy:
         assert "getaddrinfo" not in text
         assert ".rstrip(\".\")" not in text
         assert "split(\"%\"" not in text
+
+
+class TestCheckedAddresses:
+    """The composed rule: resolve, then refuse any non-public answer unless listed."""
+
+    def test_a_public_answer_passes_as_strings(self):
+        addresses, refused = net_guard.checked_addresses(
+            "site.example", 443, private_hosts=[], resolve=lambda h, p: ["93.184.216.34"],
+        )
+        assert (addresses, refused) == (["93.184.216.34"], None)
+
+    def test_a_private_address_is_refused_unlisted(self):
+        addresses, refused = net_guard.checked_addresses(
+            "site.example", 443, private_hosts=[], resolve=lambda h, p: ["10.0.0.5"],
+        )
+        assert addresses == []
+        assert str(refused) == "10.0.0.5"
+
+    def test_a_private_address_is_allowed_when_the_exact_name_is_listed(self):
+        addresses, refused = net_guard.checked_addresses(
+            "Site.Example.", 443, private_hosts=["site.example"],
+            resolve=lambda h, p: ["10.0.0.5"],
+        )
+        assert (addresses, refused) == (["10.0.0.5"], None)
+
+    def test_one_public_and_one_private_answer_is_refused(self):
+        addresses, refused = net_guard.checked_addresses(
+            "site.example", 443, private_hosts=["other.example"],
+            resolve=lambda h, p: ["93.184.216.34", "192.168.1.9"],
+        )
+        assert addresses == []
+        assert str(refused) == "192.168.1.9"
+
+    def test_nothing_resolved_is_empty_with_nothing_refused(self):
+        assert net_guard.checked_addresses(
+            "nowhere.example", 443, private_hosts=[], resolve=lambda h, p: [],
+        ) == ([], None)
+
+    def test_a_private_literal_is_refused_unlisted(self):
+        addresses, refused = net_guard.checked_addresses("127.0.0.1", 80, private_hosts=[])
+        assert addresses == [] and str(refused) == "127.0.0.1"

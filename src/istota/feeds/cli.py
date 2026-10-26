@@ -484,7 +484,7 @@ def _poll_due(ctx: FeedsContext, limit) -> None:
     with feeds_db.connect(ctx.db_path) as conn:
         outcomes = poll_due_feeds(
             conn, tumblr_api_key=api_key, limit=limit,
-            now=datetime.now(timezone.utc),
+            now=datetime.now(timezone.utc), private_hosts=ctx.private_hosts,
         )
 
     summary = []

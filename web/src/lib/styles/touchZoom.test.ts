@@ -96,6 +96,8 @@ describe('stylesheets do not slip under the floor', () => {
           const effective = size ?? (shorthand ? `font: ${shorthand}` : undefined);
           if (!effective) continue;
           if (effective.startsWith('var(--text-')) continue;
+          // The apps kit styles a document without primitives.css, so it writes the floor out.
+          if (/^max\(16px,\s*var\(--text-/.test(effective)) continue;
           offenders.push(`${rel}: ${rule.selector} → ${effective}`);
         }
       }

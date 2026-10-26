@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
-    "build": "vite build && npm run build:render",
+    "build": "vite build && npm run build:render && npm run build:apps",
     "build:render": "vite build --app -c vite.render.config.ts",
+    "build:apps": "vite build --app -c vite.apps.config.ts",
+    "test:apps-escape": "playwright test -c tests-apps-escape/playwright.config.ts",
     "preview": "vite preview",
     "prepare": "svelte-kit sync || echo ''",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
@@ -19,6 +21,7 @@
     "format:check": "prettier --check ."
   },
   "devDependencies": {
+    "@playwright/test": "1.64.0",
     "@sveltejs/adapter-auto": "^7.0.0",
     "@sveltejs/adapter-static": "^3.0.10",
     "@sveltejs/kit": "^2.50.2",

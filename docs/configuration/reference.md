@@ -891,6 +891,12 @@ Procedural memory — see [memory](../features/memory.md#layer-6-learned-playboo
 |---|---|---|
 | `max_document_bytes` | `26214400` (25 MiB) | Cap on a single stored document (scan, discharge summary, vaccination card). 0 = unlimited |
 
+## `[feeds]`
+
+| Setting | Default | Description |
+|---|---|---|
+| `private_hosts` | `[]` | Exact host names an RSS or Atom feed may resolve to a private, loopback or reserved address. Every other feed must be on a public address; a redirect is checked again at each hop. Plain HTTP is allowed to any public host. Same rule as `[wordpress] private_hosts`, and operator-only for the same reason. See [feeds](../features/feeds.md) |
+
 ## `[users.<id>]`
 
 Most per-user settings are documented in [per-user configuration](per-user.md), because the DB row wins over the TOML block for nearly all of them and the CLI is the provisioning path. The one below is the exception: it exists **only** here.

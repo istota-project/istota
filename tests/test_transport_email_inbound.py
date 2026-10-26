@@ -2607,3 +2607,54 @@ class TestVerifyHoldIsDiagnosable:
 
         assert held == 0
         assert "confirm_sender_match is 'verify'" not in caplog.text
+
+
+class TestTheItipReplyPlacement:
+    """The iTIP REPLY intercept sits after the answer intercept (ISSUE-649).
+
+    A mail that is both an answer to a held task and a calendar reply for one
+    of our events is the answer: it approves the held task and the event's
+    attendee status is not touched.
+    """
+
+    def test_a_reply_that_is_also_a_held_answer_goes_to_the_answer_intercept(self, mail_config):
+        pytest.importorskip("icalendar")
+        from istota.config import SiteConfig
+        from istota.sharing import events
+
+        config = mail_config(
+            {"carol": UserConfig(email_addresses=["carol@example.org"])},
+            bot_email="istota@example.org", authserv_id="mx.example.org",
+        )
+        config.site = SiteConfig(hostname="istota.example.org")
+        uid = "11111111-2222-4333-8444-555555555555@istota.example.org"
+        with db.get_db(config.db_path) as conn:
+            held = db.create_task(conn, "held mail", "carol", source_type="email")
+            db.set_task_confirmation(conn, held, "Email from unknown sender")
+            task = db.get_task(conn, db.create_task(conn, "calendar", "carol", source_type="cli"))
+            events.apply_ops(conn, config, task, [events.upsert_op(uid, create=True, fields={
+                "summary": "Tax review", "dtstart": "2026-10-29T13:00:00Z",
+                "dtend": "2026-10-29T15:00:00Z", "all_day": False})])
+            conn.commit()
+        reply = (
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example//EN\r\nMETHOD:REPLY\r\n"
+            f"BEGIN:VEVENT\r\nUID:{uid}\r\nSEQUENCE:0\r\nDTSTAMP:20261026T090000Z\r\n"
+            "ORGANIZER:mailto:istota@example.org\r\n"
+            "ATTENDEE;PARTSTAT=ACCEPTED:mailto:carol@example.org\r\n"
+            "END:VEVENT\r\nEND:VCALENDAR\r\n"
+        ).encode()
+        email = Email(
+            id="p1", subject="Accepted: Tax review", sender="carol@example.org",
+            date="Mon, 26 Oct 2026 10:00:00 +0000", body=f"!confirm {held}",
+            attachments=[], message_id="<p1@example.org>", to=("istota@example.org",),
+            authentication_results="mx.example.org; dmarc=pass header.from=example.org",
+            authentication_results_all=("mx.example.org; dmarc=pass header.from=example.org",),
+            calendar_parts=(reply,),
+        )
+        with patch(f"{_INBOUND}._deliver_answer_acks"):
+            assert _poll(config, email) == []
+
+        assert _processed(config, "p1")["routing_method"] == "confirm_answer"
+        assert _task(config, held).status == "pending"
+        with db.get_db(config.db_path) as conn:
+            assert events.get_event(conn, "carol", uid).attendee_status is None

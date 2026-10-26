@@ -24,6 +24,7 @@ This file is loaded into every session, so it stays an index: what exists, where
 
 Subsystems:
 
+- `apps.md` — user-written apps: the sandboxed frame and its CSP, the bridge with the fragment key and per-version grants, install/approve/rollback, the capability table, and the rules a change must keep
 - `brain.md` — Brain protocol + ClaudeCodeBrain + NativeBrain (in-process agent loop), plus per-room brain selection
 - `executor.md` — `execute_task()`, env mapping, prompt assembly, security
 - `prompts.md` — the two halves of a task prompt, and the control directory that hands them over
@@ -33,6 +34,7 @@ Subsystems:
 - `transport.md` — Transport seam over messaging surfaces (Talk, email, web chat, SMS and WhatsApp ship; Matrix designed-for), plus the room model, phone rooms (SMS and private WhatsApp: mint, transcript writes, backfill) and multiplayer rooms (speech gate, participants, host and guests, audience, epochs, shared-room delivery refusal)
 - `sms.md` — provider-neutral SMS surface, Twilio and Telnyx adapters, delivery states, switching, and the user's private SMS room
 - `whatsapp.md` — WhatsApp surface behind a provider seam: the common half (adapter-native identity, the one-send ledger, parked status, opt-out, the private chat's room), Meta's Cloud API adapter (signed webhook, 24-hour window, templates, cost controls) and the Baileys adapter (paired session, Node sidecar, QR pairing)
+- `sharing.md` — open-protocol sharing: ICS feeds, Istota's own calendar (invitations or a feed), Open Cloud Mesh folder shares (receiving, accept and decline, remote notifications), where each secret lives, the Files page's shared folders and the known gaps
 - `relay.md` — relay questions between users: destinations (room, WhatsApp, SMS), the recipient preference, clean-turn approval, per-surface answers and returns
 - `web-chat.md` — web chat surface: rooms, composer, drafts, send durability, message replies, room-event stream, read-only phone rooms
 - `web-ui.md` — web UI backend: route/endpoint map, admin Logs + Configuration panes, settings/module-services split
@@ -66,6 +68,7 @@ Boundaries and operations:
 
 ```
 src/istota/
+├── apps/                 # User-written apps as a module: _loader/db, manifest, capabilities, document, drafts, install, bridge, routes → apps.md
 ├── brain/                # Pluggable model invocation (Brain protocol)
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
 ├── assignments/          # Goals Istota carries across days: store.py (row access), charter.py, validators.py, lifecycle.py (the one state writer), caller.py (user turn, wake or neither), budget.py (the ledger and ceilings), wakes.py (due wakes, the wake task, pickup, orphan reaping), scratchpad.py (snapshots, user edits, repair), prompt.py (the wake prompt) → assignments.md
@@ -96,7 +99,7 @@ src/istota/
 ├── tasks_file_poller.py  # TASKS.md monitoring
 ├── heartbeat.py          # Health-check system
 ├── cron_loader.py        # CRON.md → DB sync
-├── modules.py            # MODULE_NAMES (feeds, money, location, health, briefings) + EXPERIMENTAL_MODULES (empty)
+├── modules.py            # MODULE_NAMES (feeds, money, location, health, briefings, apps) + EXPERIMENTAL_MODULES (apps → module_apps)
 ├── experimental.py       # Operator feature-flag gate (`@requires_feature`, env helpers)
 ├── user_profiles.py      # Per-user profile store
 ├── user_briefings.py     # Per-user briefings store
@@ -119,6 +122,7 @@ src/istota/
 │   └── provision.py      # Default Talk rooms (general/logs/alerts) for a user → leaf-modules.md
 ├── prompts/              # Loaders for the system half's standing instructions
 │   └── persona.py        # The operator persona at `{root}/PERSONA.md`: shipped digests, the conffile sync, the last good copy → prompts.md
+├── sharing/              # Shared with Istota over open protocols: sources (the `shared_sources` store and its reach), ics (feeds and their poll), events (Istota's calendar and its feed token), itip (invitations and replies), ocm and ocm_routes (Open Cloud Mesh), feed_routes (the public calendar feed) → sharing.md
 ├── relay/                # Relay questions between users: relays, destinations, requests (the `whatsapp_skill_requests` table) → relay.md
 ├── sandbox/              # A task's runtime and its boundaries → sandbox.md
 │   ├── task_env.py       # `build_task_runtime`: one task's env, the credential split, the proxies, the bind list → sandbox.md
@@ -140,6 +144,7 @@ src/istota/
 │   ├── process_group.py  # `kill_process_group(pid, sig)`: signal a subprocess and its descendants; `signal_task_worker` only in the scheduler's process → sandbox.md
 │   ├── peer_process.py   # Who connected to a Unix socket, and whether they descend from a task's root → sandbox.md
 │   ├── forge_cli.py      # The `gh` / `glab` wrapper: deny policy + server-side token injection → sandbox.md
+│   ├── guarded_http.py   # HTTP to a host somebody else chose: a request pinned to a checked address, and a guarded send with per-hop redirect checks → sandbox.md
 │   └── net_guard.py      # Whether an address is public: the SSRF rule shared by WebFetch and the wordpress skill → leaf-modules.md
 ├── credentials/          # Secrets and the credential vault
 │   ├── store.py          # Encrypted credential store (Fernet via scrypt-derived key)
@@ -228,6 +233,7 @@ src/istota/
 │   ├── workspace_marker.py  # The `.istota-workspace` a host folder's workspace carries, and whether the host requires it → leaf-modules.md
 │   ├── dav_xml.py        # Hardened DAV multistatus parsing, principal hrefs and path segments, for CardDAV and the web sharing module → leaf-modules.md
 │   ├── url_redact.py     # A configured URL safe to print, userinfo replaced or removed: doctor, the admin cards and the servarr skill → leaf-modules.md
+│   ├── rate_limit.py     # A sliding-window hit counter per key, in bounded memory, for public routes with no table behind them → leaf-modules.md
 │   └── unix_connect.py   # Connecting to a Unix socket without following a symlink at its leaf → leaf-modules.md
 ├── briefings/            # Personal/group briefings — source grants, generation, edition/delivery ledger, reader/settings routes and migration → briefings.md
 ├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML, image_dedupe
@@ -357,6 +363,8 @@ uv run pytest -m testbed -n0     # wire-level email against a real IMAP/SMTP ser
 scripts/test-upgrade.sh          # the current image over an older release's state
 scripts/test-vm.sh               # the stack on a VM provisioned by host/provision.sh, in Lima
 ```
+
+**The apps escape tier** is Playwright, not pytest, and needs only the browsers: `npm --prefix web run test:apps-escape` frames each fixture under `tests/fixtures/apps/` (built by the real `apps.document`) in Chromium, Firefox and WebKit around the real `src/lib/apps/bridge.ts`, and fails on anything the app frame reaches at the tier's second loopback origin (the recorder) after its own document, or on a navigation the shell did not catch. The recorder, not Playwright's request events, is the leak verdict: Chromium emits an event for a CSP-blocked request the network never saw. Its negative control is `scripts/test-apps-escape-negative-control.sh`, which serves the hostile fixture without its CSP and must go red. Rerun both after any change to the frame, its CSP, the kit's guard or the bridge. `web/tests-apps-escape/README.md` has the fixture contract.
 
 `image`, `smoke`, `full`, `testbed` and `vm` require `-n0`: their fixtures are session-scoped and build one tagged image or drive one VM. Before a release, add `-m full -n0`, `-m image -n0 --platform amd64` and `scripts/test-upgrade.sh --from-floor --shape volume`. Three tiers carry a negative control that must go red (`scripts/test-image-negative-control.sh`, `scripts/test-vm-negative-control.sh`, and the same broken image handed to the upgrade tier via `ISTOTA_IMAGE_TAG`); `scripts/test-stack-negative-control.sh` does the same for `istota-stack`'s release checks and its `setup --web` tests.
 

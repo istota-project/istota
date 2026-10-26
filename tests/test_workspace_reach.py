@@ -256,3 +256,56 @@ def test_unsandboxed_note_names_the_bot(config, monkeypatch):
     assert note.endswith(
         "the Istota process can, so the reach shown below is what Helper is told, not a limit."
     )
+
+
+def _share(conn, user="alice", key="cloud.example.org|41", name="Taxes 2026", state="active",
+           access="read"):
+    from istota.sharing import sources
+    source_id = sources.create_source(
+        conn, user_id=user, kind="ocm_share", state="pending", remote_host="cloud.example.org",
+        remote_key=key, access=access, extras={"name": name} if name is not None else {},
+    )
+    if state != "pending":
+        sources.set_state(conn, source_id, user, state)
+    return source_id
+
+
+def test_accepted_shares_are_places_reached_through_the_skill(config, conn):
+    from istota.workspace.places import list_places
+    from istota.workspace.reach import place_reach
+    active = _share(conn, key="cloud.example.org|1", name="Taxes\n 2026", access="write")
+    unnamed = _share(conn, key="cloud.example.org|2", name=None)
+    _share(conn, key="cloud.example.org|3", state="pending")
+    _share(conn, key="cloud.example.org|4", state="revoked")
+    _share(conn, key="cloud.example.org|5", state="declined")
+    _share(conn, user="bob", key="cloud.example.org|6")
+    conn.commit()
+
+    places = {p.id: p for p in list_places(config, conn, "alice") if p.kind == "share"}
+    assert set(places) == {f"share:{active}", f"share:{unnamed}"}
+    place = places[f"share:{active}"]
+    assert (place.label, place.browsable, place.root, place.view_root) == (
+        "Taxes 2026", False, None, None)
+    assert (place.remote_host, place.remote_access) == ("cloud.example.org", "write")
+    assert places[f"share:{unnamed}"].label == "cloud.example.org"
+
+    reach = place_reach(config, conn, "alice", list(places.values()))
+    mine = reach[f"share:{active}"]
+    assert (mine.private, mine.shared_member, mine.restricted) == ("skill", "skill", "none")
+    assert "cloud.example.org" in mine.note and "read and change" in mine.note
+    assert "read and change" not in reach[f"share:{unnamed}"].note
+    config.disabled_skills = ["shares"]
+    mine = place_reach(config, conn, "alice", list(places.values()))[f"share:{active}"]
+    assert (mine.private, mine.shared_member, mine.restricted) == ("none", "none", "none")
+
+
+def test_a_share_in_error_stays_a_place_and_needs_no_workspace(tmp_path):
+    from istota.sharing import sources
+    from istota.workspace.places import list_places
+    c = Config(db_path=tmp_path / "istota.db", temp_dir=tmp_path / "temp")
+    db.init_db(c.db_path)
+    with db.get_db(c.db_path) as conn:
+        source_id = _share(conn)
+        sources.set_state(conn, source_id, "alice", "error", reason="timeout")
+        conn.commit()
+        assert [p.id for p in list_places(c, conn, "alice")] == [f"share:{source_id}"]

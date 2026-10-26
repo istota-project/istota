@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Recall</title>
+    <link rel="stylesheet" href="recall.css" />
+  </head>
+  <body>
+    <header class="recall-bar">
+      <h1 class="recall-heading">Recall</h1>
+      <div class="recall-row">
+        <istota-button id="add">Add card</istota-button>
+        <istota-button id="refresh">Refresh</istota-button>
+      </div>
+    </header>
+    <p id="status" class="recall-status" role="status"></p>
+    <div id="empty" class="recall-empty" hidden>
+      <p>No cards yet.</p>
+      <p>
+        Ask Istota in chat to make cards from your notes, for example "make cards from my aviation
+        weather notes", or add one yourself.
+      </p>
+    </div>
+    <section id="review-section" class="recall-section" aria-labelledby="review-heading" hidden>
+      <h2 id="review-heading" class="recall-section-title">Review</h2>
+      <p id="progress" class="recall-note"></p>
+      <div class="recall-card">
+        <p id="question" class="recall-question"></p>
+        <p id="answer" class="recall-answer" hidden></p>
+        <div id="reveal-row" class="recall-row">
+          <istota-button id="reveal" variant="primary">Show answer</istota-button>
+        </div>
+        <div id="grade-row" class="recall-stack" hidden>
+          <p class="recall-note">How well did you remember it?</p>
+          <div id="grades" class="recall-row"></div>
+        </div>
+        <div id="source-block" class="recall-stack recall-source" hidden>
+          <h3 class="recall-source-title">From your notes</h3>
+          <p id="source-path" class="recall-note"></p>
+          <pre id="source-text" class="recall-source-text" hidden></pre>
+          <p id="source-note" class="recall-note" hidden></p>
+          <div class="recall-row">
+            <istota-button id="next" variant="primary">Next card</istota-button>
+          </div>
+        </div>
+      </div>
+    </section>
+    <p id="done" class="recall-done" hidden></p>
+    <section id="cards-section" class="recall-section" aria-labelledby="cards-heading" hidden>
+      <h2 id="cards-heading" class="recall-section-title">Cards</h2>
+      <istota-list id="cards"></istota-list>
+    </section>
+    <script src="sm2.js"></script>
+    <script src="recall-model.js"></script>
+    <script src="recall.js"></script>
+  </body>
+</html>

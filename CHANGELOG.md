@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Istota can read a calendar from any provider. Paste its secret iCal address under Settings > Connections > Shared with Istota, and tasks can list its events beside your other calendars; the calendar stays read-only and nothing else on that account is reachable.
+- Istota has a calendar of its own. A task can put an event on it, move it or cancel it, and you see those events by subscribing once to a private feed address from Settings > Connections; it needs no CalDAV account.
+- Events on Istota's calendar can reach you as invitations instead. Istota mails each one to your own address, sends an update when it moves and a cancellation when it is removed, and records your accept or decline when your calendar answers; that answer starts no task. Invitations an organizer sends to Istota's address directly can be read by tasks too; forwarded ones are not recorded. Recording answers needs `[email] authserv_id`, and `istota doctor` says so.
+- With `[sharing.ocm] enabled`, someone on a Nextcloud can share a folder with `<user>@<site hostname>`, and it shows as a waiting offer on the Shared with Istota card and in the bell. Istota checks the sending server and its signature first, and `istota doctor` says whether other servers can reach it.
+- You can accept or decline a shared folder on that card, and accept a single offer from the bell. Accepting checks the share opens, records whether it can be written, and lets scheduled jobs use it only if you tick that box. Removing it, or unsharing it on the Nextcloud side, cuts Istota's access off; offers left unanswered expire after two weeks.
+- Tasks can work in a folder you accepted: list it, download files into your workspace and, when the share allows editing, upload, create folders, move and delete. Istota asks your server what the share allows on every use, so a permission change there takes effect at once, and an unshared folder is removed on its next use.
+- Folders you accepted show on the Files page under Shared folders, with the server they come from and whether they can be written. Tasks reach them through the shares skill; the Files page lists them and does not browse them. The new Sharing page in the documentation covers calendars, Istota's calendar and shared folders, with the operator settings.
 - **Assignments (experimental, admins only).** Behind the `skill_assignment` experimental feature, an admin can give the bot a goal in chat with a budget, done-when checks and an optional deadline, approve it once, and have it work on the goal over days in short runs, handing steps back and pausing itself when it stalls, keeps failing or runs out of budget. Steps, pauses, proposed completions and low budgets appear in the notifications bell. See docs/features/assignments.md.
 
   **Upgrade note:** the first start rebuilds the approval-request table to allow the new activation approval, so this release owes a run of the upgrade tier before it ships.
@@ -23,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The native brain can be told when its tool calls keep failing (opt-in).** After several failed tool calls in a row, the model gets one notice naming what failed and is told to try another approach or finish with what it has, instead of retrying the same broken sources. Off by default, because evals showed no fewer failed calls with it on; an operator turns it on with `tool_failure_nudge_after`.
 
+### Security
+
+- An RSS or Atom feed can no longer point the feed poller at a private address. A feed on a local, loopback or internal address, or one that redirects to such an address, is now refused with an error on the feed, and nothing is requested from it. **Upgrade note:** a feed you poll on your own network stops updating until its host is listed in `[feeds] private_hosts`.
+
 ### Changed
 
 - **Specs the bot drafts are ready for a coding agent.** A new spec has every section an implementer reads, including a survey of the existing code taken from the project's source, and its stages are one checklist line each. Specs drafted before this may lack those sections.
@@ -30,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Long tasks on the native brain no longer forget earlier work when a summary fails.** When the request to summarize older turns failed, those turns were dropped anyway and the task carried on without them. They are now kept, the summary is tried once more, and the cost of summary requests is counted in the task's usage.
+- Skill commands no longer print config warnings, such as a retired `[[default_briefings]]` notice, under every result a task reads. The daemon log and the admin configuration view still show them.
 
 ## [0.47.0] - 2026-10-25
 

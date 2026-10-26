@@ -59,6 +59,17 @@ def place_reach(
             mode = "skill" if "google_workspace" in advertised else "none"
             result[place.id] = Reach(mode, mode, "none")
             continue
+        if place.kind == "share":
+            # The shares skill's scope, withheld from guests and unasked tasks
+            # like every other skill (ISSUE-576); nothing is mounted.
+            mode = "skill" if "shares" in advertised else "none"
+            access = "read and change" if place.remote_access == "write" else "read"
+            result[place.id] = Reach(mode, mode, "none", note=(
+                f"Shared from {place.remote_host}. Tasks can {access} it through the shares "
+                f"skill as {place.id}; it cannot be browsed here. Its grant in "
+                "Settings > Credentials can limit which rooms and scheduled jobs may use it."
+            ))
+            continue
         token = place.conversation_token if place.kind == "room" else None
         if token not in plans:
             plans[token] = [user_data_mounts(

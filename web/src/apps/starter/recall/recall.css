@@ -1,0 +1,171 @@
+/* Recall: the card under review first, then the list of every card. One
+   column at every width. */
+
+.recall-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.recall-heading {
+  margin: 0;
+  margin-right: auto;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+}
+
+.recall-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.recall-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.recall-status {
+  margin: 0 0 var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.recall-status:empty {
+  display: none;
+}
+
+/* design-lint-allow: an app frame cannot import @minot/ui; this is the in-frame empty state */
+.recall-empty {
+  padding: var(--space-6) var(--space-4);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+/* design-lint-allow: an app frame cannot import @minot/ui; this is the in-frame empty state */
+.recall-empty p {
+  margin: 0 0 var(--space-2);
+}
+
+.recall-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-6);
+}
+
+/* The displays here would otherwise outrank the browser's own [hidden] rule. */
+.recall-section[hidden],
+.recall-stack[hidden],
+.recall-row[hidden] {
+  display: none;
+}
+
+.recall-section-title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+
+.recall-note {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.recall-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+}
+
+.recall-question {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.recall-answer {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.recall-source {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-default);
+}
+
+.recall-source-title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.recall-source-text {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-left: 3px solid var(--border-default);
+  font-family: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.recall-done {
+  margin: 0 0 var(--space-6);
+  color: var(--text-secondary);
+}
+
+.recall-list-main {
+  flex: 1 1 14rem;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.recall-list-text {
+  overflow-wrap: anywhere;
+}
+
+.recall-list-meta {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.recall-icon-button {
+  min-width: var(--space-8);
+  min-height: var(--space-8);
+  padding: 0 var(--space-1);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.recall-icon-button:hover {
+  background: var(--hover-bg);
+}
+
+@media (pointer: coarse) {
+  .recall-icon-button {
+    min-width: var(--touch-min);
+    min-height: var(--touch-min);
+  }
+}

@@ -28,6 +28,11 @@ Each producer writes here under its own key:
 ``persona-retired``                  a user's edited ``PERSONA.md`` was
                                      renamed ``.retired``, written by
                                      ``istota init`` and never delivered
+``istota-calendar:send-failed``      an invitation for Istota's own
+                                     calendar could not be mailed
+                                     (``sharing.itip``), fixed text
+``istota-calendar:no-address``       the same with no address to mail,
+                                     raised once
 ===================================  ==================================
 
 ``vault-unscoped`` is a fixed key, like ``room-migration:partial`` — one row

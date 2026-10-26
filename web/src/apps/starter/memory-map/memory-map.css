@@ -1,0 +1,232 @@
+/* Memory map: the graph beside the chosen entity's facts and history. Made
+   for a desktop-width pane; opened anyway on a narrower one, the panel goes
+   under the graph. */
+
+.map-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.map-heading {
+  margin: 0;
+  margin-right: auto;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+}
+
+.map-picker {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.map-status {
+  margin: 0 0 var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.map-status:empty {
+  display: none;
+}
+
+/* design-lint-allow: an app frame cannot import @minot/ui; this is the in-frame empty state */
+.map-empty {
+  padding: var(--space-6) var(--space-4);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+/* design-lint-allow: an app frame cannot import @minot/ui; this is the in-frame empty state */
+.map-empty p {
+  margin: 0 0 var(--space-2);
+}
+
+.map-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(16rem, 24rem);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+/* The display above would otherwise outrank the browser's own [hidden] rule. */
+.map-body[hidden],
+.map-picker[hidden],
+.map-details[hidden],
+.map-scrubber[hidden],
+.map-note[hidden],
+#current[hidden] {
+  display: none;
+}
+
+@media (max-width: 1023px) {
+  .map-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.map-graph {
+  min-width: 0;
+}
+
+.map-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 75vh;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-card);
+}
+
+.map-edge {
+  stroke: var(--border-default);
+  stroke-width: 1.5;
+}
+
+.map-edge.is-near {
+  stroke: var(--accent);
+  stroke-width: 2.5;
+}
+
+.map-edge-label {
+  display: none;
+  fill: var(--text-secondary);
+  font-size: 13px;
+}
+
+.map-edge-label.is-near {
+  display: inline;
+}
+
+.map-node {
+  cursor: pointer;
+  outline: none;
+}
+
+.map-node circle {
+  fill: var(--surface-raised);
+  stroke: var(--text-secondary);
+  stroke-width: 1.5;
+}
+
+.map-node.is-near circle {
+  stroke: var(--accent);
+}
+
+.map-node.is-selected circle {
+  fill: var(--accent);
+  stroke: var(--accent);
+}
+
+.map-node:focus-visible circle {
+  stroke: var(--focus-ring-color);
+  stroke-width: 4;
+}
+
+.map-label {
+  fill: var(--text-primary);
+  font-size: 15px;
+  pointer-events: none;
+}
+
+.map-node.is-selected .map-label {
+  font-weight: var(--weight-semibold);
+}
+
+.map-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.map-panel-title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.map-details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.map-subtitle {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+}
+
+.map-note {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.map-footnote {
+  margin-top: var(--space-4);
+}
+
+.map-scrubber {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.map-scrub-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-weight: var(--weight-medium);
+}
+
+.map-scrubber input {
+  width: 100%;
+  touch-action: manipulation;
+}
+
+.map-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.map-row-text {
+  overflow-wrap: anywhere;
+}
+
+.map-row-meta {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.map-row--mention .map-row-text {
+  color: var(--text-secondary);
+}
+
+.map-row.is-not-held .map-row-text {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.map-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

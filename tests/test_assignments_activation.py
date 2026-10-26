@@ -214,6 +214,21 @@ class TestApprove:
             kinds = [e.kind for e in store.list_events(conn, assignment_id)]
         assert "activated" in kinds
 
+    def test_charter_md_is_current_after_approval(self, config, monkeypatch):
+        """ISSUE-837: approval writes no file, and CHARTER.md said `draft` after it."""
+        assignment_id = _draft(config, monkeypatch)
+        task_id, _request_id = _held(config, monkeypatch, assignment_id)
+        _approve(config, task_id)
+        assignment = _assignment(config, assignment_id)
+        on_disk = (
+            config.workspace_root("alice") / config.bot_dir_name / assignment.dir_relpath / charter.CHARTER_FILE
+        ).read_text()
+        with db.get_db(config.db_path) as conn:
+            current = charter.render_current(conn, assignment_id)
+
+        assert on_disk.endswith(current)
+        assert "draft" not in on_disk
+
     def test_a_charter_change_cancels_the_held_request(self, config, monkeypatch):
         assignment_id = _draft(config, monkeypatch)
         task_id, request_id = _held(config, monkeypatch, assignment_id)

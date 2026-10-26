@@ -259,7 +259,9 @@
   {#snippet sidebar()}
     <Sidebar title="Settings" open={sidebarOpen} onClose={() => (sidebarOpen = false)}>
       <SidebarNav
-        items={USER_SETTINGS_SECTIONS.map((section) => ({
+        items={USER_SETTINGS_SECTIONS.filter(
+          (section) => !section.feature || identity.user.features[section.feature],
+        ).map((section) => ({
           href: `${settingsBase}${section.href}`,
           label: section.label,
           icon: section.icon,

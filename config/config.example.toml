@@ -1283,6 +1283,29 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #                                 #   must resolve to a public one
 
 # ============================================================================
+# Shared with Istota: calendar feeds and federated folder shares
+# ============================================================================
+# Users subscribe Istota to a calendar's secret ICS address in Settings >
+# Connections, and share a folder from their own Nextcloud with
+# <user_id>@<site hostname> when [sharing.ocm] is on.
+# [sharing]
+# private_hosts = []              # exact host names a feed or sharing server
+#                                 #   may reach on a private address; also the
+#                                 #   only hosts reachable over plain http
+# ics_poll_interval = 900         # seconds between polls of one feed (min 300)
+# ics_max_bytes = 2097152         # largest feed body read
+# ics_max_feeds_per_user = 10
+# events_per_task = 10            # writes to Istota's own calendar per task
+#                                 #   attempt; 0 turns those writes off
+#
+# [sharing.ocm]
+# enabled = false                 # receive Open Cloud Mesh folder shares on
+#                                 #   [site] hostname
+# max_pending_per_user = 20       # offers waiting for an answer, per user
+# pending_days = 14               # an unanswered offer is declined after this
+# max_discovery_fetches_per_minute = 30  # across every sender
+
+# ============================================================================
 # Servarr skill: Sonarr, Radarr, Lidarr and Prowlarr (docs/features/servarr.md)
 # ============================================================================
 # One install-wide connection per app. Admins get every verb; users listed in
@@ -1491,6 +1514,23 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # [health]
 # max_document_bytes = 26214400   # 25 MiB. 0 = unlimited, for a scanner that
                                   # produces genuinely large files
+
+# Apps module (experimental: add "module_apps" to [experimental] features).
+# Fixed caps, all positive integers; there is no per-app override.
+# [apps]
+# bundle_max_bytes = 2000000      # an installed app's built document, kit included
+# kv_max_bytes = 5000000          # one app's KV namespace, keys plus values
+# kv_value_max_bytes = 262144     # one KV value an app writes
+# files_max_bytes = 50000000      # an app's data/ folder
+# calls_per_minute = 120          # bridge calls per app, per user
+# calls_retention_days = 30       # how long the bridge call log is kept
+# errors_per_version = 50         # newest error reports kept per app version
+
+# Feeds module. Every RSS or Atom fetch must reach a public address; list the
+# exact host names of feeds served on your own network.
+# [feeds]
+# private_hosts = []              # exact host names a feed may reach on a
+#                                 #   private address
 
 # User configuration
 # Map Nextcloud usernames to their settings
