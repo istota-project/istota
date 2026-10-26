@@ -858,18 +858,131 @@ def _cache_age(seconds: float) -> str:
     return f"{int(seconds // 86400)}d"
 
 
+#: Model fields every brain's internal callers read (sleep cycle, triage, the
+#: speech gate, review), checked in the namespace of `[brain] kind`.
+_INTERNAL_MODEL_FIELDS = (
+    ("[conversation] selection_model", ("conversation", "selection_model")),
+    ("[speech_gate] model", ("speech_gate", "model")),
+    ("[sleep_cycle] extraction_model", ("sleep_cycle", "extraction_model")),
+    ("[sleep_cycle] curation_model", ("sleep_cycle", "curation_model")),
+    ("[channel_sleep_cycle] extraction_model", ("channel_sleep_cycle", "extraction_model")),
+    ("[developer.review] model", ("developer", "review", "model")),
+)
+_SHOWN_MODEL_CHARS = 80
+
+
+def _config_value(config: "Config", path: tuple[str, ...]) -> str:
+    value = config
+    for part in path:
+        value = getattr(value, part, None)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _model_fields_to_check(config: "Config") -> list[tuple[str, str, str]]:
+    """``(label, value, brain kind)`` for every configured model field a brain
+    on this deployment would run, with an empty value left out."""
+    brain = config.brain
+    reachable = _reachable_kinds(config)
+    fields: list[tuple[str, str, str]] = []
+    if "claude_code" in reachable:
+        fields.append(("[brain.claude_code] model", brain.claude_code.model, "claude_code"))
+    if "tmux_claude" in reachable:
+        fields.append(("[brain.tmux] model", brain.tmux.model, "tmux_claude"))
+    if reachable & {"claude_code", "tmux_claude"}:
+        fields.append(("advisor_model", config.advisor_model, "claude_code"))
+    if "native" in reachable:
+        fields.append(("[brain.native] model", brain.native.model, "native"))
+    base = getattr(brain, "kind", "")
+    for label, path in _INTERNAL_MODEL_FIELDS:
+        fields.append((label, _config_value(config, path), base))
+    return [(label, (value or "").strip(), kind) for label, value, kind in fields if (value or "").strip()]
+
+
+def _configured_model_findings(config: "Config", catalogue) -> tuple[list[str], list[str]]:
+    """The Stage 5 arms of `models.catalogue`, through the resolver.
+
+    FAIL for a configured model field that resolves to nothing on the brain
+    that runs it. Two shapes are let through, because the brain sends them as
+    written and they can work: a Claude-shaped id the catalogue does not list
+    (a dated id, a model newer than the shipped file) is a WARN, and a native
+    model is not checked while native's provider has no model list at all
+    (the cache arms above report that). WARN for an alias that resolves to a
+    deprecated model. Never raises.
+    """
+    from .brain._resolve import (
+        BRAIN_NAMESPACES,
+        Resolution,
+        ResolveError,
+        config_providers,
+        native_provider_id,
+        preferred_provider,
+        resolve_selection,
+    )
+    from .brain._aliases import split_effort
+    from .brain._roles import LEGACY_NAMESPACE, parse_alias_overrides
+    from .brain.claude_code import _looks_canonical
+
+    fails: list[str] = []
+    warns: list[str] = []
+    try:
+        aliases = parse_alias_overrides(config.models.aliases, log=False)
+        providers = config_providers(config)
+        native_id = native_provider_id(config)
+    except Exception:  # noqa: BLE001 - a doctor check never raises
+        return fails, warns
+
+    for label, value, kind in _model_fields_to_check(config):
+        if kind == "native" and not native_id:
+            continue
+        shown = value[:_SHOWN_MODEL_CHARS]
+        resolved = resolve_selection(
+            value, catalogue, aliases=aliases, for_brain=kind,
+            providers=providers, native_provider=native_id,
+        )
+        if isinstance(resolved, Resolution):
+            continue
+        written = split_effort(resolved.target or value)[0]
+        if kind == "native":
+            if resolved.code in ("unknown", "ambiguous") and not catalogue.models(native_id):
+                continue
+        elif resolved.code == "unknown" and _looks_canonical(written):
+            warns.append(f"{label} = {shown!r} is not in the catalogue; it is sent to the CLI as written")
+            continue
+        fails.append(f"{label} = {shown!r} resolves to no model: {resolved.message[:200]}")
+
+    for name in aliases.names():
+        for namespace in aliases.overrides.get(name, {}):
+            effective = "anthropic" if namespace == LEGACY_NAMESPACE else namespace
+            if effective not in BRAIN_NAMESPACES.values():
+                continue
+            resolved = resolve_selection(
+                name, catalogue, aliases=aliases, namespace=effective,
+                prefer_provider=preferred_provider(effective, config), providers=providers,
+            )
+            if isinstance(resolved, ResolveError) or resolved.info is None:
+                continue
+            if resolved.info.deprecated:
+                warns.append(
+                    f"[models.aliases] {name} ({namespace}) resolves to the deprecated {resolved.ref}"
+                )
+    return fails, warns
+
+
 def check_models_catalogue(config: "Config", probe: bool) -> CheckResult:
     """The model catalogue: the shipped file, each provider's discovery cache,
-    and the config that names models (model-catalogue spec, Stage 4 arms).
+    and the config that names models.
 
-    OK with a summary (providers, models, the oldest cache). FAIL for a family
-    the default tiers name with no current model, a `[providers.<id>]` table
-    the loader refused, a 401/403 on Anthropic's model list, and a model-listing
-    key file that is not a 0400/0600 regular file owned by this user. WARN for
-    a cache past twice its TTL, a discovering provider with no cache yet or
-    whose last fetch failed, an Anthropic model the API lists with no shipped
-    price, a renamed `[brain.native]` catalogue key, and an override naming no
-    model. Reads the caches and the config file only; spawns nothing and
+    OK with a summary (providers, models, how many a non-admin may pick, the
+    oldest cache). FAIL for a family the default tiers name with no current
+    model, a `[providers.<id>]` table the loader refused, a 401/403 on
+    Anthropic's model list, a model-listing key file that is not a 0400/0600
+    regular file owned by this user, and a configured model field that
+    resolves to nothing (`_configured_model_findings`). WARN for a cache past
+    twice its TTL, a discovering provider with no cache yet or whose last fetch
+    failed, an Anthropic model the API lists with no shipped price, a renamed
+    `[brain.native]` catalogue key, an override naming no model, a Claude id
+    the catalogue does not list, and an alias resolving to a deprecated model.
+    Reads the caches and the config file only; spawns nothing and
     opens no socket, so it is the same under `probe=False`. Names only, never
     a key or a cache body.
     """
@@ -976,8 +1089,22 @@ def check_models_catalogue(config: "Config", probe: bool) -> CheckResult:
         warns.append(f"Anthropic lists {', '.join(unpriced)} with no shipped price; cost is estimated at zero")
         remedies.append(f"Run {_UPDATE_SCRIPT} and commit the result.")
 
+    model_fails, model_warns = _configured_model_findings(config, catalogue)
+    if model_fails:
+        fails.extend(model_fails)
+        remedies.append(
+            "Name a model the catalogue lists: an alias, a provider/id reference or "
+            "a bare id one provider lists (`!models` shows the aliases)."
+        )
+    if model_warns:
+        warns.extend(model_warns)
+        remedies.append("Point each alias at a current model, or name a current model where one is written.")
+
+    from .brain._resolve import default_enabled_patterns, enabled_refs
+
+    enabled_count = len(enabled_refs(catalogue, default_enabled_patterns(config)))
     model_count = len(catalogue.refs())
-    summary = f"{len(specs)} providers, {model_count} models"
+    summary = f"{len(specs)} providers, {model_count} models, {enabled_count} enabled"
     summary += f", oldest cache {_cache_age(max(ages))}" if ages else ", no discovery cache"
     if notes:
         summary += "; " + "; ".join(notes)

@@ -1011,6 +1011,85 @@ class TestModelsCatalogue:
     def test_it_is_deployment_scoped(self):
         assert doctor.CHECK_SCOPES["models.catalogue"] == doctor.DEPLOYMENT
 
+    # --- the Stage 5 arms, through the resolver ---------------------------------
+
+    @staticmethod
+    def _brain(kind="claude_code", **blocks):
+        from istota.config import BrainConfig
+
+        return BrainConfig(kind=kind, **blocks)
+
+    def test_the_summary_counts_what_a_non_admin_may_pick(self, make_config):
+        result = self._run(make_config())
+        assert result.status == OK
+        assert " enabled" in result.detail
+
+    def test_a_configured_model_that_resolves_to_nothing_fails(self, make_config):
+        from istota.config import ClaudeCodeBrainConfig
+
+        config = make_config(brain=self._brain(claude_code=ClaudeCodeBrainConfig(model="sonet")))
+        result = self._run(config)
+        assert result.status == FAIL
+        assert "[brain.claude_code] model = 'sonet' resolves to no model" in result.detail
+        assert result.remedy
+
+    def test_an_internal_field_is_checked_on_the_base_brain(self, make_config):
+        from istota.config import SleepCycleConfig
+
+        config = make_config(sleep_cycle=SleepCycleConfig(extraction_model="openrouter/z-ai/glm-5"))
+        result = self._run(config)
+        assert result.status == FAIL
+        assert "[sleep_cycle] extraction_model" in result.detail
+
+    def test_an_unlisted_claude_id_is_a_warning(self, make_config):
+        from istota.config import ClaudeCodeBrainConfig
+
+        config = make_config(brain=self._brain(
+            claude_code=ClaudeCodeBrainConfig(model="claude-opus-4-1-20250805"),
+        ))
+        result = self._run(config)
+        assert result.status == WARN
+        assert "sent to the CLI as written" in result.detail
+
+    def test_a_native_model_its_provider_does_not_list_fails(self, make_config):
+        from istota.config import NativeBrainConfig
+
+        config = make_config(brain=self._brain(
+            kind="native", native=NativeBrainConfig(provider="openrouter", model="z-ai/nope"),
+        ))
+        self._cache(config, "openrouter", kind="openrouter", fetched_at=self.NOW, models={
+            "z-ai/glm-5": {"context_window": 1000, "max_output_tokens": 100, "last_seen": self.NOW},
+        })
+        result = self._run(config)
+        assert result.status == FAIL
+        assert "[brain.native] model = 'z-ai/nope'" in result.detail
+
+    def test_a_native_model_is_not_checked_without_a_model_list(self, make_config):
+        from istota.config import NativeBrainConfig
+
+        config = make_config(brain=self._brain(
+            kind="native", native=NativeBrainConfig(provider="openrouter", model="z-ai/nope"),
+        ))
+        result = self._run(config)
+        assert "[brain.native] model" not in result.detail
+
+    def test_an_alias_resolving_to_a_deprecated_model_warns(self, make_config, monkeypatch):
+        from dataclasses import replace
+
+        from istota.config import ModelsConfig
+        from istota.llm import catalog
+
+        shipped = catalog.shipped_anthropic_models()
+        old = next(m for m in shipped if m.family == "opus" and m.id != catalog.latest_shipped_id("opus"))
+        monkeypatch.setattr(
+            catalog, "shipped_anthropic_models",
+            lambda: tuple(replace(m, deprecated=True) if m.id == old.id else m for m in shipped),
+        )
+        config = make_config(models=ModelsConfig(aliases={"legacy": {"anthropic": old.id}}))
+        result = self._run(config)
+        assert result.status == WARN
+        assert f"[models.aliases] legacy (anthropic) resolves to the deprecated anthropic/{old.id}" in result.detail
+
 
 class TestNativeBrainCredential:
     """`runtime.native_brain` — buildable is not runnable.
