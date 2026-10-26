@@ -82,6 +82,7 @@ def cmd_init(args):
     print(f"Database initialized at {config.db_path}")
     _init_sync_operator_persona(config)
     _init_retire_user_personas(config)
+    _init_move_native_keys(config)
     if getattr(args, "relocate_rooms", False):
         from istota.maintenance.room_relocate import migrate_database, reconcile_mount, record_outcome
         if getattr(args, "scheduler_stopped", False):
@@ -125,6 +126,28 @@ def _init_sync_operator_persona(config) -> None:
     if result.action in _PERSONA_SYNC_REPORTED:
         detail = f": {result.detail}" if result.detail else ""
         print(f"operator persona: {result.action}{detail}", file=sys.stderr)
+
+
+def _init_move_native_keys(config) -> None:
+    """Move users' `native_brain/api_key` secrets to `provider_keys/<native's
+    provider>`, once; never changes the exit code.
+
+    With no native provider configured the rows are left where they are, since
+    there is no provider to file them under; they move at the first `init`
+    after one is set.
+    """
+    provider_id = (config.brain.native.provider or "").strip()
+    if not provider_id or provider_id not in config.providers:
+        return
+    try:
+        from istota.credentials import store as secrets_store
+
+        moved = secrets_store.move_legacy_native_keys(config.db_path, provider_id)
+    except Exception as exc:  # noqa: BLE001 - a deploy must not fail on this
+        print(f"provider keys: moving native_brain keys failed ({type(exc).__name__})", file=sys.stderr)
+        return
+    if moved:
+        print(f"provider keys: moved {moved} native_brain/api_key secret(s) to provider_keys/{provider_id}")
 
 
 def _init_retire_user_personas(config) -> None:
@@ -1131,7 +1154,9 @@ def cmd_secret(args):
             file=sys.stderr,
         )
         sys.exit(1)
-    if args.key not in valid_keys:
+    from istota.credentials.schema import service_accepts_key
+
+    if not service_accepts_key(args.service, args.key):
         print(
             f"Error: unknown key {args.key!r} for service {args.service!r} "
             f"(known: {', '.join(sorted(valid_keys))})",
@@ -5388,7 +5413,16 @@ def main():
     setup_parser.add_argument(
         "--brain", choices=["claude_code", "native"], help="Model backend (skip detection)",
     )
-    setup_parser.add_argument("--native-base-url", help="Native brain API base URL")
+    setup_parser.add_argument(
+        "--native-provider",
+        help="Native brain provider: anthropic, openrouter, or an id of your own "
+             "(with --native-provider-kind and --native-base-url); no default",
+    )
+    setup_parser.add_argument(
+        "--native-provider-kind",
+        help="An own provider's kind: openai_compat (the default), anthropic or openrouter",
+    )
+    setup_parser.add_argument("--native-base-url", help="An own provider's API base URL")
     setup_parser.add_argument("--native-model", help="Native brain model id")
     setup_parser.add_argument("--user", help="The first admin's user id")
     setup_parser.add_argument("--display-name", help="Display name")

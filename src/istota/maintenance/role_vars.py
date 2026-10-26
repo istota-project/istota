@@ -74,6 +74,10 @@ SECRET_VARS = {
     "istota_whatsapp_access_token": "istota_whatsapp_access_token",
     "istota_whatsapp_app_secret": "istota_whatsapp_app_secret",
     "istota_whatsapp_verify_token": "istota_whatsapp_verify_token",
+    "istota_provider_anthropic_api_key": "istota_provider_anthropic_api_key",
+    "istota_provider_anthropic_extra_headers": "istota_provider_anthropic_extra_headers",
+    "istota_provider_openrouter_api_key": "istota_provider_openrouter_api_key",
+    "istota_provider_openrouter_extra_headers": "istota_provider_openrouter_extra_headers",
 }
 
 #: Values the old role rendered beside its secrets that have no stack secrets

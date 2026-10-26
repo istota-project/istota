@@ -37,7 +37,14 @@ from istota.sandbox.claude_runtime_env import (
     # the only remaining call, and `tests/test_security.py` imports both names
     # from here beside `build_clean_env`.
 )
-from .config import SERVARR_APPS, Config, servarr_key_variable
+from .config import (
+    BUILTIN_PROVIDERS,
+    SERVARR_APPS,
+    Config,
+    provider_headers_variable,
+    provider_key_variable,
+    servarr_key_variable,
+)
 from istota.prompts import persona as operator_persona
 from istota.sandbox.plan import (
     Mount,
@@ -1612,31 +1619,35 @@ def _persist_task_usage(
     )
 
 
-def _native_with_user_key(native_config, config: Config, user_id: str):
-    """Overlay the user's per-user native-brain API key onto the native config.
+def _with_user_provider_key(brain_config, config: Config, user_id: str):
+    """``brain_config`` with the user's own key for native's provider, when they have one.
 
-    Looks up the encrypted ``native_brain``/``api_key`` secret for ``user_id``;
-    when present it replaces the instance-wide key (`[brain.native] api_key` /
-    `ISTOTA_BRAIN_NATIVE_API_KEY`), enabling per-user provider credentials in a
-    multi-user deployment. Falls back to the instance key on absence/error so a
-    missing secret never blocks the task. Returns a copy — never mutates input.
+    The provider key rule applied per user (D16): a request to provider P in
+    user U's task carries U's ``provider_keys/<P>`` secret when U has one, and
+    the deployment's key otherwise. A failed lookup keeps the deployment's key,
+    so a missing secret never blocks the task. Returns a copy; never mutates.
+    Internal operator calls (triage, the speech gate) never come through here.
     """
     import dataclasses
 
-    try:
-        from istota.credentials import store as secrets_store
+    from .brain import native_provider_spec
+    from .llm.providers import user_provider_key, with_user_key
 
-        key = secrets_store.get_secret(
-            config.db_path, user_id, "native_brain", "api_key"
-        )
-    except Exception:
-        logger.debug(
-            "native api key secret lookup failed for user=%s", user_id, exc_info=True
-        )
-        key = None
-    if key:
-        return dataclasses.replace(native_config, api_key=key)
-    return native_config
+    spec = native_provider_spec(brain_config)
+    if spec is None:
+        return brain_config
+    key = user_provider_key(config, user_id, spec.id)
+    if not key:
+        return brain_config
+    specs = dict(brain_config.provider_specs or {})
+    native = brain_config.native
+    if not specs:
+        from .config import providers_for_native
+
+        specs, provider_id = providers_for_native(native)
+        native = dataclasses.replace(native, provider=provider_id)
+    specs[spec.id] = with_user_key(spec, key)
+    return dataclasses.replace(brain_config, native=native, provider_specs=specs)
 
 
 #: Stands in for a provider so ``NativeBrain`` can resolve a model name without
@@ -1953,10 +1964,7 @@ def _run_fallback(config, brain_config, fallback_kind, task, req, *, on_start=No
     try:
         fb_config = _dc.replace(brain_config, kind=fallback_kind)
         if fallback_kind == "native":
-            fb_config = _dc.replace(
-                fb_config,
-                native=_native_with_user_key(fb_config.native, config, task.user_id),
-            )
+            fb_config = _with_user_provider_key(fb_config, config, task.user_id)
         fb_brain = make_brain(fb_config)
     except Exception as e:  # noqa: BLE001 — misconfigured nested block
         logger.warning("brain fallback: could not construct %s: %s", fallback_kind, e)
@@ -2541,7 +2549,7 @@ def fallback_notice_text(primary_kind, reason, fallback_kind, model, dropped_pin
 
 
 def _build_native_completer(
-    native_config, timeout: float, *, on_usage=None, close_after_call: bool = False,
+    native_config, timeout: float, *, spec=None, on_usage=None, close_after_call: bool = False,
 ):
     """A `prompt -> raw_output | None` one-shot completer over the native provider.
 
@@ -2563,7 +2571,12 @@ def _build_native_completer(
         from istota.llm import make_provider
         from istota.llm.oneshot import make_message_completer
 
-        provider = make_provider(native_config)
+        if spec is None:
+            from .brain import native_provider_spec
+            from .config import BrainConfig
+
+            spec = native_provider_spec(BrainConfig(native=native_config))
+        provider = make_provider(spec)
         # Generous output budget: a JSON id array is short, but reasoning
         # models burn tokens thinking first and would otherwise return empty.
         completer = make_message_completer(
@@ -2744,12 +2757,17 @@ def build_oneshot_completer(
     if routed.kind != "native":
         return None
 
-    native = _native_with_user_key(routed.native, config, user_id)
+    from .brain import native_provider_spec
+
+    # The deployment's key: an internal operator call never carries a user's
+    # own provider key (D16).
+    native = routed.native
     if model:
         native = _native_with_model(native, model)
     completer = _build_native_completer(
         native,
         timeout,
+        spec=native_provider_spec(routed),
         on_usage=_oneshot_usage_sink(
             config, user_id=user_id, source_type=source_type, origin=origin,
         ),
@@ -3575,7 +3593,15 @@ SKILL_MODEL_CREDENTIAL_VARS = CLAUDE_RUNTIME_ENV_VARS | frozenset(
 #: model calls only through this copy.
 SKILL_DAEMON_CREDENTIAL_VARS: dict[str, frozenset[str]] = {
     "servarr": frozenset(servarr_key_variable(app) for app in SERVARR_APPS),
-    "code_review": frozenset({"ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS"}),
+    # The native reviewer's provider key and headers, for the built-in
+    # providers whose credentials are stack secrets (an operator provider's key
+    # is in config.toml, which the CLI reads itself). Replaced by
+    # `model_caller_env` with CLI auth.
+    "code_review": frozenset({"ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS"}) | frozenset(
+        variable
+        for provider_id in BUILTIN_PROVIDERS
+        for variable in (provider_key_variable(provider_id), provider_headers_variable(provider_id))
+    ),
 }
 
 
@@ -8937,16 +8963,10 @@ def execute_task(
                 "brain routing: task %d source_type=%s -> kind=%s (default %s)",
                 task.id, task.source_type, _brain_config.kind, config.brain.kind,
             )
-        # Overlay the per-user native-brain API key (encrypted secrets) so a
-        # multi-user deployment can give each user their own provider credential.
+        # The user's own key for native's provider (`provider_keys/<id>`), when
+        # they have one, in place of the deployment's.
         if _brain_config.kind == "native":
-            import dataclasses as _dc
-            _brain_config = _dc.replace(
-                _brain_config,
-                native=_native_with_user_key(
-                    _brain_config.native, config, task.user_id
-                ),
-            )
+            _brain_config = _with_user_provider_key(_brain_config, config, task.user_id)
         brain = make_brain(_brain_config)
 
         # Filesystem confinement roots for NativeBrain's in-process file tools

@@ -3469,7 +3469,9 @@ def _admin_models_section() -> dict:
         }
 
         if brain_config.kind == "native":
-            section["endpoint"] = brain_config.native.base_url
+            from istota.brain import native_provider_spec
+            spec = native_provider_spec(brain_config)
+            section["endpoint"] = spec.base_url if spec is not None else ""
             section["provider"] = brain_config.native.provider
 
         if brain_config.source_type_overrides:
@@ -16574,8 +16576,9 @@ async def settings_set_secret(
     schema = _all_known_services().get(service)
     if not schema:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
-    valid_keys = {f["key"] for f in schema["fields"]}
-    if key not in valid_keys:
+    from istota.credentials.schema import service_accepts_key
+
+    if not service_accepts_key(service, key):
         raise HTTPException(
             status_code=400,
             detail=f"Unknown key '{key}' for service '{service}'",

@@ -1924,7 +1924,9 @@ class TestCacheAffinityKey:
 
     def test_off_by_default_on_the_default_endpoint(self, tmp_path):
         brain = NativeBrain(
-            NativeBrainConfig(model="claude-sonnet-4-6", session_log=self._no_log())
+            NativeBrainConfig(
+                provider="anthropic", model="claude-sonnet-4-6", session_log=self._no_log(),
+            )
         )
         assert brain._provider.prompt_cache_key is False
         _, bodies = self._attempt(brain, tmp_path, [_TEXT_TURN])

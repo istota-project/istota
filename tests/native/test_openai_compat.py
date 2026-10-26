@@ -7,7 +7,6 @@ the provider never raises.
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import httpx
 
@@ -47,6 +46,15 @@ def _provider():
     return OpenAICompatibleProvider(api_key="sk-test", base_url="https://x/v1")
 
 
+
+def _spec(kind, base_url, **settings):
+    from istota.llm.providers import InferenceKey, ProviderSpec, resolve_compat
+
+    return ProviderSpec(
+        id="p", kind=kind, base_url=base_url, inference_key=InferenceKey("k"),
+        compat=resolve_compat(kind, base_url, settings),
+    )
+
 class TestRequestBuilding:
     def test_system_prompt_becomes_system_message(self):
         body = _provider()._build_chat_completion_request(
@@ -71,7 +79,8 @@ class TestRequestBuilding:
     def test_openai_reasoning_model_uses_max_completion_tokens(self):
         # NB-12: o-series / gpt-5 on api.openai.com 400 on max_tokens (require
         # max_completion_tokens). Only the direct OpenAI endpoint is affected.
-        p = OpenAICompatibleProvider(api_key="k", base_url="https://api.openai.com/v1")
+        # The rule is the openai_compat kind's default on OpenAI's own host.
+        p = make_provider(_spec("openai_compat", "https://api.openai.com/v1"))
         for model in ["o1", "o3-mini", "gpt-5", "o4-mini"]:
             body = p._build_chat_completion_request("", [], [], model, 100)
             assert body.get("max_completion_tokens") == 100, model
@@ -92,7 +101,7 @@ class TestRequestBuilding:
 
     def test_openrouter_requests_cost_accounting(self):
         # OpenRouter returns real charged cost only when asked via usage.include.
-        p = OpenAICompatibleProvider(api_key="k", base_url="https://openrouter.ai/api/v1")
+        p = make_provider(_spec("openrouter", "https://openrouter.ai/api/v1"))
         body = p._build_chat_completion_request("", [], [], "m", 100)
         assert body["usage"] == {"include": True}
 
@@ -867,7 +876,7 @@ class TestReasoningReplayWire:
         endpoint streams `reasoning_content` and no `reasoning_details`, so
         under the default `auto` nothing about its wire may change.
         """
-        provider = make_provider(SimpleNamespace(provider="openai_compat", api_key="k"))
+        provider = make_provider(_spec("anthropic", "https://api.anthropic.com"))
         assert provider.reasoning_replay == "auto"
         messages = [
             UserMessage(content=[TextContent(text="Fix the failing test.")]),
@@ -931,7 +940,7 @@ class TestReasoningRejection:
     def test_make_provider_falls_back_on_an_unknown_mode(self):
         def build(mode):
             return make_provider(
-                SimpleNamespace(provider="openai_compat", api_key="k", reasoning_replay=mode)
+                _spec("anthropic", "https://api.anthropic.com", reasoning_replay=mode)
             )
 
         assert build("sometimes").reasoning_replay == "auto"

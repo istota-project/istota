@@ -733,6 +733,10 @@ SECRET_NAMES: tuple[str, ...] = (
     "istota_whatsapp_app_secret",
     "istota_whatsapp_verify_token",
     "istota_brain_native_extra_headers",
+    "istota_provider_anthropic_api_key",
+    "istota_provider_anthropic_extra_headers",
+    "istota_provider_openrouter_api_key",
+    "istota_provider_openrouter_extra_headers",
 )
 
 #: What the scripted endpoint is sent as a key. Nothing in this tier can use a

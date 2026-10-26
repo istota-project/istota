@@ -863,7 +863,7 @@ class TestVisionDroppedNote:
             ),
         )
         monkeypatch.setattr(
-            executor, "_native_with_user_key", lambda nc, *a, **k: nc,
+            executor, "_with_user_provider_key", lambda bc, *a, **k: bc,
         )
 
         def fake_make_brain(bc):

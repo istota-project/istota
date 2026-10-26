@@ -104,18 +104,26 @@ features = []
 # room_selectable = []                # e.g. ["claude_code", "native"]
 #
 # Native-brain settings (only used when kind = "native", or via a routing
-# override below). The API key stays out of this file — set it via the
-# ISTOTA_BRAIN_NATIVE_API_KEY env override.
+# override below). The endpoint and its key are a provider's ([providers.<id>]
+# further down); native names the one it uses, and has no default.
 # [brain.native]
-# provider = "openai_compat"                 # only provider currently
-# model = "claude-sonnet-4-6"                # explicit id for openai_compat
+# provider = "openrouter"                    # a [providers.<id>] id: anthropic,
+#                                            #   openrouter or your own. Unset, the
+#                                            #   native brain is unavailable.
+# model = "claude-sonnet-4-6"                # explicit id at that provider
 # effort = ""                                # default effort: low/medium/high/xhigh/max.
 #                                            #   Sent as `reasoning_effort` only to a
 #                                            #   thinking-capable model; xhigh/max fold
 #                                            #   to high over the compat endpoint. Empty
 #                                            #   = no reasoning_effort field. Per-task
 #                                            #   effort (e.g. !model opus:high) overrides.
-# base_url = "https://api.anthropic.com/v1"  # any OpenAI-compatible endpoint
+# base_url = ""                              # legacy, read for one release: the
+#                                            #   endpoint is [providers.<id>] base_url.
+#                                            #   So are api_key, extra_headers,
+#                                            #   prompt_caching, prompt_cache_key,
+#                                            #   prompt_cache_ttl, strict_tool_schemas,
+#                                            #   reasoning_replay and model_catalog_*,
+#                                            #   below; doctor names each one in use.
 # context_window = 0                         # 0 = resolve from the live-fetched
 #                                            #   OpenRouter catalog (below) or the
 #                                            #   conservative 200k default. A NON-
@@ -205,7 +213,7 @@ features = []
 # bash_spill_full_output = true              # write Bash output past the per-tool cap to a
 #                                            #   temp file the model can Read, rather than
 #                                            #   dropping the tail.
-# api_key = ""                               # prefer the ISTOTA_BRAIN_NATIVE_API_KEY override
+# api_key = ""                               # legacy: the provider's key, below
 #
 # The native brain's WebFetch tool, available to every user. It runs in the
 # daemon's network namespace, outside the sandbox allowlist, so the fields
@@ -963,6 +971,53 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # budget_low_fraction = 0.75           # share of the budget spent that raises a budget_low notice
 # scratchpad_prompt_chars = 24000      # scratchpad cap in a wake's prompt
 # history_prompt_chars = 12000         # cap on earlier wake summaries in a wake's prompt
+
+# ============================================================================
+# Model providers [providers.<id>] — optional
+# ============================================================================
+# A provider is one endpoint and the key for it; a request to a provider
+# carries that provider's key, whichever brain sends it. Two are built in and
+# exist without a table: anthropic (https://api.anthropic.com) and openrouter
+# (https://openrouter.ai/api/v1). A table with a built-in id sets fields on it.
+# A provider existing does not make any brain use it: [brain.native] provider
+# names native's.
+#
+# The key is api_key here, or better the variable ISTOTA_PROVIDER_<ID>_API_KEY
+# (the stack secret istota_provider_<id>_api_key for a built-in provider);
+# headers likewise, ISTOTA_PROVIDER_<ID>_EXTRA_HEADERS, a JSON object that
+# replaces the table. An operator's own provider keeps its key here, in this
+# 0600 file. A user may hold their own key for a provider:
+# `istota secret ensure -s provider_keys -k <id>`.
+#      [providers.openrouter]
+#      api_key = ""                  # prefer the stack secret
+#
+#      [providers.local]             # an id of your own: lowercase letters, digits, _
+#      kind = "openai_compat"        # anthropic | openrouter | openai_compat
+#      base_url = "http://192.0.2.10:8080/v1"
+#      api_key = ""
+#      extra_headers = {}
+#      discover = true               # list the provider's models (OpenRouter today)
+#      discover_ttl_hours = 24
+#      models = [ { id = "qwen3-32b", context_window = 32768, supports_thinking = true } ]
+#
+# What the endpoint accepts. Omitted, each takes the kind's default: caching on
+# for anthropic; prompt_cache_key on for openrouter and for api.openai.com;
+# reported cost and the attribution headers for openrouter.
+#      prompt_caching = true         # cache_control breakpoints
+#      prompt_cache_key = true       # a random per-attempt prompt_cache_key
+#      prompt_cache_ttl = "5m"       # "5m" or "1h"
+#      strict_tool_schemas = "auto"  # "off" | "auto" | "on"
+#      reasoning_replay = "auto"     # "auto" | "on" | "off"
+#      [providers.local.compat]
+#      cost_accounting = false       # send usage.include for a reported cost
+#      attribution_headers = false   # OpenRouter's HTTP-Referer / X-Title
+#      max_completion_tokens = false # send max_completion_tokens, not max_tokens
+#      reasoning_effort = true       # send reasoning_effort at all
+#
+# Per-model patches over the catalogue, keyed by provider/id. One naming a
+# model no catalogue layer has is ignored.
+#      [models.overrides."local/qwen3-32b"]
+#      context_window = 65536
 
 # ============================================================================
 # Model alias registry [models.aliases] (operator override) — optional

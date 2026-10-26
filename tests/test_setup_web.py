@@ -1014,11 +1014,13 @@ class TestTheMailboxCheck:
 class TestConfigFromDocument:
     def test_it_maps_what_the_setup_would_write(self):
         a = setup_wizard.ContainerAnswers(
-            user_id="ada", brain_kind="native", native_model="m", native_api_key=SENTINEL,
+            user_id="ada", brain_kind="native", native_provider="openrouter", native_model="m",
+            native_api_key=SENTINEL,
             nextcloud_url="https://cloud.example.com", nextcloud_app_password="pw",
         )
         config = config_from_document(setup_wizard.container_config_document(a, inline_credentials=True))
-        assert config.brain.native.api_key == SENTINEL
+        assert config.brain.native.provider == "openrouter"
+        assert config.providers["openrouter"].api_key == SENTINEL
         assert config.brain.native.model == "m"
         assert config.nextcloud.url == "https://cloud.example.com"
         assert config.nextcloud.app_password == "pw"
@@ -1647,7 +1649,8 @@ class TestPlainWordsOnTheWeb:
         a = setup_wizard.answers_from_payload({"user_id": "ada", "brain_kind": "native"})
         messages = {e.field: e.message for e in setup_wizard.validate_container_answers(a)}
         assert "--native-model" in messages["native_model"]
-        assert "ISTOTA_BRAIN_NATIVE_API_KEY" in messages["native_api_key"]
+        # The page's preset URL names Anthropic, so the key is that provider's.
+        assert "ISTOTA_PROVIDER_ANTHROPIC_API_KEY" in messages["native_api_key"]
 
 
 class TestTheForwardedPort:
@@ -1751,7 +1754,7 @@ def _rerun(dirs, clock, *, local=False):
 
 _NATIVE_STACK = dict(
     hostname="localhost:8080", ingress="local", brain_kind="native",
-    native_model="model-x", native_api_key="native-key",
+    native_provider="anthropic", native_model="model-x", native_api_key="native-key",
 )
 _EMAIL_STACK = dict(
     hostname="localhost:8080", ingress="local", claude_code_oauth_token="oauth-token",

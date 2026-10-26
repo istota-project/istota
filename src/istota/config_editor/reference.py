@@ -64,9 +64,19 @@ def _collection_of_dataclasses(owner: type, field: dataclasses.Field) -> bool:
 
 
 #: Credentials whose variable is outside `config.SECRET_ENV_OVERRIDES`,
-#: because they sit deeper than its section/key rows: the native brain's two,
-#: and each arr app's key under the `servarr.apps` dict field.
-_DEEP_CREDENTIAL_VARIABLES: tuple[tuple[str, str], ...] = (
+#: because they sit deeper than its section/key rows: each built-in provider's
+#: key and headers under the `providers` dict field, the native brain's two
+#: legacy ones (read for one release through `config.LEGACY_PROVIDER_SOURCES`),
+#: and each arr app's key under the `servarr.apps` dict field. An operator's
+#: own provider has no secret file, so its key stays in `config.toml`.
+_DEEP_CREDENTIAL_VARIABLES: tuple[tuple[str, str], ...] = tuple(
+    (f"providers.{provider_id}.{field_name}", variable(provider_id))
+    for provider_id in config_module.BUILTIN_PROVIDERS
+    for field_name, variable in (
+        ("api_key", config_module.provider_key_variable),
+        ("extra_headers", config_module.provider_headers_variable),
+    )
+) + (
     ("brain.native.api_key", "ISTOTA_BRAIN_NATIVE_API_KEY"),
     ("brain.native.extra_headers", "ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS"),
 ) + tuple(

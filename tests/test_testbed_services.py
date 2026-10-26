@@ -358,14 +358,18 @@ class TestServiceConfigNamesOnlyRealKeys:
 
     def test_the_endpoint_points_the_brain_at_its_own_container_url(self, services):
         endpoint = services["model"]
-        brain = endpoint.config()["brain"]
+        fragment = endpoint.config()
+        brain = fragment["brain"]
+        provider = fragment["providers"]["scripted"]
 
         assert brain["kind"] == "native"
-        assert brain["native"]["base_url"] == endpoint.container_url
+        assert brain["native"]["provider"] == "scripted"
+        assert provider["kind"] == "openai_compat"
+        assert provider["base_url"] == endpoint.container_url
         # `host.docker.internal`, not loopback: a container reaching its own
         # loopback finds nothing, and the symptom is a task that failed to
         # reach the model for no stated reason.
-        assert "host.docker.internal" in brain["native"]["base_url"]
+        assert "host.docker.internal" in provider["base_url"]
 
     def test_the_signaling_image_tag_matches_the_shipped_compose_default(self):
         """One version, written in two places and held equal by nothing else.

@@ -339,7 +339,7 @@ def test_snapshot_slots_are_metadata_only_and_registry_is_explicit(user_install,
 
     assert provisionable_keys() == {
         "karakeep": {"api_key", "base_url"}, "ntfy": {"server_url", "topic", "token", "username", "password"},
-        "native_brain": {"api_key"}, "feeds": {"tumblr_api_key"}, "overland": {"ingest_token"}, "carto": {"api_key"},
+        "provider_keys": {"anthropic", "openrouter"}, "feeds": {"tumblr_api_key"}, "overland": {"ingest_token"}, "carto": {"api_key"},
     }
     assert set(known_service_keys()) - set(provisionable_keys()) == {"google_workspace", "garmin", "monarch"}
     for service, key in [("karakeep", "api_key"), ("karakeep", "base_url"), ("vault_entries", "private_name"),

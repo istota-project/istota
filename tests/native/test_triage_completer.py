@@ -133,8 +133,8 @@ class TestTheTaskFreeFactory:
             )
         ])
         with patch("istota.llm.make_provider", return_value=provider), \
-                patch("istota.executor._native_with_user_key",
-                      side_effect=lambda nc, *a, **k: nc):
+                patch("istota.llm.providers.user_provider_key",
+                      side_effect=AssertionError("an internal call never reads a user's key")):
             completer = build_oneshot_completer(
                 cfg, user_id="bob", source_type="web",
                 timeout=5.0, origin="speech_gate",

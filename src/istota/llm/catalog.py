@@ -181,6 +181,19 @@ def model_info_from_dict(raw: Mapping) -> ModelInfo:
 _DEFAULT = ModelInfo(id="unknown", context_window=200_000, max_output_tokens=16384)
 
 
+def declared_model(raw: Mapping, provider: str) -> ModelInfo:
+    """A model a ``[providers.<id>] models`` entry declares: the fields it
+    gives over the conservative default's."""
+    record = {
+        "context_window": _DEFAULT.context_window,
+        "max_output_tokens": _DEFAULT.max_output_tokens,
+        "price_source": "operator",
+        **raw,
+        "provider": provider,
+    }
+    return model_info_from_dict(record)
+
+
 def _clean_overrides(overrides: Mapping | None) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for key, raw in (overrides or {}).items():
@@ -208,6 +221,10 @@ class Catalogue:
     discovered: Mapping[str, tuple[ModelInfo, ...]] = field(default_factory=dict, hash=False)
     operator: Mapping[str, tuple[ModelInfo, ...]] = field(default_factory=dict, hash=False)
     overrides: Mapping[str, Mapping] = field(default_factory=dict, hash=False)
+    # Override keys that also apply over the default for a model no layer has:
+    # the legacy `[brain.native] model_overrides`, keyed by bare id. A
+    # `[models.overrides]` entry naming nothing is ignored.
+    legacy_override_keys: frozenset = frozenset()
     _by_ref: Mapping[str, ModelInfo] = field(default_factory=dict, hash=False, repr=False)
     _by_id: Mapping[str, ModelInfo] = field(default_factory=dict, hash=False, repr=False)
 
@@ -225,6 +242,8 @@ class Catalogue:
             # A legacy ``[brain.native.model_overrides]`` entry may describe a
             # model no layer has; it applies over the default, as it always did.
             info = replace(_DEFAULT, id=key, name=key)
+            if key not in self.legacy_override_keys:
+                override = None
         if override:
             info = replace(info, **override)
         return info
@@ -257,6 +276,7 @@ def build_catalogue(
     discovered: Mapping[str, Iterable[ModelInfo]] | None = None,
     operator: Mapping[str, Iterable[ModelInfo]] | None = None,
     overrides: Mapping | None = None,
+    legacy_override_keys: Iterable[str] = (),
 ) -> Catalogue:
     """Merge the layers into a snapshot. A higher layer replaces a lower one by ref."""
     shipped_t = tuple(_with_provider(m, m.provider or SHIPPED_PROVIDER) for m in shipped)
@@ -293,6 +313,7 @@ def build_catalogue(
         discovered=discovered_t,
         operator=operator_t,
         overrides=_clean_overrides(overrides),
+        legacy_override_keys=frozenset(legacy_override_keys),
         _by_ref=by_ref,
         _by_id=by_id,
     )
@@ -359,18 +380,39 @@ def _swap(**layers) -> None:
             "discovered": cur.discovered,
             "operator": cur.operator,
             "overrides": cur.overrides,
+            "legacy_override_keys": cur.legacy_override_keys,
         }
         inputs.update(layers)
         _CURRENT = build_catalogue(**inputs)
 
 
 def set_model_overrides(overrides: dict | None) -> None:
-    """Replace the override layer (``[brain.native.model_overrides]``).
+    """Replace the override layer with legacy entries only.
 
-    Each value is a partial record; unknown keys are dropped. ``{}`` / ``None``
-    clears the layer.
+    A shim for one release: every key keeps the legacy reach (it applies over
+    the default for a model no layer has). Each value is a partial record;
+    unknown keys are dropped. ``{}`` / ``None`` clears the layer.
     """
-    _swap(overrides=overrides or {})
+    overrides = overrides or {}
+    _swap(overrides=overrides, legacy_override_keys=frozenset(overrides))
+
+
+def set_config_layers(
+    *,
+    operator: Mapping[str, Iterable[ModelInfo]] | None,
+    overrides: Mapping | None,
+    legacy_override_keys: Iterable[str] = (),
+) -> None:
+    """Install what config declares: operator models per provider, and overrides.
+
+    Called by ``load_config``. ``legacy_override_keys`` names the overrides
+    that keep the legacy reach over the default.
+    """
+    _swap(
+        operator=operator or {},
+        overrides=overrides or {},
+        legacy_override_keys=frozenset(legacy_override_keys),
+    )
 
 
 def set_fetched_catalog(entries: dict[str, ModelInfo] | None) -> None:

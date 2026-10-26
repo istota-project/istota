@@ -1,6 +1,7 @@
 """Configuration loading for istota."""
 
 import copy
+import dataclasses
 import json
 import logging
 import math
@@ -11,7 +12,7 @@ import threading
 import time
 from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Mapping
+from typing import TYPE_CHECKING, Callable, Iterator, Mapping
 from urllib.parse import urlsplit
 
 import tomli
@@ -28,6 +29,15 @@ from .config_mapper import (
     key_path,
     report_problem,
     report_unknown,
+)
+from istota.llm.providers import (
+    BUILTIN_PROVIDERS,
+    COMPAT_TABLE_KEYS,
+    PROVIDER_KINDS,
+    implied_provider_id,
+    is_provider_id,
+    provider_headers_variable,
+    provider_key_variable,
 )
 from istota.llm.types import (
     PROMPT_CACHE_TTLS,
@@ -2070,16 +2080,17 @@ class NativeBrainConfig:
     """Settings for the native harness (``brain.kind = "native"``).
 
     The native brain runs istota's own agent loop in-process against an
-    ``LLMProvider``. ``provider`` selects the backend; the rest configure it.
+    ``LLMProvider``.
 
-    - ``provider`` — ``"openai_compat"``: any OpenAI chat-completions endpoint
-      (Anthropic, OpenRouter, Ollama, …). The only provider; the field stays so
-      the layer can grow new backends without a config break.
+    - ``provider`` — the id of a ``[providers.<id>]`` record (``"anthropic"``,
+      ``"openrouter"`` or an operator's own). No default: a native brain with
+      no provider is unavailable rather than quietly billing a service (D18).
+      The old value ``"openai_compat"`` (a wire protocol) reads as unset.
     - ``model`` — explicit model id (``openai_compat`` does no aliasing).
-    - ``base_url`` / ``api_key`` / ``extra_headers`` — for ``openai_compat``.
-      ``api_key`` is populated from the ``ISTOTA_BRAIN_NATIVE_API_KEY`` env
-      override (kept out of the TOML file), and ``extra_headers`` is replaced
-      by ``ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS`` (a JSON object) when it is set.
+    - ``base_url`` / ``api_key`` / ``extra_headers``, the wire settings and
+      ``model_catalog_*`` — legacy: read for one release through
+      ``LEGACY_PROVIDER_SOURCES`` as an implied provider's fields. The
+      endpoint and its key belong to ``[providers.<id>]`` now.
     - ``context_window`` — 0 resolves from the live-fetched (OpenRouter) catalog
       or the conservative 200k default; set to override per deployment (the
       documented contract for a non-OpenRouter native endpoint).
@@ -2087,11 +2098,11 @@ class NativeBrainConfig:
     - ``max_tokens`` — per-completion output cap.
     """
 
-    provider: str = "openai_compat"  # only "openai_compat"
+    provider: str = ""  # a [providers.<id>] id; no default (D18)
     model: str = ""
     effort: str = ""  # native-brain default effort: low/medium/high/xhigh/max (empty = none)
-    base_url: str = "https://api.anthropic.com/v1"
-    api_key: str = ""  # from ISTOTA_BRAIN_NATIVE_API_KEY at load time
+    base_url: str = ""  # legacy: [providers.<id>] base_url (LEGACY_PROVIDER_SOURCES)
+    api_key: str = ""  # legacy: [providers.<id>] api_key / ISTOTA_PROVIDER_<ID>_API_KEY
     extra_headers: dict = field(default_factory=dict)
     context_window: int = 0  # 0 = resolve from fetched catalog / 200k default
     max_turns: int = 100
@@ -2190,6 +2201,35 @@ class NativeBrainConfig:
     # Per-attempt JSONL transcript of the run ([brain.native.session_log]).
     # Native-only: the other two brains already get one from the `claude` CLI.
     session_log: SessionLogConfig = field(default_factory=SessionLogConfig)
+
+
+class LoaderMap(Mapping):
+    """A read-only mapping the loader builds onto a config: no TOML table, and
+    shared rather than duplicated by `copy.deepcopy` (it holds key wrappers
+    that refuse to be pickled)."""
+
+    __slots__ = ("_data",)
+
+    def __init__(self, data: Mapping | None = None) -> None:
+        self._data = dict(data or {})
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __iter__(self) -> Iterator:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __repr__(self) -> str:
+        return f"LoaderMap({sorted(self._data)!r})"
+
+    def __copy__(self) -> "LoaderMap":
+        return self
+
+    def __deepcopy__(self, memo) -> "LoaderMap":
+        return self
 
 
 @dataclass
@@ -2372,6 +2412,14 @@ class BrainConfig:
     # unavailability, subsequent tasks skip it for this long. 0 disables
     # stickiness (every task probes the primary first).
     fallback_cooldown_seconds: int = 900
+    # Set by the loader, never from the file. The resolved providers
+    # (`llm.providers.build_providers`), so `make_brain` can hand the native
+    # brain its provider without a `Config`; and the brain kinds that are not
+    # configured, kind -> reason (`brain_unconfigured_reason`). Fields rather
+    # than attributes so `dataclasses.replace` (every routed config) keeps them;
+    # read-only mappings, not dicts, since they are no TOML table.
+    provider_specs: Mapping = field(default_factory=LoaderMap, repr=False, compare=False)
+    unconfigured: Mapping = field(default_factory=LoaderMap, repr=False, compare=False)
 
 
 @dataclass
@@ -2453,6 +2501,45 @@ class MoneyModuleConfig:
 
 
 @dataclass
+class ProviderConfig:
+    """One ``[providers.<id>]`` table: an endpoint and the key for it.
+
+    ``kind`` is ``anthropic``, ``openrouter`` or ``openai_compat`` and decides
+    the model source, the wire defaults and the path rule (see
+    ``llm.providers``). The five wire settings are ``None`` when unset, which
+    takes the kind's default; ``compat`` holds the rest of what an endpoint
+    accepts (``cost_accounting``, ``attribution_headers``,
+    ``max_completion_tokens``, ``reasoning_effort``). ``models`` declares models
+    no list carries, each a table with at least ``id``.
+
+    The key is ``api_key`` here, overridden by
+    ``provider_key_variable(id)``; headers by ``provider_headers_variable(id)``.
+    """
+
+    kind: str = ""
+    base_url: str = ""
+    api_key: str = field(default="", repr=False)
+    extra_headers: dict = field(default_factory=dict, repr=False)
+    prompt_caching: bool | None = None
+    prompt_cache_key: bool | None = None
+    prompt_cache_ttl: str | None = None
+    strict_tool_schemas: str | None = None
+    reasoning_replay: str | None = None
+    compat: dict = field(default_factory=dict)
+    discover: bool = True
+    discover_ttl_hours: float = 24.0
+    models: list[dict] = field(default_factory=list)
+
+
+def builtin_provider_configs() -> dict[str, "ProviderConfig"]:
+    """The built-in providers, present without a table."""
+    return {
+        provider_id: ProviderConfig(kind=kind, base_url=base_url)
+        for provider_id, (kind, base_url) in BUILTIN_PROVIDERS.items()
+    }
+
+
+@dataclass
 class ModelsConfig:
     """Operator-controlled model alias registry (``[models.aliases]``).
 
@@ -2474,6 +2561,9 @@ class ModelsConfig:
     """
 
     aliases: dict[str, str | dict] = field(default_factory=dict)
+    # `[models.overrides."<ref>"]`: per-field patches over the catalogue, keyed
+    # by `provider/id`. One naming a model no layer has is ignored.
+    overrides: dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass
@@ -2552,6 +2642,7 @@ class Config:
     web: WebConfig = field(default_factory=WebConfig)
     push: PushConfig = field(default_factory=PushConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
+    providers: dict[str, ProviderConfig] = field(default_factory=builtin_provider_configs)
     experimental: ExperimentalConfig = field(default_factory=ExperimentalConfig)
     users: dict[str, UserConfig] = field(default_factory=dict)  # nc_username -> UserConfig
     # Legacy migration declarations. Never copied into new personal schedules.
@@ -4008,6 +4099,9 @@ _PARSED_BY_HAND = frozenset({
     "users",
     "default_briefings",
     "briefing_shared_blocks",
+    # `[providers.<id>]` over the built-ins (`_providers`), refusing a table
+    # per provider rather than the section.
+    "providers",
 
     # Cross-field: `confirm_sender_match = "verify"` is only meaningful with an
     # authserv-id to scope the verdict to, so the validator has to see both.
@@ -4078,6 +4172,9 @@ _NOT_CONFIGURATION = frozenset({
     "servarr.incomplete_apps",
     "servarr.keyless_apps",
     "servarr.daemon_keyed_apps",
+    # The resolved providers and the unconfigured brain kinds, built at load.
+    "brain.provider_specs",
+    "brain.unconfigured",
 })
 """Declared fields that are not settings, and must not be writable from TOML.
 
@@ -4699,25 +4796,428 @@ def parse_native_extra_headers(raw: str) -> dict[str, str] | None:
     return headers
 
 
-def _apply_native_extra_headers(config: Config, raw: str) -> None:
-    """`[brain.native] extra_headers` from `ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS`.
+_PROVIDER_TABLE_KEYS = frozenset(f.name for f in dataclasses.fields(ProviderConfig))
 
-    The stack secret file `istota_brain_native_extra_headers` holds a JSON
-    object of header name to string value. A valid one replaces the inline
-    table whole, so a header has one source; anything else is discarded,
-    naming the variable and never the value, and the inline table stays.
+
+def _provider_bool(raw: object, path: tuple[str, ...]) -> object:
+    if isinstance(raw, bool):
+        return raw
+    report_problem("discarded", path, "[config] %s must be true or false; ignoring it", ".".join(path))
+    return _KEEP
+
+
+def _provider_choice(raw: object, path: tuple[str, ...], valid: tuple[str, ...]) -> object:
+    if isinstance(raw, str) and raw in valid:
+        return raw
+    report_problem(
+        "discarded", path, "[config] %s=%s is not one of %s; ignoring it",
+        ".".join(path), Value(raw), "/".join(valid),
+    )
+    return _KEEP
+
+
+def _provider_table(provider_id: str, table: dict, base: ProviderConfig) -> ProviderConfig | None:
+    """`base` with the fields `table` sets, or `None` when the table is refused.
+
+    A refusal is a `discarded` problem: the provider is left out and the rest of
+    the config loads.
     """
-    if not raw:
-        return
-    headers = parse_native_extra_headers(raw)
-    if headers is None:
+    path = ("providers", provider_id)
+    provider = dataclasses.replace(
+        base,
+        extra_headers=dict(base.extra_headers),
+        compat=dict(base.compat),
+        models=list(base.models),
+    )
+    for extra in sorted(set(table) - _PROVIDER_TABLE_KEYS):
         report_problem(
-            "discarded", ("brain", "native", "extra_headers"),
-            "ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS is not a JSON object of header names to "
-            "string values; keeping [brain.native.extra_headers] from the config file",
+            "unknown", (*path, str(extra)),
+            "[config] providers.%s.%s is not a recognised key and is ignored", provider_id, extra,
         )
-        return
-    config.brain.native.extra_headers = headers
+    for name in ("kind", "base_url", "api_key"):
+        if name in table:
+            raw = table[name]
+            if isinstance(raw, str):
+                setattr(provider, name, raw.strip())
+            else:
+                report_problem(
+                    "discarded", (*path, name), "[config] providers.%s.%s must be a string; ignoring it",
+                    provider_id, name,
+                )
+    if "extra_headers" in table:
+        raw = table["extra_headers"]
+        if isinstance(raw, dict) and all(isinstance(v, str) for v in raw.values()):
+            provider.extra_headers = {str(k): v for k, v in raw.items()}
+        else:
+            report_problem(
+                "discarded", (*path, "extra_headers"),
+                "[config] providers.%s.extra_headers must be a table of header names to "
+                "strings; ignoring it", provider_id,
+            )
+    for name in ("prompt_caching", "prompt_cache_key", "discover"):
+        if name in table:
+            value = _provider_bool(table[name], (*path, name))
+            if value is not _KEEP:
+                setattr(provider, name, value)
+    for name, valid in (
+        ("prompt_cache_ttl", PROMPT_CACHE_TTLS),
+        ("strict_tool_schemas", STRICT_TOOL_SCHEMA_MODES),
+        ("reasoning_replay", REASONING_REPLAY_MODES),
+    ):
+        if name in table:
+            value = _provider_choice(table[name], (*path, name), valid)
+            if value is not _KEEP:
+                setattr(provider, name, value)
+    if "discover_ttl_hours" in table:
+        value = coerce_float(table["discover_ttl_hours"], f"providers.{provider_id}.discover_ttl_hours")
+        if value is not _KEEP:
+            provider.discover_ttl_hours = value
+    if "compat" in table:
+        raw = table["compat"]
+        if not isinstance(raw, dict):
+            report_problem(
+                "discarded", (*path, "compat"), "[config] providers.%s.compat must be a table; ignoring it",
+                provider_id,
+            )
+        else:
+            for key, value in raw.items():
+                if key not in COMPAT_TABLE_KEYS:
+                    report_problem(
+                        "unknown", (*path, "compat", str(key)),
+                        "[config] providers.%s.compat.%s is not a recognised key and is ignored",
+                        provider_id, key,
+                    )
+                    continue
+                checked = _provider_bool(value, (*path, "compat", str(key)))
+                if checked is not _KEEP:
+                    provider.compat[str(key)] = checked
+    if "models" in table:
+        raw = table["models"]
+        if not isinstance(raw, list) or not all(
+            isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"].strip() for m in raw
+        ):
+            report_problem(
+                "discarded", (*path, "models"),
+                "[config] providers.%s.models must be a list of tables, each with an id; "
+                "ignoring the provider", provider_id,
+            )
+            return None
+        provider.models = [dict(m) for m in raw]
+
+    if provider.kind not in PROVIDER_KINDS:
+        report_problem(
+            "discarded", (*path, "kind"),
+            "[config] providers.%s needs kind = one of %s; ignoring the provider",
+            provider_id, "/".join(PROVIDER_KINDS),
+        )
+        return None
+    try:
+        parts = urlsplit(provider.base_url) if provider.base_url else None
+        host = parts.hostname if parts is not None else None
+    except ValueError:
+        parts, host = None, None
+    if parts is None or parts.scheme not in ("http", "https") or not host:
+        report_problem(
+            "discarded", (*path, "base_url"),
+            "[config] providers.%s needs an http(s) base_url; ignoring the provider", provider_id,
+        )
+        return None
+    return provider
+
+
+def _providers(raw: object, key: str) -> object:
+    """`[providers.<id>]` tables over the built-ins, as `ProviderConfig` records.
+
+    A table with a built-in id sets fields on it and may not change its kind.
+    Any other id must be a valid provider id and set `kind` and `base_url`. A
+    refused table is a `discarded` problem and leaves that provider out (a
+    built-in keeps its defaults); the rest of the config loads.
+    """
+    providers = builtin_provider_configs()
+    if not isinstance(raw, dict):
+        report_problem(
+            "discarded", key_path(key),
+            "[config] %s must be a table of [providers.<id>] tables; ignoring it", key,
+        )
+        return providers
+    for provider_id, table in raw.items():
+        provider_id = str(provider_id)
+        path = ("providers", provider_id)
+        if not is_provider_id(provider_id):
+            report_problem(
+                "discarded", path,
+                "[config] [providers.%s]: a provider id is lowercase letters, digits and _, "
+                "starting with a letter; ignoring the table", provider_id,
+            )
+            continue
+        if not isinstance(table, dict):
+            report_problem(
+                "discarded", path, "[config] [providers.%s] must be a table; ignoring it", provider_id,
+            )
+            continue
+        builtin = providers.get(provider_id)
+        if builtin is not None:
+            kind = table.get("kind")
+            if kind is not None and kind != builtin.kind:
+                report_problem(
+                    "discarded", (*path, "kind"),
+                    "[config] [providers.%s] is built in with kind = %r and cannot be another kind; "
+                    "ignoring the table", provider_id, builtin.kind,
+                )
+                continue
+            base = builtin
+        else:
+            base = ProviderConfig()
+        provider = _provider_table(provider_id, table, base)
+        if provider is not None:
+            providers[provider_id] = provider
+    return providers
+
+
+@dataclass(frozen=True)
+class LegacyProviderSource:
+    """One pre-provider source of native's endpoint or key, and what it is read as."""
+
+    source: str        # `brain.native.<field>` or `env:<VARIABLE>`
+    target: str        # the `ProviderConfig` field it fills on the implied provider
+    replacement: str   # what to write instead, for doctor and `apply --check`
+
+
+#: Every legacy source of the native brain's endpoint and key, read for one
+#: release as the fields of an implied provider, and nowhere else. The implied
+#: provider's id comes from the legacy base URL's host (`implied_provider_id`),
+#: or is `[brain.native] provider` when the document names one and no base URL.
+#: `ANTHROPIC_API_KEY` (the CLI's key) is not here yet: it moves with CLI auth.
+LEGACY_PROVIDER_SOURCES: tuple[LegacyProviderSource, ...] = (
+    LegacyProviderSource("brain.native.base_url", "base_url", "[providers.<id>] base_url"),
+    LegacyProviderSource("brain.native.api_key", "api_key", "[providers.<id>] api_key"),
+    LegacyProviderSource("brain.native.extra_headers", "extra_headers", "[providers.<id>] extra_headers"),
+    LegacyProviderSource("brain.native.prompt_caching", "prompt_caching", "[providers.<id>] prompt_caching"),
+    LegacyProviderSource("brain.native.prompt_cache_key", "prompt_cache_key", "[providers.<id>] prompt_cache_key"),
+    LegacyProviderSource("brain.native.prompt_cache_ttl", "prompt_cache_ttl", "[providers.<id>] prompt_cache_ttl"),
+    LegacyProviderSource("brain.native.strict_tool_schemas", "strict_tool_schemas", "[providers.<id>] strict_tool_schemas"),
+    LegacyProviderSource("brain.native.reasoning_replay", "reasoning_replay", "[providers.<id>] reasoning_replay"),
+    LegacyProviderSource("brain.native.model_catalog_fetch", "discover", "[providers.<id>] discover"),
+    LegacyProviderSource("brain.native.model_catalog_cache_ttl_hours", "discover_ttl_hours", "[providers.<id>] discover_ttl_hours"),
+    LegacyProviderSource("env:ISTOTA_BRAIN_NATIVE_API_KEY", "api_key", "ISTOTA_PROVIDER_<ID>_API_KEY (the stack secret istota_provider_<id>_api_key)"),
+    LegacyProviderSource("env:ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS", "extra_headers", "ISTOTA_PROVIDER_<ID>_EXTRA_HEADERS (the stack secret istota_provider_<id>_extra_headers)"),
+)
+
+#: `[brain.native] model_overrides` is read under `[models.overrides]` for the
+#: same release (`_apply_catalogue_layers`).
+LEGACY_MODEL_OVERRIDES = "brain.native.model_overrides"
+
+
+def _legacy_base_url(provider_id: str, base_url: str) -> str:
+    # An `anthropic` provider's base URL is the API root; the legacy field
+    # carried the OpenAI-compatible path.
+    if provider_id == "anthropic":
+        trimmed = base_url.rstrip("/")
+        return trimmed[: -len("/v1")] if trimmed.endswith("/v1") else trimmed
+    return base_url
+
+
+def legacy_provider_sources_in_use(
+    data: object, environ: Mapping[str, str],
+) -> list[LegacyProviderSource]:
+    """The legacy sources a document and an environment set, in table order."""
+    brain = data.get("brain") if isinstance(data, dict) else None
+    native = brain.get("native") if isinstance(brain, dict) else None
+    native = native if isinstance(native, dict) else {}
+    found = []
+    for row in LEGACY_PROVIDER_SOURCES:
+        if row.source.startswith("env:"):
+            if (environ.get(row.source[4:]) or "").strip():
+                found.append(row)
+        elif row.source.rsplit(".", 1)[1] in native:
+            found.append(row)
+    return found
+
+
+def _settle_providers(data: dict, config: Config, environ: Mapping[str, str]) -> None:
+    """Fold the legacy native sources into an implied provider, then apply the
+    current per-provider variables over every provider.
+
+    Precedence: a `[providers.<id>]` table for the implied id wins over the old
+    fields as a whole, and a current variable wins over its legacy one. Each
+    legacy source in use is a `warning` problem recorded without logging (D20):
+    doctor and `istota apply --check` name it; the load says nothing.
+    """
+    native = config.brain.native
+    provider_setting = (native.provider or "").strip()
+    if provider_setting == "openai_compat":
+        provider_setting = ""
+    native.provider = provider_setting
+
+    in_use = legacy_provider_sources_in_use(data, environ)
+    for row in in_use:
+        path = ("brain", "native") if row.source.startswith("env:") else tuple(row.source.split("."))
+        report_problem(
+            "warning", path,
+            "%s is read for one release as the native provider's %s; move it to %s",
+            row.source.removeprefix("env:"), row.target, row.replacement, log=False,
+        )
+
+    document_providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
+    legacy_fields = {row.target for row in in_use if not row.source.startswith("env:")}
+    legacy_base = native.base_url.strip() if "base_url" in legacy_fields else ""
+    implied = implied_provider_id(legacy_base) if legacy_base else provider_setting
+    if implied and in_use:
+        table_wins = implied in document_providers
+        provider = config.providers.get(implied)
+        if provider is None and legacy_base and not table_wins:
+            provider = ProviderConfig(kind="openai_compat")
+            config.providers[implied] = provider
+        if provider is not None and not table_wins:
+            if legacy_base:
+                provider.base_url = _legacy_base_url(implied, legacy_base)
+            for target in sorted(legacy_fields - {"base_url"}):
+                if target == "discover":
+                    provider.discover = bool(native.model_catalog_fetch)
+                elif target == "discover_ttl_hours":
+                    provider.discover_ttl_hours = float(native.model_catalog_cache_ttl_hours)
+                elif target == "extra_headers":
+                    provider.extra_headers = dict(native.extra_headers or {})
+                else:
+                    setattr(provider, target, getattr(native, target))
+        if provider is not None:
+            # A legacy variable fills in only where no current source has: not
+            # over the current variable, and not over a current table's value.
+            legacy_key = (environ.get("ISTOTA_BRAIN_NATIVE_API_KEY") or "").strip()
+            if (
+                legacy_key
+                and not (environ.get(provider_key_variable(implied)) or "").strip()
+                and not (table_wins and provider.api_key)
+            ):
+                provider.api_key = legacy_key
+            raw_headers = environ.get("ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS") or ""
+            if (
+                raw_headers
+                and not environ.get(provider_headers_variable(implied))
+                and not (table_wins and provider.extra_headers)
+            ):
+                headers = parse_native_extra_headers(raw_headers)
+                if headers is None:
+                    report_problem(
+                        "discarded", ("brain", "native", "extra_headers"),
+                        "ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS is not a JSON object of header names "
+                        "to string values; keeping the provider's extra_headers",
+                    )
+                else:
+                    provider.extra_headers = headers
+        if not native.provider and provider is not None:
+            native.provider = implied
+
+    for provider_id, provider in config.providers.items():
+        key = (environ.get(provider_key_variable(provider_id)) or "").strip()
+        if key:
+            provider.api_key = key
+        raw = environ.get(provider_headers_variable(provider_id)) or ""
+        if raw:
+            headers = parse_native_extra_headers(raw)
+            if headers is None:
+                report_problem(
+                    "discarded", ("providers", provider_id, "extra_headers"),
+                    "%s is not a JSON object of header names to string values; keeping "
+                    "[providers.%s] extra_headers from the config file",
+                    provider_headers_variable(provider_id), provider_id,
+                )
+            else:
+                provider.extra_headers = headers
+
+
+#: `[brain.native]` fields a directly-built `NativeBrainConfig` may carry as
+#: legacy sources: every `LEGACY_PROVIDER_SOURCES` row read from the document.
+_LEGACY_NATIVE_FIELDS = tuple(
+    row.source.rsplit(".", 1)[1] for row in LEGACY_PROVIDER_SOURCES
+    if not row.source.startswith("env:")
+)
+
+
+def providers_for_native(native: "NativeBrainConfig") -> tuple[dict, str]:
+    """The provider specs and native's provider id, for a `NativeBrainConfig`
+    that never went through `load_config`.
+
+    Its non-default legacy fields stand in for the document, read through the
+    same transition table; no environment is read.
+    """
+    from .llm.providers import build_providers
+
+    default = NativeBrainConfig()
+    native_doc = {
+        name: getattr(native, name) for name in _LEGACY_NATIVE_FIELDS
+        if getattr(native, name) != getattr(default, name)
+    }
+    config = Config()
+    config.brain.native = dataclasses.replace(native)
+    _settle_providers({"brain": {"native": native_doc}}, config, {})
+    return build_providers(config), config.brain.native.provider
+
+
+def _settle_model_overrides(data: dict, config: Config) -> None:
+    """`[models.overrides]`: per-field patches keyed by `provider/id`."""
+    models = data.get("models") if isinstance(data.get("models"), dict) else {}
+    raw = models.get("overrides", {})
+    if not isinstance(raw, dict):
+        report_problem(
+            "discarded", ("models", "overrides"),
+            "[config] [models.overrides] must be a table of tables keyed by provider/id; ignoring it",
+        )
+        raw = {}
+    overrides: dict[str, dict] = {}
+    for ref, table in raw.items():
+        if not isinstance(table, dict):
+            report_problem(
+                "discarded", ("models", "overrides", str(ref)),
+                "[config] [models.overrides.%s] must be a table; ignoring it", str(ref),
+            )
+            continue
+        overrides[str(ref)] = dict(table)
+    config.models.overrides = overrides
+
+
+def _apply_brain_providers(config: Config) -> None:
+    """Resolve the providers onto `BrainConfig`, with native's reason if it cannot run."""
+    from .llm.providers import build_providers, native_provider_reason
+
+    config.brain.provider_specs = LoaderMap(build_providers(config))
+    reason = native_provider_reason(config)
+    config.brain.unconfigured = LoaderMap({"native": reason} if reason else {})
+
+
+def _apply_catalogue_layers(config: Config) -> None:
+    """Operator-declared provider models and `[models.overrides]` into the catalogue.
+
+    Process-wide, like the alias table. The legacy `[brain.native]
+    model_overrides` keep their old reach: keyed by bare id, they apply over the
+    default for a model no layer has. A `[models.overrides]` entry naming
+    nothing is ignored.
+    """
+    from .llm.catalog import declared_model, set_config_layers
+
+    operator: dict[str, tuple] = {}
+    for provider_id, provider in config.providers.items():
+        records = []
+        for raw in provider.models:
+            try:
+                records.append(declared_model(raw, provider_id))
+            except (TypeError, ValueError):
+                report_problem(
+                    "discarded", ("providers", provider_id, "models"),
+                    "[config] providers.%s.models has an entry the catalogue cannot read "
+                    "(%s); ignoring it", provider_id, str(raw.get("id")),
+                )
+        if records:
+            operator[provider_id] = tuple(records)
+    legacy = {
+        str(k): v for k, v in (config.brain.native.model_overrides or {}).items()
+        if isinstance(v, dict)
+    }
+    set_config_layers(
+        operator=operator,
+        overrides={**legacy, **config.models.overrides},
+        legacy_override_keys=frozenset(legacy) - frozenset(config.models.overrides),
+    )
 
 
 def _settle_servarr_apps(data: dict, config: Config, environ: Mapping[str, str]) -> None:
@@ -5101,6 +5601,8 @@ def _map_document(data: dict, config: Config) -> list[str]:
         config, data, hooks=_CONFIG_HOOKS, unknown=unknown,
         skip=_HANDWRITTEN, reject=_NOT_CONFIGURATION,
     )
+    if "providers" in data:
+        config.providers = _providers(data["providers"], "providers")
     _migrate_workspace_fields(data, config, old_mount_spelling=old_mount_spelling)
     if config.workspace_path is None:
         config.workspace_path = config.workspace_mount_path
@@ -5168,6 +5670,8 @@ def config_from_document(data: dict) -> Config:
     # still the one it means to write.
     data = copy.deepcopy(data)
     _map_document(data, config)
+    _settle_providers(data, config, {})
+    _apply_brain_providers(config)
     _settle_servarr_apps(data, config, {})
     _map_users(data, config)
     return config
@@ -5316,6 +5820,7 @@ def load_config(
         # shapes (and drops malformed values with a warning) — keeping the raw
         # structure here lets the namespace-aware validation loop below inspect it.
         config.models = ModelsConfig(aliases={str(k): v for k, v in aliases.items()})
+        _settle_model_overrides(data, config)
 
     if "experimental" in data:
         exp = data["experimental"]
@@ -5496,12 +6001,10 @@ def load_config(
             section = getattr(section, part)
         setattr(section, path[-1], value)
 
-    # Native-brain API key lives two levels deep (brain.native.api_key), so it
-    # doesn't fit the flat section/field table above.
-    _native_key = os.environ.get("ISTOTA_BRAIN_NATIVE_API_KEY")
-    if _native_key:
-        config.brain.native.api_key = _native_key
-    _apply_native_extra_headers(config, os.environ.get("ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS", ""))
+    # Provider keys are keyed by provider id, so they don't fit the flat table
+    # above; the legacy native sources are folded in here too.
+    _settle_providers(data, config, os.environ)
+    _apply_brain_providers(config)
     # The arr keys are keyed by app, so they don't fit the table either; and an
     # app is only judged complete once its key could have come from here.
     _settle_servarr_apps(data, config, os.environ)
@@ -5600,15 +6103,14 @@ def load_config(
                         _validate_target(_name, str(_ns), _target.get("model"))
     set_alias_overrides(config.models.aliases)
 
-    # Per-model capability/window overrides for the native brain (NB-4). Global
-    # like the role overrides — every get_model_info consumer (compaction sizing,
+    # Operator-declared models and per-model overrides (NB-4). Global like the
+    # role overrides — every get_model_info consumer (compaction sizing,
     # capability gates, usage pricing) picks them up.
     try:
-        from .llm.catalog import set_model_overrides
-        set_model_overrides(config.brain.native.model_overrides)
+        _apply_catalogue_layers(config)
     except Exception:  # pragma: no cover - defensive; never fail config load
         logging.getLogger("istota.config").warning(
-            "failed to apply [brain.native.model_overrides]", exc_info=True
+            "failed to apply the catalogue layers", exc_info=True
         )
 
     _validate_brain_fallback(config)

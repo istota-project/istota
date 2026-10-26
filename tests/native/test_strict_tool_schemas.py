@@ -7,7 +7,6 @@ that drops the `null` a strict model sends for an optional key.
 
 import copy
 import logging
-from types import SimpleNamespace
 
 import pytest
 
@@ -208,8 +207,11 @@ class TestToolWire:
 
         catalog.set_model_overrides({})
         catalog.set_fetched_catalog(None)
-        config = NativeBrainConfig(api_key="k")
-        provider = make_provider(config)
+        from istota.brain import native_provider_spec
+        from istota.config import BrainConfig
+
+        config = NativeBrainConfig(provider="anthropic", api_key="k")
+        provider = make_provider(native_provider_spec(BrainConfig(native=config)))
         assert provider.strict_tool_schemas == "auto"
         body = provider._build_chat_completion_request("sys", [], _tools(), config.model, 100)
         assert "strict" not in body["tools"][0]["function"]
@@ -234,9 +236,17 @@ class TestToolWire:
         assert any("strict_tool_schemas" in r.getMessage() for r in caplog.records)
 
     def test_make_provider_passes_the_mode(self):
-        cfg = SimpleNamespace(api_key="k", base_url="https://x/v1", strict_tool_schemas="on")
-        assert make_provider(cfg).strict_tool_schemas == "on"
-        assert make_provider(SimpleNamespace(api_key="k")).strict_tool_schemas == "auto"
+        from istota.llm.providers import InferenceKey, ProviderSpec, resolve_compat
+
+        def spec(**settings):
+            return ProviderSpec(
+                id="p", kind="openai_compat", base_url="https://x/v1",
+                inference_key=InferenceKey("k"),
+                compat=resolve_compat("openai_compat", "https://x/v1", settings),
+            )
+
+        assert make_provider(spec(strict_tool_schemas="on")).strict_tool_schemas == "on"
+        assert make_provider(spec()).strict_tool_schemas == "auto"
 
     def test_carries_strict_tools(self):
         assert carries_strict_tools(_tools(), "m", "on") is True

@@ -623,7 +623,7 @@ def _reset_process_globals():
 
     def _clear():
         set_alias_overrides({})
-        catalog_mod.set_model_overrides({})
+        catalog_mod.set_config_layers(operator={}, overrides={})
         reset_availability_breaker()
 
     _clear()

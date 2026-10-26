@@ -436,7 +436,7 @@ def _overrides_inline(name: str, raw: str) -> bool:
 
     if not raw.strip():
         return False
-    if name == "istota_brain_native_extra_headers":
+    if name.endswith("_extra_headers"):
         # The loader keeps the inline table when the variable does not parse.
         return parse_native_extra_headers(raw) is not None
     return True

@@ -708,6 +708,21 @@ def make_session_log(req: BrainRequest, cfg) -> SessionLogWriter:
     return SessionLogWriter(resolve_session_log_dir(req.db_path, cfg.dir), ident, policy)
 
 
+def _spec_from_native_config(config):
+    """The provider spec a bare `NativeBrainConfig` implies, or `None`. Never raises."""
+    try:
+        from istota.config import BrainConfig, NativeBrainConfig
+
+        from . import native_provider_spec
+
+        if not isinstance(config, NativeBrainConfig):
+            return None
+        return native_provider_spec(BrainConfig(native=config))
+    except Exception:  # noqa: BLE001 - a missing spec means "not configured"
+        logger.debug("could not derive the native provider spec", exc_info=True)
+        return None
+
+
 def _base_url_host(base_url: str) -> str:
     """The host of the configured endpoint, and nothing else.
 
@@ -1032,14 +1047,27 @@ class NativeBrain:
     # translated from the Anthropic namespace.
     model_namespace = "openai_compat"
 
-    def __init__(self, config, provider=None):
+    def __init__(self, config, provider=None, spec=None):
         self._config = config
-        # ``provider`` injectable for tests; production builds from config.
-        self._provider = provider if provider is not None else make_provider(config)
+        # The provider record native's requests go to (`[brain.native]
+        # provider`), with the key for it. `None` means native is not
+        # configured: construction still succeeds (config load builds a brain
+        # to validate aliases), and a task fails with the reason. A brain built
+        # without `make_brain` reads it off the config's legacy fields.
+        if spec is None:
+            spec = _spec_from_native_config(config)
+        self._spec = spec
+        # ``provider`` injectable for tests; production builds from the spec.
+        if provider is not None:
+            self._provider = provider
+        elif spec is not None:
+            self._provider = make_provider(spec)
+        else:
+            self._provider = None
         # We own (and must close) a provider we built ourselves; an injected one
         # belongs to the caller (NB-17). A fresh NativeBrain + provider is built
         # per task, so its httpx client is closed at task end rather than leaked.
-        self._owns_provider = provider is None
+        self._owns_provider = provider is None and self._provider is not None
 
     # --- Model resolution --------------------------------------------------
     #
@@ -1192,7 +1220,19 @@ class NativeBrain:
         # Idempotent with `_run`'s own two `or`s; applied here so the stamp
         # below reports the effort this attempt really used (ISSUE-418).
         req = self.with_defaults(req)
-        result = self._execute_sync(req)
+        if self._provider is None:
+            reason = (
+                "[brain.native] provider is not set or names no configured provider"
+            )
+            logger.warning("native brain unavailable: %s", reason)
+            result = BrainResult(
+                success=False,
+                result_text=f"The native brain is not configured: {reason}.",
+                stop_reason="error",
+                model_used=req.model or self._config.model,
+            )
+        else:
+            result = self._execute_sync(req)
         # Stamped on the way out, so a return added later cannot forget it.
         result.brain_kind = BRAIN_KIND
         if not result.effort_used:
@@ -1321,17 +1361,14 @@ class NativeBrain:
 
     async def _ensure_fetched_catalog_inner(self, req: BrainRequest) -> None:
         global _CATALOG_FETCHED_AT
-        cfg = self._config
-        if not getattr(cfg, "model_catalog_fetch", False):
-            return
-        base_url = cfg.base_url or ""
-        if "openrouter.ai" not in base_url:
+        spec = self._spec
+        if spec is None or spec.kind != "openrouter" or not spec.discover:
             return
 
         from ..llm import catalog as _catalog
         from ..llm import openrouter_catalog as orc
 
-        ttl = float(getattr(cfg, "model_catalog_cache_ttl_hours", 24.0) or 0.0)
+        ttl = float(spec.discover_ttl_hours or 0.0)
         now = time.time()
 
         # Serialize the first-use stampede across worker threads. Held across the
@@ -1360,8 +1397,10 @@ class NativeBrain:
             # 2) live fetch
             entries: dict = {}
             try:
+                from ..llm.providers import reveal_inference_key
+
                 entries = await orc.fetch_openrouter_catalog(
-                    base_url, api_key=cfg.api_key or ""
+                    spec.openai_base_url, api_key=reveal_inference_key(spec.inference_key)
                 )
             except Exception:  # noqa: BLE001 — network/HTTP; fall through
                 logger.warning("openrouter model-catalog fetch failed", exc_info=True)
@@ -1568,8 +1607,8 @@ class NativeBrain:
                 # fallback, so its absence means a log from before the field
                 # existed and not a primary run.
                 "is_fallback": bool(req.is_fallback),
-                "provider": self._config.provider,
-                "base_url_host": _base_url_host(self._config.base_url),
+                "provider": self._spec.id if self._spec is not None else "",
+                "base_url_host": _base_url_host(self._spec.base_url if self._spec is not None else ""),
                 "model": model,
                 "effort": effort,
                 "reasoning_effort": reasoning_effort,

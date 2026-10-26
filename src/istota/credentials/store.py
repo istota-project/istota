@@ -498,6 +498,37 @@ def prune_history(conn, *, older_than_days: int) -> int:
                         (f"-{older_than_days} days",)).rowcount
 
 
+#: Where a user's own native-brain key lived before provider keys.
+LEGACY_NATIVE_KEY = ("native_brain", "api_key")
+
+
+def move_legacy_native_keys(db_path: Path, provider_id: str) -> int:
+    """Move every `native_brain/api_key` row to `provider_keys/<provider_id>`.
+
+    Run by `istota init` with native's provider. The ciphertext moves as it is
+    (a Fernet token is not bound to its row), so no key is decrypted. A user
+    who already holds `provider_keys/<provider_id>` keeps it, and their legacy
+    row is removed. Idempotent: once moved, there is nothing left to move.
+    Returns how many rows moved.
+    """
+    service, key = LEGACY_NATIVE_KEY
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        moved = conn.execute(
+            """
+            UPDATE secrets SET service = 'provider_keys', key = ?, updated_at = datetime('now')
+            WHERE service = ? AND key = ? AND NOT EXISTS (
+                SELECT 1 FROM secrets AS current
+                WHERE current.user_id = secrets.user_id
+                  AND current.service = 'provider_keys' AND current.key = ?
+            )
+            """,
+            (provider_id, service, key, provider_id),
+        ).rowcount
+        conn.execute("DELETE FROM secrets WHERE service = ? AND key = ?", (service, key))
+    return moved
+
+
 def secret_exists(db_path: Path, user_id: str, service: str, key: str) -> bool:
     """True if a row is present, regardless of whether it can be decrypted.
 

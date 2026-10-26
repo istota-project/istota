@@ -135,7 +135,7 @@ def run(
     with (
         patch("istota.executor.make_brain", return_value=fallback),
         patch(
-            "istota.executor._native_with_user_key",
+            "istota.executor._with_user_provider_key",
             side_effect=lambda nc, *a, **k: nc,
         ),
     ):
@@ -231,7 +231,7 @@ class TestThePrimaryFailsAndReroutes:
         with (
             patch("istota.executor.make_brain", side_effect=RuntimeError("misconfig")),
             patch(
-                "istota.executor._native_with_user_key",
+                "istota.executor._with_user_provider_key",
                 side_effect=lambda nc, *a, **k: nc,
             ),
         ):

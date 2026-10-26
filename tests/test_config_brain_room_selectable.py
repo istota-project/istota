@@ -39,10 +39,22 @@ REPO = Path(__file__).resolve().parent.parent
 EXAMPLE_CONFIG = REPO / "config" / "config.example.toml"
 
 
-def _load(tmp_path, body: str) -> Config:
+#: Native names a provider, so it is configured: an unconfigured kind is
+#: never selectable (`brain_unconfigured_reason`), which is its own test below.
+NATIVE_PROVIDER = '\n[brain.native]\nprovider = "openrouter"\n'
+
+
+def _load(tmp_path, body: str, *, native: str = NATIVE_PROVIDER) -> Config:
     cfg = tmp_path / "config.toml"
-    cfg.write_text(textwrap.dedent(body))
+    cfg.write_text(textwrap.dedent(body) + native)
     return load_config(cfg)
+
+
+class TestAnUnconfiguredKind:
+    def test_native_with_no_provider_is_not_selectable(self, tmp_path):
+        config = _load(tmp_path, '[brain]\nroom_selectable = ["native"]\n', native="")
+        assert config.brain.room_selectable == ["native"]
+        assert room_selectable_kinds(config.brain) == frozenset()
 
 
 class TestTheDefault:

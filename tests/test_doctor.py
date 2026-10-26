@@ -937,22 +937,56 @@ class TestNativeBrainCredential:
         if named:
             assert named in r.detail
 
-    def test_the_env_var_satisfies_it(self, make_config, monkeypatch):
-        """Asked separately from the field: `load_config` folds the variable
-        into `api_key`, but a Config assembled any other way holds one and not
-        the other."""
-        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "sk-env")
-        assert self._run(self._native(make_config)).status == OK
+    def test_the_providers_variable_satisfies_it(self, monkeypatch, tmp_path):
+        """`load_config` folds `ISTOTA_PROVIDER_<ID>_API_KEY` into the provider
+        native names, which is what the check reads."""
+        from istota.config import load_config
 
-    def _stored(self, make_config, monkeypatch, tmp_path, owner="alice", service="native_brain"):
-        """A native-brain config whose only key may be a stored secret row."""
+        monkeypatch.setenv("ISTOTA_PROVIDER_ANTHROPIC_API_KEY", "sk-env")
+        path = tmp_path / "config.toml"
+        path.write_text('[brain]\nkind = "native"\n[brain.native]\nprovider = "anthropic"\n')
+        r = self._run(load_config(path))
+        assert r.status == OK
+        assert "anthropic" in r.detail
+
+    def test_no_provider_is_named_as_the_reason(self, monkeypatch, tmp_path):
+        """Native has no default provider (D18): with none named it is not
+        configured, and the check says which field to set."""
+        from istota.config import load_config
+
+        path = tmp_path / "config.toml"
+        path.write_text('[brain]\nkind = "native"\n')
+        r = self._run(load_config(path))
+        assert r.status == FAIL
+        assert "[brain.native] provider" in r.detail
+
+    def test_a_legacy_source_is_named_with_its_replacement(self, monkeypatch, tmp_path):
+        """Nothing says so at load (D20); doctor names each legacy source."""
+        from istota.config import load_config
+
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "sk-legacy")
+        path = tmp_path / "config.toml"
+        path.write_text(
+            '[brain]\nkind = "native"\n[brain.native]\n'
+            'base_url = "https://openrouter.ai/api/v1"\n'
+        )
+        r = self._run(load_config(path))
+        assert r.status == OK
+        assert "brain.native.base_url -> [providers.<id>] base_url" in r.detail
+        assert "ISTOTA_BRAIN_NATIVE_API_KEY -> ISTOTA_PROVIDER_<ID>_API_KEY" in r.detail
+        assert "sk-legacy" not in r.detail
+
+    def _stored(self, make_config, monkeypatch, tmp_path, owner="alice", service="provider_keys"):
+        """A native-brain config whose only key may be a stored secret row:
+        a user's own key for native's provider (`provider_keys/anthropic`)."""
         from istota import db
         from istota.config import UserConfig
 
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 40)
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
-        secrets_store.set_secret(db_path, owner, service, "api_key", "sk-u")
+        key = "anthropic" if service == "provider_keys" else "api_key"
+        secrets_store.set_secret(db_path, owner, service, key, "sk-u")
         config = self._native(make_config)
         config.db_path = db_path
         config.users = {"alice": UserConfig()}
@@ -963,12 +997,12 @@ class TestNativeBrainCredential:
         [
             # The executor overlays this per task, so a deployment where every
             # user brings their own key needs no instance-wide one.
-            ("alice", "native_brain", OK),
+            ("alice", "provider_keys", OK),
             # A row for a service that is not the native brain must not count.
             ("alice", "ntfy", FAIL),
             # A row left behind by a removed user is not a credential any
             # current user has.
-            ("gone", "native_brain", FAIL),
+            ("gone", "provider_keys", FAIL),
         ],
         ids=["own-native-key", "another-service", "unlisted-user"],
     )

@@ -58,9 +58,25 @@ SECRET_NAME_PATTERNS = frozenset({
 # dict would also catch those three spellings, but the field is an auth channel
 # by construction and a header we have not thought of should not be the thing
 # standing between a config page and a live provider key.
+#
+# A `*` segment matches any one segment: a provider's id is the operator's.
 _ALWAYS_SECRET_KEYS = frozenset({
     "brain.native.extra_headers",
+    "providers.*.extra_headers",
 })
+
+
+def _always_secret(key: str) -> bool:
+    if key in _ALWAYS_SECRET_KEYS:
+        return True
+    segments = key.split(".")
+    for pattern in _ALWAYS_SECRET_KEYS:
+        parts = pattern.split(".")
+        if "*" in parts and len(parts) == len(segments) and all(
+            part in ("*", segment) for part, segment in zip(parts, segments)
+        ):
+            return True
+    return False
 
 # Fields the patterns above flag but which carry no credential. Keyed on the
 # full dotted path rather than the bare name, so an allowlist entry can never
@@ -86,6 +102,7 @@ NON_SECRET_KEYS = frozenset({
     "brain.native.max_tokens",        # a count
     "brain.native.compaction_reserve_tokens",
     "brain.native.compaction_keep_recent_tokens",
+    "brain.native.compaction_background_tokens",
     "security.passthrough_env_vars",  # a list of var *names*
     "brain.tmux.bypass_accept_marker",   # a TUI dialog substring; the config
     "brain.tmux.bypass_warning_marker",  # hotfix knob when a CLI reword lands
@@ -152,7 +169,7 @@ def is_secret_name(name: str) -> bool:
 
 def is_secret_field(key: str, name: str) -> bool:
     """Whether the field at dotted ``key`` must be redacted."""
-    if key in _ALWAYS_SECRET_KEYS:
+    if _always_secret(key):
         return True
     if key in NON_SECRET_KEYS:
         return False
@@ -175,7 +192,7 @@ def is_secret_path(path: tuple[str, ...] | list[str]) -> bool:
     section: Any = Config
     for index, name in enumerate(segments):
         key = ".".join(segments[: index + 1])
-        if key in _ALWAYS_SECRET_KEYS:
+        if _always_secret(key):
             return True
         field = None
         if section is not None:

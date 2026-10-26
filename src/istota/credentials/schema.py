@@ -10,7 +10,7 @@ There are two flavors:
 * **Connected services** — cross-cutting per-user credentials a skill
   consumes (Karakeep, Google Workspace). They appear on the main
   ``/istota/settings`` page, unless flagged ``cli_only`` (e.g.
-  ``native_brain``), in which case they stay operator-provisioned via the
+  ``provider_keys``), in which case they stay operator-provisioned via the
   ``istota secret`` CLI and never render in the web UI.
 * **Module services** — credentials owned by a specific module (Monarch
   for ``money``, Tumblr for ``feeds``, Overland for ``location``). They
@@ -93,24 +93,26 @@ CONNECTED_SERVICE_SCHEMA: dict[str, dict] = {
             {"key": "password",   "label": "Password (optional)",     "type": "password"},
         ],
     },
-    "native_brain": {
-        "label": "Native brain provider",
-        # Consumed by the native brain (brain.kind = "native"), not a skill.
-        # When set, this per-user key overlays the instance-wide
-        # `[brain.native] api_key` / `ISTOTA_BRAIN_NATIVE_API_KEY`.
+    "provider_keys": {
+        "label": "Model provider keys",
+        # A user's own key for a model provider, keyed by provider id
+        # (`istota secret ensure -s provider_keys -k openrouter`). In that
+        # user's tasks a request to that provider carries it in place of the
+        # deployment's key (`llm.providers.with_user_key`); internal operator
+        # calls never do. Replaced `native_brain`/`api_key`, which `istota
+        # init` moves here once.
         #
-        # cli_only: not surfaced in the web UI. The web knob overrode only the
-        # key (not provider/model/base_url), so it did less than it appeared to
-        # — a per-user *billing* override, not a "bring your own brain" one.
-        # Rather than grow it into a full per-user brain config (which opens an
-        # SSRF surface, since NativeBrain runs in-process on the daemon), we
-        # keep it operator-provisioned via `istota secret ensure -s native_brain`
-        # and the runtime overlay in `executor._native_with_user_key`. Still in
-        # the schema so CLI validation accepts it; just hidden from the UI.
+        # cli_only: not surfaced in the web UI. Opening a per-user endpoint
+        # would be an SSRF surface, so a user can hold a key for a deployment
+        # provider but not add one.
         "cli_only": True,
         "used_by": (),
+        # Any provider id is a key (`key_rule`); the built-ins are listed so a
+        # settings plan, whose keys are a fixed set, can provision them.
+        "key_rule": "provider_id",
         "fields": [
-            {"key": "api_key", "label": "Provider API key", "type": "password"},
+            {"key": "anthropic", "label": "Anthropic API key", "type": "password"},
+            {"key": "openrouter", "label": "OpenRouter API key", "type": "password"},
         ],
     },
 }
@@ -194,6 +196,24 @@ def all_known_services() -> dict[str, dict]:
         for service, schema in mod_services.items():
             out[service] = schema
     return out
+
+
+def service_accepts_key(service: str, key: str) -> bool:
+    """Whether ``key`` may be written under ``service``.
+
+    A listed field, or, for a service with ``key_rule = "provider_id"``, any
+    provider id (`llm.providers.is_provider_id`).
+    """
+    schema = all_known_services().get(service)
+    if not schema:
+        return False
+    if key in {f["key"] for f in schema.get("fields", [])}:
+        return True
+    if schema.get("key_rule") == "provider_id":
+        from istota.llm.providers import is_provider_id
+
+        return is_provider_id(key)
+    return False
 
 
 def known_service_keys() -> dict[str, frozenset[str]]:

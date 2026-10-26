@@ -72,28 +72,6 @@ _REASONING_EFFORT_WIRE = {
     "max": "high",
 }
 
-# Model families on OpenAI's own endpoint that require ``max_completion_tokens``
-# instead of ``max_tokens`` (NB-12). Matched as a lowercase prefix of the id.
-_OPENAI_REASONING_PREFIXES = ("o1", "o3", "o4", "gpt-5")
-
-
-def _uses_max_completion_tokens(base_url: str, model: str) -> bool:
-    if "api.openai.com" not in (base_url or ""):
-        return False
-    return model.lower().startswith(_OPENAI_REASONING_PREFIXES)
-
-
-def _supports_cost_accounting(base_url: str) -> bool:
-    """Whether the endpoint returns real per-request cost in its usage object.
-
-    OpenRouter does when the request carries ``"usage": {"include": true}``;
-    other OpenAI-compatible endpoints (OpenAI, vLLM, LM Studio, local servers)
-    don't, and some 400 on the unknown body field — so the request param is
-    scoped to OpenRouter. Parsing of ``usage.cost`` stays unconditional and
-    degrades gracefully (absent → catalog pricing)."""
-    return "openrouter.ai" in (base_url or "")
-
-
 def _parse_reported_cost(usage_raw: dict) -> float | None:
     """Extract a provider-reported per-request cost (USD) from a usage object.
 
@@ -358,7 +336,7 @@ class OpenAICompatibleProvider:
     def __init__(
         self,
         api_key: str,
-        base_url: str = "https://api.anthropic.com/v1",
+        base_url: str = "",
         timeout: float = 300.0,
         extra_headers: dict[str, str] | None = None,
         prompt_caching: bool = False,
@@ -366,6 +344,9 @@ class OpenAICompatibleProvider:
         prompt_cache_key: bool = False,
         prompt_cache_ttl: str = "5m",
         strict_tool_schemas: str = "off",
+        cost_accounting: bool = False,
+        max_completion_tokens_models: tuple[str, ...] = (),
+        reasoning_effort: bool = True,
     ):
         headers = {
             "authorization": f"Bearer {api_key}",
@@ -406,6 +387,11 @@ class OpenAICompatibleProvider:
             )
             strict_tool_schemas = "off"
         self._strict_tool_schemas = strict_tool_schemas
+        # What the provider's kind says the endpoint accepts
+        # (`llm.providers.KIND_DEFAULTS`), resolved by `make_provider`.
+        self._cost_accounting = bool(cost_accounting)
+        self._max_completion_tokens_models = tuple(max_completion_tokens_models)
+        self._reasoning_effort = bool(reasoning_effort)
 
     @property
     def strict_tool_schemas(self) -> str:
@@ -576,16 +562,18 @@ class OpenAICompatibleProvider:
             "stream_options": {"include_usage": True},
         }
         # OpenRouter returns the actual charged cost (markup included) in the
-        # trailing usage chunk's ``cost`` field, but only when asked. Scoped to
-        # OpenRouter because other endpoints may 400 on the unknown field.
-        if _supports_cost_accounting(self._base_url):
+        # trailing usage chunk's ``cost`` field, but only when asked. Off for
+        # other kinds because other endpoints may 400 on the unknown field.
+        if self._cost_accounting:
             body["usage"] = {"include": True}
         # NB-12: OpenAI's own o-series / gpt-5 reasoning models 400 on
         # ``max_tokens`` and require ``max_completion_tokens``. Only the direct
-        # OpenAI endpoint is affected — OpenRouter and others normalize — so the
-        # gate is scoped to ``api.openai.com`` to avoid breaking a local server
-        # that only knows ``max_tokens``.
-        if _uses_max_completion_tokens(self._base_url, model):
+        # OpenAI endpoint is affected, so the prefixes are set for that host
+        # alone (`llm.providers.kind_defaults`) and a local server that only
+        # knows ``max_tokens`` never sees the other field.
+        if self._max_completion_tokens_models and (model or "").lower().startswith(
+            self._max_completion_tokens_models
+        ):
             body["max_completion_tokens"] = max_tokens
         else:
             body["max_tokens"] = max_tokens
@@ -593,7 +581,7 @@ class OpenAICompatibleProvider:
             body["tools"] = tools_wire
 
         effort = _REASONING_EFFORT_WIRE.get((reasoning_effort or "").lower())
-        if effort:
+        if effort and self._reasoning_effort:
             body["reasoning_effort"] = effort
         if self._prompt_cache_key and cache_affinity_key:
             body["prompt_cache_key"] = cache_affinity_key

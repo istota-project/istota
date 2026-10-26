@@ -522,8 +522,9 @@ def check_gws(config: "Config", probe: bool) -> CheckResult:
     )
 
 
-def _native_key_holders(config: "Config") -> int:
-    """How many configured users have a ``native_brain``/``api_key`` secret.
+def _native_key_holders(config: "Config", provider_id: str) -> int:
+    """How many configured users have their own key for ``provider_id``
+    (a ``provider_keys``/``<provider_id>`` secret).
 
     **Its own read-only query rather than ``secrets_store.secret_exists``**:
     that helper opens the database read-write *and commits*, and against a
@@ -572,7 +573,7 @@ def _native_key_holders(config: "Config") -> int:
         conn = sqlite_util.connect_read_only(db_path)
         rows = conn.execute(
             "SELECT DISTINCT user_id FROM secrets WHERE service = ? AND key = ?",
-            ("native_brain", "api_key"),
+            ("provider_keys", provider_id),
         ).fetchall()
         return len({str(row[0]) for row in rows} & users)
     except Exception:  # noqa: BLE001 — a check reports, it does not propagate
@@ -613,39 +614,55 @@ def _native_endpoint_is_local(base_url: object) -> bool:
     return address.is_loopback or address.is_private or address.is_link_local
 
 
+def _legacy_native_sources(config: "Config") -> list:
+    """The `config.LEGACY_PROVIDER_SOURCES` rows this install still uses.
+
+    Read from the config file as a document plus this process's environment,
+    since the loaded `Config` has already folded them into a provider.
+    """
+    from istota.config import legacy_provider_sources_in_use
+
+    document: dict = {}
+    path = getattr(config, "config_path", None)
+    if path:
+        try:
+            import tomllib
+
+            document = tomllib.loads(Path(path).read_text())
+        except Exception:  # noqa: BLE001 - an unreadable file names no legacy source
+            document = {}
+    try:
+        return legacy_provider_sources_in_use(document, os.environ)
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def check_native_brain(config: "Config", probe: bool) -> CheckResult:
-    """The native brain has a provider credential to run on.
+    """The native brain names a provider, and that provider has a key.
 
-    Buildable is not runnable. ``make_brain("native")`` constructs a defaulted
-    dataclass and asserts nothing about a key, and the per-user overlay falls
-    back to the instance key rather than refusing — so a deployment that can
-    reach the native brain with no credential anywhere is one where every
-    native task fails at the provider, with nothing in the registry naming it.
-    ``claude`` and ``tmux`` have had a check since they were added; this one
-    did not.
-
-    Any one of three sources satisfies it: ``[brain.native] api_key``, the
-    ``ISTOTA_BRAIN_NATIVE_API_KEY`` variable that normally populates that field
-    at load, and a per-user ``native_brain``/``api_key`` secret, which the
-    executor overlays per task. The variable is asked separately even though
-    ``load_config`` folds it in, because a ``Config`` assembled any other way
-    holds the variable and not the field, and telling a process that is holding
-    a credential it has none is how a check stops being believed.
+    ``[brain.native] provider`` has no default (D18), so an unset or unknown
+    provider is the first answer, through ``brain_unconfigured_reason``, the
+    predicate routing reads. Then the key: the provider's own (from
+    ``[providers.<id>] api_key`` or ``ISTOTA_PROVIDER_<ID>_API_KEY``), or a
+    per-user ``provider_keys``/``<id>`` secret, which the executor overlays
+    per task.
 
     **Two shapes resolve no key and are not defects**, and both WARN rather than
     FAIL, because a FAIL here is not inert: it reaches the start-up report, the
     scheduler's sweep and the ``self-check`` heartbeat, all of which alert on
-    ``FAIL`` and none of which alert on ``WARN`` — so a working deployment would
-    get a permanently red Health pane and a repeating alert. An
-    ``openai_compat`` endpoint on this machine (Ollama, vLLM, llama.cpp) takes
-    no key, and an operator can authenticate through ``extra_headers`` instead,
-    which the provider merges over the ``Authorization`` header it builds. This
-    check cannot confirm either is really a credential, so it says what it found
-    rather than passing them as OK.
+    ``FAIL``. An endpoint on this machine (Ollama, vLLM, llama.cpp) takes no
+    key, and an operator can authenticate through ``extra_headers`` instead,
+    which the provider merges over the ``Authorization`` header it builds.
+
+    Every legacy source still in use (``[brain.native] base_url`` and the rest
+    of ``config.LEGACY_PROVIDER_SOURCES``) is named in the detail with what to
+    write instead, since nothing says so at load (D20).
 
     SKIPs where ``native`` is not reachable, so it stays silent on the
-    deployments it does not describe — which is most of them.
+    deployments it does not describe.
     """
+    from istota.brain import brain_unconfigured_reason, native_provider_spec
+
     name = "runtime.native_brain"
     reachable = _reachable_kinds(config)
     if "native" not in reachable:
@@ -655,47 +672,62 @@ def check_native_brain(config: "Config", probe: bool) -> CheckResult:
             "no task on this deployment can run the native brain "
             f"(reachable: {', '.join(sorted(reachable)) or 'none'})",
         )
-    native = getattr(getattr(config, "brain", None), "native", None)
-    if str(getattr(native, "api_key", "") or "").strip():
-        return CheckResult(name, OK, "[brain.native] api_key is set")
-    if (os.environ.get("ISTOTA_BRAIN_NATIVE_API_KEY") or "").strip():
-        return CheckResult(name, OK, "ISTOTA_BRAIN_NATIVE_API_KEY is set")
-    holders = _native_key_holders(config)
+    legacy = _legacy_native_sources(config)
+    legacy_note = ""
+    if legacy:
+        moves = "; ".join(f"{row.source.removeprefix('env:')} -> {row.replacement}" for row in legacy)
+        legacy_note = f"; legacy sources read for one release: {moves}"
+    brain = getattr(config, "brain", None)
+    reason = brain_unconfigured_reason("native", config)
+    spec = native_provider_spec(brain) if brain is not None and reason is None else None
+    if reason is not None or spec is None:
+        return CheckResult(
+            name,
+            FAIL,
+            f"the native brain is reachable but not configured: "
+            f"{reason or '[brain.native] provider names no configured provider'}{legacy_note}",
+            remedy=(
+                'Set [brain.native] provider = "<id>" (anthropic, openrouter, or a '
+                "[providers.<id>] table of your own) and that provider's key."
+            ),
+        )
+    variable = f"ISTOTA_PROVIDER_{spec.id.upper()}_API_KEY"
+    if spec.inference_key:
+        return CheckResult(name, OK, f"provider {spec.id!r} has a key{legacy_note}")
+    holders = _native_key_holders(config, spec.id)
     if holders:
         return CheckResult(
             name,
             OK,
-            f"a per-user native_brain/api_key secret is stored for {holders} user(s)",
+            f"provider {spec.id!r}: a per-user provider_keys/{spec.id} secret is stored "
+            f"for {holders} user(s){legacy_note}",
         )
     remedy = (
-        "Set ISTOTA_BRAIN_NATIVE_API_KEY, or store one per user with "
-        "`istota secret ensure -s native_brain -k api_key`."
+        f"Set {variable} (the stack secret {variable.lower()} for a built-in "
+        f"provider), [providers.{spec.id}] api_key, or one per user with "
+        f"`istota secret ensure -s provider_keys -k {spec.id}`."
     )
-    unresolved = (
-        "no provider API key resolves from config, the environment or the "
-        "secrets store"
-    )
-    if getattr(native, "extra_headers", None):
+    unresolved = f"provider {spec.id!r} has no API key from config, the environment or the secrets store"
+    if spec.extra_headers:
         return CheckResult(
             name,
             WARN,
-            f"{unresolved}; [brain.native] extra_headers is set, so a credential "
-            "may be travelling there — this check cannot tell",
+            f"{unresolved}; its extra_headers are set, so a credential may be "
+            f"travelling there — this check cannot tell{legacy_note}",
             remedy=remedy,
         )
-    base_url = getattr(native, "base_url", "")
-    if _native_endpoint_is_local(base_url):
+    if _native_endpoint_is_local(spec.base_url):
         return CheckResult(
             name,
             WARN,
-            f"{unresolved}; base_url names a local endpoint, which commonly "
-            "needs none",
+            f"{unresolved}; its base_url names a local endpoint, which commonly "
+            f"needs none{legacy_note}",
             remedy=remedy,
         )
     return CheckResult(
         name,
         FAIL,
-        f"the native brain is reachable but {unresolved}",
+        f"the native brain is reachable but {unresolved}{legacy_note}",
         remedy=remedy,
     )
 

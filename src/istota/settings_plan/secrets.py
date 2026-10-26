@@ -107,7 +107,7 @@ def resolve_config(document: dict, config_path: Path, sidecar: Sidecar) -> dict:
 
 # Deliberate subset of secret ensure's registry: session cookies, OAuth material,
 # vault entries and generated credentials are outside declarative settings.
-PROVISIONABLE_SERVICES = frozenset({"karakeep", "ntfy", "native_brain", "feeds", "overland", "carto"})
+PROVISIONABLE_SERVICES = frozenset({"karakeep", "ntfy", "provider_keys", "feeds", "overland", "carto"})
 
 
 def provisionable_keys():

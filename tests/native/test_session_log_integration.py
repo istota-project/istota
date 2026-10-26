@@ -85,6 +85,7 @@ def _brain(provider, root: Path, **cfg) -> NativeBrain:
     session_log = cfg.pop("session_log", None) or SessionLogConfig(
         enabled=True, dir=str(root)
     )
+    cfg.setdefault("provider", "anthropic")
     config = NativeBrainConfig(
         model="claude-sonnet-4-6", session_log=session_log, **cfg
     )

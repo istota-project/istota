@@ -104,7 +104,8 @@ def config_for_check(answers) -> Config:
 
 def _credentials(config: Config) -> list[str]:
     values = [
-        config.brain.native.api_key,
+        provider.api_key for provider in config.providers.values()
+    ] + [
         config.nextcloud.app_password,
         config.email.imap_password,
         config.email.smtp_password,
@@ -135,9 +136,14 @@ async def check_model(config: Config, *, seconds: float = CHECK_SECONDS) -> Chec
     from istota.llm.oneshot import acomplete_message  # noqa: PLC0415
     from istota.session.retry import extract_status_code  # noqa: PLC0415
 
+    from istota.brain import native_provider_spec  # noqa: PLC0415
+
     native = config.brain.native
-    host = host_of(native.base_url)
-    provider = make_provider(native)
+    spec = native_provider_spec(config.brain)
+    if spec is None:
+        return CheckResult(False, "No model provider is set for the native brain.")
+    host = spec.host
+    provider = make_provider(spec)
     try:
         message = await asyncio.wait_for(
             acomplete_message(provider, "", "Reply with the word OK.", model=native.model, max_tokens=16),

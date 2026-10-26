@@ -58,6 +58,8 @@ def _full_answers(**overrides) -> ContainerAnswers:
         oauth_client_id="client-id",
         oauth_client_secret="client-secret",
         brain_kind="native",
+        native_provider="local",
+        native_provider_kind="openai_compat",
         native_base_url="https://llm.example.test/v1",
         native_model="model-x",
         native_api_key="native-key",
@@ -126,9 +128,14 @@ class TestEveryAnswerReachesItsKey:
         assert config.talk.signaling.url == "http://signaling:8080"
 
         assert config.brain.kind == "native"
-        assert config.brain.native.base_url == "https://llm.example.test/v1"
+        assert config.brain.native.provider == "local"
         assert config.brain.native.model == "model-x"
-        assert config.brain.native.api_key == "native-key"
+        # An operator's own provider: its key is inline, since compose declares
+        # secrets by fixed name.
+        assert config.providers["local"].kind == "openai_compat"
+        assert config.providers["local"].base_url == "https://llm.example.test/v1"
+        assert config.providers["local"].api_key == "native-key"
+        assert config.brain.unconfigured == {}
 
         assert config.email.enabled is True
         assert config.email.imap_host == "imap.example.test"
@@ -182,7 +189,7 @@ class TestEveryAnswerReachesItsKey:
         config = _load(tmp_path, render_container_config(a, inline_credentials=True), monkeypatch)
 
         assert config.nextcloud.app_password == "nc-app-password"
-        assert config.brain.native.api_key == "native-key"
+        assert config.providers["local"].api_key == "native-key"
         assert config.email.imap_password == "imap-password"
         assert config.web.oauth2_client_secret == "client-secret"
         assert config.web.session_secret_key == "s" * 64
@@ -242,18 +249,31 @@ class TestTheSecretFilesMatchCompose:
         `istota-secrets`; every one but the two Claude Code credentials is a
         `load_config` override, and those two are read by the `claude` CLI.
         """
-        from istota.config import SERVARR_APPS, servarr_key_variable
+        from istota.config import (
+            BUILTIN_PROVIDERS,
+            SERVARR_APPS,
+            provider_headers_variable,
+            provider_key_variable,
+            servarr_key_variable,
+        )
 
         source = (REPO / "src" / "istota" / "config.py").read_text(encoding="utf-8")
         # Built per app; tests/test_config_servarr.py loads a key from each.
         servarr = {servarr_key_variable(app) for app in SERVARR_APPS}
+        # Built per provider; tests/test_llm_providers.py loads each one.
+        providers = {
+            variable(provider_id)
+            for provider_id in BUILTIN_PROVIDERS
+            for variable in (provider_key_variable, provider_headers_variable)
+        }
         for name in SECRET_NAMES:
             if name in ("anthropic_api_key", "claude_code_oauth_token"):
                 continue
-            if name.upper() in servarr:
+            if name.upper() in servarr | providers:
                 continue
             assert f'"{name.upper()}"' in source, name
         assert servarr <= {name.upper() for name in SECRET_NAMES}
+        assert providers <= {name.upper() for name in SECRET_NAMES}
 
 
 def _args(tmp_path: Path, **kw):
@@ -266,6 +286,7 @@ def _args(tmp_path: Path, **kw):
         nextcloud_dav_prefix=None, no_nextcloud_auto_share=False, no_talk=False,
         workspace=None,
         oauth_client_id=None, no_email_login=False, brain="native",
+        native_provider="anthropic", native_provider_kind=None,
         native_base_url=None, native_model="model-x", email=False,
         imap_host=None, imap_user=None, smtp_host=None, bot_email=None, authserv_id=None,
         caldav_url=None, caldav_username=None, location=False, developer=False,
@@ -298,8 +319,12 @@ class TestTheRun:
         assert _mode(vm / "secrets") == 0o700
         for name in SECRET_NAMES:
             assert _mode(vm / "secrets" / name) == 0o400, name
-        assert (vm / "secrets" / "istota_brain_native_api_key").read_text() == "native-key"
+        # The legacy variable is read as native's provider's key, and written
+        # to that provider's file; the legacy file is left empty.
+        assert (vm / "secrets" / "istota_provider_anthropic_api_key").read_text() == "native-key"
+        assert (vm / "secrets" / "istota_brain_native_api_key").read_text() == ""
         assert (vm / "secrets" / "anthropic_api_key").read_text() == ""
+        assert 'provider = "anthropic"' in config.read_text()
         assert "native-key" not in config.read_text()
         env = (vm / ".env").read_text()
         assert "COMPOSE_PROFILES=" in env and "ISTOTA_SECRETS_DIR=./secrets" in env
@@ -1660,7 +1685,10 @@ class TestARerunWritesWhatIsThere:
             _bare_args(tmp_path, yes=True, hostname="localhost:9090"), out=lambda *_: None,
         )
 
-        assert (tmp_path / "vm" / "secrets" / "istota_brain_native_api_key").read_text() == "rotated-key"
+        # This case's endpoint is an operator's own provider (no secret file),
+        # so the rotated key is written inline on its table.
+        written = tomllib.loads((tmp_path / "data" / "config" / "config.toml").read_text())
+        assert written["providers"]["native"]["api_key"] == "rotated-key"
         assert _env((tmp_path / "vm" / ".env").read_text())["NGINX_PUBLISH"] == "127.0.0.1:9090:80"
 
 
