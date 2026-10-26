@@ -186,7 +186,8 @@ istota_admins: []
 # profile, folders, briefings, jobs, heartbeats and credential slots. A
 # snapshot of a running install is one, and `--format ansible` writes it as a
 # group_vars file setting this variable (see the README):
-#   istota snapshot --format ansible | ansible-vault encrypt --output FILE -
+#   plan=$(istota snapshot --format ansible) \
+#     && printf '%s\n' "$plan" | ansible-vault encrypt --output FILE -
 # Applied with `istota-stack apply`; under --check, with --dry-run. Empty skips
 # the step. The config is managed (read-only in the web editor) only when the
 # plan sets meta.managed = true; each user's profile_mode is left as written.

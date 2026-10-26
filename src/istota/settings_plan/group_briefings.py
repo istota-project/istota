@@ -35,6 +35,19 @@ def operator_is_admin(conn, config, actor):
     return is_admin_with_stored_users(replace(config, admin_users=load_admin_users()), actor, stored_user_ids(conn))
 
 
+def _as_saved_today(old):
+    """The stored row as the validator would save it now.
+
+    A row saved before a normalization changed (a null block directive, now "")
+    compares equal to its own snapshot, so applying that snapshot stays a no-op.
+    """
+    stored = {key: deepcopy(old[key]) for key in GROUP_BRIEFING_FIELDS if key != "group_id"}
+    try:
+        return {**old, **validate_group_definition_payload(stored)}
+    except (ValueError, TypeError, KeyError, OSError):
+        return old
+
+
 def prepare_definition(conn, config, declaration, *, actor, expected_revision=None, allow_unchanged=False):
     """Merge supplied fields only, then run the store's read-only save checks."""
     group_id, name = declaration["group_id"], declaration["name"]
@@ -46,8 +59,10 @@ def prepare_definition(conn, config, declaration, *, actor, expected_revision=No
         payload = validate_group_definition_payload(payload)
     except (ValueError, TypeError, KeyError, OSError):
         raise GroupError(422, "invalid_definition", "Invalid briefing definition") from None
-    if allow_unchanged and old and all(payload[key] == old[key] for key in payload):
-        return payload, old
+    if allow_unchanged and old:
+        saved = _as_saved_today(old)
+        if all(payload[key] == saved[key] for key in payload):
+            return payload, old
     if not actor:
         raise ExecutionError("group_briefing_actor_required", ["group_briefings", "--actor"])
     is_admin = operator_is_admin(conn, config, actor)
@@ -102,7 +117,7 @@ def plan_group_briefings(plan, user, context, options):
     expected = state_digest(existing)
     operations = []
     for identity, after in desired.items():
-        before = existing[identity]
+        before = _as_saved_today(existing[identity]) if existing[identity] else None
         changes = [{"path": [key], "before": redact_document(before[key]) if before else None,
                     "after": redact_document(after[key])}
                    for key in GROUP_BRIEFING_FIELDS if before is None or before[key] != after[key]]
