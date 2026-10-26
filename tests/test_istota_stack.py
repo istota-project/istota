@@ -4325,6 +4325,21 @@ class TestSetupInTheTerminal:
         assert " -e ISTOTA_SECRETS_DIR=/nonexistent " in f" {call} "
         assert call.index("ISTOTA_SECRETS_DIR=/nonexistent") < call.index(" istota setup ")
 
+    def test_an_own_providers_key_is_handed_through_by_name(self, web):
+        """An operator's own provider has no secret file, so its key variable
+        is in no `SECRET_NAMES` entry; the wizard reads it all the same."""
+        sentinel = "own-provider-key-sentinel"
+        result = web.run(
+            "setup", "--yes",
+            ISTOTA_PROVIDER_LOCAL_API_KEY=sentinel,
+            ISTOTA_PROVIDER_LOCAL_BASE_URL="http://not-a-credential",
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        call = f" {self._wizard_call(web)} "
+        assert " -e ISTOTA_PROVIDER_LOCAL_API_KEY " in call, call
+        assert sentinel not in "\n".join(web.docker_calls())
+        assert "ISTOTA_PROVIDER_LOCAL_BASE_URL" not in call, call
+
     def test_a_forced_run_backs_up_the_stack_files_first(self, web):
         (web.stack / "rclone.conf").write_text("[nextcloud]\npass = obscured\n")
         env_before = (web.stack / ".env").read_bytes()
