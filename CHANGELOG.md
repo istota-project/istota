@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The native brain can be told when its tool calls keep failing (opt-in).** After several failed tool calls in a row, the model gets one notice naming what failed and is told to try another approach or finish with what it has, instead of retrying the same broken sources. Off by default, because evals showed no fewer failed calls with it on; an operator turns it on with `tool_failure_nudge_after`.
 
+- **Medications in the health module.** Record prescriptions, over-the-counter drugs and supplements with dose, schedule and start and stop dates, in chat or on the new Health > Medications page, and attach a prescription label or pharmacy printout to each. Medications show up in search and the admin module counts, and the current ones in the new-doctor history summary. A dose change is recorded as a stop and a new entry, so the list shows what you were taking on any past date.
+
 ### Security
 
 - An RSS or Atom feed can no longer point the feed poller at a private address. A feed on a local, loopback or internal address, or one that redirects to such an address, is now refused with an error on the feed, and nothing is requested from it. **Upgrade note:** a feed you poll on your own network stops updating until its host is listed in `[feeds] private_hosts`.

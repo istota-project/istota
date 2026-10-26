@@ -1,6 +1,6 @@
 # Health tracking
 
-Body stats, lab panels, biomarker trends, Garmin Connect daily summaries, immunization registry, and medical history. Per-user SQLite on local disk at `Config.module_db_path(user, "health")` (default `{db_path.parent}/modules/{user}/health.db`); user-facing uploads stay in the workspace on the mount. All measurements stored metric (kg, cm, °C, mmHg, bpm); the display layer converts to the user's preferred units.
+Body stats, lab panels, biomarker trends, Garmin Connect daily summaries, immunization registry, medications, and medical history. Per-user SQLite on local disk at `Config.module_db_path(user, "health")` (default `{db_path.parent}/modules/{user}/health.db`); user-facing uploads stay in the workspace on the mount. All measurements stored metric (kg, cm, °C, mmHg, bpm); the display layer converts to the user's preferred units.
 
 Health is an on-by-default module with per-user opt-out via `disabled_modules` in user settings.
 
@@ -16,7 +16,9 @@ Health is an on-by-default module with per-user opt-out via `disabled_modules` i
 
 **Immunizations** — Registry of administered vaccines with date, product, manufacturer, lot, site, route, and facility. Bundled canonical vaccine reference list with recommended schedules. Coverage tracker shows due-soon and overdue immunizations. Bulk import from MyChart/clipboard paste with dry-run preview. Static educational explainers per vaccine.
 
-**Medical history** — Encounters (doctor visits, procedures, screenings, hospitalizations) and diagnoses (active, resolved, chronic) with ICD-10 codes. `history-summary` command generates a new-doctor packet.
+**Medications** — The regimen you take: prescriptions, over-the-counter drugs and supplements in one list, each with dose and unit, frequency, route, prescriber, pharmacy, reason, start and end dates, and optionally the visit that prescribed it. A medication is current until you stop it; a stop can have no known end date, and a current course can have a planned one. A dose change ends the old row and starts a new one, so the history of what you took and when stays readable. The list can be filtered to what was current in a date range, which answers questions like "what was I on when my LDL dropped in March?". Names are free text, and a medication is found by its brand or its generic name. There is no adherence logging, interaction checking or refill tracking.
+
+**Medical history** — Encounters (doctor visits, procedures, screenings, hospitalizations) and diagnoses (active, resolved, chronic) with ICD-10 codes. `history-summary` command generates a new-doctor packet, which lists current medications with prescriptions first, then over-the-counter drugs, then supplements.
 
 A condition is linked to every appointment it was seen at, not just one: something a GP found, a specialist was referred for and a follow-up reviewed carries all three, and appears under each of them. Link and unlink from either side — an encounter's page lists its conditions, a condition lists its appointments — and unlinking keeps both records; removing the last link does not delete the condition. Links recorded before this existed are carried over on first upgrade.
 
@@ -49,10 +51,11 @@ Per-user SQLite on local disk (see above). Tables:
 | `immunization_refs` | Bundled canonical vaccine reference list and schedules |
 | `encounters` | Medical encounters (visits, procedures, screenings) |
 | `diagnoses` | Diagnoses with status (active, resolved, chronic) |
+| `medications` | What the user takes: prescriptions, OTC drugs and supplements, current or stopped |
 | `diagnosis_encounters` | Which appointments a condition was seen at (many-to-many) |
 | `health_settings` | Key/value store for profile (DOB, height, sex) and unit display preferences |
 | `documents` | Stored paperwork — scans, discharge summaries, vaccination cards |
-| `document_links` | Which records a document evidences (encounter / diagnosis / immunization) |
+| `document_links` | Which records a document evidences (encounter / diagnosis / immunization / medication) |
 
 Document bytes live at `{workspace}/health/uploads/documents/{id}/{filename}` — beside the panel sources, under the one path root the file-serving routes guard. A document is stored once and can be linked to several records, so a visit summary covering a diagnosis and a vaccine given at the same visit is one file, not three copies. Size is capped by `[health] max_document_bytes` (default 25 MiB; `0` = unlimited). A document that ends up attached to nothing is deleted 24 hours after the last thing that referenced it — long enough that detaching a file on the way to re-attaching it elsewhere is safe, short enough that an import you abandoned doesn't linger.
 
@@ -71,6 +74,8 @@ Garmin Connect OAuth tokens are not stored here — they live in the framework-l
 | `/health/history/encounter?id=…` | Encounter detail — linked diagnoses, panels, and its documents |
 | `/health/history/diagnoses` | Conditions list; a paperclip badge opens that condition's documents |
 | `/health/immunizations/detail?id=…` | Per-record edit plus "Proof of immunization" |
+| `/health/medications` | Current prescriptions, OTC drugs and supplements, the stopped history, and an add form |
+| `/health/medications/detail?id=…` | Per-medication edit, its prescribing visit, and its documents |
 | `/health/settings` | DOB/height/sex, display preferences (Garmin connect/sync lives on Settings → Connections) |
 
 ## Skill CLI
@@ -86,12 +91,13 @@ The `health` skill exposes `istota-skill health <subcommand>`. Key subcommands:
 - `diagnoses`, `diagnosis`, `add-diagnosis`, `resolve-diagnosis`, `update-diagnosis`, `delete-diagnosis` — conditions
 - `link-encounter`, `unlink-encounter` — attach a condition to an appointment it was seen at, or detach it (both records are kept)
 - `immunizations`, `add-immunization`, `update-immunization`, `delete-immunization` — vaccine records
+- `medications`, `medication`, `add-medication`, `update-medication`, `stop-medication`, `delete-medication` — the medication regimen (`medications --status all --since D --until D` for what was current in a window)
 - `vaccine-refs`, `coverage`, `explain-immunization` — reference data and coverage
 - `import-immunizations` — bulk import from clipboard/paste
 - `garmin-status`, `garmin-sync`, `garmin-disconnect` — Garmin integration
 - `documents`, `document`, `attach-document`, `detach-document` — file paperwork against a record
 
-Attaching takes a `TYPE:ID` token: `istota-skill health attach-document --path ~/inbox/card.jpg --to immunization:5`. Types are `encounter`, `diagnosis`, `immunization`. The agent attaches files the user supplied; deleting a document stays a web-UI action behind a confirmation, since it removes the file from every record it is attached to.
+Attaching takes a `TYPE:ID` token: `istota-skill health attach-document --path ~/inbox/card.jpg --to immunization:5`. Types are `encounter`, `diagnosis`, `immunization`, `medication`. The agent attaches files the user supplied; deleting a document stays a web-UI action behind a confirmation, since it removes the file from every record it is attached to.
 
 ## Immunization coverage status
 
@@ -117,7 +123,7 @@ All mutating operations are deferred under sandbox (written to `task_<id>_health
 
 Health data is the most sensitive data in the system. The health DB is the single source of truth.
 
-- Quantitative health data (measurements, biomarker values, lab dates, symptoms) must never be written to USER.md, the knowledge graph, dated memories, or KV.
+- Quantitative health data (measurements, biomarker values, lab dates, symptoms, medication names and schedules) must never be written to USER.md, the knowledge graph, dated memories, or KV.
 - Biomarker values are excluded from briefings and log channels.
 - Source files for uploaded labs are served only through the auth-gated `/panels/{id}/source` route; attached documents likewise through `/documents/{id}/file`. Neither is ever a public share link. Documents are always served as a download with `nosniff`, because one may have arrived from outside (an email attachment the agent filed).
 - Stable identity-level medical facts (allergies, named chronic conditions) belong in the knowledge graph; detailed records stay in the health DB.
