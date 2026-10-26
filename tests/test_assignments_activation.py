@@ -22,7 +22,6 @@ from istota.config import UserConfig
 from istota.relay.requests import RequestError, associate_confirmation, text_hash
 from tests.support.skill_cli import run_skill_main
 
-FLAG = "skill_assignment"
 KIND = "assignment_activation"
 
 
@@ -36,7 +35,7 @@ def config(make_config, tmp_path, monkeypatch):
     db.init_db(config.db_path)
     monkeypatch.setattr("istota.config.load_config", lambda: config)
     monkeypatch.setenv("ISTOTA_DB_PATH", str(config.db_path))
-    monkeypatch.setenv("ISTOTA_EXPERIMENTAL_FEATURES", FLAG)
+    monkeypatch.delenv("ISTOTA_EXPERIMENTAL_FEATURES", raising=False)
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
     monkeypatch.delenv("ISTOTA_TASK_ID", raising=False)
     monkeypatch.delenv("ISTOTA_WITHHELD_SCOPES", raising=False)
