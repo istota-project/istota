@@ -37,10 +37,11 @@ import pool
 
 import browsing
 import document_render
+import pdf_text
 import render
 import visual
 import xdotool
-from text_budget import checked_offset
+from text_budget import checked_offset, text_window
 
 # Page helpers resolve the instance from this request, never a shared default.
 _user_scope = LocalProxy(lambda: request.user_scope)
@@ -1177,6 +1178,103 @@ def _checked_url(url):
         return None, (jsonify({"status": "error", "error": str(e)}), 400)
 
 
+#: Seconds a PDF read leaves before BROWSE_WATCHDOG_DEADLINE_S, whose relaunch
+#: would take every tab with it.
+PDF_WATCHDOG_MARGIN_S = 10
+
+
+def _pdf_deadline():
+    """This request's deadline for a PDF read, on the monotonic clock."""
+    if BROWSE_WATCHDOG_DEADLINE_S <= 0:
+        # No watchdog to stay clear of; the steps' own timeouts bound it.
+        return time.monotonic() + pdf_text.FETCH_TIMEOUT_S + pdf_text.PARSE_TIMEOUT_S
+    started = getattr(request, "_start_time", None) or time.time()
+    left = started + BROWSE_WATCHDOG_DEADLINE_S - PDF_WATCHDOG_MARGIN_S - time.time()
+    return time.monotonic() + left
+
+
+def _read_pdf(page, data, session_id):
+    """`(pdf, text)`, `(error_body, None)` or None when the tab shows no PDF (#850).
+
+    Chrome's viewer has no DOM text, so the ordinary read of a PDF is empty
+    and used to come back as an `ok`. The text is scrubbed like any page's,
+    and kept on the session, so paging a kept session through a long PDF by
+    offset fetches and parses it once.
+    """
+    pdf_url, user_agent = pdf_text.probe(page)
+    if pdf_url is None:
+        return None
+    mask = bool(data.get("mask_secrets", False))
+    key = (pdf_url, mask)
+    with _sessions_lock:
+        cached = (_sessions.get(session_id) or {}).get("pdf_text")
+    if cached is not None and cached[0] == key:
+        return cached[1], cached[2]
+    pdf = pdf_text.read_pdf(
+        pdf_url, deadline=_pdf_deadline(), user_agent=user_agent,
+        cookies_for=lambda url: page.context.cookies([url]),
+    )
+    if isinstance(pdf, pdf_text.PdfFailure):
+        return _scrub_extracted(pdf_text.failure_response(pdf), _credential_values, mask), None
+    text = _scrub_extracted(pdf.text, _credential_values, mask)
+    with _sessions_lock:
+        session = _sessions.get(session_id)
+        if session is not None:
+            session["pdf_text"] = (key, pdf, text)
+    return pdf, text
+
+
+def _pdf_notes(pdf):
+    notes = [
+        "the page is a PDF: this is the text extracted from the document, "
+        "with a [page N] line before each page; links and layout are not kept"
+    ]
+    if pdf.capped:
+        notes.append(
+            f"only the first {pdf.pages_read} of {pdf.pages} pages were extracted, "
+            f"at most {pdf_text.MAX_EXTRACTED_CHARS} characters; text past that "
+            "cannot be reached by offset"
+        )
+    if pdf.pages_unreadable:
+        notes.append(f"{pdf.pages_unreadable} page(s) could not be read and are empty")
+    return notes
+
+
+def _pdf_browse_result(page, pdf, text, max_chars, offset):
+    max_chars = max(1, min(int(max_chars or browsing.DEFAULT_TEXT_MAX_CHARS), browsing.MAX_TEXT_MAX_CHARS))
+    window, metadata = text_window(text, max_chars, offset)
+    return {
+        "status": "ok",
+        "title": pdf.title or page.title(),
+        "url": page.url,
+        "text": window,
+        "links": [],
+        **metadata,
+        "content_type": pdf_text.PDF_CONTENT_TYPE,
+        "pdf": pdf_text.summary(pdf),
+        "notes": _pdf_notes(pdf),
+    }
+
+
+def _pdf_render_result(page, pdf, text, max_chars, offset, mode):
+    window, metadata = text_window(text, max_chars, offset)
+    return {
+        "status": "ok",
+        "url": page.url,
+        "title": pdf.title or page.title(),
+        "markdown": window,
+        "mode": "pdf",
+        "requested_mode": mode,
+        "chars": len(window),
+        "truncated": metadata.get("text_truncated", False),
+        **metadata,
+        "frames": {"found": 0, "included": 0, "capped": False, "urls": []},
+        "notes": _pdf_notes(pdf),
+        "content_type": pdf_text.PDF_CONTENT_TYPE,
+        "pdf": pdf_text.summary(pdf),
+    }
+
+
 @app.route("/browse", methods=["POST"])
 def browse():
     """Navigate to URL and return page content."""
@@ -1270,14 +1368,21 @@ def browse():
             if solved != CHALLENGE_CLEARED:
                 return _captcha_response(session_id, challenge_press=solved)
 
-        content = browsing.extract_page_content(
-            page,
-            max_chars=data.get("max_chars"),
-            max_links=data.get("max_links"),
-            offset=offset,
-            scrub=lambda value: _scrub_extracted(value, _credential_values, mask_secrets=data.get("mask_secrets", False)),
-        )
-        result = {"status": "ok", **content}
+        status_code = 200
+        pdf = _read_pdf(page, data, session_id)
+        if pdf is not None and pdf[1] is None:
+            result, status_code = pdf[0], 422
+        elif pdf is not None:
+            result = _pdf_browse_result(page, pdf[0], pdf[1], data.get("max_chars"), offset)
+        else:
+            content = browsing.extract_page_content(
+                page,
+                max_chars=data.get("max_chars"),
+                max_links=data.get("max_links"),
+                offset=offset,
+                scrub=lambda value: _scrub_extracted(value, _credential_values, mask_secrets=data.get("mask_secrets", False)),
+            )
+            result = {"status": "ok", **content}
         if solved == CHALLENGE_CLEARED:
             result["challenge_solved"] = True
 
@@ -1287,7 +1392,7 @@ def browse():
         else:
             _close_session(session_id)
 
-        return jsonify(result)
+        return jsonify(result) if status_code == 200 else (jsonify(result), status_code)
 
     except Exception as e:
         if created_new and not keep_session:
@@ -1725,6 +1830,21 @@ def extract():
         if _page_is_gone(page):
             raise RuntimeError("Tab not found")
 
+        pdf_url, _ = pdf_text.probe(page)
+        if pdf_url is not None:
+            if created_new:
+                _close_session(session_id)
+            return jsonify(_scrub_extracted({
+                "status": "error",
+                "error": "pdf_document",
+                "message": (
+                    "The page is a PDF, which has no elements to select. Read its "
+                    "text with `browse render` or `browse get`."
+                ),
+                "url": page.url,
+                "content_type": pdf_text.PDF_CONTENT_TYPE,
+            }, _credential_values, mask_secrets=data.get("mask_secrets", False))), 422
+
         # Passwords can be autofilled without a credential action. Read their
         # values only into the redactor, never into the returned element data.
         secrets = _credential_values | set(page.evaluate(_PASSWORD_VALUES_JS))
@@ -1909,22 +2029,29 @@ def render_page():
                 if solved != CHALLENGE_CLEARED:
                     return _captcha_response(session_id, challenge_press=solved)
 
-        html = page.content()
-        frame_payload, frames_capped = _collect_frames(page, include_frames)
-        html = _scrub_extracted(html, _credential_values, mask_secrets=data.get("mask_secrets", False))
-        frame_payload = _scrub_extracted(frame_payload, _credential_values, mask_secrets=data.get("mask_secrets", False))
-        rendered = render.to_markdown(
-            html, base_url=page.url, mode=mode, max_chars=max_chars,
-            frames=frame_payload, include_frames=include_frames,
-            frames_capped=frames_capped, offset=offset,
-            scrub=lambda value: _scrub_extracted(value, _credential_values, mask_secrets=data.get("mask_secrets", False)),
-        )
-        result = {
-            "status": "ok",
-            "url": page.url,
-            "title": page.title(),
-            **rendered,
-        }
+        status_code = 200
+        pdf = _read_pdf(page, data, session_id)
+        if pdf is not None and pdf[1] is None:
+            result, status_code = pdf[0], 422
+        elif pdf is not None:
+            result = _pdf_render_result(page, pdf[0], pdf[1], max_chars, offset, mode)
+        else:
+            html = page.content()
+            frame_payload, frames_capped = _collect_frames(page, include_frames)
+            html = _scrub_extracted(html, _credential_values, mask_secrets=data.get("mask_secrets", False))
+            frame_payload = _scrub_extracted(frame_payload, _credential_values, mask_secrets=data.get("mask_secrets", False))
+            rendered = render.to_markdown(
+                html, base_url=page.url, mode=mode, max_chars=max_chars,
+                frames=frame_payload, include_frames=include_frames,
+                frames_capped=frames_capped, offset=offset,
+                scrub=lambda value: _scrub_extracted(value, _credential_values, mask_secrets=data.get("mask_secrets", False)),
+            )
+            result = {
+                "status": "ok",
+                "url": page.url,
+                "title": page.title(),
+                **rendered,
+            }
         if solved == CHALLENGE_CLEARED:
             result["challenge_solved"] = True
 
@@ -1934,7 +2061,7 @@ def render_page():
         else:
             _close_session(session_id)
 
-        return jsonify(result)
+        return jsonify(result) if status_code == 200 else (jsonify(result), status_code)
 
     except Exception as e:
         if created_new and not keep_session:

@@ -76,6 +76,30 @@ def test_document_render_draws_the_share_map_bundle(browser_image, render_bundle
     assert len(pixels) > 50, len(pixels)
 
 
+def test_a_pdf_in_chromes_viewer_is_read_as_text(browser_image):
+    """#850: real Chrome's PDF viewer is seen, and the child's limits hold on Linux.
+
+    Negative control: `PDF_TEXT_CONTROL=html` serves the PDF route as HTML,
+    which turns the `pdf_probe` assertion red.
+    """
+    script = Path(__file__).with_name("pdf_text_run.py").read_text()
+    control = os.environ.get("PDF_TEXT_CONTROL", "")
+    result = run_in(browser_image, ["-c", script], entrypoint="python", timeout=300,
+                    env={"PDF_TEXT_CONTROL": control} if control else None)
+    report = json.loads(assert_ok(result, "pdf text").strip().splitlines()[-1])
+
+    assert report["html_probe"] is None, report
+    assert report["pdf_probe"] == "https://docs.example/programme.pdf", report
+    assert report["read"] == "PdfText", report
+    assert "Programme deadline 30 June" in report["text"], report
+    assert report["cookie"] == "sid=tab-cookie", report
+    assert "Locked for editing only" in report["locked"], report
+    assert report["bomb"]["ok"] is False, report
+    assert report["bomb"]["error"] in ("pdf_too_complex", "pdf_unreadable"), report
+    assert report["unbombed"]["ok"] is True, report
+    assert "Padded but readable" in report["unbombed"]["text"], report
+
+
 def test_browser_card_checkout(browser_image):
     script = Path(__file__).with_name("browser_checkout.py").read_text()
     result = run_in(browser_image, ["-c", script], entrypoint="python", timeout=180)
