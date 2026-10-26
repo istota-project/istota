@@ -872,6 +872,146 @@ class TestTheBinaryChecksFollowTheReachableSet:
             assert named in r.detail
 
 
+class TestModelsCatalogue:
+    """`models.catalogue`, the Stage 4 arms: the shipped file, the discovery
+    caches and the config that names models. Reads files only."""
+
+    NOW = time.time()
+
+    def _run(self, config):
+        return run_checks(config, only=("models.catalogue",))[0]
+
+    def _cache(self, config, provider, **fields):
+        from istota.llm import discovery
+
+        cache_dir = discovery.config_cache_dir(config)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        doc = {"provider": provider, "kind": fields.pop("kind", provider), "models": {}, **fields}
+        (cache_dir / f"{provider}.json").write_text(json.dumps(doc))
+
+    def _listing_key(self, tmp_path, value="LISTING-SENTINEL", mode=0o600):
+        path = tmp_path / "listing-key"
+        path.write_text(value)
+        os.chmod(path, mode)
+        return path
+
+    def _with_key(self, make_config, tmp_path, **kwargs):
+        from istota.config import ModelsConfig
+
+        path = self._listing_key(tmp_path, **kwargs)
+        return make_config(models=ModelsConfig(anthropic_listing_key_file=str(path)))
+
+    def test_ok_with_a_summary(self, make_config):
+        result = self._run(make_config())
+        assert result.status == OK
+        assert "providers" in result.detail and "models" in result.detail
+        assert "no model-listing key file" in result.detail
+
+    def test_an_empty_listing_key_file_is_discovery_off_not_a_warning(self, make_config, tmp_path):
+        result = self._run(self._with_key(make_config, tmp_path, value=""))
+        assert result.status == OK
+
+    def test_a_family_with_no_current_model_fails(self, make_config, monkeypatch):
+        from dataclasses import replace
+
+        from istota.llm import catalog
+
+        shipped = catalog.shipped_anthropic_models()
+        monkeypatch.setattr(
+            catalog, "shipped_anthropic_models",
+            lambda: tuple(replace(m, deprecated=True) if m.family == "opus" else m for m in shipped),
+        )
+        result = self._run(make_config())
+        assert result.status == FAIL
+        assert "no current opus model" in result.detail
+        assert result.remedy
+
+    def test_a_refused_provider_table_fails(self, make_config, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text(
+            '[providers.local]\nkind = "openai_compat"\n\n'
+            '[providers.anthropic]\nkind = "openrouter"\n\n'
+            '[providers.fine]\nkind = "openai_compat"\nbase_url = "http://192.0.2.1/v1"\n'
+        )
+        from istota.config import ProviderConfig, builtin_provider_configs
+
+        providers = {**builtin_provider_configs(), "fine": ProviderConfig(kind="openai_compat", base_url="http://192.0.2.1/v1")}
+        result = self._run(make_config(config_path=path, providers=providers))
+        assert result.status == FAIL
+        assert "[providers.local]" in result.detail and "[providers.anthropic]" in result.detail
+        assert "[providers.fine]" not in result.detail
+
+    def test_a_401_on_anthropics_list_fails_and_names_no_key(self, make_config, tmp_path):
+        config = self._with_key(make_config, tmp_path)
+        self._cache(config, "anthropic", fetched_at=self.NOW, last_status=401, last_error="HTTP 401")
+        result = self._run(config)
+        assert result.status == FAIL
+        assert "HTTP 401" in result.detail
+        assert "LISTING-SENTINEL" not in result.detail + result.remedy
+
+    def test_a_listing_key_file_with_a_loose_mode_fails(self, make_config, tmp_path):
+        result = self._run(self._with_key(make_config, tmp_path, mode=0o644))
+        assert result.status == FAIL
+        assert "0644" in result.detail
+
+    def test_a_listing_key_file_with_no_cache_warns(self, make_config, tmp_path):
+        result = self._run(self._with_key(make_config, tmp_path))
+        assert result.status == WARN
+        assert "provider anthropic has no model cache yet" in result.detail
+
+    def test_a_stale_cache_warns(self, make_config):
+        from istota.config import BrainConfig, NativeBrainConfig
+
+        config = make_config(brain=BrainConfig(native=NativeBrainConfig(provider="openrouter")))
+        self._cache(config, "openrouter", fetched_at=self.NOW - 3 * 86400)
+        result = self._run(config)
+        assert result.status == WARN
+        assert "past twice its TTL" in result.detail
+        fresh = make_config(brain=BrainConfig(native=NativeBrainConfig(provider="openrouter")))
+        self._cache(fresh, "openrouter", fetched_at=self.NOW - 3600)
+        assert self._run(fresh).status == OK
+
+    def test_a_renamed_catalogue_key_warns(self, make_config, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text("[brain.native]\nmodel_catalog_fetch = false\n")
+        result = self._run(make_config(config_path=path))
+        assert result.status == WARN
+        assert "model_catalog_fetch" in result.detail and "discover" in result.detail
+
+    def test_an_override_naming_nothing_warns(self, make_config):
+        from istota.llm import catalog
+
+        catalog.set_config_layers(operator={}, overrides={
+            "anthropic/claude-nope-1": {"context_window": 5},
+            "anthropic/claude-opus-5-5": {"context_window": 5},
+        })
+        result = self._run(make_config())
+        assert result.status == WARN
+        assert "claude-nope-1" in result.detail
+        assert "claude-opus-5-5" not in result.detail
+
+    def test_an_api_model_with_no_shipped_price_warns(self, make_config, tmp_path):
+        config = self._with_key(make_config, tmp_path)
+        self._cache(config, "anthropic", fetched_at=self.NOW, last_status=200, models={
+            "claude-sonnet-6": {"family": "sonnet", "released": "2026-10-20", "last_seen": self.NOW},
+        })
+        result = self._run(config)
+        assert result.status == WARN
+        assert "claude-sonnet-6" in result.detail
+        assert "update-anthropic-catalog.py" in result.remedy
+
+    def test_it_spawns_nothing(self, make_config, monkeypatch):
+        def _no(*a, **k):
+            raise AssertionError("models.catalogue spawned a process")
+
+        monkeypatch.setattr(subprocess, "run", _no)
+        monkeypatch.setattr(subprocess, "Popen", _no)
+        assert run_checks(make_config(), only=("models.catalogue",), probe=False)[0].status == OK
+
+    def test_it_is_deployment_scoped(self):
+        assert doctor.CHECK_SCOPES["models.catalogue"] == doctor.DEPLOYMENT
+
+
 class TestNativeBrainCredential:
     """`runtime.native_brain` — buildable is not runnable.
 

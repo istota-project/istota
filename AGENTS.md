@@ -232,6 +232,7 @@ src/istota/
 │   ├── workspace_marker.py  # The `.istota-workspace` a host folder's workspace carries, and whether the host requires it → leaf-modules.md
 │   ├── dav_xml.py        # Hardened DAV multistatus parsing, principal hrefs and path segments, for CardDAV and the web sharing module → leaf-modules.md
 │   ├── url_redact.py     # A configured URL safe to print, userinfo replaced or removed: doctor, the admin cards and the servarr skill → leaf-modules.md
+│   ├── fixed_get.py      # One credentialed GET to a fixed URL, no redirect, no proxy: the usage poll and Anthropic's model list → leaf-modules.md
 │   ├── rate_limit.py     # A sliding-window hit counter per key, in bounded memory, for public routes with no table behind them → leaf-modules.md
 │   └── unix_connect.py   # Connecting to a Unix socket without following a symlink at its leaf → leaf-modules.md
 ├── briefings/            # Personal/group briefings — source grants, generation, edition/delivery ledger, reader/settings routes and migration → briefings.md

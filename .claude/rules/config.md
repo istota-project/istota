@@ -187,7 +187,7 @@ Sweep (ISSUE-317): `sandbox_cache_sweep_enabled`, `sandbox_cache_max_gb` (10/use
 
 `[brain.native]` (brain.md "NativeBrain"):
 - `model_overrides`: legacy, read under `[models.overrides]`, keyed by bare id, and keeps the old reach over the default for a model no layer has (`Catalogue.legacy_override_keys`).
-- `model_catalog_fetch`/`model_catalog_cache_ttl_hours`: legacy names for the provider's `discover` / `discover_ttl_hours`. OpenRouter `GET /models` for an `openrouter` provider with `discover`, cached at `{db_path.parent}/openrouter_models.json` (ISSUE-182). Override > fetched > default; never fatal.
+- `model_catalog_fetch`/`model_catalog_cache_ttl_hours`: legacy names for the provider's `discover` / `discover_ttl_hours`, which the scheduler's `model-catalogue` gate reads (`llm/discovery.py`); doctor's `models.catalogue` names them while they are set. The cache moved from `{db_path.parent}/openrouter_models.json` (read once as `openrouter`'s initial cache) to `{db_path.parent}/model-catalogue/<provider>.json`.
 - `compaction_*_tokens`: 0 derives from the window, capped at 16k/20k (NB-14).
 - `web_fetch`: on by default; all fields but `admin_only` map to `WebFetchPolicy`. `require_url_provenance` only fetches URLs from the prompt. `admin_only` (false since ISSUE-449) is read only by `executor.build_allowed_tools`.
 - `session_log`: `retention_days` (14), `max_total_gb` (2.0 across all users, 0.5 floor; 0 drops it, hence the sweep's `or` gate); on the char caps 0 means no cap. `session_log.resolve_session_log_dir` maps `""` to `{db_path.parent}/logs` (bound at no path; the stack masks `db_path.parent` too, a config with the database in the workspace does not). A set `dir` is literal; `/`, `.`, `..` or a null byte fall back, since the sweep deletes under it. Defaults pinned by `tests/test_config_native_session_log.py`.
@@ -196,7 +196,7 @@ Sweep (ISSUE-317): `sandbox_cache_sweep_enabled`, `sandbox_cache_max_gb` (10/use
 - `soft_deadline_percent` (90; 0 or ≥100 off, ISSUE-373): stop with `soft_timeout`, `success = True`, before `task_timeout_minutes` discards the work.
 - Tiers resolve to `native.model` unless remapped (NB-3).
 
-`[models] anthropic_listing_key_file`: the path to the key used only for Anthropic's `GET /v1/models` (empty is `/run/secrets/istota_anthropic_listing_key`, `config.anthropic_listing_key_path`). A path, never the key, and in `NON_SECRET_KEYS`; the file is mounted on the daemon alone and `istota-secrets` never exports it.
+`[models] anthropic_listing_key_file`: the path to the key used only for Anthropic's `GET /v1/models` (empty is `/run/secrets/istota_anthropic_listing_key`, `config.anthropic_listing_key_path`). A path, never the key, and in `NON_SECRET_KEYS`; the file is mounted on the daemon alone and `istota-secrets` never exports it. `llm.discovery._read_listing_key` opens it (no link followed) at each fetch and nothing else reads it; an empty file means Anthropic discovery is off. Doctor's `models.catalogue` stats it: FAIL unless a regular file, 0400 or 0600, owned by the process's uid.
 
 `[models.overrides."<provider>/<id>"]`: per-field patches over a catalogue record (`_settle_model_overrides`, `_apply_catalogue_layers`); one naming a model no layer has is ignored.
 

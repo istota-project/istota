@@ -785,6 +785,210 @@ def _api_key_source_seen(config: "Config") -> str | None:
     return seen.strftime("%Y-%m-%d %H:%M UTC")
 
 
+#: The families the default tiers name; each must have a current model.
+_REQUIRED_FAMILIES = ("opus", "sonnet", "haiku")
+#: `[brain.native]` catalogue keys renamed onto the provider and `[models]`.
+_RENAMED_CATALOGUE_KEYS = {
+    "model_catalog_fetch": "[providers.<id>] discover",
+    "model_catalog_cache_ttl_hours": "[providers.<id>] discover_ttl_hours",
+    "model_overrides": '[models.overrides."<provider>/<id>"]',
+}
+_UPDATE_SCRIPT = "scripts/update-anthropic-catalog.py"
+_DISCOVERY_REMEDY = (
+    "Check the daemon reaches the provider's /models (Anthropic's list bypasses any "
+    "HTTPS_PROXY) and its key; the model-catalogue gate retries every 15 minutes."
+)
+
+
+def _config_document(config: "Config") -> dict:
+    """The config file as a TOML document, or `{}` when there is none to read."""
+    path = getattr(config, "config_path", None)
+    if not path:
+        return {}
+    try:
+        import tomllib
+
+        document = tomllib.loads(Path(path).read_text())
+    except Exception:  # noqa: BLE001 - an unreadable file says nothing here
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
+def _refused_provider_tables(config: "Config", document: dict) -> list[str]:
+    """`[providers.<id>]` tables the loader left out (or, for a built-in, ignored)."""
+    from .llm.providers import BUILTIN_PROVIDERS
+
+    tables = document.get("providers")
+    if not isinstance(tables, dict):
+        return []
+    loaded = getattr(config, "providers", None) or {}
+    refused = []
+    for provider_id, table in tables.items():
+        provider_id = str(provider_id)
+        builtin = BUILTIN_PROVIDERS.get(provider_id)
+        if builtin is not None:
+            kind = table.get("kind") if isinstance(table, dict) else None
+            if not isinstance(table, dict) or (kind is not None and kind != builtin[0]):
+                refused.append(provider_id)
+        elif provider_id not in loaded:
+            refused.append(provider_id)
+    return refused
+
+
+def _listing_key_file_problem(path: Path) -> str | None:
+    """Why the model-listing key file is held wrongly, or `None`. Stats only."""
+    try:
+        metadata = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode):
+        return f"{path} is not a regular file"
+    if stat.S_IMODE(metadata.st_mode) not in (0o400, 0o600):
+        return f"{path} has mode {stat.S_IMODE(metadata.st_mode):04o}, not 0400 or 0600"
+    if metadata.st_uid != os.geteuid():
+        return f"{path} is not owned by this process's user"
+    return None
+
+
+def _cache_age(seconds: float) -> str:
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 172800:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
+def check_models_catalogue(config: "Config", probe: bool) -> CheckResult:
+    """The model catalogue: the shipped file, each provider's discovery cache,
+    and the config that names models (model-catalogue spec, Stage 4 arms).
+
+    OK with a summary (providers, models, the oldest cache). FAIL for a family
+    the default tiers name with no current model, a `[providers.<id>]` table
+    the loader refused, a 401/403 on Anthropic's model list, and a model-listing
+    key file that is not a 0400/0600 regular file owned by this user. WARN for
+    a cache past twice its TTL, a discovering provider with no cache yet or
+    whose last fetch failed, an Anthropic model the API lists with no shipped
+    price, a renamed `[brain.native]` catalogue key, and an override naming no
+    model. Reads the caches and the config file only; spawns nothing and
+    opens no socket, so it is the same under `probe=False`. Names only, never
+    a key or a cache body.
+    """
+    from .config import anthropic_listing_key_path
+    from .llm import catalog as catalog_mod
+    from .llm import discovery
+    from .llm.providers import build_providers
+
+    name = "models.catalogue"
+    fails: list[str] = []
+    warns: list[str] = []
+    notes: list[str] = []
+    remedies: list[str] = []
+    now = time.time()
+
+    cache_dir = discovery.config_cache_dir(config)
+    discovered = discovery.load_discovered(cache_dir) if cache_dir is not None else {}
+    installed = catalog_mod.current_catalogue()
+    catalogue = catalog_mod.build_catalogue(
+        shipped=catalog_mod.shipped_anthropic_models(),
+        discovered=discovered,
+        operator=installed.operator,
+        overrides=installed.overrides,
+        legacy_override_keys=installed.legacy_override_keys,
+    )
+
+    for family in _REQUIRED_FAMILIES:
+        if catalogue.latest(family) is None:
+            fails.append(f"no current {family} model, so the {family!r} shortcut resolves to nothing")
+            remedies.append(f"Run {_UPDATE_SCRIPT} or mark a {family} model current in anthropic_overrides.json.")
+
+    document = _config_document(config)
+    refused = _refused_provider_tables(config, document)
+    if refused:
+        fails.append("refused [providers] table(s): " + ", ".join(f"[providers.{p}]" for p in refused))
+        remedies.append("`istota apply --check -f` on the config names why each table was refused.")
+
+    native = (document.get("brain") or {}).get("native") if isinstance(document.get("brain"), dict) else None
+    if isinstance(native, dict):
+        for key, replacement in _RENAMED_CATALOGUE_KEYS.items():
+            if key in native:
+                warns.append(f"[brain.native] {key} is read for one release; write {replacement}")
+                remedies.append("Move each renamed [brain.native] catalogue key to the setting named.")
+
+    refs = set(catalogue.refs())
+    ids = {m.id for m in catalogue.models()}
+    for key in catalogue.overrides:
+        if key in catalogue.legacy_override_keys:
+            continue
+        if key not in refs and key not in ids:
+            warns.append(f"[models.overrides.{key!r}] names no model the catalogue has")
+            remedies.append("Key each [models.overrides] entry by a provider/id the catalogue lists, or remove it.")
+
+    specs = build_providers(config)
+    listing_path = anthropic_listing_key_path(config)
+    listing_problem = _listing_key_file_problem(listing_path)
+    if listing_problem:
+        fails.append(f"the model-listing key file: {listing_problem}")
+        remedies.append(f"Make {listing_path} a regular file, mode 0400 or 0600, owned by the daemon's user.")
+    try:
+        listing_present = listing_problem is None and listing_path.is_file() and listing_path.stat().st_size > 0
+    except OSError:
+        listing_present = False
+
+    ages: list[float] = []
+    for spec in specs.values():
+        if not discovery.wants_discovery(spec, config):
+            continue
+        if spec.kind == "anthropic":
+            if spec.id != "anthropic":
+                continue
+            if not listing_present:
+                notes.append("Anthropic discovery off (no model-listing key file); the shipped list serves")
+                continue
+        doc = discovery.read_cache(cache_dir, spec.id) if cache_dir is not None else None
+        if doc is None:
+            warns.append(f"provider {spec.id} has no model cache yet; only its declared models are known")
+            remedies.append(_DISCOVERY_REMEDY)
+            continue
+        fetched_at = doc.get("fetched_at")
+        if isinstance(fetched_at, (int, float)):
+            age = max(0.0, now - float(fetched_at))
+            ages.append(age)
+            ttl = float(spec.discover_ttl_hours or 0.0) * 3600
+            if ttl > 0 and age > 2 * ttl:
+                warns.append(f"provider {spec.id}'s model cache is {_cache_age(age)} old, past twice its TTL")
+                remedies.append(_DISCOVERY_REMEDY)
+        status = doc.get("last_status")
+        error = doc.get("last_error")
+        if spec.id == "anthropic" and status in (401, 403):
+            fails.append(f"Anthropic's model list answered HTTP {status} to the model-listing key")
+            remedies.append(
+                "Replace the key in the istota_anthropic_listing_key file with a key from a "
+                "zero-spend Console workspace."
+            )
+        elif error:
+            warns.append(f"provider {spec.id}'s last model-list fetch failed ({error})")
+            remedies.append(_DISCOVERY_REMEDY)
+
+    unpriced = sorted(
+        m.id for m in catalogue.models("anthropic") if m.price_source == "unknown" and not m.deprecated
+    )
+    if unpriced:
+        warns.append(f"Anthropic lists {', '.join(unpriced)} with no shipped price; cost is estimated at zero")
+        remedies.append(f"Run {_UPDATE_SCRIPT} and commit the result.")
+
+    model_count = len(catalogue.refs())
+    summary = f"{len(specs)} providers, {model_count} models"
+    summary += f", oldest cache {_cache_age(max(ages))}" if ages else ", no discovery cache"
+    if notes:
+        summary += "; " + "; ".join(notes)
+    if fails or warns:
+        status = FAIL if fails else WARN
+        detail = "; ".join(fails + warns) + f" ({summary})"
+        remedy = " ".join(dict.fromkeys(remedies))
+        return CheckResult(name, status, detail, remedy=remedy)
+    return CheckResult(name, OK, summary)
+
+
 def check_native_brain(config: "Config", probe: bool) -> CheckResult:
     """The native brain names a provider, and that provider has a key.
 
@@ -10449,6 +10653,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.gws", check_gws),
     ("runtime.native_brain", check_native_brain),
     ("models.cli_auth", check_cli_auth),
+    ("models.catalogue", check_models_catalogue),
     ("runtime.pdf_tools", check_pdf_tools),
     ("runtime.framework_db", check_framework_db),
     ("runtime.task_failure_rate", check_task_failure_rate),
@@ -10560,6 +10765,8 @@ CHECK_SCOPES: dict[str, str] = {
     # has neither and would report a missing key about nothing.
     "runtime.native_brain": DEPLOYMENT,
     "models.cli_auth": DEPLOYMENT,
+    # Deployment: it reads the install's discovery caches and config file.
+    "models.catalogue": DEPLOYMENT,
     "runtime.pdf_tools": IMAGE,
     "runtime.framework_db": DEPLOYMENT,
     # Deployment, not image: it queries the `tasks` table of an install's own

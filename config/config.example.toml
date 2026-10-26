@@ -1005,7 +1005,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #      base_url = "http://192.0.2.10:8080/v1"
 #      api_key = ""
 #      extra_headers = {}
-#      discover = true               # list the provider's models (OpenRouter today)
+#      discover = true               # the daemon lists the provider's models in the background
 #      discover_ttl_hours = 24
 #      models = [ { id = "qwen3-32b", context_window = 32768, supports_thinking = true } ]
 #

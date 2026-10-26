@@ -2189,14 +2189,9 @@ class NativeBrainConfig:
     # the hard deadline still covers: a turn that hangs past the soft stop.
     # 0 (or >= 100) turns it off and the hard clock is the only backstop again.
     soft_deadline_percent: int = 90
-    # Live model-catalog enrichment from OpenRouter (ISSUE-182). When the brain
-    # talks to an OpenRouter endpoint (``base_url`` contains ``openrouter.ai``),
-    # it fetches OpenRouter's public model list once per process (disk-cached
-    # with the TTL below) and installs the real window/capabilities/prices into
-    # the catalog. No effect for non-OpenRouter endpoints — those resolve
-    # metadata from ``model_overrides`` / ``context_window`` / the conservative
-    # default. Fetch failure is never fatal (falls back to stale cache, then
-    # default). Off via ``model_catalog_fetch = false``.
+    # Legacy names for native's provider's `discover` / `discover_ttl_hours`,
+    # read for one release through `LEGACY_PROVIDER_SOURCES`. The fetch itself
+    # is the scheduler's `model-catalogue` gate (`llm/discovery.py`).
     model_catalog_fetch: bool = True
     model_catalog_cache_ttl_hours: float = 24.0
     # Per-attempt JSONL transcript of the run ([brain.native.session_log]).
