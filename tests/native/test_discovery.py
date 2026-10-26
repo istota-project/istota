@@ -467,10 +467,33 @@ class TestInstall:
         assert catalog.current_catalogue().discovered == {}
 
 
-def _config(tmp_path) -> Config:
+def _config(tmp_path, *, native_provider="openrouter") -> Config:
     config = Config()
     config.db_path = tmp_path / "istota.db"
+    config.brain.native.provider = native_provider
     return config
+
+
+class TestWhoIsFetched:
+    def test_an_unused_builtin_openrouter_is_not_fetched(self, tmp_path):
+        stub = _Stub((200, FIXTURE))
+        results = discovery.refresh_all(_config(tmp_path, native_provider=""), NOW, transport=stub)
+        assert stub.calls == []
+        assert [r.provider for r in results] == ["anthropic"]
+
+    def test_a_deployment_key_or_natives_choice_makes_it_used(self, tmp_path):
+        config = _config(tmp_path, native_provider="")
+        spec = _openrouter()
+        assert discovery.wants_discovery(spec, config) is False
+        assert discovery.wants_discovery(replace(spec, inference_key=InferenceKey("k")), config) is True
+        config.brain.native.provider = "openrouter"
+        assert discovery.wants_discovery(spec, config) is True
+        assert discovery.wants_discovery(replace(spec, discover=False), config) is False
+
+    def test_an_operators_own_provider_is_fetched(self, tmp_path):
+        config = _config(tmp_path, native_provider="")
+        local = ProviderSpec(id="local", kind="openai_compat", base_url="http://192.0.2.10:8080/v1")
+        assert discovery.wants_discovery(local, config) is True
 
 
 class TestTheGateAndTheBoot:

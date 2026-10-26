@@ -752,10 +752,30 @@ def _refresh_provider(spec, cache_dir, now, *, listing_key_path, transport, time
     return DiscoveryResult(spec.id, "refreshed", count=len(fresh))
 
 
+def wants_discovery(spec: ProviderSpec, config) -> bool:  # noqa: ANN001
+    """Whether the gate fetches this provider's list.
+
+    ``discover`` must be on. A built-in provider exists on every install, so
+    the built-in ``openrouter`` is fetched only when something uses it (native
+    names it, or it has a deployment key); otherwise every install would send
+    a request to a third party it never configured. An operator's own provider
+    was configured on purpose and is fetched. ``anthropic`` is fetched by its
+    own rule, the model-listing key file, checked at the fetch.
+    """
+    from .providers import BUILTIN_PROVIDERS
+
+    if not spec.discover:
+        return False
+    if spec.kind == "anthropic" or spec.id not in BUILTIN_PROVIDERS:
+        return True
+    native = getattr(getattr(getattr(config, "brain", None), "native", None), "provider", "") or ""
+    return spec.id == native.strip() or bool(spec.inference_key)
+
+
 def _discovering(config) -> list[ProviderSpec]:  # noqa: ANN001
     from .providers import build_providers
 
-    return [spec for spec in build_providers(config).values() if spec.discover]
+    return [spec for spec in build_providers(config).values() if wants_discovery(spec, config)]
 
 
 def _listing_key_path(config) -> Path | None:  # noqa: ANN001
