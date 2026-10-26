@@ -102,3 +102,47 @@ class TestOpenRouterAppAttribution:
         cfg = SimpleNamespace(api_key="k", base_url="https://openrouter.ai/api/v1")
         headers = make_provider(cfg)._client.headers
         assert headers["X-Title"] == "Istota"
+
+
+class TestPromptCacheKeyResolution:
+    """Stage 5: unset means on for OpenRouter and OpenAI, off elsewhere,
+    including api.anthropic.com; an explicit value always wins."""
+
+    @pytest.mark.parametrize(
+        "base_url, setting, expected",
+        [
+            ("https://openrouter.ai/api/v1", None, True),
+            ("https://api.openai.com/v1", None, True),
+            ("https://api.anthropic.com/v1", None, False),
+            ("http://localhost:11434/v1", None, False),
+            ("https://api.anthropic.com/v1", True, True),
+            ("http://localhost:11434/v1", True, True),
+            ("https://openrouter.ai/api/v1", False, False),
+            ("https://api.openai.com/v1", False, False),
+        ],
+    )
+    def test_matrix(self, base_url, setting, expected):
+        cfg = SimpleNamespace(api_key="k", base_url=base_url, prompt_cache_key=setting)
+        assert make_provider(cfg).prompt_cache_key is expected
+
+    def test_missing_attr_derives_from_base_url(self):
+        cfg = SimpleNamespace(api_key="k", base_url="https://openrouter.ai/api/v1")
+        assert make_provider(cfg).prompt_cache_key is True
+
+
+class TestPromptCacheTtl:
+    def test_defaults_to_5m(self):
+        cfg = SimpleNamespace(api_key="k", base_url="https://api.anthropic.com/v1")
+        assert make_provider(cfg).prompt_cache_ttl == "5m"
+
+    def test_passes_1h_through(self):
+        cfg = SimpleNamespace(
+            api_key="k", base_url="https://api.anthropic.com/v1", prompt_cache_ttl="1h"
+        )
+        assert make_provider(cfg).prompt_cache_ttl == "1h"
+
+    def test_an_unknown_value_runs_as_5m(self):
+        cfg = SimpleNamespace(
+            api_key="k", base_url="https://api.anthropic.com/v1", prompt_cache_ttl="1d"
+        )
+        assert make_provider(cfg).prompt_cache_ttl == "5m"

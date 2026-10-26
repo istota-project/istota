@@ -181,3 +181,185 @@ class TestCacheWriteAccounting:
         usage = events[-1].message.usage
         assert usage.cache_read_tokens == 40
         assert usage.cache_write_tokens == 60
+
+
+class TestPerRequestOverride:
+    """A compaction summary is a one-off prompt: no cache write is ever read."""
+
+    def test_false_on_the_request_beats_a_caching_provider(self):
+        body = _provider(True)._build_chat_completion_request(
+            "sys", [_user("hi")], [], "m", 100, prompt_caching=False
+        )
+        assert _cache_control_blocks(body) == []
+
+    def test_none_on_the_request_keeps_the_provider_setting(self):
+        body = _provider(True)._build_chat_completion_request(
+            "sys", [_user("hi")], [], "m", 100, prompt_caching=None
+        )
+        assert _cache_control_blocks(body) != []
+
+    async def test_a_summary_request_on_the_wire_carries_no_cache_control(self):
+        # The real seam: compaction through the brain's retrying wrapper into
+        # a caching provider, with the request body read off the transport.
+        import json
+
+        import httpx
+
+        from istota.brain.native import _RetryingProvider
+        from istota.session.compaction import compact_messages
+
+        bodies: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(request.content))
+            sse = (
+                'data: {"choices":[{"delta":{"content":"## Goal\\nx"}}]}\n\n'
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+                '"usage":{"prompt_tokens":50,"completion_tokens":5}}\n\n'
+                "data: [DONE]\n\n"
+            )
+            return httpx.Response(200, text=sse)
+
+        p = _provider(True)
+        p._client = httpx.AsyncClient(
+            base_url="https://x/v1", transport=httpx.MockTransport(handler)
+        )
+        outcome = await compact_messages(
+            [_user("hello"), _user("again")],
+            None,
+            None,
+            _RetryingProvider(p, None),
+            "m",
+            lambda msgs: list(msgs),
+        )
+        await p.aclose()
+        assert outcome.ok is True
+        assert outcome.usage.input_tokens == 50
+        assert len(bodies) == 1
+        assert "cache_control" not in json.dumps(bodies[0])
+
+
+def _all_cache_controls(body) -> list[dict]:
+    found = [block["cache_control"] for _, block in _cache_control_blocks(body)]
+    for t in body.get("tools", []):
+        fn = t.get("function") if isinstance(t, dict) else None
+        if isinstance(fn, dict) and "cache_control" in fn:
+            found.append(fn["cache_control"])
+    return found
+
+
+def _ttl_provider(ttl, **kw):
+    return OpenAICompatibleProvider(
+        api_key="k", base_url="https://x/v1", prompt_caching=True, prompt_cache_ttl=ttl, **kw
+    )
+
+
+def _a_tool():
+    from istota.llm.types import ToolParameter, ToolSchema
+
+    return ToolSchema(
+        name="Read",
+        description="read",
+        parameters=[ToolParameter(name="p", type="string", description="path")],
+    )
+
+
+class TestCacheTtl:
+    """Stage 5: `prompt_cache_ttl = "1h"` marks every breakpoint with the TTL."""
+
+    def _body(self, provider, **kw):
+        from istota.llm.types import AssistantMessage
+
+        msgs = [_user("first"), AssistantMessage(content=[TextContent(text="a")]), _user("last")]
+        return provider._build_chat_completion_request(
+            "sys", msgs, [_a_tool()], "m", 100, **kw
+        )
+
+    def test_1h_on_every_breakpoint(self):
+        controls = _all_cache_controls(self._body(_ttl_provider("1h")))
+        # tools, system, first user, rolling
+        assert len(controls) == 4
+        assert all(cc == {"type": "ephemeral", "ttl": "1h"} for cc in controls)
+
+    def test_5m_writes_the_bare_ephemeral_marker(self):
+        controls = _all_cache_controls(self._body(_ttl_provider("5m")))
+        assert len(controls) == 4
+        assert all(cc == {"type": "ephemeral"} for cc in controls)
+
+    def test_an_unknown_ttl_warns_and_runs_as_5m(self, caplog):
+        caplog.set_level("WARNING", logger="istota.llm.openai_compat")
+        provider = _ttl_provider("2h")
+        assert provider.prompt_cache_ttl == "5m"
+        assert any("prompt_cache_ttl" in r.message for r in caplog.records)
+        controls = _all_cache_controls(self._body(provider))
+        assert controls and all(cc == {"type": "ephemeral"} for cc in controls)
+
+    def test_a_summary_request_carries_no_breakpoint_at_1h(self):
+        import json
+
+        body = self._body(_ttl_provider("1h"), prompt_caching=False)
+        assert "cache_control" not in json.dumps(body)
+        assert '"ttl"' not in json.dumps(body)
+
+
+class TestCacheAffinityKey:
+    """Stage 5: `prompt_cache_key` on the body, only when the provider has it on."""
+
+    def test_sent_when_on_and_given(self):
+        p = OpenAICompatibleProvider(api_key="k", base_url="https://x/v1", prompt_cache_key=True)
+        body = p._build_chat_completion_request(
+            "sys", [_user("hi")], [], "m", 100, cache_affinity_key="abc123"
+        )
+        assert body["prompt_cache_key"] == "abc123"
+
+    def test_not_sent_when_off(self):
+        p = OpenAICompatibleProvider(api_key="k", base_url="https://x/v1", prompt_cache_key=False)
+        body = p._build_chat_completion_request(
+            "sys", [_user("hi")], [], "m", 100, cache_affinity_key="abc123"
+        )
+        assert "prompt_cache_key" not in body
+
+    def test_not_sent_without_a_key(self):
+        p = OpenAICompatibleProvider(api_key="k", base_url="https://x/v1", prompt_cache_key=True)
+        body = p._build_chat_completion_request("sys", [_user("hi")], [], "m", 100)
+        assert "prompt_cache_key" not in body
+
+    async def test_a_summary_request_carries_the_attempts_key(self):
+        # The real seam: compaction through the retrying wrapper, which holds
+        # the attempt's key, into a provider with the key on.
+        import json
+
+        import httpx
+
+        from istota.brain.native import _RetryingProvider
+        from istota.session.compaction import compact_messages
+
+        bodies: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(request.content))
+            sse = (
+                'data: {"choices":[{"delta":{"content":"## Goal\\nx"}}]}\n\n'
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+                "data: [DONE]\n\n"
+            )
+            return httpx.Response(200, text=sse)
+
+        p = OpenAICompatibleProvider(
+            api_key="k", base_url="https://x/v1", prompt_caching=True, prompt_cache_key=True
+        )
+        p._client = httpx.AsyncClient(
+            base_url="https://x/v1", transport=httpx.MockTransport(handler)
+        )
+        outcome = await compact_messages(
+            [_user("hello"), _user("again")],
+            None,
+            None,
+            _RetryingProvider(p, None, cache_affinity_key="attempt-key"),
+            "m",
+            lambda msgs: list(msgs),
+        )
+        await p.aclose()
+        assert outcome.ok is True
+        assert bodies[0]["prompt_cache_key"] == "attempt-key"
+        assert "cache_control" not in json.dumps(bodies[0])

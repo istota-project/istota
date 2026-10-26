@@ -2,7 +2,7 @@
 
 from istota.llm.catalog import ModelInfo
 from istota.llm.types import Usage
-from istota.session.usage import TaskUsage, price_usage
+from istota.session.usage import TaskUsage, cache_write_multiplier_for_ttl, price_usage
 
 
 class TestPriceUsage:
@@ -113,3 +113,49 @@ class TestTaskUsage:
         assert parent.output_tokens == 13
         assert parent.cost_usd == 3.0
         assert parent.turns == 4
+
+
+def _priced():
+    return ModelInfo(
+        id="m",
+        context_window=200_000,
+        max_output_tokens=16384,
+        input_price_per_mtok=3.0,
+        cache_write_price_per_mtok=3.75,
+    )
+
+
+class TestCacheWriteMultiplier:
+    """Stage 5: a 1h cache write costs 2x input, against the catalog's one
+    (5-minute) write price."""
+
+    def test_1h_prices_writes_at_twice_input(self):
+        usage = Usage(cache_write_tokens=1_000_000)
+        assert price_usage(usage, _priced(), cache_write_multiplier=2.0) == 6.0
+
+    def test_no_multiplier_keeps_the_catalog_write_price(self):
+        usage = Usage(cache_write_tokens=1_000_000)
+        assert price_usage(usage, _priced()) == 3.75
+
+    def test_the_multiplier_touches_writes_only(self):
+        usage = Usage(input_tokens=1_000_000, cache_write_tokens=1_000_000)
+        assert price_usage(usage, _priced(), cache_write_multiplier=2.0) == 9.0
+
+    def test_task_usage_add_carries_it(self):
+        tu = TaskUsage()
+        tu.add(Usage(cache_write_tokens=1_000_000), _priced(), cache_write_multiplier=2.0)
+        assert tu.cost_usd == 6.0
+
+    def test_a_reported_cost_still_wins(self):
+        tu = TaskUsage()
+        tu.add(
+            Usage(cache_write_tokens=1_000_000, cost_usd=0.5),
+            _priced(),
+            cache_write_multiplier=2.0,
+        )
+        assert tu.cost_usd == 0.5
+
+    def test_the_ttl_rule(self):
+        assert cache_write_multiplier_for_ttl("1h") == 2.0
+        assert cache_write_multiplier_for_ttl("5m") is None
+        assert cache_write_multiplier_for_ttl("") is None

@@ -29,6 +29,11 @@ from .config_mapper import (
     report_problem,
     report_unknown,
 )
+from istota.llm.types import (
+    PROMPT_CACHE_TTLS,
+    REASONING_REPLAY_MODES,
+    STRICT_TOOL_SCHEMA_MODES,
+)
 from istota.mail.outbound_policy import VALID_POLICIES as OUTBOUND_APPROVAL_POLICIES
 from istota.sandbox.user_scope import paths_overlap, scoped_user_dir
 from istota.webui.map_basemap import provider_names as map_provider_names
@@ -2094,7 +2099,7 @@ class NativeBrainConfig:
     max_tokens: int = 16384
     # Per-model capability/window overrides ([brain.native.model_overrides]).
     # Maps a model id to a partial ModelInfo (context_window, supports_thinking,
-    # supports_vision, max_output_tokens, prices). Lets a non-Anthropic
+    # supports_vision, supports_structured_outputs, max_output_tokens, prices). Lets a non-Anthropic
     # reasoning/vision model or a small-window local model no live catalog
     # knows declare its real capabilities instead of being degraded to the
     # conservative default (NB-4). Also corrects a single wrong field on a
@@ -2105,12 +2110,36 @@ class NativeBrainConfig:
     # 16k/20k constants). See istota.session.compaction (NB-14).
     compaction_reserve_tokens: int = 0
     compaction_keep_recent_tokens: int = 0
+    # Background compaction: start the summary this many tokens below the
+    # blocking threshold and place it at a later turn boundary, so the turn
+    # does not stall on the summary call. 0 = derive from the window.
+    compaction_background: bool = False
+    compaction_background_tokens: int = 0
     # Opt-in cache_control breakpoints (Anthropic/OpenRouter). Tri-state: ``None``
     # (the operator set no explicit value) derives the default from base_url in
     # make_provider — on for api.anthropic.com, off elsewhere. An explicit
     # ``True``/``False`` always wins, whether it came from the TOML or was set
     # directly on the dataclass.
     prompt_caching: bool | None = None
+    # Whether an assistant turn's reasoning is sent back on later turns of the
+    # same attempt: "auto" (structured reasoning_details only), "on" (plain
+    # reasoning too) or "off". An endpoint that refuses it gets one re-issue
+    # without, and replay is off for the rest of the attempt.
+    reasoning_replay: str = "auto"
+    # Whether requests carry a random per-attempt ``prompt_cache_key`` (cache
+    # affinity: OpenRouter routes an attempt's requests to one cache). Tri-state
+    # like ``prompt_caching``: ``None`` derives it from base_url in
+    # make_provider, on for openrouter.ai and api.openai.com, off elsewhere.
+    prompt_cache_key: bool | None = None
+    # How long a cache breakpoint lives: "5m" (the endpoint default) or "1h".
+    # A 1h write is priced at twice input when no cost is reported.
+    prompt_cache_ttl: str = "5m"
+    # Whether tool definitions go out with `"strict": true` (constrained
+    # argument sampling): "off", "auto" (when the model's
+    # supports_structured_outputs is true) or "on". A refused request gets one
+    # re-issue without, and strict is off for the rest of the attempt. "auto"
+    # since the round's stage 8 evals: fewer failed edits on the weaker model.
+    strict_tool_schemas: str = "auto"
     # Daemon-side WebFetch tool ([brain.native.web_fetch]). Enabled by default
     # with safe caps; the tool is native-only (added to build_default_tools).
     web_fetch: WebFetchConfig = field(default_factory=WebFetchConfig)
@@ -2133,6 +2162,12 @@ class NativeBrainConfig:
     turn_budget_nudge: bool = True
     turn_budget_nudge_early_percent: int = 50
     turn_budget_nudge_remaining: list[int] = field(default_factory=lambda: [15, 5])
+    # Tool-failure nudge: once per attempt, after this many tool calls in a row
+    # have failed (an error result, or a Bash command that exited non-zero),
+    # the loop tells the model so and steers it off the failing approach.
+    # 0 (the default) turns it off: the round's stage 8 evals showed no fewer
+    # failed calls with it on, so it ships off until a run shows otherwise.
+    tool_failure_nudge_after: int = 0
     # Soft wall-clock deadline (ISSUE-373). The three limits governing a native
     # run — `max_turns`, `scheduler.task_timeout_minutes` and the nudge ladder —
     # are all sized against a brain that answers in a couple of seconds. On a
@@ -4813,6 +4848,11 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     "web.token_storage": _one_of(*WEB_TOKEN_STORAGE_MODES),
     "nextcloud.sharing.calendars": _one_of(*NEXTCLOUD_SHARING_LEVELS, fallback="off"),
     "nextcloud.sharing.contacts": _one_of(*NEXTCLOUD_SHARING_LEVELS, fallback="off"),
+    "brain.native.reasoning_replay": _one_of(*REASONING_REPLAY_MODES),
+    "brain.native.prompt_cache_ttl": _one_of(*PROMPT_CACHE_TTLS),
+    "brain.native.strict_tool_schemas": _one_of(*STRICT_TOOL_SCHEMA_MODES),
+    # 0 is the off switch, so only a negative count is refused.
+    "brain.native.tool_failure_nudge_after": _non_negative_int,
     # Normalised from three historical spellings, and the retired `backend` key
     # is warned about rather than ignored -- an operator who wrote
     # `backend = "none"` to keep builds off the container had that honoured

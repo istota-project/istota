@@ -14,7 +14,9 @@ Key decisions:
 - Never cut at a tool_result — it must follow its tool_call.
 - File-operation tracking across cycles: ``CompactionDetails`` (read / modified
   files) is carried forward so the model keeps awareness of files touched early.
-- Compaction failure never crashes the loop — it returns the previous summary.
+- Compaction failure never crashes the loop, and never cuts: ``compact_messages``
+  reports it as ``CompactionOutcome.ok`` false, and both callers leave the
+  context as it was.
 - Everything here operates on ``ctx.messages`` and nothing else. Istota's
   standing instructions — identity, emissaries, persona, tool descriptions,
   skill inventory, rules — are the *system* half and live in
@@ -37,6 +39,7 @@ summaries, file-operation tracking, structured prompt format.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from istota.llm.tokens import estimate_tokens
 from istota.llm.types import (
@@ -44,6 +47,7 @@ from istota.llm.types import (
     ImageContent,
     TextContent,
     ToolResultMessage,
+    Usage,
     UserMessage,
 )
 
@@ -51,10 +55,29 @@ from .messages import CompactionDetails, CompactionSummaryMessage
 
 logger = logging.getLogger("istota.session.compaction")
 
+# Per tool result in the summary input, head and tail (pi does the same).
+_SUMMARY_TOOL_RESULT_CHARS = 2000
+
+
+@dataclass
+class CompactionOutcome:
+    """What one ``compact_messages`` call produced.
+
+    ``ok`` false means no usable summary: ``summary`` is then the previous one
+    (or ``""``) and must not stand in for the messages a cut would drop.
+    """
+
+    summary: str
+    details: CompactionDetails
+    usage: Usage
+    ok: bool
+    error: str | None = None
+
 # Legacy Anthropic-sized constants, kept as the ceiling for the window-relative
 # derivation so a 200k-window model behaves exactly as before.
 _RESERVE_CEILING = 16384
 _KEEP_RECENT_CEILING = 20000
+_BACKGROUND_CEILING = 32768
 
 
 def derive_reserve_tokens(context_window: int) -> int:
@@ -74,6 +97,15 @@ def derive_keep_recent_tokens(context_window: int) -> int:
     on a small-window model.
     """
     return max(1, min(_KEEP_RECENT_CEILING, context_window // 2))
+
+
+def derive_background_tokens(context_window: int) -> int:
+    """How far below the blocking threshold a background summary starts.
+
+    An eighth of the window, capped at 32768, floored at 1. The background
+    threshold is ``window - reserve - background_tokens``.
+    """
+    return max(1, min(_BACKGROUND_CEILING, context_window // 8))
 
 
 def _msg_tokens(m) -> int:
@@ -302,8 +334,25 @@ def plan_image_pin(to_compact: list, keep_recent_tokens: int = 0):
     return pin, summary_input
 
 
+def _cap_tool_result(text: str) -> str:
+    """Head and tail of one tool result, at most ``_SUMMARY_TOOL_RESULT_CHARS``.
+
+    Applied per result, before ``_truncate_middle`` caps the whole prompt, so
+    one giant output cannot push every other turn out of the summary input.
+    """
+    if len(text) <= _SUMMARY_TOOL_RESULT_CHARS:
+        return text
+    keep = _SUMMARY_TOOL_RESULT_CHARS // 2
+    elided = len(text) - 2 * keep
+    return f"{text[:keep]}\n… [{elided} chars of tool output elided] …\n{text[-keep:]}"
+
+
 def _serialize_for_summary(llm_messages: list) -> str:
-    """Render LLM messages to plain text for the summary prompt."""
+    """Render LLM messages to plain text for the summary prompt.
+
+    Reasoning (``ThinkingContent``) is left out: it matches no branch below,
+    and that is deliberate rather than an omission.
+    """
     lines: list[str] = []
     for msg in llm_messages:
         role = getattr(msg, "role", "?")
@@ -313,7 +362,7 @@ def _serialize_for_summary(llm_messages: list) -> str:
                 else getattr(c, "text", "")
                 for c in msg.content
             )
-            lines.append(f"[tool_result {msg.tool_name}]\n{text}")
+            lines.append(f"[tool_result {msg.tool_name}]\n{_cap_tool_result(text)}")
             continue
         text_parts = []
         for c in getattr(msg, "content", []):
@@ -339,23 +388,44 @@ _STRUCTURE = (
 )
 
 
-async def _complete_simple(provider, model: str, prompt: str) -> str:
-    """Run a single text completion through ``provider`` and return its text."""
+class SummaryCallError(RuntimeError):
+    """The summary call failed; ``usage`` is whatever the endpoint reported."""
+
+    def __init__(self, message: str, usage: Usage):
+        super().__init__(message)
+        self.usage = usage
+
+
+async def _complete_simple(provider, model: str, prompt: str) -> tuple[str, Usage]:
+    """Run a single text completion through ``provider``: ``(text, usage)``.
+
+    The summary is a one-off prompt, so it asks for no cache breakpoints: a
+    cache write here is paid at the write premium and never read back.
+    """
     from istota.llm.provider import StreamDone, StreamError, TextDelta
 
     text_parts: list[str] = []
     final_text = ""
+    usage = Usage()
     async for event in provider.stream(
-        "", [UserMessage(content=[TextContent(text=prompt)])], [], model=model
+        "",
+        [UserMessage(content=[TextContent(text=prompt)])],
+        [],
+        model=model,
+        prompt_caching=False,
     ):
         if isinstance(event, TextDelta):
             text_parts.append(event.text)
         elif isinstance(event, StreamDone):
             final_text = event.message.text
+            usage = event.message.usage
             break
         elif isinstance(event, StreamError):
-            raise RuntimeError(event.message.error_message or "compaction stream error")
-    return final_text or "".join(text_parts)
+            raise SummaryCallError(
+                event.message.error_message or "compaction stream error",
+                event.message.usage,
+            )
+    return final_text or "".join(text_parts), usage
 
 
 def _truncate_middle(text: str, max_chars: int) -> str:
@@ -384,12 +454,15 @@ async def compact_messages(
     model: str,
     convert_to_llm,
     max_input_chars: int = 0,
-) -> tuple[str, CompactionDetails]:
+) -> CompactionOutcome:
     """Generate (or update) a structured summary, tracking file operations.
 
-    Returns ``(summary_text, merged_details)``. File-operation details are merged
-    with the previous cycle's and carried forward. On any provider failure the
-    previous summary is returned unchanged — compaction never crashes the loop.
+    File-operation details are merged with the previous cycle's and carried
+    forward. A failure never raises: it comes back with ``ok`` false, the
+    previous summary unchanged in ``summary``, and the reason in ``error``. A
+    caller must check ``ok`` before cutting anything (an empty or stale summary
+    in place of the dropped turns is the defect this field exists to prevent).
+    ``usage`` is the summary call's own spend, reported on failure too.
 
     ``max_input_chars`` (0 = unbounded) caps the serialized conversation fed to
     the summarizer so the summary request can't itself overflow the window.
@@ -409,13 +482,22 @@ async def compact_messages(
         ),
     )
 
+    def _failed(error: str, usage: Usage) -> CompactionOutcome:
+        return CompactionOutcome(
+            summary=previous_summary or "",
+            details=merged_details,
+            usage=usage,
+            ok=False,
+            error=error,
+        )
+
     try:
         llm_messages = convert_to_llm(messages_to_compact)
         conversation_text = _serialize_for_summary(llm_messages)
         conversation_text = _truncate_middle(conversation_text, max_input_chars)
     except Exception as e:  # noqa: BLE001 — conversion must not crash compaction
         logger.warning("Compaction serialization failed: %s", e)
-        return previous_summary or "", merged_details
+        return _failed(f"serialization failed: {e}", Usage())
 
     file_ops_text = (
         _format_file_operations(merged_details)
@@ -446,8 +528,16 @@ async def compact_messages(
         )
 
     try:
-        summary = await _complete_simple(provider, model, prompt)
-        return summary or (previous_summary or ""), merged_details
+        summary, usage = await _complete_simple(provider, model, prompt)
+    except SummaryCallError as e:
+        logger.warning("Compaction summary failed: %s", e)
+        return _failed(str(e), e.usage)
     except Exception as e:  # noqa: BLE001 — failed summary must not crash the loop
         logger.warning("Compaction summary failed: %s", e)
-        return previous_summary or "", merged_details
+        return _failed(str(e) or type(e).__name__, Usage())
+    if not summary.strip():
+        logger.warning("Compaction summary came back empty")
+        return _failed("the summary came back empty", usage)
+    return CompactionOutcome(
+        summary=summary, details=merged_details, usage=usage, ok=True, error=None
+    )

@@ -64,6 +64,10 @@ class ReplayProvider:
         max_tokens: int = 16384,
         reasoning_effort: str | None = None,
         render_tool_images: bool = False,
+        prompt_caching: bool | None = None,
+        reasoning_replay: str | None = None,
+        cache_affinity_key: str | None = None,
+        strict_tool_schemas: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         lines = read_fixture(self._path)
 
@@ -90,6 +94,22 @@ class RecordingProvider:
         self._inner = inner
         self._path = Path(fixture_path)
 
+    @property
+    def reasoning_replay(self) -> str:
+        return self._inner.reasoning_replay
+
+    @property
+    def prompt_cache_key(self) -> bool:
+        return self._inner.prompt_cache_key
+
+    @property
+    def prompt_cache_ttl(self) -> str:
+        return self._inner.prompt_cache_ttl
+
+    @property
+    def strict_tool_schemas(self) -> str:
+        return self._inner.strict_tool_schemas
+
     async def stream(
         self,
         system_prompt: str,
@@ -100,6 +120,10 @@ class RecordingProvider:
         max_tokens: int = 16384,
         reasoning_effort: str | None = None,
         render_tool_images: bool = False,
+        prompt_caching: bool | None = None,
+        reasoning_replay: str | None = None,
+        cache_affinity_key: str | None = None,
+        strict_tool_schemas: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         body = self._inner._build_chat_completion_request(
             system_prompt,
@@ -109,6 +133,10 @@ class RecordingProvider:
             max_tokens,
             reasoning_effort=reasoning_effort,
             render_tool_images=render_tool_images,
+            prompt_caching=prompt_caching,
+            reasoning_replay=reasoning_replay,
+            cache_affinity_key=cache_affinity_key,
+            strict_tool_schemas=strict_tool_schemas,
         )
         recorded: list[str] = []
         try:

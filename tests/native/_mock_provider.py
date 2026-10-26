@@ -45,9 +45,16 @@ class MockProvider:
         max_tokens: int = 16384,
         reasoning_effort: str | None = None,
         render_tool_images: bool = False,
+        prompt_caching: bool | None = None,
+        reasoning_replay: str | None = None,
+        cache_affinity_key: str | None = None,
+        strict_tool_schemas: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         self.calls.append(
             {
+                "reasoning_replay": reasoning_replay,
+                "cache_affinity_key": cache_affinity_key,
+                "strict_tool_schemas": strict_tool_schemas,
                 "system_prompt": system_prompt,
                 "messages": list(messages),
                 "tools": list(tools),
@@ -55,6 +62,7 @@ class MockProvider:
                 "max_tokens": max_tokens,
                 "reasoning_effort": reasoning_effort,
                 "render_tool_images": render_tool_images,
+                "prompt_caching": prompt_caching,
             }
         )
         if not self._turns:

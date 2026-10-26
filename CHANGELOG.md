@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **Upgrade note:** the first start rebuilds the approval-request table to allow the new activation approval, so this release owes a run of the upgrade tier before it ships.
 
+- **Background summaries for long native-brain tasks (opt-in).** An operator can let the native brain start summarizing older turns before the context fills, while the task keeps working, and swap the summary in at a later step. Off by default; it is turned on in the native brain's configuration.
+
+- **The native brain keeps a model's reasoning across the steps of a task.** On endpoints that return structured reasoning, such as OpenRouter, the reasoning from one step is sent back with the next, so the model works from its own earlier thinking. If the endpoint refuses it, the step is re-sent once without and the task carries on.
+
+- **Longer prompt caching for the native brain.** On OpenRouter and OpenAI, each task attempt now tags its requests with a random cache key so they reach the same cache. An operator can also keep cached prompts for an hour instead of five minutes, which helps tasks with long tool runs; the cost estimate charges the higher one-hour write price.
+
+- **Strict tool schemas for the native brain.** Tool definitions are sent strict to models that support structured outputs, so the model is held to each tool's argument schema instead of having malformed arguments repaired afterwards. This is the `auto` default, chosen after evals showed fewer failed edits; `off` turns it off. If the endpoint refuses it, the step is re-sent once without.
+
+- **The native brain can be told when its tool calls keep failing (opt-in).** After several failed tool calls in a row, the model gets one notice naming what failed and is told to try another approach or finish with what it has, instead of retrying the same broken sources. Off by default, because evals showed no fewer failed calls with it on; an operator turns it on with `tool_failure_nudge_after`.
+
 ### Security
 
 - An RSS or Atom feed can no longer point the feed poller at a private address. A feed on a local, loopback or internal address, or one that redirects to such an address, is now refused with an error on the feed, and nothing is requested from it. **Upgrade note:** a feed you poll on your own network stops updating until its host is listed in `[feeds] private_hosts`.
@@ -30,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Long tasks on the native brain no longer forget earlier work when a summary fails.** When the request to summarize older turns failed, those turns were dropped anyway and the task carried on without them. They are now kept, the summary is tried once more, and the cost of summary requests is counted in the task's usage.
 - Skill commands no longer print config warnings, such as a retired `[[default_briefings]]` notice, under every result a task reads. The daemon log and the admin configuration view still show them.
 
 ## [0.47.0] - 2026-10-25

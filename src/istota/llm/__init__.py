@@ -42,6 +42,8 @@ from .types import (
 # operator can override either via [brain.native.extra_headers].
 _OPENROUTER_APP_URL = "https://istota.cynium.com"
 _OPENROUTER_APP_TITLE = "Istota"
+# Hosts whose API takes `prompt_cache_key` (OpenRouter routes on it).
+_PROMPT_CACHE_KEY_HOSTS = ("openrouter.ai", "api.openai.com")
 
 __all__ = [
     "AssistantMessage",
@@ -93,6 +95,15 @@ def make_provider(config):
             caching = "api.anthropic.com" in base_url
         else:
             caching = bool(pc)
+        # The cache affinity key is the same tri-state, derived from a
+        # different host list: the endpoints that document `prompt_cache_key`.
+        # api.anthropic.com is left off, since an unknown body field is not
+        # something to discover in production.
+        pck = getattr(config, "prompt_cache_key", None)
+        if pck is None:
+            cache_key = any(host in (base_url or "") for host in _PROMPT_CACHE_KEY_HOSTS)
+        else:
+            cache_key = bool(pck)
         extra_headers = dict(getattr(config, "extra_headers", None) or {})
         if "openrouter.ai" in (base_url or ""):
             # Attribute this app to Istota on OpenRouter. Operator-set headers
@@ -107,5 +118,12 @@ def make_provider(config):
             base_url=base_url,
             extra_headers=extra_headers,
             prompt_caching=caching,
+            # An unknown value warns in the provider and runs as "auto".
+            reasoning_replay=getattr(config, "reasoning_replay", "auto"),
+            prompt_cache_key=cache_key,
+            # An unknown value warns in the provider and runs as "5m".
+            prompt_cache_ttl=getattr(config, "prompt_cache_ttl", "5m"),
+            # An unknown value warns in the provider and runs as "off".
+            strict_tool_schemas=getattr(config, "strict_tool_schemas", "auto"),
         )
     raise ValueError(f"Unknown provider: {kind!r}")

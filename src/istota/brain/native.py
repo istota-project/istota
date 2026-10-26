@@ -48,6 +48,9 @@ import re
 import statistics
 import threading
 import time
+import uuid
+from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -65,6 +68,13 @@ from istota.agent.types import (
 )
 from istota.llm import make_provider
 from istota.llm.catalog import get_model_info
+from istota.llm.openai_compat import (
+    carries_strict_tools,
+    is_reasoning_rejection,
+    is_strict_schema_rejection,
+    replays_reasoning,
+    strict_tools_enabled,
+)
 from istota.llm.provider import (
     StreamDone,
     StreamError,
@@ -81,7 +91,9 @@ from istota.llm.types import (
     UserMessage,
 )
 from istota.session.compaction import (
+    CompactionOutcome,
     compact_messages,
+    derive_background_tokens,
     derive_keep_recent_tokens,
     derive_reserve_tokens,
     estimate_context_tokens,
@@ -89,7 +101,7 @@ from istota.session.compaction import (
     plan_image_pin,
     should_compact,
 )
-from istota.session.loop_detection import detect_repeated_tool_calls
+from istota.session.loop_detection import _result_text, detect_repeated_tool_calls
 from istota.session.messages import CompactionSummaryMessage
 from istota.session.retry import classify_error, extract_status_code
 from istota.session.session_log import (
@@ -98,7 +110,7 @@ from istota.session.session_log import (
     SessionLogWriter,
     resolve_session_log_dir,
 )
-from istota.session.usage import TaskUsage
+from istota.session.usage import TaskUsage, cache_write_multiplier_for_ttl
 
 from ._aliases import CANONICAL_ROLES, split_effort
 from ._roles import get_alias_override_target, get_alias_overrides
@@ -370,7 +382,36 @@ def _compaction_input_chars(window: int) -> int:
 # genuinely too-large single turn can't thrash compaction forever.
 _MAX_OVERFLOW_RECOVERIES = 2
 
+# A failed proactive summary is retried at the next boundary still over the
+# threshold, once; after the second failure the attempt stops paying for a call
+# that keeps failing, and overflow recovery is the safety net.
+_MAX_PROACTIVE_COMPACTION_FAILURES = 2
+
 _RECOVERY_NUDGE = "[context was compacted; continue]"
+
+
+def _background_await_budget(deadline: float | None) -> float | None:
+    """Seconds the blocking threshold may wait on a background summary.
+
+    The attempt's remaining wall clock, or ``None`` (unbounded) when the attempt
+    has no deadline. A summary that outlives the wait keeps running, and the
+    placement check discards it if a blocking compaction lands first.
+    """
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _prefix_in_place(messages: list, prefix: list) -> bool:
+    """Whether ``prefix`` still leads ``messages``, by object identity.
+
+    Every compaction replaces the list with new objects at its head, and
+    nothing else does, so identity of the prefix says exactly whether the
+    messages a background summary covers are still the ones in context.
+    """
+    if len(messages) < len(prefix):
+        return False
+    return all(a is b for a, b in zip(messages, prefix))
 
 # NB-15: markers appended to a final answer whose last turn ended on a
 # non-clean finish reason, so a truncated/filtered response is visibly flagged
@@ -468,6 +509,53 @@ def _turn_budget_nudge_message(remaining: int, phase: str) -> UserMessage:
             f"Start wrapping up — if you can't finish, summarize what you have "
             f"and deliver a partial answer now"
         )
+    return UserMessage(content=[TextContent(text=_TURN_BUDGET_FRAME.format(body=body))])
+
+
+# How many failing Bash commands the tool-health notice names by first word.
+_FAILURE_NUDGE_COMMANDS_SHOWN = 3
+
+
+def _tool_failed(tool_name: str, result: ToolResultMessage | None, is_error: bool) -> bool:
+    """Whether one tool result counts as a failure for the tool-health notice.
+
+    Bash leaves ``is_error`` unset on a non-zero exit, so its status suffix is
+    read through ``bash_result_failed``, the one parser of that suffix.
+    """
+    if is_error:
+        return True
+    if tool_name == "Bash" and result is not None:
+        # Lazy, as the module's other `session.tools` imports are.
+        from istota.session.tools.bash import bash_result_failed
+
+        return bash_result_failed(_result_text(result))
+    return False
+
+
+def _failure_breakdown(failed_names: Counter, failed_commands: list[str]) -> str:
+    """``Bash ×4 (curl, python3), WebFetch ×1``, most frequent tool first."""
+    parts = []
+    for name, count in failed_names.most_common():
+        part = f"{name} ×{count}"
+        if name == "Bash" and failed_commands:
+            part += f" ({', '.join(failed_commands)})"
+        parts.append(part)
+    return ", ".join(parts)
+
+
+def _tool_failure_nudge_message(
+    failures: int, breakdown: str, turns_since_success: int | None
+) -> UserMessage:
+    if turns_since_success is None:
+        worked = "No tool call in this run has worked yet"
+    else:
+        worked = f"The last one that worked was {turns_since_success} turns ago"
+    body = (
+        f"tool-health notice. Your last {failures} tool calls failed "
+        f"({breakdown}). {worked}. Stop retrying what is failing: skip that "
+        f"source, try a different approach, or finish with what you have. Do "
+        f"not debug the tools themselves"
+    )
     return UserMessage(content=[TextContent(text=_TURN_BUDGET_FRAME.format(body=body))])
 
 
@@ -728,6 +816,53 @@ def _drain_one_steer(buffer: list) -> list:
     return [UserMessage(content=[TextContent(text=_STEER_FRAME.format(text=text))])]
 
 
+@dataclasses.dataclass(frozen=True)
+class _ReissuableFeature:
+    """A request feature an endpoint may refuse, which can be dropped instead.
+
+    ``stream_kwarg``/``off_value`` is how one request is sent without it;
+    ``is_rejection`` reads the refusal off the error text; ``carried`` says
+    whether the refused request had the feature at all, so a refusal that
+    only looks like one is not re-sent. ``name`` keys the attempt's disabled
+    set and the session log's ``<name>_rejected`` error record.
+    """
+
+    name: str
+    stream_kwarg: str
+    off_value: object
+    is_rejection: Callable[[str], bool]
+    carried: Callable[[object, list, list, str], bool]
+
+
+def _carries_replayed_reasoning(inner, messages, tools, model) -> bool:
+    # A provider that does not say how it replays (a test double) replays none.
+    return replays_reasoning(messages, getattr(inner, "reasoning_replay", "off"))
+
+
+def _carries_strict_tools(inner, messages, tools, model) -> bool:
+    return carries_strict_tools(tools, model, getattr(inner, "strict_tool_schemas", "off"))
+
+
+# Features re-sent once without on refusal, then off for the attempt. The order
+# is the order a refusal is matched in.
+_REISSUABLE_FEATURES: tuple[_ReissuableFeature, ...] = (
+    _ReissuableFeature(
+        name="reasoning",
+        stream_kwarg="reasoning_replay",
+        off_value="off",
+        is_rejection=is_reasoning_rejection,
+        carried=_carries_replayed_reasoning,
+    ),
+    _ReissuableFeature(
+        name="strict",
+        stream_kwarg="strict_tool_schemas",
+        off_value="off",
+        is_rejection=is_strict_schema_rejection,
+        carried=_carries_strict_tools,
+    ),
+)
+
+
 class _RetryingProvider:
     """Wrap a provider with turn-level retry on *immediate* transient errors.
 
@@ -741,11 +876,59 @@ class _RetryingProvider:
     Putting retry here — at single-completion granularity — keeps it correct for
     multi-turn tasks: re-issuing one request never replays already-executed
     tools. ``abort`` makes the backoff sleep interruptible.
+
+    It also owns the one-shot re-issue for a refused feature
+    (:meth:`_reissue_once_without`). One instance lives for one attempt, so
+    "off for the rest of the attempt" is this instance's disabled set.
+    ``on_feature_disabled(name, error_message)`` is told once per feature.
+
+    ``cache_affinity_key`` is the attempt's ``prompt_cache_key``, put on every
+    request this instance sends: turns, compaction summaries and the overflow
+    recovery's calls alike, since they all go through it.
     """
 
-    def __init__(self, inner, abort: asyncio.Event | None):
+    def __init__(
+        self,
+        inner,
+        abort: asyncio.Event | None,
+        on_feature_disabled: Callable[[str, str], None] | None = None,
+        cache_affinity_key: str | None = None,
+    ):
         self._inner = inner
         self._abort = abort
+        self._on_feature_disabled = on_feature_disabled
+        self._disabled_features: set[str] = set()
+        self._cache_affinity_key = cache_affinity_key
+
+    def _reissue_once_without(self, error_message: str, messages, tools, model: str) -> bool:
+        """Turn off the feature this refusal names, if the request carried it.
+
+        True means the caller should send the request again at once: the
+        feature is now in the disabled set, so the next request goes without
+        it, and every later one in the attempt too. Each feature is turned off
+        at most once, which is what bounds the re-issue to one.
+        """
+        for feature in _REISSUABLE_FEATURES:
+            if feature.name in self._disabled_features:
+                continue
+            if not feature.is_rejection(error_message):
+                continue
+            if not feature.carried(self._inner, messages, tools, model):
+                continue
+            self._disabled_features.add(feature.name)
+            logger.warning(
+                "native provider refused %s; re-sending without it, and it is off "
+                "for the rest of this attempt: %s",
+                feature.name,
+                error_message[:200],
+            )
+            if self._on_feature_disabled is not None:
+                try:
+                    self._on_feature_disabled(feature.name, error_message)
+                except Exception:  # noqa: BLE001 — a log hook must not fail a turn
+                    logger.debug("on_feature_disabled raised", exc_info=True)
+            return True
+        return False
 
     async def stream(
         self,
@@ -757,9 +940,18 @@ class _RetryingProvider:
         max_tokens=16384,
         reasoning_effort=None,
         render_tool_images=False,
+        prompt_caching=None,
     ):
         attempt = 0
         while True:
+            # Forwarded only when set, so a turn call reaches the inner provider
+            # with exactly the arguments it took before the override existed.
+            extra = {} if prompt_caching is None else {"prompt_caching": prompt_caching}
+            if self._cache_affinity_key is not None:
+                extra["cache_affinity_key"] = self._cache_affinity_key
+            for feature in _REISSUABLE_FEATURES:
+                if feature.name in self._disabled_features:
+                    extra[feature.stream_kwarg] = feature.off_value
             committed = False
             pending_error: StreamError | None = None
 
@@ -771,6 +963,7 @@ class _RetryingProvider:
                 max_tokens=max_tokens,
                 reasoning_effort=reasoning_effort,
                 render_tool_images=render_tool_images,
+                **extra,
             ):
                 if isinstance(event, StreamError) and not committed:
                     pending_error = event
@@ -787,6 +980,11 @@ class _RetryingProvider:
 
             if pending_error is None:
                 return
+
+            if self._reissue_once_without(
+                pending_error.message.error_message or "", messages, tools, model
+            ):
+                continue
 
             cls = classify_error(pending_error.message.error_message or "")
             if not cls.retryable or attempt >= _API_RETRY_MAX_ATTEMPTS:
@@ -1275,7 +1473,33 @@ class NativeBrain:
             return drained
 
         model = req.model or self._config.model
-        provider = _RetryingProvider(self._provider, abort)
+        # One random key per attempt, never derived from the user or the task:
+        # it goes to a third party, and an attempt is what a cached prefix
+        # lives for. Minted only where the provider sends it, which also keeps
+        # it off test doubles that take no such argument.
+        cache_affinity_key = (
+            uuid.uuid4().hex if getattr(self._provider, "prompt_cache_key", False) else None
+        )
+        provider = _RetryingProvider(
+            self._provider,
+            abort,
+            on_feature_disabled=lambda name, message: log.error_event(
+                f"{name}_rejected", message
+            ),
+            cache_affinity_key=cache_affinity_key,
+        )
+        # The provider's resolved TTL, as for `prompt_caching` in the header.
+        prompt_cache_ttl = getattr(
+            self._provider,
+            "prompt_cache_ttl",
+            getattr(self._config, "prompt_cache_ttl", "5m"),
+        )
+        # The TTL reaches the wire only on breakpoints, so without caching a
+        # write was made at the endpoint's default and keeps the catalog price.
+        caching = getattr(self._provider, "prompt_caching", self._config.prompt_caching)
+        write_multiplier = (
+            cache_write_multiplier_for_ttl(prompt_cache_ttl) if caching else None
+        )
         usage = TaskUsage()
         # Cost provenance, for the usage row's `cost_basis`. `TaskUsage.add`
         # decides per turn whether to take the provider's reported cost or fall
@@ -1290,6 +1514,17 @@ class NativeBrain:
 
         def _all_turns_costed() -> bool:
             return turns_accumulated > 0 and turns_costed == turns_accumulated
+
+        def _count_summary_usage(summary_usage) -> None:
+            # A compaction summary is a model call the turn loop never sees, so
+            # its spend is folded in here, failed calls included.
+            nonlocal turns_accumulated, turns_costed
+            if summary_usage.total_tokens > 0 or summary_usage.cost_usd is not None:
+                # Summary calls are sent with prompt_caching=False, so no TTL.
+                usage.add(summary_usage, get_model_info(model))
+                turns_accumulated += 1
+                if summary_usage.cost_usd is not None:
+                    turns_costed += 1
 
         # Live model-catalog enrichment (ISSUE-182). Populate the per-model
         # metadata catalog from OpenRouter before the loop resolves windows /
@@ -1350,6 +1585,14 @@ class NativeBrain:
                 # value is the best available answer.
                 "prompt_caching": getattr(
                     self._provider, "prompt_caching", self._config.prompt_caching
+                ),
+                # Whether requests carried a key, never the key itself.
+                "prompt_cache_key": cache_affinity_key is not None,
+                "prompt_cache_ttl": prompt_cache_ttl,
+                # Resolved for this model, so an `auto` run says what it sent.
+                "strict_tool_schemas": bool(req.allowed_tools)
+                and strict_tools_enabled(
+                    getattr(self._provider, "strict_tool_schemas", "off"), model
                 ),
                 "cwd": str(req.cwd),
                 "istota_version": _ISTOTA_VERSION,
@@ -1471,6 +1714,7 @@ class NativeBrain:
                 inv = _tool_invocation(event.tool_name, event.args)
                 if inv:
                     entry["raw"] = inv
+                    tool_commands[event.tool_call_id] = inv
                 # Held until this turn's turn_end so the trace keeps document
                 # order (text the model wrote, then the tools it went on to
                 # call). Progress emission below stays live and unbuffered.
@@ -1480,6 +1724,7 @@ class NativeBrain:
                     req, _tool_use_event(event.tool_name, desc, event.tool_call_id, event.args)
                 )
             elif event.type == "tool_execution_end":
+                _record_tool_health(event)
                 await self._emit_progress(
                     req,
                     _tool_end_event(
@@ -1521,7 +1766,7 @@ class NativeBrain:
                     # token counts (some OpenRouter free/BYOK responses) would
                     # otherwise silently drop its charge from the task total.
                     if msg.usage.total_tokens > 0 or msg.usage.cost_usd is not None:
-                        usage.add(msg.usage, get_model_info(model))
+                        usage.add(msg.usage, get_model_info(model), write_multiplier)
                         turns_accumulated += 1
                         if msg.usage.cost_usd is not None:
                             turns_costed += 1
@@ -1584,9 +1829,168 @@ class NativeBrain:
         # Rolling turn latency, for converting the time budget into a turn
         # budget. Written by the turn_end handler above, read by the nudge.
         turn_clock: dict = {"last": time.monotonic(), "recent": []}
+        # Tool-failure accounting for the tool-health notice. Attempt-scoped
+        # like `turn_clock`, so an overflow-recovery continue carries it on.
+        # `turn_of_last_success` is None until a tool call has worked.
+        tool_health: dict = {
+            "consecutive_failures": 0,
+            "turn_of_last_success": None,
+            "failed_names": Counter(),
+            "failed_commands": [],
+            "fired": False,
+        }
+        # A Bash call's command, by call id, from its start event: the end
+        # event carries the result but not the arguments.
+        tool_commands: dict[str, str] = {}
+
+        def _record_tool_health(event: AgentEvent) -> None:
+            command = tool_commands.pop(event.tool_call_id, "")
+            if not _tool_failed(event.tool_name, event.result, event.is_error):
+                tool_health["consecutive_failures"] = 0
+                tool_health["failed_names"].clear()
+                tool_health["failed_commands"].clear()
+                tool_health["turn_of_last_success"] = stats["turns"]
+                return
+            tool_health["consecutive_failures"] += 1
+            tool_health["failed_names"][event.tool_name] += 1
+            first_word = command.split(maxsplit=1)[0] if command.strip() else ""
+            shown = tool_health["failed_commands"]
+            if (
+                first_word
+                and first_word not in shown
+                and len(shown) < _FAILURE_NUDGE_COMMANDS_SHOWN
+            ):
+                shown.append(first_word)
 
         # --- compaction + turn-budget nudge via prepare_next_turn ---------
-        compaction_state = {"summary": None, "details": None}
+        # `failures` counts failed proactive summaries this attempt; at
+        # `_MAX_PROACTIVE_COMPACTION_FAILURES` the proactive path stops trying
+        # and the overflow path is the only compaction left.
+        compaction_state = {"summary": None, "details": None, "failures": 0}
+        # Background compaction: a summary started below the blocking threshold
+        # and placed at a later boundary. One in flight at a time; `prefix` is
+        # the snapshot it summarizes, checked by identity before it is placed.
+        background_on = self._config.compaction_background and bool(req.allowed_tools)
+        background: dict = {
+            "task": None, "cut": 0, "prefix": None, "pin": None, "tokens_before": 0,
+        }
+
+        def _start_background(ctx, tokens, keep_recent, window) -> None:
+            cut = find_cut_point(ctx.messages, keep_recent_tokens=keep_recent)
+            if cut <= 0:
+                return
+            prefix = list(ctx.messages[:cut])
+            pin, to_summarize = plan_image_pin(prefix, keep_recent)
+            task = asyncio.create_task(
+                compact_messages(
+                    to_summarize,
+                    compaction_state["summary"],
+                    compaction_state["details"],
+                    provider,
+                    model,
+                    self._convert_to_llm,
+                    max_input_chars=_compaction_input_chars(window),
+                )
+            )
+            background.update(
+                task=task, cut=cut, prefix=prefix, pin=pin, tokens_before=tokens
+            )
+            logger.debug(
+                "native background compaction started: tokens=%d cut=%d", tokens, cut
+            )
+
+        def _clear_background():
+            task = background["task"]
+            background.update(
+                task=None, cut=0, prefix=None, pin=None, tokens_before=0
+            )
+            return task
+
+        def _take_background(ctx) -> list | None:
+            """Place a finished background summary, or discard it.
+
+            Returns the compacted message list when it was placed. Usage is
+            counted whether or not it was, since the spend is real.
+            """
+            cut, prefix, pin = background["cut"], background["prefix"], background["pin"]
+            tokens_before = background["tokens_before"]
+            task = _clear_background()
+            if task.cancelled():
+                return None
+            exc = task.exception()
+            if exc is not None:
+                # `compact_messages` reports failure in its outcome and never
+                # raises, so this is a bug; it still counts as a failed summary.
+                compaction_state["failures"] += 1
+                logger.warning("native background compaction raised: %r", exc)
+                return None
+            outcome = task.result()
+            _count_summary_usage(outcome.usage)
+            placed = outcome.ok and _prefix_in_place(ctx.messages, prefix)
+            compacted: list | None = None
+            if placed:
+                compaction_state["summary"] = outcome.summary
+                compaction_state["details"] = outcome.details
+                stats["compactions"] += 1
+                summary_msg = CompactionSummaryMessage(
+                    summary=outcome.summary,
+                    tokens_before=tokens_before,
+                    details=outcome.details,
+                )
+                remaining = ctx.messages[cut:]
+                compacted = (
+                    [pin, summary_msg, *remaining]
+                    if pin is not None
+                    else [summary_msg, *remaining]
+                )
+            elif not outcome.ok:
+                compaction_state["failures"] += 1
+                logger.warning(
+                    "native background compaction failed (%d/%d), "
+                    "context left uncut: %s",
+                    compaction_state["failures"],
+                    _MAX_PROACTIVE_COMPACTION_FAILURES,
+                    outcome.error,
+                )
+            else:
+                logger.info(
+                    "native background compaction discarded: the context was "
+                    "compacted while it ran"
+                )
+            log.compaction(
+                trigger="background",
+                ok=outcome.ok,
+                error=outcome.error,
+                placed=placed,
+                summary=outcome.summary if placed else None,
+                tokens_before=tokens_before,
+                cut_index=cut if placed else None,
+                messages_dropped=cut if placed else 0,
+                image_pinned=placed and pin is not None,
+                details=_details_dict(outcome.details),
+                recovery_index=None,
+                usage=_usage_dict(outcome.usage),
+            )
+            return compacted
+
+        async def _discard_background() -> None:
+            """Cancel an in-flight background summary and wait for it to go.
+
+            A cancelled call reported no usage, so it adds none. One that had
+            already finished unplaced is counted, because it was paid for.
+            """
+            task = _clear_background()
+            if task is None:
+                return
+            if not task.done():
+                task.cancel()
+            try:
+                outcome = await task
+            except asyncio.CancelledError:
+                return
+            except Exception:  # noqa: BLE001 — see `_take_background`
+                return
+            _count_summary_usage(outcome.usage)
         # Turn-budget nudge (ISSUE-187 defect 3). Only for tool-bearing tasks with
         # a cap — a text-only run (empty allowed_tools, e.g. the sleep cycle)
         # never sees it. ``fired`` tracks crossed thresholds so each surfaces once.
@@ -1638,10 +2042,46 @@ class NativeBrain:
             )
             return _turn_budget_nudge_message(remaining, phase)
 
+        failure_nudge_after = self._config.tool_failure_nudge_after
+        failure_nudge_on = failure_nudge_after > 0 and bool(req.allowed_tools)
+
+        def _next_failure_nudge(new_messages) -> UserMessage | None:
+            """The tool-health notice, once per attempt, or None.
+
+            Declines while a cancel is pending, as the stop conditions do: the
+            loop's own abort check should end the run, not one more turn.
+            """
+            if not failure_nudge_on or tool_health["fired"] or abort.is_set():
+                return None
+            failures = tool_health["consecutive_failures"]
+            if failures < failure_nudge_after:
+                return None
+            tool_health["fired"] = True
+            breakdown = _failure_breakdown(
+                tool_health["failed_names"], tool_health["failed_commands"]
+            )
+            last_success = tool_health["turn_of_last_success"]
+            since = None if last_success is None else stats["turns"] - last_success
+            logger.info(
+                "tool_failure_nudge fired consecutive_failures=%d breakdown=%s",
+                failures, breakdown,
+            )
+            log.nudge(
+                phase="tool_failure",
+                consecutive_failures=failures,
+                breakdown=breakdown,
+            )
+            return _tool_failure_nudge_message(failures, breakdown, since)
+
         async def prepare_next_turn(ctx: AgentContext, new_messages):
             from istota.agent.types import PrepareNextTurnResult
 
-            nudge = _next_budget_nudge(new_messages)
+            # Budget first, then tool health, when both fire on one boundary.
+            nudges = [
+                n
+                for n in (_next_budget_nudge(new_messages), _next_failure_nudge(new_messages))
+                if n is not None
+            ]
             info = get_model_info(model)
             window = self._config.context_window or info.context_window
             reserve = self._config.compaction_reserve_tokens or derive_reserve_tokens(window)
@@ -1650,7 +2090,29 @@ class NativeBrain:
             )
             tokens, _ = estimate_context_tokens(ctx.messages)
             compacted: list | None = None
-            if should_compact(tokens, window, reserve_tokens=reserve):
+            blocking = (
+                compaction_state["failures"] < _MAX_PROACTIVE_COMPACTION_FAILURES
+                and should_compact(tokens, window, reserve_tokens=reserve)
+            )
+            pending_bg = background["task"]
+            if pending_bg is not None and (blocking or pending_bg.done()):
+                if not pending_bg.done():
+                    # One summary at a time: the blocking threshold waits for
+                    # the one already running rather than paying for a second.
+                    logger.info(
+                        "native compaction: blocking threshold reached with a "
+                        "background summary in flight; awaiting it"
+                    )
+                    await asyncio.wait(
+                        {pending_bg}, timeout=_background_await_budget(deadline)
+                    )
+                if pending_bg.done():
+                    compacted = _take_background(ctx)
+            if (
+                compacted is None
+                and blocking
+                and compaction_state["failures"] < _MAX_PROACTIVE_COMPACTION_FAILURES
+            ):
                 cut = find_cut_point(ctx.messages, keep_recent_tokens=keep_recent)
                 if cut > 0:
                     to_compact = ctx.messages[:cut]
@@ -1665,7 +2127,7 @@ class NativeBrain:
                     # floor for the case where there is nothing to pin; the pin
                     # is what keeps the capability itself.
                     pin, to_summarize = plan_image_pin(to_compact, keep_recent)
-                    summary, details = await compact_messages(
+                    outcome = await compact_messages(
                         to_summarize,
                         compaction_state["summary"],
                         compaction_state["details"],
@@ -1678,42 +2140,76 @@ class NativeBrain:
                         # Bound the summary input so the request can't overflow.
                         max_input_chars=_compaction_input_chars(window),
                     )
-                    compaction_state["summary"] = summary
-                    compaction_state["details"] = details
-                    stats["compactions"] += 1
+                    _count_summary_usage(outcome.usage)
+                    if outcome.ok:
+                        compaction_state["summary"] = outcome.summary
+                        compaction_state["details"] = outcome.details
+                        stats["compactions"] += 1
+                    else:
+                        # No cut: the next request goes out uncompacted, and a
+                        # real overflow then reaches the reactive path, which
+                        # fails cleanly when it cannot summarize either.
+                        compaction_state["failures"] += 1
+                        logger.warning(
+                            "native proactive compaction failed (%d/%d), "
+                            "context left uncut: %s",
+                            compaction_state["failures"],
+                            _MAX_PROACTIVE_COMPACTION_FAILURES,
+                            outcome.error,
+                        )
                     # The messages this dropped are already in the file above
                     # it, so the record does not repeat them. `trigger` is the
                     # whole diagnostic value: proactive is the system working,
                     # overflow (below) is it catching a miss.
                     log.compaction(
                         trigger="proactive",
-                        summary=summary,
+                        ok=outcome.ok,
+                        error=outcome.error,
+                        placed=outcome.ok,
+                        summary=outcome.summary if outcome.ok else None,
                         tokens_before=tokens,
-                        cut_index=cut,
-                        messages_dropped=len(to_compact),
-                        image_pinned=pin is not None,
-                        details=_details_dict(details),
+                        cut_index=cut if outcome.ok else None,
+                        messages_dropped=len(to_compact) if outcome.ok else 0,
+                        image_pinned=outcome.ok and pin is not None,
+                        details=_details_dict(outcome.details),
                         recovery_index=None,
+                        usage=_usage_dict(outcome.usage),
                     )
-                    summary_msg = CompactionSummaryMessage(
-                        summary=summary, tokens_before=tokens, details=details
-                    )
-                    compacted = (
-                        [pin, summary_msg, *remaining]
-                        if pin is not None
-                        else [summary_msg, *remaining]
-                    )
+                    if outcome.ok:
+                        summary_msg = CompactionSummaryMessage(
+                            summary=outcome.summary,
+                            tokens_before=tokens,
+                            details=outcome.details,
+                        )
+                        compacted = (
+                            [pin, summary_msg, *remaining]
+                            if pin is not None
+                            else [summary_msg, *remaining]
+                        )
+            elif (
+                compacted is None
+                and not blocking
+                and background_on
+                and background["task"] is None
+                and compaction_state["failures"] < _MAX_PROACTIVE_COMPACTION_FAILURES
+            ):
+                background_tokens = (
+                    self._config.compaction_background_tokens
+                    or derive_background_tokens(window)
+                )
+                if tokens > window - reserve - background_tokens:
+                    _start_background(ctx, tokens, keep_recent, window)
 
             # Combine: a nudge injects into whichever message list is current
             # (compacted, or the unchanged context) as a trailing environment
             # note. Injecting via the returned list keeps it out of new_messages
             # (invisible to the trace + turn count) — purely model-facing.
-            if nudge is None:
+            if not nudges:
                 if compacted is None:
                     return None
                 return PrepareNextTurnResult(messages=compacted)
             base = compacted if compacted is not None else list(ctx.messages)
-            base.append(nudge)
+            base.extend(nudges)
             return PrepareNextTurnResult(messages=base)
 
         # --- stop conditions ----------------------------------------------
@@ -1948,7 +2444,9 @@ class NativeBrain:
                 # Preserve the overflow error before clearing, so an unusable
                 # recovery can fail with the real cause instead of a wrong answer.
                 overflow_error = last_error_message
-                recovery_ctx, summary, details = await _build_recovery_context(
+                # A background summary of the context being replaced is moot.
+                await _discard_background()
+                recovery_ctx, outcome = await _build_recovery_context(
                     transcript,
                     context.system_prompt,
                     context.tools,
@@ -1965,9 +2463,11 @@ class NativeBrain:
                     ),
                     max_input_chars=_compaction_input_chars(_rec_window),
                 )
-                stats["compactions"] += 1
-                # Written before the no-summary check below, deliberately: a
-                # recovery that produced nothing records `summary: null` and
+                _count_summary_usage(outcome.usage)
+                if outcome.ok:
+                    stats["compactions"] += 1
+                # Written before the `ok` check below, deliberately: a
+                # recovery that produced nothing records `ok: false` and
                 # then the run fails, and this record is what explains the
                 # failure.
                 #
@@ -1988,30 +2488,40 @@ class NativeBrain:
                 _added = [m for m in recovery_ctx.messages if id(m) not in {id(t) for t in transcript}]
                 log.compaction(
                     trigger="overflow",
+                    ok=outcome.ok,
+                    error=outcome.error,
+                    placed=outcome.ok,
                     recovery_index=recoveries,
-                    summary=summary or None,
+                    summary=outcome.summary if outcome.ok else None,
                     tokens_before=_estimated_tokens(transcript),
                     cut_index=None,
-                    messages_dropped=sum(1 for m in transcript if id(m) not in _kept),
-                    image_pinned=any(_carries_image(m) for m in _added),
-                    details=_details_dict(details),
+                    messages_dropped=(
+                        sum(1 for m in transcript if id(m) not in _kept)
+                        if outcome.ok else 0
+                    ),
+                    image_pinned=outcome.ok and any(_carries_image(m) for m in _added),
+                    details=_details_dict(outcome.details),
+                    usage=_usage_dict(outcome.usage),
                 )
-                # If compaction produced no summary (the summary request itself
-                # overflowed and there was no prior summary to fall back on),
-                # continuing would answer with the user's request gone from
-                # context — a confident non-answer. Fail with the overflow error
-                # instead (NB-10).
-                if not (summary and summary.strip()):
+                # If compaction failed (the summary request itself overflowed,
+                # or the endpoint refused it), continuing would answer with the
+                # dropped turns gone from context, the user's request among
+                # them — a confident non-answer. Fail with the overflow error
+                # instead (NB-10). A previous summary does not stand in: it
+                # predates everything the cut would now drop.
+                if not outcome.ok:
                     logger.warning(
-                        "native overflow recovery produced no summary; failing with overflow error"
+                        "native overflow recovery could not summarize (%s); "
+                        "failing with overflow error",
+                        outcome.error,
                     )
                     final_stop["reason"] = "error"
                     last_error_message = (
                         overflow_error or "context window exceeded and compaction failed"
                     )
                     break
-                compaction_state["summary"] = summary
-                compaction_state["details"] = details
+                compaction_state["summary"] = outcome.summary
+                compaction_state["details"] = outcome.details
                 # Clear the error markers so the post-continue re-check sees the
                 # continue's own outcome, not the prior overflow.
                 final_stop["reason"] = ""
@@ -2037,6 +2547,8 @@ class NativeBrain:
                         await _bg
                     except asyncio.CancelledError:
                         pass
+            # Before the telemetry line, so a finished summary's spend is in it.
+            await _discard_background()
             # In ``finally`` so the per-task cache footer is logged at task end
             # even if the recovery body raises a non-overflow exception.
             _log_cache_telemetry(usage)
@@ -2702,8 +3214,12 @@ async def _build_recovery_context(
     convert_to_llm,
     keep_recent_tokens: int = 20000,
     max_input_chars: int = 0,
-) -> tuple[AgentContext, str, object]:
+) -> tuple[AgentContext, CompactionOutcome]:
     """Force-compact ``transcript`` and return a context ready for continue.
+
+    The caller must check ``outcome.ok`` before continuing from the context: on
+    a failed summary it holds the previous summary, or none, in place of the
+    dropped turns.
 
     Ignores ``should_compact`` (this is the reactive safety net — the window was
     already exceeded). Falls back to ``_aggressive_cut`` when ``find_cut_point``
@@ -2725,19 +3241,21 @@ async def _build_recovery_context(
     # oversized set of blocks is dropped with the summary's loss notice rather
     # than carried into a request that just failed for length.
     pin, to_summarize = plan_image_pin(to_compact, keep_recent_tokens)
-    summary, details = await compact_messages(
+    outcome = await compact_messages(
         to_summarize, prev_summary, prev_details, provider, model, convert_to_llm,
         max_input_chars=max_input_chars,
     )
     messages: list = [
         *([pin] if pin is not None else []),
-        CompactionSummaryMessage(summary=summary, tokens_before=0, details=details),
+        CompactionSummaryMessage(
+            summary=outcome.summary, tokens_before=0, details=outcome.details
+        ),
         *remaining,
     ]
     if messages and getattr(messages[-1], "role", None) == "assistant":
         messages.append(UserMessage(content=[TextContent(text=_RECOVERY_NUDGE)]))
     ctx = AgentContext(system_prompt=system_prompt, messages=messages, tools=tools)
-    return ctx, summary, details
+    return ctx, outcome
 
 
 def _log_cache_telemetry(usage: TaskUsage) -> None:

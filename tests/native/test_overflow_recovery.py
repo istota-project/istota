@@ -183,6 +183,33 @@ class TestRecoveryEndToEnd:
         assert "context length" in result.result_text  # the original overflow cause
         assert spy["continue"] == 0  # never continued with an empty summary
 
+    def test_a_failed_summary_with_a_previous_one_still_fails(self, tmp_path, monkeypatch):
+        # The previous summary predates every turn the second cut would drop,
+        # so it cannot stand in for them. The run used to continue on it.
+        spy = {"continue": 0}
+        real_continue = native_mod.run_agent_loop_continue
+
+        async def _spy_continue(*a, **k):
+            spy["continue"] += 1
+            return await real_continue(*a, **k)
+
+        monkeypatch.setattr(native_mod, "run_agent_loop_continue", _spy_continue)
+
+        provider = _ScriptedProvider(
+            [
+                _OVERFLOW,
+                ("done", "SUMMARY"),
+                _OVERFLOW,
+                ("refused", "HTTP 400: summary request refused"),
+            ]
+        )
+        result = _brain(provider).execute(_req("hi", tmp_path))
+        assert result.success is False
+        assert result.stop_reason == "error"
+        assert "context length" in result.result_text
+        assert spy["continue"] == 1
+        assert provider.calls == 4
+
     def test_transient_error_during_compaction_is_retried(self, tmp_path, monkeypatch):
         # NB-10: compaction runs through the retrying provider, so a transient
         # 429 during the summary call is retried instead of failing the recovery.
@@ -274,7 +301,7 @@ class TestBuildRecoveryContext:
             UserMessage(content=[TextContent(text="hi")]),
             AssistantMessage(content=[TextContent(text="")], stop_reason="error"),
         ]
-        ctx, summary, details = await _build_recovery_context(
+        ctx, _outcome = await _build_recovery_context(
             transcript, "sys", None, None, None, _SummaryProvider(), "m", _convert
         )
         last = ctx.messages[-1]
@@ -304,7 +331,7 @@ class TestBuildRecoveryContext:
             ToolResultMessage(tool_call_id="c", content=[TextContent(text="r")]),
             AssistantMessage(content=[TextContent(text="")], stop_reason="error"),
         ]
-        ctx, _s, _d = await _build_recovery_context(
+        ctx, _outcome = await _build_recovery_context(
             transcript, "sys", None, None, None, _SummaryProvider(), "m", _convert
         )
         from istota.session.messages import CompactionSummaryMessage

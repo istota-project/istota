@@ -40,6 +40,27 @@ class ToolCallContent:
 class ThinkingContent:
     type: Literal["thinking"] = "thinking"
     thinking: str = ""
+    # The endpoint's structured reasoning (OpenRouter ``reasoning_details``),
+    # coalesced, kept verbatim so it can be sent back on a later turn. Encrypted
+    # items carry no readable text, so ``thinking`` can be empty beside them.
+    details: list[dict] | None = None
+    # Which delta field ``thinking`` was read from: ``reasoning_content``,
+    # ``reasoning`` or ``reasoning_details``. Empty when unknown.
+    source_field: str = ""
+
+
+# ``[brain.native] reasoning_replay``: whether an assistant turn's reasoning is
+# sent back. ``auto`` sends structured ``details`` only; ``on`` also sends plain
+# reasoning under its ``source_field``; ``off`` sends none.
+REASONING_REPLAY_MODES = ("auto", "on", "off")
+
+# ``[brain.native] prompt_cache_ttl``: how long a ``cache_control`` breakpoint
+# lives. ``5m`` is the endpoint default and writes the bare marker.
+PROMPT_CACHE_TTLS = ("5m", "1h")
+
+# ``[brain.native] strict_tool_schemas``: whether tool definitions go out with
+# ``"strict": true``. ``auto`` follows the model's ``supports_structured_outputs``.
+STRICT_TOOL_SCHEMA_MODES = ("off", "auto", "on")
 
 
 Content = TextContent | ImageContent | ToolCallContent | ThinkingContent

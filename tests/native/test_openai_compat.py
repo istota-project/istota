@@ -5,9 +5,20 @@ The SSE parser is exercised directly via an injected async line iterator
 the provider never raises.
 """
 
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
 import httpx
 
-from istota.llm.openai_compat import OpenAICompatibleProvider
+from istota.llm import make_provider
+from istota.llm.openai_compat import (
+    OpenAICompatibleProvider,
+    coalesce_reasoning_details,
+    is_reasoning_rejection,
+    replays_reasoning,
+)
+from istota.llm.replay import ReplayProvider, read_fixture
 from istota.llm.provider import (
     StreamDone,
     StreamError,
@@ -18,6 +29,7 @@ from istota.llm.provider import (
 from istota.llm.types import (
     AssistantMessage,
     TextContent,
+    ThinkingContent,
     ToolCallContent,
     ToolParameter,
     ToolResultMessage,
@@ -596,3 +608,282 @@ class TestErrorEncoding:
         events = [e async for e in p.stream("", [], [])]
         assert isinstance(events[-1], StreamDone)
         assert events[-1].message.text == "hi"
+
+
+# --------------------------------------------------------------------------- #
+# Reasoning continuity (native-brain pi 1.x round, stage 4)
+# --------------------------------------------------------------------------- #
+
+_FIXTURES = Path(__file__).parent / "fixtures"
+_RECORDED = _FIXTURES / "sse_reasoning_details.jsonl"
+
+
+def _sse(delta: dict, finish: str | None = None) -> str:
+    return "data: " + json.dumps({"choices": [{"delta": delta, "finish_reason": finish}]})
+
+
+_FINISH = [_sse({}, "stop"), "data: [DONE]"]
+
+
+async def _events(lines) -> list:
+    return [e async for e in _provider()._parse_sse_lines(_aiter(lines), "m")]
+
+
+async def _done(lines) -> StreamDone:
+    events = await _events(lines)
+    assert isinstance(events[-1], StreamDone), events[-1]
+    return events[-1]
+
+
+def _thinking(message) -> ThinkingContent:
+    blocks = [c for c in message.content if isinstance(c, ThinkingContent)]
+    assert len(blocks) == 1, message.content
+    return blocks[0]
+
+
+def _recorded_reasoning() -> tuple[str, str]:
+    """The fixture's reasoning, read from each of the two fields alone."""
+    plain = ""
+    detailed = ""
+    for line in read_fixture(_RECORDED):
+        if not line.startswith("data:") or line.endswith("[DONE]"):
+            continue
+        for choice in json.loads(line[5:]).get("choices") or []:
+            delta = choice.get("delta") or {}
+            plain += delta.get("reasoning") or ""
+            for item in delta.get("reasoning_details") or []:
+                detailed += item.get("text") or ""
+    return plain, detailed
+
+
+class TestReasoningDetailsFixture:
+    """The recorded OpenRouter stream says each chunk's reasoning twice."""
+
+    async def test_it_coalesces_into_one_item_and_the_text_is_not_doubled(self):
+        plain, detailed = _recorded_reasoning()
+        assert plain and plain == detailed  # the premise the parser is built on
+
+        events = [e async for e in ReplayProvider(_RECORDED).stream("", [], [])]
+        done = events[-1]
+        assert isinstance(done, StreamDone)
+        block = _thinking(done.message)
+        assert block.thinking == plain
+        assert "".join(e.thinking for e in events if isinstance(e, ThinkingDelta)) == plain
+        assert block.details == [
+            {"type": "reasoning.text", "text": plain, "format": "unknown", "index": 0}
+        ]
+        assert block.source_field == "reasoning"
+        assert done.message.tool_calls
+
+
+class TestReasoningDetailsParse:
+    async def test_a_reasoning_only_stream_parses_as_before(self):
+        done = await _done(
+            [
+                _sse({"reasoning_content": "Let me "}),
+                _sse({"reasoning_content": "think."}),
+                _sse({"content": "A."}),
+            ]
+            + _FINISH
+        )
+        block = _thinking(done.message)
+        assert block.thinking == "Let me think."
+        assert block.details is None
+        assert block.source_field == "reasoning_content"
+        assert done.message.text == "A."
+
+    async def test_details_alone_supply_the_text_and_the_deltas(self):
+        events = await _events(
+            [
+                _sse({"reasoning_details": [{"type": "reasoning.text", "text": "one ", "index": 0}]}),
+                _sse({"reasoning_details": [{"type": "reasoning.text", "text": "two", "index": 0}]}),
+            ]
+            + _FINISH
+        )
+        assert [e.thinking for e in events if isinstance(e, ThinkingDelta)] == ["one ", "two"]
+        block = _thinking(events[-1].message)
+        assert block.thinking == "one two"
+        assert block.source_field == "reasoning_details"
+        assert block.details == [{"type": "reasoning.text", "text": "one two", "index": 0}]
+
+    async def test_coalescing_keeps_order_type_index_and_the_last_signature(self):
+        def item(**kw):
+            return _sse({"reasoning_details": [kw]})
+
+        lines = [
+            item(type="reasoning.text", text="a", index=0, format="anthropic-claude-v1"),
+            item(type="reasoning.text", text="b", index=0, signature="sig-1"),
+            item(type="reasoning.text", text="", index=0, signature="sig-2"),
+            item(type="reasoning.text", text="", index=0, signature=""),
+            item(type="reasoning.summary", summary="sum", index=1),
+            item(type="reasoning.summary", summary="mary", index=1),
+            item(type="reasoning.encrypted", data="QUJD", index=2),
+            item(type="reasoning.encrypted", data="REVG", index=2),
+            item(type="reasoning.text", text="c", index=3),
+        ] + _FINISH
+        block = _thinking((await _done(lines)).message)
+        assert block.details == [
+            {
+                "type": "reasoning.text",
+                "text": "ab",
+                "index": 0,
+                "format": "anthropic-claude-v1",
+                "signature": "sig-2",
+            },
+            {"type": "reasoning.summary", "summary": "summary", "index": 1},
+            {"type": "reasoning.encrypted", "data": "QUJDREVG", "index": 2},
+            {"type": "reasoning.text", "text": "c", "index": 3},
+        ]
+        # Encrypted data is not readable reasoning.
+        assert block.thinking == "absummaryc"
+
+    async def test_an_encrypted_only_stream_still_keeps_its_details(self):
+        lines = [
+            _sse({"reasoning_details": [{"type": "reasoning.encrypted", "data": "opaque", "index": 0}]}),
+            _sse({"content": "ok"}),
+        ] + _FINISH
+        block = _thinking((await _done(lines)).message)
+        assert block.thinking == ""
+        assert block.details == [{"type": "reasoning.encrypted", "data": "opaque", "index": 0}]
+
+    async def test_a_stream_with_no_reasoning_has_no_thinking_block(self):
+        done = await _done([_sse({"content": "plain"})] + _FINISH)
+        assert not [c for c in done.message.content if isinstance(c, ThinkingContent)]
+
+    def test_coalesce_skips_items_that_are_not_objects(self):
+        assert coalesce_reasoning_details(
+            ["junk", {"type": "reasoning.text", "text": "x", "index": 0}, None]
+        ) == [{"type": "reasoning.text", "text": "x", "index": 0}]
+
+
+_DETAILS = [{"type": "reasoning.encrypted", "data": "QUJD", "index": 0}]
+_CALL = ToolCallContent(id="c1", name="Read", arguments={"path": "a"})
+
+
+def _turn(*blocks) -> AssistantMessage:
+    return AssistantMessage(content=list(blocks), stop_reason="tool_use")
+
+
+def _wire(block: ThinkingContent, mode: str) -> dict:
+    return OpenAICompatibleProvider._message_to_wire(_turn(block, _CALL), mode)
+
+
+class TestReasoningReplayWire:
+    def test_auto_sends_details_verbatim(self):
+        wire = _wire(ThinkingContent(details=_DETAILS, source_field="reasoning_details"), "auto")
+        assert wire["reasoning_details"] == _DETAILS
+        assert wire["tool_calls"][0]["id"] == "c1"
+
+    def test_auto_does_not_send_plain_reasoning(self):
+        wire = _wire(ThinkingContent(thinking="hm", source_field="reasoning_content"), "auto")
+        assert set(wire) == {"role", "content", "tool_calls"}
+
+    def test_on_sends_plain_reasoning_under_its_own_field(self):
+        wire = _wire(ThinkingContent(thinking="hm", source_field="reasoning_content"), "on")
+        assert wire["reasoning_content"] == "hm"
+        assert "reasoning_details" not in wire
+
+    def test_on_sends_details_rather_than_the_text_they_repeat(self):
+        wire = _wire(ThinkingContent(thinking="hm", details=_DETAILS, source_field="reasoning"), "on")
+        assert wire["reasoning_details"] == _DETAILS
+        assert "reasoning" not in wire
+
+    def test_off_sends_nothing(self):
+        wire = _wire(ThinkingContent(thinking="hm", details=_DETAILS, source_field="reasoning"), "off")
+        assert set(wire) == {"role", "content", "tool_calls"}
+
+    def test_the_provider_setting_and_the_per_call_override(self):
+        msgs = [
+            UserMessage(content=[TextContent(text="hi")]),
+            _turn(ThinkingContent(details=_DETAILS, source_field="reasoning_details"), _CALL),
+        ]
+        p = OpenAICompatibleProvider(api_key="k", base_url="https://x/v1", reasoning_replay="auto")
+        assert p.reasoning_replay == "auto"
+        body = p._build_chat_completion_request("", msgs, [], "m", 10)
+        assert body["messages"][-1]["reasoning_details"] == _DETAILS
+        off = p._build_chat_completion_request("", msgs, [], "m", 10, reasoning_replay="off")
+        assert "reasoning_details" not in off["messages"][-1]
+
+    def test_replays_reasoning_reads_the_same_rule(self):
+        msgs = [_turn(ThinkingContent(thinking="hm", source_field="reasoning"), _CALL)]
+        assert replays_reasoning(msgs, "auto") is False
+        assert replays_reasoning(msgs, "on") is True
+        assert replays_reasoning(msgs, "off") is False
+
+    def test_the_default_endpoint_body_is_byte_identical_to_before(self):
+        """The body api.anthropic.com was sent before reasoning replay existed.
+
+        The golden was written by the pre-stage-4 request builder. That
+        endpoint streams `reasoning_content` and no `reasoning_details`, so
+        under the default `auto` nothing about its wire may change.
+        """
+        provider = make_provider(SimpleNamespace(provider="openai_compat", api_key="k"))
+        assert provider.reasoning_replay == "auto"
+        messages = [
+            UserMessage(content=[TextContent(text="Fix the failing test.")]),
+            AssistantMessage(
+                content=[
+                    ThinkingContent(
+                        thinking="The test reads a file first.", source_field="reasoning_content"
+                    ),
+                    TextContent(text="Reading it."),
+                    ToolCallContent(id="call_1", name="Read", arguments={"path": "a.py"}),
+                ],
+                stop_reason="tool_use",
+            ),
+            ToolResultMessage(
+                tool_call_id="call_1", tool_name="Read", content=[TextContent(text="x = 1\n")]
+            ),
+            AssistantMessage(
+                content=[
+                    ThinkingContent(thinking="Done.", source_field="reasoning_content"),
+                    TextContent(text="It passes now."),
+                ],
+            ),
+            UserMessage(content=[TextContent(text="Thanks.")]),
+        ]
+        tools = [
+            ToolSchema(
+                name="Read",
+                description="Read a file.",
+                parameters=[
+                    ToolParameter(name="path", type="string", description="The file."),
+                    ToolParameter(name="offset", type="integer", required=False),
+                ],
+            )
+        ]
+        body = provider._build_chat_completion_request(
+            "You are a coding agent.",
+            messages,
+            tools,
+            "claude-sonnet-5-5",
+            16384,
+            reasoning_effort="high",
+        )
+        golden = (_FIXTURES / "default_endpoint_request_body.json").read_text()
+        assert json.dumps(body) + "\n" == golden
+
+
+class TestReasoningRejection:
+    def test_a_400_naming_reasoning_thinking_or_a_signature(self):
+        assert is_reasoning_rejection('HTTP 400: {"error":{"message":"invalid reasoning_details"}}')
+        assert is_reasoning_rejection("HTTP 400: thinking blocks cannot be modified")
+        assert is_reasoning_rejection("Provider error frame: HTTP 400: Invalid signature in block")
+
+    def test_other_errors_are_not(self):
+        assert not is_reasoning_rejection("HTTP 400: messages: field required")
+        assert not is_reasoning_rejection("HTTP 500: reasoning service down")
+        assert not is_reasoning_rejection("HTTP 429: thinking too fast")
+        assert not is_reasoning_rejection("")
+        # The effort knob is a different field with a failure of its own.
+        assert not is_reasoning_rejection("HTTP 400: reasoning_effort is not supported")
+
+    def test_make_provider_falls_back_on_an_unknown_mode(self):
+        def build(mode):
+            return make_provider(
+                SimpleNamespace(provider="openai_compat", api_key="k", reasoning_replay=mode)
+            )
+
+        assert build("sometimes").reasoning_replay == "auto"
+        assert build("off").reasoning_replay == "off"
+        assert build("on").reasoning_replay == "on"

@@ -640,6 +640,51 @@ class TestHooks:
         assert len(tr) == 1
         assert tr[0].is_error is True
 
+    async def test_a_null_for_an_optional_argument_never_reaches_the_tool(self):
+        # A strict schema makes every optional key nullable, so a strict model
+        # sends `null` for each one it does not use.
+        calls: list = []
+        provider = MockProvider([_tool_turn("echo", {"value": None}), _text_turn("ok")])
+        await run_agent_loop(
+            [UserMessage(content=[TextContent(text="go")])],
+            _ctx(tools=[_echo_tool(calls)]),
+            _config(provider),
+            _Sink(),
+        )
+        assert calls == [{}]
+
+    async def test_the_null_is_dropped_before_prepare_arguments_runs(self):
+        seen: list = []
+
+        def _prepare(args):
+            seen.append(dict(args))
+            return args
+
+        async def _exec(call_id, args, ou, ab):
+            return ToolResult(content=[TextContent(text="x")])
+
+        tool = AgentTool(
+            schema=ToolSchema(
+                name="p",
+                description="d",
+                parameters=[
+                    ToolParameter(name="a", type="string"),
+                    ToolParameter(name="b", type="string", required=False),
+                ],
+            ),
+            execute=_exec,
+            execution_mode="sequential",
+            prepare_arguments=_prepare,
+        )
+        provider = MockProvider([_tool_turn("p", {"a": "x", "b": None}), _text_turn("ok")])
+        await run_agent_loop(
+            [UserMessage(content=[TextContent(text="go")])],
+            _ctx(tools=[tool]),
+            _config(provider),
+            _Sink(),
+        )
+        assert seen == [{"a": "x"}]
+
     async def test_after_hook_exception_parallel_mode_no_orphan(self):
         # Parallel mode: gather(return_exceptions=True) previously swallowed a
         # raising after-hook and `continue`d, leaving the call with no result

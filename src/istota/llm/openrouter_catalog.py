@@ -100,6 +100,7 @@ def _parse_one(entry: dict) -> ModelInfo | None:
     params = entry.get("supported_parameters")
     params = params if isinstance(params, list) else []
     supports_thinking = "reasoning" in params
+    supports_structured_outputs = "structured_outputs" in params
     # Default True when the field is absent (avoid over-restricting an endpoint
     # that simply doesn't enumerate parameters); only False when a list is
     # present and lacks "tools".
@@ -116,6 +117,7 @@ def _parse_one(entry: dict) -> ModelInfo | None:
         supports_tools=supports_tools,
         supports_vision=supports_vision,
         supports_thinking=supports_thinking,
+        supports_structured_outputs=supports_structured_outputs,
     )
 
 

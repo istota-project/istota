@@ -135,6 +135,22 @@ features = []
 #                                            #   way. The two are read independently — setting
 #                                            #   one and leaving the other at 0 derives only
 #                                            #   the one left unset.
+# compaction_background = false              # start the compaction summary in the background
+#                                            #   before the blocking threshold, and place it at
+#                                            #   a later turn boundary, so a long task does not
+#                                            #   stall on the summary call. Off: in the evals
+#                                            #   it made the primary model slower.
+# compaction_background_tokens = 0           # how far below the blocking threshold the
+#                                            #   background summary starts. 0 derives it:
+#                                            #   an eighth of the window, at most 32768.
+# reasoning_replay = "auto"                  # send a turn's reasoning back on later turns of
+#                                            #   the same attempt. "auto": structured
+#                                            #   reasoning_details only (OpenRouter); "on":
+#                                            #   plain reasoning text as well; "off": never.
+#                                            #   A request the endpoint refuses is re-sent
+#                                            #   once without, and replay stays off for the
+#                                            #   rest of the attempt. "auto" passed as many
+#                                            #   eval cases as "off" or more.
 # model_catalog_fetch = true                 # when base_url is OpenRouter, fetch its
 #                                            #   public model list once/process for real
 #                                            #   window / capabilities / prices (self-
@@ -153,6 +169,12 @@ features = []
 #                                            #   loop estimates the turns the remaining time has
 #                                            #   room for and uses whichever budget is scarcer, so
 #                                            #   the notices stay reachable on a slow brain.
+# tool_failure_nudge_after = 0               # after this many failed tool calls in a row (an
+#                                            #   error result, or a Bash command that exited
+#                                            #   non-zero), tell the model once to stop retrying
+#                                            #   what fails and change approach. 0 (default)
+#                                            #   disables: in the evals it did not reduce
+#                                            #   failed calls. 4 is a reasonable value to try.
 # soft_deadline_percent = 90                 # stop the loop at this % of scheduler.task_timeout_
 #                                            #   minutes, keeping the model's partial work.
 #                                            #   0 or >= 100 disables.
@@ -162,6 +184,24 @@ features = []
 #                                            #   to force either way (a plain-OpenAI / local
 #                                            #   endpoint that rejects cache_control needs
 #                                            #   `false`).
+# prompt_cache_key = true                    # send a random per-attempt prompt_cache_key so
+#                                            #   an attempt's requests reach one cache. Omit
+#                                            #   to use the default: ON for openrouter.ai and
+#                                            #   api.openai.com, OFF for any other endpoint,
+#                                            #   api.anthropic.com included.
+# prompt_cache_ttl = "5m"                    # cache breakpoint lifetime: "5m" or "1h". "1h"
+#                                            #   keeps the cached prefix through long tool
+#                                            #   runs; its writes cost 2x input, not 1.25x.
+#                                            #   Endpoints that cache implicitly ignore it.
+# strict_tool_schemas = "auto"               # send tool definitions with "strict": true, so
+#                                            #   the endpoint constrains tool arguments to the
+#                                            #   schema. "auto": only for a model whose
+#                                            #   supports_structured_outputs is true (from the
+#                                            #   OpenRouter catalog or model_overrides); "on":
+#                                            #   always; "off": never. A request the endpoint
+#                                            #   refuses is re-sent once without, and strict
+#                                            #   stays off for the rest of the attempt. "auto"
+#                                            #   cut failed edits on the weaker eval model.
 # bash_spill_full_output = true              # write Bash output past the per-tool cap to a
 #                                            #   temp file the model can Read, rather than
 #                                            #   dropping the tail.

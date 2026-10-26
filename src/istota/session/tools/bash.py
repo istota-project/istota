@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -33,6 +34,29 @@ from .env import ToolEnv
 # base64, ``jq -c``); chunked reads have no per-line ceiling and stream just as
 # incrementally (NB-6).
 _READ_CHUNK_BYTES = 65536
+
+_START_FAILED_PREFIX = "Failed to start command: "
+_ABORTED_SUFFIX = "\n[command aborted]"
+_TIMED_OUT_MARKER = "\n[command timed out after "
+_EXIT_CODE_RE = re.compile(r"\n\[exit code: (\d+)\][^\n]*\Z")
+
+
+def bash_result_failed(text: str) -> bool:
+    """True when a Bash result's text reports a failed command.
+
+    Bash never sets ``is_error`` on a non-zero exit, since a no-match ``grep``
+    is not a tool failure, so a caller counting failures reads the status
+    suffix this module writes. SIGPIPE's 141 is not a failure (see
+    ``shell_exec.SIGPIPE_NOTE``).
+    """
+    text = text or ""
+    if text.startswith(_START_FAILED_PREFIX):
+        return True
+    last_line = text[text.rfind("\n"):]
+    if last_line == _ABORTED_SUFFIX or last_line.startswith(_TIMED_OUT_MARKER):
+        return True
+    match = _EXIT_CODE_RE.search(text)
+    return match is not None and int(match.group(1)) != SIGPIPE_EXIT
 
 
 # Module-level for the reason the file schemas are: `session/tools/remote.py`
@@ -109,7 +133,7 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
                 start_new_session=True,
             )
         except (OSError, ValueError) as exc:
-            return ToolResult(content=[TextContent(text=f"Failed to start command: {exc}")])
+            return ToolResult(content=[TextContent(text=f"{_START_FAILED_PREFIX}{exc}")])
 
         out = bytearray()
         total_bytes = 0
@@ -193,9 +217,9 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
         # model can't see the status of would be reasoned about as a success.
         status_suffix = ""
         if status == "aborted":
-            status_suffix = "\n[command aborted]"
+            status_suffix = _ABORTED_SUFFIX
         elif status == "timeout":
-            status_suffix = f"\n[command timed out after {timeout_s:.0f}s]"
+            status_suffix = f"{_TIMED_OUT_MARKER}{timeout_s:.0f}s]"
         elif proc.returncode == SIGPIPE_EXIT:
             # `pipefail`'s one recognisable cost. A bare 141 reads as a failure;
             # `yes | head -1` is a correct command that now reports one.

@@ -44,6 +44,7 @@ class ModelInfo:
     supports_tools: bool = True
     supports_vision: bool = False
     supports_thinking: bool = False
+    supports_structured_outputs: bool = False
 
 
 # The real floor for an unknown model — no bundled catalog sits above it now.

@@ -1,0 +1,1 @@
+You are being evaluated on a small software task in a scratch repository. The repository is your working directory; work only inside it. Use the tools to inspect and change files and to run commands. When the task is done, reply with a short final answer that states the result.

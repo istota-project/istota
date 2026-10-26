@@ -180,6 +180,19 @@ heartbeat = "native"
 
 Defaults to `"claude_code"`, so existing deployments need no changes. `source_type_overrides` maps a task's `source_type` to a brain kind, overriding `kind` for matching tasks — the gradual-rollout knob (`brain.resolve_brain_kind` resolves it per task; unknown kinds are logged and ignored). `"native"` is istota's own in-process agent loop — see the [native brain operator runbook](../configuration/native-brain.md) for enabling it, the dev tiers, and shadow compare. `"tmux_claude"` drives the interactive `claude` TUI in a detached tmux session to keep traffic on subscription billing; a launch-level failure returns `stop_reason="fallback"`, so the executor reruns the task through `[brain] fallback` where one is configured, and a process-global circuit breaker short-circuits to it for a cooldown after repeated launch failures. With no fallback named the task fails; there is no implicit `claude_code` target (ISSUE-362).
 
+### Native brain request and context options
+
+`[brain.native]` carries the native loop's own options. These came in with the pi 1.x comparison round, and their defaults were set from that round's evals (stage 8):
+
+- `compaction_background` (default `false`) and `compaction_background_tokens` (0 = an eighth of the window, at most 32768): start the compaction summary before the blocking threshold and swap it in at a later turn boundary. Kept off because the primary eval model got slower with it.
+- `reasoning_replay` (default `"auto"`): send structured reasoning back on later turns of the same attempt. `"on"` adds plain reasoning text, `"off"` sends none.
+- `prompt_cache_key` (unset = on for OpenRouter and OpenAI, off elsewhere): a random per-attempt key, so an attempt's requests reach one cache.
+- `prompt_cache_ttl` (default `"5m"`, or `"1h"`): lifetime of the cache breakpoints. Kept at 5m because both eval providers cache implicitly and ignore the field.
+- `strict_tool_schemas` (default `"auto"`): send tool definitions strict for models whose catalog entry says they support structured outputs. Moved from `"off"` because the weaker eval model made fewer failed edits with it.
+- `tool_failure_nudge_after` (default 0 = off): after this many failed tool calls in a row, tell the model once to change approach. Shipped off because it did not reduce failed calls.
+
+A refused reasoning replay or strict schema is re-sent once without the feature, which stays off for the rest of the attempt. A failed compaction summary never drops context: the proactive path keeps the messages and tries again later, and overflow recovery fails the attempt when its own summary fails. The [native brain operator runbook](../configuration/native-brain.md) has the details.
+
 ## Adding a new brain
 
 1. Create `brain/<name>.py` with a class implementing `Brain.execute()`.
