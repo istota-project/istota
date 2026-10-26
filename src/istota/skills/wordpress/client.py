@@ -30,7 +30,6 @@ redirect authenticated traffic; the TLS trust store still honours
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import re
@@ -38,7 +37,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from istota.sandbox import net_guard
+from istota.sandbox import guarded_http, net_guard
 from istota.sandbox.net_guard import resolve_host
 from istota.lib.untrusted import frame_untrusted
 
@@ -101,8 +100,7 @@ def _wp_code(body: bytes) -> str | None:
 
 def _host_header(host: str, port: int) -> str:
     """The Host header for a name or an address literal, brackets on IPv6."""
-    name = f"[{host}]" if ":" in host else host
-    return name if port == 443 else f"{name}:{port}"
+    return guarded_http.host_header(host, port, "https")
 
 
 class WordPressClient:
@@ -125,14 +123,7 @@ class WordPressClient:
         self._private = net_guard.host_set(private_hosts)
         self._resolve = resolve or resolve_host
         self._timeout = timeout
-        # `verify` is built with trust_env=True on its own: that reads only
-        # SSL_CERT_FILE / SSL_CERT_DIR, while the client's trust_env=False keeps
-        # proxy variables out. httpx couples the two otherwise.
-        verify = True if transport is not None else httpx.create_ssl_context(trust_env=True)
-        self._http = httpx.Client(
-            transport=transport, trust_env=False, follow_redirects=False,
-            verify=verify, timeout=timeout,
-        )
+        self._http = guarded_http.new_client(timeout=timeout, transport=transport)
 
     def __repr__(self) -> str:
         return f"WordPressClient({self.site_url})"
@@ -148,43 +139,32 @@ class WordPressClient:
 
     def _checked_addresses(self, host: str, port: int) -> list[str]:
         name = net_guard.normal_host(host)
-        addresses = net_guard.host_addresses(host, port, resolve=self._resolve)
+        addresses, refused = net_guard.checked_addresses(
+            host, port, private_hosts=self._private, resolve=self._resolve,
+        )
+        if refused is not None:
+            raise WordPressError(
+                f"{name} resolves to a private or reserved address ({refused}). "
+                f"Only a host the operator lists in [wordpress] private_hosts "
+                f"may; nothing was sent.",
+                "host_refused",
+            )
         if not addresses:
             raise WordPressError(f"Could not resolve {name}; nothing was sent.",
                                  "connection_failed")
-        if name not in self._private:
-            address = net_guard.first_non_public(addresses)
-            if address is not None:
-                raise WordPressError(
-                    f"{name} resolves to a private or reserved address ({address}). "
-                    f"Only a host the operator lists in [wordpress] private_hosts "
-                    f"may; nothing was sent.",
-                    "host_refused",
-                )
-        return [str(a) for a in addresses]
+        return addresses
 
     def _build(self, method, url, host, port, address, params, body, *,
                content=None, headers=None, timeout=None) -> httpx.Request:
-        target = httpx.URL(url, params=params).copy_with(host=address, port=port)
-        credentials = f"{self._username.reveal()}:{self._password.reveal()}"
-        # The caller's headers first, so they can never replace these four.
+        # The caller's headers first, so they can never replace these four:
+        # `pinned_request` sets Host and Authorization over them.
         merged = dict(headers or {})
-        merged.update({
-            "Host": _host_header(host, port),
-            "Authorization": "Basic " + base64.b64encode(credentials.encode()).decode(),
-            "Accept": "application/json",
-            "User-Agent": USER_AGENT,
-        })
-        if content is not None:
-            request = httpx.Request(method, target, headers=merged, content=content)
-        else:
-            request = httpx.Request(method, target, headers=merged, json=body)
-        extensions = dict(request.extensions or {})
-        extensions["sni_hostname"] = host
-        if timeout is not None:
-            extensions["timeout"] = httpx.Timeout(timeout).as_dict()
-        request.extensions = extensions
-        return request
+        merged.update({"Accept": "application/json", "User-Agent": USER_AGENT})
+        return guarded_http.pinned_request(
+            method, url, address, headers=merged, content=content, json=body,
+            params=params, timeout=timeout,
+            auth=(self._username.reveal(), self._password.reveal()),
+        )
 
     def _send(self, request: httpx.Request) -> tuple[httpx.Response, bytes]:
         response = self._http.send(request, stream=True)

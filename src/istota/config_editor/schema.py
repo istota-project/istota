@@ -110,6 +110,10 @@ RISKY_KEYS: frozenset[tuple[str, ...]] = frozenset({
     ("brain", "kind"),
     ("brain", "fallback"),
     ("brain", "room_selectable"),
+    # Opens unauthenticated public routes that write per-user rows.
+    ("sharing", "ocm", "enabled"),
+    # Lifts the private-address refusal for daemon-side fetches.
+    ("sharing", "private_hosts"),
 })
 
 

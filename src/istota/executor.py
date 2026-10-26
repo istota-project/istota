@@ -6926,6 +6926,9 @@ def build_prompt(
     group_memory: str | None = None,
     channel_memory_shared: bool = False,
     skip_memory: bool = False,
+    shared_calendars: "list[tuple[str, str]] | None" = None,
+    istota_calendar: str | None = None,
+    shared_folders: "list[tuple[str, str, str]] | None" = None,
     assignment_prompt: "AssignmentWakePrompt | None" = None,
 ) -> ComposedPrompt:
     """Build a task's prompt, split by authority rather than by size.
@@ -7032,6 +7035,41 @@ def build_prompt(
         )
         resource_sections.append(
             f"Calendars (shared by {display_user_id}):\n{cal_list}"
+        )
+
+    # Feeds the user shared with Istota by address (`sharing.ics`): ids and
+    # hosts only. A feed's name is the provider's text, so it stays out of
+    # this half and is read fenced through `calendar calendars`. Then Istota's
+    # own calendar (`sharing.events`), when the caller found it in reach.
+    entries = [
+        f"{_one_line(calendar_id)} ({_one_line(host)})"
+        for calendar_id, host in (shared_calendars or [])
+    ]
+    if istota_calendar == "writable":
+        entries.append("istota (writable)")
+    elif istota_calendar:
+        entries.append("istota")
+    if istota_calendar:
+        # Invitations other people mailed the user (`sharing.itip`), behind the same gate.
+        entries.append("feed:invitations")
+    if entries:
+        listed = ", ".join(entries)
+        resource_sections.append(
+            "Other calendars (read-only unless noted, via istota-skill calendar): "
+            f"{listed}"
+        )
+
+    # Folders the user shared with Istota over OCM (`sharing.ocm`): ids, hosts
+    # and access only; a folder's name is the sharer's text, read fenced
+    # through `shares list`.
+    folders = [
+        f"{_one_line(share_id)} ({_one_line(host)}, "
+        f"{'read-write' if access == 'write' else 'read-only'})"
+        for share_id, host, access in (shared_folders or [])
+    ]
+    if folders:
+        resource_sections.append(
+            "Shared folders (via istota-skill shares): " + ", ".join(folders)
         )
 
     resources_text = "\n\n".join(resource_sections)
@@ -7738,6 +7776,29 @@ def _task_withheld_scopes(
     return withheld
 
 
+def _discover_shared(
+    config: Config, task: db.Task, conn: "db.sqlite3.Connection | None", skill_index,
+    *, kind: str,
+) -> list[tuple]:
+    """``sharing.sources.discover_shared_calendars`` or ``discover_shared_folders``
+    (``kind`` ``calendars`` or ``folders``), best-effort: ``[]`` on any failure."""
+    from istota.sharing import sources as shared_sources
+
+    discover = {
+        "calendars": shared_sources.discover_shared_calendars,
+        "folders": shared_sources.discover_shared_folders,
+    }[kind]
+    try:
+        with db.get_db_if_present(config.db_path, conn) as c:
+            if c is None:
+                return []
+            return discover(c, task, skill_index=skill_index)
+    except Exception as exc:  # noqa: BLE001 — a missing line beats a failed task
+        logger.warning("shared %s discovery failed for task %s: %s",
+                       kind, task.id, type(exc).__name__)
+        return []
+
+
 def _ambient_memory_off(
     config: Config, task: db.Task, conn: "db.sqlite3.Connection | None",
 ) -> bool:
@@ -8307,9 +8368,10 @@ def execute_task(
     _selected_metas = [skill_index[n] for n in selected_skills if n in skill_index]
     # A shared room leaves the sender's ambient memory out of the prompt
     # (ISSUE-576); the memory skill is still there when they ask for it.
+    _ambient_off = _ambient_memory_off(config, task, conn)
     _skip_memory = (
         any(m.exclude_memory for m in _selected_metas) or "memory" in _withheld
-        or _ambient_memory_off(config, task, conn)
+        or _ambient_off
     )
     _skip_persona = any(m.exclude_persona for m in _selected_metas)
 
@@ -8535,6 +8597,20 @@ def execute_task(
         )
     )
 
+    # The feeds line is ambient: a member's turn in a shared room reaches the
+    # feeds when it asks, but is not told about them unasked (ISSUE-576).
+    shared_calendars = []
+    istota_calendar = None
+    if "calendar" in cli_skill_names and "calendar" not in _withheld and not _ambient_off:
+        shared_calendars = _discover_shared(config, task, conn, skill_index, kind="calendars")
+        # Istota's own calendar (`sharing.events`) is always there; writable
+        # unless `[sharing] events_per_task` turned its writes off.
+        istota_calendar = "writable" if config.sharing.events_per_task > 0 else "read-only"
+    # Accepted folder shares (`sharing.ocm`), ambient on the same terms.
+    shared_folders = []
+    if "shares" in cli_skill_names and "shares" not in _withheld and not _ambient_off:
+        shared_folders = _discover_shared(config, task, conn, skill_index, kind="folders")
+
     # Build prompt
     # Detect confirmed tasks — pass their previous output as confirmation context
     _confirmation_context = None
@@ -8558,6 +8634,9 @@ def execute_task(
         group_memory=group_memory,
         channel_memory_shared=_channel_shared,
         skip_memory=_skip_memory,
+        shared_calendars=shared_calendars,
+        istota_calendar=istota_calendar,
+        shared_folders=shared_folders,
         conn=conn,
         effective_prompt=effective_prompt,
         attachment_status=image_attachment_status(image_prep),

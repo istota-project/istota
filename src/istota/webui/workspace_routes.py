@@ -46,11 +46,16 @@ async def api_workspace_places(request: Request, user: dict = Depends(require_au
         with db.get_db(config.db_path) as conn:
             places = list_places(config, conn, user["username"])
             reach = place_reach(config, conn, user["username"], places)
-            payload = [{
-                "id": place.id, "kind": place.kind, "label": place.label,
-                "browsable": place.browsable, "view_root": place.view_root,
-                "reach": asdict(reach[place.id]),
-            } for place in places]
+            payload = []
+            for place in places:
+                entry = {
+                    "id": place.id, "kind": place.kind, "label": place.label,
+                    "browsable": place.browsable, "view_root": place.view_root,
+                    "reach": asdict(reach[place.id]),
+                }
+                if place.kind == "share":
+                    entry["remote"] = {"host": place.remote_host, "access": place.remote_access}
+                payload.append(entry)
         return {"places": payload, "notes": deployment_notes(config)}
 
     return await asyncio.to_thread(query)

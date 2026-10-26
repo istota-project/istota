@@ -2427,8 +2427,13 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         "workspace": False,
         "groups": is_admin,
         "admin": is_admin,
+        "sharing": False,
+        "sharing_ocm": False,
     }
     if _config:
+        # Calendar feeds have no switch of their own; the card needs the database.
+        features["sharing"] = bool(_config.db_path)
+        features["sharing_ocm"] = bool(_config.db_path) and bool(_config.sharing.ocm.enabled)
         features["feeds"] = _user_has_feeds(username)
         features["location"] = _user_has_location(username)
         features["money"] = _user_has_money(username)
@@ -15659,6 +15664,357 @@ async def settings_mail_account_test_state(request_id: str,
         return _MailAccountRefusal(500, "The test could not be read").response()
 
 
+# --- Shared with Istota: ICS feeds (open-protocol sharing) -------------------
+#
+# A feed's address is a bearer secret: the body is parsed by hand (a declared
+# model's 422 would echo it), no answer carries it, and a refusal is a fixed
+# message per reason code. The one validating fetch runs in a worker thread
+# through `sharing.ics`, which goes through the guarded HTTP client.
+
+_FEED_REFUSALS = {
+    "invalid_url": "That is not a calendar address Istota can use.",
+    "host_refused": "Istota cannot reach that host.",
+    "not_a_calendar": "That address did not return a calendar.",
+    "too_large": "That calendar is too large.",
+    "redirect_refused": "That address redirects too many times.",
+    "connection_failed": "Istota could not connect to that host.",
+    "timeout": "That host did not answer in time.",
+    "too_many_feeds": "You have reached the limit of calendar feeds on this server.",
+}
+
+
+def _feed_refusal_message(code: str) -> str:
+    if code in _FEED_REFUSALS:
+        return _FEED_REFUSALS[code]
+    if code.startswith("http_"):
+        return "That address answered with an error."
+    return "The calendar could not be added."
+
+
+def _shared_feed_dict(source) -> dict:
+    return {
+        "id": source.id, "host": source.remote_host, "name": source.extras.get("name"),
+        "state": source.state, "last_reason": source.last_reason,
+        "last_ok_at": source.last_ok_at, "created_at": source.created_at,
+    }
+
+
+def _ocm_offer_dict(source) -> dict:
+    """An offer as the card shows it: the sender's words and host, never the WebDAV base."""
+    return {
+        "id": source.id, "name": source.extras.get("name"), "owner": source.extras.get("owner"),
+        "host": source.remote_host, "reoffer": source.state != "pending",
+        "created_at": source.created_at,
+    }
+
+
+def _ocm_share_dict(source) -> dict:
+    """An accepted folder share: its name and host, the access the provider reports."""
+    return {
+        "id": source.id, "name": source.extras.get("name"), "owner": source.extras.get("owner"),
+        "host": source.remote_host, "access": source.access, "state": source.state,
+        "last_reason": source.last_reason, "created_at": source.created_at,
+    }
+
+
+# How each refusal of an accept, decline or remove answers over HTTP; the
+# text is `sharing.ocm`'s fixed message.
+_OCM_ACTION_STATUS = {
+    "isolation": 403,
+    "not_found": 404,
+    "not_waiting": 409,
+    "not_active": 409,
+    "offer_changed": 409,
+    "share_unopened": 409,
+    "credential_refused": 409,
+    "share_unreachable": 502,
+    "unavailable": 503,
+}
+
+
+def _ocm_action(action: str, user_id: str, source_id: int, allow_scheduled: bool) -> dict:
+    from istota import db
+    from istota.credentials import names
+    from istota.sharing import ocm, sources
+
+    with db.get_db(_config.db_path) as conn:
+        if action == "accept":
+            result = ocm.accept(conn, _config, source_id, user_id, allow_scheduled=allow_scheduled,
+                                sandboxed=names.tasks_sandboxed(_config))
+        elif action == "decline":
+            result = ocm.decline(conn, _config, source_id, user_id)
+        else:
+            result = ocm.remove(conn, _config, source_id, user_id)
+        source = sources.get_source(conn, source_id, user_id)
+    return {"share": _ocm_share_dict(source), "notified": result.notified}
+
+
+async def _run_ocm_action(action: str, ident: str, user: dict, allow_scheduled: bool = False):
+    from istota.sharing import ocm
+
+    if _config is None or not _config.db_path:
+        return _sharing_refusal(503, "unavailable", "Config not loaded")
+    if not ident.isascii() or not ident.isdigit() or len(ident) > 18:
+        return _sharing_refusal(404, "not_found", "That folder share was not found.")
+    try:
+        body = await asyncio.to_thread(_ocm_action, action, user["username"], int(ident),
+                                       allow_scheduled)
+    except ocm.ShareActionRefused as refused:
+        return _sharing_refusal(_OCM_ACTION_STATUS.get(refused.code, 409), refused.code,
+                                str(refused))
+    except Exception as exc:
+        logger.error("folder share %s failed: %s", action, type(exc).__name__)
+        return _sharing_refusal(500, "error", "The folder share could not be changed.")
+    return JSONResponse(body, headers=_NO_STORE)
+
+
+def _sharing_listing(user_id: str) -> dict:
+    from istota import db
+    from istota.credentials import store as secrets_store
+    from istota.sharing import sources
+
+    from istota.sharing import events
+
+    from istota.notifications.resolvers import shared_source
+
+    ocm = None
+    with db.get_db(_config.db_path) as conn:
+        feeds = sources.sources_for_user(conn, user_id, kinds=("ics_feed",))
+        feed_link = events.token_info(conn, user_id)
+        receiving = bool(_config.sharing.ocm.enabled and _config.site.hostname)
+        shares = sources.sources_for_user(conn, user_id, kinds=("ocm_share",))
+        # With OCM off the section stays while shares do, so they can still
+        # be removed; no new offer can arrive then, so none are listed.
+        if receiving or shares:
+            ocm = {
+                "enabled": receiving,
+                "federated_id": f"{user_id}@{_config.site.hostname}" if receiving else None,
+                "pending": ([_ocm_offer_dict(offer) for offer in shared_source.waiting(conn, user_id)]
+                            if receiving else []),
+                "shares": [_ocm_share_dict(share) for share in shares],
+                "accept_refusal": _web_vault_refusal(user_id),
+            }
+    profile = user_profiles.get_profile(_config.db_path, user_id)
+    delivery = profile.calendar_delivery if profile is not None else "invite"
+    return {
+        "feeds": [_shared_feed_dict(feed) for feed in feeds],
+        "max_feeds": _config.sharing.ics_max_feeds_per_user,
+        "can_add": secrets_store.secret_key_available(),
+        # Istota's own calendar. The feed link's token is shown once, when made.
+        "calendar": {
+            "delivery": delivery,
+            "effective_delivery": events.effective_delivery(_config, delivery),
+            "email_enabled": bool(_config.email.enabled),
+            "feed": feed_link,
+            "can_link": bool(_config.site.hostname),
+            "reachable_elsewhere": events.feed_reachable_elsewhere(_config),
+        },
+        # Folders shared over OCM. Absent while OCM is off, so the card hides
+        # the federated id.
+        "ocm": ocm,
+    }
+
+
+def _add_shared_feed(user_id: str, url: str) -> dict:
+    from istota import db
+    from istota.sharing import ics, sources
+
+    with db.get_db(_config.db_path) as conn:
+        source_id = ics.add_feed(conn, _config, user_id, url)
+        conn.commit()
+        return _shared_feed_dict(sources.get_source(conn, source_id, user_id))
+
+
+def _remove_shared_feed(user_id: str, source_id: int) -> bool:
+    from istota import db
+    from istota.sharing import ics
+
+    with db.get_db(_config.db_path) as conn:
+        removed = ics.remove_feed(conn, user_id, source_id)
+        conn.commit()
+    return removed
+
+
+def _sharing_refusal(status: int, reason: str, detail: str, **extra) -> JSONResponse:
+    return JSONResponse({"detail": detail, "reason": reason, **extra},
+                        status_code=status, headers=_NO_STORE)
+
+
+@api_router.get("/settings/sharing")
+async def settings_sharing(user: dict = Depends(_require_api_auth)):
+    if _config is None or not _config.db_path:
+        return _sharing_refusal(503, "unavailable", "Config not loaded")
+    try:
+        listing = await asyncio.to_thread(_sharing_listing, user["username"])
+    except Exception as exc:
+        logger.error("shared sources read failed: %s", type(exc).__name__)
+        return _sharing_refusal(500, "error", "The shared calendars could not be loaded")
+    return JSONResponse(listing, headers=_NO_STORE)
+
+
+@api_router.post("/settings/sharing/feeds")
+async def settings_sharing_feed_add(request: Request, user: dict = Depends(_require_api_auth),
+                                    _csrf: None = Depends(_verify_origin)):
+    from istota.credentials import store as secrets_store
+    from istota.sharing import ics, sources
+
+    if _config is None or not _config.db_path:
+        return _sharing_refusal(503, "unavailable", "Config not loaded")
+    try:
+        raw = await read_bounded_body(request, 8 * 1024)
+        body = json.loads(raw)
+    except BodyError as exc:
+        return _sharing_refusal(exc.status, "invalid_body", exc.message)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return _sharing_refusal(400, "invalid_body", "The request body is not JSON")
+    if not isinstance(body, dict) or set(body) != {"url"} or not isinstance(body["url"], str):
+        return _sharing_refusal(400, "invalid_body", "The request needs a url and nothing else")
+    if not secrets_store.secret_key_available():
+        return _sharing_refusal(503, "unavailable", "The credential store is not configured")
+    try:
+        feed = await asyncio.to_thread(_add_shared_feed, user["username"], body["url"])
+    except sources.SourceExists as exc:
+        return _sharing_refusal(409, "already_subscribed",
+                                "You are already subscribed to that calendar.", id=exc.source_id)
+    except ics.FeedError as exc:
+        return _sharing_refusal(400, exc.code, _feed_refusal_message(exc.code))
+    except Exception as exc:
+        logger.error("shared feed add failed: %s", type(exc).__name__)
+        return _sharing_refusal(500, "error", "The calendar could not be added.")
+    return JSONResponse({"feed": feed}, status_code=201, headers=_NO_STORE)
+
+
+@api_router.delete("/settings/sharing/feeds/{ident}")
+async def settings_sharing_feed_remove(ident: str, user: dict = Depends(_require_api_auth),
+                                       _csrf: None = Depends(_verify_origin)):
+    if _config is None or not _config.db_path:
+        return _sharing_refusal(503, "unavailable", "Config not loaded")
+    # Parsed by hand, as `_mail_account_id` is: a validation error echoes the segment.
+    if not ident.isascii() or not ident.isdigit() or len(ident) > 18:
+        return _sharing_refusal(404, "not_found", "Calendar not found")
+    try:
+        removed = await asyncio.to_thread(_remove_shared_feed, user["username"], int(ident))
+    except Exception as exc:
+        logger.error("shared feed remove failed: %s", type(exc).__name__)
+        return _sharing_refusal(500, "error", "The calendar could not be removed.")
+    if not removed:
+        return _sharing_refusal(404, "not_found", "Calendar not found")
+    return JSONResponse({"removed": True}, headers=_NO_STORE)
+
+
+def _issue_calendar_feed(user_id: str) -> str:
+    from istota import db
+    from istota.sharing import events
+
+    with db.get_db(_config.db_path) as conn:
+        token = events.issue_token(conn, user_id)
+        conn.commit()
+    return events.feed_url(_config, token)
+
+
+def _revoke_calendar_feed(user_id: str) -> bool:
+    from istota import db
+    from istota.sharing import events
+
+    with db.get_db(_config.db_path) as conn:
+        removed = events.revoke_token(conn, user_id)
+        conn.commit()
+    return removed
+
+
+@api_router.post("/settings/sharing/calendar-feed")
+async def settings_sharing_calendar_feed(user: dict = Depends(_require_api_auth),
+                                         _csrf: None = Depends(_verify_origin)):
+    """Make the user's Istota calendar feed link, or replace it; the URL is shown this once."""
+    if _config is None or not _config.db_path:
+        return _sharing_refusal(503, "unavailable", "Config not loaded")
+    if not _config.site.hostname:
+        return _sharing_refusal(503, "no_hostname", "This server has no public name to link to.")
+    try:
+        url = await asyncio.to_thread(_issue_calendar_feed, user["username"])
+    except Exception as exc:
+        logger.error("calendar feed link failed: %s", type(exc).__name__)
+        return _sharing_refusal(500, "error", "The feed link could not be made.")
+    return JSONResponse({"url": url}, status_code=201, headers=_NO_STORE)
+
+
+@api_router.delete("/settings/sharing/calendar-feed")
+async def settings_sharing_calendar_feed_remove(user: dict = Depends(_require_api_auth),
+                                                _csrf: None = Depends(_verify_origin)):
+    if _config is None or not _config.db_path:
+        return _sharing_refusal(503, "unavailable", "Config not loaded")
+    try:
+        removed = await asyncio.to_thread(_revoke_calendar_feed, user["username"])
+    except Exception as exc:
+        logger.error("calendar feed link removal failed: %s", type(exc).__name__)
+        return _sharing_refusal(500, "error", "The feed link could not be removed.")
+    if not removed:
+        return _sharing_refusal(404, "not_found", "There is no feed link.")
+    return JSONResponse({"removed": True}, headers=_NO_STORE)
+
+
+def _set_calendar_delivery(user_id: str, delivery: str) -> None:
+    user_profiles.ensure_profile(_config.db_path, user_id)
+    user_profiles.update_profile(_config.db_path, user_id, calendar_delivery=delivery)
+
+
+@api_router.put("/settings/sharing/delivery")
+async def settings_sharing_delivery(request: Request, user: dict = Depends(_require_api_auth),
+                                    _csrf: None = Depends(_verify_origin)):
+    """How events on Istota's calendar reach the user: ``invite`` or ``feed``."""
+    if _config is None or not _config.db_path:
+        return _sharing_refusal(503, "unavailable", "Config not loaded")
+    try:
+        body = json.loads(await read_bounded_body(request, 1024))
+    except BodyError as exc:
+        return _sharing_refusal(exc.status, "invalid_body", exc.message)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return _sharing_refusal(400, "invalid_body", "The request body is not JSON")
+    if (not isinstance(body, dict) or set(body) != {"delivery"}
+            or body["delivery"] not in user_profiles.CALENDAR_DELIVERY_VALUES):
+        return _sharing_refusal(400, "invalid_body", "The request needs a delivery of invite or feed")
+    try:
+        await asyncio.to_thread(_set_calendar_delivery, user["username"], body["delivery"])
+    except Exception as exc:
+        logger.error("calendar delivery update failed: %s", type(exc).__name__)
+        return _sharing_refusal(500, "error", "The choice could not be saved.")
+    return JSONResponse({"delivery": body["delivery"]}, headers=_NO_STORE)
+
+
+@api_router.post("/settings/sharing/folders/{ident}/accept")
+async def settings_sharing_folder_accept(ident: str, request: Request,
+                                         user: dict = Depends(_require_api_auth),
+                                         _csrf: None = Depends(_verify_origin)):
+    """Accept a folder offer, or a re-offer of an active share.
+
+    The body is ``{"allow_scheduled": bool}``, the accept dialog's checkbox,
+    parsed by hand. The PROPFIND and the sender's notification are outbound
+    HTTP from this process, not a message send, so they run here.
+    """
+    try:
+        body = json.loads(await read_bounded_body(request, 1024))
+    except BodyError as exc:
+        return _sharing_refusal(exc.status, "invalid_body", exc.message)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return _sharing_refusal(400, "invalid_body", "The request body is not JSON")
+    if (not isinstance(body, dict) or set(body) != {"allow_scheduled"}
+            or type(body["allow_scheduled"]) is not bool):
+        return _sharing_refusal(400, "invalid_body", "The request needs allow_scheduled and nothing else")
+    return await _run_ocm_action("accept", ident, user, body["allow_scheduled"])
+
+
+@api_router.post("/settings/sharing/folders/{ident}/decline")
+async def settings_sharing_folder_decline(ident: str, user: dict = Depends(_require_api_auth),
+                                          _csrf: None = Depends(_verify_origin)):
+    return await _run_ocm_action("decline", ident, user)
+
+
+@api_router.delete("/settings/sharing/folders/{ident}")
+async def settings_sharing_folder_remove(ident: str, user: dict = Depends(_require_api_auth),
+                                         _csrf: None = Depends(_verify_origin)):
+    return await _run_ocm_action("remove", ident, user)
+
+
 @api_router.get("/settings/credentials")
 async def settings_credentials(user: dict = Depends(_require_api_auth)) -> dict:
     return await asyncio.to_thread(_credential_settings, user["username"])
@@ -16458,6 +16814,9 @@ _PROFILE_FIELD_SPECS: dict[str, dict] = {
     },
     "relay_delivery":         {
         "type": "enum", "values": user_profiles.RELAY_DELIVERY_VALUES,
+    },
+    "calendar_delivery":      {
+        "type": "enum", "values": user_profiles.CALENDAR_DELIVERY_VALUES,
     },
     # A folder below My files, walked with no link followed; '' clears it.
     "quick_notes_folder":     {"type": "workspace_folder"},
@@ -18674,6 +19033,23 @@ from istota.briefings.admin_routes import step_up_gate as _admin_briefings_step_
 
 app.include_router(_admin_briefings_router, prefix="/istota/api", tags=["briefings"])
 app.dependency_overrides[_admin_briefings_step_up] = lambda: _require_step_up
+
+# The Istota calendar feed: a public route, its token the whole credential
+# (`sharing/feed_routes.py`). Before the static mount, which would take the path.
+from istota.sharing import feed_routes as _feed_routes
+
+app.include_router(_feed_routes.router)
+app.dependency_overrides[_feed_routes.current_config] = lambda: _config
+app.dependency_overrides[_feed_routes.client_address] = _client_ip
+
+# Open Cloud Mesh: discovery and offers at the root, unauthenticated
+# (`sharing/ocm_routes.py`). Always included; each route answers 404 while
+# `[sharing.ocm] enabled` is off, read per request so a reload closes them.
+from istota.sharing import ocm_routes as _ocm_routes
+
+app.include_router(_ocm_routes.router)
+app.dependency_overrides[_ocm_routes.current_config] = lambda: _config
+app.dependency_overrides[_ocm_routes.client_address] = _client_ip
 
 # Serve SvelteKit build as static files (catch-all for SPA routing)
 if _STATIC_DIR.is_dir():

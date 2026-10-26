@@ -2,6 +2,7 @@ import type { Plugin } from 'vite';
 import type {
   BriefingArchiveItem,
   BriefingDocument,
+  SharingSettings,
   WorkspacePin,
   WorkspacePlace,
   WorkspaceEntry,
@@ -441,6 +442,8 @@ const user = {
     google_workspace: false,
     google_workspace_enabled: false,
     admin: true,
+    sharing: true,
+    sharing_ocm: true,
   },
 };
 
@@ -3838,6 +3841,145 @@ function mockNcSharingPayload() {
   };
 }
 
+// The "Shared with Istota" card: one feed, Istota's calendar on invitations
+// with no feed link yet, one waiting folder offer and the accepted share the
+// Files page lists as `share:7`. No address or secret is ever in the payload.
+const mockSharing: SharingSettings = {
+  feeds: [
+    {
+      id: 12,
+      host: 'cal.example.org',
+      name: 'Family',
+      state: 'active',
+      last_reason: null,
+      last_ok_at: '2026-10-25T08:00:00Z',
+      created_at: '2026-10-20 09:00:00',
+    },
+  ],
+  max_feeds: 10,
+  can_add: true,
+  calendar: {
+    delivery: 'invite',
+    effective_delivery: 'invite',
+    email_enabled: true,
+    feed: null,
+    can_link: true,
+    reachable_elsewhere: true,
+  },
+  ocm: {
+    enabled: true,
+    federated_id: 'carol@istota.example.com',
+    pending: [
+      {
+        id: 8,
+        name: 'Receipts',
+        owner: 'carol@https://cloud.example.org',
+        host: 'cloud.example.org',
+        reoffer: false,
+        created_at: '2026-10-24 17:00:00',
+      },
+    ],
+    shares: [
+      {
+        id: 7,
+        name: 'Taxes 2026',
+        owner: 'carol@https://cloud.example.org',
+        host: 'cloud.example.org',
+        access: 'write',
+        state: 'active',
+        last_reason: null,
+        created_at: '2026-10-22 10:00:00',
+      },
+    ],
+    accept_refusal: null,
+  },
+};
+
+function mockSharingRoute(url: string, method: string, body: unknown): unknown {
+  const ocm = mockSharing.ocm!;
+  if (url === '/istota/api/settings/sharing' && method === 'GET') return mockSharing;
+  if (url === '/istota/api/settings/sharing/feeds' && method === 'POST') {
+    const raw = String((body as { url?: unknown })?.url ?? '');
+    let host = '';
+    try {
+      host = new URL(raw.replace(/^webcal:/, 'https:')).host;
+    } catch {
+      return { __status: 400, detail: 'That is not a calendar address.', reason: 'invalid_url' };
+    }
+    const feed = {
+      id: Math.max(0, ...mockSharing.feeds.map((f) => f.id)) + 1,
+      host,
+      name: null,
+      state: 'active' as const,
+      last_reason: null,
+      last_ok_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    };
+    mockSharing.feeds.push(feed);
+    return { __status: 201, feed };
+  }
+  const feed = url.match(/^\/istota\/api\/settings\/sharing\/feeds\/(\d+)$/);
+  if (feed && method === 'DELETE') {
+    const before = mockSharing.feeds.length;
+    mockSharing.feeds = mockSharing.feeds.filter((f) => f.id !== Number(feed[1]));
+    return { removed: mockSharing.feeds.length < before };
+  }
+  if (url === '/istota/api/settings/sharing/calendar-feed' && method === 'POST') {
+    mockSharing.calendar!.feed = { created_at: new Date().toISOString(), last_used_at: null };
+    return {
+      __status: 201,
+      url: `https://istota.example.com/istota/calendar/mock-${Date.now()}.ics`,
+    };
+  }
+  if (url === '/istota/api/settings/sharing/calendar-feed' && method === 'DELETE') {
+    const removed = mockSharing.calendar!.feed !== null;
+    mockSharing.calendar!.feed = null;
+    return { removed };
+  }
+  if (url === '/istota/api/settings/sharing/delivery' && method === 'PUT') {
+    const delivery = (body as { delivery?: unknown })?.delivery;
+    if (delivery !== 'invite' && delivery !== 'feed') {
+      return { __status: 400, detail: 'Choose invitations or the feed.', reason: 'invalid' };
+    }
+    mockSharing.calendar!.delivery = delivery;
+    mockSharing.calendar!.effective_delivery = delivery;
+    return { delivery };
+  }
+  const folder = url.match(
+    /^\/istota\/api\/settings\/sharing\/folders\/(\d+)(\/accept|\/decline)?$/,
+  );
+  if (!folder) return undefined;
+  const id = Number(folder[1]);
+  const offer = ocm.pending.find((o) => o.id === id);
+  if (folder[2] === '/accept' && method === 'POST') {
+    if (!offer)
+      return { __status: 409, detail: 'This offer is no longer waiting.', reason: 'not_waiting' };
+    ocm.pending = ocm.pending.filter((o) => o.id !== id);
+    const share = {
+      ...offer,
+      access: 'read' as const,
+      state: 'active' as const,
+      last_reason: null,
+    };
+    ocm.shares = [...(ocm.shares ?? []), share];
+    return { share, notified: true };
+  }
+  if (folder[2] === '/decline' && method === 'POST') {
+    if (!offer)
+      return { __status: 409, detail: 'This offer is no longer waiting.', reason: 'not_waiting' };
+    ocm.pending = ocm.pending.filter((o) => o.id !== id);
+    return { notified: true };
+  }
+  if (!folder[2] && method === 'DELETE') {
+    if (!ocm.shares?.some((share) => share.id === id)) {
+      return { __status: 404, detail: 'No such shared folder.', reason: 'not_found' };
+    }
+    ocm.shares = ocm.shares.filter((share) => share.id !== id);
+    return { notified: true };
+  }
+  return undefined;
+}
+
 const GOOGLE_SCOPE_OWNER: Record<string, string> = Object.fromEntries(
   Object.entries(GOOGLE_SCOPES).flatMap(([svc, m]) =>
     [...m.readonly, ...m.full].map((scope) => [scope, svc]),
@@ -6429,6 +6571,20 @@ const workspacePlaces: WorkspacePlace[] = [
     view_root: null,
     reach: workspaceReach,
   },
+  {
+    id: 'share:7',
+    kind: 'share',
+    label: 'Taxes 2026',
+    browsable: false,
+    view_root: null,
+    remote: { host: 'cloud.example.org', access: 'write' },
+    reach: {
+      private: 'skill',
+      shared_member: 'skill',
+      restricted: 'none',
+      note: 'Shared from cloud.example.org. Tasks can read and change it through the shares skill as share:7; it cannot be browsed here. Its grant in Settings > Credentials can limit which rooms and scheduled jobs may use it.',
+    },
+  },
 ];
 function workspaceEntry(name: string, kind: WorkspaceEntry['kind'] = 'file'): WorkspaceEntry {
   return {
@@ -8266,6 +8422,10 @@ const handlers: MockHandler[] = [
       }
       user.nextcloud_token = { connected: false, expires_at: null };
       return { ok: true, was_connected: true };
+    }
+    if (url.startsWith('/istota/api/settings/sharing')) {
+      const answer = mockSharingRoute(url, method, body);
+      if (answer !== undefined) return answer;
     }
     if (url === '/istota/api/settings/nextcloud-sharing' && method === 'GET') {
       if (!user.nextcloud_token?.connected) {

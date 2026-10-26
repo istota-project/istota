@@ -1243,6 +1243,29 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #                                 #   must resolve to a public one
 
 # ============================================================================
+# Shared with Istota: calendar feeds and federated folder shares
+# ============================================================================
+# Users subscribe Istota to a calendar's secret ICS address in Settings >
+# Connections, and share a folder from their own Nextcloud with
+# <user_id>@<site hostname> when [sharing.ocm] is on.
+# [sharing]
+# private_hosts = []              # exact host names a feed or sharing server
+#                                 #   may reach on a private address; also the
+#                                 #   only hosts reachable over plain http
+# ics_poll_interval = 900         # seconds between polls of one feed (min 300)
+# ics_max_bytes = 2097152         # largest feed body read
+# ics_max_feeds_per_user = 10
+# events_per_task = 10            # writes to Istota's own calendar per task
+#                                 #   attempt; 0 turns those writes off
+#
+# [sharing.ocm]
+# enabled = false                 # receive Open Cloud Mesh folder shares on
+#                                 #   [site] hostname
+# max_pending_per_user = 20       # offers waiting for an answer, per user
+# pending_days = 14               # an unanswered offer is declined after this
+# max_discovery_fetches_per_minute = 30  # across every sender
+
+# ============================================================================
 # Servarr skill: Sonarr, Radarr, Lidarr and Prowlarr (docs/features/servarr.md)
 # ============================================================================
 # One install-wide connection per app. Admins get every verb; users listed in

@@ -207,6 +207,7 @@ from .scheduler_deferred import (  # noqa: F401  -- re-exported for back-compat
     _load_deferred_json,
     _process_deferred_garmin_import,
     _process_deferred_health_ops,
+    _process_deferred_istota_events,
     _process_deferred_kg_ops,
     _process_deferred_kv_ops,
     _process_deferred_sent_emails,
@@ -3036,6 +3037,7 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
         ("kg_ops", _process_deferred_kg_ops),
         ("health_ops", _process_deferred_health_ops),
         ("garmin_import", _process_deferred_garmin_import),
+        ("istota_events", _process_deferred_istota_events),
         ("user_alerts", _process_deferred_user_alerts),
         ("email_output", _deliver_deferred_email_output),
     )
@@ -10261,6 +10263,22 @@ def build_interval_gates(
     def _email_poll(now: float) -> None:
         _run_email_poll(config)
 
+    def _ics_poll(now: float) -> None:
+        from .sharing.ics import poll_due_feeds
+
+        report = poll_due_feeds(config)
+        if report.polled:
+            logger.info(
+                "ICS feeds polled=%d changed=%d unchanged=%d failed=%d",
+                report.polled, report.changed, report.unchanged, report.failed,
+            )
+
+    def _ocm_expire(now: float) -> None:
+        from .sharing.ocm import expire_pending
+
+        with db.get_db(config.db_path) as conn:
+            expire_pending(conn, config)
+
     def _shared_files(now: float) -> None:
         from .shared_file_organizer import discover_and_organize_shared_files
         organized = discover_and_organize_shared_files(config)
@@ -10556,6 +10574,29 @@ def build_interval_gates(
             one_shot=True,
             # `_run_email_poll` guards itself.
             one_shot_on_error=None,
+        ),
+        # ICS feeds users shared with Istota (`sharing.ics`). Network I/O to
+        # hosts users chose, so off the dispatch thread. Each feed carries its
+        # own `next_poll_at` (`[sharing] ics_poll_interval`, backed off on
+        # failure), so the gate only looks for due ones, once a minute; one
+        # indexed read when none is due. `poll_due_feeds` never raises.
+        IntervalGate(
+            name="sharing-ics-poll",
+            run=_ics_poll,
+            fixed_interval=60,
+            background=True,
+            overlap_expected=True,
+        ),
+        # OCM folder offers nobody answered within `[sharing.ocm] pending_days`
+        # (`sharing.ocm.expire_pending`): declined, their secrets deleted, and
+        # nothing sent to the sender. Database only, so on the loop thread;
+        # hourly, since the window is days. Runs with OCM off too, so offers
+        # held when it was turned off still lose their secrets.
+        IntervalGate(
+            name="sharing-ocm-expire",
+            run=_ocm_expire,
+            fixed_interval=3600,
+            on_error="Error expiring folder offers: %s",
         ),
         # Before the TASKS.md poll below, so the files are in place when it
         # walks them. Mount only: on a local workspace nothing a user shares

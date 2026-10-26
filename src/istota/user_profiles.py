@@ -56,6 +56,10 @@ EXTERNAL_TURN_DISPLAY_VALUES = ("full", "collapsed", "hidden")
 # them from here.
 RELAY_DELIVERY_VALUES = ("", "room", "whatsapp", "sms")
 PUSH_CHAT_ALERTS_VALUES = ("alerts", "badge", "off")
+# How events on Istota's own calendar reach the user (`sharing.events`). There
+# is no "both": an accepted invitation and the same UID in a subscribed feed
+# show as two events in most calendar apps.
+CALENDAR_DELIVERY_VALUES = ("invite", "feed")
 
 
 @dataclass
@@ -98,6 +102,9 @@ class UserProfile:
     # `relay_destinations.resolve_destination`, which treats an unknown value
     # as no preference.
     relay_delivery: str = ""
+    # Istota's own calendar: invite | feed. `sharing.events.effective_delivery`
+    # reads it as feed whenever [email] is off.
+    calendar_delivery: str = "invite"
     # Legacy migration input; new delivery preferences belong to the group.
     default_briefings: bool = True
     # Deliver briefing email as multipart/alternative (HTML + plain) — default on.
@@ -128,7 +135,7 @@ _PROFILE_COLUMNS = (
     "disabled_modules",
     "routing", "default_destination", "default_room",
     "outbound_approval", "external_turn_display", "relay_delivery",
-    "default_briefings", "briefing_email_html",
+    "calendar_delivery", "default_briefings", "briefing_email_html",
     "timezone_follow_location", "show_nav_unread_badges",
     "push_chat_alerts", "push_preview", "push_inbox_categories",
     "google_scopes", "quick_notes_folder",
@@ -168,7 +175,7 @@ SELF_EDITABLE_FIELDS = (
     "default_destination", "default_room", "routing",
     "briefing_email_html", "timezone_follow_location", "show_nav_unread_badges",
     "external_turn_display", "relay_delivery", "push_chat_alerts", "push_preview", "push_inbox_categories",
-    "quick_notes_folder",
+    "quick_notes_folder", "calendar_delivery",
 )
 ADMIN_EDITABLE_FIELDS = (
     "display_name", "timezone", "email_addresses",
@@ -465,6 +472,7 @@ def _row_to_profile(row: sqlite3.Row, *, strict: bool = False) -> UserProfile:
             _row_get(row, "external_turn_display") or "collapsed"
         ),
         relay_delivery=str(_row_get(row, "relay_delivery") or ""),
+        calendar_delivery=str(_row_get(row, "calendar_delivery") or "invite"),
         default_briefings=_coerce_bool(_row_get(row, "default_briefings"), True),
         briefing_email_html=_coerce_bool(
             _row_get(row, "briefing_email_html"), True,
@@ -740,6 +748,8 @@ def _same_value(col: str, current: object, value: object) -> bool:
         return (current or "talk") == (value or "talk")
     if col == "external_turn_display":
         return (current or "collapsed") == (value or "collapsed")
+    if col == "calendar_delivery":
+        return (current or "invite") == (value or "invite")
     if col in {"max_foreground_workers", "max_background_workers"}:
         return int(current or 0) == int(value or 0)
     if col == "quick_notes_folder":
@@ -824,6 +834,8 @@ def update_profile(
     unknown = set(fields) - set(_PROFILE_COLUMNS)
     if unknown:
         raise ValueError(f"unknown profile field(s): {sorted(unknown)}")
+    if "calendar_delivery" in fields and fields["calendar_delivery"] not in CALENDAR_DELIVERY_VALUES:
+        raise ValueError("calendar_delivery must be invite or feed")
 
     sets: list[str] = []
     params: list[object] = []
@@ -948,8 +960,9 @@ def delete_profile(db_path: Path, user_id: str) -> bool:
     """Remove a profile row and the user's rows keyed on it. True if a profile row went.
 
     With it go the avatars, the WhatsApp binding, device tokens, quick note
-    keys, location ingest tokens (with the legacy `overland` secret) and the
-    managed-field record, and the account
+    keys, location ingest tokens (with the legacy `overland` secret), the
+    Istota calendar's events and feed token, the shared sources with their
+    secrets and credentials, and the managed-field record, and the account
     leaves the system groups. The location receiver is signalled to rebuild its
     token map.
 
@@ -985,6 +998,16 @@ def delete_profile(db_path: Path, user_id: str) -> bool:
         # shared secret, which would otherwise also come back to a user
         # re-created under the same id.
         conn.execute("DELETE FROM location_ingest_tokens WHERE user_id = ?", (user_id,))
+        # And the Istota calendar feed's token, a bearer URL with no session
+        # behind it, with the events that feed would serve.
+        from istota.sharing import events as istota_events  # noqa: PLC0415
+
+        istota_events.delete_for_user(conn, user_id)
+        # Shared sources hold bearer secrets: a feed's address, a held OCM
+        # secret and an accepted share's `ocm_share_<id>` credential.
+        from istota.sharing import sources as shared_sources  # noqa: PLC0415
+
+        shared_sources.delete_for_user(conn, user_id)
         from istota.credentials import store as secrets_store  # noqa: PLC0415
 
         secrets_store.delete_secret(
@@ -1058,6 +1081,7 @@ def insert_profile(conn: sqlite3.Connection, profile: UserProfile, *, replace: b
         profile.outbound_approval or "",
         profile.external_turn_display or "collapsed",
         profile.relay_delivery or "",
+        profile.calendar_delivery or "invite",
         1 if profile.default_briefings else 0,
         1 if profile.briefing_email_html else 0,
         1 if profile.timezone_follow_location else 0,
@@ -1379,6 +1403,8 @@ def validate_provisioning_fields(
             f"--outbound-approval must be one of {', '.join(VALID_POLICIES)}, "
             f"or '' to follow the operator floor; got {fields['outbound_approval']!r}"
         )
+    if "calendar_delivery" in updates and updates["calendar_delivery"] not in CALENDAR_DELIVERY_VALUES:
+        raise ValueError("calendar_delivery must be invite or feed")
     if "push_chat_alerts" in updates and updates["push_chat_alerts"] not in PUSH_CHAT_ALERTS_VALUES:
         raise ValueError("push_chat_alerts must be alerts, badge, or off")
     if "external_turn_display" in updates and updates["external_turn_display"] not in EXTERNAL_TURN_DISPLAY_VALUES:

@@ -289,8 +289,15 @@ SKILLS: dict[str, tuple[list[str], str]] = {
 }
 
 
-def _write_skills(bundled: Path) -> None:
-    for name, (extra, body) in SKILLS.items():
+#: Written only for a case that sets `Case.shared_feed`: a `calendar` skill in
+#: the shared catalogue would add a menu entry and a CLI line to every golden.
+CALENDAR_SKILL = {"calendar": ([], "CALENDAR BODY")}
+#: Likewise for `Case.shared_folder`.
+SHARES_SKILL = {"shares": ([], "SHARES BODY")}
+
+
+def _write_skills(bundled: Path, extra_skills: dict | None = None) -> None:
+    for name, (extra, body) in {**SKILLS, **(extra_skills or {})}.items():
         d = bundled / name
         d.mkdir(parents=True, exist_ok=True)
         front = [
@@ -457,6 +464,15 @@ class Case:
     #: card is the email one and the host's memory loads.
     email_thread: bool = False
     pins: bool = False
+    #: Seeds one ICS feed for the user (open-protocol sharing) and puts a
+    #: `calendar` skill in the catalogue, which the feeds line is gated on.
+    #: The feed's name is a sentinel that must render nowhere: names are the
+    #: provider's text and are read through the skill, fenced.
+    shared_feed: bool = False
+    #: Seeds one accepted OCM folder share for the user and puts a `shares`
+    #: skill in the catalogue, which the shared-folders line is gated on. Its
+    #: name is a sentinel that must render nowhere, as a feed's is.
+    shared_folder: bool = False
     #: Seeds an active assignment whose open wake is this task (task 1), with a
     #: charter, a board, a hand-off, an inbox holding a trusted and an
     #: untrusted event, a thrashing target, a scratchpad and one earlier wake,
@@ -615,6 +631,26 @@ CASES: tuple[Case, ...] = (
         memory=True,
         email_thread=True,
     ),
+    # A feed the user shared with Istota, against `base_nextcloud` plus the
+    # `calendar` skill: the `Other calendars` line in the system half, with the
+    # feed's id and host and not its name.
+    Case("shared_calendar", shared_feed=True),
+    # An accepted folder share, against `base_nextcloud` plus the `shares`
+    # skill: the `Shared folders` line in the system half, with the share's id,
+    # host and access and not its name.
+    Case("shared_folder", shared_folder=True),
+    # The same feed and share, on a member's turn in a shared room
+    # (`shared_room` plus both): the lines are ambient, so both are absent,
+    # while the skills stay.
+    Case(
+        "shared_room_member",
+        source_type="web",
+        conversation_token="web-room",
+        room=("#weekly", "web"),
+        shared=True,
+        shared_feed=True,
+        shared_folder=True,
+    ),
     # An assignment wake (assignments spec, stage 6): the guidelines and the
     # charter as the system half's `## Assignment` section after the persona,
     # in place of `## Response format`, and the wake's material replacing the
@@ -631,7 +667,8 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
     skills_dir = config_dir / "skills"
     skills_dir.mkdir(parents=True, exist_ok=True)
     bundled = tmp_path / "bundled"
-    _write_skills(bundled)
+    _write_skills(bundled, {**(CALENDAR_SKILL if case.shared_feed else {}),
+                            **(SHARES_SKILL if case.shared_folder else {})})
     if case.skills_changelog:
         (bundled / "CHANGELOG.md").write_text(SKILLS_CHANGELOG + "\n")
 
@@ -920,6 +957,44 @@ def _seed_room(config: Config, case: Case) -> None:
         conn.commit()
 
 
+#: A shared feed's name; must appear in no prompt.
+FEED_NAME_SENTINEL = "FEED_NAME_SENTINEL"
+
+
+def _seed_shared_feed(config: Config, case: Case) -> None:
+    if not case.shared_feed:
+        return
+    from istota.sharing import sources
+
+    with db.get_db(config.db_path) as conn:
+        sources.create_source(
+            conn, user_id=USER, kind="ics_feed", state="active",
+            remote_host="cal.example.org", remote_key="golden-feed",
+            extras={"name": FEED_NAME_SENTINEL},
+        )
+        conn.commit()
+
+
+#: A shared folder's name; must appear in no prompt.
+FOLDER_NAME_SENTINEL = "FOLDER_NAME_SENTINEL"
+
+
+def _seed_shared_folder(config: Config, case: Case) -> None:
+    if not case.shared_folder:
+        return
+    from istota.sharing import sources
+
+    with db.get_db(config.db_path) as conn:
+        source_id = sources.create_source(
+            conn, user_id=USER, kind="ocm_share", state="pending",
+            remote_host="cloud.example.org", remote_key="cloud.example.org|5", access="write",
+            extras={"name": FOLDER_NAME_SENTINEL, "owner": "carol@https://cloud.example.org",
+                    "webdav": "https://cloud.example.org/public.php/webdav/"},
+        )
+        sources.set_state(conn, source_id, USER, "active")
+        conn.commit()
+
+
 #: In a group the case's user is not in; must appear in no prompt.
 NOT_MY_GROUP_SENTINEL = "NOT_MY_GROUP_SENTINEL"
 
@@ -1054,6 +1129,8 @@ def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
     _seed_shared_credentials(config, case, monkeypatch)
     _seed_room(config, case)
     _seed_groups(config, case)
+    _seed_shared_feed(config, case)
+    _seed_shared_folder(config, case)
     _seed_assignment(config, case)
     if case.pins:
         with db.get_db(config.db_path) as conn:
@@ -1093,6 +1170,30 @@ def split_halves(rendered: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------- the test
+
+
+def test_a_shared_feed_is_named_by_id_and_host_in_the_system_half(tmp_path, monkeypatch):
+    system, user = split_halves(assemble(CASES_BY_NAME["shared_calendar"], tmp_path, monkeypatch))
+    lines = [line for line in system.splitlines() if line.startswith("Other calendars")]
+    assert len(lines) == 1 and lines[0].endswith(": feed:1 (cal.example.org), istota (writable), feed:invitations")
+    assert FEED_NAME_SENTINEL not in system + user
+
+
+def test_a_shared_folder_is_named_by_id_host_and_access_in_the_system_half(tmp_path, monkeypatch):
+    system, user = split_halves(assemble(CASES_BY_NAME["shared_folder"], tmp_path, monkeypatch))
+    lines = [line for line in system.splitlines() if line.startswith("Shared folders")]
+    assert lines == ["Shared folders (via istota-skill shares): share:1 (cloud.example.org, read-write)"]
+    assert FOLDER_NAME_SENTINEL not in system + user
+
+
+def test_a_members_turn_in_a_shared_room_has_no_feeds_or_folders_line(tmp_path, monkeypatch):
+    rendered = assemble(CASES_BY_NAME["shared_room_member"], tmp_path, monkeypatch)
+    assert "Other calendars" not in rendered
+    assert "Shared folders" not in rendered
+    assert "istota-skill calendar" in rendered
+    assert "istota-skill shares" in rendered
+    assert FEED_NAME_SENTINEL not in rendered
+    assert FOLDER_NAME_SENTINEL not in rendered
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.name)
