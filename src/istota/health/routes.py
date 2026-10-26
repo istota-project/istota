@@ -251,6 +251,10 @@ def _format_entity_label(entity_type: str, entity_id: int, record) -> str:
             return record.name
         if entity_type == "immunization":
             return f"{record.name} ({record.date_given})"
+        if entity_type == "medication":
+            if record.dose is None:
+                return record.name
+            return f"{record.name} {record.dose}{record.dose_unit or ''}"
     return f"{entity_type} {entity_id}"
 
 
@@ -260,6 +264,7 @@ def _entity_label(conn, entity_type: str, entity_id: int) -> str:
         "encounter": health_db.get_encounter,
         "diagnosis": health_db.get_diagnosis,
         "immunization": health_db.get_immunization,
+        "medication": health_db.get_medication,
     }.get(entity_type)
     record = getter(conn, entity_id) if getter else None
     return _format_entity_label(entity_type, entity_id, record)
@@ -2779,7 +2784,7 @@ async def api_list_medications(
 ):
     def _query():
         with health_db.connect(ctx.db_path) as conn:
-            return health_db.list_medications(
+            rows = health_db.list_medications(
                 conn,
                 status=status,
                 category=category or None,
@@ -2789,12 +2794,21 @@ async def api_list_medications(
                 limit=limit,
                 offset=offset,
             )
+            counts = health_db.document_counts_for_entities(
+                conn, "medication", [r.id for r in rows],
+            )
+        return rows, counts
 
     try:
-        rows = await asyncio.to_thread(_query)
+        rows, doc_counts = await asyncio.to_thread(_query)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    return {"medications": [medication_to_dict(r) for r in rows]}
+    return {
+        "medications": [
+            {**medication_to_dict(r), "document_count": doc_counts.get(r.id, 0)}
+            for r in rows
+        ],
+    }
 
 
 @router.post("/medications")
@@ -2841,17 +2855,22 @@ async def api_get_medication(
         with health_db.connect(ctx.db_path) as conn:
             row = health_db.get_medication(conn, medication_id)
             encounter = None
+            docs: list = []
             if row and row.encounter_id is not None:
                 encounter = health_db.get_encounter(conn, row.encounter_id)
-        return row, encounter
+            if row:
+                docs = health_db.documents_for_entity(
+                    conn, "medication", medication_id,
+                )
+        return row, encounter, docs
 
-    row, encounter = await asyncio.to_thread(_query)
+    row, encounter, docs = await asyncio.to_thread(_query)
     if not row:
         raise HTTPException(404, "medication not found")
     return {
         "medication": medication_to_dict(row),
         "encounter": _encounter_to_dict(encounter) if encounter else None,
-        "documents": [],
+        "documents": [_document_to_dict(d) for d in docs],
     }
 
 

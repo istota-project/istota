@@ -1271,6 +1271,8 @@ def _process_deferred_health_ops(
     # encounter created earlier in the same batch. Kept in its own dict so a
     # panel ref and an encounter ref sharing a name can't cross-resolve.
     encounter_refs: dict[str, int] = {}
+    # And for medications (`add-medication --ref`), for the same reason.
+    medication_refs: dict[str, int] = {}
     with health_db.connect(ctx.db_path) as conn:
         for entry in data:
             if not isinstance(entry, dict):
@@ -1401,7 +1403,12 @@ def _process_deferred_health_ops(
                             f"unknown entity type: {entity_type!r}"
                         )
                     enc_ref = entry.get("encounter_ref")
+                    med_ref = entry.get("medication_ref")
                     if enc_ref is not None:
+                        if entity_type != "encounter":
+                            raise ValueError(
+                                f"encounter_ref on a {entity_type} target"
+                            )
                         resolved = encounter_refs.get(str(enc_ref))
                         if resolved is None:
                             # Fail loudly rather than mis-file paperwork
@@ -1409,6 +1416,18 @@ def _process_deferred_health_ops(
                             raise KeyError(
                                 f"unresolved encounter_ref {enc_ref!r} "
                                 f"(known refs: {sorted(encounter_refs)})"
+                            )
+                        entity_id = resolved
+                    elif med_ref is not None:
+                        if entity_type != "medication":
+                            raise ValueError(
+                                f"medication_ref on a {entity_type} target"
+                            )
+                        resolved = medication_refs.get(str(med_ref))
+                        if resolved is None:
+                            raise KeyError(
+                                f"unresolved medication_ref {med_ref!r} "
+                                f"(known refs: {sorted(medication_refs)})"
                             )
                         entity_id = resolved
                     else:
@@ -1633,7 +1652,7 @@ def _process_deferred_health_ops(
                 elif op == "insert_medication":
                     enc_id = entry.get("encounter_id")
                     source = entry.get("source")
-                    health_db.insert_medication(
+                    mid = health_db.insert_medication(
                         conn,
                         name=entry["name"],
                         category=entry.get("category", "prescription"),
@@ -1657,6 +1676,9 @@ def _process_deferred_health_ops(
                         ),
                         dedup_key=entry.get("dedup_key"),
                     )
+                    med_ref = entry.get("ref")
+                    if med_ref:
+                        medication_refs[str(med_ref)] = mid
                     count += 1
                 elif op == "update_medication":
                     update_kwargs = {

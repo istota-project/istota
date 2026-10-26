@@ -18,8 +18,8 @@ Subcommands cover both body stats and lab results:
   ``delete-medication`` — record and change it.
 * ``documents`` / ``document <id>`` — list/show stored paperwork.
 * ``attach-document --path P --to TYPE:ID`` / ``detach-document <id>
-  --from TYPE:ID`` — file paperwork against an encounter, condition, or
-  immunization.
+  --from TYPE:ID`` — file paperwork against an encounter, condition,
+  immunization or medication.
 
 Per-user health DB resolved via ``HEALTH_DB_PATH`` (set by the
 ``setup_env`` hook below). Writes go through the deferred-op pattern when
@@ -515,13 +515,19 @@ def cmd_upload(args: argparse.Namespace) -> None:
     _emit({"status": "ok", "id": pid, "draft": True})
 
 
+# Entity types whose create verb takes `--ref`, so `TYPE:@NAME` can name one
+# made earlier in the same deferred batch.
+_REF_ENTITY_TYPES = ("encounter", "medication")
+
+
 def _parse_entity_ref(raw: str) -> tuple[str, int | str]:
     """Parse a ``TYPE:ID`` token (``encounter:42``) into its two parts.
 
-    ``encounter:@NAME`` is also accepted and returns the ``@NAME`` string
-    unchanged, mirroring ``add-biomarker``'s ``@ref``: a deferred
-    ``add-encounter --ref NAME`` can't hand its new id back to the sandboxed
-    CLI, so the scheduler resolves the name at replay time.
+    ``encounter:@NAME`` and ``medication:@NAME`` are also accepted and return
+    the ``@NAME`` string unchanged, mirroring ``add-biomarker``'s ``@ref``: a
+    deferred ``add-encounter --ref NAME`` or ``add-medication --ref NAME``
+    can't hand its new id back to the sandboxed CLI, so the scheduler
+    resolves the name at replay time.
 
     Emits the standard error envelope and exits on anything malformed — a
     mis-parsed reference would file paperwork against the wrong record.
@@ -543,16 +549,31 @@ def _parse_entity_ref(raw: str) -> tuple[str, int | str]:
             f"expected one of {', '.join(DOCUMENT_ENTITY_TYPES)}"
         )
     if id_part.startswith("@"):
-        if entity_type != "encounter":
-            _fail(f"@ref is only supported for encounter, not {entity_type}")
+        if entity_type not in _REF_ENTITY_TYPES:
+            _fail(
+                f"@ref is only supported for encounter or medication, "
+                f"not {entity_type}"
+            )
         if len(id_part) < 2:
-            _fail("@ref must name an encounter (e.g. encounter:@visit)")
+            _fail(f"@ref must name a record (e.g. {entity_type}:@label)")
         return entity_type, id_part
     try:
         entity_id = int(id_part)
     except (TypeError, ValueError):
         _fail(f"entity id must be an integer, got {id_part!r}")
     return entity_type, entity_id
+
+
+def _document_summary(d) -> dict[str, Any]:
+    return {
+        "id": d.id,
+        "filename": d.filename,
+        "mime": d.mime,
+        "byte_size": d.byte_size,
+        "source": d.source,
+        "notes": d.notes,
+        "created_at": d.created_at,
+    }
 
 
 def cmd_documents(args: argparse.Namespace) -> None:
@@ -573,18 +594,7 @@ def cmd_documents(args: argparse.Namespace) -> None:
         conn.close()
     _emit({
         "status": "ok",
-        "documents": [
-            {
-                "id": d.id,
-                "filename": d.filename,
-                "mime": d.mime,
-                "byte_size": d.byte_size,
-                "source": d.source,
-                "notes": d.notes,
-                "created_at": d.created_at,
-            }
-            for d in docs
-        ],
+        "documents": [_document_summary(d) for d in docs],
     })
 
 
@@ -641,7 +651,7 @@ def cmd_attach_document(args: argparse.Namespace) -> None:
         "notes": args.notes,
     }
     if isinstance(entity_id, str):
-        op["encounter_ref"] = entity_id.lstrip("@")
+        op[f"{entity_type}_ref"] = entity_id.lstrip("@")
     else:
         op["entity_id"] = entity_id
     if _defer_op(op):
@@ -650,8 +660,8 @@ def cmd_attach_document(args: argparse.Namespace) -> None:
 
     if isinstance(entity_id, str):
         _fail(
-            "encounter:@ref only resolves inside a sandboxed task; pass a "
-            "numeric encounter id directly"
+            f"{entity_type}:@ref only resolves inside a sandboxed task; pass "
+            f"a numeric {entity_type} id directly"
         )
 
     import mimetypes
@@ -1679,11 +1689,13 @@ def cmd_medication(args: argparse.Namespace) -> None:
         encounter = None
         if row.encounter_id is not None:
             encounter = health_db.get_encounter(conn, row.encounter_id)
+        docs = health_db.documents_for_entity(conn, "medication", args.id)
     finally:
         conn.close()
     _emit({
         "medication": _medication_to_dict(row),
         "encounter": _encounter_to_dict(encounter) if encounter else None,
+        "documents": [_document_summary(d) for d in docs],
     })
 
 
@@ -1714,6 +1726,8 @@ def cmd_add_medication(args: argparse.Namespace) -> None:
         op["end_date"] = end_date
     if args.encounter_id is not None:
         op["encounter_id"] = args.encounter_id
+    if args.ref:
+        op["ref"] = args.ref
 
     # Read before the write so a direct insert does not match itself.
     conn = _connect()
@@ -1727,7 +1741,7 @@ def cmd_add_medication(args: argparse.Namespace) -> None:
     else:
         conn = _connect()
         try:
-            kwargs = {k: op[k] for k in op if k != "op"}
+            kwargs = {k: op[k] for k in op if k not in ("op", "ref")}
             try:
                 mid = health_db.insert_medication(conn, **kwargs)
             except ValueError as e:
@@ -2411,6 +2425,11 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Record a medication no longer taken")
     add_med.add_argument("--encounter-id", dest="encounter_id", type=int,
                          default=None, help="Prescribing encounter")
+    add_med.add_argument(
+        "--ref", default=None,
+        help="Name this medication so a later attach-document in the same "
+        "sandboxed task can target it as medication:@NAME",
+    )
 
     upd_med = sub.add_parser(
         "update-medication",
@@ -2488,7 +2507,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     attach_p.add_argument(
         "--to", required=True, metavar="TYPE:ID",
-        help="Record to attach it to (encounter:42, diagnosis:7, immunization:5)",
+        help="Record to attach it to (encounter:42, diagnosis:7, "
+        "immunization:5, medication:3)",
     )
     attach_p.add_argument("--notes", default=None)
 

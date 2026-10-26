@@ -132,7 +132,7 @@ istota-skill health explain-immunization Influenza        # educational primer
 istota-skill health medications                           # current regimen
 istota-skill health medications --status all --since 2026-02-01 --until 2026-03-31
 istota-skill health medications --name atorvastatin       # matches name or generic name
-istota-skill health medication 4                          # one row + its encounter
+istota-skill health medication 4                          # one row + its encounter + documents
 istota-skill health add-medication Atorvastatin --category prescription \
     --dose 20 --dose-unit mg --frequency daily --route oral \
     --prescriber "Dr. Lee" --start-date 2026-01-15
@@ -156,6 +156,8 @@ istota-skill health detach-document 9 --from encounter:42
 istota-skill health add-encounter --date 2026-06-29 --type visit --ref visit
 istota-skill health attach-document --path /Users/{user_id}/inbox/letter.pdf \
     --to encounter:@visit
+# The same works for a medication: add-medication ... --ref label, then
+# attach-document ... --to medication:@label.
 
 # Garmin (initial connect happens in the web UI — health settings page)
 istota-skill health garmin-status
@@ -263,11 +265,11 @@ A condition and an encounter are many-to-many. Someone is diagnosed by their GP,
 
 ## Filing paperwork
 
-A health record and the document that proves it are separate things. `attach-document` links a file the user gave you to the record it evidences — a discharge summary to its encounter, a referral to the condition it names, a vaccination card to the immunization it shows.
+A health record and the document that proves it are separate things. `attach-document` links a file the user gave you to the record it evidences — a discharge summary to its encounter, a referral to the condition it names, a vaccination card to the immunization it shows, a prescription label or pharmacy printout to the medication it describes.
 
-- `--to` / `--from` take a `TYPE:ID` token. Types are `encounter`, `diagnosis`, `immunization`. Nothing else (lab panels keep their own source file).
+- `--to` / `--from` take a `TYPE:ID` token. Types are `encounter`, `diagnosis`, `immunization`, `medication`. Nothing else (lab panels keep their own source file). `encounter:@name` and `medication:@name` name a record created earlier in the same task with `--ref name`.
 - **Attach to the most specific record the document evidences.** A vaccination card belongs on the immunization, not merely on the visit where the shot was given. One document can be attached to several records — a visit summary covering a diagnosis and a vaccine is one file linked three ways, not three copies.
-- If no record exists yet, create it first (`add-encounter` / `add-diagnosis` / `add-immunization`), then attach.
+- If no record exists yet, create it first (`add-encounter` / `add-diagnosis` / `add-immunization` / `add-medication`), then attach.
 - **Only attach files the user supplied** — an email attachment, a photo they sent, a file they named. Never go looking through the workspace for medical documents to file; a document the user did not hand you is not yours to put in their medical record.
 - Attaching the same bytes twice costs one file: the store recognises it and just adds the link.
 - Deleting a document removes it from *every* record it is attached to, so it is a web-UI action behind a confirmation. Use `detach-document` when you only want it off one record.

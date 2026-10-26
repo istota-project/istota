@@ -126,8 +126,8 @@ class TestCreateAndRead:
         _create(client, name="Atorvastatin")
         row = client.get(f"{BASE}/medications").json()["medications"][0]
         assert list(row)[:3] == ["id", "name", "generic_name"]
-        assert list(row)[-1] == "created_at"
-        assert "document_count" not in row
+        assert list(row)[-2:] == ["created_at", "document_count"]
+        assert row["document_count"] == 0
 
     def test_get_missing_is_404(self, client):
         assert client.get(f"{BASE}/medications/999").status_code == 404

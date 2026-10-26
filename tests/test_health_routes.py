@@ -1039,6 +1039,11 @@ def _make_encounter(client) -> int:
     ).json()["id"]
 
 
+def _make_medication(client, **fields) -> int:
+    body = {"name": "Atorvastatin", "dose": "20", "dose_unit": "mg", **fields}
+    return client.post("/istota/api/health/medications", json=body).json()["id"]
+
+
 def _upload(client, *, data=PDF_BYTES, filename="discharge.pdf",
             mime="application/pdf", **form):
     return client.post(
@@ -1334,6 +1339,7 @@ class TestDocumentRoutes:
         requires the count not to grow with it.
         """
         eid = _make_encounter(client)
+        mid = _make_medication(client)
         counts = []
         for n in (3, 12):
             for i in range(n):
@@ -1345,6 +1351,10 @@ class TestDocumentRoutes:
                     f"/istota/api/health/documents/{did}/links",
                     json={"entity_type": "encounter", "entity_id": eid},
                 )
+                client.post(
+                    f"/istota/api/health/documents/{did}/links",
+                    json={"entity_type": "medication", "entity_id": mid},
+                )
             with _count_selects(ctx) as tally:
                 listing = client.get(
                     "/istota/api/health/documents", params={"limit": 1000},
@@ -1354,6 +1364,47 @@ class TestDocumentRoutes:
         assert counts[0] == counts[1], (
             f"link resolution scales with row count: {counts}"
         )
+
+    def test_medication_is_an_entity_type(self, client):
+        mid = _make_medication(client)
+        resp = _upload(client, entity_type="medication", entity_id=str(mid))
+        assert resp.status_code == 200, resp.text
+        did = resp.json()["id"]
+
+        detail = client.get(f"/istota/api/health/medications/{mid}").json()
+        assert [d["id"] for d in detail["documents"]] == [did]
+        rows = client.get("/istota/api/health/medications").json()["medications"]
+        assert rows[0]["document_count"] == 1
+
+    def test_medication_link_labels(self, client):
+        dosed = _make_medication(client)
+        bare = _make_medication(client, name="Fish oil", dose=None,
+                                dose_unit=None, category="supplement")
+        did = _upload(
+            client, entity_type="medication", entity_id=str(dosed),
+        ).json()["id"]
+        client.post(
+            f"/istota/api/health/documents/{did}/links",
+            json={"entity_type": "medication", "entity_id": bare},
+        )
+        listed = client.get("/istota/api/health/documents").json()["documents"]
+        labels = {
+            link["entity_id"]: link["label"] for link in listed[0]["links"]
+        }
+        assert labels == {dosed: "Atorvastatin 20mg", bare: "Fish oil"}
+        detail = client.get(f"/istota/api/health/documents/{did}").json()
+        assert detail["links"] == listed[0]["links"]
+
+    def test_deleting_a_medication_clears_its_links(self, client):
+        mid = _make_medication(client)
+        did = _upload(
+            client, entity_type="medication", entity_id=str(mid),
+        ).json()["id"]
+        assert client.delete(
+            f"/istota/api/health/medications/{mid}",
+        ).status_code == 200
+        detail = client.get(f"/istota/api/health/documents/{did}").json()
+        assert detail["links"] == []
 
     def test_missing_bytes_404s_but_row_still_listed(self, client, ctx):
         did = _upload(client).json()["id"]

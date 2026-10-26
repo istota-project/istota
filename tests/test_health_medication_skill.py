@@ -309,3 +309,66 @@ class TestSchedulerDeferredReplay:
         with health_db.connect(db_path) as conn:
             (m,) = health_db.list_medications(conn)
         assert m.source == "agent"
+
+
+class TestMedicationDocuments:
+    @pytest.fixture
+    def scoped(self, ready, tmp_path) -> tuple[Path, dict, Path]:
+        """Direct mode with a workspace a source file may sit in."""
+        db_path, env = ready
+        workspace = tmp_path / "mount" / "Users" / "alice"
+        workspace.mkdir(parents=True)
+        env = {**env, "NEXTCLOUD_MOUNT_PATH": str(tmp_path / "mount")}
+        return db_path, env, workspace
+
+    def test_attach_direct_and_show(self, scoped):
+        db_path, env, workspace = scoped
+        mid = _seed(db_path, name="Atorvastatin")
+        src = workspace / "label.pdf"
+        src.write_bytes(b"%PDF-1.4 prescription label")
+
+        out = _run(
+            ["attach-document", "--path", str(src), "--to", f"medication:{mid}"],
+            env,
+        )
+        assert out["entity_type"] == "medication"
+
+        detail = _run(["medication", str(mid)], env)
+        assert [d["id"] for d in detail["documents"]] == [out["id"]]
+        assert detail["documents"][0]["filename"] == "label.pdf"
+
+    def test_ref_defers_as_a_medication_ref(self, scoped, tmp_path):
+        db_path, env, workspace = scoped
+        ddir = tmp_path / "deferred"
+        ddir.mkdir()
+        env = {**env, "ISTOTA_DEFERRED_DIR": str(ddir), "ISTOTA_TASK_ID": "80"}
+        src = workspace / "label.pdf"
+        src.write_bytes(b"%PDF-1.4 prescription label")
+
+        _run(["add-medication", "Atorvastatin", "--ref", "statin"], env)
+        _run(
+            ["attach-document", "--path", str(src), "--to", "medication:@statin"],
+            env,
+        )
+        ops = _ops(ddir / "task_80_health_ops.json")
+        assert ops[0]["op"] == "insert_medication"
+        assert ops[0]["ref"] == "statin"
+        assert ops[1]["medication_ref"] == "statin"
+        assert "entity_id" not in ops[1]
+        assert "encounter_ref" not in ops[1]
+
+    def test_ref_in_direct_mode_is_not_passed_to_the_insert(self, ready):
+        """`ref` is a replay-only key; the direct insert must not receive it."""
+        _, env = ready
+        out = _run(["add-medication", "Atorvastatin", "--ref", "statin"], env)
+        assert out["status"] == "ok"
+
+    def test_a_medication_ref_needs_a_sandboxed_task(self, scoped):
+        _, env, workspace = scoped
+        src = workspace / "label.pdf"
+        src.write_bytes(b"%PDF-1.4 prescription label")
+        out = _run(
+            ["attach-document", "--path", str(src), "--to", "medication:@x"],
+            env, expect_success=False,
+        )
+        assert "medication:@ref only resolves inside a sandboxed task" in out["error"]

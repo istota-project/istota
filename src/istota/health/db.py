@@ -13,7 +13,7 @@ Tables:
 * ``health_settings`` — DOB, height, biological sex, display unit prefs
 * ``medications``     — the regimen: prescriptions, OTC drugs, supplements
 * ``documents``     — stored paperwork (scans, discharge summaries, cards)
-* ``document_links``  — polymorphic join to encounter / diagnosis / immunization
+* ``document_links``  — polymorphic join to encounter / diagnosis / immunization / medication
 * ``schema_meta``     — schema version + migration sentinels
 """
 
@@ -302,12 +302,13 @@ CREATE TABLE IF NOT EXISTS documents (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_hash ON documents(content_hash);
 
--- Polymorphic join. `entity_id` carries no FK — it points at one of three
+-- Polymorphic join. `entity_id` carries no FK — it points at one of four
 -- tables — so an entity delete must clear its links by hand (see
--- delete_encounter / delete_diagnosis / delete_immunization).
+-- delete_encounter / delete_diagnosis / delete_immunization /
+-- delete_medication).
 CREATE TABLE IF NOT EXISTS document_links (
     document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-    entity_type TEXT NOT NULL,       -- encounter | diagnosis | immunization
+    entity_type TEXT NOT NULL,       -- encounter | diagnosis | immunization | medication
     entity_id INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (document_id, entity_type, entity_id)
@@ -2172,6 +2173,8 @@ def delete_medication(conn: sqlite3.Connection, medication_id: int) -> int:
     cur = conn.execute(
         "DELETE FROM medications WHERE id = ?", (medication_id,),
     )
+    if cur.rowcount:
+        unlink_entity_documents(conn, "medication", medication_id)
     return cur.rowcount
 
 
@@ -2305,11 +2308,11 @@ def find_immunization_ref_by_alias(
 # -- documents ---------------------------------------------------------------
 
 
-# Closed set. An entity_id carries no foreign key (it points at one of three
+# Closed set. An entity_id carries no foreign key (it points at one of four
 # tables), so this tuple is the only thing standing between a typo and a link
 # row nothing will ever read. `panel` is deliberately absent — panels keep
 # their own source_file column and /panels/{id}/source route (D1).
-DOCUMENT_ENTITY_TYPES = ("encounter", "diagnosis", "immunization")
+DOCUMENT_ENTITY_TYPES = ("encounter", "diagnosis", "immunization", "medication")
 
 # The table each entity type's records live in. Declared here, beside the tuple
 # above, so `DOCUMENT_ENTITY_TYPES` and this map cannot disagree — a type added
@@ -2319,6 +2322,7 @@ _ENTITY_TABLES = {
     "encounter": "encounters",
     "diagnosis": "diagnoses",
     "immunization": "immunizations",
+    "medication": "medications",
 }
 
 # The row converter for each, same reasoning.
@@ -2326,6 +2330,7 @@ _ENTITY_ROW_CONVERTERS = {
     "encounter": _row_to_encounter,
     "diagnosis": _row_to_diagnosis,
     "immunization": _row_to_immunization,
+    "medication": _row_to_medication,
 }
 
 for _name, _map in (("tables", _ENTITY_TABLES),
