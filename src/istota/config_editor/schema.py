@@ -124,6 +124,57 @@ RISKY_KEYS: frozenset[tuple[str, ...]] = frozenset({
 })
 
 
+@dataclasses.dataclass(frozen=True)
+class ModelField:
+    """How a field that names a model is picked and checked.
+
+    `sources` is which providers it may name: `anthropic` (the CLI brains),
+    `native` (the providers the native brain can run) or `any` (every
+    provider a configured brain can run). `effort` says whether the field
+    honours `:effort`, `aliases` whether an alias is offered. `brain` is the
+    kind that runs it, or None for `[brain] kind` (the internal callers).
+    """
+
+    sources: str
+    effort: bool
+    aliases: bool = True
+    brain: str | None = None
+
+
+#: Every config field that names one model, edited with the model picker and
+#: checked by `config_editor.models.model_problems`. The drift guard in
+#: tests/test_config_editor_schema.py holds this to the `Config` tree.
+MODEL_FIELDS: dict[tuple[str, ...], ModelField] = {
+    ("brain", "claude_code", "model"): ModelField("anthropic", effort=True, brain="claude_code"),
+    ("brain", "tmux", "model"): ModelField("anthropic", effort=True, brain="tmux_claude"),
+    # Resolved through the alias table with no effort (`executor._resolve_advisor`).
+    ("advisor_model",): ModelField("anthropic", effort=False, brain="claude_code"),
+    ("brain", "native", "model"): ModelField("native", effort=True, brain="native"),
+    # Triage and the speech gate strip `:effort` (`claude_code.cli_model_name`).
+    ("conversation", "selection_model"): ModelField("any", effort=False),
+    ("speech_gate", "model"): ModelField("any", effort=False),
+    ("sleep_cycle", "extraction_model"): ModelField("any", effort=True),
+    ("sleep_cycle", "curation_model"): ModelField("any", effort=True),
+    ("channel_sleep_cycle", "extraction_model"): ModelField("any", effort=True),
+    ("developer", "review", "model"): ModelField("any", effort=True),
+}
+
+#: `model` / `*_model` string fields that are not edited with the picker.
+MODEL_FIELD_EXEMPT: dict[tuple[str, ...], str] = {
+    ("model",): (
+        "Deprecated: migrated onto [brain.claude_code] and [brain.tmux] model at load. "
+        "A plain text field until it is removed."
+    ),
+}
+
+#: `[models] enabled`: glob patterns over refs, each row picked or typed.
+MODEL_PATTERN_FIELDS: frozenset[tuple[str, ...]] = frozenset({("models", "enabled")})
+
+
+def model_field_for(path: tuple[str, ...] | list[str]) -> ModelField | None:
+    return MODEL_FIELDS.get(tuple(path))
+
+
 def _unwrap_optional(declared: Any) -> Any:
     if typing.get_origin(declared) in (typing.Union, types.UnionType):
         args = [arg for arg in typing.get_args(declared) if arg is not type(None)]
@@ -254,7 +305,8 @@ def editor_kind(path: tuple[str, ...] | list[str], declared: Any, value: Any) ->
     """The control for the field at `path`, its declared type `declared`.
 
     `bool` | `int` | `float` | `str` | `path` | `list` | `choice` |
-    `multi_choice` | `secret` | `table` | `readonly`. What a live environment
+    `multi_choice` | `model` | `model_patterns` | `secret` | `table` |
+    `readonly`. What a live environment
     variable or a managed resource makes read-only is the view's to decide.
     """
     path = tuple(path)
@@ -268,6 +320,10 @@ def editor_kind(path: tuple[str, ...] | list[str], declared: Any, value: Any) ->
         return "table"
     if credential_for(path) is not None:
         return "secret"
+    if path in MODEL_FIELDS:
+        return "model"
+    if path in MODEL_PATTERN_FIELDS:
+        return "model_patterns"
     if path in config_module.FIELD_CHOICES:
         return "choice"
     if path in config_module.MULTI_CHOICES:

@@ -110,6 +110,13 @@ class SectionPlan:
     write: Callable[[], None] | None = None
 
 
+#: Problem kinds that refuse a plan, here and in the web's config editor. A
+#: loader exception refuses too; `config_editor.check` reports it as `error`.
+#: `model` is a model field naming a provider no config has; an unresolvable
+#: model of any other shape is `model_unknown`, a warning.
+BLOCKING_KINDS = frozenset({"discarded", "error", "model"})
+
+
 @dataclass
 class CheckResult:
     """What loading a `[config]` document reported.
@@ -128,8 +135,12 @@ class CheckResult:
         return [problem for problem in self.problems if problem["kind"] == "discarded"]
 
     @property
+    def blocking(self) -> list[dict]:
+        return [problem for problem in self.problems if problem["kind"] in BLOCKING_KINDS]
+
+    @property
     def refused(self) -> bool:
-        return self.error is not None or bool(self.discarded)
+        return self.error is not None or bool(self.blocking)
 
     def as_json(self) -> dict:
         return {"problems": self.problems, "error": self.error}
@@ -273,9 +284,10 @@ def collect(document: object) -> CheckResult:
         except toml_write.TomlWriteError as exc:
             return CheckResult(error=f"[config]: {exc}")
         error = None
+        config = None
         with collect_problems() as problems:
             try:
-                load_config(path, apply_db_overlays=False)
+                config = load_config(path, apply_db_overlays=False)
             except Exception:  # noqa: BLE001 - loader exceptions may contain credentials
                 error = "[config] does not load: invalid configuration"
     scratch_name = str(path)
@@ -287,6 +299,10 @@ def collect(document: object) -> CheckResult:
         }
         for problem in problems
     ]
+    if config is not None:
+        from istota.config_editor.models import model_problems
+
+        reported += model_problems(document, config)
     if error is not None:
         error = error.replace(scratch_name, "the plan's [config]")
     return CheckResult(problems=reported, error=error)
@@ -302,13 +318,13 @@ def validate_config(document: dict) -> list[str]:
     if result.error is not None:
         # collect() authors every error: key paths and type names, never a value.
         raise PlanError.authored(result.error)
-    if result.discarded:
+    if result.blocking:
         # The loader's messages quote the value; the JSON message names the keys instead.
-        keys = ", ".join(".".join(str(part) for part in problem["path"]) for problem in result.discarded)
+        keys = ", ".join(".".join(str(part) for part in problem["path"]) for problem in result.blocking)
         raise PlanError(
-            "[config] has values the loader would discard: "
-            + "; ".join(problem["message"] for problem in result.discarded),
-            message=f"[config] has values the loader would discard at {keys}",
+            "[config] has values the loader would discard or cannot resolve: "
+            + "; ".join(problem["message"] for problem in result.blocking),
+            message=f"[config] has values the loader would discard or cannot resolve at {keys}",
         )
     return [problem["message"] for problem in result.problems]
 

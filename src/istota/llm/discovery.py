@@ -792,6 +792,36 @@ def config_cache_dir(config) -> Path | None:  # noqa: ANN001
     return cache_dir_for(db_path) if db_path else None
 
 
+def catalogue_from_caches(config) -> catalog.Catalogue:  # noqa: ANN001
+    """A catalogue of the shipped file, ``config``'s caches and the installed
+    operator and override layers, built without swapping the process's
+    snapshot: doctor and the config check judge with it and change nothing."""
+    cache_dir = config_cache_dir(config)
+    discovered = load_discovered(cache_dir) if cache_dir is not None else {}
+    installed = catalog.current_catalogue()
+    return catalog.build_catalogue(
+        shipped=catalog.shipped_anthropic_models(),
+        discovered=discovered,
+        operator=installed.operator,
+        overrides=installed.overrides,
+        legacy_override_keys=installed.legacy_override_keys,
+    )
+
+
+def cache_state(cache_dir: Path | None, provider_id: str) -> tuple[float | None, str | None]:
+    """``(fetched_at, last_error)`` of a provider's cache; ``(None, None)``
+    with no cache. Reads the file only."""
+    doc = read_cache(cache_dir, provider_id) if cache_dir is not None else None
+    if not doc:
+        return None, None
+    fetched_at = doc.get("fetched_at")
+    last_error = doc.get("last_error")
+    return (
+        fetched_at if isinstance(fetched_at, (int, float)) else None,
+        str(last_error) if last_error else None,
+    )
+
+
 def refresh_all(config, now: float | None = None, *, transport: Transport | None = None) -> list[DiscoveryResult]:  # noqa: ANN001
     """The scheduler gate's body: every due `discover = true` provider, then the snapshot."""
     cache_dir = config_cache_dir(config)

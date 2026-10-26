@@ -3523,9 +3523,7 @@ def _admin_provider_rows() -> list[dict]:
     rows = []
     for spec in sorted(build_providers(_config).values(), key=lambda s: s.id):
         models = [m for m in catalogue.models(spec.id) if not m.deprecated]
-        doc = discovery.read_cache(cache_dir, spec.id) if cache_dir is not None else None
-        fetched_at = doc.get("fetched_at") if doc else None
-        last_error = doc.get("last_error") if doc else None
+        fetched_at, last_error = discovery.cache_state(cache_dir, spec.id)
         try:
             host = urlparse(spec.base_url or "").hostname or ""
         except ValueError:
@@ -5700,6 +5698,7 @@ async def admin_config(_: dict = Depends(_require_admin)):
             text = data.decode("utf-8", errors="replace")
             check = await config_check.check_current(text, digest)
         managed = await asyncio.to_thread(applier.read_managed, config_path.parent)
+    await asyncio.to_thread(_install_model_caches)
     view = await asyncio.to_thread(
         admin_config_view.build_config_view, _config,
         document=text, document_digest=digest, check=check, managed=managed,

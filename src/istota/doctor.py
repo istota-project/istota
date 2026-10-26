@@ -987,7 +987,6 @@ def check_models_catalogue(config: "Config", probe: bool) -> CheckResult:
     a key or a cache body.
     """
     from .config import anthropic_listing_key_path
-    from .llm import catalog as catalog_mod
     from .llm import discovery
     from .llm.providers import build_providers
 
@@ -999,15 +998,7 @@ def check_models_catalogue(config: "Config", probe: bool) -> CheckResult:
     now = time.time()
 
     cache_dir = discovery.config_cache_dir(config)
-    discovered = discovery.load_discovered(cache_dir) if cache_dir is not None else {}
-    installed = catalog_mod.current_catalogue()
-    catalogue = catalog_mod.build_catalogue(
-        shipped=catalog_mod.shipped_anthropic_models(),
-        discovered=discovered,
-        operator=installed.operator,
-        overrides=installed.overrides,
-        legacy_override_keys=installed.legacy_override_keys,
-    )
+    catalogue = discovery.catalogue_from_caches(config)
 
     for family in _REQUIRED_FAMILIES:
         if catalogue.latest(family) is None:

@@ -424,7 +424,149 @@ def _editor_keys(
     })
     if path in schema.TABLE_PATHS and path not in schema.READ_ONLY:
         entry["toml"] = _snippet(ctx["redacted"], path)
+    model_field = schema.model_field_for(path)
+    if model_field is not None:
+        entry["model_field"] = {
+            "sources": _model_sources(ctx["config"], model_field.sources),
+            "effort": model_field.effort,
+            "aliases": model_field.aliases,
+        }
     return entry
+
+
+def _model_sources(config: "Config", sources: str) -> list[str]:
+    """The provider ids a model field may name, for the picker's source list.
+
+    `anthropic` is the CLI brains'; `native` is every provider the native brain
+    can run (`llm.providers.brain_can_run`); `any` is both.
+    """
+    from istota.brain._resolve import config_providers, native_provider_id
+    from istota.llm.catalog import SHIPPED_PROVIDER
+    from istota.llm.providers import brain_can_run
+
+    found: list[str] = []
+    if sources in ("anthropic", "any"):
+        found.append(SHIPPED_PROVIDER)
+    if sources in ("native", "any"):
+        try:
+            providers = config_providers(config)
+            native_id = native_provider_id(config)
+        except Exception:  # noqa: BLE001 - a view never fails on a model list
+            return found
+        if native_id:
+            for provider_id in sorted(providers, key=lambda p: (p != native_id, p)):
+                if provider_id not in found and brain_can_run(
+                    "native", f"{provider_id}/-", providers, native_provider=native_id,
+                ):
+                    found.append(provider_id)
+    return found
+
+
+#: How the picker names the built-in providers; any other id is shown as is.
+_PROVIDER_LABELS = {"anthropic": "Anthropic", "openrouter": "OpenRouter"}
+
+
+def model_catalogue(config: "Config") -> dict | None:
+    """What the config page's model pickers choose from: one source per
+    configured provider with its models, and the aliases.
+
+    Read from the process's catalogue snapshot (the caller takes up the
+    discovery caches first) and the caches' fetch state; no fetch, no key.
+    Deprecated models are included, marked, and sorted last. Never raises:
+    with no catalogue the fields fall back to text.
+    """
+    try:
+        return _model_catalogue(config)
+    except Exception as exc:  # noqa: BLE001 - the page still renders without pickers
+        logger.warning("model catalogue unavailable for the config view: %s", type(exc).__name__)
+        return None
+
+
+def _model_catalogue(config: "Config") -> dict:
+    from istota.brain._resolve import (
+        DEFAULT_ALIAS,
+        DEFAULT_TIER_TARGETS,
+        FAMILY_SHORTCUTS,
+        Resolution,
+        config_providers,
+        enabled_patterns,
+        enabled_refs,
+        resolve_selection,
+        supported_efforts,
+    )
+    from istota.brain._roles import parse_alias_overrides
+    from istota.llm import discovery
+    from istota.llm.catalog import SHIPPED_PROVIDER, current_catalogue
+    from istota.llm.providers import build_providers
+
+    catalogue = current_catalogue()
+    enabled = set(enabled_refs(catalogue, enabled_patterns(config)))
+    cache_dir = discovery.config_cache_dir(config)
+    sources = []
+    specs = sorted(build_providers(config).values(), key=lambda s: (s.id != SHIPPED_PROVIDER, s.id))
+    for spec in specs:
+        fetched_at, last_error = discovery.cache_state(cache_dir, spec.id)
+        models = sorted(
+            catalogue.models(spec.id),
+            key=lambda m: (m.deprecated, m.ref not in enabled, m.family or "", m.ref),
+        )
+        sources.append({
+            "id": spec.id,
+            "kind": spec.kind,
+            "label": _PROVIDER_LABELS.get(spec.id, spec.id),
+            "discovered_at": _iso_from_epoch(fetched_at),
+            "last_error": last_error,
+            "models": [
+                {
+                    "ref": m.ref,
+                    "name": m.name,
+                    "family": m.family,
+                    "deprecated": m.deprecated,
+                    "reasoning": m.reasoning,
+                    "efforts": supported_efforts(m),
+                    "context_window": m.context_window,
+                    "enabled": m.ref in enabled,
+                }
+                for m in models
+            ],
+        })
+
+    aliases_table = parse_alias_overrides(config.models.aliases, log=False)
+    providers = config_providers(config)
+    names = [*sorted(DEFAULT_TIER_TARGETS), *FAMILY_SHORTCUTS]
+    names += sorted(n for n in aliases_table.names() if n not in names and n != DEFAULT_ALIAS)
+    aliases = []
+    for name in names:
+        resolved = resolve_selection(
+            name, catalogue, aliases=aliases_table, namespace="anthropic",
+            prefer_provider=SHIPPED_PROVIDER, providers=providers,
+        )
+        ok = isinstance(resolved, Resolution)
+        aliases.append({
+            "name": name,
+            "target": (resolved.ref or None) if ok else None,
+            "effort": resolved.effort_requested if ok else None,
+            "efforts": supported_efforts(resolved.info) if ok and resolved.info is not None else None,
+        })
+    # The count beside each stored `[models] enabled` entry, by the rule that
+    # decides what a non-admin may pick; the page counts a typed one itself.
+    pattern_counts = {
+        pattern: len(enabled_refs(catalogue, [pattern]))
+        for pattern in (config.models.enabled or [])
+        if isinstance(pattern, str)
+    }
+    return {"sources": sources, "aliases": aliases, "pattern_counts": pattern_counts}
+
+
+def _iso_from_epoch(value: float | None) -> str | None:
+    from datetime import datetime, timezone
+
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _walk(
@@ -694,6 +836,7 @@ def build_config_view(
         docs = {}
     ctx = {
         "schema": schema,
+        "config": config,
         "document": parsed,
         "redacted": secrets.redact_document(parsed) if parsed is not None else None,
         "docs": docs,
@@ -740,6 +883,7 @@ def build_config_view(
         "raw_toml": _raw_document(ctx["redacted"]),
         "has_comments": edits.has_comments(document) if document is not None else False,
         "secrets": _secret_files(config, ctx),
+        "model_catalogue": model_catalogue(config),
         "admins": {
             "users": sorted(str(user) for user in (getattr(config, "admin_users", None) or ())),
             "candidates": _admin_candidates(config),
