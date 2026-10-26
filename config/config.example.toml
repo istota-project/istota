@@ -1475,6 +1475,12 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # max_document_bytes = 26214400   # 25 MiB. 0 = unlimited, for a scanner that
                                   # produces genuinely large files
 
+# Feeds module. Every RSS or Atom fetch must reach a public address; list the
+# exact host names of feeds served on your own network.
+# [feeds]
+# private_hosts = []              # exact host names a feed may reach on a
+#                                 #   private address
+
 # User configuration
 # Map Nextcloud usernames to their settings
 # Only messages from configured users will be processed

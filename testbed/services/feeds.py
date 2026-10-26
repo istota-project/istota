@@ -1,7 +1,7 @@
 """A static document server the feeds poller can be pointed at.
 
 What this witnesses is the poller end to end against a real HTTP client:
-`httpx.get` with the conditional-GET headers `_poll_rss` builds, feedparser
+the guarded fetch with the conditional-GET headers `_poll_rss` builds, feedparser
 against bytes that arrived over a socket, the per-user SQLite write, and
 `image_dedupe`. Every existing test of that path injects an `http_get` stub, so
 nothing has ever checked that the headers the poller *sends* are the ones a
@@ -20,7 +20,7 @@ import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 
-from ..httpstub import LOOPBACK, HttpStub
+from ..httpstub import FROM_CONTAINER, LOOPBACK, HttpStub
 from . import ServiceCall
 
 #: The credential this stub publishes, and it authenticates nothing.
@@ -72,15 +72,17 @@ class FeedsService(HttpStub):
     # -- the `Service` members --------------------------------------------
 
     def config(self) -> dict:
-        """Nothing, and that is not an omission.
+        """The one host this stub is reached on, as a private feed host.
 
         A feed's URL is a *row* — `feeds.url` in the user's own
-        `modules/{user}/feeds.db` — not a config value, so there is no key that
-        could point the daemon here. The scenario seeds the rows through the
-        shipped `feeds add` CLI inside the container, against `container_url`.
-        The module is on by default, so nothing switches it on either.
+        `modules/{user}/feeds.db` — not a config value, so nothing here points
+        the daemon at the stub; the scenario seeds the rows through the shipped
+        `feeds add` CLI inside the container, against `container_url`. But
+        `host.docker.internal` resolves to a private address, and the poller
+        reaches one only for a `[feeds] private_hosts` host (#838), which is
+        what an operator with a feed on their own network writes too.
         """
-        return {}
+        return {"feeds": {"private_hosts": [FROM_CONTAINER]}}
 
     def reset(self) -> None:
         """Forget every document and every recorded fetch.

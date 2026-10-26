@@ -9,6 +9,13 @@ Public surface:
 Conditional GET (etag / last-modified) is honoured for RSS feeds. Errors
 back off by doubling ``poll_interval_minutes`` up to ``backoff_max_minutes``.
 
+An RSS fetch goes through ``sandbox.guarded_http.guarded_send`` (#838): the
+URL is the user's and the request leaves from the daemon's own network, so a
+non-public address is reached only for a ``[feeds] private_hosts`` host, every
+redirect is checked again, and the body and the whole call are bounded. Plain
+http stays allowed: the user chose the scheme, and the request carries nothing
+the daemon adds. Tumblr and Are.na call fixed API hosts and are not guarded.
+
 Rate limiting (ISSUE-347) is four separate things, and they are only useful
 together:
 
@@ -39,6 +46,7 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from istota.feeds import db as feeds_db
 from istota.feeds.models import (
@@ -73,9 +81,55 @@ from istota.feeds.sanitize import (
     remove_images,
     sanitize_html,
 )
+from istota.sandbox import guarded_http
 
 
 logger = logging.getLogger("istota.feeds.poller")
+
+FETCH_TIMEOUT_SECONDS = 30.0
+FETCH_DEADLINE_SECONDS = 90.0
+FETCH_MAX_BYTES = 16 * 1024 * 1024
+MAX_REDIRECTS = 5
+
+#: What a refused fetch says in ``last_error``: fixed text per guard code, so
+#: no URL or response text reaches the row.
+_REFUSAL_MESSAGES = {
+    "host_refused": "The feed's address is not an http or https URL on a public host.",
+    "too_large": "The feed is larger than 16 MiB.",
+    "redirect_refused": "The feed redirected too many times.",
+    "connection_failed": "Could not connect to the feed's host.",
+    "timeout": "The feed took too long to answer.",
+}
+
+
+def _guarded_get(url: str, *, headers: dict, private_hosts) -> object:
+    # The guard refuses userinfo in a URL; a private feed's `user:token@` is
+    # sent as Basic auth instead, as httpx did, and dropped on a cross-origin hop.
+    url, auth = _split_userinfo(url)
+    with guarded_http.new_client(timeout=FETCH_TIMEOUT_SECONDS) as client:
+        return guarded_http.guarded_send(
+            client, "GET", url,
+            private_hosts=private_hosts,
+            max_bytes=FETCH_MAX_BYTES,
+            timeout=FETCH_TIMEOUT_SECONDS,
+            deadline_seconds=FETCH_DEADLINE_SECONDS,
+            max_redirects=MAX_REDIRECTS,
+            headers=headers,
+            auth=auth,
+            allow_plain_http=True,
+        )
+
+
+def _split_userinfo(url: str) -> tuple[str, tuple[str, str] | None]:
+    try:
+        parts = urlsplit(url)
+        if parts.username is None and parts.password is None:
+            return url, None
+        netloc = parts.netloc.rpartition("@")[2]
+    except ValueError:
+        return url, None
+    auth = (unquote(parts.username or ""), unquote(parts.password or ""))
+    return urlunsplit(parts._replace(netloc=netloc)), auth
 
 
 # -- single-feed polling ------------------------------------------------------
@@ -86,11 +140,13 @@ def poll_feed(
     *,
     tumblr_api_key: str = "",
     http_get: Callable | None = None,
+    private_hosts=(),
 ) -> FetchResult:
     """Fetch one feed, dispatching by source_type.
 
-    ``http_get`` is the RSS-fetch hook — defaults to ``httpx.get``. Tests
-    inject a stub. Tumblr and Are.na providers manage their own HTTP.
+    ``http_get`` is the RSS-fetch hook — defaults to the guarded fetch, which
+    reads ``private_hosts``. Tests inject a stub. Tumblr and Are.na providers
+    manage their own HTTP.
     """
     source = feed.source_type or detect_source_type(feed.url)
     try:
@@ -102,7 +158,10 @@ def poll_feed(
             ident = provider_identifier(feed.url)
             items = arena_provider.fetch(ident)
             return FetchResult(feed_url=feed.url, items=items)
-        return _poll_rss(feed, http_get=http_get)
+        return _poll_rss(feed, http_get=http_get, private_hosts=private_hosts)
+    except guarded_http.GuardRefused as exc:
+        logger.info("poll_feed refused feed_id=%s code=%s", feed.id, exc.code)
+        return FetchResult(feed_url=feed.url, error=_REFUSAL_MESSAGES[exc.code])
     except FeedRateLimited as exc:
         # Ahead of the generic handler below, and deliberately not folded into
         # it: a throttle is not a failure of the feed, so it carries no
@@ -121,11 +180,11 @@ def poll_feed(
         return FetchResult(feed_url=feed.url, error=str(exc))
 
 
-def _poll_rss(feed: FeedRecord, *, http_get: Callable | None) -> FetchResult:
+def _poll_rss(feed: FeedRecord, *, http_get: Callable | None, private_hosts=()) -> FetchResult:
     """RSS/Atom poll via feedparser. Conditional GET honoured."""
     if http_get is None:
-        import httpx
-        http_get = httpx.get
+        def http_get(url, *, headers):
+            return _guarded_get(url, headers=headers, private_hosts=private_hosts)
 
     headers: dict[str, str] = {
         "User-Agent": "istota-feeds/0.1 (+https://github.com/istota-project/istota)",
@@ -135,7 +194,7 @@ def _poll_rss(feed: FeedRecord, *, http_get: Callable | None) -> FetchResult:
     if feed.last_modified:
         headers["If-Modified-Since"] = feed.last_modified
 
-    resp = http_get(feed.url, headers=headers, timeout=30.0, follow_redirects=True)
+    resp = http_get(feed.url, headers=headers)
     status = getattr(resp, "status_code", 0)
     if status == 304:
         return FetchResult(feed_url=feed.url, not_modified=True)
@@ -387,6 +446,7 @@ def poll_due_feeds(
     jitter_fraction: float = DEFAULT_JITTER_FRACTION,
     rng: random.Random | None = None,
     sleep: Callable[[float], None] | None = None,
+    private_hosts=(),
 ) -> list[tuple[FeedRecord, FetchResult, int]]:
     """Poll every feed whose ``next_poll_at`` is in the past.
 
@@ -462,7 +522,10 @@ def poll_due_feeds(
         # against a request that was never issued.
         last_request_at[host] = time.monotonic()
 
-        result = poll_feed(feed, tumblr_api_key=tumblr_api_key, http_get=http_get)
+        result = poll_feed(
+            feed, tumblr_api_key=tumblr_api_key, http_get=http_get,
+            private_hosts=private_hosts,
+        )
         # Pacing means the loop can run for minutes, so the schedule is
         # computed against the clock as it is now rather than against the
         # instant the batch started — otherwise the tail of a paced run is

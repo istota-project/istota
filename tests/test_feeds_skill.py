@@ -265,3 +265,44 @@ class TestLoaderEnvFirst:
         )
         ctx = _loader.resolve_for_user("alice", istota_config)
         assert ctx.tumblr_api_key == "from-store"
+
+
+_ONE_ITEM_RSS = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel><title>Local</title><link>https://example.org</link>
+<item><guid>g1</guid><title>A</title><link>https://example.org/a</link></item>
+</channel></rss>"""
+
+
+class TestThePollIsGuarded:
+    """Through the facade the scheduled job runs: config, loader, CLI, poller,
+    guard, and a real socket at the end (#838)."""
+
+    @pytest.fixture
+    def feed_server(self):
+        from tests.support.feed_server import FeedServer
+
+        s = FeedServer()
+        s.routes["/feed.xml"] = (200, {}, _ONE_ITEM_RSS)
+        yield s
+        s.close()
+
+    def test_a_feed_on_a_private_address_is_never_requested(self, istota_config, feed_server):
+        from istota.skills.feeds import _run
+
+        assert _run(["add", "--url", feed_server.url("/feed.xml")])["status"] == "ok"
+        out = _run(["poll"])
+
+        assert out["errors"] == 1
+        assert out["feeds"][0]["error"] == "The feed's address is not an http or https URL on a public host."
+        assert feed_server.received == []
+
+    def test_a_host_in_feeds_private_hosts_is_polled(self, istota_config, feed_server):
+        from istota.skills.feeds import _run
+
+        istota_config.feeds.private_hosts = ["localhost"]
+        assert _run(["add", "--url", feed_server.url("/feed.xml")])["status"] == "ok"
+        out = _run(["poll"])
+
+        assert out["status"] == "ok"
+        assert out["new_entries"] == 1
+        assert feed_server.received == ["/feed.xml"]

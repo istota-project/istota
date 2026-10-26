@@ -232,12 +232,16 @@ class FeedsContext:
     that need workspace-level config drop-ins (e.g. seed-OPML override
     discovery) must consult this field — ``data_dir.parent`` is
     unreliable in that case.
+
+    ``private_hosts`` is ``[feeds] private_hosts``: the only hosts an RSS
+    fetch may reach on a non-public address.
     """
     user_id: str
     data_dir: Path
     db_path: Path
     tumblr_api_key: str = ""
     workspace_root: Path | None = None
+    private_hosts: list[str] = field(default_factory=list)
 
     def ensure_dirs(self) -> None:
         """Create the data dir and the SQLite parent dir."""

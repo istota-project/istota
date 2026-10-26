@@ -318,8 +318,9 @@ class TestTheFeedsStub:
         assert documents.calls == []
         assert _request(f"{documents.url}/feed.xml")[0] == 404
 
-    def test_it_writes_nothing_into_the_config(self, documents):
-        """Feed URLs are rows, not config. Same guard as the ntfy stub's, and
-        for the same reason: an empty `config` that quietly gains an entry
-        is how a fixture starts side-loading configuration."""
-        assert documents.config() == {}
+    def test_it_writes_only_its_own_host_into_the_config(self, documents):
+        """Feed URLs are rows, not config, so the one key is the host the
+        daemon reaches this stub on, which the poller's guard refuses unless an
+        operator lists it (#838). Pinned whole: a `config` that quietly gains
+        another entry is how a fixture starts side-loading configuration."""
+        assert documents.config() == {"feeds": {"private_hosts": ["host.docker.internal"]}}
