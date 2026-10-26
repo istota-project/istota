@@ -446,7 +446,14 @@ SECRET_NAMES: tuple[str, ...] = (
     "istota_provider_anthropic_extra_headers",
     "istota_provider_openrouter_api_key",
     "istota_provider_openrouter_extra_headers",
+    # The key used only to list Anthropic's models. Read as a file by the
+    # discovery fetch and never as a variable: `istota-secrets` skips it, and
+    # compose mounts it on the daemon alone (DAEMON_ONLY_SECRETS).
+    "istota_anthropic_listing_key",
 )
+
+#: Secret files compose mounts on the `daemon` service only.
+DAEMON_ONLY_SECRETS: frozenset[str] = frozenset({"istota_anthropic_listing_key"})
 
 #: Ingress modes, as `host.env`'s INGRESS names them, mapped to the hop count the
 #: web app subtracts from X-Forwarded-For: one for the compose nginx, plus one
@@ -501,7 +508,12 @@ class ContainerAnswers:
     # Brain.
     brain_kind: str = "claude_code"
     claude_code_oauth_token: str = ""
+    #: The `claude` CLI's API key: the `anthropic` provider's key, written to
+    #: `istota_provider_anthropic_api_key` (`[brain.claude_code] auth = "api_key"`).
     anthropic_api_key: str = ""
+    #: The key used only to list Anthropic's models, on either auth path. A
+    #: file only (`istota_anthropic_listing_key`), never a variable.
+    anthropic_listing_key: str = ""
     #: The provider native uses: "anthropic", "openrouter" or an operator's own
     #: id. No default (D18). Empty with a `native_base_url` reads that URL the
     #: way `config.LEGACY_PROVIDER_SOURCES` does, which is what the web setup's
@@ -645,10 +657,31 @@ def _native_payload_url(a: ContainerAnswers) -> str:
     return base_url
 
 
+def cli_auth_answer(a: ContainerAnswers) -> str:
+    """`[brain.claude_code] auth` for these answers: the token wins, then the
+    key, else unset (derived per process from the environment)."""
+    if a.brain_kind == "native":
+        return ""
+    if a.claude_code_oauth_token:
+        return "subscription"
+    if a.anthropic_api_key:
+        return "api_key"
+    return ""
+
+
+def _anthropic_key_file_value(a: ContainerAnswers) -> str:
+    if native_key_file(a) == "istota_provider_anthropic_api_key":
+        return a.native_api_key
+    return a.anthropic_api_key if cli_auth_answer(a) == "api_key" else ""
+
+
 def container_secret_values(a: ContainerAnswers) -> dict[str, str]:
     """Every file under ``secrets/``, name to content, empty when unused."""
     values = {
-        "anthropic_api_key": a.anthropic_api_key if a.brain_kind != "native" else "",
+        # Legacy: read through `config.LEGACY_PROVIDER_SOURCES` for one
+        # release; the CLI's key is the anthropic provider's file now. An
+        # empty value keeps a non-empty file.
+        "anthropic_api_key": "",
         "claude_code_oauth_token": (
             a.claude_code_oauth_token if a.brain_kind != "native" else ""
         ),
@@ -684,14 +717,13 @@ def container_secret_values(a: ContainerAnswers) -> dict[str, str]:
         "istota_whatsapp_app_secret": "",
         "istota_whatsapp_verify_token": "",
         "istota_brain_native_extra_headers": "",
-        "istota_provider_anthropic_api_key": (
-            a.native_api_key if native_key_file(a) == "istota_provider_anthropic_api_key" else ""
-        ),
+        "istota_provider_anthropic_api_key": _anthropic_key_file_value(a),
         "istota_provider_anthropic_extra_headers": "",
         "istota_provider_openrouter_api_key": (
             a.native_api_key if native_key_file(a) == "istota_provider_openrouter_api_key" else ""
         ),
         "istota_provider_openrouter_extra_headers": "",
+        "istota_anthropic_listing_key": a.anthropic_listing_key,
     }
     assert tuple(values) == SECRET_NAMES
     return values
@@ -742,6 +774,12 @@ def container_config_document(a: ContainerAnswers, *, inline_credentials: bool) 
             if a.native_api_key:
                 own["api_key"] = a.native_api_key
             doc["providers"] = {provider_id: own}
+    else:
+        auth = cli_auth_answer(a)
+        if auth:
+            brain["claude_code"] = {"auth": auth}
+        if auth == "api_key" and credential("istota_provider_anthropic_api_key"):
+            doc["providers"] = {"anthropic": {"api_key": secret["istota_provider_anthropic_api_key"]}}
     doc["brain"] = brain
 
     if a.uses_nextcloud:
@@ -1147,7 +1185,14 @@ def prior_answers(data_dir: Path, vm_dir: Path | None) -> ContainerAnswers | Non
             a.native_api_key = credential("istota_brain_native_api_key", native, "api_key")
     else:
         a.claude_code_oauth_token = credential("claude_code_oauth_token", {}, "")
-        a.anthropic_api_key = credential("anthropic_api_key", {}, "")
+        # The provider's file, then the legacy one a pre-provider stack holds
+        # (`config.LEGACY_PROVIDER_SOURCES`); this run writes the current shape.
+        a.anthropic_api_key = (
+            credential("istota_provider_anthropic_api_key", table("providers", "anthropic"), "api_key")
+            or credential("anthropic_api_key", {}, "")
+        )
+    if secrets_dir is not None:
+        a.anthropic_listing_key = _read_secret_file(secrets_dir / "istota_anthropic_listing_key")
 
     mounted = "workspace_mount_path" in doc
     nextcloud = table("nextcloud")
@@ -1473,6 +1518,7 @@ WEB_SETUP_FIELDS: dict[str, type] = {
     "native_model": str,
     "native_api_key": str,
     "claude_code_oauth_token": str,
+    "anthropic_listing_key": str,
     "email_enabled": bool,
     "imap_host": str,
     "imap_user": str,
@@ -1609,6 +1655,7 @@ def answers_from_payload(payload: dict, base: ContainerAnswers | None = None) ->
         a.native_api_key = text("native_api_key")
     else:
         a.claude_code_oauth_token = text("claude_code_oauth_token")
+    a.anthropic_listing_key = text("anthropic_listing_key")
 
     a.email_enabled = flag("email_enabled", False)
     if a.email_enabled:
@@ -1678,6 +1725,7 @@ def payload_from_answers(a: ContainerAnswers) -> dict:
         "native_model": a.native_model,
         "native_api_key": a.native_api_key,
         "claude_code_oauth_token": a.claude_code_oauth_token,
+        "anthropic_listing_key": a.anthropic_listing_key,
         "email_enabled": a.email_enabled,
         "imap_host": a.imap_host,
         "imap_user": a.imap_user,
@@ -1971,9 +2019,30 @@ def collect_container_answers(
             "claude_code_oauth_token", "Claude Code OAuth token", a.claude_code_oauth_token,
         )
         if not a.claude_code_oauth_token:
-            a.anthropic_api_key = secret("anthropic_api_key", "Anthropic API key", a.anthropic_api_key)
+            # The provider's variable, then the legacy one a pre-provider
+            # environment holds (`config.LEGACY_PROVIDER_SOURCES`).
+            key = _env_credential("istota_provider_anthropic_api_key") or _env_credential("anthropic_api_key")
+            if not key and interactive:
+                key = _ask_secret_optional(getpass_fn, "Anthropic API key", keeps=bool(a.anthropic_api_key))
+            a.anthropic_api_key = key or a.anthropic_api_key
         if not (a.claude_code_oauth_token or a.anthropic_api_key):
             out("  No Claude credential given; add one to secrets/ before the first task.")
+    # The model-listing key, on either path. Never from the environment: a
+    # `--yes` run reads it from a file it is pointed at.
+    listing_file = flag("anthropic_model_listing_key_file")
+    if listing_file:
+        try:
+            a.anthropic_listing_key = Path(listing_file).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise SetupError(
+                f"--anthropic-model-listing-key-file: cannot read {listing_file} ({type(exc).__name__})"
+            ) from None
+    elif interactive:
+        out("  Optional: a key used only to list Anthropic's models (create it in a")
+        out("  Console workspace with a spend limit of zero); leave empty to use the")
+        out("  list istota ships.")
+        key = _ask_secret_optional(getpass_fn, "Model-listing key", keeps=bool(a.anthropic_listing_key))
+        a.anthropic_listing_key = key or a.anthropic_listing_key
 
     # Email.
     if flag("email", False):
@@ -2253,11 +2322,17 @@ def write_container_setup(
             path.write_text(render(a, existing), encoding="utf-8")
         if a.workspace_is_mount:
             _stage_rclone_conf(a, vm_dir, secrets_dir, out)
-    elif a.brain_kind != "native" and (a.claude_code_oauth_token or a.anthropic_api_key):
-        out(
-            "  The Claude credential has no config key; without --vm-dir it was not "
-            "written. Put it in the stack's secrets/ directory."
-        )
+    else:
+        if a.brain_kind != "native" and a.claude_code_oauth_token:
+            out(
+                "  The Claude Code token has no config key; without --vm-dir it was not "
+                "written. Put it in the stack's secrets/ directory."
+            )
+        if a.anthropic_listing_key:
+            out(
+                "  The model-listing key is read from a file only; without --vm-dir it was "
+                "not written. Put it in the stack's secrets/istota_anthropic_listing_key."
+            )
 
 
 # ===========================================================================

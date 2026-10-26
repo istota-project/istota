@@ -48,12 +48,24 @@ inside the agent loop. Same reasoning as `git_hardening.py` and `shell_exec.py`.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
 #: Names a task env carries only for the `claude` CLI's benefit.
 #:
-#: One entry today. A second variable hand-set beside the first in
-#: `build_clean_env` belongs here too, unless a native tool subprocess has
-#: business reading it.
-CLAUDE_RUNTIME_ENV_VARS = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
+#: Everything `llm.providers.cli_auth_env` can put in a task env, for either
+#: auth mode: the OAuth token under "subscription", the `anthropic` provider's
+#: key and base URL under "api_key", and the bearer name nothing sets but a
+#: CLI would read. A variable `build_clean_env` sets later belongs here too,
+#: unless a native tool subprocess has business reading it.
+CLAUDE_RUNTIME_ENV_VARS = frozenset({
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+})
 
 
 def without_claude_runtime_env(
@@ -80,3 +92,82 @@ def without_claude_runtime_env(
     if env is None:
         return None
     return {k: v for k, v in env.items() if k not in CLAUDE_RUNTIME_ENV_VARS}
+
+
+# --- The OAuth token as a file ------------------------------------------------
+#
+# The `claude` CLI reads its subscription credential from
+# `$CLAUDE_CONFIG_DIR/.credentials.json` (default `~/.claude`). On the stack
+# `HOME` is on the data volume `web` mounts too, so the file is shared by every
+# process in both containers: it follows the auth mode, written only under
+# "subscription" with a token and removed otherwise, by one verb
+# (`istota cli-auth sync-credentials-file`) the entrypoint runs at boot.
+
+#: Where the file sits under a home directory.
+CREDENTIALS_FILE = (".claude", ".credentials.json")
+
+#: The scope the CLI requires of a stored token before it counts as logged in.
+#: Without it the file reads as "Not logged in" (measured against the pinned
+#: 2.1.296 in the Stage 3 probe; a file of only `accessToken` and `expiresAt`,
+#: the shape the entrypoint used to write, never authenticated on its own).
+_INFERENCE_SCOPE = "user:inference"
+
+
+def credentials_file_path(home: str | None = None) -> Path:
+    from pathlib import Path
+    import os
+
+    return Path(home if home is not None else os.environ.get("HOME", "/tmp")).joinpath(*CREDENTIALS_FILE)
+
+
+def credentials_document(token: str) -> str:
+    """The file's contents for a long-lived setup token: never expiring, no
+    refresh token, the inference scope."""
+    import json
+
+    return json.dumps({"claudeAiOauth": {
+        "accessToken": token,
+        "refreshToken": "",
+        "expiresAt": 253402300799000,
+        "scopes": [_INFERENCE_SCOPE],
+    }})
+
+
+def sync_credentials_file(mode: str | None, token: str, home: str | None = None) -> str:
+    """Make the file agree with the mode: written (0600) under "subscription"
+    with a token, removed otherwise. Returns what it did: ``written``,
+    ``unchanged``, ``removed`` or ``absent``. Follows no link at the file."""
+    import os
+
+    path = credentials_file_path(home)
+    if mode == "subscription" and token:
+        wanted = credentials_document(token)
+        try:
+            with open(path, "rb", opener=lambda p, f: os.open(p, f | os.O_NOFOLLOW)) as fh:
+                if fh.read().decode("utf-8", "replace") == wanted:
+                    return "unchanged"
+        except OSError:
+            pass
+        path.parent.mkdir(mode=0o700, exist_ok=True)
+        staging = path.with_name(f".credentials.json.{os.getpid()}")
+        fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(fd, wanted.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(staging, path)
+        return "written"
+    return "removed" if remove_stale_credentials_file(home) else "absent"
+
+
+def remove_stale_credentials_file(home: str | None = None) -> bool:
+    """Remove the file when it is there (a link at the name too). True if it was."""
+    path = credentials_file_path(home)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    return True

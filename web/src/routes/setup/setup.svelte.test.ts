@@ -39,6 +39,7 @@ const CREDENTIALS = new Set([
   'password',
   'native_api_key',
   'claude_code_oauth_token',
+  'anthropic_listing_key',
   'nextcloud_app_password',
   'imap_password',
   'caldav_password',

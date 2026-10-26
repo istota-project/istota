@@ -47,7 +47,13 @@ NATIVE_PROVIDER = '\n[brain.native]\nprovider = "openrouter"\n'
 def _load(tmp_path, body: str, *, native: str = NATIVE_PROVIDER) -> Config:
     cfg = tmp_path / "config.toml"
     cfg.write_text(textwrap.dedent(body) + native)
-    return load_config(cfg)
+    config = load_config(cfg)
+    # The unconfigured kinds are filled per process, with the CLI mode
+    # (`resolve_process_auth`); a token here keeps the CLI brains configured.
+    from istota.llm.providers import resolve_process_auth
+
+    resolve_process_auth(config, {"CLAUDE_CODE_OAUTH_TOKEN": "token"})
+    return config
 
 
 class TestAnUnconfiguredKind:

@@ -559,8 +559,6 @@ class TestTheNarrowedEnvCanStillReachTheProvider:
         "HTTP_PROXY": "http://proxy.internal:3128",
         "SSL_CERT_FILE": "/etc/ssl/certs/corporate.pem",
         "NODE_EXTRA_CA_CERTS": "/etc/ssl/certs/corporate.pem",
-        "ANTHROPIC_BASE_URL": "https://gateway.internal/v1",
-        "ANTHROPIC_AUTH_TOKEN": "gateway-token-placeholder",
     }
 
     def test_the_provider_reachability_vars_survive(
@@ -579,6 +577,26 @@ class TestTheNarrowedEnvCanStillReachTheProvider:
             assert env.get(name) == value, f"{name} was dropped"
         for name in DAEMON_CREDENTIALS:
             assert name not in env
+
+    def test_the_endpoint_comes_from_config_never_the_daemon_env(
+        self, monkeypatch, make_config
+    ):
+        """A gateway is the `anthropic` provider's base URL under "api_key";
+        an `ANTHROPIC_BASE_URL` or bearer name in the daemon's environment
+        reaches no CLI env (the model-catalogue spec, "CLI auth")."""
+        from istota.executor import build_model_cli_env
+
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://elsewhere.internal/v1")
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "gateway-token-placeholder")
+        config = make_config()
+        config.brain.claude_code.auth = "api_key"
+        config.providers["anthropic"].base_url = "https://gateway.internal"
+        config.providers["anthropic"].api_key = "gateway-key"
+
+        env = build_model_cli_env(config)
+
+        assert env["ANTHROPIC_BASE_URL"] == "https://gateway.internal"
+        assert "ANTHROPIC_AUTH_TOKEN" not in env
 
     def test_an_empty_no_proxy_survives(self, monkeypatch, make_config):
         """``NO_PROXY=`` blanks an inherited exemption list; it is not absence."""

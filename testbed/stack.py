@@ -737,6 +737,7 @@ SECRET_NAMES: tuple[str, ...] = (
     "istota_provider_anthropic_extra_headers",
     "istota_provider_openrouter_api_key",
     "istota_provider_openrouter_extra_headers",
+    "istota_anthropic_listing_key",
 )
 
 #: What the scripted endpoint is sent as a key. Nothing in this tier can use a

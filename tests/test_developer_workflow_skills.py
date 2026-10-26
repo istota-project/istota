@@ -120,32 +120,13 @@ class TestCliFlagMatchesReality:
         invariant that it stays runnable."""
         assert bundled_index["code_review"].cli is True
 
-    def test_code_review_declares_the_api_key_it_needs(self, bundled_index):
-        """A native-brain deployment authenticates from
-        `ISTOTA_BRAIN_NATIVE_API_KEY`, which `config.py` reads at load time. The
-        CLI does not run in the daemon process, so it does not inherit it — the
-        env spec is the only thing that gets the key there.
-
-        It must be `sensitive` and **not** `proxy_only`. The executor splits the
-        proxy-only set out of the env *before* the credential set, so a var
-        flagged both lands in `proxy_only_env` and never reaches
-        `credential_env` — and `proxy_only_env` is handed to every skill CLI
-        unscoped, on the stated grounds that those vars are not secrets. An API
-        key is. Declared `sensitive` alone, injection is scoped to the skills
-        whose own manifest asked for it, so only `code_review` sees it.
-        """
+    def test_code_review_declares_no_model_credential(self, bundled_index):
+        """The reviewer's credentials are `model_caller_env`'s copy, built
+        from config and injected into this skill alone; a manifest naming a
+        model credential is refused at load (the model-catalogue spec,
+        Stage 3), so the manifest declares only the repos directory."""
         specs = {spec.var: spec for spec in bundled_index["code_review"].env_specs}
-        assert set(specs) == {"DEVELOPER_REPOS_DIR", "ISTOTA_BRAIN_NATIVE_API_KEY"}
-
-        api_key = specs["ISTOTA_BRAIN_NATIVE_API_KEY"]
-        assert api_key.source == "config"
-        assert api_key.config_path == "brain.native.api_key"
-        assert api_key.sensitive is True
-        assert api_key.proxy_only is False, (
-            "proxy_only would leak the key to every other skill CLI and skip "
-            "the scoped credential path entirely"
-        )
-        assert api_key.when == ["developer.enabled", "brain.native.api_key"]
+        assert set(specs) == {"DEVELOPER_REPOS_DIR"}
 
         repos = specs["DEVELOPER_REPOS_DIR"]
         assert repos.sensitive is False, "a directory path is not a credential"

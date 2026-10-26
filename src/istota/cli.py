@@ -184,6 +184,10 @@ def cmd_doctor(args):
 
     requested = Path(args.config) if args.config else None
     config = load_config(requested)
+    # Doctor reads the CLI auth mode and the unconfigured brain kinds, which
+    # each process resolves once (`resolve_process_auth`), never at load.
+    from .llm.providers import resolve_process_auth
+    resolve_process_auth(config)
     # A run that loaded no config file describes a default `Config`, not this
     # deployment, and says so nowhere (ISSUE-412). Render the one line that says
     # it and stop: there is no subset of such a run worth reading. Inside a task
@@ -211,11 +215,34 @@ def cmd_doctor(args):
     return doctor.exit_code(results)
 
 
+def cmd_cli_auth(args):
+    """`istota cli-auth sync-credentials-file`: the one writer of the CLI's
+    credentials file. Resolves the mode as the daemon would and makes the file
+    agree with it; prints what it did and never the token."""
+    import os
+
+    from .llm.providers import OAUTH_TOKEN_VARIABLE, resolve_cli_auth
+    from .sandbox.claude_runtime_env import credentials_file_path, sync_credentials_file
+
+    config = load_config(Path(args.config) if args.config else None)
+    mode = resolve_cli_auth(config, os.environ)
+    token = (os.environ.get(OAUTH_TOKEN_VARIABLE) or "").strip()
+    try:
+        outcome = sync_credentials_file(mode, token)
+    except OSError as exc:
+        print(f"Error: could not write {credentials_file_path()}: {type(exc).__name__}", file=sys.stderr)
+        return 1
+    print(f"Claude Code credentials file: {outcome} (auth: {mode or 'none'})")
+    return 0
+
+
 def cmd_task(args):
     """Submit a task directly."""
     from .executor import execute_task
+    from .llm.providers import resolve_process_auth
     from .scheduler import _task_heartbeat
     config = load_config(Path(args.config) if args.config else None)
+    resolve_process_auth(config)
     args.user = config.resolve_user_id(args.user) or args.user
 
     if args.prompt:
@@ -328,9 +355,11 @@ def cmd_task(args):
 
 def cmd_repl(args):
     """Launch the interactive terminal assistant (full-stack, streamed)."""
+    from .llm.providers import resolve_process_auth
     from .repl import run_session
 
     config = load_config(Path(args.config) if args.config else None)
+    resolve_process_auth(config)
 
     user_id = args.user
     if not user_id:
@@ -566,8 +595,10 @@ def cmd_serve(args):
 
 def cmd_run(args):
     """Run the scheduler once (process pending tasks)."""
+    from .llm.providers import resolve_process_auth
     from .scheduler import check_briefings, process_one_task
     config = load_config(Path(args.config) if args.config else None)
+    resolve_process_auth(config)
 
     if args.briefings:
         # Check and queue briefings
@@ -5361,6 +5392,17 @@ def main():
              "as the scheduler's next start would",
     )
 
+    # cli-auth
+    cli_auth_parser = subparsers.add_parser(
+        "cli-auth", help="The claude CLI's authentication ([brain.claude_code] auth)",
+    )
+    cli_auth_subparsers = cli_auth_parser.add_subparsers(dest="cli_auth_action", required=True)
+    cli_auth_subparsers.add_parser(
+        "sync-credentials-file",
+        help="Write ~/.claude/.credentials.json under \"subscription\" with a token, "
+             "remove it otherwise",
+    )
+
     # doctor
     doctor_parser = subparsers.add_parser(
         "doctor", help="Check the runtime this deployment actually has"
@@ -5424,6 +5466,11 @@ def main():
     )
     setup_parser.add_argument("--native-base-url", help="An own provider's API base URL")
     setup_parser.add_argument("--native-model", help="Native brain model id")
+    setup_parser.add_argument(
+        "--anthropic-model-listing-key-file", metavar="PATH",
+        help="A file holding the key used only to list Anthropic's models (optional; "
+             "never read from the environment)",
+    )
     setup_parser.add_argument("--user", help="The first admin's user id")
     setup_parser.add_argument("--display-name", help="Display name")
     setup_parser.add_argument("--timezone", help="Timezone (default UTC)")
@@ -6230,6 +6277,7 @@ def main():
         "migrate": cmd_migrate,
         "init": cmd_init,
         "doctor": cmd_doctor,
+        "cli-auth": cmd_cli_auth,
         "task": cmd_task,
         "run": cmd_run,
         "list": cmd_list,

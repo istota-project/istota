@@ -104,6 +104,10 @@ NON_SECRET_KEYS = frozenset({
     "brain.native.compaction_keep_recent_tokens",
     "brain.native.compaction_background_tokens",
     "security.passthrough_env_vars",  # a list of var *names*
+    # The claude CLI's auth mode ("subscription" | "api_key"); `AUTH` catches it.
+    "brain.claude_code.auth",
+    # A path to the model-listing key's file, never the key itself.
+    "models.anthropic_listing_key_file",
     "brain.tmux.bypass_accept_marker",   # a TUI dialog substring; the config
     "brain.tmux.bypass_warning_marker",  # hotfix knob when a CLI reword lands
 })

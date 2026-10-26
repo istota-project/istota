@@ -383,10 +383,13 @@ def _build_heartbeat_skill_env(
         discovered_calendars=[],
     )
 
+    from .llm.providers import strip_model_credentials
+
     env: dict[str, str] = {}
     env.update(build_skill_env(list(skill_index), skill_index, ctx))
     env.update(dispatch_setup_env_hooks(list(skill_index), skill_index, ctx))
-    return env
+    # A shell check carries no model credential, whatever a merge brought.
+    return strip_model_credentials(env)
 
 
 def _check_shell_command(check: HeartbeatCheck, config: "Config", user_id: str | None = None) -> CheckResult:

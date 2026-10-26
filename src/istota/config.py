@@ -32,6 +32,7 @@ from .config_mapper import (
 )
 from istota.llm.providers import (
     BUILTIN_PROVIDERS,
+    CLI_AUTH_MODES,
     COMPAT_TABLE_KEYS,
     PROVIDER_KINDS,
     implied_provider_id,
@@ -2346,6 +2347,11 @@ class ClaudeCodeBrainConfig:
     # through this brain's alias table at the point of use, not here.
     model: str = ""
     effort: str = ""  # low/medium/high/xhigh/max (empty = the model's own default)
+    # How the `claude` CLI authenticates, for this brain and tmux:
+    # "subscription" (the OAuth token, never an API key) or "api_key" (the
+    # `anthropic` provider's key, never the token). Empty derives it once per
+    # process from the environment (`llm.providers.resolve_cli_auth`).
+    auth: str = ""
     # Poll api.anthropic.com for plan utilization at all.
     subscription_usage: bool = True
     # One deployment-wide fetch per this window; every surface reads the same
@@ -2564,6 +2570,20 @@ class ModelsConfig:
     # `[models.overrides."<ref>"]`: per-field patches over the catalogue, keyed
     # by `provider/id`. One naming a model no layer has is ignored.
     overrides: dict[str, dict] = field(default_factory=dict)
+    # The file holding the key used only to list Anthropic's models (`GET
+    # /v1/models`). A path, never the key: the discovery fetch reads the file
+    # each time and nothing else does, so no `Config` holds the value.
+    # Empty is the stack's secret file, `DEFAULT_ANTHROPIC_LISTING_KEY_FILE`.
+    anthropic_listing_key_file: str = ""
+
+
+#: Where compose mounts the model-listing key on the daemon.
+DEFAULT_ANTHROPIC_LISTING_KEY_FILE = "/run/secrets/istota_anthropic_listing_key"
+
+
+def anthropic_listing_key_path(config: "Config") -> Path:
+    """The file the Anthropic model-list fetch reads its key from."""
+    return Path(config.models.anthropic_listing_key_file or DEFAULT_ANTHROPIC_LISTING_KEY_FILE)
 
 
 @dataclass
@@ -2680,6 +2700,10 @@ class Config:
     _profile_checked_at: float = field(default=0.0, repr=False, compare=False)
     _profile_refresh_failing: bool = field(default=False, repr=False, compare=False)
     _profile_user_ids: set[str] = field(default_factory=set, repr=False, compare=False)
+    # The `claude` CLI's auth mode, resolved once per process that builds a CLI
+    # env (`llm.providers.resolve_process_auth`), never by `load_config`.
+    _cli_mode: str | None = field(default=None, repr=False, compare=False)
+    _cli_mode_resolved: bool = field(default=False, repr=False, compare=False)
     _configured_user_ids: set[str] | None = field(default=None, repr=False, compare=False)
     _user_registry_complete: bool = field(default=True, repr=False, compare=False)
 
@@ -4167,6 +4191,9 @@ _NOT_CONFIGURATION = frozenset({
     "_profile_refresh_failing",
     "_profile_user_ids",
     "_configured_user_ids",
+    # The CLI auth mode this process resolved.
+    "_cli_mode",
+    "_cli_mode_resolved",
     "_user_registry_complete",
     # What `_settle_servarr_apps` dropped, recorded once the environment is read.
     "servarr.incomplete_apps",
@@ -4981,13 +5008,18 @@ class LegacyProviderSource:
     source: str        # `brain.native.<field>` or `env:<VARIABLE>`
     target: str        # the `ProviderConfig` field it fills on the implied provider
     replacement: str   # what to write instead, for doctor and `apply --check`
+    # The provider it fills: "" for native's implied provider, else a fixed id.
+    provider: str = ""
 
 
 #: Every legacy source of the native brain's endpoint and key, read for one
 #: release as the fields of an implied provider, and nowhere else. The implied
 #: provider's id comes from the legacy base URL's host (`implied_provider_id`),
 #: or is `[brain.native] provider` when the document names one and no base URL.
-#: `ANTHROPIC_API_KEY` (the CLI's key) is not here yet: it moves with CLI auth.
+#: `ANTHROPIC_API_KEY` (the CLI's key) is the `anthropic` provider's key, and,
+#: with no OAuth token and `[brain.claude_code] auth` unset, makes the CLI mode
+#: `"api_key"` (`llm.providers.resolve_cli_auth`), which is what such an
+#: install meant.
 LEGACY_PROVIDER_SOURCES: tuple[LegacyProviderSource, ...] = (
     LegacyProviderSource("brain.native.base_url", "base_url", "[providers.<id>] base_url"),
     LegacyProviderSource("brain.native.api_key", "api_key", "[providers.<id>] api_key"),
@@ -5001,17 +5033,26 @@ LEGACY_PROVIDER_SOURCES: tuple[LegacyProviderSource, ...] = (
     LegacyProviderSource("brain.native.model_catalog_cache_ttl_hours", "discover_ttl_hours", "[providers.<id>] discover_ttl_hours"),
     LegacyProviderSource("env:ISTOTA_BRAIN_NATIVE_API_KEY", "api_key", "ISTOTA_PROVIDER_<ID>_API_KEY (the stack secret istota_provider_<id>_api_key)"),
     LegacyProviderSource("env:ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS", "extra_headers", "ISTOTA_PROVIDER_<ID>_EXTRA_HEADERS (the stack secret istota_provider_<id>_extra_headers)"),
+    LegacyProviderSource(
+        "env:ANTHROPIC_API_KEY", "api_key",
+        "ISTOTA_PROVIDER_ANTHROPIC_API_KEY (the stack secret istota_provider_anthropic_api_key) "
+        'and [brain.claude_code] auth = "api_key"',
+        provider="anthropic",
+    ),
 )
+
+#: The legacy variable holding the `claude` CLI's API key.
+LEGACY_CLI_API_KEY = "ANTHROPIC_API_KEY"
 
 #: `[brain.native] model_overrides` is read under `[models.overrides]` for the
 #: same release (`_apply_catalogue_layers`).
 LEGACY_MODEL_OVERRIDES = "brain.native.model_overrides"
 
 
-def _legacy_base_url(provider_id: str, base_url: str) -> str:
+def _legacy_base_url(kind: str, base_url: str) -> str:
     # An `anthropic` provider's base URL is the API root; the legacy field
     # carried the OpenAI-compatible path.
-    if provider_id == "anthropic":
+    if kind == "anthropic":
         trimmed = base_url.rstrip("/")
         return trimmed[: -len("/v1")] if trimmed.endswith("/v1") else trimmed
     return base_url
@@ -5049,28 +5090,51 @@ def _settle_providers(data: dict, config: Config, environ: Mapping[str, str]) ->
         provider_setting = ""
     native.provider = provider_setting
 
-    in_use = legacy_provider_sources_in_use(data, environ)
-    for row in in_use:
+    all_in_use = legacy_provider_sources_in_use(data, environ)
+    for row in all_in_use:
+        if row.provider:
+            report_problem(
+                "warning", ("providers", row.provider, row.target),
+                "%s is read for one release as the %s provider's %s; move it to %s",
+                row.source.removeprefix("env:"), row.provider, row.target, row.replacement, log=False,
+            )
+            continue
         path = ("brain", "native") if row.source.startswith("env:") else tuple(row.source.split("."))
         report_problem(
             "warning", path,
             "%s is read for one release as the native provider's %s; move it to %s",
             row.source.removeprefix("env:"), row.target, row.replacement, log=False,
         )
+    in_use = [row for row in all_in_use if not row.provider]
 
     document_providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
     legacy_fields = {row.target for row in in_use if not row.source.startswith("env:")}
     legacy_base = native.base_url.strip() if "base_url" in legacy_fields else ""
     implied = implied_provider_id(legacy_base) if legacy_base else provider_setting
+    cli_legacy_key = (environ.get(LEGACY_CLI_API_KEY) or "").strip()
+    native_legacy_key = (
+        (native.api_key or "").strip() if "api_key" in legacy_fields else ""
+    ) or (environ.get("ISTOTA_BRAIN_NATIVE_API_KEY") or "").strip()
+    split_off = (
+        implied == "anthropic" and bool(legacy_base)
+        and "anthropic" not in document_providers
+        and bool(cli_legacy_key) and bool(native_legacy_key)
+        and cli_legacy_key != native_legacy_key
+        and not (environ.get(provider_key_variable("anthropic")) or "").strip()
+    )
+    if split_off:
+        # Two legacy keys for one endpoint (separate workspaces or billing):
+        # each keeps doing what it did, native's on a provider of its own.
+        implied = "native"
     if implied and in_use:
         table_wins = implied in document_providers
         provider = config.providers.get(implied)
         if provider is None and legacy_base and not table_wins:
-            provider = ProviderConfig(kind="openai_compat")
+            provider = ProviderConfig(kind="anthropic" if split_off else "openai_compat")
             config.providers[implied] = provider
         if provider is not None and not table_wins:
             if legacy_base:
-                provider.base_url = _legacy_base_url(implied, legacy_base)
+                provider.base_url = _legacy_base_url(provider.kind, legacy_base)
             for target in sorted(legacy_fields - {"base_url"}):
                 if target == "discover":
                     provider.discover = bool(native.model_catalog_fetch)
@@ -5107,6 +5171,15 @@ def _settle_providers(data: dict, config: Config, environ: Mapping[str, str]) ->
                     provider.extra_headers = headers
         if not native.provider and provider is not None:
             native.provider = implied
+
+    # The CLI's legacy key, as the `anthropic` provider's when nothing current
+    # holds one.
+    anthropic = config.providers.get("anthropic")
+    if (
+        cli_legacy_key and anthropic is not None and not anthropic.api_key
+        and not (environ.get(provider_key_variable("anthropic")) or "").strip()
+    ):
+        anthropic.api_key = cli_legacy_key
 
     for provider_id, provider in config.providers.items():
         key = (environ.get(provider_key_variable(provider_id)) or "").strip()
@@ -5178,11 +5251,13 @@ def _settle_model_overrides(data: dict, config: Config) -> None:
 
 def _apply_brain_providers(config: Config) -> None:
     """Resolve the providers onto `BrainConfig`, with native's reason if it cannot run."""
-    from .llm.providers import build_providers, native_provider_reason
+    from .llm.providers import build_providers
 
     config.brain.provider_specs = LoaderMap(build_providers(config))
-    reason = native_provider_reason(config)
-    config.brain.unconfigured = LoaderMap({"native": reason} if reason else {})
+    # Empty after a load: nothing is unconfigured until the process resolves
+    # its CLI mode (`llm.providers.resolve_process_auth`), which fills both
+    # halves, native's provider and the CLI brains' credential.
+    config.brain.unconfigured = LoaderMap()
 
 
 def _apply_catalogue_layers(config: Config) -> None:
@@ -5328,6 +5403,7 @@ def _one_of(*valid: str, fallback: object = _KEEP) -> Hook:
 _CONFIG_HOOKS: dict[str, Hook] = {
     "web.auth": lambda raw, key: normalize_auth_methods(raw) or _KEEP,
     "web.token_storage": _one_of(*WEB_TOKEN_STORAGE_MODES),
+    "brain.claude_code.auth": _one_of("", *CLI_AUTH_MODES),
     "nextcloud.sharing.calendars": _one_of(*NEXTCLOUD_SHARING_LEVELS, fallback="off"),
     "nextcloud.sharing.contacts": _one_of(*NEXTCLOUD_SHARING_LEVELS, fallback="off"),
     "brain.native.reasoning_replay": _one_of(*REASONING_REPLAY_MODES),
@@ -5461,6 +5537,8 @@ FIELD_CHOICES: dict[tuple[str, ...], tuple[str, ...]] = {
     ("email", "imap_security"): MAIL_SECURITY_MODES,
     ("email", "smtp_security"): MAIL_SECURITY_MODES,
     ("brain", "kind"): BRAIN_KINDS,
+    # Empty is a value here: derived per process from the environment.
+    ("brain", "claude_code", "auth"): _CONFIG_HOOKS["brain.claude_code.auth"].choices,
     # Empty is a value here: no failover (ISSUE-362).
     ("brain", "fallback"): BRAIN_KINDS + ("",),
     ("speech_gate", "mode"): SPEECH_GATE_MODES,
@@ -5821,6 +5899,15 @@ def load_config(
         # structure here lets the namespace-aware validation loop below inspect it.
         config.models = ModelsConfig(aliases={str(k): v for k, v in aliases.items()})
         _settle_model_overrides(data, config)
+        listing_file = models_section.get("anthropic_listing_key_file", "")
+        if isinstance(listing_file, str):
+            config.models.anthropic_listing_key_file = listing_file.strip()
+        else:
+            report_problem(
+                "discarded", ("models", "anthropic_listing_key_file"),
+                "[config] models.anthropic_listing_key_file must be a path string; "
+                "keeping the default",
+            )
 
     if "experimental" in data:
         exp = data["experimental"]

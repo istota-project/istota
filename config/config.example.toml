@@ -296,6 +296,15 @@ features = []
 # model = "claude-opus-5-5"
 # effort = "high"
 #
+# How the `claude` CLI authenticates, for this brain and tmux. "subscription"
+# carries the OAuth token (CLAUDE_CODE_OAUTH_TOKEN, the claude_code_oauth_token
+# secret file) and never an API key; "api_key" carries the [providers.anthropic]
+# key and base_url and never the token. Unset: "subscription" when the token is
+# in the environment, else nothing (an API key alone never switches a
+# deployment to API billing). Under "api_key" the model can read the key from
+# its Bash tool, as it can read the token under "subscription".
+# auth = "subscription"
+#
 # Poll the Claude plan's utilization for /admin and `istota doctor`. The
 # credential is only read. Off = no admin card and the doctor check skips.
 # subscription_usage = true
@@ -1018,6 +1027,17 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # model no catalogue layer has is ignored.
 #      [models.overrides."local/qwen3-32b"]
 #      context_window = 65536
+
+# ============================================================================
+# Model catalogue [models]
+# ============================================================================
+# The file holding a key used only to list Anthropic's models (GET /v1/models),
+# so a new model shows up without a release. A path, never the key: the key is
+# read from the file at each fetch and is in no environment. Empty is the
+# stack's secret file, /run/secrets/istota_anthropic_listing_key. Create the key
+# in an Anthropic Console workspace with a spend limit of zero.
+# [models]
+# anthropic_listing_key_file = ""
 
 # ============================================================================
 # Model alias registry [models.aliases] (operator override) — optional

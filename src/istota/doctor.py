@@ -678,7 +678,14 @@ def check_native_brain(config: "Config", probe: bool) -> CheckResult:
         moves = "; ".join(f"{row.source.removeprefix('env:')} -> {row.replacement}" for row in legacy)
         legacy_note = f"; legacy sources read for one release: {moves}"
     brain = getattr(config, "brain", None)
+    # The predicate routing reads, filled by `resolve_process_auth`; in a
+    # process that never resolved it (a check run at config load, a test) the
+    # same native reason is computed directly, since it needs no CLI mode.
     reason = brain_unconfigured_reason("native", config)
+    if reason is None and not getattr(config, "_cli_mode_resolved", False):
+        from istota.llm.providers import native_provider_reason
+
+        reason = native_provider_reason(config)
     spec = native_provider_spec(brain) if brain is not None and reason is None else None
     if reason is not None or spec is None:
         return CheckResult(
@@ -2923,7 +2930,11 @@ def check_skill_model_credential(
         from .executor import (  # noqa: PLC0415
             SKILL_DAEMON_CREDENTIAL_VARS,
             SKILL_MODEL_CALLERS,
-            SKILL_MODEL_CREDENTIAL_VARS,
+        )
+        from .llm.providers import (  # noqa: PLC0415
+            model_caller_env,
+            model_caller_provider,
+            process_cli_auth,
         )
         from .skills._loader import (  # noqa: PLC0415
             effective_disabled_skills,
@@ -3003,27 +3014,36 @@ def check_skill_model_credential(
         return results
 
     # code_review runs on the configured brain, and on tmux on claude_code, so
-    # these Anthropic names authenticate it only there. On native the brain's
-    # own key does, which `brain.native` checks.
+    # the CLI credential authenticates it only there. On native the brain's
+    # own provider key does, which `brain.native` checks.
     brain_kind = getattr(getattr(config, "brain", None), "kind", "claude_code")
     if brain_kind not in ("claude_code", "tmux_claude"):
         results.append(
             CheckResult(
                 f"{prefix}.value",
                 SKIP,
-                f"{', '.join(live)} runs on the {brain_kind} brain, which needs "
-                f"none of {', '.join(sorted(SKILL_MODEL_CREDENTIAL_VARS))}",
+                f"{', '.join(live)} runs on the {brain_kind} brain, which "
+                f"authenticates with its own provider's key",
             )
         )
         return results
 
-    present = sorted(n for n in SKILL_MODEL_CREDENTIAL_VARS if os.environ.get(n))
+    # What the proxy would inject: `model_caller_env`'s copy for this
+    # process's auth mode, names only. Under "subscription" the credential is
+    # the token, under "api_key" the `anthropic` provider's key.
+    try:
+        mode = process_cli_auth(config)
+        provider_id, cli_reviewer = model_caller_provider(config)
+        copy = model_caller_env(config, mode, provider_id, cli_reviewer=cli_reviewer)
+    except Exception:  # noqa: BLE001 - a check never raises
+        mode, copy = None, {}
+    present = sorted(name for name in copy if name != "ISTOTA_CLI_AUTH")
     if present:
         results.append(
             CheckResult(
                 f"{prefix}.value",
                 OK,
-                f"the daemon holds {', '.join(present)} to inject",
+                f"the proxy injects {', '.join(present)} ({mode})",
             )
         )
     elif not getattr(config.security, "skill_proxy_enabled", True):
@@ -3065,12 +3085,12 @@ def check_skill_model_credential(
             CheckResult(
                 f"{prefix}.value",
                 FAIL,
-                "the daemon holds none of "
-                f"{', '.join(sorted(SKILL_MODEL_CREDENTIAL_VARS))}, so "
+                f"no Claude Code credential for auth mode {mode or 'none'}, so "
                 f"{', '.join(live)} will fail unauthenticated",
                 remedy=(
-                    "Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in the "
-                    "daemon's environment."
+                    'Set [brain.claude_code] auth: "subscription" with the token in '
+                    'the claude_code_oauth_token secret file, or "api_key" with the '
+                    "key in istota_provider_anthropic_api_key."
                 ),
             )
         )

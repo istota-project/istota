@@ -48,7 +48,13 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 def _doc(**sections):
-    return config_from_document(sections)
+    """A config as a process that builds CLI envs sees it: the CLI mode
+    resolved (here, a subscription token) and the unconfigured kinds filled."""
+    from istota.llm.providers import resolve_process_auth
+
+    config = config_from_document(sections)
+    resolve_process_auth(config, {"CLAUDE_CODE_OAUTH_TOKEN": "token"})
+    return config
 
 
 def _problems(document):
@@ -368,6 +374,10 @@ class TestTheTransitionTable:
         path.write_text('[brain]\nkind = "native"\n')
         config = load_config(path)
         assert config.brain.native.provider == ""
+        # The reason is filled per process, with the CLI mode.
+        from istota.llm.providers import resolve_process_auth
+
+        resolve_process_auth(config, {})
         assert brain_unconfigured_reason("native", config) is not None
 
     def test_each_source_in_use_is_a_warning_and_nothing_is_logged(self, caplog, monkeypatch, tmp_path):

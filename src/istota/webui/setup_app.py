@@ -78,6 +78,7 @@ CREDENTIAL_FIELDS = frozenset({
     "nextcloud_app_password",
     "native_api_key",
     "claude_code_oauth_token",
+    "anthropic_listing_key",
     "imap_password",
     "caldav_password",
     PASSWORD_FIELD,
@@ -92,7 +93,10 @@ _MODULE_FIELDS = tuple(name for name, _module, _question in setup_wizard._OPT_OU
 SETUP_STEPS: dict[str, tuple[str, ...]] = {
     "welcome": ("bot_name", "display_name", "user_email", "timezone", "user_id"),
     "account": (PASSWORD_FIELD,),
-    "model": ("brain_kind", "native_base_url", "native_model", "native_api_key", "claude_code_oauth_token"),
+    "model": (
+        "brain_kind", "native_base_url", "native_model", "native_api_key", "claude_code_oauth_token",
+        "anthropic_listing_key",
+    ),
     "address": ("hostname", "ingress", "upstream_proxy", "listen_addr", "listen_port", "tls_cert_source"),
     "nextcloud": (
         "storage", "workspace", "nextcloud_url", "nextcloud_public_url", "nextcloud_username",

@@ -2670,9 +2670,16 @@ def _execute_skill_task(
     """
     from .executor import (
         SKILL_DAEMON_CREDENTIAL_VARS,
+        SKILL_MODEL_CALLERS,
         build_clean_env,
         get_user_temp_dir,
         skill_model_credentials,
+    )
+    from .llm.providers import (
+        model_caller_env,
+        model_caller_provider,
+        process_cli_auth,
+        strip_model_credentials,
     )
     from .skills._env import EnvContext, build_skill_env, dispatch_setup_env_hooks
     from .skills._loader import load_skill_index
@@ -2761,6 +2768,18 @@ def _execute_skill_task(
     # Resolved from the live user_profiles DB row so it tracks travel
     # without a daemon restart (ISSUE-099).
     env["ISTOTA_USER_TZ"] = config.resolve_user_timezone(task.user_id)
+
+    # A skill task runs a trusted CLI, not a model, so it carries no model
+    # credential: after the last merge every model credential name goes, then
+    # a skill that calls a model gets `model_caller_env`'s copy, the one the
+    # skill proxy injects, so a `code_review` cron job keeps its key.
+    env = strip_model_credentials(env)
+    if skill_name in SKILL_MODEL_CALLERS:
+        caller_provider, cli_reviewer = model_caller_provider(config)
+        env.update(model_caller_env(
+            config, process_cli_auth(config), caller_provider, task.user_id,
+            cli_reviewer=cli_reviewer,
+        ))
 
     # The copy `build_task_runtime` makes for the proxy: a skill whose CLI needs
     # an operator credential only the daemon's environment holds gets it here
@@ -11012,6 +11031,9 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
     Returns number of tasks processed.
     """
     processed = 0
+    # This process builds CLI envs and routes tasks between brains.
+    from .llm.providers import resolve_process_auth
+    resolve_process_auth(config)
 
     # Hydrate user configs from Nextcloud API
     try:
@@ -11391,6 +11413,19 @@ def run_daemon(
     # The worker pids this process records are in its own PID namespace, so
     # the cancel paths may signal them here and nowhere else (ISSUE-701).
     process_group.own_task_pids(True)
+
+    # The `claude` CLI's auth mode, once for this process, which also fills the
+    # unconfigured brain kinds routing reads. Under "api_key" a credentials file
+    # left from a token is removed: the web container may have seen it in the
+    # window before this start.
+    from .llm.providers import resolve_process_auth
+    from .sandbox.claude_runtime_env import remove_stale_credentials_file
+    if resolve_process_auth(config) == "api_key" and remove_stale_credentials_file():
+        logger.error(
+            "STARTUP Removed a Claude Code credentials file under "
+            '[brain.claude_code] auth = "api_key"; a subscription token must not '
+            "sit beside an API key"
+        )
 
     # Set up signal handlers (main-thread only; the serve launcher opts out).
     if install_signal_handlers:

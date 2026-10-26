@@ -65,6 +65,7 @@ def _resolve(path: tuple[str, ...]) -> object:
 BAD_HOOK_VALUES: dict[str, object] = {
     "web.auth": ["bogus"],
     "web.token_storage": "plain",
+    "brain.claude_code.auth": "oauth",
     "nextcloud.sharing.calendars": "read-only",
     "nextcloud.sharing.contacts": "rw",
     "brain.native.reasoning_replay": "always",

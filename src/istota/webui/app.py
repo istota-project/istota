@@ -138,6 +138,10 @@ def _reload_config(launch_app: FastAPI | None = None):
     """
     global _config, _oauth
     config = load_config()
+    # Two callers build a CLI env here: the speech gate (inside
+    # `record_inbound`) and the biomarker explainer.
+    from istota.llm.providers import resolve_process_auth
+    resolve_process_auth(config)
     _assert_no_auth_launch_safe(config.web.auth, launch_app or app)
     oauth = OAuth()
     if config.web.oauth2_client_id:

@@ -2784,12 +2784,27 @@ class TestSkillModelCredential:
         assert results[self.WIRING].status == OK
         assert results[self.VALUE].status == FAIL
 
-    def test_an_api_key_counts(self, make_config, monkeypatch):
-        _clear_env(monkeypatch, "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-test")
-        value = self._run(make_config())[self.VALUE]
+    def test_an_api_key_stack_passes(self, make_config, monkeypatch):
+        """Under `auth = "api_key"` the copy is the anthropic provider's key,
+        named by its provider variable and never by value."""
+        _clear_env(monkeypatch, *_MODEL_CREDENTIALS, *_NON_DAEMON_MARKERS)
+        config = make_config()
+        config.brain.claude_code.auth = "api_key"
+        config.providers["anthropic"].api_key = "sk-ant-api-test"
+        value = self._run(config)[self.VALUE]
         assert value.status == OK
-        assert "ANTHROPIC_API_KEY" in value.detail
+        assert "ISTOTA_PROVIDER_ANTHROPIC_API_KEY" in value.detail
+        assert "sk-ant-api-test" not in value.detail
+
+    def test_the_legacy_variable_alone_counts_through_the_transition_row(self, make_config, monkeypatch):
+        """With no token and auth unset, `ANTHROPIC_API_KEY` derives "api_key";
+        the loader reads it as the anthropic provider's key."""
+        _clear_env(monkeypatch, *_MODEL_CREDENTIALS, *_NON_DAEMON_MARKERS)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-test")
+        config = make_config()
+        config.providers["anthropic"].api_key = "sk-ant-api-test"
+        value = self._run(config)[self.VALUE]
+        assert value.status == OK
 
     def test_the_value_half_skips_on_the_native_brain(self, make_config, monkeypatch):
         """code_review runs on the configured brain, and on native it

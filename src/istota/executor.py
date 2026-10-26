@@ -31,18 +31,22 @@ from istota.sandbox import task_env
 from istota.rooms import speech_gate
 from istota.rooms.scopes import CHANNEL_NOTES_LABEL as CHANNEL_MEMORY_LABEL
 from istota.sandbox.claude_runtime_env import (
-    CLAUDE_RUNTIME_ENV_VARS,  # used by `_PROXY_LOOKUP_BLOCKED` below, and
-    # re-exported: the drift guard reads it beside `build_clean_env`.
+    CLAUDE_RUNTIME_ENV_VARS,  # noqa: F401 - re-exported: the drift guard
+    # reads it beside `build_clean_env`.
     without_claude_runtime_env,  # noqa: F401  — re-exported; `task_env` owns
     # the only remaining call, and `tests/test_security.py` imports both names
     # from here beside `build_clean_env`.
 )
+from .llm.providers import (
+    CLI_AUTH_VARIABLE,
+    anthropic_spec,
+    cli_auth_env,
+    is_model_credential_name,
+    process_cli_auth,
+)
 from .config import (
-    BUILTIN_PROVIDERS,
     SERVARR_APPS,
     Config,
-    provider_headers_variable,
-    provider_key_variable,
     servarr_key_variable,
 )
 from istota.prompts import persona as operator_persona
@@ -3284,12 +3288,14 @@ def _bwrap_supports_remount_ro() -> bool:
     return supported
 
 
-def build_clean_env(config: Config) -> dict[str, str]:
+def build_clean_env(config: Config, *, user_id: str | None = None) -> dict[str, str]:
     """Build minimal environment for Claude subprocess.
 
     Returns a restricted env (PATH, HOME, PYTHONUNBUFFERED) plus any
-    configured passthrough vars. Credentials are injected per-task by
-    execute_task() and optionally routed through the skill proxy.
+    configured passthrough vars, plus the `claude` CLI's credential for this
+    process's auth mode (`llm.providers.cli_auth_env`; ``user_id``'s own
+    `anthropic` key under "api_key"). Skill credentials are injected per-task
+    by execute_task() and routed through the skill proxy.
     """
     # Ensure the active Python venv bin dir is on PATH so skills can run
     # as `python -m istota.skills.*` inside the sandbox. Use sys.prefix
@@ -3329,20 +3335,30 @@ def build_clean_env(config: Config) -> dict[str, str]:
                 "control — ignoring it. Remove it from the config.", key,
             )
             continue
+        # A model credential reaches the CLI from config alone
+        # (`[brain.claude_code] auth` and the provider's key), never because
+        # the daemon's environment happened to hold it.
+        if is_model_credential_name(key):
+            logger.warning(
+                "[security] passthrough_env_vars names %s, a model credential, "
+                "which comes from [brain.claude_code] auth and the provider's key "
+                "— ignoring it. Remove it from the config.", key,
+            )
+            continue
         val = os.environ.get(key)
         if val is not None:
             env[key] = val
-    # Pass through Claude Code auth token if present.
-    #
-    # Set for every task whatever brain will run it, because two of the three
-    # brains authenticate with it. The one that does not takes it back out —
-    # `claude_runtime_env.CLAUDE_RUNTIME_ENV_VARS` names it, `NativeBrain`
-    # applies that on the way into its tools, and `execute_task` applies it to
-    # `proxy_base_env` (ISSUE-390). A second variable hand-set here belongs in
-    # that set too, unless a model-facing subprocess has business reading it.
-    oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-    if oauth_token:
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
+    # The CLI's credential for this process's auth mode, by allowlist:
+    # the OAuth token under "subscription", the `anthropic` provider's key and
+    # base URL under "api_key", nothing without a mode. Set for every task
+    # whatever brain will run it, because two of the three brains authenticate
+    # with it; the one that does not takes it back out
+    # (`claude_runtime_env.CLAUDE_RUNTIME_ENV_VARS` names every name this adds,
+    # and `tests/test_security.py` holds that).
+    mode = process_cli_auth(config)
+    env.update(cli_auth_env(config, mode, user_id))
+    if mode is not None:
+        env[CLI_AUTH_VARIABLE] = mode
     # Propagate the admins-file path (a path, not a secret) so subprocess
     # config loads — the feeds/money skill facades call load_config() —
     # resolve the namespace-correct admins file instead of the hardcoded
@@ -3416,10 +3432,10 @@ _MODEL_CLI_PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
 #: trust, never redirect a request or carry a credential.
 _MODEL_CLI_TLS_VARS = ("SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
                        "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
-#: Where the provider *is*, on a gateway deployment, and how to authenticate
-#: to it. `ANTHROPIC_API_KEY` is the long-standing member of this group.
-_MODEL_CLI_ENDPOINT_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
-                            "ANTHROPIC_BASE_URL")
+# Where the provider is and how to authenticate to it are not topped up from
+# the daemon's environment: they come from config, through `cli_auth_env`
+# (the model-catalogue spec's "CLI auth"). An `ANTHROPIC_API_KEY` exported for
+# another tool used to move a subscription deployment onto API billing here.
 
 
 #: The reachability half of ISSUE-410, and the axis it is split on.
@@ -3458,8 +3474,8 @@ _MODEL_CLI_ENDPOINT_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
 #: through the same per-skill map ISSUE-409 used — which is the structure for
 #: a value that must reach exactly one subprocess and stay out of the
 #: manifest-lookup union, and that is what these need. `ANTHROPIC_BASE_URL`
-#: travels with them because no other skill reads it and a gateway URL can
-#: carry a key in its path.
+#: used to travel with them; the child now derives it from the `anthropic`
+#: provider's config (`llm.providers.model_caller_env`).
 #:
 #: What this leaves undone is deliberate and is **not** what ISSUE-410 filed:
 #: `feeds` fetches external URLs and would want an egress proxy. Giving it one
@@ -3474,9 +3490,7 @@ _MODEL_CLI_ENDPOINT_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
 SKILL_CLI_TLS_VARS = _MODEL_CLI_TLS_VARS
 
 #: The half that is scoped rather than shared — see above.
-SKILL_MODEL_REACHABILITY_VARS = frozenset(
-    (*_MODEL_CLI_PROXY_VARS, "ANTHROPIC_BASE_URL")
-)
+SKILL_MODEL_REACHABILITY_VARS = frozenset(_MODEL_CLI_PROXY_VARS)
 
 
 def _reachability_env(
@@ -3554,26 +3568,11 @@ def skill_model_reachability(*present: Mapping[str, str]) -> dict[str, str]:
 #: its own credential, which is a much wider door than one reader needs.
 SKILL_MODEL_CALLERS = frozenset({"code_review"})
 
-#: What such a CLI needs in order to *authenticate*, as opposed to reach.
-#:
-#: `build_model_cli_env` runs inside the skill subprocess, so the `os.environ`
-#: it reads is `proxy_base_env` plus whatever the proxy injected — not the
-#: daemon's own. The two API-key names are in that env by no route at all
-#: (`build_clean_env` is an allowlist and does not carry them), so this was
-#: broken on an API-key deployment before ISSUE-390 broke it on a subscription
-#: one; same failure, one shape earlier (ISSUE-409). Naming all three keeps
-#: the fix from being true only of the deployment it was found on.
-#:
-#: Deliberately not the rest of `_MODEL_CLI_*`: a base URL, a CA bundle and an
-#: outbound proxy are *reachability*, which ISSUE-410 handled separately —
-#: :data:`SKILL_CLI_TLS_VARS` shared with every host-side CLI, and
-#: :data:`SKILL_MODEL_REACHABILITY_VARS` scoped here beside these. This set is
-#: what a CLI needs to *authenticate*, and it stays a set of its own because
-#: the empty-value rule differs: an empty credential is not a credential,
-#: while an empty `NO_PROXY` is meaningful.
-SKILL_MODEL_CREDENTIAL_VARS = CLAUDE_RUNTIME_ENV_VARS | frozenset(
-    {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
-)
+# What such a CLI needs in order to *authenticate* is `llm.providers.
+# model_caller_env`'s copy: the mode, the CLI credential for it and the key of
+# the provider it calls. It replaced a fixed name list read out of the daemon's
+# environment (ISSUE-409's fix), and `is_model_credential_name` replaced that
+# list at its readers.
 
 
 #: Skills whose CLI needs an operator credential the daemon holds only in its
@@ -3588,29 +3587,18 @@ SKILL_MODEL_CREDENTIAL_VARS = CLAUDE_RUNTIME_ENV_VARS | frozenset(
 #: manifest value is served to the sandbox by the proxy's `credential`
 #: request wherever reveal enforcement is off (the servarr spec's decision).
 #:
-#: `code_review` builds the native brain from its own `load_config`, so the
-#: headers in the `istota_brain_native_extra_headers` secret file reach its
-#: model calls only through this copy.
+#: A model-calling skill (`code_review`) is not here: its credentials are
+#: `llm.providers.model_caller_env`'s copy, built from config.
 SKILL_DAEMON_CREDENTIAL_VARS: dict[str, frozenset[str]] = {
     "servarr": frozenset(servarr_key_variable(app) for app in SERVARR_APPS),
-    # The native reviewer's provider key and headers, for the built-in
-    # providers whose credentials are stack secrets (an operator provider's key
-    # is in config.toml, which the CLI reads itself). Replaced by
-    # `model_caller_env` with CLI auth.
-    "code_review": frozenset({"ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS"}) | frozenset(
-        variable
-        for provider_id in BUILTIN_PROVIDERS
-        for variable in (provider_key_variable(provider_id), provider_headers_variable(provider_id))
-    ),
 }
 
 
 def skill_model_credentials(
-    *sources: Mapping[str, str], names: frozenset[str] = SKILL_MODEL_CREDENTIAL_VARS,
+    *sources: Mapping[str, str], names: frozenset[str],
 ) -> dict[str, str]:
-    """``names`` (:data:`SKILL_MODEL_CREDENTIAL_VARS` unless given), read from
-    the first source that has each one. An entry of
-    :data:`SKILL_DAEMON_CREDENTIAL_VARS` is read the same way.
+    """``names`` (an entry of :data:`SKILL_DAEMON_CREDENTIAL_VARS`), read from
+    the first source that has each one.
 
     A *copy* out of its sources, never a split, and that is the shape of the
     whole fix. Everything else in the proxy's `credential_env` got there by
@@ -3663,8 +3651,7 @@ def build_model_cli_env(config: Config) -> dict[str, str]:
     applied by `build_clean_env` and are only filled in here when absent.
     """
     env = build_clean_env(config)
-    for name in (*_MODEL_CLI_PROXY_VARS, *_MODEL_CLI_TLS_VARS,
-                 *_MODEL_CLI_ENDPOINT_VARS):
+    for name in (*_MODEL_CLI_PROXY_VARS, *_MODEL_CLI_TLS_VARS):
         # Presence, not truthiness — see `_MODEL_CLI_PROXY_VARS`.
         if name not in env and name in os.environ:
             env[name] = os.environ[name]
@@ -3698,6 +3685,9 @@ def build_stripped_env() -> dict[str, str]:
         if not any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
         and k.upper() not in _SHELL_STARTUP_ENV_VARS
         and k.upper() not in secret_file_vars
+        # An operator provider's `_EXTRA_HEADERS` matches no pattern and has
+        # no secret file, and can reach the daemon through host.env.
+        and not is_model_credential_name(k)
     }
     env["PRECOMMIT_SCANS_REQUIRED"] = "1"
     return env
@@ -3716,16 +3706,16 @@ def build_stripped_env() -> dict[str, str]:
 # ``istota-credential env ISTOTA_SECRET_KEY`` is rejected by the proxy even if
 # the var sneaks into ``credential_env``.
 #
-# ``SKILL_MODEL_CREDENTIAL_VARS`` joins it for the same reason from the other
-# direction: `task_env` puts those in ``credential_env`` on purpose, so the
-# proxy can inject them into the one skill CLI that calls a model. Injection
+# Every model credential name (`is_model_credential_name`, applied in
+# `derive_lookup_allowlist`) is refused the same way from the other direction:
+# `task_env` puts the model-caller copy in ``credential_env`` on purpose, so
+# the proxy can inject it into the one skill CLI that calls a model. Injection
 # is scoped to that skill; the lookup endpoint is not scoped to anything — its
 # allowlist is a union, and the socket is bound into the sandbox, so a name in
 # it is a name the model can ask for by hand. That would put the credential
 # back on the route ISSUE-390 closed, through a different door.
 _PROXY_LOOKUP_BLOCKED = (
     frozenset({"ISTOTA_SECRET_KEY"})
-    | SKILL_MODEL_CREDENTIAL_VARS
     # The proxy triple and the gateway URL are injected per skill for the same
     # reason the credentials are, so they need the same second door shut: an
     # outbound proxy URL can carry basic-auth userinfo, and the lookup
@@ -3812,6 +3802,20 @@ def _build_network_allowlist(
     wasn't selected — symmetric with credential authorization.
     """
     hosts: set[str] = set(_DEFAULT_NETWORK_HOSTS)
+
+    # Under "api_key" the CLI talks to the `anthropic` provider's base URL,
+    # which may be a gateway in front of Anthropic.
+    if process_cli_auth(config) == "api_key":
+        spec = anthropic_spec(config)
+        if spec is not None and spec.host:
+            from urllib.parse import urlsplit
+
+            try:
+                port = urlsplit(spec.base_url).port
+            except ValueError:
+                port = None
+            scheme_port = 80 if spec.base_url.lower().startswith("http:") else 443
+            hosts.add(f"{spec.host}:{port or scheme_port}")
 
     if config.security.network.allow_pypi:
         hosts |= _PYPI_HOSTS
@@ -4053,7 +4057,10 @@ def derive_lookup_allowlist(
     allowed: set[str] = set()
     for creds in derive_skill_credential_map(authorized_skills, skill_index).values():
         allowed |= creds
-    return allowed - _PROXY_LOOKUP_BLOCKED
+    return {
+        name for name in allowed - _PROXY_LOOKUP_BLOCKED
+        if not is_model_credential_name(name)
+    }
 
 
 def _split_credential_env(

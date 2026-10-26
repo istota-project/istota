@@ -226,8 +226,20 @@ def build_task_runtime(
         skill_model_credentials,
         skill_model_reachability,
     )
+    from istota.llm.providers import (
+        cli_auth_env,
+        model_caller_env,
+        model_caller_provider,
+        process_cli_auth,
+        strip_unselected_cli_credentials,
+    )
 
-    env = build_clean_env(config)
+    cli_mode = process_cli_auth(config)
+    # The CLI credential this task carries, the user's own `anthropic` key
+    # under "api_key". Computed once: `build_clean_env` sets it and the strip
+    # below puts it back over anything a merge replaced.
+    cli_credentials = cli_auth_env(config, cli_mode, task.user_id)
+    env = build_clean_env(config, user_id=task.user_id)
     env.update({
         "ISTOTA_TASK_ID": str(task.id),
         # `tasks transcript` reads this to decide which log is the one being
@@ -355,6 +367,11 @@ def build_task_runtime(
             continue
         if k not in env:
             env[k] = v
+    # After the last merge, before the proxy split: whatever a manifest or a
+    # hook put under a model credential name goes, and the mode's own value is
+    # restored. The hook and manifest filters are the first line; this is the
+    # guarantee.
+    env = strip_unselected_cli_credentials(env, cli_mode, cli_credentials)
 
     # Credential isolation via skill proxy: strip secrets from Claude's env
     # and run skill CLIs through a Unix socket proxy that injects them.
@@ -476,19 +493,21 @@ def build_task_runtime(
         # unauthenticated: `code_review` spawns the `claude` binary per
         # reviewer, so from ISSUE-390 every review came back `review_failed`
         # on a deployment where that token is the only credential there is.
-        # `skill_model_credentials` is where the reasoning lives, including
-        # why this is a copy rather than a third `_split_credential_env`.
-        #
-        # Two sources, in order: the token is in `env` because
-        # `build_clean_env` put it there, and the two API-key names are in no
-        # task env by any route, so they come from the daemon's own.
+        # `model_caller_env` is its copy, built from config: the mode, the CLI
+        # credential for it and the key of the provider it calls (the user's
+        # own when they have one). A copy rather than a third
+        # `_split_credential_env`, since the task's own CLI brain needs the
+        # same credential.
         #
         # Injection only, never lookup: the map scopes a value to one skill's
         # subprocess, while `allowed_credentials` — which this deliberately
         # does not touch — is a union any holder of the socket can fetch from,
-        # the model included. `_PROXY_LOOKUP_BLOCKED` says the same thing at
-        # the endpoint, so the two do not depend on each other's ordering.
-        model_creds = skill_model_credentials(env, os.environ)
+        # the model included. `derive_lookup_allowlist` refuses every model
+        # credential name, so the two do not depend on each other's ordering.
+        caller_provider, cli_reviewer = model_caller_provider(config)
+        model_creds = model_caller_env(
+            config, cli_mode, caller_provider, task.user_id, cli_reviewer=cli_reviewer,
+        )
         # And how to *reach* the provider, scoped the same way (ISSUE-410).
         # Not in `proxy_base_env` with the TLS names above, because a proxy
         # URL redirects traffic rather than merely sitting unread: `browse`
@@ -504,7 +523,10 @@ def build_task_runtime(
         scoped_for_model = {**model_creds, **model_reach}
         if scoped_for_model:
             credential_env.update(scoped_for_model)
-            for skill_name in SKILL_MODEL_CALLERS & set(authorized_skills):
+            # Gated on `cli_skills`, as the daemon-credential copy below is:
+            # the manifest declares no credential, so a menu pick never
+            # authorizes the skill, and `cli_skills` is what the proxy runs.
+            for skill_name in SKILL_MODEL_CALLERS & cli_skills:
                 skill_cred_map.setdefault(skill_name, set()).update(
                     scoped_for_model
                 )

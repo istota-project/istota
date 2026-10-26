@@ -6288,6 +6288,7 @@ const MOCK_SETUP_CREDENTIALS = new Set([
   'nextcloud_app_password',
   'native_api_key',
   'claude_code_oauth_token',
+  'anthropic_listing_key',
   'imap_password',
   'caldav_password',
   'password',
