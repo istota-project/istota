@@ -9,10 +9,16 @@ import { createContext, runInContext } from 'node:vm';
 
 const STARTER = join(process.cwd(), 'src', 'apps', 'starter');
 
-/** Run `starter/<app>/<file>` in a new context and return that context's globals. */
-export function loadStarterScript(app: string, file: string): Record<string, unknown> {
-  const path = join(STARTER, app, file);
+/**
+ * Run `starter/<app>/<file>` in a new context and return that context's
+ * globals. Several files run in order in the one context, as the document
+ * inlines them, for a script that reads another's global.
+ */
+export function loadStarterScript(app: string, ...files: string[]): Record<string, unknown> {
   const context = createContext({});
-  runInContext(readFileSync(path, 'utf8'), context, { filename: path });
+  for (const file of files) {
+    const path = join(STARTER, app, file);
+    runInContext(readFileSync(path, 'utf8'), context, { filename: path });
+  }
   return context as Record<string, unknown>;
 }

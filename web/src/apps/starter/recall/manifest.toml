@@ -1,0 +1,9 @@
+id = "recall"
+name = "Recall"
+icon = "book"
+entry = "index.html"
+description = "Spaced-repetition review over your own notes. Istota can make cards from them in chat, and a missed card shows the paragraph it came from."
+capabilities = ["kv:own", "files:read:notes"]
+
+[display]
+narrowest = "phone"
