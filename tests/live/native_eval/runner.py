@@ -204,6 +204,16 @@ def run_check(case: EvalCase, workdir: Path, result_text: str, *, env: dict) -> 
     return False, "case has no check"
 
 
+def kept_log_path(report_path: Path, case_name: str, run: int) -> Path:
+    """Where a run's transcript is kept: a directory beside the report.
+
+    pytest's basetemp keeps three sessions, so a log left there is gone by the
+    end of a multi-arm sweep while the report still names it.
+    """
+    report_path = Path(report_path)
+    return report_path.with_name(f"{report_path.stem}-logs") / f"{case_name}-{run}.jsonl"
+
+
 def _single_log(log_root: Path) -> Path | None:
     files = sorted((log_root / EVAL_USER).glob("*.jsonl"))
     return files[-1] if files else None
@@ -288,12 +298,14 @@ def run_case(
     provider=None,
     log_root: Path | None = None,
     record_sse: Path | None = None,
+    keep_log: Path | None = None,
 ) -> EvalResult:
     """Run ``case`` once in ``workdir`` (created here) and measure it.
 
     ``provider`` is for the offline test; left ``None`` the brain builds its
     own from ``brain_config``. ``record_sse`` tees the run's raw SSE lines to a
-    file (a live provider only; tee an injected one yourself).
+    file (a live provider only; tee an injected one yourself). ``keep_log`` is
+    a path the session log is copied to, and the one the result names.
     """
     workdir = Path(workdir)
     log_root = Path(log_root) if log_root is not None else workdir.parent / "logs"
@@ -350,10 +362,20 @@ def run_case(
         result.cache_write_tokens = usage.cache_write_tokens
         result.cache_hit_rate = cache_hit_rate(usage)
         result.cost_usd = float(usage.cost_usd or 0.0)
+    if not result.success:
+        # The brain puts a failure's reason in result_text (an output-limit
+        # stop with no answer is the marker alone); the row reads `error`.
+        result.error = result.result_text.strip() or f"brain stopped with {result.stop_reason}"
 
     log_path = _single_log(log_root)
     if log_path is not None:
-        result.session_log = str(log_path)
+        if keep_log is not None:
+            keep_log = Path(keep_log)
+            keep_log.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            shutil.copy2(log_path, keep_log)  # keeps the transcript's 0600
+            result.session_log = str(keep_log)
+        else:
+            result.session_log = str(log_path)
         counts = metrics_from_log(log_path, case.success_marker)
         logged_turns = counts.pop("turns")
         if not result.turns and logged_turns:
@@ -361,7 +383,9 @@ def run_case(
         for key, value in counts.items():
             setattr(result, key, value)
     else:
-        result.error = "no session log was written"
+        result.error = "; ".join(
+            part for part in (result.error, "no session log was written") if part
+        )
 
     passed, detail = run_check(case, workdir, result.result_text, env=env)
     if passed and result.compactions < case.min_compactions:

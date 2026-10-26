@@ -230,6 +230,33 @@ class TestCompactMessages:
         assert outcome.usage.cost_usd == 0.002
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("previous_summary", [None, "## Goal\nCollect words"])
+    async def test_the_prompt_asks_for_collected_results_verbatim(self, previous_summary):
+        # ISSUE-846: a summary that kept goal and progress but not the words
+        # already read left the model listing them as unknown.
+        provider = _SummaryProvider("summary")
+        prompts: list[str] = []
+        original = provider.stream
+
+        async def _capturing(system_prompt, messages, tools, **kw):
+            prompts.append(messages[0].content[0].text)
+            async for event in original(system_prompt, messages, tools, **kw):
+                yield event
+
+        provider.stream = _capturing
+        await compact_messages(
+            [_user("read part 1"), _assistant("part 1 says: apple")],
+            previous_summary, None, provider, "m", _to_llm,
+        )
+        prompt = prompts[0]
+        assert "## Collected Results" in prompt
+        assert "verbatim" in prompt
+        results_at = prompt.index("## Collected Results")
+        assert prompt.index("## Progress") < results_at < prompt.index("## Next Steps")
+        if previous_summary:
+            assert "never drop a collected result" in prompt
+
+    @pytest.mark.asyncio
     async def test_the_summary_call_asks_for_no_cache_breakpoints(self):
         provider = _SummaryProvider("summary")
         await compact_messages([_user("hi")], None, None, provider, "m", _to_llm)
@@ -408,6 +435,61 @@ class TestTheSummaryInputIsShapedPerMessage:
             ]
         )
         assert text == "[tool_result Read]\nsmall"
+
+    @pytest.mark.asyncio
+    async def test_a_value_mid_tool_result_reaches_the_summarizer_when_it_fits(self):
+        # ISSUE-846: the eval's word sat mid-file, and the per-result cap cut it
+        # out even though the whole input was far inside the summary budget.
+        provider = _SummaryProvider("summary")
+        prompts: list[str] = []
+        original = provider.stream
+
+        async def _capturing(system_prompt, messages, tools, **kw):
+            prompts.append(messages[0].content[0].text)
+            async for event in original(system_prompt, messages, tools, **kw):
+                yield event
+
+        provider.stream = _capturing
+        filler = "filler line\n" * 400
+        part = f"{filler}fragment: garnet\n{filler}"
+        msgs = [
+            _user("collect the word from each part"),
+            ToolResultMessage(
+                tool_call_id="c1", tool_name="Read", content=[TextContent(text=part)]
+            ),
+        ]
+        await compact_messages(
+            msgs, None, None, provider, "m", _to_llm, max_input_chars=98_304
+        )
+        assert "fragment: garnet" in prompts[0]
+        assert "chars of tool output elided" not in prompts[0]
+
+    @pytest.mark.asyncio
+    async def test_results_are_capped_once_the_input_exceeds_the_budget(self):
+        provider = _SummaryProvider("summary")
+        prompts: list[str] = []
+        original = provider.stream
+
+        async def _capturing(system_prompt, messages, tools, **kw):
+            prompts.append(messages[0].content[0].text)
+            async for event in original(system_prompt, messages, tools, **kw):
+                yield event
+
+        provider.stream = _capturing
+        big = "HEAD" + "x" * 50_000 + "TAIL"
+        msgs = [
+            _user("find it"),
+            ToolResultMessage(
+                tool_call_id="c1", tool_name="Bash", content=[TextContent(text=big)]
+            ),
+            _assistant("found it"),
+        ]
+        await compact_messages(
+            msgs, None, None, provider, "m", _to_llm, max_input_chars=20_000
+        )
+        assert "chars of tool output elided" in prompts[0]
+        assert "summarization window" not in prompts[0]
+        assert "find it" in prompts[0] and "found it" in prompts[0]
 
     @pytest.mark.asyncio
     async def test_reasoning_never_reaches_the_summary_prompt(self):
