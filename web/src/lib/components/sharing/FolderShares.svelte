@@ -17,9 +17,11 @@
     CopyField,
     EmptyState,
     FormModal,
+    Icon,
     KebabMenu,
     Timestamp,
   } from '@minot/ui';
+  import { File, Folder, Inbox } from '@lucide/svelte';
   import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import { accessLabel, folderName, shareCaption, sharedFrom } from './folderShares';
 
@@ -30,6 +32,7 @@
     onSaved,
     onError,
     open = null,
+    layout = 'card',
   }: {
     ocm: SharedFolderSettings;
     onSaved: () => void;
@@ -39,7 +42,17 @@
       href: (share: SharedFolder) => string;
       onOpen: (event: MouseEvent, share: SharedFolder) => void;
     } | null;
+    /** `index` draws ruled record rows, like the Files page's other indexes. */
+    layout?: 'card' | 'index';
   } = $props();
+
+  const ADDRESS_HELP =
+    'Share a folder or a file with this address from your Nextcloud, or any server with federated sharing. Istota cannot read it until you accept it.';
+  const indexed = $derived(layout === 'index');
+  const listClass = $derived(indexed ? 'list-reset' : 'divided-list');
+  const rowClass = $derived(
+    indexed ? 'shared-row record-row record-row--divided index-row' : 'shared-row',
+  );
 
   const folderShares = $derived(ocm.shares ?? []);
   let accepting = $state<SharedFolderOffer | null>(null);
@@ -98,31 +111,49 @@
   }
 </script>
 
-{#if ocm.federated_id}
-  <p class="caption">
-    Share a folder or a file with this address from your Nextcloud, or any server with federated
-    sharing. Istota cannot read it until you accept it.
-  </p>
-  <CopyField label="Federated sharing address" value={ocm.federated_id} monospace />
+{#snippet intro()}
+  {#if ocm.federated_id}
+    {#if indexed}
+      <CopyField
+        label="Federated sharing address"
+        value={ocm.federated_id}
+        monospace
+        description={ADDRESS_HELP}
+      />
+    {:else}
+      <p class="caption">{ADDRESS_HELP}</p>
+      <CopyField label="Federated sharing address" value={ocm.federated_id} monospace />
+    {/if}
+  {:else}
+    <Alert appearance="inline" variant="info"
+      >This server no longer receives folder shares, so Istota does not hear when one of these
+      folders is unshared. Remove a share here once you stop using it.</Alert
+    >
+  {/if}
+  {#if ocm.accept_refusal && ocm.pending.length > 0}
+    <Alert appearance="inline" variant="warn">{ocm.accept_refusal}</Alert>
+  {/if}
+{/snippet}
+
+{#if indexed}
+  <div class="share-intro">{@render intro()}</div>
 {:else}
-  <Alert appearance="inline" variant="info"
-    >This server no longer receives folder shares, so Istota does not hear when one of these folders
-    is unshared. Remove a share here once you stop using it.</Alert
-  >
-{/if}
-{#if ocm.accept_refusal && ocm.pending.length > 0}
-  <Alert appearance="inline" variant="warn">{ocm.accept_refusal}</Alert>
+  {@render intro()}
 {/if}
 {#if ocm.pending.length === 0 && folderShares.length === 0}
-  <EmptyState size="sm">No folder offers are waiting.</EmptyState>
+  <EmptyState size={indexed ? 'md' : 'sm'}>No folder offers are waiting.</EmptyState>
 {/if}
 {#if ocm.pending.length > 0}
-  <ul class="divided-list" aria-label="Folder offers">
+  <ul class={listClass} aria-label="Folder offers">
     {#each ocm.pending as offer (offer.id)}
       {@const from = sharedFrom(offer)}
-      <li class="shared-row">
+      <li class={rowClass}>
         <div class="shared-row-main">
-          <span>{folderName(offer)}</span>
+          <span class="share-name"
+            >{#if indexed}<Icon icon={Inbox} size="sm" />{/if}<span class="share-label"
+              >{folderName(offer)}</span
+            ></span
+          >
           <span class="caption"
             >from {from ? `${from} · ` : ''}{offer.host} · offered
             <Timestamp value={offer.created_at} format="relative" empty="just now" /></span
@@ -149,24 +180,28 @@
   </ul>
 {/if}
 {#if folderShares.length > 0}
-  <ul class="divided-list" aria-label="Shared folders">
+  <ul class={listClass} aria-label="Shared folders">
     {#each folderShares as share (share.id)}
-      <li class="shared-row">
+      <li class={rowClass}>
         <div class="shared-row-main">
           {#if open}
             <a
-              class="share-link"
+              class="share-name share-link"
               href={open.href(share)}
-              onclick={(event) => open!.onOpen(event, share)}>{folderName(share)}</a
+              onclick={(event) => open!.onOpen(event, share)}
+              >{#if indexed}<Icon
+                  icon={share.kind === 'file' ? File : Folder}
+                  size="sm"
+                />{/if}<span class="share-label">{folderName(share)}</span></a
             >
           {:else}
-            <span>{folderName(share)}</span>
+            <span class="share-name"><span class="share-label">{folderName(share)}</span></span>
           {/if}
           <span class="caption"
             >{shareCaption(share)}{#if share.accepted_at}
               · accepted <Timestamp value={share.accepted_at} format="relative" />{/if}</span
           >
-          <span class="caption mono">share:{share.id}</span>
+          {#if !indexed}<span class="caption mono">share:{share.id}</span>{/if}
         </div>
         <Badge size="sm" variant={share.access === 'write' ? 'info' : 'neutral'}
           >{accessLabel(share.access)}</Badge
@@ -252,11 +287,33 @@
     min-width: 0;
     overflow-wrap: anywhere;
   }
-  .share-link {
+  /* The Files page's index: a record row (table.css), ruled like the file table beside it. */
+  .index-row {
+    align-items: center;
+  }
+  .share-intro {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: 0 var(--space-3) var(--space-3);
+  }
+  .share-name {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
     color: var(--text-primary);
+  }
+  .share-name :global(svg) {
+    flex-shrink: 0;
+    color: var(--accent-amber);
+  }
+  .share-link {
+    align-self: flex-start;
+    max-width: 100%;
     text-decoration: none;
   }
-  .share-link:hover {
+  .share-link:hover .share-label {
     text-decoration: underline;
   }
 </style>

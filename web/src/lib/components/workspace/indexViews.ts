@@ -4,11 +4,11 @@ export type IndexView = 'rooms' | 'groups' | 'shares' | 'config' | 'skills' | 's
 export const INDEX_VIEWS: readonly IndexView[] = [
   'rooms',
   'groups',
-  'shares',
   'config',
   'skills',
   'scripts',
   'prompts',
+  'shares',
 ];
 
 export const INDEX_VIEW_LABELS: Record<IndexView, string> = {

@@ -46,11 +46,11 @@
   const ENTRIES: { view: IndexView; label: string; icon: typeof House }[] = [
     { view: 'rooms', label: 'Rooms', icon: MessageSquare },
     { view: 'groups', label: 'Groups', icon: Users },
-    { view: 'shares', label: 'From other servers', icon: Globe },
     { view: 'config', label: 'Configuration', icon: SlidersHorizontal },
     { view: 'skills', label: 'Skill instructions', icon: BookOpen },
     { view: 'scripts', label: 'Scripts', icon: FileCode },
     { view: 'prompts', label: 'Prompt files', icon: FileText },
+    { view: 'shares', label: 'From other servers', icon: Globe },
   ];
 </script>
 
