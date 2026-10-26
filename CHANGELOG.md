@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The file viewer shows CSV and TSV files as a table, with the header kept in view and wide tables scrolling sideways. A toggle switches to the raw source, the same way it does for Markdown; a very long file shows its first 2,000 rows as a table.
 - Istota can read a calendar from any provider. Paste its secret iCal address under Settings > Connections > Shared with Istota, and tasks can list its events beside your other calendars; the calendar stays read-only and nothing else on that account is reachable.
 - Istota has a calendar of its own. A task can put an event on it, move it or cancel it, and you see those events by subscribing once to a private feed address from Settings > Connections; it needs no CalDAV account.
 - Events on Istota's calendar can reach you as invitations instead. Istota mails each one to your own address, sends an update when it moves and a cancellation when it is removed, and records your accept or decline when your calendar answers; that answer starts no task. Invitations an organizer sends to Istota's address directly can be read by tasks too; forwarded ones are not recorded. Recording answers needs `[email] authserv_id`, and `istota doctor` says so.

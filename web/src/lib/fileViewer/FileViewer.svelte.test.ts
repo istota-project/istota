@@ -195,6 +195,21 @@ describe('workspace file viewer through the host', () => {
     expect(screen.getByRole('heading', { name: 'Hello' })).toBeTruthy();
     expect(screen.queryByRole('textbox')).toBeNull();
   });
+  it('renders a CSV as a table, with its source a toggle away', async () => {
+    const body = 'name,note\nAda,"likes <b>, commas"\n';
+    preview.mockResolvedValue(text('data.csv', body));
+    open('/data.csv');
+    const table = await screen.findByRole('table', { name: 'data.csv' });
+    expect(table.closest('.csv-scroll')).not.toBeNull();
+    expect(screen.getByRole('columnheader', { name: 'note' })).toBeTruthy();
+    expect(screen.getByRole('cell', { name: 'likes <b>, commas' })).toBeTruthy();
+    expect(table.querySelector('b')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Source' }));
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Source of data.csv' })).toHaveValue(body);
+    await fireEvent.click(screen.getByRole('button', { name: 'Rendered' }));
+    expect(screen.getByRole('table', { name: 'data.csv' })).toBeTruthy();
+  });
   it('draws the header actions as named icons, with the view toggle reporting its state', async () => {
     preview.mockResolvedValue(text('note.md', '# Hello'));
     open('/note.md');
