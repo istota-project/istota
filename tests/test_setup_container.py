@@ -278,11 +278,10 @@ class TestTheSecretFilesMatchCompose:
             for variable in (provider_key_variable, provider_headers_variable)
         }
         for name in SECRET_NAMES:
-            # The `claude` CLI reads the token; `anthropic_api_key` is read
-            # once by `load_config` as `ANTHROPIC_API_KEY`, a row of
-            # `LEGACY_PROVIDER_SOURCES`, whose name is not in the quoted form
-            # below.
-            if name in ("anthropic_api_key", "claude_code_oauth_token"):
+            # The `claude` CLI reads the token. `anthropic_api_key` needs no
+            # exemption: `load_config` reads it as `ANTHROPIC_API_KEY`, the
+            # transition row of `LEGACY_PROVIDER_SOURCES`.
+            if name == "claude_code_oauth_token":
                 continue
             # Read as a file and never as a variable.
             if name in DAEMON_ONLY_SECRETS:
