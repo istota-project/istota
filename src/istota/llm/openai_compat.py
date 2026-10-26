@@ -136,17 +136,19 @@ def coalesce_reasoning_details(items: list) -> list[dict]:
     non-empty one (it arrives with the final piece). Checked against the
     recorded OpenRouter stream, which sends one ``reasoning.text`` item per
     chunk at index 0.
+
+    An item whose ``id`` differs from the previous piece's is never merged,
+    and neither is an encrypted item with no ``index``: joining two encrypted
+    items makes a blob the endpoint refuses on replay, which turns replay off
+    for the attempt. Readable items with no ``index`` still merge, as a split
+    signed text item would be refused just the same.
     """
     merged: list[dict] = []
     for item in items:
         if not isinstance(item, dict):
             continue
         last = merged[-1] if merged else None
-        if (
-            last is not None
-            and last.get("type") == item.get("type")
-            and last.get("index") == item.get("index")
-        ):
+        if last is not None and _continues_detail(last, item):
             for key in _DETAIL_STRING_FIELDS:
                 piece = item.get(key)
                 if isinstance(piece, str) and piece:
@@ -154,9 +156,24 @@ def coalesce_reasoning_details(items: list) -> list[dict]:
             signature = item.get("signature")
             if signature:
                 last["signature"] = signature
+            if not last.get("id") and item.get("id"):
+                last["id"] = item["id"]
             continue
         merged.append(dict(item))
     return merged
+
+
+def _continues_detail(last: dict, item: dict) -> bool:
+    if last.get("type") != item.get("type"):
+        return False
+    index = item.get("index")
+    if last.get("index") != index:
+        return False
+    if index is None and item.get("type") == "reasoning.encrypted":
+        return False
+    last_id = last.get("id")
+    item_id = item.get("id")
+    return not (last_id and item_id and last_id != item_id)
 
 
 def _readable_detail_text(item: dict) -> str:
