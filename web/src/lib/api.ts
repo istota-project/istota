@@ -2966,6 +2966,7 @@ export async function getEncounter(id: number): Promise<{
   diagnoses: Diagnosis[];
   panels: HealthPanel[];
   documents: HealthDocument[];
+  medications: Medication[];
 }> {
   return healthFetch(`/encounters/${id}`);
 }
@@ -3264,6 +3265,104 @@ export async function bulkInsertImmunizations(
 
 export async function getImmunizationExplainer(name: string): Promise<ImmunizationExplainer> {
   return healthFetch(`/immunizations/${encodeURIComponent(name)}/explainer`);
+}
+
+// ---- Medications ---------------------------------------------------------
+
+export type MedicationCategory = 'prescription' | 'otc' | 'supplement';
+export type MedicationStatus = 'active' | 'stopped' | 'all';
+
+/** `medication_to_dict` in `src/istota/health/serialize.py`, in its key order. */
+export interface Medication {
+  id: number;
+  name: string;
+  generic_name: string | null;
+  dose: string | null;
+  dose_unit: string | null;
+  frequency: string | null;
+  route: string | null;
+  category: MedicationCategory;
+  prescriber: string | null;
+  pharmacy: string | null;
+  reason: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  active: boolean;
+  encounter_id: number | null;
+  notes: string | null;
+  source: string;
+  created_at: string;
+  /** Attached-document count; present on list responses. */
+  document_count?: number;
+}
+
+/** The writable fields. `null` clears a nullable one; an absent key leaves it alone. */
+export type MedicationFields = Partial<
+  Omit<Medication, 'id' | 'source' | 'created_at' | 'document_count'>
+>;
+
+export async function listMedications(
+  params: {
+    status?: MedicationStatus;
+    category?: MedicationCategory;
+    name?: string;
+    since?: string;
+    until?: string;
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<{ medications: Medication[] }> {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== '') q.set(k, String(v));
+  }
+  const suffix = q.toString() ? `?${q.toString()}` : '';
+  return healthFetch(`/medications${suffix}`);
+}
+
+export async function createMedication(
+  body: MedicationFields & { name: string },
+): Promise<{ status: string; id: number }> {
+  return healthFetch('/medications', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function getMedication(id: number): Promise<{
+  medication: Medication;
+  encounter: Encounter | null;
+  documents: HealthDocument[];
+}> {
+  return healthFetch(`/medications/${id}`);
+}
+
+export async function updateMedication(
+  id: number,
+  body: MedicationFields,
+): Promise<{ status: string }> {
+  return healthFetch(`/medications/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Without `endDate` the server uses today in the user's timezone. */
+export async function discontinueMedication(
+  id: number,
+  endDate?: string,
+): Promise<{ status: string; end_date: string }> {
+  return healthFetch(`/medications/${id}/discontinue`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(endDate ? { end_date: endDate } : {}),
+  });
+}
+
+export async function deleteMedication(id: number): Promise<{ status: string }> {
+  return healthFetch(`/medications/${id}`, { method: 'DELETE' });
 }
 
 // ---- Documents -----------------------------------------------------------
