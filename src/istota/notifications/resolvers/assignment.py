@@ -361,6 +361,86 @@ def settle(conn: "sqlite3.Connection", assignment_id: int) -> int:
     return closed
 
 
+# ---------------------------------------------------------------------------
+# Where a notice sends the user (#848)
+# ---------------------------------------------------------------------------
+
+#: Where Open in chat goes when no room of the user's can be named.
+CHAT_FALLBACK_HREF = "/chat"
+
+
+def folder_href(assignment_id: int) -> str:
+    """The web app's redirect to the assignment's folder in Files.
+
+    A path rather than the Files page's own `?place=&path=` form, which the
+    URL allowlist refuses; the server looks the folder up from the id.
+    """
+    return f"/files/assignments/{int(assignment_id)}"
+
+
+def _activation_room(conn, assignment) -> str | None:
+    """The room the assignment's approved activation was asked in, while the
+    user is a member and can still open it (not archived, not hidden). The
+    assignment row records no room."""
+    from istota import db
+    from istota.rooms.scopes import canonical_token
+
+    row = conn.execute(
+        "SELECT origin FROM whatsapp_skill_requests WHERE kind = 'assignment_activation'"
+        " AND requester_user_id = ? AND state = 'approved'"
+        " AND json_extract(destination, '$.assignment_id') = ?"
+        " ORDER BY approved_at DESC, rowid DESC LIMIT 1",
+        (assignment.user_id, assignment.id),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        origin = json.loads(row[0] or "{}")
+    except ValueError:
+        return None
+    token = origin.get("room_token") if isinstance(origin, dict) else None
+    if not isinstance(token, str) or not token:
+        return None
+    token = canonical_token(conn, token)
+    if token is None or not db.is_room_member(conn, token, assignment.user_id):
+        return None
+    if db.visible_room(conn, assignment.user_id, token) is None:
+        return None
+    return token
+
+
+def chat_href(conn, assignment) -> str:
+    """Open in chat: the activation room, else the user's default web room,
+    else the chat page, through the `/chat/r/<token>` redirect."""
+    from istota import db
+    from istota.notifications.sources import is_safe_path
+
+    token = _activation_room(conn, assignment)
+    if token is None:
+        room = db.default_web_room(conn, assignment.user_id)
+        token = room.token if room is not None else None
+    if token:
+        href = f"/chat/r/{token}"
+        if is_safe_path(href):
+            return href
+    return CHAT_FALLBACK_HREF
+
+
+def _actions(conn, assignment) -> tuple:
+    from istota.notifications.sources import NotificationAction
+
+    return (
+        NotificationAction(
+            id="open-chat", label="Open in chat", kind="primary", method="LINK",
+            href=chat_href(conn, assignment),
+        ),
+        NotificationAction(
+            id="open-folder", label="Open folder", kind="default", method="LINK",
+            href=folder_href(assignment.id),
+        ),
+    )
+
+
 class AssignmentResolver:
     source = SOURCE
     auto_resolve_on_seen = True
@@ -379,10 +459,14 @@ class AssignmentResolver:
         kind, ref = _parse_key(row.dedup_key)
         if kind not in KINDS or not is_open(conn, assignment, kind, ref):
             return None
+        body = f"Assignment {assignment.id} · {assignment.slug}"
+        if row.body:
+            body += "\n" + row.body
         return NotificationView(
             title=row.title,
-            body=row.body,
+            body=body,
             severity=row.severity,
+            actions=_actions(conn, assignment),
             status_note=_STATUS_NOTE.get(kind),
         )
 
