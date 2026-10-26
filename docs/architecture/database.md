@@ -192,6 +192,7 @@ The two Nominatim caches (`geocode_cache`, `reverse_geocode_cache`) remain in th
 | `diagnosis_encounters` | Which appointments a condition was seen at (many-to-many; real FKs, cascading) |
 | `immunizations` | Vaccine administration records |
 | `immunization_refs` | Bundled canonical vaccine list and schedules |
+| `medications` | Prescriptions, OTC drugs and supplements; `active` marks the current regimen, a dose change is a new row |
 | `documents` | Stored paperwork, one row per blob, deduped by content hash |
 | `document_links` | Polymorphic join: which records a document evidences |
 | `health_settings` | Profile (DOB, height, sex) and unit display preferences |

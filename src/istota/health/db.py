@@ -11,7 +11,8 @@ Tables:
 * ``biomarkers``      — individual values from a panel
 * ``biomarker_refs``  — canonical names + Istota-curated reference ranges
 * ``health_settings`` — DOB, height, biological sex, display unit prefs
-* ``documents``       — stored paperwork (scans, discharge summaries, cards)
+* ``medications``     — the regimen: prescriptions, OTC drugs, supplements
+* ``documents``     — stored paperwork (scans, discharge summaries, cards)
 * ``document_links``  — polymorphic join to encounter / diagnosis / immunization
 * ``schema_meta``     — schema version + migration sentinels
 """
@@ -36,16 +37,18 @@ from istota.health.models import (
     Encounter,
     Immunization,
     ImmunizationRef,
+    Medication,
     Panel,
     Stat,
 )
+from istota.lib.date_parse import parse_loose_date
 from istota.lib.timestamps import iso_now as _now
 
 
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # What a lab panel was run on. NULL means the report did not say; existing
 # rows are never backfilled, since a wrong label is worse than none.
@@ -58,6 +61,24 @@ def normalize_specimen(value: Any) -> str | None:
         return None
     v = value.strip().lower()
     return v if v in SPECIMENS else None
+
+
+MEDICATION_CATEGORIES = ("prescription", "otc", "supplement")
+
+_MEDICATION_CATEGORY_ALIASES = {
+    "rx": "prescription",
+    "over_the_counter": "otc",
+    "over-the-counter": "otc",
+}
+
+
+def normalize_medication_category(value: Any) -> str | None:
+    """Return ``value`` as a member of :data:`MEDICATION_CATEGORIES`, or None."""
+    if not isinstance(value, str):
+        return None
+    v = value.strip().lower()
+    v = _MEDICATION_CATEGORY_ALIASES.get(v, v)
+    return v if v in MEDICATION_CATEGORIES else None
 
 
 SCHEMA_SQL = """
@@ -221,6 +242,36 @@ CREATE TABLE IF NOT EXISTS immunization_refs (
     description TEXT,
     typical_age_range TEXT
 );
+
+-- New in SCHEMA_VERSION 5. A new table, so `CREATE TABLE IF NOT EXISTS`
+-- inside executescript(SCHEMA_SQL) covers an existing DB; no migration
+-- function exists for it.
+CREATE TABLE IF NOT EXISTS medications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    generic_name TEXT,
+    dose TEXT,
+    dose_unit TEXT,
+    frequency TEXT,
+    route TEXT,
+    category TEXT NOT NULL DEFAULT 'prescription',
+    prescriber TEXT,
+    pharmacy TEXT,
+    reason TEXT,
+    start_date TEXT,
+    end_date TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    encounter_id INTEGER REFERENCES encounters(id) ON DELETE SET NULL,
+    notes TEXT,
+    source TEXT NOT NULL DEFAULT 'manual',
+    dedup_key TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_medications_active ON medications(active);
+CREATE INDEX IF NOT EXISTS idx_medications_name ON medications(name);
+CREATE INDEX IF NOT EXISTS idx_medications_encounter ON medications(encounter_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_medications_dedup
+    ON medications(dedup_key) WHERE dedup_key IS NOT NULL;
 
 -- Stored paperwork: one row per blob, independent of what it evidences.
 -- Bytes live at {uploads_dir}/documents/{id}/{filename}; `stored_path` is
@@ -1859,6 +1910,305 @@ def immunizations_for_encounter(
         (encounter_id,),
     ).fetchall()
     return [_row_to_immunization(r) for r in rows]
+
+
+# -- medications -------------------------------------------------------------
+
+
+_MEDICATION_UPDATE_FIELDS = (
+    "name", "generic_name", "dose", "dose_unit", "frequency", "route",
+    "category", "prescriber", "pharmacy", "reason", "start_date",
+    "end_date", "active", "encounter_id", "notes",
+)
+MEDICATION_STATUSES = ("active", "stopped", "all")
+
+# Current rows first, each group newest first.
+_MEDICATION_ORDER = "active DESC, COALESCE(start_date, '') DESC, id DESC"
+
+
+def _row_to_medication(row: sqlite3.Row) -> Medication:
+    return Medication(
+        id=row["id"],
+        name=row["name"],
+        generic_name=row["generic_name"],
+        dose=row["dose"],
+        dose_unit=row["dose_unit"],
+        frequency=row["frequency"],
+        route=row["route"],
+        category=row["category"],
+        prescriber=row["prescriber"],
+        pharmacy=row["pharmacy"],
+        reason=row["reason"],
+        start_date=row["start_date"],
+        end_date=row["end_date"],
+        active=bool(row["active"]),
+        encounter_id=row["encounter_id"],
+        notes=row["notes"],
+        source=row["source"],
+        created_at=row["created_at"],
+    )
+
+
+def _medication_category(value: Any) -> str:
+    category = normalize_medication_category(value)
+    if category is None:
+        raise ValueError(
+            f"category must be one of {', '.join(MEDICATION_CATEGORIES)}: {value!r}"
+        )
+    return category
+
+
+def _medication_date(field: str, value: Any) -> str | None:
+    """None stays None; anything else must parse to an ISO date."""
+    if value is None:
+        return None
+    parsed = parse_loose_date(value)
+    if parsed is None:
+        raise ValueError(f"{field} is not a valid date: {value!r}")
+    return parsed
+
+
+def _check_medication_range(start_date: str | None, end_date: str | None) -> None:
+    if start_date and end_date and end_date < start_date:
+        raise ValueError(
+            f"end_date {end_date} is before start_date {start_date}"
+        )
+
+
+def _medication_name(value: Any) -> str:
+    name = str(value).strip() if value is not None else ""
+    if not name:
+        raise ValueError("name is required")
+    return name
+
+
+def insert_medication(
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    category: str = "prescription",
+    generic_name: str | None = None,
+    dose: str | None = None,
+    dose_unit: str | None = None,
+    frequency: str | None = None,
+    route: str | None = None,
+    prescriber: str | None = None,
+    pharmacy: str | None = None,
+    reason: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    active: bool = True,
+    encounter_id: int | None = None,
+    notes: str | None = None,
+    source: str = "manual",
+    dedup_key: str | None = None,
+) -> int:
+    """Insert one medication row. Never reconciles by name: two rows for one
+    drug are a dose change kept as history, or two strengths taken at once."""
+    name = _medication_name(name)
+    category = _medication_category(category)
+    start_date = _medication_date("start_date", start_date)
+    end_date = _medication_date("end_date", end_date)
+    _check_medication_range(start_date, end_date)
+    if dedup_key is not None:
+        row = conn.execute(
+            "SELECT id FROM medications WHERE dedup_key = ?", (dedup_key,),
+        ).fetchone()
+        if row is not None:
+            return int(row[0])
+    cur = conn.execute(
+        """
+        INSERT INTO medications(
+            name, generic_name, dose, dose_unit, frequency, route, category,
+            prescriber, pharmacy, reason, start_date, end_date, active,
+            encounter_id, notes, source, dedup_key
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            name, generic_name, dose, dose_unit, frequency, route, category,
+            prescriber, pharmacy, reason, start_date, end_date,
+            1 if active else 0, encounter_id, notes, source, dedup_key,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def get_medication(
+    conn: sqlite3.Connection, medication_id: int,
+) -> Medication | None:
+    row = conn.execute(
+        "SELECT * FROM medications WHERE id = ?", (medication_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return _row_to_medication(row)
+
+
+def list_medications(
+    conn: sqlite3.Connection,
+    *,
+    status: str = "active",
+    category: str | None = None,
+    name: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> list[Medication]:
+    """One read for "what am I on now" and "what was I on between dates".
+
+    ``since`` / ``until`` are an overlap window, each half applied only when
+    given. A stopped row with no end date matches any ``since``: the filter
+    cannot exclude what it does not know.
+    """
+    if status not in MEDICATION_STATUSES:
+        raise ValueError(
+            f"status must be one of {', '.join(MEDICATION_STATUSES)}: {status!r}"
+        )
+    clauses: list[str] = []
+    params: list[Any] = []
+    if status == "active":
+        clauses.append("active = 1")
+    elif status == "stopped":
+        clauses.append("active = 0")
+    if category is not None:
+        clauses.append("category = ?")
+        params.append(_medication_category(category))
+    if name:
+        # Stored names are trimmed on write, so only the argument needs the
+        # trailing-punctuation strip.
+        wanted = _normalize_condition_name(name)
+        clauses.append(
+            "(lower(trim(name)) = ? OR lower(trim(generic_name)) = ?)"
+        )
+        params.extend([wanted, wanted])
+    if until:
+        clauses.append("(start_date IS NULL OR start_date <= ?)")
+        params.append(until)
+    if since:
+        clauses.append("(end_date IS NULL OR end_date >= ?)")
+        params.append(since)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = conn.execute(
+        f"SELECT * FROM medications {where} "
+        f"ORDER BY {_MEDICATION_ORDER} LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    ).fetchall()
+    return [_row_to_medication(r) for r in rows]
+
+
+def update_medication(
+    conn: sqlite3.Connection, medication_id: int, **kwargs: Any,
+) -> int:
+    fields: list[str] = []
+    params: list[Any] = []
+    values: dict[str, Any] = {}
+    for k in _MEDICATION_UPDATE_FIELDS:
+        if k not in kwargs:
+            continue
+        v = kwargs[k]
+        # name and category are NOT NULL; explicit None is a no-op.
+        if k in ("name", "category") and v is None:
+            continue
+        if k == "name":
+            v = _medication_name(v)
+        elif k == "category":
+            v = _medication_category(v)
+        elif k == "active":
+            v = 1 if v else 0
+        elif k in ("start_date", "end_date"):
+            v = _medication_date(k, v)
+        values[k] = v
+    if not values:
+        return 0
+    if "start_date" in values or "end_date" in values:
+        row = conn.execute(
+            "SELECT start_date, end_date FROM medications WHERE id = ?",
+            (medication_id,),
+        ).fetchone()
+        if row is None:
+            return 0
+        _check_medication_range(
+            values.get("start_date", row["start_date"]),
+            values.get("end_date", row["end_date"]),
+        )
+    for k, v in values.items():
+        fields.append(f"{k} = ?")
+        params.append(v)
+    params.append(medication_id)
+    cur = conn.execute(
+        f"UPDATE medications SET {', '.join(fields)} WHERE id = ?", params,
+    )
+    return cur.rowcount
+
+
+def discontinue_medication(
+    conn: sqlite3.Connection, medication_id: int, *, end_date: str,
+) -> int:
+    """Stop a medication on ``end_date``.
+
+    The caller picks the date: the CLI, a route and a replay each have a
+    different correct "today". Stopping a stopped row overwrites its end
+    date, which is how a wrong stop date is corrected.
+    """
+    parsed = _medication_date("end_date", end_date)
+    if parsed is None:
+        raise ValueError("end_date is required")
+    row = conn.execute(
+        "SELECT start_date FROM medications WHERE id = ?", (medication_id,),
+    ).fetchone()
+    if row is None:
+        return 0
+    _check_medication_range(row["start_date"], parsed)
+    cur = conn.execute(
+        "UPDATE medications SET active = 0, end_date = ? WHERE id = ?",
+        (parsed, medication_id),
+    )
+    return cur.rowcount
+
+
+def delete_medication(conn: sqlite3.Connection, medication_id: int) -> int:
+    cur = conn.execute(
+        "DELETE FROM medications WHERE id = ?", (medication_id,),
+    )
+    return cur.rowcount
+
+
+def medications_for_encounter(
+    conn: sqlite3.Connection, encounter_id: int,
+) -> list[Medication]:
+    rows = conn.execute(
+        f"SELECT * FROM medications WHERE encounter_id = ? "
+        f"ORDER BY {_MEDICATION_ORDER}",
+        (encounter_id,),
+    ).fetchall()
+    return [_row_to_medication(r) for r in rows]
+
+
+def active_medications_named(
+    conn: sqlite3.Connection, name: str,
+) -> list[Medication]:
+    """Current rows matching ``name`` or its generic name, for the CLI's
+    duplicate warning."""
+    return list_medications(conn, status="active", name=name)
+
+
+def current_regimen(conn: sqlite3.Connection) -> list[Medication]:
+    """Active rows for the history summary: prescription, then otc, then
+    supplement, and by name within each."""
+    rows = conn.execute(
+        """
+        SELECT * FROM medications WHERE active = 1
+        ORDER BY CASE category
+            WHEN 'prescription' THEN 0
+            WHEN 'otc' THEN 1
+            WHEN 'supplement' THEN 2
+            ELSE 3
+        END, lower(name), id
+        """,
+    ).fetchall()
+    return [_row_to_medication(r) for r in rows]
 
 
 # -- immunization_refs -------------------------------------------------------
