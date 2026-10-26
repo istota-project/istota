@@ -68,6 +68,7 @@
   import { configFileDescription } from '$lib/components/workspace/configFiles';
   import {
     INDEX_VIEW_LABELS,
+    INDEX_VIEWS,
     indexViewForKind,
     parseIndexView,
     type IndexView,
@@ -304,18 +305,16 @@
       : undefined,
   );
   let botViews = $derived(
-    (['rooms', 'groups', 'shares', 'config', 'skills', 'scripts', 'prompts'] as IndexView[]).filter(
-      (item) => {
-        if (item === 'rooms') return places.some((p) => p.kind === 'room');
-        if (item === 'groups') return places.some((p) => p.kind === 'group');
-        if (item === 'shares') return shareIndex;
-        // The rest live in My files, so they need it.
-        if (!places.some((p) => p.kind === 'home')) return false;
-        if (item === 'skills') return configFiles.some((file) => file.kind === 'skill');
-        if (item === 'prompts') return !!scriptsIndex?.files.some((file) => file.kind === 'prompt');
-        return true;
-      },
-    ),
+    INDEX_VIEWS.filter((item) => {
+      if (item === 'rooms') return places.some((p) => p.kind === 'room');
+      if (item === 'groups') return places.some((p) => p.kind === 'group');
+      if (item === 'shares') return shareIndex;
+      // The rest live in My files, so they need it.
+      if (!places.some((p) => p.kind === 'home')) return false;
+      if (item === 'skills') return configFiles.some((file) => file.kind === 'skill');
+      if (item === 'prompts') return !!scriptsIndex?.files.some((file) => file.kind === 'prompt');
+      return true;
+    }),
   );
   // Configuration, skills, scripts and prompts all live in the user's own folder, so they reach as it does.
   let botReach = $derived.by(() => {
@@ -759,14 +758,13 @@
             {:else if !sharing}
               <PageLoading label="Loading shares…" />
             {:else if sharing.ocm}
-              <div class="share-list">
-                <FolderShares
-                  ocm={sharing.ocm}
-                  onSaved={sharingChanged}
-                  onError={sharingFailed}
-                  open={{ href: shareHref, onOpen: openShare }}
-                />
-              </div>
+              <FolderShares
+                layout="index"
+                ocm={sharing.ocm}
+                onSaved={sharingChanged}
+                onError={sharingFailed}
+                open={{ href: shareHref, onOpen: openShare }}
+              />
             {:else}
               <EmptyState>This server does not receive shares from other servers.</EmptyState>
             {/if}
@@ -1124,12 +1122,6 @@
     flex-direction: column;
     min-height: 0;
     overflow-y: auto;
-  }
-  .share-list {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    padding: var(--space-3);
   }
   .share-caption {
     margin: 0;

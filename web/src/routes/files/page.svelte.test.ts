@@ -419,6 +419,12 @@ describe('shares from other servers (#849)', () => {
     expect(shares).toHaveTextContent(
       'Folder · from Carol (carol@cloud.example.org) · cloud.example.org',
     );
+    // Ruled record rows like the other indexes, without the place id the Settings card shows.
+    expect(within(shares).getAllByRole('listitem')[0]).toHaveClass('record-row--divided');
+    expect(shares).not.toHaveTextContent('share:7');
+    // The last entry in the bot's section.
+    const entries = within(sidebar).getByRole('region', { name: 'Istota' }).querySelectorAll('a');
+    expect(entries[entries.length - 1]).toHaveTextContent('From other servers');
     const offers = screen.getByRole('list', { name: 'Folder offers' });
     expect(within(offers).getByRole('button', { name: 'Accept Photos' })).toBeInTheDocument();
     expect(within(offers).getByRole('button', { name: 'Decline Photos' })).toBeInTheDocument();
