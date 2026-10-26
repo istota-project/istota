@@ -251,6 +251,10 @@ export async function getRoomModelChoices(roomId: number, brain?: string): Promi
       : [],
     defaultModel: catalogue.default_model ?? null,
     roomModel: catalogue.room_model ?? null,
+    providers: Array.isArray(catalogue.providers)
+      ? catalogue.providers.filter((p) => typeof p?.id === 'string')
+      : [],
+    roomProvider: typeof catalogue.room_provider === 'string' ? catalogue.room_provider : null,
   };
 }
 

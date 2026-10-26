@@ -1,11 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import type { ChatModel } from '$lib/api';
 import {
+  defaultModelFor,
+  effectiveProvider,
   effortOptions,
   effortsFor,
   filterOptions,
+  keepsOnProvider,
   modelRefusalOf,
   pickerOptions,
+  providerOptions,
   refusalMessage,
   valueOf,
   type ModelChoices,
@@ -188,5 +192,53 @@ describe('a refused pick', () => {
     expect(refusal('model_not_runnable')).toBe("This room's brain cannot run that model.");
     expect(refusal('unknown')).toBe('server text');
     expect(refusal('something_new')).toBe('server text');
+    expect(refusal('provider_admin_only')).toMatch(/only an admin can change the provider/);
+    expect(refusal('no_default_model')).toMatch(/no default model/);
+  });
+});
+
+describe("a native room's provider", () => {
+  const PROVIDERS = [
+    { id: 'anthropic', kind: 'anthropic', default: true, default_model: 'claude-sonnet-5-5' },
+    { id: 'openrouter', kind: 'openrouter', default: false, default_model: null },
+  ];
+
+  it('offers the default provider first, as the empty value', () => {
+    expect(providerOptions(choices({ providers: PROVIDERS }))).toEqual([
+      { value: '', label: 'anthropic (default)' },
+      { value: 'openrouter', label: 'openrouter' },
+    ]);
+    expect(providerOptions(choices())).toEqual([]);
+  });
+
+  it("lists only the chosen provider's models, aliases still first", () => {
+    const options = pickerOptions(choices(), 'openrouter');
+    expect(options.map((o) => o.value)).toEqual([
+      'smart',
+      'openrouter/moonshotai/kimi-k2.6',
+      'openrouter/vendor/x',
+    ]);
+  });
+
+  it('runs on the default provider until another is chosen', () => {
+    const c = choices({ providers: PROVIDERS });
+    expect(effectiveProvider(c, '')).toBe('anthropic');
+    expect(effectiveProvider(c, 'openrouter')).toBe('openrouter');
+  });
+
+  it("names the provider's own default model for a provider being moved to", () => {
+    const c = choices({ providers: PROVIDERS, defaultModel: 'the-room-default' });
+    expect(defaultModelFor(c, '', '')).toBe('the-room-default');
+    expect(defaultModelFor(c, 'openrouter', '')).toBeNull();
+    expect(defaultModelFor(c, '', 'openrouter')).toBe('claude-sonnet-5-5');
+  });
+
+  it("keeps an alias and the new provider's own models, nothing else", () => {
+    const options = pickerOptions(choices());
+    expect(keepsOnProvider(options, 'smart', 'openrouter')).toBe(true);
+    expect(keepsOnProvider(options, 'openrouter/vendor/x', 'openrouter')).toBe(true);
+    expect(keepsOnProvider(options, 'anthropic/claude-opus-5-5', 'openrouter')).toBe(false);
+    expect(keepsOnProvider(options, 'qwen3', 'openrouter')).toBe(false);
+    expect(keepsOnProvider(options, '', 'openrouter')).toBe(true);
   });
 });

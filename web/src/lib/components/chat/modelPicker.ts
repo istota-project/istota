@@ -5,7 +5,7 @@
 // enabled first in each), the enabled mark is part of the label, and a picked
 // label is mapped back to the value it stands for.
 
-import type { ChatModel, ChatModelAlias, ChatRoomModel } from '$lib/api';
+import type { ChatModel, ChatModelAlias, ChatProvider, ChatRoomModel } from '$lib/api';
 
 export interface ModelChoices {
   aliases: ChatModelAlias[];
@@ -14,6 +14,11 @@ export interface ModelChoices {
   defaultModel: string | null;
   /** The room's stored model as this viewer sees it, or null when none. */
   roomModel: ChatRoomModel | null;
+  /** The providers a native room may be moved to; empty for anyone who may
+   *  not choose one (D22), and for a room that is not native. */
+  providers?: ChatProvider[];
+  /** The room's stored provider; null is native's default. */
+  roomProvider?: string | null;
 }
 
 export interface PickerOption {
@@ -33,7 +38,10 @@ const ENABLED_MARK = ' · enabled';
  *  The enabled mark appears only on a list that mixes enabled and other models,
  *  which is an admin's; on anyone else's every model is enabled and the mark
  *  would say nothing. */
-export function pickerOptions(choices: ModelChoices): PickerOption[] {
+export function pickerOptions(
+  choices: ModelChoices,
+  provider: string | null = null,
+): PickerOption[] {
   const out: PickerOption[] = [];
   for (const a of choices.aliases) {
     out.push({
@@ -42,8 +50,11 @@ export function pickerOptions(choices: ModelChoices): PickerOption[] {
       efforts: a.efforts ?? null,
     });
   }
-  const mixed = choices.models.some((m) => m.enabled) && choices.models.some((m) => !m.enabled);
-  for (const m of choices.models) {
+  // With a provider chosen, only its models: a room's model is an id within
+  // its provider (D22), and the admin's provider select fills the list.
+  const models = provider ? choices.models.filter((m) => m.provider === provider) : choices.models;
+  const mixed = models.some((m) => m.enabled) && models.some((m) => !m.enabled);
+  for (const m of models) {
     const id = m.ref.slice(m.provider.length + 1);
     const name = m.name && m.name !== id ? ` (${m.name})` : '';
     out.push({
@@ -53,6 +64,50 @@ export function pickerOptions(choices: ModelChoices): PickerOption[] {
     });
   }
   return out;
+}
+
+/** The provider select's options: native's default first, as the empty value
+ *  a room with no provider of its own holds, then the other listed ones. */
+export function providerOptions(choices: ModelChoices): { value: string; label: string }[] {
+  const out: { value: string; label: string }[] = [];
+  for (const p of choices.providers ?? []) {
+    if (p.default) out.unshift({ value: '', label: `${p.id} (default)` });
+    else out.push({ value: p.id, label: p.id });
+  }
+  return out;
+}
+
+/** The provider a selection runs on: the chosen one, else native's default. */
+export function effectiveProvider(choices: ModelChoices, selected: string): string | null {
+  if (selected) return selected;
+  return (choices.providers ?? []).find((p) => p.default)?.id ?? null;
+}
+
+/** What a room on the selected provider runs with no model pinned: the
+ *  server's answer for the room's own provider, the provider's own default
+ *  model for another one. */
+export function defaultModelFor(
+  choices: ModelChoices,
+  selected: string,
+  stored: string,
+): string | null {
+  if (selected === stored) return choices.defaultModel;
+  const provider = effectiveProvider(choices, selected);
+  return (choices.providers ?? []).find((p) => p.id === provider)?.default_model ?? null;
+}
+
+/** Whether a value can stay when the room moves to ``provider``: an alias
+ *  stays (the server says whether it has a target there), a ref only when it
+ *  is that provider's, and a stored id only while the provider is unchanged. */
+export function keepsOnProvider(
+  options: PickerOption[],
+  value: string,
+  provider: string | null,
+): boolean {
+  if (!value) return true;
+  const option = options.find((o) => o.value === value);
+  if (option && !value.includes('/')) return true;
+  return !!provider && value.startsWith(`${provider}/`);
 }
 
 /** The value the field's text stands for: an option's value when the text is
@@ -128,6 +183,10 @@ export function refusalMessage(refusal: ModelRefusal): string {
       return "This room's brain cannot run that model.";
     case 'no_tools':
       return 'That model cannot use tools, which a room needs.';
+    case 'provider_admin_only':
+      return 'That model runs on another provider, and only an admin can change the provider.';
+    case 'no_default_model':
+      return 'That provider has no default model. Pick a model for the room too.';
     case 'unknown':
       return refusal.candidates.length
         ? 'No model has that name.'

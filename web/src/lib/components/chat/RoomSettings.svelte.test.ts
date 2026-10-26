@@ -1289,3 +1289,62 @@ describe('RoomSettings — a group-owned room', () => {
     expect(name.readOnly).toBe(false);
   });
 });
+
+describe("RoomSettings — a native room's provider", () => {
+  const models = vi.mocked(getRoomModelChoices);
+  const PROVIDERS = [
+    { id: 'anthropic', kind: 'anthropic', default: true, default_model: 'claude-sonnet-5-5' },
+    {
+      id: 'openrouter',
+      kind: 'openrouter',
+      default: false,
+      default_model: 'moonshotai/kimi-k2.6',
+    },
+  ];
+  const REFS = ['anthropic/claude-opus-5', 'openrouter/moonshotai/kimi-k2.6'];
+  const PROVIDER = 'Room provider';
+
+  afterEach(() => {
+    models.mockReset();
+    models.mockResolvedValue(catalogue());
+  });
+
+  it('renders no control where the server offered no providers', async () => {
+    // A non-admin, or a room that is not native: the server sends none.
+    models.mockResolvedValue(catalogue(REFS));
+    await mountSettled(room({ brain: 'native' }));
+    expect(screen.queryByRole('button', { name: PROVIDER })).toBeNull();
+  });
+
+  it("starts from the room's stored provider", async () => {
+    models.mockResolvedValue(catalogue(REFS, { providers: PROVIDERS, roomProvider: 'openrouter' }));
+    await mountSettled(room({ brain: 'native' }));
+    expect(screen.getByRole('button', { name: PROVIDER })).toHaveTextContent('openrouter');
+  });
+
+  it('fills the model list from the chosen provider and sends both', async () => {
+    models.mockResolvedValue(catalogue(REFS, { providers: PROVIDERS }));
+    const onSave = vi.fn();
+    await mountSettled(room({ brain: 'native', model: 'claude-opus-5' }), onSave);
+    await pick(PROVIDER, 'openrouter');
+    // The anthropic model cannot carry to OpenRouter, so it goes.
+    expect(modelField().value).toBe('');
+    await fireEvent.focus(modelField());
+    expect(screen.queryByRole('option', { name: /claude-opus-5/ })).toBeNull();
+    await chooseModel('openrouter/moonshotai/kimi-k2.6');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(onSave.mock.calls[0][0] as RoomPatch).toEqual({
+      provider: 'openrouter',
+      model: 'openrouter/moonshotai/kimi-k2.6',
+    });
+  });
+
+  it('sends null to move back to the default provider', async () => {
+    models.mockResolvedValue(catalogue(REFS, { providers: PROVIDERS, roomProvider: 'openrouter' }));
+    const onSave = vi.fn();
+    await mountSettled(room({ brain: 'native' }), onSave);
+    await pick(PROVIDER, 'anthropic (default)');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(onSave.mock.calls[0][0] as RoomPatch).toEqual({ provider: null });
+  });
+});

@@ -34,10 +34,14 @@
     getSelectableBrains,
   } from '$lib/components/chat/autocomplete/providers';
   import {
+    defaultModelFor,
+    effectiveProvider,
     effortOptions,
     effortsFor,
     filterOptions,
+    keepsOnProvider,
     pickerOptions,
+    providerOptions,
     refusalMessage,
     valueOf,
     type ModelChoices,
@@ -157,10 +161,41 @@
     models: [],
     defaultModel: null,
     roomModel: null,
+    providers: [],
+    roomProvider: null,
   });
   let modelText = $state(untrack(() => room.model ?? ''));
   let effortValue = $state(untrack(() => room.effort ?? ''));
-  const modelOptions = $derived(pickerOptions(choices));
+
+  // A native room's provider (model-catalogue D22). Offered only where the
+  // server sent providers, which it does for an admin on a native room: the
+  // provider decides which key is billed. "" is native's default. The stored
+  // value arrives with the choices, so it is seeded from the first load for
+  // this room rather than from the room row, which does not carry it.
+  let providerValue = $state('');
+  let storedProvider = $state('');
+  let providerSeededFor = $state<number | null>(null);
+  const showProvider = $derived((choices.providers ?? []).length > 0);
+  const providerSelectOptions = $derived<SelectOption[]>(providerOptions(choices));
+  const providerChanged = $derived(showProvider && providerValue !== storedProvider);
+  const shownProvider = $derived(showProvider ? effectiveProvider(choices, providerValue) : null);
+  const modelOptions = $derived(pickerOptions(choices, shownProvider));
+  const shownDefaultModel = $derived(
+    showProvider ? defaultModelFor(choices, providerValue, storedProvider) : choices.defaultModel,
+  );
+
+  function chooseProvider(next: string) {
+    providerValue = next;
+    // A model of the provider being left cannot carry to the new one; clear it
+    // back to the provider's default rather than send what the server would
+    // read as a move back.
+    const value = valueOf(modelOptions, modelText);
+    const kept = next === storedProvider && value === (room.model ?? '');
+    if (!kept && !keepsOnProvider(modelOptions, value, effectiveProvider(choices, next))) {
+      modelText = '';
+      effortValue = '';
+    }
+  }
   const modelLabels = $derived(modelOptions.map((o) => o.label));
   const modelFilter = $derived(filterOptions(modelOptions, room.model ?? null));
   const modelValue = $derived(valueOf(modelOptions, modelText));
@@ -192,6 +227,11 @@
     getRoomModelChoices(forRoom, forBrain || undefined).then((c) => {
       if (room.id !== forRoom || brainValue !== forBrain) return;
       choices = c;
+      if (untrack(() => providerSeededFor) !== forRoom) {
+        providerSeededFor = forRoom;
+        storedProvider = c.roomProvider ?? '';
+        providerValue = storedProvider;
+      }
     });
   });
 
@@ -340,6 +380,9 @@
       modelText = room.model ?? '';
       effortValue = room.effort ?? '';
       brainValue = room.brain ?? '';
+      providerSeededFor = null;
+      providerValue = '';
+      storedProvider = '';
       guestReplyValue = room.policy?.guest_reply ?? 'direct';
       speechModeValue = room.policy?.speech_mode ?? '';
       dispositionValue = room.policy?.disposition ?? '';
@@ -376,7 +419,8 @@
         guestReplyChanged ||
         speechModeChanged ||
         dispositionChanged ||
-        (!locked && (nameChanged || modelChanged || effortChanged || brainChanged))),
+        (!locked &&
+          (nameChanged || modelChanged || effortChanged || brainChanged || providerChanged))),
   );
 
   function handleSave() {
@@ -391,6 +435,7 @@
       if (modelChanged) patch.model = modelValue || null;
       if (effortChanged) patch.effort = effortValue || null;
       if (brainChanged) patch.brain = brainValue || null;
+      if (providerChanged) patch.provider = providerValue || null;
     }
     if (colorChanged) patch.color = colorValue || null;
     if (listedChanged) patch.listed = listedValue;
@@ -594,6 +639,22 @@
       </Field>
     {/if}
 
+    {#if showProvider}
+      <Field
+        label="Provider"
+        description="Which of the native brain's providers this room runs on, and so whose key it is billed to. The model below is one of its models."
+      >
+        <Select
+          value={providerValue}
+          options={providerSelectOptions}
+          onValueChange={chooseProvider}
+          ariaLabel="Room provider"
+          disabled={locked}
+          fullWidth
+        />
+      </Field>
+    {/if}
+
     <Field
       label="Model"
       description={modelNote}
@@ -608,9 +669,7 @@
         filter={modelFilter}
         limit={500}
         onSelect={(label) => (modelText = valueOf(modelOptions, label))}
-        placeholder={choices.defaultModel
-          ? `Default model (${choices.defaultModel})`
-          : 'Default model'}
+        placeholder={shownDefaultModel ? `Default model (${shownDefaultModel})` : 'Default model'}
         ariaLabel="Room model default"
         disabled={locked}
       />

@@ -1661,6 +1661,14 @@ const MOCK_PICKER_MODELS = [
 
 const MOCK_ALIAS_NAMES = ['fast', 'general', 'smart', 'opus', 'sonnet', 'haiku'];
 
+// A native room's provider (model-catalogue D22): the providers an admin may
+// move a room to, and each room's stored one (absent is native's default).
+const MOCK_PROVIDERS = [
+  { id: 'anthropic', kind: 'anthropic', default: true, default_model: 'claude-sonnet-5-5' },
+  { id: 'openrouter', kind: 'openrouter', default: false, default_model: 'moonshotai/kimi-k2.6' },
+];
+const mockRoomProviders = new Map<number, string>();
+
 /** `room_model` for a room whose stored model the picker's list does not hold:
  *  unavailable, as the server says of a pin its brain can no longer run. */
 function mockRoomModel(roomId: string | null) {
@@ -1840,6 +1848,10 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
       // rest of a discovered OpenRouter list, the way the picker sees it there.
       models: MOCK_PICKER_MODELS,
       ...mockRoomModel(new URL(`http://x${url}`).searchParams.get('room_id')),
+      providers: MOCK_PROVIDERS,
+      room_provider:
+        mockRoomProviders.get(Number(new URL(`http://x${url}`).searchParams.get('room_id'))) ??
+        null,
     };
   }
 
@@ -2190,6 +2202,14 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
         };
       }
       room.model = (model || null) as string | null;
+    }
+    if ('provider' in (body ?? {})) {
+      const provider = String(body.provider || '').trim();
+      if (provider && !MOCK_PROVIDERS.some((p) => p.id === provider))
+        return { __status: 400, error: 'provider not selectable' };
+      if (!provider || MOCK_PROVIDERS.find((p) => p.id === provider)?.default)
+        mockRoomProviders.delete(room.id);
+      else mockRoomProviders.set(room.id, provider);
     }
     if ('effort' in (body ?? {}))
       room.effort = (String(body.effort || '').trim() || null) as string | null;

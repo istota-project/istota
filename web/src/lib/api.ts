@@ -4110,6 +4110,17 @@ export interface SelectableBrain {
   model_namespace: string;
 }
 
+/** A provider a native room may run on, for an admin's provider select
+ *  (model-catalogue D22). `default` marks native's default provider, which a
+ *  room with no provider of its own runs on. */
+export interface ChatProvider {
+  id: string;
+  kind: string;
+  default: boolean;
+  /** What a room on this provider runs with no model of its own. */
+  default_model: string | null;
+}
+
 export interface ChatCommands {
   commands: ChatCommand[];
   command_aliases?: ChatCommandAlias[];
@@ -4138,6 +4149,11 @@ export interface ChatCommands {
   /** What a room with no pin of its own runs, on the web surface. Null only for
    *  a non-admin, or where the deployment's kind is not a known one. */
   inherited_brain?: SelectableBrain | null;
+  /** The room's stored provider, with `room_id`; null is native's default. */
+  room_provider?: string | null;
+  /** The providers a native room may be moved to. Sent to an admin only, and
+   *  only for a native room, so emptiness is the whole test for the control. */
+  providers?: ChatProvider[];
 }
 
 /** Command, model-alias and brain catalogue powering the composer autocomplete
@@ -4177,6 +4193,8 @@ export interface RoomPatch {
   model?: string | null;
   effort?: string | null;
   brain?: string | null;
+  /** A native room's provider, admin only; null is native's default. */
+  provider?: string | null;
   /** A `ROOM_COLORS` name, or null to clear. Absent leaves it untouched. */
   color?: string | null;
   /** Personal override; default restores inheritance, absent leaves it unchanged. */
