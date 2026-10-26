@@ -605,19 +605,40 @@ def brain_can_run(
     """Whether brain ``kind`` can run the model ``ref`` (``provider/id``).
 
     The CLI brains run only the `anthropic` provider's models, because the
-    `claude` CLI talks only to Anthropic. Native runs the models of the
-    provider `[brain.native] provider` names (``native_provider``): it still
-    sends every request to that one provider, so a model of another provider
-    is not runnable there until native picks its provider per request.
-    A ref naming no configured provider runs nowhere. Never raises.
+    `claude` CLI talks only to Anthropic. Native picks its provider per
+    request from the ref (D4), so it runs the models of the provider
+    `[brain.native] provider` names (``native_provider``, key or not, as
+    before), of any `openai_compat` provider (a local server may need no key),
+    and of an `openrouter` or `anthropic` provider that holds a deployment
+    key. A model-listing key never counts: it is not in a provider record. A
+    user's own key is not consulted here, so a provider only they hold a key
+    for is not runnable at selection. A ref naming no configured provider runs
+    nowhere. Never raises.
     """
     if not isinstance(ref, str) or "/" not in ref:
         return False
     provider_id = ref.split("/", 1)[0]
-    if provider_id not in provider_kinds(providers):
+    kinds = provider_kinds(providers)
+    if provider_id not in kinds:
         return False
     if kind in ("claude_code", "tmux_claude"):
         return provider_id == CLI_PROVIDER
     if kind == "native":
-        return bool(native_provider) and provider_id == native_provider
+        if native_provider and provider_id == native_provider:
+            return True
+        if kinds[provider_id] == "openai_compat":
+            return True
+        return _has_deployment_key((providers or {}).get(provider_id))
     return False
+
+
+def _has_deployment_key(value: object) -> bool:
+    """Whether a provider record (a `ProviderSpec` or `ProviderConfig`) holds
+    an inference key. A bare kind string, or nothing, holds none."""
+    if value is None or isinstance(value, str):
+        return False
+    key = getattr(value, "inference_key", None)
+    if isinstance(key, InferenceKey):
+        return bool(key)
+    api_key = getattr(value, "api_key", None)
+    return isinstance(api_key, str) and bool(api_key.strip())

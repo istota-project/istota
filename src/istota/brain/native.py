@@ -1030,7 +1030,7 @@ class NativeBrain:
     model_namespace = "openai_compat"
     kind = BRAIN_KIND
 
-    def __init__(self, config, provider=None, spec=None):
+    def __init__(self, config, provider=None, spec=None, providers=None, *, route=True):
         self._config = config
         # The provider record native's requests go to (`[brain.native]
         # provider`), with the key for it. `None` means native is not
@@ -1040,6 +1040,16 @@ class NativeBrain:
         if spec is None:
             spec = _spec_from_native_config(config)
         self._spec = spec
+        # Every configured provider, by id, so a request for another
+        # provider's ref goes to that provider with its key (D4). `route` is
+        # off on the brain a routed request runs on, so a wire id that itself
+        # reads as a ref is never routed a second time.
+        self._providers = dict(providers or {})
+        if spec is not None:
+            self._providers.setdefault(spec.id, spec)
+        self._route_requests = route
+        # `(wire id, ref)` on a routed attempt's brain; see `_model_info`.
+        self._info_ref: tuple[str, str] | None = None
         # ``provider`` injectable for tests; production builds from the spec.
         if provider is not None:
             self._provider = provider
@@ -1082,6 +1092,41 @@ class NativeBrain:
         if isinstance(resolved, Resolution) and resolved.source == "ref":
             return resolved.info.id
         return name
+
+    def _route(self, model: str):
+        """``(spec, wire id)`` when ``model`` is a ref of another provider
+        native can run, else ``(None, model)``.
+
+        Only a ref the catalogue holds is routed, read the way the resolver
+        reads it: native's own provider is asked for the whole string first,
+        so an OpenRouter id such as ``anthropic/claude-opus-5`` stays
+        OpenRouter's when OpenRouter lists it. ``brain_can_run`` decides
+        whether the other provider is reachable (an `openai_compat` provider,
+        or one holding a key, the user's own included once the executor has
+        overlaid it). Never raises.
+        """
+        own = self._provider_id
+        if not self._route_requests or not own or not model:
+            return None, model
+        head, sep, tail = model.partition("/")
+        if not sep or not tail or head == own:
+            return None, model
+        spec = self._providers.get(head)
+        if spec is None:
+            return None, model
+        try:
+            resolved = resolve_selection(
+                model, use_aliases=False, for_brain="native",
+                native_provider=own, providers=self._providers,
+            )
+        except Exception:  # noqa: BLE001 - routing falls back to native's own provider
+            logger.debug("native routing lookup failed for %r", model, exc_info=True)
+            return None, model
+        if not isinstance(resolved, Resolution) or resolved.source != "ref":
+            return None, model
+        if resolved.provider != head or resolved.info is None:
+            return None, model
+        return spec, resolved.info.id
 
     def resolve_alias(self, alias):
         if not alias:
@@ -1239,7 +1284,17 @@ class NativeBrain:
                 model_used=req.model or self._config.model,
             )
         else:
-            result = self._execute_sync(req)
+            routed, wire = self._route(req.model)
+            own_wire = self._wire_id(req.model) if req.model else req.model
+            if own_wire != req.model:
+                # A stored ref of native's own provider, reaching here unresolved.
+                import dataclasses as _dc
+
+                req = _dc.replace(req, model=own_wire)
+            if routed is not None:
+                result = self._execute_routed(req, routed, wire)
+            else:
+                result = self._execute_sync(req)
         # Stamped on the way out, so a return added later cannot forget it.
         result.brain_kind = BRAIN_KIND
         # A clamp that dropped the effort leaves `effort_used` empty on purpose;
@@ -1249,6 +1304,31 @@ class NativeBrain:
             if not result.effort_used:
                 result.effort_used = req.effort
         return result
+
+    def _execute_routed(self, req: BrainRequest, spec, wire: str) -> BrainResult:
+        """Run ``req`` against another provider: its record, its key, its id.
+
+        A brain of its own for the attempt, so the provider client, the session
+        log header and every compat setting are that provider's, and it is
+        closed with the attempt like any brain this one builds.
+        """
+        import dataclasses as _dc
+
+        logger.info("native request routed to provider %s for model %s", spec.id, wire)
+        routed_brain = NativeBrain(
+            self._config, spec=spec, providers=self._providers, route=False,
+        )
+        # The record is asked for by ref: a bare Claude id is `_DEFAULT` in
+        # the catalogue (Stage 5), which would drop every routed effort.
+        routed_brain._info_ref = (wire, f"{spec.id}/{wire}")
+        return routed_brain._execute_sync(_dc.replace(req, model=wire))
+
+    def _model_info(self, model: str):
+        """The catalogue record for the model this attempt sends."""
+        pinned = self._info_ref
+        if pinned is not None and model == pinned[0]:
+            return get_model_info(pinned[1])
+        return get_model_info(model)
 
     def _max_turns(self, req: BrainRequest) -> int:
         """The turn cap for this request: the configured one, lowered by
@@ -1505,7 +1585,7 @@ class NativeBrain:
             nonlocal turns_accumulated, turns_costed
             if summary_usage.total_tokens > 0 or summary_usage.cost_usd is not None:
                 # Summary calls are sent with prompt_caching=False, so no TTL.
-                usage.add(summary_usage, get_model_info(model), count_turn=False)
+                usage.add(summary_usage, self._model_info(model), count_turn=False)
                 turns_accumulated += 1
                 if summary_usage.cost_usd is not None:
                     turns_costed += 1
@@ -1524,7 +1604,7 @@ class NativeBrain:
         # them; elsewhere they clamp to `high`, which is what the provider's
         # old fold sent.
         effort = (req.effort or self._config.effort or "").strip()
-        model_info = get_model_info(model)
+        model_info = self._model_info(model)
         effort_level = clamp_effort_level(model_info, effort)
         reasoning_effort = effort_wire_value(model_info, effort_level)
         if effort and effort_level is None:
@@ -1563,7 +1643,7 @@ class NativeBrain:
                 "max_turns": self._max_turns(req),
                 "max_tokens": self._config.max_tokens,
                 "context_window": (
-                    self._config.context_window or get_model_info(model).context_window
+                    self._config.context_window or self._model_info(model).context_window
                 ),
                 # The provider's resolved answer, not the config's tri-state:
                 # `make_provider` reads `None` as "on for api.anthropic.com",
@@ -1758,7 +1838,7 @@ class NativeBrain:
                     # token counts (some OpenRouter free/BYOK responses) would
                     # otherwise silently drop its charge from the task total.
                     if msg.usage.total_tokens > 0 or msg.usage.cost_usd is not None:
-                        usage.add(msg.usage, get_model_info(model), write_multiplier)
+                        usage.add(msg.usage, self._model_info(model), write_multiplier)
                         turns_accumulated += 1
                         if msg.usage.cost_usd is not None:
                             turns_costed += 1
@@ -2074,7 +2154,7 @@ class NativeBrain:
                 for n in (_next_budget_nudge(new_messages), _next_failure_nudge(new_messages))
                 if n is not None
             ]
-            info = get_model_info(model)
+            info = self._model_info(model)
             window = self._config.context_window or info.context_window
             reserve = self._config.compaction_reserve_tokens or derive_reserve_tokens(window)
             keep_recent = (
@@ -2283,7 +2363,7 @@ class NativeBrain:
         # One capability answer for both consumers: whether a tool result's
         # images render, and whether this task's own attachments become image
         # blocks at all. Reading it twice invites the two halves disagreeing.
-        supports_vision = get_model_info(model).supports_vision
+        supports_vision = self._model_info(model).supports_vision
 
         loop_config = AgentLoopConfig(
             provider=provider,
@@ -2432,7 +2512,7 @@ class NativeBrain:
                     recoveries,
                     _MAX_OVERFLOW_RECOVERIES,
                 )
-                _rec_window = self._config.context_window or get_model_info(model).context_window
+                _rec_window = self._config.context_window or self._model_info(model).context_window
                 # Preserve the overflow error before clearing, so an unusable
                 # recovery can fail with the real cause instead of a wrong answer.
                 overflow_error = last_error_message

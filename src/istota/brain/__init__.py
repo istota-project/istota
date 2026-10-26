@@ -204,6 +204,21 @@ def native_provider_spec(brain_config: BrainConfig):
     return specs.get(provider_id)
 
 
+def native_providers(brain_config: BrainConfig) -> dict:
+    """Every provider record native may send a request to, by id (D4).
+
+    ``BrainConfig.provider_specs`` where ``load_config`` filled it, else the
+    built-ins plus what ``[brain.native]``'s legacy fields imply.
+    """
+    specs = getattr(brain_config, "provider_specs", None) or {}
+    if specs:
+        return dict(specs)
+    from istota.config import providers_for_native
+
+    specs, _provider_id = providers_for_native(brain_config.native)
+    return dict(specs)
+
+
 def make_brain(brain_config: BrainConfig) -> Brain:
     """Construct a brain instance from config.
 
@@ -216,7 +231,11 @@ def make_brain(brain_config: BrainConfig) -> Brain:
     if kind == "native":
         from .native import NativeBrain
 
-        return NativeBrain(brain_config.native, spec=native_provider_spec(brain_config))
+        return NativeBrain(
+            brain_config.native,
+            spec=native_provider_spec(brain_config),
+            providers=native_providers(brain_config),
+        )
     if kind == "tmux_claude":
         from .tmux_claude import TmuxClaudeBrain
 

@@ -1700,34 +1700,43 @@ def _persist_task_usage(
     )
 
 
-def _with_user_provider_key(brain_config, config: Config, user_id: str):
-    """``brain_config`` with the user's own key for native's provider, when they have one.
+def _with_user_provider_key(brain_config, config: Config, user_id: str, model: str | None = None):
+    """``brain_config`` with the user's own keys for the providers this task may call.
 
     The provider key rule applied per user (D16): a request to provider P in
     user U's task carries U's ``provider_keys/<P>`` secret when U has one, and
-    the deployment's key otherwise. A failed lookup keeps the deployment's key,
-    so a missing secret never blocks the task. Returns a copy; never mutates.
-    Internal operator calls (triage, the speech gate) never come through here.
+    the deployment's key otherwise. The providers are native's own and, when
+    ``model`` is a ref of another configured provider, that one, since native
+    routes such a request there (D4). A failed lookup keeps the deployment's
+    key, so a missing secret never blocks the task. Returns a copy; never
+    mutates. Internal operator calls (triage, the speech gate) never come
+    through here.
     """
     import dataclasses
 
-    from .brain import native_provider_spec
+    from .brain import native_provider_spec, native_providers
     from .llm.providers import user_provider_key, with_user_key
 
     spec = native_provider_spec(brain_config)
     if spec is None:
         return brain_config
-    key = user_provider_key(config, user_id, spec.id)
-    if not key:
+    specs = native_providers(brain_config)
+    wanted = [spec.id]
+    head, sep, _tail = (model or "").strip().partition("/")
+    if sep and head in specs and head != spec.id:
+        wanted.append(head)
+    keys = {pid: user_provider_key(config, user_id, pid) for pid in wanted}
+    keys = {pid: key for pid, key in keys.items() if key}
+    if not keys:
         return brain_config
-    specs = dict(brain_config.provider_specs or {})
     native = brain_config.native
-    if not specs:
+    if not brain_config.provider_specs:
         from .config import providers_for_native
 
-        specs, provider_id = providers_for_native(native)
+        _specs, provider_id = providers_for_native(native)
         native = dataclasses.replace(native, provider=provider_id)
-    specs[spec.id] = with_user_key(spec, key)
+    for pid, key in keys.items():
+        specs[pid] = with_user_key(specs[pid], key)
     return dataclasses.replace(brain_config, native=native, provider_specs=specs)
 
 
@@ -2078,7 +2087,7 @@ def _run_fallback(config, brain_config, fallback_kind, task, req, *, on_start=No
     try:
         fb_config = _dc.replace(brain_config, kind=fallback_kind)
         if fallback_kind == "native":
-            fb_config = _with_user_provider_key(fb_config, config, task.user_id)
+            fb_config = _with_user_provider_key(fb_config, config, task.user_id, task.model)
         fb_brain = make_brain(fb_config)
     except Exception as e:  # noqa: BLE001 — misconfigured nested block
         logger.warning("brain fallback: could not construct %s: %s", fallback_kind, e)
@@ -9140,7 +9149,7 @@ def execute_task(
         # The user's own key for native's provider (`provider_keys/<id>`), when
         # they have one, in place of the deployment's.
         if _brain_config.kind == "native":
-            _brain_config = _with_user_provider_key(_brain_config, config, task.user_id)
+            _brain_config = _with_user_provider_key(_brain_config, config, task.user_id, task.model)
         brain = make_brain(_brain_config)
 
         # Filesystem confinement roots for NativeBrain's in-process file tools
