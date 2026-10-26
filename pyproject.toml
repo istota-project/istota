@@ -374,4 +374,8 @@ dev = [
     # real answer and is a deployment change, not this one.
     "ruff==0.16.4",
     "flask>=3.1.0",
+    # pypdf: `tests/test_browser_pdf_text.py` runs the browser image's PDF
+    #   child for real. Pinned to `docker/browser/requirements.txt`'s version,
+    #   which that file holds equal.
+    "pypdf==6.20.1",
 ]

@@ -43,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `browse render` and `browse get` read a PDF instead of returning an empty success. They return the document's text page by page, pageable by offset, and say plainly when a PDF cannot be read, such as a scanned one. The file is parsed in a separate process with memory and time limits. Needs a rebuilt browser image.
 - In Files, the notice for a folder shared from another server, and the "Drive access is off" message, now show their button below the text, as other notices do, instead of beside it.
 - `istota snapshot` no longer refuses an install with a group briefing block that has no directive. Group blocks now store an empty directive as an empty string, as personal blocks do, and a block saved with none before this release snapshots and applies back unchanged. The documented `snapshot | ansible-vault encrypt` command now writes the inventory only when the snapshot succeeded, instead of replacing it with an encrypted empty file.
 - Settings now has a Security card when you sign in with Nextcloud. You can change your email-login password there, or, if your account has none yet, ask for a link to set one. Before this, an account that had only ever signed in with Nextcloud had no way to set a password from Settings.
