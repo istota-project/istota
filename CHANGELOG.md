@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Specs the bot drafts are ready for a coding agent.** A new spec has every section an implementer reads, including a survey of the existing code taken from the project's source, and its stages are one checklist line each. Specs drafted before this may lack those sections.
 
+### Fixed
+
+- Skill commands no longer print config warnings, such as a retired `[[default_briefings]]` notice, under every result a task reads. The daemon log and the admin configuration view still show them.
+
 ## [0.47.0] - 2026-10-25
 
 Briefings can now go to a whole group. A group owner drafts one with a prompt or the block editor, previews it, and each run produces one edition that reaches every member by email, Talk or ntfy, with personal sources used only after their owner approves. All users is a built-in group of every account, and the old default briefings move into it. The Istota iOS app gets push notifications for chat and the inbox with a badge, one-tap location tracking, voice tasks and quick notes, and opens the room a tapped alert came from.

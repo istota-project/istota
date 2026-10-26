@@ -93,9 +93,14 @@ if __name__ == "__main__":
 
 ```python
 # __main__.py
-from istota.skills.my_skill import main
-main()
+from istota.skills._cli import run_skill_main
+
+from . import main
+
+run_skill_main(main)
 ```
+
+Every `__main__.py` has this one shape, pinned by `tests/test_skill_cli_facade.py`. `run_skill_main` keeps `load_config`'s warnings about the config document off the skill's stderr, then exits with what `main()` returns.
 
 Pattern: `build_parser()` + `main()`, JSON output, credentials via env vars. See [credentials](../configuration/credentials.md) for the two-tier model and how to wire new credentials into the proxy.
 
