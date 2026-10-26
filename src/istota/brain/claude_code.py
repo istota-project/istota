@@ -47,6 +47,8 @@ from ._resolve import (
     DEFAULT_TIER_TARGETS,
     FAMILY_SHORTCUTS,
     Resolution,
+    anthropic_model_info,
+    clamp_effort_level,
     resolve_selection,
 )
 from ._roles import AliasTable, current_alias_table
@@ -1279,6 +1281,26 @@ class ClaudeCodeBrain:
             return req
         return dataclasses.replace(req, model=model, effort=effort)
 
+    def with_clamped_effort(self, req: BrainRequest) -> BrainRequest:
+        """``req`` with its effort clamped to what its model supports.
+
+        Applied after ``with_defaults``, so the block's own default effort is
+        clamped too. The model's record comes from the catalogue by its
+        `anthropic` ref; a model the catalogue does not list (the CLI's own
+        default when no model is set, a dated id, a release newer than the
+        catalogue) is not checked and keeps the effort as asked. The level, not
+        a wire value, is what ``--effort`` takes.
+        """
+        if not req.effort:
+            return req
+        info = anthropic_model_info(req.model)
+        if info is None:
+            return req
+        effort = clamp_effort_level(info, req.effort) or ""
+        if effort == req.effort:
+            return req
+        return dataclasses.replace(req, effort=effort)
+
     # --- Model resolution (Brain Protocol) ---------------------------------
 
     def resolve_alias(
@@ -1379,8 +1401,11 @@ class ClaudeCodeBrain:
         # below reads `req.model`, so filling it at the single entry point is
         # what keeps the re-issue on the same model as the first attempt.
         req = self.with_defaults(req)
+        requested_effort = req.effort
+        req = self.with_clamped_effort(req)
         result = self._execute(req)
         result.brain_kind = BRAIN_KIND
+        result.effort_requested = requested_effort
         # What this attempt actually ran with, for `task_usage.effort`. Stamped
         # here because `with_defaults` fills the default onto a *copy*, so the
         # executor's own `req` no longer describes the attempt (ISSUE-418) —

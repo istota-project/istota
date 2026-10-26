@@ -112,7 +112,7 @@ from istota.session.session_log import (
 from istota.session.usage import TaskUsage, cache_write_multiplier_for_ttl
 
 from ._aliases import CANONICAL_ROLES, split_effort
-from ._resolve import Resolution, resolve_selection
+from ._resolve import Resolution, clamp_effort_level, effort_wire_value, resolve_selection
 from ._roles import current_alias_table
 from ._types import BrainRequest, BrainResult, ImageInput
 from .claude_code import is_usage_limit_error
@@ -1242,8 +1242,12 @@ class NativeBrain:
             result = self._execute_sync(req)
         # Stamped on the way out, so a return added later cannot forget it.
         result.brain_kind = BRAIN_KIND
-        if not result.effort_used:
-            result.effort_used = req.effort
+        # A clamp that dropped the effort leaves `effort_used` empty on purpose;
+        # only a run that never reached the clamp takes the request's.
+        if not result.effort_requested:
+            result.effort_requested = req.effort
+            if not result.effort_used:
+                result.effort_used = req.effort
         return result
 
     def _max_turns(self, req: BrainRequest) -> int:
@@ -1290,6 +1294,9 @@ class NativeBrain:
         try:
             try:
                 result = asyncio.run(_run_and_close())
+                if "effort_requested" in stats:
+                    result.effort_requested = stats["effort_requested"]
+                    result.effort_used = stats["effort_used"]
             except Exception as e:  # noqa: BLE001 — never let the brain crash the worker
                 logger.exception("NativeBrain.execute raised")
                 # Both records, in this order: `error` says what went wrong,
@@ -1508,19 +1515,24 @@ class NativeBrain:
         # capabilities and prices. Never fatal.
         await self._ensure_fetched_catalog(req)
 
-        # Resolve the effort tier and capability-gate it. The compat field
-        # (``reasoning_effort``) only makes sense for a reasoning model; sending
-        # it to a non-thinking endpoint (a local qwen) would 400. The raw tier
-        # passes through — the provider folds xhigh/max → high at the wire.
+        # Clamp the effort to what the model supports and map it to its wire
+        # value (`brain._resolve.clamp_effort_level`). A model without
+        # reasoning gets none: sending ``reasoning_effort`` to a non-thinking
+        # endpoint (a local qwen) would 400, and a model the catalogue does not
+        # know has the conservative default, which has no reasoning. `xhigh`
+        # and `max` reach the wire only where the model's `effort_map` names
+        # them; elsewhere they clamp to `high`, which is what the provider's
+        # old fold sent.
         effort = (req.effort or self._config.effort or "").strip()
-        reasoning_effort: str | None = None
-        if effort:
-            if get_model_info(model).supports_thinking:
-                reasoning_effort = effort
-            else:
-                logger.debug(
-                    "native effort ignored: model=%s does not support thinking", model
-                )
+        model_info = get_model_info(model)
+        effort_level = clamp_effort_level(model_info, effort)
+        reasoning_effort = effort_wire_value(model_info, effort_level)
+        if effort and effort_level is None:
+            logger.debug(
+                "native effort ignored: model=%s does not support thinking", model
+            )
+        stats["effort_requested"] = effort
+        stats["effort_used"] = effort_level or ""
 
         # --- session log --------------------------------------------------
         # Opened here, once the model and the effort are resolved, so the

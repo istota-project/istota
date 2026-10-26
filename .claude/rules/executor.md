@@ -117,7 +117,7 @@ The brain owns command construction, sandboxing (via the wrap closure), transpor
 
 Request fields:
 - `cwd=temp_dir`, `timeout_seconds = task_timeout_minutes * 60`, `streaming = event_writer is not None`, `result_file = {user_temp_dir}/task_{id}_result.txt`, `custom_system_prompt_path` when set.
-- `model = task.model or ""`, `effort = task.effort or ""`: never a deployment default (ISSUE-418); the brain fills its own. A pinned model with no effort carries none (`_resolve_effort`).
+- `model = task.model or ""`, `effort = task.effort or ""`: never a deployment default (ISSUE-418); the brain fills its own. A pinned model with no effort carries none (`_resolve_effort`). The effort is the requested level, never clamped here (D7 of the model-catalogue spec): the brain clamps it at its `execute` seam, where a defaulted effort and the model are known, and reports `effort_requested` and `effort_used`; `_with_effort_note` puts an `{"type": "effort", "requested", "used", "text"}` entry first in the trace when they differ, and the usage row records `effort_used`.
 - `advisor` only for an anthropic-namespace brain, via `_resolve_advisor`; a model pin drops it (the CLI's fatal advisor gate depends on the main model). Kept on an anthropic reroute, dropped to native (Stage 3).
 - `on_progress = stream.on_event`: tool use/end/progress, text and context-management events become `tool_start`/`tool_end`/`tool_progress`/`progress_text`/`context_management`; `tool_*` gated on `progress_show_tool_use`, text on `progress_show_text`, progress always (SSE only).
 - `cancel_check` polls `db.is_task_cancelled()`.

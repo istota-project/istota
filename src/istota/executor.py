@@ -1493,12 +1493,45 @@ def _resolve_effort(task, config: Config) -> str:
 
     `config` is still taken, and still read by nothing here. Kept because every
     caller has it and the signature is the seam ISSUE-417 widens.
+
+    The level returned is the one asked for, never clamped: the stored effort
+    stays what the person chose (D7). Each brain clamps it to what its model
+    supports at its `execute` seam, after filling its own default, because only
+    there are the model and a defaulted effort known, on the primary and the
+    fallback alike; `_with_effort_note` records both in the trace.
     """
     task_model = (task.model or "").strip()
     task_effort = (task.effort or "").strip()
     if task_model and not task_effort:
         return ""
     return task_effort
+
+
+def _with_effort_note(trace_json: str | None, requested: str, used: str) -> str | None:
+    """``trace_json`` with an ``effort`` entry first when the clamp changed the level.
+
+    The stored effort (`tasks.effort`, `rooms.effort`) stays what was asked
+    (D7); the brain clamps it to what the model supports and reports both. This
+    is where a reader of the task sees that they differed. First in the list so
+    the composer's walk over the final turn never meets it; every trace reader
+    skips a type it does not know.
+    """
+    requested = (requested or "").strip()
+    used = (used or "").strip()
+    if not requested or requested.lower() == used.lower():
+        return trace_json
+    try:
+        entries = json.loads(trace_json) if trace_json else []
+    except (json.JSONDecodeError, TypeError):
+        return trace_json
+    if not isinstance(entries, list):
+        return trace_json
+    if used:
+        text = f"Effort {requested} was clamped to {used} for this model."
+    else:
+        text = f"Effort {requested} was dropped: this model takes no effort."
+    note = {"type": "effort", "requested": requested, "used": used, "text": text}
+    return json.dumps([note, *entries])
 
 
 def _resolve_advisor(task, config: Config) -> str:
@@ -9330,7 +9363,11 @@ def execute_task(
         success = brain_result.success
         result = brain_result.result_text
         actions = brain_result.actions_taken
-        trace = brain_result.execution_trace
+        trace = _with_effort_note(
+            brain_result.execution_trace,
+            brain_result.effort_requested,
+            brain_result.effort_used,
+        )
 
         # What the model had written when a cancel or a timeout ended the run
         # (ISSUE-372). It rides on the task rather than in the return tuple:

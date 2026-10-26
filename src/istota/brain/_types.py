@@ -359,6 +359,12 @@ class BrainResult:
     # requested effort, exactly as it does for the model.
     effort_used: str = ""
 
+    # The effort asked for, after the brain's own default was filled and
+    # before it was clamped to what the model supports. `effort_used` is the
+    # clamped level ("" when the model takes none); the executor records both
+    # in the trace when they differ.
+    effort_requested: str = ""
+
     # True when the run reached the model and may have executed tools before
     # failing, so re-running the same prompt would repeat those side effects
     # (a re-sent email, a re-applied edit). Set by the paths that reclassify a

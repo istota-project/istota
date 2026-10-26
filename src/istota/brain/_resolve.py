@@ -37,6 +37,11 @@ enabled set; aliases are exempt, because the operator wrote them) and
 The resolver is strict. The brains stay lenient: a selection it cannot
 resolve is still sent as written, as it always was, and the strict answer is
 doctor's to report.
+
+``clamp_effort_level`` and ``clamp_effort`` check an effort against what a
+model supports (pi's rule, upward first) and give the level or its wire value.
+The brains call them at their ``execute`` seam; the stored effort stays what
+was asked.
 """
 
 from __future__ import annotations
@@ -395,6 +400,85 @@ def default_enabled_patterns(config) -> list[str]:  # noqa: ANN001
     return patterns
 
 
+# --- effort ------------------------------------------------------------------
+
+#: Effort levels, lowest first: the order clamping walks.
+EFFORT_ORDER: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+
+# Supported by every reasoning model unless its map says otherwise. `xhigh`
+# and `max` are supported only where the map names them (pi's rule).
+_BASE_EFFORTS = frozenset({"low", "medium", "high"})
+
+
+def _supported_efforts(info: ModelInfo) -> list[str]:
+    effort_map = info.effort_map or {}
+    supported = []
+    for level in EFFORT_ORDER:
+        if level in effort_map:
+            if effort_map[level] is not None:
+                supported.append(level)
+        elif level in _BASE_EFFORTS:
+            supported.append(level)
+    return supported
+
+
+def clamp_effort_level(info: ModelInfo | None, requested: str | None) -> str | None:
+    """The effort level ``info``'s model runs for ``requested``, or ``None``.
+
+    A model without reasoning gets none. An unsupported level moves up to the
+    nearest supported one first, then down (D8). ``info`` of ``None`` means the
+    catalogue does not know the model: there is nothing to check against, so
+    the level is returned as asked, which is what a brain sent before.
+    """
+    level = (requested or "").strip().lower()
+    if not level:
+        return None
+    if info is None:
+        return (requested or "").strip()
+    if not info.reasoning or level not in EFFORT_ORDER:
+        return None
+    supported = _supported_efforts(info)
+    if level in supported:
+        return level
+    index = EFFORT_ORDER.index(level)
+    for candidate in EFFORT_ORDER[index + 1:]:
+        if candidate in supported:
+            return candidate
+    for candidate in reversed(EFFORT_ORDER[:index]):
+        if candidate in supported:
+            return candidate
+    return None
+
+
+def effort_wire_value(info: ModelInfo | None, level: str | None) -> str | None:
+    """What goes on the wire for a clamped ``level``: the map's entry, else the name."""
+    if not level:
+        return None
+    if info is not None:
+        mapped = (info.effort_map or {}).get(level)
+        if mapped:
+            return mapped
+    return level
+
+
+def clamp_effort(info: ModelInfo | None, requested: str | None) -> str | None:
+    """The wire value for ``requested`` on ``info``'s model, or ``None``."""
+    return effort_wire_value(info, clamp_effort_level(info, requested))
+
+
+def anthropic_model_info(model_id: str | None, catalogue: Catalogue | None = None) -> ModelInfo | None:
+    """The catalogue record of an `anthropic` model id, or ``None`` when the
+    catalogue does not list it (an empty id, a dated id, a newer model)."""
+    model_id = (model_id or "").strip()
+    if not model_id:
+        return None
+    catalogue = catalogue if catalogue is not None else current_catalogue()
+    ref = f"{SHIPPED_PROVIDER}/{model_id}"
+    if ref not in catalogue.refs():
+        return None
+    return catalogue.get(ref)
+
+
 # --- config-derived inputs ---------------------------------------------------
 
 
@@ -432,11 +516,16 @@ __all__ = [
     "BRAIN_NAMESPACES",
     "DEFAULT_ALIAS",
     "DEFAULT_TIER_TARGETS",
+    "EFFORT_ORDER",
     "ERROR_CODES",
     "FAMILY_SHORTCUTS",
     "Resolution",
     "ResolveError",
+    "anthropic_model_info",
+    "clamp_effort",
+    "clamp_effort_level",
     "config_providers",
+    "effort_wire_value",
     "default_enabled_patterns",
     "enabled_refs",
     "latest_in_family",

@@ -112,9 +112,11 @@ features = []
 #                                            #   native brain is unavailable.
 # model = "claude-sonnet-4-6"                # explicit id at that provider
 # effort = ""                                # default effort: low/medium/high/xhigh/max.
-#                                            #   Sent as `reasoning_effort` only to a
-#                                            #   thinking-capable model; xhigh/max fold
-#                                            #   to high over the compat endpoint. Empty
+#                                            #   Clamped to what the model supports
+#                                            #   (xhigh/max only where its effort_map
+#                                            #   names them, else high) and sent as
+#                                            #   `reasoning_effort` only to a reasoning
+#                                            #   model. Empty
 #                                            #   = no reasoning_effort field. Per-task
 #                                            #   effort (e.g. !model opus:high) overrides.
 # base_url = ""                              # legacy, read for one release: the

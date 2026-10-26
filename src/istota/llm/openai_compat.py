@@ -60,18 +60,6 @@ _FINISH_REASON_MAP = {
     "error": "error",
 }
 
-# The OpenAI-compatible ``reasoning_effort`` field accepts only low/medium/high.
-# Istota's finer Opus tiers fold down — the compat endpoint exposes no knob
-# below "high", so xhigh/max both map there. The original tier stays on the
-# task row unchanged.
-_REASONING_EFFORT_WIRE = {
-    "low": "low",
-    "medium": "medium",
-    "high": "high",
-    "xhigh": "high",
-    "max": "high",
-}
-
 def _parse_reported_cost(usage_raw: dict) -> float | None:
     """Extract a provider-reported per-request cost (USD) from a usage object.
 
@@ -580,7 +568,9 @@ class OpenAICompatibleProvider:
         if tools_wire is not None:
             body["tools"] = tools_wire
 
-        effort = _REASONING_EFFORT_WIRE.get((reasoning_effort or "").lower())
+        # Sent as given: the brain has already clamped it to what the model
+        # supports and mapped it through the model's `effort_map`.
+        effort = (reasoning_effort or "").strip()
         if effort and self._reasoning_effort:
             body["reasoning_effort"] = effort
         if self._prompt_cache_key and cache_affinity_key:

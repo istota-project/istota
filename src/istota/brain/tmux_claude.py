@@ -809,7 +809,10 @@ class TmuxClaudeBrain:
         # `_execute` has ~20 return sites and the effort stamp has to reach all
         # of them, so it is applied on the way out rather than at each one.
         req = self.with_defaults(req)
+        requested_effort = req.effort
+        req = self._cli.with_clamped_effort(req)
         result = self._execute(req)
+        result.effort_requested = requested_effort
         if not result.effort_used:
             result.effort_used = req.effort
         return result
