@@ -237,7 +237,7 @@ The second linking route (`.claude/rules/transport.md`, "Private replies", which
 - **A 409 is read against the action**: already-discarded settles a discard, refuses a send with a notice. Every 409 carries `state`; missing `state` keeps the card. Permanent `DraftError` → `retryable: false`: retry is withheld where it cannot succeed.
 - Optimistic removal is suppressed for `ANSWERED_SUPPRESS_MS` only on acceptance. Seeded on entry, refreshed by `recoverStream`; `refreshDrafts` coalesces callers. The full-row latch resets when no longer truncated.
 - `placement: 'turn' | 'banner'`: banner is `compact` (whitespace-collapsed CSS-clipped peek; Send/Edit/Discard kept; not while `editing` or `unreadable`/`truncated`/`sending`). Send and Edit use the stored `body`, never `shownBody`/`peek`.
-- `--chat-body-max` lives in `Message.svelte` on `.content > :global(.draft-card)`, pinned against source in `DraftCard.svelte.test.ts` (that file's margin regex reads comments too).
+- `--chat-body-max` lives in `Message.svelte` on `.content > :global(.draft-card)` and `.content > :global(.confirm-card)`, pinned against source in `DraftCard.svelte.test.ts` (that file's margin regex reads comments too).
 
 ## Phone rooms are read-only
 
