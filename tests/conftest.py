@@ -255,6 +255,19 @@ def _no_subscription_usage_lookups(monkeypatch):
     monkeypatch.setattr(subscription_usage, "get_snapshot", _no_credential)
     monkeypatch.setattr(subscription_usage, "_urllib_transport", _refuse)
 
+    # Model discovery's two default transports, for the same reason: a test
+    # that reaches a provider's model list injects a transport.
+    try:
+        from istota.llm import discovery
+    except Exception:
+        return
+
+    def _refuse_discovery(url, headers, timeout):
+        raise AssertionError("a test reached a real model list; inject a transport")
+
+    monkeypatch.setattr(discovery, "_anthropic_transport", _refuse_discovery)
+    monkeypatch.setattr(discovery, "_http_transport", _refuse_discovery)
+
 
 def _init_db_inputs() -> dict:
     """Everything `db.init_db` runs, by identity, so a patched one is visible."""
@@ -620,10 +633,13 @@ def _reset_process_globals():
     from istota.brain._fallback import reset_availability_breaker
     from istota.brain._roles import set_alias_overrides
     from istota.llm import catalog as catalog_mod
+    from istota.llm import discovery as discovery_mod
 
     def _clear():
         set_alias_overrides({})
         catalog_mod.set_config_layers(operator={}, overrides={})
+        catalog_mod.set_discovered({})
+        discovery_mod.reset_install_state()
         reset_availability_breaker()
 
     _clear()

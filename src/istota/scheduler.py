@@ -10213,6 +10213,8 @@ def build_interval_gates(
     gate it runs reads any, and building the closures costs nothing since they
     are never called.
     """
+    from .llm.discovery import REFRESH_INTERVAL_SECONDS as model_catalogue_interval
+
     keeper: dict[str, threading.Thread] = (
         background_checks if background_checks is not None else {}
     )
@@ -10347,6 +10349,11 @@ def build_interval_gates(
 
     def _browser_instances(now: float) -> None:
         check_browser_instances(config)
+
+    def _model_catalogue(now: float) -> None:
+        from .llm import discovery
+
+        discovery.refresh_all(config)
 
     def _shared_block_request(now: float) -> None:
         poll_shared_block_requests(config, keeper)
@@ -10695,6 +10702,16 @@ def build_interval_gates(
             enabled=lambda c: c.browser.enabled,
             background=True,
             overlap_expected=True,
+        ),
+        # Each `discover = true` provider's model list, refreshed when its cache
+        # is older than the provider's TTL; this is only the look's cadence.
+        # Network I/O, so off the loop thread. Every other process reads the
+        # caches (`llm/discovery.py`). Never raises.
+        IntervalGate(
+            name="model-catalogue",
+            run=_model_catalogue,
+            fixed_interval=model_catalogue_interval,
+            background=True,
         ),
         # ISSUE-288. Seeded to 0 for the reason the sweeps below share: the
         # accumulation it clears is the state a restart usually arrives into,
@@ -11638,6 +11655,13 @@ def run_daemon(
         recover_orphaned_tasks_on_startup(config)
     except Exception as e:  # noqa: BLE001
         logger.warning("Startup orphan recovery skipped: %s", e)
+
+    # The model lists, before any worker takes a task: the caches installed,
+    # and a provider with no cache yet fetched, all of them within one
+    # 10-second budget. One unfinished is left to the `model-catalogue` gate
+    # and reported by doctor. Never raises.
+    from .llm import discovery as _discovery
+    _discovery.boot_refresh(config)
 
     # Start the persistent asyncio runtime that hosts all Talk (and other) I/O
     # on one loop with one pooled httpx client. Explicit start here surfaces a

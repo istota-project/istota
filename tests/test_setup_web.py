@@ -1398,10 +1398,10 @@ class _Catalog:
 
 @pytest.fixture
 def catalog(monkeypatch):
-    from istota.llm import openrouter_catalog
+    from istota.llm import discovery
 
     fake = _Catalog()
-    monkeypatch.setattr(openrouter_catalog, "fetch_openrouter_catalog", fake)
+    monkeypatch.setattr(discovery, "fetch_openrouter_catalog", fake)
     return fake
 
 

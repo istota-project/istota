@@ -699,11 +699,11 @@ async def openrouter_model_ids(seconds: float) -> list[str]:
     """OpenRouter's model ids, for the model field's suggestions; ``[]`` on
     any failure, since the list is a convenience and the Test button is what
     checks a model."""
-    from istota.llm import openrouter_catalog  # noqa: PLC0415
+    from istota.llm import discovery  # noqa: PLC0415
 
     try:
         catalog = await asyncio.wait_for(
-            openrouter_catalog.fetch_openrouter_catalog(
+            discovery.fetch_openrouter_catalog(
                 setup_wizard.DEFAULT_OPENROUTER_BASE_URL, timeout=seconds,
             ),
             timeout=seconds + _CHECK_GRACE_SECONDS,

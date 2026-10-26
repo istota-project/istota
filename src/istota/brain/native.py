@@ -46,7 +46,6 @@ import json
 import logging
 import re
 import statistics
-import threading
 import time
 import uuid
 from collections import Counter
@@ -121,24 +120,6 @@ logger = logging.getLogger("istota.brain.native")
 
 # What a usage row records as the brain that ran. One of KNOWN_BRAIN_KINDS.
 BRAIN_KIND = "native"
-
-# Process-global coordinator for the live OpenRouter model-catalog fetch
-# (ISSUE-182). Each task runs on its own worker thread + event loop, so without
-# a guard every first task would stampede OpenRouter's /models endpoint. The
-# lock serializes the first-use fetch (held across the network call — simple,
-# and the stampede window at process start is tiny given low task concurrency);
-# ``_CATALOG_FETCHED_AT`` records the wall time of the last successful install
-# so a task within the TTL skips the fetch entirely. Reset in tests.
-_CATALOG_FETCH_LOCK = threading.Lock()
-_CATALOG_FETCHED_AT: float | None = None
-
-
-def _reset_catalog_fetch_state() -> None:
-    """Test hook: forget the process-global fetch timestamp so a test can drive
-    ``_ensure_fetched_catalog`` from a clean slate."""
-    global _CATALOG_FETCHED_AT
-    _CATALOG_FETCHED_AT = None
-
 
 # What the model is told instead of an image it will not receive. Both name the
 # image, because "attached" alone is not evidence of sight: the failure this
@@ -1326,7 +1307,7 @@ class NativeBrain:
 
     @staticmethod
     def _catalog_cache_dir(req: BrainRequest) -> Path | None:
-        """Local, writable dir for the OpenRouter cache = ``db_path.parent``.
+        """The directory holding the model caches' directory: ``db_path.parent``.
 
         Taken from ``BrainRequest.db_path``, which the executor sets from
         ``config.db_path``. It used to read ``ISTOTA_DB_PATH`` out of the task
@@ -1334,9 +1315,8 @@ class NativeBrain:
         the skill proxy instead), and this is a daemon-side path anyway.
 
         Absent (a direct brain call that built no task env, e.g. some
-        sleep-cycle paths) → ``None``: the in-memory ``_FETCHED`` table + the
-        process-global TTL guard still prevent refetch storms, only the
-        cross-process disk cache is skipped.
+        sleep-cycle paths) → ``None``: whatever discovered layer the process
+        already installed serves.
         """
         if not req.db_path:
             return None
@@ -1346,90 +1326,21 @@ class NativeBrain:
             return None
 
     async def _ensure_fetched_catalog(self, req: BrainRequest) -> None:
-        """Install the live OpenRouter model catalog into ``istota.llm.catalog``.
+        """Install the discovered model lists from their caches.
 
-        Gated on ``model_catalog_fetch`` + an OpenRouter ``base_url``. Fetches at
-        most once per process per TTL (module-level guard). Resolution order:
-        fresh disk cache → live fetch (+write cache) → stale disk cache → leave
-        the default. Never raises into task execution — a metadata-resolution
-        problem must not fail a task.
+        Reads only: the scheduler's ``model-catalogue`` gate fetches (D11), so
+        a task never waits on a provider's ``/models``. One stat per cache file
+        when nothing changed. Never raises into task execution.
         """
-        try:
-            await self._ensure_fetched_catalog_inner(req)
-        except Exception:  # noqa: BLE001 — a fetch bug must never break a task
-            logger.debug("catalog fetch coordinator raised; using default/overrides", exc_info=True)
-
-    async def _ensure_fetched_catalog_inner(self, req: BrainRequest) -> None:
-        global _CATALOG_FETCHED_AT
-        spec = self._spec
-        if spec is None or spec.kind != "openrouter" or not spec.discover:
+        data_dir = self._catalog_cache_dir(req)
+        if data_dir is None:
             return
-
-        from ..llm import catalog as _catalog
-        from ..llm import openrouter_catalog as orc
-
-        ttl = float(spec.discover_ttl_hours or 0.0)
-        now = time.time()
-
-        # Serialize the first-use stampede across worker threads. Held across the
-        # network call by design (see the module-level note); a loser thread
-        # blocks until the winner installs, then the freshness gate short-circuits
-        # it. Off-loop blocking of a waiting thread is acceptable — it has nothing
-        # else to do until the catalog is ready.
-        _CATALOG_FETCH_LOCK.acquire()
         try:
-            # Already installed within TTL this process → nothing to do.
-            if _CATALOG_FETCHED_AT is not None:
-                if ttl <= 0 or (now - _CATALOG_FETCHED_AT) <= ttl * 3600:
-                    return
+            from ..llm import discovery
 
-            data_dir = self._catalog_cache_dir(req)
-            path = orc.cache_path(data_dir) if data_dir is not None else None
-
-            # 1) fresh disk cache
-            if path is not None:
-                fresh = orc.read_cache(path, ttl, now_ts=now)
-                if fresh:
-                    _catalog.set_fetched_catalog(fresh)
-                    _CATALOG_FETCHED_AT = now
-                    return
-
-            # 2) live fetch
-            entries: dict = {}
-            try:
-                from ..llm.providers import reveal_inference_key
-
-                entries = await orc.fetch_openrouter_catalog(
-                    spec.openai_base_url, api_key=reveal_inference_key(spec.inference_key)
-                )
-            except Exception:  # noqa: BLE001 — network/HTTP; fall through
-                logger.warning("openrouter model-catalog fetch failed", exc_info=True)
-                entries = {}
-            if entries:
-                _catalog.set_fetched_catalog(entries)
-                if path is not None:
-                    orc.write_cache(path, entries, now)
-                _CATALOG_FETCHED_AT = now
-                return
-
-            # 3) stale disk cache — keep serving it, stamp so we don't refetch
-            # every task while the endpoint is down (TTL still governs the next
-            # attempt).
-            if path is not None:
-                stale = orc.read_cache_any_age(path)
-                if stale:
-                    _catalog.set_fetched_catalog(stale)
-                    _CATALOG_FETCHED_AT = now
-                    logger.warning("using stale openrouter model-catalog cache")
-                    return
-
-            # 4) nothing available: leave _FETCHED as-is (→ conservative default),
-            # do NOT stamp so the next task retries the network.
-            logger.warning(
-                "no openrouter model catalog available; using conservative default"
-            )
-        finally:
-            _CATALOG_FETCH_LOCK.release()
+            discovery.install_from_cache_dir(data_dir / discovery.CACHE_DIRNAME)
+        except Exception:  # noqa: BLE001 - metadata must never fail a task
+            logger.debug("model cache install raised; using what is installed", exc_info=True)
 
     async def _maybe_close_provider(self) -> None:
         if not self._owns_provider:
@@ -1566,10 +1477,9 @@ class NativeBrain:
                 if summary_usage.cost_usd is not None:
                     turns_costed += 1
 
-        # Live model-catalog enrichment (ISSUE-182). Populate the per-model
-        # metadata catalog from OpenRouter before the loop resolves windows /
-        # capabilities / prices. No-ops for a non-OpenRouter endpoint or when
-        # disabled; never fatal.
+        # The discovered model lists (ISSUE-182), read from the caches the
+        # scheduler's gate writes, before the loop resolves windows,
+        # capabilities and prices. Never fatal.
         await self._ensure_fetched_catalog(req)
 
         # Resolve the effort tier and capability-gate it. The compat field

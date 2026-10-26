@@ -52,8 +52,6 @@ import platform
 import re
 import subprocess
 import threading
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,6 +61,7 @@ from istota.lib.retry_after import parse_retry_after as _parse_retry_after
 from istota.lib.retry_after import retry_after_from_headers as _retry_after_from_headers
 
 from istota import __version__
+from istota.lib import fixed_get as _fixed_get
 from istota.lib.atomic_write import write_text_atomic
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -717,34 +716,11 @@ def _first_exponent(*blocks: dict) -> int:
 # ---------------------------------------------------------------------------
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Refuse to follow a redirect, because following one would leak the token.
-
-    ``urllib``'s default ``HTTPRedirectHandler.redirect_request`` copies every
-    header except ``content-length`` and ``content-type`` onto the new request,
-    so a 30x from ``api.anthropic.com`` to anywhere else would re-send
-    ``Authorization: Bearer <token>`` to that host. httpx and requests both drop
-    the header on a cross-host redirect; the stdlib does not, and this module
-    holds a subscription credential. The endpoint does not redirect, so refusing
-    outright costs nothing and needs no host comparison to get right.
-
-    Returning ``None`` makes ``urllib`` raise the 30x as an ``HTTPError``, which
-    the caller turns back into ``(status, body)`` — the redirect is reported as
-    the status it was, not as a success.
-    """
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
-        return None
-
-
-def _build_opener() -> urllib.request.OpenerDirector:
-    """An opener that follows no redirects and consults no proxy env vars.
-
-    ``ProxyHandler({})`` is passed explicitly so the credentialed request cannot
-    be routed through whatever ``http_proxy`` happens to be set in the daemon's
-    environment.
-    """
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+# The no-redirect, no-proxy opener moved to `lib/fixed_get.py` when Anthropic's
+# model list became the second credentialed request to `api.anthropic.com`;
+# the names stay here because this module's tests address them here.
+_NoRedirect = _fixed_get.NoRedirect
+_build_opener = _fixed_get.build_opener
 
 
 # `parse_retry_after` and `_retry_after_from` used to live here, and this
@@ -760,33 +736,13 @@ _retry_after_from = _retry_after_from_headers
 def _urllib_transport(
     url: str, headers: dict[str, str], timeout: float
 ) -> tuple[int, bytes, Mapping[str, str]]:
-    """The default ``Transport``: one GET, stdlib only.
+    """The default ``Transport``: one GET through ``lib/fixed_get``.
 
-    An ``HTTPError`` is a response, not a transport failure, so it is turned back
-    into ``(status, body, headers)`` — that is what routes a 401 or a 403 into
-    the status branch instead of the exception branch, what turns a refused
-    redirect into a reported 30x, and what carries a 429's ``Retry-After`` back
-    to the caller. The headers matter most on exactly the branch that used to
-    look like an error and nothing else.
+    An ``HTTPError`` comes back as ``(status, body, headers)``, so a 401 or 403
+    takes the status branch, a refused redirect reports its 30x, and a 429's
+    ``Retry-After`` reaches the caller.
     """
-    request = urllib.request.Request(url, headers=headers, method="GET")
-    try:
-        with _build_opener().open(request, timeout=timeout) as response:
-            return (
-                int(response.status),
-                response.read(_MAX_BODY_BYTES),
-                dict(response.headers),
-            )
-    except urllib.error.HTTPError as exc:
-        try:
-            body = exc.read(_MAX_BODY_BYTES)
-        except Exception:  # noqa: BLE001 — the status is what we needed
-            body = b""
-        try:
-            response_headers = dict(exc.headers or {})
-        except Exception:  # noqa: BLE001 — same: the status is the load-bearing part
-            response_headers = {}
-        return int(exc.code), body, response_headers
+    return _fixed_get.get(url, headers, timeout, max_body=_MAX_BODY_BYTES, opener=_build_opener())
 
 
 def fetch_snapshot(
