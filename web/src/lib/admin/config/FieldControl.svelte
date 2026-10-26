@@ -1,6 +1,11 @@
 <script lang="ts">
   import { CircleDashed, Lock } from '@lucide/svelte';
-  import type { AdminConfigField, ConfigOp, ConfigSecretSource } from '$lib/api';
+  import type {
+    AdminConfigField,
+    ConfigModelCatalogue,
+    ConfigOp,
+    ConfigSecretSource,
+  } from '$lib/api';
   import {
     Icon,
     Badge,
@@ -14,6 +19,8 @@
   } from '@minot/ui';
   import ConfigSecretField from './ConfigSecretField.svelte';
   import FieldRow from './FieldRow.svelte';
+  import ModelField from './ModelField.svelte';
+  import ModelPatternsField from './ModelPatternsField.svelte';
   import TableEditor from './TableEditor.svelte';
   import { displayValue, formatValue, opFor } from './changeSet';
   import { parseList, parseNumber } from '@minot/ui/ui/parse';
@@ -32,12 +39,23 @@
     editable: boolean;
     /** A problem the last check reported against this key. */
     problem?: string;
+    /** The view's model catalogue; without it a model field is plain text. */
+    catalogue?: ConfigModelCatalogue | null;
     onOp: (op: ConfigOp | null, path: string[]) => void;
     onSecret: (name: string, value: string | null) => void;
   }
 
-  let { field, op, secretPending, secretSource, editable, problem, onOp, onSecret }: Props =
-    $props();
+  let {
+    field,
+    op,
+    secretPending,
+    secretSource,
+    editable,
+    problem,
+    catalogue = null,
+    onOp,
+    onSecret,
+  }: Props = $props();
 
   // What the admin typed into a number or list input, held while it does not
   // parse (a number) or while it is being typed (a list, whose blank lines
@@ -45,7 +63,14 @@
   let draftText = $state<string | null>(null);
   let inputError = $state('');
 
-  let kind = $derived(editable ? field.editor : 'readonly');
+  let kind = $derived(editable ? editorKind(field.editor) : 'readonly');
+
+  /** A model field with no catalogue to pick from is edited as text. */
+  function editorKind(editor: AdminConfigField['editor']): AdminConfigField['editor'] {
+    if (editor === 'model' && !(catalogue && field.model_field)) return 'str';
+    if (editor === 'model_patterns' && !catalogue) return 'list';
+    return editor;
+  }
   let hint = $derived(field.doc ?? undefined);
   let showMeta = $derived(editable && field.editor !== 'readonly' && field.editor !== 'secret');
   let shown = $derived(displayValue(field, op));
@@ -248,6 +273,29 @@
           {@render defaultMark()}
         </span>
       </Field>
+    {:else if kind === 'model' && catalogue && field.model_field}
+      <ModelField
+        label={field.name}
+        value={shown === null || shown === undefined ? '' : String(shown)}
+        modelField={field.model_field}
+        {catalogue}
+        {hint}
+        {badge}
+        {labelMark}
+        {problem}
+        onValue={onText}
+      />
+    {:else if kind === 'model_patterns' && catalogue}
+      <ModelPatternsField
+        label={field.name}
+        value={Array.isArray(shown) ? shown.map(String) : null}
+        {catalogue}
+        {hint}
+        {badge}
+        {labelMark}
+        {problem}
+        onValue={(value) => emit(value)}
+      />
     {:else if kind === 'choice'}
       <Field label={field.name} {hint} {badge} {labelMark} layout="inline" error={problem}>
         <span class="adorned select">

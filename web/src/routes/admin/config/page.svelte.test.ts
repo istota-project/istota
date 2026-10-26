@@ -3,7 +3,9 @@ import { page } from '../../../../vitest-stubs/app-state.svelte';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import {
+  configCatalogue,
   configField,
+  configModelField,
   configPreview,
   configRequest,
   configSecret,
@@ -1034,5 +1036,172 @@ describe('the [servarr] apps editor', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
     expect(radarr.getByLabelText<HTMLInputElement>(/^URL/).value).toBe('http://10.0.0.5:7878');
     expect(screen.getByRole('button', { name: 'Review changes' })).toBeDisabled();
+  });
+});
+
+/** The ops the page sends to preview when Review changes is pressed. */
+async function reviewedOps() {
+  api.previewConfigChange.mockResolvedValue(configPreview());
+  await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+  await waitFor(() => expect(api.previewConfigChange).toHaveBeenCalled());
+  return api.previewConfigChange.mock.calls[0][0].ops;
+}
+
+describe('model fields', () => {
+  /** Pick an option out of a `Select` the way bits-ui listens for it: the
+   *  item commits on pointerup, so a plain click selects nothing. */
+  async function openSelect(ariaLabel: string) {
+    const trigger = screen.getByRole('button', { name: ariaLabel });
+    await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
+    await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
+    await fireEvent.click(trigger);
+  }
+
+  async function pick(ariaLabel: string, optionLabel: string) {
+    await openSelect(ariaLabel);
+    const item = screen.getByText(optionLabel).closest('[data-select-item]');
+    if (!item) throw new Error(`no option ${optionLabel} under ${ariaLabel}`);
+    await fireEvent.pointerMove(item, { pointerType: 'mouse' });
+    await fireEvent.pointerDown(item, { pointerType: 'mouse', button: 0 });
+    await fireEvent.pointerUp(item, { pointerType: 'mouse', button: 0 });
+  }
+
+  async function selectOptions(ariaLabel: string): Promise<string[]> {
+    await openSelect(ariaLabel);
+    return [...document.querySelectorAll('[data-select-item]')].map((el) =>
+      (el.textContent ?? '').trim(),
+    );
+  }
+
+  async function chooseModel(ariaLabel: string, label: string) {
+    await fireEvent.focus(screen.getByRole('combobox', { name: ariaLabel }));
+    await fireEvent.mouseDown(screen.getByRole('option', { name: label }));
+  }
+
+  const native = configModelField(['brain', 'native', 'model'], 'openrouter/z-ai/glm-5.3-flash', {
+    sources: ['openrouter', 'anthropic'],
+  });
+
+  it('fills the model list from the chosen source', async () => {
+    mount(configView([native], { model_catalogue: configCatalogue() }));
+    await screen.findByRole('combobox', { name: 'model model' });
+    await pick('model source', 'Anthropic');
+    await fireEvent.focus(screen.getByRole('combobox', { name: 'model model' }));
+    expect(
+      screen.getByRole('option', {
+        name: 'anthropic/claude-sonnet-5-5 (Claude Sonnet 5.5) · enabled',
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /kimi/ })).toBeNull();
+  });
+
+  it('offers the effort levels the chosen model takes', async () => {
+    mount(configView([native], { model_catalogue: configCatalogue() }));
+    await screen.findByRole('combobox', { name: 'model model' });
+    expect(await selectOptions('model effort')).toEqual(['Default effort']);
+    cleanup();
+    const kimi = configModelField(['brain', 'native', 'model'], 'openrouter/moonshotai/kimi-k2.6', {
+      sources: ['openrouter', 'anthropic'],
+    });
+    mount(configView([kimi], { model_catalogue: configCatalogue() }));
+    await screen.findByRole('combobox', { name: 'model model' });
+    expect(await selectOptions('model effort')).toEqual([
+      'Default effort',
+      'low',
+      'medium',
+      'high',
+    ]);
+  });
+
+  it('keeps a stored value outside the catalogue through a save of another field', async () => {
+    const claude = configModelField(['brain', 'claude_code', 'model'], 'claude-legacy-20240101');
+    mount(configView([claude, imapHost], { model_catalogue: configCatalogue() }));
+    expect(
+      await screen.findByText('Not in the catalogue: claude-legacy-20240101'),
+    ).toBeInTheDocument();
+    await fireEvent.input(screen.getByLabelText('imap_host'), { target: { value: 'new' } });
+    expect(await reviewedOps()).toEqual([
+      { op: 'set', path: ['email', 'imap_host'], value: 'new' },
+    ]);
+  });
+
+  it('saves an id typed under Other… as a ref under the provider', async () => {
+    mount(configView([native], { model_catalogue: configCatalogue() }));
+    await screen.findByRole('combobox', { name: 'model model' });
+    await chooseModel('model model', 'Other…');
+    await fireEvent.input(screen.getByLabelText('model model id'), {
+      target: { value: 'new-vendor/new-model' },
+    });
+    expect(screen.getByText(/catalogue does not list openrouter\/new-vendor/)).toBeInTheDocument();
+    expect(await reviewedOps()).toEqual([
+      {
+        op: 'set',
+        path: ['brain', 'native', 'model'],
+        value: 'openrouter/new-vendor/new-model',
+      },
+    ]);
+  });
+
+  it('shows each enabled entry’s match count', async () => {
+    const enabled = configField({
+      path: ['models', 'enabled'],
+      value: ['anthropic/*'],
+      default: null,
+      in_file: true,
+      editor: 'model_patterns',
+      type: 'list',
+    });
+    mount(
+      configView([enabled], {
+        model_catalogue: configCatalogue({ pattern_counts: { 'anthropic/*': 7 } }),
+      }),
+    );
+    expect(await screen.findByText('7 models')).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Add pattern' }));
+    await fireEvent.input(screen.getByLabelText('enabled entry 2'), {
+      target: { value: 'openrouter/*' },
+    });
+    expect(screen.getByText('2 models')).toBeInTheDocument();
+    expect(await reviewedOps()).toEqual([
+      { op: 'set', path: ['models', 'enabled'], value: ['anthropic/*', 'openrouter/*'] },
+    ]);
+  });
+
+  it('falls back to a text field with no catalogue', async () => {
+    mount(configView([native], { model_catalogue: null }));
+    expect(await screen.findByLabelText('model')).toHaveValue('openrouter/z-ai/glm-5.3-flash');
+    expect(screen.queryByRole('combobox', { name: 'model model' })).toBeNull();
+  });
+});
+
+describe('the [models.aliases] editor', () => {
+  const aliases = configField({
+    path: ['models', 'aliases'],
+    value: { fast: 'haiku' },
+    default: {},
+    in_file: true,
+    editor: 'table',
+    type: 'dict',
+    toml: '[aliases]\nfast = "haiku"\n',
+  });
+
+  it('has a row per tier and writes the table back as one set_toml op', async () => {
+    mount(configView([aliases], { model_catalogue: configCatalogue() }));
+    const general = within(await screen.findByTestId('alias-general'));
+    expect(screen.getByTestId('alias-fast')).toBeInTheDocument();
+    expect(screen.getByTestId('alias-smart')).toBeInTheDocument();
+    await fireEvent.focus(general.getByRole('combobox', { name: 'Claude Code and tmux model' }));
+    await fireEvent.mouseDown(
+      screen.getByRole('option', {
+        name: 'anthropic/claude-sonnet-5-5 (Claude Sonnet 5.5) · enabled',
+      }),
+    );
+    expect(await reviewedOps()).toEqual([
+      {
+        op: 'set_toml',
+        path: ['models', 'aliases'],
+        toml: '[aliases]\nfast = "haiku"\ngeneral = { anthropic = "anthropic/claude-sonnet-5-5" }\n',
+      },
+    ]);
   });
 });

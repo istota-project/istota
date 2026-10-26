@@ -6,6 +6,9 @@
 import type {
   AdminConfigField,
   AdminConfigView,
+  ConfigCatalogueModel,
+  ConfigModelCatalogue,
+  ConfigModelField,
   ConfigPreview,
   ConfigRequest,
   ConfigSecretFile,
@@ -86,6 +89,81 @@ export function configView(
     admins: { users: ['alice'], candidates: ['alice', 'bob'], read_only_reason: null },
     ...overrides,
   };
+}
+
+/** A catalogue with two Anthropic models (one deprecated), two OpenRouter
+ *  models (one enabled) and the tiers plus one shortcut. */
+export function configCatalogue(
+  overrides: Partial<ConfigModelCatalogue> = {},
+): ConfigModelCatalogue {
+  const model = (ref: string, extra: Partial<ConfigCatalogueModel> = {}): ConfigCatalogueModel => ({
+    ref,
+    name: ref.split('/').slice(1).join('/'),
+    family: null,
+    deprecated: false,
+    reasoning: true,
+    efforts: ['low', 'medium', 'high'],
+    context_window: 200000,
+    enabled: false,
+    ...extra,
+  });
+  return {
+    sources: [
+      {
+        id: 'anthropic',
+        kind: 'anthropic',
+        label: 'Anthropic',
+        discovered_at: null,
+        last_error: null,
+        models: [
+          model('anthropic/claude-sonnet-5-5', {
+            name: 'Claude Sonnet 5.5',
+            family: 'sonnet',
+            enabled: true,
+            efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+          }),
+          model('anthropic/claude-sonnet-4-5', { family: 'sonnet', deprecated: true }),
+        ],
+      },
+      {
+        id: 'openrouter',
+        kind: 'openrouter',
+        label: 'OpenRouter',
+        discovered_at: '2026-10-25T08:00:00Z',
+        last_error: null,
+        models: [
+          model('openrouter/z-ai/glm-5.3-flash', { enabled: true, efforts: [], reasoning: false }),
+          model('openrouter/moonshotai/kimi-k2.6', { name: 'Kimi K2.6' }),
+        ],
+      },
+    ],
+    aliases: [
+      { name: 'fast', target: 'anthropic/claude-haiku-5-5', effort: null, efforts: ['low'] },
+      { name: 'general', target: 'anthropic/claude-sonnet-5-5', effort: null, efforts: null },
+      { name: 'smart', target: 'anthropic/claude-opus-5-5', effort: 'high', efforts: null },
+      { name: 'opus', target: 'anthropic/claude-opus-5-5', effort: null, efforts: null },
+    ],
+    pattern_counts: {},
+    ...overrides,
+  };
+}
+
+/** A `model` field for `path`, naming `sources`. */
+export function configModelField(
+  path: string[],
+  value: string,
+  modelField: Partial<ConfigModelField> = {},
+  overrides: Partial<AdminConfigField> = {},
+): AdminConfigField {
+  return configField({
+    path,
+    value,
+    default: '',
+    in_file: !!value,
+    editor: 'model',
+    model_field: { sources: ['anthropic'], effort: true, aliases: true, ...modelField },
+    ...overrides,
+  });
 }
 
 export function configPreview(overrides: Partial<ConfigPreview> = {}): ConfigPreview {

@@ -663,9 +663,57 @@ export type ConfigEditorKind =
   | 'list'
   | 'choice'
   | 'multi_choice'
+  | 'model'
+  | 'model_patterns'
   | 'secret'
   | 'table'
   | 'readonly';
+
+/** What a `model` field may name: provider ids, whether it takes `:effort`,
+ *  whether aliases are offered. */
+export interface ConfigModelField {
+  sources: string[];
+  effort: boolean;
+  aliases: boolean;
+}
+
+export interface ConfigCatalogueModel {
+  ref: string;
+  name: string;
+  family: string | null;
+  deprecated: boolean;
+  reasoning: boolean;
+  /** The effort levels the model takes; empty when it takes none. */
+  efforts: string[];
+  context_window: number;
+  /** In `[models] enabled`, which a non-admin may pick from. */
+  enabled: boolean;
+}
+
+export interface ConfigCatalogueSource {
+  id: string;
+  kind: string;
+  label: string;
+  discovered_at: string | null;
+  last_error: string | null;
+  models: ConfigCatalogueModel[];
+}
+
+export interface ConfigCatalogueAlias {
+  name: string;
+  /** The ref it resolves to on the CLI brains; null for the brain's own model. */
+  target: string | null;
+  effort: string | null;
+  efforts: string[] | null;
+}
+
+/** What the config page's model pickers choose from, once per view. */
+export interface ConfigModelCatalogue {
+  sources: ConfigCatalogueSource[];
+  aliases: ConfigCatalogueAlias[];
+  /** How many models each stored `[models] enabled` entry matches. */
+  pattern_counts: Record<string, number>;
+}
 
 export interface AdminConfigField {
   /** Dotted display label — `web.oauth2_client_secret`. Never an address: a
@@ -695,6 +743,8 @@ export interface AdminConfigField {
   risky: boolean;
   /** A `table` field's current file value as TOML, secrets as sentinels. */
   toml?: string;
+  /** A `model` field's sources and effort, read against `model_catalogue`. */
+  model_field?: ConfigModelField;
 }
 
 export interface AdminConfigSection {
@@ -704,7 +754,7 @@ export interface AdminConfigSection {
 }
 
 export interface ConfigProblem {
-  kind: 'discarded' | 'unknown' | 'retired' | 'warning' | 'error';
+  kind: 'discarded' | 'unknown' | 'retired' | 'warning' | 'error' | 'model' | 'model_unknown';
   path: string[];
   message: string;
   blocking: boolean;
@@ -766,6 +816,8 @@ export interface AdminConfigView {
   raw_toml: string | null;
   /** One entry per deployment secrets file, never a value. */
   secrets: ConfigSecretFile[];
+  /** Null when the catalogue could not be read; model fields are then text. */
+  model_catalogue?: ConfigModelCatalogue | null;
   /** `candidates`: every user with a live sign-in identity, who may be picked. */
   admins: { users: string[]; candidates?: string[]; read_only_reason: string | null };
 }

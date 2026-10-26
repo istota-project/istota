@@ -4646,6 +4646,14 @@ function mockAdminConfigBase() {
         fields: [f('model', 'sonnet', 'str'), f('effort', '', 'str')],
       },
       {
+        key: 'models',
+        label: '[models]',
+        fields: [
+          f('aliases', { smart: { anthropic: 'opus:high' } }, 'dict'),
+          f('enabled', ['anthropic/*', 'openrouter/moonshotai/*'], 'list'),
+        ],
+      },
+      {
         key: 'servarr',
         label: '[servarr]',
         fields: [
@@ -4760,6 +4768,48 @@ const MOCK_CHOICES: Record<string, string[]> = {
   'brain.fallback': ['', 'claude_code', 'native', 'tmux'],
 };
 const MOCK_MULTI: Record<string, string[]> = { 'web.auth': ['email', 'nextcloud'] };
+/** The model pickers' fields, as `config_editor.schema.MODEL_FIELDS` names them. */
+const MOCK_MODEL_FIELDS: Record<string, { sources: string[]; effort: boolean; aliases: boolean }> =
+  {
+    'brain.claude_code.model': { sources: ['anthropic'], effort: true, aliases: true },
+    'brain.native.model': { sources: ['openrouter'], effort: true, aliases: true },
+  };
+
+/** The view's `model_catalogue`, from the room picker's model list. */
+function mockConfigCatalogue() {
+  const providers = [
+    { id: 'anthropic', label: 'Anthropic', discovered_at: null, last_error: null },
+    {
+      id: 'openrouter',
+      label: 'OpenRouter',
+      discovered_at: '2026-10-25T08:00:00Z',
+      last_error: null,
+    },
+  ];
+  return {
+    sources: providers.map((p) => ({
+      ...p,
+      kind: p.id,
+      models: MOCK_PICKER_MODELS.filter((m) => m.provider === p.id).map((m) => ({
+        ref: m.ref,
+        name: m.name,
+        family: m.family,
+        deprecated: false,
+        reasoning: m.reasoning,
+        efforts: m.efforts,
+        context_window: m.context_window,
+        enabled: m.enabled,
+      })),
+    })),
+    aliases: MOCK_ALIAS_NAMES.map((name) => ({
+      name,
+      target: `anthropic/claude-${{ fast: 'haiku', general: 'sonnet', smart: 'opus' }[name] ?? name}-5-5`,
+      effort: name === 'smart' ? 'high' : null,
+      efforts: name === 'smart' || name === 'opus' ? MOCK_OPUS_EFFORTS : MOCK_BASE_EFFORTS,
+    })),
+    pattern_counts: { 'anthropic/*': 3, 'openrouter/moonshotai/*': 1 },
+  };
+}
 const MOCK_RISKY = new Set(['web.auth', 'brain.kind', 'brain.fallback']);
 const MOCK_FILE_CREDENTIALS: Record<string, string> = {
   'sms.twilio.auth_token': 'istota_twilio_auth_token',
@@ -4813,6 +4863,9 @@ function mockAdminConfig() {
       if (MOCK_CHOICES[key]) editor = 'choice';
       if (MOCK_MULTI[key]) editor = 'multi_choice';
       if (field.type === 'null') editor = 'str';
+      if (field.type === 'dict') editor = 'table';
+      if (MOCK_MODEL_FIELDS[key]) editor = 'model';
+      if (key === 'models.enabled') editor = 'model_patterns';
       if (readOnly) editor = 'readonly';
       return {
         ...field,
@@ -4831,6 +4884,7 @@ function mockAdminConfig() {
         editor,
         read_only_reason: readOnly,
         risky: MOCK_RISKY.has(key),
+        ...(MOCK_MODEL_FIELDS[key] ? { model_field: MOCK_MODEL_FIELDS[key] } : {}),
       };
     }),
   }));
@@ -4868,6 +4922,7 @@ function mockAdminConfig() {
     ],
     has_comments: state.hasComments,
     raw_toml: mockRawToml(sections),
+    model_catalogue: mockConfigCatalogue(),
     secrets: [
       ...Object.entries(MOCK_FILE_CREDENTIALS).map(([key, name]) => {
         const set =
