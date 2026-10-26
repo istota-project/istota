@@ -38,8 +38,8 @@ def _real_kit() -> Kit:
     )
 
 
-def test_board_ledger_recall_and_light_planner_are_starter_apps():
-    assert install.STARTER_APPS[:4] == ("board", "ledger", "recall", "light-planner")
+def test_the_five_starter_apps():
+    assert install.STARTER_APPS == ("board", "ledger", "recall", "light-planner", "memory-map")
 
 
 @pytest.mark.parametrize("app_id", install.STARTER_APPS)
@@ -87,6 +87,22 @@ def test_the_light_planner_manifest():
     assert sorted(files) == [
         "ephemeris.js", "index.html", "light-planner-model.js", "light-planner.css",
         "light-planner.js", "manifest.toml",
+    ]
+
+
+def test_the_memory_map_manifest():
+    files = shipped_starter("memory-map")
+    manifest = parse_manifest(files["manifest.toml"], folder_name="memory-map", bot_dir="istota")
+    assert (manifest.name, manifest.icon) == ("Memory map", "network")
+    # The worked example of the display range: desktop, with the reason the shell shows.
+    assert manifest.narrowest == "desktop"
+    assert manifest.reason.startswith("A graph worth reading needs the width")
+    assert sorted(c.text for c in manifest.capabilities) == [
+        "files:own", "kv:own", "skill:memory_search.facts", "skill:memory_search.timeline",
+    ]
+    assert sorted(files) == [
+        "graph-layout.js", "index.html", "manifest.toml", "memory-map-model.js",
+        "memory-map.css", "memory-map.js",
     ]
 
 
@@ -147,6 +163,17 @@ def test_seeding_installs_every_shipped_starter_app(config, conn):
     assert apps_db.get_grants(conn, "light-planner", 1) == {"files:own": None, "kv:own": None}
     assert sorted(install.ungranted(conn, "light-planner")) == ["calendar:read", "skill:location.places"]
     assert apps_db.get_version(conn, "light-planner", 1)["warnings"] == []
+    memory_map = apps_db.get_app(conn, "memory-map")
+    assert (memory_map["name"], memory_map["icon"], memory_map["origin"], memory_map["current_version"]) == (
+        "Memory map", "network", "starter", 1,
+    )
+    # Both reads of the knowledge graph are asked for on first open.
+    assert apps_db.get_grants(conn, "memory-map", 1) == {"files:own": None, "kv:own": None}
+    assert sorted(install.ungranted(conn, "memory-map")) == [
+        "skill:memory_search.facts", "skill:memory_search.timeline",
+    ]
+    version = apps_db.get_version(conn, "memory-map", 1)
+    assert (version["narrowest"], version["warnings"]) == ("desktop", [])
     again = install.ensure_starter_apps(config, USER, conn)
     assert again == {app_id: "current" for app_id in install.STARTER_APPS}
 

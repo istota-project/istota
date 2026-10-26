@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { writable } from 'svelte/store';
 import { page } from '../../../../vitest-stubs/app-state.svelte';
@@ -181,6 +183,27 @@ describe('the app view', () => {
     expect((await frame()).getAttribute('sandbox')).toBe('allow-scripts');
     // Opened anyway, it says it may not fit rather than pretending it does.
     expect(screen.getByText('This app may not fit')).toBeTruthy();
+  });
+
+  it('gives the shipped Memory map its empty state on a phone, with its own reason', async () => {
+    const shipped = readFileSync(
+      join(process.cwd(), 'src', 'apps', 'starter', 'memory-map', 'manifest.toml'),
+      'utf8',
+    );
+    const value = (key: string) => new RegExp(`^${key} = "(.*)"$`, 'm').exec(shipped)?.[1] ?? '';
+    const narrowest = value('narrowest') as AppDetail['narrowest'];
+    expect(narrowest).toBe('desktop');
+    const memoryMap = { app_id: 'memory-map', name: value('name'), narrowest };
+    apps.getApps.mockResolvedValue({ ...list(), apps: [summary(), summary(memoryMap)] });
+    apps.getApp.mockResolvedValue(detail({ ...memoryMap, reason: value('reason') }));
+    paneWidth = 375;
+    page.url = new URL('http://localhost/apps/memory-map/');
+    page.params = { id: 'memory-map' };
+    render(Harness);
+    expect(await screen.findByText('Made for a wider screen')).toBeTruthy();
+    const message = screen.getByText(/Memory map is made for a desktop-width screen\./);
+    expect(message.textContent).toContain(value('reason'));
+    expect(document.querySelector('iframe')).toBeNull();
   });
 
   it('opens a desktop app straight away in a pane wide enough', async () => {

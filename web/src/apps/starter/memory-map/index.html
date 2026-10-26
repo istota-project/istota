@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Memory map</title>
+    <link rel="stylesheet" href="memory-map.css" />
+  </head>
+  <body>
+    <header class="map-bar">
+      <h1 class="map-heading">Memory map</h1>
+      <label class="map-picker" id="subject-picker" hidden>
+        <span>Entity</span>
+        <select id="subject"></select>
+      </label>
+      <istota-button id="refresh">Refresh</istota-button>
+    </header>
+    <p id="status" class="map-status" role="status"></p>
+    <div id="empty" class="map-empty" hidden>
+      <p id="empty-title">Istota has not learned any facts yet.</p>
+      <p id="empty-detail"></p>
+    </div>
+    <div id="body" class="map-body" hidden>
+      <section class="map-graph" aria-labelledby="graph-heading">
+        <h2 id="graph-heading" class="map-visually-hidden">The graph of what Istota knows</h2>
+        <svg
+          id="graph"
+          class="map-svg"
+          role="group"
+          aria-label="Entities and the facts between them"
+        ></svg>
+        <p id="graph-note" class="map-note" hidden></p>
+      </section>
+      <aside class="map-panel" aria-labelledby="subject-heading">
+        <h2 id="subject-heading" class="map-panel-title">Choose an entity</h2>
+        <p id="subject-prompt" class="map-note">
+          Choose a person, place or thing in the graph, or from the list above, to see what Istota
+          holds about it and when it learned each fact.
+        </p>
+        <div id="details" class="map-details" hidden>
+          <h3 class="map-subtitle">Now</h3>
+          <p id="current-empty" class="map-note" hidden></p>
+          <istota-list id="current"></istota-list>
+          <h3 class="map-subtitle">History</h3>
+          <p id="history-note" class="map-note" hidden></p>
+          <div id="scrubber" class="map-scrubber" hidden>
+            <label class="map-scrub-label" for="scrub">
+              <span id="scrub-day"></span>
+              <span id="scrub-count" class="map-note"></span>
+            </label>
+            <input id="scrub" type="range" min="0" max="0" step="1" value="0" />
+          </div>
+          <istota-list id="history"></istota-list>
+        </div>
+      </aside>
+    </div>
+    <p class="map-note map-footnote">
+      Memory map only reads. To correct a fact, tell Istota in chat.
+    </p>
+    <script src="graph-layout.js"></script>
+    <script src="memory-map-model.js"></script>
+    <script src="memory-map.js"></script>
+  </body>
+</html>

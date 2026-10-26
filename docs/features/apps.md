@@ -175,6 +175,16 @@ Light planner asks on first open for two things: your saved places (`skill:locat
 
 Everything is computed in the page. The sun follows NOAA's solar position algorithm; the moon uses the leading terms of the lunar series in Meeus, *Astronomical Algorithms*, chapter 47. Its tests check sunrise, sunset and solar noon at three places against NOAA's published tables (within 2 minutes), moonrise and moonset against the U.S. Naval Observatory's (within 10 minutes), and the positions against Meeus's worked examples. In practice the times are within a minute of both. Rise and set are for a flat horizon at sea level; hills, buildings and the place's height above sea level move them by minutes.
 
+### Memory map
+
+What Istota has learned about you, from its knowledge graph, drawn as a graph: each person, place or thing a fact names is a node, and a line joins two of them when a fact connects them ("alex lives in oslo"). The more connections a node has, the larger it is drawn. Choose a node, or pick a name from the list above the graph, and the panel beside it shows what Istota holds about it now, both the facts about it and the facts that name it, with the day each was learned. Below that is the history of everything Istota has held about it, including facts that no longer hold. The slider steps through each day one of those facts was learned or stopped holding, and shows which ones Istota held on that day. The facts that did not hold yet, or no longer held, are struck through.
+
+The history covers the facts where the chosen entity is the subject. An entity that is only ever the object of a fact (a city you live in, say) has current facts but no history of its own. The graph draws the 120 best connected entities and says when there are more; every entity stays in the list. The layout is computed in the page from a fixed seed, so the map looks the same each time it opens until the facts change.
+
+Memory map asks on first open to read your current facts (`skill:memory_search.facts`) and the history of one entity at a time (`skill:memory_search.timeline`). Without the first it has nothing to draw and says how to allow it from **Permissions**. Without the second it still draws the graph and the current facts. It only reads: to correct a fact, tell Istota in chat. It stores nothing.
+
+Its display range is `desktop`. The names in a graph need the width, and the history panel sits beside the graph, so on a pane narrower than 1024px the app opens on "Made for a wider screen" with **Open anyway**. Opened anyway, the panel moves under the graph.
+
 ## The house kit
 
 Every installed app gets Istota's tokens, a small client library and a set of components (list, table, form, button, dialog, chart). The kit applies your theme and text size before the first paint, keeps forms usable with the on-screen keyboard, and follows the same touch-target, type-size and layout rules as the rest of the interface. An app that does not use the kit still gets its sandbox and its permissions; the kit is what makes it look and feel like the rest of Istota.
