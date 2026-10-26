@@ -215,7 +215,9 @@ class TestBudgetLow:
         made = _start(config, a, now=_later())
         with db.get_db(config.db_path) as conn:
             db.insert_task_usage(
-                conn, usage=BrainUsage(has_totals=True, cost_usd=0.8), task_id=made.task_id,
+                # Not on the wake's task: one wake costing 0.8 of 1.0 leaves less
+                # than a wake's cost, and the floor would pause it (ISSUE-853).
+                conn, usage=BrainUsage(has_totals=True, cost_usd=0.8), task_id=None,
                 user_id="alice", source_type="assignment", assignment_id=a,
             )
         _end(config, made)
@@ -244,7 +246,7 @@ class TestCompletionAndClosed:
         assert "quotes.csv has the rows" in row["body"] and row["actionable"] == 1
 
         with db.get_db(config.db_path) as conn:
-            lifecycle.close(conn, a, user_id="alice", completed=True)
+            lifecycle.close(conn, config, a, user_id="alice", completed=True)
         assert _rows(config, "completion")[0]["state"] == "resolved"
         [closed] = _rows(config, "closed")
         assert closed["state"] == "open" and closed["severity"] == "success"
@@ -257,7 +259,7 @@ class TestCompletionAndClosed:
     def test_a_rejection_clears_the_proposal(self, config, notify):
         a = self._proposed(config)
         with db.get_db(config.db_path) as conn:
-            lifecycle.close(conn, a, user_id="alice", completed=False, missing="a fourth quote")
+            lifecycle.close(conn, config, a, user_id="alice", completed=False, missing="a fourth quote")
         assert _rows(config, "completion")[0]["state"] == "resolved"
         assert _rows(config, "closed") == []
 
@@ -511,7 +513,9 @@ class TestAbandon:
         _handoff(config, made)
         with db.get_db(config.db_path) as conn:
             db.insert_task_usage(
-                conn, usage=BrainUsage(has_totals=True, cost_usd=0.8), task_id=made.task_id,
+                # Not on the wake's task: one wake costing 0.8 of 1.0 leaves less
+                # than a wake's cost, and the floor would pause it (ISSUE-853).
+                conn, usage=BrainUsage(has_totals=True, cost_usd=0.8), task_id=None,
                 user_id="alice", source_type="assignment", assignment_id=a,
             )
         _attempt(config, made, "acme.example/quote", "ok")

@@ -13,6 +13,13 @@ frame, which `usage.telemetry` records with `has_totals = 0`. Its cost counts
 as zero; `max_wakes` still binds, so an unmeasured brain cannot run forever. A
 wake that ended `not_active` never reached a brain and is not counted.
 
+**The floor for one more wake** (ISSUE-853). A wake may overshoot the budget,
+so starting one with less left than any wake has ever cost is certain to.
+`is_spent` therefore treats the budget as spent once what is left is under the
+cheapest measured wake this assignment has run (`cheapest_wake_usd`);
+with no measured wake there is no floor. One predicate, so the pre-wake check,
+the after-wake check and a top-up's resume agree.
+
 The pre-wake and post-wake enforcement steps that move state belong to `wakes`
 and `lifecycle`; this module only reads and checks (`check_before_wake` is the
 pre-wake check).
@@ -42,6 +49,8 @@ class Totals:
     unmeasured_wakes: int
     billed_input_tokens: int
     output_tokens: int
+    #: The cost of the cheapest measured wake; None before there is one.
+    cheapest_wake_usd: float | None = None
 
 
 def totals(conn: sqlite3.Connection, assignment_id: int) -> Totals:
@@ -68,12 +77,29 @@ def totals(conn: sqlite3.Connection, assignment_id: int) -> Totals:
         """,
         (assignment_id,),
     ).fetchone()
+    # From the usage rows rather than `assignment_wakes.cost_usd`, so the
+    # after-wake check counts the wake being finished, whose row is not yet
+    # written. A running wake has no measured row and is left out, and so is a
+    # zero sum, which a measured row can carry when the brain reported no cost.
+    cheapest = conn.execute(
+        """
+        SELECT MIN(cost) FROM (
+            SELECT SUM(u.cost_usd) AS cost FROM assignment_wakes w
+            JOIN task_usage u ON u.assignment_id = w.assignment_id AND u.task_id = w.task_id
+            WHERE w.assignment_id = ? AND COALESCE(w.outcome, '') != 'not_active'
+            GROUP BY w.id
+            HAVING MAX(u.has_totals) = 1 AND SUM(u.cost_usd) > 0
+        )
+        """,
+        (assignment_id,),
+    ).fetchone()
     return Totals(
         cost_usd=float(usage["cost"]),
         wakes=store.count_wakes(conn, assignment_id),
         unmeasured_wakes=int(unmeasured[0]),
         billed_input_tokens=int(usage["input"]),
         output_tokens=int(usage["output"]),
+        cheapest_wake_usd=float(cheapest[0]) if cheapest[0] is not None else None,
     )
 
 
@@ -88,10 +114,13 @@ def remaining(assignment: store.Assignment, spent: Totals) -> dict[str, Any]:
 
 
 def is_spent(assignment: store.Assignment, spent: Totals) -> bool:
-    """Whether cost or wakes have reached the charter's cap."""
+    """Whether cost or wakes have reached the charter's cap, or what is left
+    is under the cheapest wake so far."""
     max_cost = float(assignment.budget.get("max_cost_usd") or 0.0)
     max_wakes = int(assignment.budget.get("max_wakes") or 0)
-    return spent.cost_usd >= max_cost or spent.wakes >= max_wakes
+    left = max_cost - spent.cost_usd
+    floor = spent.cheapest_wake_usd or 0.0
+    return left <= 0 or left < floor or spent.wakes >= max_wakes
 
 
 def check_before_wake(conn: sqlite3.Connection, assignment: store.Assignment) -> bool:

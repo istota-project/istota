@@ -39,7 +39,7 @@ The host runs every check after every wake. A link in the folder is not followed
 
 ## What happens while it runs
 
-The scheduler wakes an assignment when its next wake is due, when you leave it a note or report a step done, and once at the deadline. A completion it proposed holds the deadline wake back until you answer it: confirming closes the assignment, and rejecting it lets the deadline wake run, if the deadline has not had one. A wake is an ordinary task on its own worker lane: its prompt carries the charter, the done-when board, open hand-offs, what arrived since the last wake, the attempt log, the scratchpad and the last wakes' summaries. Its answer is not posted anywhere; it is kept as the wake's summary.
+The scheduler wakes an assignment when its next wake is due, when you leave it a note, report a step done or confirm an item, and once at the deadline. A completion it proposed holds the deadline wake back until you answer it: confirming closes the assignment, and rejecting it lets the deadline wake run, if the deadline has not had one. A wake is an ordinary task on its own worker lane: its prompt carries the charter, the done-when board, open hand-offs, what arrived since the last wake, the attempt log, the scratchpad and the last wakes' summaries. Its answer is not posted anywhere; it is kept as the wake's summary.
 
 A wake ends by asking for the next one: in some hours, at a time, or not until you act. It can hand you a step ("photograph the furnace label", with what to report back and a due date), record what it tried and how it went, report a milestone, and propose completion. Two wakes are at least 15 minutes apart by default.
 
@@ -65,6 +65,8 @@ A pause you set yourself waits for you to resume it. A wake running when you pau
 
 When a wake proposes completion, the host runs every check first. If any mechanical item fails, the proposal is refused and the next wake is told which items. Otherwise the assignment completes on its own if the charter allows that and nothing is left to confirm; if not, it waits for you to confirm it or say what is missing.
 
+You can also finish it without a wake. Confirming the last item you were asked to confirm completes the assignment when every mechanical check passes at that moment, since your confirmation is the answer a proposal would ask for. `close --completed` does the same when nothing has been proposed, from a sleeping assignment or one waiting on you, and names the failing items if any check fails.
+
 ## Notices
 
 What needs you reaches the [notifications](notifications.md) bell, under the push category "Assignments". Routine wakes post nothing.
@@ -84,7 +86,7 @@ A notice's text may quote what a wake wrote, such as the step or the report, and
 
 ## Budget and cost
 
-The dollar budget is counted from the usage records of the assignment's wakes, which the model cannot write. A wake whose cost could not be measured counts as zero; `show` says how many there were, and the wake cap still binds. Tokens are recorded but not limited. The budget can be overshot by at most one wake, since a running wake is not stopped for cost.
+The dollar budget is counted from the usage records of the assignment's wakes, which the model cannot write. A wake whose cost could not be measured counts as zero; `show` says how many there were, and the wake cap still binds. Tokens are recorded but not limited. The budget can be overshot by at most one wake, since a running wake is not stopped for cost. To keep that rare, the host does not start a wake when less is left than the cheapest measured wake of this assignment has cost; the assignment pauses for budget instead, and a top-up must leave at least that much to resume it; `topup` says so when it does not. Before any wake has been measured there is no such floor.
 
 Each wake's time limit is the charter's per-wake minutes, never past `task_timeout_minutes`. The per-wake turn limit applies on the native brain only.
 
@@ -93,6 +95,8 @@ Each wake's time limit is the charter's per-wake minutes, never past `task_timeo
 All verbs are `istota-skill assignment <verb>`, normally run by the bot for you. `<id>` is the number or the slug.
 
 From your own turn: `create`, `set`, `item add|remove|confirm`, `frozen add|remove`, `activate`, `pause`, `resume`, `abandon`, `wake`, `topup --usd N | --wakes N`, `note`, `handoff done <id> <action-id> --report`, and `close --completed | --reject "what is missing"`. From any task of yours: `list` and `show`. From a wake, on its own assignment only: `next`, `handoff`, `report`, `attempt` and `complete`.
+
+`show` and the replies of the other verbs include `wake_due`: why the scheduler will wake the assignment on its next pass (`inbox`, `time` or `deadline`), or empty when it will not. An assignment waiting on you that shows `inbox` has already been answered and is about to wake.
 
 Errors are `{"status": "error", "error": "<code>", "message": "..."}`:
 
@@ -105,6 +109,8 @@ Errors are `{"status": "error", "error": "<code>", "message": "..."}`:
 | `not_a_wake` | A wake-only verb from something other than a running wake |
 | `wrong_assignment` | A wake named another assignment |
 | `bad_state` | Not allowed in the current state, which the error names |
+| `not_met` | `close --completed` with nothing proposed, while a mechanical check fails; the message names the items |
+| `items_changed` | The assignment or its done-when list changed while `close` was checking it; run it again |
 | `over_ceiling` | A budget above the deployment's ceiling |
 | `too_many_active` | The user is at the limit of running assignments |
 | `invalid_charter` | A charter field is missing or not valid |

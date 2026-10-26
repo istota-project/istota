@@ -12,7 +12,14 @@ item or hand-off that is not this assignment's), `bad_state` (with the current
 state), `invalid_input` (an empty or overlong note or report),
 `deadline_passed` and `confirmation_pending` (from `hold_activation`),
 `not_a_wake` (a wake's write on a wake that is not this task's or has ended),
-and the `CharterError` codes passed through from the checks.
+`not_met` and `items_changed` (from `close --completed` with no proposal), and
+the `CharterError` codes passed through from the checks.
+
+**The user's own "done" needs no wake** (ISSUE-853). Confirming the last open
+confirmed item, or `close --completed` with no proposal, completes the
+assignment when every mechanical item passes. The checks run before the
+transaction opens (no file I/O under the writer lock), and the transaction
+applies them only to the same done-when list (`validators.items_key`).
 
 Trusted inbox events are written here for what the user did after activation,
 so the next wake sees it. A draft has no wakes yet, and its charter is the
@@ -42,12 +49,12 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable
 
 from istota import db
-from istota.assignments import budget, charter, store
+from istota.assignments import budget, charter, store, validators
 from istota.notifications.resolvers import assignment as notices
 from istota.relay.requests import write_transaction
 
 if TYPE_CHECKING:
-    from istota.config import AssignmentsConfig
+    from istota.config import AssignmentsConfig, Config
 
 TERMINAL_STATES = ("completed", "abandoned")
 NOTE_MAX_CHARS = 4000
@@ -491,8 +498,85 @@ def topup(
         return store.get_assignment(conn, assignment_id)
 
 
+#: Where `close --completed` may complete an assignment that has not proposed it.
+CLOSE_EARLY_STATES = ("sleeping", "waiting")
+
+
+def _proposal_pending(assignment: store.Assignment) -> bool:
+    return assignment.state == "waiting" and "completion" in assignment.waiting_on
+
+
+class _Checked:
+    """The mechanical items' results, run with no transaction open."""
+
+    def __init__(self, key: tuple, results: dict):
+        self.key = key
+        self.results = results
+
+
+def _check_mechanical(
+    conn: sqlite3.Connection, config: "Config", assignment_id: int, user_id: str,
+) -> _Checked | None:
+    # `write_transaction` never commits, so a caller still in a transaction
+    # holds the writer lock; reading the mount then would stall the scheduler.
+    if conn.in_transaction:
+        return None
+    assignment = store.get_assignment(conn, assignment_id, user_id=user_id)
+    if assignment is None:
+        return None
+    items = store.list_items(conn, assignment_id)
+    return _Checked(validators.items_key(items), validators.run_mechanical(config, assignment, items))
+
+
+def record_item_results(
+    conn: sqlite3.Connection, assignment_id: int, results: dict, checked_at: str,
+    *, wake_id: int | None = None,
+) -> list[int]:
+    """Record every mechanical item's result, with an `item_status` event on
+    a change. Returns the ids that moved to `passing`."""
+    newly_passing: list[int] = []
+    for item in store.list_items(conn, assignment_id):
+        if item.kind != "mechanical":
+            continue
+        result = results[item.id]
+        store.set_item_status(conn, item.id, result.status, detail=result.detail, checked_at=checked_at)
+        if result.status != item.status:
+            store.insert_event(
+                conn, assignment_id, kind="item_status", actor="system", wake_id=wake_id,
+                payload={"item_id": item.id, "from": item.status, "to": result.status,
+                         "detail": result.detail},
+            )
+        if result.status == "passing" and item.status != "passing":
+            newly_passing.append(item.id)
+    return newly_passing
+
+
+def _failing(items: list[store.Item], checked: _Checked) -> list[int]:
+    return [
+        item.id for item in items
+        if item.kind == "mechanical" and checked.results[item.id].status != "passing"
+    ]
+
+
+def _complete_by_user(
+    conn: sqlite3.Connection, assignment_id: int, now: str, *, via: str | None,
+) -> None:
+    """→ completed on the user's word: every open confirmed item confirmed."""
+    for item in store.list_items(conn, assignment_id):
+        if item.kind == "confirmed" and item.status != "confirmed":
+            store.set_item_status(conn, item.id, "confirmed", detail="confirmed at close", checked_at=now)
+    store.set_state(conn, assignment_id, "completed", reason="user")
+    store.update_assignment(conn, assignment_id, next_wake_at=None, closed_at=now)
+    store.insert_event(
+        conn, assignment_id, kind="completed", actor="user", payload={"via": via} if via else None,
+    )
+    # The bell row only, no alert delivery: the user is in the chat that closed it.
+    notices.write_notices(conn, assignment_id, [("closed", None)])
+
+
 def close(
     conn: sqlite3.Connection,
+    config: "Config",
     assignment_id: int,
     *,
     user_id: str,
@@ -503,23 +587,45 @@ def close(
 
     Confirming marks every open confirmed item confirmed and → completed.
     Rejecting writes a trusted `completion_rejected` event and → sleeping, due now.
+
+    `completed` also works with no proposal, from sleeping or a wait on the
+    user, when every mechanical item passes now (`not_met` names the ones that
+    do not): the user may stop once everything is met.
     """
+    checked = None
+    if completed:
+        found = store.get_assignment(conn, assignment_id, user_id=user_id)
+        if found is not None and not _proposal_pending(found) and found.state in CLOSE_EARLY_STATES:
+            checked = _check_mechanical(conn, config, assignment_id, user_id)
     with write_transaction(conn):
         assignment = _load(conn, assignment_id, user_id)
-        if assignment.state != "waiting" or "completion" not in assignment.waiting_on:
+        now = db.iso_utc_now()
+        if _proposal_pending(assignment):
+            pass
+        elif completed and assignment.state in CLOSE_EARLY_STATES:
+            items = store.list_items(conn, assignment_id)
+            if checked is None or checked.key != validators.items_key(items):
+                raise TransitionError(
+                    "items_changed", "the assignment changed while its checks ran; try again",
+                    state=assignment.state,
+                )
+            failing = _failing(items, checked)
+            if failing:
+                raise TransitionError(
+                    "not_met",
+                    "these mechanical items are not passing: " + ", ".join(str(i) for i in failing),
+                    state=assignment.state,
+                )
+            record_item_results(conn, assignment_id, checked.results, now)
+            _complete_by_user(conn, assignment_id, now, via="close")
+            notices.settle(conn, assignment_id)
+            return store.get_assignment(conn, assignment_id)
+        else:
             raise TransitionError(
                 "bad_state", "this assignment has not proposed completion", state=assignment.state,
             )
-        now = db.iso_utc_now()
         if completed:
-            for item in store.list_items(conn, assignment_id):
-                if item.kind == "confirmed" and item.status != "confirmed":
-                    store.set_item_status(conn, item.id, "confirmed", detail="confirmed at close", checked_at=now)
-            store.set_state(conn, assignment_id, "completed", reason="user")
-            store.update_assignment(conn, assignment_id, next_wake_at=None, closed_at=now)
-            store.insert_event(conn, assignment_id, kind="completed", actor="user")
-            # The bell row only, no alert delivery: the user is in the chat that closed it.
-            notices.write_notices(conn, assignment_id, [("closed", None)])
+            _complete_by_user(conn, assignment_id, now, via=None)
         else:
             text = _text(missing, "what is missing")
             store.insert_inbox_event(
@@ -537,10 +643,28 @@ def close(
 # ---------------------------------------------------------------------------
 
 
+def _last_open_confirmed(conn: sqlite3.Connection, assignment_id: int, item_id: int) -> bool:
+    return not any(
+        item.kind == "confirmed" and item.status != "confirmed" and item.id != item_id
+        for item in store.list_items(conn, assignment_id)
+    )
+
+
 def confirm_item(
-    conn: sqlite3.Connection, assignment_id: int, *, user_id: str, item_id: int,
+    conn: sqlite3.Connection, config: "Config", assignment_id: int, *, user_id: str, item_id: int,
 ) -> store.Item:
-    """Mark a confirmed item confirmed. Mechanical items are the validators' alone."""
+    """Mark a confirmed item confirmed. Mechanical items are the validators' alone.
+
+    The last open confirmed item, on an activated assignment whose mechanical
+    items all pass now, completes it: the user's confirmation is the answer a
+    proposal would ask for, so no wake is spent proposing it (ISSUE-853).
+    Otherwise the next wake reads an `item_confirmed` inbox event.
+    """
+    checked = None
+    found = store.get_assignment(conn, assignment_id, user_id=user_id)
+    if (found is not None and found.state not in ("draft", *TERMINAL_STATES)
+            and _last_open_confirmed(conn, assignment_id, item_id)):
+        checked = _check_mechanical(conn, config, assignment_id, user_id)
     with write_transaction(conn):
         assignment = _load(conn, assignment_id, user_id)
         _require_live(assignment, "confirm an item of")
@@ -553,9 +677,18 @@ def confirm_item(
             )
         if item.status == "confirmed":
             return item
-        store.set_item_status(conn, item.id, "confirmed", detail="confirmed by the user", checked_at=db.iso_utc_now())
+        now = db.iso_utc_now()
+        store.set_item_status(conn, item.id, "confirmed", detail="confirmed by the user", checked_at=now)
         store.insert_event(conn, assignment_id, kind="item_confirmed", actor="user", payload={"item_id": item.id})
-        if assignment.state != "draft":
+        if assignment.state == "draft":
+            return store.get_item(conn, assignment_id, item_id)
+        items = store.list_items(conn, assignment_id)
+        if (checked is not None and checked.key == validators.items_key(items)
+                and _last_open_confirmed(conn, assignment_id, item_id) and not _failing(items, checked)):
+            record_item_results(conn, assignment_id, checked.results, now)
+            _complete_by_user(conn, assignment_id, now, via="item_confirm")
+            notices.settle(conn, assignment_id)
+        else:
             store.insert_inbox_event(
                 conn, assignment_id, kind="item_confirmed", trusted=True,
                 payload={"item_id": item.id, "text": item.text},
