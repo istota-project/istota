@@ -38,6 +38,7 @@ import itertools
 import json
 import logging
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -311,6 +312,11 @@ _USAGE_LIMIT_MARKERS = (
     "usage limit reached",
     "Claude usage limit",
 )
+
+#: The welcome header's billing line under "api_key" ("Opus 5.5 · API Usage
+#: Billing"). Its "Billing" is the broad detector's keyword, so the line is
+#: left out of what that detector reads.
+_BILLING_HEADER_RE = re.compile(r"^.*·\s*API Usage Billing\s*$", re.MULTILINE)
 
 # Flags the interactive TUI rejects vs the headless `-p` path. Stage 1 verifies
 # this against the pinned CLI; the prototype passed --effort and
@@ -1659,7 +1665,9 @@ class TmuxClaudeBrain:
             # Marker substrings first (fast, config-tunable); then the shared
             # keyword detector as a CLI-reword-resilient fallback, so a weekly /
             # Opus limit (or a future scope word) is caught without a marker edit.
-            if any(m in pane for m in self._p.usage_limit_markers) or is_usage_limit_error(pane):
+            if any(m in pane for m in self._p.usage_limit_markers) or is_usage_limit_error(
+                _BILLING_HEADER_RE.sub("", pane)
+            ):
                 return ("usage_limit", pane)
             if any(m in pane for m in self._p.error_markers):
                 return ("error", pane)
