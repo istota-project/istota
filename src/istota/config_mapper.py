@@ -167,7 +167,7 @@ def report_problem(
     path = tuple(str(segment) for segment in path)
     rendered = tuple(_shown(path, arg.raw) if isinstance(arg, Value) else arg for arg in args)
     if log:
-        logger.log(level, message, *rendered)
+        logger.log(level, message, *rendered, extra={"config_problem": kind})
     problems = _collector.get()
     if problems is not None:
         problems.append({
@@ -175,6 +175,21 @@ def report_problem(
             "path": path,
             "message": message % rendered if rendered else message,
         })
+
+
+def _below_error_document_problem(record: logging.LogRecord) -> bool:
+    return not (hasattr(record, "config_problem") and record.levelno < logging.ERROR)
+
+
+def drop_logged_problem_warnings() -> None:
+    """Stop logging `report_problem` warnings in this process; errors still log.
+
+    For a skill CLI (ISSUE-839): the problems are about the document, which
+    the daemon parses too, so its log and the admin view still carry them. The
+    logger's other warnings, about database state only this process read, stay.
+    """
+    if _below_error_document_problem not in logger.filters:
+        logger.addFilter(_below_error_document_problem)
 
 # Strings accepted for a bool-declared field. TOML has real booleans, so a
 # string only arrives when an operator quoted one or a generator emitted an
