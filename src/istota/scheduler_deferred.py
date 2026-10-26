@@ -163,8 +163,8 @@ def _inherited_model(
     time it is stored, so there is usually no intent left to carry; the
     exception is an operator-declared portable alias that the writing brain's
     table had no entry for, which is passed through by name and would be
-    re-resolvable here. Carrying it would mean reaching into the executor for
-    ``config_alias_portable_names``, and the outcome for the narrow case is the
+    re-resolvable here. Carrying it would mean reading the alias table's
+    ``portable_names`` here too, and the outcome for the narrow case is the
     child's own default either way, so the deviation is stated rather than
     closed.
 

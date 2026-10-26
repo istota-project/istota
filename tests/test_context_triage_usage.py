@@ -356,3 +356,23 @@ class TestTriageBudget:
         )
 
         assert result == history
+
+
+class TestTheCliTriageModel:
+    """The CLI path resolves `selection_model` for the CLI that runs it
+    (`claude_code.cli_model_name`, the resolver in the `anthropic` namespace),
+    with no brain built to ask."""
+
+    def test_an_anthropic_override_of_the_tier_reaches_the_cli(self):
+        from istota.brain import set_alias_overrides
+
+        set_alias_overrides({"fast": {"anthropic": "sonnet", "openai_compat": "z-ai/glm-5"}})
+        seen = {}
+
+        def _fake(prompt, model, *args, **kwargs):
+            seen["model"] = model
+            return None
+
+        with patch.object(context, "_claude_cli_triage", side_effect=_fake):
+            context._run_triage("p", _config(selection_model="fast"), None, None, "Context")
+        assert seen["model"] == claude_code.SONNET

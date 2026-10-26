@@ -141,6 +141,17 @@ class TestLatest:
         assert set(cat.refs()) == {"anthropic/a", "openrouter/x/b"}
         assert [m.id for m in cat.models("openrouter")] == ["x/b"]
 
+    def test_an_openrouter_id_spelling_a_shipped_ref_does_not_replace_it(self):
+        """`anthropic/o2` is OpenRouter's id and also the shipped record's ref;
+        `models()` takes each record by its ref, so the family stays intact."""
+        cat = build_catalogue(
+            shipped=[_m("o1", family="opus", released="2026-01-01"),
+                     _m("o2", family="opus", released="2026-05-01")],
+            discovered={"openrouter": [_m("anthropic/o2", provider="openrouter")]},
+        )
+        assert cat.latest("opus").id == "o2"
+        assert {m.provider for m in cat.models("anthropic")} == {"anthropic"}
+
 
 class TestModuleSnapshot:
     def teardown_method(self):

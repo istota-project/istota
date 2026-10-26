@@ -1,0 +1,447 @@
+"""One resolver for every model selection.
+
+A selection is what a person or a config wrote: an alias (``smart``,
+``opus``, an operator's own), a qualified reference (``provider/id``), a bare
+id, or, in chat commands only, a pattern. ``resolve_selection`` turns it into
+a ``Resolution`` (the ref, its catalogue record, the effort asked for, and
+which step matched) or a ``ResolveError`` with a code. Every surface asks it:
+the brains' ``resolve_alias`` family, the fallback crossing rule, doctor.
+
+Order, after splitting a trailing ``:effort`` with ``split_effort``:
+
+1. **Alias**: an operator override for the namespace, else ``default``, the
+   tiers (``fast`` / ``general`` / ``smart``, which name a family) and the
+   family shortcuts (``opus`` / ``sonnet`` / ``haiku``: the newest current
+   ``anthropic`` model of that family). An override's target is itself a
+   selection, resolved one level deep without operator aliases.
+2. **The preferred provider's own id**: an exact match among the models of the
+   provider the brain uses. This sits before the ref step so a stored bare id
+   keeps running where it ran: an OpenRouter id such as
+   ``anthropic/claude-opus-5`` is OpenRouter's own id on a native brain that
+   uses OpenRouter, not a reference to the built-in ``anthropic`` provider.
+3. **Qualified reference**: the first ``/`` segment names a configured
+   provider and the rest is that provider's id. A ref the provider does not
+   list falls through to step 4 before it is refused.
+4. **Bare id**: an exact, case-insensitive match on ``id`` across providers.
+   Several matches prefer the brain's provider, then refuse as ambiguous.
+5. **Pattern** (``allow_patterns`` only): a case-insensitive substring of
+   ``id`` or ``name``. Matches narrow to the preferred provider when it has
+   any; one family (or one model) picks the undated, newest one; anything
+   wider refuses as ambiguous and lists candidates.
+
+Then the refusals: ``model_not_runnable`` (``for_brain`` cannot run the
+ref), ``model_not_enabled`` (``enabled_only`` and the ref is outside the
+enabled set; aliases are exempt, because the operator wrote them) and
+``no_tools`` (``needs_tools`` and the model has no tool calling).
+
+The resolver is strict. The brains stay lenient: a selection it cannot
+resolve is still sent as written, as it always was, and the strict answer is
+doctor's to report.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import re
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+
+from istota.llm.catalog import SHIPPED_PROVIDER, Catalogue, ModelInfo, current_catalogue
+from istota.llm.providers import brain_can_run, provider_kinds
+
+from ._aliases import split_effort
+from ._roles import AliasTable, current_alias_table
+
+#: The family shortcuts: each is the newest current `anthropic` model of it.
+FAMILY_SHORTCUTS: tuple[str, ...] = ("opus", "sonnet", "haiku")
+
+#: The default tier targets, in code: names, not ids.
+DEFAULT_TIER_TARGETS: dict[str, str] = {"fast": "haiku", "general": "sonnet", "smart": "opus"}
+
+#: The reserved alias for "the brain's own configured default".
+DEFAULT_ALIAS = "default"
+
+SOURCES = ("alias", "ref", "id", "pattern")
+ERROR_CODES = ("unknown", "ambiguous", "model_not_runnable", "model_not_enabled", "no_tools")
+
+#: The alias namespace each brain kind resolves names in.
+BRAIN_NAMESPACES: dict[str, str] = {
+    "claude_code": "anthropic",
+    "tmux_claude": "anthropic",
+    "native": "openai_compat",
+}
+
+_DATED_ID = re.compile(r"-\d{8}\Z")
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """A selection resolved.
+
+    ``ref`` and ``info`` are empty for ``brain_default``: the selection named
+    the brain's own configured model (``default``, or a tier on a namespace
+    whose tiers mean that), which only the brain knows.
+    """
+
+    ref: str
+    info: ModelInfo | None
+    effort_requested: str | None
+    source: str
+    alias: str | None = None
+    brain_default: bool = False
+
+    @property
+    def provider(self) -> str:
+        return self.ref.split("/", 1)[0] if self.ref else ""
+
+
+@dataclass(frozen=True)
+class ResolveError:
+    """Why a selection did not resolve.
+
+    ``target`` is the alias target an override named when that is what failed,
+    so a lenient caller can still send it as written.
+    """
+
+    code: str
+    selection: str
+    message: str
+    candidates: tuple[str, ...] = ()
+    effort_requested: str | None = None
+    target: str | None = None
+
+
+# --- the catalogue index -----------------------------------------------------
+
+_last_index: tuple[Catalogue, dict] | None = None
+
+
+def _index(catalogue: Catalogue) -> dict:
+    """``{"models": (...), "by_ref": {lower ref: info}, "by_id": {lower id: [info]}}``,
+    cached for the last catalogue seen (snapshots are immutable)."""
+    global _last_index
+    cached = _last_index
+    if cached is not None and cached[0] is catalogue:
+        return cached[1]
+    models = catalogue.models()
+    by_ref: dict[str, ModelInfo] = {}
+    by_id: dict[str, list[ModelInfo]] = {}
+    for info in models:
+        by_ref[info.ref.lower()] = info
+        by_id.setdefault(info.id.lower(), []).append(info)
+    index = {"models": models, "by_ref": by_ref, "by_id": by_id}
+    _last_index = (catalogue, index)
+    return index
+
+
+def latest_in_family(catalogue: Catalogue, family: str) -> ModelInfo | None:
+    """The newest current `anthropic` model of ``family``: what a shortcut means."""
+    return catalogue.latest(family, SHIPPED_PROVIDER)
+
+
+# --- resolution --------------------------------------------------------------
+
+
+def _error(code, selection, message, *, candidates=(), effort=None, target=None) -> ResolveError:
+    return ResolveError(
+        code=code, selection=selection, message=message,
+        candidates=tuple(candidates)[:20], effort_requested=effort, target=target,
+    )
+
+
+def _family(catalogue, name, selection, effort, alias) -> Resolution | ResolveError:
+    info = latest_in_family(catalogue, name)
+    if info is None:
+        return _error("unknown", selection, f"no current {name} model in the catalogue", effort=effort)
+    return Resolution(ref=info.ref, info=info, effort_requested=effort, source="alias", alias=alias)
+
+
+def _rank(info: ModelInfo) -> tuple:
+    # Undated before dated, then newest, then the id for a stable answer.
+    return (0 if _DATED_ID.search(info.id) else 1, info.released or "", info.id)
+
+
+def _model_step(
+    base: str, selection: str, effort, catalogue, *, kinds, prefer, allow_patterns, pool,
+) -> Resolution | ResolveError:
+    """Steps 2 to 5 for a base with no alias meaning."""
+    index = _index(catalogue)
+    lowered = base.lower()
+
+    if prefer:
+        for info in index["by_id"].get(lowered, ()):
+            if info.provider == prefer:
+                return Resolution(ref=info.ref, info=info, effort_requested=effort, source="id")
+
+    head, sep, tail = base.partition("/")
+    if sep and tail and head in kinds:
+        info = index["by_ref"].get(lowered)
+        if info is not None:
+            return Resolution(ref=info.ref, info=info, effort_requested=effort, source="ref")
+
+    matches = list(index["by_id"].get(lowered, ()))
+    if len(matches) == 1:
+        info = matches[0]
+        return Resolution(ref=info.ref, info=info, effort_requested=effort, source="id")
+    if len(matches) > 1:
+        preferred = [m for m in matches if m.provider == prefer]
+        if len(preferred) == 1:
+            info = preferred[0]
+            return Resolution(ref=info.ref, info=info, effort_requested=effort, source="id")
+        return _error(
+            "ambiguous", selection, f"{base!r} is an id of several providers",
+            candidates=sorted(m.ref for m in matches), effort=effort,
+        )
+
+    if sep and tail and head in kinds:
+        return _error("unknown", selection, f"provider {head!r} lists no model {tail!r}", effort=effort)
+
+    if allow_patterns:
+        found = [
+            m for m in pool
+            if not m.deprecated and (lowered in m.id.lower() or lowered in (m.name or "").lower())
+        ]
+        if prefer and any(m.provider == prefer for m in found):
+            found = [m for m in found if m.provider == prefer]
+        if found:
+            providers = {m.provider for m in found}
+            families = {m.family for m in found}
+            one_family = len(providers) == 1 and len(families) == 1 and None not in families
+            if len(found) == 1 or one_family:
+                info = max(found, key=_rank)
+                return Resolution(ref=info.ref, info=info, effort_requested=effort, source="pattern")
+            return _error(
+                "ambiguous", selection, f"{base!r} matches several models",
+                candidates=sorted(m.ref for m in found), effort=effort,
+            )
+
+    return _error("unknown", selection, f"no model {base!r} in the catalogue", effort=effort)
+
+
+def _alias_step(
+    name: str, selection: str, effort, catalogue, *, aliases, namespace, kinds, prefer,
+) -> Resolution | ResolveError | None:
+    """Step 1. ``None`` when ``name`` is no alias in ``namespace``."""
+    target = aliases.target(name, namespace) if aliases is not None else None
+    if target is not None:
+        raw = target.model
+        if not raw:
+            # Effort-only: keep the alias's own default target.
+            raw = DEFAULT_TIER_TARGETS.get(name) or (name if name in FAMILY_SHORTCUTS else "")
+            if not raw:
+                return Resolution(
+                    ref="", info=None, effort_requested=effort or target.effort,
+                    source="alias", alias=name, brain_default=True,
+                )
+            if namespace != BRAIN_NAMESPACES["claude_code"] and name in DEFAULT_TIER_TARGETS:
+                return Resolution(
+                    ref="", info=None, effort_requested=effort or target.effort,
+                    source="alias", alias=name, brain_default=True,
+                )
+        target_base, target_effort = split_effort(raw)
+        chosen_effort = effort or target.effort or target_effort
+        inner = _alias_step(
+            target_base.lower(), selection, chosen_effort, catalogue,
+            aliases=None, namespace=namespace, kinds=kinds, prefer=prefer,
+        )
+        if inner is None:
+            inner = _model_step(
+                target_base, selection, chosen_effort, catalogue,
+                kinds=kinds, prefer=prefer, allow_patterns=False, pool=(),
+            )
+        if isinstance(inner, ResolveError):
+            return _error(
+                inner.code, selection, f"alias {name!r}: {inner.message}",
+                candidates=inner.candidates, effort=chosen_effort, target=target_base,
+            )
+        return Resolution(
+            ref=inner.ref, info=inner.info, effort_requested=inner.effort_requested,
+            source="alias", alias=name, brain_default=inner.brain_default,
+        )
+
+    if name == DEFAULT_ALIAS:
+        return Resolution(
+            ref="", info=None, effort_requested=effort, source="alias", alias=name, brain_default=True,
+        )
+    if name in DEFAULT_TIER_TARGETS:
+        if namespace == BRAIN_NAMESPACES["claude_code"]:
+            return _family(catalogue, DEFAULT_TIER_TARGETS[name], selection, effort, name)
+        # On native the tiers mean its one configured model unless remapped (NB-3).
+        return Resolution(
+            ref="", info=None, effort_requested=effort, source="alias", alias=name, brain_default=True,
+        )
+    if name in FAMILY_SHORTCUTS:
+        return _family(catalogue, name, selection, effort, name)
+    return None
+
+
+def resolve_selection(
+    selection: str,
+    catalogue: Catalogue | None = None,
+    *,
+    aliases: AliasTable | None = None,
+    for_brain: str | None = None,
+    enabled_only: bool = False,
+    enabled: Iterable[str] | None = None,
+    namespace: str | None = None,
+    prefer_provider: str | None = None,
+    providers: Mapping[str, object] | None = None,
+    native_provider: str | None = None,
+    use_aliases: bool = True,
+    allow_patterns: bool = False,
+    needs_tools: bool = False,
+) -> Resolution | ResolveError:
+    """Resolve one selection; see the module docstring for the order.
+
+    ``catalogue`` and ``aliases`` default to the process's snapshots.
+    ``namespace`` defaults to ``for_brain``'s, else ``anthropic``; the
+    preferred provider defaults to the brain's (``anthropic`` for the CLI
+    brains, ``native_provider`` for native). ``providers`` is the configured
+    providers (``id -> spec``, config or kind); the built-ins are always in it.
+    ``enabled`` is the glob list ``enabled_only`` checks against. Never raises.
+    """
+    text = (selection or "").strip() if isinstance(selection, str) else ""
+    if not text:
+        return _error("unknown", "", "no model named")
+    catalogue = catalogue if catalogue is not None else current_catalogue()
+    if aliases is None and use_aliases:
+        aliases = current_alias_table()
+    kinds = provider_kinds(providers)
+    namespace = namespace or BRAIN_NAMESPACES.get(for_brain or "", "anthropic")
+    if prefer_provider is None:
+        if for_brain in ("claude_code", "tmux_claude"):
+            prefer_provider = SHIPPED_PROVIDER
+        elif for_brain == "native":
+            prefer_provider = native_provider
+
+    base, effort = split_effort(text)
+    enabled_set: frozenset[str] | None = None
+    if enabled_only:
+        enabled_set = frozenset(enabled_refs(catalogue, enabled or ()))
+
+    result = None
+    if use_aliases:
+        result = _alias_step(
+            base.lower(), text, effort, catalogue,
+            aliases=aliases, namespace=namespace, kinds=kinds, prefer=prefer_provider,
+        )
+    if result is None:
+        pool = _index(catalogue)["models"]
+        if enabled_set is not None:
+            pool = tuple(m for m in pool if m.ref in enabled_set)
+        result = _model_step(
+            base, text, effort, catalogue,
+            kinds=kinds, prefer=prefer_provider, allow_patterns=allow_patterns, pool=pool,
+        )
+    if isinstance(result, ResolveError) or result.brain_default:
+        return result
+
+    if for_brain and not brain_can_run(for_brain, result.ref, providers, native_provider=native_provider):
+        return _error(
+            "model_not_runnable", text, f"the {for_brain} brain cannot run {result.ref}",
+            effort=result.effort_requested,
+        )
+    if enabled_set is not None and result.source != "alias" and result.ref not in enabled_set:
+        return _error(
+            "model_not_enabled", text, f"{result.ref} is not one of the models you can pick",
+            effort=result.effort_requested,
+        )
+    if needs_tools and result.info is not None and not result.info.supports_tools:
+        return _error(
+            "no_tools", text, f"{result.ref} does not support tool calling, which a task needs",
+            effort=result.effort_requested,
+        )
+    return result
+
+
+# --- the enabled set ---------------------------------------------------------
+
+
+def enabled_refs(catalogue: Catalogue, patterns: Iterable[str]) -> tuple[str, ...]:
+    """The refs ``patterns`` (``fnmatch`` globs over refs, case-insensitive)
+    match. An entry may carry ``:effort``, which does not narrow the match.
+    A deprecated model is matched only by an entry naming it exactly."""
+    globs = []
+    for raw in patterns or ():
+        if isinstance(raw, str) and raw.strip():
+            globs.append(split_effort(raw.strip())[0].lower())
+    out = []
+    for info in _index(catalogue)["models"]:
+        ref = info.ref.lower()
+        for glob in globs:
+            if info.deprecated:
+                if glob == ref:
+                    out.append(info.ref)
+                    break
+            elif fnmatch.fnmatchcase(ref, glob):
+                out.append(info.ref)
+                break
+    return tuple(out)
+
+
+def unmatched_patterns(catalogue: Catalogue, patterns: Iterable[str]) -> list[str]:
+    """The entries of ``patterns`` that match no model in ``catalogue``."""
+    return [p for p in patterns or () if isinstance(p, str) and not enabled_refs(catalogue, [p])]
+
+
+def default_enabled_patterns(config) -> list[str]:  # noqa: ANN001
+    """What non-admins may pick when ``[models] enabled`` is not set:
+    ``anthropic/*``, plus native's configured model when native has a provider."""
+    patterns = [f"{SHIPPED_PROVIDER}/*"]
+    native_id = native_provider_id(config)
+    model = (getattr(getattr(getattr(config, "brain", None), "native", None), "model", "") or "").strip()
+    if native_id and model:
+        patterns.append(f"{native_id}/{split_effort(model)[0]}")
+    return patterns
+
+
+# --- config-derived inputs ---------------------------------------------------
+
+
+def native_provider_id(config) -> str | None:  # noqa: ANN001
+    """The provider id native's requests go to, or ``None``. Never raises."""
+    brain = getattr(config, "brain", config)
+    try:
+        from . import native_provider_spec
+
+        spec = native_provider_spec(brain)
+    except Exception:  # noqa: BLE001 - a resolution read must not raise
+        return None
+    return spec.id if spec is not None else None
+
+
+def config_providers(config) -> Mapping[str, object]:  # noqa: ANN001
+    """The configured providers of ``config`` (a `Config` or a `BrainConfig`)."""
+    providers = getattr(config, "providers", None)
+    if providers:
+        return providers
+    brain = getattr(config, "brain", config)
+    return getattr(brain, "provider_specs", None) or {}
+
+
+def preferred_provider(namespace: str | None, config) -> str | None:  # noqa: ANN001
+    """The provider whose bare ids a namespace's stored values are."""
+    if namespace == BRAIN_NAMESPACES["claude_code"]:
+        return SHIPPED_PROVIDER
+    if namespace == BRAIN_NAMESPACES["native"]:
+        return native_provider_id(config)
+    return None
+
+
+__all__ = [
+    "BRAIN_NAMESPACES",
+    "DEFAULT_ALIAS",
+    "DEFAULT_TIER_TARGETS",
+    "ERROR_CODES",
+    "FAMILY_SHORTCUTS",
+    "Resolution",
+    "ResolveError",
+    "config_providers",
+    "default_enabled_patterns",
+    "enabled_refs",
+    "latest_in_family",
+    "native_provider_id",
+    "preferred_provider",
+    "resolve_selection",
+    "unmatched_patterns",
+]

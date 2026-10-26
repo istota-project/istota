@@ -62,6 +62,38 @@ def test_native_build_failure_fails_open_without_cli(tmp_path):
     assert completer("any prompt") is None
 
 
+class TestTheSelectionModel:
+    """`[conversation] selection_model` reaches native triage, as it reaches the
+    CLI path. Its default `fast` is an unoverridden tier on native, so the
+    default stays the native brain's own model."""
+
+    @staticmethod
+    def _model_used(cfg):
+        seen = {}
+
+        def _capture(native, timeout, **_kw):
+            seen["model"] = native.model
+            return lambda _p: None
+
+        with patch("istota.executor._build_native_completer", side_effect=_capture):
+            _build_triage_completer(_task(), cfg)
+        return seen["model"]
+
+    def test_the_default_tier_is_the_native_model(self, tmp_path):
+        assert self._model_used(_cfg(tmp_path, "native")) == "claude-sonnet-4-6"
+
+    def test_a_remapped_tier_is_honoured(self, tmp_path):
+        from istota.brain import set_alias_overrides
+
+        set_alias_overrides({"fast": {"openai_compat": "z-ai/glm-5-flash"}})
+        assert self._model_used(_cfg(tmp_path, "native")) == "z-ai/glm-5-flash"
+
+    def test_an_explicit_id_is_honoured(self, tmp_path):
+        cfg = _cfg(tmp_path, "native")
+        cfg.conversation.selection_model = "z-ai/glm-5-air"
+        assert self._model_used(cfg) == "z-ai/glm-5-air"
+
+
 def test_per_source_type_override_routes_to_native(tmp_path):
     """A scheduled task routed to native via overrides gets the native completer,
     while an interactive task on the same config stays on the CLI (None)."""

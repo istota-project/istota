@@ -200,7 +200,7 @@ Sweep (ISSUE-317): `sandbox_cache_sweep_enabled`, `sandbox_cache_max_gb` (10/use
 
 `[models.overrides."<provider>/<id>"]`: per-field patches over a catalogue record (`_settle_model_overrides`, `_apply_catalogue_layers`); one naming a model no layer has is ignored.
 
-`[models.aliases]`: tiers and shortcuts in one table, raw. Flat string or per-namespace table (`anthropic`, `openai_compat`, `portable = true`). Floor: `brain.claude_code.DEFAULT_ALIASES`. `:effort` is a modifier. `brain._roles.set_alias_overrides` normalizes to `name -> namespace -> RoleTarget` (`"*"` flat), so an anthropic value never reaches the native wire. Warn-only. `[models.roles]` is no longer read (one-time WARNING).
+`[models.aliases]`: tiers and shortcuts in one table, raw. Flat string or per-namespace table (`anthropic`, `openai_compat`, `portable = true`); a namespace value `{effort = "…"}` with no `model` changes only the effort. Floor: the resolver's tiers and family shortcuts (`brain._resolve`, brain.md). `:effort` is a modifier. `brain._roles.set_alias_overrides` normalizes to `name -> namespace -> RoleTarget` (`"*"` flat), so an anthropic value never reaches the native wire. Warn-only. `[models.roles]` is no longer read (one-time WARNING).
 
 ## Memory and playbooks
 

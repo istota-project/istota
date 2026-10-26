@@ -249,11 +249,18 @@ class Catalogue:
         return info
 
     def models(self, provider: str | None = None) -> tuple[ModelInfo, ...]:
-        """Every known model (overrides applied), optionally for one provider."""
+        """Every known model (overrides applied), optionally for one provider.
+
+        Each record is taken by its ref, never through ``get``: ``get`` tries a
+        bare id first, and an OpenRouter id such as ``anthropic/claude-opus-5``
+        spells the same string as the shipped record's ref.
+        """
         out = []
         for ref, info in self._by_ref.items():
-            if provider is None or info.provider == provider:
-                out.append(self.get(ref))
+            if provider is not None and info.provider != provider:
+                continue
+            override = self.overrides.get(ref)
+            out.append(replace(info, **override) if override else info)
         return tuple(out)
 
     def refs(self) -> tuple[str, ...]:

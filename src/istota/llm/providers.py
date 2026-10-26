@@ -579,3 +579,45 @@ def strip_unselected_cli_credentials(
 def strip_model_credentials(env: Mapping[str, str]) -> dict[str, str]:
     """``env`` without any model credential name, adding nothing."""
     return {k: v for k, v in env.items() if not is_model_credential_name(k)}
+
+
+# --- which brain can run which model ------------------------------------------
+
+#: The provider the `claude` CLI brains always use.
+CLI_PROVIDER = "anthropic"
+
+
+def provider_kinds(providers: Mapping[str, object] | None) -> dict[str, str]:
+    """``id -> kind`` from a mapping of provider ids to `ProviderSpec`s,
+    `ProviderConfig`s or bare kind strings. The built-ins are always present."""
+    out = {pid: kind for pid, (kind, _url) in BUILTIN_PROVIDERS.items()}
+    for pid, value in (providers or {}).items():
+        kind = value if isinstance(value, str) else getattr(value, "kind", None)
+        if isinstance(kind, str) and kind:
+            out[str(pid)] = kind
+    return out
+
+
+def brain_can_run(
+    kind: str, ref: str, providers: Mapping[str, object] | None = None,
+    *, native_provider: str | None = None,
+) -> bool:
+    """Whether brain ``kind`` can run the model ``ref`` (``provider/id``).
+
+    The CLI brains run only the `anthropic` provider's models, because the
+    `claude` CLI talks only to Anthropic. Native runs the models of the
+    provider `[brain.native] provider` names (``native_provider``): it still
+    sends every request to that one provider, so a model of another provider
+    is not runnable there until native picks its provider per request.
+    A ref naming no configured provider runs nowhere. Never raises.
+    """
+    if not isinstance(ref, str) or "/" not in ref:
+        return False
+    provider_id = ref.split("/", 1)[0]
+    if provider_id not in provider_kinds(providers):
+        return False
+    if kind in ("claude_code", "tmux_claude"):
+        return provider_id == CLI_PROVIDER
+    if kind == "native":
+        return bool(native_provider) and provider_id == native_provider
+    return False

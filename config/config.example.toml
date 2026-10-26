@@ -1069,6 +1069,15 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #      openai_compat = "anthropic/claude-opus-4.8"
 #      portable      = true                                          # a cross-brain custom tier
 #
+# Effort only: keep the alias's own target and change its effort, without
+# naming a model.
+#      [models.aliases.general]
+#      anthropic     = { effort = "medium" }
+#
+# The tiers name families (fast = haiku, general = sonnet, smart = opus), and a
+# family is the newest current model the catalogue lists, so a model Anthropic's
+# own list reports reaches them before the next release.
+#
 # An alias uses one form, not both. The old [models.roles] key is no longer read.
 
 # ============================================================================

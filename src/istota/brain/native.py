@@ -112,7 +112,8 @@ from istota.session.session_log import (
 from istota.session.usage import TaskUsage, cache_write_multiplier_for_ttl
 
 from ._aliases import CANONICAL_ROLES, split_effort
-from ._roles import get_alias_override_target, get_alias_overrides
+from ._resolve import Resolution, resolve_selection
+from ._roles import current_alias_table
 from ._types import BrainRequest, BrainResult, ImageInput
 from .claude_code import is_usage_limit_error
 
@@ -1027,6 +1028,7 @@ class NativeBrain:
     # value written here is an endpoint slug and is sent verbatim, never
     # translated from the Anthropic namespace.
     model_namespace = "openai_compat"
+    kind = BRAIN_KIND
 
     def __init__(self, config, provider=None, spec=None):
         self._config = config
@@ -1052,11 +1054,34 @@ class NativeBrain:
 
     # --- Model resolution --------------------------------------------------
     #
-    # The only provider is ``openai_compat``, which can point at any endpoint
-    # (Anthropic, OpenRouter, a local qwen, …). Anthropic aliases must NOT be
-    # translated — sending "claude-opus-5" to a qwen endpoint would fail — so
-    # explicit ids pass through and only operator [models.aliases] overrides
-    # resolve.
+    # Native sends every request to one provider (``self._spec``), which can be
+    # any endpoint (Anthropic, OpenRouter, a local qwen, …). Anthropic aliases
+    # must NOT be translated — sending "claude-opus-5" to a qwen endpoint would
+    # fail — so explicit ids pass through as written and only operator
+    # [models.aliases] overrides and the tiers resolve. The resolver
+    # (``brain._resolve``) is asked about refs: ``<native's provider>/<id>``
+    # goes to the wire as ``<id>``. A ref or bare id of another provider is
+    # sent as written, as it always was, and the catalogue is asked by that
+    # wire id, so a bare Claude id on native keeps the metadata (and so the
+    # wire features) it had.
+
+    @property
+    def _provider_id(self) -> str | None:
+        return self._spec.id if self._spec is not None else None
+
+    def _wire_id(self, name: str) -> str:
+        """``name`` as native's provider takes it: its own ref without the
+        ``<provider>/`` prefix, anything else as written."""
+        provider_id = self._provider_id
+        if not provider_id or not name.startswith(provider_id + "/"):
+            return name
+        resolved = resolve_selection(
+            name, use_aliases=False, for_brain="native",
+            native_provider=provider_id, providers={provider_id: self._spec.kind},
+        )
+        if isinstance(resolved, Resolution) and resolved.source == "ref":
+            return resolved.info.id
+        return name
 
     def resolve_alias(self, alias):
         if not alias:
@@ -1067,34 +1092,35 @@ class NativeBrain:
         base_lower = base.lower()
         # 1. Operator-overridden alias — read THIS brain's namespace only, so an
         # anthropic-namespace value (e.g. "opus") never leaks onto the OpenRouter
-        # wire. The slug passes through verbatim; no translation. The suffix
-        # modifier wins over the override's own effort.
-        rt = get_alias_override_target(base_lower, self.model_namespace)
+        # wire. Effort precedence: request suffix > explicit RoleTarget.effort >
+        # an effort baked into the target (``smart = "opus:high"`` as a legacy
+        # flat value). An effort-only override (no model) keeps the alias's own
+        # target, which on native is the configured model for a tier.
+        rt = current_alias_table().target(base_lower, self.model_namespace)
         if rt is not None:
-            # A legacy-flat value may carry a baked ``:effort`` (``smart =
-            # "opus:high"``); peel it so native resolves the same flat string
-            # claude_code does, instead of gluing ``:high`` onto the wire model.
-            # A provider slug's ``/`` is untouched by split_effort. Effort
-            # precedence: request suffix > explicit RoleTarget.effort > baked.
             target_model, target_effort = (
-                split_effort(rt.model) if rt.model else (rt.model, None)
+                split_effort(rt.model) if rt.model else ("", None)
             )
-            return (target_model, suffix_effort or rt.effort or target_effort)
+            effort = suffix_effort or rt.effort or target_effort
+            if not target_model:
+                return (self._config.model or None, effort)
+            return (self._wire_id(target_model), effort)
         # A built-in role alias with no operator override resolves to the single
-        # model this endpoint is configured for (NB-3). The native brain speaks
-        # to one endpoint with one model, so fast/general/smart all mean "the
-        # configured model" unless the operator remapped them via [models.aliases].
-        # This must come BEFORE the generic ``:effort`` passthrough below, or a
-        # role tier + effort with an unset model (``general:high``) would fall
-        # through and leak the literal "general" onto the wire (NB-3). An empty
-        # model collapses to None → resolve_model_name treats it as brain default.
-        # Provider shortcuts (opus/sonnet/haiku) are NOT roles and pass through
-        # untranslated (None unless an explicit effort modifier was given).
+        # model this endpoint is configured for (NB-3). This must come BEFORE
+        # the generic ``:effort`` passthrough below, or a role tier + effort
+        # with an unset model (``general:high``) would leak the literal
+        # "general" onto the wire. An empty model collapses to None →
+        # resolve_model_name treats it as brain default. Provider shortcuts
+        # (opus/sonnet/haiku) are NOT roles and pass through untranslated.
         if base_lower in _BUILTIN_ROLE_NAMES:
             return (self._config.model or None, suffix_effort)
+        # A ref of native's own provider goes to the wire as the provider's id.
+        wire = self._wire_id(base)
+        if wire != base:
+            return (wire, suffix_effort)
         # An explicit id/slug carrying a ``:effort`` modifier passes through with
-        # the effort applied; a plain unknown id stays None (unchanged — the
-        # caller's resolve_model_name handles bare-id passthrough).
+        # the effort applied; a plain unknown id stays None (the caller's
+        # resolve_model_name handles bare-id passthrough).
         if suffix_effort is not None:
             return (base, suffix_effort)
         return None
@@ -1164,26 +1190,26 @@ class NativeBrain:
         return base  # explicit id pass-through (effort stripped); no translation
 
     def list_aliases(self):
-        overrides = get_alias_overrides()
+        table = current_alias_table()
         listed: list[tuple[str, str | None, str | None]] = []
         seen: set[str] = set()
         # Built-in roles first: operator override (in THIS brain's namespace) if
         # present, else the native model. So `!models` shows the truthful
         # resolved table on native.
         for role in _BUILTIN_ROLE_NAMES:
-            rt = get_alias_override_target(role, self.model_namespace)
+            rt = table.target(role, self.model_namespace)
             if rt is not None:
-                listed.append((role, rt.model, rt.effort))
+                listed.append((role, rt.model or self._config.model, rt.effort))
             else:
                 listed.append((role, self._config.model, None))
             seen.add(role)
         # Any custom operator alias names beyond the three defaults.
-        for name in overrides:
+        for name in table.names():
             if name in seen:
                 continue
-            rt = get_alias_override_target(name, self.model_namespace)
+            rt = table.target(name, self.model_namespace)
             if rt is not None:
-                listed.append((name, rt.model, rt.effort))
+                listed.append((name, rt.model or self._config.model, rt.effort))
         return listed
 
     def validate_alias_override(self, name, target):

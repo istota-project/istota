@@ -43,7 +43,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from ._aliases import CANONICAL_ROLES
 
 logger = logging.getLogger("istota.brain.aliases")
 
@@ -97,9 +99,14 @@ def _is_truthy(value: object) -> bool:
     return False
 
 
-def _coerce_target(name: str, namespace: str, raw: object) -> RoleTarget | None:
+def _coerce_target(name: str, namespace: str, raw: object, log: bool = True) -> RoleTarget | None:
     """Turn a raw namespace value (string or ``{model, effort}`` table) into a
-    ``RoleTarget``. Returns None (with a warning) for a malformed value."""
+    ``RoleTarget``. Returns None (with a warning) for a malformed value.
+
+    A table with an ``effort`` and no ``model`` is an effort-only override: it
+    keeps the alias's default target and changes only its effort, so an
+    operator tuning effort never names a model id.
+    """
     if isinstance(raw, str):
         model = raw.strip()
         if not model:
@@ -107,20 +114,104 @@ def _coerce_target(name: str, namespace: str, raw: object) -> RoleTarget | None:
         return RoleTarget(model=model)
     if isinstance(raw, Mapping):
         model = raw.get("model")
-        if not isinstance(model, str) or not model.strip():
-            logger.warning(
-                "ignoring [models.aliases] %s.%s: table missing a 'model' string",
-                name, namespace,
-            )
-            return None
         effort = raw.get("effort")
         effort_str = effort.strip() if isinstance(effort, str) and effort.strip() else None
+        if model is None and effort_str is not None:
+            return RoleTarget(model="", effort=effort_str)
+        if not isinstance(model, str) or not model.strip():
+            if log:
+                logger.warning(
+                    "ignoring [models.aliases] %s.%s: table missing a 'model' string",
+                    name, namespace,
+                )
+            return None
         return RoleTarget(model=model.strip(), effort=effort_str)
-    logger.warning(
-        "ignoring [models.aliases] %s.%s: value %r is neither a string nor a table",
-        name, namespace, raw,
-    )
+    if log:
+        logger.warning(
+            "ignoring [models.aliases] %s.%s: value %r is neither a string nor a table",
+            name, namespace, raw,
+        )
     return None
+
+
+@dataclass(frozen=True)
+class AliasTable:
+    """One immutable snapshot of the operator's alias overrides.
+
+    ``overrides`` is ``name -> namespace -> RoleTarget``; ``portable`` the
+    custom names flagged ``portable = true``. The resolver reads one of these,
+    and so does the executor's fallback crossing rule, so the portable set has
+    one source.
+    """
+
+    overrides: Mapping[str, Mapping[str, RoleTarget]] = field(default_factory=dict, hash=False)
+    portable: frozenset[str] = frozenset()
+
+    def target(self, name: str, namespace: str) -> RoleTarget | None:
+        """The per-namespace override, else the legacy flat one, else None."""
+        entry = self.overrides.get(name.lower())
+        if not entry:
+            return None
+        per_namespace = entry.get(namespace)
+        if per_namespace is not None:
+            return per_namespace
+        return entry.get(LEGACY_NAMESPACE)
+
+    def names(self) -> tuple[str, ...]:
+        return tuple(self.overrides)
+
+    def portable_names(self) -> set[str]:
+        """The canonical tiers plus every alias flagged ``portable = true``."""
+        return set(CANONICAL_ROLES) | set(self.portable)
+
+
+def parse_alias_overrides(overrides: Mapping[str, object] | None, *, log: bool = True) -> AliasTable:
+    """Parse the raw ``[models.aliases]`` mapping into an ``AliasTable``.
+
+    Touches no module state. ``log=False`` parses quietly, for a caller that
+    reads a config's aliases without installing them.
+    """
+    next_overrides: dict[str, dict[str, RoleTarget]] = {}
+    next_portable: set[str] = set()
+    for name, value in (overrides or {}).items():
+        if not isinstance(name, str) or not name.strip():
+            if log and name is not None and not isinstance(name, str):
+                logger.warning("ignoring non-string alias override key: %r", name)
+            continue
+        name_key = name.strip().lower()
+        targets: dict[str, RoleTarget] = {}
+        if isinstance(value, str):
+            target = _coerce_target(name_key, LEGACY_NAMESPACE, value, log)
+            if target is not None:
+                targets[LEGACY_NAMESPACE] = target
+        elif isinstance(value, Mapping):
+            for namespace, raw in value.items():
+                if not isinstance(namespace, str) or not namespace.strip():
+                    if log:
+                        logger.warning(
+                            "ignoring [models.aliases] %s: non-string namespace key %r",
+                            name_key, namespace,
+                        )
+                    continue
+                ns_key = namespace.strip()
+                if ns_key.lower() == PORTABLE_KEY:
+                    # Reserved flag, not a namespace — record and skip.
+                    if _is_truthy(raw):
+                        next_portable.add(name_key)
+                    continue
+                target = _coerce_target(name_key, ns_key, raw, log)
+                if target is not None:
+                    targets[ns_key] = target
+        else:
+            if log:
+                logger.warning(
+                    "ignoring [models.aliases] %s: value %r is neither a string nor a table",
+                    name_key, value,
+                )
+            continue
+        if targets:
+            next_overrides[name_key] = targets
+    return AliasTable(overrides=next_overrides, portable=frozenset(next_portable))
 
 
 def set_alias_overrides(overrides: Mapping[str, object] | None) -> None:
@@ -145,54 +236,22 @@ def set_alias_overrides(overrides: Mapping[str, object] | None) -> None:
     invoked by the config loader, not here, since this module stays
     brain-agnostic.
     """
-    global _alias_overrides, _portable_names
-    next_overrides: dict[str, dict[str, RoleTarget]] = {}
-    next_portable: set[str] = set()
-    if overrides:
-        for name, value in overrides.items():
-            if not isinstance(name, str) or not name.strip():
-                if name is not None and not isinstance(name, str):
-                    logger.warning("ignoring non-string alias override key: %r", name)
-                continue
-            name_key = name.strip().lower()
-            targets: dict[str, RoleTarget] = {}
-            if isinstance(value, str):
-                target = _coerce_target(name_key, LEGACY_NAMESPACE, value)
-                if target is not None:
-                    targets[LEGACY_NAMESPACE] = target
-            elif isinstance(value, Mapping):
-                for namespace, raw in value.items():
-                    if not isinstance(namespace, str) or not namespace.strip():
-                        logger.warning(
-                            "ignoring [models.aliases] %s: non-string namespace key %r",
-                            name_key, namespace,
-                        )
-                        continue
-                    ns_key = namespace.strip()
-                    if ns_key.lower() == PORTABLE_KEY:
-                        # Reserved flag, not a namespace — record and skip.
-                        if _is_truthy(raw):
-                            next_portable.add(name_key)
-                        continue
-                    target = _coerce_target(name_key, ns_key, raw)
-                    if target is not None:
-                        targets[ns_key] = target
-            else:
-                logger.warning(
-                    "ignoring [models.aliases] %s: value %r is neither a string nor a table",
-                    name_key, value,
-                )
-                continue
-            if targets:
-                next_overrides[name_key] = targets
+    global _alias_overrides, _portable_names, _table
+    table = parse_alias_overrides(overrides)
     # Atomic rebind — readers see either the old table or the new one,
     # never a half-cleared mid-state.
-    _alias_overrides = next_overrides
-    _portable_names = next_portable
+    _table = table
+    _alias_overrides = {name: dict(ns) for name, ns in table.overrides.items()}
+    _portable_names = set(table.portable)
     if _alias_overrides:
         logger.info("alias overrides: %s", _format_overrides(_alias_overrides))
     if _portable_names:
         logger.info("portable aliases: %s", ", ".join(sorted(_portable_names)))
+
+
+def current_alias_table() -> AliasTable:
+    """The installed table: what ``set_alias_overrides`` last parsed."""
+    return _table
 
 
 def _format_overrides(table: Mapping[str, Mapping[str, RoleTarget]]) -> str:
@@ -215,6 +274,10 @@ def get_alias_overrides() -> dict[str, dict[str, RoleTarget]]:
     return {name: dict(namespaces) for name, namespaces in _alias_overrides.items()}
 
 
+# The same state as one immutable snapshot, which the resolver reads.
+_table = AliasTable()
+
+
 def get_alias_override_target(name: str, namespace: str) -> RoleTarget | None:
     """Return the override ``RoleTarget`` for ``name`` in ``namespace``, or None.
 
@@ -222,27 +285,24 @@ def get_alias_override_target(name: str, namespace: str) -> RoleTarget | None:
     legacy flat value (``[name]["*"]``); else None (the caller uses its brain's
     ``DEFAULT_ALIASES`` floor).
     """
-    entry = _alias_overrides.get(name.lower())
-    if not entry:
-        return None
-    per_namespace = entry.get(namespace)
-    if per_namespace is not None:
-        return per_namespace
-    return entry.get(LEGACY_NAMESPACE)
+    return _table.target(name, namespace)
 
 
 def get_portable_alias_names() -> set[str]:
     """Return a copy of the operator-declared portable custom-alias names
     (``portable = true`` in ``[models.aliases]``). Unioned with CANONICAL_ROLES
-    by the executor's ``config_alias_portable_names`` for the fallback check.
+    by ``AliasTable.portable_names`` for the fallback check.
     """
     return set(_portable_names)
 
 
 __all__ = [
+    "AliasTable",
     "LEGACY_NAMESPACE",
     "PORTABLE_KEY",
     "RoleTarget",
+    "current_alias_table",
+    "parse_alias_overrides",
     "get_alias_override_target",
     "get_alias_overrides",
     "get_portable_alias_names",

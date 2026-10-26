@@ -291,10 +291,11 @@ def _run_triage(
     ``claude`` CLI is the default. Both fail open by returning None, which
     ``_parse_relevant_ids`` and its callers read as "include everything".
 
-    The model name is resolved through ``ClaudeCodeBrain`` rather than the
-    configured brain because the CLI is what runs it, and a name resolved in
-    another brain's namespace (a native deployment's endpoint model, say) is not
-    one `claude --model` accepts. That mismatch was reachable before: the caller
+    The model name is resolved for the `claude` CLI (``cli_model_name``, the
+    resolver in the ``anthropic`` namespace) rather than for the configured
+    brain because the CLI is what runs it, and a name resolved in another
+    brain's namespace (a native deployment's endpoint model, say) is not one
+    `claude --model` accepts. That mismatch was reachable before: the caller
     resolved through ``make_brain(config.brain)`` and then handed the answer to
     the CLI regardless.
     """
@@ -306,11 +307,9 @@ def _run_triage(
             return None
 
     try:
-        from .brain import ClaudeCodeBrain
+        from .brain.claude_code import cli_model_name
 
-        model = ClaudeCodeBrain().resolve_model_name(
-            config.conversation.selection_model
-        )
+        model = cli_model_name(config.conversation.selection_model)
     except Exception as e:  # never let triage crash context assembly
         logger.warning("%s triage model resolution failed: %s", label, e)
         return None

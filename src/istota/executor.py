@@ -77,13 +77,12 @@ from .storage import (
     read_user_memory_v2,
 )
 from .brain import (
-    CANONICAL_ROLES,
     is_portable_alias,
     make_brain,
     model_namespace_for_kind,
     resolve_brain_kind,
 )
-from .brain._roles import PORTABLE_KEY
+from .brain._roles import parse_alias_overrides
 from .brain._fallback import (
     COOLDOWN_STOP_REASONS,
     TRIGGER_STOP_REASONS,
@@ -1734,30 +1733,37 @@ def _native_with_model(native_config, model: str):
 # the same-attempt/no-increment rerun already lives here.
 
 
-def config_alias_portable_names(config) -> set[str]:
-    """The portable alias names for the cross-brain fallback check.
+def _pin_as_ref(raw: str, config, origin_namespace):
+    """The ``Resolution`` of a pin written as a qualified reference, or ``None``.
 
-    The canonical tiers (``fast``/``general``/``smart``) plus any custom alias an
-    operator flagged ``portable = true`` in ``[models.aliases]``. A shortcut
-    (``opus``) or canonical id is deliberately absent — it pins one provider and
-    can't cross the boundary. Derived from the config's raw alias mapping so it's
-    independent of global load-order state.
+    Only a ref carries its provider across a brain boundary. A value the
+    origin's own provider lists as a bare id is that provider's id, not a ref
+    (an OpenRouter id such as ``anthropic/claude-opus-5`` on a native brain
+    that uses OpenRouter), so it keeps the namespace rules below, as every
+    stored bare value does. Never raises.
     """
-    def _truthy(raw):
-        if isinstance(raw, bool):
-            return raw
-        if isinstance(raw, str):
-            return raw.strip().lower() in {"true", "1", "yes", "on"}
-        return False
+    from .brain._resolve import (
+        Resolution,
+        config_providers,
+        preferred_provider,
+        resolve_selection,
+    )
 
-    names = set(CANONICAL_ROLES)
-    aliases = getattr(getattr(config, "models", None), "aliases", None) or {}
-    for name, value in aliases.items():
-        if isinstance(value, Mapping):
-            for key, raw in value.items():
-                if str(key).lower() == PORTABLE_KEY and _truthy(raw):
-                    names.add(str(name).strip().lower())
-    return names
+    if "/" not in raw:
+        return None
+    try:
+        resolved = resolve_selection(
+            raw,
+            use_aliases=False,
+            prefer_provider=preferred_provider(origin_namespace, config),
+            providers=config_providers(config),
+        )
+    except Exception:  # noqa: BLE001 - a crossing read must not raise into a request build
+        logger.debug("pin resolution failed for %r", raw, exc_info=True)
+        return None
+    if isinstance(resolved, Resolution) and resolved.source == "ref":
+        return resolved
+    return None
 
 
 def _resolve_crossing_model_effort(
@@ -1807,7 +1813,33 @@ def _resolve_crossing_model_effort(
     # portability is unknown rather than sending it to a wire that may not
     # take it. Same direction `commands._clear_pin_across_namespaces` takes.
     crossing = origin_namespace is None or origin_namespace != target_namespace
-    if not crossing or is_portable_alias(raw, config_alias_portable_names(config)):
+    ref = _pin_as_ref(raw, config, origin_namespace) if crossing else None
+    if ref is not None:
+        # A qualified reference carries its provider, so the question is
+        # whether the target brain can run that provider's model, not whether
+        # the namespaces match: `anthropic/...` survives a claude_code ->
+        # native fallback when native's provider is `anthropic`.
+        from .brain._resolve import config_providers, native_provider_id
+        from .llm.providers import brain_can_run
+
+        if brain_can_run(
+            getattr(target_brain, "kind", None), ref.ref, config_providers(config),
+            native_provider=native_provider_id(config),
+        ):
+            pair = target_brain.resolve_alias(raw)
+            if pair and pair[0]:
+                return (pair[0], pair[1] or effort, None)
+            return (target_brain.resolve_model_name(raw), effort, None)
+        logger.info(
+            "fallback_model: %r cannot run on the target brain (%s -> %s); "
+            "using the target brain's default",
+            raw, origin_namespace, target_namespace,
+        )
+        return ("", effort, raw)
+    portable = parse_alias_overrides(
+        getattr(getattr(config, "models", None), "aliases", None), log=False,
+    ).portable_names()
+    if not crossing or is_portable_alias(raw, portable):
         # Resolve through the target brain's own alias table. Two cases share
         # this arm, and folding them is what keeps the non-crossing branch
         # honest: a portable intent crossing a boundary must land on a valid
@@ -2796,7 +2828,7 @@ def build_oneshot_completer(
     writes a task-less ``task_usage`` row under ``origin``.
 
     ``model`` is a role alias or id resolved in the native namespace; None keeps
-    the native brain's own model, which is what context triage has always used.
+    the native brain's own model.
     ``close_after_call`` closes the native provider after each call, for a
     caller that builds a completer per call and uses it once.
     """
@@ -2833,6 +2865,10 @@ def _build_triage_completer(task: "db.Task", config: Config):
     ``build_oneshot_completer`` with the task's fields: None means the CLI path,
     and an unbuildable native completer yields None so triage fails open. The
     CLI path's sink is passed separately — see ``_build_triage_usage_sink``.
+
+    ``[conversation] selection_model`` applies on native as it does on the CLI
+    path; its default ``fast`` is an unoverridden tier there, so it is still the
+    native brain's own model unless the operator remapped the tier.
     """
     return build_oneshot_completer(
         config,
@@ -2841,6 +2877,7 @@ def _build_triage_completer(task: "db.Task", config: Config):
         brain_kind=task.brain,
         timeout=config.conversation.selection_timeout,
         origin="context_triage",
+        model=config.conversation.selection_model,
     )
 
 
@@ -2913,10 +2950,10 @@ def build_speech_gate_completer(
     )
 
     def _cli(prompt: str) -> str | None:
-        from .brain import ClaudeCodeBrain
+        from .brain.claude_code import cli_model_name
         from .context import _claude_cli_triage
 
-        model = ClaudeCodeBrain().resolve_model_name(gate.model)
+        model = cli_model_name(gate.model)
         return _claude_cli_triage(
             prompt, model, gate.timeout_seconds, config, sink,
             label="Speech gate classifier",

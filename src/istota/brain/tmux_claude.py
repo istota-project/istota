@@ -750,6 +750,7 @@ class TmuxClaudeBrain:
     # the "anthropic" namespace by delegation (an operator's anthropic role value
     # covers both CLI brains).
     model_namespace = ClaudeCodeBrain.model_namespace
+    kind = "tmux_claude"
 
     def __init__(self, config=None) -> None:
         # Composed, not inherited: we forward the four resolution methods and
