@@ -15,7 +15,7 @@ The web UI at `/istota/settings` lets each user edit their own profile and add p
 
 The first-run setup, in the browser or the terminal, collects a long-lived Claude Code OAuth token (the Claude subscription choice, which writes it to `/srv/app/istota/secrets/claude_code_oauth_token`), and the daemon writes Claude Code's credentials file from it at every start. Generate the token with `claude setup-token`. If you supplied it during install, Claude auth is already done — skip this section.
 
-Only if you skipped the token at install time (and aren't using `ANTHROPIC_API_KEY` or a native-brain provider key), authenticate manually:
+Only if you skipped the token at install time (and aren't using an API key under `[brain.claude_code] auth = "api_key"` or a native-brain provider key), authenticate manually:
 
 ```bash
 istota-stack exec claude login
