@@ -162,6 +162,23 @@
     'week',
   ];
 
+  /**
+   * The form's first submit button, which Enter in a field acts through.
+   * @param {HTMLFormElement} form
+   */
+  function defaultButton(form) {
+    for (const element of form.elements) {
+      if (element instanceof HTMLButtonElement && element.type === 'submit') return element;
+      if (
+        element instanceof HTMLInputElement &&
+        (element.type === 'submit' || element.type === 'image')
+      ) {
+        return element;
+      }
+    }
+    return null;
+  }
+
   // Chromium and Firefox fire no submit event at all in a frame sandboxed
   // without allow-forms, which an app's frame always is; WebKit does. So the
   // form takes the two things that submit, a submit button's click and Enter in
@@ -202,6 +219,7 @@
       const target = /** @type {Element} */ (event.target);
       const button = target instanceof Element ? target.closest('button, input') : null;
       if (!(button instanceof HTMLButtonElement || button instanceof HTMLInputElement)) return;
+      if (event.defaultPrevented) return;
       if (button.type !== 'submit' || button.disabled) return;
       const form = this.ownForm(button.form);
       if (!form) return;
@@ -216,6 +234,10 @@
       if (!(field instanceof HTMLInputElement) || !ENTER_SUBMITS.includes(field.type)) return;
       const form = this.ownForm(field.form);
       if (!form) return;
+      // Implicit submission goes through the form's default button, and a
+      // disabled one blocks it.
+      const fallback = defaultButton(form);
+      if (fallback && fallback.disabled) return;
       event.preventDefault();
       this.submit(form);
     };

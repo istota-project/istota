@@ -215,6 +215,21 @@ describe('istota-form', () => {
       expect(seen).toEqual([]);
     });
 
+    it('does not submit when an app listener cancels the submit button click', () => {
+      const { host, seen } = form();
+      const button = host.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+      button.addEventListener('click', (event) => event.preventDefault());
+      button.click();
+      expect(seen).toEqual([]);
+    });
+
+    it('does not submit on Enter when the default submit button is disabled', () => {
+      const { host, seen } = form('<button type="submit" disabled>Save</button>');
+      const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+      host.querySelector('input')!.dispatchEvent(enter);
+      expect(seen).toEqual([]);
+    });
+
     it('ignores a plain button', () => {
       const { host, seen } = form('<istota-button>Other</istota-button>');
       host.querySelector<HTMLButtonElement>('button[type="button"]')!.click();
