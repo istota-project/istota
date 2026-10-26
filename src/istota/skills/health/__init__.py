@@ -13,6 +13,9 @@ Subcommands cover both body stats and lab results:
   workspace) as a draft panel for later web-UI review.
 * ``summary`` — dashboard-style snapshot.
 * ``settings`` / ``set KEY VALUE`` — profile + display preferences.
+* ``medications`` / ``medication <id>`` — list/show the regimen;
+  ``add-medication`` / ``update-medication`` / ``stop-medication`` /
+  ``delete-medication`` — record and change it.
 * ``documents`` / ``document <id>`` — list/show stored paperwork.
 * ``attach-document --path P --to TYPE:ID`` / ``detach-document <id>
   --from TYPE:ID`` — file paperwork against an encounter, condition, or
@@ -1583,6 +1586,269 @@ def cmd_delete_immunization(args: argparse.Namespace) -> None:
     _emit({"status": "ok"})
 
 
+# -- medications ------------------------------------------------------------
+
+# Free-text columns a flag sets as given; an empty string clears one on update.
+_MEDICATION_TEXT_FIELDS = (
+    "generic_name", "dose", "dose_unit", "frequency", "route",
+    "prescriber", "pharmacy", "reason", "notes",
+)
+
+
+def _medication_to_dict(m) -> dict:
+    from istota.health.serialize import medication_to_dict
+
+    return medication_to_dict(m)
+
+
+def _medication_date_arg(field: str, raw: str | None) -> str | None:
+    """A date flag as ISO, refused here so the model sees the error rather
+    than a replay it never hears about. ``""`` means no date."""
+    from istota.lib.date_parse import parse_loose_date
+
+    if raw is None or raw == "":
+        return None
+    parsed = parse_loose_date(raw)
+    if parsed is None:
+        _fail(f"{field} is not a valid date: {raw!r}")
+    return parsed
+
+
+def _medication_category_arg(raw: str) -> str:
+    from istota.health import db as health_db
+
+    category = health_db.normalize_medication_category(raw)
+    if category is None:
+        _fail(
+            "category must be one of "
+            f"{', '.join(health_db.MEDICATION_CATEGORIES)}: {raw!r}"
+        )
+    return category
+
+
+def _check_medication_range(start_date: str | None, end_date: str | None) -> None:
+    if start_date and end_date and end_date < start_date:
+        _fail(f"end_date {end_date} is before start_date {start_date}")
+
+
+def _stored_medication(medication_id: int):
+    """The row as stored now, or None. Read-only; used to check a date
+    against the stored start before a write is deferred."""
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        return health_db.get_medication(conn, medication_id)
+    finally:
+        conn.close()
+
+
+def cmd_medications(args: argparse.Namespace) -> None:
+    from istota.health import db as health_db
+
+    category = (
+        _medication_category_arg(args.category)
+        if args.category is not None else None
+    )
+    since = _medication_date_arg("since", args.since)
+    until = _medication_date_arg("until", args.until)
+    conn = _connect()
+    try:
+        rows = health_db.list_medications(
+            conn,
+            status=args.status,
+            category=category,
+            name=args.name,
+            since=since,
+            until=until,
+            limit=args.limit,
+        )
+    finally:
+        conn.close()
+    _emit({"medications": [_medication_to_dict(r) for r in rows]})
+
+
+def cmd_medication(args: argparse.Namespace) -> None:
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        row = health_db.get_medication(conn, args.id)
+        if not row:
+            _fail(f"medication {args.id} not found")
+        encounter = None
+        if row.encounter_id is not None:
+            encounter = health_db.get_encounter(conn, row.encounter_id)
+    finally:
+        conn.close()
+    _emit({
+        "medication": _medication_to_dict(row),
+        "encounter": _encounter_to_dict(encounter) if encounter else None,
+    })
+
+
+def cmd_add_medication(args: argparse.Namespace) -> None:
+    from istota.health import db as health_db
+
+    name = args.name.strip()
+    if not name:
+        _fail("name is required")
+    start_date = _medication_date_arg("start_date", args.start_date)
+    end_date = _medication_date_arg("end_date", args.end_date)
+    _check_medication_range(start_date, end_date)
+    op: dict[str, Any] = {
+        "op": "insert_medication",
+        "dedup_key": uuid.uuid4().hex,
+        "name": name,
+        "category": _medication_category_arg(args.category),
+        "active": not args.stopped,
+        "source": "agent",
+    }
+    for k in _MEDICATION_TEXT_FIELDS:
+        v = getattr(args, k)
+        if v is not None:
+            op[k] = v
+    if start_date is not None:
+        op["start_date"] = start_date
+    if end_date is not None:
+        op["end_date"] = end_date
+    if args.encounter_id is not None:
+        op["encounter_id"] = args.encounter_id
+
+    # Read before the write so a direct insert does not match itself.
+    conn = _connect()
+    try:
+        same_name = [m.id for m in health_db.active_medications_named(conn, name)]
+    finally:
+        conn.close()
+
+    if _defer_op(op):
+        result: dict[str, Any] = {"status": "ok", "deferred": True, "op": op}
+    else:
+        conn = _connect()
+        try:
+            kwargs = {k: op[k] for k in op if k != "op"}
+            try:
+                mid = health_db.insert_medication(conn, **kwargs)
+            except ValueError as e:
+                _fail(str(e))
+            conn.commit()
+        finally:
+            conn.close()
+        result = {"status": "ok", "id": mid}
+    if same_name:
+        result["active_with_same_name"] = same_name
+    _emit(result)
+
+
+def cmd_update_medication(args: argparse.Namespace) -> None:
+    from istota.health import db as health_db
+
+    updates: dict[str, Any] = {}
+    if args.name is not None:
+        name = args.name.strip()
+        if not name:
+            _fail("name cannot be empty")
+        updates["name"] = name
+    if args.category is not None:
+        updates["category"] = _medication_category_arg(args.category)
+    for k in _MEDICATION_TEXT_FIELDS:
+        v = getattr(args, k)
+        if v is not None:
+            updates[k] = v if v != "" else None
+    for k in ("start_date", "end_date"):
+        raw = getattr(args, k)
+        if raw is not None:
+            updates[k] = _medication_date_arg(k, raw)
+    if args.encounter_id is not None:
+        if args.encounter_id == "":
+            updates["encounter_id"] = None
+        else:
+            try:
+                updates["encounter_id"] = int(args.encounter_id)
+            except ValueError:
+                _fail(f"encounter_id must be an integer: {args.encounter_id!r}")
+    if args.active is not None:
+        updates["active"] = args.active == "yes"
+    if not updates:
+        _fail("no fields to update")
+
+    if "start_date" in updates or "end_date" in updates:
+        stored = _stored_medication(args.id)
+        _check_medication_range(
+            updates.get("start_date", stored.start_date if stored else None),
+            updates.get("end_date", stored.end_date if stored else None),
+        )
+
+    op = {"op": "update_medication", "medication_id": args.id, **updates}
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+    conn = _connect()
+    try:
+        try:
+            n = health_db.update_medication(conn, args.id, **updates)
+        except ValueError as e:
+            _fail(str(e))
+        conn.commit()
+    finally:
+        conn.close()
+    if not n:
+        _fail(f"medication {args.id} not found")
+    _emit({"status": "ok"})
+
+
+def cmd_stop_medication(args: argparse.Namespace) -> None:
+    """Stop a medication. ``--date`` defaults to today *here*, so a replay
+    after midnight records the day the user said it."""
+    from datetime import date as _date
+
+    from istota.health import db as health_db
+
+    end_date = _medication_date_arg("date", args.date) or _date.today().isoformat()
+    stored = _stored_medication(args.id)
+    if stored is not None:
+        _check_medication_range(stored.start_date, end_date)
+    op = {
+        "op": "discontinue_medication",
+        "medication_id": args.id,
+        "end_date": end_date,
+    }
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+    conn = _connect()
+    try:
+        try:
+            n = health_db.discontinue_medication(conn, args.id, end_date=end_date)
+        except ValueError as e:
+            _fail(str(e))
+        conn.commit()
+    finally:
+        conn.close()
+    if not n:
+        _fail(f"medication {args.id} not found")
+    _emit({"status": "ok", "id": args.id, "end_date": end_date})
+
+
+def cmd_delete_medication(args: argparse.Namespace) -> None:
+    op = {"op": "delete_medication", "medication_id": args.id}
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        n = health_db.delete_medication(conn, args.id)
+        conn.commit()
+    finally:
+        conn.close()
+    if not n:
+        _fail(f"medication {args.id} not found")
+    _emit({"status": "ok"})
+
+
 def cmd_vaccine_refs(args: argparse.Namespace) -> None:
     from istota.health import db as health_db
 
@@ -2101,6 +2367,73 @@ def build_parser() -> argparse.ArgumentParser:
     )
     del_imm.add_argument("id", type=int)
 
+    meds = sub.add_parser(
+        "medications", help="List medications (current by default)",
+    )
+    meds.add_argument(
+        "--status", choices=["active", "stopped", "all"], default="active",
+    )
+    meds.add_argument("--category", default=None,
+                      help="prescription | otc | supplement")
+    meds.add_argument("--name", default=None,
+                      help="Match on name or generic name")
+    meds.add_argument("--since", default=None,
+                      help="Taken on or after this date (overlap window)")
+    meds.add_argument("--until", default=None,
+                      help="Taken on or before this date (overlap window)")
+    meds.add_argument("--limit", type=int, default=200)
+
+    med_one = sub.add_parser("medication", help="Show a single medication")
+    med_one.add_argument("id", type=int)
+
+    def _medication_field_flags(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--category", default=None,
+                       help="prescription | otc | supplement")
+        p.add_argument("--generic-name", dest="generic_name", default=None)
+        p.add_argument("--dose", default=None, help="Text: 20, 0.5, 1-2")
+        p.add_argument("--dose-unit", dest="dose_unit", default=None)
+        p.add_argument("--frequency", default=None,
+                       help="daily | twice_daily | weekly | as_needed | …")
+        p.add_argument("--route", default=None,
+                       help="oral | topical | injection | inhalation | …")
+        p.add_argument("--prescriber", default=None)
+        p.add_argument("--pharmacy", default=None)
+        p.add_argument("--reason", default=None)
+        p.add_argument("--start-date", dest="start_date", default=None)
+        p.add_argument("--end-date", dest="end_date", default=None)
+        p.add_argument("--notes", default=None)
+
+    add_med = sub.add_parser("add-medication", help="Record a medication")
+    add_med.add_argument("name", help="What the user calls it")
+    _medication_field_flags(add_med)
+    add_med.set_defaults(category="prescription")
+    add_med.add_argument("--stopped", action="store_true",
+                         help="Record a medication no longer taken")
+    add_med.add_argument("--encounter-id", dest="encounter_id", type=int,
+                         default=None, help="Prescribing encounter")
+
+    upd_med = sub.add_parser(
+        "update-medication",
+        help="Update a medication; an empty value clears a field",
+    )
+    upd_med.add_argument("id", type=int)
+    upd_med.add_argument("--name", default=None)
+    _medication_field_flags(upd_med)
+    upd_med.add_argument("--encounter-id", dest="encounter_id", default=None)
+    upd_med.add_argument("--active", choices=["yes", "no"], default=None)
+
+    stop_med = sub.add_parser(
+        "stop-medication", help="Mark a medication stopped",
+    )
+    stop_med.add_argument("id", type=int)
+    stop_med.add_argument("--date", help="End date (default: today)")
+
+    del_med = sub.add_parser(
+        "delete-medication",
+        help="Delete a medication entered by mistake (prefer stop-medication)",
+    )
+    del_med.add_argument("id", type=int)
+
     sub.add_parser("vaccine-refs", help="Bundled canonical vaccine list")
 
     cov = sub.add_parser(
@@ -2217,6 +2550,12 @@ def main() -> None:
         "add-immunization": cmd_add_immunization,
         "update-immunization": cmd_update_immunization,
         "delete-immunization": cmd_delete_immunization,
+        "medications": cmd_medications,
+        "medication": cmd_medication,
+        "add-medication": cmd_add_medication,
+        "update-medication": cmd_update_medication,
+        "stop-medication": cmd_stop_medication,
+        "delete-medication": cmd_delete_medication,
         "vaccine-refs": cmd_vaccine_refs,
         "coverage": cmd_coverage,
         "import-immunizations": cmd_import_immunizations,

@@ -1,7 +1,7 @@
 ---
 name: health
-triggers: [health, weight, bloodwork, labs, lab results, lab work, urinalysis, urine test, stool test, biomarker, biomarkers, panel, blood pressure, heart rate, body fat, cholesterol, glucose, bmi, vitals, body temp, body temperature, resting hr, spo2, sleep, sleep score, stress, body battery, steps, hrv, vo2, vo2 max, garmin, encounter, doctor, doctor visit, procedure, screening, hospitalization, diagnosis, diagnosed, condition, medical history, icd10, chronic, immunization, immunizations, vaccine, vaccines, vaccinated, vaccination, shot, booster, flu shot, tdap, mmr, shingles, hpv, covid shot, travel vaccine, mychart vaccines]
-description: Health tracking — body stats, lab panels (blood, urine and other specimens), biomarker trends, lab analysis, and Garmin daily summaries.
+triggers: [health, weight, bloodwork, labs, lab results, lab work, urinalysis, urine test, stool test, biomarker, biomarkers, panel, blood pressure, heart rate, body fat, cholesterol, glucose, bmi, vitals, body temp, body temperature, resting hr, spo2, sleep, sleep score, stress, body battery, steps, hrv, vo2, vo2 max, garmin, encounter, doctor, doctor visit, procedure, screening, hospitalization, diagnosis, diagnosed, condition, medical history, icd10, chronic, immunization, immunizations, vaccine, vaccines, vaccinated, vaccination, shot, booster, flu shot, tdap, mmr, shingles, hpv, covid shot, travel vaccine, mychart vaccines, medication, medications, prescription, prescriptions, supplement, supplements]
+description: Health tracking — body stats, lab panels (blood, urine and other specimens), biomarker trends, lab analysis, medical history, immunizations, medications and supplements, and Garmin daily summaries.
 cli: true
 env: [{"var":"HEALTH_DB_PATH","from":"setup_env","proxy_only":true}]
 ---
@@ -128,6 +128,20 @@ istota-skill health import-immunizations --paste "Influenza (Given 11/28/2025)" 
 
 istota-skill health explain-immunization Influenza        # educational primer
 
+# Medications — prescriptions, OTC drugs and supplements
+istota-skill health medications                           # current regimen
+istota-skill health medications --status all --since 2026-02-01 --until 2026-03-31
+istota-skill health medications --name atorvastatin       # matches name or generic name
+istota-skill health medication 4                          # one row + its encounter
+istota-skill health add-medication Atorvastatin --category prescription \
+    --dose 20 --dose-unit mg --frequency daily --route oral \
+    --prescriber "Dr. Lee" --start-date 2026-01-15
+istota-skill health add-medication Omeprazole --category otc --stopped --end-date 2025-03-01
+istota-skill health update-medication 4 --frequency twice_daily
+istota-skill health update-medication 4 --active yes --end-date ""   # undo a stop
+istota-skill health stop-medication 4 --date 2026-04-02   # --date defaults to today
+istota-skill health delete-medication 4                   # data-entry mistakes only
+
 # Documents — the paperwork behind a record
 istota-skill health documents                             # everything stored
 istota-skill health documents --entity encounter:42
@@ -217,6 +231,27 @@ Use canonical names where possible (`Hemoglobin`, `LDL`, `HDL`, `Cholesterol_Tot
 
 When the user uploads a photo or PDF of a lab report through the web UI, the upload pipeline runs the OCR + LLM extraction automatically and the user confirms the extraction in the web UI. From a Talk message with an image attachment, you can transcribe the image and call `add-panel` + `add-biomarker` directly, or recommend they upload via the web UI for the full review-and-edit flow.
 
+## Medications
+
+One list covers prescriptions, over-the-counter drugs and supplements. `--category` is `prescription` (the default, `rx` also works), `otc` or `supplement`. Names are free text: put what the user calls it in `NAME` and the ingredient in `--generic-name` when you know it.
+
+- Before adding X, run `medications --name X`. `add-medication` always writes the row, and when an active row with the same name or generic name already exists its output carries `active_with_same_name: [ids]`. Tell the user it may be a duplicate and ask whether to stop or delete one. Two strengths of one drug taken at once are legitimate.
+- A dose change is two calls: `stop-medication <old_id>`, then `add-medication` with the new dose and `--start-date`. Never edit the dose of the old row; the old row is the history.
+- `stop-medication` keeps the row as history. `delete-medication` is only for a row entered by mistake.
+- `--frequency` is free text. Prefer `daily`, `twice_daily`, `three_times_daily`, `every_other_day`, `weekly`, `monthly`, `as_needed`. `--route` likewise: `oral`, `topical`, `injection`, `inhalation`, `sublingual`, `transdermal`, `nasal`, `ophthalmic`, `other`.
+- `--dose` is text, so `1-2` and `2.5/25` are fine. Dates are `YYYY-MM-DD`; an impossible date or an end before the start is refused.
+- On `update-medication`, an empty value (`--end-date ""`) clears that field. `--active yes|no` sets whether it is current.
+- `--since` / `--until` on `medications` select what was taken at any point in that window. A stopped row with no end date always matches `--since`.
+
+| User says | Run |
+|---|---|
+| "I'm taking 20mg atorvastatin daily" | `medications --name atorvastatin`, then `add-medication Atorvastatin --category prescription --dose 20 --dose-unit mg --frequency daily --route oral` |
+| "Started vitamin D, 5000 IU" | `add-medication "Vitamin D3" --category supplement --dose 5000 --dose-unit IU --frequency daily --start-date <today>` |
+| "Stopped the statin last week" | `medications --name statin` (or by generic name), then `stop-medication <id> --date <date a week ago>` |
+| "Doctor doubled my dose to 40mg" | `stop-medication <old_id>`, then `add-medication Atorvastatin --dose 40 --dose-unit mg ... --start-date <today>` |
+| "What am I taking?" | `medications` |
+| "What was I on when my LDL dropped in March?" | `trend LDL`, then `medications --status all --since 2026-02-01 --until 2026-03-31` |
+
 ## One condition, several visits
 
 A condition and an encounter are many-to-many. Someone is diagnosed by their GP, referred to a specialist, and seen again at a follow-up — that is one condition linked to three encounters, not three conditions.
@@ -241,7 +276,7 @@ A health record and the document that proves it are separate things. `attach-doc
 
 Health data is the most sensitive data in the system. The health DB is the single source of truth — quantitative health data must not be duplicated elsewhere.
 
-- Never write measurements, biomarker values, medication doses, lab dates, or current symptoms to USER.md, the knowledge graph, dated memories, or KV. Those stores are not scoped for clinical data and surface in unrelated prompt contexts.
+- Never write measurements, biomarker values, medication names and schedules, medication doses, lab dates, or current symptoms to USER.md, the knowledge graph, dated memories, or KV. Those stores are not scoped for clinical data and surface in unrelated prompt contexts.
 - Don't include biomarker values in news / briefings / log channels.
 - When another skill or response needs a current value, call `istota-skill health latest` or `health trend NAME` at the moment of use rather than caching the number.
 - Stable identity-level medical facts (allergies, named chronic conditions) stay in the knowledge graph via the `memory` skill — see its classification rules. The detailed encounter/diagnosis registry stays in the health DB; only the identity-level fact (`has_condition: hypertension`) belongs in the KG.

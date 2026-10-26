@@ -1630,6 +1630,62 @@ def _process_deferred_health_ops(
                         conn, int(entry["immunization_id"]),
                     )
                     count += 1
+                elif op == "insert_medication":
+                    enc_id = entry.get("encounter_id")
+                    source = entry.get("source")
+                    health_db.insert_medication(
+                        conn,
+                        name=entry["name"],
+                        category=entry.get("category", "prescription"),
+                        generic_name=entry.get("generic_name"),
+                        dose=entry.get("dose"),
+                        dose_unit=entry.get("dose_unit"),
+                        frequency=entry.get("frequency"),
+                        route=entry.get("route"),
+                        prescriber=entry.get("prescriber"),
+                        pharmacy=entry.get("pharmacy"),
+                        reason=entry.get("reason"),
+                        start_date=entry.get("start_date"),
+                        end_date=entry.get("end_date"),
+                        active=bool(entry.get("active", True)),
+                        encounter_id=(
+                            int(enc_id) if enc_id is not None else None
+                        ),
+                        notes=entry.get("notes"),
+                        source=(
+                            source if source in ("agent", "manual") else "agent"
+                        ),
+                        dedup_key=entry.get("dedup_key"),
+                    )
+                    count += 1
+                elif op == "update_medication":
+                    update_kwargs = {
+                        k: entry[k] for k in (
+                            "name", "generic_name", "dose", "dose_unit",
+                            "frequency", "route", "category", "prescriber",
+                            "pharmacy", "reason", "start_date", "end_date",
+                            "active", "encounter_id", "notes",
+                        ) if k in entry
+                    }
+                    if update_kwargs.get("encounter_id") is not None:
+                        update_kwargs["encounter_id"] = int(
+                            update_kwargs["encounter_id"],
+                        )
+                    health_db.update_medication(
+                        conn, int(entry["medication_id"]), **update_kwargs,
+                    )
+                    count += 1
+                elif op == "discontinue_medication":
+                    health_db.discontinue_medication(
+                        conn, int(entry["medication_id"]),
+                        end_date=entry["end_date"],
+                    )
+                    count += 1
+                elif op == "delete_medication":
+                    health_db.delete_medication(
+                        conn, int(entry["medication_id"]),
+                    )
+                    count += 1
                 elif op == "bulk_insert_immunizations":
                     prefix = entry.get("dedup_key_prefix") or ""
                     for i, r in enumerate(entry.get("rows") or []):
