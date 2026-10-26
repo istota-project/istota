@@ -15,6 +15,7 @@ import type {
   Encounter,
   HealthDocument,
   Immunization,
+  Medication,
 } from '$lib/api';
 import type { SelectOption } from '@minot/ui';
 import { conditionOptionLabel, encounterOptionLabel } from './conditions';
@@ -59,12 +60,14 @@ const ENTITY_LABELS: Record<DocumentEntity, string> = {
   encounter: 'Visit',
   diagnosis: 'Condition',
   immunization: 'Vaccination',
+  medication: 'Medication',
 };
 
 /**
  * What a link points at, in the user's vocabulary rather than the schema's.
- * The tables are `encounters` / `diagnoses` / `immunizations`, but the pages
- * they back are called Visits, Conditions and Immunizations.
+ * The tables are `encounters` / `diagnoses` / `immunizations` / `medications`,
+ * but the pages they back are called Visits, Conditions, Immunizations and
+ * Medications.
  */
 export function entityTypeLabel(entityType: string): string {
   return ENTITY_LABELS[entityType as DocumentEntity] ?? entityType;
@@ -107,7 +110,7 @@ export function documentName(doc: HealthDocument): string {
  * endpoint's own ceiling is a 422 rather than a clamp: FastAPI validates the
  * query parameter before the handler runs, so the request never reaches the
  * paging logic to be corrected. A single shared size is what broke this view
- * in production — the page asked all four lists for 1000, `/encounters` and
+ * in production — the page asked every list for 1000, `/encounters` and
  * `/diagnoses` cap at 500, and the two rejections failed the `Promise.all`
  * that loads the page, so the whole view rendered "Health API error: 422"
  * however few documents were stored.
@@ -126,6 +129,7 @@ export const PAGE_SIZES = {
   encounters: 500,
   diagnoses: 500,
   immunizations: 2000,
+  medications: 500,
 } as const;
 export const MAX_PAGES = 20;
 
@@ -170,18 +174,19 @@ export interface AttachPool {
   encounters: Encounter[];
   diagnoses: Diagnosis[];
   immunizations: Immunization[];
+  medications: Medication[];
 }
 
 /**
- * Which of the Documents view's four walks stopped at the ceiling (ISSUE-441).
+ * Which of the Documents view's walks stopped at the ceiling (ISSUE-441).
  *
- * One flag per list rather than a single boolean, because the four are not one
+ * One flag per list rather than a single boolean, because the lists are not one
  * fact: the header count is a statement about the documents and nothing else,
  * while a cut *pool* costs the attach picker rather than the table. A union
  * would make the page disown a document total it reached in full, and a picker
  * showing visits would carry a notice earned by the vaccinations.
  *
- * Written against `AttachPool` rather than as a fourth hand-listed copy of the
+ * Written against `AttachPool` rather than as another hand-listed copy of the
  * same key set, so a pool added later cannot be walked and then dropped — which
  * is the defect this type exists to fix.
  */
@@ -192,6 +197,7 @@ const POOL_FOR: Record<DocumentEntity, keyof AttachPool> = {
   encounter: 'encounters',
   diagnosis: 'diagnoses',
   immunization: 'immunizations',
+  medication: 'medications',
 };
 
 /**
@@ -206,6 +212,7 @@ const POOL_LABELS: Record<keyof AttachPool, string> = {
   encounters: 'visits',
   diagnoses: 'conditions',
   immunizations: 'vaccinations',
+  medications: 'medications',
 };
 
 const POOL_ORDER = Object.keys(POOL_LABELS) as Array<keyof AttachPool>;
@@ -245,8 +252,8 @@ export function truncationNotice(flags: TruncationFlags): string {
  * The same fact where the user is acting on it.
  *
  * The page banner is behind the modal, so it cannot be the only place this is
- * said. Scoped to the type the picker is currently showing: a notice on all
- * three whenever any one was cut is false for two of them, and a warning that
+ * said. Scoped to the type the picker is currently showing: a notice on every
+ * type whenever any one was cut is false for the rest, and a warning that
  * is usually wrong is one the reader learns to skip.
  */
 export function attachPoolNotice(entityType: DocumentEntity, flags: TruncationFlags): string {
@@ -287,10 +294,26 @@ export function attachOptions(
       label: conditionOptionLabel(d),
     }));
   }
-  return free(pool.immunizations).map((i) => ({
-    value: String(i.id),
-    label: `${formatDate(i.date_given)} · ${i.name}`,
+  if (entityType === 'immunization') {
+    return free(pool.immunizations).map((i) => ({
+      value: String(i.id),
+      label: `${formatDate(i.date_given)} · ${i.name}`,
+    }));
+  }
+  return free(pool.medications).map((m) => ({
+    value: String(m.id),
+    label: medicationOptionLabel(m, formatDate),
   }));
+}
+
+/**
+ * The server's link label for a medication (`_format_entity_label`), led by the
+ * start date when there is one. A dose change is a new row, so two rows can
+ * share a name and dose, and the date is what tells them apart in the picker.
+ */
+export function medicationOptionLabel(m: Medication, formatDate: (iso: string) => string): string {
+  const name = m.dose ? `${m.name} ${m.dose}${m.dose_unit ?? ''}` : m.name;
+  return m.start_date ? `${formatDate(m.start_date)} · ${name}` : name;
 }
 
 /** Preview the raster formats admitted by the Health document store. */

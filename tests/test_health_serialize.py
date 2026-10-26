@@ -68,6 +68,27 @@ IMMUNIZATION = SimpleNamespace(
     created_at="2026-01-15T11:00:00+00:00",
 )
 
+MEDICATION = SimpleNamespace(
+    id=5,
+    name="Lipitor",
+    generic_name="Atorvastatin",
+    dose="20",
+    dose_unit="mg",
+    frequency="daily",
+    route="oral",
+    category="prescription",
+    prescriber="Dr Fixture",
+    pharmacy="Fixture Pharmacy",
+    reason="cholesterol",
+    start_date="2026-01-15",
+    end_date="2026-04-02",
+    active=False,
+    encounter_id=7,
+    notes="med notes",
+    source="agent",
+    created_at="2026-01-15T12:00:00+00:00",
+)
+
 COVERAGE = SimpleNamespace(
     name="influenza",
     display_name="Influenza",
@@ -127,6 +148,29 @@ IMMUNIZATION_DICT = {
     "created_at": "2026-01-15T11:00:00+00:00",
 }
 
+# Not captured from an older copy: medications were added with one serialiser,
+# and this pins the order the spec names.
+MEDICATION_DICT = {
+    "id": 5,
+    "name": "Lipitor",
+    "generic_name": "Atorvastatin",
+    "dose": "20",
+    "dose_unit": "mg",
+    "frequency": "daily",
+    "route": "oral",
+    "category": "prescription",
+    "prescriber": "Dr Fixture",
+    "pharmacy": "Fixture Pharmacy",
+    "reason": "cholesterol",
+    "start_date": "2026-01-15",
+    "end_date": "2026-04-02",
+    "active": False,
+    "encounter_id": 7,
+    "notes": "med notes",
+    "source": "agent",
+    "created_at": "2026-01-15T12:00:00+00:00",
+}
+
 COVERAGE_DICT = {
     "name": "influenza",
     "display_name": "Influenza",
@@ -178,6 +222,14 @@ class TestTheCapturedWireFormat:
 
     def test_coverage(self):
         _assert_exact(serialize.coverage_to_dict(COVERAGE), COVERAGE_DICT)
+
+    def test_medication(self):
+        _assert_exact(serialize.medication_to_dict(MEDICATION), MEDICATION_DICT)
+
+    def test_medication_active_is_a_json_boolean(self):
+        """SQLite hands back 0/1; the wire format says true/false."""
+        row = SimpleNamespace(**{**vars(MEDICATION), "active": 1})
+        assert serialize.medication_to_dict(row)["active"] is True
 
     def test_the_unmatched_other_bucket_keeps_its_own_captured_shape(self):
         """`routes.api_immunization_coverage` built this by hand, in the same
@@ -261,6 +313,7 @@ class TestNoFifthCopy:
         "diagnosis": tuple(SKILL_DIAGNOSIS),
         "diagnosis+created_at": tuple(ROUTE_DIAGNOSIS),
         "immunization": tuple(IMMUNIZATION_DICT),
+        "medication": tuple(MEDICATION_DICT),
         "coverage": tuple(COVERAGE_DICT),
     }
 
@@ -302,7 +355,7 @@ class TestNoFifthCopy:
     def test_the_guard_is_actually_finding_them(self):
         """Without this, deleting `serialize.py` would leave the guard green.
 
-        The walk must see all four bodies — encounter and diagnosis in their
+        The walk must see all five bodies — encounter and diagnosis in their
         no-``created_at`` form, since ``created_at`` is appended after the
         literal rather than being part of it.
         """
@@ -311,5 +364,6 @@ class TestNoFifthCopy:
             self.KEY_SETS["encounter"],
             self.KEY_SETS["diagnosis"],
             self.KEY_SETS["immunization"],
+            self.KEY_SETS["medication"],
             self.KEY_SETS["coverage"],
         }

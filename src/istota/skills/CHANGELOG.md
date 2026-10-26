@@ -1,5 +1,11 @@
 # Skills Changelog
 
+## 2026-10-26
+- `health` records medications: prescriptions, over-the-counter drugs and supplements in one list. `medications` shows the current regimen, `--status all` with `--since` / `--until` shows what was taken in a date window, and `medication <id>` shows one row
+- `add-medication`, `update-medication`, `stop-medication` and `delete-medication` write it. Run `medications --name X` before adding X; when `add-medication` returns `active_with_same_name`, tell the user it may be a duplicate
+- A dose change is `stop-medication` on the old row, then `add-medication` with the new dose. Use `delete-medication` only for a row entered by mistake
+- Medication names and schedules stay in the health DB, never in memory, the knowledge graph or KV
+
 ## 2026-10-25
 - New `assignment` skill, for admins: a goal carried across days in short runs called wakes, with a budget, done-when checks and hand-offs to the user. The user may call it a quest. Draft the charter with `create`, `item add` and `set`, show the user the rendered charter each call returns, and run `activate` only when they say to start; the user approves that exact text
 - Only the user's own turn in their private chat may change an assignment. Elsewhere those verbs answer `not_a_user_turn`; tell the user to say it there

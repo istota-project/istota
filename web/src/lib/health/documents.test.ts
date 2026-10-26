@@ -14,7 +14,7 @@ import {
   type AttachPool,
   type TruncationFlags,
 } from './documents';
-import type { Diagnosis, DocumentLink, Encounter, Immunization } from '$lib/api';
+import type { Diagnosis, DocumentLink, Encounter, Immunization, Medication } from '$lib/api';
 
 describe('formatBytes', () => {
   it('renders bytes below 1 KB verbatim', () => {
@@ -203,6 +203,17 @@ describe('attachOptions', () => {
       { id: 5, name: 'Asthma', icd10: null } as Diagnosis,
     ],
     immunizations: [{ id: 1, name: 'Tetanus', date_given: '2026-02-02' } as Immunization],
+    medications: [
+      {
+        id: 1,
+        name: 'Atorvastatin',
+        dose: '20',
+        dose_unit: 'mg',
+        start_date: '2026-01-15',
+      } as Medication,
+      { id: 2, name: 'Atorvastatin', dose: '40', dose_unit: 'mg', start_date: null } as Medication,
+      { id: 3, name: 'Vitamin D3', dose: null, dose_unit: null, start_date: null } as Medication,
+    ],
   };
 
   function link(entity_type: DocumentLink['entity_type'], entity_id: number): DocumentLink {
@@ -234,6 +245,19 @@ describe('attachOptions', () => {
       { value: '1', label: '2026-02-02 · Tetanus' },
     ]);
   });
+
+  it('labels medications as the server does, led by the start date', () => {
+    // An immunization 1 is attached; medication 1 is a different record and
+    // must still be offered.
+    expect(attachOptions('medication', pool, [link('immunization', 1)], iso)).toEqual([
+      { value: '1', label: '2026-01-15 · Atorvastatin 20mg' },
+      { value: '2', label: 'Atorvastatin 40mg' },
+      { value: '3', label: 'Vitamin D3' },
+    ]);
+    expect(
+      attachOptions('medication', pool, [link('medication', 2)], iso).map((o) => o.value),
+    ).toEqual(['1', '3']);
+  });
 });
 
 describe('entityTypeLabel', () => {
@@ -241,6 +265,7 @@ describe('entityTypeLabel', () => {
     expect(entityTypeLabel('encounter')).toBe('Visit');
     expect(entityTypeLabel('diagnosis')).toBe('Condition');
     expect(entityTypeLabel('immunization')).toBe('Vaccination');
+    expect(entityTypeLabel('medication')).toBe('Medication');
   });
 
   it('passes an unknown type through rather than blanking the chip', () => {
@@ -255,6 +280,7 @@ const whole: TruncationFlags = {
   encounters: false,
   diagnoses: false,
   immunizations: false,
+  medications: false,
 };
 
 describe('truncationNotice', () => {
@@ -286,9 +312,13 @@ describe('truncationNotice', () => {
         encounters: true,
         diagnoses: true,
         immunizations: true,
+        medications: false,
       }),
     ).toBe(
       'There are more visits, conditions and vaccinations than this page loads, so the attach picker does not offer every record.',
+    );
+    expect(truncationNotice({ ...whole, medications: true, diagnoses: true })).toBe(
+      'There are more conditions and medications than this page loads, so the attach picker does not offer every record.',
     );
   });
 
@@ -319,6 +349,9 @@ describe('attachPoolNotice', () => {
     );
     expect(attachPoolNotice('immunization', { ...whole, immunizations: true })).toBe(
       'There are more vaccinations than this page loads, so this list is not complete.',
+    );
+    expect(attachPoolNotice('medication', { ...whole, medications: true })).toBe(
+      'There are more medications than this page loads, so this list is not complete.',
     );
   });
 });

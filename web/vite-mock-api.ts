@@ -11408,7 +11408,7 @@ const handlers: MockHandler[] = [
     }
     interface MockDocumentLink {
       document_id: number;
-      entity_type: 'encounter' | 'diagnosis' | 'immunization';
+      entity_type: 'encounter' | 'diagnosis' | 'immunization' | 'medication';
       entity_id: number;
     }
     const documents: MockDocument[] = [
@@ -11502,6 +11502,12 @@ const handlers: MockHandler[] = [
               label = `${record.encounter_date} · ${record.reason || record.encounter_type}`;
           } else if (link.entity_type === 'diagnosis') {
             label = diagnoses.find((row) => row.id === link.entity_id)?.name ?? label;
+          } else if (link.entity_type === 'medication') {
+            const record = medications.find((row) => row.id === link.entity_id);
+            if (record)
+              label = record.dose
+                ? `${record.name} ${record.dose}${record.dose_unit ?? ''}`
+                : record.name;
           } else {
             label = immunizations.find((row) => row.id === link.entity_id)?.name ?? label;
           }
@@ -11839,6 +11845,164 @@ const handlers: MockHandler[] = [
         created_at: new Date().toISOString(),
       },
     ];
+
+    interface Medication {
+      id: number;
+      name: string;
+      generic_name: string | null;
+      dose: string | null;
+      dose_unit: string | null;
+      frequency: string | null;
+      route: string | null;
+      category: 'prescription' | 'otc' | 'supplement';
+      prescriber: string | null;
+      pharmacy: string | null;
+      reason: string | null;
+      start_date: string | null;
+      end_date: string | null;
+      active: boolean;
+      encounter_id: number | null;
+      notes: string | null;
+      source: string;
+      created_at: string;
+    }
+    const medicationBase = {
+      generic_name: null,
+      dose: null,
+      dose_unit: null,
+      frequency: null,
+      route: null,
+      prescriber: null,
+      pharmacy: null,
+      reason: null,
+      start_date: null,
+      end_date: null,
+      encounter_id: null,
+      notes: null,
+      source: 'manual',
+      created_at: new Date().toISOString(),
+    };
+    const daysAgo = (n: number) => iso(n).slice(0, 10);
+    let nextMedicationId = 1;
+    const medications: Medication[] = [
+      {
+        ...medicationBase,
+        id: nextMedicationId++,
+        name: 'Lipitor',
+        generic_name: 'Atorvastatin',
+        dose: '20',
+        dose_unit: 'mg',
+        frequency: 'daily',
+        route: 'oral',
+        category: 'prescription',
+        prescriber: 'Dr. Example',
+        reason: 'High cholesterol',
+        start_date: daysAgo(280),
+        end_date: daysAgo(120),
+        active: false,
+        source: 'agent',
+      },
+      {
+        ...medicationBase,
+        id: nextMedicationId++,
+        name: 'Lipitor',
+        generic_name: 'Atorvastatin',
+        dose: '40',
+        dose_unit: 'mg',
+        frequency: 'daily',
+        route: 'oral',
+        category: 'prescription',
+        prescriber: 'Dr. Example',
+        reason: 'High cholesterol',
+        start_date: daysAgo(120),
+        active: true,
+        source: 'agent',
+      },
+      {
+        ...medicationBase,
+        id: nextMedicationId++,
+        name: 'Vitamin D3',
+        dose: '5000',
+        dose_unit: 'IU',
+        frequency: 'daily',
+        route: 'oral',
+        category: 'supplement',
+        start_date: daysAgo(60),
+        active: true,
+      },
+      {
+        ...medicationBase,
+        id: nextMedicationId++,
+        name: 'Ibuprofen',
+        dose: '200',
+        dose_unit: 'mg',
+        frequency: 'as_needed',
+        route: 'oral',
+        category: 'otc',
+        active: true,
+      },
+      {
+        ...medicationBase,
+        id: nextMedicationId++,
+        name: 'Amoxicillin',
+        dose: '500',
+        dose_unit: 'mg',
+        frequency: 'three_times_daily',
+        route: 'oral',
+        category: 'prescription',
+        start_date: daysAgo(400),
+        active: false,
+      },
+    ];
+    const MEDICATION_CATEGORIES = ['prescription', 'otc', 'supplement'] as const;
+    const MEDICATION_TEXT_FIELDS = [
+      'name',
+      'generic_name',
+      'dose',
+      'dose_unit',
+      'frequency',
+      'route',
+      'category',
+      'prescriber',
+      'pharmacy',
+      'reason',
+      'start_date',
+      'end_date',
+      'notes',
+    ] as const;
+    /** The writable fields in `body`, or an error, as the route's `_medication_fields`. */
+    function medicationFields(body: any): { fields: Partial<Medication>; error?: string } {
+      const fields: any = {};
+      for (const k of MEDICATION_TEXT_FIELDS) {
+        if (!(k in body)) continue;
+        const raw = body[k];
+        const value = typeof raw === 'string' ? raw.trim() || null : raw;
+        if ((k === 'name' || k === 'category') && value == null) {
+          return { fields, error: `${k} cannot be empty` };
+        }
+        fields[k] = value;
+      }
+      if (
+        fields.category &&
+        !(MEDICATION_CATEGORIES as readonly string[]).includes(fields.category)
+      ) {
+        return { fields, error: `unknown category: ${fields.category}` };
+      }
+      if ('active' in body) fields.active = Boolean(body.active);
+      if ('encounter_id' in body) fields.encounter_id = body.encounter_id ?? null;
+      return { fields };
+    }
+    const medicationDict = (m: Medication) => ({
+      ...m,
+      document_count: documentCount('medication', m.id),
+    });
+    const sortMedications = (rows: Medication[]) =>
+      rows.sort(
+        (a, b) =>
+          Number(b.active) - Number(a.active) ||
+          (b.start_date ?? '').localeCompare(a.start_date ?? '') ||
+          b.id - a.id,
+      );
 
     let nextStatId = 1;
     const stats: Stat[] = [];
@@ -12296,7 +12460,7 @@ const handlers: MockHandler[] = [
         }
         const entityType = body?.entity_type;
         const entityId = Number(body?.entity_id);
-        if (!['encounter', 'diagnosis', 'immunization'].includes(entityType)) {
+        if (!['encounter', 'diagnosis', 'immunization', 'medication'].includes(entityType)) {
           return { error: `unknown entity type: ${entityType}`, __status: 400 };
         }
         const exists = documentLinks.some(
@@ -13126,6 +13290,7 @@ const handlers: MockHandler[] = [
             diagnoses: linkedDiag,
             panels: linkedPanels,
             documents: documentsFor('encounter', id),
+            medications: sortMedications(medications.filter((m) => m.encounter_id === id)),
           };
         }
         const u = new URL(url, 'http://x');
@@ -13198,6 +13363,9 @@ const handlers: MockHandler[] = [
         }
         for (const p of panels) {
           if (p.encounter_id === id) p.encounter_id = null;
+        }
+        for (const m of medications) {
+          if (m.encounter_id === id) m.encounter_id = null;
         }
         return { status: 'ok' };
       }
@@ -13384,11 +13552,21 @@ const handlers: MockHandler[] = [
           .filter((e) => e.encounter_type === 'procedure' && e.encounter_date >= fiveYearsAgo)
           .sort((a, b) => b.encounter_date.localeCompare(a.encounter_date))
           .slice(0, 5);
+        const categoryOrder = ['prescription', 'otc', 'supplement'];
+        const regimen = medications
+          .filter((m) => m.active)
+          .sort(
+            (a, b) =>
+              categoryOrder.indexOf(a.category) - categoryOrder.indexOf(b.category) ||
+              a.name.toLowerCase().localeCompare(b.name.toLowerCase()) ||
+              a.id - b.id,
+          );
         return {
           active_diagnoses: active,
           chronic_diagnoses: chronic,
           recent_encounters: recent,
           recent_procedures: procs,
+          medications: regimen.map(medicationDict),
         };
       }
 
@@ -13808,6 +13986,94 @@ const handlers: MockHandler[] = [
         const idx = immunizations.findIndex((x) => x.id === id);
         if (idx < 0) return { error: 'immunization not found' };
         immunizations.splice(idx, 1);
+        return { status: 'ok' };
+      }
+
+      // ---- Medications -----------------------------------------------
+      if (url.startsWith('/istota/api/health/medications') && method === 'GET') {
+        const idMatch = url.match(/^\/istota\/api\/health\/medications\/(\d+)$/);
+        if (idMatch) {
+          const id = Number(idMatch[1]);
+          const row = medications.find((m) => m.id === id);
+          if (!row) return { error: 'medication not found' };
+          const enc = row.encounter_id
+            ? encounters.find((e) => e.id === row.encounter_id) || null
+            : null;
+          return {
+            medication: row,
+            encounter: enc,
+            documents: documentsFor('medication', id),
+          };
+        }
+        const u = new URL(url, 'http://x');
+        const status = u.searchParams.get('status') || 'active';
+        const category = u.searchParams.get('category');
+        const name = u.searchParams.get('name')?.trim().toLowerCase();
+        const since = u.searchParams.get('since');
+        const until = u.searchParams.get('until');
+        let rows = [...medications];
+        if (status === 'active') rows = rows.filter((m) => m.active);
+        else if (status === 'stopped') rows = rows.filter((m) => !m.active);
+        if (category) rows = rows.filter((m) => m.category === category);
+        if (name) {
+          rows = rows.filter(
+            (m) => m.name.toLowerCase() === name || m.generic_name?.toLowerCase() === name,
+          );
+        }
+        if (until) rows = rows.filter((m) => !m.start_date || m.start_date <= until);
+        if (since) rows = rows.filter((m) => !m.end_date || m.end_date >= since);
+        return { medications: sortMedications(rows).map(medicationDict) };
+      }
+      if (url === '/istota/api/health/medications' && method === 'POST') {
+        if (!body || typeof body.name !== 'string' || !body.name.trim()) {
+          return { error: 'name is required' };
+        }
+        const { fields, error } = medicationFields(body);
+        if (error) return { error };
+        const med: Medication = {
+          ...medicationBase,
+          category: 'prescription',
+          active: true,
+          ...fields,
+          id: nextMedicationId++,
+          name: String(fields.name),
+          source: 'manual',
+          created_at: new Date().toISOString(),
+        };
+        medications.push(med);
+        return { status: 'ok', id: med.id };
+      }
+      const medStopMatch = url.match(/^\/istota\/api\/health\/medications\/(\d+)\/discontinue$/);
+      if (medStopMatch && method === 'POST') {
+        const med = medications.find((m) => m.id === Number(medStopMatch[1]));
+        if (!med) return { error: 'medication not found' };
+        const endDate = body?.end_date || new Date().toISOString().slice(0, 10);
+        if (med.start_date && endDate < med.start_date) {
+          return { error: 'end_date is before start_date' };
+        }
+        med.active = false;
+        med.end_date = endDate;
+        return { status: 'ok', end_date: endDate };
+      }
+      const medUpdMatch = url.match(/^\/istota\/api\/health\/medications\/(\d+)$/);
+      if (medUpdMatch && method === 'PUT') {
+        const med = medications.find((m) => m.id === Number(medUpdMatch[1]));
+        if (!med) return { error: 'medication not found' };
+        const { fields, error } = medicationFields(body ?? {});
+        if (error) return { error };
+        Object.assign(med, fields);
+        return { status: 'ok' };
+      }
+      if (medUpdMatch && method === 'DELETE') {
+        const idx = medications.findIndex((m) => m.id === Number(medUpdMatch[1]));
+        if (idx < 0) return { error: 'medication not found' };
+        const [removed] = medications.splice(idx, 1);
+        for (let i = documentLinks.length - 1; i >= 0; i--) {
+          const link = documentLinks[i];
+          if (link.entity_type === 'medication' && link.entity_id === removed.id) {
+            documentLinks.splice(i, 1);
+          }
+        }
         return { status: 'ok' };
       }
 

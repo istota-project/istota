@@ -1,6 +1,6 @@
 """Client route destinations supported by search results."""
 
-ROUTE_PATHS = frozenset(['/chat/', '/briefings/', '/feeds/', '/health/documents/', '/health/labs/panel/', '/health/labs/marker/', '/health/history/encounter/', '/health/history/diagnoses/', '/health/immunizations/detail/', '/location/', '/money/transactions/'])
+ROUTE_PATHS = frozenset(['/chat/', '/briefings/', '/feeds/', '/health/documents/', '/health/labs/panel/', '/health/labs/marker/', '/health/history/encounter/', '/health/history/diagnoses/', '/health/immunizations/detail/', '/health/medications/detail/', '/location/', '/money/transactions/'])
 
 
 def route(path: str, **params) -> dict:

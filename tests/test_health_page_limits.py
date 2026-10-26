@@ -1,9 +1,9 @@
 """The Documents view's page sizes must fit the caps the routes declare.
 
 ``PAGE_SIZES`` (``web/src/lib/health/documents.ts``) is what the Documents view
-asks each of its four lists for; every ``limit`` there is validated against an
+asks each of its lists for; every ``limit`` there is validated against an
 ``le`` on the route. FastAPI rejects an over-cap value with a 422 *before* the
-handler runs, so nothing clamps it and nothing degrades — and the four reads sit
+handler runs, so nothing clamps it and nothing degrades — and the reads sit
 in one ``Promise.all``, so a single rejection blanks the whole page with
 "Health API error: 422" however few documents are stored.
 
@@ -38,6 +38,7 @@ ROUTE_FOR_LIST = {
     "encounters": "/encounters",
     "diagnoses": "/diagnoses",
     "immunizations": "/immunizations",
+    "medications": "/medications",
 }
 
 

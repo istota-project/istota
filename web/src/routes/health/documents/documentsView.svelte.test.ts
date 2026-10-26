@@ -37,7 +37,7 @@ vi.mock('$lib/health/documents', async () => {
   // of 2 that is a *full* page, so every unrelated test would page a second
   // time and its call-count assertions would be about paging instead of about
   // what they are named for.
-  const small = { documents: 3, encounters: 3, diagnoses: 3, immunizations: 3 };
+  const small = { documents: 3, encounters: 3, diagnoses: 3, immunizations: 3, medications: 3 };
   return { ...actual, PAGE_SIZES: small, MAX_PAGES: 3 };
 });
 
@@ -49,6 +49,7 @@ vi.mock('$lib/api', async () => {
     listEncounters: vi.fn(),
     listDiagnoses: vi.fn(),
     listImmunizations: vi.fn(),
+    listMedications: vi.fn(),
     getDocument: vi.fn(),
     linkDocument: vi.fn(),
     unlinkDocument: vi.fn(),
@@ -64,6 +65,7 @@ import {
   listDocuments,
   listEncounters,
   listImmunizations,
+  listMedications,
   unlinkDocument,
   type DocumentLink,
   type HealthDocument,
@@ -114,7 +116,7 @@ const loose = doc(2, 'scan.pdf', []);
  * body, so a text lookup is over the whole page, and "Condition" is also the
  * kind label on a link chip in the table behind the modal.
  */
-async function pick(trigger: HTMLElement, label: string) {
+async function pick(trigger: HTMLElement, label: string | RegExp) {
   const mouse = { pointerType: 'mouse', button: 0 };
   await fireEvent.pointerDown(trigger, mouse);
   await fireEvent.pointerUp(trigger, mouse);
@@ -145,6 +147,7 @@ beforeEach(() => {
   vi.mocked(listImmunizations).mockResolvedValue({ immunizations: [] } as Awaited<
     ReturnType<typeof listImmunizations>
   >);
+  vi.mocked(listMedications).mockResolvedValue({ medications: [] });
   vi.mocked(unlinkDocument).mockResolvedValue({ status: 'ok', removed: true });
   vi.mocked(linkDocument).mockResolvedValue({ status: 'ok', created: true });
   vi.mocked(deleteDocument).mockResolvedValue({ status: 'ok' });
@@ -374,6 +377,34 @@ describe('the Documents view', () => {
           'There are more conditions than this page loads, so this list is not complete.',
         ),
       ).toBeTruthy(),
+    );
+  });
+
+  it('attaches a document to a medication from the picker', async () => {
+    vi.mocked(listMedications).mockResolvedValue({
+      medications: [
+        {
+          id: 3,
+          name: 'Atorvastatin',
+          dose: '20',
+          dose_unit: 'mg',
+          start_date: '2026-01-15',
+        },
+      ],
+    } as Awaited<ReturnType<typeof listMedications>>);
+
+    const { container } = render(Page);
+    await waitFor(() => expect(screen.getByText('scan.pdf')).toBeTruthy());
+    expect(vi.mocked(listMedications)).toHaveBeenCalledWith({ status: 'all', limit: 3, offset: 0 });
+
+    (container.querySelector('.attach') as HTMLElement).click();
+    const dialog = await screen.findByRole('dialog');
+    await pick(within(dialog).getByRole('button', { name: 'Record type' }), 'Medication');
+    await pick(within(dialog).getByRole('button', { name: 'Record' }), /Atorvastatin 20mg/);
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Attach' }));
+
+    await waitFor(() =>
+      expect(vi.mocked(linkDocument)).toHaveBeenCalledWith(2, { type: 'medication', id: 3 }),
     );
   });
 

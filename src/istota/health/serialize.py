@@ -113,6 +113,30 @@ def immunization_to_dict(i) -> dict:
     }
 
 
+def medication_to_dict(m) -> dict:
+    """Serialise a medication row. Both callers emit ``created_at``."""
+    return {
+        "id": m.id,
+        "name": m.name,
+        "generic_name": m.generic_name,
+        "dose": m.dose,
+        "dose_unit": m.dose_unit,
+        "frequency": m.frequency,
+        "route": m.route,
+        "category": m.category,
+        "prescriber": m.prescriber,
+        "pharmacy": m.pharmacy,
+        "reason": m.reason,
+        "start_date": m.start_date,
+        "end_date": m.end_date,
+        "active": bool(m.active),
+        "encounter_id": m.encounter_id,
+        "notes": m.notes,
+        "source": m.source,
+        "created_at": m.created_at,
+    }
+
+
 def coverage_to_dict(c) -> dict:
     """Serialise a computed immunization-coverage row. Neither caller emits ``created_at``."""
     return {

@@ -30,6 +30,7 @@
     listDocuments,
     listEncounters,
     listImmunizations,
+    listMedications,
     unlinkDocument,
     type Diagnosis,
     type DocumentEntity,
@@ -37,6 +38,7 @@
     type Encounter,
     type HealthDocument,
     type Immunization,
+    type Medication,
   } from '$lib/api';
   import {
     Icon,
@@ -79,6 +81,7 @@
     { value: 'encounter', label: 'Visit' },
     { value: 'diagnosis', label: 'Condition' },
     { value: 'immunization', label: 'Vaccination' },
+    { value: 'medication', label: 'Medication' },
   ];
 
   // `loading` is the first load only. A reload after an edit sets `refreshing`
@@ -89,10 +92,10 @@
   let refreshing = $state(false);
   let loadError = $state('');
   let documents = $state<HealthDocument[]>([]);
-  // Which of the four walks ran out of pages before it ran out of records, one
+  // Which of the walks ran out of pages before it ran out of records, one
   // flag each. On `documents` it means the header must not state a total and
   // the unattached count is a count of what is loaded rather than of what
-  // exists. On the three pools it means the attach picker is short — a
+  // exists. On the pools it means the attach picker is short — a
   // different consequence on a different surface, which is why this is not one
   // boolean (ISSUE-441).
   let truncated = $state<TruncationFlags>({
@@ -100,10 +103,12 @@
     encounters: false,
     diagnoses: false,
     immunizations: false,
+    medications: false,
   });
   let encounters = $state<Encounter[]>([]);
   let diagnoses = $state<Diagnosis[]>([]);
   let immunizations = $state<Immunization[]>([]);
+  let medications = $state<Medication[]>([]);
 
   let unattachedOnly = $state(false);
   let requestedDocumentId = $state<number | null>(null);
@@ -168,7 +173,7 @@
   let attachId = $state('');
   const deleteTargetId = createConfirm<number>();
 
-  const pool = $derived({ encounters, diagnoses, immunizations });
+  const pool = $derived({ encounters, diagnoses, immunizations, medications });
 
   const byId = $derived(new Map(documents.map((d) => [d.id, d])));
   const attachFor = $derived(attachForId === null ? null : (byId.get(attachForId) ?? null));
@@ -231,7 +236,7 @@
       maxPages: MAX_PAGES,
     });
     try {
-      const [docs, enc, dx, imm] = await Promise.all([
+      const [docs, enc, dx, imm, meds] = await Promise.all([
         fetchAllPages(async (offset, limit) => {
           const out = await listDocuments(undefined, { limit, offset });
           return out.documents;
@@ -248,16 +253,22 @@
           const out = await listImmunizations({ limit, offset });
           return out.immunizations;
         }, paged('immunizations')),
+        fetchAllPages(async (offset, limit) => {
+          const out = await listMedications({ status: 'all', limit, offset });
+          return out.medications;
+        }, paged('medications')),
       ]);
       documents = docs.items;
       encounters = enc.items;
       diagnoses = dx.items;
       immunizations = imm.items;
+      medications = meds.items;
       truncated = {
         documents: docs.truncated,
         encounters: enc.truncated,
         diagnoses: dx.truncated,
         immunizations: imm.truncated,
+        medications: meds.truncated,
       };
       // The filter's chip is only rendered while something is unattached, so
       // attaching the last loose document would otherwise leave the filter on
@@ -414,8 +425,8 @@
   {#snippet emptyState()}
     {#if documents.length === 0}
       <EmptyState>
-        Nothing uploaded yet. Documents attach to a visit, a condition or a vaccination from those
-        pages, and every one of them shows up here.
+        Nothing uploaded yet. Documents attach to a visit, a condition, a vaccination or a
+        medication from those pages, and every one of them shows up here.
       </EmptyState>
     {:else}
       <EmptyState>Every document is attached to a record.</EmptyState>
