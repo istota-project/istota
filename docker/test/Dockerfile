@@ -26,8 +26,10 @@ ENV LANG=C.UTF-8
 # tests shell out to `ps` to prove a grandchild died with its group, and a
 # slim image has no `ps` at all — the assertion then fails on exit 127 rather
 # than on the property it is about.
+# openssh-client for `ssh-keygen`: tests/test_mac_istota_stack.py signs and
+# verifies release manifests with a throwaway SSH key.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bubblewrap git sqlite3 curl tmux ca-certificates procps \
+    bubblewrap git sqlite3 curl tmux ca-certificates procps openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Pinned, not `:latest`. The Python dependencies are pinned by `uv sync
