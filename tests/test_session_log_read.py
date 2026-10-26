@@ -631,6 +631,27 @@ class TestDigest:
         assert compactions[0]["summary_chars"] == 0
         assert compactions[1]["error"] is None
 
+    def test_a_stale_background_compaction_reads_as_not_placed(self, tmp_path):
+        path = write_log(
+            tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl",
+            [
+                _session(), _context(), _user(),
+                {"type": "compaction", "ts": "t", "trigger": "background",
+                 "ok": True, "placed": False, "error": None, "summary": None,
+                 "messages_dropped": 0, "recovery_index": None},
+                {"type": "compaction", "ts": "t", "trigger": "proactive",
+                 "messages_dropped": 3, "recovery_index": None},
+                _assistant(text="ok", stop_reason="end_turn"),
+                _result(),
+            ],
+        )
+        compactions = reader.digest(path)["compactions"]
+        assert [c["trigger"] for c in compactions] == ["background", "proactive"]
+        assert compactions[0]["ok"] is True
+        assert compactions[0]["placed"] is False
+        # Written before `placed` existed: unknown.
+        assert compactions[1]["placed"] is None
+
     def test_an_error_record_is_surfaced(self, tmp_path):
         path = write_log(
             tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl",

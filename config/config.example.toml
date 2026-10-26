@@ -135,6 +135,13 @@ features = []
 #                                            #   way. The two are read independently — setting
 #                                            #   one and leaving the other at 0 derives only
 #                                            #   the one left unset.
+# compaction_background = false             # start the compaction summary in the background
+#                                            #   before the blocking threshold, and place it at
+#                                            #   a later turn boundary, so a long task does not
+#                                            #   stall on the summary call.
+# compaction_background_tokens = 0           # how far below the blocking threshold the
+#                                            #   background summary starts. 0 derives it:
+#                                            #   an eighth of the window, at most 32768.
 # model_catalog_fetch = true                 # when base_url is OpenRouter, fetch its
 #                                            #   public model list once/process for real
 #                                            #   window / capabilities / prices (self-

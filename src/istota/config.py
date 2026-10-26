@@ -2068,6 +2068,11 @@ class NativeBrainConfig:
     # 16k/20k constants). See istota.session.compaction (NB-14).
     compaction_reserve_tokens: int = 0
     compaction_keep_recent_tokens: int = 0
+    # Background compaction: start the summary this many tokens below the
+    # blocking threshold and place it at a later turn boundary, so the turn
+    # does not stall on the summary call. 0 = derive from the window.
+    compaction_background: bool = False
+    compaction_background_tokens: int = 0
     # Opt-in cache_control breakpoints (Anthropic/OpenRouter). Tri-state: ``None``
     # (the operator set no explicit value) derives the default from base_url in
     # make_provider — on for api.anthropic.com, off elsewhere. An explicit

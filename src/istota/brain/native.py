@@ -83,6 +83,7 @@ from istota.llm.types import (
 from istota.session.compaction import (
     CompactionOutcome,
     compact_messages,
+    derive_background_tokens,
     derive_keep_recent_tokens,
     derive_reserve_tokens,
     estimate_context_tokens,
@@ -377,6 +378,30 @@ _MAX_OVERFLOW_RECOVERIES = 2
 _MAX_PROACTIVE_COMPACTION_FAILURES = 2
 
 _RECOVERY_NUDGE = "[context was compacted; continue]"
+
+
+def _background_await_budget(deadline: float | None) -> float | None:
+    """Seconds the blocking threshold may wait on a background summary.
+
+    The attempt's remaining wall clock, or ``None`` (unbounded) when the attempt
+    has no deadline. A summary that outlives the wait keeps running, and the
+    placement check discards it if a blocking compaction lands first.
+    """
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _prefix_in_place(messages: list, prefix: list) -> bool:
+    """Whether ``prefix`` still leads ``messages``, by object identity.
+
+    Every compaction replaces the list with new objects at its head, and
+    nothing else does, so identity of the prefix says exactly whether the
+    messages a background summary covers are still the ones in context.
+    """
+    if len(messages) < len(prefix):
+        return False
+    return all(a is b for a, b in zip(messages, prefix))
 
 # NB-15: markers appended to a final answer whose last turn ended on a
 # non-clean finish reason, so a truncated/filtered response is visibly flagged
@@ -1611,6 +1636,130 @@ class NativeBrain:
         # `_MAX_PROACTIVE_COMPACTION_FAILURES` the proactive path stops trying
         # and the overflow path is the only compaction left.
         compaction_state = {"summary": None, "details": None, "failures": 0}
+        # Background compaction: a summary started below the blocking threshold
+        # and placed at a later boundary. One in flight at a time; `prefix` is
+        # the snapshot it summarizes, checked by identity before it is placed.
+        background_on = self._config.compaction_background and bool(req.allowed_tools)
+        background: dict = {
+            "task": None, "cut": 0, "prefix": None, "pin": None, "tokens_before": 0,
+        }
+
+        def _start_background(ctx, tokens, keep_recent, window) -> None:
+            cut = find_cut_point(ctx.messages, keep_recent_tokens=keep_recent)
+            if cut <= 0:
+                return
+            prefix = list(ctx.messages[:cut])
+            pin, to_summarize = plan_image_pin(prefix, keep_recent)
+            task = asyncio.create_task(
+                compact_messages(
+                    to_summarize,
+                    compaction_state["summary"],
+                    compaction_state["details"],
+                    provider,
+                    model,
+                    self._convert_to_llm,
+                    max_input_chars=_compaction_input_chars(window),
+                )
+            )
+            background.update(
+                task=task, cut=cut, prefix=prefix, pin=pin, tokens_before=tokens
+            )
+            logger.debug(
+                "native background compaction started: tokens=%d cut=%d", tokens, cut
+            )
+
+        def _clear_background():
+            task = background["task"]
+            background.update(
+                task=None, cut=0, prefix=None, pin=None, tokens_before=0
+            )
+            return task
+
+        def _take_background(ctx) -> list | None:
+            """Place a finished background summary, or discard it.
+
+            Returns the compacted message list when it was placed. Usage is
+            counted whether or not it was, since the spend is real.
+            """
+            cut, prefix, pin = background["cut"], background["prefix"], background["pin"]
+            tokens_before = background["tokens_before"]
+            task = _clear_background()
+            if task.cancelled():
+                return None
+            exc = task.exception()
+            if exc is not None:
+                # `compact_messages` reports failure in its outcome and never
+                # raises, so this is a bug; it still counts as a failed summary.
+                compaction_state["failures"] += 1
+                logger.warning("native background compaction raised: %r", exc)
+                return None
+            outcome = task.result()
+            _count_summary_usage(outcome.usage)
+            placed = outcome.ok and _prefix_in_place(ctx.messages, prefix)
+            compacted: list | None = None
+            if placed:
+                compaction_state["summary"] = outcome.summary
+                compaction_state["details"] = outcome.details
+                stats["compactions"] += 1
+                summary_msg = CompactionSummaryMessage(
+                    summary=outcome.summary,
+                    tokens_before=tokens_before,
+                    details=outcome.details,
+                )
+                remaining = ctx.messages[cut:]
+                compacted = (
+                    [pin, summary_msg, *remaining]
+                    if pin is not None
+                    else [summary_msg, *remaining]
+                )
+            elif not outcome.ok:
+                compaction_state["failures"] += 1
+                logger.warning(
+                    "native background compaction failed (%d/%d), "
+                    "context left uncut: %s",
+                    compaction_state["failures"],
+                    _MAX_PROACTIVE_COMPACTION_FAILURES,
+                    outcome.error,
+                )
+            else:
+                logger.info(
+                    "native background compaction discarded: the context was "
+                    "compacted while it ran"
+                )
+            log.compaction(
+                trigger="background",
+                ok=outcome.ok,
+                error=outcome.error,
+                placed=placed,
+                summary=outcome.summary if placed else None,
+                tokens_before=tokens_before,
+                cut_index=cut if placed else None,
+                messages_dropped=cut if placed else 0,
+                image_pinned=placed and pin is not None,
+                details=_details_dict(outcome.details),
+                recovery_index=None,
+                usage=_usage_dict(outcome.usage),
+            )
+            return compacted
+
+        async def _discard_background() -> None:
+            """Cancel an in-flight background summary and wait for it to go.
+
+            A cancelled call reported no usage, so it adds none. One that had
+            already finished unplaced is counted, because it was paid for.
+            """
+            task = _clear_background()
+            if task is None:
+                return
+            if not task.done():
+                task.cancel()
+            try:
+                outcome = await task
+            except asyncio.CancelledError:
+                return
+            except Exception:  # noqa: BLE001 — see `_take_background`
+                return
+            _count_summary_usage(outcome.usage)
         # Turn-budget nudge (ISSUE-187 defect 3). Only for tool-bearing tasks with
         # a cap — a text-only run (empty allowed_tools, e.g. the sleep cycle)
         # never sees it. ``fired`` tracks crossed thresholds so each surfaces once.
@@ -1674,9 +1823,28 @@ class NativeBrain:
             )
             tokens, _ = estimate_context_tokens(ctx.messages)
             compacted: list | None = None
-            if (
+            blocking = (
                 compaction_state["failures"] < _MAX_PROACTIVE_COMPACTION_FAILURES
                 and should_compact(tokens, window, reserve_tokens=reserve)
+            )
+            pending_bg = background["task"]
+            if pending_bg is not None and (blocking or pending_bg.done()):
+                if not pending_bg.done():
+                    # One summary at a time: the blocking threshold waits for
+                    # the one already running rather than paying for a second.
+                    logger.info(
+                        "native compaction: blocking threshold reached with a "
+                        "background summary in flight; awaiting it"
+                    )
+                    await asyncio.wait(
+                        {pending_bg}, timeout=_background_await_budget(deadline)
+                    )
+                if pending_bg.done():
+                    compacted = _take_background(ctx)
+            if (
+                compacted is None
+                and blocking
+                and compaction_state["failures"] < _MAX_PROACTIVE_COMPACTION_FAILURES
             ):
                 cut = find_cut_point(ctx.messages, keep_recent_tokens=keep_recent)
                 if cut > 0:
@@ -1730,6 +1898,7 @@ class NativeBrain:
                         trigger="proactive",
                         ok=outcome.ok,
                         error=outcome.error,
+                        placed=outcome.ok,
                         summary=outcome.summary if outcome.ok else None,
                         tokens_before=tokens,
                         cut_index=cut if outcome.ok else None,
@@ -1750,6 +1919,19 @@ class NativeBrain:
                             if pin is not None
                             else [summary_msg, *remaining]
                         )
+            elif (
+                compacted is None
+                and not blocking
+                and background_on
+                and background["task"] is None
+                and compaction_state["failures"] < _MAX_PROACTIVE_COMPACTION_FAILURES
+            ):
+                background_tokens = (
+                    self._config.compaction_background_tokens
+                    or derive_background_tokens(window)
+                )
+                if tokens > window - reserve - background_tokens:
+                    _start_background(ctx, tokens, keep_recent, window)
 
             # Combine: a nudge injects into whichever message list is current
             # (compacted, or the unchanged context) as a trailing environment
@@ -1995,6 +2177,8 @@ class NativeBrain:
                 # Preserve the overflow error before clearing, so an unusable
                 # recovery can fail with the real cause instead of a wrong answer.
                 overflow_error = last_error_message
+                # A background summary of the context being replaced is moot.
+                await _discard_background()
                 recovery_ctx, outcome = await _build_recovery_context(
                     transcript,
                     context.system_prompt,
@@ -2039,6 +2223,7 @@ class NativeBrain:
                     trigger="overflow",
                     ok=outcome.ok,
                     error=outcome.error,
+                    placed=outcome.ok,
                     recovery_index=recoveries,
                     summary=outcome.summary if outcome.ok else None,
                     tokens_before=_estimated_tokens(transcript),
@@ -2095,6 +2280,8 @@ class NativeBrain:
                         await _bg
                     except asyncio.CancelledError:
                         pass
+            # Before the telemetry line, so a finished summary's spend is in it.
+            await _discard_background()
             # In ``finally`` so the per-task cache footer is logged at task end
             # even if the recovery body raises a non-overflow exception.
             _log_cache_telemetry(usage)

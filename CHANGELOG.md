@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **Upgrade note:** the first start rebuilds the approval-request table to allow the new activation approval, so this release owes a run of the upgrade tier before it ships.
 
+- **Background summaries for long native-brain tasks (opt-in).** An operator can let the native brain start summarizing older turns before the context fills, while the task keeps working, and swap the summary in at a later step. Off by default; it is turned on in the native brain's configuration.
+
 ### Changed
 
 - **Specs the bot drafts are ready for a coding agent.** A new spec has every section an implementer reads, including a survey of the existing code taken from the project's source, and its stages are one checklist line each. Specs drafted before this may lack those sections.

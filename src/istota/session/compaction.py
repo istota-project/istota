@@ -77,6 +77,7 @@ class CompactionOutcome:
 # derivation so a 200k-window model behaves exactly as before.
 _RESERVE_CEILING = 16384
 _KEEP_RECENT_CEILING = 20000
+_BACKGROUND_CEILING = 32768
 
 
 def derive_reserve_tokens(context_window: int) -> int:
@@ -96,6 +97,15 @@ def derive_keep_recent_tokens(context_window: int) -> int:
     on a small-window model.
     """
     return max(1, min(_KEEP_RECENT_CEILING, context_window // 2))
+
+
+def derive_background_tokens(context_window: int) -> int:
+    """How far below the blocking threshold a background summary starts.
+
+    An eighth of the window, capped at 32768, floored at 1. The background
+    threshold is ``window - reserve - background_tokens``.
+    """
+    return max(1, min(_BACKGROUND_CEILING, context_window // 8))
 
 
 def _msg_tokens(m) -> int:

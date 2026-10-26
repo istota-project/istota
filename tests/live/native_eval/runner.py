@@ -223,8 +223,9 @@ def metrics_from_log(path: Path, success_marker: str | None) -> dict:
     for record in read_records(path):
         kind = record.get("type")
         if kind == "compaction":
-            # A failed summary writes a record too, and cut nothing.
-            if record.get("ok") is not False:
+            # A failed summary writes a record too, and cut nothing; so does a
+            # background summary discarded as stale.
+            if record.get("ok") is not False and record.get("placed") is not False:
                 out["compactions"] += 1
         elif kind == "result":
             turns = record.get("turns")
