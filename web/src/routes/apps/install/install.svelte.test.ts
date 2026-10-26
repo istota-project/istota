@@ -8,7 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
-import { page } from '../../../../../../vitest-stubs/app-state.svelte';
+import { page } from '../../../../vitest-stubs/app-state.svelte';
 import type { AppsList, PendingCapability, PendingInstall } from '$lib/apps/api';
 
 const apps = vi.hoisted(() => ({
@@ -117,8 +117,7 @@ const LIST: AppsList = { apps: [], pending: [], drafts: [], starter: [], kit_bui
 
 beforeEach(() => {
   vi.clearAllMocks();
-  page.url = new URL('http://localhost/apps/tides/install/p-1/');
-  page.params = { id: 'tides', pending: 'p-1' };
+  page.url = new URL('http://localhost/apps/install/?id=tides&pending=p-1');
   apps.getApps.mockResolvedValue(LIST);
   apps.getPending.mockResolvedValue(pending());
   apps.approvePending.mockResolvedValue({ app_id: 'tides', version: 3 });
@@ -234,7 +233,7 @@ describe('the approval screen', () => {
     expect(screen.getAllByRole('button', { name: /^(Update|Allow and update)$/ })).toHaveLength(1);
     await fireEvent.click(approve);
     await waitFor(() => expect(apps.approvePending).toHaveBeenCalledWith('tides', 'p-1', []));
-    await waitFor(() => expect(navigation.goto).toHaveBeenCalledWith('/apps/tides/'));
+    await waitFor(() => expect(navigation.goto).toHaveBeenCalledWith('/apps/open/?id=tides'));
     expect(apps.getApps).toHaveBeenCalledTimes(2);
   });
 

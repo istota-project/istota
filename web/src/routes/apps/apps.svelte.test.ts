@@ -92,9 +92,9 @@ describe('the Apps section', () => {
   it('lists the installed apps in the sidebar, each a link to its view', async () => {
     render(Harness);
     const board = await within(await waitFor(sidebar)).findByRole('link', { name: /Board/ });
-    expect(board).toHaveAttribute('href', '/apps/board/');
+    expect(board).toHaveAttribute('href', '/apps/open/?id=board');
     const tides = within(sidebar()).getByRole('link', { name: /Tides/ });
-    expect(tides).toHaveAttribute('href', '/apps/tides/');
+    expect(tides).toHaveAttribute('href', '/apps/open/?id=tides');
     // The waiting install is marked on its row; the other row carries no mark.
     expect(within(tides).getByRole('img', { name: 'An install is waiting' })).toBeTruthy();
     expect(within(board).queryByRole('img', { name: 'An install is waiting' })).toBeNull();
@@ -111,13 +111,13 @@ describe('the Apps section', () => {
     expect(within(installed).getByText('Shipped with Istota')).toBeTruthy();
     expect(within(installed).getByRole('link', { name: 'Open Board' })).toHaveAttribute(
       'href',
-      '/apps/board/',
+      '/apps/open/?id=board',
     );
 
     const waiting = screen.getByRole('region', { name: 'Waiting for review' });
     expect(within(waiting).getByRole('link', { name: 'Review Tides' })).toHaveAttribute(
       'href',
-      '/apps/tides/install/p-tides/',
+      '/apps/install/?id=tides&pending=p-tides',
     );
 
     const drafts = screen.getByRole('region', { name: 'Drafts' });
@@ -139,7 +139,7 @@ describe('the Apps section', () => {
       await screen.findByRole('button', { name: 'Review install of Packing list' }),
     );
     await waitFor(() => expect(apps.createPending).toHaveBeenCalledWith('packing'));
-    expect(navigation.goto).toHaveBeenCalledWith('/apps/packing/install/p-new/');
+    expect(navigation.goto).toHaveBeenCalledWith('/apps/install/?id=packing&pending=p-new');
   });
 
   it('shows a draft that fails validation with its errors on its own card', async () => {

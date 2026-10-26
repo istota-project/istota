@@ -3,7 +3,7 @@
      which owns the app bar and the list the screen reloads after approving.
      Not a route (no `+` prefix) and not collected as a test (vitest picks up
      `*.test.ts` only). */
-  import AppsLayout from '../../../+layout.svelte';
+  import AppsLayout from '../+layout.svelte';
   import Install from './+page.svelte';
 </script>
 

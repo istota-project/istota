@@ -32,10 +32,11 @@
   import { AuthError } from '$lib/api';
   import {
     AppsApiError,
-    appPath,
+    activityPath,
     getApp,
     installPath,
     uninstallApp,
+    versionsPath,
     type AppDetail,
     type BridgeErrorCode,
   } from '$lib/apps/api';
@@ -49,7 +50,7 @@
   const apps = getAppsList();
   const identity = getCurrentUser();
 
-  const appId = $derived(page.params.id ?? '');
+  const appId = $derived(page.url.searchParams.get('id') ?? '');
 
   let detail = $state<AppDetail | null>(null);
   let loading = $state(true);
@@ -159,8 +160,8 @@
     }
     items.push(
       { label: 'Permissions', href: `${base}/settings/apps/` },
-      { label: 'Versions', href: `${base}${appPath(id)}versions/` },
-      { label: 'Activity', href: `${base}${appPath(id)}activity/` },
+      { label: 'Versions', href: `${base}${versionsPath(id)}` },
+      { label: 'Activity', href: `${base}${activityPath(id)}` },
       { label: 'Reload', onSelect: () => void reloadApp() },
       {
         label: 'Uninstall',

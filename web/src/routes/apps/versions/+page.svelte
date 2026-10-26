@@ -27,7 +27,7 @@
   const apps = getAppsList();
   const identity = getCurrentUser();
 
-  const appId = $derived(page.params.id ?? '');
+  const appId = $derived(page.url.searchParams.get('id') ?? '');
   const name = $derived(apps.list?.apps.find((a) => a.app_id === appId)?.name ?? appId);
 
   let data = $state<AppVersions | null>(null);
