@@ -365,6 +365,7 @@ class TestTheRootIsRegistered:
                 brain.model_namespace = "anthropic"
                 brain.resolve_model_name.side_effect = lambda m: m or "model"
                 brain.supports_steering = False
+                brain.bound_to.return_value = brain
                 make_brain.return_value = brain
                 execute_task(_make_task(id=task_id), config, [])
 
