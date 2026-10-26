@@ -1,0 +1,5 @@
+id = "escape-contract"
+name = "Escape tier contract"
+icon = "check"
+description = "Proves the escape tier's harness: the frame loads under its CSP, the port connects, a call round-trips."
+capabilities = ["kv:own"]
