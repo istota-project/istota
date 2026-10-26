@@ -1517,11 +1517,12 @@ class NativeBrain:
 
         def _count_summary_usage(summary_usage) -> None:
             # A compaction summary is a model call the turn loop never sees, so
-            # its spend is folded in here, failed calls included.
+            # its spend is folded in here, failed calls included. It is part of
+            # the turn it happened in, so it adds no turn (ISSUE-845).
             nonlocal turns_accumulated, turns_costed
             if summary_usage.total_tokens > 0 or summary_usage.cost_usd is not None:
                 # Summary calls are sent with prompt_caching=False, so no TTL.
-                usage.add(summary_usage, get_model_info(model))
+                usage.add(summary_usage, get_model_info(model), count_turn=False)
                 turns_accumulated += 1
                 if summary_usage.cost_usd is not None:
                     turns_costed += 1
