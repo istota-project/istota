@@ -15,6 +15,7 @@
     type Encounter,
     type HealthDocument,
     type HealthPanel,
+    type Medication,
   } from '$lib/api';
   import {
     Alert,
@@ -46,6 +47,7 @@
   let encounter: Encounter | null = $state(null);
   let diagnoses: Diagnosis[] = $state([]);
   let panels: HealthPanel[] = $state([]);
+  let medications: Medication[] = $state([]);
   let documents: HealthDocument[] = $state([]);
 
   let editing = $state(false);
@@ -120,6 +122,7 @@
       encounter = resp.encounter;
       diagnoses = resp.diagnoses;
       panels = resp.panels;
+      medications = resp.medications ?? [];
       documents = resp.documents ?? [];
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load encounter';
@@ -194,6 +197,13 @@
         },
       },
     ];
+  }
+
+  /** Dose and frequency, as the medications list shows them. */
+  function regimenLine(m: Medication): string {
+    const dose = m.dose ? (m.dose_unit ? `${m.dose} ${m.dose_unit}` : m.dose) : '';
+    const frequency = (m.frequency ?? '').replaceAll('_', ' ');
+    return [dose, frequency].filter(Boolean).join(' · ');
   }
 
   function startEdit() {
@@ -413,6 +423,26 @@
         </ul>
       {/if}
     </section>
+
+    {#if medications.length > 0}
+      <section class="related">
+        <h2 class="micro-label">Medications</h2>
+        <ul class="card-grid">
+          {#each medications as m (m.id)}
+            <li>
+              <a href="{base}/health/medications/detail?id={m.id}">
+                <h3 class="name title-card">{m.name}</h3>
+                {#if regimenLine(m)}<div class="caption">{regimenLine(m)}</div>{/if}
+                <div class="card-meta caption">
+                  {#if m.start_date}<span>Started {formatDate(m.start_date)}</span>{/if}
+                  {#if !m.active}<span>Stopped</span>{/if}
+                </div>
+              </a>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
 
     <section class="related">
       <h2 class="micro-label">Documents</h2>
