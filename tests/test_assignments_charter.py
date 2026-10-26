@@ -49,7 +49,7 @@ def _fixed(conn):
 
 GOLDEN = """# Heat pump quotes
 
-Assignment 1 · draft · created 2026-10-25
+Assignment 1 · created 2026-10-25
 
 ## Goal
 Three written quotes for a heat pump.
@@ -79,6 +79,16 @@ class TestRender:
     def test_render_current_reads_the_rows(self, db_conn):
         assignment = _fixed(db_conn)
         assert charter.render_current(db_conn, assignment.id) == GOLDEN
+
+    def test_the_state_is_not_rendered(self, db_conn):
+        """ISSUE-837: CHARTER.md is rewritten only on a charter change, so a
+        state in it went stale on every transition; `assignment show` has it."""
+        assignment = _fixed(db_conn)
+        digest = charter.charter_digest(db_conn, assignment.id)
+        store.set_state(db_conn, assignment.id, "sleeping")
+
+        assert charter.render_current(db_conn, assignment.id) == GOLDEN
+        assert charter.charter_digest(db_conn, assignment.id) == digest
 
     def test_empty_sections_and_no_deadline(self, db_conn):
         assignment = _create(db_conn, autonomy="", deadline=None, cadence_minutes=90)

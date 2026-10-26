@@ -30,7 +30,7 @@ Assignment id: 1. Its directory is <TMP>/mount/Users/alice/istota/assignments/he
 
 #### Heat pump quotes
 
-Assignment 1 · active · created 2026-01-10
+Assignment 1 · created 2026-01-10
 
 ##### Goal
 Get three written quotes for a heat pump.

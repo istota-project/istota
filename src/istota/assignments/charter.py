@@ -372,11 +372,15 @@ def _item_line(position: int, item: store.Item) -> str:
 def render(
     assignment: store.Assignment, items: Sequence[store.Item], frozen: Sequence[store.Frozen],
 ) -> str:
-    """The charter as markdown: the activation preview, `CHARTER.md`'s body, the wake's charter."""
+    """The charter as markdown: the activation preview, `CHARTER.md`'s body, the wake's charter.
+
+    No state: `CHARTER.md` is rewritten only on a charter change, so a state
+    here would go stale on every transition (ISSUE-837). `assignment show` has it.
+    """
     lines = [
         f"# {_one_line(assignment.title)}",
         "",
-        f"Assignment {assignment.id} · {assignment.state} · created {assignment.created_at[:10]}",
+        f"Assignment {assignment.id} · created {assignment.created_at[:10]}",
         "",
         "## Goal",
         assignment.goal.strip(),
