@@ -197,12 +197,24 @@ def _rewrite(ctx: _Ctx, assignment_id: int) -> str:
     return charter.rewrite_charter_file(ctx.config, ctx.conn, assignment_id)
 
 
+def _wake_due(ctx: _Ctx, assignment_id: int) -> str | None:
+    """Whether the next gate tick wakes it, and why: a wait an inbox event has
+    already ended reads `inbox`, not stuck (ISSUE-853)."""
+    from istota.assignments import store, wakes
+
+    current = store.get_assignment(ctx.conn, assignment_id)
+    return wakes.wake_due(ctx.conn, ctx.config, current) if current is not None else None
+
+
 def _changed(ctx: _Ctx, assignment, **extra: Any) -> dict:
     rendered = _rewrite(ctx, assignment.id)
     from istota.assignments import store
 
     current = store.get_assignment(ctx.conn, assignment.id)
-    return {"status": "ok", "assignment": _summary(current), "charter": rendered, **extra}
+    return {
+        "status": "ok", "assignment": _summary(current), "wake_due": _wake_due(ctx, assignment.id),
+        "charter": rendered, **extra,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +381,9 @@ def cmd_item_confirm(ctx: _Ctx, args) -> dict:
 
     _require_user_turn(ctx)
     assignment = _resolve(ctx, args.id)
-    item = lifecycle.confirm_item(ctx.conn, assignment.id, user_id=ctx.user_id, item_id=args.item_id)
+    item = lifecycle.confirm_item(
+        ctx.conn, ctx.config, assignment.id, user_id=ctx.user_id, item_id=args.item_id,
+    )
     return _changed(ctx, assignment, item={"id": item.id, "status": item.status})
 
 
@@ -419,7 +433,7 @@ def cmd_frozen_remove(ctx: _Ctx, args) -> dict:
 
 def _state_result(ctx: _Ctx, assignment, **extra: Any) -> dict:
     ctx.conn.commit()
-    return {"status": "ok", "assignment": _summary(assignment), **extra}
+    return {"status": "ok", "assignment": _summary(assignment), "wake_due": _wake_due(ctx, assignment.id), **extra}
 
 
 def cmd_activate(ctx: _Ctx, args) -> dict:
@@ -486,7 +500,17 @@ def cmd_topup(ctx: _Ctx, args) -> dict:
         ctx.conn, ctx.cfg, assignment.id, user_id=ctx.user_id, usd=args.usd, wakes=args.wakes,
         by_task_id=_task_id(),
     )
-    return _changed(ctx, updated)
+    extra: dict[str, Any] = {}
+    if updated.state == "paused" and updated.state_reason == "budget":
+        from istota.assignments import budget
+
+        spent = budget.totals(ctx.conn, updated.id)
+        # Still paused: the top-up left less than a wake costs (ISSUE-853).
+        extra["still_paused"] = {
+            "remaining": budget.remaining(updated, spent),
+            "cheapest_wake_usd": spent.cheapest_wake_usd,
+        }
+    return _changed(ctx, updated, **extra)
 
 
 def cmd_note(ctx: _Ctx, args) -> dict:
@@ -515,7 +539,7 @@ def cmd_close(ctx: _Ctx, args) -> dict:
     _require_user_turn(ctx)
     assignment = _resolve(ctx, args.id)
     updated = lifecycle.close(
-        ctx.conn, assignment.id, user_id=ctx.user_id,
+        ctx.conn, ctx.config, assignment.id, user_id=ctx.user_id,
         completed=bool(args.completed), missing=args.reject,
     )
     return _state_result(ctx, updated)
@@ -650,6 +674,7 @@ def cmd_show(ctx: _Ctx, args) -> dict:
     return {
         "status": "ok",
         "assignment": _summary(assignment),
+        "wake_due": _wake_due(ctx, assignment.id),
         "charter": charter.render(assignment, items, frozen),
         "ledger": {
             "cost_usd": round(spent.cost_usd, 4),
@@ -658,6 +683,7 @@ def cmd_show(ctx: _Ctx, args) -> dict:
             "billed_input_tokens": spent.billed_input_tokens,
             "output_tokens": spent.output_tokens,
             "remaining": budget.remaining(assignment, spent),
+            "cheapest_wake_usd": spent.cheapest_wake_usd,
         },
         "items": [
             {"id": i.id, "position": i.position, "kind": i.kind, "text": i.text, "status": i.status,

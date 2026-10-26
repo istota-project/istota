@@ -1075,6 +1075,35 @@ class TestNoFileIOUnderTheWriterLock:
             assert store.wake_snapshot(conn, made.wake_id, "after").content == charter.SCRATCHPAD_SEED
         assert [(p["phase"], p["reason"]) for p in restored] == [("begin", "empty"), ("end", "empty")]
 
+    def test_the_users_completion_runs_its_checks_with_the_lock_free(self, config):
+        """ISSUE-853: `confirm_item` and `close --completed` run the checks too."""
+        items = (("Three quotes", "mechanical", CSV_CHECK), ("Usable", "confirmed", None))
+        confirmed = _live(config, items=items)
+        closed = _live(config, items=items)
+        for a in (confirmed, closed):
+            _file(config, a, "quotes.csv").write_text(GOOD_CSV)
+        calls: list = []
+        probes = self._probe(config, calls)
+        for probe in probes:
+            probe.start()
+        try:
+            with db.get_db(config.db_path) as conn:
+                item = store.list_items(conn, confirmed)[1]
+                lifecycle.confirm_item(conn, config, confirmed, user_id="alice", item_id=item.id)
+                # Still in the confirmation's transaction: no file is read, and
+                # close asks for a retry rather than checking under the lock.
+                with pytest.raises(lifecycle.TransitionError) as retry:
+                    lifecycle.close(conn, config, closed, user_id="alice", completed=True)
+                conn.commit()
+                lifecycle.close(conn, config, closed, user_id="alice", completed=True)
+        finally:
+            for probe in probes:
+                probe.stop()
+
+        assert retry.value.code == "items_changed"
+        assert [c for c in calls if c[0] == "run_item"] == [("run_item", "free")] * 2
+        assert (_get(config, confirmed).state, _get(config, closed).state) == ("completed", "completed")
+
     def test_an_item_added_after_the_read_is_read_again_before_it_is_recorded(self, config):
         a = _live(config, items=(("Three quotes", "mechanical", CSV_CHECK),))
         made = _start(config, a)
@@ -1221,11 +1250,12 @@ class TestValidatorsAndSignals:
         assert _end(config, made).progress_signals == ["deliverable_changed"]
 
     def test_the_users_input_counts(self, config):
-        a = _live(config, items=(("Picked an installer", "confirmed", None),))
+        # Two confirmed items, so confirming one does not complete it (ISSUE-853).
+        a = _live(config, items=(("Picked an installer", "confirmed", None), ("Signed", "confirmed", None)))
         with db.get_db(config.db_path) as conn:
             lifecycle.add_note(conn, a, user_id="alice", text="Try the co-op first.")
-            [item] = store.list_items(conn, a)
-            lifecycle.confirm_item(conn, a, user_id="alice", item_id=item.id)
+            item = store.list_items(conn, a)[0]
+            lifecycle.confirm_item(conn, config, a, user_id="alice", item_id=item.id)
 
         wake = _end(config, _start(config, a))
         assert wake.progress_signals == ["item_confirmed", "user_input"]
@@ -1371,7 +1401,9 @@ class TestPauses:
         made = _start(config, a, now=_later())
         with db.get_db(config.db_path) as conn:
             db.insert_task_usage(
-                conn, usage=BrainUsage(has_totals=True, cost_usd=0.8), task_id=made.task_id,
+                # Not on the wake's task: one wake costing 0.8 of 1.0 leaves less
+                # than a wake's cost, and the floor would pause it (ISSUE-853).
+                conn, usage=BrainUsage(has_totals=True, cost_usd=0.8), task_id=None,
                 user_id="alice", source_type="assignment", assignment_id=a,
             )
         _end(config, made)
@@ -1439,7 +1471,7 @@ class TestCompletion:
         assert _dispatch(config, _later()) == []
 
         with db.get_db(config.db_path) as conn:
-            lifecycle.close(conn, a, user_id="alice", completed=True)
+            lifecycle.close(conn, config, a, user_id="alice", completed=True)
             items = store.list_items(conn, a)
         assert _get(config, a).state == "completed"
         assert [i.status for i in items] == ["passing", "confirmed"]
@@ -1450,7 +1482,7 @@ class TestCompletion:
         _complete(config, made)
         _end(config, made)
         with db.get_db(config.db_path) as conn:
-            lifecycle.close(conn, a, user_id="alice", completed=False, missing="a fourth quote")
+            lifecycle.close(conn, config, a, user_id="alice", completed=False, missing="a fourth quote")
 
         made = _start(config, a)
         with db.get_db(config.db_path) as conn:
@@ -1483,7 +1515,7 @@ class TestCompletion:
             assert conn.execute(bell_row, (key,)).fetchone()["state"] == "open"
 
         with db.get_db(config.db_path) as conn:
-            lifecycle.close(conn, a, user_id="alice", completed=False, missing="a fourth quote")
+            lifecycle.close(conn, config, a, user_id="alice", completed=False, missing="a fourth quote")
         (deadline_wake,) = _dispatch(config, past_deadline)
         assert (deadline_wake.assignment_id, deadline_wake.fired_by) == (a, "deadline")
 
@@ -1496,6 +1528,202 @@ class TestCompletion:
         assert _get(config, a).state == "sleeping"
         with db.get_db(config.db_path) as conn:
             assert [e.kind for e in store.list_events(conn, a)].count("complete_ignored") == 1
+
+
+# ISSUE-853: the user's last confirmation answers the completion; no wake is
+# spent proposing what the host already knows.
+
+
+def _waiting_on_the_user(config, *, items, auto_complete=False) -> int:
+    a = _live(config, items=items, auto_complete=auto_complete)
+    made = _start(config, a)
+    _next(config, made, mode="wait", requested="user", wait="user")
+    _end(config, made)
+    after = _get(config, a)
+    assert (after.state, after.waiting_on) == ("waiting", ["user"])
+    return a
+
+
+def _item_ids(config, a) -> dict[str, int]:
+    with db.get_db(config.db_path) as conn:
+        return {item.text: item.id for item in store.list_items(conn, a)}
+
+
+class TestTheLastConfirmation:
+    ITEMS = (("Three quotes", "mechanical", CSV_CHECK), ("The table is usable", "confirmed", None))
+
+    def test_confirming_the_last_item_with_the_checks_passing_completes_it_without_a_wake(self, config):
+        a = _waiting_on_the_user(config, items=self.ITEMS)
+        _file(config, a, "quotes.csv").write_text(GOOD_CSV)
+        ids = _item_ids(config, a)
+        with db.get_db(config.db_path) as conn:
+            action = store.insert_action(conn, a, text="Read the table", report_spec="usable?")
+            lifecycle.complete_handoff(conn, a, user_id="alice", action_id=action, report="usable as is")
+            conn.commit()  # two CLI calls, each committed, as in the live run
+            lifecycle.confirm_item(conn, config, a, user_id="alice", item_id=ids["The table is usable"])
+
+        after = _get(config, a)
+        assert (after.state, after.state_reason, after.closed_at is not None) == ("completed", "user", True)
+        assert _dispatch(config, _later()) == []
+        assert len(_wakes(config, a)) == 1
+        with db.get_db(config.db_path) as conn:
+            items = store.list_items(conn, a)
+            [completed] = [e for e in store.list_events(conn, a) if e.kind == "completed"]
+            keys = [row[0] for row in conn.execute(
+                "SELECT dedup_key FROM notifications WHERE source = 'assignment'",
+            ).fetchall()]
+        assert [i.status for i in items] == ["passing", "confirmed"]
+        assert (completed.actor, completed.payload) == ("user", {"via": "item_confirm"})
+        assert f"closed:{a}" in keys
+
+    def test_auto_complete_off_still_completes_on_the_users_confirmation(self, config):
+        a = _waiting_on_the_user(config, items=(("The table is usable", "confirmed", None),))
+        with db.get_db(config.db_path) as conn:
+            [item] = store.list_items(conn, a)
+            lifecycle.confirm_item(conn, config, a, user_id="alice", item_id=item.id)
+        assert _get(config, a).state == "completed"
+
+    def test_a_failing_check_leaves_it_for_the_next_wake(self, config):
+        a = _waiting_on_the_user(config, items=self.ITEMS)
+        _file(config, a, "quotes.csv").write_text("source,price\n")
+        ids = _item_ids(config, a)
+        with db.get_db(config.db_path) as conn:
+            lifecycle.confirm_item(conn, config, a, user_id="alice", item_id=ids["The table is usable"])
+            inbox = store.list_inbox(conn, a)
+            items = store.list_items(conn, a)
+        assert _get(config, a).state == "waiting"
+        assert [e.kind for e in inbox if e.consumed_by_wake is None] == ["item_confirmed"]
+        assert items[1].status == "confirmed"
+        # The confirmation ends the wait, so the next wake sees it and the failing check.
+        with db.get_db(config.db_path) as conn:
+            assert wakes.wake_due(conn, config, store.get_assignment(conn, a)) == "inbox"
+        assert [c.fired_by for c in _dispatch(config)] == ["inbox"]
+
+    def test_another_open_confirmed_item_leaves_it_running(self, config):
+        a = _waiting_on_the_user(config, items=(
+            ("Picked an installer", "confirmed", None), ("Signed", "confirmed", None),
+        ))
+        ids = _item_ids(config, a)
+        with db.get_db(config.db_path) as conn:
+            lifecycle.confirm_item(conn, config, a, user_id="alice", item_id=ids["Signed"])
+        assert _get(config, a).state == "waiting"
+
+    def test_a_draft_is_not_completed(self, config):
+        with db.get_db(config.db_path) as conn:
+            a = store.insert_assignment(
+                conn, user_id="alice", slug="d1", title="T", goal="G", budget=BUDGET,
+                dir_relpath=charter.dir_relpath("d1"),
+            )
+            item = store.insert_item(conn, a, text="ok", kind="confirmed")
+            lifecycle.confirm_item(conn, config, a, user_id="alice", item_id=item)
+        assert _get(config, a).state == "draft"
+
+
+class TestClosingEarly:
+    ITEMS = TestTheLastConfirmation.ITEMS
+
+    def test_close_completed_from_a_wait_on_the_user_when_the_checks_pass(self, config):
+        a = _waiting_on_the_user(config, items=self.ITEMS)
+        _file(config, a, "quotes.csv").write_text(GOOD_CSV)
+        with db.get_db(config.db_path) as conn:
+            lifecycle.close(conn, config, a, user_id="alice", completed=True)
+            items = store.list_items(conn, a)
+        assert _get(config, a).state == "completed"
+        assert [i.status for i in items] == ["passing", "confirmed"]
+
+    def test_close_completed_from_sleeping_is_refused_while_a_check_fails(self, config):
+        a = _live(config, items=self.ITEMS)
+        ids = _item_ids(config, a)
+        with db.get_db(config.db_path) as conn:
+            with pytest.raises(lifecycle.TransitionError) as refused:
+                lifecycle.close(conn, config, a, user_id="alice", completed=True)
+        assert refused.value.code == "not_met"
+        assert str(ids["Three quotes"]) in refused.value.message
+        assert _get(config, a).state == "sleeping"
+
+    def test_reject_still_answers_only_a_proposal(self, config):
+        a = _waiting_on_the_user(config, items=self.ITEMS)
+        with db.get_db(config.db_path) as conn:
+            with pytest.raises(lifecycle.TransitionError) as refused:
+                lifecycle.close(conn, config, a, user_id="alice", completed=False, missing="x")
+        assert refused.value.code == "bad_state"
+
+
+class TestADueWakeIsVisible:
+    def test_a_handoff_report_makes_the_wait_due(self, config):
+        a = _waiting_on_the_user(config, items=(("Picked", "confirmed", None),))
+        with db.get_db(config.db_path) as conn:
+            assert wakes.wake_due(conn, config, store.get_assignment(conn, a)) is None
+            action = store.insert_action(conn, a, text="Call Acme", report_spec="the price")
+            lifecycle.complete_handoff(conn, a, user_id="alice", action_id=action, report="1200")
+            assert wakes.wake_due(conn, config, store.get_assignment(conn, a)) == "inbox"
+
+    def test_nothing_is_due_while_a_wake_is_open(self, config):
+        a = _live(config)
+        with db.get_db(config.db_path) as conn:
+            assert wakes.wake_due(conn, config, store.get_assignment(conn, a)) == "time"
+        _start(config, a)
+        with db.get_db(config.db_path) as conn:
+            assert wakes.wake_due(conn, config, store.get_assignment(conn, a)) is None
+
+
+class TestTheBudgetFloor:
+    def _spend_on_a_wake(self, config, a, cost):
+        made = _start(config, a, now=_later())
+        with db.get_db(config.db_path) as conn:
+            db.insert_task_usage(
+                conn, usage=BrainUsage(has_totals=True, cost_usd=cost), task_id=made.task_id,
+                user_id="alice", assignment_id=a,
+            )
+        return _end(config, made)
+
+    def test_less_left_than_the_cheapest_wake_pauses_it(self, config):
+        a = _live(config, budget_fields={**BUDGET, "max_cost_usd": 1.0})
+        self._spend_on_a_wake(config, a, 0.94)
+        after = _get(config, a)
+        assert (after.state, after.state_reason) == ("paused", "budget")
+        with db.get_db(config.db_path) as conn:
+            spent = budget.totals(conn, a)
+        assert spent.cheapest_wake_usd == pytest.approx(0.94)
+
+    def test_the_pre_wake_check_uses_the_same_floor(self, config):
+        a = _live(config, budget_fields={**BUDGET, "max_cost_usd": 3.0})
+        self._spend_on_a_wake(config, a, 0.5)
+        self._spend_on_a_wake(config, a, 2.0)
+        # 0.5 left against a cheapest wake of 0.5: not under the floor yet.
+        assert _get(config, a).state == "sleeping"
+        with db.get_db(config.db_path) as conn:
+            db.insert_task_usage(
+                conn, usage=BrainUsage(has_totals=True, cost_usd=0.1), task_id=None,
+                user_id="alice", assignment_id=a,
+            )
+        assert _dispatch(config, _later() + timedelta(days=2)) == []
+        assert _get(config, a).state_reason == "budget"
+
+    def test_a_measured_wake_that_cost_nothing_sets_no_floor(self, config):
+        a = _live(config, budget_fields={**BUDGET, "max_cost_usd": 1.0})
+        self._spend_on_a_wake(config, a, 0.0)
+        with db.get_db(config.db_path) as conn:
+            assert budget.totals(conn, a).cheapest_wake_usd is None
+
+    def test_no_measured_wake_means_no_floor(self, config):
+        a = _live(config, budget_fields={**BUDGET, "max_cost_usd": 1.0})
+        with db.get_db(config.db_path) as conn:
+            db.insert_task_usage(
+                conn, usage=BrainUsage(has_totals=True, cost_usd=0.94), task_id=None,
+                user_id="alice", assignment_id=a,
+            )
+        assert len(_dispatch(config)) == 1
+
+    def test_a_topup_still_under_the_floor_does_not_resume_it(self, config):
+        a = _live(config, budget_fields={**BUDGET, "max_cost_usd": 1.0})
+        self._spend_on_a_wake(config, a, 0.94)
+        with db.get_db(config.db_path) as conn:
+            lifecycle.topup(conn, config.assignments, a, user_id="alice", usd=0.5)
+        assert _get(config, a).state == "paused"
+        with db.get_db(config.db_path) as conn:
+            lifecycle.topup(conn, config.assignments, a, user_id="alice", usd=1.0)
+        assert _get(config, a).state == "sleeping"
 
 
 class TestFinishingIsSafe:

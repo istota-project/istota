@@ -68,8 +68,11 @@ SUMMARY_MAX_CHARS = 4000
 
 #: The inbox kinds that end each wait. A proposed completion is answered by
 #: `close`, which moves the state itself, so no inbox event ends that wait.
+#: `item_confirmed` ends a wait on the user as it pulls a sleeping wake
+#: forward: a confirmation that did not complete the assignment (a check still
+#: fails) needs a wake, or nothing comes (ISSUE-853).
 WAIT_WAKERS: dict[str, tuple[str, ...]] = {
-    "user": ("user_note", "handoff_done", "charter_change"),
+    "user": ("user_note", "handoff_done", "charter_change", "item_confirmed"),
     "completion": (),
 }
 
@@ -193,6 +196,22 @@ def _resolved_model_brain(
             warn_key=f"assignment_model:{assignment.id}",
         )
     return model or None, effort or None, admitted or None
+
+
+def wake_due(
+    conn: sqlite3.Connection, config: "Config", assignment: store.Assignment,
+    *, now: datetime | None = None,
+) -> str | None:
+    """What the gate's next tick would wake this assignment for (`fired_by`),
+    or None. Read-only, so `show` can tell a wait about to end from one that is
+    stuck: `waiting` on `user` with an unconsumed `handoff_done` is due (ISSUE-853).
+    The same decision `_dispatch_one` makes, including the budget check."""
+    if store.open_wake(conn, assignment.id) is not None:
+        return None
+    fired_by, _ = _decide(conn, config, assignment, now or datetime.now(timezone.utc))
+    if fired_by is None or not budget.check_before_wake(conn, assignment):
+        return None
+    return fired_by
 
 
 def _dispatch_one(
@@ -330,15 +349,6 @@ class _FilesMoved(Exception):
     """What the files were read for changed before the transaction opened."""
 
 
-def _items_key(items: list[store.Item]) -> tuple:
-    """What a file read depends on in the done-when list: the mechanical items
-    and their checks, not their status."""
-    return tuple(
-        (item.id, json.dumps(item.validator, sort_keys=True))
-        for item in items if item.kind == "mechanical"
-    )
-
-
 @dataclass(frozen=True)
 class _PickupFiles:
     """The workspace as pickup found it, read with no transaction open."""
@@ -358,7 +368,7 @@ def _read_pickup_files(conn: sqlite3.Connection, config: "Config", task: db.Task
     items = store.list_items(conn, assignment.id)
     return _PickupFiles(
         wake_id=wake.id,
-        items_key=_items_key(items),
+        items_key=validators.items_key(items),
         scratchpad=scratchpad.read_file(config, assignment),
         # The deliverables as the wake found them, for finish_wake's
         # `deliverable_changed` signal.
@@ -407,8 +417,9 @@ def start_wake(config: "Config", task: db.Task, *, dry_run: bool = False) -> Wak
                         if target is not None:
                             assignment, wake = target
                             if wake.started_at is None:
+                                items_now = store.list_items(conn, assignment.id)
                                 if (files is None or files.wake_id != wake.id
-                                        or files.items_key != _items_key(store.list_items(conn, assignment.id))):
+                                        or files.items_key != validators.items_key(items_now)):
                                     raise _FilesMoved
                                 begun = scratchpad.begin(conn, assignment, wake, files.scratchpad)
                                 text, rewrite = begun.text, begun.rewrite
@@ -545,13 +556,10 @@ def _read_finish_files(
     return _FinishFiles(
         read=True,
         started_at=wake.started_at,
-        items_key=_items_key(items),
+        items_key=validators.items_key(items),
         # A wake that never started has no `before`, and takes no `after`.
         scratchpad=scratchpad.read_file(config, assignment) if wake.started_at is not None else None,
-        results={
-            item.id: validators.run_item(config, assignment, item)
-            for item in items if item.kind == "mechanical"
-        },
+        results=validators.run_mechanical(config, assignment, items),
         digests=validators.deliverable_digests(config, assignment, items),
     )
 
@@ -651,7 +659,7 @@ def _finish(
                         None, [])
 
     if (not files.read or files.started_at != wake.started_at
-            or files.items_key != _items_key(store.list_items(conn, assignment.id))):
+            or files.items_key != validators.items_key(store.list_items(conn, assignment.id))):
         raise _FilesMoved
 
     cfg = config.assignments
@@ -753,22 +761,7 @@ def _record_validators(
 ) -> list[int]:
     """Record every mechanical item's result, run before the transaction
     opened. Returns the ids that moved to `passing`."""
-    checked_at = iso_z(now)
-    newly_passing: list[int] = []
-    for item in store.list_items(conn, assignment.id):
-        if item.kind != "mechanical":
-            continue
-        result = results[item.id]
-        store.set_item_status(conn, item.id, result.status, detail=result.detail, checked_at=checked_at)
-        if result.status != item.status:
-            store.insert_event(
-                conn, assignment.id, kind="item_status", actor="system", wake_id=wake.id,
-                payload={"item_id": item.id, "from": item.status, "to": result.status,
-                         "detail": result.detail},
-            )
-        if result.status == "passing" and item.status != "passing":
-            newly_passing.append(item.id)
-    return newly_passing
+    return lifecycle.record_item_results(conn, assignment.id, results, iso_z(now), wake_id=wake.id)
 
 
 def _progress_signals(
