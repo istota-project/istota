@@ -1,8 +1,7 @@
 """`istota-skill assignment`: the user's verbs on an assignment, and the read verbs.
 
-Runs host-side through the skill proxy. Every verb refuses unless the
-`skill_assignment` flag is on and the caller is an admin (`admin_only` gates
-only selection), and refuses while the calling task has scopes withheld, since
+Runs host-side through the skill proxy. Every verb refuses unless the caller
+is an admin (`admin_only` gates only selection), and refuses while the calling task has scopes withheld, since
 an assignment is the user's personal record. Every assignment lookup is scoped
 by `ISTOTA_USER_ID`, so another user's id or slug answers `not_found`.
 
@@ -41,7 +40,6 @@ from typing import Any
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import NOT_A_PATH, host_path
 
-FEATURE = "skill_assignment"
 STATES = ("draft", "active", "sleeping", "waiting", "paused", "completed", "abandoned")
 DEFAULT_SHOW_WAKES = 3
 MAX_SHOW_WAKES = 20
@@ -105,12 +103,10 @@ class _Ctx:
 
 
 def _gate() -> dict:
-    """The flag, the admin check and the skill guard, before any DB is opened."""
+    """The admin check and the skill guard, before any DB is opened."""
     from istota.skills.skills import _guard_skill, _load_context
 
     ctx = _load_context()
-    if FEATURE not in ctx["enabled_features"]:
-        raise Refusal("feature_disabled", "assignments are not enabled on this deployment")
     if not ctx["is_admin"]:
         raise Refusal("not_admin", "assignments are available to admins only")
     refusal = _guard_skill("assignment", ctx)

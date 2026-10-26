@@ -1,19 +1,19 @@
-"""Assignments end to end on the local-mode stack: flag, charter, wakes, close.
+"""Assignments end to end on the local-mode stack: default, charter, wakes, close.
 
 The default suite holds each half of an assignment against a fake clock and a
-fake brain. Here every seam is the stack's own: the experimental flag goes in
-through `istota-stack apply` and the restart it decides, the user's turns are
+fake brain. Here every seam is the stack's own: the `[assignments]` section goes
+in through `istota-stack apply` and the restart it decides, the user's turns are
 web chat messages in a private room the case creates, the approval is the web
 confirm route, the wakes are created by the scheduler's `assignments` gate and
 run by the native brain in the sandbox, and the scripted model on the Mac
 answers each turn with one Bash call. Nothing inside the stack is patched; the
 case reads the framework DB from inside the daemon container.
 
-1. With the flag off, `istota-skill assignment list` refuses `feature_disabled`,
-   and the migration has run (the two `assignment_id` columns, and the request
+1. With no experimental flag, `istota-skill assignment list` answers `ok`, and
+   the migration has run (the two `assignment_id` columns, and the request
    ledger's `kind` CHECK admitting `assignment_activation`).
-2. The flag on (with a one-minute wake floor so the inbox wake is not held for
-   fifteen) through `istota-stack apply`.
+2. A one-minute wake floor, so the inbox wake is not held for fifteen, through
+   `istota-stack apply`.
 3. A user turn runs `create`, two `item add`s (a `contains` check on a
    deliverable, a confirmed item) and `activate`; the task parks on the charter
    preview; the web confirm approves it; the assignment is `sleeping`, and the
@@ -28,7 +28,7 @@ case reads the framework DB from inside the daemon container.
 6. The sandbox: the wake's mounts are the private task's, less the per-room
    and per-task paths, and the framework DB's directory is the empty mask.
 
-The flag and the `[assignments]` section are put back as they were at the end.
+The `[assignments]` section is put back as it was at the end.
 Each session's assignment has a fresh slug; old ones stay in the VM's DB, which
 is why the case raises `max_active_per_user` while it runs.
 """
@@ -48,7 +48,6 @@ from .web import API, WebSession, db_read, sign_in
 
 pytestmark = pytest.mark.vm
 
-FLAG = "skill_assignment"
 #: The gate runs on `briefing_check_interval` (60s); a wake is one Bash call.
 WAKE_SECONDS = 360
 TASK_SECONDS = 300
@@ -73,21 +72,14 @@ def _config(vm: lima.Vm) -> dict:
     ))
 
 
-def _set_flag(vm: lima.Vm, on: bool) -> None:
-    current = _config(vm)
-    features = [f for f in (current.get("experimental") or {}).get("features") or [] if f != FLAG]
-    if on:
-        features.append(FLAG)
-    delta: dict = {"experimental": {"features": features}}
-    if on:
-        delta["assignments"] = ASSIGNMENTS
-    lima.apply_config(vm, delta)
+def _set_assignments(vm: lima.Vm) -> None:
+    lima.apply_config(vm, {"assignments": ASSIGNMENTS})
     lima.wait_healthy(vm)
 
 
 def _restore(vm: lima.Vm, original: dict) -> None:
-    delta = {key: original[key] for key in ("experimental", "assignments") if key in original}
-    drop = tuple(key for key in ("experimental", "assignments") if key not in original)
+    delta = {key: original[key] for key in ("assignments",) if key in original}
+    drop = tuple(key for key in ("assignments",) if key not in original)
     lima.apply_config(vm, delta, drop=drop)
     lima.wait_healthy(vm)
 
@@ -326,7 +318,6 @@ class Scenario:
 def stack(local_stack):
     vm = local_stack
     original = _config(vm)
-    _set_flag(vm, False)
     try:
         yield vm
     finally:
@@ -361,8 +352,8 @@ def _step(scenario: Scenario, name: str):
     return _Guard()
 
 
-def test_with_the_flag_off_the_cli_refuses_and_the_migration_has_run(scenario):
-    with _step(scenario, "flag off"):
+def test_with_no_flag_the_cli_answers_and_the_migration_has_run(scenario):
+    with _step(scenario, "default"):
         vm = scenario.vm
         for table in ("tasks", "task_usage"):
             assert db_read(vm, f"SELECT COUNT(*) FROM pragma_table_info('{table}') "
@@ -372,14 +363,14 @@ def test_with_the_flag_off_the_cli_refuses_and_the_migration_has_run(scenario):
         assert db_read(vm, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'assignment_wakes'") == "1"
         printed = lima.run_probe_task(vm, scenario.model, "istota-skill assignment list")
         answers = _json_lines(printed)
-        assert answers and answers[-1].get("error") == "feature_disabled", printed
+        assert answers and answers[-1].get("status") == "ok", printed
 
 
 def test_an_admin_charters_and_activates_and_the_approval_starts_it(scenario):
     with _step(scenario, "charter"):
         vm = scenario.vm
-        _set_flag(vm, True)
-        assert FLAG in _config(vm)["experimental"]["features"]
+        _set_assignments(vm)
+        assert _config(vm)["assignments"]["min_wake_interval_minutes"] == 1
         scenario.rescript()
         task_id = scenario.say(f"{scenario.marker('charter')} Draft the assignment and start it.")
         _wait_task(vm, task_id, ("pending_confirmation", "completed", "failed", "cancelled"))

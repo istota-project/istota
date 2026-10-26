@@ -10526,7 +10526,6 @@ def build_interval_gates(
             name="assignments",
             run=_assignments,
             field="briefing_check_interval",  # mismatch: not a briefing
-            enabled=lambda c: c.experimental.is_enabled("skill_assignment"),
             background=True,
             on_error="Error checking assignments: %s",
         ),

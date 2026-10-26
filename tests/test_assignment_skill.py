@@ -16,7 +16,6 @@ from istota.skills._loader import build_disclosure_index, load_skill_index
 from istota.usage.telemetry import BrainUsage
 from tests.support.skill_cli import run_skill_main
 
-FLAG = "skill_assignment"
 
 
 @pytest.fixture
@@ -33,7 +32,7 @@ def config(make_config, tmp_path, monkeypatch):
     db.init_db(config.db_path)
     monkeypatch.setattr("istota.config.load_config", lambda: config)
     monkeypatch.setenv("ISTOTA_DB_PATH", str(config.db_path))
-    monkeypatch.setenv("ISTOTA_EXPERIMENTAL_FEATURES", FLAG)
+    monkeypatch.delenv("ISTOTA_EXPERIMENTAL_FEATURES", raising=False)
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
     monkeypatch.delenv("ISTOTA_TASK_ID", raising=False)
     monkeypatch.delenv("ISTOTA_WITHHELD_SCOPES", raising=False)
@@ -178,11 +177,10 @@ class TestCallerFromTaskRows:
 
 
 class TestRefusals:
-    def test_the_flag_off(self, config, turn, monkeypatch):
-        monkeypatch.setenv("ISTOTA_EXPERIMENTAL_FEATURES", "")
+    def test_a_disabled_skill(self, config, turn, monkeypatch):
+        config.disabled_skills = ["assignment"]
         code, out = _run("list")
-        assert code == 1
-        assert out["error"] == "feature_disabled"
+        assert (code, out["error"]) == (1, "feature_disabled")
 
     def test_not_an_admin(self, config, monkeypatch):
         monkeypatch.setenv("ISTOTA_USER_ID", "carol")
@@ -551,23 +549,18 @@ class TestTheSkill:
     def test_the_menu_line_carries_quest(self, config):
         index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
         meta = index["assignment"]
-        assert meta.admin_only and meta.experimental and meta.cli
+        assert meta.admin_only and meta.cli and not meta.experimental
         assert meta.source_types == ["assignment"]
         menu = build_disclosure_index(["assignment"], index)
         line = next(line for line in menu.splitlines() if "- assignment:" in line)
         assert "quest" in line
 
-    def test_selection_needs_the_flag(self, config):
+    def test_selection_needs_admin_and_no_flag(self, config):
         from istota.skills._loader import eligible_skill_names
 
         index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
-        assert "assignment" not in eligible_skill_names(index, set(), is_admin=True)
-        assert "assignment" in eligible_skill_names(
-            index, set(), is_admin=True, enabled_experimental_features=frozenset({FLAG}),
-        )
-        assert "assignment" not in eligible_skill_names(
-            index, set(), is_admin=False, enabled_experimental_features=frozenset({FLAG}),
-        )
+        assert "assignment" in eligible_skill_names(index, set(), is_admin=True)
+        assert "assignment" not in eligible_skill_names(index, set(), is_admin=False)
 
     def test_the_cli_answers_json_through_the_facade(self, config, turn):
         out = _run("list")
