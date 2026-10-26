@@ -22,7 +22,6 @@ from istota.config import (
 )
 from istota.executor import build_prompt, execute_task
 
-FLAG = "skill_assignment"
 BUDGET = {"max_cost_usd": 20.0, "max_wakes": 40, "per_wake_minutes": 25, "per_wake_turns": 12}
 NOW = datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc)
 
@@ -34,7 +33,6 @@ def config(make_config, tmp_path):
         users={"alice": UserConfig(timezone="UTC")},
         scheduler=SchedulerConfig(task_timeout_minutes=30),
     )
-    config.experimental.features = [FLAG]
     db.init_db(config.db_path)
     # `load_channel_guidelines` reads `guidelines/` beside the skills directory.
     guidelines = config.skills_dir.parent / "guidelines"
@@ -130,15 +128,11 @@ class TestStartWake:
 
         assert started.timeout_seconds == 30 * 60
 
-    @pytest.mark.parametrize("why", ["paused", "flag_off"])
-    def test_a_wake_that_is_no_longer_active_ends_not_active(self, config, why):
+    def test_a_wake_that_is_no_longer_active_ends_not_active(self, config):
         assignment_id = _assignment(config)
         created = _dispatch(config)
-        if why == "paused":
-            with db.get_db(config.db_path) as conn:
-                store.set_state(conn, assignment_id, "paused", reason="user")
-        else:
-            config.experimental.features = []
+        with db.get_db(config.db_path) as conn:
+            store.set_state(conn, assignment_id, "paused", reason="user")
 
         assert wakes.start_wake(config, _task(config, created.task_id)) is None
 
@@ -148,7 +142,7 @@ class TestStartWake:
             assert wake.ended_at is not None and wake.outcome == "not_active"
             assert wake.started_at is None
             assert store.wake_snapshot(conn, wake.id, "before") is None
-        assert assignment.state == ("paused" if why == "paused" else "sleeping")
+        assert assignment.state == "paused"
 
     def test_another_users_assignment_is_not_picked_up(self, config):
         _assignment(config)

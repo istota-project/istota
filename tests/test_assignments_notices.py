@@ -22,7 +22,6 @@ from istota.notifications.resolvers import assignment as notices
 from istota.usage.telemetry import BrainUsage
 from tests.test_assignments_wakes import (
     BUDGET,
-    FLAG,
     GOOD_CSV,
     _assignment,
     _attempt,
@@ -48,7 +47,6 @@ def config(make_config, tmp_path):
         db_path=tmp_path / "istota.db",
         users={"alice": UserConfig(timezone="UTC")},
     )
-    config.experimental.features = [FLAG]
     db.init_db(config.db_path)
     return config
 

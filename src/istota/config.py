@@ -1080,8 +1080,7 @@ class AssignmentsConfig:
     """`[assignments]`: goals Istota carries across days (`.claude/rules/assignments.md`).
 
     The lane's worker caps, the deployment ceilings every charter is held to,
-    and the host's pause thresholds. The feature itself is gated by the
-    `skill_assignment` experimental flag, not by anything here.
+    and the host's pause thresholds.
     """
     max_workers: int = 2                      # instance-wide assignment lane
     user_max_workers: int = 1                 # per-user share of the lane

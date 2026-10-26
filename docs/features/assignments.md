@@ -4,16 +4,9 @@ An assignment is a goal the bot keeps working on across days until it is met, ab
 
 A single task already has compaction, `!steer`, `!stop`, retries and a turn limit. An assignment adds what a single task cannot hold: state that lives outside any one context window, a lifetime of days with no worker held while it waits, a budget across all its runs, steps that belong to you rather than the bot, and progress judged by the host from evidence the model cannot write.
 
-## Turning it on
+## Who can use it
 
-Assignments are experimental and for admins only. Add the feature to the config:
-
-```toml
-[experimental]
-features = ["skill_assignment"]
-```
-
-The one flag gates the skill, its CLI and the scheduler step that starts wakes. A non-admin gets `not_admin` from every command. An admin who loses admin keeps any running assignment running, the same as a scheduled job, and can no longer change it.
+Assignments are on by default and for admins only. A non-admin gets `not_admin` from every command. An admin who loses admin keeps any running assignment running, the same as a scheduled job, and can no longer change it.
 
 ## Starting one
 
@@ -103,7 +96,7 @@ Errors are `{"status": "error", "error": "<code>", "message": "..."}`:
 
 | Code | Meaning |
 |---|---|
-| `feature_disabled` | The `skill_assignment` feature is off |
+| `feature_disabled` | The `assignment` skill is disabled for this user or unavailable on this deployment |
 | `not_admin` | The caller is not an admin |
 | `not_found` | No such assignment, item, hand-off or frozen commitment for this user |
 | `not_a_user_turn` | The verb needs your own turn in your private chat, or the task has scopes withheld |

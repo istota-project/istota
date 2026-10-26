@@ -951,7 +951,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # retention_days = 90                  # 0 = keep forever; >0 = age-prune by last-use (recall refreshes it)
 # max_chars = 0                        # 0 = share the global max_memory_chars budget
 
-# [assignments]                        # Goals carried across days; needs the skill_assignment experimental flag
+# [assignments]                        # Goals carried across days (admins only)
 # max_workers = 2                      # instance-wide assignment lane
 # user_max_workers = 1                 # assignment wakes one user may run at once
 # max_active_per_user = 3              # assignments past draft and not yet closed, per user

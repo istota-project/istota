@@ -402,13 +402,9 @@ class TestTheEnablingConditions:
         assert gate.enabled(off) is False
         assert gate.enabled(on) is True
 
-    def test_assignments_follow_the_experimental_flag(self):
+    def test_assignments_run_with_no_experimental_flag(self):
         gate = _by_name()["assignments"]
-        off = Config()
-        on = Config()
-        on.experimental.features = ["skill_assignment"]
-        assert gate.enabled(off) is False
-        assert gate.enabled(on) is True
+        assert gate.enabled(Config()) is True
         # Off the dispatch thread: it sends notices and touches the mount.
         assert gate.background
         assert not gate.overlap_expected

@@ -47,7 +47,7 @@ Subsystems:
 - `wallet.md` — payment cards, purchase approval, private checkout fills and static-card limits
 - `money.md` — quarterly tax estimator, portfolio snapshots, classifications
 - `memory.md` — USER.md/CHANNEL.md/GROUP.md, per-skill overlays, knowledge graph, playbooks, sleep cycle
-- `assignments.md` — goals carried across days: the assignment tables, the `assignment_id` columns on `tasks` and `task_usage`, the store, the charter, lifecycle, caller and ledger, wake creation and the assignment lane, pickup (scratchpad snapshots and the wake prompt), the `assignment` skill, `[assignments]`, the `skill_assignment` flag
+- `assignments.md` — goals carried across days: the assignment tables, the `assignment_id` columns on `tasks` and `task_usage`, the store, the charter, lifecycle, caller and ledger, wake creation and the assignment lane, pickup (scratchpad snapshots and the wake prompt), the `assignment` skill, `[assignments]`
 
 Boundaries and operations:
 

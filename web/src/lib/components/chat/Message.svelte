@@ -1665,6 +1665,10 @@
        slot, not the card. */
     max-width: var(--chat-body-max);
   }
+  /* The same cap, for the same reason, on the confirmation card. */
+  .content > :global(.confirm-card) {
+    max-width: var(--chat-body-max);
+  }
 
   /* A mail card under the bot's prose gets the same gap as a chip between
      paragraphs; the card has no outer margin of its own. */

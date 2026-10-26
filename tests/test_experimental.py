@@ -132,10 +132,8 @@ class TestRegistry:
         assert "money_tax" in KNOWN_FEATURES
         assert "money_wash_sales" in KNOWN_FEATURES
 
-    def test_assignments_flag_is_known(self):
-        # One flag for selection (frontmatter `experimental: true` on the
-        # `assignment` skill), the CLI, the scheduler gate and the lane.
-        assert "skill_assignment" in KNOWN_FEATURES
+    def test_assignments_left_experimental(self):
+        assert "skill_assignment" not in KNOWN_FEATURES
 
 
 class TestIsModuleEnabled:

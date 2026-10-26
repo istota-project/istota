@@ -58,7 +58,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-FEATURE_FLAG = "skill_assignment"
 SOURCE_TYPE = "assignment"
 QUEUE = "assignment"
 #: The task's stored prompt. The real prompt is built at pickup.
@@ -105,10 +104,6 @@ class CreatedWake:
     wake_id: int
     task_id: int
     fired_by: str
-
-
-def feature_enabled(config: "Config") -> bool:
-    return config.experimental.is_enabled(FEATURE_FLAG)
 
 
 def _parse(value: str | None) -> datetime | None:
@@ -259,10 +254,8 @@ def dispatch_due(
     """Create a wake for every assignment that is due. Returns what was created.
 
     One transaction per assignment, committed before the next; a failure is
-    logged, rolled back and skipped. Does nothing with the flag off.
+    logged, rolled back and skipped.
     """
-    if not feature_enabled(config):
-        return []
     moment = now or datetime.now(timezone.utc)
     candidates = [
         row[0] for row in conn.execute(
@@ -317,7 +310,7 @@ def _pickup_target(
     conn: sqlite3.Connection, config: "Config", task: db.Task,
 ) -> tuple[store.Assignment, store.Wake] | None:
     """The assignment and open wake this task runs, or None when it must not run."""
-    if not feature_enabled(config) or task.assignment_id is None:
+    if task.assignment_id is None:
         return None
     assignment = store.get_assignment(conn, task.assignment_id, user_id=task.user_id)
     wake = store.get_wake_by_task(conn, task.id)

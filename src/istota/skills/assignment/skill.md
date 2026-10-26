@@ -3,7 +3,6 @@ name: assignment
 triggers: [assignment, quest, errand, mission]
 description: Assignments (quests): goals Istota carries across days, with a budget, check-ins and hand-offs
 admin_only: true
-experimental: true
 cli: true
 shared_room: private
 source_types: [assignment]

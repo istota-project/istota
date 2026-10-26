@@ -475,8 +475,8 @@ class Case:
     shared_folder: bool = False
     #: Seeds an active assignment whose open wake is this task (task 1), with a
     #: charter, a board, a hand-off, an inbox holding a trusted and an
-    #: untrusted event, a thrashing target, a scratchpad and one earlier wake,
-    #: and turns on `skill_assignment`. Every timestamp is fixed.
+    #: untrusted event, a thrashing target, a scratchpad and one earlier wake.
+    #: Every timestamp is fixed.
     assignment: bool = False
 
 
@@ -1048,7 +1048,6 @@ def _seed_assignment(config: Config, case: Case) -> None:
         return
     from istota.assignments import charter, store
 
-    config.experimental.features = ["skill_assignment"]
     with db.get_db(config.db_path) as conn:
         assignment_id = store.insert_assignment(
             conn, user_id=USER, slug="heat-pump-quotes", title="Heat pump quotes",

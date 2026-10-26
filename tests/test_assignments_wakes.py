@@ -23,7 +23,6 @@ from istota.assignments import budget, charter, lifecycle, scratchpad, store, va
 from istota.config import AssignmentsConfig, BrainConfig, SchedulerConfig, UserConfig
 from istota.usage.telemetry import BrainUsage
 
-FLAG = "skill_assignment"
 BUDGET = {"max_cost_usd": 20.0, "max_wakes": 40, "per_wake_minutes": 20, "per_wake_turns": 60}
 
 
@@ -36,7 +35,6 @@ def config(make_config, tmp_path):
             worker_idle_timeout=1, worker_idle_poll_interval=0.02, poll_interval=1,
         ),
     )
-    config.experimental.features = [FLAG]
     db.init_db(config.db_path)
     return config
 
@@ -426,13 +424,12 @@ class TestOneFailingAssignmentDoesNotStopTheOthers:
                    for r in caplog.records)
 
 
-class TestTheFlag:
-    def test_with_the_flag_off_nothing_is_created(self, config):
-        config.experimental.features = []
+class TestNoFlag:
+    def test_a_due_assignment_wakes_with_no_experimental_features(self, config):
+        assert config.experimental.features == []
         assignment_id = _assignment(config, next_wake_at=_iso(_now()))
 
-        assert _dispatch(config) == []
-        assert _get(config, assignment_id).state == "sleeping"
+        assert [c.assignment_id for c in _dispatch(config)] == [assignment_id]
 
 
 class TestModelEffortAndBrain:
@@ -624,18 +621,6 @@ class TestTheAssignmentLane:
             queues = sorted(qt for (_, qt, _) in pool._workers)
             pool.shutdown()
         assert queues == ["assignment", "background", "foreground"]
-
-    def test_the_lane_drains_with_the_flag_off(self, config):
-        """A wake queued before the flag went off still reaches pickup, which ends it."""
-        config.experimental.features = []
-        with db.get_db(config.db_path) as conn:
-            _pending_wake_task(conn, "alice")
-
-        pool = sched.WorkerPool(config)
-        with patch("istota.scheduler.process_one_task", return_value=None):
-            pool.dispatch()
-            assert pool.active_count == 1
-            pool.shutdown()
 
     def test_the_backlog_counts_the_assignment_queue(self, config):
         with db.get_db(config.db_path) as conn:
@@ -1555,7 +1540,6 @@ def cli_env(config, monkeypatch):
     config.admin_users = {"alice"}
     monkeypatch.setattr("istota.config.load_config", lambda: config)
     monkeypatch.setenv("ISTOTA_DB_PATH", str(config.db_path))
-    monkeypatch.setenv("ISTOTA_EXPERIMENTAL_FEATURES", FLAG)
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
     monkeypatch.delenv("ISTOTA_WITHHELD_SCOPES", raising=False)
     return monkeypatch
