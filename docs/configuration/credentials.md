@@ -25,8 +25,9 @@ These belong to the Istota instance, not to any user. They live in `config.toml`
 | Twilio (SMS) | `[sms.twilio]` | `ISTOTA_SMS_TWILIO_AUTH_TOKEN`, `ISTOTA_SMS_TWILIO_API_KEY_SID`, `ISTOTA_SMS_TWILIO_API_KEY_SECRET` | SMS transport |
 | Telnyx (SMS) | `[sms.telnyx]` | `ISTOTA_SMS_TELNYX_API_KEY` | SMS transport |
 | WhatsApp Cloud API | `[whatsapp.cloud]` | `ISTOTA_WHATSAPP_ACCESS_TOKEN`, `ISTOTA_WHATSAPP_APP_SECRET`, `ISTOTA_WHATSAPP_VERIFY_TOKEN` | WhatsApp transport, `whatsapp_cloud` adapter |
-| Native brain API key | `[brain.native]` | `ISTOTA_BRAIN_NATIVE_API_KEY` | The native brain's model provider, and the `code_review` skill, which calls a model of its own even where the native brain is otherwise unused |
-| Native brain extra headers | `[brain.native]` | `ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS` (a JSON object) | Headers sent with every native-brain request, which can carry a bearer token; copied to the `code_review` skill too |
+| Model provider API key | `[providers.<id>]` | `ISTOTA_PROVIDER_<ID>_API_KEY` | Every request to that provider, whichever brain sends it, and the `code_review` skill, which calls a model of its own. A stack secret file for the built-in `anthropic` and `openrouter`; inline in `config.toml` for a provider of your own |
+| Model provider extra headers | `[providers.<id>]` | `ISTOTA_PROVIDER_<ID>_EXTRA_HEADERS` (a JSON object) | Headers sent with every request to that provider, which can carry a bearer token; replaces the table |
+| Native brain API key and headers (legacy) | `[brain.native]` | `ISTOTA_BRAIN_NATIVE_API_KEY`, `ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS` | Read for one release as native's provider's key and headers; a provider's own variable wins |
 | `ISTOTA_SECRET_KEY` | env only | `ISTOTA_SECRET_KEY` | Fernet encryption for tier-2 secrets |
 | `ISTOTA_WEB_TOKEN_KEY` | env only | `ISTOTA_WEB_TOKEN_KEY` | Separate Fernet key for stored per-user Talk tokens (`web_user_tokens`) |
 
@@ -203,7 +204,7 @@ The proxy strips these env vars from the Claude subprocess and injects them serv
 - `MONARCH_SESSION_ID`, `MONARCH_CSRFTOKEN`
 - `NTFY_TOKEN`, `NTFY_PASSWORD`
 - `TUMBLR_API_KEY`
-- `ISTOTA_BRAIN_NATIVE_API_KEY` — declared by `code_review`, which calls a model itself. It is therefore in this set on a `claude_code` deployment where the native brain is otherwise unused
+- `ISTOTA_BRAIN_NATIVE_API_KEY` — declared by `code_review`, which calls a model itself. It is therefore in this set on a `claude_code` deployment where the native brain is otherwise unused. The built-in providers' `ISTOTA_PROVIDER_<ID>_API_KEY` and `_EXTRA_HEADERS` are copied to the same skill from the daemon's environment
 - `ISTOTA_SECRET_KEY` — routed to module-skill subprocesses that need to decrypt per-user secrets, but blocked at the lookup endpoint via `_PROXY_LOOKUP_BLOCKED` so `istota-credential env ISTOTA_SECRET_KEY` from inside Claude is rejected
 
 See [environment variables](../reference/environment-variables.md) for the complete env var reference.

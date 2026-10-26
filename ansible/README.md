@@ -35,7 +35,7 @@ istota_listen_addr: 10.0.0.5
 istota_listen_port: 8080
 istota_admins: [alice]
 istota_secrets:
-  istota_brain_native_api_key: "{{ vault_native_api_key }}"
+  istota_provider_openrouter_api_key: "{{ vault_openrouter_api_key }}"
   istota_web_session_secret_key: "{{ vault_web_session_secret }}"
 istota_plan:
   config:
