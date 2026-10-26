@@ -91,10 +91,15 @@ def _tmux_server_env() -> dict[str, str]:
     global environment, and `-e` only adds to it. Without this the daemon's
     whole environment reached the pane, the `claude` CLI in it and the model's
     Bash. A pane gets what `-e` hands it and nothing else.
+
+    SHELL is named rather than inherited: without it tmux runs the pane through
+    the account's shell, which for the image's uid 10001 is nologin, and the
+    session closes before the CLI is typed into it. `/bin/sh` reads no rc file.
     """
     return {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", "/tmp"),
+        "SHELL": "/bin/sh",
     }
 
 

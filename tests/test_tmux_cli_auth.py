@@ -89,7 +89,19 @@ class TestTheServerAndThePane:
             assert call["argv"][:3] == ["-u", "-L", tmux_claude.TMUX_SOCKET]
             assert AMBIENT not in call["env"].values()
             assert TOKEN not in call["env"].values()
-            assert set(call["env"]) <= {"PATH", "HOME", "PWD", "SHLVL", "_", "LC_CTYPE", "__CF_USER_TEXT_ENCODING"}
+            assert set(call["env"]) <= {
+                "PATH", "HOME", "SHELL", "PWD", "SHLVL", "_", "LC_CTYPE", "__CF_USER_TEXT_ENCODING",
+            }
+
+    def test_the_pane_shell_is_named_not_taken_from_the_account(self, monkeypatch):
+        """The image's uid 10001 has /usr/sbin/nologin as its shell and the
+        daemon has no SHELL, so a server started without one ran every pane
+        through nologin: the session closed at once and the brain timed out
+        waiting for a REPL that was never launched (the vm-tier probe)."""
+        monkeypatch.setenv("SHELL", "/usr/sbin/nologin")
+        assert tmux_claude._tmux_server_env()["SHELL"] == "/bin/sh"
+        monkeypatch.delenv("SHELL")
+        assert tmux_claude._tmux_server_env()["SHELL"] == "/bin/sh"
 
     @pytest.mark.parametrize("mode", ["subscription", "api_key"])
     def test_no_credential_is_on_tmuxs_argv(self, fake_tmux, mode):
