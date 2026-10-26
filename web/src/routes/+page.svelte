@@ -102,7 +102,7 @@
           <div class="feature-desc description">Talk to Istota in the app</div>
         </Card>
       {/if}
-      {#if user.features.workspace}
+      {#if user.features.files ?? user.features.workspace}
         <Card href="{base}/files" class="feature-card">
           <div class="feature-title title-section"><FolderOpen aria-hidden="true" />Files</div>
           <div class="feature-desc description">Your files and pins</div>

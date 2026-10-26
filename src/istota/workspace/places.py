@@ -28,9 +28,11 @@ class Place:
     # root, with no link followed (ISSUE-782); every other place from `root`.
     anchor: Path | None = None
     walk: tuple[str, ...] = ()
-    # A shared folder's provider host and last recorded access; it has no root.
+    # A share's provider host, last recorded access and whether its root is a
+    # file or a folder (None until read); it has no root here, being remote.
     remote_host: str | None = None
     remote_access: str | None = None
+    remote_kind: str | None = None
 
 
 def place_anchor(place: Place) -> tuple[Path, tuple[str, ...]]:
@@ -106,13 +108,26 @@ def list_places(config: Config, conn: sqlite3.Connection, user_id: str) -> list[
             places.append(Place("drive", "drive", "Google Drive", None, True, None))
     if config.nextcloud_enabled:
         places.append(Place("nextcloud", "nextcloud", "Nextcloud", None, True, None))
-    # An accepted OCM share is reached over WebDAV by the shares skill, with a
-    # secret the web process never sends, so it is listed and never browsed.
+    # An accepted OCM share is browsed over the sharer's WebDAV
+    # (`webui.share_files`); the Files page lists them under one index rather
+    # than in the sidebar, and `share:<id>` stays the id tasks know it by.
     for source in shared_sources.sources_for_user(conn, user_id, kinds=("ocm_share",)):
-        name = source.extras.get("name")
-        # The sharer's own words: one line, and the host when there are none.
-        label = " ".join(name.split()) if isinstance(name, str) else ""
-        places.append(Place(f"share:{source.id}", "share", (label or source.remote_host)[:120],
-                            None, False, None,
-                            remote_host=source.remote_host, remote_access=source.access))
+        kind = source.extras.get("root_kind")
+        places.append(Place(f"share:{source.id}", "share", share_label(source)[:120],
+                            None, True, None,
+                            remote_host=source.remote_host, remote_access=source.access,
+                            remote_kind=kind if kind in ("file", "folder") else None))
     return places
+
+
+def share_label(source) -> str:
+    """A share's name, the sharer's own words on one line, or its host when there are none."""
+    name = source.extras.get("name")
+    label = " ".join(name.split()) if isinstance(name, str) else ""
+    return label or source.remote_host
+
+
+def share_index_shown(config: Config, places: list[Place]) -> bool:
+    """Whether the Files page offers its index of shares from other servers."""
+    receiving = bool(config.sharing.ocm.enabled and config.site.hostname)
+    return receiving or any(place.kind == "share" for place in places)

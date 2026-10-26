@@ -28,7 +28,9 @@ SOURCE = "shared_source"
 DEDUP_KEY = "pending-offers"
 TITLE = "A folder was shared with you"
 BODY = "Review it in Istota."
-LINK = "/settings/connections"
+# The Files page's index of shares from other servers, which lists waiting
+# offers with Accept and Decline (#849); a server redirect adds its query.
+LINK = "/files/shares"
 MAX_LISTED = 10
 _MAX_FIELD_CHARS = 120
 

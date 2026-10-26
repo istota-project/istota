@@ -42,8 +42,9 @@ REPO = Path(__file__).resolve().parent.parent
 WEBDAV = "/public.php/webdav/"
 
 
-def _multistatus(permissions: str | None) -> bytes:
+def _multistatus(permissions: str | None, folder: bool = True) -> bytes:
     prop = f"<oc:permissions>{permissions}</oc:permissions>" if permissions is not None else ""
+    prop += "<d:resourcetype><d:collection/></d:resourcetype>" if folder else "<d:resourcetype/>"
     return (
         '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">'
         f"<d:response><d:href>{WEBDAV}</d:href><d:propstat><d:prop>{prop}</d:prop>"
@@ -68,6 +69,7 @@ class _Server:
         self.received: list[dict] = []
         self.dav_secrets: set[str] = set()
         self.permissions: str | None = "RGDNVCK"
+        self.root_folder = True
         self.notification_status = 201
         server = self
 
@@ -106,7 +108,7 @@ class _Server:
                     user = base64.b64decode(encoded).decode().partition(":")[0]
                 if user not in server.dav_secrets:
                     return self._answer(401)
-                self._answer(207, _multistatus(server.permissions),
+                self._answer(207, _multistatus(server.permissions, server.root_folder),
                              {"Content-Type": "application/xml; charset=utf-8"})
 
             def do_POST(self):
@@ -451,6 +453,12 @@ class TestTheCapturedOffer:
         _receive(config, sender.offer(providerId=5))
         _receive(config, sender.offer(providerId="5"))
         assert [o.remote_key for o in _offers(config)] == [f"{sender.host}|5"]
+
+    def test_the_display_names_are_kept(self, config, sender):
+        _receive(config, sender.offer(ownerDisplayName="Carol", sharedByDisplayName="Dave"))
+        [offer] = _offers(config)
+        assert (offer.extras["owner_display_name"], offer.extras["shared_by_display_name"]) == (
+            "Carol", "Dave")
 
     def test_empty_and_absent_display_names_are_accepted(self, config, sender):
         body = sender.offer(ownerDisplayName="", sharedByDisplayName="")
@@ -937,6 +945,17 @@ class TestAccept:
         assert note["providerId"] == "5" and isinstance(note["providerId"], str)
         assert note["notification"]["sharedSecret"] == SECRET
         assert note["notification"]["message"]
+
+    @pytest.mark.parametrize("folder, kind", [(True, "folder"), (False, "file")])
+    def test_accept_records_whether_the_root_is_a_file_and_when(self, config, sender, folder, kind):
+        """#849: OCM sends ``resourceType: file`` for both, so the root's PROPFIND decides."""
+        sender.server.dav_secrets = {SECRET}
+        sender.server.root_folder = folder
+        offer = _offered(config, sender)
+        _accept(config, offer.id)
+        extras = _source(config, offer.id).extras
+        assert extras["root_kind"] == kind
+        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", extras["accepted_at"])
 
     def test_scheduled_use_is_off_by_default(self, config, sender):
         sender.server.dav_secrets = {SECRET}

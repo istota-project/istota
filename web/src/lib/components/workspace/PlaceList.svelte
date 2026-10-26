@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Icon, CategoryGroup, ListRow } from '@minot/ui';
-  import { Folder, FolderSymlink, Cloud, Paperclip } from '@lucide/svelte';
+  import { Folder, Cloud, Paperclip } from '@lucide/svelte';
   import type { WorkspacePlace } from '$lib/api';
   import TaskReachIcon from './TaskReachIcon.svelte';
   import { reachesTasks } from './reach';
@@ -17,10 +17,9 @@
     href: (place: string, path?: string) => string;
     onNavigate: (event: MouseEvent, place: string, path?: string) => void;
   } = $props();
-  // My files, rooms and groups live in the bot section and its index views.
+  // My files, rooms, groups and shares from other servers live in the bot section and its index views.
   const groups = [
     { label: 'Linked folders', kinds: ['linked'], icon: Folder },
-    { label: 'Shared folders', kinds: ['share'], icon: FolderSymlink },
     { label: 'Connections', kinds: ['drive', 'nextcloud', 'talk'], icon: Cloud },
   ];
 </script>

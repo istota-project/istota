@@ -942,6 +942,8 @@ class TestApiMe:
         response = await client.get("/istota/api/me", cookies=login.cookies)
         assert response.status_code == 200
         assert response.json()["features"]["workspace"] is expected
+        # With OCM off, the Files page is offered exactly where a workspace or a connection is.
+        assert response.json()["features"]["files"] is expected
 
     async def test_workspace_router_mounted(self, client):
         import istota.webui.app as mod

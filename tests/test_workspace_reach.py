@@ -285,7 +285,7 @@ def test_accepted_shares_are_places_reached_through_the_skill(config, conn):
     assert set(places) == {f"share:{active}", f"share:{unnamed}"}
     place = places[f"share:{active}"]
     assert (place.label, place.browsable, place.root, place.view_root) == (
-        "Taxes 2026", False, None, None)
+        "Taxes 2026", True, None, None)
     assert (place.remote_host, place.remote_access) == ("cloud.example.org", "write")
     assert places[f"share:{unnamed}"].label == "cloud.example.org"
 
