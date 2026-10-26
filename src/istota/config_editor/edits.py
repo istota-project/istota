@@ -393,7 +393,7 @@ def check_read_only(
     """Keys the editor shows and never edits, and keys the environment sets.
 
     `[users.*]` is the exception: seed-only, it may be edited in the raw editor.
-    A path with a `*` segment is retired input: it may be removed, never written.
+    A `RETIRED` path may be removed, never written.
     A path in `moved` that `new` no longer holds is a move to its secret file,
     which applies the same value, so it passes; `preview` refuses any other
     change at a moved path.
@@ -404,7 +404,7 @@ def check_read_only(
     for path, reason in schema.READ_ONLY.items():
         if path == ("users",):
             continue
-        if "*" in path:
+        if path in schema.RETIRED:
             for concrete in _expand(new, path):
                 if _differs(new, current, concrete):
                     errors.append(f"{secrets.label(concrete)} is not edited here. {reason}")
