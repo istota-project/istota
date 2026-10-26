@@ -404,8 +404,8 @@ class SummaryCallError(RuntimeError):
         self.usage = usage
 
 
-async def _complete_simple(provider, model: str, prompt: str) -> tuple[str, Usage]:
-    """Run a single text completion through ``provider``: ``(text, usage)``.
+async def _complete_simple(provider, model: str, prompt: str) -> tuple[str, Usage, str]:
+    """Run a single text completion through ``provider``: ``(text, usage, stop_reason)``.
 
     The summary is a one-off prompt, so it asks for no cache breakpoints: a
     cache write here is paid at the write premium and never read back.
@@ -415,6 +415,7 @@ async def _complete_simple(provider, model: str, prompt: str) -> tuple[str, Usag
     text_parts: list[str] = []
     final_text = ""
     usage = Usage()
+    stop_reason = ""
     async for event in provider.stream(
         "",
         [UserMessage(content=[TextContent(text=prompt)])],
@@ -427,13 +428,14 @@ async def _complete_simple(provider, model: str, prompt: str) -> tuple[str, Usag
         elif isinstance(event, StreamDone):
             final_text = event.message.text
             usage = event.message.usage
+            stop_reason = event.message.stop_reason
             break
         elif isinstance(event, StreamError):
             raise SummaryCallError(
                 event.message.error_message or "compaction stream error",
                 event.message.usage,
             )
-    return final_text or "".join(text_parts), usage
+    return final_text or "".join(text_parts), usage, stop_reason
 
 
 def _truncate_middle(text: str, max_chars: int) -> str:
@@ -543,7 +545,7 @@ async def compact_messages(
         )
 
     try:
-        summary, usage = await _complete_simple(provider, model, prompt)
+        summary, usage, stop_reason = await _complete_simple(provider, model, prompt)
     except SummaryCallError as e:
         logger.warning("Compaction summary failed: %s", e)
         return _failed(str(e), e.usage)
@@ -553,6 +555,11 @@ async def compact_messages(
     if not summary.strip():
         logger.warning("Compaction summary came back empty")
         return _failed("the summary came back empty", usage)
+    # A summary cut at the output cap has lost its later sections, and once it
+    # replaces the turns nothing can restore them; pi rejects it the same way.
+    if stop_reason == "max_tokens":
+        logger.warning("Compaction summary hit the output token cap")
+        return _failed("the summary hit the output token cap and is incomplete", usage)
     return CompactionOutcome(
         summary=summary, details=merged_details, usage=usage, ok=True, error=None
     )

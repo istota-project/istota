@@ -71,8 +71,9 @@ class _ScriptedProvider:
         yield StreamStart()
         # Any non-"done" kind (overflow / transient) surfaces as a pre-commit
         # StreamError carrying ``payload`` as the message — classify_error then
-        # decides overflow-vs-transient from the text.
-        if kind != "done":
+        # decides overflow-vs-transient from the text. "length" completes but
+        # stops at the output cap.
+        if kind not in ("done", "length"):
             yield StreamError(
                 message=AssistantMessage(stop_reason="error", error_message=payload)
             )
@@ -82,7 +83,7 @@ class _ScriptedProvider:
                 message=AssistantMessage(
                     content=[TextContent(text=payload)],
                     usage=Usage(input_tokens=10, output_tokens=5),
-                    stop_reason="end_turn",
+                    stop_reason="max_tokens" if kind == "length" else "end_turn",
                 )
             )
 
@@ -182,6 +183,23 @@ class TestRecoveryEndToEnd:
         assert result.stop_reason == "error"
         assert "context length" in result.result_text  # the original overflow cause
         assert spy["continue"] == 0  # never continued with an empty summary
+
+    def test_a_summary_cut_at_the_output_cap_is_never_continued_on(self, tmp_path, monkeypatch):
+        spy = {"continue": 0}
+        real_continue = native_mod.run_agent_loop_continue
+
+        async def _spy_continue(*a, **k):
+            spy["continue"] += 1
+            return await real_continue(*a, **k)
+
+        monkeypatch.setattr(native_mod, "run_agent_loop_continue", _spy_continue)
+
+        provider = _ScriptedProvider([_OVERFLOW, ("length", "## Goal\nhalf a summ")])
+        result = _brain(provider).execute(_req("hi", tmp_path))
+        assert result.success is False
+        assert result.stop_reason == "error"
+        assert "context length" in result.result_text
+        assert spy["continue"] == 0
 
     def test_a_failed_summary_with_a_previous_one_still_fails(self, tmp_path, monkeypatch):
         # The previous summary predates every turn the second cut would drop,
