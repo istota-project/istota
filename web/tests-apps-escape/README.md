@@ -26,7 +26,7 @@ A fixture is a folder under `tests/fixtures/apps/` holding `manifest.toml` and `
 
 - `escape-contract/` is the tier's check on itself. It uses only the kit and reports through it, so it shows the frame loads under its CSP, the port connects and a call round-trips. It is green with or without the CSP.
 - `hostile/` is the adversarial fixture. It tries every way out of the frame the apps-foundation spec lists (Design sections 1 to 3), reports each attempt, then navigates itself away with data in the URL as its last act.
-- `early-nav/` navigates the frame to the recorder's `/landed` page before its own first `load`, so that load belongs to a page the shell has never seen. The landing page takes the port, sends a `hello` with no key and a call, and reports what happened through the recorder's `/mark`. The tier asserts the port arrived and that nothing it sent was answered.
+- `early-nav/` navigates the frame to the recorder's `/landed` page before its own first `load`, so that load belongs to a page the shell has never seen. The landing page takes the port, posts a `key` message of its own to the shell's window, sends a `hello` with no key and one with its own key, then a call, and reports what happened through the recorder's `/mark`. The tier asserts the port arrived and that nothing it sent was answered.
 
 ### Reporting convention
 
@@ -42,7 +42,7 @@ The spec attaches every `report:*` value and the recorder's log to the test as `
 It tries each way out of the frame and reports each attempt, so the per-channel table is filled per browser, not asserted. The two questions earlier stages left for this tier:
 
 - whether app code can get the WebRTC constructors back from a fresh realm after the guard deleted them — answered: a nested `src` or `srcdoc` iframe is blocked by `frame-src 'none'`, and its `contentWindow` is a `SecurityError` in all three, so no fresh realm is reachable;
-- whether a page the frame navigates to before its own `load` can reach the bridge — answered: it is handed the port (that load is its own), but the kit read the fragment's key and stripped it before any app script ran, and the page never saw it, so its `hello` fails and its calls are refused.
+- whether a page the frame navigates to before its own `load` can reach the bridge — answered: it is handed the port (that load is its own), but not the key. The kit makes the key in its own closure and posts it to the shell while it is parsed, before any app script runs, and the shell takes only the frame window's first message as the key. The key was once carried in the fragment and stripped by the kit, but app code could still read it back (from `performance.getEntriesByType('navigation')[0].name` in all three browsers, and from an error's stack in Firefox) and forward it; it is now in nothing the frame's realm can read. So the landing page's own key message is ignored, its `hello` fails and its calls are refused.
 
 A request the tier is meant to catch only shows up as a failure if it reaches the network layer, so point any attempted request at the recorder (`http://127.0.0.1:5198`) or another loopback address. Nothing in this tier needs a host outside the machine. Whether a `dns-prefetch` hint causes a DNS lookup is not observable here and is recorded as open.
 

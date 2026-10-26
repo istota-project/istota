@@ -9,10 +9,12 @@
      The frame is `sandbox="allow-scripts"`, exactly: never `allow-same-origin`,
      which would let the app's code run on Istota's origin with the user's
      session, and none of the popup, download or top-navigation flags. The
-     element is built here rather than in markup so the sandbox attribute and
-     the load watch are both in place before `src` is set; the first `load` is
-     then the installed document's, and hands it the bridge's port, and any
-     later one is a navigation.
+     element is built here rather than in markup so the sandbox attribute, the
+     load watch and the bridge are all in place before `src` is set: the
+     bridge's window listener has to be there for the kit's key, the first
+     message the frame sends, and the first `load` is then the installed
+     document's, which is handed the bridge's port, and any later one is a
+     navigation.
 
      Reload is the parent's: it remounts this component, which builds a new
      frame and a new bridge, so no counter carries over. */
@@ -20,7 +22,7 @@
   import { copyText } from '@minot/ui/clipboard';
   import { get } from 'svelte/store';
   import { callApp, reportAppError, type BridgeErrorCode } from '$lib/apps/api';
-  import { createBridge, newFrameKey } from '$lib/apps/bridge';
+  import { createBridge } from '$lib/apps/bridge';
   import { currentEnv, frameUrl, watchEnv, type AppEnv } from '$lib/apps/env';
   import { watchFrame } from '$lib/apps/frameWatch';
   import { online } from '$lib/stores/connectivity';
@@ -53,9 +55,6 @@
     frame.setAttribute('title', name);
     frame.setAttribute('referrerpolicy', 'no-referrer');
     frame.className = 'app-frame';
-    // One key per mount: the kit echoes it in its hello, and a page that
-    // navigates the frame before its first load never saw the fragment.
-    const key = newFrameKey();
 
     let gone = false;
     function leave() {
@@ -73,7 +72,6 @@
     const watch = watchFrame(frame, leave, () => bridge.connect());
 
     const bridge = createBridge({
-      nonce: key,
       onUnresponsive: leave,
       frameWindow: () => frame.contentWindow,
       navigations: () => watch.navigations,
@@ -90,7 +88,7 @@
       bridge.postEnv(next);
     });
 
-    frame.src = frameUrl(id, ver, env, key);
+    frame.src = frameUrl(id, ver, env);
     host.append(frame);
 
     cleanup = () => {

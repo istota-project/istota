@@ -36,13 +36,17 @@ const LANDED = `<!doctype html>
   }
   await mark('page=landed&port=1');
   // A page that navigated the frame before its first load is handed the port.
-  // It never saw the fragment, so it cannot know the key: every call must be
-  // refused. A reply here would mean the gate failed.
+  // The key the installed document's kit posted to the shell stayed in the
+  // kit's closure, and the shell took that one, the frame's first message, and
+  // no other. So this page's own key message is ignored and neither hello is
+  // taken: every call must be refused. A reply here would mean the gate failed.
   port.onmessage = (event) => {
     const data = event.data || {};
     if (data.istota === 1 && typeof data.id === 'number') mark('page=landed&call-answered=1');
   };
+  window.parent.postMessage({ istota: 1, kind: 'key', k: 'landed-key' }, '*');
   port.postMessage({ istota: 1, kind: 'hello', k: '' });
+  port.postMessage({ istota: 1, kind: 'hello', k: 'landed-key' });
   port.postMessage({ istota: 1, id: 1, kind: 'call', capability: 'kv:own', op: 'list', args: {} });
 })();
 </script></body></html>`;

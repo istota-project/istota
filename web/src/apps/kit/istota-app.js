@@ -3,13 +3,24 @@
 // which checks each against the installed version's grants; this file enforces
 // nothing. It runs after the guard and before any app code.
 //
+// While this file is parsed, before any app script exists, it makes a one-time
+// key in its own closure and posts {istota: 1, kind: 'key', k} to the parent.
+// The shell takes the first message the frame's window sends and no other, so
+// this one is the key. The key is never in the URL, the DOM or anything else
+// the frame's realm can read back, so app code cannot hand it to a page it
+// navigates to.
+//
 // On the frame's first load the shell posts {istota: 1, kind: 'port'} to this
 // window with one end of a MessageChannel. The first such message from the
 // parent window is taken and every later one ignored; calls made before it
-// arrives wait in a queue. Everything else travels on that port, so a page the
-// frame navigates to, which never holds it, can neither call nor be answered.
+// arrives wait in a queue. The kit's first message on the port is
+// {istota: 1, kind: 'hello', k}, and the shell answers nothing until it has
+// seen that key. A page the frame navigates to before its first load is handed
+// the port, but cannot produce the key.
 //
-// Frame to shell:  {istota: 1, id, kind: 'call', capability, op, args}
+// Frame to parent: {istota: 1, kind: 'key', k}, once
+// Frame to shell:  {istota: 1, kind: 'hello', k}, first on the port
+//                  {istota: 1, id, kind: 'call', capability, op, args}
 //                  {istota: 1, id, kind: 'shell', op, args}
 // Shell to frame:  {istota: 1, id, ok: true, result}
 //                  {istota: 1, id, ok: false, error: {code, message}}
@@ -17,6 +28,20 @@
 // Anything else is dropped.
 (() => {
   const PROTOCOL = 1;
+  // Taken before any app code runs, so nothing the app redefines later is used.
+  const parentWindow = window.parent;
+  const postToParent = /** @type {(message: unknown, targetOrigin: string) => void} */ (
+    parentWindow.postMessage
+  );
+  const portKey = (() => {
+    const bytes = new Uint8Array(16);
+    // getRandomValues, unlike randomUUID, works outside a secure context.
+    crypto.getRandomValues(bytes);
+    let hex = '';
+    for (const byte of bytes) hex += byte.toString(16).padStart(2, '0');
+    return hex;
+  })();
+  postToParent.call(parentWindow, { istota: PROTOCOL, kind: 'key', k: portKey }, '*');
   const TIMEOUT_MS = 15000;
   const REPORT_MAX = 4096;
   const ERROR_CODES = Object.freeze([
@@ -64,16 +89,13 @@
     return SCALES.includes(name) ? name : null;
   }
 
-  // The one-time key the shell put in the fragment, which the bridge's hello
-  // echoes. Read now, then the fragment is stripped: app code runs after this
-  // file, and a page this document navigates to never sees the URL at all, so
-  // neither can read the key back and hand it on.
+  // The starting environment rides in the fragment. It holds nothing secret;
+  // it is stripped so the app's own URL stays clean.
   const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-  const portKey = params.get('k') || '';
   try {
     window.history.replaceState(null, '', window.location.pathname + window.location.search);
   } catch {
-    // A context that refuses this keeps the fragment in place; the hello still works.
+    // A context that refuses this keeps the fragment in place.
   }
 
   /**
@@ -226,7 +248,7 @@
 
   /** @param {MessageEvent} event */
   function takePort(event) {
-    if (port || event.source !== window.parent) return;
+    if (port || event.source !== parentWindow) return;
     const data = event.data;
     if (!data || typeof data !== 'object' || data.istota !== PROTOCOL || data.kind !== 'port') {
       return;

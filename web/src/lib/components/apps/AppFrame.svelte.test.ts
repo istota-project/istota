@@ -34,15 +34,22 @@ function connect(frame: HTMLIFrameElement): MessagePort {
   return ((call as unknown[])[2] as MessagePort[])[0];
 }
 
-/** The kit's first port message: the key it read from the frame's fragment. */
-function greet(frame: HTMLIFrameElement, port: MessagePort) {
-  const key = new URLSearchParams(new URL(frame.src).hash.slice(1)).get('k') ?? '';
-  port.postMessage({ istota: 1, kind: 'hello', k: key });
+const KEY = 'key-from-the-kit';
+
+/** The kit's key, posted to the shell's window while the frame's document is parsed. */
+function postKey(frame: HTMLIFrameElement, k = KEY) {
+  window.dispatchEvent(
+    new MessageEvent('message', {
+      data: { istota: 1, kind: 'key', k },
+      source: frame.contentWindow,
+    }),
+  );
 }
 
 function fromFrame(frame: HTMLIFrameElement, data: unknown) {
+  postKey(frame);
   const port = connect(frame);
-  greet(frame, port);
+  port.postMessage({ istota: 1, kind: 'hello', k: KEY });
   port.postMessage(data);
 }
 
@@ -65,19 +72,58 @@ describe('AppFrame', () => {
     expect(env.get('scale')).toMatch(/^(small|medium|large)$/);
     expect(env.get('shell')).toBe('web');
     expect(env.get('v')).toBe('1');
-    expect(env.get('k')).toBeTruthy();
+    // The bridge's key is the kit's own and never rides in the URL.
+    expect([...env.keys()].sort()).toEqual(['scale', 'shell', 'theme', 'v']);
   });
 
-  it('gives each mounted frame its own fragment key', () => {
-    const first = render(AppFrame, { appId: 'board', version: 2, name: 'Board' });
-    const second = render(AppFrame, { appId: 'board', version: 2, name: 'Board' });
-    const key = (frame: HTMLElement) =>
-      new URLSearchParams(new URL(frameOf(frame).src).hash.slice(1)).get('k');
-    const a = key(first.container);
-    const b = key(second.container);
-    expect(a).toBeTruthy();
-    expect(b).toBeTruthy();
-    expect(a).not.toBe(b);
+  it("listens for the kit's key before the frame is given its src", () => {
+    const order: string[] = [];
+    const add = window.addEventListener.bind(window);
+    vi.spyOn(window, 'addEventListener').mockImplementation((type, fn, opts) => {
+      if (type === 'message') order.push('listen');
+      add(type, fn, opts);
+    });
+    const setSrc = vi.spyOn(HTMLIFrameElement.prototype, 'src', 'set');
+    setSrc.mockImplementation(function (this: HTMLIFrameElement, value: string) {
+      order.push('src');
+      this.setAttribute('src', value);
+    });
+    render(AppFrame, { appId: 'board', version: 2, name: 'Board' });
+    vi.restoreAllMocks();
+    expect(order).toEqual(['listen', 'src']);
+  });
+
+  it('refuses a hello whose key the frame never posted, and removes the frame', () => {
+    vi.useFakeTimers();
+    const onNavigated = vi.fn();
+    const { container } = render(AppFrame, {
+      appId: 'board',
+      version: 2,
+      name: 'Board',
+      onNavigated,
+    });
+    const frame = frameOf(container);
+    // A page that navigated the frame early: the port is its, the key is not.
+    const port = connect(frame);
+    port.postMessage({ istota: 1, kind: 'hello', k: KEY });
+    port.postMessage({ istota: 1, id: 1, kind: 'call', capability: 'kv:own', op: 'get', args: {} });
+    vi.advanceTimersByTime(4000);
+    expect(api.callApp).not.toHaveBeenCalled();
+    expect(onNavigated).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('iframe')).toBeNull();
+    vi.useRealTimers();
+  });
+
+  it('takes only the first key the frame posts', async () => {
+    const { container } = render(AppFrame, { appId: 'board', version: 2, name: 'Board' });
+    const frame = frameOf(container);
+    postKey(frame);
+    postKey(frame, 'forwarded');
+    const port = connect(frame);
+    port.postMessage({ istota: 1, kind: 'hello', k: 'forwarded' });
+    port.postMessage({ istota: 1, id: 1, kind: 'call', capability: 'kv:own', op: 'get', args: {} });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(api.callApp).not.toHaveBeenCalled();
   });
 
   it('relays a call from its own frame to this app and version', async () => {

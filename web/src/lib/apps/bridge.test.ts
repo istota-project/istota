@@ -1,10 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CallOutcome } from './api';
 import {
   createBridge,
   ERROR_REPORTS_PER_LOAD,
-  newFrameKey,
+  KEY_MAX,
   parseRequest,
+  type Bridge,
   type BridgeOptions,
 } from './bridge';
 import type { AppEnv } from './env';
@@ -18,13 +19,22 @@ const ENV: AppEnv = {
   keyboard: false,
 };
 
-const NONCE = 'test-nonce';
+const KEY = 'key-from-the-kit';
+
+const bridges: Bridge[] = [];
+afterEach(() => {
+  for (const bridge of bridges.splice(0)) bridge.dispose();
+});
+
+/** A message posted to the shell's window, as the frame's `window.parent.postMessage` lands. */
+function onWindow(data: unknown, source: unknown) {
+  window.dispatchEvent(new MessageEvent('message', { data, source: source as Window }));
+}
 
 function harness(overrides: Partial<BridgeOptions> = {}) {
   const frameWindow = { postMessage: vi.fn() };
   const state = { navigations: 0, online: true };
   const options: BridgeOptions = {
-    nonce: NONCE,
     frameWindow: () => frameWindow as unknown as Window,
     navigations: () => state.navigations,
     online: () => state.online,
@@ -35,6 +45,13 @@ function harness(overrides: Partial<BridgeOptions> = {}) {
     ...overrides,
   };
   const bridge = createBridge(options);
+  bridges.push(bridge);
+  let keyed = false;
+  /** The kit's key, the first message the frame's window posts to the shell. */
+  function key(data: unknown = { istota: 1, kind: 'key', k: KEY }, source: unknown = frameWindow) {
+    if (source === frameWindow) keyed = true;
+    onWindow(data, source);
+  }
   // The frame's end of the channel, as the kit would hold it.
   let kitPort: MessagePort | null = null;
   const received: unknown[] = [];
@@ -48,8 +65,9 @@ function harness(overrides: Partial<BridgeOptions> = {}) {
     if (greet) hello();
     return handoff;
   }
-  /** The kit's first port message, the key it read from the frame's fragment. */
-  function hello(k = NONCE) {
+  /** The kit's first port message, echoing the key it posted; posts that key first if nothing has. */
+  function hello(k = KEY) {
+    if (!keyed) key();
     if (!kitPort) connect({ greet: false });
     kitPort!.postMessage({ istota: 1, kind: 'hello', k });
   }
@@ -64,7 +82,19 @@ function harness(overrides: Partial<BridgeOptions> = {}) {
   function replies() {
     return received.filter((m) => (m as { kind?: string }).kind !== 'env');
   }
-  return { bridge, options, frameWindow, state, connect, hello, send, settle, received, replies };
+  return {
+    bridge,
+    options,
+    frameWindow,
+    state,
+    key,
+    connect,
+    hello,
+    send,
+    settle,
+    received,
+    replies,
+  };
 }
 
 const LIST = { istota: 1, id: 7, kind: 'call', capability: 'kv:own', op: 'list', args: {} };
@@ -355,18 +385,90 @@ describe('the bridge', () => {
   });
 });
 
-describe('newFrameKey', () => {
-  it('mints a distinct key, and still does where randomUUID is missing', () => {
-    const first = newFrameKey();
-    const second = newFrameKey();
-    expect(first).toBeTruthy();
-    expect(second).toBeTruthy();
-    expect(first).not.toBe(second);
-    const spy = vi.spyOn(crypto, 'randomUUID').mockImplementation(() => {
-      throw new TypeError('crypto.randomUUID is not a function');
-    });
-    expect(newFrameKey()).toMatch(/^key-/);
-    spy.mockRestore();
+describe('the key', () => {
+  /** True when a call sent after `hello(k)` was relayed. */
+  async function accepted(h: ReturnType<typeof harness>, k = KEY) {
+    h.connect({ greet: false });
+    h.hello(k);
+    h.send(LIST);
+    await h.settle();
+    return (h.options.call as ReturnType<typeof vi.fn>).mock.calls.length > 0;
+  }
+
+  it('takes a hello carrying the key from the first frame-window message', async () => {
+    const h = harness();
+    h.key();
+    expect(await accepted(h)).toBe(true);
+  });
+
+  it('refuses every hello when no key message came at all', async () => {
+    const h = harness();
+    h.connect({ greet: false });
+    for (const k of [KEY, '', 'undefined']) {
+      h.send({ istota: 1, kind: 'hello', k });
+    }
+    h.send(LIST);
+    await h.settle();
+    expect(h.options.call).not.toHaveBeenCalled();
+    expect(h.received).toEqual([]);
+  });
+
+  it('refuses the hello when the first frame-window message was not a key', async () => {
+    const h = harness();
+    h.key({ istota: 1, kind: 'hello', k: KEY });
+    h.key();
+    expect(await accepted(h)).toBe(false);
+  });
+
+  it.each([
+    ['an empty key', { istota: 1, kind: 'key', k: '' }],
+    ['a key that is not a string', { istota: 1, kind: 'key', k: 7 }],
+    ['an overlong key', { istota: 1, kind: 'key', k: 'k'.repeat(KEY_MAX + 1) }],
+    ['another protocol', { istota: 2, kind: 'key', k: KEY }],
+  ])('takes no key from %s, and none after it', async (_label, data) => {
+    const h = harness();
+    h.key(data);
+    h.key();
+    const k = typeof (data as { k: unknown }).k === 'string' ? (data as { k: string }).k : KEY;
+    expect(await accepted(h, k)).toBe(false);
+  });
+
+  it('ignores a second key message from the frame', async () => {
+    const h = harness();
+    h.key();
+    h.key({ istota: 1, kind: 'key', k: 'forwarded-by-app-code' });
+    expect(await accepted(h, 'forwarded-by-app-code')).toBe(false);
+    h.send({ istota: 1, kind: 'hello', k: KEY });
+    h.send({ ...LIST, id: 8 });
+    await h.settle();
+    expect(h.options.call).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes no key from another window, and still takes the frame’s after it', async () => {
+    const h = harness();
+    const stranger = { postMessage: vi.fn() };
+    h.key({ istota: 1, kind: 'key', k: 'stranger' }, stranger);
+    h.key({ istota: 1, kind: 'key', k: 'parent' }, window);
+    h.connect({ greet: false });
+    h.send({ istota: 1, kind: 'hello', k: 'stranger' });
+    h.send({ istota: 1, kind: 'hello', k: 'parent' });
+    h.send(LIST);
+    await h.settle();
+    expect(h.options.call).not.toHaveBeenCalled();
+    h.key();
+    h.hello();
+    h.send({ ...LIST, id: 8 });
+    await h.settle();
+    expect(h.options.call).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes a frame that never posted a key, on the hello deadline', async () => {
+    const onUnresponsive = vi.fn();
+    const h = harness({ onUnresponsive, helloTimeoutMs: 20 });
+    h.connect({ greet: false });
+    h.send({ istota: 1, kind: 'hello', k: KEY });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(onUnresponsive).toHaveBeenCalledTimes(1);
   });
 });
 

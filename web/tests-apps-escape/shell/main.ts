@@ -1,7 +1,7 @@
 // The shell page: the real bridge and frame watch, around one app frame, with an
 // in-memory `kv:own` standing in for the server. Every relayed call and the
 // frame watch's verdict are published on `window.__escape` for the spec to read.
-import { createBridge, newFrameKey } from '../../src/lib/apps/bridge';
+import { createBridge } from '../../src/lib/apps/bridge';
 import { watchFrame } from '../../src/lib/apps/frameWatch';
 
 interface EscapeState {
@@ -39,9 +39,6 @@ const frame = document.createElement('iframe');
 frame.setAttribute('sandbox', 'allow-scripts');
 frame.setAttribute('data-istota-app-frame', '');
 frame.title = app;
-// The bridge's one-time key, as env.frameUrl puts it in the fragment.
-const portKey = newFrameKey();
-frame.src = `/frame/${encodeURIComponent(app)}#theme=light&scale=medium&shell=web&v=1&k=${portKey}`;
 
 function kvOwn(op: string, args: Record<string, unknown>) {
   const key = typeof args.key === 'string' ? args.key : '';
@@ -62,7 +59,6 @@ function kvOwn(op: string, args: Record<string, unknown>) {
 }
 
 const bridge = createBridge({
-  nonce: portKey,
   onUnresponsive: leave,
   frameWindow: () => frame.contentWindow,
   navigations: () => watch.navigations,
@@ -91,4 +87,7 @@ const watch = watchFrame(frame, leave, () => {
   state.connected = true;
 });
 
+// The bridge is listening for the kit's key before the frame starts loading.
+// The fragment is what env.frameUrl writes.
+frame.src = `/frame/${encodeURIComponent(app)}#theme=light&scale=medium&shell=web&v=1`;
 document.getElementById('host')?.append(frame);

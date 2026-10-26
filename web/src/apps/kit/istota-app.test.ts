@@ -42,8 +42,11 @@ let windowPosted: MockInstance;
 let kitPort: MessagePort | null;
 let istota: Istota;
 
-/** Run the kit; `port: false` leaves it waiting for the shell's port. */
-function load(hash = '', { port = true } = {}): Istota {
+/**
+ * Run the kit, then `app` as the app's first script would run; `port: false`
+ * leaves it waiting for the shell's port.
+ */
+function load(hash = '', { port = true, app = '' } = {}): Istota {
   window.history.replaceState(null, '', `/frame${hash}`);
   const add = window.addEventListener.bind(window);
   const spy = vi
@@ -52,7 +55,7 @@ function load(hash = '', { port = true } = {}): Istota {
       listeners.push([type, fn as EventListener]);
       add(type, fn, opts as AddEventListenerOptions);
     });
-  new Function(SOURCE)();
+  new Function(`${SOURCE}\n;${app}`)();
   spy.mockRestore();
   if (port) handOver();
   return (globalThis as unknown as { istota: Istota }).istota;
@@ -69,6 +72,15 @@ function handOver(source: Window | null = window, data: unknown = { istota: 1, k
     posted = spy;
   }
   return { channel, spy };
+}
+
+/** The key the kit posted to its parent window while it was parsed. */
+function postedKey(): string {
+  const keys = windowPosted.mock.calls
+    .map((call) => call[0] as Message)
+    .filter((message) => message.kind === 'key');
+  if (keys.length !== 1) throw new Error(`the kit posted ${keys.length} keys`);
+  return keys[0].k as string;
 }
 
 /** Everything the kit sent over the port, the hello first. */
@@ -141,11 +153,12 @@ describe('the port', () => {
   it('queues a call made before the port arrives and sends it once it does', async () => {
     istota = load('', { port: false });
     const call = istota.kv.get('early');
-    expect(windowPosted).not.toHaveBeenCalled();
+    // Only the key went to the window; the call waits for the port.
+    expect(windowPosted).toHaveBeenCalledTimes(1);
     handOver();
     // The hello goes first, then the call that waited for the port.
     expect(raw()).toEqual([
-      { istota: 1, kind: 'hello', k: '' },
+      { istota: 1, kind: 'hello', k: postedKey() },
       {
         istota: 1,
         id: expect.any(Number),
@@ -200,20 +213,49 @@ describe('the port', () => {
 });
 
 describe('the port key', () => {
-  it('sends the key from the fragment as its first port message', () => {
-    istota = load('#theme=dark&k=s3cret-key');
-    expect(raw()[0]).toEqual({ istota: 1, kind: 'hello', k: 's3cret-key' });
+  it('posts exactly one key to its parent, before any app code runs', () => {
+    istota = load('#theme=dark', {
+      port: false,
+      app: 'globalThis.__postsAtAppStart = window.postMessage.mock.calls.length;',
+    });
+    const atAppStart = (globalThis as unknown as { __postsAtAppStart?: number }).__postsAtAppStart;
+    delete (globalThis as unknown as { __postsAtAppStart?: number }).__postsAtAppStart;
+    expect(atAppStart).toBe(1);
+    expect(windowPosted.mock.calls).toEqual([
+      [{ istota: 1, kind: 'key', k: expect.stringMatching(/^[0-9a-f]{32}$/) }, '*'],
+    ]);
   });
 
-  it('strips the fragment so app code cannot read the key back', () => {
-    istota = load('#theme=dark&k=s3cret-key');
-    expect(window.location.hash).toBe('');
-    expect(hellos()).toEqual([{ istota: 1, kind: 'hello', k: 's3cret-key' }]);
+  it('still says hello with the key when app code replaces window.postMessage', () => {
+    istota = load('', {
+      port: false,
+      app: 'window.postMessage = () => { throw new Error("replaced"); };',
+    });
+    void istota.kv.get('k');
+    handOver();
+    expect(windowPosted).toHaveBeenCalledTimes(1);
+    expect(hellos()).toEqual([{ istota: 1, kind: 'hello', k: postedKey() }]);
   });
 
-  it('sends an empty key when the fragment has none', () => {
+  it('echoes that key as its first port message', () => {
     istota = load('#theme=dark');
-    expect(hellos()).toEqual([{ istota: 1, kind: 'hello', k: '' }]);
+    expect(raw()[0]).toEqual({ istota: 1, kind: 'hello', k: postedKey() });
+    expect(hellos()).toHaveLength(1);
+  });
+
+  it('makes a new key for every document', () => {
+    load('', { port: false });
+    const first = postedKey();
+    windowPosted.mockClear();
+    load('', { port: false });
+    expect(postedKey()).not.toBe(first);
+  });
+
+  it('puts the key nowhere in the URL, and still strips the fragment', () => {
+    istota = load('#theme=dark&scale=large');
+    expect(window.location.hash).toBe('');
+    expect(window.location.href).not.toContain(postedKey());
+    expect(istota.env.scale).toBe('large');
   });
 });
 
@@ -277,10 +319,11 @@ describe('calls', () => {
     ]);
   });
 
-  it('sends over the port and never posts on a window', () => {
+  it('sends over the port and posts nothing on a window but the key', () => {
     void istota.kv.get('a');
     expect(sent()).toHaveLength(1);
-    expect(windowPosted).not.toHaveBeenCalled();
+    expect(windowPosted).toHaveBeenCalledTimes(1);
+    expect(windowPosted.mock.calls[0][0]).toMatchObject({ kind: 'key' });
   });
 
   it('resolves with the result of the matching reply', async () => {
