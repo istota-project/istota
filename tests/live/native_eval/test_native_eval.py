@@ -20,6 +20,8 @@ scrub takes every `ISTOTA_*` name out of a test body):
 - `ISTOTA_EVAL_RUNS`: runs per case, default 1.
 - `ISTOTA_EVAL_OUT`: the JSON report path; default a file in the session's
   temporary directory. Rewritten after every case, started fresh per session.
+  Each run's session log is copied to `<report stem>-logs/<case>-<run>.jsonl`
+  beside it, and the report names that copy.
 - `ISTOTA_EVAL_CONFIG`: a TOML file of `[brain.native]` overrides (a
   `[brain.native]` table or bare top-level keys), so one case can run with a
   feature on and off.
@@ -167,6 +169,7 @@ def test_case(case_name, run, eval_settings, eval_report, tmp_path):
         tmp_path / "repo",
         log_root=tmp_path / "logs",
         record_sse=eval_settings["record_sse"],
+        keep_log=runner.kept_log_path(path, case_name, run),
     )
     row = result.to_dict()
     row["run"] = run

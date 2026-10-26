@@ -1944,6 +1944,21 @@ class TestCacheAffinityKey:
         assert header["prompt_cache_key"] is True
         assert header["prompt_cache_ttl"] == "1h"
 
+    def test_the_session_log_header_records_the_reasoning_replay_mode(self, tmp_path):
+        # ISSUE-841: the provider's mode, not the config default, so a
+        # transcript says what the run was set to send.
+        from istota.config import SessionLogConfig
+
+        logs = tmp_path / "logs"
+        brain = _brain(
+            self._provider(None, reasoning_replay="off"),
+            session_log=SessionLogConfig(enabled=True, dir=str(logs)),
+        )
+        self._attempt(brain, tmp_path, [_TEXT_TURN])
+        files = sorted((logs / "alice").glob("*.jsonl"))
+        header = json.loads(files[0].read_text().splitlines()[0])
+        assert header["reasoning_replay"] == "off"
+
 
 class TestOneHourWritePricing:
     """Stage 5: with `prompt_cache_ttl = "1h"` and no provider-reported cost, a

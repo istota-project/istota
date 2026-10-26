@@ -533,6 +533,21 @@ class TestSummarize:
         write_log(path, [_session(is_fallback="yes"), _context(), _result()])
         assert reader.summarize(path)["is_fallback"] is None
 
+    def test_the_reasoning_replay_mode_is_read_back(self, tmp_path):
+        # ISSUE-841.
+        path = tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl"
+        write_log(path, [_session(reasoning_replay="on"), _context(), _result()])
+        assert reader.summarize(path)["reasoning_replay"] == "on"
+
+    def test_a_log_without_the_reasoning_replay_mode_reads_as_empty(self, tmp_path):
+        path = tmp_path / "alice" / f"{STAMP}_task-4471-1.jsonl"
+        header = _session()
+        assert "reasoning_replay" not in header
+        write_log(path, [header, _context(), _result()])
+        assert reader.summarize(path)["reasoning_replay"] == ""
+        write_log(path, [_session(reasoning_replay=1), _context(), _result()])
+        assert reader.summarize(path)["reasoning_replay"] == ""
+
 
 class TestDigest:
     def test_it_reports_the_tools_in_order_with_their_status_and_sizes(self, tmp_path):

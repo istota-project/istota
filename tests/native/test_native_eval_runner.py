@@ -208,6 +208,39 @@ class TestRunCaseMetrics:
         assert read_fixture(out) == _tool_turn() + _answer_turn()
 
 
+class TestRunCaseReporting:
+    """ISSUE-840: what a sweep needs from a row after the run is over."""
+
+    def test_an_output_limit_stop_names_its_reason_in_error(self, tmp_path):
+        done = {"choices": [{"delta": {}, "finish_reason": "length"}],
+                "usage": _usage(1000, 4096, 0, 0.001)}
+        fixture = tmp_path / "sse" / "truncated.jsonl"
+        write_fixture(fixture, [f"data: {json.dumps(done)}", "data: [DONE]"])
+        result = runner.run_case(
+            _case(tmp_path), _config(), tmp_path / "repo",
+            provider=_Sequence([ReplayProvider(fixture)]),
+        )
+        assert result.stop_reason == "error"
+        assert "output token limit" in result.error
+
+    def test_the_session_log_is_copied_to_keep_log(self, tmp_path):
+        kept = tmp_path / "report-logs" / "replayed-1.jsonl"
+        result = runner.run_case(
+            _case(tmp_path), _config(), tmp_path / "repo",
+            provider=_replay(tmp_path), keep_log=kept,
+        )
+        assert result.session_log == str(kept)
+        assert kept.is_file()
+        assert MARKER in kept.read_text()
+        assert result.tool_calls == 2
+
+    def test_the_kept_log_sits_beside_the_report(self, tmp_path):
+        report = tmp_path / "out" / "arm-a.json"
+        assert runner.kept_log_path(report, "fix_failing_test", 2) == (
+            tmp_path / "out" / "arm-a-logs" / "fix_failing_test-2.jsonl"
+        )
+
+
 class TestTheFiveCases:
     def test_there_are_five_with_distinct_names(self):
         names = [case.name for case in eval_cases.CASES]

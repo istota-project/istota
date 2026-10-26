@@ -625,6 +625,8 @@ def summarize(path: Path | str) -> dict:
         "brain": "",
         # Tri-state, never a bare False — see `_as_bool_or_none`.
         "is_fallback": None,
+        # `auto`/`on`/`off`, or "" for a log written before ISSUE-841.
+        "reasoning_replay": "",
         "header_user_id": "",
         "header_task_id": None,
         "header_attempt": None,
@@ -662,6 +664,7 @@ def summarize(path: Path | str) -> dict:
     # `attempt` and `user_id` there is nothing to check the header against and
     # the header is the only source there is.
     row["is_fallback"] = _as_bool_or_none(header.get("is_fallback"))
+    row["reasoning_replay"] = _as_str(header.get("reasoning_replay"))
 
     # **Three identity fields come off the name and the directory, never off the
     # header, and the rule is one rule.** The name and the directory are what
