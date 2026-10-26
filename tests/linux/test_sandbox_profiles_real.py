@@ -41,6 +41,11 @@ pytestmark = pytest.mark.linux
 #: a probe's stdout cannot be a coincidence, and it is not a credential shape.
 CREDENTIAL_SENTINEL = "sentinel-not-a-real-token"
 
+#: `.credentials.json` is bound only under the "subscription" auth mode, so
+#: every probe here names it: the absences under NATIVE must hold in the one
+#: mode where CLAUDE does bind it.
+CLI_AUTH = "subscription"
+
 
 @pytest.fixture(autouse=True)
 def _requires_real_bwrap():
@@ -164,7 +169,7 @@ class TestTheClaudeProfileIsThePositiveControl:
     ):
         result = run_probe(
             _sentinel_probe(claude_home), layout, task, user_temp,
-            profile=SandboxProfile.CLAUDE,
+            profile=SandboxProfile.CLAUDE, cli_auth_mode=CLI_AUTH,
         )
         out = result.stdout
 
@@ -183,7 +188,7 @@ class TestTheClaudeProfileIsThePositiveControl:
         result = run_probe(
             f'echo tampered > {_q(creds)} 2>/dev/null && echo WRITE_OK '
             f"|| echo WRITE_FAIL",
-            layout, task, user_temp, profile=SandboxProfile.CLAUDE,
+            layout, task, user_temp, profile=SandboxProfile.CLAUDE, cli_auth_mode=CLI_AUTH,
         )
         assert "WRITE_FAIL" in result.stdout, result.stdout
         assert creds.read_text().strip().endswith('"}'), "the host file was rewritten"
@@ -195,7 +200,7 @@ class TestTheNativeProfileHasNoneOfIt:
     ):
         result = run_probe(
             _sentinel_probe(claude_home), layout, task, user_temp,
-            profile=SandboxProfile.NATIVE,
+            profile=SandboxProfile.NATIVE, cli_auth_mode=CLI_AUTH,
         )
         out = result.stdout
 
@@ -219,7 +224,7 @@ class TestTheNativeProfileHasNoneOfIt:
         (alice / "mine.txt").write_text("alice-can-read-this\n")
         result = run_probe(
             f"{_sentinel_probe(claude_home)}; cat {_q(alice / 'mine.txt')}",
-            layout, task, user_temp, profile=SandboxProfile.NATIVE,
+            layout, task, user_temp, profile=SandboxProfile.NATIVE, cli_auth_mode=CLI_AUTH,
         )
 
         assert result.returncode == 0, (result.stdout, result.stderr)
@@ -236,7 +241,7 @@ class TestTheNativeProfileHasNoneOfIt:
         local_entries = f'ls -A {_q(claude_home / ".local")} 2>/dev/null | tr "\\n" " "'
         result = run_probe(
             f'echo "home=[$({home_entries})]"; echo "local=[$({local_entries})]"',
-            layout, task, user_temp, profile=SandboxProfile.NATIVE,
+            layout, task, user_temp, profile=SandboxProfile.NATIVE, cli_auth_mode=CLI_AUTH,
         )
         out = result.stdout
 
