@@ -750,6 +750,56 @@ class TestReasoningDetailsParse:
         done = await _done([_sse({"content": "plain"})] + _FINISH)
         assert not [c for c in done.message.content if isinstance(c, ThinkingContent)]
 
+    def test_coalesce_keeps_separate_encrypted_items_with_no_index_apart(self):
+        items = [
+            {"type": "reasoning.encrypted", "data": "QUJD"},
+            {"type": "reasoning.encrypted", "data": "REVG"},
+        ]
+        assert coalesce_reasoning_details(items) == items
+
+    def test_coalesce_keeps_items_with_the_same_index_and_different_ids_apart(self):
+        items = [
+            {"type": "reasoning.encrypted", "id": "rs_1", "data": "QUJD", "index": 0},
+            {"type": "reasoning.encrypted", "id": "rs_2", "data": "REVG", "index": 0},
+        ]
+        assert coalesce_reasoning_details(items) == items
+
+    def test_coalesce_merges_a_piece_whose_id_arrived_only_on_the_first(self):
+        assert coalesce_reasoning_details(
+            [
+                {"type": "reasoning.text", "id": "rs_1", "text": "a", "index": 0},
+                {"type": "reasoning.text", "text": "b", "index": 0},
+                {"type": "reasoning.text", "id": "rs_1", "text": "c", "index": 0},
+            ]
+        ) == [{"type": "reasoning.text", "id": "rs_1", "text": "abc", "index": 0}]
+
+    def test_coalesce_still_merges_readable_pieces_with_no_index(self):
+        assert coalesce_reasoning_details(
+            [{"type": "reasoning.text", "text": "a"}, {"type": "reasoning.text", "text": "b"}]
+        ) == [{"type": "reasoning.text", "text": "ab"}]
+
+    def test_coalesce_keeps_an_id_that_arrives_on_a_later_piece(self):
+        assert coalesce_reasoning_details(
+            [
+                {"type": "reasoning.encrypted", "data": "A", "index": 0},
+                {"type": "reasoning.encrypted", "id": "rs_1", "data": "B", "index": 0},
+                {"type": "reasoning.encrypted", "id": "rs_2", "data": "C", "index": 0},
+            ]
+        ) == [
+            {"type": "reasoning.encrypted", "data": "AB", "index": 0, "id": "rs_1"},
+            {"type": "reasoning.encrypted", "id": "rs_2", "data": "C", "index": 0},
+        ]
+
+    async def test_two_encrypted_items_in_one_stream_replay_as_two(self):
+        lines = [
+            _sse({"reasoning_details": [{"type": "reasoning.encrypted", "id": "rs_1", "data": "QUJD", "index": 0}]}),
+            _sse({"reasoning_details": [{"type": "reasoning.encrypted", "id": "rs_2", "data": "REVG", "index": 0}]}),
+            _sse({"content": "ok"}),
+        ] + _FINISH
+        block = _thinking((await _done(lines)).message)
+        wire = _wire(block, "auto")
+        assert [d["data"] for d in wire["reasoning_details"]] == ["QUJD", "REVG"]
+
     def test_coalesce_skips_items_that_are_not_objects(self):
         assert coalesce_reasoning_details(
             ["junk", {"type": "reasoning.text", "text": "x", "index": 0}, None]
