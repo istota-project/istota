@@ -26,6 +26,10 @@ shared-source fetchers: ICS feeds, OCM discovery and WebDAV):
   ``auth`` and no ``Authorization`` header;
 - the body read to at most ``max_bytes``.
 
+`guarded_stream` is the same first hop for a body too large to hold in
+memory (a file the web process passes on to a browser): no redirect at all,
+and the body handed over as it arrives, under the same cap and deadline.
+
 Every refusal is a `GuardRefused` with one code from `CODES`, and its text is
 the code alone: no URL, path, query or response text, since a feed URL and a
 share secret are bearer credentials.
@@ -38,6 +42,9 @@ from __future__ import annotations
 
 import base64
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -166,35 +173,41 @@ def _read_capped(response: httpx.Response, max_bytes: int, deadline: float) -> b
     return bytes(buffer)
 
 
-def _send_pinned(client, method, url, addresses, *, headers, content, auth, timeout,
-                 max_bytes, deadline) -> httpx.Response:
+def _open_pinned(client, method, url, addresses, *, headers, content, auth, timeout,
+                 deadline) -> tuple[httpx.Response, httpx.Request]:
+    """The first checked address that connects, its answer open and its body unread."""
     last = "connection_failed"
     for address in addresses:
         request = pinned_request(method, url, address, headers=headers, content=content,
                                  auth=auth, timeout=min(timeout, _remaining(deadline)))
         try:
-            response = client.send(request, stream=True, follow_redirects=False)
+            return client.send(request, stream=True, follow_redirects=False), request
         except httpx.ConnectTimeout:
             last = "timeout"
-            continue
         except httpx.ConnectError:
             last = "connection_failed"
-            continue
         except httpx.TimeoutException:
             raise GuardRefused("timeout") from None
         except httpx.TransportError:
             raise GuardRefused("connection_failed") from None
-        try:
-            body = _read_capped(response, max_bytes, deadline)
-        except httpx.TimeoutException:
-            raise GuardRefused("timeout") from None
-        except httpx.TransportError:
-            raise GuardRefused("connection_failed") from None
-        finally:
-            response.close()
-        kept = [(k, v) for k, v in response.headers.multi_items() if k.lower() not in _WIRE_HEADERS]
-        return httpx.Response(response.status_code, headers=kept, content=body, request=request)
     raise GuardRefused(last)
+
+
+def _send_pinned(client, method, url, addresses, *, headers, content, auth, timeout,
+                 max_bytes, deadline) -> httpx.Response:
+    response, request = _open_pinned(client, method, url, addresses, headers=headers,
+                                     content=content, auth=auth, timeout=timeout,
+                                     deadline=deadline)
+    try:
+        body = _read_capped(response, max_bytes, deadline)
+    except httpx.TimeoutException:
+        raise GuardRefused("timeout") from None
+    except httpx.TransportError:
+        raise GuardRefused("connection_failed") from None
+    finally:
+        response.close()
+    kept = [(k, v) for k, v in response.headers.multi_items() if k.lower() not in _WIRE_HEADERS]
+    return httpx.Response(response.status_code, headers=kept, content=body, request=request)
 
 
 def guarded_send(
@@ -261,3 +274,71 @@ def guarded_send(
         ):
             method = "GET"
             content = None
+
+
+@dataclass
+class Streamed:
+    """An answer whose body is still on the wire: read it through `chunks`."""
+
+    status_code: int
+    headers: httpx.Headers
+    chunks: Iterator[bytes]
+
+
+@contextmanager
+def guarded_stream(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    private_hosts,
+    max_bytes: int,
+    timeout: float,
+    deadline_seconds: float,
+    auth: tuple[str, str] | None = None,
+    headers: dict | None = None,
+    resolve=None,
+) -> Iterator[Streamed]:
+    """One request under the guard, with no redirect; the answer, its body unread.
+
+    The address rule is `guarded_send`'s first hop. A 3xx with a ``Location``
+    is ``redirect_refused``. ``chunks`` raises ``too_large`` past
+    ``max_bytes`` and ``timeout`` past the deadline, so a caller that has
+    already sent its own headers can only end its body short. The response is
+    closed when the block exits.
+    """
+    deadline = time.monotonic() + deadline_seconds
+    scheme, host, port = _parse(url)
+    if scheme == "http" and host not in net_guard.host_set(private_hosts):
+        raise GuardRefused("host_refused")
+    addresses, refused = net_guard.checked_addresses(
+        host, port, private_hosts=net_guard.host_set(private_hosts), resolve=resolve,
+    )
+    if refused is not None:
+        raise GuardRefused("host_refused")
+    if not addresses:
+        raise GuardRefused("connection_failed")
+    response, _request = _open_pinned(client, method, url, addresses, headers=headers,
+                                      content=None, auth=auth, timeout=timeout,
+                                      deadline=deadline)
+    try:
+        if response.status_code in _REDIRECT_STATUSES and response.headers.get("location"):
+            raise GuardRefused("redirect_refused")
+
+        def chunks() -> Iterator[bytes]:
+            total = 0
+            try:
+                for chunk in response.iter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise GuardRefused("too_large")
+                    _remaining(deadline)
+                    yield chunk
+            except httpx.TimeoutException:
+                raise GuardRefused("timeout") from None
+            except httpx.TransportError:
+                raise GuardRefused("connection_failed") from None
+
+        yield Streamed(response.status_code, response.headers, chunks())
+    finally:
+        response.close()

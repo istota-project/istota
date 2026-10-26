@@ -390,3 +390,54 @@ class TestHopRulesOnPublicNames:
                 resolve=self._resolve({"cal.example": [PUBLIC], "cdn.example": [PUBLIC, "10.1.1.1"]}),
             )
         assert err.value.code == "host_refused"
+
+
+def _stream(client, url, **kwargs):
+    kwargs.setdefault("private_hosts", ["127.0.0.1"])
+    kwargs.setdefault("max_bytes", 1024 * 1024)
+    kwargs.setdefault("timeout", 5.0)
+    kwargs.setdefault("deadline_seconds", 10.0)
+    return guarded_http.guarded_stream(client, kwargs.pop("method", "GET"), url, **kwargs)
+
+
+class TestTheStream:
+    """`guarded_stream`: the first hop's address rule, with the body handed over as it arrives."""
+
+    def test_the_body_arrives_with_the_status_and_headers(self, server, client):
+        server.routes["/f"] = (206, {"Content-Range": "bytes 0-3/10"}, b"abcd")
+        with _stream(client, server.url("/f"), auth=("secret-user", "")) as answer:
+            assert answer.status_code == 206
+            assert answer.headers["content-range"] == "bytes 0-3/10"
+            assert b"".join(answer.chunks) == b"abcd"
+        expected = "Basic " + base64.b64encode(b"secret-user:").decode()
+        assert server.received[0]["headers"]["authorization"] == expected
+
+    def test_the_byte_cap_holds_while_streaming(self, server, client):
+        server.routes["/big"] = (200, {}, b"x" * 50000)
+        with _stream(client, server.url("/big"), max_bytes=1000) as answer:
+            with pytest.raises(GuardRefused) as err:
+                b"".join(answer.chunks)
+        assert err.value.code == "too_large"
+
+    def test_a_dripped_body_stops_at_the_deadline(self, server, client):
+        started = time.monotonic()
+        with _stream(client, server.url("/drip"), timeout=1.0, deadline_seconds=0.5) as answer:
+            with pytest.raises(GuardRefused) as err:
+                b"".join(answer.chunks)
+        assert err.value.code == "timeout"
+        assert time.monotonic() - started < 3.0
+
+    def test_a_redirect_is_refused(self, server, other, client):
+        server.routes["/a"] = (302, {"Location": other.url("/b")}, b"")
+        with pytest.raises(GuardRefused) as err:
+            with _stream(client, server.url("/a")):
+                pass
+        assert err.value.code == "redirect_refused"
+        assert other.received == []
+
+    def test_an_unlisted_private_host_is_refused_before_a_connection(self, server, client):
+        with pytest.raises(GuardRefused) as err:
+            with _stream(client, server.url("/f"), private_hosts=[]):
+                pass
+        assert err.value.code == "host_refused"
+        assert server.received == []

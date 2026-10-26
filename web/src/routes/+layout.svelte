@@ -462,7 +462,7 @@
     const items: MenuItem[] = [
       { ...link('Chat', '/chat'), ariaLabel: chatLabel, title: chatLabel, trailing: chatPill },
     ];
-    if (user.features.workspace) items.push(link('Files', '/files'));
+    if (user.features.files ?? user.features.workspace) items.push(link('Files', '/files'));
     if (user.features.groups)
       items.push({ ...link('Groups', '/groups/'), active: isActive('/groups') });
     if (user.features.briefings) {
@@ -528,7 +528,7 @@
           >
             Chat<CountPill count={chatCount ?? 0} title={chatLabel} shape="mark" />
           </a>
-          {#if user.features.workspace}
+          {#if user.features.files ?? user.features.workspace}
             <a href="{base}/files" class:active={isActive('/files')}>Files</a>
           {/if}
           {#if user.features.groups}

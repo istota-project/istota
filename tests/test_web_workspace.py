@@ -71,7 +71,7 @@ async def test_nextcloud_workspace_has_the_talk_attachments_place(client, config
     assert response.status_code == 404
 
 
-async def test_an_accepted_share_is_listed_and_never_browsed(client, config):
+async def test_an_accepted_share_is_a_browsable_place_with_no_root(client, config):
     from istota.sharing import sources
     with db.get_db(config.db_path) as conn:
         source_id = sources.create_source(
@@ -84,12 +84,10 @@ async def test_an_accepted_share_is_listed_and_never_browsed(client, config):
     response = await client.get("/workspace/places")
     share = next(p for p in response.json()["places"] if p["id"] == f"share:{source_id}")
     assert share["kind"] == "share" and share["label"] == "Taxes 2026"
-    assert share["browsable"] is False and share["view_root"] is None
-    assert share["remote"] == {"host": "cloud.example.org", "access": "read"}
+    assert share["browsable"] is True and share["view_root"] is None
+    assert share["remote"] == {"host": "cloud.example.org", "access": "read", "kind": None}
     assert share["reach"]["restricted"] == "none"
     assert "webdav" not in response.text
-    response = await client.get("/workspace/list", params={"place": f"share:{source_id}", "path": ""})
-    assert response.status_code == 404
 
 
 @pytest.mark.parametrize("place,path", [("unknown", ""), ("talk", ""), ("home", "../bob"), ("home", "notes/../"), ("home", "bad\0name")])

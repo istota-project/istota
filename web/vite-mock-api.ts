@@ -434,6 +434,7 @@ const user = {
     chat: true,
     briefings: true,
     workspace: true,
+    files: true,
     groups: true,
     feeds: true,
     location: true,
@@ -3895,11 +3896,16 @@ const mockSharing: SharingSettings = {
         id: 7,
         name: 'Taxes 2026',
         owner: 'carol@https://cloud.example.org',
+        owner_display_name: 'Carol',
+        shared_by: null,
+        shared_by_display_name: null,
         host: 'cloud.example.org',
         access: 'write',
         state: 'active',
+        kind: 'folder',
         last_reason: null,
         created_at: '2026-10-22 10:00:00',
+        accepted_at: '2026-10-22T10:05:00Z',
       },
     ],
     accept_refusal: null,
@@ -6647,14 +6653,14 @@ const workspacePlaces: WorkspacePlace[] = [
     id: 'share:7',
     kind: 'share',
     label: 'Taxes 2026',
-    browsable: false,
+    browsable: true,
     view_root: null,
-    remote: { host: 'cloud.example.org', access: 'write' },
+    remote: { host: 'cloud.example.org', access: 'write', kind: 'folder' },
     reach: {
       private: 'skill',
       shared_member: 'skill',
       restricted: 'none',
-      note: 'Shared from cloud.example.org. Tasks can read and change it through the shares skill as share:7; it cannot be browsed here. Its grant in Settings > Credentials can limit which rooms and scheduled jobs may use it.',
+      note: 'Shared from cloud.example.org. Tasks can read and change it through the shares skill as share:7. Its grant in Settings > Credentials can limit which rooms and scheduled jobs may use it.',
     },
   },
 ];
@@ -8316,6 +8322,7 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
   if (path === '/istota/api/workspace/places')
     return {
       places: workspacePlaces,
+      share_index: true,
       notes: [
         'Tasks run in a sandbox.',
         'Files are stored in your Nextcloud at cloud.example.com.',
@@ -8343,12 +8350,13 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
         : folder === 'istota'
           ? [workspaceEntry('config', 'dir')]
           : undefined;
+  const shared = place.startsWith('share:');
   const entries =
     place === 'home'
       ? (configEntries ?? workspaceTree[folder])
       : folder
         ? undefined
-        : [workspaceEntry('note.md')];
+        : [{ ...workspaceEntry('note.md'), ...(shared ? { share_path: 'note.md' } : {}) }];
   if (!entries) return { __status: 404, error: 'Folder not found.' };
   return {
     place,
@@ -8357,6 +8365,7 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
     truncated: folder === 'Archive',
     skipped_names: folder === 'Archive' ? 2 : 0,
     notes: folder === 'Archive' ? ['Nextcloud share state is unavailable.'] : [],
+    ...(shared ? { access: 'write', root_kind: 'folder' } : {}),
   };
 };
 

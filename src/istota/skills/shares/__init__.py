@@ -18,20 +18,22 @@ fetch budget and, with the broker on, the credential grant. The secret goes to
 the share's own verified WebDAV base only, as the Basic user with an empty
 password, through `sandbox.guarded_http`.
 
-**Access is read from the provider on every invocation.** Nextcloud tells a
-recipient nothing when the owner changes a share's permissions, so each
-invocation on a share starts with a depth-0 PROPFIND of its root
-(`sharing.ocm.share_access`, the same request the accept step makes), records
-``access`` when it changed, and refuses a write verb on a read share with
-``read_only_share`` before any write request. A 403 on a write re-reads it and
-is reported the same way. A 401 or 404 on the root revokes the share.
+**Access is read from the provider on every invocation.** Each invocation on a
+share starts with `sharing.ocm_files.check_root`, the depth-0 PROPFIND of its
+root that the Files page makes too, and refuses a write verb on a read share
+with ``read_only_share`` before any write request. A 403 on a write re-reads
+it and is reported the same way. A 401 or 404 on the root revokes the share.
 
-**Remote paths** are checked before anything is spent: no absolute path, no
-``.`` or ``..``, no empty segment, no backslash or control character. Each
-segment is percent-encoded on the wire. Every ``href`` in a listing is reduced
-to a path under the share root, and one outside it is left out and counted.
-The provider is the boundary; these checks keep a request from naming
-anything but the share.
+**Remote paths** follow `sharing.ocm_files`' rules, checked before anything is
+spent: no absolute path, no ``.`` or ``..``, no empty segment, no backslash
+or control character, each segment percent-encoded on the wire, and every
+``href`` in a listing reduced to a path under the share root or left out and
+counted. The provider is the boundary; these checks keep a request from
+naming anything but the share.
+
+**A share of one file** (OCM offers a file and a folder alike) lists as that
+one file at ``share:<id>``, named by the share, and ``get share:<id>``
+downloads it under that name made safe for a filesystem.
 
 **Names are third-party text**: every file and folder name, and the share's
 own name and owner, is fenced as ``shared folder``. A listing's ``path`` is a
@@ -47,8 +49,18 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote, unquote, urlsplit
 
+from istota.sharing.ocm_files import (  # noqa: F401 -- re-exported, the skill's path rules
+    LISTING_BODY,
+    LISTING_MAX_BYTES,
+    MAX_SEGMENT_CHARS,
+    MAX_TRANSFER_BYTES,
+    REQUEST_DEADLINE_SECONDS,
+    REQUEST_TIMEOUT_SECONDS,
+    relative_parts,
+    url_for,
+    valid_segment,
+)
 from istota.skills._cli import parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import EGRESS, REMOTE, WRITE, host_path
 
@@ -57,22 +69,9 @@ logger = logging.getLogger("istota.skills.shares")
 SCOPE = "shares"
 LABEL = "shared folder"
 PREFIX = "share:"
-MAX_TRANSFER_BYTES = 64 * 1024 * 1024
-LISTING_MAX_BYTES = 4 * 1024 * 1024
 REPLY_MAX_BYTES = 64 * 1024
-REQUEST_TIMEOUT_SECONDS = 60.0
-# Generous: a skill call moves whole files, and runs in its own process.
-REQUEST_DEADLINE_SECONDS = 600.0
-MAX_SEGMENT_CHARS = 255
 
 _REF = re.compile(r"\Ashare:([0-9]{1,18})(?::(.*))?\Z", re.DOTALL)
-_DAV = "{DAV:}"
-_LISTING_BODY = (
-    b'<?xml version="1.0" encoding="utf-8"?>'
-    b'<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop>'
-    b"<d:resourcetype/><d:getcontentlength/><d:getlastmodified/>"
-    b"</d:prop></d:propfind>"
-)
 _REMOTE_NOTE = (
     "share:<id>[:<path>] names a path inside a folder share on the sharer's "
     "server, which scopes it; it is never a host path"
@@ -128,16 +127,6 @@ def _fence(text: object) -> str:
 
 # ----------------------------------------------------------------- the paths
 
-def valid_segment(name: str) -> bool:
-    """One path segment, decoded: a name a folder can hold and nothing more."""
-    return (
-        isinstance(name, str) and 0 < len(name) <= MAX_SEGMENT_CHARS
-        and name not in (".", "..")
-        and not any(c in name for c in "/\\")
-        and not any(ord(c) < 32 or ord(c) == 127 for c in name)
-    )
-
-
 @dataclass(frozen=True)
 class Ref:
     source_id: int
@@ -169,46 +158,6 @@ def _one_share(raws) -> list[Ref]:
     if len({ref.source_id for ref in refs}) > 1:
         raise Refusal("mixed_shares")
     return refs
-
-
-def url_for(root: str, parts: tuple[str, ...], *, folder: bool = False) -> str:
-    """The URL of ``parts`` under the share root, each segment percent-encoded."""
-    if not parts:
-        return root
-    return root + "/".join(quote(part, safe="") for part in parts) + ("/" if folder else "")
-
-
-def relative_parts(root: str, href: object) -> tuple[str, ...] | None:
-    """An ``href`` from a multistatus as segments under ``root``, or None outside it.
-
-    Refuses a query, a fragment, user information, another origin, a path that
-    does not start with the root's segments, and any segment that decodes to
-    something `valid_segment` refuses (an encoded ``/`` or ``..`` included),
-    checked segment by segment so a decoded separator cannot split one.
-    """
-    if not isinstance(href, str) or not href or "\\" in href \
-            or any(ord(c) < 32 or ord(c) == 127 for c in href):
-        return None
-    parts = urlsplit(href)
-    if parts.query or parts.fragment or parts.username or parts.password:
-        return None
-    base = urlsplit(root)
-    if parts.scheme or parts.netloc:
-        if (parts.scheme.lower(), parts.netloc.lower()) != (base.scheme.lower(), base.netloc.lower()):
-            return None
-    if not parts.path.startswith("/"):
-        return None
-    raw = parts.path.split("/")
-    base_raw = base.path.rstrip("/").split("/")
-    if [unquote(s) for s in raw[:len(base_raw)]] != [unquote(s) for s in base_raw]:
-        return None
-    rest = raw[len(base_raw):]
-    if rest and rest[-1] == "":
-        rest = rest[:-1]
-    names = tuple(unquote(s) for s in rest)
-    if not all(valid_segment(name) for name in names):
-        return None
-    return names
 
 
 # ------------------------------------------------------------------ the task
@@ -275,39 +224,15 @@ def _source(context: _Context, source_id: int):
 # ------------------------------------------------------------ the row's state
 
 def _revoke(context: _Context, source, reason: str) -> None:
-    from istota import db
-    from istota.sharing import sources
+    from istota.sharing import ocm_files
 
-    with db.get_db(context.db_path) as conn:
-        sources.revoke(conn, source.id, context.user_id, reason=reason)
-    logger.info("shares source=%s revoked reason=%s", source.id, reason)
+    ocm_files.revoke(context.db_path, source, reason)
 
 
 def _record_error(context: _Context, source, reason: str) -> None:
-    from istota import db
-    from istota.sharing import sources
+    from istota.sharing import ocm_files
 
-    try:
-        with db.get_db(context.db_path) as conn:
-            sources.set_state(conn, source.id, context.user_id, "error", reason=reason)
-    except ValueError:
-        logger.info("shares source=%s error not recorded reason=%s", source.id, reason)
-    logger.info("shares source=%s error reason=%s", source.id, reason)
-
-
-def _record_access(context: _Context, source, access: str) -> None:
-    from istota import db
-    from istota.sharing import sources
-
-    with db.get_db(context.db_path) as conn:
-        current = sources.get_source(conn, source.id, context.user_id)
-        if current is None:
-            return
-        if current.access != access:
-            sources.set_access(conn, source.id, context.user_id, access)
-            logger.info("shares source=%s access=%s", source.id, access)
-        if current.state == "error":
-            sources.set_state(conn, source.id, context.user_id, "active")
+    ocm_files.record_error(context.db_path, source, reason)
 
 
 # ---------------------------------------------------------------- the secret
@@ -361,6 +286,7 @@ class _Session:
     root: str
     client: object
     access: str = "read"
+    root_kind: str = "folder"
 
     def close(self) -> None:
         self.client.close()
@@ -368,35 +294,29 @@ class _Session:
 
 def _read_access(session: _Session) -> str:
     """The depth-0 PROPFIND of the root: records and returns the share's access."""
-    from istota.sharing import ocm
+    from istota.sharing import ocm_files
 
     try:
-        access = ocm.share_access(session.context.config, session.source, session.secret.reveal())
-    except ocm.ShareActionRefused as exc:
-        if exc.status in (401, 404):
-            _revoke(session.context, session.source, "share_revoked")
-            raise Refusal("share_revoked") from None
-        _record_error(session.context, session.source, exc.reason)
+        root = ocm_files.check_root(session.context.db_path, session.context.config,
+                                    session.source, session.secret.reveal())
+    except ocm_files.ShareRefused as exc:
         raise Refusal(exc.reason) from None
-    _record_access(session.context, session.source, access)
-    session.access = access
-    return access
+    session.access = root.access
+    session.root_kind = root.kind
+    return root.access
 
 
 def _open(ref: Ref, *, write: bool) -> _Session:
     """Reach, secret and the root PROPFIND, in that order; a write checked against fresh access."""
     from istota.sandbox import guarded_http
-    from istota.sharing import ocm
+    from istota.sharing import ocm_files
 
     context = _context()
     source = _source(context, ref.source_id)
     try:
-        root = ocm.share_root_url(source)
-    except ocm.ShareActionRefused:
-        raise Refusal("invalid_response") from None
-    origin = urlsplit(root)
-    if origin.scheme not in ("http", "https") or origin.netloc.lower() != source.remote_host.lower():
-        raise Refusal("credential_host_mismatch")
+        root = ocm_files.checked_root(source)
+    except ocm_files.ShareRefused as exc:
+        raise Refusal(exc.reason) from None
     secret = _fetch_secret(context, source)
     session = _Session(context=context, source=source, secret=secret, root=root,
                        client=guarded_http.new_client(timeout=REQUEST_TIMEOUT_SECONDS))
@@ -469,28 +389,22 @@ def cmd_list(args) -> dict:
     }
 
 
-def _entry(ref: Ref, parts: tuple[str, ...], props: dict) -> dict:
-    from email.utils import parsedate_to_datetime
+def _share_name(source) -> str:
+    """The share's own name, one line: what a file share's one file is called."""
+    name = source.extras.get("name")
+    return " ".join(name.split()) if isinstance(name, str) else ""
 
-    kind = props.get(_DAV + "resourcetype")
-    folder = kind is not None and kind.find(_DAV + "collection") is not None
-    size = None
-    length = props.get(_DAV + "getcontentlength")
-    if length is not None and (length.text or "").strip().isdigit():
-        size = int(length.text.strip())
-    modified = None
-    stamp = props.get(_DAV + "getlastmodified")
-    if stamp is not None and stamp.text:
-        try:
-            modified = parsedate_to_datetime(stamp.text.strip()).isoformat()
-        except (TypeError, ValueError):
-            modified = None
+
+def _entry(ref: Ref, parts: tuple[str, ...], props: dict, name: str | None = None) -> dict:
+    from istota.sharing.ocm_files import entry_fields
+
+    folder, size, modified = entry_fields(props)
     return {
-        "name": _fence(parts[-1]),
+        "name": _fence(parts[-1] if name is None else name),
         "path": ref.text(parts),
         "type": "folder" if folder else "file",
-        "size": None if folder else size,
-        "modified": modified,
+        "size": size,
+        "modified": modified.isoformat() if modified is not None else None,
     }
 
 
@@ -500,8 +414,9 @@ def cmd_ls(args) -> dict:
     ref = parse_ref(args.target)
     session = _open(ref, write=False)
     try:
-        response = _send(session, "PROPFIND", url_for(session.root, ref.parts, folder=True),
-                         max_bytes=LISTING_MAX_BYTES, content=_LISTING_BODY,
+        folder = bool(ref.parts) or session.root_kind == "folder"
+        response = _send(session, "PROPFIND", url_for(session.root, ref.parts, folder=folder),
+                         max_bytes=LISTING_MAX_BYTES, content=LISTING_BODY,
                          headers={"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
         if response.status_code != 207:
             raise _status_refusal(response.status_code, {404: "not_found"})
@@ -515,7 +430,9 @@ def cmd_ls(args) -> dict:
             if parts is None:
                 skipped += 1
             elif parts == ref.parts:
-                if ref.parts and _entry(ref, parts, props)["type"] == "file":
+                if not ref.parts and session.root_kind == "file":
+                    entries.append(_entry(ref, parts, props, _share_name(session.source)))
+                elif ref.parts and _entry(ref, parts, props)["type"] == "file":
                     entries.append(_entry(ref, parts, props))
             elif parts[:-1] == ref.parts:
                 entries.append(_entry(ref, parts, props))
@@ -531,22 +448,33 @@ def cmd_ls(args) -> dict:
 def cmd_get(args) -> dict:
     from istota.sandbox.host_paths import write_resolved
 
+    from istota.lib.filenames import safe_filename
+
     refs = _one_share(args.targets)
-    if any(not ref.parts for ref in refs):
-        raise Refusal("invalid_path", "get takes file paths, not the share itself.")
+    whole = any(not ref.parts for ref in refs)
+    if whole and len(refs) > 1:
+        raise Refusal("invalid_path", "A share of one file is fetched on its own.")
     dest = Path(args.dest)
     for ref in refs:
-        if (dest / ref.parts[-1]).exists() and not args.overwrite:
+        if ref.parts and (dest / ref.parts[-1]).exists() and not args.overwrite:
             raise Refusal("exists", path=ref.text())
     session = _open(refs[0], write=False)
     saved = []
     try:
+        if whole and session.root_kind != "file":
+            raise Refusal("invalid_path", "get takes file paths, not the share itself.")
+        # A file share's one file is named by the share, which the sharer chose.
+        names = {ref: ref.parts[-1] if ref.parts else
+                 safe_filename(_share_name(session.source), fallback="shared-file")
+                 for ref in refs}
+        if whole and (dest / names[refs[0]]).exists() and not args.overwrite:
+            raise Refusal("exists", path=refs[0].text())
         for ref in refs:
             response = _send(session, "GET", url_for(session.root, ref.parts),
                              max_bytes=MAX_TRANSFER_BYTES)
             if response.status_code != 200:
                 raise _status_refusal(response.status_code, {404: "not_found"})
-            target = dest / ref.parts[-1]
+            target = dest / names[ref]
             try:
                 write_resolved(target, response.content, exclusive=not args.overwrite)
             except FileExistsError:

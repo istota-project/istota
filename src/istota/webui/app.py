@@ -2425,6 +2425,7 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         "google_workspace": False,
         "google_workspace_enabled": False,
         "workspace": False,
+        "files": False,
         "groups": is_admin,
         "admin": is_admin,
         "sharing": False,
@@ -2449,15 +2450,22 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
                     return bool(db.list_user_groups(conn, username))
 
             features["groups"] = await asyncio.to_thread(_has_groups)
-        if not features["workspace"] and _config.google_workspace.enabled:
+        receiving = features["sharing_ocm"] and bool(_config.site.hostname)
+        if not features["workspace"] and _config.db_path:
             from istota import db
             from istota.workspace.places import list_places
 
-            def _has_workspace_connection():
+            def _connections():
                 with db.get_db(_config.db_path) as conn:
-                    return any(p.kind == "drive" for p in list_places(_config, conn, username))
+                    return {p.kind for p in list_places(_config, conn, username)}
 
-            features["workspace"] = await asyncio.to_thread(_has_workspace_connection)
+            kinds = await asyncio.to_thread(_connections)
+            features["workspace"] = "drive" in kinds
+            # The Files page also holds the index of shares from other servers
+            # (#849), which needs no workspace: the bell sends a waiting offer there.
+            features["files"] = features["workspace"] or receiving or "share" in kinds
+        else:
+            features["files"] = features["workspace"] or receiving
         if _config.google_workspace.enabled:
             features["google_workspace"] = _has_google_token(username)
     # Nextcloud user-token status: null when the feature is off (ephemeral /
@@ -12987,6 +12995,15 @@ async def files_assignment_folder(request: Request, assignment_id: str):
     return RedirectResponse(url=target, status_code=302)
 
 
+@auth_router.get("/files/shares")
+async def files_share_index():
+    """The bell's link for a waiting folder offer: the Files page's index of shares (#849).
+
+    A notification link is a bare path, so the query the page reads is added here.
+    """
+    return RedirectResponse(url="/istota/files?view=shares", status_code=302)
+
+
 def _chat_retry_task(task_id: int, username: str, resume: bool):
     """Queue a re-run of ``task_id`` through `!retry`'s own path.
 
@@ -15749,21 +15766,50 @@ def _shared_feed_dict(source) -> dict:
     }
 
 
+def _ocm_people(source) -> dict:
+    """Who offered a share: owner and sharer by federated id and display name, the sender's words.
+
+    ``shared_by`` is null when the owner shared it themselves. Display names
+    are stored from offers since #849; an older row has none.
+    """
+    extras = source.extras
+
+    def text(key):
+        value = extras.get(key)
+        return value if isinstance(value, str) and value else None
+
+    owner, shared_by = text("owner"), text("shared_by")
+    return {
+        "owner": owner, "owner_display_name": text("owner_display_name"),
+        "shared_by": shared_by if shared_by and shared_by != owner else None,
+        "shared_by_display_name": (text("shared_by_display_name")
+                                   if shared_by and shared_by != owner else None),
+    }
+
+
 def _ocm_offer_dict(source) -> dict:
     """An offer as the card shows it: the sender's words and host, never the WebDAV base."""
     return {
-        "id": source.id, "name": source.extras.get("name"), "owner": source.extras.get("owner"),
+        "id": source.id, "name": source.extras.get("name"), **_ocm_people(source),
         "host": source.remote_host, "reoffer": source.state != "pending",
         "created_at": source.created_at,
     }
 
 
 def _ocm_share_dict(source) -> dict:
-    """An accepted folder share: its name and host, the access the provider reports."""
+    """An accepted share: its name, people and host, the access the provider reports.
+
+    ``kind`` is ``file`` or ``folder`` once the root has been read (at accept
+    since #849, or the first time it is opened), else null.
+    """
+    kind = source.extras.get("root_kind")
+    accepted = source.extras.get("accepted_at")
     return {
-        "id": source.id, "name": source.extras.get("name"), "owner": source.extras.get("owner"),
+        "id": source.id, "name": source.extras.get("name"), **_ocm_people(source),
         "host": source.remote_host, "access": source.access, "state": source.state,
+        "kind": kind if kind in ("file", "folder") else None,
         "last_reason": source.last_reason, "created_at": source.created_at,
+        "accepted_at": accepted if isinstance(accepted, str) else None,
     }
 
 
