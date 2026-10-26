@@ -112,7 +112,7 @@ from istota.session.session_log import (
 from istota.session.usage import TaskUsage, cache_write_multiplier_for_ttl
 
 from ._aliases import CANONICAL_ROLES, split_effort
-from ._resolve import Resolution, clamp_effort_level, effort_wire_value, resolve_selection
+from ._resolve import Resolution, alias_keys, clamp_effort_level, effort_wire_value, resolve_selection
 from ._roles import current_alias_table
 from ._types import BrainRequest, BrainResult, ImageInput
 from .claude_code import is_usage_limit_error
@@ -1030,7 +1030,7 @@ class NativeBrain:
     model_namespace = "openai_compat"
     kind = BRAIN_KIND
 
-    def __init__(self, config, provider=None, spec=None, providers=None, *, route=True):
+    def __init__(self, config, provider=None, spec=None, providers=None, *, route=True, home=None):
         self._config = config
         # The provider record native's requests go to (`[brain.native]
         # provider`), with the key for it. `None` means native is not
@@ -1049,6 +1049,12 @@ class NativeBrain:
         if spec is not None:
             self._providers.setdefault(spec.id, spec)
         self._route_requests = route
+        # Native's default provider (`[brain.native] provider`). A brain built
+        # for a task on another listed provider (`make_brain(..., bind=True)`)
+        # has that provider as `_spec` and this as its home: its default
+        # model is the provider's `default_model`, and its aliases are read
+        # under the provider's own key (D22).
+        self._home_id = home if home is not None else (spec.id if spec is not None else None)
         # `(wire id, ref)` on a routed attempt's brain; see `_model_info`.
         self._info_ref: tuple[str, str] | None = None
         # ``provider`` injectable for tests; production builds from the spec.
@@ -1080,6 +1086,30 @@ class NativeBrain:
     @property
     def _provider_id(self) -> str | None:
         return self._spec.id if self._spec is not None else None
+
+    def bound_to(self, provider_id: str | None) -> "NativeBrain":
+        """This brain as a task runs it (D22): on ``provider_id``, the task's
+        effective provider (``brain._resolve.effective_provider`` has checked
+        it against `[brain.native] providers`), reading no provider out of a
+        model id. Without a binding native runs on its default provider and
+        still routes a listed provider's ``provider/id`` ref, which is how an
+        internal model field in config names one. Returns this brain when the
+        provider is its own, else a brain on that provider's record."""
+        self._route_requests = False
+        spec = self._providers.get(provider_id) if provider_id else None
+        if spec is None or self._spec is None or spec.id == self._spec.id:
+            return self
+        return NativeBrain(
+            self._config, spec=spec, providers=self._providers, route=False, home=self._home_id,
+        )
+
+    @property
+    def _bound_elsewhere(self) -> bool:
+        """Whether this brain runs on a listed provider other than its home."""
+        return bool(self._spec is not None and self._home_id and self._spec.id != self._home_id)
+
+    def _alias_keys(self) -> tuple[str, ...]:
+        return alias_keys(BRAIN_KIND, self._provider_id, self._home_id)
 
     def _wire_id(self, name: str) -> str:
         """``name`` as native's provider takes it: its own ref without the
@@ -1154,14 +1184,14 @@ class NativeBrain:
         # an effort baked into the target (``smart = "opus:high"`` as a legacy
         # flat value). An effort-only override (no model) keeps the alias's own
         # target, which on native is the configured model for a tier.
-        rt = current_alias_table().target(base_lower, self.model_namespace)
+        rt = current_alias_table().target_in(base_lower, self._alias_keys())
         if rt is not None:
             target_model, target_effort = (
                 split_effort(rt.model) if rt.model else ("", None)
             )
             effort = suffix_effort or rt.effort or target_effort
             if not target_model:
-                return (self._config.model or None, effort)
+                return (self.default_model or None, effort)
             return (self._wire_id(target_model), effort)
         # A built-in role alias with no operator override resolves to the single
         # model this endpoint is configured for (NB-3). This must come BEFORE
@@ -1171,7 +1201,7 @@ class NativeBrain:
         # resolve_model_name treats it as brain default. Provider shortcuts
         # (opus/sonnet/haiku) are NOT roles and pass through untranslated.
         if base_lower in _BUILTIN_ROLE_NAMES:
-            return (self._config.model or None, suffix_effort)
+            return (self.default_model or None, suffix_effort)
         # A ref of native's own provider goes to the wire as the provider's id.
         wire = self._wire_id(base)
         if wire != base:
@@ -1190,10 +1220,15 @@ class NativeBrain:
         A property on the Brain protocol rather than a reach into each brain's
         own config block, so a surface that displays a deployment's effective
         default asks the brain that would run the task (ISSUE-418). This brain
-        applies it at the wire (``req.model or self._config.model``); the
-        property is the read-only view of the same value.
+        applies it at the wire (``req.model or self.default_model``). On a
+        listed provider other than native's default it is that provider's
+        ``default_model``; on the default provider ``[brain.native] model``,
+        else the provider's ``default_model``.
         """
-        return (getattr(self._config, "model", "") or "").strip()
+        provider_default = (getattr(self._spec, "default_model", "") or "").strip()
+        if self._bound_elsewhere:
+            return provider_default
+        return (getattr(self._config, "model", "") or "").strip() or provider_default
 
     @property
     def default_effort(self) -> str:
@@ -1244,7 +1279,7 @@ class NativeBrain:
         # the wire as the literal "general"/"fast"/"smart" — collapse to the
         # (empty) configured model, which downstream treats as "brain default".
         if base.lower() in _BUILTIN_ROLE_NAMES:
-            return self._config.model
+            return self.default_model
         return base  # explicit id pass-through (effort stripped); no translation
 
     def list_aliases(self):
@@ -1254,20 +1289,21 @@ class NativeBrain:
         # Built-in roles first: operator override (in THIS brain's namespace) if
         # present, else the native model. So `!models` shows the truthful
         # resolved table on native.
+        keys = self._alias_keys()
         for role in _BUILTIN_ROLE_NAMES:
-            rt = table.target(role, self.model_namespace)
+            rt = table.target_in(role, keys)
             if rt is not None:
-                listed.append((role, rt.model or self._config.model, rt.effort))
+                listed.append((role, rt.model or self.default_model, rt.effort))
             else:
-                listed.append((role, self._config.model, None))
+                listed.append((role, self.default_model, None))
             seen.add(role)
         # Any custom operator alias names beyond the three defaults.
         for name in table.names():
             if name in seen:
                 continue
-            rt = table.target(name, self.model_namespace)
+            rt = table.target_in(name, keys)
             if rt is not None:
-                listed.append((name, rt.model or self._config.model, rt.effort))
+                listed.append((name, rt.model or self.default_model, rt.effort))
         return listed
 
     def validate_alias_override(self, name, target):
@@ -1294,7 +1330,7 @@ class NativeBrain:
                 success=False,
                 result_text=f"The native brain is not configured: {reason}.",
                 stop_reason="error",
-                model_used=req.model or self._config.model,
+                model_used=req.model or self.default_model,
             )
         else:
             self._install_catalog_caches(req)
@@ -1331,6 +1367,7 @@ class NativeBrain:
         logger.info("native request routed to provider %s for model %s", spec.id, wire)
         routed_brain = NativeBrain(
             self._config, spec=spec, providers=self._providers, route=False,
+            home=self._home_id,
         )
         # The record is asked for by ref: a bare Claude id is `_DEFAULT` in
         # the catalogue (Stage 5), which would drop every routed effort.
@@ -1342,6 +1379,10 @@ class NativeBrain:
         pinned = self._info_ref
         if pinned is not None and model == pinned[0]:
             return get_model_info(pinned[1])
+        if self._bound_elsewhere:
+            # By ref, as a routed attempt is: a listed provider's bare id is
+            # that provider's model, not one the catalogue guesses by id.
+            return get_model_info(f"{self._spec.id}/{model}")
         return get_model_info(model)
 
     def _max_turns(self, req: BrainRequest) -> int:
@@ -1400,7 +1441,7 @@ class NativeBrain:
                     success=False,
                     result_text=f"Execution error: {e}",
                     stop_reason="error",
-                    model_used=req.model or self._config.model,
+                    model_used=req.model or self.default_model,
                 )
             except BaseException as e:
                 # `CancelledError`, `KeyboardInterrupt`, `SystemExit`. The
@@ -1553,7 +1594,7 @@ class NativeBrain:
                 log.steer(raw)
             return drained
 
-        model = req.model or self._config.model
+        model = req.model or self.default_model
         # One random key per attempt, never derived from the user or the task:
         # it goes to a third party, and an attempt is what a cached prefix
         # lives for. Minted only where the provider sends it, which also keeps

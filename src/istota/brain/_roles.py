@@ -17,6 +17,12 @@ cross-namespace bug: an operator writing ``smart = "opus"`` under ``anthropic``
 and ``anthropic/claude-opus-4.8`` under ``openai_compat`` gets each brain
 resolving its own value.
 
+Since the provider-per-room change (model-catalogue D22) a key may also be a
+provider id, ``[models.aliases.<name>.<provider>]``: the target on that
+provider. ``anthropic`` serves the CLI brains and native on the `anthropic`
+provider; ``openai_compat`` is read, for one release, as native's default
+provider. ``brain._resolve.alias_keys`` is the one place that order lives.
+
 The reserved namespace key ``"*"`` holds a *legacy* namespace-agnostic value
 (from a flat ``[models.aliases] name = "string"``), resolved by whichever brain
 is active. At config-load time we don't yet know which brain a given task will
@@ -156,6 +162,19 @@ class AliasTable:
         if per_namespace is not None:
             return per_namespace
         return entry.get(LEGACY_NAMESPACE)
+
+    def target_in(self, name: str, keys) -> RoleTarget | None:  # noqa: ANN001
+        """The first of ``keys`` (namespace or provider ids, then ``"*"``)
+        that ``name`` has a target under, or None. ``brain._resolve.alias_keys``
+        says which keys a brain on a provider reads, and in what order."""
+        entry = self.overrides.get(name.lower())
+        if not entry:
+            return None
+        for key in keys:
+            target = entry.get(key)
+            if target is not None:
+                return target
+        return None
 
     def names(self) -> tuple[str, ...]:
         return tuple(self.overrides)

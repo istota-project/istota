@@ -282,9 +282,10 @@ class TestModelResolution:
                 task_model="opus-high",
                 primary_result=BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
             )
-        # opus-high can't cross the boundary → fallback uses its own default (empty model).
+        # opus-high is an exact pin of the `anthropic` provider, which the
+        # native fallback does not reach → it uses its own default (D22).
         assert fb.received_reqs[0].model == ""
-        assert any("non-portable" in r.message for r in caplog.records)
+        assert any("cannot run on the target brain" in r.message for r in caplog.records)
 
 
 class TestVisibleNote:

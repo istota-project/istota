@@ -3,10 +3,11 @@
 `[models] enabled` bounds a non-admin's selection; an admin picks from the
 whole catalogue (D9). Aliases are open to both. The bound is on setting a
 selection, not on running one, so an admin's pin outside the set runs for
-every member. A room stores the alias or the ref it was given and the task
-records the ref it resolves to at creation (D6), except a portable alias,
-which it keeps. Native runs on Anthropic here and lists OpenRouter in
-`[brain.native] providers`, so OpenRouter's models are offered and routed.
+every member. A room stores the alias or the id within its provider, with
+the provider in its own column (D22), and the task records the id it resolves
+to at creation (D6), except a portable alias, which it keeps. Native runs on
+Anthropic here and lists OpenRouter in `[brain.native] providers`, so an
+admin's OpenRouter pick moves the room to OpenRouter.
 
 Each surface is driven as a pair, admin and non-admin, so a refusal cannot
 pass against a writer that refuses everything. The integration test at the
@@ -44,6 +45,7 @@ from istota.llm.catalog import ModelInfo, set_discovered
 from istota.transport.ingest import record_inbound
 
 OUTSIDE = "openrouter/moonshotai/kimi-k2.6"
+OUTSIDE_ID = "moonshotai/kimi-k2.6"
 
 
 def _brain_and_providers():
@@ -147,7 +149,7 @@ class TestAPersonsSelection:
         alias = resolve_for_person("smart", config, kind="claude_code", is_admin=False)
         assert stored_selection(alias) == "smart"
         bare = resolve_for_person("moonshotai/kimi-k2.6", config, kind="native", is_admin=True)
-        assert stored_selection(bare) == OUTSIDE
+        assert stored_selection(bare) == OUTSIDE_ID
 
     def test_a_pattern_only_where_asked(self, tmp_path):
         config = _config(tmp_path)
@@ -162,13 +164,13 @@ class TestAPersonsSelection:
 
         config = _config(tmp_path)
         model, _effort = selection_for_task(config, "opus", kind="claude_code")
-        assert model.startswith("anthropic/claude-opus-")
+        assert model.startswith("claude-opus-")
         set_alias_overrides({"deep": {"anthropic": "sonnet:high"}})
         try:
             model, effort = selection_for_task(config, "deep", kind="claude_code")
         finally:
             set_alias_overrides({})
-        assert model.startswith("anthropic/claude-sonnet-")
+        assert model.startswith("claude-sonnet-")
         assert effort == "high"
 
     def test_a_portable_alias_is_kept_by_name(self, tmp_path):
@@ -196,8 +198,11 @@ class TestRoomModel:
         config = _config(tmp_path, admins=("alice",))
         with db.get_db(config.db_path) as conn:
             _room(conn)
-            await cmd_room(_ctx(config, conn, f"model {OUTSIDE}", "alice"))
-            assert db.get_room(conn, "room1").model == OUTSIDE
+            out = await cmd_room(_ctx(config, conn, f"model {OUTSIDE}", "alice"))
+            room = db.get_room(conn, "room1")
+        # The ref is split into the two columns (D22).
+        assert (room.model, room.provider) == (OUTSIDE_ID, "openrouter")
+        assert "Provider set to `openrouter`" in out
 
     async def test_a_non_admin_is_refused_and_told_why(self, tmp_path):
         config = _config(tmp_path)
@@ -213,7 +218,7 @@ class TestRoomModel:
             _room(conn)
             await cmd_room(_ctx(config, conn, "model kimi:high", "alice"))
             room = db.get_room(conn, "room1")
-        assert (room.model, room.effort) == (OUTSIDE, "high")
+        assert (room.model, room.effort, room.provider) == (OUTSIDE_ID, "high", "openrouter")
 
     async def test_an_admin_s_pin_runs_for_someone_outside_the_set(self, tmp_path):
         config = _config(tmp_path, admins=("alice",))
@@ -228,7 +233,7 @@ class TestRoomModel:
                 user_id="alice", text="hello", source_type="web",
             )
             task = db.get_task(conn, inbound.task_id)
-        assert task.model == OUTSIDE
+        assert (task.model, task.provider) == (OUTSIDE_ID, "openrouter")
 
 
 @pytest.mark.asyncio
@@ -244,7 +249,7 @@ class TestTheModelPrefix:
         admin = resolve_model_prefix(
             f"!model {OUTSIDE} hello", brain, config=config, user_id="alice",
         )
-        assert (admin.model, admin.content) == (OUTSIDE, "hello")
+        assert (admin.model, admin.provider, admin.content) == (OUTSIDE_ID, "openrouter", "hello")
         member = resolve_model_prefix(
             f"!model {OUTSIDE} hello", brain, config=config, user_id="bob",
         )
@@ -293,12 +298,16 @@ class TestCronJobs:
             config, user_id, errors,
         )
         job = jobs[0]
-        return job, _file_owned_values(job, None, None, None, None)["model"], errors
+        values = _file_owned_values(job, None, None, None, None)
+        self.provider = values["provider"]
+        return job, values["model"], errors
 
     def test_an_admin_s_job_keeps_a_model_outside_the_set(self, tmp_path):
         config = _config(tmp_path, admins=("alice",))
         job, stored, errors = self._parse(config, "alice", OUTSIDE)
-        assert (job.model, stored, errors) == (OUTSIDE, OUTSIDE, [])
+        # The file keeps the ref; the row stores the two columns (D22).
+        assert (job.model, stored, errors) == (OUTSIDE, OUTSIDE_ID, [])
+        assert self.provider == "openrouter"
 
     def test_a_non_admin_s_job_runs_on_the_default_and_keeps_its_line(self, tmp_path):
         config = _config(tmp_path)
@@ -349,8 +358,9 @@ class _ToolServer:
 async def test_a_web_room_pick_reaches_the_provider_it_names(tmp_path):
     """An admin pins an OpenRouter model in a native room from the web
     settings (native on Anthropic, OpenRouter listed in `[brain.native]
-    providers`); the next turn's task records the ref and the request goes to
-    OpenRouter with its key, its own id and the effort the model supports.
+    providers`); the room stores OpenRouter's id and the provider (D22), the
+    next turn's task copies both, and the request goes to OpenRouter with its
+    key, its own id and the effort the model supports.
 
     `execute_task(dry_run=True)` returns once the prompt is rendered and builds
     no request, so this runs it for real, with the provider and the tool server
@@ -391,7 +401,7 @@ async def test_a_web_room_pick_reaches_the_provider_it_names(tmp_path):
                 cookies=cookies, headers={"origin": "https://example.com"},
             )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["model"] == OUTSIDE
+    assert resp.json()["model"] == OUTSIDE_ID
 
     built_specs = []
     providers = []
@@ -414,7 +424,9 @@ async def test_a_web_room_pick_reaches_the_provider_it_names(tmp_path):
             user_id="alice", text="hello", source_type="web",
         )
         task = db.get_task(conn, inbound.task_id)
-    assert (task.model, task.effort, task.brain) == (OUTSIDE, "xhigh", "native")
+    assert (task.model, task.effort, task.brain, task.provider) == (
+        OUTSIDE_ID, "xhigh", "native", "openrouter",
+    )
 
     def _execute():
         with db.get_db(config.db_path) as conn:

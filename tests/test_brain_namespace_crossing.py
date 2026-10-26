@@ -572,10 +572,19 @@ class TestARefCarriesItsProvider:
         )
         assert result == ("", "", "anthropic/claude-opus-5")
 
-    def test_a_bare_legacy_id_keeps_the_namespace_rule(self):
+    def test_a_bare_id_crosses_to_a_brain_that_reaches_its_provider(self):
+        # The pin is an id of the provider the task ran on (D22): `anthropic`
+        # for the CLI brain, which native reaches here, so it carries.
         result = _resolve_crossing_model_effort(
             _Task("claude-opus-5"), self._config("claude_code", "anthropic"),
             self._native("anthropic"), "", origin_namespace="anthropic",
+        )
+        assert result == ("claude-opus-5", "", None)
+
+    def test_a_bare_id_is_dropped_where_native_uses_another_provider(self):
+        result = _resolve_crossing_model_effort(
+            _Task("claude-opus-5"), self._config("claude_code", "openrouter"),
+            self._native("openrouter"), "", origin_namespace="anthropic",
         )
         assert result == ("", "", "claude-opus-5")
 

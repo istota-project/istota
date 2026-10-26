@@ -129,8 +129,8 @@ class ModelField:
     """How a field that names a model is picked and checked.
 
     `sources` is which providers it may name: `anthropic` (the CLI brains),
-    `native` (the providers the native brain can run) or `any` (every
-    provider a configured brain can run). `effort` says whether the field
+    `native` (native's default provider, whose default model the field is) or
+    `any` (`anthropic` and the providers `[brain.native] providers` lists). `effort` says whether the field
     honours `:effort`, `aliases` whether an alias is offered. `brain` is the
     kind that runs it, or None for `[brain] kind` (the internal callers).
     """

@@ -560,17 +560,18 @@ def _live_pin_namespace(config, conn, room_token: str, source_type: str) -> str 
         return None
 
 
-def _selection_for_task(config, model: str, *, source_type, brain) -> tuple[str, str | None]:
+def _selection_for_task(config, model: str, *, source_type, brain, provider=None) -> tuple[str, str | None]:
     """``(model, effort)`` for the task row, resolved on the brain that will
-    run it (`brain._resolve.selection_for_task`). Never raises: a failure
-    keeps the stored value, which the brain resolves leniently as before."""
+    run it, within the task's provider (`brain._resolve.selection_for_task`).
+    Never raises: a failure keeps the stored value, which the brain resolves
+    leniently as before."""
     try:
         from ..brain import resolve_brain_kind
         from ..brain._resolve import selection_for_task
 
         override = brain if isinstance(brain, str) and brain else None
         kind = resolve_brain_kind(source_type or "", config.brain, override=override).kind
-        return selection_for_task(config, model, kind=kind)
+        return selection_for_task(config, model, kind=kind, provider=provider)
     except Exception:  # noqa: BLE001 — a model lookup must not fail an inbound
         logger.debug("record_inbound: could not resolve the selection", exc_info=True)
         return model, None
@@ -611,6 +612,11 @@ def record_inbound(
     # the condition above would therefore look like tidying and would silently
     # let a `!model default` turn drop the room's brain too.
     brain: str | None = None,
+    # The provider an inline `!model` named (model-catalogue D22), "" for the
+    # brain's default, or None to take the room's standing provider. Like
+    # `brain`, the room's provider is a room setting rather than part of the
+    # model pin, so `apply_room_default` does not gate it.
+    provider: str | None = None,
     apply_room_default: bool = True,
     priority: int = 5,
     # The worker queue the resulting task lands on. Interactive surfaces leave
@@ -866,13 +872,17 @@ def record_inbound(
         # to the room cannot change a task already running.
         if brain is None and existing is not None:
             brain = existing.brain
+        # The room's provider beside its brain (D22): the model below is an id
+        # within it, and the task runs on it.
+        if provider is None and existing is not None:
+            provider = existing.provider
 
         # The room stores what was selected (an alias or a ref); the task
         # records what that resolves to now, so an alias change reaches the
         # next turn and a task row says which model ran (D6).
         if model:
             model, selection_effort = _selection_for_task(
-                config, model, source_type=source_type, brain=brain,
+                config, model, source_type=source_type, brain=brain, provider=provider or None,
             )
             if effort is None and selection_effort:
                 effort = selection_effort
@@ -1091,6 +1101,7 @@ def record_inbound(
         effort=effort,
         brain=brain,
         model_namespace=model_namespace,
+        provider=provider or None,
         priority=priority,
         queue=queue,
         scheduled_for=ack_reaction.hold_until() if held else None,
@@ -1181,6 +1192,7 @@ def ingest(conn, config: "Config", msg: IncomingMessage) -> InboundResult:
         model=msg.model,
         effort=msg.effort,
         brain=msg.brain,
+        provider=msg.provider,
         queue=msg.queue,
         apply_room_default=not msg.model_prefix_used,
         external_id=str(msg.platform_message_id)

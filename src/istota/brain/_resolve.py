@@ -40,9 +40,16 @@ otherwise. That holds without a discovery cache: ``anthropic/claude-opus-5``
 on an OpenRouter-native brain that does not list `anthropic` is never the
 `anthropic` provider's, so it never bills Anthropic. When native's default
 provider is an `openrouter` one and `anthropic` is listed too, the string is
-ambiguous; until the provider is stored apart from the id, an
-``anthropic/...`` value is read as OpenRouter's (its ``vendor/model`` space
-can hold it), and doctor's ``models.catalogue`` warns about the pair.
+ambiguous as typed input, and is read as OpenRouter's (its ``vendor/model``
+space can hold it).
+
+A stored selection is never ambiguous (D22): rooms, jobs and tasks keep the
+provider in a column of its own, and ``selection_for_task`` resolves the
+stored model within that one provider (``scope_provider``), so a task never
+reads a provider out of a model string. ``select_for_person`` is the write
+side: it resolves typed input against the room's provider, splits a
+``provider/id`` an admin typed into the two columns, and refuses a provider
+change to anyone else.
 
 Then the refusals: ``model_not_runnable`` (``for_brain`` cannot run the
 ref), ``model_not_enabled`` (``enabled_only`` and the ref is outside the
@@ -82,7 +89,13 @@ DEFAULT_TIER_TARGETS: dict[str, str] = {"fast": "haiku", "general": "sonnet", "s
 DEFAULT_ALIAS = "default"
 
 SOURCES = ("alias", "ref", "id", "pattern")
-ERROR_CODES = ("unknown", "ambiguous", "model_not_runnable", "model_not_enabled", "no_tools")
+ERROR_CODES = (
+    "unknown", "ambiguous", "model_not_runnable", "model_not_enabled", "no_tools",
+    "provider_admin_only",
+)
+
+#: The brain kinds that run the `claude` CLI, and so only the `anthropic` provider.
+CLI_KINDS = frozenset({"claude_code", "tmux_claude"})
 
 #: The alias namespace each brain kind resolves names in.
 BRAIN_NAMESPACES: dict[str, str] = {
@@ -183,10 +196,11 @@ def _rank(info: ModelInfo) -> tuple:
 
 def _model_step(
     base: str, selection: str, effort, catalogue, *, kinds, prefer, allow_patterns, pool,
-    reaches=None,
+    reaches=None, scope=None,
 ) -> Resolution | ResolveError:
     """Steps 2 to 5 for a base with no alias meaning. ``reaches(provider)``
-    says whether step 3 may read a ref of that provider; ``None`` reads any."""
+    says whether step 3 may read a ref of that provider; ``None`` reads any.
+    ``scope`` keeps step 4 to that provider's models."""
     index = _index(catalogue)
     lowered = base.lower()
 
@@ -203,6 +217,8 @@ def _model_step(
             return Resolution(ref=info.ref, info=info, effort_requested=effort, source="ref")
 
     matches = list(index["by_id"].get(lowered, ()))
+    if scope:
+        matches = [m for m in matches if m.provider == scope]
     if len(matches) == 1:
         info = matches[0]
         return Resolution(ref=info.ref, info=info, effort_requested=effort, source="id")
@@ -249,10 +265,13 @@ def _model_step(
 
 def _alias_step(
     name: str, selection: str, effort, catalogue, *, aliases, namespace, kinds, prefer,
-    reaches=None,
+    reaches=None, keys=None, scope=None,
 ) -> Resolution | ResolveError | None:
-    """Step 1. ``None`` when ``name`` is no alias in ``namespace``."""
-    target = aliases.target(name, namespace) if aliases is not None else None
+    """Step 1. ``None`` when ``name`` is no alias in ``namespace``, or under
+    ``keys`` (``alias_keys``) when those are given."""
+    target = None
+    if aliases is not None:
+        target = aliases.target_in(name, keys) if keys else aliases.target(name, namespace)
     if target is not None:
         raw = target.model
         if not raw:
@@ -273,11 +292,13 @@ def _alias_step(
         inner = _alias_step(
             target_base.lower(), selection, chosen_effort, catalogue,
             aliases=None, namespace=namespace, kinds=kinds, prefer=prefer, reaches=reaches,
+            scope=scope,
         )
         if inner is None:
             inner = _model_step(
                 target_base, selection, chosen_effort, catalogue,
                 kinds=kinds, prefer=prefer, allow_patterns=False, pool=(), reaches=reaches,
+                scope=scope,
             )
         if isinstance(inner, ResolveError):
             return _error(
@@ -321,6 +342,8 @@ def resolve_selection(
     use_aliases: bool = True,
     allow_patterns: bool = False,
     needs_tools: bool = False,
+    alias_provider: str | None = None,
+    scope_provider: str | None = None,
 ) -> Resolution | ResolveError:
     """Resolve one selection; see the module docstring for the order.
 
@@ -330,7 +353,11 @@ def resolve_selection(
     brains, ``native_provider`` for native). ``providers`` is the configured
     providers (``id -> spec``, config or kind); the built-ins are always in it.
     ``native_reach`` is `[brain.native] providers` (``native_reach_ids``).
-    ``enabled`` is the glob list ``enabled_only`` checks against. Never raises.
+    ``enabled`` is the glob list ``enabled_only`` checks against.
+    ``alias_provider`` reads operator aliases by provider (``alias_keys``)
+    rather than by namespace. ``scope_provider`` keeps every step to that one
+    provider's models: what a stored selection is resolved with, since its
+    provider is in a column of its own (D22). Never raises.
     """
     text = (selection or "").strip() if isinstance(selection, str) else ""
     if not text:
@@ -341,7 +368,9 @@ def resolve_selection(
     kinds = provider_kinds(providers)
     namespace = namespace or BRAIN_NAMESPACES.get(for_brain or "", "anthropic")
     if prefer_provider is None:
-        if for_brain in ("claude_code", "tmux_claude"):
+        if scope_provider:
+            prefer_provider = scope_provider
+        elif for_brain in CLI_KINDS:
             prefer_provider = SHIPPED_PROVIDER
         elif for_brain == "native":
             prefer_provider = native_provider
@@ -354,7 +383,10 @@ def resolve_selection(
         )
 
     reaches = None
-    if for_brain:
+    if scope_provider:
+        def reaches(provider_id: str) -> bool:
+            return provider_id == scope_provider
+    elif for_brain:
         def reaches(provider_id: str) -> bool:
             if not _runs(f"{provider_id}/-"):
                 return False
@@ -371,12 +403,13 @@ def resolve_selection(
     if enabled_only:
         enabled_set = frozenset(enabled_refs(catalogue, enabled or ()))
 
+    keys = alias_keys(for_brain, alias_provider, native_provider) if alias_provider else None
     result = None
     if use_aliases:
         result = _alias_step(
             base.lower(), text, effort, catalogue,
             aliases=aliases, namespace=namespace, kinds=kinds, prefer=prefer_provider,
-            reaches=reaches,
+            reaches=reaches, keys=keys, scope=scope_provider,
         )
     if result is None:
         pool = _index(catalogue)["models"]
@@ -384,14 +417,21 @@ def resolve_selection(
             pool = tuple(m for m in pool if m.ref in enabled_set)
         if for_brain:
             pool = tuple(m for m in pool if _runs(m.ref))
+        if scope_provider:
+            pool = tuple(m for m in pool if m.provider == scope_provider)
         result = _model_step(
             base, text, effort, catalogue,
             kinds=kinds, prefer=prefer_provider, allow_patterns=allow_patterns, pool=pool,
-            reaches=reaches,
+            reaches=reaches, scope=scope_provider,
         )
     if isinstance(result, ResolveError) or result.brain_default:
         return result
 
+    if scope_provider and result.provider != scope_provider:
+        return _error(
+            "model_not_runnable", text,
+            f"{result.ref} is not a model of the {scope_provider} provider", effort=result.effort_requested,
+        )
     if for_brain and not _runs(result.ref):
         return _error(
             "model_not_runnable", text, f"the {for_brain} brain cannot run {result.ref}",
@@ -473,17 +513,25 @@ def resolve_for_person(
     is_admin: bool,
     allow_patterns: bool = False,
     catalogue: Catalogue | None = None,
+    provider: str | None = None,
 ) -> Resolution | ResolveError:
     """A selection a person made for a room, a job or one task.
 
     An admin selects from the whole catalogue; anyone else from the enabled
-    set (D9). ``kind`` is the brain that will run it. Patterns are for chat
-    commands only (D10), so every other caller leaves ``allow_patterns`` off.
-    A task needs tool calling, so a model without it is refused.
+    set (D9). ``kind`` is the brain that will run it, and ``provider`` the
+    effective provider of the room or job (``effective_provider``), which is
+    asked first and whose aliases apply. Patterns are for chat commands only
+    (D10), so every other caller leaves ``allow_patterns`` off. A task needs
+    tool calling, so a model without it is refused. ``select_for_person`` is
+    what a writer calls: it also decides the provider column.
     """
+    if provider is None:
+        provider = effective_provider(config, kind, None)
     return resolve_selection(
         selection, catalogue,
         for_brain=kind,
+        prefer_provider=provider,
+        alias_provider=provider,
         enabled_only=not is_admin,
         enabled=None if is_admin else enabled_patterns(config),
         providers=config_providers(config),
@@ -495,12 +543,158 @@ def resolve_for_person(
 
 
 def stored_selection(resolution: Resolution) -> str:
-    """What a room or a ``!model`` turn stores for a resolved selection: the
-    alias name for an alias, else the ref it matched (a bare id or a pattern
-    is stored as its ref). Never carries ``:effort``; effort is its own field."""
+    """What a room, a job or a ``!model`` turn stores for a resolved
+    selection: the alias name for an alias, else the id within its provider
+    (a ref, a bare id or a pattern is stored as the id it matched; the
+    provider goes in its own column, D22). Never carries ``:effort``; effort
+    is its own field."""
     if resolution.source == "alias" and resolution.alias:
         return resolution.alias
+    if resolution.info is not None:
+        return resolution.info.id
     return resolution.ref
+
+
+@dataclass(frozen=True)
+class Selection:
+    """A person's selection, split into what the columns store (D22).
+
+    ``model`` is an alias name or an id within ``provider``; ``provider`` is
+    the stored provider column, ``None`` for the brain's default.
+    ``provider_changed`` says the selection moved the room or job to another
+    provider, which only an admin may do.
+    """
+
+    model: str
+    effort: str | None
+    provider: str | None
+    resolution: Resolution
+    provider_changed: bool = False
+
+
+def alias_keys(kind: str | None, provider: str | None, native_default: str | None) -> tuple[str, ...]:
+    """The `[models.aliases.<name>]` keys a brain on ``provider`` reads, in order.
+
+    The CLI brains read ``anthropic``. Native reads its provider's id; on its
+    default provider it reads the old ``openai_compat`` namespace key first,
+    for one release, so a config written before providers keeps its meaning.
+    ``"*"`` (a flat string) is read last by every brain. An alias with no
+    target under these keys has no operator target on that provider: it never
+    resolves into another provider.
+    """
+    if kind in CLI_KINDS:
+        return (SHIPPED_PROVIDER, "*")
+    keys: list[str] = []
+    if not provider or provider == native_default:
+        keys.append(BRAIN_NAMESPACES["native"])
+    if provider:
+        keys.append(provider)
+    keys.append("*")
+    return tuple(keys)
+
+
+_warned_unlisted: set[tuple[str, str]] = set()
+
+
+def effective_provider(config, kind: str | None, provider: str | None) -> str | None:  # noqa: ANN001
+    """The provider a room, job or task of brain ``kind`` runs on.
+
+    The CLI brains always run on `anthropic`. Native runs on the stored
+    provider when `[brain.native] providers` lists it, and on its default
+    provider when none is stored. A stored provider the list no longer holds
+    falls back to the default with a WARNING (once per pair and process),
+    like a room's brain pin the operator stopped allowing. ``None`` for a
+    kind with no provider, or a native brain with none. Never raises.
+    """
+    if kind in CLI_KINDS:
+        return SHIPPED_PROVIDER
+    if kind != "native":
+        return None
+    default = native_provider_id(config)
+    wanted = provider.strip() if isinstance(provider, str) else ""
+    if not wanted or wanted == default:
+        return default
+    if wanted in native_reach_ids(config):
+        return wanted
+    if (wanted, default or "") not in _warned_unlisted and len(_warned_unlisted) < 64:
+        _warned_unlisted.add((wanted, default or ""))
+        import logging
+
+        logging.getLogger("istota.brain").warning(
+            "provider %r is not in [brain.native] providers; running on the default "
+            "provider %r instead", wanted, default,
+        )
+    return default
+
+
+def stored_provider(config, kind: str | None, provider: str | None) -> str | None:  # noqa: ANN001
+    """What a provider column stores for ``provider``: ``None`` for the
+    brain's default provider (so the row follows a change of default) and for
+    the CLI brains, else the id."""
+    if kind != "native" or not provider:
+        return None
+    return None if provider == native_provider_id(config) else provider
+
+
+def select_for_person(
+    selection: str,
+    config,  # noqa: ANN001
+    *,
+    kind: str | None,
+    provider: str | None,
+    is_admin: bool,
+    allow_patterns: bool = False,
+    catalogue: Catalogue | None = None,
+) -> Selection | ResolveError:
+    """A person's selection for a room, a job or one task, split for storage.
+
+    ``provider`` is the stored provider column of the room or job (``None``
+    for the default). The selection is resolved against that provider first
+    (``resolve_for_person``). A ref of another provider native reaches moves
+    the selection there: an admin's ``provider/id`` is split into the two
+    columns, anyone else is refused (``provider_admin_only``), since the
+    provider decides which key is billed. An alias stays on the room's
+    provider: one whose target is another provider's model is refused, never
+    resolved into it. Never raises.
+    """
+    current = effective_provider(config, kind, provider)
+    resolved = resolve_for_person(
+        selection, config, kind=kind, is_admin=is_admin,
+        allow_patterns=allow_patterns, catalogue=catalogue, provider=current,
+    )
+    if isinstance(resolved, ResolveError):
+        return resolved
+    stored = stored_provider(config, kind, current)
+    if resolved.brain_default or not resolved.ref:
+        return Selection(
+            model=stored_selection(resolved) if resolved.alias else "",
+            effort=resolved.effort_requested, provider=stored, resolution=resolved,
+        )
+    landed = resolved.provider
+    if kind != "native" or landed == current:
+        return Selection(
+            model=stored_selection(resolved), effort=resolved.effort_requested,
+            provider=stored, resolution=resolved,
+        )
+    if resolved.source == "alias":
+        return _error(
+            "model_not_runnable", selection,
+            f"alias {resolved.alias!r} names a {landed} model, and this room runs on "
+            f"{current}; it is not available here",
+            effort=resolved.effort_requested,
+        )
+    if not is_admin:
+        return _error(
+            "provider_admin_only", selection,
+            f"{resolved.ref} is a {landed} model and this room runs on {current}; "
+            "only an admin can change the provider",
+            effort=resolved.effort_requested,
+        )
+    return Selection(
+        model=stored_selection(resolved), effort=resolved.effort_requested,
+        provider=stored_provider(config, kind, landed), resolution=resolved,
+        provider_changed=True,
+    )
 
 
 def describe_resolve_error(error: ResolveError) -> str:
@@ -515,11 +709,16 @@ def describe_resolve_error(error: ResolveError) -> str:
     return text
 
 
-def selection_for_task(config, selection: str | None, *, kind: str | None) -> tuple[str, str | None]:  # noqa: ANN001
+def selection_for_task(
+    config, selection: str | None, *, kind: str | None, provider: str | None = None,  # noqa: ANN001
+) -> tuple[str, str | None]:
     """``(model, effort)`` a task row records for a stored selection (D6).
 
-    An alias or ref resolves now, so ``tasks.model`` names the ref that ran
-    and an alias change reaches the next task. A portable alias (the tiers,
+    Resolved within the one provider the task runs on (``provider``, the
+    stored column; ``effective_provider`` decides), never by reading a
+    provider out of the string (D22). An alias or a model resolves now, so
+    ``tasks.model`` names the id within that provider that ran, and an alias
+    change reaches the next task. A portable alias (the tiers,
     and any ``portable = true``) is the exception: its name is kept, because
     a fallback to a brain on another provider re-resolves it there, which a
     ref would stop. The model that ran is still recorded, as
@@ -536,23 +735,33 @@ def selection_for_task(config, selection: str | None, *, kind: str | None) -> tu
     if not raw:
         return "", None
     try:
+        scope = effective_provider(config, kind, provider)
         resolved = resolve_selection(
             raw,
             for_brain=kind,
             providers=config_providers(config),
             native_provider=native_provider_id(config),
             native_reach=native_reach_ids(config),
+            alias_provider=scope,
+            scope_provider=scope,
         )
     except Exception:  # noqa: BLE001 - task creation must not fail on a lookup
         return raw, None
     if isinstance(resolved, Resolution) and resolved.alias and is_portable_selection(config, resolved.alias):
         return resolved.alias, resolved.effort_requested
     if isinstance(resolved, Resolution) and not resolved.brain_default:
-        return resolved.ref, resolved.effort_requested
+        return stored_selection_id(resolved), resolved.effort_requested
     base, effort = split_effort(raw)
     if isinstance(resolved, Resolution):
         return base, resolved.effort_requested
     return raw, None
+
+
+def stored_selection_id(resolution: Resolution) -> str:
+    """The id within its provider a resolved model runs as."""
+    if resolution.info is not None:
+        return resolution.info.id
+    return resolution.ref.split("/", 1)[1] if "/" in resolution.ref else resolution.ref
 
 
 def is_portable_selection(config, alias: str) -> bool:  # noqa: ANN001
@@ -700,6 +909,13 @@ def preferred_provider(namespace: str | None, config) -> str | None:  # noqa: AN
 
 __all__ = [
     "BRAIN_NAMESPACES",
+    "CLI_KINDS",
+    "Selection",
+    "alias_keys",
+    "effective_provider",
+    "select_for_person",
+    "stored_provider",
+    "stored_selection_id",
     "DEFAULT_ALIAS",
     "DEFAULT_TIER_TARGETS",
     "EFFORT_ORDER",

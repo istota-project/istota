@@ -933,17 +933,7 @@ def _configured_model_findings(config: "Config", catalogue) -> tuple[list[str], 
     except Exception:  # noqa: BLE001 - a doctor check never raises
         return fails, warns
 
-    from .llm.providers import provider_kinds
-
-    kinds = provider_kinds(providers)
-    reach_kinds = {kinds.get(pid) for pid in reach}
-    if "openrouter" in reach_kinds and "anthropic" in reach_kinds:
-        # Residual until the provider is stored apart from the model id.
-        warns.append(
-            f"[brain.native] providers reaches both {', '.join(reach)}: an "
-            "`anthropic/...` model value is ambiguous between OpenRouter's id and "
-            "Anthropic's own model, and is read as OpenRouter's"
-        )
+    warns.extend(_unlisted_provider_rows(config, reach))
 
     for label, value, kind in _model_fields_to_check(config):
         if kind == "native" and not native_id:
@@ -981,6 +971,53 @@ def _configured_model_findings(config: "Config", catalogue) -> tuple[list[str], 
                     f"[models.aliases] {name} ({namespace}) resolves to the deprecated {resolved.ref}"
                 )
     return fails, warns
+
+
+#: How many rooms or jobs pinned to an unlisted provider the detail names.
+_SHOWN_UNLISTED_ROWS = 10
+
+
+def _unlisted_provider_rows(config: "Config", reach: tuple[str, ...]) -> list[str]:
+    """One WARN per room and scheduled job whose stored provider (D22) is not
+    in `[brain.native] providers`, which runs on native's default provider
+    instead. Rooms by token, jobs by owner and name. Reads the framework
+    database read-only; nothing when it is absent. Never raises."""
+    from contextlib import closing
+
+    from .db import database_present
+
+    db_path = getattr(config, "db_path", None)
+    if not database_present(db_path):
+        return []
+    listed = set(reach)
+    found: list[str] = []
+    try:
+        with closing(sqlite_util.connect_read_only(Path(db_path))) as conn:
+            rooms = conn.execute(
+                "SELECT token, provider FROM rooms WHERE provider IS NOT NULL AND provider != '' "
+                "ORDER BY token"
+            ).fetchall()
+            jobs = conn.execute(
+                "SELECT user_id, name, provider FROM scheduled_jobs "
+                "WHERE provider IS NOT NULL AND provider != '' ORDER BY user_id, name"
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - a doctor check never raises
+        return [f"the rooms' and jobs' providers could not be read ({type(exc).__name__})"]
+    for token, provider in rooms:
+        if provider not in listed:
+            found.append(f"room {token}")
+    for user_id, job_name, provider in jobs:
+        if provider not in listed:
+            found.append(f"job {user_id}/{job_name}")
+    if not found:
+        return []
+    shown = ", ".join(found[:_SHOWN_UNLISTED_ROWS])
+    if len(found) > _SHOWN_UNLISTED_ROWS:
+        shown += f" and {len(found) - _SHOWN_UNLISTED_ROWS} more"
+    return [
+        f"{len(found)} room(s) or job(s) name a provider [brain.native] providers does not "
+        f"list, and run on native's default provider instead: {shown}"
+    ]
 
 
 def check_models_catalogue(config: "Config", probe: bool) -> CheckResult:

@@ -6,8 +6,10 @@ its default provider always among them. An `anthropic` key held for the CLI
 does not make Anthropic a native provider. Every reading of a model for the
 room stays within those providers, with or without a discovery cache: a value
 naming another provider is the default provider's id when it lists it, else
-refused, and it is never routed or billed elsewhere. A fallback across brains
-drops an exact pin the target cannot reach and re-resolves a portable alias.
+refused, and it is never routed or billed elsewhere. The room stores the
+provider beside the model (D22), so a task runs on the provider its row names
+and a model string is never read for one. A fallback across brains drops an
+exact pin the target cannot reach and re-resolves a portable alias.
 """
 
 from __future__ import annotations
@@ -21,7 +23,9 @@ from istota.brain import make_brain
 from istota.brain._resolve import (
     Resolution,
     ResolveError,
+    Selection,
     resolve_for_person,
+    select_for_person,
     selection_for_task,
     stored_selection,
 )
@@ -98,18 +102,20 @@ def _config(tmp_path, **kwargs) -> Config:
     return config
 
 
-def _room(conn, token="room1", *, brain=None, model=None):
+def _room(conn, token="room1", *, brain=None, model=None, provider=None):
     db.register_room(conn, token, "alice", origin="web")
     db.add_room_binding(conn, token, "web", token)
     if brain:
         db.set_room_brain(conn, token, brain)
     if model:
         db.set_room_model(conn, token, model)
+    if provider:
+        db.set_room_provider(conn, token, provider)
 
 
-def _inbound_task(config, *, brain=None, model=None):
+def _inbound_task(config, *, brain=None, model=None, provider=None):
     with db.get_db(config.db_path) as conn:
-        _room(conn, brain=brain, model=model)
+        _room(conn, brain=brain, model=model, provider=provider)
         inbound = record_inbound(
             conn, config, surface="web", surface_ref="room1",
             user_id="alice", text="hello", source_type="web",
@@ -134,19 +140,21 @@ def _run_native(config, tmp_path, model, *, through_executor=None):
         prompt="hi", allowed_tools=[], cwd=str(tmp_path), env={},
         timeout_seconds=30, model=model,
     )
-    brain_config = config.brain
-    if through_executor is not None:
-        # The executor's own request model and per-user key overlay.
-        from istota.executor import _request_model, _with_user_provider_key
-
-        brain_config = _with_user_provider_key(brain_config, config, "alice", through_executor.model)
-        req = BrainRequest(
-            prompt="hi", allowed_tools=[], cwd=str(tmp_path), env={}, timeout_seconds=30,
-            model=_request_model(through_executor, config, make_brain(brain_config)),
-        )
     with patch("istota.brain.native.make_provider", _make), \
             patch("istota.llm.discovery.install_from_cache_dir", return_value=False):
-        result = make_brain(brain_config).execute(req)
+        if through_executor is not None:
+            # The executor's own brain (bound to the task's provider), request
+            # model and per-user key overlay.
+            from istota.executor import _request_model, _task_brain
+
+            _brain_config, brain = _task_brain(through_executor, config)
+            req = BrainRequest(
+                prompt="hi", allowed_tools=[], cwd=str(tmp_path), env={}, timeout_seconds=30,
+                model=_request_model(through_executor, config, brain),
+            )
+        else:
+            brain = make_brain(config.brain)
+        result = brain.execute(req)
     assert result.success, result.result_text
     return [s.id for s in specs], [c["model"] for p in providers for c in p.calls]
 
@@ -163,7 +171,8 @@ class TestAnOpenRouterNativeRoom:
         config = _config(tmp_path)
         picked = resolve_for_person(ANTHROPIC_SPELLING, config, kind="native", is_admin=True)
         assert isinstance(picked, Resolution)
-        assert stored_selection(picked) == f"openrouter/{ANTHROPIC_SPELLING}"
+        assert picked.ref == f"openrouter/{ANTHROPIC_SPELLING}"
+        assert stored_selection(picked) == ANTHROPIC_SPELLING
 
     def test_with_a_cache_an_anthropic_direct_model_is_refused(self, tmp_path):
         # Listed by OpenRouter under another id only: the anthropic provider's
@@ -189,9 +198,8 @@ class TestAnOpenRouterNativeRoom:
         config = _config(tmp_path)
         task = _inbound_task(config, brain="native", model=ANTHROPIC_SPELLING)
         assert task.brain == "native"
-        if cached:
-            assert task.model == f"openrouter/{ANTHROPIC_SPELLING}"
-        built, wire = _run_native(config, tmp_path, task.model)
+        assert (task.model, task.provider) == (ANTHROPIC_SPELLING, None)
+        built, wire = _run_native(config, tmp_path, task.model, through_executor=task)
         assert built == ["openrouter"]
         assert wire == [ANTHROPIC_SPELLING]
 
@@ -205,16 +213,40 @@ class TestAListedProvider:
         assert isinstance(picked, ResolveError)
         assert picked.code == "model_not_runnable"
 
-    def test_listed_it_is_accepted_and_routed_through_record_inbound(self, tmp_path):
+    def test_listed_it_is_split_into_the_columns_and_runs_there(self, tmp_path):
         config = _config(tmp_path, provider="local", providers=("anthropic",))
-        picked = resolve_for_person(ANTHROPIC_SPELLING, config, kind="native", is_admin=True)
-        assert isinstance(picked, Resolution)
-        assert stored_selection(picked) == ANTHROPIC_SPELLING
-        task = _inbound_task(config, brain="native", model=ANTHROPIC_SPELLING)
-        assert task.model == ANTHROPIC_SPELLING
+        picked = select_for_person(
+            ANTHROPIC_SPELLING, config, kind="native", provider=None, is_admin=True,
+        )
+        assert isinstance(picked, Selection)
+        assert (picked.model, picked.provider, picked.provider_changed) == (
+            "claude-opus-5", "anthropic", True,
+        )
+        task = _inbound_task(config, brain="native", model=picked.model, provider=picked.provider)
+        assert (task.model, task.provider) == ("claude-opus-5", "anthropic")
         built, wire = _run_native(config, tmp_path, task.model, through_executor=task)
         assert built[-1] == "anthropic"
         assert wire == ["claude-opus-5"]
+
+    def test_a_member_may_not_move_the_room_to_it(self, tmp_path):
+        config = _config(tmp_path, provider="local", providers=("anthropic",))
+        config.admin_users = {"carol"}
+        config.models.enabled = ["anthropic/*"]
+        refused = select_for_person(
+            ANTHROPIC_SPELLING, config, kind="native", provider=None, is_admin=False,
+        )
+        assert isinstance(refused, ResolveError)
+        assert refused.code == "provider_admin_only"
+
+    def test_a_stored_ref_on_the_default_provider_is_not_routed(self, tmp_path):
+        # A model column holding `anthropic/...` with no provider is the
+        # default provider's value, sent there as written (D22).
+        config = _config(tmp_path, provider="local", providers=("anthropic",))
+        task = _inbound_task(config, brain="native", model=ANTHROPIC_SPELLING)
+        assert task.provider is None
+        built, wire = _run_native(config, tmp_path, task.model, through_executor=task)
+        assert built[-1] == "local"
+        assert wire == [ANTHROPIC_SPELLING]
 
 
 class TestAClaudeCodeRoom:
@@ -245,9 +277,18 @@ class TestTheFallbackAcrossBrains:
     def test_an_exact_anthropic_pin_is_dropped(self, tmp_path):
         config = _config(tmp_path, kind="claude_code", fallback="native")
         task = _inbound_task(config, model=ANTHROPIC_SPELLING)
-        assert task.model == ANTHROPIC_SPELLING
+        assert (task.model, task.provider) == ("claude-opus-5", None)
         model, _effort, dropped = self._crossing(config, task)
-        assert (model, dropped) == ("", ANTHROPIC_SPELLING)
+        assert (model, dropped) == ("", "claude-opus-5")
+
+    def test_an_exact_anthropic_pin_crosses_where_native_lists_anthropic(self, tmp_path):
+        from istota.executor import _crossing_provider
+
+        config = _config(tmp_path, kind="claude_code", fallback="native", providers=("anthropic",))
+        task = _inbound_task(config, model=ANTHROPIC_SPELLING)
+        model, _effort, dropped = self._crossing(config, task)
+        assert (model, dropped) == ("claude-opus-5", None)
+        assert _crossing_provider(task, config, "claude_code", "native") == "anthropic"
 
     def test_a_portable_alias_survives_task_creation_and_re_resolves(self, tmp_path):
         from istota.brain._roles import set_alias_overrides
@@ -331,17 +372,34 @@ async def test_chat_commands_lists_every_listed_provider(tmp_path):
     assert {m["provider"] for m in native} == {"openrouter", "anthropic"}
 
 
-class TestDoctorNamesTheAmbiguity:
-    def test_anthropic_listed_beside_openrouter_warns(self, tmp_path):
-        from istota.doctor import WARN, check_models_catalogue
-
-        config = _config(tmp_path, providers=("anthropic",))
-        result = check_models_catalogue(config, probe=False)
-        assert result.status == WARN
-        assert "ambiguous" in result.detail
-
-    def test_openrouter_alone_does_not(self, tmp_path):
+class TestDoctor:
+    def test_both_listed_is_no_longer_ambiguous(self, tmp_path):
+        # The provider column ends it (D22): nothing to warn about.
         from istota.doctor import check_models_catalogue
 
-        result = check_models_catalogue(_config(tmp_path), probe=False)
+        result = check_models_catalogue(_config(tmp_path, providers=("anthropic",)), probe=False)
         assert "ambiguous" not in result.detail
+
+    def test_a_room_and_a_job_on_a_dropped_provider_are_named(self, tmp_path):
+        from istota.doctor import WARN, check_models_catalogue
+
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            _room(conn, brain="native", provider="local")
+            conn.execute(
+                "INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, provider) "
+                "VALUES ('alice', 'nightly', '0 3 * * *', 'hi', 'local')"
+            )
+        result = check_models_catalogue(config, probe=False)
+        assert result.status == WARN
+        assert "room room1" in result.detail
+        assert "job alice/nightly" in result.detail
+
+    def test_a_listed_provider_is_not_named(self, tmp_path):
+        from istota.doctor import check_models_catalogue
+
+        config = _config(tmp_path, providers=("local",))
+        with db.get_db(config.db_path) as conn:
+            _room(conn, brain="native", provider="local")
+        result = check_models_catalogue(config, probe=False)
+        assert "room room1" not in result.detail

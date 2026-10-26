@@ -440,7 +440,7 @@ class TestModelEffortAndBrain:
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, wake.task_id)
         from istota.brain.claude_code import SONNET
-        assert (task.model, task.effort) == (f"anthropic/{SONNET}", "high")
+        assert (task.model, task.effort) == (SONNET, "high")
 
     def test_a_brain_the_operator_did_not_list_is_not_pinned(self, config):
         assignment_id = _assignment(config, next_wake_at=_iso(_now()), brain="native")

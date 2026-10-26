@@ -1874,6 +1874,7 @@ async def _process_poll_results(
                 # The active brain owns the alias namespace.
                 model_override: str | None = None
                 effort_override: str | None = None
+                provider_override: str | None = None
                 from ...brain import make_brain
                 from ...commands import (
                     ModelPrefixOutcome,
@@ -1881,6 +1882,7 @@ async def _process_poll_results(
                     dispatch as dispatch_command,
                     is_model_prefix,
                     resolve_model_prefix,
+                    room_provider,
                 )
 
                 # !model prefix — strip and capture per-task overrides via the
@@ -1915,6 +1917,7 @@ async def _process_poll_results(
                         has_attachments=bool(attachments),
                         config=config,
                         user_id=actor_id,
+                        room_provider=room_provider(conn, room_token),
                     )
                 else:
                     prefix = ModelPrefixOutcome(matched=False, content=content)
@@ -1935,6 +1938,7 @@ async def _process_poll_results(
                 if prefix.matched:
                     model_override = prefix.model
                     effort_override = prefix.effort
+                    provider_override = prefix.provider
                     content = prefix.content
 
                 # !command dispatch — intercept before task creation
@@ -2069,6 +2073,7 @@ async def _process_poll_results(
                     reply_to_content=reply_to_content,
                     model=model_override,
                     effort=effort_override,
+                    provider=provider_override,
                     model_prefix_used=prefix.matched,
                     can_react=True,
                 ))

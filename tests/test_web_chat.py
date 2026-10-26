@@ -620,14 +620,14 @@ class TestChatRoomsApi:
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body["model"] == "anthropic/claude-opus-5"  # stored as the ref it names
+        assert body["model"] == "claude-opus-5"  # stored as the id within its provider (D22)
         assert body["effort"] == "high"
         # Surfaced in the room listing too.
         rooms = (await chat_client.get(
             "/istota/api/chat/rooms", cookies=cookies,
         )).json()["rooms"]
         room = next(r for r in rooms if r["id"] == created["id"])
-        assert room["model"] == "anthropic/claude-opus-5"
+        assert room["model"] == "claude-opus-5"
         assert room["effort"] == "high"
 
     async def test_clear_room_model_default(self, chat_client):
@@ -666,7 +666,7 @@ class TestChatRoomsApi:
             f"/istota/api/chat/rooms/{created['id']}", json={"name": "renamed"},
             cookies=cookies, headers={"origin": "https://example.com"},
         )
-        assert resp.json()["model"] == "anthropic/claude-opus-5"
+        assert resp.json()["model"] == "claude-opus-5"
 
     async def test_unknown_model_rejected(self, chat_client):
         cookies = await _login(chat_client, "alice")
@@ -3263,7 +3263,7 @@ class TestTheRoomPatchValidatesInTheRoomsNamespace:
             headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 200
-        assert resp.json()["model"] == "anthropic/claude-opus-5"
+        assert resp.json()["model"] == "claude-opus-5"
 
 
 @_needs_web_deps
@@ -3277,9 +3277,9 @@ class TestRoomModelSelection:
         _patch_app(_make_config(tmp_path))
         anthropic = BrainConfig(kind="claude_code")
         native = BrainConfig(kind="native")
-        assert mod._room_model_selection(anthropic, OPUS, is_admin=True) == (
-            f"anthropic/{OPUS}", None,
-        )
+        picked, refusal = mod._room_model_selection(anthropic, OPUS, is_admin=True)
+        assert refusal is None
+        assert (picked.model, picked.provider) == (OPUS, None)
         stored, refusal = mod._room_model_selection(native, OPUS, is_admin=True)
         assert stored is None
         assert refusal["code"] == "model_not_runnable"
@@ -3290,7 +3290,8 @@ class TestRoomModelSelection:
 
         _patch_app(_make_config(tmp_path))
         anthropic = BrainConfig(kind="claude_code")
-        assert mod._room_model_selection(anthropic, "opus", is_admin=False) == ("opus", None)
+        picked, refusal = mod._room_model_selection(anthropic, "opus", is_admin=False)
+        assert (picked.model, refusal) == ("opus", None)
 
     def test_effort_suffixes_and_unknown_ids_are_refused(self, tmp_path):
         """Effort is its own field on the PATCH."""
@@ -3505,7 +3506,7 @@ class TestTheRoomPatchBrainIsAdminGated:
         )
         assert resp.status_code == 200
         with db.get_db(config.db_path) as conn:
-            assert db.get_room(conn, room["token"]).model == "anthropic/claude-opus-5"
+            assert db.get_room(conn, room["token"]).model == "claude-opus-5"
 
     async def test_an_admin_can_set_it(self, two_users):
         """The other control: the same request from an admin on the same
@@ -3610,13 +3611,13 @@ class TestBrainAndModelInOneBody:
         assert resp.status_code == 200
         body = resp.json()
         assert body["brain"] == "native"
-        # The bare id is stored as the ref it matched (D6).
-        assert body["model"] == "openrouter/vendor/some-model"
+        # The bare id is stored as the id within its provider (D6, D22).
+        assert body["model"] == "vendor/some-model"
         # Replaced, not lost, so the report says nothing was cleared.
         assert "cleared" not in body
         with db.get_db(config.db_path) as conn:
             stored = db.get_room(conn, room["token"])
-        assert (stored.brain, stored.model) == ("native", "openrouter/vendor/some-model")
+        assert (stored.brain, stored.model) == ("native", "vendor/some-model")
 
     async def test_a_stored_pin_still_goes_when_the_body_replaces_nothing(
         self, client_and_config,
@@ -3656,10 +3657,10 @@ class TestBrainAndModelInOneBody:
         assert resp.status_code == 200
         body = resp.json()
         assert body["brain"] == "tmux_claude"
-        assert body["model"] == "anthropic/claude-opus-5"
+        assert body["model"] == "claude-opus-5"
         assert "cleared" not in body
         with db.get_db(config.db_path) as conn:
-            assert db.get_room(conn, room["token"]).model == "anthropic/claude-opus-5"
+            assert db.get_room(conn, room["token"]).model == "claude-opus-5"
 
     async def test_it_clears_a_pin_that_was_already_stored(
         self, client_and_config,

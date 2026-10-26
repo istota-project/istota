@@ -1233,8 +1233,9 @@ class TestGroupBriefingsUpgrade:
                                     "same_edition": True, "retirement_survived_restart": True, "rollback": True}
 
 
-# The last release before `_migrate_group_owned_rooms`, and the one a rollback
-# returns to: SCHEMA_VERSION was left at 1 so that it still can. The floor
+# The last release before `_migrate_group_owned_rooms`. SCHEMA_VERSION was left
+# at 1 by that migration; the provider columns (model-catalogue D22) raised it
+# to 2, so a rollback to this release is now refused by the stamp. The floor
 # predates `rooms.group_id`, so it cannot hold a linked room.
 GROUP_ROOMS_RELEASE = "v0.46.0"
 

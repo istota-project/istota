@@ -67,13 +67,13 @@ def test_an_unconfigured_native_brain_is_returned_as_is(tmp_path):
     lookup.assert_not_called()
 
 
-def test_the_provider_a_task_s_ref_routes_to_gets_the_user_s_key_too(tmp_path):
-    # Native routes `anthropic/...` to the anthropic provider when
-    # `[brain.native] providers` lists it (D4), so the user's own key for that
+def test_the_provider_a_task_runs_on_gets_the_user_s_key_too(tmp_path):
+    # A task on the anthropic provider (its stored column, D22) when
+    # `[brain.native] providers` lists it, so the user's own key for that
     # provider rides along; no other provider's does.
     config = _cfg(tmp_path, providers=["anthropic"])
     with patch("istota.credentials.store.get_secret", return_value="user-key") as lookup:
-        out = _with_user_provider_key(config.brain, config, "alice", "anthropic/claude-x")
+        out = _with_user_provider_key(config.brain, config, "alice", "anthropic")
     asked = sorted(call.args[3] for call in lookup.call_args_list)
     assert asked == ["anthropic", "openrouter"]
     assert out.provider_specs["anthropic"].inference_key == InferenceKey("user-key")
@@ -81,16 +81,18 @@ def test_the_provider_a_task_s_ref_routes_to_gets_the_user_s_key_too(tmp_path):
 
 
 def test_an_unlisted_provider_s_key_is_not_asked_for(tmp_path):
-    # Not on the list, the ref is not routed, so its provider's key is not used.
+    # Not on the list, the task runs on the default, so that provider's key
+    # is not used.
     config = _cfg(tmp_path)
     with patch("istota.credentials.store.get_secret", return_value="user-key") as lookup:
-        out = _with_user_provider_key(config.brain, config, "alice", "anthropic/claude-x")
+        out = _with_user_provider_key(config.brain, config, "alice", "anthropic")
     assert [call.args[3] for call in lookup.call_args_list] == ["openrouter"]
     assert out.provider_specs["anthropic"].inference_key == InferenceKey("anthropic-instance-key")
 
 
-def test_a_model_naming_no_provider_asks_for_native_s_key_only(tmp_path):
+def test_a_task_on_the_default_provider_asks_for_native_s_key_only(tmp_path):
+    # A model id that reads like another provider's ref names no provider.
     config = _cfg(tmp_path, providers=["anthropic"])
     with patch("istota.credentials.store.get_secret", return_value=None) as lookup:
-        _with_user_provider_key(config.brain, config, "alice", "moonshotai/kimi")
+        _with_user_provider_key(config.brain, config, "alice", None)
     assert [call.args[3] for call in lookup.call_args_list] == ["openrouter"]

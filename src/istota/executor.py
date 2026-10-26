@@ -1700,17 +1700,16 @@ def _persist_task_usage(
     )
 
 
-def _with_user_provider_key(brain_config, config: Config, user_id: str, model: str | None = None):
+def _with_user_provider_key(brain_config, config: Config, user_id: str, provider: str | None = None):
     """``brain_config`` with the user's own keys for the providers this task may call.
 
     The provider key rule applied per user (D16): a request to provider P in
     user U's task carries U's ``provider_keys/<P>`` secret when U has one, and
-    the deployment's key otherwise. The providers are native's own and, when
-    ``model`` is a ref of another provider `[brain.native] providers` lists,
-    that one, since native routes such a request there (D4). A failed lookup
-    keeps the deployment's key, so a missing secret never blocks the task.
-    Returns a copy; never mutates. Internal operator calls (triage, the
-    speech gate) never come through here.
+    the deployment's key otherwise. The providers are native's own and
+    ``provider``, the task's effective provider (D22), when `[brain.native]
+    providers` lists it. A failed lookup keeps the deployment's key, so a
+    missing secret never blocks the task. Returns a copy; never mutates.
+    Internal operator calls (triage, the speech gate) never come through here.
     """
     import dataclasses
 
@@ -1723,9 +1722,9 @@ def _with_user_provider_key(brain_config, config: Config, user_id: str, model: s
         return brain_config
     specs = native_providers(brain_config)
     wanted = [spec.id]
-    head, sep, _tail = (model or "").strip().partition("/")
-    if sep and head in specs and head != spec.id and head in native_reach_ids(brain_config):
-        wanted.append(head)
+    other = provider.strip() if isinstance(provider, str) else ""
+    if other and other in specs and other != spec.id and other in native_reach_ids(brain_config):
+        wanted.append(other)
     keys = {pid: user_provider_key(config, user_id, pid) for pid in wanted}
     keys = {pid: key for pid, key in keys.items() if key}
     if not keys:
@@ -1739,6 +1738,36 @@ def _with_user_provider_key(brain_config, config: Config, user_id: str, model: s
     for pid, key in keys.items():
         specs[pid] = with_user_key(specs[pid], key)
     return dataclasses.replace(brain_config, native=native, provider_specs=specs)
+
+
+def _task_brain(task, config: Config):
+    """``(brain_config, brain)`` a task runs on: its brain kind and, for native,
+    its provider.
+
+    The kind is `tasks.brain` (the room's or job's standing pick, frozen at
+    creation), then `[brain.source_type_overrides]`, then `[brain] kind`; an
+    admitted pin also clears `fallback`. The provider is `tasks.provider`
+    through ``brain._resolve.effective_provider``: the stored provider when
+    `[brain.native] providers` lists it, else native's default, with a
+    WARNING for one the list dropped (D22). Native is bound to it, so no
+    provider is read out of the model id. The user's own key for that
+    provider (`provider_keys/<id>`) replaces the deployment's.
+    """
+    from .brain import resolve_brain_kind
+    from .brain._resolve import effective_provider
+
+    brain_config = resolve_brain_kind(task.source_type, config.brain, override=task.brain)
+    provider = effective_provider(config, brain_config.kind, getattr(task, "provider", None))
+    if brain_config.kind == "native":
+        brain_config = _with_user_provider_key(brain_config, config, task.user_id, provider)
+    return brain_config, _bound_brain(make_brain(brain_config), provider)
+
+
+def _bound_brain(brain, provider: str | None):
+    """``brain`` bound to the task's provider; a brain with no providers
+    (the CLI brains, a test's stand-in) is returned as it is."""
+    bind = getattr(brain, "bound_to", None)
+    return bind(provider) if callable(bind) else brain
 
 
 #: Stands in for a provider so ``NativeBrain`` can resolve a model name without
@@ -1776,46 +1805,51 @@ def _native_with_model(native_config, model: str):
 # the same-attempt/no-increment rerun already lives here.
 
 
-def _pin_as_ref(raw: str, config, origin_namespace):
-    """The ``Resolution`` of a pin written as a qualified reference, or ``None``.
+def _kind_for_namespace(namespace: str | None) -> str | None:
+    """The brain kind a pin written in ``namespace`` came from, for its provider."""
+    from .brain._resolve import BRAIN_NAMESPACES
 
-    Only a ref carries its provider across a brain boundary. It is read on
-    the origin's brain, so a value the origin's own provider lists as a bare
-    id is that provider's id, not a ref (an OpenRouter id such as
-    ``anthropic/claude-opus-5`` on a native brain that uses OpenRouter), and
-    a ref of a provider the origin does not reach is not read as one, cached
-    list or not. Either keeps the namespace rules below, as every stored bare
-    value does. Never raises.
-    """
-    from .brain._resolve import (
-        BRAIN_NAMESPACES,
-        Resolution,
-        config_providers,
-        native_provider_id,
-        native_reach_ids,
-        resolve_selection,
-    )
-
-    if "/" not in raw:
-        return None
-    origin_kind = "native" if origin_namespace == BRAIN_NAMESPACES["native"] else (
-        "claude_code" if origin_namespace == BRAIN_NAMESPACES["claude_code"] else None
-    )
-    try:
-        resolved = resolve_selection(
-            raw,
-            use_aliases=False,
-            for_brain=origin_kind,
-            providers=config_providers(config),
-            native_provider=native_provider_id(config),
-            native_reach=native_reach_ids(config),
-        )
-    except Exception:  # noqa: BLE001 - a crossing read must not raise into a request build
-        logger.debug("pin resolution failed for %r", raw, exc_info=True)
-        return None
-    if isinstance(resolved, Resolution) and resolved.source == "ref":
-        return resolved
+    if namespace == BRAIN_NAMESPACES["native"]:
+        return "native"
+    if namespace == BRAIN_NAMESPACES["claude_code"]:
+        return "claude_code"
     return None
+
+
+def _target_reaches(config, target_kind: str | None, provider_id: str | None) -> bool:
+    """Whether brain ``target_kind`` can run models of ``provider_id``."""
+    from .brain._resolve import config_providers, native_provider_id, native_reach_ids
+    from .llm.providers import brain_can_run
+
+    if not provider_id or not target_kind:
+        return False
+    return brain_can_run(
+        target_kind, f"{provider_id}/-", config_providers(config),
+        native_provider=native_provider_id(config), native_reach=native_reach_ids(config),
+    )
+
+
+def _crossing_provider(task, config, origin_kind: str | None, target_kind: str | None) -> str | None:
+    """The provider a fallback to ``target_kind`` runs on (D22).
+
+    Fallback between brains is always a provider change. An exact pin keeps
+    its provider when the target reaches it (``_resolve_crossing_model_effort``
+    keeps the pin then); anything else runs on the target's provider for the
+    task: the room's native provider when the target is native and the room
+    has one listed, else the target's default.
+    """
+    from .brain._resolve import effective_provider
+
+    stored = getattr(task, "provider", None)
+    raw = (getattr(task, "model", None) or "").strip()
+    portable = parse_alias_overrides(
+        getattr(getattr(config, "models", None), "aliases", None), log=False,
+    ).portable_names()
+    if raw and not is_portable_alias(raw, portable):
+        origin = effective_provider(config, origin_kind, stored)
+        if _target_reaches(config, target_kind, origin):
+            return origin
+    return effective_provider(config, target_kind, stored)
 
 
 def _resolve_crossing_model_effort(
@@ -1865,34 +1899,33 @@ def _resolve_crossing_model_effort(
     # portability is unknown rather than sending it to a wire that may not
     # take it. Same direction `commands._clear_pin_across_namespaces` takes.
     crossing = origin_namespace is None or origin_namespace != target_namespace
-    ref = _pin_as_ref(raw, config, origin_namespace) if crossing else None
-    if ref is not None:
-        # A qualified reference carries its provider, so the question is
-        # whether the target brain reaches that provider, not whether the
-        # namespaces match: `anthropic/...` survives a claude_code -> native
-        # fallback only when `[brain.native] providers` lists `anthropic`.
-        # An exact pin the target cannot reach is dropped, never carried to
-        # another provider.
-        from .brain._resolve import config_providers, native_provider_id, native_reach_ids
-        from .llm.providers import brain_can_run
+    portable = parse_alias_overrides(
+        getattr(getattr(config, "models", None), "aliases", None), log=False,
+    ).portable_names()
+    if crossing and not is_portable_alias(raw, portable):
+        # An exact pin is an id of the provider the task ran on (its stored
+        # column, D22), so the question is whether the target brain reaches
+        # that provider, not whether the namespaces match: a `claude_code`
+        # pin survives a fallback to native only when `[brain.native]
+        # providers` lists `anthropic`. A pin the target cannot reach is
+        # dropped, never carried to another provider.
+        from .brain._resolve import effective_provider
 
-        if brain_can_run(
-            getattr(target_brain, "kind", None), ref.ref, config_providers(config),
-            native_provider=native_provider_id(config), native_reach=native_reach_ids(config),
-        ):
-            pair = target_brain.resolve_alias(raw)
+        origin = effective_provider(
+            config, _kind_for_namespace(origin_namespace), getattr(task, "provider", None),
+        )
+        if _target_reaches(config, getattr(target_brain, "kind", None), origin):
+            pinned = raw[len(origin) + 1:] if origin and raw.startswith(origin + "/") else raw
+            pair = target_brain.resolve_alias(pinned)
             if pair and pair[0]:
                 return (pair[0], pair[1] or effort, None)
-            return (target_brain.resolve_model_name(raw), effort, None)
+            return (target_brain.resolve_model_name(pinned), effort, None)
         logger.info(
             "fallback_model: %r cannot run on the target brain (%s -> %s); "
             "using the target brain's default",
             raw, origin_namespace, target_namespace,
         )
         return ("", effort, raw)
-    portable = parse_alias_overrides(
-        getattr(getattr(config, "models", None), "aliases", None), log=False,
-    ).portable_names()
     if not crossing or is_portable_alias(raw, portable):
         # Resolve through the target brain's own alias table. Two cases share
         # this arm, and folding them is what keeps the non-crossing branch
@@ -2098,9 +2131,10 @@ def _run_fallback(config, brain_config, fallback_kind, task, req, *, on_start=No
 
     try:
         fb_config = _dc.replace(brain_config, kind=fallback_kind)
+        fb_provider = _crossing_provider(task, config, brain_config.kind, fallback_kind)
         if fallback_kind == "native":
-            fb_config = _with_user_provider_key(fb_config, config, task.user_id, task.model)
-        fb_brain = make_brain(fb_config)
+            fb_config = _with_user_provider_key(fb_config, config, task.user_id, fb_provider)
+        fb_brain = _bound_brain(make_brain(fb_config), fb_provider)
     except Exception as e:  # noqa: BLE001 — misconfigured nested block
         logger.warning("brain fallback: could not construct %s: %s", fallback_kind, e)
         return None, None, ""
@@ -9143,26 +9177,13 @@ def execute_task(
         # the sandbox — the CLI opens it there.
         sp_path = custom_system_prompt_path(config)
 
-        from .brain import BrainRequest, resolve_brain_kind
-        # Brain routing. `tasks.brain` is the room's standing pick, frozen
-        # onto this row at creation; below it, an operator can map this task's
-        # source_type to a different kind via [brain.source_type_overrides].
-        # No-op for the common case, where both are unset. An admitted room pin
-        # also clears `fallback`, so the failover machinery below collapses to a
-        # plain primary call for that task.
-        _brain_config = resolve_brain_kind(
-            task.source_type, config.brain, override=task.brain,
-        )
+        from .brain import BrainRequest
+        _brain_config, brain = _task_brain(task, config)
         if _brain_config.kind != config.brain.kind:
             logger.info(
                 "brain routing: task %d source_type=%s -> kind=%s (default %s)",
                 task.id, task.source_type, _brain_config.kind, config.brain.kind,
             )
-        # The user's own key for native's provider (`provider_keys/<id>`), when
-        # they have one, in place of the deployment's.
-        if _brain_config.kind == "native":
-            _brain_config = _with_user_provider_key(_brain_config, config, task.user_id, task.model)
-        brain = make_brain(_brain_config)
 
         # Filesystem confinement roots for NativeBrain's in-process file tools
         # (NB-1). Only when effective sandboxing is active — same predicate the

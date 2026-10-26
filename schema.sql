@@ -136,6 +136,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- and copied by retries and subtasks. Outranks
     -- `[brain.source_type_overrides]`; see `brain.resolve_brain_kind`.
     brain TEXT,
+    -- The provider `model` is an id of (model-catalogue D22), frozen at task
+    -- creation from `rooms.provider` or `scheduled_jobs.provider` like `brain`
+    -- and copied by retries and subtasks. NULL = the brain's default provider
+    -- (`anthropic` for the CLI brains, `[brain.native] provider` for native).
+    -- Native routes on this column, never on the first segment of `model`.
+    provider TEXT,
     -- The model namespace `model` was resolved in, frozen from
     -- `rooms.model_namespace` (or, for an inline `!model`, from the brain the
     -- room actually admits) at task creation. Read by
@@ -400,6 +406,7 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     model TEXT,                             -- Per-job model override; empty = use config default
     effort TEXT,                            -- Per-job effort override; empty = use config default
     brain TEXT,                             -- Per-job brain kind override; empty = resolve from config
+    provider TEXT,                          -- Per-job provider (native, admin-only); empty = the brain's default
     -- Skill-task dispatch (Phase 1.3). Mutually exclusive with command.
     skill TEXT,
     skill_args TEXT,
@@ -1401,6 +1408,10 @@ CREATE TABLE IF NOT EXISTS rooms (
     -- `tasks.brain > [brain.source_type_overrides] > [brain] kind`. Admitted
     -- only for a kind the operator listed in `[brain] room_selectable`.
     brain       TEXT,
+    -- The provider `model` is an id of, for a native room (model-catalogue
+    -- D22). NULL = the brain's default provider. Admin-written; copied onto
+    -- `tasks.provider` by record_inbound beside `brain`.
+    provider    TEXT,
     -- The namespace `model` above was resolved in, recorded by whichever writer
     -- set it (ISSUE-420). A stored fact rather than an inference from `brain`:
     -- `commands.brain_for_room` refuses a kind the operator has since dropped

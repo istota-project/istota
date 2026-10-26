@@ -9703,6 +9703,7 @@ def _resolve_job_model_effort(job, app_config, pinned_brain, job_effort):
         pinned_brain=pinned_brain,
         label=f"Scheduled job '{job.name}' (user: {job.user_id})",
         warn_key=f"cron_model:{job.id}",
+        provider=job.provider,
     )
 
 
@@ -9715,10 +9716,14 @@ def resolve_pinned_model_effort(
     pinned_brain: str,
     label: str,
     warn_key: str,
+    provider: str | None = None,
 ) -> tuple[str, str]:
     """``(model, effort)`` for a task created from a stored row, resolved by
     the brain that will run it. ``_resolve_job_model_effort`` states the rules;
     an assignment's wake (`assignments.wakes`) is the second caller.
+
+    ``provider`` is the row's stored provider: the model is an id within it,
+    resolved there and nowhere else (D22); ``None`` is the brain's default.
 
     ``warn_key`` must be built from the row id, never from a model-writable
     value: ``_warned_keys`` is process-global with no eviction. Never raises.
@@ -9733,17 +9738,22 @@ def resolve_pinned_model_effort(
         from istota.brain._resolve import (
             Resolution,
             config_providers,
+            effective_provider,
             is_portable_selection,
             native_provider_id,
             native_reach_ids,
             resolve_selection,
+            stored_selection_id,
         )
 
+        scope = effective_provider(app_config, row_config.kind, provider)
         resolved = resolve_selection(
             model, for_brain=row_config.kind,
             providers=config_providers(app_config),
             native_provider=native_provider_id(app_config),
             native_reach=native_reach_ids(app_config),
+            alias_provider=scope,
+            scope_provider=scope,
         )
         if isinstance(resolved, Resolution) and resolved.alias and is_portable_selection(
             app_config, resolved.alias,
@@ -9752,8 +9762,11 @@ def resolve_pinned_model_effort(
             # re-resolves it there; the model that ran is `tasks.model_used`.
             return resolved.alias, effort or (resolved.effort_requested or "")
         if isinstance(resolved, Resolution) and not resolved.brain_default:
-            return resolved.ref, effort or (resolved.effort_requested or "")
+            return stored_selection_id(resolved), effort or (resolved.effort_requested or "")
         row_brain = make_brain(row_config)
+        bind = getattr(row_brain, "bound_to", None)
+        if callable(bind):
+            row_brain = bind(scope)
         pair = row_brain.resolve_alias(model)
         if pair:
             effort = effort or (pair[1] or "")
@@ -9860,6 +9873,9 @@ def _create_scheduled_job_task(
             model=job_model or None,
             effort=job_effort or None,
             brain=admitted_brain or None,
+            # Copied like `brain` (D22); `effective_provider` judges it at
+            # dispatch, so a provider the operator dropped falls back there.
+            provider=job.provider or None,
             parent_task_id=parent_task_id,
         )
 

@@ -126,6 +126,9 @@ class IncomingMessage:
     # None-vs-empty split `model` already has and the reason there is no
     # `brain_prefix_used` flag beside `model_prefix_used`.
     brain: str | None = None
+    # The provider an inline `!model` named (model-catalogue D22): "" for the
+    # brain's default, None to take the room's standing provider.
+    provider: str | None = None
     # Withhold this turn from the canonical transcript even when its token
     # resolves to a real room. Set by the email poller for a message facing the
     # untrusted-sender confirmation gate: publishing attacker-supplied text into

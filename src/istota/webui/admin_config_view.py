@@ -437,8 +437,11 @@ def _editor_keys(
 def _model_sources(config: "Config", sources: str) -> list[str]:
     """The provider ids a model field may name, for the picker's source list.
 
-    `anthropic` is the CLI brains'; `native` is every provider the native brain
-    can run (`llm.providers.brain_can_run`); `any` is both.
+    `anthropic` is the CLI brains'; `native` is `[brain.native] model`'s,
+    which is native's default provider's default model and so names that
+    provider alone (D22: another provider's default is its own
+    `default_model`); `any` is `anthropic` plus every provider `[brain.native]
+    providers` lists (`llm.providers.brain_can_run`).
     """
     from istota.brain._resolve import config_providers, native_provider_id, native_reach_ids
     from istota.llm.catalog import SHIPPED_PROVIDER
@@ -453,7 +456,10 @@ def _model_sources(config: "Config", sources: str) -> list[str]:
             native_id = native_provider_id(config)
         except Exception:  # noqa: BLE001 - a view never fails on a model list
             return found
-        if native_id:
+        if native_id and sources == "native":
+            if native_id not in found:
+                found.append(native_id)
+        elif native_id:
             for provider_id in sorted(providers, key=lambda p: (p != native_id, p)):
                 if provider_id not in found and brain_can_run(
                     "native", f"{provider_id}/-", providers, native_provider=native_id,

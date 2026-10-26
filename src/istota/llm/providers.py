@@ -245,6 +245,8 @@ class ProviderSpec:
     discover: bool = True
     discover_ttl_hours: float = 24.0
     models: tuple[Mapping, ...] = field(default=(), hash=False)
+    #: The model a native room or job on this provider runs when it pins none.
+    default_model: str = ""
 
     @property
     def openai_base_url(self) -> str:
@@ -286,6 +288,7 @@ def spec_from_provider_config(provider_id: str, provider) -> ProviderSpec:  # no
         discover=bool(provider.discover),
         discover_ttl_hours=float(provider.discover_ttl_hours),
         models=tuple(dict(m) for m in (provider.models or ())),
+        default_model=(getattr(provider, "default_model", "") or "").strip(),
     )
 
 
@@ -608,7 +611,7 @@ def brain_can_run(
     `claude` CLI talks only to Anthropic. Native runs the models of the
     providers `[brain.native] providers` lists (``native_reach``) and of its
     default provider (``native_provider``, always one of them), key or not;
-    native routes a request to the provider its ref names (D4). A key held
+    a task runs on the provider its room or job stores (D22). A key held
     for a provider never adds it: the `anthropic` key the CLI uses does not
     make Anthropic a native provider. A ref naming no configured provider
     runs nowhere. Never raises.
@@ -624,12 +627,4 @@ def brain_can_run(
         if not native_provider:
             return False
         return provider_id == native_provider or provider_id in set(native_reach or ())
-    return False
-    provider_id = ref.split("/", 1)[0]
-    if provider_id not in provider_kinds(providers):
-        return False
-    if kind in ("claude_code", "tmux_claude"):
-        return provider_id == CLI_PROVIDER
-    if kind == "native":
-        return bool(native_provider) and provider_id == native_provider
     return False

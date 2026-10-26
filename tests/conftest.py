@@ -572,7 +572,7 @@ def _reset_expunge_warning_latch():
 
 @pytest.fixture(autouse=True)
 def _reset_brain_refusal_latch():
-    """Isolate ``brain._WARNED_REFUSALS``.
+    """Isolate ``brain._WARNED_REFUSALS`` and ``brain._resolve._warned_unlisted``.
 
     Same shape and same reason as the latch above: a process-global set of
     routing refusals already warned about, so any test that resolves a refused
@@ -580,10 +580,13 @@ def _reset_brain_refusal_latch():
     on the warning passes or fails on who ran first.
     """
     from istota import brain as brain_mod
+    from istota.brain import _resolve
 
     brain_mod._WARNED_REFUSALS.clear()
+    _resolve._warned_unlisted.clear()
     yield
     brain_mod._WARNED_REFUSALS.clear()
+    _resolve._warned_unlisted.clear()
 
 
 @pytest.fixture(autouse=True)

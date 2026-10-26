@@ -628,26 +628,29 @@ class TestTheModelsPayload:
 class TestTheRoomModelStatus:
     """`room_model`: what the picker makes of a pin the viewer's list may not hold."""
 
-    async def _status(self, tmp_path, *, admins, model):
+    async def _status(self, tmp_path, *, admins, model, provider=None):
         config = _provider_config(tmp_path, admins=admins)
         _write_openrouter_cache(config, [_kimi()])
         async with _client_for(config) as client:
             cookies = await _login(client, "alice")
             room = await _make_room(client, cookies)
-            if model is not None:
-                with db.get_db(config.db_path) as conn:
+            with db.get_db(config.db_path) as conn:
+                db.set_room_brain(conn, room["token"], "native")
+                if model is not None:
                     db.set_room_model(conn, room["token"], model)
+                db.set_room_provider(conn, room["token"], provider)
             body = (await client.get(
                 f"/istota/api/chat/commands?room_id={room['id']}", cookies=cookies,
             )).json()
         return body.get("room_model", "absent")
 
     async def test_an_admins_pin_outside_a_members_set(self, tmp_path):
+        # A room on OpenRouter stores its id and the provider (D22).
         status = await self._status(
-            tmp_path, admins={"carol"}, model="openrouter/moonshotai/kimi-k2.6",
+            tmp_path, admins={"carol"}, model="moonshotai/kimi-k2.6", provider="openrouter",
         )
         assert status == {
-            "value": "openrouter/moonshotai/kimi-k2.6",
+            "value": "moonshotai/kimi-k2.6",
             "status": "set_by_admin",
             "ref": "openrouter/moonshotai/kimi-k2.6",
             "efforts": ["low", "medium", "high"],
@@ -655,12 +658,20 @@ class TestTheRoomModelStatus:
 
     async def test_the_same_pin_is_listed_for_an_admin(self, tmp_path):
         status = await self._status(
-            tmp_path, admins={"alice"}, model="openrouter/moonshotai/kimi-k2.6",
+            tmp_path, admins={"alice"}, model="moonshotai/kimi-k2.6", provider="openrouter",
         )
         assert status["status"] == "listed"
 
+    async def test_another_provider_s_id_is_not_read_as_this_one_s(self, tmp_path):
+        # The room runs on native's default (Anthropic): OpenRouter's id is
+        # not a model of it, whatever the string looks like (D22).
+        status = await self._status(tmp_path, admins={"alice"}, model="moonshotai/kimi-k2.6")
+        assert status["status"] == "unavailable"
+
     async def test_a_pin_that_no_longer_resolves(self, tmp_path):
-        status = await self._status(tmp_path, admins={"alice"}, model="openrouter/gone/model")
+        status = await self._status(
+            tmp_path, admins={"alice"}, model="gone/model", provider="openrouter",
+        )
         assert status["status"] == "unavailable"
         assert status["ref"] is None
 

@@ -377,6 +377,9 @@ def _process_deferred_subtasks(
                 # could silently run a different brain from the parent that
                 # spawned it.
                 brain=task.brain,
+                # And its provider, like its brain (model-catalogue D22): the
+                # inherited model is an id within it.
+                provider=task.provider,
                 # The recorded namespace travels with the model it describes
                 # and only with it (ISSUE-420), which after ISSUE-421(b) means
                 # keying on the name that actually lands rather than on the

@@ -2518,7 +2518,9 @@ class ProviderConfig:
     takes the kind's default; ``compat`` holds the rest of what an endpoint
     accepts (``cost_accounting``, ``attribution_headers``,
     ``max_completion_tokens``, ``reasoning_effort``). ``models`` declares models
-    no list carries, each a table with at least ``id``.
+    no list carries, each a table with at least ``id``. ``default_model`` is the
+    id a native room or job on this provider runs when it pins none (D22);
+    for native's default provider ``[brain.native] model`` wins.
 
     The key is ``api_key`` here, overridden by
     ``provider_key_variable(id)``; headers by ``provider_headers_variable(id)``.
@@ -2537,6 +2539,7 @@ class ProviderConfig:
     discover: bool = True
     discover_ttl_hours: float = 24.0
     models: list[dict] = field(default_factory=list)
+    default_model: str = ""
 
 
 def builtin_provider_configs() -> dict[str, "ProviderConfig"]:
@@ -4868,7 +4871,7 @@ def _provider_table(provider_id: str, table: dict, base: ProviderConfig) -> Prov
             "unknown", (*path, str(extra)),
             "[config] providers.%s.%s is not a recognised key and is ignored", provider_id, extra,
         )
-    for name in ("kind", "base_url", "api_key"):
+    for name in ("kind", "base_url", "api_key", "default_model"):
         if name in table:
             raw = table[name]
             if isinstance(raw, str):

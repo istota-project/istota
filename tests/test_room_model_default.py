@@ -102,7 +102,7 @@ class TestRecordInboundRoomDefault:
             _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
-        assert task.model == "anthropic/claude-opus-4-8"  # a stored bare id is recorded as its ref
+        assert task.model == "claude-opus-4-8"  # the id within its provider (D22)
         assert task.effort == "high"
 
     def test_room_default_applies_across_talk_surface(self, config, db_path):
@@ -120,7 +120,7 @@ class TestRecordInboundRoomDefault:
             _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
-        assert task.model == "anthropic/claude-opus-4-8"
+        assert task.model == "claude-opus-4-8"
         assert task.effort == "high"
 
     def test_inline_override_wins(self, config, db_path):
@@ -138,7 +138,7 @@ class TestRecordInboundRoomDefault:
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
         # Inline model present → room default (incl. its effort) does not bleed in.
-        assert task.model == "anthropic/claude-sonnet-4-6"
+        assert task.model == "claude-sonnet-4-6"
         assert task.effort is None
 
     def test_explicit_default_escapes_room_default(self, config, db_path):
@@ -184,7 +184,7 @@ class TestRecordInboundRoomDefault:
                 platform_message_id=999,
             ))
         with db.get_db(db_path) as conn:
-            assert db.get_task(conn, tid2).model == "anthropic/claude-opus-4-8"
+            assert db.get_task(conn, tid2).model == "claude-opus-4-8"
 
     def test_no_default_no_model(self, config, db_path):
         with db.get_db(db_path) as conn:

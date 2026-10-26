@@ -157,6 +157,11 @@ class Task:
     # a room edited while this task runs cannot change what it is, and copied by
     # retries and subtasks. Outranks `[brain.source_type_overrides]`.
     brain: str | None = None
+    # The provider this task's model is an id of (D22 of the model-catalogue
+    # spec), frozen at creation from `rooms.provider` or
+    # `scheduled_jobs.provider` like `brain`, and copied by retries and
+    # subtasks. None = the brain's default provider.
+    provider: str | None = None
     #: The assignment this task is a wake of (`assignments.id`); None for
     #: every task that is not `source_type = 'assignment'`.
     assignment_id: int | None = None
@@ -291,6 +296,9 @@ class ScheduledJob:
     #: = resolve from config. Written from CRON.md only for an admin; see
     #: ``cron_loader.fj_brain_or_none``.
     brain: str | None = None
+    #: Per-job provider for a native job, admin-only like ``brain``. None =
+    #: the brain's default provider.
+    provider: str | None = None
     # Phase 1.3 — skill-task dispatch (mirrors ``Task.skill`` / ``skill_args``).
     skill: str | None = None
     skill_args: str | None = None
@@ -471,6 +479,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # backfill: NULL is the right answer for every existing row and reads
         # as "resolve from config", which is what they all did.
         "brain": "TEXT",
+        # The provider `model` is an id of (model-catalogue D22). No backfill:
+        # NULL is the brain's default provider, which is where every existing
+        # row ran.
+        "provider": "TEXT",
         # The namespace `model` was resolved in (ISSUE-420). No backfill, and
         # for the same reason as `brain` but with more riding on it: NULL means
         # "not recorded", which `executor._pin_origin_namespace` answers with
@@ -528,6 +540,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # backfill — NULL reads as "resolve from config", which is what
         # every existing row already means.
         "brain": "TEXT",
+        # model-catalogue D22: per-job provider. NULL = the brain's default.
+        "provider": "TEXT",
         # Phase 1.3 — skill-task dispatch
         "skill": "TEXT",
         "skill_args": "TEXT",
@@ -934,7 +948,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 archived    INTEGER NOT NULL DEFAULT 0,
                 model       TEXT,
                 effort      TEXT,
-                brain       TEXT
+                brain       TEXT,
+                provider    TEXT
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived)")
@@ -946,6 +961,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             "effort": "TEXT",
             "brain": "TEXT",
             "model_namespace": "TEXT",
+            # model-catalogue D22. NULL = the brain's default provider.
+            "provider": "TEXT",
         })
         # Per-user room membership (ISSUE-134). A room is shared (one token, one
         # transcript) but each participant has a membership row; web visibility is
@@ -1464,7 +1481,7 @@ def _migrate_messages_fts(conn: sqlite3.Connection) -> None:
 #: image then refuses the database rather than running its own migrations over a
 #: schema it does not know. An additive column an older reader ignores does not
 #: need a bump.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class SchemaTooNew(Exception):
@@ -1645,6 +1662,7 @@ def create_task(
     effort: str | None = None,
     brain: str | None = None,
     model_namespace: str | None = None,
+    provider: str | None = None,
     talk_delivery_token: str | None = None,
     skill: str | None = None,
     skill_args: str | None = None,
@@ -1710,9 +1728,9 @@ def create_task(
             reply_to_message_id, guest_participant_id, audience,
             about_room_token, host_absent, declinable,
             heartbeat_silent, skip_log_channel, scheduled_job_id, briefing_name,
-            queue, model, effort, brain, model_namespace,
+            queue, model, effort, brain, model_namespace, provider,
             talk_delivery_token, skill, skill_args, assignment_id{extra_columns}
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{", ?" * len(extra_values)})
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{", ?" * len(extra_values)})
         RETURNING id
         """,
         (
@@ -1745,6 +1763,7 @@ def create_task(
             effort or None,
             brain or None,
             model_namespace or None,
+            provider or None,
             talk_delivery_token,
             skill,
             skill_args,
@@ -1772,7 +1791,7 @@ _TASK_COLUMNS = (
     "reply_to_content, reply_to_message_id, "
     "guest_participant_id, audience, about_room_token, host_absent, declinable, heartbeat_silent, skip_log_channel, scheduled_job_id, "
     "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
-    "brain, model_namespace, talk_delivery_token, skill, skill_args, whatsapp_confirmation_request_id, "
+    "brain, provider, model_namespace, talk_delivery_token, skill, skill_args, whatsapp_confirmation_request_id, "
     "assignment_id"
 )
 
@@ -1829,6 +1848,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         effort=row["effort"],
         model_used=row["model_used"],
         brain=row["brain"],
+        provider=row["provider"],
         model_namespace=row["model_namespace"],
         talk_delivery_token=row["talk_delivery_token"],
         skill=row["skill"],
@@ -4898,6 +4918,10 @@ class Room:
     #: `!room model` typed afterwards lands in the lane's namespace while
     #: `brain` still names the refused kind (ISSUE-420). None = not recorded.
     model_namespace: str | None = None
+    #: The provider `model` is an id of, for a native room (model-catalogue
+    #: D22). None = the brain's default provider. Admin-written only; copied
+    #: onto `tasks.provider` at `record_inbound` beside `brain`.
+    provider: str | None = None
     # Newest row in the room's canonical transcript, falling back to the room's
     # own creation time when it has never been spoken in. Populated only by the
     # queries that compute it (`list_member_rooms`) — a room fetched by token
@@ -4969,6 +4993,7 @@ def _row_to_room(row: sqlite3.Row) -> Room:
         model_namespace=(
             row["model_namespace"] if "model_namespace" in keys else None
         ),
+        provider=row["provider"] if "provider" in keys else None,
         last_activity=row["last_activity"] if "last_activity" in keys else None,
         group_id=row["group_id"] if "group_id" in keys else None,
         membership_source=(
@@ -6002,6 +6027,16 @@ def set_room_brain(conn: sqlite3.Connection, token: str, brain: str | None) -> N
     """
     conn.execute(
         "UPDATE rooms SET brain = ? WHERE token = ?", (brain, token)
+    )
+
+
+def set_room_provider(conn: sqlite3.Connection, token: str, provider: str | None) -> None:
+    """Set the provider a native room's model is an id of, or None for the
+    brain's default. Stored as given and judged at dispatch, like
+    `set_room_brain`, so a provider dropped from `[brain.native] providers`
+    falls back without a sweep and comes back when it is listed again."""
+    conn.execute(
+        "UPDATE rooms SET provider = ? WHERE token = ?", (provider or None, token)
     )
 
 
@@ -12410,7 +12445,7 @@ def get_enabled_scheduled_jobs(conn: sqlite3.Connection) -> list[ScheduledJob]:
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
-               once, model, effort, brain, skill, skill_args,
+               once, model, effort, brain, provider, skill, skill_args,
                publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
         WHERE enabled = 1 AND auto_disabled_at IS NULL
@@ -12428,7 +12463,7 @@ def get_user_scheduled_jobs(conn: sqlite3.Connection, user_id: str) -> list[Sche
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
-               once, model, effort, brain, skill, skill_args,
+               once, model, effort, brain, provider, skill, skill_args,
                publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
         WHERE user_id = ?
@@ -12464,6 +12499,7 @@ def _row_to_scheduled_job(row: sqlite3.Row) -> ScheduledJob:
         model=row["model"] if "model" in row.keys() else None,
         effort=row["effort"] if "effort" in row.keys() else None,
         brain=row["brain"] if "brain" in row.keys() else None,
+        provider=row["provider"] if "provider" in row.keys() else None,
         skill=row["skill"] if "skill" in row.keys() else None,
         skill_args=row["skill_args"] if "skill_args" in row.keys() else None,
         publish_shared_kv=(
@@ -12579,7 +12615,7 @@ def get_scheduled_job(conn: sqlite3.Connection, job_id: int) -> ScheduledJob | N
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
-               once, model, effort, brain, skill, skill_args,
+               once, model, effort, brain, provider, skill, skill_args,
                publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
         WHERE id = ?
@@ -12639,7 +12675,7 @@ def get_scheduled_job_by_name(
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
-               once, model, effort, brain, skill, skill_args,
+               once, model, effort, brain, provider, skill, skill_args,
                publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
         WHERE user_id = ? AND name = ?
