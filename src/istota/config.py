@@ -29,7 +29,11 @@ from .config_mapper import (
     report_problem,
     report_unknown,
 )
-from istota.llm.types import PROMPT_CACHE_TTLS, REASONING_REPLAY_MODES
+from istota.llm.types import (
+    PROMPT_CACHE_TTLS,
+    REASONING_REPLAY_MODES,
+    STRICT_TOOL_SCHEMA_MODES,
+)
 from istota.mail.outbound_policy import VALID_POLICIES as OUTBOUND_APPROVAL_POLICIES
 from istota.sandbox.user_scope import paths_overlap, scoped_user_dir
 from istota.webui.map_basemap import provider_names as map_provider_names
@@ -2058,7 +2062,7 @@ class NativeBrainConfig:
     max_tokens: int = 16384
     # Per-model capability/window overrides ([brain.native.model_overrides]).
     # Maps a model id to a partial ModelInfo (context_window, supports_thinking,
-    # supports_vision, max_output_tokens, prices). Lets a non-Anthropic
+    # supports_vision, supports_structured_outputs, max_output_tokens, prices). Lets a non-Anthropic
     # reasoning/vision model or a small-window local model no live catalog
     # knows declare its real capabilities instead of being degraded to the
     # conservative default (NB-4). Also corrects a single wrong field on a
@@ -2093,6 +2097,11 @@ class NativeBrainConfig:
     # How long a cache breakpoint lives: "5m" (the endpoint default) or "1h".
     # A 1h write is priced at twice input when no cost is reported.
     prompt_cache_ttl: str = "5m"
+    # Whether tool definitions go out with `"strict": true` (constrained
+    # argument sampling): "off", "auto" (when the model's
+    # supports_structured_outputs is true) or "on". A refused request gets one
+    # re-issue without, and strict is off for the rest of the attempt.
+    strict_tool_schemas: str = "off"
     # Daemon-side WebFetch tool ([brain.native.web_fetch]). Enabled by default
     # with safe caps; the tool is native-only (added to build_default_tools).
     web_fetch: WebFetchConfig = field(default_factory=WebFetchConfig)
@@ -4745,6 +4754,7 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     "nextcloud.sharing.contacts": _one_of(*NEXTCLOUD_SHARING_LEVELS, fallback="off"),
     "brain.native.reasoning_replay": _one_of(*REASONING_REPLAY_MODES),
     "brain.native.prompt_cache_ttl": _one_of(*PROMPT_CACHE_TTLS),
+    "brain.native.strict_tool_schemas": _one_of(*STRICT_TOOL_SCHEMA_MODES),
     # Normalised from three historical spellings, and the retired `backend` key
     # is warned about rather than ignored -- an operator who wrote
     # `backend = "none"` to keep builds off the container had that honoured

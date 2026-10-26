@@ -37,7 +37,7 @@ from istota.llm.types import (
     ToolSchema,
 )
 
-from .coercion import coerce_arguments
+from .coercion import coerce_arguments, drop_null_optionals
 from .events import AgentEvent, AgentEventSink
 from .hooks import (
     AfterToolCallContext,
@@ -666,10 +666,11 @@ async def _prepare_tool_call(
     # loop or orphan the call — a raise becomes an immediate error result the
     # model sees, and the batch keeps going (NB-8).
     try:
+        raw_args = drop_null_optionals(tc.arguments, tool.schema)
         if tool.prepare_arguments is not None:
-            args = tool.prepare_arguments(tc.arguments)
+            args = tool.prepare_arguments(raw_args)
         else:
-            args = coerce_arguments(tc.arguments, tool.schema)
+            args = coerce_arguments(raw_args, tool.schema)
     except Exception as exc:  # noqa: BLE001 — contain into an error result
         logger.warning("tool_prepare_error tool=%s id=%s: %s", tc.name, tc.id, exc)
         return _Prepared(

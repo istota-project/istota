@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
+from .catalog import get_model_info
 from .provider import (
     StreamDone,
     StreamError,
@@ -27,6 +28,7 @@ from .provider import (
 from .types import (
     PROMPT_CACHE_TTLS,
     REASONING_REPLAY_MODES,
+    STRICT_TOOL_SCHEMA_MODES,
     AssistantMessage,
     ImageContent,
     Message,
@@ -212,6 +214,107 @@ def is_reasoning_rejection(error_message: str) -> bool:
     return bool(_REASONING_REJECTION_RE.search(_REASONING_EFFORT_RE.sub("", text)))
 
 
+_STRICT_REJECTION_RE = re.compile(r"strict|schema|response_format", re.IGNORECASE)
+
+
+def is_strict_schema_rejection(error_message: str) -> bool:
+    """A 400 that names ``strict``, a schema or ``response_format``.
+
+    What an endpoint answers when it refuses a strict tool definition. Read
+    off the ``HTTP 400`` this provider stamps into every error.
+    """
+    text = error_message or ""
+    if not re.search(r"\bHTTP 400\b", text):
+        return False
+    return bool(_STRICT_REJECTION_RE.search(text))
+
+
+# What strict mode accepts, as this tree writes tool schemas. Anything else
+# (``default``, ``anyOf``, an undeclared object, a bare ``null``) makes the
+# whole tool go out non-strict.
+_STRICT_SCHEMA_KEYS = {"type", "description", "enum", "properties", "items", "required"}
+_STRICT_SCALAR_TYPES = ("string", "integer", "number", "boolean")
+
+
+def _strict_node(node, nullable: bool) -> dict | None:
+    if not isinstance(node, dict) or set(node) - _STRICT_SCHEMA_KEYS:
+        return None
+    kind = node.get("type")
+    out: dict = {"type": [kind, "null"] if nullable else kind}
+    if "description" in node:
+        out["description"] = node["description"]
+    if kind == "object":
+        props = node.get("properties")
+        required = node.get("required", [])
+        if not isinstance(props, dict) or "enum" in node or "items" in node:
+            return None
+        if not isinstance(required, list) or set(required) - set(props):
+            return None
+        # A nested object written without `required` has every property optional.
+        strict_props: dict = {}
+        for name, sub in props.items():
+            strict_sub = _strict_node(sub, nullable=name not in required)
+            if strict_sub is None:
+                return None
+            strict_props[name] = strict_sub
+        out["properties"] = strict_props
+        out["required"] = list(props)
+        out["additionalProperties"] = False
+        return out
+    if kind == "array":
+        if "properties" in node or "enum" in node or "required" in node:
+            return None
+        items = _strict_node(node.get("items"), nullable=False)
+        if items is None:
+            return None
+        out["items"] = items
+        return out
+    if kind in _STRICT_SCALAR_TYPES:
+        if "properties" in node or "items" in node or "required" in node:
+            return None
+        if "enum" in node:
+            enum = node["enum"]
+            if not isinstance(enum, list):
+                return None
+            out["enum"] = list(enum) + [None] if nullable else list(enum)
+        return out
+    return None
+
+
+def strictify_schema(schema: dict) -> dict | None:
+    """``schema`` (a tool's parameters object) rewritten for strict mode.
+
+    Every object gets ``additionalProperties: false`` and lists every property
+    as required; a property that was optional becomes nullable
+    (``"type": [T, "null"]``), and the dispatch layer drops the ``null`` again
+    (``agent.coercion.drop_null_optionals``). ``None`` for a construct this
+    does not handle, and that tool is then sent non-strict. The input is not
+    modified.
+    """
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return None
+    return _strict_node(schema, nullable=False)
+
+
+def strict_tools_enabled(mode: str, model: str) -> bool:
+    """Whether ``mode`` sends strict tool definitions for ``model``."""
+    if mode == "on":
+        return True
+    if mode == "auto":
+        return get_model_info(model).supports_structured_outputs
+    return False
+
+
+def carries_strict_tools(tools: list[ToolSchema], model: str, mode: str) -> bool:
+    """Whether a request with ``tools`` for ``model`` has a strict tool in it."""
+    if not tools or not strict_tools_enabled(mode, model):
+        return False
+    return any(
+        strictify_schema(OpenAICompatibleProvider._tool_parameters(t)) is not None
+        for t in tools
+    )
+
+
 def _tool_delta_index(tc: dict, tool_acc: dict, id_to_index: dict) -> int:
     """Resolve the accumulator slot for a streamed tool_call delta (NB-16).
 
@@ -245,6 +348,7 @@ class OpenAICompatibleProvider:
         reasoning_replay: str = "auto",
         prompt_cache_key: bool = False,
         prompt_cache_ttl: str = "5m",
+        strict_tool_schemas: str = "off",
     ):
         headers = {
             "authorization": f"Bearer {api_key}",
@@ -277,6 +381,23 @@ class OpenAICompatibleProvider:
             )
             prompt_cache_ttl = "5m"
         self._prompt_cache_ttl = prompt_cache_ttl
+        if strict_tool_schemas not in STRICT_TOOL_SCHEMA_MODES:
+            logger.warning(
+                "strict_tool_schemas=%r is not one of %s; using 'off'",
+                strict_tool_schemas,
+                "/".join(STRICT_TOOL_SCHEMA_MODES),
+            )
+            strict_tool_schemas = "off"
+        self._strict_tool_schemas = strict_tool_schemas
+
+    @property
+    def strict_tool_schemas(self) -> str:
+        """Whether tool definitions go out strict (``off``/``auto``/``on``).
+
+        Read by ``NativeBrain``'s retrying wrapper to tell whether a refused
+        request carried a strict tool, before it re-issues one without.
+        """
+        return self._strict_tool_schemas
 
     @property
     def prompt_cache_key(self) -> bool:
@@ -342,6 +463,7 @@ class OpenAICompatibleProvider:
         prompt_caching: bool | None = None,
         reasoning_replay: str | None = None,
         cache_affinity_key: str | None = None,
+        strict_tool_schemas: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         body = self._build_chat_completion_request(
             system_prompt,
@@ -354,6 +476,7 @@ class OpenAICompatibleProvider:
             prompt_caching=prompt_caching,
             reasoning_replay=reasoning_replay,
             cache_affinity_key=cache_affinity_key,
+            strict_tool_schemas=strict_tool_schemas,
         )
         try:
             async with self._client.stream("POST", "/chat/completions", json=body) as resp:
@@ -391,6 +514,7 @@ class OpenAICompatibleProvider:
         prompt_caching: bool | None = None,
         reasoning_replay: str | None = None,
         cache_affinity_key: str | None = None,
+        strict_tool_schemas: str | None = None,
     ) -> dict:
         """Convert istota Message types to an OpenAI chat completions body.
 
@@ -398,7 +522,8 @@ class OpenAICompatibleProvider:
         request; ``None`` keeps it. A compaction summary passes ``False``.
         ``reasoning_replay`` is the same, and a refused replay is re-sent with
         ``"off"``. ``cache_affinity_key`` becomes ``prompt_cache_key`` only
-        when this provider has the field on.
+        when this provider has the field on. ``strict_tool_schemas`` overrides
+        the provider's mode the same way, and a refused one is re-sent ``"off"``.
         """
         replay = self._reasoning_replay if reasoning_replay is None else reasoning_replay
         wire: list[dict] = []
@@ -414,7 +539,11 @@ class OpenAICompatibleProvider:
             if extra is not None:
                 wire.append(extra)
 
-        tools_wire = [self._tool_to_wire(t) for t in tools] if tools else None
+        strict_mode = (
+            self._strict_tool_schemas if strict_tool_schemas is None else strict_tool_schemas
+        )
+        strict = bool(tools) and strict_tools_enabled(strict_mode, model)
+        tools_wire = [self._tool_to_wire(t, strict) for t in tools] if tools else None
 
         caching = self._prompt_caching if prompt_caching is None else prompt_caching
         if caching:
@@ -600,25 +729,29 @@ class OpenAICompatibleProvider:
             _mark(wire[-1])
 
     @staticmethod
-    def _tool_to_wire(tool: ToolSchema) -> dict:
+    def _tool_parameters(tool: ToolSchema) -> dict:
         properties: dict = {}
         required: list[str] = []
         for p in tool.parameters:
             properties[p.name] = OpenAICompatibleProvider._param_to_schema(p)
             if p.required:
                 required.append(p.name)
-        return {
-            "type": "function",
-            "function": {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required,
-                },
-            },
+        return {"type": "object", "properties": properties, "required": required}
+
+    @staticmethod
+    def _tool_to_wire(tool: ToolSchema, strict: bool = False) -> dict:
+        parameters = OpenAICompatibleProvider._tool_parameters(tool)
+        function: dict = {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": parameters,
         }
+        if strict:
+            strict_parameters = strictify_schema(parameters)
+            if strict_parameters is not None:
+                function["parameters"] = strict_parameters
+                function["strict"] = True
+        return {"type": "function", "function": function}
 
     @staticmethod
     def _param_to_schema(p: ToolParameter) -> dict:

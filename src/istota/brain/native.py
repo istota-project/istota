@@ -67,7 +67,13 @@ from istota.agent.types import (
 )
 from istota.llm import make_provider
 from istota.llm.catalog import get_model_info
-from istota.llm.openai_compat import is_reasoning_rejection, replays_reasoning
+from istota.llm.openai_compat import (
+    carries_strict_tools,
+    is_reasoning_rejection,
+    is_strict_schema_rejection,
+    replays_reasoning,
+    strict_tools_enabled,
+)
 from istota.llm.provider import (
     StreamDone,
     StreamError,
@@ -777,16 +783,20 @@ class _ReissuableFeature:
     stream_kwarg: str
     off_value: object
     is_rejection: Callable[[str], bool]
-    carried: Callable[[object, list, list], bool]
+    carried: Callable[[object, list, list, str], bool]
 
 
-def _carries_replayed_reasoning(inner, messages, tools) -> bool:
+def _carries_replayed_reasoning(inner, messages, tools, model) -> bool:
     # A provider that does not say how it replays (a test double) replays none.
     return replays_reasoning(messages, getattr(inner, "reasoning_replay", "off"))
 
 
-# Features re-sent once without on refusal, then off for the attempt. Stage 6
-# of the pi 1.x round adds strict tool schemas here.
+def _carries_strict_tools(inner, messages, tools, model) -> bool:
+    return carries_strict_tools(tools, model, getattr(inner, "strict_tool_schemas", "off"))
+
+
+# Features re-sent once without on refusal, then off for the attempt. The order
+# is the order a refusal is matched in.
 _REISSUABLE_FEATURES: tuple[_ReissuableFeature, ...] = (
     _ReissuableFeature(
         name="reasoning",
@@ -794,6 +804,13 @@ _REISSUABLE_FEATURES: tuple[_ReissuableFeature, ...] = (
         off_value="off",
         is_rejection=is_reasoning_rejection,
         carried=_carries_replayed_reasoning,
+    ),
+    _ReissuableFeature(
+        name="strict",
+        stream_kwarg="strict_tool_schemas",
+        off_value="off",
+        is_rejection=is_strict_schema_rejection,
+        carried=_carries_strict_tools,
     ),
 )
 
@@ -835,7 +852,7 @@ class _RetryingProvider:
         self._disabled_features: set[str] = set()
         self._cache_affinity_key = cache_affinity_key
 
-    def _reissue_once_without(self, error_message: str, messages, tools) -> bool:
+    def _reissue_once_without(self, error_message: str, messages, tools, model: str) -> bool:
         """Turn off the feature this refusal names, if the request carried it.
 
         True means the caller should send the request again at once: the
@@ -848,7 +865,7 @@ class _RetryingProvider:
                 continue
             if not feature.is_rejection(error_message):
                 continue
-            if not feature.carried(self._inner, messages, tools):
+            if not feature.carried(self._inner, messages, tools, model):
                 continue
             self._disabled_features.add(feature.name)
             logger.warning(
@@ -917,7 +934,7 @@ class _RetryingProvider:
                 return
 
             if self._reissue_once_without(
-                pending_error.message.error_message or "", messages, tools
+                pending_error.message.error_message or "", messages, tools, model
             ):
                 continue
 
@@ -1518,6 +1535,11 @@ class NativeBrain:
                 # Whether requests carried a key, never the key itself.
                 "prompt_cache_key": cache_affinity_key is not None,
                 "prompt_cache_ttl": prompt_cache_ttl,
+                # Resolved for this model, so an `auto` run says what it sent.
+                "strict_tool_schemas": bool(req.allowed_tools)
+                and strict_tools_enabled(
+                    getattr(self._provider, "strict_tool_schemas", "off"), model
+                ),
                 "cwd": str(req.cwd),
                 "istota_version": _ISTOTA_VERSION,
             }

@@ -58,6 +58,10 @@ REASONING_REPLAY_MODES = ("auto", "on", "off")
 # lives. ``5m`` is the endpoint default and writes the bare marker.
 PROMPT_CACHE_TTLS = ("5m", "1h")
 
+# ``[brain.native] strict_tool_schemas``: whether tool definitions go out with
+# ``"strict": true``. ``auto`` follows the model's ``supports_structured_outputs``.
+STRICT_TOOL_SCHEMA_MODES = ("off", "auto", "on")
+
 
 Content = TextContent | ImageContent | ToolCallContent | ThinkingContent
 

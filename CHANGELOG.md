@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Longer prompt caching for the native brain.** On OpenRouter and OpenAI, each task attempt now tags its requests with a random cache key so they reach the same cache. An operator can also keep cached prompts for an hour instead of five minutes, which helps tasks with long tool runs; the cost estimate charges the higher one-hour write price.
 
+- **Strict tool schemas for the native brain, opt-in.** An operator can have tool definitions sent strict, so a model that supports structured outputs is held to each tool's argument schema instead of having malformed arguments repaired afterwards. It is off by default; `auto` turns it on only for models that support it. If the endpoint refuses it, the step is re-sent once without.
+
 ### Changed
 
 - **Specs the bot drafts are ready for a coding agent.** A new spec has every section an implementer reads, including a survey of the existing code taken from the project's source, and its stages are one checklist line each. Specs drafted before this may lack those sections.

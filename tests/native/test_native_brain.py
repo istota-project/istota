@@ -1590,6 +1590,99 @@ class TestReasoningRejectionReissue:
         assert not [r for r in records if r["type"] == "error" and r.get("kind") == "reasoning_rejected"]
 
 
+def _read_call(call_id: str, args: dict) -> tuple[int, list[str]]:
+    return 200, [
+        _sse_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": call_id,
+                        "function": {"name": "Read", "arguments": json.dumps(args)},
+                    }
+                ]
+            }
+        ),
+        _sse_chunk({}, "tool_calls"),
+        "data: [DONE]",
+    ]
+
+
+def _strict_flags(body: dict) -> list:
+    return [t["function"].get("strict") for t in body["tools"]]
+
+
+class TestStrictSchemaRejectionReissue:
+    """Stage 6: a refused strict tool schema is re-sent once without it, and
+    strict stays off for the rest of the attempt, through the same helper
+    as the reasoning refusal."""
+
+    def _run(self, tmp_path, responses, mode="on"):
+        from istota.config import SessionLogConfig
+        from istota.llm.openai_compat import OpenAICompatibleProvider
+
+        notes = tmp_path / "notes.txt"
+        notes.write_text("hello\n")
+        http = _ScriptedHttp([r(notes) if callable(r) else r for r in responses])
+        provider = OpenAICompatibleProvider(
+            api_key="k", base_url="https://x.invalid/v1", strict_tool_schemas=mode
+        )
+        provider._client = http
+        logs = tmp_path / "logs"
+        brain = NativeBrain(
+            NativeBrainConfig(
+                model="claude-sonnet-4-6",
+                session_log=SessionLogConfig(enabled=True, dir=str(logs)),
+            ),
+            provider=provider,
+        )
+        req = _req("read the notes", tmp_path, tools=["Read"])
+        req.task_id = 92
+        req.user_id = "alice"
+        result = brain.execute(req)
+        files = sorted((logs / "alice").glob("*.jsonl"))
+        records = [json.loads(line) for line in files[0].read_text().splitlines() if line]
+        return result, http.bodies, records
+
+    def test_rejected_then_reissued_without_strict_then_off_for_the_attempt(
+        self, tmp_path, caplog
+    ):
+        rejection = (
+            400,
+            ['{"error":{"message":"Invalid schema for function Read: strict is not supported"}}'],
+        )
+        caplog.set_level("WARNING", logger="istota.brain.native")
+        result, bodies, records = self._run(
+            tmp_path,
+            [
+                rejection,
+                lambda p: _read_call("c1", {"file_path": str(p)}),
+                _TEXT_TURN,
+            ],
+        )
+        assert result.success is True
+        assert result.result_text == "done"
+        assert len(bodies) == 3
+        assert _strict_flags(bodies[0]) == [True]
+        assert _strict_flags(bodies[1]) == [None]
+        assert _strict_flags(bodies[2]) == [None]
+        assert bodies[1]["messages"] == bodies[0]["messages"]
+
+        errors = [r for r in records if r["type"] == "error"]
+        assert [e["kind"] for e in errors] == ["strict_rejected"]
+        assert records[0]["strict_tool_schemas"] is True
+        warnings = [r for r in caplog.records if "strict" in r.getMessage()]
+        assert len(warnings) == 1
+
+    def test_a_rejection_with_strict_off_is_not_reissued(self, tmp_path):
+        rejection = (400, ['{"error":{"message":"Invalid schema for function Read"}}'])
+        result, bodies, records = self._run(tmp_path, [rejection], mode="off")
+        assert len(bodies) == 1
+        assert result.success is False
+        assert records[0]["strict_tool_schemas"] is False
+        assert not [r for r in records if r.get("kind") == "strict_rejected"]
+
+
 class TestFactory:
     def test_make_brain_native(self):
         cfg = BrainConfig(kind="native", native=NativeBrainConfig(model="claude-sonnet-4-6"))

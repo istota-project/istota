@@ -184,6 +184,14 @@ features = []
 # prompt_cache_ttl = "5m"                    # cache breakpoint lifetime: "5m" or "1h". "1h"
 #                                            #   keeps the cached prefix through long tool
 #                                            #   runs; its writes cost 2x input, not 1.25x.
+# strict_tool_schemas = "off"                # send tool definitions with "strict": true, so
+#                                            #   the endpoint constrains tool arguments to the
+#                                            #   schema. "auto": only for a model whose
+#                                            #   supports_structured_outputs is true (from the
+#                                            #   OpenRouter catalog or model_overrides); "on":
+#                                            #   always; "off": never. A request the endpoint
+#                                            #   refuses is re-sent once without, and strict
+#                                            #   stays off for the rest of the attempt.
 # bash_spill_full_output = true             # write Bash output past the per-tool cap to a
 #                                            #   temp file the model can Read, rather than
 #                                            #   dropping the tail.

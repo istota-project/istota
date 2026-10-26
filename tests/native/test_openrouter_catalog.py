@@ -32,7 +32,7 @@ FIXTURE = {
                 "input_cache_write": "0.00000625",
             },
             "architecture": {"input_modalities": ["text", "image"]},
-            "supported_parameters": ["tools", "reasoning"],
+            "supported_parameters": ["tools", "reasoning", "structured_outputs"],
         },
         {
             "id": "meta-llama/llama-3-8b",
@@ -65,6 +65,7 @@ class TestParse:
         assert info.supports_vision is True
         assert info.supports_thinking is True
         assert info.supports_tools is True
+        assert info.supports_structured_outputs is True
         # USD/token strings → USD/mtok (exact floats)
         assert info.input_price_per_mtok == pytest.approx(5.0)
         assert info.output_price_per_mtok == pytest.approx(25.0)
@@ -76,6 +77,7 @@ class TestParse:
         info = out["meta-llama/llama-3-8b"]
         assert info.supports_vision is False
         assert info.supports_thinking is False
+        assert info.supports_structured_outputs is False
         assert info.context_window == 8192
         # no max_completion_tokens reported → floor bounded by window
         assert info.max_output_tokens == 8192
@@ -166,6 +168,19 @@ class TestCache:
         assert got is not None
         assert got["anthropic/claude-opus-4.8"].context_window == 200000
         assert isinstance(got["anthropic/claude-opus-4.8"], ModelInfo)
+
+    def test_the_capability_flag_round_trips_and_an_older_entry_still_loads(self, tmp_path):
+        path = cache_path(tmp_path)
+        write_cache(path, parse_openrouter_models(FIXTURE), now_ts=1000.0)
+        assert read_cache_any_age(path)["anthropic/claude-opus-4.8"].supports_structured_outputs
+        # A cache written before the field existed reads as not supported.
+        raw = json.loads(path.read_text())
+        for entry in raw["models"].values():
+            del entry["supports_structured_outputs"]
+        path.write_text(json.dumps(raw))
+        got = read_cache_any_age(path)
+        assert got["anthropic/claude-opus-4.8"].supports_structured_outputs is False
+        assert got["anthropic/claude-opus-4.8"].supports_thinking is True
 
     def test_past_ttl_returns_none(self, tmp_path):
         path = cache_path(tmp_path)
