@@ -1949,7 +1949,7 @@ class TestOneHourWritePricing:
     """Stage 5: with `prompt_cache_ttl = "1h"` and no provider-reported cost, a
     cache write is priced at twice input rather than the catalog's 5m price."""
 
-    def _run(self, tmp_path, monkeypatch, ttl):
+    def _run(self, tmp_path, monkeypatch, ttl, caching=True):
         from istota.brain import native as native_mod
         from istota.llm.catalog import ModelInfo
 
@@ -1964,6 +1964,7 @@ class TestOneHourWritePricing:
 
         class _TtlProvider(MockProvider):
             prompt_cache_ttl = ttl
+            prompt_caching = caching
 
         provider = _TtlProvider(
             [
@@ -1981,3 +1982,8 @@ class TestOneHourWritePricing:
 
     def test_5m_writes_keep_the_catalog_price(self, tmp_path, monkeypatch):
         assert self._run(tmp_path, monkeypatch, "5m").usage.cost_usd == 3.75
+
+    def test_1h_without_caching_keeps_the_catalog_price(self, tmp_path, monkeypatch):
+        # No breakpoints, so no ttl on the wire: the write was not a 1h write.
+        run = self._run(tmp_path, monkeypatch, "1h", caching=False)
+        assert run.usage.cost_usd == 3.75

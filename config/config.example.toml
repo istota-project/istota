@@ -135,7 +135,7 @@ features = []
 #                                            #   way. The two are read independently — setting
 #                                            #   one and leaving the other at 0 derives only
 #                                            #   the one left unset.
-# compaction_background = false             # start the compaction summary in the background
+# compaction_background = false              # start the compaction summary in the background
 #                                            #   before the blocking threshold, and place it at
 #                                            #   a later turn boundary, so a long task does not
 #                                            #   stall on the summary call. Off: in the evals
@@ -151,7 +151,7 @@ features = []
 #                                            #   once without, and replay stays off for the
 #                                            #   rest of the attempt. "auto" passed as many
 #                                            #   eval cases as "off" or more.
-# model_catalog_fetch = true                # when base_url is OpenRouter, fetch its
+# model_catalog_fetch = true                 # when base_url is OpenRouter, fetch its
 #                                            #   public model list once/process for real
 #                                            #   window / capabilities / prices (self-
 #                                            #   updating; disk-cached). No effect for a
@@ -202,7 +202,7 @@ features = []
 #                                            #   refuses is re-sent once without, and strict
 #                                            #   stays off for the rest of the attempt. "auto"
 #                                            #   cut failed edits on the weaker eval model.
-# bash_spill_full_output = true             # write Bash output past the per-tool cap to a
+# bash_spill_full_output = true              # write Bash output past the per-tool cap to a
 #                                            #   temp file the model can Read, rather than
 #                                            #   dropping the tail.
 # api_key = ""                               # prefer the ISTOTA_BRAIN_NATIVE_API_KEY override

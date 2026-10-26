@@ -1494,7 +1494,12 @@ class NativeBrain:
             "prompt_cache_ttl",
             getattr(self._config, "prompt_cache_ttl", "5m"),
         )
-        write_multiplier = cache_write_multiplier_for_ttl(prompt_cache_ttl)
+        # The TTL reaches the wire only on breakpoints, so without caching a
+        # write was made at the endpoint's default and keeps the catalog price.
+        caching = getattr(self._provider, "prompt_caching", self._config.prompt_caching)
+        write_multiplier = (
+            cache_write_multiplier_for_ttl(prompt_cache_ttl) if caching else None
+        )
         usage = TaskUsage()
         # Cost provenance, for the usage row's `cost_basis`. `TaskUsage.add`
         # decides per turn whether to take the provider's reported cost or fall
@@ -1515,7 +1520,8 @@ class NativeBrain:
             # its spend is folded in here, failed calls included.
             nonlocal turns_accumulated, turns_costed
             if summary_usage.total_tokens > 0 or summary_usage.cost_usd is not None:
-                usage.add(summary_usage, get_model_info(model), write_multiplier)
+                # Summary calls are sent with prompt_caching=False, so no TTL.
+                usage.add(summary_usage, get_model_info(model))
                 turns_accumulated += 1
                 if summary_usage.cost_usd is not None:
                     turns_costed += 1
