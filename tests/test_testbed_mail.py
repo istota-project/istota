@@ -15,6 +15,7 @@ own wiring is only checked behind a marker rots.
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -497,3 +498,52 @@ class TestPublishedPort:
 
         with pytest.raises(stack_support.StackError, match="not a host port"):
             self._stack().published_port("mail", 993)
+
+
+class TestRestartWaitsForItsPorts:
+    """`compose restart` returns before Docker re-binds a published port, and a
+    `published_port` asked in that window reads `0.0.0.0:0`."""
+
+    @staticmethod
+    def _ps(published: int) -> str:
+        return json.dumps([{
+            "Service": "signaling",
+            "State": "running",
+            "Publishers": [
+                {"URL": "127.0.0.1", "TargetPort": 8080, "PublishedPort": published},
+                # Exposed and never published: zero on both sides of a restart.
+                {"URL": "", "TargetPort": 9090, "PublishedPort": 0},
+            ],
+        }])
+
+    def _restart(self, monkeypatch, answers_after: list[int]):
+        calls = []
+        after = iter(answers_after)
+
+        def run(args, *, timeout, env=None):
+            calls.append(args)
+            if "restart" in args:
+                return ""
+            if not any("restart" in c for c in calls):
+                return self._ps(54321)
+            return self._ps(next(after))
+
+        monkeypatch.setattr(stack_support, "_run", run)
+        monkeypatch.setattr(stack_support.time, "sleep", lambda _s: None)
+        stack = stack_support.Stack(
+            profile=profiles.SIGNALING, args=["docker", "compose"], services={}
+        )
+        stack.restart("signaling")
+        return calls
+
+    def test_it_returns_only_once_the_port_is_published_again(self, monkeypatch):
+        calls = self._restart(monkeypatch, [0, 0, 55555])
+
+        restarted_at = next(i for i, c in enumerate(calls) if "restart" in c)
+        assert [c[2] for c in calls[restarted_at + 1:]] == ["ps", "ps", "ps"]
+
+    def test_it_gives_up_with_a_stack_error(self, monkeypatch):
+        monkeypatch.setattr(stack_support, "RESTART_PORT_TIMEOUT", -1)
+
+        with pytest.raises(stack_support.StackError, match=r"re-published \[8080\]"):
+            self._restart(monkeypatch, [0])

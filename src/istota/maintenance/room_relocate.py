@@ -111,6 +111,7 @@ PRESERVE_COLUMNS: dict[tuple[str, str], str] = {
     ("web_user_tokens", "refresh_token"): "credential ciphertext",
     ("web_auth_tokens", "token_hash"): "authentication token digest",
     ("location_ingest_tokens", "token_hash"): "ingest token digest",
+    ("calendar_feed_tokens", "token_sha256"): "calendar feed token digest",
     ("location_ingest_tokens", "token_tail"): "ingest token display suffix",
     ("device_tokens", "token_hash"): "device token digest",
     ("device_tokens", "token_tail"): "device token display suffix",
