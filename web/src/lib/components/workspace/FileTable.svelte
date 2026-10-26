@@ -22,7 +22,12 @@
     Checkbox,
     Timestamp,
   } from '@minot/ui';
-  import { chatFileUrl, nextcloudFileUrl, WORKSPACE_TEXT_EDIT_MAX_BYTES } from '$lib/api';
+  import {
+    chatFileUrl,
+    nextcloudFileUrl,
+    shareFileUrl,
+    WORKSPACE_TEXT_EDIT_MAX_BYTES,
+  } from '$lib/api';
   import { formatBytes } from '$lib/format';
   import { fileIcon, mayBeText } from './filePresentation';
   import { loadSetting, saveSetting } from '@minot/ui/ui/persisted';
@@ -87,7 +92,8 @@
                 : null),
             mime_type: null,
             modified: new Date(entry.modified * 1000).toISOString(),
-            path: [listing?.path, entry.name].filter(Boolean).join('/'),
+            // A share's own path, since a file share's one file sits at the root.
+            path: entry.share_path ?? [listing?.path, entry.name].filter(Boolean).join('/'),
             web_url: null,
           })),
   );
@@ -196,6 +202,12 @@
     }
     if (place.kind === 'nextcloud' && entry.kind === 'file') {
       items.push({ label: 'Download', href: nextcloudFileUrl(entry.path), download: entry.name });
+    } else if (place.kind === 'share' && entry.kind === 'file') {
+      items.push({
+        label: 'Download',
+        href: shareFileUrl(place.id, entry.path),
+        download: entry.name,
+      });
     } else if (place.kind !== 'drive' && entry.kind === 'file' && entry.ref) {
       items.push({ label: 'Download', href: chatFileUrl(entry.ref), download: entry.name });
     }
@@ -358,6 +370,17 @@
                       viewer.openFile(entry.path, {
                         kind: 'nextcloud',
                         webUrl: entry.nextcloud_url ?? null,
+                      })}>{entry.name}</button
+                  >
+                {:else if entry.kind === 'file' && place.kind === 'share'}
+                  <button
+                    class="button-reset"
+                    type="button"
+                    onclick={() =>
+                      viewer.openFile(entry.path, {
+                        kind: 'share',
+                        place: place.id,
+                        name: entry.name,
                       })}>{entry.name}</button
                   >
                 {:else if entry.kind === 'file' && entry.web_url}

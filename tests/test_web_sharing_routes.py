@@ -252,10 +252,32 @@ async def test_the_federated_id_and_pending_offers(signed_client, config):  # no
     [offer] = ocm["pending"]
     assert offer == {
         "id": source_id, "name": "Taxes 2026", "owner": "carol@https://cloud.example.org",
+        "owner_display_name": None, "shared_by": None, "shared_by_display_name": None,
         "host": "cloud.example.org", "reoffer": False, "created_at": offer["created_at"],
     }
     me = await signed_client.get("/istota/api/me")
     assert me.json()["features"]["sharing_ocm"] is True
+
+
+async def test_an_offer_names_its_sharer_when_it_is_not_the_owner(signed_client, config):  # noqa: F811
+    config.sharing.ocm.enabled = True
+    _pending_offer(config, owner_display_name="Carol", shared_by="dave@https://cloud.example.org",
+                   shared_by_display_name="Dave")
+    [offer] = (await signed_client.get(BASE)).json()["ocm"]["pending"]
+    assert (offer["owner_display_name"], offer["shared_by"], offer["shared_by_display_name"]) == (
+        "Carol", "dave@https://cloud.example.org", "Dave")
+
+
+async def test_the_files_page_is_offered_wherever_offers_can_arrive(signed_client, config):  # noqa: F811
+    """#849: the bell sends a waiting offer to Files, so Files exists with no workspace."""
+    config.workspace_path = None
+    config.sharing.ocm.enabled = True
+    me = (await signed_client.get("/istota/api/me")).json()
+    # Files is offered; `workspace` still means a workspace, which other pages read.
+    assert (me["features"]["files"], me["features"]["workspace"]) == (True, False)
+    response = await signed_client.get("/istota/files/shares", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/istota/files?view=shares"
 
 
 async def test_another_users_offers_are_not_listed(signed_client, config):  # noqa: F811

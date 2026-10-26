@@ -66,8 +66,8 @@ def place_reach(
             access = "read and change" if place.remote_access == "write" else "read"
             result[place.id] = Reach(mode, mode, "none", note=(
                 f"Shared from {place.remote_host}. Tasks can {access} it through the shares "
-                f"skill as {place.id}; it cannot be browsed here. Its grant in "
-                "Settings > Credentials can limit which rooms and scheduled jobs may use it."
+                f"skill as {place.id}. Its grant in Settings > Credentials can limit which "
+                "rooms and scheduled jobs may use it."
             ))
             continue
         token = place.conversation_token if place.kind == "room" else None

@@ -50,8 +50,11 @@ it('serves the sharing card and the shared folder place on the mock dev server',
   expect(again.status).toBe(409);
 
   const places = await request('GET', '/workspace/places');
+  expect(places.body.share_index).toBe(true);
   const share = places.body.places.find((place: any) => place.kind === 'share');
-  expect(share).toMatchObject({ browsable: false, remote: { host: 'cloud.example.org' } });
+  expect(share).toMatchObject({ browsable: true, remote: { host: 'cloud.example.org' } });
+  // #849: a share is browsed like a folder, its entries carrying their share path.
   const listing = await request('GET', `/workspace/list?place=${encodeURIComponent(share.id)}`);
-  expect(listing.status).toBe(404);
+  expect(listing.status).toBe(200);
+  expect(listing.body.entries[0].share_path).toBe('note.md');
 });

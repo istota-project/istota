@@ -1,12 +1,15 @@
 /**
  * Where a viewed file's bytes come from. A workspace path goes through
  * `/chat/files`; a Nextcloud path is relative to the caller's own account and
- * is read with their personal connection. A `url` source is an app endpoint
+ * is read with their personal connection. A `share` path is relative to a share
+ * from another server (`place` is its `share:<id>`, `''` the file of a file
+ * share, whose `name` is the share's). A `url` source is an app endpoint
  * that serves one known type; it is trusted, not sniffed through a preview call.
  */
 export type FileSource =
   | { kind: 'workspace' }
   | { kind: 'nextcloud'; webUrl: string | null }
+  | { kind: 'share'; place: string; name: string }
   | { kind: 'url'; url: string; name: string; mime: 'application/pdf' };
 
 type ViewerState =

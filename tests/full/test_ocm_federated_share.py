@@ -49,6 +49,8 @@ the next task's `shares ls` must record `access = read` from its own root
 PROPFIND. This is also the private channel's witness in a deployed sandbox:
 the lean stack has no shipped way to seed an accepted share.
 
+**The Files page browses a share** (#849) through the web API over the same public WebDAV, and a share of a single file is listed and downloaded as that file, by the web API and by the skill, since only a real Nextcloud says how it serves a file share's root.
+
 Discretionary: `uv run pytest -m full -n0 tests/full/test_ocm_federated_share.py`.
 """
 
@@ -369,6 +371,84 @@ def test_accepting_through_the_web_api_and_unsharing_on_nextcloud(ocm_stack, web
         "the unshare did not reach istota; Nextcloud logs:\n"
         + ocm_stack.logs(tail=40, service="nextcloud"))
     assert _credential_names(ocm_stack, offer["id"]) == []
+
+
+def _share_path(stack, path: str, name: str, permissions: int) -> dict:
+    """``path`` in testuser's Nextcloud shared to istota; the offer row named ``name``."""
+    nextcloud = stack.service("nextcloud")
+    [row] = stack.probe.query("SELECT COALESCE(MAX(id), 0) AS mark FROM shared_sources")
+    shared = nextcloud._ocs(
+        "/ocs/v2.php/apps/files_sharing/api/v1/shares", user=nextcloud.test_user, method="POST",
+        body={"path": f"/{path}", "shareType": 6, "shareWith": f"testuser@{SITE}",
+              "permissions": permissions},
+        tolerate=(403, 404),
+    )
+    assert shared.status_code in (100, 200), (shared.status_code, shared.message)
+    deadline = time.monotonic() + OFFER_WAIT_SECONDS
+    offers = _offers_since(stack, row["mark"], name)
+    while not offers and time.monotonic() < deadline:
+        time.sleep(2)
+        offers = _offers_since(stack, row["mark"], name)
+    assert offers, "no offer reached istota:\n" + stack.logs(tail=40, service="nextcloud")
+    return offers[0]
+
+
+def test_the_files_page_browses_a_shared_folder(ocm_stack, web):
+    """#849: the web process lists and downloads a share over Nextcloud's public WebDAV."""
+    nextcloud = ocm_stack.service("nextcloud")
+    folder, _share_id, offer = _share_folder(ocm_stack, permissions=1)
+    marker = f"browsed-{uuid.uuid4().hex[:8]}"
+    _body, status = nextcloud._dav(f"{folder}/inner", user=nextcloud.test_user, method="MKCOL")
+    assert status == 201, status
+    _body, status = nextcloud._dav(f"{folder}/inner/note.txt", user=nextcloud.test_user,
+                                   method="PUT", body=marker.encode())
+    assert status in (201, 204), status
+    accepted = web.post(f"{API}/settings/sharing/folders/{offer['id']}/accept",
+                        json={"allow_scheduled": False})
+    assert accepted.status_code == 200, accepted.text
+    place = f"share:{offer['id']}"
+
+    root = web.get(f"{API}/workspace/list", params={"place": place, "path": ""})
+    assert root.status_code == 200, root.text
+    assert (root.json()["access"], root.json()["root_kind"]) == ("read", "folder")
+    assert [(e["name"], e["kind"]) for e in root.json()["entries"]] == [("inner", "dir")]
+    inner = web.get(f"{API}/workspace/list", params={"place": place, "path": "inner"})
+    assert [e["share_path"] for e in inner.json()["entries"]] == ["inner/note.txt"]
+    got = web.get(f"{API}/workspace/share/file", params={"place": place, "path": "inner/note.txt"})
+    assert (got.status_code, got.text) == (200, marker)
+    assert got.headers["content-disposition"].startswith("attachment;")
+
+
+def test_a_shared_file_is_listed_and_downloaded_as_that_file(ocm_stack, web):
+    """#849: OCM offers a file as ``resourceType: file`` too; the root's PROPFIND says which."""
+    nextcloud = ocm_stack.service("nextcloud")
+    name = f"OCM file {uuid.uuid4().hex[:8]}.txt"
+    marker = f"one-file-{uuid.uuid4().hex[:8]}"
+    _body, status = nextcloud._dav(name, user=nextcloud.test_user, method="PUT",
+                                   body=marker.encode())
+    assert status in (201, 204), status
+    offer = _share_path(ocm_stack, name, name, permissions=1)
+    accepted = web.post(f"{API}/settings/sharing/folders/{offer['id']}/accept",
+                        json={"allow_scheduled": False})
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["share"]["kind"] == "file"
+    place = f"share:{offer['id']}"
+
+    listing = web.get(f"{API}/workspace/list", params={"place": place, "path": ""})
+    assert listing.status_code == 200, listing.text
+    [entry] = listing.json()["entries"]
+    assert (entry["name"], entry["kind"], entry["share_path"]) == (name, "file", "")
+    got = web.get(f"{API}/workspace/share/file", params={"place": place, "path": ""})
+    assert (got.status_code, got.text) == (200, marker)
+
+    transcript = _bash_task(ocm_stack, (
+        "set -eu\n"
+        'W="${ISTOTA_WORKSPACE_PATH:-/mnt/shared}/Users/testuser/ocm-file"\n'
+        f"istota-skill shares ls {place}\n"
+        f'istota-skill shares get {place} --dest "$W" --overwrite\n'
+        f'cat "$W/{name}"; echo\n'
+    ), "fetch the shared file")
+    assert marker in transcript, transcript[-4000:]
 
 
 def test_a_read_share_is_accepted_read_only_and_removing_ends_it(ocm_stack, web):
