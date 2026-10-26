@@ -157,7 +157,12 @@ describe('the settings page re-resolving the identity', () => {
   it('shows the Security card from the identity loaded by the layout', async () => {
     getMe.mockResolvedValue({
       ...person(),
-      auth: { method: 'email', email: 'alice@example.com', can_change_password: false },
+      auth: {
+        method: 'email',
+        email: 'alice@example.com',
+        can_change_password: false,
+        can_set_password: true,
+      },
     });
     render(SettingsInLayout);
     expect(await screen.findByRole('heading', { name: 'Security' })).toBeTruthy();

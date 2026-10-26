@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Settings now has a Security card when you sign in with Nextcloud. You can change your email-login password there, or, if your account has none yet, ask for a link to set one. Before this, an account that had only ever signed in with Nextcloud had no way to set a password from Settings.
 - **Long tasks on the native brain no longer forget earlier work when a summary fails.** When the request to summarize older turns failed, those turns were dropped anyway and the task carried on without them. They are now kept, the summary is tried once more, and the cost of summary requests is counted in the task's usage.
 - In web chat, the Confirm and Cancel card under a message now stops at the same width as the message text instead of spanning the whole pane.
 - Skill commands no longer print config warnings, such as a retired `[[default_briefings]]` notice, under every result a task reads. The daemon log and the admin configuration view still show them.

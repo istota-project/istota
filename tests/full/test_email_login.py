@@ -93,7 +93,8 @@ def test_delivered_sign_in_code_and_password_login(stack):
             me = browser.get("/istota/api/me")
             assert me.status_code == 200
             assert me.json()["username"] == user_id
-            assert me.json()["auth"] == {"method": "email", "email": address, "can_change_password": False}
+            assert me.json()["auth"] == {"method": "email", "email": address, "can_change_password": False,
+                                         "can_set_password": True}
             replayed = browser.post("/istota/auth/sign-in-code", data={**fields, "code": code})
             assert replayed.status_code in (400, 403)
 
@@ -130,7 +131,8 @@ def test_delivered_sign_in_code_and_password_login(stack):
             me = browser.get("/istota/api/me")
             assert me.status_code == 200
             assert me.json()["username"] == user_id
-            assert me.json()["auth"] == {"method": "email", "email": address, "can_change_password": True}
+            assert me.json()["auth"] == {"method": "email", "email": address, "can_change_password": True,
+                                         "can_set_password": False}
     finally:
         removed = stack.exec(command + ["remove", user_id])
         assert removed.returncode == 0, removed.stderr
