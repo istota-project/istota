@@ -5622,11 +5622,14 @@ export function isSafeActionPath(path: string | null | undefined): path is strin
 }
 
 /** Whether an action path is answered by the server rather than by a page.
- *  `/chat/r/<room>[/t/<task>]` is the deep-link redirect (#624): the
- *  frontend is prerendered with no route there, so its link must make the
- *  client do a full navigation. */
+ *  `/chat/r/<room>[/t/<task>]` is the deep-link redirect (#624) and
+ *  `/files/assignments/<id>` an assignment's folder (#848): the frontend is
+ *  prerendered with no route there, so their links must make the client do a
+ *  full navigation. */
+const SERVER_ACTION_PREFIXES = ['/chat/r/', '/files/assignments/'];
+
 export function isServerActionPath(path: string | null | undefined): boolean {
-  return isSafeActionPath(path) && path.startsWith('/chat/r/');
+  return isSafeActionPath(path) && SERVER_ACTION_PREFIXES.some((prefix) => path.startsWith(prefix));
 }
 
 /** The deep link into a room by its token, or null for a token that cannot be

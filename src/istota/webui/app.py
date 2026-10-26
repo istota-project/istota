@@ -12953,6 +12953,40 @@ async def chat_deep_link_room(request: Request, room_token: str):
     return await _deep_link(request, room_token, None)
 
 
+def _assignment_folder_target(username: str, assignment_id: str) -> str:
+    """Where `/files/assignments/<id>` lands ``username``: the assignment's
+    folder in their home place, or the bare Files page for an id that is not
+    one of their assignments, with nothing said about which."""
+    from urllib.parse import urlencode
+
+    from istota import db
+    from istota.assignments import store
+
+    fallback = "/istota/files"
+    if not (assignment_id.isascii() and assignment_id.isdigit() and len(assignment_id) <= 18):
+        return fallback
+    if _config.workspace_root(username) is None:
+        return fallback
+    with db.get_db(_config.db_path) as conn:
+        assignment = store.get_assignment(conn, int(assignment_id), user_id=username)
+    if assignment is None:
+        return fallback
+    path = f"{_config.bot_dir_name}/{assignment.dir_relpath}"
+    return f"{fallback}?{urlencode({'place': 'home', 'path': path})}"
+
+
+# The assignment notices' Open folder (#848), a redirect for the reason the
+# chat deep links above are one: the Files page takes its folder as a query.
+@auth_router.get("/files/assignments/{assignment_id}")
+async def files_assignment_folder(request: Request, assignment_id: str):
+    try:
+        user = await asyncio.to_thread(_require_api_auth, request)
+    except _UnauthorizedException:
+        return RedirectResponse(url="/istota/files", status_code=302)
+    target = await asyncio.to_thread(_assignment_folder_target, user["username"], assignment_id)
+    return RedirectResponse(url=target, status_code=302)
+
+
 def _chat_retry_task(task_id: int, username: str, resume: bool):
     """Queue a re-run of ``task_id`` through `!retry`'s own path.
 

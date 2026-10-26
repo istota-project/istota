@@ -78,6 +78,8 @@ What needs you reaches the [notifications](notifications.md) bell, under the pus
 | Progress report | A wake reports a milestone | You see it |
 | Completed | It completes | You see it |
 
+Each notice in the bell starts with the assignment's number and slug (`Assignment 1 · heat-pump-quotes`), so you can name it in chat. It has two links: Open in chat goes to the room you activated the assignment from, or your default room when that one is gone or you have left it, and Open folder opens the assignment's folder on the Files page.
+
 A notice's text may quote what a wake wrote, such as the step or the report, and that text stays in the bell. A push names the assignment and points to the bell. When you confirm completion yourself in chat, the completed notice goes to the bell without a push.
 
 ## Budget and cost
