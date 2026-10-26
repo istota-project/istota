@@ -38,8 +38,8 @@ def _real_kit() -> Kit:
     )
 
 
-def test_board_ledger_and_recall_are_starter_apps():
-    assert install.STARTER_APPS[:3] == ("board", "ledger", "recall")
+def test_board_ledger_recall_and_light_planner_are_starter_apps():
+    assert install.STARTER_APPS[:4] == ("board", "ledger", "recall", "light-planner")
 
 
 @pytest.mark.parametrize("app_id", install.STARTER_APPS)
@@ -74,6 +74,20 @@ def test_the_recall_manifest():
     manifest = parse_manifest(files["manifest.toml"], folder_name="recall", bot_dir="istota")
     assert (manifest.name, manifest.icon, manifest.narrowest) == ("Recall", "book", "phone")
     assert sorted(c.text for c in manifest.capabilities) == ["files:own", "files:read:notes", "kv:own"]
+
+
+def test_the_light_planner_manifest():
+    files = shipped_starter("light-planner")
+    manifest = parse_manifest(files["manifest.toml"], folder_name="light-planner", bot_dir="istota")
+    assert (manifest.name, manifest.icon, manifest.narrowest) == ("Light planner", "sun", "phone")
+    assert sorted(c.text for c in manifest.capabilities) == [
+        "calendar:read", "files:own", "kv:own", "skill:location.places",
+    ]
+    # The ephemeris and the model ship with the page, not their tests.
+    assert sorted(files) == [
+        "ephemeris.js", "index.html", "light-planner-model.js", "light-planner.css",
+        "light-planner.js", "manifest.toml",
+    ]
 
 
 @pytest.fixture
@@ -125,8 +139,16 @@ def test_seeding_installs_every_shipped_starter_app(config, conn):
     assert apps_db.get_grants(conn, "recall", 1) == {"files:own": None, "kv:own": None}
     assert install.ungranted(conn, "recall") == ["files:read:notes"]
     assert apps_db.get_version(conn, "recall", 1)["warnings"] == []
+    planner = apps_db.get_app(conn, "light-planner")
+    assert (planner["name"], planner["icon"], planner["origin"], planner["current_version"]) == (
+        "Light planner", "sun", "starter", 1,
+    )
+    # Places and calendar are both asked for on first open.
+    assert apps_db.get_grants(conn, "light-planner", 1) == {"files:own": None, "kv:own": None}
+    assert sorted(install.ungranted(conn, "light-planner")) == ["calendar:read", "skill:location.places"]
+    assert apps_db.get_version(conn, "light-planner", 1)["warnings"] == []
     again = install.ensure_starter_apps(config, USER, conn)
-    assert (again["board"], again["ledger"], again["recall"]) == ("current", "current", "current")
+    assert again == {app_id: "current" for app_id in install.STARTER_APPS}
 
 
 # -- Recall's folder, through the real router ---------------------------------

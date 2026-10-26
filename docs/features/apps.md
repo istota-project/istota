@@ -165,6 +165,16 @@ The review state is SM-2. A grade of 3 or more (Hard, Good, Easy are 3, 4 and 5)
 
 As with Board, the values are fenced as untrusted when Istota reads them back.
 
+### Light planner
+
+Sun and moon for the places you saved in Location. For one place at a time, Light planner shows where the sun and moon are now, today's blue and golden hours, sunrise, solar noon, sunset, moonrise and moonset, how much of the moon is lit, and a chart of the sun's and moon's height through the day. Below that it lists every golden hour in the next 14 days, at each of your places, that falls in free time on your calendar. A golden hour that is only partly free shows the free part. With more than one place, a picker above the table chooses which one today's details are for.
+
+Golden hour is the sun between 6° above the horizon and 4° below it, and blue hour between 4° and 6° below. Busy time is every timed event on your calendars; an all-day event does not count, and a free stretch under 15 minutes is not listed. Times are shown in the device's time zone, not the place's, so a place in another zone shows its times as they are where you are.
+
+Light planner asks on first open for two things: your saved places (`skill:location.places`) and your calendars (`calendar:read`). Choose **Not now** for the calendar and it lists every golden hour, busy or not, and says so. Without places it has nothing to plan for and says how to fix that: allow it from **Permissions**, or save places in Location. It stores nothing.
+
+Everything is computed in the page. The sun follows NOAA's solar position algorithm; the moon uses the leading terms of the lunar series in Meeus, *Astronomical Algorithms*, chapter 47. Its tests check sunrise, sunset and solar noon at three places against NOAA's published tables (within 2 minutes), moonrise and moonset against the U.S. Naval Observatory's (within 10 minutes), and the positions against Meeus's worked examples. In practice the times are within a minute of both. Rise and set are for a flat horizon at sea level; hills, buildings and the place's height above sea level move them by minutes.
+
 ## The house kit
 
 Every installed app gets Istota's tokens, a small client library and a set of components (list, table, form, button, dialog, chart). The kit applies your theme and text size before the first paint, keeps forms usable with the on-screen keyboard, and follows the same touch-target, type-size and layout rules as the rest of the interface. An app that does not use the kit still gets its sandbox and its permissions; the kit is what makes it look and feel like the rest of Istota.
