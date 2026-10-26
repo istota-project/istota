@@ -11,6 +11,11 @@ calling, maps them onto istota's model record, applies the hand-written
 sorted by family and release date. This script is the only thing that fetches
 models.dev; istota never does at runtime.
 
+``--listing-key-file PATH`` takes the model set and capabilities from
+Anthropic's own ``GET /v1/models`` instead, through istota's parser and merge
+(``llm/discovery.py``), with prices still from models.dev. The key is read from
+the file, as istota reads it; no environment variable names it.
+
 Exit codes: 0 done (or, under ``--check``, the committed file is current);
 2 under ``--check`` when the committed file differs; 1 on a fetch or
 validation failure, in which case nothing is written.
@@ -148,8 +153,46 @@ def map_model(model: dict) -> dict:
     }
 
 
-def build(payload: dict, overrides: dict) -> list[dict]:
-    """The catalogue records for a models.dev payload and an overrides document."""
+def apply_api(records: dict[str, dict], api: dict[str, dict]) -> dict[str, dict]:
+    """The model set and capabilities from Anthropic's ``GET /v1/models``,
+    prices from models.dev.
+
+    ``api`` is ``parse_anthropic_models``' output. The merge is istota's own
+    (``llm.discovery.merge_anthropic``), so the script and a running
+    deployment agree on what the API's fields mean. A model the API lists and
+    models.dev does not starts at zero prices.
+    """
+    from dataclasses import asdict
+
+    from istota.llm.catalog import parse_shipped
+    from istota.llm.discovery import merge_anthropic
+
+    base = {mid: records.get(mid) or map_model({"id": mid, "tool_call": True}) for mid in api}
+    merged = merge_anthropic(api, parse_shipped({"models": list(base.values())}))
+    out = {}
+    for info in merged:
+        raw = json.loads(json.dumps(asdict(info)))
+        out[info.id] = {k: raw[k] for k in RECORD_FIELDS}
+    return out
+
+
+def fetch_api_models(key_file: Path) -> dict[str, dict]:
+    """Anthropic's model list, with the model-listing key read from ``key_file``.
+
+    The key comes from a file and nothing else, as it does in istota.
+    """
+    from istota.llm.discovery import fetch_anthropic_models
+    from istota.llm.providers import ModelListingKey
+
+    value = key_file.read_text(encoding="utf-8").strip()
+    if not value:
+        raise CatalogueError(f"{key_file} is empty")
+    return fetch_anthropic_models(ModelListingKey(value), timeout=30.0)
+
+
+def build(payload: dict, overrides: dict, api: dict[str, dict] | None = None) -> list[dict]:
+    """The catalogue records for a models.dev payload and an overrides document,
+    with Anthropic's own list deciding the model set when ``api`` is given."""
     provider = payload.get("anthropic")
     if not isinstance(provider, dict) or not isinstance(provider.get("models"), dict):
         raise CatalogueError("models.dev payload has no anthropic models")
@@ -162,6 +205,10 @@ def build(payload: dict, overrides: dict) -> list[dict]:
         mid: map_model(m) for mid, m in source.items()
         if not (_DATED_ID.search(mid) and _DATED_ID.sub("", mid) in source)
     }
+    if api is not None:
+        if not api:
+            raise CatalogueError("Anthropic's model list is empty")
+        records = apply_api(records, api)
 
     patches = overrides.get("models", {})
     if not isinstance(patches, dict):
@@ -313,6 +360,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--overrides", type=Path, default=DEFAULT_OVERRIDES)
     parser.add_argument("--models-dev-file", type=Path,
                         help="read models.dev's api.json from a file instead of fetching it")
+    parser.add_argument("--listing-key-file", type=Path, metavar="PATH",
+                        help="take the model set and capabilities from Anthropic's GET /v1/models, "
+                             "with the model-listing key read from PATH; prices still come from models.dev")
+    parser.add_argument("--anthropic-models-file", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     try:
@@ -321,7 +372,17 @@ def main(argv: list[str] | None = None) -> int:
         else:
             payload = fetch_models_dev()
         overrides = json.loads(args.overrides.read_text()) if args.overrides.exists() else {}
-        records = build(payload, overrides)
+        api = None
+        if args.anthropic_models_file:
+            # Offline input for the tests: the pages of a recorded response.
+            from istota.llm.discovery import parse_anthropic_models
+
+            api = {}
+            for page in json.loads(args.anthropic_models_file.read_text()):
+                api.update(parse_anthropic_models(page))
+        elif args.listing_key_file:
+            api = fetch_api_models(args.listing_key_file)
+        records = build(payload, overrides, api)
     except CatalogueError as exc:
         print(f"anthropic catalogue: {exc}", file=sys.stderr)
         return 1

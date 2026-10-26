@@ -114,6 +114,83 @@ class TestCheck:
         assert out.read_text() == GOLDEN.read_text()
 
 
+def _api_page(*entries, has_more=False):
+    return {"data": list(entries), "has_more": has_more, "last_id": entries[-1]["id"]}
+
+
+API_PAGES = [
+    _api_page(
+        {"id": "claude-opus-5-5", "display_name": "Claude Opus 5.5", "line": "opus",
+         "lifecycle": "active", "created_at": "2026-09-22T00:00:00Z", "max_input_tokens": 900000,
+         "max_tokens": None,
+         "capabilities": {"effort": {"low": {"supported": False}, "max": {"supported": False}}}},
+        {"id": "claude-haiku-5-5", "display_name": "Claude Haiku 5.5", "line": "haiku",
+         "lifecycle": "active", "created_at": "2026-10-07T00:00:00Z"},
+        has_more=True,
+    ),
+    _api_page(
+        {"id": "claude-sonnet-6", "display_name": "Claude Sonnet 6", "line": "sonnet",
+         "lifecycle": "active", "created_at": "2026-10-20T00:00:00Z", "max_input_tokens": 1000000,
+         "max_tokens": 128000, "capabilities": {"thinking": {"supported": True}}},
+    ),
+]
+
+
+class TestTheListingKey:
+    """`--listing-key-file`: the model set and capabilities from Anthropic's
+    list, through istota's own parser and merge; prices from models.dev."""
+
+    def _expect(self, out):
+        models = {m["id"]: m for m in json.loads(out.read_text())["models"]}
+        assert set(models) == {"claude-opus-5-5", "claude-haiku-5-5", "claude-sonnet-6"}
+        opus = models["claude-opus-5-5"]
+        assert opus["context_window"] == 900000
+        assert opus["max_output_tokens"] == 128000  # null in the API: models.dev's stays
+        assert opus["input_price_per_mtok"] == 4.0
+        assert opus["effort_map"] == {"xhigh": "xhigh", "max": None, "low": None}
+        sonnet = models["claude-sonnet-6"]
+        assert sonnet["family"] == "sonnet"
+        assert sonnet["input_price_per_mtok"] == 0.0
+        assert sonnet["reasoning"] is True
+
+    def test_the_recorded_pages(self, script, tmp_path):
+        pages = tmp_path / "pages.json"
+        pages.write_text(json.dumps(API_PAGES))
+        out = tmp_path / "anthropic.json"
+        assert script.main(_args(
+            out, "--anthropic-models-file", str(pages), overrides=tmp_path / "none.json",
+        )) == 0
+        self._expect(out)
+
+    def test_the_key_comes_from_the_file(self, script, tmp_path, monkeypatch):
+        from istota.llm import discovery
+
+        key = tmp_path / "listing-key"
+        key.write_text("LISTING-SENTINEL\n")
+        sent = []
+        answers = [json.dumps(p).encode() for p in API_PAGES]
+
+        def transport(url, headers, timeout):
+            sent.append((url, headers["x-api-key"]))
+            return 200, answers.pop(0), {}
+
+        monkeypatch.setattr(discovery, "_anthropic_transport", transport)
+        out = tmp_path / "anthropic.json"
+        assert script.main(_args(
+            out, "--listing-key-file", str(key), overrides=tmp_path / "none.json",
+        )) == 0
+        assert [k for _url, k in sent] == ["LISTING-SENTINEL", "LISTING-SENTINEL"]
+        assert all(url.startswith(discovery.ANTHROPIC_MODELS_URL) for url, _k in sent)
+        self._expect(out)
+
+    def test_an_empty_key_file_fails_and_writes_nothing(self, script, tmp_path):
+        key = tmp_path / "listing-key"
+        key.write_text("")
+        out = tmp_path / "anthropic.json"
+        assert script.main(_args(out, "--listing-key-file", str(key))) == 1
+        assert not out.exists()
+
+
 def _git(repo, *args):
     return subprocess.run(
         ["git", *args], cwd=repo, check=True, capture_output=True, text=True

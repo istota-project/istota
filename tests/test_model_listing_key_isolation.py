@@ -7,17 +7,22 @@ builds every env, and each sentinel may appear only where its mode carries it:
 the model-listing key nowhere, the OAuth token nowhere under "api_key", a
 provider's key only in its own provider and its own `model_caller_env` copy.
 
-The parts that need discovery (the single call site of
-`reveal_for_model_listing`, the fixed URL, no redirects) are Stage 4's and
-join this file there.
+Stage 4 adds the discovery fetch's guards: `reveal_for_model_listing` has one
+call site and `ModelListingKey` is constructed in one place (a scan of
+`src/istota/`), the list goes to the fixed URL whatever the provider's base
+URL says, and a redirect is reported rather than followed.
 """
 
 from __future__ import annotations
 
+import ast
+import http.server
 import os
 import subprocess
 import sys
+import threading
 import types
+from pathlib import Path
 
 import pytest
 
@@ -30,6 +35,8 @@ from istota.llm.providers import (
     reveal_inference_key,
 )
 from istota.skills._types import EnvSpec, SkillMeta
+
+SRC = Path(__file__).resolve().parents[1] / "src" / "istota"
 
 LISTING = "LISTING-SENTINEL"
 OAUTH = "OAUTH-SENTINEL"
@@ -255,3 +262,108 @@ def test_a_manifest_naming_the_listing_key_or_a_provider_is_refused():
         {"var": "KEPT", "from": "config", "config_path": "nextcloud.url"},
     ])
     assert [s.var for s in specs] == ["KEPT"]
+
+
+# --- the discovery fetch (Stage 4) ---------------------------------------------
+
+
+def _calls_named(name: str) -> list[tuple[str, str]]:
+    """Every call of `name` (bare or attribute) under src/istota, as (file, enclosing function)."""
+    found = []
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(func):
+                if not isinstance(node, ast.Call):
+                    continue
+                target = node.func
+                called = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", None)
+                if called == name:
+                    found.append((path.relative_to(SRC).as_posix(), func.name))
+    return found
+
+
+def test_the_listing_key_is_revealed_at_exactly_one_call_site():
+    assert _calls_named("reveal_for_model_listing") == [("llm/discovery.py", "fetch_anthropic_models")]
+
+
+def test_a_listing_key_is_constructed_only_in_the_discovery_fetch():
+    assert _calls_named("ModelListingKey") == [("llm/discovery.py", "_read_listing_key")]
+
+
+def test_the_anthropic_list_goes_to_the_fixed_url_whatever_the_base_url(tmp_path):
+    """A base URL pointed at a stub or a gateway never receives the key."""
+    from dataclasses import replace
+
+    from istota.llm import discovery
+    from istota.llm.providers import ProviderSpec
+
+    key_file = tmp_path / "listing"
+    key_file.write_text(LISTING)
+    seen = []
+
+    def transport(url, headers, timeout):
+        seen.append((url, headers.get("x-api-key")))
+        return 200, b'{"data": [{"id": "claude-x-1", "line": "opus"}], "has_more": false}', {}
+
+    spec = ProviderSpec(id="anthropic", kind="anthropic", base_url="http://127.0.0.1:9/stub")
+    for base in ("http://127.0.0.1:9/stub", "https://gateway.example.com"):
+        result = discovery.refresh_provider(
+            replace(spec, base_url=base), tmp_path / "cache", 1.0,
+            listing_key_path=key_file, transport=transport,
+        )
+        assert result.outcome == "refreshed"
+    assert discovery.ANTHROPIC_MODELS_URL == "https://api.anthropic.com/v1/models"
+    assert seen and all(url.startswith(f"{discovery.ANTHROPIC_MODELS_URL}?") for url, _key in seen)
+    assert all(key == LISTING for _url, key in seen)
+
+
+def test_the_default_transport_is_the_no_redirect_no_proxy_one():
+    from istota.lib import fixed_get
+    from istota.llm import discovery
+
+    # The conftest swaps the module attribute out for every test, so the
+    # function as written is what is checked.
+    source = Path(discovery.__file__).read_text(encoding="utf-8")
+    assert "    return fixed_get.get(url, headers, timeout)\n" in source
+    opener = fixed_get.build_opener()
+    assert any(isinstance(h, fixed_get.NoRedirect) for h in opener.handlers)
+    assert fixed_get.NoRedirect().redirect_request(None, None, 302, "Found", {}, "http://x/") is None
+
+
+def test_a_redirect_is_reported_and_its_target_never_reached():
+    """Against a real local server: the 302 comes back as a status, and the
+    request carrying the key is never re-sent to where it points."""
+    from istota.lib import fixed_get
+
+    hits = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            hits.append(self.path)
+            if self.path.startswith("/models"):
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/elsewhere")
+                self.end_headers()
+            else:
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, _body, _headers = fixed_get.get(
+            f"http://127.0.0.1:{server.server_port}/models", {"x-api-key": LISTING}, 5.0,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert status == 302
+    assert hits == ["/models"]
