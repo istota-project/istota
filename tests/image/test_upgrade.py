@@ -457,13 +457,29 @@ class TestTheUpgradeStaysClean:
         "nextcloud.connection",
     )
 
+    #: `models.cli_auth` FAILs when a CLI brain is reachable and the process
+    #: holds no Claude Code credential at all, which is this container for the
+    #: reason `.value` above is: no `-e` carries one. An older release ran with
+    #: `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` in its environment, and
+    #: the check derives a mode from either. Exempt on that one detail only, so
+    #: its other FAILs (a `.credentials.json` an older entrypoint wrote, under
+    #: "api_key") still count.
+    NO_CREDENTIAL = ("models.cli_auth", "the claude CLI cannot run: no Claude Code credential")
+
+    @classmethod
+    def _not_about_the_upgrade(cls, row) -> bool:
+        if row["name"] in cls.NOT_ABOUT_THE_UPGRADE:
+            return True
+        name, detail = cls.NO_CREDENTIAL
+        return row["name"] == name and str(row.get("detail", "")).startswith(detail)
+
     @pytest.mark.parametrize("shape", SHAPES)
     def test_no_check_fails(self, shape, request):
         result = request.getfixturevalue(f"{shape}_upgrade")
         failed = [
             row
             for row in result.doctor
-            if row["status"] == "fail" and row["name"] not in self.NOT_ABOUT_THE_UPGRADE
+            if row["status"] == "fail" and not self._not_about_the_upgrade(row)
         ]
         assert not failed, (
             f"[{shape}] upgrading from {result.anchor.ref} "
@@ -489,7 +505,8 @@ class TestTheUpgradeStaysClean:
         """
         result = request.getfixturevalue(f"{shape}_upgrade")
         reported = {row["name"] for row in result.doctor}
-        missing = [n for n in self.NOT_ABOUT_THE_UPGRADE if n not in reported]
+        excluded = (*self.NOT_ABOUT_THE_UPGRADE, self.NO_CREDENTIAL[0])
+        missing = [n for n in excluded if n not in reported]
         assert not missing, (
             f"[{shape}] excluded from the no-FAIL assertion but absent from the "
             f"doctor run: {missing}. Either the check was renamed or removed, or "
@@ -1114,9 +1131,10 @@ def rollback_boot(istota_image) -> RollbackBoot:
     try:
         seeded = _docker(
             "run", "--rm", *platform_args, "--entrypoint", "istota-drop",
-            "-e", "ISTOTA_BRAIN_NATIVE_API_KEY=rollback-unused-key",
+            "-e", "ISTOTA_PROVIDER_ANTHROPIC_API_KEY=rollback-unused-key",
             "-v", f"{volume}:/data", istota_image.tag, "sh", "-c",
-            "istota setup --yes --user alice --brain native --native-model scripted-test-model"
+            "istota setup --yes --user alice --brain native --native-provider anthropic"
+            " --native-model scripted-test-model"
             " >/dev/null && istota -c /data/config/config.toml init >/dev/null"
             f" && python3 -c \"import sqlite3; c=sqlite3.connect('/data/db/istota.db');"
             f" c.execute('PRAGMA user_version = {newer}'); c.commit()\"",
