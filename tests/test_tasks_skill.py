@@ -401,6 +401,14 @@ class TestTasksRecentCommand:
         assert exc.value.code == 1
         assert json.loads(capsys.readouterr().out)["status"] == "error"
 
+    @pytest.mark.parametrize("value", ["3651d", "999999999999d"])
+    def test_since_past_the_bound_says_so(self, value):
+        # Pins the 3650-day bound itself: the enormous-window test above
+        # only checks for an error envelope (ISSUE-834).
+        from istota.skills.tasks import parse_since
+        with pytest.raises(ValueError, match="further back than 3650 days"):
+            parse_since(value)
+
     def test_unknown_status_is_rejected_not_silently_empty(self, cli_env, capsys):
         # "complete" (not "completed") would otherwise return an empty list
         # indistinguishable from "nothing has finished yet".

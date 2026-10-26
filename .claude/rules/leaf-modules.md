@@ -267,6 +267,17 @@ This costs nothing new: every caller already handles the same answer from the al
 
 stdlib-only leaf, never raises.
 
+## lib/duration_parse.py
+
+`parse_duration(value, units)`: a whole number and one unit letter (`s`, `m`, `h`, `d`) as a `timedelta`, with the allowed letters passed by the caller, or a `ValueError` with a plain message (ISSUE-834). Four skill CLIs had a copy: `skills/tasks.parse_since` (`mhd`), `skills/location._share_duration` (`smh`), `assignments/charter.parse_duration_minutes` (`mhd`) and `skills/email._parse_since` (`d`). Only the charter capped the digits and only `parse_since` bounded the value before building a `timedelta`, so the email one raised `OverflowError` on a huge window, which its command reported as an out-of-range date or, on a connected account, as a connection failure; three matched `\d`, which takes any Unicode digit. The strict answer wins on each: ASCII digits only, at most `MAX_DIGITS` (9) significant digits (leading zeros do not count), so building the answer cannot overflow for any unit. Whitespace is stripped and the unit matched without case, the charter's rule, which widens the other three slightly.
+
+- **Too many digits is its own error.** `DurationTooLong` is a `ValueError` subclass, so `parse_since` and the email skill read it as past their bound and answer "further back than N days" rather than a shape error; the charter and location map both the same way.
+- **The bounds and the error stay with each caller.** `parse_since` caps at 3650 days, the email skill at 36500, the location share at 5 minutes to 24 hours, the charter at 1 minute to 366 days; each maps the `ValueError` to its own message, `argparse` error or `CharterError("invalid_duration")`. Zero is a valid parse.
+- `value` is typed `object`, since the charter takes values off argparse and JSON; `None` is a `ValueError`, not a `TypeError`.
+- Not converted: `assignments/charter._duration`, the inverse (minutes back to text).
+
+stdlib-only leaf, imports nothing from istota.
+
 ## lib/llm_json.py
 
 Where a markdown code fence starts and ends in **model** output: `lib/toml_fence.py`'s question about a string the model wrote. The expressions it replaced had two different defects, each in its own file:

@@ -364,6 +364,16 @@ class TestPreview:
         found, _ = _preview(held, {"ops": [{"op": "unset", "path": ["users", "sam", "briefings"]}]})
         assert found.errors == []
 
+    def test_default_briefings_may_be_removed(self):
+        held = CURRENT + '\n[[default_briefings]]\nname = "morning"\ncron = "0 7 * * *"\n'
+        found, _ = _preview(held, {"ops": [{"op": "unset", "path": ["default_briefings"]}]})
+        assert found.errors == []
+
+    def test_default_briefings_are_not_written(self):
+        held = CURRENT + '\n[[default_briefings]]\nname = "morning"\ncron = "0 7 * * *"\n'
+        found, _ = _preview(held, {"raw": held.replace("0 7", "0 8")})
+        assert found.errors and found.errors[0].startswith("default_briefings is not edited here.")
+
     def test_risky_keys_and_admins_are_listed(self, db_path):
         user_profiles.ensure_profile(db_path, "alice")
         web_auth.upsert_identity(db_path, "alice", "alice@example.org")

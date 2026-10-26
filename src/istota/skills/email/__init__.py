@@ -37,6 +37,7 @@ from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._credref import SecretValue
 from istota.skills._hostpath import EGRESS, WRITE, host_path
 from istota.lib.untrusted import frame_untrusted
+from istota.lib.duration_parse import DurationTooLong, parse_duration
 
 logger = logging.getLogger("istota.skills.email")
 
@@ -2099,6 +2100,11 @@ def _frame_untrusted(text: object) -> str:
     return frame_untrusted(text, _UNTRUSTED_LABEL)
 
 
+# Older than any mailbox worth searching, and well inside what `datetime`
+# can subtract from today without an OverflowError.
+_MAX_SINCE_DAYS = 36500
+
+
 def _parse_since(value: str | None) -> "_date | None":
     """Parse a --since value into a date: ISO ``YYYY-MM-DD`` or relative ``Nd``.
 
@@ -2109,9 +2115,16 @@ def _parse_since(value: str | None) -> "_date | None":
     if not value:
         return None
     value = value.strip()
-    m = re.fullmatch(r"(\d+)d", value)
-    if m:
-        return (datetime.now() - timedelta(days=int(m.group(1)))).date()
+    try:
+        delta = parse_duration(value, "d")
+    except DurationTooLong:
+        delta = timedelta.max
+    except ValueError:
+        delta = None
+    if delta is not None:
+        if delta > timedelta(days=_MAX_SINCE_DAYS):
+            raise ArgumentError(f"--since '{value}' is further back than {_MAX_SINCE_DAYS} days")
+        return (datetime.now() - delta).date()
     try:
         return _date.fromisoformat(value)
     except ValueError:

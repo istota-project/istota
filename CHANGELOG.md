@@ -44,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Native-brain summaries keep the results a task has already collected.** When older turns were summarized to make room, the summarizer saw only the start and end of each tool output, so a value in the middle of a file was lost along with the turn that read it. Tool outputs now reach the summarizer whole when they fit, and the summary prompt asks for collected results to be copied word for word and carried into later summaries.
 - In web chat, the Confirm and Cancel card under a message now stops at the same width as the message text instead of spanning the whole pane.
 - Skill commands no longer print config warnings, such as a retired `[[default_briefings]]` notice, under every result a task reads. The daemon log and the admin configuration view still show them.
+- The admin configuration page can now remove a retired `[[default_briefings]]` block. Its Remove button was refused with "default_briefings is not edited here"; the block may still not be added or changed there.
+- An email search with an enormous relative `--since`, such as `99999999d`, now says the window is too far back, instead of reporting an out-of-range date or, on a connected account, a connection failure.
 
 ## [0.47.0] - 2026-10-25
 

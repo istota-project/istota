@@ -2,6 +2,8 @@
 
 - `READ_ONLY`: keys the editor shows and never edits, each with the reason the
   page gives and where the key is changed instead.
+- `RETIRED`: the `READ_ONLY` keys that are old input: they may be removed,
+  never written.
 - `RISKY_KEYS`: editable, but able to lock admins out or change the security
   posture, so a change needs a typed confirmation. Any change to the admins
   file is risky too; it is not a config path, so it is not listed here.
@@ -34,7 +36,7 @@ def _read_only() -> dict[tuple[str, ...], str]:
     for name in config_module._NOT_CONFIGURATION:
         found[tuple(name.split("."))] = "Not a setting: istota sets this itself."
     found[("default_briefings",)] = "default_briefings is migration input only; use istota briefings migrate report/import."
-    # `*` is any user id. Retired: imported once, so it may be removed but not written.
+    # `*` is any user id.
     found[("users", "*", "briefings")] = (
         "[users.*.briefings] is retired: its entries were imported into the briefings "
         "database once. Edit briefings on the Briefings settings page."
@@ -81,6 +83,11 @@ def _read_only() -> dict[tuple[str, ...], str]:
 
 
 READ_ONLY: dict[tuple[str, ...], str] = _read_only()
+
+RETIRED: frozenset[tuple[str, ...]] = frozenset({
+    ("default_briefings",),
+    ("users", "*", "briefings"),
+})
 
 
 def read_only_reason(path: tuple[str, ...] | list[str]) -> str | None:
