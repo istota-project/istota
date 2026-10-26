@@ -1733,7 +1733,7 @@ class TestCmdSkills:
         result = await _skills(make_config(), "calendar")
         assert "**calendar**" in result
         assert "Status:" in result
-        assert "CalDAV" in result
+        assert "Dependencies: caldav" in result
 
 
 # =============================================================================
