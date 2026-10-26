@@ -46,6 +46,7 @@ from istota.health.serialize import (
     diagnosis_to_dict,
     encounter_to_dict,
     immunization_to_dict,
+    medication_to_dict,
     unmatched_coverage_to_dict,
 )
 from istota.health.units import (
@@ -1816,19 +1817,21 @@ async def api_get_encounter(
                 panel_dicts.append(_panel_to_dict(
                     p, biomarker_count=total, flagged_count=flagged,
                 ))
+            medications = health_db.medications_for_encounter(conn, encounter_id)
             docs = health_db.documents_for_entity(
                 conn, "encounter", encounter_id,
             )
-            return enc, diagnoses, panel_dicts, docs
+            return enc, diagnoses, panel_dicts, medications, docs
 
     result = await asyncio.to_thread(_query)
     if result is None:
         raise HTTPException(404, "encounter not found")
-    enc, diagnoses, panel_dicts, docs = result
+    enc, diagnoses, panel_dicts, medications, docs = result
     return {
         "encounter": _encounter_to_dict(enc),
         "diagnoses": [_diagnosis_to_dict(d) for d in diagnoses],
         "panels": panel_dicts,
+        "medications": [medication_to_dict(m) for m in medications],
         "documents": [_document_to_dict(d) for d in docs],
     }
 
@@ -2711,6 +2714,244 @@ async def api_immunization_explainer(
     if result is None:
         raise HTTPException(404, "vaccine not found")
     return result
+
+
+# ---- Medications ----------------------------------------------------------
+#
+# `/medications/{medication_id}` is typed int. A static sub-path added under
+# `/medications/` later must be declared before it.
+
+
+_MEDICATION_TEXT_FIELDS = (
+    "name", "generic_name", "dose", "dose_unit", "frequency", "route",
+    "category", "prescriber", "pharmacy", "reason", "start_date", "end_date",
+    "notes",
+)
+_MEDICATION_REQUIRED_FIELDS = ("name", "category")
+
+
+def _medication_fields(body: dict) -> tuple[dict, str | None]:
+    """The writable fields present in ``body``, or an error naming the field.
+
+    An empty string clears a nullable field, as null does. ``name`` and
+    ``category`` cannot be cleared. Category, dates and their order are
+    checked by the db functions, which raise ``ValueError``.
+    """
+    out: dict = {}
+    for field in _MEDICATION_TEXT_FIELDS:
+        if field not in body:
+            continue
+        value = body[field]
+        if value is not None and not isinstance(value, str):
+            return {}, f"{field} must be a string"
+        if isinstance(value, str):
+            value = value.strip() or None
+        if value is None and field in _MEDICATION_REQUIRED_FIELDS:
+            return {}, f"{field} cannot be empty"
+        out[field] = value
+    if "active" in body:
+        if not isinstance(body["active"], bool):
+            return {}, "active must be true or false"
+        out["active"] = body["active"]
+    if "encounter_id" in body:
+        encounter_id = body["encounter_id"]
+        if encounter_id is not None:
+            if isinstance(encounter_id, bool):
+                return {}, "encounter_id must be an integer"
+            try:
+                encounter_id = int(encounter_id)
+            except (TypeError, ValueError):
+                return {}, "encounter_id must be an integer"
+        out["encounter_id"] = encounter_id
+    return out, None
+
+
+@router.get("/medications")
+async def api_list_medications(
+    ctx: HealthContext = Depends(get_user_context),
+    status: str = Query(default="active"),
+    category: str = Query(default=""),
+    name: str = Query(default=""),
+    since: str = Query(default=""),
+    until: str = Query(default=""),
+    limit: int = Query(default=200, le=500, ge=1),
+    offset: int = Query(default=0, ge=0),
+):
+    def _query():
+        with health_db.connect(ctx.db_path) as conn:
+            return health_db.list_medications(
+                conn,
+                status=status,
+                category=category or None,
+                name=name or None,
+                since=since or None,
+                until=until or None,
+                limit=limit,
+                offset=offset,
+            )
+
+    try:
+        rows = await asyncio.to_thread(_query)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return {"medications": [medication_to_dict(r) for r in rows]}
+
+
+@router.post("/medications")
+async def api_create_medication(
+    request: Request,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be an object"}, status_code=400)
+    if not isinstance(body.get("name"), str) or not body["name"].strip():
+        return JSONResponse({"error": "name is required"}, status_code=400)
+    fields, error = _medication_fields(body)
+    if error:
+        return JSONResponse({"error": error}, status_code=400)
+    encounter_id = fields.get("encounter_id")
+
+    def _insert():
+        with health_db.connect(ctx.db_path) as conn:
+            if encounter_id is not None and health_db.get_encounter(
+                conn, encounter_id,
+            ) is None:
+                return None
+            mid = health_db.insert_medication(conn, **fields, source="manual")
+            conn.commit()
+        return mid
+
+    try:
+        mid = await asyncio.to_thread(_insert)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    if mid is None:
+        return JSONResponse({"error": "encounter not found"}, status_code=400)
+    return {"status": "ok", "id": mid}
+
+
+@router.get("/medications/{medication_id}")
+async def api_get_medication(
+    medication_id: int,
+    ctx: HealthContext = Depends(get_user_context),
+):
+    def _query():
+        with health_db.connect(ctx.db_path) as conn:
+            row = health_db.get_medication(conn, medication_id)
+            encounter = None
+            if row and row.encounter_id is not None:
+                encounter = health_db.get_encounter(conn, row.encounter_id)
+        return row, encounter
+
+    row, encounter = await asyncio.to_thread(_query)
+    if not row:
+        raise HTTPException(404, "medication not found")
+    return {
+        "medication": medication_to_dict(row),
+        "encounter": _encounter_to_dict(encounter) if encounter else None,
+        "documents": [],
+    }
+
+
+@router.put("/medications/{medication_id}")
+async def api_update_medication(
+    medication_id: int,
+    request: Request,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be an object"}, status_code=400)
+    fields, error = _medication_fields(body)
+    if error:
+        return JSONResponse({"error": error}, status_code=400)
+    encounter_id = fields.get("encounter_id")
+
+    def _update():
+        with health_db.connect(ctx.db_path) as conn:
+            if health_db.get_medication(conn, medication_id) is None:
+                return "missing"
+            if encounter_id is not None and health_db.get_encounter(
+                conn, encounter_id,
+            ) is None:
+                return "no-encounter"
+            health_db.update_medication(conn, medication_id, **fields)
+            conn.commit()
+        return "ok"
+
+    try:
+        outcome = await asyncio.to_thread(_update)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    if outcome == "missing":
+        raise HTTPException(404, "medication not found")
+    if outcome == "no-encounter":
+        return JSONResponse({"error": "encounter not found"}, status_code=400)
+    return {"status": "ok"}
+
+
+@router.post("/medications/{medication_id}/discontinue")
+async def api_discontinue_medication(
+    medication_id: int,
+    request: Request,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    body: object = {}
+    if await request.body():
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be an object"}, status_code=400)
+    end_date = body.get("end_date")
+    if end_date is not None and not isinstance(end_date, str):
+        return JSONResponse({"error": "end_date must be a string"}, status_code=400)
+    if end_date is None or not end_date.strip():
+        # The user's today, not the server's: a stop recorded in the evening
+        # west of UTC would otherwise land on tomorrow.
+        end_date = health_garmin_sync._user_today(
+            _user_tz(request, ctx.user_id),
+        ).isoformat()
+
+    def _discontinue():
+        with health_db.connect(ctx.db_path) as conn:
+            n = health_db.discontinue_medication(
+                conn, medication_id, end_date=end_date,
+            )
+            stored = health_db.get_medication(conn, medication_id) if n else None
+            conn.commit()
+        return stored
+
+    try:
+        stored = await asyncio.to_thread(_discontinue)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    if stored is None:
+        raise HTTPException(404, "medication not found")
+    return {"status": "ok", "end_date": stored.end_date}
+
+
+@router.delete("/medications/{medication_id}")
+async def api_delete_medication(
+    medication_id: int,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    def _delete():
+        with health_db.connect(ctx.db_path) as conn:
+            n = health_db.delete_medication(conn, medication_id)
+            conn.commit()
+        return n
+
+    n = await asyncio.to_thread(_delete)
+    if not n:
+        raise HTTPException(404, "medication not found")
+    return {"status": "ok"}
 
 
 # ---- Documents ------------------------------------------------------------
