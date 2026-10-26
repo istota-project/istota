@@ -25,11 +25,12 @@ import math
 import os
 import re
 import sqlite3
-from datetime import date, datetime, timezone, tzinfo
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import TYPE_CHECKING, Any, Sequence
 
 from istota import storage
 from istota.assignments import store, validators
+from istota.lib.duration_parse import parse_duration
 from istota.sandbox import confined
 
 if TYPE_CHECKING:
@@ -66,8 +67,6 @@ SCRATCHPAD_SEED = (
 # A date-only deadline is the end of that day, so it renders back as the date.
 _END_OF_DAY_SUFFIX = "T23:59:59.999Z"
 _SLUG_DROP = re.compile(r"[^a-z0-9]+")
-_DURATION = re.compile(r"(\d{1,6})([mhd])")
-_DURATION_UNITS = {"m": 1, "h": 60, "d": 1440}
 _DURATION_MAX_MINUTES = 366 * 1440
 MODEL_MAX_CHARS = 100
 
@@ -219,14 +218,14 @@ def validate_cadence(cfg: "AssignmentsConfig", minutes: object) -> int:
 def parse_duration_minutes(value: object) -> int:
     """`Nm`, `Nh` or `Nd` as whole minutes; the inverse of `_duration`.
 
-    Raises `CharterError("invalid_duration")`. The tree's only other relative
-    parser, `skills/tasks.parse_since`, turns a window into a past timestamp
-    rather than a length, so it is not this.
+    Raises `CharterError("invalid_duration")`. The shape is `lib/duration_parse`'s,
+    shared with the tasks, location and email skills; the bounds are this one's.
     """
-    match = _DURATION.fullmatch(str(value or "").strip().lower())
-    if match is None:
-        raise CharterError("invalid_duration", "a duration is a number with m, h or d, such as 30m, 6h or 2d")
-    minutes = int(match.group(1)) * _DURATION_UNITS[match.group(2)]
+    try:
+        delta = parse_duration(value, "mhd")
+    except ValueError:
+        raise CharterError("invalid_duration", "a duration is a number with m, h or d, such as 30m, 6h or 2d") from None
+    minutes = delta // timedelta(minutes=1)
     if minutes < 1 or minutes > _DURATION_MAX_MINUTES:
         raise CharterError("invalid_duration", "a duration must be between 1 minute and 366 days")
     return minutes

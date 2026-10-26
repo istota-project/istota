@@ -24,12 +24,12 @@ subcommands also need the framework-side geocode caches and read
 import argparse
 import json
 import os
-import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from istota.lib.duration_parse import parse_duration
 from istota.skills._cli import fail as _fail, parse_and_resolve, run_skill_cli
 
 
@@ -853,11 +853,12 @@ def cmd_import_garmin_tracks(args):
 
 
 def _share_duration(value):
-    match = re.fullmatch(r"([0-9]+)(s|m|h)", value)
-    if match:
-        seconds = int(match[1]) * {"s": 1, "m": 60, "h": 3600}[match[2]]
-        if 300 <= seconds <= 86400:
-            return seconds
+    try:
+        seconds = int(parse_duration(value, "smh").total_seconds())
+    except ValueError:
+        seconds = None
+    if seconds is not None and 300 <= seconds <= 86400:
+        return seconds
     raise argparse.ArgumentTypeError("Use a duration from 5m to 24h, with s, m or h units")
 
 

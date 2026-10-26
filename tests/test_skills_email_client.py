@@ -777,6 +777,14 @@ class TestParseSince:
         with pytest.raises(ValueError):
             _parse_since("2026")
 
+    @pytest.mark.parametrize("value", ["999999999d", "999999999999d"])
+    def test_an_enormous_window_is_an_argument_error(self, value):
+        # timedelta(days=...) and the subtraction from now raise
+        # OverflowError, which escaped the ArgumentError envelope (ISSUE-834).
+        from istota.skills.email import ArgumentError, _parse_since
+        with pytest.raises(ArgumentError):
+            _parse_since(value)
+
 
 # --------------------------------------------------------------------------
 # read / search / from-senders / newsletters / thread commands

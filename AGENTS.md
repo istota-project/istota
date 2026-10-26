@@ -225,6 +225,7 @@ src/istota/
 │   ├── markdown_headings.py # Headings in somebody else's text pushed below the section it sits under: skill overlays, the assignment charter → leaf-modules.md
 │   ├── text_match.py     # Literal query terms, FTS/LIKE matching and plain snippets → search.md
 │   ├── date_parse.py     # Loose date parsing for text a model or a person typed, validated → leaf-modules.md
+│   ├── duration_parse.py # `30m` / `6h` / `2d` as a timedelta, units chosen by the caller, digits bounded: tasks, location, email, assignments → leaf-modules.md
 │   ├── filenames.py      # The one rule for turning a name somebody else chose into a filename → leaf-modules.md
 │   ├── unreachable.py    # Why a host could not be reached, as a fixed message, and whether a request read-timed out: setup's checks and doctor → leaf-modules.md
 │   ├── mountinfo.py      # Which mount covers a path: the entrypoint's rclone preflight and the cgroup root check → leaf-modules.md
