@@ -221,6 +221,29 @@ def test_each_provider_carries_its_own_key_only(world, mode):
         assert LISTING not in reveal_inference_key(spec.inference_key)
 
 
+def test_the_config_editor_never_writes_the_listing_key():
+    """It moves credentials only through config paths, and this file has none
+    whose value is the key; a change set naming it is refused."""
+    from istota.config_editor.edits import ChangeError, _read_secrets
+
+    with pytest.raises(ChangeError):
+        _read_secrets({"istota_anthropic_listing_key": LISTING})
+    files, _inline = _read_secrets({"istota_provider_anthropic_api_key": "k"})
+    assert files == {"istota_provider_anthropic_api_key": "k"}
+
+
+def test_the_admin_view_names_the_two_ways_to_set_it(tmp_path):
+    from istota.webui.admin_config_view import build_config_view
+
+    config = Config(db_path=tmp_path / "istota.db", temp_dir=tmp_path / "temp")
+    view = build_config_view(config)
+    entry = next(e for e in view["secrets"] if e["name"] == "istota_anthropic_listing_key")
+    assert entry["read_only_reason"]
+    assert "--anthropic-model-listing-key-file" in entry["read_only_reason"]
+    assert "put-files" in entry["read_only_reason"]
+    assert LISTING not in str(view)
+
+
 def test_a_manifest_naming_the_listing_key_or_a_provider_is_refused():
     from istota.skills._loader import _parse_env_specs
 

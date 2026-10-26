@@ -300,6 +300,18 @@ _MISSING = object()
 _SECRET_LABELS = {
     "anthropic_api_key": "Anthropic API key",
     "claude_code_oauth_token": "Claude Code OAuth token",
+    "istota_anthropic_listing_key": "Anthropic model-listing key",
+}
+
+#: Files this page never writes, with how they are set instead. The
+#: model-listing key is mounted on the daemon alone, so this process cannot
+#: even see whether it is there.
+_DAEMON_ONLY_REASONS = {
+    "istota_anthropic_listing_key": (
+        "Read by the daemon alone, which this page cannot see. Set it with "
+        "`istota setup --anthropic-model-listing-key-file PATH`, or on the VM with "
+        "`istota-stack put-files`."
+    ),
 }
 
 # The section a file no config key reads belongs with: both are the Claude
@@ -307,6 +319,7 @@ _SECRET_LABELS = {
 _STANDALONE_SECTIONS = {
     "anthropic_api_key": "brain.claude_code",
     "claude_code_oauth_token": "brain.claude_code",
+    "istota_anthropic_listing_key": "models",
 }
 
 
@@ -613,7 +626,11 @@ def _secret_files(config: "Config", ctx: dict) -> list[dict]:
             # the uppercase variable, in the web process too.
             is_set = bool(os.environ.get(name.upper(), "").strip())
         source = _secret_source(name, path, ctx["document"], ctx["secrets_dir"])
-        reason = (schema.READ_ONLY.get(path) if path else None) or ctx["managed_reasons"]["secrets"]
+        reason = (
+            _DAEMON_ONLY_REASONS.get(name)
+            or (schema.READ_ONLY.get(path) if path else None)
+            or ctx["managed_reasons"]["secrets"]
+        )
         if reason is None and source == "environment":
             reason = _env_override_reason(name.upper())
         # A move writes both resources but keeps the value, so `READ_ONLY`,
