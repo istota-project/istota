@@ -1,7 +1,12 @@
+import { sortRows } from '@minot/ui/ui/tableSort.svelte';
+import { findLinks } from '$lib/markdown';
+
 /** The rows the viewer draws as a table; the rest stay in the source view. */
 export const CSV_MAX_ROWS = 2_000;
 
-export type CsvTable = { header: string[]; rows: string[][]; totalRows: number; width: number };
+export type CsvRecords = { header: string[]; body: string[][]; width: number };
+export type CsvSort = { column: number; descending: boolean };
+export type CellPart = { text: string; href?: string };
 
 /**
  * Parse delimited text the RFC 4180 way: quoted fields may hold the delimiter,
@@ -55,20 +60,61 @@ export function parseDelimited(text: string, delimiter: string): string[][] {
   return records;
 }
 
-/** The first record is the header; every row is padded to the widest one. */
-export function csvTable(text: string, delimiter: string, maxRows = CSV_MAX_ROWS): CsvTable | null {
+/** The first record is the header, padded to the widest record; the body is every other record, unpadded. */
+export function csvRecords(text: string, delimiter: string): CsvRecords | null {
   const records = parseDelimited(text, delimiter).filter(
     (record) => !(record.length === 1 && record[0] === ''),
   );
   if (records.length === 0) return null;
   const width = Math.max(...records.map((record) => record.length));
-  const pad = (record: string[]) =>
-    record.length < width ? [...record, ...Array(width - record.length).fill('')] : record;
-  const body = records.slice(1);
-  return {
-    header: pad(records[0]),
-    rows: body.slice(0, maxRows).map(pad),
-    totalRows: body.length,
-    width,
-  };
+  return { header: pad(records[0], width), body: records.slice(1), width };
+}
+
+/**
+ * The rows to draw: the whole body sorted, then cut to `maxRows` and padded.
+ * Sorting before the cut is what makes a sorted view of a long file show the
+ * top of the whole file rather than of its first `maxRows` rows.
+ */
+export function csvRows(
+  records: CsvRecords,
+  sort: CsvSort | null,
+  maxRows = CSV_MAX_ROWS,
+): string[][] {
+  const rows = sort ? sortBody(records.body, sort) : records.body;
+  return rows.slice(0, maxRows).map((row) => pad(row, records.width));
+}
+
+function pad(record: string[], width: number): string[] {
+  return record.length < width ? [...record, ...Array(width - record.length).fill('')] : record;
+}
+
+const NUMBER = /^[-+]?(\d+(\.\d*)?|\.\d+)(e[-+]?\d+)?$/i;
+
+/** A column whose every non-empty cell is a number sorts by value; any other by text. */
+function sortBody(body: string[][], sort: CsvSort): string[][] {
+  const cell = (row: string[]) => (row[sort.column] ?? '').trim();
+  const numeric = body.every((row) => cell(row) === '' || NUMBER.test(cell(row)));
+  if (!numeric) return sortRows(body, sort.descending, (row) => [cell(row)]);
+  const keyed = body.map((row) => ({ row, value: cell(row) === '' ? null : Number(cell(row)) }));
+  keyed.sort((a, b) => {
+    if (a.value === null || b.value === null)
+      return (a.value === null ? 1 : 0) - (b.value === null ? 1 : 0);
+    return sort.descending ? b.value - a.value : a.value - b.value;
+  });
+  return keyed.map((k) => k.row);
+}
+
+/** A cell's text split around the links in it, by the rule rendered documents autolink by. */
+export function cellParts(text: string): CellPart[] {
+  const links = text.includes(':') ? findLinks(text) : [];
+  if (links.length === 0) return [{ text }];
+  const parts: CellPart[] = [];
+  let at = 0;
+  for (const link of links) {
+    if (link.start > at) parts.push({ text: text.slice(at, link.start) });
+    parts.push({ text: text.slice(link.start, link.end), href: link.url });
+    at = link.end;
+  }
+  if (at < text.length) parts.push({ text: text.slice(at) });
+  return parts;
 }
