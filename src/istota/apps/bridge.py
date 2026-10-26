@@ -449,8 +449,22 @@ def _window_bound(args: dict, name: str, zone) -> datetime:
     return when if when.tzinfo is not None else when.replace(tzinfo=zone)
 
 
-def _event_time(value: datetime, all_day: bool) -> str:
-    return value.date().isoformat() if all_day else value.isoformat()
+def _event_instant(value: datetime, event_zone: str | None, zone) -> datetime:
+    # get_events strips tzinfo, leaving the wall time in the event's own zone;
+    # an event with no zone is floating and so the user's wall time.
+    source = zone
+    if event_zone:
+        try:
+            source = timezone.utc if event_zone.upper() == "UTC" else ZoneInfo(event_zone)
+        except (ValueError, KeyError):
+            source = zone
+    return value.replace(tzinfo=source).astimezone(zone)
+
+
+def _event_time(value: datetime, all_day: bool, event_zone: str | None, zone) -> str:
+    if all_day:
+        return value.date().isoformat()
+    return _event_instant(value, event_zone, zone).isoformat()
 
 
 def _calendar_list(ctx: CallContext, args: dict) -> dict:
@@ -492,7 +506,8 @@ def _calendar_list(ctx: CallContext, args: dict) -> dict:
             read.append(name)
             for event in calendar_skill.get_events(client, url, start, end):
                 events.append((name, event))
-    events.sort(key=lambda pair: pair[1].start)
+    events.sort(key=lambda pair: _event_instant(
+        pair[1].start, None if pair[1].all_day else pair[1].timezone, zone))
     return {
         "calendars": read,
         "events": [
@@ -500,8 +515,8 @@ def _calendar_list(ctx: CallContext, args: dict) -> dict:
                 "uid": event.uid,
                 "calendar": name,
                 "summary": event.summary,
-                "start": _event_time(event.start, event.all_day),
-                "end": _event_time(event.end, event.all_day),
+                "start": _event_time(event.start, event.all_day, event.timezone, zone),
+                "end": _event_time(event.end, event.all_day, event.timezone, zone),
                 "all_day": event.all_day,
                 "timezone": event.timezone,
                 "location": event.location,
@@ -530,9 +545,11 @@ def _skill_call(ctx: CallContext, args: dict) -> object:
     except CapabilityError:
         raise BridgeError("not_granted", "This app may not call that operation.") from None
     cap = skill_caps.SKILL_CAPS[scope]
-    user = ctx.config.get_user(ctx.user_id)
-    disabled = set(ctx.config.disabled_skills) | set(user.disabled_skills if user else ())
-    if cap.skill in disabled:
+    from istota.skills._loader import effective_disabled_skills, load_skill_index
+
+    config = ctx.config
+    index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+    if cap.skill in effective_disabled_skills(config, ctx.user_id, index):
         raise BridgeError("not_found", f"The {cap.skill} skill is turned off for you.")
     try:
         values = skill_caps.check_args(cap.arg_schema, args)

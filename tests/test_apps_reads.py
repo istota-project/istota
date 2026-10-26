@@ -270,6 +270,7 @@ WINDOW = {"from": "2026-11-01", "to": "2026-11-08"}
 
 class TestCalendarRead:
     def test_reads_every_owned_calendar_and_no_one_elses(self, config, apps_root, client, caldav):
+        config.users[USER].timezone = "Europe/Berlin"
         _install(config, apps_root, capabilities=["calendar:read"])
         result = _call(client, "calendar:read", "list", WINDOW).json()["result"]
         assert sorted(url for url, _, _ in caldav) == sorted([ALICE_WORK, ALICE_HOME])
@@ -279,11 +280,32 @@ class TestCalendarRead:
         standup, holiday = result["events"]
         assert standup == {
             "uid": "w1", "calendar": "Work", "summary": "Standup",
-            "start": "2026-11-02T09:00:00", "end": "2026-11-02T09:15:00", "all_day": False,
+            "start": "2026-11-02T09:00:00+01:00", "end": "2026-11-02T09:15:00+01:00", "all_day": False,
             "timezone": "Europe/Berlin", "location": "Room 4", "description": None,
         }
         assert (holiday["start"], holiday["end"], holiday["all_day"]) == ("2026-11-03", "2026-11-04", True)
         assert "dentist" not in str(result)
+
+    def test_timed_events_carry_an_offset_in_the_users_zone(self, config, apps_root, client, caldav):
+        # get_events hands back wall times in each event's own zone; an app
+        # parsing them as local time would put a UTC meeting an hour off.
+        config.users[USER].timezone = "America/New_York"
+        utc = CalendarEvent(
+            uid="u1", summary="Call", start=datetime(2026, 10, 26, 15, 0), end=datetime(2026, 10, 26, 16, 0),
+            timezone="UTC",
+        )
+        floating = CalendarEvent(
+            uid="f1", summary="Gym", start=datetime(2026, 10, 26, 7, 0), end=datetime(2026, 10, 26, 8, 0),
+        )
+        with patch("istota.skills.calendar.get_events", side_effect=lambda _c, url, s, e: (
+                [utc, floating] if url == ALICE_WORK else [])):
+            _install(config, apps_root, capabilities=["calendar:read"])
+            result = _call(client, "calendar:read", "list", WINDOW).json()["result"]
+        by_uid = {e["uid"]: e for e in result["events"]}
+        assert (by_uid["u1"]["start"], by_uid["u1"]["end"]) == ("2026-10-26T11:00:00-04:00", "2026-10-26T12:00:00-04:00")
+        # No zone on the event: it is floating, so it is the user's wall time.
+        assert by_uid["f1"]["start"] == "2026-10-26T07:00:00-04:00"
+        assert [e["uid"] for e in result["events"]] == ["f1", "u1"]
 
     def test_the_window_is_in_the_users_zone(self, config, apps_root, client, caldav):
         config.users[USER].timezone = "America/New_York"

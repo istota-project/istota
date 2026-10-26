@@ -129,6 +129,15 @@ class TestDispatch:
         resp = _call(client, "skill:memory_search.facts", "call", {})
         assert _code(resp) == "not_found"
 
+    def test_a_skill_off_by_its_capability_gate_is_not_found(self, config, apps_root, client, monkeypatch):
+        # The bridge reads the same disabled set a task does, capability gate included.
+        _install(config, apps_root, capabilities=["skill:memory_search.facts"])
+        monkeypatch.setattr(
+            "istota.skills._loader.capability_disabled_skills", lambda index, available: {"memory_search"},
+        )
+        resp = _call(client, "skill:memory_search.facts", "call", {})
+        assert _code(resp) == "not_found"
+
 
 _VALID_ARGS = {
     "markets.quote": {"symbols": ["AAPL"]},
