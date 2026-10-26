@@ -316,6 +316,13 @@ describe('the readable-width cap belongs to the slot, not the card', () => {
     expect(rule).not.toBeNull();
     expect(rule![1]).toMatch(/max-width:\s*var\(--chat-body-max\)/);
   });
+
+  it('is present on the confirmation card slot too', () => {
+    const css = styleOf('Message.svelte');
+    const rule = css.match(/\.content\s*>\s*:global\(\.confirm-card\)\s*\{([^}]*)\}/);
+    expect(rule).not.toBeNull();
+    expect(rule![1]).toMatch(/max-width:\s*var\(--chat-body-max\)/);
+  });
 });
 
 describe('editing', () => {
