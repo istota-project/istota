@@ -236,9 +236,11 @@ class TestTheTaskCarriesItFromTheRoom:
             _token, task_id = _inbound.room_token, _inbound.task_id
             task = db.get_task(conn, task_id)
         assert task.brain == "native"
-        # A stored bare id is recorded on the task as the ref it names.
-        assert task.model == "anthropic/claude-opus-5"
+        # The model column holds the id within its provider; a legacy row names no
+        # provider, which means the brain's default.
+        assert task.model == "claude-opus-5"
         assert task.model_namespace == "anthropic"
+        assert task.provider is None
 
     async def test_the_whole_chain_keeps_the_users_model(self, db_path, tmp_path):
         """End to end: the ISSUE-420 room, one turn, model intact.
