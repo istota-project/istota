@@ -30,6 +30,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from istota.lib.duration_parse import DurationTooLong, parse_duration
 from istota.skills._cli import fail as _fail, parse_and_resolve, run_skill_cli
 
 # The response comes back as one line of JSON and lands in an agent's context.
@@ -51,11 +52,8 @@ TASK_STATUSES = (
     "failed", "pending_confirmation", "cancelled",
 )
 
-_RELATIVE_SINCE = re.compile(r"^(\d+)([mhd])$")
 # The largest relative window worth honouring. `timedelta` accepts far more
-# than SQLite will ever hold, and an unbounded int reaches C-level conversion
-# and raises OverflowError — which is not a ValueError, so it escaped the
-# caller's handler as a traceback instead of the JSON error envelope.
+# than SQLite will ever hold.
 _MAX_SINCE_DAYS = 3650
 _ABSOLUTE_FORMATS = ("%Y-%m-%d", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S")
 
@@ -213,17 +211,17 @@ def parse_since(value: str) -> str:
     ``created_at``, matching nothing at all and reporting it as "no tasks yet".
     """
     value = (value or "").strip()
-    match = _RELATIVE_SINCE.match(value)
-    if match:
-        amount, unit = int(match.group(1)), match.group(2)
-        days = {"m": amount / 1440, "h": amount / 24, "d": amount}[unit]
-        if days > _MAX_SINCE_DAYS:
+    try:
+        delta = parse_duration(value, "mhd")
+    except DurationTooLong:
+        delta = timedelta.max
+    except ValueError:
+        delta = None
+    if delta is not None:
+        if delta > timedelta(days=_MAX_SINCE_DAYS):
             raise ValueError(
                 f"--since {value!r} is further back than {_MAX_SINCE_DAYS} days"
             )
-        delta = {"m": timedelta(minutes=amount),
-                 "h": timedelta(hours=amount),
-                 "d": timedelta(days=amount)}[unit]
         return (datetime.now(timezone.utc) - delta).strftime("%Y-%m-%d %H:%M:%S")
 
     normalized = value.replace("T", " ", 1)
