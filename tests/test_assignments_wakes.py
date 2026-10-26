@@ -9,6 +9,8 @@ it. The lane is the third phase of `WorkerPool.dispatch`.
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -17,7 +19,7 @@ import pytest
 
 from istota import db
 from istota import scheduler as sched
-from istota.assignments import budget, charter, lifecycle, store, wakes
+from istota.assignments import budget, charter, lifecycle, scratchpad, store, validators, wakes
 from istota.config import AssignmentsConfig, BrainConfig, SchedulerConfig, UserConfig
 from istota.usage.telemetry import BrainUsage
 
@@ -1016,6 +1018,187 @@ class TestTheScratchpadAtTheEnd:
         assert wake.outcome == "failed"
         with db.get_db(config.db_path) as conn:
             assert store.wake_snapshot(conn, made.wake_id, "after") is None
+
+
+def _started_digests(config, wake_id) -> dict:
+    with db.get_db(config.db_path) as conn:
+        row = conn.execute(
+            "SELECT payload FROM assignment_events WHERE wake_id = ? AND kind = 'wake_started'", (wake_id,),
+        ).fetchone()
+    return json.loads(row[0])["deliverables"]
+
+
+class TestNoFileIOUnderTheWriterLock:
+    """ISSUE-833: a workspace read can stall on the mount, and the whole
+    scheduler waits on the framework DB's writer lock while it does."""
+
+    def _probe(self, config, calls: list):
+        """Record, for each file access, whether another connection could take
+        the writer lock at that moment."""
+
+        def wrap(name, real):
+            def probed(*args, **kwargs):
+                other = sqlite3.connect(config.db_path, timeout=0)
+                try:
+                    other.execute("BEGIN IMMEDIATE")
+                    other.rollback()
+                    calls.append((name, "free"))
+                except sqlite3.OperationalError:
+                    calls.append((name, "held"))
+                finally:
+                    other.close()
+                return real(*args, **kwargs)
+            return probed
+
+        return [
+            patch.object(scratchpad, "read_file", wrap("read_file", scratchpad.read_file)),
+            patch.object(scratchpad, "write_file", wrap("write_file", scratchpad.write_file)),
+            patch.object(validators, "run_item", wrap("run_item", validators.run_item)),
+            patch.object(
+                validators, "deliverable_digests",
+                wrap("deliverable_digests", validators.deliverable_digests),
+            ),
+        ]
+
+    def test_pickup_and_finish_read_and_write_files_with_the_lock_free(self, config):
+        a = _live(config, items=(("Three quotes", "mechanical", CSV_CHECK),))
+        pad = _file(config, a, charter.SCRATCHPAD_FILE)
+        pad.write_text("")  # restored at pickup
+        calls: list = []
+        probes = self._probe(config, calls)
+        for probe in probes:
+            probe.start()
+        try:
+            made = _start(config, a)
+            assert pad.read_text() == charter.SCRATCHPAD_SEED
+            _file(config, a, "quotes.csv").write_text(GOOD_CSV)
+            pad.write_text("")  # broken by the wake, restored at finish
+            wake = _end(config, made)
+        finally:
+            for probe in probes:
+                probe.stop()
+
+        assert {name for name, _ in calls} == {
+            "read_file", "write_file", "run_item", "deliverable_digests",
+        }
+        assert [c for c in calls if c[1] == "held"] == []
+        # The outcomes are what they were with the reads under the lock.
+        assert wake.progress_signals == ["item_passing", "deliverable_changed"]
+        assert pad.read_text() == charter.SCRATCHPAD_SEED
+        with db.get_db(config.db_path) as conn:
+            restored = [e.payload for e in store.list_events(conn, a) if e.kind == "scratchpad_restored"]
+            assert store.wake_snapshot(conn, made.wake_id, "after").content == charter.SCRATCHPAD_SEED
+        assert [(p["phase"], p["reason"]) for p in restored] == [("begin", "empty"), ("end", "empty")]
+
+    def test_an_item_added_after_the_read_is_read_again_before_it_is_recorded(self, config):
+        a = _live(config, items=(("Three quotes", "mechanical", CSV_CHECK),))
+        made = _start(config, a)
+        _file(config, a, "quotes.csv").write_text(GOOD_CSV)
+        real = wakes._read_finish_files
+        reads: list = []
+
+        def read_then_add(*args, **kwargs):
+            files = real(*args, **kwargs)
+            reads.append(files)
+            if len(reads) == 1:
+                with db.get_db(config.db_path) as other:
+                    store.insert_item(
+                        other, a, text="Has a header", kind="mechanical",
+                        validator={"check": "contains", "file": "quotes.csv", "text": "source"},
+                    )
+            return files
+
+        with patch.object(wakes, "_read_finish_files", side_effect=read_then_add):
+            _end(config, made)
+
+        assert len(reads) == 2
+        with db.get_db(config.db_path) as conn:
+            statuses = [(item.text, item.status) for item in store.list_items(conn, a)]
+        assert statuses == [("Three quotes", "passing"), ("Has a header", "passing")]
+
+    def _add_item_on(self, config, a, real, reads, *, every=False):
+        def read_then_add(*args, **kwargs):
+            files = real(*args, **kwargs)
+            reads.append(files)
+            if every or len(reads) == 1:
+                with db.get_db(config.db_path) as other:
+                    store.insert_item(
+                        other, a, text=f"Header {len(reads)}", kind="mechanical",
+                        validator={"check": "contains", "file": "quotes.csv", "text": "source"},
+                    )
+            return files
+        return read_then_add
+
+    def test_pickup_reads_again_when_an_item_is_added_after_the_read(self, config):
+        a = _live(config, items=(("Three quotes", "mechanical", CSV_CHECK),))
+        _file(config, a, "quotes.csv").write_text(GOOD_CSV)
+        (made,) = _dispatch(config)
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, made.task_id)
+        reads: list = []
+        with patch.object(wakes, "_read_pickup_files",
+                          side_effect=self._add_item_on(config, a, wakes._read_pickup_files, reads)):
+            assert wakes.start_wake(config, task) is not None
+
+        assert len(reads) == 2
+        assert set(_started_digests(config, made.wake_id)) == {"quotes.csv"}
+
+    def test_a_pickup_whose_files_keep_moving_is_turned_away(self, config):
+        a = _live(config, items=(("Three quotes", "mechanical", CSV_CHECK),))
+        (made,) = _dispatch(config)
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, made.task_id)
+        reads: list = []
+        with patch.object(wakes, "_read_pickup_files",
+                          side_effect=self._add_item_on(config, a, wakes._read_pickup_files, reads, every=True)):
+            assert wakes.start_wake(config, task) is None
+
+        assert len(reads) == wakes._IO_ATTEMPTS
+        (wake,) = _wakes(config, a)
+        assert (wake.started_at, wake.outcome) == (None, "not_active")
+        assert _get(config, a).state == "sleeping"
+
+    def test_a_finish_whose_files_keep_moving_leaves_the_wake_open(self, config):
+        a = _live(config, items=(("Three quotes", "mechanical", CSV_CHECK),))
+        made = _start(config, a)
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE tasks SET status = 'completed' WHERE id = ?", (made.task_id,))
+            task = db.get_task(conn, made.task_id)
+        reads: list = []
+        with patch.object(wakes, "_read_finish_files",
+                          side_effect=self._add_item_on(config, a, wakes._read_finish_files, reads, every=True)):
+            assert wakes.finish_wake(config, task, "completed") is False
+
+        assert len(reads) == wakes._IO_ATTEMPTS
+        (wake,) = _wakes(config, a)
+        assert wake.ended_at is None
+        assert _get(config, a).state == "active"
+        with db.get_db(config.db_path) as conn:
+            assert "finish_failed" not in [e.kind for e in store.list_events(conn, a)]
+        # The reaper's later call reads a settled list and ends it.
+        assert wakes.finish_wake(config, task, "completed") is True
+
+    def test_a_finish_read_before_pickup_set_started_at_is_read_again(self, config):
+        _live(config)
+        (made,) = _dispatch(config)
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, made.task_id)
+        real = wakes._read_finish_files
+        reads: list = []
+
+        def read_then_start(conn, config_, wake, outcome):
+            files = real(conn, config_, wake, outcome)
+            reads.append(files)
+            if len(reads) == 1:
+                with db.get_db(config.db_path) as other:
+                    store.update_wake(other, wake.id, started_at=_iso(_now()))
+            return files
+
+        with patch.object(wakes, "_read_finish_files", side_effect=read_then_start):
+            assert wakes.finish_wake(config, task, "failed") is True
+
+        assert [files.started_at is None for files in reads] == [True, False]
+        assert [files.scratchpad is None for files in reads] == [True, False]
 
 
 class TestValidatorsAndSignals:

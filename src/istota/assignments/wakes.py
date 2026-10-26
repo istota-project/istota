@@ -42,7 +42,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -328,6 +328,51 @@ def _pickup_target(
     return assignment, wake
 
 
+#: How many times pickup or a finish re-reads the files when what it read them
+#: for moved before its transaction opened.
+_IO_ATTEMPTS = 3
+
+
+class _FilesMoved(Exception):
+    """What the files were read for changed before the transaction opened."""
+
+
+def _items_key(items: list[store.Item]) -> tuple:
+    """What a file read depends on in the done-when list: the mechanical items
+    and their checks, not their status."""
+    return tuple(
+        (item.id, json.dumps(item.validator, sort_keys=True))
+        for item in items if item.kind == "mechanical"
+    )
+
+
+@dataclass(frozen=True)
+class _PickupFiles:
+    """The workspace as pickup found it, read with no transaction open."""
+
+    wake_id: int
+    items_key: tuple
+    scratchpad: scratchpad.FileState
+    digests: dict
+
+
+def _read_pickup_files(conn: sqlite3.Connection, config: "Config", task: db.Task) -> _PickupFiles | None:
+    """Read what a first pickup needs, or None when pickup will not need it."""
+    target = _pickup_target(conn, config, task)
+    if target is None or target[1].started_at is not None:
+        return None
+    assignment, wake = target
+    items = store.list_items(conn, assignment.id)
+    return _PickupFiles(
+        wake_id=wake.id,
+        items_key=_items_key(items),
+        scratchpad=scratchpad.read_file(config, assignment),
+        # The deliverables as the wake found them, for finish_wake's
+        # `deliverable_changed` signal.
+        digests=validators.deliverable_digests(config, assignment, items),
+    )
+
+
 def start_wake(config: "Config", task: db.Task, *, dry_run: bool = False) -> WakeStart | None:
     """Pick a wake up (spec Design section 7): check, snapshot, claim, build.
 
@@ -355,31 +400,51 @@ def start_wake(config: "Config", task: db.Task, *, dry_run: bool = False) -> Wak
                 if e.consumed_by_wake in (None, wake.id)
             ]
         else:
-            with write_transaction(conn):
-                target = _pickup_target(conn, config, task)
-                if target is not None:
-                    assignment, wake = target
-                    if wake.started_at is None:
-                        text = scratchpad.begin(config, conn, assignment, wake).text
-                        store.consume_inbox(conn, assignment.id, wake.id)
-                        store.update_wake(conn, wake.id, started_at=iso_z(now))
-                        # The deliverables as the wake found them, for
-                        # finish_wake's `deliverable_changed` signal.
-                        digests = validators.deliverable_digests(
-                            config, assignment, store.list_items(conn, assignment.id),
-                        )
-                        store.insert_event(
-                            conn, assignment.id, kind="wake_started", actor="system",
-                            wake_id=wake.id, payload={"task_id": task.id, "deliverables": digests},
-                        )
-                    else:
-                        before = store.wake_snapshot(conn, wake.id, "before")
-                        text = before.content if before is not None else scratchpad.restore_text(
-                            conn, assignment.id,
-                        )
-            conn.commit()
+            # The files are read before the writer lock is taken (ISSUE-833),
+            # then the transaction re-checks the wake and the items they were
+            # read for, and reads again if either moved.
+            target = None
+            rewrite = None
+            exhausted = False
+            for _attempt in range(_IO_ATTEMPTS):
+                files = _read_pickup_files(conn, config, task)
+                try:
+                    with write_transaction(conn):
+                        target = _pickup_target(conn, config, task)
+                        if target is not None:
+                            assignment, wake = target
+                            if wake.started_at is None:
+                                if (files is None or files.wake_id != wake.id
+                                        or files.items_key != _items_key(store.list_items(conn, assignment.id))):
+                                    raise _FilesMoved
+                                begun = scratchpad.begin(conn, assignment, wake, files.scratchpad)
+                                text, rewrite = begun.text, begun.rewrite
+                                store.consume_inbox(conn, assignment.id, wake.id)
+                                store.update_wake(conn, wake.id, started_at=iso_z(now))
+                                store.insert_event(
+                                    conn, assignment.id, kind="wake_started", actor="system",
+                                    wake_id=wake.id,
+                                    payload={"task_id": task.id, "deliverables": files.digests},
+                                )
+                            else:
+                                before = store.wake_snapshot(conn, wake.id, "before")
+                                text = before.content if before is not None else scratchpad.restore_text(
+                                    conn, assignment.id,
+                                )
+                except _FilesMoved:
+                    conn.rollback()
+                    target = None
+                    continue
+                conn.commit()
+                break
+            else:
+                exhausted = True
+                logger.warning("assignment wake task %s turned away: the files kept moving at pickup", task.id)
+            if target is not None and rewrite is not None:
+                scratchpad.write_restored(config, conn, assignment, wake.id, rewrite, phase="begin")
             if target is None:
-                logger.info("assignment wake task %s turned away: not active", task.id)
+                if not exhausted:
+                    logger.info("assignment wake task %s turned away: not active", task.id)
                 finish_wake(config, task, "not_active")
                 return None
             wake = store.get_wake(conn, wake.id)
@@ -459,6 +524,43 @@ class Finished:
     notices: list[tuple[str, object]]
     #: The bell rows those notices wrote, for `deliver_pending` after commit.
     raised: tuple = ()
+    #: The scratchpad text `scratchpad.end` chose to write back after commit.
+    rewrite: str | None = None
+
+
+@dataclass(frozen=True)
+class _FinishFiles:
+    """The workspace as the finish found it, read with no transaction open.
+    `read` is False when the finish needs no files (no assignment, or a wake
+    turned away)."""
+
+    read: bool
+    started_at: str | None
+    items_key: tuple = ()
+    scratchpad: scratchpad.FileState | None = None
+    results: dict = field(default_factory=dict)
+    digests: dict = field(default_factory=dict)
+
+
+def _read_finish_files(
+    conn: sqlite3.Connection, config: "Config", wake: store.Wake, outcome: str,
+) -> _FinishFiles:
+    assignment = store.get_assignment(conn, wake.assignment_id)
+    if assignment is None or outcome == "not_active":
+        return _FinishFiles(read=False, started_at=wake.started_at)
+    items = store.list_items(conn, assignment.id)
+    return _FinishFiles(
+        read=True,
+        started_at=wake.started_at,
+        items_key=_items_key(items),
+        # A wake that never started has no `before`, and takes no `after`.
+        scratchpad=scratchpad.read_file(config, assignment) if wake.started_at is not None else None,
+        results={
+            item.id: validators.run_item(config, assignment, item)
+            for item in items if item.kind == "mechanical"
+        },
+        digests=validators.deliverable_digests(config, assignment, items),
+    )
 
 
 def finish_wake(
@@ -479,11 +581,36 @@ def finish_wake(
     now = datetime.now(timezone.utc)
     try:
         with db.get_db(config.db_path) as conn:
-            with write_transaction(conn):
+            # The files are read before the writer lock is taken (ISSUE-833);
+            # `_finish` re-checks what they were read for and raises
+            # `_FilesMoved` when it changed, and they are read again.
+            finished = None
+            for _attempt in range(_IO_ATTEMPTS):
                 wake = _wake_for(conn, task, wake_id)
                 if wake is None or wake.ended_at is not None:
                     return False
-                finished = _finish(conn, config, wake, task, outcome, now)
+                files = _read_finish_files(conn, config, wake, outcome)
+                try:
+                    with write_transaction(conn):
+                        wake = _wake_for(conn, task, wake_id)
+                        if wake is None or wake.ended_at is not None:
+                            return False
+                        finished = _finish(conn, config, wake, task, outcome, now, files)
+                except _FilesMoved:
+                    conn.rollback()
+                    continue
+                conn.commit()
+                break
+            if finished is None:
+                # Left open; the reaper tries again once the task is past its grace.
+                logger.warning("assignment wake %s: the files kept moving at finish", wake_id)
+                return False
+            if finished.rewrite is not None:
+                assignment = store.get_assignment(conn, finished.assignment_id)
+                if assignment is not None:
+                    scratchpad.write_restored(
+                        config, conn, assignment, finished.wake_id, finished.rewrite, phase="end",
+                    )
         deliver_pending(config, finished.raised)
         return True
     except Exception:
@@ -516,8 +643,11 @@ def _finish(
     task: db.Task | None,
     outcome: str,
     now: datetime,
+    files: _FinishFiles,
 ) -> Finished:
-    """The finishing sequence, in the spec's order. Runs inside the caller's transaction."""
+    """The finishing sequence, in the spec's order. Runs inside the caller's
+    transaction, from `files` read before it opened; raises `_FilesMoved` when
+    the wake or its mechanical items changed since."""
     assignment = store.get_assignment(conn, wake.assignment_id)
     if assignment is None or outcome == "not_active":
         store.update_wake(conn, wake.id, ended_at=iso_z(now), outcome=_WAKE_OUTCOMES.get(outcome, "failed"),
@@ -527,20 +657,25 @@ def _finish(
         return Finished(wake.id, wake.assignment_id, _WAKE_OUTCOMES.get(outcome, "failed"), [],
                         None, [])
 
+    if (not files.read or files.started_at != wake.started_at
+            or files.items_key != _items_key(store.list_items(conn, assignment.id))):
+        raise _FilesMoved
+
     cfg = config.assignments
     task_outcome = outcome if outcome in _TASK_OUTCOMES else "failed"
 
     # 1. The scratchpad. A wake that never started has no `before` snapshot,
     # and an `after` taken now would swallow the user's edit as a baseline.
+    rewrite = None
     if wake.started_at is not None:
-        scratchpad.end(config, conn, assignment, wake)
+        rewrite = scratchpad.end(conn, assignment, wake, files.scratchpad).rewrite
 
     # 2. Validators.
-    newly_passing = _run_validators(conn, config, assignment, wake, now)
+    newly_passing = _record_validators(conn, assignment, wake, files.results, now)
     items = store.list_items(conn, assignment.id)
 
     # 3. Progress signals.
-    signals = _progress_signals(conn, config, assignment, wake, items, newly_passing)
+    signals = _progress_signals(conn, assignment, wake, items, newly_passing, files.digests)
 
     # 4. Attempts: the thrash check.
     thrash_target = _thrash_target(conn, assignment.id, wake.id)
@@ -614,20 +749,23 @@ def _finish(
     )
     raised = assignment_notices.write_notices(conn, assignment.id, notices)
     assignment_notices.settle(conn, assignment.id)
-    return Finished(wake.id, assignment.id, wake_outcome, signals, state, notices, tuple(raised))
+    return Finished(
+        wake.id, assignment.id, wake_outcome, signals, state, notices, tuple(raised), rewrite,
+    )
 
 
-def _run_validators(
-    conn: sqlite3.Connection, config: "Config", assignment: store.Assignment, wake: store.Wake,
-    now: datetime,
+def _record_validators(
+    conn: sqlite3.Connection, assignment: store.Assignment, wake: store.Wake,
+    results: dict, now: datetime,
 ) -> list[int]:
-    """Run every mechanical item and record it. Returns the ids that moved to `passing`."""
+    """Record every mechanical item's result, run before the transaction
+    opened. Returns the ids that moved to `passing`."""
     checked_at = iso_z(now)
     newly_passing: list[int] = []
     for item in store.list_items(conn, assignment.id):
         if item.kind != "mechanical":
             continue
-        result = validators.run_item(config, assignment, item)
+        result = results[item.id]
         store.set_item_status(conn, item.id, result.status, detail=result.detail, checked_at=checked_at)
         if result.status != item.status:
             store.insert_event(
@@ -642,11 +780,11 @@ def _run_validators(
 
 def _progress_signals(
     conn: sqlite3.Connection,
-    config: "Config",
     assignment: store.Assignment,
     wake: store.Wake,
     items: list[store.Item],
     newly_passing: list[int],
+    digests: dict,
 ) -> list[str]:
     """The host-visible facts that say the wake moved the assignment (section 11).
 
@@ -677,20 +815,20 @@ def _progress_signals(
     ).fetchone()
     if new_pair is not None:
         signals.append("attempt_new_outcome")
-    if _deliverable_changed(conn, config, assignment, wake, items):
+    if _deliverable_changed(conn, wake, items, digests):
         signals.append("deliverable_changed")
     return signals
 
 
 def _deliverable_changed(
     conn: sqlite3.Connection,
-    config: "Config",
-    assignment: store.Assignment,
     wake: store.Wake,
     items: list[store.Item],
+    after: dict,
 ) -> bool:
     """A file a mechanical item names changed during the wake, and every item
-    checking that file now passes. Compared with the digests pickup recorded."""
+    checking that file now passes. `after` (read before the finish's
+    transaction) is compared with the digests pickup recorded."""
     row = conn.execute(
         "SELECT payload FROM assignment_events WHERE wake_id = ? AND kind = 'wake_started'"
         " ORDER BY id LIMIT 1",
@@ -704,7 +842,6 @@ def _deliverable_changed(
         return False
     if not isinstance(before, dict):
         return False
-    after = validators.deliverable_digests(config, assignment, items)
     for file, digest in after.items():
         if digest is None or digest == before.get(file):
             continue
