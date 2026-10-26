@@ -60,6 +60,15 @@ A poll run reports `throttled` alongside `errors`, and per feed `rate_limited` a
 
 The known gap is that none of this spans users: a poll is a per-user subprocess, so two users reach one host from one IP with no shared budget.
 
+**A feed must be on a public address.** The poll runs from the daemon's own network, so a feed URL that resolves to a private, loopback or reserved address is refused before any request is sent, and so is a redirect to one. The feed shows "The feed's address is not an http or https URL on a public host." as its error. To poll a feed on your own network, list its exact host name in the operator config:
+
+```toml
+[feeds]
+private_hosts = ["rss.home.example.org"]
+```
+
+Plain HTTP is allowed to any public host, and a user name and password in a feed URL are sent as Basic auth to that host only. Each fetch is capped at 16 MiB and 90 seconds, and follows at most five redirects. Tumblr and Are.na feeds are fetched from their fixed API hosts and are not affected.
+
 Are.na runs on the v3 API. Six block types have typed builders (`Text`, `Image`, `Link`, `Embed`, `Attachment`, `Channel`) over a generic fallback, so a type Are.na adds later still renders rather than breaking the poll.
 
 ## Storage

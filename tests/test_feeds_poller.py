@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from tests.support.feed_server import FeedServer
+
 pytest.importorskip("feedparser", reason="feeds extra not installed")
 
 from istota.feeds import db as feeds_db
@@ -1493,3 +1495,82 @@ class TestLeadImageSchemes:
         )
         assert entry.image_urls == []
         assert 'src="data:image/png;base64,iVBORw0KGgo="' in (entry.content_html or "")
+
+
+# ---------------------------------------------------------------------------
+# The default RSS fetch goes through the guard (#838)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def feed_server():
+    s = FeedServer()
+    yield s
+    s.close()
+
+
+def _feed_at(url: str) -> FeedRecord:
+    feed = _rss_feed()
+    feed.url = url
+    return feed
+
+
+class TestTheRssFetchIsGuarded:
+    def test_a_feed_on_a_private_address_is_refused_before_any_request(self, feed_server):
+        feed_server.routes["/feed.xml"] = (200, {}, SAMPLE_RSS)
+        result = poll_feed(_feed_at(feed_server.url("/feed.xml")))
+        assert result.items == []
+        assert result.error == "The feed's address is not an http or https URL on a public host."
+        assert feed_server.received == []
+
+    def test_a_feed_on_a_listed_private_host_is_fetched(self, feed_server):
+        feed_server.routes["/feed.xml"] = (200, {"ETag": '"v1"'}, SAMPLE_RSS)
+        result = poll_feed(
+            _feed_at(feed_server.url("/feed.xml")), private_hosts=["localhost"],
+        )
+        assert result.error is None
+        assert [item.guid for item in result.items] == ["hello-1"]
+        assert result.etag == '"v1"'
+
+    def test_credentials_in_the_url_are_sent_as_basic_auth(self, feed_server):
+        import base64
+
+        feed_server.routes["/feed.xml"] = (200, {}, SAMPLE_RSS)
+        url = feed_server.url("/feed.xml").replace("http://", "http://reader:p%40ss@")
+        result = poll_feed(_feed_at(url), private_hosts=["localhost"])
+        assert result.error is None
+        assert feed_server.authorization == [
+            "Basic " + base64.b64encode(b"reader:p@ss").decode(),
+        ]
+
+    def test_a_scheme_other_than_http_gets_the_same_plain_refusal(self):
+        result = poll_feed(_feed_at("ftp://feeds.example.org/rss.xml"))
+        assert result.error == "The feed's address is not an http or https URL on a public host."
+
+    def test_a_redirect_to_another_private_host_is_refused_at_the_hop(self, feed_server):
+        feed_server.routes["/feed.xml"] = (
+            302, {"Location": feed_server.url("/moved.xml", host="127.0.0.1")}, b"",
+        )
+        feed_server.routes["/moved.xml"] = (200, {}, SAMPLE_RSS)
+        result = poll_feed(
+            _feed_at(feed_server.url("/feed.xml")),
+            private_hosts=["localhost", "127.0.0.1"],
+        )
+        assert result.error == "The feed's address is not an http or https URL on a public host."
+        assert feed_server.received == ["/feed.xml"]
+
+    def test_poll_due_feeds_hands_the_listed_hosts_to_each_fetch(self, tmp_path, feed_server):
+        feed_server.routes["/feed.xml"] = (200, {}, SAMPLE_RSS)
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.upsert_feed(
+                conn, url=feed_server.url("/feed.xml"), title=None, site_url=None,
+                source_type="rss", category_id=None, poll_interval_minutes=30,
+            )
+            conn.commit()
+            outcomes = poll_due_feeds(
+                conn, now=datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc),
+                private_hosts=["localhost"],
+            )
+        assert [new for _, _, new in outcomes] == [1]

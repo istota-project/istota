@@ -345,7 +345,7 @@ ICS_POLL_INTERVAL_MIN = 300
 
 
 # What a `private_hosts` entry (`[wordpress]`, `[servarr]`,
-# `[mail_accounts]`, `[sharing]`) may look like: a
+# `[mail_accounts]`, `[sharing]`, `[feeds]`) may look like: a
 # host name (with an optional trailing dot) or an IP literal. The skills match
 # entries by exact name, so a URL, a port or a wildcard matches nothing. The
 # Ansible role asserts with this same string.
@@ -2392,6 +2392,18 @@ class HealthModuleConfig:
 
 
 @dataclass
+class FeedsModuleConfig:
+    """Module-level config for the feeds module (``[feeds]``).
+
+    ``private_hosts`` has ``[wordpress] private_hosts``'s meaning: exact names
+    an RSS or Atom feed may reach on a private address. Unlike ``[sharing]``,
+    plain http to a public host is allowed: the user chose the scheme, and the
+    request carries nothing the daemon adds.
+    """
+    private_hosts: list[str] = field(default_factory=list)
+
+
+@dataclass
 class MoneyModuleConfig:
     """Module-level config for the money module (``[money]``).
 
@@ -2489,6 +2501,7 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     briefings: BriefingsModuleConfig = field(default_factory=BriefingsModuleConfig)
     health: HealthModuleConfig = field(default_factory=HealthModuleConfig)
+    feeds: FeedsModuleConfig = field(default_factory=FeedsModuleConfig)
     money: MoneyModuleConfig = field(default_factory=MoneyModuleConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
     memory_search: MemorySearchConfig = field(default_factory=MemorySearchConfig)
@@ -5564,6 +5577,7 @@ def load_config(
     _validate_wordpress_private_hosts(config)
     _warn_malformed_private_hosts("mail_accounts", config.mail_accounts.private_hosts, "account")
     _warn_malformed_private_hosts("sharing", config.sharing.private_hosts, "shared source")
+    _warn_malformed_private_hosts("feeds", config.feeds.private_hosts, "feed")
     _validate_servarr(config)
     _validate_claude_code_brain(config)
     _validate_configured_model_references(config)

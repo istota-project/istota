@@ -27,6 +27,7 @@ def synthesize_feeds_context(
     data_dir: Path | None = None,
     db_path: Path | None = None,
     tumblr_api_key: str = "",
+    private_hosts: list[str] | None = None,
 ) -> FeedsContext:
     """Build a :class:`FeedsContext` rooted at a workspace dir.
 
@@ -50,4 +51,5 @@ def synthesize_feeds_context(
         db_path=db_path,
         tumblr_api_key=tumblr_api_key,
         workspace_root=workspace_root,
+        private_hosts=list(private_hosts or []),
     )

@@ -752,7 +752,7 @@ def _check_task_deadline(check: HeartbeatCheck, config: "Config", user_id: str) 
 #: What every entry has in common is a cost that multiplies by something the
 #: heartbeat multiplies by. `self-check` is per user *and* per check definition,
 #: on a cadence each user chooses in their own `HEARTBEAT.md`, and it is not
-#: admin-gated — `run_check` gates only `shell-command`. So a check costing one
+#: admin-gated — `run_check` gates only `shell-command` and `url-health`. So a check costing one
 #: spawn per configured user, or reaching past a `--version`, is a check this
 #: path must not run.
 #:
@@ -824,7 +824,7 @@ def _check_self(check: HeartbeatCheck, config: "Config", user_id: str) -> CheckR
     **An admin is told which checks failed; everyone else gets the count.** The
     disclosure boundary the removed `!check` command drew, kept here for the same
     reason and by the same mechanism, because this handler reaches the same
-    audience: ``run_check`` admin-gates only ``shell-command``, and
+    audience: ``run_check`` admin-gates only ``shell-command`` and ``url-health``, and
     ``check_heartbeats`` runs each user's own ``HEARTBEAT.md`` and delivers the
     message to that user. A registry ``detail`` is not a per-user fact —
     ``config.skill_overlays`` labels overlays ``{user_id}/{filename}`` across

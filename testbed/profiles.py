@@ -144,8 +144,9 @@ NETWORK = Profile("network", services=("model", "gitlab"))
 # `services/ntfy.py::NtfyService.config` for why that is not a gap.
 NOTIFY = Profile("notify", services=("model", "ntfy"))
 
-#: No config: the feeds module is on by default (modules are opt-out), and the
-#: stub is pointed at by seeded DB rows rather than by anything in config.toml.
+#: No config of its own: the feeds module is on by default (modules are
+#: opt-out), the stub is pointed at by seeded DB rows, and the stub's own
+#: `config()` lists its host in `[feeds] private_hosts`.
 FEEDS = Profile("feeds", services=("model", "feeds"))
 
 #: The signaling server, run for real, driven from the harness.

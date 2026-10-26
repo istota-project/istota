@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **Upgrade note:** the first start rebuilds the approval-request table to allow the new activation approval, so this release owes a run of the upgrade tier before it ships.
 
+### Security
+
+- An RSS or Atom feed can no longer point the feed poller at a private address. A feed on a local, loopback or internal address, or one that redirects to such an address, is now refused with an error on the feed, and nothing is requested from it. **Upgrade note:** a feed you poll on your own network stops updating until its host is listed in `[feeds] private_hosts`.
+
 ### Changed
 
 - **Specs the bot drafts are ready for a coding agent.** A new spec has every section an implementer reads, including a survey of the existing code taken from the project's source, and its stages are one checklist line each. Specs drafted before this may lack those sections.

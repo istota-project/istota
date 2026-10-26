@@ -68,4 +68,3 @@ An `active` or `error` share is a `share:<id>` place (`workspace/places.py`): no
 - An `error` share has no backoff: there is no poller for shares, so the next invocation retries; `error_count` still counts.
 - A share's `ls` path (`share:<id>:<path>`) carries the sharer's file name unfenced, since the model passes it back.
 - No provider-captured iTIP REPLY fixtures; the tests use ones built from RFC 6047 and RFC 5546.
-- `feeds/poller.py` and the heartbeat `url-health` check still fetch user-chosen URLs without `guarded_send` (the spec's open question 6).

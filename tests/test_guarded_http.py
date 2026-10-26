@@ -313,6 +313,38 @@ class TestHopRulesOnPublicNames:
         assert err.value.code == "host_refused"
         assert seen == ["cal.example"]
 
+    def test_plain_http_to_a_public_host_is_sent_when_the_caller_allows_it(self):
+        seen = []
+
+        def handler(request):
+            seen.append(str(request.url))
+            return httpx.Response(200, content=b"ok")
+
+        with _mock_client(handler) as c:
+            response = guarded_http.guarded_send(
+                c, "GET", "http://blog.example/rss", private_hosts=[], max_bytes=100,
+                timeout=5, deadline_seconds=10, allow_plain_http=True,
+                resolve=self._resolve({"blog.example": [PUBLIC]}),
+            )
+        assert response.content == b"ok"
+        assert seen == [f"http://{PUBLIC}/rss"]
+
+    def test_allowing_plain_http_still_refuses_a_private_address(self):
+        seen = []
+
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(200)
+
+        with _mock_client(handler) as c, pytest.raises(GuardRefused) as err:
+            guarded_http.guarded_send(
+                c, "GET", "http://nas.internal/rss", private_hosts=[], max_bytes=100,
+                timeout=5, deadline_seconds=10, allow_plain_http=True,
+                resolve=self._resolve({"nas.internal": ["10.0.0.5"]}),
+            )
+        assert err.value.code == "host_refused"
+        assert seen == []
+
     def test_a_public_feed_cannot_bounce_onto_a_listed_internal_host(self):
         seen = []
 

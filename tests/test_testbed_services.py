@@ -22,7 +22,7 @@ import pytest
 from testbed import profiles, services
 from testbed import stack as stack_support
 from testbed.httpstub import LOOPBACK, HttpStub
-from testbed.services import REGISTRY, ServiceCall, gitlab, mail, signaling
+from testbed.services import REGISTRY, ServiceCall, feeds, gitlab, mail, signaling
 from testbed.services.model_endpoint import serve_script
 
 REPO = Path(__file__).resolve().parents[1]
@@ -318,22 +318,25 @@ class TestServiceConfigNamesOnlyRealKeys:
         """One of each service that has a `config()` to check.
 
         `mail` costs nothing: `serve()` starts no container — the profile's
-        compose overlay does that. `signaling` is the same shape. `nextcloud`,
-        `ntfy` and `feeds` return nothing by design; their stubs' own tests say
-        so (`tests/test_testbed_stubs.py`).
+        compose overlay does that. `signaling` is the same shape. `nextcloud`
+        and `ntfy` return nothing by design; their stubs' own tests say so
+        (`tests/test_testbed_stubs.py`).
         """
         endpoint = serve_script([{"text": "ok"}])
         forge = gitlab.serve(tmp_path / "repos")
         post = mail.serve(tmp_path / "mail")
         hpb = signaling.serve()
+        documents = feeds.serve()
         try:
             yield {
                 endpoint.name: endpoint,
                 forge.name: forge,
                 post.name: post,
                 hpb.name: hpb,
+                documents.name: documents,
             }
         finally:
+            documents.close()
             hpb.close()
             post.close()
             forge.close()

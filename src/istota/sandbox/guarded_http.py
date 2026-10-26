@@ -14,8 +14,10 @@ their own.
 `guarded_send` is the whole path for the callers that have no such rules (the
 shared-source fetchers: ICS feeds, OCM discovery and WebDAV):
 
-- plain ``http`` only to a host on ``private_hosts``, and a non-public address
-  only for a listed host;
+- plain ``http`` only to a host on ``private_hosts`` unless the caller passes
+  ``allow_plain_http`` (the RSS poller, whose user chose the scheme and whose
+  request carries nothing the daemon adds), and a
+  non-public address only for a listed host either way;
 - each checked address in turn on a refused connection;
 - no redirect unless ``max_redirects`` allows it, and then every hop checked
   from scratch: a hop may reach a non-public address only when its host is
@@ -209,6 +211,7 @@ def guarded_send(
     headers: dict | None = None,
     content: bytes | None = None,
     resolve=None,
+    allow_plain_http: bool = False,
 ) -> httpx.Response:
     """One request under the guard, redirects included; the answer, body read.
 
@@ -228,8 +231,8 @@ def guarded_send(
     while True:
         scheme, host, port = _parse(url)
         # Plain http, a first request or an https-to-http hop alike, goes only
-        # to a listed host.
-        if scheme == "http" and host not in listed:
+        # to a listed host, unless the caller allows it for user-chosen URLs.
+        if scheme == "http" and host not in listed and not allow_plain_http:
             raise GuardRefused("host_refused")
         allowed_private = listed if hops == 0 else listed & {origin[1]}
         addresses, refused = net_guard.checked_addresses(
