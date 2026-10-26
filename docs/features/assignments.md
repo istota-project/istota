@@ -46,7 +46,7 @@ The host runs every check after every wake. A link in the folder is not followed
 
 ## What happens while it runs
 
-The scheduler wakes an assignment when its next wake is due, when you leave it a note or report a step done, and once at the deadline. A wake is an ordinary task on its own worker lane: its prompt carries the charter, the done-when board, open hand-offs, what arrived since the last wake, the attempt log, the scratchpad and the last wakes' summaries. Its answer is not posted anywhere; it is kept as the wake's summary.
+The scheduler wakes an assignment when its next wake is due, when you leave it a note or report a step done, and once at the deadline. A completion it proposed holds the deadline wake back until you answer it: confirming closes the assignment, and rejecting it lets the deadline wake run, if the deadline has not had one. A wake is an ordinary task on its own worker lane: its prompt carries the charter, the done-when board, open hand-offs, what arrived since the last wake, the attempt log, the scratchpad and the last wakes' summaries. Its answer is not posted anywhere; it is kept as the wake's summary.
 
 A wake ends by asking for the next one: in some hours, at a time, or not until you act. It can hand you a step ("photograph the furnace label", with what to report back and a due date), record what it tried and how it went, report a milestone, and propose completion. Two wakes are at least 15 minutes apart by default.
 

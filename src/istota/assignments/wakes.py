@@ -11,7 +11,9 @@ The rules, first match wins (spec Design section 7):
 
 1. A deadline that has passed, with no deadline wake recorded for that
    deadline, wakes a sleeping or waiting assignment once (`fired_by =
-   'deadline'`).
+   'deadline'`). Not one waiting on a proposed completion: the user answers
+   that with `close`; a rejection sleeps it, and a deadline that has not had
+   its wake fires then.
 2. A sleeping assignment whose `next_wake_at` has come is woken (`time`).
 3. A sleeping assignment with an unconsumed inbox event of a kind in
    `PULL_FORWARD_KINDS` is woken early (`inbox`), unless its last wake ended
@@ -146,8 +148,11 @@ def _decide(
     """``(fired_by, None)`` to wake, ``(None, floor)`` to defer to a floor, else ``(None, None)``."""
     if assignment.state not in lifecycle.WAKEABLE_STATES:
         return None, None
+    # The deadline wake would drop a pending completion proposal (ISSUE-835).
+    proposal_pending = assignment.state == "waiting" and "completion" in assignment.waiting_on
     deadline = _parse(assignment.deadline)
-    if deadline is not None and deadline <= now and not _deadline_wake_done(conn, assignment):
+    if (deadline is not None and deadline <= now and not proposal_pending
+            and not _deadline_wake_done(conn, assignment)):
         return "deadline", None
 
     if assignment.state == "sleeping":

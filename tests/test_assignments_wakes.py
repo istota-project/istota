@@ -281,9 +281,20 @@ class TestTheDeadlineWake:
             store.update_assignment(conn, assignment_id, next_wake_at=_iso(_now() + timedelta(hours=5)))
         assert _dispatch(config) == []
 
-    def test_the_deadline_wakes_a_wait_on_a_proposed_completion(self, config):
+    def test_a_pending_completion_proposal_blocks_the_deadline_wake(self, config):
+        """ISSUE-835: the proposal is the user's to answer; a wake would drop it."""
         assignment_id = _assignment(
             config, state="waiting", waiting_on=["completion"],
+            deadline=_iso(_now() - timedelta(minutes=1)),
+        )
+
+        assert _dispatch(config) == []
+        after = _get(config, assignment_id)
+        assert (after.state, after.waiting_on) == ("waiting", ["completion"])
+
+    def test_the_deadline_still_wakes_a_wait_on_the_user(self, config):
+        assignment_id = _assignment(
+            config, state="waiting", waiting_on=["user"],
             deadline=_iso(_now() - timedelta(minutes=1)),
         )
 
@@ -1285,6 +1296,28 @@ class TestCompletion:
         _end(config, made)
         after = _get(config, a)
         assert (after.state, after.waiting_on) == ("waiting", ["completion"])
+
+    def test_a_deadline_passing_on_a_proposal_keeps_it_until_the_user_rejects(self, config):
+        """ISSUE-835, end to end: the deadline waits for the user's answer."""
+        deadline = _now() + timedelta(hours=1)
+        a = _live(config, deadline=_iso(deadline))
+        made = _start(config, a)
+        _complete(config, made)
+        _end(config, made)
+        bell_row = "SELECT state FROM notifications WHERE source = 'assignment' AND dedup_key = ?"
+        key = f"completion:{a}"
+
+        past_deadline = deadline + timedelta(minutes=5)
+        assert _dispatch(config, past_deadline) == []
+        after = _get(config, a)
+        assert (after.state, after.waiting_on) == ("waiting", ["completion"])
+        with db.get_db(config.db_path) as conn:
+            assert conn.execute(bell_row, (key,)).fetchone()["state"] == "open"
+
+        with db.get_db(config.db_path) as conn:
+            lifecycle.close(conn, a, user_id="alice", completed=False, missing="a fourth quote")
+        (deadline_wake,) = _dispatch(config, past_deadline)
+        assert (deadline_wake.assignment_id, deadline_wake.fired_by) == (a, "deadline")
 
     def test_a_failed_wakes_completion_is_ignored(self, config):
         a = _live(config, auto_complete=True)
