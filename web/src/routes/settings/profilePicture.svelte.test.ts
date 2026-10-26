@@ -140,7 +140,12 @@ afterEach(cleanup);
 it('places Security directly after Identity for an email session', async () => {
   renderPage({
     ...person(),
-    auth: { method: 'email', email: 'alice@example.com', can_change_password: true },
+    auth: {
+      method: 'email',
+      email: 'alice@example.com',
+      can_change_password: true,
+      can_set_password: false,
+    },
   });
   const identity = await screen.findByRole('heading', { name: 'Identity' });
   const security = await screen.findByRole('heading', { name: 'Security' });

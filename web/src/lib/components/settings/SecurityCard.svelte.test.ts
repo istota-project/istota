@@ -9,7 +9,12 @@ vi.mock('$lib/api', async (importOriginal) => ({
 }));
 import { changePassword, AuthError } from '$lib/api';
 
-const auth = { method: 'email' as const, email: 'alice@example.com', can_change_password: true };
+const auth = {
+  method: 'email' as const,
+  email: 'alice@example.com',
+  can_change_password: true,
+  can_set_password: false,
+};
 afterEach(cleanup);
 beforeEach(() => vi.clearAllMocks());
 
@@ -35,18 +40,33 @@ it('requires the current password and ends the session after a successful change
 });
 
 it('shows passwordless users their login email and the reset-page action', () => {
-  render(SecurityCard, { auth: { ...auth, can_change_password: false }, onSignedOut: vi.fn() });
+  render(SecurityCard, {
+    auth: { ...auth, can_change_password: false, can_set_password: true },
+    onSignedOut: vi.fn(),
+  });
   expect(screen.queryByLabelText('Current password')).toBeNull();
   expect(screen.getByRole('link', { name: 'Set a password' }).getAttribute('href')).toBe(
     '/istota/auth/reset',
   );
   expect(screen.getByLabelText('Login email')).toHaveValue(auth.email);
-  expect(screen.getByText(/You sign in with an email link/)).toHaveClass('description');
+  expect(screen.getByText(/no password yet/)).toHaveClass('description');
   expect(screen.getByRole('link', { name: 'Set a password' }).parentElement).toHaveClass('actions');
 });
 
-it('does not show the card for a Nextcloud session', () => {
-  render(SecurityCard, { auth: { ...auth, method: 'nextcloud' }, onSignedOut: vi.fn() });
+it('offers a Nextcloud session with no password the set-password action', () => {
+  render(SecurityCard, {
+    auth: { ...auth, method: 'nextcloud', can_change_password: false, can_set_password: true },
+    onSignedOut: vi.fn(),
+  });
+  expect(screen.queryByLabelText('Current password')).toBeNull();
+  expect(screen.getByRole('link', { name: 'Set a password' })).toBeTruthy();
+});
+
+it('does not show the card when the session can neither set nor change a password', () => {
+  render(SecurityCard, {
+    auth: { ...auth, method: 'nextcloud', email: null, can_change_password: false },
+    onSignedOut: vi.fn(),
+  });
   expect(screen.queryByRole('heading', { name: 'Security' })).toBeNull();
 });
 

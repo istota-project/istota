@@ -2490,7 +2490,7 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         "contact": contact,
         "nextcloud_token": nextcloud_token,
         "auth": {"method": method, "email": identity.email if identity else None,
-                 "can_change_password": bool(method in ("email", "local_code") and identity and identity.password_hash)},
+                 **_password_capability(method, identity)},
         # Content hashes for the two identities the client always renders, so
         # it can build an immutable URL for each without a round trip. A third
         # party's hash deliberately does not travel here or per message: the
@@ -2501,15 +2501,30 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
     }
 
 
+# A Nextcloud session holds the same identity row, and the password it may
+# hold signs in by email; changing it revokes that session too (one epoch).
+_PASSWORD_SESSION_METHODS = ("email", "nextcloud")
+
+
+def _password_capability(method: str, identity) -> dict:
+    """Whether Settings may change this account's password, or only send a link to set one."""
+    usable = bool(_config and _config.web.has_method("email") and method in _PASSWORD_SESSION_METHODS
+                  and identity and not identity.disabled)
+    return {"can_change_password": usable and bool(identity.password_hash),
+            "can_set_password": usable and not identity.password_hash}
+
+
 @api_router.post("/account/password")
 async def api_account_password(request: Request):
     if not _config or not _config.web.has_method("email"):
         raise HTTPException(status_code=404)
     _require_api_auth(request)
     _verify_origin(request)
-    if request.session["auth"]["method"] != "email":
-        raise HTTPException(status_code=403, detail="Sign in by email to change your password.")
+    if request.session["auth"]["method"] not in _PASSWORD_SESSION_METHODS:
+        raise HTTPException(status_code=403, detail="Sign in by email or Nextcloud to change your password.")
     identity = request.state.web_auth_identity
+    if identity is None:
+        raise HTTPException(status_code=403, detail="This account has no email login.")
     if not identity.password_hash:
         raise HTTPException(status_code=400, detail="Use a password reset link to set your first password.")
     try:
