@@ -41,7 +41,9 @@
   let name = $derived(
     direct?.name ?? preview?.name ?? (path.split('/').pop() || share?.name) ?? 'File',
   );
-  let markdown = $derived(preview?.kind === 'text' && presentationFor(name).kind === 'markdown');
+  let rendersView = $derived(
+    preview?.kind === 'text' && ['markdown', 'table'].includes(presentationFor(name).kind),
+  );
   // The year only when it is not this one (at every width), so a phone keeps size and time on one line.
   function shortModified(iso: string): DateFormatOptions {
     const sameYear = new Date(iso).getFullYear() === new Date().getFullYear();
@@ -112,7 +114,7 @@
     {/if}
   {/snippet}
   {#snippet actions()}
-    {#if markdown}<div class="view-toggle" role="group" aria-label="Document view">
+    {#if rendersView}<div class="view-toggle" role="group" aria-label="Document view">
         <IconButton
           label="Rendered"
           title="Rendered"

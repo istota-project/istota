@@ -9,6 +9,7 @@
     splitFrontmatter,
     HIGHLIGHT_MAX_CHARS,
   } from '$lib/fileViewer/presentation';
+  import { csvTable } from '$lib/fileViewer/csv';
 
   let {
     name,
@@ -19,7 +20,7 @@
   }: {
     name: string;
     text: string;
-    /** Show a Markdown document as its readonly source. The caller owns the toggle. */
+    /** Show a Markdown document or a table as its readonly source. The caller owns the toggle. */
     source?: boolean;
     fill?: boolean;
     untrusted?: boolean;
@@ -31,6 +32,9 @@
     language && text.length <= HIGHLIGHT_MAX_CHARS
       ? hljs.highlight(text, { language, ignoreIllegals: true }).value
       : null,
+  );
+  let table = $derived(
+    presentation.kind === 'table' && !source ? csvTable(text, presentation.delimiter) : null,
   );
 </script>
 
@@ -46,6 +50,27 @@
           {@html (untrusted ? renderUntrustedDocument : renderDocument)(split.body)}
         </div>
       </article>
+    {:else if table}
+      {#if table.rows.length < table.totalRows}<p class="caption table-note">
+          Showing the first {table.rows.length.toLocaleString()} of {table.totalRows.toLocaleString()}
+          rows. The source view has the rest.
+        </p>{/if}
+      <div class="csv-scroll">
+        <table class="table csv-table" aria-label={name}>
+          <thead>
+            <tr>
+              {#each table.header as cell, i (i)}<th scope="col" title={cell}>{cell}</th>{/each}
+            </tr>
+          </thead>
+          <tbody>
+            {#each table.rows as row, r (r)}
+              <tr>
+                {#each row as cell, i (i)}<td title={cell}>{cell}</td>{/each}
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
     {:else if highlighted !== null}
       <div class="markdown"><pre><code class="hljs">{@html highlighted}</code></pre></div>
     {:else}
@@ -103,6 +128,42 @@
     padding: var(--space-2) var(--space-3);
     border: 0;
     border-radius: 0;
+  }
+  /* One scroller for both axes, so the header can stick while a wide table
+     scrolls sideways. */
+  .csv-scroll {
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .fill .csv-scroll {
+    flex: 1;
+    min-height: 0;
+  }
+  .table-note {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+  }
+  .csv-table {
+    width: max-content;
+    min-width: 100%;
+  }
+  .csv-table th,
+  .csv-table td {
+    max-width: 24rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    overflow-wrap: normal;
+  }
+  .csv-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--surface-card);
+  }
+  .csv-table th:first-child,
+  .csv-table td:first-child {
+    padding-inline-start: var(--space-3);
   }
   .file-body {
     /* Escapes the 16px touch floor; see TextFileEditor.svelte. */
