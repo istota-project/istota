@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Long tasks on the native brain no longer forget earlier work when a summary fails.** When the request to summarize older turns failed, those turns were dropped anyway and the task carried on without them. They are now kept, the summary is tried once more, and the cost of summary requests is counted in the task's usage.
+- **Native-brain summaries keep the results a task has already collected.** When older turns were summarized to make room, the summarizer saw only the start and end of each tool output, so a value in the middle of a file was lost along with the turn that read it. Tool outputs now reach the summarizer whole when they fit, and the summary prompt asks for collected results to be copied word for word and carried into later summaries.
 - In web chat, the Confirm and Cancel card under a message now stops at the same width as the message text instead of spanning the whole pane.
 - Skill commands no longer print config warnings, such as a retired `[[default_briefings]]` notice, under every result a task reads. The daemon log and the admin configuration view still show them.
 

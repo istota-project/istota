@@ -347,9 +347,10 @@ def _cap_tool_result(text: str) -> str:
     return f"{text[:keep]}\n… [{elided} chars of tool output elided] …\n{text[-keep:]}"
 
 
-def _serialize_for_summary(llm_messages: list) -> str:
+def _serialize_for_summary(llm_messages: list, cap_tool_results: bool = True) -> str:
     """Render LLM messages to plain text for the summary prompt.
 
+    ``cap_tool_results`` applies ``_cap_tool_result`` to each tool result.
     Reasoning (``ThinkingContent``) is left out: it matches no branch below,
     and that is deliberate rather than an omission.
     """
@@ -362,7 +363,9 @@ def _serialize_for_summary(llm_messages: list) -> str:
                 else getattr(c, "text", "")
                 for c in msg.content
             )
-            lines.append(f"[tool_result {msg.tool_name}]\n{_cap_tool_result(text)}")
+            if cap_tool_results:
+                text = _cap_tool_result(text)
+            lines.append(f"[tool_result {msg.tool_name}]\n{text}")
             continue
         text_parts = []
         for c in getattr(msg, "content", []):
@@ -380,6 +383,11 @@ _STRUCTURE = (
     "## Goal\nWhat the task is trying to accomplish.\n\n"
     "## Constraints\nRules, limits, or requirements that bound the work.\n\n"
     "## Progress\n- Done: completed items\n- In Progress: current items\n\n"
+    "## Collected Results\nThe intermediate results the task needs for its answer "
+    "(values read, facts found, partial answers, items collected from each "
+    "source), copied verbatim and labelled with where each came from. The task "
+    "cannot read the conversation again, so a result left out here is lost. "
+    "Leave out filler and content that does not bear on the task.\n\n"
     "## Key Decisions\nDecisions made and alternatives rejected (with reasons).\n\n"
     "## Next Steps\nWhat remains to be done.\n\n"
     "## Critical Context\nAnything the model must remember to continue correctly "
@@ -493,8 +501,13 @@ async def compact_messages(
 
     try:
         llm_messages = convert_to_llm(messages_to_compact)
-        conversation_text = _serialize_for_summary(llm_messages)
-        conversation_text = _truncate_middle(conversation_text, max_input_chars)
+        # Results stay whole when everything fits: a cap would cut the value
+        # in the middle of a file read, the result the summary must carry
+        # (ISSUE-846). Over budget, the cap stops one output crowding out the rest.
+        conversation_text = _serialize_for_summary(llm_messages, cap_tool_results=False)
+        if max_input_chars > 0 and len(conversation_text) > max_input_chars:
+            conversation_text = _serialize_for_summary(llm_messages)
+            conversation_text = _truncate_middle(conversation_text, max_input_chars)
     except Exception as e:  # noqa: BLE001 — conversion must not crash compaction
         logger.warning("Compaction serialization failed: %s", e)
         return _failed(f"serialization failed: {e}", Usage())
@@ -511,7 +524,9 @@ async def compact_messages(
             "summary followed by new conversation content.\n\n"
             "Update the summary using this structure. Preserve existing entries, "
             "add new information, and move In Progress items to Done where "
-            "applicable:\n\n"
+            "applicable. Carry every Collected Results entry over and add the "
+            "new ones; never drop a collected result, and replace an entry only "
+            "when its source was read again:\n\n"
             f"{_STRUCTURE}"
             f"Previous summary:\n{previous_summary}\n\n"
             f"New conversation:\n{conversation_text}\n\n"
