@@ -78,4 +78,5 @@ class LLMProvider(Protocol):
         render_tool_images: bool = False,
         prompt_caching: bool | None = None,
         reasoning_replay: str | None = None,
+        cache_affinity_key: str | None = None,
     ) -> AsyncIterator[StreamEvent]: ...

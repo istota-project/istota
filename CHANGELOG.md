@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The native brain keeps a model's reasoning across the steps of a task.** On endpoints that return structured reasoning, such as OpenRouter, the reasoning from one step is sent back with the next, so the model works from its own earlier thinking. If the endpoint refuses it, the step is re-sent once without and the task carries on.
 
+- **Longer prompt caching for the native brain.** On OpenRouter and OpenAI, each task attempt now tags its requests with a random cache key so they reach the same cache. An operator can also keep cached prompts for an hour instead of five minutes, which helps tasks with long tool runs; the cost estimate charges the higher one-hour write price.
+
 ### Changed
 
 - **Specs the bot drafts are ready for a coding agent.** A new spec has every section an implementer reads, including a survey of the existing code taken from the project's source, and its stages are one checklist line each. Specs drafted before this may lack those sections.

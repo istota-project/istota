@@ -48,6 +48,7 @@ import re
 import statistics
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlparse
@@ -102,7 +103,7 @@ from istota.session.session_log import (
     SessionLogWriter,
     resolve_session_log_dir,
 )
-from istota.session.usage import TaskUsage
+from istota.session.usage import TaskUsage, cache_write_multiplier_for_ttl
 
 from ._aliases import CANONICAL_ROLES, split_effort
 from ._roles import get_alias_override_target, get_alias_overrides
@@ -815,6 +816,10 @@ class _RetryingProvider:
     (:meth:`_reissue_once_without`). One instance lives for one attempt, so
     "off for the rest of the attempt" is this instance's disabled set.
     ``on_feature_disabled(name, error_message)`` is told once per feature.
+
+    ``cache_affinity_key`` is the attempt's ``prompt_cache_key``, put on every
+    request this instance sends: turns, compaction summaries and the overflow
+    recovery's calls alike, since they all go through it.
     """
 
     def __init__(
@@ -822,11 +827,13 @@ class _RetryingProvider:
         inner,
         abort: asyncio.Event | None,
         on_feature_disabled: Callable[[str, str], None] | None = None,
+        cache_affinity_key: str | None = None,
     ):
         self._inner = inner
         self._abort = abort
         self._on_feature_disabled = on_feature_disabled
         self._disabled_features: set[str] = set()
+        self._cache_affinity_key = cache_affinity_key
 
     def _reissue_once_without(self, error_message: str, messages, tools) -> bool:
         """Turn off the feature this refusal names, if the request carried it.
@@ -875,6 +882,8 @@ class _RetryingProvider:
             # Forwarded only when set, so a turn call reaches the inner provider
             # with exactly the arguments it took before the override existed.
             extra = {} if prompt_caching is None else {"prompt_caching": prompt_caching}
+            if self._cache_affinity_key is not None:
+                extra["cache_affinity_key"] = self._cache_affinity_key
             for feature in _REISSUABLE_FEATURES:
                 if feature.name in self._disabled_features:
                     extra[feature.stream_kwarg] = feature.off_value
@@ -1399,13 +1408,28 @@ class NativeBrain:
             return drained
 
         model = req.model or self._config.model
+        # One random key per attempt, never derived from the user or the task:
+        # it goes to a third party, and an attempt is what a cached prefix
+        # lives for. Minted only where the provider sends it, which also keeps
+        # it off test doubles that take no such argument.
+        cache_affinity_key = (
+            uuid.uuid4().hex if getattr(self._provider, "prompt_cache_key", False) else None
+        )
         provider = _RetryingProvider(
             self._provider,
             abort,
             on_feature_disabled=lambda name, message: log.error_event(
                 f"{name}_rejected", message
             ),
+            cache_affinity_key=cache_affinity_key,
         )
+        # The provider's resolved TTL, as for `prompt_caching` in the header.
+        prompt_cache_ttl = getattr(
+            self._provider,
+            "prompt_cache_ttl",
+            getattr(self._config, "prompt_cache_ttl", "5m"),
+        )
+        write_multiplier = cache_write_multiplier_for_ttl(prompt_cache_ttl)
         usage = TaskUsage()
         # Cost provenance, for the usage row's `cost_basis`. `TaskUsage.add`
         # decides per turn whether to take the provider's reported cost or fall
@@ -1426,7 +1450,7 @@ class NativeBrain:
             # its spend is folded in here, failed calls included.
             nonlocal turns_accumulated, turns_costed
             if summary_usage.total_tokens > 0 or summary_usage.cost_usd is not None:
-                usage.add(summary_usage, get_model_info(model))
+                usage.add(summary_usage, get_model_info(model), write_multiplier)
                 turns_accumulated += 1
                 if summary_usage.cost_usd is not None:
                     turns_costed += 1
@@ -1491,6 +1515,9 @@ class NativeBrain:
                 "prompt_caching": getattr(
                     self._provider, "prompt_caching", self._config.prompt_caching
                 ),
+                # Whether requests carried a key, never the key itself.
+                "prompt_cache_key": cache_affinity_key is not None,
+                "prompt_cache_ttl": prompt_cache_ttl,
                 "cwd": str(req.cwd),
                 "istota_version": _ISTOTA_VERSION,
             }
@@ -1661,7 +1688,7 @@ class NativeBrain:
                     # token counts (some OpenRouter free/BYOK responses) would
                     # otherwise silently drop its charge from the task total.
                     if msg.usage.total_tokens > 0 or msg.usage.cost_usd is not None:
-                        usage.add(msg.usage, get_model_info(model))
+                        usage.add(msg.usage, get_model_info(model), write_multiplier)
                         turns_accumulated += 1
                         if msg.usage.cost_usd is not None:
                             turns_costed += 1

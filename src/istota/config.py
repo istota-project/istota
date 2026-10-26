@@ -29,7 +29,7 @@ from .config_mapper import (
     report_problem,
     report_unknown,
 )
-from istota.llm.types import REASONING_REPLAY_MODES
+from istota.llm.types import PROMPT_CACHE_TTLS, REASONING_REPLAY_MODES
 from istota.mail.outbound_policy import VALID_POLICIES as OUTBOUND_APPROVAL_POLICIES
 from istota.sandbox.user_scope import paths_overlap, scoped_user_dir
 from istota.webui.map_basemap import provider_names as map_provider_names
@@ -2085,6 +2085,14 @@ class NativeBrainConfig:
     # reasoning too) or "off". An endpoint that refuses it gets one re-issue
     # without, and replay is off for the rest of the attempt.
     reasoning_replay: str = "auto"
+    # Whether requests carry a random per-attempt ``prompt_cache_key`` (cache
+    # affinity: OpenRouter routes an attempt's requests to one cache). Tri-state
+    # like ``prompt_caching``: ``None`` derives it from base_url in
+    # make_provider, on for openrouter.ai and api.openai.com, off elsewhere.
+    prompt_cache_key: bool | None = None
+    # How long a cache breakpoint lives: "5m" (the endpoint default) or "1h".
+    # A 1h write is priced at twice input when no cost is reported.
+    prompt_cache_ttl: str = "5m"
     # Daemon-side WebFetch tool ([brain.native.web_fetch]). Enabled by default
     # with safe caps; the tool is native-only (added to build_default_tools).
     web_fetch: WebFetchConfig = field(default_factory=WebFetchConfig)
@@ -4736,6 +4744,7 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     "nextcloud.sharing.calendars": _one_of(*NEXTCLOUD_SHARING_LEVELS, fallback="off"),
     "nextcloud.sharing.contacts": _one_of(*NEXTCLOUD_SHARING_LEVELS, fallback="off"),
     "brain.native.reasoning_replay": _one_of(*REASONING_REPLAY_MODES),
+    "brain.native.prompt_cache_ttl": _one_of(*PROMPT_CACHE_TTLS),
     # Normalised from three historical spellings, and the retired `backend` key
     # is warned about rather than ignored -- an operator who wrote
     # `backend = "none"` to keep builds off the container had that honoured

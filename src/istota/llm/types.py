@@ -54,6 +54,10 @@ class ThinkingContent:
 # reasoning under its ``source_field``; ``off`` sends none.
 REASONING_REPLAY_MODES = ("auto", "on", "off")
 
+# ``[brain.native] prompt_cache_ttl``: how long a ``cache_control`` breakpoint
+# lives. ``5m`` is the endpoint default and writes the bare marker.
+PROMPT_CACHE_TTLS = ("5m", "1h")
+
 
 Content = TextContent | ImageContent | ToolCallContent | ThinkingContent
 

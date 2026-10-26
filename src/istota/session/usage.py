@@ -21,13 +21,33 @@ from istota.llm.catalog import ModelInfo
 from istota.llm.types import Usage
 
 
-def price_usage(usage: Usage, info: ModelInfo) -> float:
-    """Cost in USD for one ``Usage`` against a model's catalog prices."""
+# A 1-hour cache write is priced at twice input (Anthropic, OpenRouter); the
+# catalog's one write price is the 5-minute one.
+_CACHE_WRITE_1H_MULTIPLIER = 2.0
+
+
+def cache_write_multiplier_for_ttl(ttl: str) -> float | None:
+    """The ``cache_write_multiplier`` for a ``prompt_cache_ttl``; ``None`` keeps the catalog price."""
+    return _CACHE_WRITE_1H_MULTIPLIER if ttl == "1h" else None
+
+
+def price_usage(
+    usage: Usage, info: ModelInfo, cache_write_multiplier: float | None = None
+) -> float:
+    """Cost in USD for one ``Usage`` against a model's catalog prices.
+
+    ``cache_write_multiplier``, when set, prices a cache write as that multiple
+    of the input price instead of the catalog's write price.
+    """
+    if cache_write_multiplier is None:
+        write_price = info.cache_write_price_per_mtok
+    else:
+        write_price = info.input_price_per_mtok * cache_write_multiplier
     return (
         usage.input_tokens / 1_000_000 * info.input_price_per_mtok
         + usage.output_tokens / 1_000_000 * info.output_price_per_mtok
         + usage.cache_read_tokens / 1_000_000 * info.cache_read_price_per_mtok
-        + usage.cache_write_tokens / 1_000_000 * info.cache_write_price_per_mtok
+        + usage.cache_write_tokens / 1_000_000 * write_price
     )
 
 
@@ -40,7 +60,9 @@ class TaskUsage:
     cost_usd: float = 0.0
     turns: int = 0
 
-    def add(self, usage: Usage, info: ModelInfo) -> None:
+    def add(
+        self, usage: Usage, info: ModelInfo, cache_write_multiplier: float | None = None
+    ) -> None:
         """Fold one turn's usage in.
 
         Cost prefers the provider's reported figure (``usage.cost_usd``,
@@ -55,7 +77,7 @@ class TaskUsage:
         if usage.cost_usd is not None:
             self.cost_usd += usage.cost_usd
         else:
-            self.cost_usd += price_usage(usage, info)
+            self.cost_usd += price_usage(usage, info, cache_write_multiplier)
         self.turns += 1
 
     def merge(self, other: "TaskUsage") -> None:

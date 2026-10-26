@@ -176,7 +176,15 @@ features = []
 #                                            #   to force either way (a plain-OpenAI / local
 #                                            #   endpoint that rejects cache_control needs
 #                                            #   `false`).
-# bash_spill_full_output = true              # write Bash output past the per-tool cap to a
+# prompt_cache_key = true                    # send a random per-attempt prompt_cache_key so
+#                                            #   an attempt's requests reach one cache. Omit
+#                                            #   to use the default: ON for openrouter.ai and
+#                                            #   api.openai.com, OFF for any other endpoint,
+#                                            #   api.anthropic.com included.
+# prompt_cache_ttl = "5m"                    # cache breakpoint lifetime: "5m" or "1h". "1h"
+#                                            #   keeps the cached prefix through long tool
+#                                            #   runs; its writes cost 2x input, not 1.25x.
+# bash_spill_full_output = true             # write Bash output past the per-tool cap to a
 #                                            #   temp file the model can Read, rather than
 #                                            #   dropping the tail.
 # api_key = ""                               # prefer the ISTOTA_BRAIN_NATIVE_API_KEY override

@@ -1770,3 +1770,121 @@ class TestClaudeRuntimeEnvDoesNotReachTheTools:
         req.env = {}
         hello = _brain(MockProvider([]))._hello_payload(req)
         assert hello["subprocess_env"] is None
+
+
+class TestCacheAffinityKey:
+    """Stage 5: one random `prompt_cache_key` per attempt, shared by the turn,
+    summary and recovery calls of that attempt."""
+
+    _OVERFLOW = (400, ['{"error":{"message":"context length exceeded"}}'])
+    _SUMMARY = (
+        200,
+        [_sse_chunk({"content": "## Goal\nx"}), _sse_chunk({}, "stop"), "data: [DONE]"],
+    )
+
+    def _provider(self, http, **kw):
+        from istota.llm.openai_compat import OpenAICompatibleProvider
+
+        provider = OpenAICompatibleProvider(
+            api_key="k", base_url="https://openrouter.ai/api/v1", **kw
+        )
+        provider._client = http
+        return provider
+
+    @staticmethod
+    def _no_log():
+        # The attempt carries a task id and user, so the default log would be
+        # written under the working directory.
+        from istota.config import SessionLogConfig
+
+        return SessionLogConfig(enabled=False)
+
+    def _attempt(self, brain, tmp_path, responses):
+        http = _ScriptedHttp(responses)
+        brain._provider._client = http
+        req = _req("hi", tmp_path)
+        req.task_id = 4242
+        req.user_id = "alice"
+        result = brain.execute(req)
+        return result, http.bodies
+
+    def test_shared_across_turn_summary_and_recovery_and_new_per_attempt(self, tmp_path):
+        brain = _brain(
+            self._provider(None, prompt_caching=True, prompt_cache_key=True),
+            session_log=self._no_log(),
+        )
+        result, bodies = self._attempt(
+            brain, tmp_path, [self._OVERFLOW, self._SUMMARY, _TEXT_TURN]
+        )
+        assert result.success is True
+        assert len(bodies) == 3  # the overflowed turn, the summary, the continued turn
+        keys = {b["prompt_cache_key"] for b in bodies}
+        assert len(keys) == 1
+        (key,) = keys
+        assert len(key) == 32 and int(key, 16) >= 0
+        assert "4242" not in key and "alice" not in key
+        # The summary is still a one-off: the key rides along, cache writes don't.
+        assert "cache_control" not in json.dumps(bodies[1])
+
+        _, second = self._attempt(brain, tmp_path, [_TEXT_TURN])
+        assert second[0]["prompt_cache_key"] != key
+
+    def test_off_by_default_on_the_default_endpoint(self, tmp_path):
+        brain = NativeBrain(
+            NativeBrainConfig(model="claude-sonnet-4-6", session_log=self._no_log())
+        )
+        assert brain._provider.prompt_cache_key is False
+        _, bodies = self._attempt(brain, tmp_path, [_TEXT_TURN])
+        assert "prompt_cache_key" not in bodies[0]
+
+    def test_the_session_log_header_records_the_resolved_settings(self, tmp_path):
+        from istota.config import SessionLogConfig
+
+        logs = tmp_path / "logs"
+        brain = _brain(
+            self._provider(None, prompt_cache_key=True, prompt_cache_ttl="1h"),
+            session_log=SessionLogConfig(enabled=True, dir=str(logs)),
+        )
+        self._attempt(brain, tmp_path, [_TEXT_TURN])
+        files = sorted((logs / "alice").glob("*.jsonl"))
+        header = json.loads(files[0].read_text().splitlines()[0])
+        assert header["prompt_cache_key"] is True
+        assert header["prompt_cache_ttl"] == "1h"
+
+
+class TestOneHourWritePricing:
+    """Stage 5: with `prompt_cache_ttl = "1h"` and no provider-reported cost, a
+    cache write is priced at twice input rather than the catalog's 5m price."""
+
+    def _run(self, tmp_path, monkeypatch, ttl):
+        from istota.brain import native as native_mod
+        from istota.llm.catalog import ModelInfo
+
+        info = ModelInfo(
+            id="claude-sonnet-4-6",
+            context_window=200_000,
+            max_output_tokens=16384,
+            input_price_per_mtok=3.0,
+            cache_write_price_per_mtok=3.75,
+        )
+        monkeypatch.setattr(native_mod, "get_model_info", lambda model: info)
+
+        class _TtlProvider(MockProvider):
+            prompt_cache_ttl = ttl
+
+        provider = _TtlProvider(
+            [
+                AssistantMessage(
+                    content=[TextContent(text="done")],
+                    usage=Usage(cache_write_tokens=1_000_000, cost_usd=None),
+                    stop_reason="end_turn",
+                )
+            ]
+        )
+        return _brain(provider).execute(_req("hi", tmp_path))
+
+    def test_1h_writes_cost_twice_input(self, tmp_path, monkeypatch):
+        assert self._run(tmp_path, monkeypatch, "1h").usage.cost_usd == 6.0
+
+    def test_5m_writes_keep_the_catalog_price(self, tmp_path, monkeypatch):
+        assert self._run(tmp_path, monkeypatch, "5m").usage.cost_usd == 3.75

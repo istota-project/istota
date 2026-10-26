@@ -25,6 +25,7 @@ from .provider import (
     ToolCallDelta,
 )
 from .types import (
+    PROMPT_CACHE_TTLS,
     REASONING_REPLAY_MODES,
     AssistantMessage,
     ImageContent,
@@ -242,6 +243,8 @@ class OpenAICompatibleProvider:
         extra_headers: dict[str, str] | None = None,
         prompt_caching: bool = False,
         reasoning_replay: str = "auto",
+        prompt_cache_key: bool = False,
+        prompt_cache_ttl: str = "5m",
     ):
         headers = {
             "authorization": f"Bearer {api_key}",
@@ -263,6 +266,31 @@ class OpenAICompatibleProvider:
             )
             reasoning_replay = "auto"
         self._reasoning_replay = reasoning_replay
+        # Whether a request carries the caller's ``cache_affinity_key`` as the
+        # ``prompt_cache_key`` body field. Resolved from the host by make_provider.
+        self._prompt_cache_key = bool(prompt_cache_key)
+        if prompt_cache_ttl not in PROMPT_CACHE_TTLS:
+            logger.warning(
+                "prompt_cache_ttl=%r is not one of %s; using '5m'",
+                prompt_cache_ttl,
+                "/".join(PROMPT_CACHE_TTLS),
+            )
+            prompt_cache_ttl = "5m"
+        self._prompt_cache_ttl = prompt_cache_ttl
+
+    @property
+    def prompt_cache_key(self) -> bool:
+        """Whether this provider sends ``prompt_cache_key``, resolved.
+
+        ``NativeBrain`` mints an attempt's key only when this is on, and reads
+        it for the session log's header.
+        """
+        return self._prompt_cache_key
+
+    @property
+    def prompt_cache_ttl(self) -> str:
+        """The breakpoint TTL (``5m``/``1h``), which also prices cache writes."""
+        return self._prompt_cache_ttl
 
     @property
     def reasoning_replay(self) -> str:
@@ -313,6 +341,7 @@ class OpenAICompatibleProvider:
         render_tool_images: bool = False,
         prompt_caching: bool | None = None,
         reasoning_replay: str | None = None,
+        cache_affinity_key: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         body = self._build_chat_completion_request(
             system_prompt,
@@ -324,6 +353,7 @@ class OpenAICompatibleProvider:
             render_tool_images=render_tool_images,
             prompt_caching=prompt_caching,
             reasoning_replay=reasoning_replay,
+            cache_affinity_key=cache_affinity_key,
         )
         try:
             async with self._client.stream("POST", "/chat/completions", json=body) as resp:
@@ -360,13 +390,15 @@ class OpenAICompatibleProvider:
         render_tool_images: bool = False,
         prompt_caching: bool | None = None,
         reasoning_replay: str | None = None,
+        cache_affinity_key: str | None = None,
     ) -> dict:
         """Convert istota Message types to an OpenAI chat completions body.
 
         ``prompt_caching`` overrides the provider's own setting for this one
         request; ``None`` keeps it. A compaction summary passes ``False``.
         ``reasoning_replay`` is the same, and a refused replay is re-sent with
-        ``"off"``.
+        ``"off"``. ``cache_affinity_key`` becomes ``prompt_cache_key`` only
+        when this provider has the field on.
         """
         replay = self._reasoning_replay if reasoning_replay is None else reasoning_replay
         wire: list[dict] = []
@@ -386,7 +418,7 @@ class OpenAICompatibleProvider:
 
         caching = self._prompt_caching if prompt_caching is None else prompt_caching
         if caching:
-            self._apply_cache_breakpoints(wire, tools_wire)
+            self._apply_cache_breakpoints(wire, tools_wire, self._prompt_cache_ttl)
 
         body: dict = {
             "model": model,
@@ -417,6 +449,8 @@ class OpenAICompatibleProvider:
         effort = _REASONING_EFFORT_WIRE.get((reasoning_effort or "").lower())
         if effort:
             body["reasoning_effort"] = effort
+        if self._prompt_cache_key and cache_affinity_key:
+            body["prompt_cache_key"] = cache_affinity_key
         return body
 
     @staticmethod
@@ -502,7 +536,7 @@ class OpenAICompatibleProvider:
 
     @staticmethod
     def _apply_cache_breakpoints(
-        wire: list[dict], tools_wire: list[dict] | None = None
+        wire: list[dict], tools_wire: list[dict] | None = None, ttl: str = "5m"
     ) -> None:
         """Mark the cacheable prefix with cache_control (Anthropic/OpenRouter).
 
@@ -523,8 +557,13 @@ class OpenAICompatibleProvider:
         idempotent — one breakpoint, not two. Mutates ``wire`` / ``tools_wire``
         in place; converts string content to a single text block so cache_control
         has somewhere to live.
+
+        ``ttl="1h"`` adds ``"ttl": "1h"`` to every breakpoint; ``5m`` is the
+        endpoint default, so it writes the bare marker the wire always had.
         """
         cc = {"type": "ephemeral"}
+        if ttl == "1h":
+            cc["ttl"] = "1h"
 
         def _mark(msg: dict) -> None:
             content = msg.get("content")
