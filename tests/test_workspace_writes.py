@@ -240,32 +240,3 @@ def test_delete_pins_parent_before_directory_swap(tmp_path, monkeypatch):
     writes.delete_entry(tmp_path / "root", ["notes"], "note.txt")
     assert not (held / "note.txt").exists()
     assert (outside / "note.txt").read_text() == "keep"
-
-
-def test_replace_file_replaces_a_file_and_a_link_without_following_it(tmp_path):
-    root = tmp_path / "root"
-    root.mkdir()
-    target = tmp_path / "target"
-    target.write_bytes(b"keep")
-    (root / "note.txt").write_bytes(b"old")
-    (root / "link.txt").symlink_to(target)
-    writes.replace_file(root, [], "note.txt", b"new")
-    writes.replace_file(root, [], "link.txt", b"over")
-    assert (root / "note.txt").read_bytes() == b"new"
-    assert not (root / "link.txt").is_symlink()
-    assert (root / "link.txt").read_bytes() == b"over"
-    assert target.read_bytes() == b"keep"
-    assert sorted(os.listdir(root)) == ["link.txt", "note.txt"]
-
-
-def test_replace_file_refuses_a_folder_and_a_linked_parent(tmp_path):
-    root = tmp_path / "root"
-    (root / "dir").mkdir(parents=True)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (root / "linked").symlink_to(outside)
-    with pytest.raises(IsADirectoryError):
-        writes.replace_file(root, [], "dir", b"x")
-    with pytest.raises(ListingError):
-        writes.replace_file(root, ["linked"], "x.txt", b"x")
-    assert os.listdir(outside) == []

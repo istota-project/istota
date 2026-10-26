@@ -463,7 +463,6 @@
       { ...link('Chat', '/chat'), ariaLabel: chatLabel, title: chatLabel, trailing: chatPill },
     ];
     if (user.features.workspace) items.push(link('Files', '/files'));
-    if (user.features.apps) items.push(link('Apps', '/apps'));
     if (user.features.groups)
       items.push({ ...link('Groups', '/groups/'), active: isActive('/groups') });
     if (user.features.briefings) {
@@ -531,9 +530,6 @@
           </a>
           {#if user.features.workspace}
             <a href="{base}/files" class:active={isActive('/files')}>Files</a>
-          {/if}
-          {#if user.features.apps}
-            <a href="{base}/apps" class:active={isActive('/apps')}>Apps</a>
           {/if}
           {#if user.features.groups}
             <a href="{base}/groups/" class:active={isActive('/groups')}>Groups</a>
@@ -618,7 +614,6 @@
         class:app-content-fill={isActive('/') ||
           isActive('/chat') ||
           isActive('/files') ||
-          isActive('/apps') ||
           isActive('/groups') ||
           isActive('/location') ||
           isActive('/feeds') ||

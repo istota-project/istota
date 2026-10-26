@@ -1,9 +1,0 @@
-id = "light-planner"
-name = "Light planner"
-icon = "sun"
-entry = "index.html"
-description = "Sunrise, golden and blue hour and the moon at your places, and the golden hours in the next two weeks when your calendar is free."
-capabilities = ["kv:own", "skill:location.places", "calendar:read"]
-
-[display]
-narrowest = "phone"

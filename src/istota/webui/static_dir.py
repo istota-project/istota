@@ -64,20 +64,6 @@ def resolve_render_dir() -> Path:
     )
 
 
-def resolve_apps_dir() -> Path:
-    """Where the apps build is: the house kit and the starter apps.
-
-    ``ISTOTA_WEB_APPS_DIR`` (the image sets it to ``/app/web/build-apps``),
-    else ``web/build-apps`` in the checkout. Read by :mod:`istota.apps.kit`;
-    never served by the web.
-    """
-    here = Path(__file__).resolve()
-    return pick_static_dir(
-        os.environ.get("ISTOTA_WEB_APPS_DIR", ""),
-        here.parent.parent.parent.parent / "web" / "build-apps",
-    )
-
-
 # SvelteKit emits two classes of asset and they need opposite caching. Bare
 # `StaticFiles` sends neither header, leaving both to heuristic freshness — and
 # an iOS home-screen PWA takes that as licence to pin the app shell more or less

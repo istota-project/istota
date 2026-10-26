@@ -229,10 +229,6 @@ COPY --from=web-builder /app/web/build /app/web/build
 # (web/vite.render.config.ts). Not under web/build, so the web never serves them.
 COPY --from=web-builder /app/web/build-render /app/web/build-render
 ENV ISTOTA_WEB_RENDER_DIR=/app/web/build-render
-# The apps house kit and starter apps (web/vite.apps.config.ts), read by
-# istota.apps.kit when a pending install is built. Never served by the web.
-COPY --from=web-builder /app/web/build-apps /app/web/build-apps
-ENV ISTOTA_WEB_APPS_DIR=/app/web/build-apps
 
 # `uv run` syncs the project before it runs anything, which on this read-only
 # root means trying to install the dev group into /app/.venv and failing. The

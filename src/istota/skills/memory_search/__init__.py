@@ -252,34 +252,6 @@ def _user_md_size_bytes(user_id: str) -> int | None:
         return None
 
 
-def fact_to_dict(f) -> dict:
-    """A knowledge fact as `facts` returns it; the apps bridge's `memory_search.facts` too."""
-    return {
-        "id": f.id,
-        "subject": f.subject,
-        "predicate": f.predicate,
-        "object": f.object,
-        "valid_from": f.valid_from,
-        "valid_until": f.valid_until,
-        "temporary": f.temporary,
-        "source_type": f.source_type,
-        "source_task_id": f.source_task_id,
-    }
-
-
-def timeline_entry_to_dict(f) -> dict:
-    """A fact as `timeline` returns it, its subject being the timeline's own."""
-    return {
-        "id": f.id,
-        "predicate": f.predicate,
-        "object": f.object,
-        "valid_from": f.valid_from,
-        "valid_until": f.valid_until,
-        "temporary": f.temporary,
-        "source_type": f.source_type,
-    }
-
-
 def cmd_facts(args) -> dict:
     """Query knowledge graph facts."""
     from istota.memory.knowledge_graph import (
@@ -300,7 +272,20 @@ def cmd_facts(args) -> dict:
     return {
         "status": "ok",
         "count": len(facts),
-        "facts": [fact_to_dict(f) for f in facts],
+        "facts": [
+            {
+                "id": f.id,
+                "subject": f.subject,
+                "predicate": f.predicate,
+                "object": f.object,
+                "valid_from": f.valid_from,
+                "valid_until": f.valid_until,
+                "temporary": f.temporary,
+                "source_type": f.source_type,
+                "source_task_id": f.source_task_id,
+            }
+            for f in facts
+        ],
     }
 
 
@@ -319,7 +304,18 @@ def cmd_timeline(args) -> dict:
         "status": "ok",
         "subject": args.subject,
         "count": len(facts),
-        "facts": [timeline_entry_to_dict(f) for f in facts],
+        "facts": [
+            {
+                "id": f.id,
+                "predicate": f.predicate,
+                "object": f.object,
+                "valid_from": f.valid_from,
+                "valid_until": f.valid_until,
+                "temporary": f.temporary,
+                "source_type": f.source_type,
+            }
+            for f in facts
+        ],
     }
 
 

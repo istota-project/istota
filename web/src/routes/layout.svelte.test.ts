@@ -491,42 +491,6 @@ it('puts Files before Groups in the nav and the menu', async () => {
   expect(items.indexOf('Files')).toBeLessThan(items.indexOf('Groups'));
 });
 
-it.each([true, false, undefined])(
-  'shows Apps after Files only with the apps feature (%s)',
-  async (enabled) => {
-    const user = person();
-    user.features.workspace = true;
-    user.features.groups = true;
-    user.features.apps = enabled;
-    getMe.mockResolvedValue(user);
-    render(Layout, { children });
-    await screen.findByText('Alice');
-    const links = screen.getAllByRole('link').map((a) => a.textContent?.trim());
-    if (enabled) {
-      expect(links.indexOf('Apps')).toBe(links.indexOf('Files') + 1);
-      expect(screen.getByRole('link', { name: 'Apps' })).toHaveAttribute(
-        'href',
-        expect.stringMatching(/\/apps$/),
-      );
-    } else expect(links).not.toContain('Apps');
-    await fireEvent.keyDown(screen.getByRole('button', { name: 'Open menu' }), { key: 'Enter' });
-    await waitFor(() => expect(screen.getByRole('menu')).toBeTruthy());
-    const items = screen.getAllByRole('menuitem').map((a) => a.textContent?.trim());
-    if (enabled) expect(items.indexOf('Apps')).toBe(items.indexOf('Files') + 1);
-    else expect(items).not.toContain('Apps');
-  },
-);
-
-it('fills the pane on the Apps section, so the document never scrolls the nav away', async () => {
-  page.url = new URL('http://localhost/apps/board/');
-  const user = person();
-  user.features.apps = true;
-  getMe.mockResolvedValue(user);
-  render(Layout, { children });
-  await screen.findByText('Alice');
-  expect(document.querySelector('main.app-content')).toHaveClass('app-content-fill');
-});
-
 describe('navigation counts root ownership', () => {
   it('starts only for a live identity with the saved preference enabled', async () => {
     getMe.mockResolvedValue({ ...person(), show_nav_unread_badges: true });

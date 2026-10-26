@@ -1,9 +1,0 @@
-id = "ledger"
-name = "Ledger of guesses"
-icon = "target"
-entry = "index.html"
-description = "Write down predictions with a probability and see how well calibrated you are. Istota can log guesses from chat."
-capabilities = ["kv:own"]
-
-[display]
-narrowest = "phone"

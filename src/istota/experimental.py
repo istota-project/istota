@@ -38,7 +38,6 @@ from typing import Callable
 KNOWN_FEATURES: dict[str, str] = {
     "money_tax": "Money: tax-lot commands (lots)",
     "money_wash_sales": "Money: IRS wash-sale violation detector",
-    "module_apps": "Apps: single-page apps in a sandboxed frame, behind a permissioned bridge",
     "skill_assignment": "Assignments: goals Istota carries across days (skill, CLI, wakes)",
 }
 

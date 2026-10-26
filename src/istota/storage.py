@@ -295,11 +295,6 @@ def get_user_bot_path(user_id: str, bot_dir: str) -> str:
     return f"{get_user_base_path(user_id)}/{bot_dir}"
 
 
-def get_user_apps_path(user_id: str, bot_dir: str) -> str:
-    """Get the path to a user's app drafts directory (e.g. /Users/{uid}/istota/apps)."""
-    return f"{get_user_bot_path(user_id, bot_dir)}/apps"
-
-
 def get_user_config_path(user_id: str, bot_dir: str) -> str:
     """Get the path to a user's bot config/ directory."""
     return f"{get_user_bot_path(user_id, bot_dir)}/config"
