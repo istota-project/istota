@@ -607,7 +607,8 @@ class TestAdminModelsSection:
         assert out["default_model"] == "claude-sonnet-4-6"
         assert out["default_effort"] == "high"
         assert out["endpoint"] == "https://openrouter.ai/api/v1"
-        assert out["provider"] == "openai_compat"
+        # Native's provider id, implied here by the legacy `base_url`.
+        assert out["provider"] == "openrouter"
         # On the native brain every role collapses to the single configured model.
         assert all(r["resolved"] == "claude-sonnet-4-6" for r in out["roles"])
         assert out["source_type_overrides"] == {"scheduled": "native"}

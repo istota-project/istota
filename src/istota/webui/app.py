@@ -3476,7 +3476,9 @@ def _admin_models_section() -> dict:
             from istota.brain import native_provider_spec
             spec = native_provider_spec(brain_config)
             section["endpoint"] = spec.base_url if spec is not None else ""
-            section["provider"] = brain_config.native.provider
+            # The provider id native sends to, legacy `base_url` installs
+            # included, rather than the raw field, which those leave empty.
+            section["provider"] = spec.id if spec is not None else brain_config.native.provider
 
         if brain_config.source_type_overrides:
             section["source_type_overrides"] = dict(brain_config.source_type_overrides)
@@ -3491,10 +3493,56 @@ def _admin_models_section() -> dict:
         if selectable:
             section["room_selectable"] = selectable
 
+        section["providers"] = _admin_provider_rows()
         return section
     except Exception as exc:  # noqa: BLE001 — never fail the stats payload
         logger.exception("admin models section failed")
         return {"error": str(exc)}
+
+
+def _admin_provider_rows() -> list[dict]:
+    """One row per configured provider for the Models card.
+
+    Kind, the base URL's host (never the URL, which may carry a path or a
+    query an operator would not publish), whether the daemon fetches its model
+    list, when it last did and what the last fetch reported, how many current
+    models the catalogue holds for it and how many of those `[models] enabled`
+    admits. Reads the caches; never fetches and never touches a key.
+    """
+    from urllib.parse import urlparse
+
+    from istota.brain._resolve import enabled_patterns, enabled_refs
+    from istota.llm import discovery
+    from istota.llm.catalog import current_catalogue
+    from istota.llm.providers import build_providers
+
+    _install_model_caches()
+    catalogue = current_catalogue()
+    enabled = set(enabled_refs(catalogue, enabled_patterns(_config)))
+    cache_dir = discovery.config_cache_dir(_config)
+    rows = []
+    for spec in sorted(build_providers(_config).values(), key=lambda s: s.id):
+        models = [m for m in catalogue.models(spec.id) if not m.deprecated]
+        doc = discovery.read_cache(cache_dir, spec.id) if cache_dir is not None else None
+        fetched_at = doc.get("fetched_at") if doc else None
+        last_error = doc.get("last_error") if doc else None
+        try:
+            host = urlparse(spec.base_url or "").hostname or ""
+        except ValueError:
+            host = ""
+        rows.append({
+            "id": spec.id,
+            "kind": spec.kind,
+            "host": host,
+            "discovers": discovery.wants_discovery(spec, _config),
+            "discovered_at": (
+                _iso_utc_from_epoch(fetched_at) if isinstance(fetched_at, (int, float)) else None
+            ),
+            "last_error": str(last_error) if last_error else None,
+            "models": len(models),
+            "enabled": sum(1 for m in models if m.ref in enabled),
+        })
+    return rows
 
 
 def _admin_system_section(version: str, db_path: Path) -> dict:
@@ -7122,6 +7170,125 @@ def _room_model_selection(brain_config, model: str, *, is_admin: bool):
             "code": "unknown", "candidates": [],
         }
     return stored_selection(resolved), None
+
+
+def _install_model_caches() -> None:
+    """Take up a discovery cache the daemon rewrote since this process last looked.
+
+    The web process never fetches (D11); the scheduler's `model-catalogue` gate
+    does, and this swaps the new lists in. One stat per cache file when nothing
+    changed. Never raises.
+    """
+    from istota.llm import discovery
+
+    discovery.install_from_cache_dir(discovery.config_cache_dir(_config))
+
+
+def _model_entry(info, *, enabled: bool) -> dict:  # noqa: ANN001
+    from istota.brain._resolve import supported_efforts
+
+    price = None
+    if info.price_source != "unknown":
+        price = {
+            "input": info.input_price_per_mtok,
+            "output": info.output_price_per_mtok,
+        }
+    return {
+        "ref": info.ref,
+        "name": info.name,
+        "provider": info.provider,
+        "family": info.family,
+        "reasoning": info.reasoning,
+        "efforts": supported_efforts(info),
+        "context_window": info.context_window,
+        "input": list(info.input),
+        "price": price,
+        "enabled": enabled,
+    }
+
+
+def _chat_model_choices(brain_config, username: str) -> list[dict]:
+    """The models the room picker offers this viewer on ``brain_config``'s brain.
+
+    An admin gets every current model the brain can run with tool calling,
+    each marked `enabled` or not; anyone else gets the enabled ones only (D9),
+    the same set `_room_model_selection` admits. Grouped by provider, enabled
+    first within each.
+    """
+    from istota.brain._resolve import enabled_patterns, enabled_refs
+    from istota.commands import runnable_models
+    from istota.llm.catalog import current_catalogue
+
+    is_admin = _config.is_admin(username)
+    enabled = set(enabled_refs(current_catalogue(), enabled_patterns(_config)))
+    out = []
+    for info in runnable_models(_config, brain_config.kind):
+        if not info.supports_tools:
+            continue
+        is_enabled = info.ref in enabled
+        if not is_admin and not is_enabled:
+            continue
+        out.append(_model_entry(info, enabled=is_enabled))
+    out.sort(key=lambda m: (m["provider"], not m["enabled"], m["ref"].lower()))
+    return out
+
+
+def _alias_efforts(brain_config, alias: str) -> list[str] | None:
+    """The effort levels the model an alias names takes on this brain, or
+    None when that is not known (the brain's own model, an id the catalogue
+    lacks)."""
+    from istota.brain._resolve import (
+        Resolution,
+        config_providers,
+        native_provider_id,
+        resolve_selection,
+        supported_efforts,
+    )
+
+    try:
+        resolved = resolve_selection(
+            alias,
+            for_brain=brain_config.kind,
+            providers=config_providers(_config),
+            native_provider=native_provider_id(_config),
+        )
+    except Exception:  # noqa: BLE001 — an unknown answer, never a failed list
+        return None
+    if isinstance(resolved, Resolution) and resolved.info is not None and not resolved.brain_default:
+        return supported_efforts(resolved.info)
+    return None
+
+
+def _room_model_status(brain_config, model: str, username: str) -> dict:
+    """What the picker says about a room's stored model for this viewer.
+
+    `listed` when the viewer may pick it, `set_by_admin` when it resolves but
+    is outside the viewer's enabled set (an admin pinned it, and it still runs
+    for every member), `unavailable` when it does not resolve on the room's
+    brain at all. `efforts` are its model's levels where the catalogue knows
+    them.
+    """
+    from istota.brain._resolve import ResolveError, resolve_for_person, supported_efforts
+
+    kind = getattr(brain_config, "kind", None)
+    entry: dict = {"value": model, "status": "unavailable", "ref": None, "efforts": None}
+    try:
+        as_admin = resolve_for_person(model, _config, kind=kind, is_admin=True)
+    except Exception:  # noqa: BLE001 — report it as unavailable rather than fail the list
+        logger.debug("room_model_status: resolution failed", exc_info=True)
+        return entry
+    if isinstance(as_admin, ResolveError):
+        return entry
+    if as_admin.ref:
+        entry["ref"] = as_admin.ref
+    if as_admin.info is not None and not as_admin.brain_default:
+        entry["efforts"] = supported_efforts(as_admin.info)
+    entry["status"] = "listed"
+    if not _config.is_admin(username):
+        as_member = resolve_for_person(model, _config, kind=kind, is_admin=False)
+        if isinstance(as_member, ResolveError) and as_member.code == "model_not_enabled":
+            entry["status"] = "set_by_admin"
+    return entry
 
 
 def _chat_list_rooms(username: str) -> list[dict]:
@@ -10759,6 +10926,13 @@ async def chat_commands(
     the fallback is about a room this user cannot see, not about a client
     sending something that is not an integer.
 
+    **`models` is the viewer's pickable set** on that same brain
+    (`_chat_model_choices`: the whole catalogue for an admin, marked
+    `enabled`, the enabled set for anyone else), each with the effort levels
+    its model takes. With `room_id`, `room_model` says what the picker should
+    make of the room's stored model (`_room_model_status`). The discovery
+    caches are re-read first when the daemon has rewritten one.
+
     The three brain fields are `_brain_catalogue`'s, published to admins only,
     which is what lets the settings modal decide by emptiness alone. Writing
     the pin is admin-gated (D8), so kinds a non-admin cannot select are not
@@ -10788,9 +10962,11 @@ async def chat_commands(
         for alias, target in sorted(commands._COMMAND_ALIASES.items())
     ]
     brain_config = _config.brain
+    room_token: str | None = None
     if room_id is not None:
         room = await asyncio.to_thread(_chat_owned_room, user["username"], room_id)
         if room is not None:
+            room_token = room.token
             brain_config = await asyncio.to_thread(
                 _brain_for_room_token, room.token, "web",
             )
@@ -10814,6 +10990,7 @@ async def chat_commands(
             brain_config = _dc_replace(_config.brain, kind=brain)
         else:
             logger.debug("chat_commands: ignoring brain=%r", brain)
+    await asyncio.to_thread(_install_model_caches)
     aliases: list[dict] = []
     # What an unpinned room runs, resolved the way the admin Models card
     # resolves it, so the room picker can name it instead of the bare "Default
@@ -10822,19 +10999,37 @@ async def chat_commands(
     try:
         model_brain = make_brain(brain_config)
         aliases = [
-            {"alias": alias, "target": model, "effort": effort}
+            {
+                "alias": alias, "target": model, "effort": effort,
+                "efforts": _alias_efforts(brain_config, alias),
+            }
             for alias, model, effort in model_brain.list_aliases()
         ]
         default_model = model_brain.effective_default_model() or None
     except Exception as e:  # noqa: BLE001 — aliases degrade independently
         logger.warning("chat_commands: model aliases unavailable: %s", e)
-    return {
+    models: list[dict] = []
+    try:
+        models = await asyncio.to_thread(_chat_model_choices, brain_config, user["username"])
+    except Exception as e:  # noqa: BLE001 — the model list degrades independently
+        logger.warning("chat_commands: model list unavailable: %s", e)
+    payload = {
         "commands": cmds,
         "command_aliases": cmd_aliases,
         "model_aliases": aliases,
+        "models": models,
         "default_model": default_model,
         **_brain_catalogue(user["username"]),
     }
+    # Only for a room the caller asked about: the picker shows a pin the
+    # viewer's list does not hold as an admin's pin or as gone.
+    if room_token is not None:
+        stored = await asyncio.to_thread(_room_stored_model, room_token)
+        if stored:
+            payload["room_model"] = await asyncio.to_thread(
+                _room_model_status, brain_config, stored, user["username"],
+            )
+    return payload
 
 
 def _brain_catalogue(username: str) -> dict:
@@ -11129,6 +11324,8 @@ async def chat_update_room(
             # member's set must not stop that member saving another field.
             current = await asyncio.to_thread(_room_stored_model, room.token)
             if model != current:
+                # Judged against the lists the picker offered from.
+                await asyncio.to_thread(_install_model_caches)
                 stored, refusal = _room_model_selection(
                     model_brain, model, is_admin=_config.is_admin(user["username"]),
                 )

@@ -517,6 +517,11 @@ def _supported_efforts(info: ModelInfo) -> list[str]:
     return supported
 
 
+def supported_efforts(info: ModelInfo) -> list[str]:
+    """The effort levels ``info``'s model takes, lowest first; none without reasoning."""
+    return _supported_efforts(info) if info.reasoning else []
+
+
 def clamp_effort_level(info: ModelInfo | None, requested: str | None) -> str | None:
     """The effort level ``info``'s model runs for ``requested``, or ``None``.
 

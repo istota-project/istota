@@ -106,7 +106,7 @@ class TestChatCommandsApi:
         assert {a["alias"] for a in aliases} == expected
         # Each carries alias/target/effort keys.
         first = aliases[0]
-        assert set(first) == {"alias", "target", "effort"}
+        assert set(first) == {"alias", "target", "effort", "efforts"}
 
     async def test_includes_command_aliases(self, chat_client):
         """The hidden alias table is published, so a client can tell that
@@ -475,3 +475,232 @@ class TestModelAliasesFollowTheRoom:
         assert resp.status_code == 200
         assert resp.json()["commands"]
         assert resp.json()["model_aliases"]
+
+
+def _provider_config(tmp_path, *, admins):
+    """A web config whose native brain runs on Anthropic with keys for both
+    built-in providers, so OpenRouter models are runnable on native."""
+    from istota.config import config_from_document
+
+    config = _make_config(tmp_path)
+    config.users = {"alice": UserConfig(), "bob": UserConfig()}
+    source = config_from_document({
+        "brain": {
+            "kind": "native",
+            "room_selectable": ["native", "claude_code"],
+            "native": {"provider": "anthropic", "model": "claude-sonnet-5-5"},
+        },
+        "providers": {
+            "anthropic": {"api_key": "anthropic-test-key"},
+            "openrouter": {"api_key": "openrouter-test-key"},
+        },
+    })
+    config.brain = source.brain
+    config.providers = source.providers
+    config.admin_users = set(admins)
+    return config
+
+
+def _write_openrouter_cache(config, models):
+    """A discovery cache file as the daemon's gate writes it."""
+    import json
+    import time
+    from dataclasses import asdict
+
+    from istota.llm import discovery
+
+    now = time.time()
+    cache_dir = discovery.config_cache_dir(config)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "provider": "openrouter", "kind": "openrouter", "fetched_at": now,
+        "checked_at": now, "etag": None, "last_error": None, "last_status": 200,
+        "models": {m.id: {**asdict(m), "last_seen": now} for m in models},
+    }
+    discovery.cache_file(cache_dir, "openrouter").write_text(json.dumps(doc))
+
+
+def _kimi():
+    from istota.llm.catalog import ModelInfo
+
+    return ModelInfo(
+        id="moonshotai/kimi-k2.6", context_window=200000, max_output_tokens=8000,
+        provider="openrouter", reasoning=True, name="Kimi K2.6",
+    )
+
+
+def _client_for(config):
+    return AsyncClient(
+        transport=ASGITransport(app=_patch_app(config)), base_url="https://example.com",
+    )
+
+
+@_needs_web_deps
+class TestTheModelsPayload:
+    """`models`: what the room picker offers, scoped to the viewer (D9) and to
+    the brain that would run the pick. Read from the daemon's discovery cache,
+    which the web process takes up at the request (D11)."""
+
+    def _config(self, tmp_path, *, admins):
+        config = _provider_config(tmp_path, admins=admins)
+        _write_openrouter_cache(config, [_kimi()])
+        return config
+
+    async def test_an_admin_sees_a_discovered_model_outside_the_enabled_set(self, tmp_path):
+        async with _client_for(self._config(tmp_path, admins={"alice"})) as client:
+            cookies = await _login(client, "alice")
+            models = (await client.get(
+                "/istota/api/chat/commands", cookies=cookies,
+            )).json()["models"]
+        by_ref = {m["ref"]: m for m in models}
+        kimi = by_ref["openrouter/moonshotai/kimi-k2.6"]
+        assert kimi["enabled"] is False
+        assert kimi["efforts"] == ["low", "medium", "high"]
+        assert kimi["price"] is None  # discovered with no price known
+        assert by_ref["anthropic/claude-sonnet-5-5"]["enabled"] is True
+        # Grouped by provider, the enabled models first within each group.
+        providers = [m["provider"] for m in models]
+        assert providers == sorted(providers)
+        anthropic = [m["enabled"] for m in models if m["provider"] == "anthropic"]
+        assert anthropic == sorted(anthropic, reverse=True)
+
+    async def test_a_member_sees_only_the_enabled_set(self, tmp_path):
+        async with _client_for(self._config(tmp_path, admins={"carol"})) as client:
+            cookies = await _login(client, "bob")
+            models = (await client.get(
+                "/istota/api/chat/commands", cookies=cookies,
+            )).json()["models"]
+        refs = {m["ref"] for m in models}
+        assert "anthropic/claude-sonnet-5-5" in refs
+        assert "openrouter/moonshotai/kimi-k2.6" not in refs
+        assert all(m["enabled"] for m in models)
+
+    async def test_the_list_follows_the_rooms_brain(self, tmp_path):
+        """A claude_code room cannot run an OpenRouter model, so it is not offered."""
+        config = self._config(tmp_path, admins={"alice"})
+        async with _client_for(config) as client:
+            cookies = await _login(client, "alice")
+            room = await _make_room(client, cookies)
+            with db.get_db(config.db_path) as conn:
+                db.set_room_brain(conn, room["token"], "claude_code")
+            models = (await client.get(
+                f"/istota/api/chat/commands?room_id={room['id']}", cookies=cookies,
+            )).json()["models"]
+        assert models
+        assert {m["provider"] for m in models} == {"anthropic"}
+
+    async def test_a_cache_the_daemon_rewrites_is_taken_up_at_the_next_request(self, tmp_path):
+        from istota.llm.catalog import ModelInfo
+
+        config = self._config(tmp_path, admins={"alice"})
+        async with _client_for(config) as client:
+            cookies = await _login(client, "alice")
+            first = (await client.get("/istota/api/chat/commands", cookies=cookies)).json()
+            assert "openrouter/z-ai/glm-5" not in {m["ref"] for m in first["models"]}
+            assert "openrouter/moonshotai/kimi-k2.6" in {m["ref"] for m in first["models"]}
+            glm = ModelInfo(
+                id="z-ai/glm-5", context_window=200000, max_output_tokens=8000,
+                provider="openrouter",
+            )
+            _write_openrouter_cache(config, [_kimi(), glm])
+            second = (await client.get("/istota/api/chat/commands", cookies=cookies)).json()
+        assert "openrouter/z-ai/glm-5" in {m["ref"] for m in second["models"]}
+
+    async def test_aliases_carry_their_models_effort_levels(self, tmp_path):
+        config = self._config(tmp_path, admins={"alice"})
+        async with _client_for(config) as client:
+            cookies = await _login(client, "alice")
+            room = await _make_room(client, cookies)
+            with db.get_db(config.db_path) as conn:
+                db.set_room_brain(conn, room["token"], "claude_code")
+            aliases = (await client.get(
+                f"/istota/api/chat/commands?room_id={room['id']}", cookies=cookies,
+            )).json()["model_aliases"]
+        opus = next(a for a in aliases if a["alias"] == "opus")
+        assert opus["efforts"] and "high" in opus["efforts"]
+
+
+@_needs_web_deps
+class TestTheRoomModelStatus:
+    """`room_model`: what the picker makes of a pin the viewer's list may not hold."""
+
+    async def _status(self, tmp_path, *, admins, model):
+        config = _provider_config(tmp_path, admins=admins)
+        _write_openrouter_cache(config, [_kimi()])
+        async with _client_for(config) as client:
+            cookies = await _login(client, "alice")
+            room = await _make_room(client, cookies)
+            if model is not None:
+                with db.get_db(config.db_path) as conn:
+                    db.set_room_model(conn, room["token"], model)
+            body = (await client.get(
+                f"/istota/api/chat/commands?room_id={room['id']}", cookies=cookies,
+            )).json()
+        return body.get("room_model", "absent")
+
+    async def test_an_admins_pin_outside_a_members_set(self, tmp_path):
+        status = await self._status(
+            tmp_path, admins={"carol"}, model="openrouter/moonshotai/kimi-k2.6",
+        )
+        assert status == {
+            "value": "openrouter/moonshotai/kimi-k2.6",
+            "status": "set_by_admin",
+            "ref": "openrouter/moonshotai/kimi-k2.6",
+            "efforts": ["low", "medium", "high"],
+        }
+
+    async def test_the_same_pin_is_listed_for_an_admin(self, tmp_path):
+        status = await self._status(
+            tmp_path, admins={"alice"}, model="openrouter/moonshotai/kimi-k2.6",
+        )
+        assert status["status"] == "listed"
+
+    async def test_a_pin_that_no_longer_resolves(self, tmp_path):
+        status = await self._status(tmp_path, admins={"alice"}, model="openrouter/gone/model")
+        assert status["status"] == "unavailable"
+        assert status["ref"] is None
+
+    async def test_no_pin_no_status(self, tmp_path):
+        assert await self._status(tmp_path, admins={"alice"}, model=None) == "absent"
+
+
+@_needs_web_deps
+class TestAdminProviderRows:
+    """The admin Models card's provider rows: read from the caches, no key."""
+
+    def _rows(self, config):
+        import istota.webui.app as mod
+
+        mod._config = config
+        return {r["id"]: r for r in mod._admin_models_section()["providers"]}
+
+    def test_a_discovering_provider_reports_its_cache(self, tmp_path):
+        config = _provider_config(tmp_path, admins={"alice"})
+        _write_openrouter_cache(config, [_kimi()])
+        rows = self._rows(config)
+        openrouter = rows["openrouter"]
+        assert openrouter["kind"] == "openrouter"
+        assert openrouter["host"] == "openrouter.ai"
+        assert openrouter["discovers"] is True
+        assert openrouter["discovered_at"]
+        assert openrouter["last_error"] is None
+        assert openrouter["models"] == 1
+        assert openrouter["enabled"] == 0
+        anthropic = rows["anthropic"]
+        assert anthropic["host"] == "api.anthropic.com"
+        assert anthropic["models"] > 0
+        assert anthropic["enabled"] == anthropic["models"]
+        assert "openrouter-test-key" not in str(rows)
+
+    def test_a_failed_fetch_is_named(self, tmp_path):
+        import json
+
+        from istota.llm import discovery
+
+        config = _provider_config(tmp_path, admins={"alice"})
+        _write_openrouter_cache(config, [_kimi()])
+        path = discovery.cache_file(discovery.config_cache_dir(config), "openrouter")
+        doc = json.loads(path.read_text())
+        doc.update(last_error="HTTP 503", last_status=503)
+        path.write_text(json.dumps(doc))
+        assert self._rows(config)["openrouter"]["last_error"] == "HTTP 503"

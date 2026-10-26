@@ -364,17 +364,21 @@ async def test_a_web_room_pick_reaches_the_provider_it_names(tmp_path):
     config.bot_name = web_config.bot_name
 
     app = _patch_app(config)
+    # The PATCH takes up the discovery caches too; with none on disk that
+    # would swap in an empty layer over the list the fixture installed.
+    no_cache = patch("istota.llm.discovery.install_from_cache_dir", return_value=False)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://example.com") as client:
         cookies = await _login(client, "alice")
         room = (await client.post(
             "/istota/api/chat/rooms", json={"name": "r"}, cookies=cookies,
             headers={"origin": "https://example.com"},
         )).json()
-        resp = await client.patch(
-            f"/istota/api/chat/rooms/{room['id']}",
-            json={"brain": "native", "model": OUTSIDE, "effort": "xhigh"},
-            cookies=cookies, headers={"origin": "https://example.com"},
-        )
+        with no_cache:
+            resp = await client.patch(
+                f"/istota/api/chat/rooms/{room['id']}",
+                json={"brain": "native", "model": OUTSIDE, "effort": "xhigh"},
+                cookies=cookies, headers={"origin": "https://example.com"},
+            )
     assert resp.status_code == 200, resp.text
     assert resp.json()["model"] == OUTSIDE
 

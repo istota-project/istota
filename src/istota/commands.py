@@ -1330,7 +1330,7 @@ async def cmd_models(ctx: CommandContext):
     return "\n".join(lines)
 
 
-def _runnable_models(config: Config, kind: str) -> list:
+def runnable_models(config: Config, kind: str) -> list:
     """The catalogue's current models the brain ``kind`` can run, in order."""
     from .brain._resolve import config_providers, native_provider_id
     from .llm.catalog import current_catalogue
@@ -1357,7 +1357,7 @@ def _models_by_provider(config: Config, kind: str, is_admin: bool) -> list[str]:
 
     enabled = set(enabled_refs(current_catalogue(), enabled_patterns(config)))
     groups: dict[str, list] = {}
-    for info in _runnable_models(config, kind):
+    for info in runnable_models(config, kind):
         groups.setdefault(info.provider, []).append(info)
     lines: list[str] = []
     for provider in sorted(groups):
@@ -1383,7 +1383,7 @@ def _models_all(config: Config, kind: str, provider: str) -> str:
     from .llm.catalog import current_catalogue
 
     enabled = set(enabled_refs(current_catalogue(), enabled_patterns(config)))
-    models = [i for i in _runnable_models(config, kind) if i.provider == provider]
+    models = [i for i in runnable_models(config, kind) if i.provider == provider]
     if not models:
         return f"No models of `{provider}` that this room's brain can run."
     models.sort(key=lambda i: (i.ref not in enabled, i.ref))

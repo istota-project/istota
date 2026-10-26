@@ -2,7 +2,7 @@
 
 import json
 import os
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -3599,11 +3599,14 @@ class TestBrainAndModelInOneBody:
         )]})
         cookies = await _login(client, "alice")
         room = await self._room(client, cookies)
-        resp = await client.patch(
-            f"/istota/api/chat/rooms/{room['id']}",
-            json={"brain": "native", "model": "vendor/some-model"},
-            cookies=cookies, headers=self.HDRS,
-        )
+        # No discovery cache on disk: keep the layer installed above rather
+        # than let the PATCH take up an empty one.
+        with patch("istota.llm.discovery.install_from_cache_dir", return_value=False):
+            resp = await client.patch(
+                f"/istota/api/chat/rooms/{room['id']}",
+                json={"brain": "native", "model": "vendor/some-model"},
+                cookies=cookies, headers=self.HDRS,
+            )
         assert resp.status_code == 200
         body = resp.json()
         assert body["brain"] == "native"
