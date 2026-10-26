@@ -1,7 +1,10 @@
 import hljs from 'highlight.js/lib/common';
 
 export type Presentation =
-  { kind: 'markdown' } | { kind: 'code'; language: string } | { kind: 'plain' };
+  | { kind: 'markdown' }
+  | { kind: 'table'; delimiter: ',' | '\t' }
+  | { kind: 'code'; language: string }
+  | { kind: 'plain' };
 
 export const HIGHLIGHT_MAX_CHARS = 200_000;
 
@@ -31,6 +34,8 @@ export function presentationFor(name: string): Presentation {
   const dot = name.lastIndexOf('.');
   const ext = dot < 0 ? '' : name.slice(dot + 1).toLowerCase();
   if (['md', 'markdown', 'mdown'].includes(ext)) return { kind: 'markdown' };
+  if (ext === 'csv') return { kind: 'table', delimiter: ',' };
+  if (ext === 'tsv') return { kind: 'table', delimiter: '\t' };
   const language = Object.hasOwn(LANGUAGES, ext) ? LANGUAGES[ext] : undefined;
   if (language && hljs.getLanguage(language)) return { kind: 'code', language };
   return { kind: 'plain' };
