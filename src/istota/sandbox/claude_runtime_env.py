@@ -148,15 +148,10 @@ def sync_credentials_file(mode: str | None, token: str, home: str | None = None)
                     return "unchanged"
         except OSError:
             pass
+        from istota.lib.atomic_write import write_text_atomic
+
         path.parent.mkdir(mode=0o700, exist_ok=True)
-        staging = path.with_name(f".credentials.json.{os.getpid()}")
-        fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        try:
-            os.write(fd, wanted.encode("utf-8"))
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(staging, path)
+        write_text_atomic(path, wanted, mode=0o600, fsync=True)
         return "written"
     return "removed" if remove_stale_credentials_file(home) else "absent"
 
