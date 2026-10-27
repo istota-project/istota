@@ -854,6 +854,12 @@
     content-visibility: auto;
     contain-intrinsic-size: auto 40rem;
   }
+  /* `auto` also clips paint to the card, which cut off a field's suggestion menu
+     where the browser has no top layer for it. The section being edited is on
+     screen, so lifting the containment there costs nothing. */
+  .config-page :global(.config-section:focus-within) {
+    content-visibility: visible;
+  }
 
   .match-count {
     white-space: nowrap;

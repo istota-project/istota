@@ -25,4 +25,9 @@ describe('admin config section cards', () => {
     expect(body).toMatch(/content-visibility:\s*auto;/);
     expect(body).toMatch(/contain-intrinsic-size:\s*auto\s+\d+(\.\d+)?rem;/);
   });
+
+  it('lift the paint clip on the section being edited, so a field menu can overhang it', () => {
+    const body = ruleBody('.config-page :global(.config-section:focus-within)');
+    expect(body).toMatch(/content-visibility:\s*visible;/);
+  });
 });
