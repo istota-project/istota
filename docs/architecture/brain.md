@@ -4,7 +4,7 @@ The Brain layer (`src/istota/brain/`) is the single seam between executor orches
 
 The prompt reaches a brain on three channels, and they are distinct on purpose. `prompt` is the task material and becomes the model's user turn. `composed_system_prompt_path` names a file holding Istota's own standing instructions — identity, emissaries, persona, tool descriptions, rules, response guidelines, skill bodies — and is sent with system authority. `custom_system_prompt_path` is the operator's own file, with each backend's existing override semantics preserved. The split exists because a brain that compacts its own message history was compacting away the instructions that define the assistant (ISSUE-375); a system prompt is outside anything compaction reaches. A brain must not silently drop a composed path it was given: running the user half alone is that bug reintroduced. Direct text-only callers pass no composed path and are unaffected.
 
-Three brains ship behind the same protocol: `ClaudeCodeBrain` (the default, a headless `claude -p` subprocess wrapper), `NativeBrain` (Istota's own in-process agent loop against any OpenAI-compatible model), and `TmuxClaudeBrain` (drives the interactive `claude` TUI in a detached tmux session, keeping traffic on subscription billing). The executor doesn't change when you swap between them. `make_brain` selects on `config.brain.kind` (`KNOWN_BRAIN_KINDS = {"claude_code", "native", "tmux_claude"}`); an unknown kind raises `ValueError` at startup.
+Two brains ship behind the same protocol: `ClaudeCodeBrain` (the default, a headless `claude -p` subprocess wrapper) and `NativeBrain` (Istota's own in-process agent loop against any OpenAI-compatible model). The executor doesn't change when you swap between them. `make_brain` selects on `config.brain.kind` (`KNOWN_BRAIN_KINDS = {"claude_code", "native"}`); an unknown kind raises `ValueError` at startup.
 
 ## Layout
 
@@ -23,9 +23,7 @@ brain/
 ├── claude_code.py  # ClaudeCodeBrain — wraps the `claude` CLI subprocess;
 │                   # its resolver methods delegate to _resolve for `anthropic`
 ├── native.py       # NativeBrain — drives Istota's in-process agent loop
-└── tmux_claude.py  # TmuxClaudeBrain — drives the interactive `claude` TUI in a
-                    # detached tmux session; delegates model resolution to a
-                    # composed ClaudeCodeBrain, only implements execute()
+└── _cli_config_dir.py  # Helpers for building a per-task CLAUDE_CONFIG_DIR
 ```
 
 The native loop's machinery lives in sibling packages: `llm/` (providers, the model catalogue and its discovery, and the OpenAI-compatible client every provider is reached through), `agent/` (the loop and tool dispatch), and `session/` (turn state, compaction, retry). How providers, the catalogue and selection fit together for an operator is in [Models and providers](../configuration/models.md).
@@ -50,7 +48,7 @@ class Brain(Protocol):
 
 Each brain owns its own model namespace. Consumers never reach into a brain module's tables — they go through `make_brain(config.brain)` and call these methods. `resolve_alias` returns `(model_id, effort)` or `None`; `resolve_model_name` collapses any name to a canonical ID; `list_aliases` exposes the merged table for `!models`; `validate_alias_override` returns human-readable warnings for an operator alias override at config-load time (warnings only — it never fails the load). `make_brain(config.brain)` constructs the right implementation; unknown `kind` values raise `ValueError` so misconfiguration fails loudly at startup.
 
-`supports_steering` gates the `!steer` control channel: the brain must be able to take an additional user turn at a loop boundary mid-run. Only NativeBrain is wired for it today — ClaudeCodeBrain's stdin is closed once the prompt is sent, and TmuxClaudeBrain declares support but is held out of the command layer's allowlist. The executor supplies a `poll_steers` callback only to steering-capable brains; the scheduler drops undrained steers at task finalization.
+`supports_steering` gates the `!steer` control channel: the brain must be able to take an additional user turn at a loop boundary mid-run. Only NativeBrain is wired for it today — ClaudeCodeBrain's stdin is closed once the prompt is sent. The executor supplies a `poll_steers` callback only to steering-capable brains; the scheduler drops undrained steers at task finalization.
 
 ## Model identity
 
@@ -75,7 +73,7 @@ The dataclass the executor populates per task. The brain treats it as immutable 
 | Field | Notes |
 |---|---|
 | `prompt` | The user half — task material only (memory + knowledge facts + playbooks + conversation and confirmation context + request + attachments). Native compaction may summarize it. |
-| `allowed_tools` | From `executor.build_allowed_tools()` — `["Read","Write","Edit","Grep","Glob","Bash","WebSearch","WebFetch"]`. For ClaudeCodeBrain / TmuxClaudeBrain the list contents no longer reach the CLI (both run with `--dangerously-skip-permissions`, not an `--allowedTools` allowlist); the names only matter to NativeBrain, which filters its in-process tool set by them. A non-empty list is also the signal that distinguishes a tool-bearing task from a text-only one (empty = no tools, no skip-permissions, e.g. the sleep cycle). |
+| `allowed_tools` | From `executor.build_allowed_tools()` — `["Read","Write","Edit","Grep","Glob","Bash","WebSearch","WebFetch"]`. For ClaudeCodeBrain the list contents no longer reach the CLI (it runs with `--dangerously-skip-permissions`, not an `--allowedTools` allowlist); the names only matter to NativeBrain, which filters its in-process tool set by them. A non-empty list is also the signal that distinguishes a tool-bearing task from a text-only one (empty = no tools, no skip-permissions, e.g. the sleep cycle). |
 | `cwd` | Subprocess working directory (`config.temp_dir`) |
 | `env` | Per-task env (already credential-stripped if the skill proxy is enabled) |
 | `timeout_seconds` | `config.scheduler.task_timeout_minutes * 60` |
@@ -104,7 +102,7 @@ The dataclass the executor populates per task. The brain treats it as immutable 
 | `result_text` | Final response text (executor reconciles against trace via `_compose_full_result`) |
 | `actions_taken` | JSON-encoded list of tool-use descriptions |
 | `execution_trace` | JSON-encoded `[{"type":"tool"\|"text"\|"cm_boundary", ...}]` |
-| `stop_reason` | `completed` / `cancelled` / `timeout` / `oom` / `terminated` / `transient_api_error` / `usage_limit` / `error` / `not_found` / `fallback`. `usage_limit` is a subscription/quota/billing limit — a persistent "brain unavailable" condition, not a retry. `terminated` is death by a signal other than SIGKILL. `fallback` is a tmux launch-level failure. |
+| `stop_reason` | `completed` / `cancelled` / `timeout` / `oom` / `terminated` / `transient_api_error` / `usage_limit` / `error` / `not_found`. `usage_limit` is a subscription/quota/billing limit — a persistent "brain unavailable" condition, not a retry. `terminated` is death by a signal other than SIGKILL. |
 
 ## ClaudeCodeBrain
 
@@ -134,11 +132,11 @@ Output that came from the CLI but carries no terminal frame now logs one warning
 
 When the primary brain is **unavailable**, the executor reruns the *same attempt* — no new DB row, no `attempt_count` increment — through a configured fallback brain. Three cooperating pieces:
 
-- **Classification.** Each brain maps "I am unavailable" onto a `stop_reason`. `usage_limit` (a shared `is_usage_limit_error` detector, so it works on CLI output, tmux pane text, and native error bodies) covers subscription/quota/billing exhaustion; `not_found` a missing binary; `fallback` a tmux launch failure; `transient_api_error` a provider capacity signal (429 / 5xx / 529 / network-level) that survived the primary's own in-brain retries.
+- **Classification.** Each brain maps "I am unavailable" onto a `stop_reason`. `usage_limit` (a shared `is_usage_limit_error` detector, so it works on CLI output and native error bodies) covers subscription/quota/billing exhaustion; `not_found` a missing binary; `transient_api_error` a provider capacity signal (429 / 5xx / 529 / network-level) that survived the primary's own in-brain retries.
 - **Portable aliases.** `CANONICAL_ROLES = ("fast", "general", "smart")` is the single source of truth every brain's `DEFAULT_ALIASES` imports. A requested model that is a canonical tier — or a custom alias the operator flagged `portable = true` — re-resolves in the fallback's namespace (model *and* effort). A pin written as a qualified ref crosses when the fallback brain can run that provider's models (`llm.providers.brain_can_run`), so an `anthropic/...` pin survives a `claude_code` to `native` fallback when native holds an Anthropic key. Any other pin (`opus`, a bare id) can't cross the boundary: the fallback's own default is used and the reply carries a one-line italic note naming the dropped pin.
-- **Availability breaker.** A process-global, thread-safe breaker keyed by primary kind. The **trigger set** (reroute this attempt) is `{usage_limit, not_found, fallback}`, plus `transient_api_error` when `fallback_on_transient` (**on by default**). The **cooldown set** (skip the primary entirely on later tasks for `fallback_cooldown_seconds`) is `{usage_limit, not_found}` only — `fallback` is excluded so tmux keeps being probed per task and its own launch circuit breaker decides when to stop, and `transient_api_error` is excluded because it is transient by definition. `oom` / `timeout` / `cancelled` / `error` never trigger fallback; they are task outcomes. The cooldown is a **deadline**, and `fallback_cooldown_seconds` is its ceiling: on a `usage_limit` from a subscription brain the window ends at the quota's own reset, read from `usage/subscription.py`'s disk cache, floored at 60 seconds and capped at the configured cooldown. Without that, a limit hit shortly before a reset kept every task on the fallback brain for the rest of the hour with the primary idle and available.
+- **Availability breaker.** A process-global, thread-safe breaker keyed by primary kind. The **trigger set** (reroute this attempt) is `{usage_limit, not_found}`, plus `transient_api_error` when `fallback_on_transient` (**on by default**). The **cooldown set** (skip the primary entirely on later tasks for `fallback_cooldown_seconds`) is `{usage_limit, not_found}` only — `transient_api_error` is excluded because it is transient by definition. `oom` / `timeout` / `cancelled` / `error` never trigger fallback; they are task outcomes. The cooldown is a **deadline**, and `fallback_cooldown_seconds` is its ceiling: on a `usage_limit` from a subscription brain the window ends at the quota's own reset, read from `usage/subscription.py`'s disk cache, floored at 60 seconds and capped at the configured cooldown. Without that, a limit hit shortly before a reset kept every task on the fallback brain for the rest of the hour with the primary idle and available.
 
-Config: `[brain] fallback` (`""` = none, for every brain kind — explicit config only, no implicit target), `fallback_on_transient`, `fallback_cooldown_seconds`. An unknown kind is neutralized at config load with one warning, as is a self-fallback — meaning the configured kind is the only one the deployment runs, so a `source_type_overrides` entry routing elsewhere keeps a value equal to `kind` and gives those routed tasks a real target. `effective_fallback_kind` carries the per-task half: it returns None where the fallback equals the resolved config's own kind. `tmux_claude` running with no fallback gets one INFO line per process (it resolved to `claude_code` implicitly before ISSUE-362, so an upgrade would otherwise drop failover silently). The breaker, the availability record and the operator alert fire on a persistent unavailability whether or not a fallback is configured; only the reroute itself needs one. There is a single fallback level — if the fallback is also unavailable for the *same* class of reason, its failure text is tagged `executor.FALLBACK_EXHAUSTED_MARKER` and `scheduler._format_error_for_user` turns it into "both my primary and backup brains are unavailable" rather than echoing a raw provider error. Otherwise the task fails or retries normally.
+Config: `[brain] fallback` (`""` = none, for every brain kind — explicit config only, no implicit target), `fallback_on_transient`, `fallback_cooldown_seconds`. An unknown kind is neutralized at config load with one warning, as is a self-fallback — meaning the configured kind is the only one the deployment runs, so a `source_type_overrides` entry routing elsewhere keeps a value equal to `kind` and gives those routed tasks a real target. `effective_fallback_kind` carries the per-task half: it returns None where the fallback equals the resolved config's own kind. The breaker, the availability record and the operator alert fire on a persistent unavailability whether or not a fallback is configured; only the reroute itself needs one. There is a single fallback level — if the fallback is also unavailable for the *same* class of reason, its failure text is tagged `executor.FALLBACK_EXHAUSTED_MARKER` and `scheduler._format_error_for_user` turns it into "both my primary and backup brains are unavailable" rather than echoing a raw provider error. Otherwise the task fails or retries normally.
 
 ### Degraded-brain policy for automatic work
 
@@ -163,7 +161,7 @@ The sleep cycle and shared-block synthesis call the primary brain *directly* rat
 
 ```toml
 [brain]
-kind = "claude_code"  # "claude_code" | "native" | "tmux_claude"
+kind = "claude_code"  # "claude_code" | "native"
 fallback = "native"               # brain kind to use when the primary is unavailable ("" = none)
 fallback_on_transient = true      # also reroute a persistent transient_api_error
 fallback_cooldown_seconds = 900   # skip an unavailable primary this long (0 = no stickiness)
@@ -173,17 +171,12 @@ provider = "openrouter"           # a [providers.<id>] id; required, no default
 model = "z-ai/glm-5.3-flash"      # an id that provider lists
 # the key is the provider's: ISTOTA_PROVIDER_OPENROUTER_API_KEY (kept out of TOML)
 
-[brain.tmux]           # only when kind = "tmux_claude" (or routed-to)
-# All fields default in code to the prototype's pinned values, so an
-# absent block is behavioral parity. See config.example.toml for the
-# full set (marker heuristics, circuit-breaker thresholds, CLI pin).
-
 [brain.source_type_overrides]   # per-source-type routing (gradual rollout)
 scheduled = "native"
 heartbeat = "native"
 ```
 
-Defaults to `"claude_code"`, so existing deployments need no changes. `source_type_overrides` maps a task's `source_type` to a brain kind, overriding `kind` for matching tasks — the gradual-rollout knob (`brain.resolve_brain_kind` resolves it per task; unknown kinds are logged and ignored). `"native"` is istota's own in-process agent loop — see the [native brain operator runbook](../configuration/native-brain.md) for enabling it, the dev tiers, and shadow compare. `"tmux_claude"` drives the interactive `claude` TUI in a detached tmux session to keep traffic on subscription billing; a launch-level failure returns `stop_reason="fallback"`, so the executor reruns the task through `[brain] fallback` where one is configured, and a process-global circuit breaker short-circuits to it for a cooldown after repeated launch failures. With no fallback named the task fails; there is no implicit `claude_code` target (ISSUE-362).
+Defaults to `"claude_code"`, so existing deployments need no changes. `source_type_overrides` maps a task's `source_type` to a brain kind, overriding `kind` for matching tasks — the gradual-rollout knob (`brain.resolve_brain_kind` resolves it per task; unknown kinds are logged and ignored). `"native"` is istota's own in-process agent loop — see the [native brain operator runbook](../configuration/native-brain.md) for enabling it, the dev tiers, and shadow compare.
 
 ### Native brain request and context options
 

@@ -11,7 +11,7 @@ A provider has an id, a `kind`, a base URL and a key. Two are built in and need 
 | `anthropic` | `anthropic` | `https://api.anthropic.com` |
 | `openrouter` | `openrouter` | `https://openrouter.ai/api/v1` |
 
-A provider existing does not make any brain use it. The native brain uses the one `[brain.native] provider` names, and that setting has no default: a native brain with no provider is unavailable, and doctor's `runtime.native_brain` names the field to set. The `claude_code` and `tmux_claude` brains always use `anthropic`, because the `claude` CLI talks only to Anthropic.
+A provider existing does not make any brain use it. The native brain uses the one `[brain.native] provider` names, and that setting has no default: a native brain with no provider is unavailable, and doctor's `runtime.native_brain` names the field to set. The `claude_code` brain always uses `anthropic`, because the `claude` CLI talks only to Anthropic.
 
 An endpoint of your own, such as a local server or a gateway, is a provider of your own. Its id is lowercase letters, digits and `_`, starting with a letter, and its table sets `kind` and `base_url`:
 
@@ -42,7 +42,7 @@ The `kind` decides what the endpoint is sent: cache breakpoints by default for `
 
 ### Which providers a brain reaches
 
-A provider existing, or holding a key, does not let a brain use it. The `claude_code` and `tmux_claude` brains reach the `anthropic` provider only. The native brain reaches its default provider, `[brain.native] provider`, and any provider listed in `[brain.native] providers`:
+A provider existing, or holding a key, does not let a brain use it. The `claude_code` brain reaches the `anthropic` provider only. The native brain reaches its default provider, `[brain.native] provider`, and any provider listed in `[brain.native] providers`:
 
 ```toml
 [brain.native]
@@ -64,7 +64,7 @@ An admin's `provider/id` in `!room model`, the room settings, `!model` or a CRON
 
 Each provider's default model is `[providers.<id>] default_model`, what a room on it runs with no model of its own. Native's default provider uses `[brain.native] model`. A tier (`fast`, `general`, `smart`) with no target for the room's provider means that provider's default model too.
 
-A room or job pinned to a provider the list no longer holds runs on native's default provider, with a warning in the log, and doctor's `models.catalogue` names each such room and job. The pin comes back into force if the provider is listed again. A room whose brain moves to `claude_code` or `tmux_claude` loses its provider, since the CLI brains run on `anthropic` alone.
+A room or job pinned to a provider the list no longer holds runs on native's default provider, with a warning in the log, and doctor's `models.catalogue` names each such room and job. The pin comes back into force if the provider is listed again. A room whose brain moves to `claude_code` loses its provider, since that brain runs on `anthropic` alone.
 
 ### A user's own key
 
@@ -72,7 +72,7 @@ A user may hold their own key for a deployment provider: `istota secret ensure -
 
 ## How the claude CLI authenticates
 
-`[brain.claude_code] auth` decides how the `claude` CLI signs in, for both CLI brains:
+`[brain.claude_code] auth` decides how the `claude` CLI signs in:
 
 - `"subscription"` gives the CLI the Claude subscription token (`CLAUDE_CODE_OAUTH_TOKEN`, the `claude_code_oauth_token` secret file) and never an API key. The token is only ever sent to Anthropic, so a non-default `[providers.anthropic] base_url` makes the CLI brains unavailable under this mode.
 - `"api_key"` gives the CLI the `anthropic` provider's key and base URL, and never the token. A gateway in front of Anthropic is the `anthropic` provider with the gateway's `base_url` and key, and the sandbox's network allowlist gains its host.
@@ -81,7 +81,7 @@ Unset, the mode is `"subscription"` when the token is in the environment. An Ant
 
 Choose `"subscription"` when the deployment runs on a Claude plan, and `"api_key"` when it pays per token. Two things to know about `"api_key"`:
 
-- The CLI has to hold the key to use it, so a task on `claude_code` or `tmux_claude` can read the key from its Bash tool, as it can read the subscription token under `"subscription"`. Use a key you are prepared to have the model see, ideally from a workspace with a spend limit.
+- The CLI has to hold the key to use it, so a task on `claude_code` can read the key from its Bash tool, as it can read the subscription token under `"subscription"`. Use a key you are prepared to have the model see, ideally from a workspace with a spend limit.
 - A gateway that accepts only a bearer token (`ANTHROPIC_AUTH_TOKEN`) is not supported. The CLI is given `ANTHROPIC_API_KEY` only.
 
 The CLI's environment is built from config alone. Nothing credential-shaped is copied from the daemon's environment, and listing a model credential such as `ANTHROPIC_API_KEY` in `[security] passthrough_env_vars` is refused with a warning. `istota doctor`'s `models.cli_auth` check reports the mode and whether it was written or derived.
@@ -166,9 +166,9 @@ Effort is clamped to what the chosen model supports, on every brain. A model wit
 
 ### The admin configuration page
 
-Every config field that names a model (`[brain.claude_code] model`, `[brain.tmux] model`, `[brain.claude_code] advisor_model`, `[brain.native] model`, the triage, speech-gate, sleep-cycle and review models) is set on the admin configuration page from two lists, a source and a model from that source, with an effort list where the field takes one. `[brain.native] model` offers native's default provider alone, since another provider's default is its own `default_model`; the internal models offer `anthropic` and the providers `[brain.native] providers` lists. `[models] enabled` and `[models.aliases]` have editors of their own. A value the catalogue does not know is kept and shown as such, so saving another field never changes it, and "Other…" accepts an id a provider has not listed yet.
+Every config field that names a model (`[brain.claude_code] model`, `[brain.claude_code] advisor_model`, `[brain.native] model`, the triage, speech-gate, sleep-cycle and review models) is set on the admin configuration page from two lists, a source and a model from that source, with an effort list where the field takes one. `[brain.native] model` offers native's default provider alone, since another provider's default is its own `default_model`; the internal models offer `anthropic` and the providers `[brain.native] providers` lists. `[models] enabled` and `[models.aliases]` have editors of their own. A value the catalogue does not know is kept and shown as such, so saving another field never changes it, and "Other…" accepts an id a provider has not listed yet.
 
-`istota apply` and the page's preview check every model field the document sets. A field naming a provider that is not configured is refused, on the fields that only Anthropic models fill (the two CLI brains' `model` and `advisor_model`). Everywhere else, including `[brain.native] model`, whose OpenRouter ids contain a slash, a value that does not resolve is a warning: an id a provider lists but istota has not fetched yet is still a valid choice.
+`istota apply` and the page's preview check every model field the document sets. A field naming a provider that is not configured is refused, on the fields that only Anthropic models fill (`[brain.claude_code] model` and `advisor_model`). Everywhere else, including `[brain.native] model`, whose OpenRouter ids contain a slash, a value that does not resolve is a warning: an id a provider lists but istota has not fetched yet is still a valid choice.
 
 ## Moving an install that predates providers
 

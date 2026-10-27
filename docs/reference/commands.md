@@ -71,7 +71,7 @@ A task held for confirmation is **discarded** rather than flagged, since a parke
 
 `!steer <text>` (alias `!inject`) is the additive counterpart to `!stop`: instead of cancelling, the note reaches the model at its next loop boundary as an extra user turn, so it adjusts course without discarding work in progress. The steer is written to the room transcript (display-only) and to the running task's live event log, so a reconnecting web client sees that it landed.
 
-It is room-scoped — it targets your most recent `running`/`locked` task in the room you send it from. A task awaiting confirmation is not steerable (reply normally instead). Steering needs a brain that can accept a mid-run turn: only the **native** brain is wired for it today, and `!steer` refuses with an explanation for `claude_code` (its stdin is closed once the prompt is sent) and `tmux_claude`. At most 10 pending steers may queue on one task.
+It is room-scoped — it targets your most recent `running`/`locked` task in the room you send it from. A task awaiting confirmation is not steerable (reply normally instead). Steering needs a brain that can accept a mid-run turn: only the **native** brain is wired for it today, and `!steer` refuses with an explanation for `claude_code` (its stdin is closed once the prompt is sent). At most 10 pending steers may queue on one task.
 
 ## Retrying a failed task
 
