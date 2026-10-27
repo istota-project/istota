@@ -113,6 +113,8 @@ class BriefingsContext:
     db_path: Path
     workspace_root: Path | None = None
     configured_briefing_names: tuple[str, ...] = ()
+    # The istota Config, set by the two callers that invoke the Click tree.
+    app_config: Any = None
 
     def ensure_dirs(self) -> None:
         """Create the data dir and the SQLite parent dir."""

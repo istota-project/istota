@@ -1,6 +1,17 @@
 """Click CLI for the briefings module content model (blocks/sources/archive).
 
-Emits JSON to stdout. The :class:`BriefingsContext` is injected via Click's
+Emits JSON to stdout. A refusal is ``{"status": "error", "reason": <code>,
+"error": <text>}`` at exit 1 (:func:`_fail`). Reason codes:
+
+- ``not_found``: the id or name does not exist for this user.
+- ``invalid_argument``: a flag value failed parsing (bad JSON, bad id list,
+  unknown kind, conflicting flags).
+- ``invalid_definition``: ``save_block_definition``'s validator refused the
+  result; the message is the validator's.
+- ``unavailable``: the tree was invoked without the context it needs.
+
+``blocks list`` for an unknown briefing still answers ``status: not_found`` at
+exit 0, now with ``reason: not_found``, for one release. The :class:`BriefingsContext` is injected via Click's
 ``obj`` (no env marshaling) — the operator CLI (``istota briefings``) and the
 skill facade (``istota-skill briefings``) both resolve the context the istota
 way and invoke this tree in-process via ``CliRunner``. Mirrors
@@ -10,22 +21,61 @@ way and invoke this tree in-process via ``CliRunner``. Mirrors
 from __future__ import annotations
 
 import json
+import sys
+from typing import NoReturn
 
 import click
 
 from istota.briefings import db as bdb
-from istota.briefings.models import SOURCE_KINDS, BriefingsContext, validate_block_options
+from istota.briefings.models import SOURCE_KINDS, BriefingsContext
 
 
 def _emit(payload) -> None:
     click.echo(json.dumps(payload))
 
 
+def _fail(reason: str, message: str, **extra) -> NoReturn:
+    _emit({"status": "error", "reason": reason, "error": message, **extra})
+    # `sys.exit`, not `click.exceptions.Exit`: both callers invoke this tree with
+    # `standalone_mode=False`, where Click returns an `Exit` code instead of
+    # raising it and `CliRunner` then reports exit 0.
+    sys.exit(1)
+
+
 def _ctx(click_ctx) -> BriefingsContext:
     obj = click_ctx.obj
     if not isinstance(obj, BriefingsContext):
-        raise click.ClickException("no briefings context injected")
+        _fail("unavailable", "no briefings context injected")
     return obj
+
+
+def _json_object(flag: str, raw: str) -> dict:
+    try:
+        value = json.loads(raw)
+    except ValueError as e:
+        _fail("invalid_argument", f"invalid {flag} JSON: {e}")
+    if not isinstance(value, dict):
+        _fail("invalid_argument", f"{flag} must be a JSON object")
+    return value
+
+
+def _merge_options(stored: dict, patch: dict) -> dict:
+    merged = {**stored, **patch}
+    if isinstance(stored.get("presentation"), dict) and isinstance(patch.get("presentation"), dict):
+        merged["presentation"] = {**stored["presentation"], **patch["presentation"]}
+    return merged
+
+
+def _save_block(bctx: BriefingsContext, payload: dict) -> None:
+    with bdb.connect(bctx.db_path) as conn:
+        try:
+            block = bdb.save_block_definition(conn, payload=payload)
+        except LookupError:
+            _fail("not_found", "block not found")
+        except ValueError as e:
+            _fail("invalid_definition", str(e))
+        conn.commit()
+    _emit({"status": "ok", "block": _block_dict(block)})
 
 
 def _block_dict(block) -> dict:
@@ -107,6 +157,7 @@ def blocks_list(ctx, briefing):
     if briefing not in available:
         _emit({
             "status": "not_found",
+            "reason": "not_found",
             "error": f"no briefing named '{briefing}'",
             "available": available,
         })
@@ -119,17 +170,16 @@ def blocks_list(ctx, briefing):
 @click.option("--title", required=True)
 @click.option("--directive", default=None)
 @click.option("--render-mode", "render_mode", default="synthesis")
+@click.option("--options", default=None, help="JSON options object")
 @click.pass_context
-def blocks_add(ctx, briefing, title, directive, render_mode):
+def blocks_add(ctx, briefing, title, directive, render_mode, options):
     bctx = _ctx(ctx)
-    with bdb.connect(bctx.db_path) as conn:
-        bid = bdb.add_block(
-            conn, briefing_name=briefing, title=title,
-            directive=directive, render_mode=render_mode,
-        )
-        conn.commit()
-        block = bdb.get_block(conn, bid)
-    _emit({"status": "ok", "block": _block_dict(block)})
+    payload = {
+        "briefing_name": briefing, "title": title,
+        "directive": directive, "render_mode": render_mode,
+        "options": _json_object("--options", options) if options is not None else {},
+    }
+    _save_block(bctx, payload)
 
 
 @blocks.command("set")
@@ -137,26 +187,33 @@ def blocks_add(ctx, briefing, title, directive, render_mode):
 @click.option("--title", default=None)
 @click.option("--directive", default=None)
 @click.option("--render-mode", "render_mode", default=None)
-@click.option("--options", default=None, help="JSON options object")
+@click.option("--options", default=None, help="JSON options object (replaces the stored one)")
+@click.option(
+    "--merge-options", "merge_options", default=None,
+    help="JSON object merged over the stored options, presentation merged too",
+)
 @click.pass_context
-def blocks_set(ctx, block_id, title, directive, render_mode, options):
+def blocks_set(ctx, block_id, title, directive, render_mode, options, merge_options):
     bctx = _ctx(ctx)
-    opts = None
+    if options is not None and merge_options is not None:
+        _fail("invalid_argument", "--options and --merge-options are mutually exclusive")
+    payload: dict = {"id": block_id}
+    if title is not None:
+        payload["title"] = title
+    if directive is not None:
+        payload["directive"] = directive
+    if render_mode is not None:
+        payload["render_mode"] = render_mode
     if options is not None:
-        try:
-            opts = validate_block_options(json.loads(options))
-        except ValueError as e:
-            raise click.ClickException(f"invalid --options: {e}")
-    with bdb.connect(bctx.db_path) as conn:
-        if not bdb.get_block(conn, block_id, with_sources=False):
-            raise click.ClickException("block not found")
-        bdb.update_block(
-            conn, block_id, title=title, directive=directive,
-            render_mode=render_mode, options=opts,
-        )
-        conn.commit()
-        block = bdb.get_block(conn, block_id)
-    _emit({"status": "ok", "block": _block_dict(block)})
+        payload["options"] = _json_object("--options", options)
+    if merge_options is not None:
+        patch = _json_object("--merge-options", merge_options)
+        with bdb.connect(bctx.db_path) as conn:
+            stored = bdb.get_block(conn, block_id, with_sources=False)
+        if stored is None:
+            _fail("not_found", "block not found")
+        payload["options"] = _merge_options(stored.options or {}, patch)
+    _save_block(bctx, payload)
 
 
 @blocks.command("remove")
@@ -165,6 +222,8 @@ def blocks_set(ctx, block_id, title, directive, render_mode, options):
 def blocks_remove(ctx, block_id):
     bctx = _ctx(ctx)
     with bdb.connect(bctx.db_path) as conn:
+        if not bdb.get_block(conn, block_id, with_sources=False):
+            _fail("not_found", "block not found")
         bdb.delete_block(conn, block_id)
         conn.commit()
     _emit({"status": "ok"})
@@ -176,9 +235,15 @@ def blocks_remove(ctx, block_id):
 @click.pass_context
 def blocks_reorder(ctx, briefing, ids):
     bctx = _ctx(ctx)
-    ordered = [int(x) for x in ids.split(",") if x.strip()]
+    try:
+        ordered = [int(x) for x in ids.split(",") if x.strip()]
+    except ValueError:
+        _fail("invalid_argument", "--ids must be a comma-separated list of block ids")
     with bdb.connect(bctx.db_path) as conn:
-        bdb.reorder_blocks(conn, briefing, ordered)
+        try:
+            bdb.reorder_blocks(conn, briefing, ordered)
+        except ValueError as e:
+            _fail("invalid_argument", str(e))
         conn.commit()
     _emit({"status": "ok", "reordered": len(ordered)})
 
@@ -197,6 +262,8 @@ def sources():
 def sources_list(ctx, block_id):
     bctx = _ctx(ctx)
     with bdb.connect(bctx.db_path) as conn:
+        if not bdb.get_block(conn, block_id, with_sources=False):
+            _fail("not_found", "block not found")
         rows = bdb.list_sources(conn, block_id)
     _emit({"status": "ok", "sources": [_source_dict(s) for s in rows]})
 
@@ -209,16 +276,16 @@ def sources_list(ctx, block_id):
 def sources_add(ctx, block_id, kind, config_json):
     bctx = _ctx(ctx)
     if kind not in SOURCE_KINDS:
-        raise click.ClickException(f"invalid kind '{kind}' (one of {', '.join(SOURCE_KINDS)})")
+        _fail("invalid_argument", f"invalid kind '{kind}' (one of {', '.join(SOURCE_KINDS)})")
     cfg = {}
     if config_json:
         try:
             cfg = json.loads(config_json)
         except ValueError as e:
-            raise click.ClickException(f"invalid --config JSON: {e}")
+            _fail("invalid_argument", f"invalid --config JSON: {e}")
     with bdb.connect(bctx.db_path) as conn:
         if not bdb.get_block(conn, block_id, with_sources=False):
-            raise click.ClickException("block not found")
+            _fail("not_found", "block not found")
         sid = bdb.add_source(conn, block_id=block_id, kind=kind, config=cfg)
         conn.commit()
     _emit({"status": "ok", "id": sid})
@@ -230,6 +297,8 @@ def sources_add(ctx, block_id, kind, config_json):
 def sources_remove(ctx, source_id):
     bctx = _ctx(ctx)
     with bdb.connect(bctx.db_path) as conn:
+        if bdb.get_source(conn, source_id) is None:
+            _fail("not_found", "source not found")
         bdb.delete_source(conn, source_id)
         conn.commit()
     _emit({"status": "ok"})
@@ -271,7 +340,7 @@ def archive_show(ctx, archive_id):
     with bdb.connect(bctx.db_path) as conn:
         row = bdb.get_archived(conn, archive_id)
     if not row:
-        raise click.ClickException("archive entry not found")
+        _fail("not_found", "archive entry not found")
     _emit({
         "status": "ok",
         "briefing": {

@@ -41,6 +41,7 @@ def test_blocks_list_reports_unknown_briefing_with_available_names(ctx):
     assert result.exit_code == 0
     assert output == {
         "status": "not_found",
+        "reason": "not_found",
         "error": "no briefing named 'Morning'",
         "available": ["evening", "morning", "weekly"],
     }
@@ -119,3 +120,140 @@ def test_cli_presentation_preserves_unrelated_options(ctx):
     options = {"tone": "neutral", "custom": 42, "presentation": {"width": "full"}}
     _, response = _invoke(ctx, ["blocks", "set", "--id", str(bid), "--options", json.dumps(options)])
     assert response["block"]["options"] == options
+
+
+# -- one error shape, block writes through save_block_definition --------------
+
+
+def _first_block_id(ctx):
+    with bdb.connect(ctx.db_path) as conn:
+        return bdb.list_blocks(conn, "morning")[0].id
+
+
+@pytest.mark.parametrize("args", [
+    ["blocks", "remove", "--id", "9999"],
+    ["sources", "remove", "--id", "9999"],
+    ["sources", "list", "--block", "9999"],
+])
+def test_missing_ids_answer_not_found(ctx, args):
+    result, output = _invoke(ctx, args)
+
+    assert result.exit_code == 1
+    assert output["status"] == "error"
+    assert output["reason"] == "not_found"
+
+
+def test_blocks_remove_of_a_real_block_still_removes_it(ctx):
+    bid = _first_block_id(ctx)
+    result, output = _invoke(ctx, ["blocks", "remove", "--id", str(bid)])
+
+    assert result.exit_code == 0
+    assert output == {"status": "ok"}
+    with bdb.connect(ctx.db_path) as conn:
+        assert bdb.get_block(conn, bid) is None
+
+
+def test_blocks_set_refuses_agent_render_mode_and_keeps_the_row(ctx):
+    bid = _first_block_id(ctx)
+    result, output = _invoke(
+        ctx, ["blocks", "set", "--id", str(bid), "--render-mode", "agent"],
+    )
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_definition"
+    assert "render_mode" in output["error"]
+    with bdb.connect(ctx.db_path) as conn:
+        assert bdb.get_block(conn, bid).render_mode == "synthesis"
+
+
+def test_blocks_set_on_a_missing_block_is_not_found(ctx):
+    result, output = _invoke(ctx, ["blocks", "set", "--id", "9999", "--title", "X"])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "not_found"
+
+
+def test_blocks_add_stores_render_mode_and_options(ctx):
+    options = {"presentation": {"width": "wide"}}
+    result, output = _invoke(ctx, [
+        "blocks", "add", "--briefing", "morning", "--title", "Quotes",
+        "--render-mode", "structured", "--options", json.dumps(options),
+    ])
+
+    assert result.exit_code == 0
+    with bdb.connect(ctx.db_path) as conn:
+        stored = bdb.get_block(conn, output["block"]["id"])
+    assert stored.render_mode == "structured"
+    assert stored.options == options
+
+
+def test_blocks_add_refuses_an_unknown_render_mode(ctx):
+    with bdb.connect(ctx.db_path) as conn:
+        before = len(bdb.list_blocks(conn, "morning"))
+    result, output = _invoke(ctx, [
+        "blocks", "add", "--briefing", "morning", "--title", "Quotes",
+        "--render-mode", "banana",
+    ])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_definition"
+    with bdb.connect(ctx.db_path) as conn:
+        assert len(bdb.list_blocks(conn, "morning")) == before
+
+
+def test_bad_options_json_is_invalid_argument(ctx):
+    bid = _first_block_id(ctx)
+    result, output = _invoke(ctx, ["blocks", "set", "--id", str(bid), "--options", "{nope"])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_argument"
+
+
+def test_merge_options_keeps_stored_keys_and_merges_presentation(ctx):
+    bid = _first_block_id(ctx)
+    _invoke(ctx, ["blocks", "set", "--id", str(bid), "--options", json.dumps(
+        {"tone": "neutral", "presentation": {"width": "full"}},
+    )])
+
+    result, output = _invoke(ctx, [
+        "blocks", "set", "--id", str(bid), "--merge-options",
+        json.dumps({"story_count": 3}),
+    ])
+    assert result.exit_code == 0
+    assert output["block"]["options"] == {
+        "tone": "neutral", "story_count": 3, "presentation": {"width": "full"},
+    }
+
+    result, output = _invoke(ctx, [
+        "blocks", "set", "--id", str(bid), "--merge-options",
+        json.dumps({"presentation": {"width": "wide"}}),
+    ])
+    assert result.exit_code == 0
+    assert output["block"]["options"] == {
+        "tone": "neutral", "story_count": 3, "presentation": {"width": "wide"},
+    }
+
+
+def test_options_and_merge_options_are_exclusive(ctx):
+    bid = _first_block_id(ctx)
+    result, output = _invoke(ctx, [
+        "blocks", "set", "--id", str(bid), "--options", "{}", "--merge-options", "{}",
+    ])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_argument"
+
+
+def test_reorder_with_a_bad_id_list_is_invalid_argument(ctx):
+    result, output = _invoke(ctx, ["blocks", "reorder", "--briefing", "morning", "--ids", "a,b"])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_argument"
+
+
+def test_sources_add_unknown_kind_is_invalid_argument(ctx):
+    bid = _first_block_id(ctx)
+    result, output = _invoke(ctx, ["sources", "add", "--block", str(bid), "--kind", "bogus"])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_argument"

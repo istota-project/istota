@@ -61,6 +61,7 @@ def _run(args: list[str]) -> dict:
         return {"status": "error", "error": str(e)}
 
     ensure_initialised(ctx, app_config=istota_cfg)
+    ctx.app_config = istota_cfg
 
     runner = CliRunner()
     result = runner.invoke(
@@ -80,6 +81,13 @@ def _run(args: list[str]) -> dict:
             "error": f"{type(result.exception).__name__}: {result.exception}",
         }
     if result.exit_code not in (0, None):
+        # The CLI's own refusal (`briefings.cli._fail`) is already the envelope.
+        try:
+            refused = json.loads(result.output or "")
+        except json.JSONDecodeError:
+            refused = None
+        if isinstance(refused, dict) and refused.get("status") == "error":
+            return refused
         return {
             "status": "error",
             "error": (result.output or f"exit {result.exit_code}").strip(),

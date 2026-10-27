@@ -158,6 +158,56 @@ class TestBlocksSources:
         )
         assert rc == 1
 
+    def test_refusal_prints_the_envelope_and_exits_one(self, config, capsys):
+        cli_briefings.dispatch(
+            ["blocks", "add", "-u", "alice", "--briefing", "M", "--title", "X"],
+            config,
+        )
+        bid = json.loads(capsys.readouterr().out)["block"]["id"]
+
+        rc = cli_briefings.dispatch(
+            ["blocks", "set", "-u", "alice", "--id", str(bid), "--render-mode", "agent"],
+            config,
+        )
+
+        assert rc == 1
+        assert json.loads(capsys.readouterr().out)["reason"] == "invalid_definition"
+
+    def test_add_options_and_merge_options_are_forwarded(self, config, capsys):
+        rc = cli_briefings.dispatch(
+            ["blocks", "add", "-u", "alice", "--briefing", "M", "--title", "X",
+             "--options", '{"tone": "neutral"}'],
+            config,
+        )
+        assert rc == 0
+        bid = json.loads(capsys.readouterr().out)["block"]["id"]
+
+        rc = cli_briefings.dispatch(
+            ["blocks", "set", "-u", "alice", "--id", str(bid),
+             "--merge-options", '{"story_count": 4}'],
+            config,
+        )
+
+        assert rc == 0
+        options = json.loads(capsys.readouterr().out)["block"]["options"]
+        assert options == {"tone": "neutral", "story_count": 4}
+
+    def test_operator_context_carries_the_app_config(self, config, capsys, monkeypatch):
+        from istota.briefings import cli as bcli
+
+        seen = {}
+        real_ctx = bcli._ctx
+
+        def capture(click_ctx):
+            bctx = real_ctx(click_ctx)
+            seen["app_config"] = bctx.app_config
+            return bctx
+
+        monkeypatch.setattr(bcli, "_ctx", capture)
+        cli_briefings.dispatch(["blocks", "list", "-u", "alice", "--briefing", "M"], config)
+
+        assert seen["app_config"] is config
+
     def test_disabled_module_errors(self, tmp_path, capsys):
         cfg = Config(
             db_path=tmp_path / "istota.db",

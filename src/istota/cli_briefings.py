@@ -53,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     blk.add_argument("--id", type=int)
     blk.add_argument("--ids")
     blk.add_argument("--options")
+    blk.add_argument("--merge-options", dest="merge_options")
 
     # sources -------------------------------------------------------------
     src = sub.add_parser("sources", help="Manage a block's sources")
@@ -370,6 +371,7 @@ def _invoke_module(config, user_id: str, module_argv: list[str]) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     ensure_initialised(ctx, app_config=config)
+    ctx.app_config = config
 
     runner = CliRunner()
     result = runner.invoke(
@@ -393,6 +395,8 @@ def _blocks_argv(args) -> list[str]:
             argv += ["--directive", args.directive]
         if args.render_mode:
             argv += ["--render-mode", args.render_mode]
+        if args.options is not None:
+            argv += ["--options", args.options]
     elif args.action == "set":
         argv += ["--id", str(args.id)]
         if args.title is not None:
@@ -403,6 +407,8 @@ def _blocks_argv(args) -> list[str]:
             argv += ["--render-mode", args.render_mode]
         if args.options is not None:
             argv += ["--options", args.options]
+        if args.merge_options is not None:
+            argv += ["--merge-options", args.merge_options]
     elif args.action == "remove":
         argv += ["--id", str(args.id)]
     elif args.action == "reorder":
