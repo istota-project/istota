@@ -36,7 +36,8 @@ may depend on them.
   runs in an executor, never on the loop.
 - **Calls are held** until ``release_calls``: the brain releases them once the
   CLI's ``system/init`` frame passed its check, so no tool runs for a CLI that
-  is about to be killed.
+  is about to be killed. ``set_cli_root`` holds them again, since a respawned
+  CLI has its own frame to pass.
 - **Failure**: a dead tool server fails every pending and later call, sets
   ``HarnessHandle.failure`` and calls ``on_failure``, which the brain uses to
   kill the CLI's group. A start failure is reported the same way: the handle
@@ -439,10 +440,16 @@ class _Bridge:
             self._roots.revoke(old)
         if not self._roots.authorize(pid):
             logger.warning("tool harness: the CLI (pid %d) was gone before it was registered", pid)
-        # The previous CLI's adapter belongs to a process that is gone.
+        # The previous CLI's adapter belongs to a process that is gone, and a
+        # respawned CLI has its own init check to pass before calls run again.
         if self._runtime.is_running:
             with contextlib.suppress(Exception):
-                self._runtime.loop.call_soon_threadsafe(self._drop_connections)
+                self._runtime.loop.call_soon_threadsafe(self._new_root)
+
+    def _new_root(self) -> None:
+        if self._released is not None:
+            self._released.clear()
+        self._drop_connections()
 
     def _drop_connections(self) -> None:
         for conn in list(self._connections):
@@ -637,7 +644,7 @@ def tool_harness(
 
 def set_cli_root(handle: HarnessHandle, pid: int) -> None:
     """The CLI was (re)spawned with ``pid``: admit its descendants, and only
-    theirs, from now on."""
+    theirs, from now on, and hold calls until ``release_calls`` again."""
     if handle._bridge is not None:
         handle._bridge.set_root(pid)
 

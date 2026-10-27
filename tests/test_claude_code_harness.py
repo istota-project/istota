@@ -1,17 +1,28 @@
-"""The CLI tool harness, executor side (cli-brain-tools spec, Stage 6).
+"""The CLI tool harness (cli-brain-tools spec, Stages 6 and 7).
 
-What the executor hands a `claude_code` brain so the CLI can run outside the
-sandbox with its tools in the tool server: the switch, the four conditions
-under which a request gets a `HarnessSpec`, the CLI's env, the harness root
-and its sweep, and the per-harness `CLAUDE_CONFIG_DIR`. Stage 7 adds the
-brain's half (argv, the init check, the failure order, the seam test).
+The executor's half: what it hands a `claude_code` brain so the CLI can run
+outside the sandbox with its tools in the tool server (the switch, the four
+conditions under which a request gets a `HarnessSpec`, the CLI's env, the
+harness root and its sweep, the per-harness `CLAUDE_CONFIG_DIR`).
+
+The brain's half, from "ClaudeCodeBrain on the harness" down: the argv, the
+`system/init` check, the failure order, the pid rules and the seam. Those run
+`ClaudeCodeBrain.execute` for real against `tests/support/fake_claude_cli.py`
+on PATH as `claude`, which starts the real adapter from the harness's MCP
+config, so every call goes adapter, bridge, dispatcher, tool server. The tool
+server runs unwrapped here; `tests/linux/test_cli_harness_real.py` runs it
+under bwrap.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import os
+import signal
 import stat
+import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -19,7 +30,15 @@ from unittest.mock import patch
 import pytest
 
 from istota import executor
+from istota.brain import claude_code
 from istota.brain._cli_config_dir import make_cli_config_dir
+from istota.brain._events import InitEvent, parse_stream_line
+from istota.brain._types import BrainRequest, HarnessSpec
+from istota.brain.claude_code import (
+    HARNESS_DENIED_TOOLS,
+    ClaudeCodeBrain,
+    build_claude_cli_flags,
+)
 from istota.config import BrainConfig, Config, SecurityConfig, load_config
 from istota.executor import (
     HARNESS_CLI_SWITCHES,
@@ -31,6 +50,7 @@ from istota.executor import (
 )
 from istota.llm import providers
 from istota.llm.providers import resolve_process_auth
+from tests.support.drift import source_of
 
 OAUTH = "OAUTH-SENTINEL"
 DEPLOY_KEY = "DEPLOY-KEY-SENTINEL"
@@ -391,3 +411,319 @@ class TestTheCliConfigDir:
 
         assert names == [".claude.json", ".credentials.json", "settings.json"]
         assert str(handle.cwd) in seeded["projects"]
+
+
+# ============================================================================
+# ClaudeCodeBrain on the harness (Stage 7)
+# ============================================================================
+
+FAKE_CLI = Path(__file__).parent / "support" / "fake_claude_cli.py"
+_SIX = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+_WAIT = 30.0
+
+
+def _flag_values(argv: list[str], flag: str) -> list[str]:
+    """The values after ``flag``, up to the next ``--`` flag."""
+    values = []
+    for value in argv[argv.index(flag) + 1:]:
+        if value.startswith("--"):
+            break
+        values.append(value)
+    return values
+
+
+class TestTheHarnessArgv:
+    def _req(self, tools):
+        return BrainRequest(
+            prompt="", allowed_tools=tools, cwd=Path("/tmp"), env={}, timeout_seconds=60,
+        )
+
+    def test_websearch_in_the_grant_is_the_one_builtin(self):
+        argv = build_claude_cli_flags(
+            self._req(["Read", "Bash", "WebSearch"]), mcp_config_path=Path("/h/mcp.json"),
+        )
+        assert _flag_values(argv, "--tools") == ["WebSearch"]
+        assert _flag_values(argv, "--mcp-config") == ["/h/mcp.json"]
+        assert "--strict-mcp-config" in argv
+        denied = _flag_values(argv, "--disallowedTools")
+        assert denied == ["Agent", "Workflow", *HARNESS_DENIED_TOOLS]
+        assert "WebSearch" not in denied
+        assert {"Bash", "Read", "Write", "Edit", "Task", "WebFetch"} <= set(denied)
+
+    def test_a_grant_without_websearch_gets_no_builtins(self):
+        argv = build_claude_cli_flags(self._req(["Read", "Bash"]), mcp_config_path=Path("/h/m.json"))
+        assert argv[argv.index("--tools") + 1] == ""
+
+    def test_a_read_only_grant_takes_the_harness_branch(self):
+        argv = build_claude_cli_flags(self._req(["Read", "Grep"]), mcp_config_path=Path("/h/m.json"))
+        assert "--mcp-config" in argv
+        assert argv[argv.index("--tools") + 1] == ""
+
+    def test_without_the_config_path_the_argv_is_unchanged(self):
+        req = self._req(["Read", "Bash", "WebSearch"])
+        req.harness = HarnessSpec(cli_env={}, harness_root=Path("/h"))
+        plain = build_claude_cli_flags(self._req(["Read", "Bash", "WebSearch"]))
+        assert build_claude_cli_flags(req) == plain
+        assert "--mcp-config" not in plain
+
+    def test_the_command_streams_whatever_the_request_asked(self):
+        req = self._req(["Read"])
+        req.streaming = False
+        cmd = ClaudeCodeBrain._build_command(req, mcp_config_path=Path("/h/m.json"))
+        assert cmd[:3] == ["claude", "-p", "-"]
+        assert "--dangerously-skip-permissions" in cmd
+        assert _flag_values(cmd, "--output-format") == ["stream-json"]
+
+
+class TestTheInitFrame:
+    def test_a_frame_with_tools_parses(self):
+        event = parse_stream_line(json.dumps({
+            "type": "system", "subtype": "init", "tools": ["WebSearch", "mcp__istota__Read"],
+            "mcp_servers": [{"name": "istota", "status": "connected", "source": "dynamic"}],
+        }))
+        assert event == InitEvent(
+            tools=("WebSearch", "mcp__istota__Read"), mcp_servers=(("istota", "connected"),),
+        )
+
+    def test_a_frame_without_tools_stays_nothing(self):
+        assert parse_stream_line(json.dumps({"type": "system", "subtype": "init", "cwd": "/"})) is None
+
+
+class TestTheSeam:
+    def test_claude_code_names_only_the_four_harness_names(self):
+        """The unified tool server (#862) replaces what is behind these four;
+        anything else named here would be a second thing it has to rewrite."""
+        tree = ast.parse(source_of(claude_code))
+        named: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("_tool_harness"):
+                named |= {alias.name for alias in node.names}
+            elif isinstance(node, ast.Import):
+                assert not any(a.name.endswith("_tool_harness") for a in node.names)
+            elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                assert node.value.id != "_tool_harness", node.attr
+        assert named == {"tool_harness", "HarnessHandle", "set_cli_root", "release_calls"}
+
+
+class _Harnessed:
+    """A harness request for `ClaudeCodeBrain.execute`, with the fake CLI on
+    PATH, a workspace, a harness root and the callbacks recorded."""
+
+    def __init__(self, tmp_path, *, plan=None, tools=None, **req_kw):
+        self.ws = tmp_path / "ws"
+        self.ws.mkdir(exist_ok=True)
+        self.root = tmp_path / "harness-root"
+        self.root.mkdir(exist_ok=True)
+        self.record = tmp_path / "record.json"
+        self.plan_path = tmp_path / "plan.json"
+        self.plan_path.write_text(json.dumps({"record": str(self.record), **(plan or {})}))
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        shim = bin_dir / "claude"
+        shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_CLI}" "$@"\n')
+        shim.chmod(0o755)
+        self.pids: list[int] = []
+        self.cancel = threading.Event()
+        path = os.environ.get("PATH", "/usr/bin:/bin")
+        base = dict(
+            prompt="go",
+            allowed_tools=list(_SIX if tools is None else tools),
+            cwd=self.ws,
+            env={"PATH": path, "ISTOTA_DEFERRED_DIR": str(self.ws)},
+            timeout_seconds=60,
+            task_id=7,
+            attempt=1,
+            model="claude-sonnet-4-5",
+            streaming=False,
+            on_pid=self.pids.append,
+            cancel_check=self.cancel.is_set,
+            harness=HarnessSpec(
+                cli_env={
+                    "PATH": f"{bin_dir}:{path}",
+                    "FAKE_CLAUDE_PLAN": str(self.plan_path),
+                    "ISTOTA_CLI_AUTH": "api_key",
+                },
+                harness_root=self.root,
+            ),
+        )
+        base.update(req_kw)
+        self.req = BrainRequest(**base)
+
+    def run(self):
+        return ClaudeCodeBrain().execute(self.req)
+
+    def recorded(self) -> dict:
+        return json.loads(self.record.read_text())
+
+    def server_pid(self) -> int:
+        deadline = time.monotonic() + _WAIT
+        while not self.pids and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return self.pids[0]
+
+
+def _unwrapped(cmd):
+    pytest.fail(f"the CLI was wrapped: {cmd[:3]}")
+
+
+class TestTheHarnessRun:
+    def test_calls_run_in_the_tool_server_and_the_cli_in_the_harness(self, tmp_path):
+        (tmp_path / "ws").mkdir()
+        (tmp_path / "ws" / "note.txt").write_text("harness note\n")
+        native_wrapped = []
+
+        def native_wrap(cmd):
+            native_wrapped.append(cmd)
+            return cmd
+
+        h = _Harnessed(tmp_path, plan={"calls": [
+            {"name": "Read", "args": {"file_path": str(tmp_path / "ws" / "note.txt")}},
+            {"name": "Bash", "args": {"command": "echo ran-$((6*7))", "description": "probe"}},
+        ]}, sandbox_wrap=_unwrapped, native_sandbox_wrap=native_wrap)
+
+        result = h.run()
+
+        assert result.success, result.result_text
+        # The NATIVE wrap went round the tool server, and nothing round the CLI.
+        assert len(native_wrapped) == 1
+        assert "istota.sandbox.tool_server" in " ".join(native_wrapped[0])
+        assert "harness note" in result.result_text
+        assert "ran-42" in result.result_text
+        tools = [e for e in json.loads(result.execution_trace) if e["type"] == "tool"]
+        assert tools[-1]["raw"] == "echo ran-$((6*7))"
+        assert "mcp__" not in result.execution_trace
+
+        seen = h.recorded()
+        assert _flag_values(seen["argv"], "--tools") == [""]
+        assert "--strict-mcp-config" in seen["argv"]
+        assert Path(seen["cwd"]).resolve() == h.ws.resolve()
+        env = seen["env"]
+        harness_dir = Path(env["CLAUDE_CONFIG_DIR"]).parent
+        assert harness_dir.parent == h.root
+        assert env["HOME"] == str(harness_dir / "home")
+        assert env["TMPDIR"] == str(harness_dir / "tmp")
+        assert env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] == "1"
+        assert "ISTOTA_DEFERRED_DIR" not in env
+        # The tool server's env carries none of the CLI's switches.
+        assert "CLAUDE_CODE_DISABLE_ADVISOR_TOOL" not in h.req.env
+
+        # `on_pid` saw the tool server and then its reap, never the CLI.
+        assert len(h.pids) == 2 and h.pids[1] == 0
+        assert seen["pid"] not in h.pids
+
+    def test_an_unexpected_tool_in_init_kills_the_cli_before_any_call(self, tmp_path):
+        marker = tmp_path / "ws" / "ran"
+        h = _Harnessed(tmp_path, plan={
+            "init_extra_tools": ["CronCreate"],
+            "calls": [{"name": "Bash", "args": {"command": f"touch {marker}"}}],
+        })
+
+        result = h.run()
+
+        assert result.stop_reason == "error"
+        assert "unexpected tools ['CronCreate']" in result.result_text
+        assert not marker.exists()
+
+    def test_an_mcp_server_that_is_not_connected_fails_the_attempt(self, tmp_path):
+        h = _Harnessed(tmp_path, plan={"init_server_status": "failed"})
+
+        result = h.run()
+
+        assert result.stop_reason == "error"
+        assert "istota (failed)" in result.result_text
+
+    def test_a_tool_the_cli_dropped_fails_the_attempt(self, tmp_path):
+        h = _Harnessed(tmp_path, tools=[*_SIX, "WebSearch"], plan={"init_drop_tools": ["WebSearch"]})
+
+        result = h.run()
+
+        assert result.stop_reason == "error"
+        assert "missing tools ['WebSearch']" in result.result_text
+
+    def test_websearch_in_the_grant_passes_the_check(self, tmp_path):
+        h = _Harnessed(tmp_path, tools=[*_SIX, "WebSearch"])
+
+        result = h.run()
+
+        assert result.success, result.result_text
+        assert _flag_values(h.recorded()["argv"], "--tools") == ["WebSearch"]
+
+    def test_a_sandboxed_request_without_a_native_wrap_is_refused(self, tmp_path):
+        h = _Harnessed(tmp_path, sandbox_wrap=lambda cmd: cmd, native_sandbox_wrap=None)
+
+        result = h.run()
+
+        assert result.stop_reason == "error"
+        assert "refusing to run tools unwrapped" in result.result_text
+        assert h.pids == []
+        assert not h.record.exists()
+
+    def test_a_harness_that_cannot_start_never_spawns_the_cli(self, tmp_path):
+        h = _Harnessed(tmp_path)
+        h.req.harness = HarnessSpec(cli_env=h.req.harness.cli_env, harness_root=tmp_path / "missing")
+
+        result = h.run()
+
+        assert result.stop_reason == "error"
+        assert "could not start the tool harness" in result.result_text
+        assert not h.record.exists()
+
+
+class TestTheFailureOrder:
+    """Cancel, then a dead tool server, then timeout, then a signal."""
+
+    def _kill_server_when_running(self, h, *, first=None):
+        def go():
+            pid = h.server_pid()
+            time.sleep(1.0)
+            if first is not None:
+                first()
+            os.killpg(pid, signal.SIGKILL)
+
+        threading.Thread(target=go, daemon=True).start()
+
+    def test_a_dead_tool_server_reads_as_its_failure_not_oom(self, tmp_path):
+        h = _Harnessed(tmp_path, plan={"calls": [{"name": "Bash", "args": {"command": "sleep 30"}}]})
+        self._kill_server_when_running(h)
+
+        started = time.monotonic()
+        result = h.run()
+
+        assert time.monotonic() - started < 25
+        # `error`, where the CLI's own SIGKILL from `on_failure` would read as
+        # `oom`. The text is the server's signal death, verbatim, so a deploy
+        # restart is still recognised as one (`attempt_failure_text`).
+        assert result.stop_reason == "error", result.result_text
+        assert result.result_text.startswith("Claude Code was terminated by SIGKILL")
+        assert h.pids[-1] == 0
+
+    def test_a_cancel_outranks_the_dead_tool_server(self, tmp_path):
+        h = _Harnessed(tmp_path, plan={"calls": [{"name": "Bash", "args": {"command": "sleep 30"}}]})
+        self._kill_server_when_running(h, first=h.cancel.set)
+
+        result = h.run()
+
+        assert result.stop_reason == "cancelled"
+        assert result.result_text == "Cancelled by user"
+
+    def test_a_timeout_reads_as_a_timeout(self, tmp_path):
+        h = _Harnessed(tmp_path, plan={"sleep_before_result": 30}, timeout_seconds=2)
+
+        result = h.run()
+
+        assert result.stop_reason == "timeout"
+
+    def test_a_kill_from_outside_still_reads_as_oom(self, tmp_path):
+        h = _Harnessed(tmp_path, plan={"sleep_before_calls": 30})
+
+        def kill_the_cli():
+            deadline = time.monotonic() + _WAIT
+            while not h.record.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            time.sleep(0.5)
+            os.kill(h.recorded()["pid"], signal.SIGKILL)
+
+        threading.Thread(target=kill_the_cli, daemon=True).start()
+        result = h.run()
+
+        assert result.stop_reason == "oom", result.result_text

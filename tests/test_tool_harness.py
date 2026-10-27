@@ -180,6 +180,29 @@ def test_a_call_waits_until_release_calls(tmp_path, failures):
             client.close()
 
 
+def test_a_respawned_cli_has_its_calls_held_again(tmp_path, failures):
+    """The transient retry respawns the CLI under one harness; the new CLI's
+    `system/init` has to pass before its calls run."""
+    (tmp_path / "ws").mkdir()
+    (tmp_path / "ws" / "note.txt").write_text("second cli\n")
+    req = _req(tmp_path)
+    with _harness(req, failures) as handle:
+        set_cli_root(handle, os.getpid())
+        release_calls(handle)
+        set_cli_root(handle, os.getpid())
+        client = _Client(_socket_of(handle))
+        try:
+            client.hello()
+            client.send({"type": proto.MSG_CALL, "id": "1", "tool": "Read",
+                         "args": {"file_path": str(tmp_path / "ws" / "note.txt")}})
+            with pytest.raises(socket.timeout):
+                client.next_frame(timeout=0.5)
+            release_calls(handle)
+            assert "second cli" in client.next_frame()["content"][0]["text"]
+        finally:
+            client.close()
+
+
 def test_a_name_the_grant_left_out_is_refused_and_not_run(tmp_path, failures):
     req = _req(tmp_path, tools=["Read"])
     with _harness(req, failures) as handle:

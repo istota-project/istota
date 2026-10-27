@@ -132,6 +132,20 @@ class TaskNotificationEvent:
 
 
 @dataclass
+class InitEvent:
+    """The CLI's ``system``/``init`` frame: the tools and MCP servers it loaded.
+
+    Only a frame whose ``tools`` is a list becomes one, so a synthetic frame
+    with neither key still parses to nothing. The tool harness reads it to
+    fail closed on anything it did not ask for; every other consumer ignores
+    it, and it never reaches ``on_progress`` or the trace.
+    """
+    tools: tuple[str, ...]
+    # `(name, status)` per entry; any other key in the frame is ignored.
+    mcp_servers: tuple[tuple[str, str], ...]
+
+
+@dataclass
 class ToolEndEvent:
     """A tool call finished. NativeBrain only — ClaudeCodeBrain's stream-json
     has no tool-completion frame, so it never emits this."""
@@ -183,6 +197,7 @@ StreamEvent = (
     | ThinkingDeltaEvent
     | RequestUsageEvent
     | RateLimitEvent
+    | InitEvent
 )
 
 
@@ -256,6 +271,26 @@ def _usage_int(usage: dict, key: str) -> int:
     return max(0, as_int)
 
 
+def _init_event(data: dict) -> InitEvent | None:
+    tools = data.get("tools")
+    if not isinstance(tools, list):
+        return None
+    raw_servers = data.get("mcp_servers") or []
+    if not isinstance(raw_servers, list):
+        # Not a shape the CLI emits; kept as an entry so a check fails on it.
+        raw_servers = [raw_servers]
+    servers = []
+    for entry in raw_servers:
+        if isinstance(entry, dict):
+            servers.append((str(entry.get("name", "")), str(entry.get("status", ""))))
+        else:
+            servers.append((str(entry), ""))
+    return InitEvent(
+        tools=tuple(str(name) for name in tools),
+        mcp_servers=tuple(servers),
+    )
+
+
 def parse_stream_line(
     line: str, *, _seen: set[str] | None = None,
 ) -> StreamEvent | None:
@@ -279,6 +314,9 @@ def parse_stream_line(
         return None
 
     event_type = data.get("type")
+
+    if event_type == "system" and data.get("subtype") == "init":
+        return _init_event(data)
 
     if event_type == "result":
         success = data.get("subtype") == "success"
