@@ -1,11 +1,22 @@
-"""The admin browser console: the ticket store, the relay counter and the
-ticket route.
+"""The admin browser console: the ticket store, the relay counter, the
+ticket route and the websocket relay.
 
 The route runs through the FastAPI app with a real database and a password
-step-up; the websocket relay's cases are added beside these.
+step-up. The relay runs through Starlette's TestClient against the real app,
+with a threaded Unix-socket server standing in for x11vnc: the TestClient runs
+the app's loop in its own thread, so a server on the test's loop would never
+be serviced.
 """
 
 import logging
+import queue
+import shutil
+import socket
+import socketserver
+import tempfile
+import threading
+import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -14,8 +25,10 @@ pytest.importorskip("authlib")
 pytest.importorskip("fastapi")
 
 from httpx import ASGITransport, AsyncClient
+from starlette.testclient import TestClient
 
 from istota import user_profiles
+from istota.lib.browser_console import console_socket_name
 from istota.config import Config, SiteConfig, UserConfig, WebConfig
 from istota.webui import admin_browser_console as console
 from istota.webui import auth as web_auth
@@ -312,3 +325,303 @@ async def test_a_wrong_password_is_the_step_up_refusal(alice):
     assert response.status_code == 403
     assert response.json()["reason"] == "bad"
     assert len(console.TICKETS._tickets) == 0
+
+
+# ---- The websocket relay ----
+
+# Absolute: TestClient joins a relative websocket path onto ws://testserver,
+# which the Secure session cookie for example.com does not reach.
+CONSOLE = "wss://example.com/istota/api/admin/browsers/console"
+BANNER = b"RFB 003.008\n"
+LOGGER = "istota.webui.admin_browser_console"
+
+
+class _FakeVnc(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+    def __init__(self, path):
+        self.received = queue.Queue()
+        self.peers = queue.Queue()
+        super().__init__(str(path), _FakeVncHandler)
+
+
+class _FakeVncHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        self.server.peers.put(self.request)
+        self.request.sendall(BANNER)
+        while True:
+            try:
+                data = self.request.recv(65536)
+            except OSError:
+                return
+            if not data:
+                return
+            self.server.received.put(data)
+
+
+@pytest.fixture
+def console_dir(monkeypatch):
+    # tmp_path on macOS is past AF_UNIX's 104-byte limit.
+    path = Path(tempfile.mkdtemp(prefix="bcon_", dir="/tmp"))
+    monkeypatch.setattr(console, "CONSOLE_DIR", path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture
+def vnc(console_dir):
+    server = _FakeVnc(console_dir / console_socket_name("bob"))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _ws_client(user_id=None):
+    import istota.webui.app as mod
+
+    client = TestClient(mod.app, base_url="https://example.com")
+    if user_id is not None:
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": user_id})
+        client.get("/istota/callback", follow_redirects=False)
+    return client
+
+
+@pytest.fixture
+def admin_ws(setup, console_dir):
+    return _ws_client("alice")
+
+
+def _ticket(client, admin="alice", target="bob"):
+    return console.TICKETS.mint(admin, session_value(client)["session_id"], target)
+
+
+def _closed_with(ws) -> int:
+    """The close code, after any relayed binary frames; never a text frame."""
+    while True:
+        message = ws.receive()
+        if message["type"] == "websocket.close":
+            return message.get("code", 1000)
+        assert message["type"] == "websocket.send", message
+        assert message.get("text") is None, message
+
+
+def _open(ws, client):
+    ws.send_text(_ticket(client))
+    assert ws.receive_text() == "ok"
+
+
+def _wait_released():
+    # The handler gives its slot back after the close frame has gone out.
+    deadline = time.monotonic() + 5
+    while console.RELAYS._open and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return console.RELAYS._open == 0
+
+
+def test_no_session_closes_4403_after_accept(setup, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        with _ws_client().websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+            assert _closed_with(ws) == 4403
+    assert "browser_console_refused admin=- user=- code=4403" in caplog.text
+
+
+def test_a_non_admin_closes_4403(setup, caplog):
+    client = _ws_client("bob")
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        with client.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+            assert _closed_with(ws) == 4403
+    assert "browser_console_refused admin='bob' user=- code=4403" in caplog.text
+
+
+@pytest.mark.parametrize("headers", [{}, {"Origin": "https://evil.example"}])
+def test_a_bad_origin_closes_4403(admin_ws, headers):
+    with admin_ws.websocket_connect(CONSOLE, headers=headers) as ws:
+        assert _closed_with(ws) == 4403
+
+
+def test_no_ticket_frame_in_time_closes_4400(admin_ws, monkeypatch):
+    monkeypatch.setattr(console, "TICKET_WAIT_SECONDS", 0.1)
+    with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+        assert _closed_with(ws) == 4400
+    assert _wait_released()
+
+
+@pytest.mark.parametrize("frame", [b"binary-ticket", "", "x" * 200])
+def test_a_malformed_ticket_frame_closes_4400(admin_ws, frame):
+    with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+        if isinstance(frame, bytes):
+            ws.send_bytes(frame)
+        else:
+            ws.send_text(frame)
+        assert _closed_with(ws) == 4400
+
+
+def test_an_unknown_ticket_closes_4401(admin_ws, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+            ws.send_text("not-a-ticket-anyone-minted")
+            assert _closed_with(ws) == 4401
+    assert "browser_console_refused admin='alice' user=- code=4401" in caplog.text
+
+
+def test_a_ticket_for_another_session_closes_4401_and_is_spent(admin_ws):
+    ticket = console.TICKETS.mint("alice", "another-session", "bob")
+    with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+        ws.send_text(ticket)
+        assert _closed_with(ws) == 4401
+    assert console.TICKETS.redeem(ticket, "alice", "another-session") is None
+
+
+def test_a_used_ticket_closes_4401(admin_ws):
+    ticket = _ticket(admin_ws)
+    with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+        ws.send_text(ticket)
+        assert _closed_with(ws) == 4404
+    with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+        ws.send_text(ticket)
+        assert _closed_with(ws) == 4401
+
+
+def test_a_user_with_no_socket_closes_4404(admin_ws, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+            ws.send_text(_ticket(admin_ws))
+            assert _closed_with(ws) == 4404
+    assert "browser_console_refused admin='alice' user='bob' code=4404" in caplog.text
+    assert _wait_released()
+
+
+def test_a_symlink_at_the_socket_path_closes_4404(admin_ws, console_dir, vnc):
+    # A live socket under another name; bob's name is a symlink to it.
+    real = console_dir / "real.sock"
+    (console_dir / console_socket_name("bob")).rename(real)
+    (console_dir / console_socket_name("bob")).symlink_to(real)
+    with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+        ws.send_text(_ticket(admin_ws))
+        assert _closed_with(ws) == 4404
+    assert vnc.peers.empty()
+
+
+def test_a_regular_file_at_the_socket_path_closes_4404(admin_ws, console_dir):
+    (console_dir / console_socket_name("bob")).write_text("not a socket")
+    with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+        ws.send_text(_ticket(admin_ws))
+        assert _closed_with(ws) == 4404
+
+
+def test_a_valid_ticket_relays_bytes_both_ways(admin_ws, vnc, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+            _open(ws, admin_ws)
+            assert ws.receive_bytes() == BANNER
+            ws.send_bytes(b"RFB 003.008\n")
+            assert vnc.received.get(timeout=5) == b"RFB 003.008\n"
+            ws.send_bytes(b"\x01\x02")
+            assert vnc.received.get(timeout=5) == b"\x01\x02"
+            ws.close(code=1005)
+        assert _wait_released()
+    assert "browser_console_opened admin='alice' user='bob'" in caplog.text
+    closed = [r.getMessage() for r in caplog.records if "browser_console_closed" in r.getMessage()]
+    assert len(closed) == 1
+    assert closed[0].startswith("browser_console_closed admin='alice' user='bob' seconds=")
+    assert closed[0].endswith(" code=1005")
+    assert _ticket(admin_ws) not in caplog.text
+
+
+def test_an_open_relay_holds_a_slot(admin_ws, vnc, monkeypatch):
+    monkeypatch.setattr(console, "MAX_RELAYS", 1)
+    with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+        _open(ws, admin_ws)
+        assert console.RELAYS.full()
+        ws.close(code=1005)
+    assert _wait_released()
+
+
+def test_the_vnc_server_ending_the_stream_closes_1000(admin_ws, vnc, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+            _open(ws, admin_ws)
+            assert ws.receive_bytes() == BANNER
+            vnc.peers.get(timeout=5).shutdown(socket.SHUT_RDWR)
+            assert _closed_with(ws) == 1000
+        assert _wait_released()
+    assert "code=1000" in caplog.text
+
+
+def test_a_full_counter_closes_4429_and_leaves_the_ticket(admin_ws, vnc, caplog):
+    for _ in range(console.MAX_RELAYS):
+        assert console.RELAYS.try_acquire()
+    ticket = _ticket(admin_ws)
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+            assert _closed_with(ws) == 4429
+    assert "browser_console_refused admin='alice' user=- code=4429" in caplog.text
+    console.RELAYS.release()
+    with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+        ws.send_text(ticket)
+        assert ws.receive_text() == "ok"
+        assert ws.receive_bytes() == BANNER
+        ws.close(code=1005)
+
+
+def test_a_failing_re_check_closes_4401(admin_ws, vnc, monkeypatch, caplog):
+    import istota.webui.app as mod
+
+    monkeypatch.setattr(console, "RECHECK_SECONDS", 0.1)
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+            _open(ws, admin_ws)
+            assert ws.receive_bytes() == BANNER
+            monkeypatch.setattr(mod, "_stream_authorized", AsyncMock(return_value=False))
+            assert _closed_with(ws) == 4401
+        assert _wait_released()
+    assert "code=4401" in caplog.text
+
+
+def test_a_passing_re_check_keeps_the_relay_open(admin_ws, vnc, monkeypatch):
+    import istota.webui.app as mod
+
+    monkeypatch.setattr(console, "RECHECK_SECONDS", 0.05)
+    checks = AsyncMock(return_value=True)
+    monkeypatch.setattr(mod, "_stream_authorized", checks)
+    with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+        _open(ws, admin_ws)
+        assert ws.receive_bytes() == BANNER
+        time.sleep(0.3)
+        ws.send_bytes(b"still here")
+        assert vnc.received.get(timeout=5) == b"still here"
+        ws.close(code=1005)
+    assert checks.await_count >= 2
+    _, kwargs = checks.await_args
+    assert kwargs == {"admin": True}
+
+
+def test_the_lifetime_limit_closes_4408(admin_ws, vnc, monkeypatch, caplog):
+    monkeypatch.setattr(console, "LIFETIME_SECONDS", 0.2)
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+            _open(ws, admin_ws)
+            assert ws.receive_bytes() == BANNER
+            assert _closed_with(ws) == 4408
+        assert _wait_released()
+    assert "code=4408" in caplog.text
+
+
+def test_an_unexpected_relay_error_closes_1011(admin_ws, vnc, monkeypatch, caplog):
+    async def broken(*args, **kwargs):
+        raise ValueError("secret detail")
+
+    monkeypatch.setattr(console, "_copy_to_socket", broken)
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+            _open(ws, admin_ws)
+            assert _closed_with(ws) == 1011
+        assert _wait_released()
+    assert "browser_console_error admin='alice' user='bob' err=ValueError" in caplog.text
+    assert "secret detail" not in caplog.text

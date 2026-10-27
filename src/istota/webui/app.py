@@ -51,6 +51,7 @@ from fastapi import (
     Query,
     Request,
     UploadFile,
+    WebSocket,
 )
 from fastapi.responses import (
     HTMLResponse,
@@ -5739,6 +5740,61 @@ async def admin_browser_console_ticket(request: Request, user: dict = Depends(_r
     ticket = console.TICKETS.mint(admin, _step_up_session(request), target)
     console.logger.info("browser_console_ticket admin=%r user=%r", admin, target)
     return JSONResponse({"ticket": ticket, "expires_in": console.TICKET_TTL_SECONDS}, headers=_NO_STORE)
+
+
+@app.websocket("/istota/api/admin/browsers/console")
+async def admin_browser_console_relay(websocket: WebSocket):
+    """Relay RFB bytes between the page and one user's x11vnc socket.
+
+    Accepted first and refused by close code: uvicorn turns a pre-accept close
+    into an HTTP 403 the page sees only as 1006. The checks are inline, since
+    the `Depends` exception handlers answer with a JSON body a websocket never
+    sends. The session id is read, never minted: a websocket cannot write the
+    cookie.
+    """
+    from . import admin_browser_console as console
+
+    await websocket.accept()
+    admin = None
+    try:
+        user = await asyncio.to_thread(_require_api_auth, websocket)
+        admin = user["username"]
+        if not _user_is_web_admin(admin):
+            raise _ForbiddenException("admin only")
+        _verify_origin(websocket)
+    except (_UnauthorizedException, _ForbiddenException):
+        console.log_refused(admin, None, console.CLOSE_FORBIDDEN)
+        await websocket.close(console.CLOSE_FORBIDDEN)
+        return
+
+    # Before the ticket is read, so a refused connect leaves it for a retry.
+    if not console.RELAYS.try_acquire():
+        console.log_refused(admin, None, console.CLOSE_TOO_MANY)
+        await websocket.close(console.CLOSE_TOO_MANY)
+        return
+    try:
+        ticket = await console.read_ticket(websocket)
+        if ticket is None:
+            console.log_refused(admin, None, console.CLOSE_BAD_FRAME)
+            await websocket.close(console.CLOSE_BAD_FRAME)
+            return
+        session_id = websocket.session.get("session_id")
+        # Redeemed even without a session id, so the ticket is spent either way.
+        target = console.TICKETS.redeem(ticket, admin, session_id if isinstance(session_id, str) else "")
+        if target is None:
+            console.log_refused(admin, None, console.CLOSE_UNAUTHORIZED)
+            await websocket.close(console.CLOSE_UNAUTHORIZED)
+            return
+        await console.relay(
+            websocket, admin, target,
+            authorized=lambda: _stream_authorized(websocket, admin=True),
+        )
+    except Exception as exc:
+        console.logger.info("browser_console_error admin=%r user=- err=%s", admin, type(exc).__name__)
+        with contextlib.suppress(Exception):
+            await websocket.close(console.CLOSE_ERROR)
+    finally:
+        console.RELAYS.release()
 
 
 @api_router.get("/admin/config")
