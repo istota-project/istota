@@ -35,7 +35,7 @@ from istota.briefings._migrate import ensure_initialised
 from istota.briefings.models import (
     ALLOWED_SHARED_SOURCE_KINDS,
     BLOCK_TEMPLATES,
-    RENDER_MODES,
+    SHARED_RENDER_MODES,
     SOURCE_KINDS,
     STRUCTURED_KINDS,
     ArchivedBriefing,
@@ -626,7 +626,7 @@ def list_shared_blocks(
     return {
         "shared_blocks": blocks,
         "allowed_source_kinds": sorted(ALLOWED_SHARED_SOURCE_KINDS),
-        "render_modes": list(RENDER_MODES),
+        "render_modes": list(SHARED_RENDER_MODES),
         "shared_block_timezone": cfg.briefings.shared_block_timezone or "UTC",
     }
 

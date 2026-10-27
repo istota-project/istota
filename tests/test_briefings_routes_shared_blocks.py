@@ -129,6 +129,40 @@ class TestValidation:
         assert resp.status_code == 400
 
 
+class TestAgentRenderMode:
+    PROMPT = "Read the front pages and write a linked digest."
+
+    def test_listing_offers_agent(self, client):
+        listed = client.get("/istota/api/briefings/shared-blocks").json()
+        assert listed["render_modes"] == ["synthesis", "structured", "agent"]
+
+    def test_agent_block_with_a_prompt_and_no_sources_saves(self, client):
+        resp = client.put(
+            "/istota/api/briefings/shared-blocks",
+            json={"name": "news", "cron": "50 5 * * *", "render_mode": "agent",
+                  "directive": self.PROMPT, "sources": [], "trusted": False},
+        )
+        assert resp.status_code == 200, resp.text
+        block = resp.json()["shared_block"]
+        assert (block["render_mode"], block["directive"]) == ("agent", self.PROMPT)
+
+    @pytest.mark.parametrize("extra, message", [
+        ({"sources": [{"kind": "browse", "config": {}}]}, "agent blocks take no sources"),
+        ({"trusted": True}, "agent blocks are never trusted"),
+        ({"directive": ""}, "agent blocks need a task prompt"),
+        ({"directive": "  \n "}, "agent blocks need a task prompt"),
+    ])
+    def test_agent_block_breaking_the_rules_is_refused(self, client, extra, message):
+        resp = client.put(
+            "/istota/api/briefings/shared-blocks",
+            json={"name": "news", "cron": "50 5 * * *", "render_mode": "agent",
+                  "directive": self.PROMPT, **extra},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == message
+        assert client.get("/istota/api/briefings/shared-blocks").json()["shared_blocks"] == []
+
+
 class TestRunNow:
     def test_run_queues_for_the_daemon_and_generates_nothing_here(
         self, client, monkeypatch,

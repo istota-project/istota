@@ -192,3 +192,54 @@ def test_user_content_rechecks_shared_reference_before_write(install):
     result = engine.execute_plan(operations, context)
     assert result.errors[0]["code"] == "state_changed"
     assert result.partial
+
+
+AGENT_PROMPT = "Read the front pages and write a linked digest."
+
+
+def test_stored_agent_block_snapshots_and_round_trips(install):
+    from istota.settings_plan.shared_briefings import snapshot_shared_blocks
+
+    shared(install, render_mode="agent", directive=AGENT_PROMPT)
+    with closing(connect_read_only(install[1])) as conn:
+        conn.row_factory = sqlite3.Row
+        definitions = snapshot_shared_blocks(conn)
+    assert definitions == [{"name": "news", "cron": "0 7 * * *", "title": "", "directive": AGENT_PROMPT, "render_mode": "agent", "enabled": True, "trusted": False, "sources": []}]
+    context, operations = preview(install, {"shared_briefing_blocks": definitions})
+    assert engine.execute_plan(operations, context).exit_code == 0
+
+
+def test_stored_agent_block_does_not_break_a_personal_briefing_plan(install):
+    shared(install, render_mode="agent", directive=AGENT_PROMPT)
+    document = {"users": {"alice": {"briefings": [{"name": "morning", "cron": "0 7 * * *", "output": "email", "blocks": [{"title": "News", "sources": [{"kind": "shared_block", "config": {"name": "news"}}]}]}]}}}
+    context, operations = preview(install, document, dry_run=True)
+    assert engine.execute_plan(operations, context).exit_code == 2
+
+
+def test_plan_creates_an_agent_block(install):
+    document = {"shared_briefing_blocks": [{"name": "news", "cron": "0 7 * * *", "render_mode": "agent", "directive": AGENT_PROMPT}]}
+    context, operations = preview(install, document)
+    assert engine.execute_plan(operations, context).exit_code == 2
+    with db.get_db(install[1]) as conn:
+        row = db.get_shared_block_config(conn, "news")
+    assert (row.render_mode, row.directive, row.sources, row.trusted) == ("agent", AGENT_PROMPT, [], False)
+
+
+@pytest.mark.parametrize("extra", [{"sources": [{"kind": "browse"}]}, {"trusted": True}, {"directive": ""}])
+def test_plan_refuses_an_agent_block_breaking_the_rules(install, extra):
+    definition = {"name": "news", "cron": "0 7 * * *", "render_mode": "agent", "directive": AGENT_PROMPT, **extra}
+    with pytest.raises(engine.ExecutionError, match="validation_error"):
+        preview(install, {"shared_briefing_blocks": [definition]})
+
+
+def test_plan_switching_a_synthesis_block_to_agent_must_drop_its_sources(install):
+    shared(install, sources=[{"kind": "browse"}])
+    with pytest.raises(engine.ExecutionError, match="validation_error"):
+        preview(install, {"shared_briefing_blocks": [{"name": "news", "render_mode": "agent", "directive": AGENT_PROMPT}]})
+    context, operations = preview(install, {"shared_briefing_blocks": [{"name": "news", "render_mode": "agent", "directive": AGENT_PROMPT, "sources": []}]})
+    assert engine.execute_plan(operations, context).exit_code == 2
+
+
+def test_plan_schema_refuses_an_unknown_shared_render_mode(install):
+    with pytest.raises(SchemaError):
+        preview(install, {"shared_briefing_blocks": [{"name": "news", "render_mode": "weird"}]})

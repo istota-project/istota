@@ -145,7 +145,8 @@ def _run_shared(args, config) -> int:
     from istota import db
     from istota.briefings.models import (
         ALLOWED_SHARED_SOURCE_KINDS,
-        RENDER_MODES,
+        SHARED_RENDER_MODES,
+        validate_shared_block_payload,
     )
 
     action = args.action
@@ -199,9 +200,9 @@ def _run_shared(args, config) -> int:
     if not args.name or not args.cron:
         print("Error: --name and --cron required for ensure", file=sys.stderr)
         return 1
-    if args.render_mode not in RENDER_MODES:
+    if args.render_mode not in SHARED_RENDER_MODES:
         print(
-            f"Error: --render-mode must be one of {sorted(RENDER_MODES)}",
+            f"Error: --render-mode must be one of {sorted(SHARED_RENDER_MODES)}",
             file=sys.stderr,
         )
         return 1
@@ -223,6 +224,16 @@ def _run_shared(args, config) -> int:
             )
             return 1
         sources.append(parsed)
+    if args.render_mode == "agent":
+        try:
+            validate_shared_block_payload({
+                "name": args.name, "cron": args.cron, "directive": args.directive,
+                "render_mode": args.render_mode, "trusted": args.trusted,
+                "sources": sources,
+            })
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
     with db.get_db(config.db_path) as conn:
         row = db.upsert_shared_block_config(
             conn,

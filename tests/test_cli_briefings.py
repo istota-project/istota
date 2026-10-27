@@ -172,6 +172,40 @@ class TestBlocksSources:
         assert "disabled" in capsys.readouterr().err.lower()
 
 
+class TestSharedEnsure:
+    PROMPT = "Read the front pages and write a linked digest."
+
+    def _ensure(self, config, *extra):
+        return cli_briefings.dispatch(
+            ["shared", "ensure", "--name", "news", "--cron", "50 5 * * *", *extra],
+            config,
+        )
+
+    def test_agent_block_with_a_prompt_and_no_sources(self, config, capsys):
+        assert self._ensure(config, "--render-mode", "agent", "--directive", self.PROMPT) == 0
+        with db.get_db(config.db_path) as conn:
+            row = db.get_shared_block_config(conn, "news")
+        assert (row.render_mode, row.directive, row.sources, row.trusted) == (
+            "agent", self.PROMPT, [], False,
+        )
+
+    @pytest.mark.parametrize("extra, message", [
+        (["--source-json", '{"kind": "browse", "config": {}}'], "agent blocks take no sources"),
+        (["--trusted"], "agent blocks are never trusted"),
+        (["--directive", "  "], "agent blocks need a task prompt"),
+    ])
+    def test_agent_block_breaking_the_rules_is_refused(self, config, capsys, extra, message):
+        args = ["--render-mode", "agent", "--directive", self.PROMPT, *extra]
+        assert self._ensure(config, *args) == 1
+        assert message in capsys.readouterr().err
+        with db.get_db(config.db_path) as conn:
+            assert db.get_shared_block_config(conn, "news") is None
+
+    def test_unknown_render_mode_is_refused(self, config, capsys):
+        assert self._ensure(config, "--render-mode", "weird") == 1
+        assert "--render-mode must be one of" in capsys.readouterr().err
+
+
 class TestArchive:
     def test_archive_list_show(self, config, capsys):
         ctx = resolve_for_user("alice", config)

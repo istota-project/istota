@@ -3383,6 +3383,17 @@ def _parse_shared_block_specs(entries: "list | None") -> list[BriefingSharedBloc
                 name or "?",
             )
             continue
+        if b.get("render_mode") == "agent":
+            from istota.briefings.models import validate_shared_block_payload
+
+            try:
+                validate_shared_block_payload(b)
+            except ValueError as exc:
+                report_problem(
+                    "discarded", path,
+                    "[[briefings.shared_blocks]] agent entry %r: %s; ignoring", name, exc,
+                )
+                continue
         raw_sources = b.get("sources", [])
         directive = b.get("directive")
         blocks.append(BriefingSharedBlock(

@@ -1,5 +1,6 @@
 """Tests for [[briefings.shared_blocks]] config parsing + canonical defaults."""
 
+import pytest
 import tomli_w
 
 from istota.config import (
@@ -8,6 +9,7 @@ from istota.config import (
     _parse_shared_block_specs,
     load_config,
 )
+from istota.config_mapper import collect_problems
 
 
 class TestParseSharedBlockSpecs:
@@ -50,6 +52,48 @@ class TestParseSharedBlockSpecs:
         ])
         assert blocks[0].trusted is True
         assert blocks[1].trusted is False
+
+
+class TestAgentRenderMode:
+    PROMPT = "Read the front pages and write a linked digest."
+
+    def test_agent_entry_with_a_prompt_and_no_sources_parses(self):
+        blocks = _parse_shared_block_specs([
+            {"name": "news", "cron": "50 5 * * *", "render_mode": "agent",
+             "directive": self.PROMPT},
+        ])
+        assert [(b.name, b.render_mode, b.directive, b.sources, b.trusted) for b in blocks] == [
+            ("news", "agent", self.PROMPT, [], False),
+        ]
+
+    @pytest.mark.parametrize("extra", [
+        {"sources": [{"kind": "browse", "config": {"preset": "ap"}}]},
+        {"trusted": True},
+        {"directive": ""},
+        {"directive": "   "},
+    ])
+    def test_agent_entry_breaking_the_rules_is_discarded(self, extra):
+        entry = {"name": "news", "cron": "50 5 * * *", "render_mode": "agent",
+                 "directive": self.PROMPT, **extra}
+        with collect_problems() as problems:
+            blocks = _parse_shared_block_specs([entry, {"name": "ok", "cron": "0 6 * * *"}])
+        assert [b.name for b in blocks] == ["ok"]
+        assert [(p["kind"], p["path"]) for p in problems] == [
+            ("discarded", ("briefings", "shared_blocks", "0")),
+        ]
+
+    def test_seeded_agent_block_survives_load(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text(tomli_w.dumps({
+            "briefings": {"shared_blocks": [
+                {"name": "news", "cron": "50 5 * * *", "render_mode": "agent",
+                 "directive": self.PROMPT},
+            ]},
+        }))
+        config = load_config(p)
+        assert [(b.name, b.render_mode) for b in config.briefings.shared_blocks] == [
+            ("news", "agent"),
+        ]
 
 
 class TestMarketsDefaultVerbatim:
