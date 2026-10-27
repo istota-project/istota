@@ -6119,7 +6119,7 @@ def check_shared_blocks(config: Config, *, run_inline: bool = False) -> list[str
 
     Returns the list of due block names.
     """
-    blocks = getattr(config, "briefing_shared_blocks", None) or []
+    blocks = getattr(config.briefings, "shared_blocks", None) or []
     if not blocks:
         return []
 
@@ -11667,7 +11667,7 @@ def run_daemon(
     try:
         from . import shared_blocks_store as _sbs  # noqa: PLC0415
 
-        _sbs.import_from_config(config.db_path, config.briefing_shared_blocks)
+        _sbs.import_from_config(config.db_path, config.briefings.shared_blocks)
         from .config import _apply_shared_blocks  # noqa: PLC0415
 
         _apply_shared_blocks(config)

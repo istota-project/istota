@@ -24,7 +24,7 @@ def _ctx(db_path, conn, *, now=None, shared_blocks=None):
         users={"alice": UserConfig(timezone="UTC")},
     )
     if shared_blocks is not None:
-        cfg.briefing_shared_blocks = shared_blocks
+        cfg.briefings.shared_blocks = shared_blocks
     return SourceContext(app_config=cfg, user_id="alice", conn=conn, now=now)
 
 

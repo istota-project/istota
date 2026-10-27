@@ -126,9 +126,9 @@ _EXCLUDED_TOP_LEVEL = {
     "_profile_refresh_failing",
 }
 
-# Top-level fields rendered as a count rather than their contents: lists of
-# dataclasses whose detail belongs on their own module page, not here.
-_COUNT_FIELDS = {"users", "default_briefings", "briefing_shared_blocks"}
+# Fields, by dotted key, rendered as a count rather than their contents: lists
+# of dataclasses whose detail belongs on their own module page, not here.
+_COUNT_FIELDS = {"users", "default_briefings", "briefings.shared_blocks"}
 
 
 def _mask_phone_number(number: Any) -> str:
@@ -273,7 +273,7 @@ def _field_entry(prefix: str, name: str, value: Any) -> dict:
             "secret": False,
             "set": _is_set(value),
         }
-    if name in _COUNT_FIELDS:
+    if key in _COUNT_FIELDS:
         size = len(value) if hasattr(value, "__len__") else 0
         return {
             "key": key,
@@ -401,7 +401,7 @@ def _editor_keys(
     if default is not _MISSING and not is_secret_field(key, name):
         entry["default"] = _field_entry(prefix, name, default)["value"]
     entry.update({
-        "in_file": _lookup(ctx["document"], path)[0] if ctx["document"] is not None else False,
+        "in_file": _lookup(ctx["read"], path)[0] if ctx["read"] is not None else False,
         "choices": list(choices) if choices is not None else None,
         "multi_choices": list(multi_choices) if multi_choices is not None else None,
         "doc": ctx["docs"].get(path),
@@ -412,7 +412,7 @@ def _editor_keys(
         "risky": path in schema.RISKY_KEYS,
     })
     if path in schema.TABLE_PATHS and path not in schema.READ_ONLY:
-        entry["toml"] = _snippet(ctx["redacted"], path)
+        entry["toml"] = _snippet(ctx["read_redacted"], path)
     model_field = schema.model_field_for(path)
     if model_field is not None:
         entry["model_field"] = {
@@ -706,8 +706,9 @@ def _secret_source(
 ) -> str:
     """Where the credential in secret file `name` comes from, without reading it.
 
-    `file` when `/run/secrets/<name>` is non-empty and the uppercase variable
-    is set: `istota-secrets` exports each file with a value as that variable,
+    `document` is the file with the loader's legacy rewrites applied
+    (`edits.normalized`). `file` when `/run/secrets/<name>` is non-empty and
+    the uppercase variable is set: `istota-secrets` exports each file with a value as that variable,
     in this process too. `environment` when the variable is set over an empty
     file, so it came from outside the stack. `inline` when neither holds it
     and `config.toml` has a value at `path`; `none` otherwise. The file is
@@ -722,7 +723,7 @@ def _secret_source(
     if os.environ.get(name.upper(), "").strip():
         return "environment"
     if path is not None and document is not None:
-        present, value = secrets.lookup(edits.normalized(document), path)
+        present, value = secrets.lookup(document, path)
         if present and edits._holds_value(value):
             return "inline"
     return "none"
@@ -793,7 +794,7 @@ def _secret_files(config: "Config", ctx: dict) -> list[dict]:
             # process shows the daemon's last answer, never its own guess.
             is_set, source = _daemon_only_secret(config)
         else:
-            source = _secret_source(name, path, ctx["document"], ctx["secrets_dir"])
+            source = _secret_source(name, path, ctx["read"], ctx["secrets_dir"])
         reason = (
             (schema.READ_ONLY.get(path) if path else None)
             or ctx["managed_reasons"]["secrets"]
@@ -861,11 +862,16 @@ def build_config_view(
         docs = field_docs(Path(config.skills_dir).parent)
     except (OSError, TypeError):
         docs = {}
+    # Fields are looked up where the loader reads them, so a key still at an
+    # old spelling shows in its new place; the raw editor keeps the file as is.
+    read = edits.normalized(parsed) if parsed is not None else None
     ctx = {
         "schema": schema,
         "config": config,
         "document": parsed,
         "redacted": secrets.redact_document(parsed) if parsed is not None else None,
+        "read": read,
+        "read_redacted": secrets.redact_document(read) if read is not None else None,
         "docs": docs,
         "managed_reasons": {
             resource: _managed_reason(entry) for resource, entry in managed_by.items()

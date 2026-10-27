@@ -895,7 +895,7 @@ class BriefingSharedBlock:
 
 
 # Batteries-included canonical shared blocks. Seeded when config declares no
-# ``[[briefing_shared_blocks]]`` (parity with how ``[[default_briefings]]`` is
+# ``[[briefings.shared_blocks]]`` (parity with how ``[[default_briefings]]`` is
 # operator/Ansible-provided). ``world-headlines`` needs the headless browser
 # (soft-degrades to an omitted section when it's off); ``markets-summary`` needs
 # only yfinance. Both regenerate twice daily in the configured shared-block
@@ -2354,6 +2354,12 @@ class ClaudeCodeBrainConfig:
     # `anthropic` provider's key, never the token). Empty derives it once per
     # process from the environment (`llm.providers.resolve_cli_auth`).
     auth: str = ""
+    # The advisor model, for this brain and tmux (the claude CLI's `--advisor`):
+    # an ID or alias resolved like `model`, carrying no effort. Empty = none.
+    # Dropped whenever a task pins its own model (`executor._resolve_advisor`).
+    # It must be a model able to act as an advisor; Istota does not check that.
+    # Read at the root as `advisor_model` until it moved here.
+    advisor_model: str = ""
     # Poll api.anthropic.com for plan utilization at all.
     subscription_usage: bool = True
     # One deployment-wide fetch per this window; every surface reads the same
@@ -2404,6 +2410,10 @@ class BrainConfig:
     claude_code: ClaudeCodeBrainConfig = field(default_factory=ClaudeCodeBrainConfig)
     source_type_overrides: dict[str, str] = field(default_factory=dict)
     room_selectable: list[str] = field(default_factory=list)
+    # Add config/system-prompt.md to every brain's system prompt: the claude CLI
+    # brains take it in place of Claude Code's default, the native brain appends
+    # it to its own. Read at the root until it moved here.
+    custom_system_prompt: bool = False
     # Availability failover (brain-fallback spec). When the primary brain is
     # unavailable (usage limit / not_found / tmux launch failure), the task runs
     # on ``fallback`` with that brain's own configured settings. "" = no
@@ -2468,6 +2478,13 @@ class BriefingsModuleConfig:
     # time (see scheduler.check_shared_blocks). Set via
     # ``[briefings] shared_block_timezone`` (Ansible ``istota_briefing_shared_tz``).
     shared_block_timezone: str = "UTC"
+    # Module-owned shared blocks (``[[briefings.shared_blocks]]``), generated
+    # once globally into ``shared_kv`` and read by user briefings through a
+    # ``shared_block`` source. Parsed by hand: ``load_config`` seeds
+    # ``DEFAULT_SHARED_BLOCKS`` when the config declares none, and an explicit
+    # empty list opts out. A directly-constructed Config has none. Read at the
+    # root as ``[[briefing_shared_blocks]]`` until it moved here.
+    shared_blocks: list[BriefingSharedBlock] = field(default_factory=list)
 
 
 @dataclass
@@ -2634,7 +2651,6 @@ class Config:
     # config written by the newer version and vice versa.
     model: str = ""  # deprecated alias for [brain.claude_code] / [brain.tmux] model
     effort: str = ""  # deprecated alias for [brain.claude_code] / [brain.tmux] effort
-    advisor_model: str = ""  # Advisor model ID or alias (anthropic-namespace brains only); resolved through the alias table like `model`, but carries no effort. Empty = no advisor. Dropped whenever a task pins its own model (see executor._resolve_advisor). Must resolve to a model capable of *being* an advisor — a weak/cheap tier (e.g. haiku) fails every task the advisor runs on; Istota does not validate this (no pairing table — see the spec's "Not doing")
     max_memory_chars: int = 0  # cap total memory in prompts (0 = unlimited)
     max_knowledge_facts: int = 50  # cap knowledge graph facts per prompt (0 = unlimited)
     db_path: Path = field(default_factory=lambda: Path("data/istota.db"))
@@ -2677,13 +2693,6 @@ class Config:
     users: dict[str, UserConfig] = field(default_factory=dict)  # nc_username -> UserConfig
     # Legacy migration declarations. Never copied into new personal schedules.
     default_briefings: list[BriefingConfig] = field(default_factory=list)
-    # Module-owned shared briefing blocks (shared-kv-curated-content spec):
-    # generated once globally and written into ``shared_kv``; per-user briefings
-    # read them via a ``shared_block`` source. In-memory only (global; never in a
-    # per-user table). ``load_config`` seeds ``DEFAULT_SHARED_BLOCKS`` when the
-    # config declares no ``[[briefing_shared_blocks]]``; a directly-constructed
-    # Config (tests) has none unless set.
-    briefing_shared_blocks: list[BriefingSharedBlock] = field(default_factory=list)
     admin_users: set[str] = field(default_factory=set)  # users with full system access
     workspace_path: Path | None = None  # On-disk root of the bot's file tree
     # The mount the workspace lives on, when it is one: checked for liveness by
@@ -2692,7 +2701,6 @@ class Config:
     skills_dir: Path = field(default_factory=lambda: Path("config/skills"))
     bundled_skills_dir: Path | None = None  # Override bundled skills dir (for testing)
     disabled_skills: list[str] = field(default_factory=list)  # instance-wide skills to exclude
-    custom_system_prompt: bool = False  # Use config/system-prompt.md instead of Claude Code's default
     temp_dir: Path = field(default_factory=lambda: Path("/tmp/istota"))
     # Local-disk root for per-user module SQLite DBs (feeds/health/location/money).
     # These live OFF the Nextcloud mount so they can use WAL safely — WAL's
@@ -3418,7 +3426,7 @@ def _parse_briefing_specs(
 
 
 def _parse_shared_block_specs(entries: "list | None") -> list[BriefingSharedBlock]:
-    """Parse ``[[briefing_shared_blocks]]`` TOML entries into dataclasses.
+    """Parse ``[[briefings.shared_blocks]]`` TOML entries into dataclasses.
 
     Fail-soft: a non-dict entry, or one missing ``name``/``cron``, is skipped
     with a warning. ``sources`` is a raw ``[{kind, config}]`` passthrough —
@@ -3427,16 +3435,16 @@ def _parse_shared_block_specs(entries: "list | None") -> list[BriefingSharedBloc
     """
     blocks: list[BriefingSharedBlock] = []
     for index, b in enumerate(entries or []):
-        path = ("briefing_shared_blocks", str(index))
+        path = ("briefings", "shared_blocks", str(index))
         if not isinstance(b, dict):
-            report_problem("discarded", path, "[[briefing_shared_blocks]] entry is not a table; ignoring")
+            report_problem("discarded", path, "[[briefings.shared_blocks]] entry is not a table; ignoring")
             continue
         name = b.get("name", "")
         cron = b.get("cron", "")
         if not name or not cron:
             report_problem(
                 "discarded", path,
-                "briefing_shared_blocks entry %r missing name/cron; ignoring",
+                "[[briefings.shared_blocks]] entry %r missing name/cron; ignoring",
                 name or "?",
             )
             continue
@@ -4132,7 +4140,7 @@ _PARSED_BY_HAND = frozenset({
     # TOML rather than from a field of a declared type.
     "users",
     "default_briefings",
-    "briefing_shared_blocks",
+    "briefings.shared_blocks",
     # `[providers.<id>]` over the built-ins (`_providers`), refusing a table
     # per provider rather than the section.
     "providers",
@@ -4448,7 +4456,7 @@ def legacy_spellings(path: tuple[str, ...]) -> list[tuple[str, ...]]:
         and path[2] in _LEGACY_FLAT_WHATSAPP_KEYS
     ):
         return [("whatsapp", path[2])]
-    return []
+    return [old for old, new in _MOVED_KEYS.items() if new == path]
 
 
 def normalize_legacy_document(data: dict) -> None:
@@ -4464,6 +4472,7 @@ def normalize_legacy_document(data: dict) -> None:
     _migrate_whatsapp_flat(data)
     _migrate_web_login_link_ttl(data)
     _migrate_workspace_mount_path(data)
+    _migrate_moved_keys(data)
 
 
 def _migrate_workspace_mount_path(data: dict) -> None:
@@ -4504,6 +4513,48 @@ def _migrate_workspace_mount_path(data: dict) -> None:
         "nextcloud_mount_path was renamed to workspace_mount_path and both are "
         "set; remove nextcloud_mount_path."
     )
+
+
+_MOVED_KEYS: dict[tuple[str, ...], tuple[str, ...]] = {
+    ("advisor_model",): ("brain", "claude_code", "advisor_model"),
+    ("custom_system_prompt",): ("brain", "custom_system_prompt"),
+    ("briefing_shared_blocks",): ("briefings", "shared_blocks"),
+}
+"""Top-level keys that moved into the section that reads them, old to new."""
+
+
+def _migrate_moved_keys(data: dict) -> None:
+    """Read each of :data:`_MOVED_KEYS` at its new path.
+
+    The new spelling wins when both are set. A target whose parent is not a
+    table is left alone, so the walk reports the old key as unknown beside the
+    section's own complaint rather than this step overwriting either.
+    """
+    for old, new in _MOVED_KEYS.items():
+        if old[0] not in data:
+            continue
+        parent = data
+        for segment in new[:-1]:
+            parent = parent.setdefault(segment, {}) if isinstance(parent, dict) else None
+        if not isinstance(parent, dict):
+            continue
+        dotted = ".".join(new[:-1])
+        value = data.pop(old[0])
+        if new[-1] in parent:
+            report_problem(
+                "retired", old,
+                "%s moved to [%s] %s and both are set; remove the top-level key.",
+                old[0], dotted, new[-1],
+            )
+            continue
+        parent[new[-1]] = value
+        # "warning", not "retired": the editor offers to unset a retired key,
+        # which here would drop the setting.
+        report_problem(
+            "warning", old,
+            "%s moved to [%s] %s. The old place still works; move the key.",
+            old[0], dotted, new[-1],
+        )
 
 
 def _migrate_web_login_link_ttl(data: dict) -> None:
@@ -5524,7 +5575,7 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     "sharing.ocm.max_pending_per_user": _positive_int,
     "sharing.ocm.pending_days": _positive_int,
     "sharing.ocm.max_discovery_fetches_per_minute": _positive_int,
-    "advisor_model": _advisor_model,
+    "brain.claude_code.advisor_model": _advisor_model,
     # 0 means unlimited here, so a negative value cannot be clamped to 0 -- that
     # reads as the opposite of what someone typing one meant.
     "health.max_document_bytes": _non_negative_int,
@@ -5989,21 +6040,21 @@ def load_config(
                 "[[default_briefings]] must be a list of tables; ignoring",
             )
 
-    # Module-owned shared briefing blocks. An explicit ``[[briefing_shared_blocks]]``
+    # Module-owned shared briefing blocks. An explicit ``[[briefings.shared_blocks]]``
     # (operator/Ansible) replaces the batteries-included defaults wholesale; an
-    # absent section seeds ``DEFAULT_SHARED_BLOCKS`` (batteries-included). An
-    # explicit empty list opts out entirely.
-    if "briefing_shared_blocks" in data:
-        raw_shared = data["briefing_shared_blocks"]
+    # absent key seeds ``DEFAULT_SHARED_BLOCKS``. An explicit empty list opts out.
+    briefings_table = data.get("briefings")
+    if isinstance(briefings_table, dict) and "shared_blocks" in briefings_table:
+        raw_shared = briefings_table["shared_blocks"]
         if isinstance(raw_shared, list):
-            config.briefing_shared_blocks = _parse_shared_block_specs(raw_shared)
+            config.briefings.shared_blocks = _parse_shared_block_specs(raw_shared)
         else:
             report_problem(
-                "discarded", ("briefing_shared_blocks",),
-                "[[briefing_shared_blocks]] must be a list of tables; ignoring",
+                "discarded", ("briefings", "shared_blocks"),
+                "[[briefings.shared_blocks]] must be a list of tables; ignoring",
             )
     else:
-        config.briefing_shared_blocks = _parse_shared_block_specs(DEFAULT_SHARED_BLOCKS)
+        config.briefings.shared_blocks = _parse_shared_block_specs(DEFAULT_SHARED_BLOCKS)
 
     if "site" in data:
         s = data["site"]
@@ -6164,7 +6215,7 @@ def load_config(
         _apply_user_briefings(config)
 
         # admin-shared-briefing-blocks: overlay shared_block_configs rows onto
-        # config.briefing_shared_blocks. DB wins by name (admin edits survive
+        # config.briefings.shared_blocks. DB wins by name (admin edits survive
         # operator re-runs); ``check_shared_blocks`` then reads DB-authoritative
         # definitions.
         _apply_shared_blocks(config)
@@ -7026,7 +7077,7 @@ def _validate_configured_model_references(config: "Config") -> None:
 
 
 def _validate_advisor_model(config: "Config") -> None:
-    """Warn-and-ignore checks for ``advisor_model`` — never fails load, matching
+    """Warn-and-ignore checks for ``[brain.claude_code] advisor_model`` — never fails load, matching
     ``[models]``. Three independent traps, each a WARNING only:
 
     1. A ``:effort`` modifier — the CLI's ``--advisor`` flag takes no effort,
@@ -7042,10 +7093,10 @@ def _validate_advisor_model(config: "Config") -> None:
        ``--advisor default`` rather than degrading, so this is worth flagging
        before the first task hits it.
     """
-    raw = (config.advisor_model or "").strip()
+    raw = (config.brain.claude_code.advisor_model or "").strip()
     if not raw:
         return
-    path = ("advisor_model",)
+    path = ("brain", "claude_code", "advisor_model")
 
     from .brain._aliases import split_effort
 
@@ -7802,7 +7853,7 @@ def shared_block_from_row(r) -> BriefingSharedBlock:
 
 
 def _apply_shared_blocks(config: "Config") -> None:
-    """Overlay ``shared_block_configs`` rows onto ``config.briefing_shared_blocks``.
+    """Overlay ``shared_block_configs`` rows onto ``config.briefings.shared_blocks``.
 
     DB wins by ``name`` (an admin's web edit survives operator re-runs); a DB row
     replaces a config/TOML block of the same name, and DB-only rows are appended.
@@ -7830,7 +7881,7 @@ def _apply_shared_blocks(config: "Config") -> None:
     db_by_name = {r.name: r for r in rows}
     merged: list[BriefingSharedBlock] = []
     seen: set[str] = set()
-    for block in config.briefing_shared_blocks:
+    for block in config.briefings.shared_blocks:
         if block.name in db_by_name:
             merged.append(shared_block_from_row(db_by_name[block.name]))
         else:
@@ -7839,4 +7890,4 @@ def _apply_shared_blocks(config: "Config") -> None:
     for r in rows:
         if r.name not in seen:
             merged.append(shared_block_from_row(r))
-    config.briefing_shared_blocks = merged
+    config.briefings.shared_blocks = merged

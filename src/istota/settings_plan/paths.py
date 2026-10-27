@@ -82,6 +82,9 @@ def _selected(document, path, value):
             pass
         case ("default_briefings", int(), "blocks", int(), "sources", int(), "config", "path") if path[0] == "config":
             pass
+        case ("briefings", "shared_blocks", int(), "sources", int(), "config", "path") if path[0] == "config":
+            pass
+        # The old top-level spelling, which the loader still reads.
         case ("briefing_shared_blocks", int(), "sources", int(), "config", "path") if path[0] == "config":
             pass
         case ("shared_briefing_blocks", int(), "sources", int(), "config", "path"):

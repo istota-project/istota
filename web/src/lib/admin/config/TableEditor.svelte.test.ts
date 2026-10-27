@@ -63,18 +63,18 @@ describe('the table editor', () => {
 
   it('keeps an empty list distinct from an absent key', async () => {
     const blocks = configField({
-      path: ['briefing_shared_blocks'],
+      path: ['briefings', 'shared_blocks'],
       editor: 'table',
       in_file: false,
       toml: '',
     });
     const { onOp, textarea } = mount(blocks);
-    await fireEvent.click(screen.getByLabelText('About briefing_shared_blocks'));
+    await fireEvent.click(screen.getByLabelText('About shared_blocks'));
     expect(await screen.findByText(/shipped default blocks apply/)).toBeInTheDocument();
-    await fireEvent.input(textarea, { target: { value: 'briefing_shared_blocks = []\n' } });
+    await fireEvent.input(textarea, { target: { value: 'shared_blocks = []\n' } });
     expect(onOp).toHaveBeenLastCalledWith(
-      { op: 'set_toml', path: ['briefing_shared_blocks'], toml: 'briefing_shared_blocks = []\n' },
-      ['briefing_shared_blocks'],
+      { op: 'set_toml', path: ['briefings', 'shared_blocks'], toml: 'shared_blocks = []\n' },
+      ['briefings', 'shared_blocks'],
     );
   });
 

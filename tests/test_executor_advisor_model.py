@@ -18,6 +18,12 @@ def _task(**kw) -> Task:
     return _make_task(**kw)
 
 
+def _config_with_advisor(advisor: str) -> Config:
+    config = Config()
+    config.brain.claude_code.advisor_model = advisor
+    return config
+
+
 class TestResolveAdvisorUnit:
     """`_resolve_advisor` in isolation — no brain, no config-loader involved."""
 
@@ -26,22 +32,22 @@ class TestResolveAdvisorUnit:
         assert _resolve_advisor(_task(model=""), config) == ""
 
     def test_configured_advisor_flows_through_when_unpinned(self):
-        config = Config(advisor_model="opus")
+        config = _config_with_advisor("opus")
         assert _resolve_advisor(_task(model=""), config) == "opus"
 
     def test_task_model_pin_drops_the_advisor(self):
         # A per-task model pin (!model, !room model, a [[jobs]] model, an API
         # caller) drops the configured advisor: a rejected executor/advisor
         # pairing is a hard CLI error, not a downgrade.
-        config = Config(advisor_model="opus")
+        config = _config_with_advisor("opus")
         assert _resolve_advisor(_task(model="haiku"), config) == ""
 
     def test_whitespace_only_task_model_does_not_count_as_a_pin(self):
-        config = Config(advisor_model="opus")
+        config = _config_with_advisor("opus")
         assert _resolve_advisor(_task(model="   "), config) == "opus"
 
     def test_none_task_model_does_not_count_as_a_pin(self):
-        config = Config(advisor_model="opus")
+        config = _config_with_advisor("opus")
         assert _resolve_advisor(_task(model=None), config) == "opus"
 
 
@@ -79,8 +85,8 @@ class _FakeNativeBrain(_FakeAnthropicBrain):
 
 def _run_with_fake_brain(tmp_path, fake_brain, *, advisor_model="", task_model=""):
     config = _make_config(tmp_path)
-    config.advisor_model = advisor_model
     config.brain = BrainConfig(kind="claude_code")
+    config.brain.claude_code.advisor_model = advisor_model
     config.security.sandbox_enabled = False
 
     patches = _patch_executor() + [
@@ -130,8 +136,8 @@ class TestRealBrainResolvesAdvisorAlias:
         from istota.brain.claude_code import OPUS
 
         config = _make_config(tmp_path)
-        config.advisor_model = "smart:high"
         config.brain = BrainConfig(kind="claude_code")
+        config.brain.claude_code.advisor_model = "smart:high"
         config.security.sandbox_enabled = False
 
         captured_cmd = []
@@ -193,8 +199,8 @@ class TestFallbackDropsAdvisor:
         fallback = _FakeNativeBrain()
 
         config = _make_config(tmp_path)
-        config.advisor_model = "opus"
         config.brain = BrainConfig(kind="claude_code", fallback="native")
+        config.brain.claude_code.advisor_model = "opus"
         config.security.sandbox_enabled = False
 
         def fake_make_brain(bc):
@@ -226,8 +232,8 @@ class TestFallbackDropsAdvisor:
         fallback = _FakeAnthropicBrain()
 
         config = _make_config(tmp_path)
-        config.advisor_model = "opus"
         config.brain = BrainConfig(kind="claude_code", fallback="tmux_claude")
+        config.brain.claude_code.advisor_model = "opus"
         config.security.sandbox_enabled = False
 
         def fake_make_brain(bc):
@@ -267,8 +273,8 @@ class TestFallbackDropsAdvisor:
         )
 
         config = _make_config(tmp_path)
-        config.advisor_model = "sonnet"
         config.brain = BrainConfig(kind="claude_code", fallback=fallback_kind)
+        config.brain.claude_code.advisor_model = "sonnet"
         config.security.sandbox_enabled = False
 
         def fake_make_brain(bc):

@@ -13,7 +13,7 @@ def _config(tmp_path, blocks) -> Config:
         workspace_path=tmp_path / "mount",
         users={"alice": UserConfig(timezone="UTC")},
     )
-    cfg.briefing_shared_blocks = blocks
+    cfg.briefings.shared_blocks = blocks
     return cfg
 
 

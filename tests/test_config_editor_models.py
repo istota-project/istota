@@ -49,4 +49,4 @@ class TestFields:
             "istota.llm.discovery.catalogue_from_caches",
             lambda config: (_ for _ in ()).throw(RuntimeError("boom")),
         )
-        assert model_problems({"advisor_model": "nosuch/x"}, _config()) == []
+        assert model_problems({"brain": {"claude_code": {"advisor_model": "nosuch/x"}}}, _config()) == []

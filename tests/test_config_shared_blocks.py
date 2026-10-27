@@ -1,4 +1,4 @@
-"""Tests for [[briefing_shared_blocks]] config parsing + canonical defaults."""
+"""Tests for [[briefings.shared_blocks]] config parsing + canonical defaults."""
 
 import tomli_w
 
@@ -76,27 +76,27 @@ class TestLoadConfigSeeding:
         cfg_path = tmp_path / "config.toml"
         cfg_path.write_text(tomli_w.dumps({"bot_name": "Istota"}))
         config = load_config(cfg_path)
-        names = {b.name for b in config.briefing_shared_blocks}
+        names = {b.name for b in config.briefings.shared_blocks}
         assert "world-headlines" in names
         assert "markets-summary" in names
 
     def test_explicit_section_replaces_defaults(self, tmp_path):
         cfg_path = tmp_path / "config.toml"
         cfg_path.write_text(tomli_w.dumps({
-            "briefing_shared_blocks": [
+            "briefings": {"shared_blocks": [
                 {"name": "custom", "cron": "0 5 * * *",
                  "sources": [{"kind": "markets", "config": {}}]},
-            ],
+            ]},
         }))
         config = load_config(cfg_path)
-        names = {b.name for b in config.briefing_shared_blocks}
+        names = {b.name for b in config.briefings.shared_blocks}
         assert names == {"custom"}
 
     def test_explicit_empty_opts_out(self, tmp_path):
         cfg_path = tmp_path / "config.toml"
-        cfg_path.write_text(tomli_w.dumps({"briefing_shared_blocks": []}))
+        cfg_path.write_text(tomli_w.dumps({"briefings": {"shared_blocks": []}}))
         config = load_config(cfg_path)
-        assert config.briefing_shared_blocks == []
+        assert config.briefings.shared_blocks == []
 
     def test_shared_block_timezone_default_utc(self, tmp_path):
         cfg_path = tmp_path / "config.toml"
@@ -146,10 +146,10 @@ class TestApplySharedBlocksOverlay:
         cfg_path = tmp_path / "config.toml"
         cfg_path.write_text(tomli_w.dumps({
             "db_path": str(tmp_path / "istota.db"),
-            "briefing_shared_blocks": [
+            "briefings": {"shared_blocks": [
                 {"name": "world-headlines", "cron": "0 6 * * *", "title": "TOML",
                  "sources": [{"kind": "browse", "config": {}}]},
-            ],
+            ]},
         }))
         db.init_db(tmp_path / "istota.db")
         return cfg_path
@@ -163,7 +163,7 @@ class TestApplySharedBlocksOverlay:
                 trusted=True,
             )
         config = load_config(cfg_path)
-        wh = next(b for b in config.briefing_shared_blocks if b.name == "world-headlines")
+        wh = next(b for b in config.briefings.shared_blocks if b.name == "world-headlines")
         assert wh.title == "DB wins"
         assert wh.cron == "0 9 * * *"
         assert wh.trusted is True
@@ -174,7 +174,7 @@ class TestApplySharedBlocksOverlay:
         with db.get_db(tmp_path / "istota.db") as conn:
             db.upsert_shared_block_config(conn, name="extra", cron="0 8 * * *")
         config = load_config(cfg_path)
-        names = {b.name for b in config.briefing_shared_blocks}
+        names = {b.name for b in config.briefings.shared_blocks}
         assert names == {"world-headlines", "extra"}
 
     def test_disabled_row_overlays_but_muted(self, tmp_path):
@@ -185,11 +185,11 @@ class TestApplySharedBlocksOverlay:
                 conn, name="world-headlines", cron="0 6 * * *", enabled=False,
             )
         config = load_config(cfg_path)
-        wh = next(b for b in config.briefing_shared_blocks if b.name == "world-headlines")
+        wh = next(b for b in config.briefings.shared_blocks if b.name == "world-headlines")
         assert wh.enabled is False  # present-but-muted
 
     def test_no_db_rows_keeps_config(self, tmp_path):
         cfg_path = self._base_config(tmp_path)
         config = load_config(cfg_path)
-        wh = next(b for b in config.briefing_shared_blocks if b.name == "world-headlines")
+        wh = next(b for b in config.briefings.shared_blocks if b.name == "world-headlines")
         assert wh.title == "TOML"  # overlay is a no-op when no DB rows

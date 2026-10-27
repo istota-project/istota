@@ -33,15 +33,6 @@ bot_name = "Istota"
 # model = "opus"
 # effort = "high"
 
-# Advisor model for the anthropic-namespace brains: an ID or alias, resolved
-# like `model` but carrying no effort. Empty = no advisor. It must be a model
-# that can act as an advisor; a cheap tier fails every task it runs on.
-# advisor_model = ""
-
-# Use config/system-prompt.md instead of Claude Code's default system prompt.
-# That one file is bind-mounted read-only into the sandbox.
-# custom_system_prompt = true
-
 # Database path (relative to working directory or absolute)
 db_path = "data/istota.db"
 
@@ -102,6 +93,11 @@ features = []
 # Brain kinds a room or a CRON.md job may pin. Empty (the default) means none
 # may; setting a pin is admin-only.
 # room_selectable = []                # e.g. ["claude_code", "native"]
+#
+# Add config/system-prompt.md to the system prompt of every brain: the claude
+# CLI brains use it in place of Claude Code's default, the native brain appends
+# it to its own. Formerly a top-level key, which still loads.
+# custom_system_prompt = false
 #
 # Native-brain settings (only used when kind = "native", or via a routing
 # override below). The endpoint and its key are a provider's ([providers.<id>]
@@ -291,6 +287,12 @@ features = []
 # deployment to API billing). Under "api_key" the model can read the key from
 # its Bash tool, as it can read the token under "subscription".
 # auth = "subscription"
+#
+# Advisor model for this brain and tmux (the CLI's --advisor): an ID or alias,
+# resolved like `model` but carrying no effort. Empty = no advisor. It must be a
+# model that can act as an advisor; a cheap tier fails every task it runs on.
+# Formerly a top-level key, which still loads.
+# advisor_model = ""
 #
 # Poll the Claude plan's utilization for /admin and `istota doctor`. The
 # credential is only read. Off = no admin card and the doctor check skips.
@@ -892,9 +894,10 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # ============================================================================
 # Blocks generated once for everyone and read by user briefings through a
 # `shared_block` source. Sources may be browse, markets or email. Omit for the
-# shipped defaults; an empty list opts out.
+# shipped defaults; an empty list (`[briefings] shared_blocks = []`) opts out.
+# Formerly the top-level [[briefing_shared_blocks]], which still loads.
 #
-# [[briefing_shared_blocks]]
+# [[briefings.shared_blocks]]
 # name = "world-headlines"          # → shared_kv key in namespace "briefing_shared_blocks"
 # cron = "45 5,17 * * *"            # twice daily, ~15 min before the briefing windows; UTC (global)
 # title = "🌍 Headlines"
@@ -902,11 +905,11 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # render_mode = "synthesis"
 # enabled = true
 #
-#   [[briefing_shared_blocks.sources]]
+#   [[briefings.shared_blocks.sources]]
 #   kind = "browse"
 #   config = { preset = "ap" }
 #
-#   [[briefing_shared_blocks.sources]]
+#   [[briefings.shared_blocks.sources]]
 #   kind = "browse"
 #   config = { preset = "reuters" }
 #

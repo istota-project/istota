@@ -1551,7 +1551,7 @@ def _resolve_advisor(task, config: Config) -> str:
     task_model = (task.model or "").strip()
     if task_model:
         return ""
-    return (config.advisor_model or "").strip()
+    return (config.brain.claude_code.advisor_model or "").strip()
 
 
 def persist_brain_usage(
@@ -5191,7 +5191,7 @@ def custom_system_prompt_path(config: Config) -> Path | None:
     still yields a path a child process with its own ``--chdir`` can open,
     without rewriting a symlinked deployment root to a name nothing else uses.
     """
-    if not config.custom_system_prompt:
+    if not config.brain.custom_system_prompt:
         return None
     path = config.skills_dir.parent / "system-prompt.md"
     if path.is_absolute():

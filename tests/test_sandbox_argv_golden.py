@@ -66,6 +66,7 @@ import pytest
 
 from istota import db
 from istota.config import (
+    BrainConfig,
     Config,
     ContainerConfig,
     DeveloperConfig,
@@ -470,7 +471,7 @@ def _make_config(case: Case, world: dict[str, Path]) -> Config:
         nextcloud=NextcloudConfig(url="https://cloud.example.com" if case.mount else ""),
         skills_dir=world["config"] / "skills",
         module_data_dir=module_data_dir,
-        custom_system_prompt=case.custom_system_prompt,
+        brain=BrainConfig(custom_system_prompt=case.custom_system_prompt),
         admin_users=set(case.admin_users),
         security=SecurityConfig(
             sandbox_enabled=True,

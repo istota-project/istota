@@ -1778,7 +1778,7 @@ def test_a_custom_system_prompt_does_not_change_the_assembled_prompt(
 ):
     """Recorded because the spec's matrix asks for the pair and the code has none.
 
-    `config.custom_system_prompt` selects `config/system-prompt.md` as the
+    `config.brain.custom_system_prompt` selects `config/system-prompt.md` as the
     brain's *system* prompt — `custom_system_prompt_path` is read at
     `executor.py`'s brain-request assembly, which is several hundred lines past
     the `dry_run` return. So the two settings produce byte-identical task
@@ -1793,7 +1793,7 @@ def test_a_custom_system_prompt_does_not_change_the_assembled_prompt(
 
     monkeypatch.setattr(executor, "_bwrap_available", lambda: case.sandboxed)
     config = _build_config(case, tmp_path / "custom")
-    config.custom_system_prompt = True
+    config.brain.custom_system_prompt = True
     (config.skills_dir.parent / "system-prompt.md").write_text("CUSTOM SYSTEM PROMPT\n")
     # The filename and directory above duplicate a derivation that lives in the
     # product. Without this, a move of either leaves the test asserting that

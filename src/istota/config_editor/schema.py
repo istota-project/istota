@@ -148,7 +148,7 @@ MODEL_FIELDS: dict[tuple[str, ...], ModelField] = {
     ("brain", "claude_code", "model"): ModelField("anthropic", effort=True, brain="claude_code"),
     ("brain", "tmux", "model"): ModelField("anthropic", effort=True, brain="tmux_claude"),
     # Resolved through the alias table with no effort (`executor._resolve_advisor`).
-    ("advisor_model",): ModelField("anthropic", effort=False, brain="claude_code"),
+    ("brain", "claude_code", "advisor_model"): ModelField("anthropic", effort=False, brain="claude_code"),
     ("brain", "native", "model"): ModelField("native", effort=True, brain="native"),
     # Triage and the speech gate strip `:effort` (`claude_code.cli_model_name`).
     ("conversation", "selection_model"): ModelField("any", effort=False),
