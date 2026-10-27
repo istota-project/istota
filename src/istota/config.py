@@ -6215,8 +6215,8 @@ def load_config(
 
         # admin-shared-briefing-blocks: overlay shared_block_configs rows onto
         # config.briefings.shared_blocks. DB wins by name (admin edits survive
-        # operator re-runs); ``check_shared_blocks`` then reads DB-authoritative
-        # definitions.
+        # operator re-runs); ``check_shared_blocks`` reads the table itself on
+        # each pass.
         _apply_shared_blocks(config)
 
     # Apply operator role-alias overrides globally so every downstream call

@@ -75,6 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A shared briefing block created or edited on the briefings settings page now runs on its schedule without a restart. Before, a new block ran only through Run now, and an edited one kept its old definition on its schedule until the daemon restarted.
 - The model suggestions in Room settings open directly under the field again. Inside a dialog the list opened offset down and to the side, past the dialog's edge, most visibly on a phone. The admin Configuration page no longer cuts a field's suggestions off at the edge of its section.
 - `browse render` and `browse get` read a PDF instead of returning an empty success. They return the document's text page by page, pageable by offset, and say plainly when a PDF cannot be read, such as a scanned one. The file is parsed in a separate process with memory and time limits. Needs a rebuilt browser image.
 - In Files, the notice for a folder shared from another server, and the "Drive access is off" message, now show their button below the text, as other notices do, instead of beside it.

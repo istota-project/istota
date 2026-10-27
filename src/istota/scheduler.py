@@ -6117,11 +6117,14 @@ def check_shared_blocks(config: Config, *, run_inline: bool = False) -> list[str
     is stamped up front so a slow or failed generation does not re-fire every
     tick. ``run_inline=True`` runs generation synchronously (tests).
 
+    Definitions come from ``shared_block_configs`` on every pass, not from
+    ``config.briefings.shared_blocks``: that list is the boot-time overlay, so a
+    web edit or a block created since boot would otherwise wait for a restart.
+    The config's entries reach the table through the seed at daemon boot.
+
     Returns the list of due block names.
     """
-    blocks = getattr(config.briefings, "shared_blocks", None) or []
-    if not blocks:
-        return []
+    from istota.config import shared_block_from_row
 
     tz_str = (config.briefings.shared_block_timezone or "").strip() or "UTC"
     try:
@@ -6134,6 +6137,7 @@ def check_shared_blocks(config: Config, *, run_inline: bool = False) -> list[str
     now_naive = _now(tz).replace(tzinfo=None)
     due = []
     with db.get_db(config.db_path) as conn:
+        blocks = [shared_block_from_row(r) for r in db.list_shared_block_configs(conn)]
         for block in blocks:
             if not getattr(block, "enabled", True) or not block.cron:
                 continue
