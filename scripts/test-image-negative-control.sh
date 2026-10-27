@@ -397,30 +397,44 @@ secrets_half() {
 
 CLI_HARNESS_TESTS="tests/image/test_cli_harness_init.py"
 
-cli_harness_half() {
+# Runs the cli-harness tests under one control and requires each named node id
+# red in pytest's FAILED summary, and the given marker somewhere in the output.
+cli_harness_control() {
+    control="$1"; marker="$2"; shift 2
     echo
-    echo "[control] cli-harness: the harness argv without --tools"
+    echo "[control] cli-harness: ${control}"
     cli_out="$(mktemp)"
     set +e
-    ISTOTA_TEST_CLI_HARNESS_CONTROL=drop-tools \
+    ISTOTA_TEST_CLI_HARNESS_CONTROL="$control" \
         uv run pytest -m image -n0 -q --no-header -p no:randomly "$CLI_HARNESS_TESTS" 2>&1 | tee "$cli_out"
     set -e
-    for node in \
-        "${CLI_HARNESS_TESTS}::TestTheInitFrameListsOnlyWhatTheHarnessAskedFor::test_websearch_granted" \
-        "${CLI_HARNESS_TESTS}::TestTheInitFrameListsOnlyWhatTheHarnessAskedFor::test_no_builtins_granted"; do
-        if ! grep -Fq "FAILED ${node}" "$cli_out"; then
+    for node in "$@"; do
+        if ! grep -Fq "FAILED ${CLI_HARNESS_TESTS}::${node}" "$cli_out"; then
             rm -f "$cli_out"
-            echo "[control] FAILED: cli-harness did not turn ${node} red."
+            echo "[control] FAILED: cli-harness ${control} did not turn ${node} red."
             exit 1
         fi
     done
-    if ! grep -Fq "CronCreate" "$cli_out"; then
+    if ! grep -Fq "$marker" "$cli_out"; then
         rm -f "$cli_out"
-        echo "[control] FAILED: cli-harness went red, but not on the extra built-ins."
+        echo "[control] FAILED: cli-harness ${control} went red, but not on ${marker}."
         exit 1
     fi
     rm -f "$cli_out"
-    echo "[control] OK: cli-harness turned both init witnesses red on the tool set."
+    echo "[control] OK: cli-harness ${control} turned its witnesses red."
+}
+
+cli_harness_half() {
+    # The harness argv without --tools: the extra built-ins reach the frame.
+    cli_harness_control drop-tools CronCreate \
+        TestTheInitFrameListsOnlyWhatTheHarnessAskedFor::test_websearch_granted \
+        TestTheInitFrameListsOnlyWhatTheHarnessAskedFor::test_no_builtins_granted
+    # The cwd witness has no control yet: it is an expected failure until the
+    # spec decides what the unwrapped CLI may do in its cwd, and a control is
+    # added (`open-cwd` in the driver) once it is green.
+    # No TMPDIR on the CLI's env: its per-uid directories land in /tmp.
+    cli_harness_control tmp-unset /tmp/claude- \
+        TestWhatTheUnwrappedCliTouches::test_nothing_appears_under_tmp
 }
 
 # --------------------------------------------------------------------------

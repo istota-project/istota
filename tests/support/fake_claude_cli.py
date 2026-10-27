@@ -14,6 +14,12 @@ What it does is read from a JSON plan named by `FAKE_CLAUDE_PLAN`:
 - `init_extra_tools`, `init_drop_tools`, `init_server_status`: what to
   misreport in `system/init`.
 - `calls`: `[{"name": "Bash", "args": {...}}]`.
+- `host_probe`: a shell command the fake runs itself first, from the CLI's
+  unwrapped view, its output put ahead of the call results.
+
+`{socket}` and `{harness_dir}` in a call's arguments or the host probe are
+replaced with the bridge socket and the harness directory, read from the MCP
+config.
 - `sleep_before_calls`, `sleep_before_result`: seconds.
 - `exit`: the exit status, 0 by default.
 
@@ -45,6 +51,8 @@ class _Mcp:
         with open(config_path) as fh:
             servers = json.load(fh)["mcpServers"]
         (self.name, server), = servers.items()
+        args = server["args"]
+        self.socket = args[args.index("--socket") + 1] if "--socket" in args else ""
         # The real CLI passes its whole environment, whatever `env` says.
         self.proc = subprocess.Popen(
             [server["command"], *server["args"]],
@@ -89,7 +97,20 @@ def main(argv: list[str]) -> int:
 
     tools_flag = _flag(argv, "--tools")
     builtins = [t for t in (tools_flag or "").split(",") if t]
-    mcp = _Mcp(_flag(argv, "--mcp-config"))
+    config_path = _flag(argv, "--mcp-config")
+    mcp = _Mcp(config_path)
+    places = {"{socket}": mcp.socket, "{harness_dir}": os.path.dirname(config_path)}
+
+    def subst(value):
+        if isinstance(value, str):
+            for key, real in places.items():
+                value = value.replace(key, real)
+            return value
+        if isinstance(value, dict):
+            return {k: subst(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [subst(v) for v in value]
+        return value
     status = "connected"
     offered: list[str] = []
     init = mcp.request("initialize", {"protocolVersion": "2025-11-25"})
@@ -112,13 +133,19 @@ def main(argv: list[str]) -> int:
     time.sleep(plan.get("sleep_before_calls", 0))
 
     texts = []
+    if plan.get("host_probe"):
+        # The same probe the model's Bash runs, from the CLI's own (host) view.
+        probe = subprocess.run(["/bin/sh", "-c", subst(plan["host_probe"])],
+                               capture_output=True, text=True)
+        texts.append("HOST:\n" + probe.stdout)
     for index, call in enumerate(plan.get("calls", [])):
         call_id = f"toolu_{index}"
+        args = subst(call.get("args", {}))
         _emit({"type": "assistant", "message": {"id": f"msg_{index}", "content": [{
             "type": "tool_use", "id": call_id, "name": f"mcp__{mcp.name}__{call['name']}",
-            "input": call.get("args", {}),
+            "input": args,
         }]}})
-        reply = mcp.request("tools/call", {"name": call["name"], "arguments": call.get("args", {})})
+        reply = mcp.request("tools/call", {"name": call["name"], "arguments": args})
         result = reply.get("result") or {}
         text = "".join(b.get("text", "") for b in result.get("content", []) if b.get("type") == "text")
         if result.get("isError") or "error" in reply:
