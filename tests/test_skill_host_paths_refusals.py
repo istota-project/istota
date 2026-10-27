@@ -925,3 +925,130 @@ class TestTheVerbsTheDaemonReplays:
 
         assert not recorder.called, f"{key} deferred a path the replay drops"
         assert run.envelope.get("reason") == "host_path_refused", run.envelope
+
+
+# --------------------------------------------------------------------------- #
+# The Click stamps
+# --------------------------------------------------------------------------- #
+
+
+#: Every resolving stamp in a Click skill, and the argv that reaches it. The
+#: Click walk keys the same way as `CASES`, but the driver differs: the stamp
+#: resolves in a parameter callback inside the facade's `CliRunner`, so what is
+#: recorded is the path the command hands to `read_resolved_text`.
+CLICK_CASES: dict[tuple[str, str, str], Callable[[str], list[str]]] = {
+    ("briefings", "blocks.add", "directive_file"): lambda p: [
+        "blocks", "add", "--briefing", "noon", "--title", "Day", "--directive-file", p,
+    ],
+    ("briefings", "blocks.set", "directive_file"): lambda p: [
+        "blocks", "set", "--id", "1", "--directive-file", p,
+    ],
+    ("briefings", "blocks.save", "payload_file"): lambda p: ["blocks", "save", "--file", p],
+}
+
+#: What the recorder hands back for each file, so an accepted call runs to the end.
+_CLICK_FILE_TEXT = {
+    "directive_file": "Lead with the outage.",
+    "payload_file": '{"briefing_name": "noon", "title": "Day"}',
+}
+
+
+def _click_resolving_stamps() -> dict[tuple[str, str, str], str]:
+    from istota.skills._hostpath import click_stamped
+
+    out: dict[tuple[str, str, str], str] = {}
+    for skill_dir in sorted(SKILLS_DIR.iterdir()):
+        source = skill_dir / "__init__.py"
+        if not source.exists() or "def build_cli" not in source.read_text():
+            continue
+        module = importlib.import_module(f"istota.skills.{skill_dir.name}")
+        for command, dest, mode in click_stamped(module.build_cli()):
+            if mode in RESOLVING:
+                out[(skill_dir.name, command, dest)] = mode
+    return out
+
+
+@pytest.fixture
+def click_drive(mount, tmp_path, monkeypatch):
+    """`(key, path) -> (run, read_paths)` through the real `briefings` facade."""
+    import istota.briefings as briefings_pkg
+    import istota.briefings.cli as briefings_cli
+    import istota.config as config_module
+    from istota.briefings import db as bdb
+    from istota.briefings.workspace import synthesize_briefings_context
+
+    ctx = synthesize_briefings_context("alice", tmp_path / "briefings")
+    ctx.ensure_dirs()
+    bdb.init_db(ctx.db_path)
+    with bdb.connect(ctx.db_path) as conn:
+        bdb.add_block(conn, briefing_name="morning", title="Headlines")
+        conn.commit()
+    monkeypatch.setattr(config_module, "load_config", lambda *a, **k: None)
+    monkeypatch.setattr(briefings_pkg, "resolve_for_user", lambda user_id, cfg: ctx)
+    monkeypatch.setattr(briefings_pkg, "ensure_initialised", lambda c, app_config=None: None)
+    monkeypatch.setenv("BRIEFINGS_USER", "alice")
+
+    def _drive(key, path):
+        dest = key[2]
+        read_paths: list[str] = []
+
+        def recorder(resolved, *, flag, max_bytes):
+            read_paths.append(str(resolved))
+            return _CLICK_FILE_TEXT[dest]
+
+        monkeypatch.setattr(briefings_cli, "read_resolved_text", recorder)
+        main = importlib.import_module(f"istota.skills.{key[0]}").main
+        return run_skill_main(main, CLICK_CASES[key](str(path))), read_paths
+
+    return _drive
+
+
+CLICK_KEYS = sorted(CLICK_CASES)
+
+
+class TestTheClickStamps:
+    def test_every_click_resolving_stamp_has_a_case(self):
+        assert sorted(_click_resolving_stamps()) == CLICK_KEYS
+
+    @pytest.mark.parametrize("key", _params(CLICK_KEYS))
+    def test_an_in_root_path_reaches_the_read_resolved(self, key, mount, click_drive):
+        given = mount.own("probe.txt")
+        given.write_text("x")
+
+        run, read_paths = click_drive(key, given)
+
+        assert run.exit_code == 0, run.stdout
+        assert read_paths == [str(given.resolve())]
+        assert read_paths[0] != str(given)
+
+    @pytest.mark.parametrize("key", _params(CLICK_KEYS))
+    def test_a_path_outside_the_roots_is_refused_before_the_read(
+        self, key, mount, tmp_path, click_drive,
+    ):
+        outside = tmp_path / "elsewhere" / "probe.txt"
+        outside.parent.mkdir()
+        outside.write_text("x")
+
+        run, read_paths = click_drive(key, outside)
+
+        assert read_paths == [], f"{key} read a file outside the roots"
+        assert run.exit_code == 1, run.stdout
+        assert run.envelope.get("reason") == "host_path_refused", run.envelope
+
+    @pytest.mark.parametrize("key", _params(CLICK_KEYS))
+    def test_another_users_workspace_is_refused(self, key, mount, click_drive):
+        theirs = mount.link / "Users" / "bob" / "probe.txt"
+        theirs.write_text("x")
+
+        run, read_paths = click_drive(key, theirs)
+
+        assert read_paths == []
+        assert run.envelope.get("reason") == "host_path_refused", run.envelope
+
+    @pytest.mark.parametrize("key", _params(CLICK_KEYS))
+    def test_an_explicitly_empty_value_is_refused(self, key, mount, click_drive):
+        run, read_paths = click_drive(key, "")
+
+        assert read_paths == []
+        assert run.exit_code == 1, run.stdout
+        assert run.envelope.get("reason") == "host_path_refused", run.envelope

@@ -54,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     blk.add_argument("--ids")
     blk.add_argument("--options")
     blk.add_argument("--merge-options", dest="merge_options")
+    blk.add_argument("--sources", help="JSON list of sources saved with a new block (add)")
 
     # sources -------------------------------------------------------------
     src = sub.add_parser("sources", help="Manage a block's sources")
@@ -403,6 +404,8 @@ def _blocks_argv(args) -> list[str]:
             argv += ["--render-mode", args.render_mode]
         if args.options is not None:
             argv += ["--options", args.options]
+        if args.sources is not None:
+            argv += ["--sources", args.sources]
     elif args.action == "set":
         argv += ["--id", str(args.id)]
         if args.title is not None:

@@ -231,6 +231,17 @@ class TestBlocksSources:
         options = json.loads(capsys.readouterr().out)["block"]["options"]
         assert options == {"tone": "neutral", "story_count": 4}
 
+    def test_add_sources_is_forwarded(self, config, capsys):
+        rc = cli_briefings.dispatch(
+            ["blocks", "add", "-u", "alice", "--briefing", "M", "--title", "X",
+             "--sources", '[{"kind": "calendar"}]'],
+            config,
+        )
+
+        assert rc == 0
+        sources = json.loads(capsys.readouterr().out)["block"]["sources"]
+        assert [s["kind"] for s in sources] == ["calendar"]
+
     def test_operator_context_carries_the_app_config(self, config, capsys, monkeypatch):
         from istota.briefings import cli as bcli
 

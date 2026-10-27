@@ -487,3 +487,250 @@ def test_sources_set_my_email_keeps_a_stale_stored_account(app_ctx, bob_account)
     ])
     assert result.exit_code == 0, output
     assert _source(app_ctx, sid).config == {"lookback_hours": 48}
+
+
+# -- block authoring in one call -----------------------------------------------
+
+
+#: The body `tests/test_briefings_routes.py::TestAtomicBlockWrites` sends to
+#: `PUT /blocks`, so the route and `blocks save --file` are driven with one payload.
+ROUTE_BLOCK_PAYLOAD = {
+    "briefing_name": "M", "title": "News", "directive": "Concise",
+    "render_mode": "structured", "options": {"custom": 42, "presentation": {"width": "full"}},
+    "sources": [{"kind": "notes", "config": {"path": "shared/notes.md"}, "enabled": False},
+                {"kind": "calendar", "config": {"days": 3}, "enabled": True}],
+}
+
+
+@pytest.fixture
+def deferred(tmp_path, monkeypatch):
+    """A task's deferred dir as the only host root, the way a sandboxed task has it."""
+    directory = tmp_path / "deferred"
+    directory.mkdir()
+    for name in ("ISTOTA_WORKSPACE_PATH", "NEXTCLOUD_MOUNT_PATH", "ISTOTA_CONVERSATION_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(directory))
+    return directory
+
+
+def _route_client(ctx):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from istota.briefings.routes import get_user_context, require_auth, router, verify_origin
+
+    app = FastAPI()
+    app.include_router(router, prefix="/istota/api/briefings")
+    app.dependency_overrides[require_auth] = lambda: {"username": "alice"}
+    app.dependency_overrides[get_user_context] = lambda: ctx
+    app.dependency_overrides[verify_origin] = lambda: None
+    return TestClient(app)
+
+
+def _row_without_ids(block) -> dict:
+    return {
+        "briefing_name": block.briefing_name, "position": block.position,
+        "title": block.title, "directive": block.directive,
+        "render_mode": block.render_mode, "options": block.options,
+        "sources": [
+            {"position": s.position, "kind": s.kind, "config": s.config, "enabled": s.enabled}
+            for s in block.sources
+        ],
+    }
+
+
+def _blocks(ctx, name):
+    with bdb.connect(ctx.db_path) as conn:
+        return bdb.list_blocks(conn, name)
+
+
+def test_blocks_add_with_sources_creates_block_and_sources_in_one_call(ctx):
+    sources = [{"kind": "calendar", "config": {}}, {"kind": "notes", "config": {"path": "n.md"}, "enabled": False}]
+
+    result, output = _invoke(ctx, [
+        "blocks", "add", "--briefing", "noon", "--title", "Day",
+        "--sources", json.dumps(sources),
+    ])
+
+    assert result.exit_code == 0, output
+    (block,) = _blocks(ctx, "noon")
+    assert [(s.kind, s.config, s.enabled) for s in block.sources] == [
+        ("calendar", {}, True), ("notes", {"path": "n.md"}, False),
+    ]
+    assert output["block"]["id"] == block.id
+
+
+@pytest.mark.parametrize("sources, reason", [
+    ('[{"kind": "calendar"}, {"kind": "browse", "config": {}}]', "invalid_source"),
+    ('[{"kind": "banana"}]', "invalid_definition"),
+    ("[]", "invalid_definition"),
+    ('{"kind": "calendar"}', "invalid_argument"),
+    ("[", "invalid_argument"),
+])
+def test_blocks_add_with_a_bad_source_list_leaves_no_block(ctx, sources, reason):
+    result, output = _invoke(ctx, [
+        "blocks", "add", "--briefing", "noon", "--title", "Day", "--sources", sources,
+    ])
+
+    assert result.exit_code == 1
+    assert output["reason"] == reason, output
+    assert _blocks(ctx, "noon") == []
+
+
+def test_blocks_save_file_matches_the_route_for_the_same_payload(ctx, deferred, tmp_path):
+    web_ctx = synthesize_briefings_context("alice", tmp_path / "web")
+    web_ctx.ensure_dirs()
+    bdb.init_db(web_ctx.db_path)
+    response = _route_client(web_ctx).put("/istota/api/briefings/blocks", json=ROUTE_BLOCK_PAYLOAD)
+    assert response.status_code == 200, response.text
+    body = deferred / "block.json"
+    body.write_text(json.dumps(ROUTE_BLOCK_PAYLOAD))
+
+    result, output = _invoke(ctx, ["blocks", "save", "--file", str(body)])
+
+    assert result.exit_code == 0, output
+    (from_route,) = _blocks(web_ctx, "M")
+    (from_cli,) = _blocks(ctx, "M")
+    assert _row_without_ids(from_cli) == _row_without_ids(from_route)
+
+
+def test_blocks_save_file_updates_in_place_and_keeps_an_unchanged_source(ctx, deferred):
+    bid = _first_block_id(ctx)
+    # A web template source with an empty config: not re-judged unless it changes.
+    (sid,) = _add_sources(ctx, bid, [("browse", {})])
+    body = deferred / "block.json"
+    body.write_text(json.dumps({
+        "id": bid, "title": "Renamed",
+        "sources": [{"id": sid, "kind": "browse", "config": {}}, {"kind": "calendar"}],
+    }))
+
+    result, output = _invoke(ctx, ["blocks", "save", "--file", str(body)])
+
+    assert result.exit_code == 0, output
+    assert output["block"]["id"] == bid
+    assert output["block"]["title"] == "Renamed"
+    assert [(s["id"], s["kind"]) for s in output["block"]["sources"]][0] == (sid, "browse")
+    assert [s["kind"] for s in output["block"]["sources"]] == ["browse", "calendar"]
+
+
+def test_blocks_save_file_checks_a_changed_source(ctx, deferred):
+    bid = _first_block_id(ctx)
+    (sid,) = _add_sources(ctx, bid, [("browse", {"preset": "bbc"})])
+    body = deferred / "block.json"
+    body.write_text(json.dumps({"id": bid, "sources": [{"id": sid, "kind": "browse", "config": {}}]}))
+
+    result, output = _invoke(ctx, ["blocks", "save", "--file", str(body)])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_source"
+    assert _source(ctx, sid).config == {"preset": "bbc"}
+
+
+@pytest.mark.parametrize("payload, reason", [
+    ({"reorder": {"briefing_name": "morning", "ordered_ids": [1, 2]}}, "invalid_argument"),
+    ([1, 2], "invalid_argument"),
+    ({"id": 9999, "title": "x"}, "not_found"),
+    ({"briefing_name": "M", "title": "x", "render_mode": "agent"}, "invalid_definition"),
+])
+def test_blocks_save_file_refusals(ctx, deferred, payload, reason):
+    body = deferred / "block.json"
+    body.write_text(json.dumps(payload))
+
+    result, output = _invoke(ctx, ["blocks", "save", "--file", str(body)])
+
+    assert result.exit_code == 1
+    assert output["reason"] == reason, output
+    assert _blocks(ctx, "M") == []
+
+
+def test_blocks_save_file_with_a_foreign_source_id_is_invalid_definition(ctx, deferred):
+    first, second = (b.id for b in _blocks(ctx, "morning"))
+    (sid,) = _add_sources(ctx, second, [("calendar", {})])
+    body = deferred / "block.json"
+    body.write_text(json.dumps({"id": first, "sources": [{"id": sid, "kind": "calendar"}]}))
+
+    result, output = _invoke(ctx, ["blocks", "save", "--file", str(body)])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_definition"
+
+
+def test_blocks_save_file_that_is_not_json_is_invalid_argument(ctx, deferred):
+    body = deferred / "block.json"
+    body.write_text("{not json")
+
+    result, output = _invoke(ctx, ["blocks", "save", "--file", str(body)])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_argument"
+
+
+def test_directive_file_sets_the_directive_on_add_and_set(ctx, deferred):
+    text = deferred / "directive.md"
+    text.write_text("Lead with the outage.\n")
+
+    result, output = _invoke(ctx, [
+        "blocks", "add", "--briefing", "noon", "--title", "Day", "--directive-file", str(text),
+    ])
+    assert result.exit_code == 0, output
+    assert output["block"]["directive"] == "Lead with the outage.\n"
+
+    text.write_text("Shorter.")
+    result, output = _invoke(ctx, [
+        "blocks", "set", "--id", str(output["block"]["id"]), "--directive-file", str(text),
+    ])
+    assert result.exit_code == 0, output
+    assert output["block"]["directive"] == "Shorter."
+
+
+def test_an_empty_directive_file_is_invalid_argument(ctx, deferred):
+    bid = _first_block_id(ctx)
+    text = deferred / "directive.md"
+    text.write_text("")
+
+    result, output = _invoke(ctx, ["blocks", "set", "--id", str(bid), "--directive-file", str(text)])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_argument"
+
+
+def test_directive_and_directive_file_are_exclusive(ctx, deferred):
+    bid = _first_block_id(ctx)
+    text = deferred / "directive.md"
+    text.write_text("x")
+
+    result, output = _invoke(ctx, [
+        "blocks", "set", "--id", str(bid), "--directive", "y", "--directive-file", str(text),
+    ])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_argument"
+
+
+def test_a_directive_file_that_is_not_a_file_is_invalid_argument(ctx, deferred):
+    bid = _first_block_id(ctx)
+
+    result, output = _invoke(ctx, [
+        "blocks", "set", "--id", str(bid), "--directive-file", str(deferred),
+    ])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_argument"
+
+
+def test_kinds_equals_the_config_route_lists(ctx):
+    from istota.briefings.models import RENDER_MODES
+
+    route = _route_client(ctx).get("/istota/api/briefings/config").json()
+
+    result, output = _invoke(ctx, ["kinds"])
+
+    assert result.exit_code == 0
+    assert output == {
+        "status": "ok",
+        "source_kinds": route["source_kinds"],
+        "structured_kinds": route["structured_kinds"],
+        "render_modes": list(RENDER_MODES),
+        "block_templates": route["block_templates"],
+    }

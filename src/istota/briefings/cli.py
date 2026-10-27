@@ -13,6 +13,9 @@ Emits JSON to stdout. A refusal is ``{"status": "error", "reason": <code>,
 - ``mail_account_refused``: a ``my_email`` account the user may not pick, with
   the web's message.
 - ``unavailable``: the tree was invoked without the context it needs.
+- ``host_path_refused``: ``--directive-file`` or ``blocks save --file`` named a
+  path outside the task's roots; raised by the ``READ`` stamp and rendered by
+  the skill facade. The operator CLI offers neither flag.
 
 ``blocks list`` for an unknown briefing still answers ``status: not_found`` at
 exit 0, now with ``reason: not_found``, for one release. The :class:`BriefingsContext` is injected via Click's
@@ -31,8 +34,19 @@ from typing import NoReturn
 import click
 
 from istota.briefings import db as bdb
-from istota.briefings.models import SOURCE_KINDS, BriefingsContext
+from istota.briefings.models import (
+    BLOCK_TEMPLATES,
+    RENDER_MODES,
+    SOURCE_KINDS,
+    STRUCTURED_KINDS,
+    BriefingsContext,
+    normalize_block_payload,
+)
 from istota.briefings.source_checks import SourceRefused, check_source
+from istota.skills._hostpath import READ, ReadRefused, click_host_path, read_resolved_text
+
+#: The cap `briefings_config shared-block set-prompt --prompt-file` reads under.
+MAX_FILE_BYTES = 256 * 1024
 
 
 def _emit(payload) -> None:
@@ -71,8 +85,65 @@ def _merge_options(stored: dict, patch: dict) -> dict:
     return merged
 
 
+def _json_list(flag: str, raw: str) -> list:
+    try:
+        value = json.loads(raw)
+    except ValueError as e:
+        _fail("invalid_argument", f"invalid {flag} JSON: {e}")
+    if not isinstance(value, list):
+        _fail("invalid_argument", f"{flag} must be a JSON list")
+    return value
+
+
+def _read_file(flag: str, path: str) -> str:
+    """A file the `READ` stamp already resolved, read with the leaf unfollowed."""
+    try:
+        return read_resolved_text(path, flag=flag, max_bytes=MAX_FILE_BYTES)
+    except ReadRefused as e:
+        _fail("invalid_argument", str(e))
+
+
+def _directive(directive: str | None, directive_file: str | None) -> str | None:
+    if directive is not None and directive_file is not None:
+        _fail("invalid_argument", "--directive and --directive-file are mutually exclusive")
+    if directive_file is None:
+        return directive
+    text = _read_file("--directive-file", directive_file)
+    if not text.strip():
+        # `--directive ""` is the way to clear one; an empty file is more likely a mistake.
+        _fail("invalid_argument", "--directive-file is empty; pass --directive '' to clear the directive")
+    return text
+
+
+def _check_block_sources(bctx: BriefingsContext, sources: list[dict], existing) -> None:
+    """`check_source` over a normalized source list, before anything is written.
+
+    A source kept by id with its kind and config unchanged is not re-judged, the
+    rule `sources set` and the web's account check apply to an unchanged value.
+    """
+    stored_by_id = {s.id: s for s in existing.sources} if existing is not None else {}
+    for source in sources:
+        stored = stored_by_id.get(source.get("id"))
+        if stored is not None and stored.kind != source["kind"]:
+            stored = None
+        if stored is not None and (stored.config or {}) == source["config"]:
+            continue
+        _check_source(bctx, source["kind"], source["config"], stored=stored.config if stored else None)
+
+
 def _save_block(bctx: BriefingsContext, payload: dict) -> None:
     with bdb.connect(bctx.db_path) as conn:
+        try:
+            values = normalize_block_payload(payload)
+        except ValueError as e:
+            _fail("invalid_definition", str(e))
+        if values.get("sources") is not None:
+            existing = None
+            if "id" in values:
+                existing = bdb.get_block(conn, values["id"])
+                if existing is None:
+                    _fail("not_found", "block not found")
+            _check_block_sources(bctx, values["sources"], existing)
         try:
             block = bdb.save_block_definition(conn, payload=payload)
         except LookupError:
@@ -143,6 +214,18 @@ def briefings_list(ctx):
     _emit({"status": "ok", "briefings": summaries})
 
 
+@cli.command("kinds")
+def briefings_kinds():
+    """The source kinds, render modes and block templates the editor offers."""
+    _emit({
+        "status": "ok",
+        "source_kinds": list(SOURCE_KINDS),
+        "structured_kinds": list(STRUCTURED_KINDS),
+        "render_modes": list(RENDER_MODES),
+        "block_templates": BLOCK_TEMPLATES,
+    })
+
+
 # -- blocks -------------------------------------------------------------------
 
 
@@ -174,16 +257,45 @@ def blocks_list(ctx, briefing):
 @click.option("--briefing", required=True)
 @click.option("--title", required=True)
 @click.option("--directive", default=None)
+@click_host_path(READ)
+@click.option("--directive-file", "directive_file", default=None, help="Read the directive from this file")
 @click.option("--render-mode", "render_mode", default="synthesis")
 @click.option("--options", default=None, help="JSON options object")
+@click.option(
+    "--sources", "sources_json", default=None,
+    help='JSON list of sources, [{"kind", "config", "enabled"?}], saved with the block',
+)
 @click.pass_context
-def blocks_add(ctx, briefing, title, directive, render_mode, options):
+def blocks_add(ctx, briefing, title, directive, directive_file, render_mode, options, sources_json):
     bctx = _ctx(ctx)
     payload = {
         "briefing_name": briefing, "title": title,
-        "directive": directive, "render_mode": render_mode,
+        "directive": _directive(directive, directive_file), "render_mode": render_mode,
         "options": _json_object("--options", options) if options is not None else {},
     }
+    if sources_json is not None:
+        payload["sources"] = _json_list("--sources", sources_json)
+    _save_block(bctx, payload)
+
+
+@blocks.command("save")
+@click_host_path(READ)
+@click.option(
+    "--file", "payload_file", required=True,
+    help="JSON file holding the PUT /blocks body: a block, with or without id",
+)
+@click.pass_context
+def blocks_save(ctx, payload_file):
+    """Create or update a block and its whole source list from one JSON body."""
+    bctx = _ctx(ctx)
+    try:
+        payload = json.loads(_read_file("--file", payload_file))
+    except ValueError as e:
+        _fail("invalid_argument", f"invalid --file JSON: {e}")
+    if not isinstance(payload, dict):
+        _fail("invalid_argument", "--file must hold a JSON object")
+    if "reorder" in payload:
+        _fail("invalid_argument", "blocks save does not reorder; use blocks reorder")
     _save_block(bctx, payload)
 
 
@@ -191,6 +303,8 @@ def blocks_add(ctx, briefing, title, directive, render_mode, options):
 @click.option("--id", "block_id", type=int, required=True)
 @click.option("--title", default=None)
 @click.option("--directive", default=None)
+@click_host_path(READ)
+@click.option("--directive-file", "directive_file", default=None, help="Read the directive from this file")
 @click.option("--render-mode", "render_mode", default=None)
 @click.option("--options", default=None, help="JSON options object (replaces the stored one)")
 @click.option(
@@ -198,10 +312,11 @@ def blocks_add(ctx, briefing, title, directive, render_mode, options):
     help="JSON object merged over the stored options, presentation merged too",
 )
 @click.pass_context
-def blocks_set(ctx, block_id, title, directive, render_mode, options, merge_options):
+def blocks_set(ctx, block_id, title, directive, directive_file, render_mode, options, merge_options):
     bctx = _ctx(ctx)
     if options is not None and merge_options is not None:
         _fail("invalid_argument", "--options and --merge-options are mutually exclusive")
+    directive = _directive(directive, directive_file)
     payload: dict = {"id": block_id}
     if title is not None:
         payload["title"] = title
