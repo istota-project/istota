@@ -174,6 +174,31 @@ class TestTake:
         assert "would write config/admins" in result.stdout
         assert NEW_IMAP not in result.stdout + result.stderr
 
+    def test_the_model_listing_key_ends_as_a_0400_file_put_files_writes(self, install, tmp_path):
+        """#859: the web process never mounts the file, and does not need to,
+        since put-files writes it on the host as the daemon's user."""
+        listing = "listing-key-from-the-page-6"
+        install.submit({"secrets": {"istota_anthropic_listing_key": listing}})
+        assert install.run("config-request", "take", "--out", str(install.out)).returncode == 0
+        assert listing not in (install.out / "plan.json").read_text()
+        files = json.loads((install.out / "files.json").read_text())
+        assert files["secrets"] == {"istota_anthropic_listing_key": listing}
+
+        script = re.search(r"^PUT_FILES_PY='\n(.*?)\n'$", STACK_SCRIPT.read_text(), re.S | re.M).group(1)
+        secrets_dir, config_dir = tmp_path / "secrets", tmp_path / "stack-config"
+        secrets_dir.mkdir()
+        config_dir.mkdir()
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script, str(secrets_dir), str(config_dir), "0"],
+            input=(install.out / "files.json").read_text(), capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 2, result.stdout + result.stderr
+        written = secrets_dir / "istota_anthropic_listing_key"
+        assert written.read_text() == listing
+        assert _mode(written) == 0o400
+        assert written.stat().st_uid == os.geteuid()
+        assert listing not in result.stdout + result.stderr
+
     def test_a_servarr_key_goes_to_its_secrets_file_and_not_the_plan(self, install):
         arr_key = "arr-key-for-the-file"
         install.submit({

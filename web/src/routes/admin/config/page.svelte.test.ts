@@ -231,6 +231,28 @@ describe('the change set', () => {
     expect(screen.getByText('1 change')).toBeInTheDocument();
   });
 
+  it('offers the model-listing key with the daemon unheard from as unknown here', async () => {
+    mount(
+      configView([imapHost], {
+        secrets: [
+          configSecret({
+            name: 'istota_anthropic_listing_key',
+            label: "Anthropic model-listing key, used only to list Anthropic's models",
+            config_key: null,
+            set: false,
+            source: 'unknown',
+          }),
+        ],
+      }),
+    );
+    await fireEvent.input(await screen.findByLabelText(/^istota_anthropic_listing_key/), {
+      target: { value: 'k' },
+    });
+    expect(screen.getByText('Unknown here')).toBeInTheDocument();
+    expect(screen.queryByText('Not set')).toBeNull();
+    expect(screen.getByText('1 change')).toBeInTheDocument();
+  });
+
   it('shows a credential no config key reads in the section it belongs to', async () => {
     const model = configField({ path: ['brain', 'claude_code', 'model'], value: 'sonnet' });
     mount(

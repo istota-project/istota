@@ -777,8 +777,9 @@ export interface ConfigManagedEntry {
 export type ConfigResource = 'config' | 'secrets' | 'admins';
 
 /** Where a credential is held: its secret file, inline in config.toml, a
- *  variable set from outside the stack (read-only here), or nowhere. */
-export type ConfigSecretSource = 'file' | 'inline' | 'environment' | 'none';
+ *  variable set from outside the stack (read-only here), or nowhere.
+ *  `unknown` is a file only the daemon mounts, before it has said. */
+export type ConfigSecretSource = 'file' | 'inline' | 'environment' | 'none' | 'unknown';
 
 export interface ConfigSecretFile {
   name: string;
