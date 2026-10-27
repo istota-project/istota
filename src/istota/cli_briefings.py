@@ -115,12 +115,15 @@ def build_parser() -> argparse.ArgumentParser:
     migration.add_argument("--accept-source-changes", action="store_true", help="Acknowledge removed/converted sources and delivery changes")
 
     # archive -------------------------------------------------------------
-    arc = sub.add_parser("archive", help="Read the briefing archive")
-    arc.add_argument("action", choices=["list", "show"])
+    arc = sub.add_parser("archive", help="Read the briefing archive and its read state")
+    arc.add_argument("action", choices=["list", "show", "read", "mark-read", "delete"])
     arc.add_argument("-u", "--user", required=True)
     arc.add_argument("--briefing")
     arc.add_argument("--limit", type=int, default=20)
     arc.add_argument("--id", type=int)
+    arc.add_argument("--blocks", action="store_true", help="show: add the block document")
+    arc.add_argument("--all", dest="all_entries", action="store_true", help="mark-read: every unread entry")
+    arc.add_argument("--confirmed", action="store_true", help="delete: remove the entry")
 
     return parser
 
@@ -458,6 +461,19 @@ def _archive_argv(args) -> list[str]:
         argv += ["--limit", str(args.limit)]
     elif args.action == "show":
         argv += ["--id", str(args.id)]
+        if args.blocks:
+            argv += ["--blocks"]
+    elif args.action == "read":
+        argv += ["--id", str(args.id)]
+    elif args.action == "mark-read":
+        if args.all_entries:
+            argv += ["--all"]
+        if args.briefing is not None:
+            argv += ["--briefing", args.briefing]
+    elif args.action == "delete":
+        argv += ["--id", str(args.id)]
+        if args.confirmed:
+            argv += ["--confirmed"]
     return argv
 
 

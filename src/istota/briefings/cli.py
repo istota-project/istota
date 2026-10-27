@@ -12,13 +12,17 @@ Emits JSON to stdout. A refusal is ``{"status": "error", "reason": <code>,
   config that could never read anything; ``field`` names the config key.
 - ``mail_account_refused``: a ``my_email`` account the user may not pick, with
   the web's message.
+- ``confirmation_required``: ``archive delete`` without ``--confirmed``; nothing
+  was removed, and ``would`` names the entry.
 - ``unavailable``: the tree was invoked without the context it needs.
 - ``host_path_refused``: ``--directive-file`` or ``blocks save --file`` named a
   path outside the task's roots; raised by the ``READ`` stamp and rendered by
   the skill facade. The operator CLI offers neither flag.
 
 ``blocks list`` for an unknown briefing still answers ``status: not_found`` at
-exit 0, now with ``reason: not_found``, for one release. The :class:`BriefingsContext` is injected via Click's
+exit 0, now with ``reason: not_found``, for one release. Each write that lands
+logs one INFO line, ``briefing_skill action=<verb> user=<id> target=<id or
+name>``, never a title, directive or config. The :class:`BriefingsContext` is injected via Click's
 ``obj`` (no env marshaling) — the operator CLI (``istota briefings``) and the
 skill facade (``istota-skill briefings``) both resolve the context the istota
 way and invoke this tree in-process via ``CliRunner``. Mirrors
@@ -28,6 +32,7 @@ way and invoke this tree in-process via ``CliRunner``. Mirrors
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from typing import NoReturn
 
@@ -46,6 +51,8 @@ from istota.briefings.models import (
 from istota.briefings.source_checks import SourceRefused, check_source
 from istota.skills._hostpath import READ, ReadRefused, click_host_path, read_resolved_text
 
+logger = logging.getLogger(__name__)
+
 #: The cap `briefings_config shared-block set-prompt --prompt-file` reads under.
 MAX_FILE_BYTES = 256 * 1024
 
@@ -60,6 +67,10 @@ def _fail(reason: str, message: str, **extra) -> NoReturn:
     # `standalone_mode=False`, where Click returns an `Exit` code instead of
     # raising it and `CliRunner` then reports exit 0.
     sys.exit(1)
+
+
+def _log_write(action: str, bctx: BriefingsContext, target) -> None:
+    logger.info("briefing_skill action=%s user=%s target=%s", action, bctx.user_id, target)
 
 
 def _ctx(click_ctx) -> BriefingsContext:
@@ -132,7 +143,7 @@ def _check_block_sources(bctx: BriefingsContext, sources: list[dict], existing) 
         _check_source(bctx, source["kind"], source["config"], stored=stored.config if stored else None)
 
 
-def _save_block(bctx: BriefingsContext, payload: dict) -> None:
+def _save_block(bctx: BriefingsContext, action: str, payload: dict) -> None:
     with bdb.connect(bctx.db_path) as conn:
         try:
             values = normalize_block_payload(payload)
@@ -152,6 +163,7 @@ def _save_block(bctx: BriefingsContext, payload: dict) -> None:
         except ValueError as e:
             _fail("invalid_definition", str(e))
         conn.commit()
+    _log_write(action, bctx, block.id)
     _emit({"status": "ok", "block": _block_dict(block)})
 
 
@@ -315,7 +327,7 @@ def blocks_add(ctx, briefing, title, directive, directive_file, render_mode, opt
     }
     if sources_json is not None:
         payload["sources"] = _json_list("--sources", sources_json)
-    _save_block(bctx, payload)
+    _save_block(bctx, "blocks.add", payload)
 
 
 @blocks.command("save")
@@ -336,7 +348,7 @@ def blocks_save(ctx, payload_file):
         _fail("invalid_argument", "--file must hold a JSON object")
     if "reorder" in payload:
         _fail("invalid_argument", "blocks save does not reorder; use blocks reorder")
-    _save_block(bctx, payload)
+    _save_block(bctx, "blocks.save", payload)
 
 
 @blocks.command("set")
@@ -373,7 +385,7 @@ def blocks_set(ctx, block_id, title, directive, directive_file, render_mode, opt
         if stored is None:
             _fail("not_found", "block not found")
         payload["options"] = _merge_options(stored.options or {}, patch)
-    _save_block(bctx, payload)
+    _save_block(bctx, "blocks.set", payload)
 
 
 @blocks.command("remove")
@@ -386,6 +398,7 @@ def blocks_remove(ctx, block_id):
             _fail("not_found", "block not found")
         bdb.delete_block(conn, block_id)
         conn.commit()
+    _log_write("blocks.remove", bctx, block_id)
     _emit({"status": "ok"})
 
 
@@ -402,6 +415,7 @@ def blocks_reorder(ctx, briefing, ids):
         except ValueError as e:
             _fail("invalid_argument", str(e))
         conn.commit()
+    _log_write("blocks.reorder", bctx, briefing)
     _emit({"status": "ok", "reordered": len(ordered)})
 
 
@@ -456,6 +470,7 @@ def sources_add(ctx, block_id, kind, config_json, disabled):
         _check_source(bctx, kind, cfg)
         sid = bdb.add_source(conn, block_id=block_id, kind=kind, config=cfg, enabled=not disabled)
         conn.commit()
+    _log_write("sources.add", bctx, sid)
     _emit({"status": "ok", "id": sid})
 
 
@@ -490,6 +505,7 @@ def sources_set(ctx, source_id, config_json, merge_config, enabled):
         bdb.update_source(conn, source_id, config=config, enabled=enabled)
         conn.commit()
         updated = bdb.get_source(conn, source_id)
+    _log_write("sources.set", bctx, source_id)
     _emit({"status": "ok", "source": _source_dict(updated)})
 
 
@@ -508,6 +524,7 @@ def sources_reorder(ctx, block_id, ids):
         except ValueError as e:
             _fail("invalid_argument", str(e))
         conn.commit()
+    _log_write("sources.reorder", bctx, block_id)
     _emit({"status": "ok", "reordered": len(ordered)})
 
 
@@ -521,6 +538,7 @@ def sources_remove(ctx, source_id):
             _fail("not_found", "source not found")
         bdb.delete_source(conn, source_id)
         conn.commit()
+    _log_write("sources.remove", bctx, source_id)
     _emit({"status": "ok"})
 
 
@@ -529,7 +547,7 @@ def sources_remove(ctx, source_id):
 
 @cli.group()
 def archive():
-    """Read the briefing archive."""
+    """Read the briefing archive and its read state."""
 
 
 @archive.command("list")
@@ -537,35 +555,106 @@ def archive():
 @click.option("--limit", type=int, default=20)
 @click.pass_context
 def archive_list(ctx, briefing, limit):
+    """Newest first; `unread_count` covers the whole archive, not this page."""
     bctx = _ctx(ctx)
     with bdb.connect(bctx.db_path) as conn:
         rows = bdb.list_archive(conn, briefing_name=briefing, limit=limit)
+        unread = bdb.count_unread_archive(conn)
     _emit({
         "status": "ok",
         "items": [
             {
                 "id": r.id, "briefing_name": r.briefing_name,
                 "subject": r.subject or "", "generated_at": r.generated_at,
+                "read_at": r.read_at,
             }
             for r in rows
         ],
+        "unread_count": unread,
     })
 
 
 @archive.command("show")
 @click.option("--id", "archive_id", type=int, required=True)
+@click.option(
+    "--blocks", "with_blocks", is_flag=True, default=False,
+    help="Add the edition's block document (null for an entry that has none)",
+)
 @click.pass_context
-def archive_show(ctx, archive_id):
+def archive_show(ctx, archive_id, with_blocks):
+    """One archived edition. Showing it does not mark it read; `archive read` does."""
     bctx = _ctx(ctx)
     with bdb.connect(bctx.db_path) as conn:
         row = bdb.get_archived(conn, archive_id)
     if not row:
         _fail("not_found", "archive entry not found")
-    _emit({
-        "status": "ok",
-        "briefing": {
-            "id": row.id, "briefing_name": row.briefing_name,
-            "subject": row.subject or "", "body_md": row.body_md,
-            "generated_at": row.generated_at, "delivered_to": row.delivered_to,
-        },
-    })
+    briefing = {
+        "id": row.id, "briefing_name": row.briefing_name,
+        "subject": row.subject or "", "body_md": row.body_md,
+        "generated_at": row.generated_at, "delivered_to": row.delivered_to,
+        "read_at": row.read_at,
+    }
+    if with_blocks:
+        briefing["document"] = row.document
+    _emit({"status": "ok", "briefing": briefing})
+
+
+@archive.command("read")
+@click.option("--id", "archive_id", type=int, required=True)
+@click.pass_context
+def archive_read(ctx, archive_id):
+    """Mark one entry read; an entry already read keeps its first read time."""
+    bctx = _ctx(ctx)
+    with bdb.connect(bctx.db_path) as conn:
+        row = bdb.mark_archived_read(conn, archive_id)
+        if row is None:
+            _fail("not_found", "archive entry not found")
+        conn.commit()
+    _log_write("archive.read", bctx, archive_id)
+    _emit({"status": "ok", "id": row.id, "read_at": row.read_at})
+
+
+@archive.command("mark-read")
+@click.option("--all", "all_entries", is_flag=True, default=False, help="Every unread entry")
+@click.option("--briefing", default=None, help="Unread entries of this briefing name, matched exactly")
+@click.pass_context
+def archive_mark_read(ctx, all_entries, briefing):
+    bctx = _ctx(ctx)
+    if all_entries == (briefing is not None):
+        _fail("invalid_argument", "pass exactly one of --all or --briefing NAME")
+    if briefing is not None and not briefing:
+        _fail("invalid_argument", "--briefing needs a non-empty name")
+    with bdb.connect(bctx.db_path) as conn:
+        updated = bdb.mark_archive_as_read(conn, briefing_name=briefing)
+        conn.commit()
+    _log_write("archive.mark-read", bctx, briefing if briefing is not None else "all")
+    _emit({"status": "ok", "updated": updated})
+
+
+@archive.command("delete")
+@click.option("--id", "archive_id", type=int, required=True)
+@click.option(
+    "--confirmed", is_flag=True, default=False,
+    help="Delete; without it nothing is removed and `would` names the entry",
+)
+@click.pass_context
+def archive_delete(ctx, archive_id, confirmed):
+    bctx = _ctx(ctx)
+    with bdb.connect(bctx.db_path) as conn:
+        if not confirmed:
+            row = bdb.get_archived(conn, archive_id)
+            if row is None:
+                _fail("not_found", "archive entry not found")
+            _fail(
+                "confirmation_required",
+                "show the user what would be deleted and pass --confirmed once they agree",
+                would={
+                    "id": row.id, "briefing_name": row.briefing_name,
+                    "subject": row.subject or "", "generated_at": row.generated_at,
+                },
+            )
+        if not bdb.delete_archived(conn, archive_id):
+            _fail("not_found", "archive entry not found")
+        conn.commit()
+    _log_write("archive.delete", bctx, archive_id)
+    _emit({"status": "ok", "deleted": archive_id})

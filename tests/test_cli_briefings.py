@@ -348,6 +348,46 @@ class TestArchive:
         shown = json.loads(capsys.readouterr().out)["briefing"]
         assert shown["body_md"] == "📰 news"
 
+    def test_archive_read_mark_read_and_delete_mirrors(self, config, capsys):
+        ctx = resolve_for_user("alice", config)
+        bdb.init_db(ctx.db_path)
+        with bdb.connect(ctx.db_path) as conn:
+            first = bdb.insert_archive(conn, briefing_name="M", subject="One", body_md="a")
+            second = bdb.insert_archive(conn, briefing_name="N", subject="Two", body_md="b")
+            conn.commit()
+
+        assert cli_briefings.dispatch(["archive", "read", "-u", "alice", "--id", str(first)], config) == 0
+        assert json.loads(capsys.readouterr().out)["read_at"]
+
+        assert cli_briefings.dispatch(["archive", "mark-read", "-u", "alice", "--all"], config) == 0
+        assert json.loads(capsys.readouterr().out) == {"status": "ok", "updated": 1}
+
+        assert cli_briefings.dispatch(
+            ["archive", "show", "-u", "alice", "--id", str(second), "--blocks"], config,
+        ) == 0
+        assert json.loads(capsys.readouterr().out)["briefing"]["document"] is None
+
+        assert cli_briefings.dispatch(["archive", "delete", "-u", "alice", "--id", str(second)], config) == 1
+        assert json.loads(capsys.readouterr().out)["reason"] == "confirmation_required"
+        assert cli_briefings.dispatch(
+            ["archive", "delete", "-u", "alice", "--id", str(second), "--confirmed"], config,
+        ) == 0
+        capsys.readouterr()
+        with bdb.connect(ctx.db_path) as conn:
+            assert bdb.get_archived(conn, second) is None
+
+    def test_archive_mark_read_by_briefing_mirror(self, config, capsys):
+        ctx = resolve_for_user("alice", config)
+        bdb.init_db(ctx.db_path)
+        with bdb.connect(ctx.db_path) as conn:
+            bdb.insert_archive(conn, briefing_name="M", subject="One", body_md="a")
+            bdb.insert_archive(conn, briefing_name="N", subject="Two", body_md="b")
+            conn.commit()
+
+        rc = cli_briefings.dispatch(["archive", "mark-read", "-u", "alice", "--briefing", "N"], config)
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out) == {"status": "ok", "updated": 1}
+
 
 class TestSkillFacade:
     def test_passthrough(self, config, capsys, monkeypatch, tmp_path):

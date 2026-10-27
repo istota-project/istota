@@ -835,3 +835,192 @@ def test_options_without_the_istota_config_is_unavailable(ctx):
 
     assert result.exit_code == 1
     assert output["reason"] == "unavailable"
+
+
+# -- archive extras -------------------------------------------------------------
+
+
+def _archive(ctx, name="morning", subject="Morning", document=None, body_md="News"):
+    with bdb.connect(ctx.db_path) as conn:
+        aid = bdb.insert_archive(
+            conn, briefing_name=name, subject=subject, body_md=body_md, document=document,
+        )
+        conn.commit()
+    return aid
+
+
+def _archived(ctx, aid):
+    with bdb.connect(ctx.db_path) as conn:
+        return bdb.get_archived(conn, aid)
+
+
+def test_archive_read_sets_read_at_once_and_keeps_it(ctx):
+    aid = _archive(ctx)
+
+    result, first = _invoke(ctx, ["archive", "read", "--id", str(aid)])
+    _, second = _invoke(ctx, ["archive", "read", "--id", str(aid)])
+
+    assert result.exit_code == 0
+    assert first["status"] == "ok" and first["id"] == aid
+    assert first["read_at"] is not None
+    assert second["read_at"] == first["read_at"] == _archived(ctx, aid).read_at
+
+
+def test_archive_read_of_a_missing_id_is_not_found(ctx):
+    result, output = _invoke(ctx, ["archive", "read", "--id", "9999"])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "not_found"
+
+
+def test_archive_list_and_show_carry_read_state(ctx):
+    read = _archive(ctx, subject="Read")
+    unread = _archive(ctx, name="evening", subject="Unread")
+    _invoke(ctx, ["archive", "read", "--id", str(read)])
+
+    _, listed = _invoke(ctx, ["archive", "list"])
+    _, shown = _invoke(ctx, ["archive", "show", "--id", str(unread)])
+
+    by_id = {item["id"]: item for item in listed["items"]}
+    assert by_id[read]["read_at"] is not None
+    assert by_id[unread]["read_at"] is None
+    assert listed["unread_count"] == 1
+    assert shown["briefing"]["read_at"] is None
+    assert "document" not in shown["briefing"]
+
+
+def test_archive_show_does_not_mark_read(ctx):
+    aid = _archive(ctx)
+
+    _invoke(ctx, ["archive", "show", "--id", str(aid)])
+
+    assert _archived(ctx, aid).read_at is None
+
+
+def test_mark_read_by_briefing_touches_only_that_name(ctx):
+    morning = _archive(ctx, name="morning")
+    other = _archive(ctx, name="Morning")
+    evening = _archive(ctx, name="evening")
+
+    result, output = _invoke(ctx, ["archive", "mark-read", "--briefing", "morning"])
+
+    assert result.exit_code == 0
+    assert output == {"status": "ok", "updated": 1}
+    assert _archived(ctx, morning).read_at is not None
+    assert _archived(ctx, other).read_at is None
+    assert _archived(ctx, evening).read_at is None
+
+
+def test_mark_read_all_marks_every_unread_row(ctx):
+    ids = [_archive(ctx, name=n) for n in ("morning", "evening")]
+
+    _, output = _invoke(ctx, ["archive", "mark-read", "--all"])
+
+    assert output == {"status": "ok", "updated": 2}
+    assert all(_archived(ctx, aid).read_at for aid in ids)
+
+
+@pytest.mark.parametrize("args", [
+    ["archive", "mark-read"],
+    ["archive", "mark-read", "--all", "--briefing", "morning"],
+    ["archive", "mark-read", "--briefing", ""],
+])
+def test_mark_read_needs_exactly_one_scope(ctx, args):
+    aid = _archive(ctx)
+
+    result, output = _invoke(ctx, args)
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_argument"
+    assert _archived(ctx, aid).read_at is None
+
+
+def test_archive_delete_without_confirmed_writes_nothing_and_says_what_would_go(ctx):
+    aid = _archive(ctx, subject="Morning Briefing")
+
+    result, output = _invoke(ctx, ["archive", "delete", "--id", str(aid)])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "confirmation_required"
+    row = _archived(ctx, aid)
+    assert row is not None
+    assert output["would"] == {
+        "id": aid, "briefing_name": "morning",
+        "subject": "Morning Briefing", "generated_at": row.generated_at,
+    }
+
+
+def test_archive_delete_confirmed_removes_the_row_and_a_second_is_not_found(ctx):
+    aid = _archive(ctx)
+
+    result, output = _invoke(ctx, ["archive", "delete", "--id", str(aid), "--confirmed"])
+    again, second = _invoke(ctx, ["archive", "delete", "--id", str(aid), "--confirmed"])
+
+    assert result.exit_code == 0
+    assert output == {"status": "ok", "deleted": aid}
+    assert _archived(ctx, aid) is None
+    assert again.exit_code == 1
+    assert second["reason"] == "not_found"
+
+
+def test_archive_delete_of_a_missing_id_without_confirmed_is_not_found(ctx):
+    result, output = _invoke(ctx, ["archive", "delete", "--id", "9999"])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "not_found"
+
+
+def test_archive_show_blocks_carries_the_document(ctx):
+    from istota.briefings.document import document_to_markdown
+
+    document = {"version": 1, "title": "Edition", "blocks": [
+        {"block_id": 42, "title": "News", "kind": "markdown", "body_md": "Complete body",
+         "presentation": {"width": "wide"}, "source_status": "complete"},
+    ]}
+    aid = _archive(ctx, subject="Edition", document=document, body_md=document_to_markdown(document))
+    plain = _archive(ctx)
+
+    _, shown = _invoke(ctx, ["archive", "show", "--id", str(aid), "--blocks"])
+    _, bare = _invoke(ctx, ["archive", "show", "--id", str(plain), "--blocks"])
+
+    assert shown["briefing"]["document"] == document
+    assert bare["briefing"]["document"] is None
+
+
+# -- write log lines ------------------------------------------------------------
+
+
+def _cli_log_lines(caplog):
+    return [r.getMessage() for r in caplog.records if r.name == "istota.briefings.cli"]
+
+
+def test_each_write_logs_one_info_line_with_verb_user_and_target(ctx, caplog):
+    import logging
+
+    aid = _archive(ctx)
+    bid = _first_block_id(ctx)
+    caplog.set_level(logging.INFO, logger="istota.briefings.cli")
+
+    _invoke(ctx, ["blocks", "set", "--id", str(bid), "--title", "Top stories"])
+    _invoke(ctx, ["archive", "delete", "--id", str(aid), "--confirmed"])
+    _invoke(ctx, ["archive", "mark-read", "--briefing", "evening"])
+    _invoke(ctx, ["blocks", "list", "--briefing", "morning"])
+
+    assert _cli_log_lines(caplog) == [
+        f"briefing_skill action=blocks.set user=alice target={bid}",
+        f"briefing_skill action=archive.delete user=alice target={aid}",
+        "briefing_skill action=archive.mark-read user=alice target=evening",
+    ]
+    assert "Top stories" not in caplog.text
+
+
+def test_a_refused_write_logs_nothing(ctx, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="istota.briefings.cli")
+
+    _invoke(ctx, ["blocks", "remove", "--id", "9999"])
+    _invoke(ctx, ["archive", "delete", "--id", "9999", "--confirmed"])
+    _invoke(ctx, ["archive", "delete", "--id", str(_archive(ctx))])
+
+    assert _cli_log_lines(caplog) == []
