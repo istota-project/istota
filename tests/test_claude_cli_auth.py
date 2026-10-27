@@ -466,9 +466,10 @@ class TestTheCredentialsFile:
         assert remove_stale_credentials_file(str(tmp_path)) is False
 
 
-class TestTheCredentialsBind:
-    """`.credentials.json` is bound only under "subscription", for a task and
-    for `build_daemon_sandbox`."""
+class TestNoCredentialsBind:
+    """`.credentials.json` is bound into no sandbox in any mode: the CLI runs
+    outside it on the tool harness, and the CLAUDE profile that bound the file
+    is gone (cli-brain-tools part 2, Stage 6)."""
 
     @pytest.fixture
     def world(self, tmp_path, monkeypatch, make_task):
@@ -479,43 +480,26 @@ class TestTheCredentialsBind:
         user_temp = tmp_path / "temp" / "alice"
         user_temp.mkdir(parents=True)
         config = Config(db_path=tmp_path / "db" / "istota.db", temp_dir=tmp_path / "temp")
-        return config, make_task(id=1, user_id="alice"), user_temp
+        return config, make_task(id=1, user_id="alice"), user_temp, home
 
-    def _reasons(self, world, mode, profile):
+    def test_no_plan_names_the_file_or_the_claude_dir(self, world):
         from istota.sandbox.plan import SandboxProfile, build_mount_plan
 
-        config, task, user_temp = world
+        config, task, user_temp, home = world
         plan = build_mount_plan(
-            config, task, True, [], user_temp, profile=getattr(SandboxProfile, profile),
-            cli_auth_mode=mode,
+            config, task, True, [], user_temp, profile=SandboxProfile.NATIVE,
         )
-        return {m.reason for m in plan.mounts}
+        assert not [m for m in plan.mounts if str(home / ".claude") in f"{m.source} {m.dest}"]
+        assert not [m for m in plan.mounts if m.reason.startswith("claude_")]
 
-    def test_subscription_binds_the_file(self, world):
-        assert "claude_credentials" in self._reasons(world, "subscription", "CLAUDE")
+    def test_the_mode_is_no_parameter_of_the_plan(self):
+        import inspect
 
-    @pytest.mark.parametrize("mode", ["api_key", None])
-    def test_any_other_mode_does_not(self, world, mode):
-        assert "claude_credentials" not in self._reasons(world, mode, "CLAUDE")
+        from istota.executor import build_bwrap_cmd, build_daemon_sandbox
+        from istota.sandbox.plan import build_mount_plan
 
-    def test_the_daemon_sandbox_passes_its_mode(self, world, monkeypatch):
-        from istota import executor
-
-        config, _task, _user_temp = world
-        config.security.sandbox_enabled = True
-        seen = {}
-
-        def fake(cmd, *a, **kw):
-            seen.update(kw)
-            return cmd
-
-        monkeypatch.setattr(executor, "build_bwrap_cmd", fake)
-        box = executor.build_daemon_sandbox(
-            config, "alice", cli_auth_mode="api_key",
-            profile=executor.SandboxProfile.CLAUDE,
-        )
-        box.wrap(["claude"])
-        assert seen["cli_auth_mode"] == "api_key"
+        for fn in (build_mount_plan, build_bwrap_cmd, build_daemon_sandbox):
+            assert "cli_auth_mode" not in inspect.signature(fn).parameters, fn
 
 
 class TestTheDoctorCheck:
@@ -627,23 +611,15 @@ class TestTheDoctorCheck:
 
 class TestTheAllowlist:
     """Under "api_key" the provider's base-URL host was on every task's
-    allowlist so the in-sandbox CLI could reach it. On the harness the CLI is
-    outside the sandbox and nothing in it calls the model (Stage 5)."""
+    allowlist so the in-sandbox CLI could reach it. The CLI is outside the
+    sandbox and nothing in it calls the model, so no mode adds a host."""
 
-    def test_the_harness_adds_no_provider_host(self):
-        from istota.executor import _build_network_allowlist
-
-        config = _with_key("api_key", base_url="https://gateway.example:8443",
-                           brain={"tool_harness": True})
-        resolve_process_auth(config, {})
-        assert not any("gateway.example" in h for h in _build_network_allowlist(config, []))
-
-    def test_the_old_cli_path_still_adds_it_under_api_key(self):
+    def test_api_key_adds_no_provider_host(self):
         from istota.executor import _build_network_allowlist
 
         config = _with_key("api_key", base_url="https://gateway.example:8443")
         resolve_process_auth(config, {})
-        assert "gateway.example:8443" in _build_network_allowlist(config, [])
+        assert not any("gateway.example" in h for h in _build_network_allowlist(config, []))
 
     def test_subscription_adds_nothing(self):
         from istota.executor import _build_network_allowlist

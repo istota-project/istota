@@ -172,7 +172,7 @@ def _q(path):
 
 
 def run_probe(script, config, task, user_temp, *, is_admin=False,
-              profile=SandboxProfile.CLAUDE, **kwargs):
+              profile=SandboxProfile.NATIVE, **kwargs):
     """Run `sh -c script` inside the real sandbox and return the result.
 
     Fails the test rather than returning if bwrap declined to build a command:
@@ -180,11 +180,8 @@ def run_probe(script, config, task, user_temp, *, is_admin=False,
     so a probe that silently ran on the host would pass every assertion below
     that expects something to be missing.
 
-    ``profile`` defaults to CLAUDE, which is what the assertions in this file
-    were written against — every one of them is about the generic half of the
-    plan (the masks, the per-user binds), which both profiles emit identically.
-    `test_sandbox_profiles_real.py` is where the difference is probed, and it
-    reuses this helper with ``profile=SandboxProfile.NATIVE``.
+    ``profile`` defaults to NATIVE, the one profile left; every assertion in
+    this file is about the generic plan (the masks, the per-user binds).
     """
     cmd = build_bwrap_cmd(
         ["/bin/sh", "-c", script], config, task, is_admin, [], user_temp,
@@ -305,7 +302,7 @@ class TestMountScoping:
              f'cat {_q(f"{mount}/Users/bob/secret.txt")} 2>/dev/null || echo BOB_UNREADABLE; '
              f'cat {_q(f"{mount}/Users/alice/shared/Doc/secret.txt")} 2>/dev/null '
              f'|| echo LINK_UNREADABLE'],
-            layout, task, False, resources, user_temp, profile=SandboxProfile.CLAUDE,
+            layout, task, False, resources, user_temp, profile=SandboxProfile.NATIVE,
         )
         assert cmd[0] == "bwrap", "sandbox unavailable — probe would have run unsandboxed"
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)

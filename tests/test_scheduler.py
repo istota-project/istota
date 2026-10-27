@@ -5658,6 +5658,7 @@ class _TaskPathEnvHarness:
         return captured
 
 
+@pytest.mark.usefixtures("cli_without_tool_server")
 class TestDeferredDirContract(_TaskPathEnvHarness):
     """ISSUE-233: all three task paths must export the same deferred dir, so a
     skill CLI behaves identically whichever path invoked it."""
@@ -5723,6 +5724,7 @@ class TestDeferredDirContract(_TaskPathEnvHarness):
         assert env["ISTOTA_DEFERRED_DIR"] == str(get_user_temp_dir(config, "alice"))
 
 
+@pytest.mark.usefixtures("cli_without_tool_server")
 class TestTaskAttemptContract(_TaskPathEnvHarness):
     """ISSUE-377: every path exporting ``ISTOTA_TASK_ID`` names the attempt too.
 

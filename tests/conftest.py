@@ -1053,3 +1053,32 @@ def _pytest_is_the_skill_proxy_task_root(monkeypatch):
         skill_proxy, "_default_trusted_roots",
         lambda: frozenset({os.getpid()}),
     )
+
+
+@pytest.fixture
+def cli_without_tool_server(monkeypatch):
+    """A `claude_code` tool grant runs its CLI against the test's mocked
+    subprocess, with no tool server and no harness.
+
+    Every `claude_code` request with tools runs on the tool harness, which
+    starts a real tool server and reads the CLI's `system/init` before it
+    releases a call (cli-brain-tools part 2, Stage 6). The executor tests that
+    drive `execute_task` end to end with a scripted CLI are about what the
+    executor does with the CLI's output, not about the harness, so this puts
+    the CLI's own streaming or simple path in place of the harness attempt.
+    The harness itself is tested in `tests/test_claude_code_harness.py`, the
+    linux tier and the image tier.
+    """
+    from istota.brain.claude_code import ClaudeCodeBrain
+
+    def _attempt(self, req):
+        # The harness wraps its tool server once per attempt; a test reading the
+        # wrap's arguments sees the same call.
+        if req.tool_server_wrap is not None:
+            req.tool_server_wrap(["python", "-m", "istota.sandbox.tool_server"])
+        cmd = self._build_command(req)
+        if req.streaming:
+            return self._execute_streaming(cmd, req)
+        return self._execute_simple(cmd, req)
+
+    monkeypatch.setattr(ClaudeCodeBrain, "_execute_harness_attempt", _attempt)

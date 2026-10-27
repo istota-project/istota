@@ -40,7 +40,6 @@ from istota.sandbox.claude_runtime_env import (
 )
 from .llm.providers import (
     CLI_AUTH_VARIABLE,
-    anthropic_spec,
     cli_credential_env,
     is_model_credential_name,
     process_cli_auth,
@@ -1106,8 +1105,8 @@ def _write_control_file(path: Path, text: str) -> None:
 class DaemonSandbox(NamedTuple):
     """What a task-less daemon-side model call needs to run confined.
 
-    ``wrap`` goes on the request (``native_sandbox_wrap`` for a NATIVE wrap,
-    through :attr:`tool_server_wrap`) and ``work_dir`` on its ``cwd``; the two
+    ``wrap`` goes on the request (``tool_server_wrap``, through
+    :attr:`tool_server_wrap`) and ``work_dir`` on its ``cwd``; the two
     travel together because bwrap chdirs into ``work_dir`` inside the
     namespace, so a request naming a different directory would disagree with
     its own wrap.
@@ -1233,7 +1232,6 @@ def build_daemon_sandbox(
     extra_ro_binds: Iterable[Path] | None = None,
     profile: SandboxProfile,
     withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
-    cli_auth_mode: object = None,
 ) -> DaemonSandbox:
     """Bubblewrap for a model call that has no task behind it (ISSUE-397).
 
@@ -1248,11 +1246,9 @@ def build_daemon_sandbox(
     entirely, so without a wrap that toolset ran host-side as the daemon user.
 
     ``profile`` is required, as on ``build_bwrap_cmd``, so a forgotten one is a
-    ``TypeError``. The shipped callers pass ``SandboxProfile.NATIVE``: the
-    process being wrapped is the tool server, the CLI runs outside on the tool
-    harness, and the namespace holds no Claude runtime and no credential.
-    ``CLAUDE`` remains for a caller that wraps the CLI itself, until the old
-    path is removed. The synthetic ``db.Task`` is what the per-user binds key
+    ``TypeError``. Its one value is ``SandboxProfile.NATIVE``: the process
+    being wrapped is the tool server, the CLI runs outside on the tool harness,
+    and the namespace holds no Claude runtime and no credential. The synthetic ``db.Task`` is what the per-user binds key
     on; ``conversation_token`` stays empty, so no channel directory is bound.
 
     No ``net_proxy_sock``, so no ``--unshare-net``: the tool server runs in the
@@ -1312,8 +1308,7 @@ def build_daemon_sandbox(
     shared-room task: without ``files`` no ``{mount}/Users/{user_id}`` and no
     resource mounts, without ``developer`` no repos subtree and no derived
     cache (``resolve_sandbox_cache_dir`` drops it on the same argument, so the
-    two gates stay one), and with anything withheld no Talk bind and no
-    ``~/.claude`` session directories.
+    two gates stay one), and with anything withheld no Talk bind.
 
     **With anything withheld the work dir is a fresh one, not
     ``{temp_dir}/{user_id}``.** That per-user directory is not a daemon-only
@@ -1335,16 +1330,9 @@ def build_daemon_sandbox(
     set of single characters, non-empty (so some binds drop) and missing
     every real scope name (so the workspace stays bound).
 
-    ``cli_auth_mode`` is the `claude` CLI's auth mode for the call, which
-    decides whether `~/.claude/.credentials.json` is bound under ``CLAUDE``;
-    ``None`` takes the mode this process resolved
-    (`llm.providers.process_cli_auth`). ``NATIVE`` binds no credential either way.
-
     Never raises; a failure to read the user's resources costs the resource
     binds, not the wrap.
     """
-    if cli_auth_mode is None:
-        cli_auth_mode = process_cli_auth(config)
     root, work_dir = _daemon_dirs(config, user_id)
     if isinstance(withheld_scopes, str):
         logger.error(
@@ -1405,7 +1393,7 @@ def build_daemon_sandbox(
         return build_bwrap_cmd(
             raw_cmd, config, task, is_admin, user_resources, work_dir,
             extra_ro_binds=binds, profile=profile,
-            withheld_scopes=withheld, cli_auth_mode=cli_auth_mode,
+            withheld_scopes=withheld,
         )
 
     return DaemonSandbox(_wrap, work_dir, scratch=scratch)
@@ -2885,11 +2873,10 @@ def _native_web_fetch_enabled(
 ) -> bool:
     """True when this task will actually have the daemon-side WebFetch tool.
 
-    A native task builds it in `NativeBrain`; a `claude_code` task on the tool
-    harness gets it from the bridge (`HarnessSpec.web_fetch`), since the
-    harness denies the CLI's own. Asked at prompt time, so the harness half
-    reads the switch and the routed kind only, as `harness_denies_web_fetch`
-    does.
+    A native task builds it in `NativeBrain`; a `claude_code` task gets it
+    from the tool harness's bridge (`HarnessSpec.web_fetch`), since the
+    harness denies the CLI's own. Asked at prompt time, so it reads the routed
+    kind only, as `harness_denies_web_fetch` does.
 
     Used to fold `untrusted_input` into the eager skill set — the native
     WebFetch tool ingests untrusted web content but, as a core tool, doesn't
@@ -2921,8 +2908,7 @@ def _native_web_fetch_enabled(
         )
     except Exception:  # noqa: BLE001 — never let routing lookup fail selection
         return False
-    harnessed = routed.kind == "claude_code" and getattr(config.brain, "tool_harness", False)
-    if routed.kind != "native" and not harnessed:
+    if routed.kind not in ("native", "claude_code"):
         return False
     wf = getattr(routed.native, "web_fetch", None)
     if not (wf and wf.enabled):
@@ -3917,22 +3903,22 @@ def build_harness_cli_env(
 
 
 def harness_wanted(
-    config: Config, *, brain_kind: str, allowed_tools: list[str],
-    native_sandbox_wrap: object,
+    config: Config, *, brain_kinds: "Iterable[str]", allowed_tools: list[str],
+    tool_server_wrap: object,
 ) -> bool:
-    """Whether a task request gets a `HarnessSpec`: the four conditions.
+    """Whether a task request gets a `HarnessSpec`.
 
-    `[brain] tool_harness` on, a `claude_code` brain, tools granted, and the
-    tool server can be wrapped (a NATIVE wrap) or nothing is sandboxed. Never
-    an unwrapped tool server on a shape that sandboxes.
+    A `claude_code` brain among ``brain_kinds`` (the routed kind and the
+    fallback it may reroute to: a `native -> claude_code` fallback reuses this
+    request, and a CLI with tools runs only on the harness), tools granted,
+    and the tool server can be wrapped or nothing is sandboxed. Never an
+    unwrapped tool server on a shape that sandboxes.
     """
-    if not getattr(config.brain, "tool_harness", False):
-        return False
-    if brain_kind != "claude_code":
+    if "claude_code" not in set(brain_kinds):
         return False
     if not allowed_tools:
         return False
-    return native_sandbox_wrap is not None or not effective_sandboxing(config)
+    return tool_server_wrap is not None or not effective_sandboxing(config)
 
 
 #: The task id a direct caller's harness root is named under. No task stands
@@ -3973,16 +3959,14 @@ def build_daemon_harness(
 
 
 def harness_denies_web_fetch(task: "db.Task", config: Config) -> bool:
-    """Whether this task is the harnessed CLI with no fetch tool at all.
+    """Whether this task is the `claude_code` CLI with no fetch tool at all.
 
     The harness denies the CLI's own WebFetch (`HARNESS_DENIED_TOOLS`) and
     offers the daemon-side one only when `[brain.native.web_fetch]` is enabled,
     so with that off the task has none. Asked at prompt time, before the tool
-    grant and the wrap exist, so it reads the switch and the routed kind only.
-    `admin_only` is not this question: the prompt states that case itself.
+    grant and the wrap exist, so it reads the routed kind only. `admin_only`
+    is not this question: the prompt states that case itself.
     """
-    if not getattr(config.brain, "tool_harness", False):
-        return False
     from .brain import resolve_brain_kind
 
     try:
@@ -4089,40 +4073,6 @@ HOOK_PATH_PREPEND_KEY = "ISTOTA_PATH_PREPEND"
 
 # --- Network proxy allowlist ---
 
-#: Where the old in-sandbox `claude` CLI reaches the model. Nothing in the
-#: sandbox talks to Anthropic once the CLI runs on the tool harness, so these
-#: are on no allowlist by default; they are added only while `[brain]
-#: tool_harness` is off, and go with the switch (cli-brain-tools part 2,
-#: Stage 6). A task that calls Anthropic itself names them in `extra_hosts`.
-_OLD_CLI_PATH_HOSTS = frozenset({
-    "api.anthropic.com:443",
-    "mcp-proxy.anthropic.com:443",
-})
-
-
-def _old_cli_path_hosts(config: Config) -> set[str]:
-    """The hosts the in-sandbox CLI needs, while the old path still runs.
-
-    Empty with `[brain] tool_harness` on. Off, `_OLD_CLI_PATH_HOSTS` and,
-    under "api_key", the `anthropic` provider's base-URL host, which may be a
-    gateway in front of Anthropic.
-    """
-    if getattr(config.brain, "tool_harness", False):
-        return set()
-    hosts = set(_OLD_CLI_PATH_HOSTS)
-    if process_cli_auth(config) == "api_key":
-        spec = anthropic_spec(config)
-        if spec is not None and spec.host:
-            from urllib.parse import urlsplit
-
-            try:
-                port = urlsplit(spec.base_url).port
-            except ValueError:
-                port = None
-            scheme_port = 80 if spec.base_url.lower().startswith("http:") else 443
-            hosts.add(f"{spec.host}:{port or scheme_port}")
-    return hosts
-
 _PYPI_HOSTS = frozenset({
     "pypi.org:443",
     "files.pythonhosted.org:443",
@@ -4183,7 +4133,7 @@ def _build_network_allowlist(
     GitLab tokens configured can reach gitlab.com even when ``developer``
     wasn't selected — symmetric with credential authorization.
     """
-    hosts: set[str] = _old_cli_path_hosts(config)
+    hosts: set[str] = set()
 
     if config.security.network.allow_pypi:
         hosts |= _PYPI_HOSTS
@@ -4694,7 +4644,9 @@ def _sandbox_bind_targets(config: Config) -> list[Path]:
         Path("/"), Path("/usr"), Path("/etc"), Path("/tmp"),
         # Every user's task workspace, and with it `.developer`.
         config.temp_dir,
-        # The Claude CLI binary, its state, and its credentials.
+        # The Claude CLI binary, its state, and its credentials: bound into no
+        # namespace, but the daemon runs the CLI from them unwrapped, so a
+        # cache over them would hand the model the binary and the token.
         home / ".local",
         home / ".claude",
         # The read-only model cache.
@@ -5397,9 +5349,6 @@ def custom_system_prompt_path(config: Config) -> Path | None:
     return Path(os.path.abspath(path))
 
 
-#: `build_bwrap_cmd`'s default for ``cli_auth_mode``: this process's mode.
-_MODE_FROM_PROCESS = object()
-
 def build_bwrap_cmd(
     cmd: list[str],
     config: Config,
@@ -5417,7 +5366,6 @@ def build_bwrap_cmd(
     withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
     group_ids: "list[str] | None" = None,
     sandbox_env: dict[str, str] | None = None,
-    cli_auth_mode: object = _MODE_FROM_PROCESS,
 ) -> list[str]:
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
@@ -5452,11 +5400,6 @@ def build_bwrap_cmd(
         workspace_dir=workspace_dir,
         withheld_scopes=withheld_scopes,
         group_ids=group_ids,
-        # The CLI's credentials file follows the auth mode. Unless a caller
-        # names one, it is the mode this process resolved.
-        cli_auth_mode=(
-            process_cli_auth(config) if cli_auth_mode is _MODE_FROM_PROCESS else cli_auth_mode
-        ),
     )
     return render_bwrap_argv(
         plan, cmd, net_proxy_sock=net_proxy_sock, user_temp_dir=user_temp_dir,
@@ -9269,42 +9212,30 @@ def execute_task(
         _extra_ro_binds = _runtime.extra_ro_binds
         authorized_skills = _runtime.authorized_skills
 
-        # Sandbox wrapper closures — capture the per-task bind config so the
-        # brain can wrap its raw cmd without knowing anything about bwrap.
-        #
-        # Two closures rather than one taking a profile, because the request
-        # carries them as two fields (see `BrainRequest.native_sandbox_wrap`):
-        # `_run_fallback` copies the request with `dataclasses.replace`, so a
-        # single field whose value encoded a profile would hand the Claude
-        # mounts to NativeBrain on the shipped `claude_code -> native` reroute.
-        # Everything else about the two is identical, which is why the plan is
-        # built once and the profile is the only argument that differs.
-        def _build_wrap(sandbox_profile: SandboxProfile):
-            def _wrap(raw_cmd: list[str]) -> list[str]:
-                if not config.security.sandbox_enabled:
-                    return raw_cmd
-                return build_bwrap_cmd(
-                    raw_cmd, config, task, is_admin, user_resources,
-                    Path(user_temp_dir), proxy_sock=_proxy_sock,
-                    net_proxy_sock=_net_proxy_sock,
-                    extra_ro_binds=_extra_ro_binds,
-                    # `TaskRuntime.authorized_skills` — the union credential
-                    # presence widened, not `selected_skills`. See
-                    # `build_bwrap_cmd`'s own docstring for why the distinction
-                    # decides whether the exec transport routes on the first
-                    # turn of a conversation.
-                    authorized_skills=authorized_skills,
-                    workspace_dir=workspace_dir,
-                    profile=sandbox_profile,
-                    withheld_scopes=_withheld,
-                    group_ids=task_group_ids,
-                    sandbox_env=_runtime.sandbox_env,
-                )
-
-            return _wrap
-
-        _sandbox_wrap = _build_wrap(SandboxProfile.CLAUDE)
-        _native_sandbox_wrap = _build_wrap(SandboxProfile.NATIVE)
+        # The sandbox wrapper for the tool server — captures the per-task bind
+        # config so the brain can wrap its raw cmd without knowing anything
+        # about bwrap. One wrap for every brain: the `claude` CLI runs outside
+        # the sandbox and its tools run in the same tool server native's do.
+        def _tool_server_wrap(raw_cmd: list[str]) -> list[str]:
+            if not config.security.sandbox_enabled:
+                return raw_cmd
+            return build_bwrap_cmd(
+                raw_cmd, config, task, is_admin, user_resources,
+                Path(user_temp_dir), proxy_sock=_proxy_sock,
+                net_proxy_sock=_net_proxy_sock,
+                extra_ro_binds=_extra_ro_binds,
+                # `TaskRuntime.authorized_skills` — the union credential
+                # presence widened, not `selected_skills`. See
+                # `build_bwrap_cmd`'s own docstring for why the distinction
+                # decides whether the exec transport routes on the first
+                # turn of a conversation.
+                authorized_skills=authorized_skills,
+                workspace_dir=workspace_dir,
+                profile=SandboxProfile.NATIVE,
+                withheld_scopes=_withheld,
+                group_ids=task_group_ids,
+                sandbox_env=_runtime.sandbox_env,
+            )
 
         # Adapts the brain's (widened) StreamEvent stream to TaskEvents:
         # the coalescing buffers for answer text and reasoning, the
@@ -9351,9 +9282,9 @@ def execute_task(
             except Exception:
                 return []
 
-        # Custom system prompt path (claude_code-only knob; brain ignores
-        # if the file is missing). `build_bwrap_cmd` binds this one file into
-        # the sandbox — the CLI opens it there.
+        # Custom system prompt path (brain ignores it if the file is missing).
+        # Read daemon-side: the CLI runs outside the sandbox, and NativeBrain
+        # reads it itself.
         sp_path = custom_system_prompt_path(config)
 
         from .brain import BrainRequest
@@ -9405,19 +9336,6 @@ def execute_task(
                 group_ids=task_group_ids,
             )
 
-        # The task env carries no CLI credential. While `[brain] tool_harness`
-        # is off, the CLI that `sandbox_wrap` runs inside the sandbox still
-        # authenticates from `req.env`, so the request's env gets it; on the
-        # harness `req.env` is the tool server's and the credential is only in
-        # `HarnessSpec.cli_env`. Goes with the switch (cli-brain-tools part 2,
-        # Stage 6). NativeBrain strips it at its seams, as before.
-        request_env = env
-        if not getattr(config.brain, "tool_harness", False):
-            request_env = {
-                **env,
-                **cli_credential_env(config, process_cli_auth(config), task.user_id),
-            }
-
         # Resolve aliases (role, provider) to a canonical model ID. Talk-poller
         # tasks already arrive resolved via the !model prefix path; cron jobs,
         # briefings, email, and operator istota_model defaults can still carry
@@ -9440,7 +9358,7 @@ def execute_task(
                 and not effective_sandboxing(config)
                 else Path(config.temp_dir)
             ),
-            env=request_env,
+            env=env,
             db_path=config.db_path,
             # Which attempt this is, for the brain's own per-attempt artifacts
             # (NativeBrain's session log names its file after them). Read off
@@ -9533,11 +9451,9 @@ def execute_task(
             # — its Bash tool spawns one child per execution. It places each of
             # those itself, from this path. Other brains ignore the field.
             task_cgroup=_task_cg,
-            sandbox_wrap=_sandbox_wrap,
-            # The same plan under the NATIVE profile — no Claude runtime block,
-            # no credential, no system-prompt bind. Read only by NativeBrain;
-            # the two Claude brains read `sandbox_wrap` and ignore this.
-            native_sandbox_wrap=_native_sandbox_wrap,
+            # The tool server's namespace, for every brain: no Claude
+            # runtime, no credential, no system-prompt bind.
+            tool_server_wrap=_tool_server_wrap,
             # Filesystem confinement for NativeBrain's in-process file tools
             # (NB-1). Populated only when effective sandboxing is on; other
             # brains ignore these (bwrap already confines their tools).
@@ -9546,15 +9462,17 @@ def execute_task(
             fs_write_denied_roots=_fs_write_denied_roots,
             result_file=result_file,
         )
-        # The CLI tool harness, behind `[brain] tool_harness`. Set here only:
-        # the direct callers build their own requests and keep the old path.
+        # The CLI tool harness, for a `claude_code` request with tools, as the
+        # routed brain or as the fallback a native task may reroute to: the
+        # reroute reuses this request, and a CLI with tools runs only on the
+        # harness. The direct callers build theirs with `build_daemon_harness`.
         # A harness root that cannot be made raises, which the handler below
         # turns into a failed task.
         if harness_wanted(
             config,
-            brain_kind=_brain_config.kind,
+            brain_kinds=(_brain_config.kind, effective_fallback_kind(_brain_config)),
             allowed_tools=allowed,
-            native_sandbox_wrap=req.native_sandbox_wrap,
+            tool_server_wrap=req.tool_server_wrap,
         ):
             from .brain._types import HarnessSpec
 
@@ -9564,7 +9482,6 @@ def execute_task(
                 ),
                 harness_root=ensure_task_harness_dir(config, task.user_id, task.id),
                 bash_spill_full_output=config.brain.native.bash_spill_full_output,
-                cli_version=os.environ.get("ISTOTA_CLAUDE_CODE_VERSION", "").strip(),
                 web_fetch=harness_web_fetch_policy(config, allowed),
             )
         if req.advisor:

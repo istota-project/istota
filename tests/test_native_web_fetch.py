@@ -552,8 +552,9 @@ class TestWiring:
         )
         assert executor._native_web_fetch_enabled(task, native_off) is False
 
+        # The CLI brain gets the same daemon-side tool through its harness.
         claude = Config(brain=BrainConfig(kind="claude_code"))
-        assert executor._native_web_fetch_enabled(task, claude) is False
+        assert executor._native_web_fetch_enabled(task, claude) is True
 
     def test_native_build_tools_omits_when_config_disabled(self):
         from istota.brain.native import NativeBrain

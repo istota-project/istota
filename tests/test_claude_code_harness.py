@@ -1,8 +1,8 @@
 """The CLI tool harness (cli-brain-tools spec, Stages 6 and 7).
 
 The executor's half: what it hands a `claude_code` brain so the CLI can run
-outside the sandbox with its tools in the tool server (the switch, the four
-conditions under which a request gets a `HarnessSpec`, the CLI's env, the
+outside the sandbox with its tools in the tool server (when a request gets a
+`HarnessSpec`, the retired switch, the CLI's env, the
 harness root and its sweep, the per-harness `CLAUDE_CONFIG_DIR`).
 
 The brain's half, from "ClaudeCodeBrain on the harness" down: the argv, the
@@ -57,25 +57,33 @@ DEPLOY_KEY = "DEPLOY-KEY-SENTINEL"
 USER_KEY = "USER-KEY-SENTINEL"
 
 
-# -- the switch ----------------------------------------------------------------
+# -- the switch is gone ----------------------------------------------------------
 
 
-class TestTheSwitch:
-    def test_it_is_off_by_default(self):
-        assert Config().brain.tool_harness is False
+class TestTheSwitchIsGone:
+    """`[brain] tool_harness` was part 1's switch; part 2, Stage 6 removed it
+    with the old in-sandbox CLI path."""
 
-    def test_it_loads_from_the_brain_table(self, tmp_path):
+    def test_it_is_no_field(self):
+        assert not hasattr(BrainConfig(), "tool_harness")
+
+    def test_a_config_still_naming_it_loads_and_is_told(self, tmp_path):
+        from istota.config_mapper import collect_problems
+
         path = tmp_path / "config.toml"
         path.write_text("[brain]\ntool_harness = true\n")
-        assert load_config(path).brain.tool_harness is True
+        with collect_problems() as problems:
+            load_config(path)
+        about_it = [p["kind"] for p in problems if "tool_harness" in str(p["path"])]
+        assert about_it == ["retired"]
 
 
-# -- the four conditions -------------------------------------------------------
+# -- when a request gets a harness ---------------------------------------------
 
 
-def _config(*, on=True, sandbox=False) -> Config:
+def _config(*, sandbox=False) -> Config:
     config = Config(security=SecurityConfig(sandbox_enabled=sandbox))
-    config.brain = BrainConfig(kind="claude_code", tool_harness=on)
+    config.brain = BrainConfig(kind="claude_code")
     return config
 
 
@@ -83,55 +91,54 @@ def _wrap(cmd):
     return cmd
 
 
-class TestTheFourConditions:
-    def test_all_four_hold(self):
+class TestWhenARequestGetsAHarness:
+    def test_a_claude_code_request_with_tools(self):
         assert harness_wanted(
-            _config(), brain_kind="claude_code", allowed_tools=["Bash"],
-            native_sandbox_wrap=_wrap,
+            _config(), brain_kinds=["claude_code"], allowed_tools=["Bash"],
+            tool_server_wrap=_wrap,
         )
 
-    def test_the_switch_off(self):
+    def test_another_brain(self):
         assert not harness_wanted(
-            _config(on=False), brain_kind="claude_code", allowed_tools=["Bash"],
-            native_sandbox_wrap=_wrap,
+            _config(), brain_kinds=["native"], allowed_tools=["Bash"],
+            tool_server_wrap=_wrap,
         )
 
-    @pytest.mark.parametrize("kind", ["native", "tmux_claude"])
-    def test_another_brain(self, kind):
-        assert not harness_wanted(
-            _config(), brain_kind=kind, allowed_tools=["Bash"],
-            native_sandbox_wrap=_wrap,
+    def test_a_native_task_that_may_fall_back_to_claude_code(self):
+        assert harness_wanted(
+            _config(), brain_kinds=["native", "claude_code"], allowed_tools=["Bash"],
+            tool_server_wrap=_wrap,
         )
 
     def test_a_text_only_request(self):
         assert not harness_wanted(
-            _config(), brain_kind="claude_code", allowed_tools=[],
-            native_sandbox_wrap=_wrap,
+            _config(), brain_kinds=["claude_code"], allowed_tools=[],
+            tool_server_wrap=_wrap,
         )
 
-    def test_sandboxed_with_no_native_wrap(self):
+    def test_sandboxed_with_no_wrap(self):
         config = _config(sandbox=True)
         with patch.object(executor, "_bwrap_available", return_value=True):
             assert not harness_wanted(
-                config, brain_kind="claude_code", allowed_tools=["Bash"],
-                native_sandbox_wrap=None,
+                config, brain_kinds=["claude_code"], allowed_tools=["Bash"],
+                tool_server_wrap=None,
             )
             assert harness_wanted(
-                config, brain_kind="claude_code", allowed_tools=["Bash"],
-                native_sandbox_wrap=_wrap,
+                config, brain_kinds=["claude_code"], allowed_tools=["Bash"],
+                tool_server_wrap=_wrap,
             )
 
-    def test_unsandboxed_with_no_native_wrap(self):
+    def test_unsandboxed_with_no_wrap(self):
         assert harness_wanted(
-            _config(sandbox=False), brain_kind="claude_code", allowed_tools=["Bash"],
-            native_sandbox_wrap=None,
+            _config(sandbox=False), brain_kinds=["claude_code"], allowed_tools=["Bash"],
+            tool_server_wrap=None,
         )
 
 
 class TestTheRequestBuilder:
     """Through `execute_task`, with the brain stubbed at `make_brain`."""
 
-    def _run(self, tmp_path, *, on):
+    def _run(self, tmp_path, *, kind="claude_code", fallback=""):
         from tests.test_executor_advisor_model import _FakeAnthropicBrain
         from tests.test_executor_streaming import (
             _make_config,
@@ -141,7 +148,7 @@ class TestTheRequestBuilder:
         )
 
         config = _make_config(tmp_path)
-        config.brain = BrainConfig(kind="claude_code", tool_harness=on)
+        config.brain = BrainConfig(kind=kind, fallback=fallback)
         config.security.sandbox_enabled = False
         brain = _FakeAnthropicBrain()
         patches = _patch_executor() + [
@@ -153,8 +160,8 @@ class TestTheRequestBuilder:
         assert execute_task_result[0], execute_task_result
         return config, task, brain.received_reqs[0]
 
-    def test_the_switch_on_sets_the_harness(self, tmp_path):
-        config, task, req = self._run(tmp_path, on=True)
+    def test_a_claude_code_task_gets_the_harness(self, tmp_path):
+        config, task, req = self._run(tmp_path)
 
         assert req.allowed_tools
         assert req.harness is not None
@@ -167,31 +174,30 @@ class TestTheRequestBuilder:
         )
         assert req.harness.bash_spill_full_output == config.brain.native.bash_spill_full_output
 
-    def test_the_switch_off_leaves_it_unset(self, tmp_path):
-        config, task, req = self._run(tmp_path, on=False)
-
-        assert req.harness is None
-        assert not (Path(config.temp_dir) / HARNESS_DIR_NAME).exists()
-
-    def test_on_the_harness_the_request_env_holds_no_credential(self, tmp_path, monkeypatch):
+    def test_the_request_env_holds_no_credential(self, tmp_path, monkeypatch):
         """The tool server's env is `req.env`; the CLI's credential is only in
-        `HarnessSpec.cli_env` (cli-brain-tools part 2, Stage 5)."""
+        `HarnessSpec.cli_env`."""
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", OAUTH)
-        _config, _task, req = self._run(tmp_path, on=True)
+        _config, _task, req = self._run(tmp_path)
 
         assert not [k for k in req.env if providers.is_model_credential_name(k)]
         assert OAUTH not in req.env.values()
         assert req.env["ISTOTA_CLI_AUTH"] == "subscription"
         assert req.harness.cli_env["CLAUDE_CODE_OAUTH_TOKEN"] == OAUTH
 
-    def test_off_the_harness_the_wrapped_cli_still_gets_it(self, tmp_path, monkeypatch):
-        """Until Stage 6 removes the old path, the CLI it wraps in the sandbox
-        authenticates from `req.env`: the credential is added to the request's
-        env, never to the task runtime's."""
-        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", OAUTH)
-        _config, _task, req = self._run(tmp_path, on=False)
+    def test_a_native_task_falling_back_to_claude_code_carries_one(self, tmp_path):
+        """`_run_fallback` reruns this request on the fallback brain, and a
+        `claude_code` brain runs tools only on the harness."""
+        _config, _task, req = self._run(tmp_path, kind="native", fallback="claude_code")
 
-        assert req.env["CLAUDE_CODE_OAUTH_TOKEN"] == OAUTH
+        assert req.allowed_tools
+        assert req.harness is not None
+
+    def test_a_native_task_with_no_cli_fallback_makes_none(self, tmp_path):
+        config, _task, req = self._run(tmp_path, kind="native")
+
+        assert req.harness is None
+        assert not (Path(config.temp_dir) / HARNESS_DIR_NAME).exists()
 
 
 # -- the CLI's env -------------------------------------------------------------
@@ -372,7 +378,7 @@ class TestTheMountPlanNeverNamesTheHarnessRoot:
         user_temp = temp / "alice"
         user_temp.mkdir()
 
-        for profile in (SandboxProfile.CLAUDE, SandboxProfile.NATIVE):
+        for profile in (SandboxProfile.NATIVE,):
             with patch.object(executor, "_bwrap_available", return_value=True):
                 argv = executor.build_bwrap_cmd(
                     ["true"], config, task, True, [], user_temp,
@@ -648,10 +654,6 @@ class _Harnessed:
         return self.pids[0]
 
 
-def _unwrapped(cmd):
-    pytest.fail(f"the CLI was wrapped: {cmd[:3]}")
-
-
 class TestTheHarnessRun:
     def test_calls_run_in_the_tool_server_and_the_cli_in_the_harness(self, tmp_path):
         (tmp_path / "ws").mkdir()
@@ -665,12 +667,12 @@ class TestTheHarnessRun:
         h = _Harnessed(tmp_path, plan={"calls": [
             {"name": "Read", "args": {"file_path": str(tmp_path / "ws" / "note.txt")}},
             {"name": "Bash", "args": {"command": "echo ran-$((6*7))", "description": "probe"}},
-        ]}, sandbox_wrap=_unwrapped, native_sandbox_wrap=native_wrap)
+        ]}, tool_server_wrap=native_wrap)
 
         result = h.run()
 
         assert result.success, result.result_text
-        # The NATIVE wrap went round the tool server, and nothing round the CLI.
+        # The wrap went round the tool server, and nothing round the CLI.
         assert len(native_wrapped) == 1
         assert "istota.sandbox.tool_server" in " ".join(native_wrapped[0])
         assert "harness note" in result.result_text
@@ -758,13 +760,25 @@ class TestTheHarnessRun:
         assert result.success, result.result_text
         assert _flag_values(h.recorded()["argv"], "--tools") == ["WebSearch"]
 
-    def test_a_sandboxed_request_without_a_native_wrap_is_refused(self, tmp_path):
-        h = _Harnessed(tmp_path, sandbox_wrap=lambda cmd: cmd, native_sandbox_wrap=None)
+    def test_a_sandboxed_request_without_a_wrap_is_refused(self, tmp_path):
+        h = _Harnessed(tmp_path, fs_read_roots=[tmp_path], tool_server_wrap=None)
 
         result = h.run()
 
         assert result.stop_reason == "error"
         assert "refusing to run tools unwrapped" in result.result_text
+        assert h.pids == []
+        assert not h.record.exists()
+
+    def test_a_tool_grant_with_no_harness_is_refused(self, tmp_path):
+        """There is no other path: the old in-sandbox CLI is gone."""
+        h = _Harnessed(tmp_path)
+        h.req.harness = None
+
+        result = h.run()
+
+        assert result.stop_reason == "error"
+        assert "only on the tool harness" in result.result_text
         assert h.pids == []
         assert not h.record.exists()
 

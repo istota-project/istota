@@ -14,6 +14,8 @@ from istota import executor
 from tests.support.sleep_spy import sleep_spy
 from istota.executor import execute_task, get_task_control_dir, get_user_temp_dir
 
+pytestmark = pytest.mark.usefixtures("cli_without_tool_server")
+
 
 @pytest.fixture(autouse=True)
 def _isolate_bwrap_probe_cache():

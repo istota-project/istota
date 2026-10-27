@@ -212,8 +212,7 @@ async def start_request_tool_server(
     ``None`` for a text-only request (empty ``allowed_tools``): those callers
     spawn nothing.
 
-    The wrap is ``req.native_sandbox_wrap``, never ``req.sandbox_wrap``, which
-    builds the CLI's namespace, credential and all (ISSUE-389). A failure raises
+    The wrap is ``req.tool_server_wrap``. A failure raises
     ``ToolServerError``; there is no fallback to in-process tools.
 
     ``start_tool_server`` is looked up on ``istota.session.tools`` at call time,
@@ -225,7 +224,7 @@ async def start_request_tool_server(
 
     return await start_tool_server(
         request_hello(req, bash_spill_full_output=bash_spill_full_output),
-        sandbox_wrap=req.native_sandbox_wrap,
+        sandbox_wrap=req.tool_server_wrap,
         task_cgroup_path=req.task_cgroup,
         cwd=Path(req.cwd),
         # Stripped here as well as in the hello: this is what the server

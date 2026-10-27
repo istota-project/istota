@@ -21,6 +21,7 @@ from istota.brain import (
     TextDeltaEvent,
     make_brain,
 )
+from istota.brain import claude_code as claude_code_module
 from istota.config import load_config
 
 
@@ -111,7 +112,7 @@ class TestBrainRequestDefaults:
         assert req.on_progress is None
         assert req.cancel_check is None
         assert req.on_pid is None
-        assert req.sandbox_wrap is None
+        assert req.tool_server_wrap is None
         assert req.result_file is None
         assert req.custom_system_prompt_path is None
         assert req.composed_system_prompt_path is None
@@ -150,11 +151,6 @@ class TestBuildCommandDisallowedTools:
         assert "--allowedTools" not in cmd
         assert "--dangerously-skip-permissions" in cmd
 
-    _WRITE_AND_NETWORK_TOOLS = [
-        "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
-        "WebFetch", "WebSearch", "TodoWrite",
-    ]
-
     def _disallowed(self, cmd):
         start = cmd.index("--disallowedTools") + 1
         end = start
@@ -162,46 +158,21 @@ class TestBuildCommandDisallowedTools:
             end += 1
         return cmd[start:end]
 
-    @pytest.mark.parametrize(
-        "tools", [["Read"], ["Read", "Grep", "Glob"], ["Glob", "Grep"]],
-    )
-    def test_a_read_only_grant_denies_the_write_and_network_tools(
-        self, tmp_path, tools
-    ):
-        # Skip-permissions hands the model the CLI's whole default toolset, so
-        # a grant of read tools alone has to deny the rest by name.
-        cmd = ClaudeCodeBrain._build_command(self._req(tmp_path, tools))
-        assert self._disallowed(cmd) == [
-            "Agent", "Workflow", *self._WRITE_AND_NETWORK_TOOLS,
-        ]
-        assert cmd.count("--disallowedTools") == 1
-
-    @pytest.mark.parametrize(
-        ("tools", "named"),
-        [
-            (["Read"], "Read"),
-            (["Read", "Grep", "Glob"], "Read,Grep,Glob"),
-            (["Glob", "Grep", "Glob"], "Grep,Glob"),
-        ],
-    )
-    def test_a_read_only_grant_has_only_its_built_ins_and_no_mcp(
-        self, tmp_path, tools, named
-    ):
-        # The deny list fails open on a tool a later CLI adds; `--tools` names
-        # the built-ins that exist, and `--strict-mcp-config` with no config
-        # drops every MCP server, the account's claude.ai connectors included.
-        cmd = ClaudeCodeBrain._build_command(self._req(tmp_path, tools))
-        assert cmd[cmd.index("--tools") + 1] == named
-        assert cmd.count("--tools") == 1
-        assert "--strict-mcp-config" in cmd
-        assert "--mcp-config" not in cmd
+    def test_the_read_only_grant_branch_is_gone(self):
+        """A read-only grant used to get its own `--tools` and
+        `--strict-mcp-config` on the wrapped CLI. Every tool grant now runs on
+        the tool harness, whose argv is the same for any grant
+        (cli-brain-tools part 2, Stage 6)."""
+        for name in ("READ_ONLY_TOOLS", "_READ_ONLY_TOOL_ORDER", "_READ_ONLY_DENIED_TOOLS"):
+            assert not hasattr(claude_code_module, name), name
 
     @pytest.mark.parametrize(
         "tools",
-        [["Read", "Bash"], ["Bash"], ["Read", "Write"],
+        [["Read"], ["Read", "Grep", "Glob"], ["Read", "Bash"], ["Bash"],
+         ["Read", "Write"],
          ["Bash", "Read", "Edit", "Write", "Grep", "Glob", "WebFetch"]],
     )
-    def test_any_other_grant_keeps_todays_argv(self, tmp_path, tools):
+    def test_with_no_harness_config_every_grant_has_one_argv(self, tmp_path, tools):
         cmd = ClaudeCodeBrain._build_command(self._req(tmp_path, tools))
         assert self._disallowed(cmd) == ["Agent", "Workflow"]
         assert "--tools" not in cmd
@@ -458,6 +429,32 @@ class TestComposedSystemPromptFlag:
         assert req.prompt not in cmd
 
 
+def _handle(tmp_path):
+    from istota.brain._tool_harness import HarnessHandle
+
+    return HarnessHandle(
+        mcp_config_path=tmp_path / "mcp_config.json",
+        config_dir=tmp_path / "config", home_dir=tmp_path / "home",
+        tmp_dir=tmp_path / "tmp", bin_dir=tmp_path / "bin", cwd=tmp_path,
+        offered=("Bash",),
+    )
+
+
+def _harness_req(tmp_path, *, cli_env=None, advisor="", allowed_tools=("Bash",)):
+    from istota.brain._types import HarnessSpec
+
+    return BrainRequest(
+        prompt="hi",
+        allowed_tools=list(allowed_tools),
+        cwd=tmp_path,
+        env={},
+        timeout_seconds=60,
+        streaming=False,
+        advisor=advisor,
+        harness=HarnessSpec(cli_env=dict(cli_env or {}), harness_root=tmp_path),
+    )
+
+
 class TestRootSkipPermissionsEnv:
     """`claude --dangerously-skip-permissions` is refused under root/sudo unless
     IS_SANDBOX=1 signals an external isolation boundary (the Docker
@@ -490,18 +487,19 @@ class TestRootSkipPermissionsEnv:
             ClaudeCodeBrain().execute(req)
         return req.env, captured
 
+    def _harness_env(self, tmp_path, *, root, cli_env=None, advisor=""):
+        from unittest.mock import patch
+
+        req = _harness_req(tmp_path, cli_env=cli_env, advisor=advisor)
+        with patch("istota.brain.claude_code._is_root", lambda: root):
+            return claude_code_module._harness_cli_env(req, _handle(tmp_path))
+
     def test_root_with_tools_sets_is_sandbox(self, tmp_path):
-        env, captured = self._execute_capturing_env(
-            tmp_path, root=True, allowed_tools=["Bash"]
-        )
-        assert env.get("IS_SANDBOX") == "1"
-        assert captured.get("IS_SANDBOX") == "1"
+        """A tool grant runs on the harness, so the CLI's env is the harness's."""
+        assert self._harness_env(tmp_path, root=True).get("IS_SANDBOX") == "1"
 
     def test_non_root_leaves_is_sandbox_unset(self, tmp_path):
-        env, _ = self._execute_capturing_env(
-            tmp_path, root=False, allowed_tools=["Bash"]
-        )
-        assert "IS_SANDBOX" not in env
+        assert "IS_SANDBOX" not in self._harness_env(tmp_path, root=False)
 
     def test_root_text_only_leaves_is_sandbox_unset(self, tmp_path):
         # No tools => no skip-permissions => no need for IS_SANDBOX.
@@ -509,9 +507,7 @@ class TestRootSkipPermissionsEnv:
         assert "IS_SANDBOX" not in env
 
     def test_existing_is_sandbox_preserved(self, tmp_path):
-        env, _ = self._execute_capturing_env(
-            tmp_path, root=True, allowed_tools=["Bash"], env={"IS_SANDBOX": "custom"}
-        )
+        env = self._harness_env(tmp_path, root=True, cli_env={"IS_SANDBOX": "custom"})
         assert env.get("IS_SANDBOX") == "custom"
 
 
@@ -526,6 +522,17 @@ class TestAdvisorEnvExclusivity:
 
     def _execute_capturing(self, tmp_path, *, advisor, allowed_tools, env=None):
         from unittest.mock import patch
+
+        if allowed_tools:
+            # A tool grant runs on the harness: its argv carries the MCP
+            # config, and the CLI's env is `_harness_cli_env`'s.
+            req = _harness_req(
+                tmp_path, cli_env=env, advisor=advisor, allowed_tools=allowed_tools,
+            )
+            cmd = ClaudeCodeBrain._build_command(
+                req, mcp_config_path=tmp_path / "mcp_config.json",
+            )
+            return cmd, claude_code_module._harness_cli_env(req, _handle(tmp_path))
 
         req = BrainRequest(
             prompt="hi",

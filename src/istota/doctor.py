@@ -3302,7 +3302,7 @@ def check_model_execution(config: "Config", probe: bool) -> CheckResult:
                 cwd=work_dir,
                 env=build_model_cli_env(config),
                 timeout_seconds=MODEL_PROBE_TIMEOUT,
-                native_sandbox_wrap=wrap,
+                tool_server_wrap=wrap,
                 harness=build_daemon_harness(
                     config, user_id, brain_kind=getattr(brain, "kind", kind),
                     timeout_seconds=MODEL_PROBE_TIMEOUT, harness_root=harness_root,

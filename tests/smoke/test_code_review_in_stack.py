@@ -3,7 +3,7 @@
 `code_review run` hands its one reviewer `Read`, `Grep` and `Glob` over a
 snapshot of the reviewed commit (`{temp_dir}/.review/{user}/run-<hex>/`). The
 unit tier checks the request: `allowed_tools`, `fs_read_roots=[run_dir]`, a
-NATIVE `native_sandbox_wrap` built with every scope withheld. None of that says what a tool
+NATIVE `tool_server_wrap` built with every scope withheld. None of that says what a tool
 call actually returns once the daemon runs it, which is what this file asks.
 
 In the native class, a task commits a change in its own repos subtree and runs

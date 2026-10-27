@@ -193,7 +193,7 @@ class TestEachCallerKeepsItsRequestShape:
         assert req.timeout_seconds == 180
         assert req.allowed_tools == ["Read"]
         assert req.fs_read_roots == [document]
-        assert req.native_sandbox_wrap is not None
+        assert req.tool_server_wrap is not None
         assert Path(req.cwd) == (config.temp_dir / "alice").resolve()
         assert req.streaming is False
 
@@ -216,7 +216,7 @@ class TestEachCallerKeepsItsRequestShape:
         assert req.timeout_seconds == 120
         assert req.allowed_tools == []
         assert req.fs_read_roots is None
-        assert req.native_sandbox_wrap is None, (
+        assert req.tool_server_wrap is None, (
             "the explainer grants no tool and never built a namespace; adding "
             "one here is a runtime change, not a tightening"
         )
@@ -332,7 +332,7 @@ class TestTheHelperCannotBeAskedForAnUnconfinedGrant:
     it: the explainer had no ``read_path`` parameter and the three extractors
     had no way to skip the namespace. One function with two keywords can, and
     the tree-wide AST guard in ``test_brain_request_confinement.py`` cannot see
-    it — it requires ``native_sandbox_wrap=`` to be present and not a literal ``None``,
+    it — it requires ``tool_server_wrap=`` to be present and not a literal ``None``,
     and what it now reads is a bare name that is ``None`` on a live branch.
 
     So these go against ``call_health_brain`` directly rather than through a
@@ -390,9 +390,9 @@ class TestTheHelperCannotBeAskedForAnUnconfinedGrant:
 
         assert len(requests) == 2
         assert requests[0].allowed_tools == []
-        assert requests[0].native_sandbox_wrap is None
+        assert requests[0].tool_server_wrap is None
         assert requests[1].allowed_tools == ["Read"]
-        assert requests[1].native_sandbox_wrap is not None
+        assert requests[1].tool_server_wrap is not None
 
 
 class TestEachCallerKeepsItsLoggerName:

@@ -1,8 +1,9 @@
 """ClaudeCodeBrain — wraps the `claude` CLI subprocess.
 
 Owns:
-- Building the `claude -p - --allowedTools ...` command.
-- Wrapping the command with bubblewrap (via the caller-supplied sandbox_wrap).
+- Building the `claude -p - ...` command.
+- Running a tool-granting request on the tool harness: the CLI outside the
+  sandbox, its tools in the bwrapped tool server (`_tool_harness.py`).
 - Spawning the subprocess, writing the prompt over stdin.
 - Parsing --output-format stream-json into StreamEvents and forwarding them.
 - Auto-retry on transient Anthropic API errors (5xx/429).
@@ -914,24 +915,6 @@ def advisor_active(req: BrainRequest) -> bool:
     return bool(req.advisor) and bool(req.allowed_tools)
 
 
-#: A grant made only of these reads files and nothing else. Daemon-side calls
-#: that hand a model a document or a snapshot (health OCR, the code reviewer)
-#: ask for these, and ``build_claude_cli_flags`` gives them exactly these
-#: built-ins and no MCP server.
-READ_ONLY_TOOLS = frozenset({"Read", "Grep", "Glob"})
-
-#: The order ``--tools`` names a read-only grant in, so one grant has one argv.
-_READ_ONLY_TOOL_ORDER = ("Read", "Grep", "Glob")
-
-#: Denied in addition to ``Agent`` and ``Workflow`` for a read-only grant, as a
-#: backstop behind ``--tools``. Deny rules hold under
-#: ``--dangerously-skip-permissions``.
-_READ_ONLY_DENIED_TOOLS = (
-    "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
-    "WebFetch", "WebSearch", "TodoWrite",
-)
-
-
 #: The built-ins a harness run may keep: none acts on the machine. ``WebSearch``
 #: runs on Anthropic's side. Only the ones the grant names are passed, so a
 #: guest turn, which ``build_allowed_tools`` leaves without WebSearch, stays
@@ -939,9 +922,9 @@ _READ_ONLY_DENIED_TOOLS = (
 HARNESS_BUILTIN_TOOLS = ("WebSearch",)
 
 #: Denied on a harness run, behind ``--tools``: every built-in that acts on the
-#: machine. Not ``_READ_ONLY_DENIED_TOOLS``, which names WebSearch: deny wins
-#: over ``--tools`` and would kill the one built-in the harness keeps. 2.1.296
-#: names its subagent tool ``Task``, which ``Agent`` may not cover.
+#: machine. Not WebSearch: deny wins over ``--tools`` and would kill the one
+#: built-in the harness keeps. 2.1.296 names its subagent tool ``Task``, which
+#: ``Agent`` may not cover.
 HARNESS_DENIED_TOOLS = (
     "Bash", "BashOutput", "KillShell", "Monitor", "Read", "Write", "Edit",
     "MultiEdit", "NotebookEdit", "Glob", "Grep", "LS", "WebFetch", "Skill",
@@ -969,7 +952,8 @@ def build_claude_cli_flags(
     ``mcp_config_path`` is the tool harness's MCP config, which only
     ``ClaudeCodeBrain`` passes, on a harness run. With it and tools granted the
     CLI gets the granted harness built-ins, the harness's one MCP server and
-    every machine-acting built-in denied; the read-only branch is skipped.
+    every machine-acting built-in denied. ``ClaudeCodeBrain`` runs no tool grant
+    without it.
     """
     flags: list[str] = []
     # Empty allowed_tools means text-only invocation (e.g. sleep cycle): skip the
@@ -978,12 +962,10 @@ def build_claude_cli_flags(
     # keeps the call text-only.
     if req.allowed_tools:
         # The brain runs non-interactively with --dangerously-skip-permissions
-        # (added by `_build_command`), so the model gets its full default toolset and an
-        # --allowedTools allowlist would only restrict it below that, blocking
-        # tools we didn't think to enumerate. The bwrap sandbox + network proxy
-        # are the security boundary, not an interactive permission prompt; Bash
-        # is permitted anyway, which is effectively unrestricted inside the
-        # sandbox. So we drop --allowedTools and rely on skip-permissions.
+        # (added by `_build_command`); an --allowedTools allowlist would only
+        # restrict the toolset below what `--tools` already leaves. The
+        # boundary is the harness: the machine-acting built-ins are denied
+        # and every tool call goes to the tool server under bwrap.
         #
         # We DO still explicitly deny the harness's built-in multi-agent
         # orchestration tools (Agent + Workflow): deny rules win even under
@@ -999,32 +981,18 @@ def build_claude_cli_flags(
         # with --dangerously-skip-permissions), the allowlist no longer
         # implicitly blocks Workflow, so it must be denied explicitly again.
         flags += ["--disallowedTools", "Agent", "Workflow"]
-        # A grant of read tools alone would still get the whole default toolset
-        # under skip-permissions. Any other grant keeps the argv above byte for
-        # byte.
-        #
         # `--tools` restricts which built-ins exist at all, so a tool a later
-        # CLI release adds is absent rather than allowed; it is not the
-        # `--allowedTools` permission allowlist removed above. It names the
-        # tools granted, no more. `--strict-mcp-config` with no `--mcp-config`
-        # drops every MCP server, the account's claude.ai connectors included.
-        # Probed on Claude Code 2.1.280: the deny list alone still left Monitor,
-        # Skill, SendMessage, Cron*, RemoteTrigger and the connectors; with both
-        # flags `system/init` lists the granted tools and no MCP server.
-        #
-        # A harness run: `--tools ""` is the CLI's empty built-in set, and
-        # `--tools` drops names it does not know, which is why the brain reads
-        # `system/init` rather than trusting this argv.
+        # CLI release adds is absent rather than allowed. `--tools ""` is the
+        # CLI's empty built-in set, and `--tools` drops names it does not know,
+        # which is why the brain reads `system/init` rather than trusting this
+        # argv. `--strict-mcp-config` drops every MCP server but the harness's,
+        # the account's claude.ai connectors included.
         if mcp_config_path is not None:
             flags += list(HARNESS_DENIED_TOOLS)
             flags += [
                 "--tools", ",".join(harness_builtin_tools(req)),
                 "--mcp-config", str(mcp_config_path), "--strict-mcp-config",
             ]
-        elif all(tool in READ_ONLY_TOOLS for tool in req.allowed_tools):
-            granted = [t for t in _READ_ONLY_TOOL_ORDER if t in req.allowed_tools]
-            flags += list(_READ_ONLY_DENIED_TOOLS)
-            flags += ["--tools", ",".join(granted), "--strict-mcp-config"]
 
     def _add(flag: str, *values: str) -> None:
         flags.extend([flag, *values])
@@ -1180,6 +1148,14 @@ def cli_model_name(name: str | None) -> str:
 # unified tool server (#862) replaces.
 # ---------------------------------------------------------------------------
 
+#: A ``claude_code`` request granting tools with no ``harness``. The executor
+#: and the direct callers set one on every such request; this is the brain's
+#: own refusal for one that arrives anyway.
+_NO_HARNESS_REFUSAL = (
+    "The Claude Code brain runs tools only on the tool harness, and this "
+    "request granted tools without one; refusing to run them"
+)
+
 # Distinct init-check failures already logged at ERROR, so a CLI release that
 # adds a tool fails every attempt loudly once rather than flooding the log.
 _LOGGED_INIT_FAILURES: set[tuple] = set()
@@ -1188,15 +1164,14 @@ _LOGGED_INIT_FAILURES: set[tuple] = set()
 def _harness_refusal(req: BrainRequest) -> str | None:
     """Why this harness request must not run, or None.
 
-    A sandboxed shape with no NATIVE wrap would run the tool server, and so
-    every tool call, unwrapped. The executor never builds such a request; this
-    is the brain's own refusal for one that arrives anyway.
+    A sandboxed shape with no tool-server wrap would run the tool server, and
+    so every tool call, unwrapped. The executor never builds such a request;
+    this is the brain's own refusal for one that arrives anyway.
     """
-    if req.native_sandbox_wrap is not None:
+    if req.tool_server_wrap is not None:
         return None
     sandboxed = (
-        req.sandbox_wrap is not None
-        or req.fs_read_roots is not None
+        req.fs_read_roots is not None
         or (req.env or {}).get("ISTOTA_SANDBOXED") == "1"
     )
     if not sandboxed:
@@ -1603,17 +1578,16 @@ class ClaudeCodeBrain:
         try:
             # First, and before `req.env` is touched: on a harness run that env
             # is the tool server's, and the CLI gets `HarnessSpec.cli_env`.
-            if req.harness is not None and req.allowed_tools:
+            # A tool grant runs on the harness or not at all: there is no
+            # other path that keeps the CLI's credential away from its tools.
+            if req.allowed_tools:
+                if req.harness is None:
+                    logger.error("claude_code: %s", _NO_HARNESS_REFUSAL)
+                    return BrainResult(
+                        success=False, result_text=_NO_HARNESS_REFUSAL,
+                        stop_reason="error",
+                    )
                 return self._execute_harness_attempt(req)
-
-            # --dangerously-skip-permissions (added by _build_command for
-            # tool-bearing tasks) is refused under root/sudo unless IS_SANDBOX=1
-            # signals an external isolation boundary. That's the Docker
-            # container-as-sandbox case (bwrap off, runs as root); on the
-            # non-root prod VM service user the flag is allowed without it, so we
-            # leave it unset.
-            if req.allowed_tools and _is_root() and "IS_SANDBOX" not in req.env:
-                req.env["IS_SANDBOX"] = "1"
 
             # Close the settings-file advisor channel whenever this request
             # won't emit --advisor itself: a host's ~/.claude/settings.json
@@ -1633,8 +1607,6 @@ class ClaudeCodeBrain:
                 req.env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] = "1"
 
             cmd = self._build_command(req)
-            if req.sandbox_wrap is not None:
-                cmd = req.sandbox_wrap(cmd)
 
             if req.streaming:
                 return self._execute_streaming(cmd, req)
@@ -1658,9 +1630,9 @@ class ClaudeCodeBrain:
 
         Always the streaming path, whatever ``req.streaming`` says: that path
         leads a process group and is where ``system/init`` arrives, and no
-        tool call runs until that frame has passed its check. ``req.sandbox_wrap``
-        is not applied. A second ``_execute_attempt`` (the image re-issue, a
-        reroute back) gets a harness of its own.
+        tool call runs until that frame has passed its check. A second
+        ``_execute_attempt`` (the image re-issue, a reroute back) gets a
+        harness of its own.
         """
         refusal = _harness_refusal(req)
         if refusal is not None:

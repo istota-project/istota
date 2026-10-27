@@ -488,6 +488,8 @@ class TestSelection:
 
     def test_a_text_only_task_does_not_gain_untrusted_input(self, tmp_path, ocr):
         config = _make_config(tmp_path)
+        # WebFetch folds it in on every brain now; off, only images could.
+        config.brain.native.web_fetch.enabled = False
         brain = _CaptureBrain()
 
         with db.get_db(config.db_path) as conn:
@@ -620,7 +622,7 @@ class TestPathsAndBinds:
     ):
         """The path the model is told to open exists inside the namespace.
 
-        Read off the argv `execute_task` itself built — `req.sandbox_wrap` is
+        Read off the argv `execute_task` itself built — `req.tool_server_wrap` is
         that closure — rather than off a command this test assembles, because
         a hand-built one can only assert the binds the test supplied. That is
         the difference between checking the executor and checking the
@@ -648,10 +650,10 @@ class TestPathsAndBinds:
             _run(config, task, brain, conn)
 
         req = brain.reqs[-1]
-        assert req.sandbox_wrap is not None, (
+        assert req.tool_server_wrap is not None, (
             "no namespace was built, so this asserts nothing about binds"
         )
-        cmd = req.sandbox_wrap(["true"])
+        cmd = req.tool_server_wrap(["true"])
         prepared = req.images[0].path
         # Both bind flags. The model's own working directory is read-write and
         # the control directory can only ever be read-only, so a set built from

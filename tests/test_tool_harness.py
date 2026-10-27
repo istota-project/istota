@@ -1,6 +1,6 @@
 """The tool harness's bridge, with a real tool server, unwrapped.
 
-No bwrap here: `native_sandbox_wrap` is `None`, so the tool server runs as a
+No bwrap here: `tool_server_wrap` is `None`, so the tool server runs as a
 plain subprocess, as it does on a developer machine. What is held is the
 relay: calls held until `release_calls`, the peer check and `set_cli_root`'s
 revocation, a dead tool server failing calls and firing `on_failure`, the

@@ -35,7 +35,7 @@ explainer had no ``read_path`` parameter at all, so "grant ``Read`` and do not
 wrap" was not a thing anyone could write. One function with two keywords makes
 it writable — and the tree-wide AST guard that would have caught it
 (``tests/test_brain_request_confinement.py::test_a_file_tool_grant_carries_a_
-sandbox_wrap``) cannot: it requires the ``native_sandbox_wrap=`` keyword to be
+sandbox_wrap``) cannot: it requires the ``tool_server_wrap=`` keyword to be
 present and not a literal ``None``, and what it now sees is a bare name that is
 ``None`` on a live branch. So the two are re-paired at run time instead, at the top of
 the function, before anything else happens.
@@ -193,7 +193,7 @@ def call_health_brain(
         fs_read_roots=[read_path] if read_path else None,
         # The tool server's namespace (ISSUE-397), for every brain: on
         # `claude_code` the CLI runs outside it on the harness.
-        native_sandbox_wrap=tool_server_wrap,
+        tool_server_wrap=tool_server_wrap,
         harness=harness,
         timeout_seconds=timeout_seconds,
         model=model,

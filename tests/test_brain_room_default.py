@@ -494,8 +494,10 @@ class TestExecutorCallSites:
     def test_a_native_pin_turns_the_web_fetch_probe_on(self, config):
         from istota.executor import _native_web_fetch_enabled
 
+        # Both brains carry the daemon-side tool now (the CLI through its
+        # harness), so a pin onto either answers yes.
         assert config.brain.kind == "claude_code"
-        assert _native_web_fetch_enabled(self._task(), config) is False
+        assert _native_web_fetch_enabled(self._task(), config) is True
         assert _native_web_fetch_enabled(self._task(brain="native"), config) is True
 
     def test_execute_task_builds_the_pinned_brain_with_no_failover(self, tmp_path):
@@ -602,5 +604,5 @@ class TestExecutorCallSites:
         assert _native_web_fetch_enabled(self._task(), config) is True
         assert (
             _native_web_fetch_enabled(self._task(brain="claude_code"), config)
-            is False
+            is True
         )

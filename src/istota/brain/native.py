@@ -9,17 +9,15 @@ module + ``istota.session``).
 What the executor still owns and ``NativeBrain`` consumes: the fully-composed
 prompt (``req.prompt`` → the user message), the optional system-prompt file, the
 per-task env, the cwd, the cancel check, ``task_cgroup``, ``on_pid``, and
-``native_sandbox_wrap`` — the sandbox under the *native* profile. The last three
+``tool_server_wrap`` — the tool server's sandbox. The last three
 go to one place: the tool server this brain spawns once per attempt
-(``session/tools/remote.py``), wrapped by that profile, placed in the cgroup
+(``session/tools/remote.py``), wrapped by it, placed in the cgroup
 from ``preexec_fn``, and reported through ``on_pid`` as the pid ``!stop``, the
 web cancel endpoint and ``host_pressure.read_sandbox_shm`` reach for. Before
 that server existed this brain called ``on_pid`` never, so every native task
 carried ``worker_pid`` 0.
 
-What it still ignores: ``sandbox_wrap`` (the *Claude* profile — that namespace
-carries the `claude` CLI's runtime state and its credential, which this brain's
-tools have no use for and must not be handed, ISSUE-389) and ``result_file``.
+What it still ignores: ``harness`` and ``result_file``.
 
 Wired here: compaction via the loop's ``prepare_next_turn`` hook, output-aware
 loop detection + a max-turns cap as composable stop conditions, transient-error

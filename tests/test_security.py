@@ -39,6 +39,8 @@ from istota.sandbox.shell_exec import PIPEFAIL_SHELLOPTS, SHELLOPTS_VAR
 from istota.skills._env import EnvContext, build_identity_env, build_skill_env
 from istota.skills._types import EnvSpec, SkillMeta
 
+pytestmark = pytest.mark.usefixtures("cli_without_tool_server")
+
 
 class TestBuildCleanEnv:
     def test_returns_minimal_env(self):

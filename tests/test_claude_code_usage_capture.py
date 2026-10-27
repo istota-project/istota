@@ -114,7 +114,7 @@ FULL_STREAM = [_init(), _REQ_1, _TOOL_USE, _REQ_2, _RESULT]
 def _run(lines, *, on_progress=None, returncode=0, tmp_path=None):
     req = BrainRequest(
         prompt="hi",
-        allowed_tools=["Bash"],
+        allowed_tools=[],
         cwd=tmp_path or Path("/tmp"),
         env={},
         timeout_seconds=60,
@@ -309,7 +309,7 @@ class TestRetryWrapperKeepsUsage:
         ):
             result = ClaudeCodeBrain().execute(
                 BrainRequest(
-                    prompt="hi", allowed_tools=["Bash"], cwd=tmp_path, env={},
+                    prompt="hi", allowed_tools=[], cwd=tmp_path, env={},
                     timeout_seconds=60, streaming=True,
                 )
             )
@@ -333,7 +333,7 @@ class TestRetryWrapperKeepsUsage:
         ):
             result = ClaudeCodeBrain().execute(
                 BrainRequest(
-                    prompt="hi", allowed_tools=["Bash"], cwd=tmp_path, env={},
+                    prompt="hi", allowed_tools=[], cwd=tmp_path, env={},
                     timeout_seconds=60, streaming=True,
                 )
             )

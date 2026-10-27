@@ -58,7 +58,8 @@ class HarnessSpec:
     """What the executor hands a CLI brain to run its tools in the tool server.
 
     Built by the executor because ``ClaudeCodeBrain`` sees only its own config
-    block. ``BrainRequest.harness`` is ``None`` for the old path.
+    block. ``BrainRequest.harness`` is ``None`` on a text-only request; a
+    ``claude_code`` request with tools and no harness is refused.
     """
 
     # The CLI's whole environment.
@@ -67,7 +68,6 @@ class HarnessSpec:
     # harness makes its own directory under it.
     harness_root: Path
     bash_spill_full_output: bool = True
-    cli_version: str = ""
     # The daemon-side WebFetch the bridge offers, from `[brain.native.web_fetch]`;
     # `None` when the grant leaves it out or the tool is disabled.
     web_fetch: "WebFetchPolicy | None" = None
@@ -201,45 +201,29 @@ class BrainRequest:
     # `on_pid` at all.
     task_cgroup: Path | None = None
 
-    # Wraps a command list (e.g. for bubblewrap sandboxing). The brain
-    # builds its raw command, then calls sandbox_wrap(cmd) before exec
-    # if provided. Returning the cmd unchanged is the no-op default.
+    # Wraps the tool server's command (bubblewrap): the brain builds the raw
+    # command and calls tool_server_wrap(cmd) before exec. Returning the cmd
+    # unchanged is the no-op default. The namespace has no Claude runtime, no
+    # credential and no system-prompt bind; NativeBrain's tool server and the
+    # CLI tool harness's are the same process, so one wrap serves both.
     #
-    # This one is the *Claude* profile: the namespace it builds carries the
-    # `claude` CLI's own runtime state — its binary directory, its installed
-    # versions, its lock directory, its credential and its session logs —
-    # because the process being wrapped is that CLI. ClaudeCodeBrain reads it;
-    # nothing else should.
-    sandbox_wrap: Callable[[list[str]], list[str]] | None = None
-
-    # The same sandbox under the *native* profile: istota's own code is the
-    # outer process, so the namespace has no Claude runtime block, no
-    # credential and no system-prompt bind (`executor.SandboxProfile`). Read by
-    # NativeBrain, for the commands its Bash tool runs.
-    #
-    # **Two fields rather than one field plus a profile argument**, and the
-    # reason is structural rather than stylistic. `executor._run_fallback`
-    # copies the request with `dataclasses.replace(req, model=…, effort=…,
-    # advisor=…, is_fallback=True)`, which names neither of these — so on the
-    # shipped `claude_code -> native` reroute a single wrap field would carry
-    # the Claude profile straight into NativeBrain, handing the model's Bash
-    # tool the credential the split exists to withhold (ISSUE-389). Two names
-    # each carry across harmlessly, because each brain reads only its own.
-    native_sandbox_wrap: Callable[[list[str]], list[str]] | None = None
+    # There used to be a second field, the CLAUDE profile around the `claude`
+    # CLI itself, and two fields so that a reroute could not carry the wrong
+    # profile across (ISSUE-389). The CLI runs outside the sandbox now, so
+    # there is one wrap and nothing to carry wrongly.
+    tool_server_wrap: Callable[[list[str]], list[str]] | None = None
 
     # Run the CLI unwrapped with its tools in the tool server
-    # (`brain/_tool_harness.py`). `None` is the old path. The reroute's
-    # `dataclasses.replace` does not name it, so it crosses unchanged and only
-    # ClaudeCodeBrain reads it.
+    # (`brain/_tool_harness.py`). Set on every `claude_code` request with
+    # tools; a text-only request has none. The reroute's `dataclasses.replace`
+    # does not name it, so it crosses unchanged and only ClaudeCodeBrain reads
+    # it.
     harness: HarnessSpec | None = None
 
-    # Filesystem confinement for in-process file tools (NativeBrain only; NB-1).
-    # ClaudeCodeBrain ignores these — its tools run inside
-    # bwrap, which already confines the filesystem. NativeBrain's Read/Write/
-    # Edit/Grep/Glob run in the daemon process (no bwrap), so the executor
-    # passes the same user-data roots bwrap would bind and the file tools
-    # enforce them. ``None`` = unconfined (dev / unsandboxed), matching the
-    # claude_code path's own posture where bwrap is unavailable.
+    # Filesystem roots for the tool server's file tools (NB-1), on either
+    # brain. Under bwrap they are the error-message layer above the namespace;
+    # without it they are the only confinement. ``None`` = unconfined
+    # (dev / unsandboxed).
     fs_read_roots: list[Path] | None = None
     fs_write_roots: list[Path] | None = None
     # RO carve-outs nested inside a write root — bwrap expresses these by

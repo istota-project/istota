@@ -987,8 +987,7 @@ class TestTheReviewerRequest:
         assert run_dir.resolve().parent == (tmp_path / "temp" / ".review" / "admin").resolve()
         assert run_dir.name.startswith("run-")
         assert Path(req.cwd) == run_dir / "tree"
-        assert req.native_sandbox_wrap is not None
-        assert req.sandbox_wrap is None
+        assert req.tool_server_wrap is not None
         # The stub brain is no `claude_code` one, so no harness is built.
         assert req.harness is None
         assert seen["tree_files"] == ["AGENTS.md", "app.py"]
@@ -1033,8 +1032,8 @@ class TestTheReviewerRequest:
         tooled, reformat = stub_brain.requests
         assert tooled.allowed_tools == ["Read", "Grep", "Glob"]
         assert reformat.allowed_tools == []
-        assert reformat.sandbox_wrap is None
-        assert reformat.native_sandbox_wrap is None
+        assert reformat.tool_server_wrap is None
+        assert reformat.tool_server_wrap is None
         assert reformat.harness is None
         assert not reformat.fs_read_roots
 
@@ -1056,7 +1055,7 @@ class TestTheReviewerRequest:
         assert tooled.harness.harness_root == (
             (tmp_path / "temp").resolve() / ".harness" / "admin" / "task_0"
         )
-        assert tooled.native_sandbox_wrap is not None
+        assert tooled.tool_server_wrap is not None
         assert tooled.fs_read_roots and Path(tooled.fs_read_roots[0]).name.startswith("run-")
         assert reformat.harness is None
 

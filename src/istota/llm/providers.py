@@ -572,9 +572,8 @@ def cli_credential_env(
 ) -> dict[str, str]:
     """The credential names a `claude` CLI process gets for ``mode``.
 
-    The one place that decides it: `executor.build_model_cli_env`,
-    `executor.build_harness_cli_env` and the old in-sandbox CLI path's request
-    env all call this. No task env carries the result, so the model's tools
+    The one place that decides it: `executor.build_model_cli_env` and
+    `executor.build_harness_cli_env` both call this. No task env carries the result, so the model's tools
     never see it. ``user_id``'s own `anthropic` key under "api_key".
     """
     return cli_auth_env(config, mode, user_id)

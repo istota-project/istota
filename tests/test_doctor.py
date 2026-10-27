@@ -1635,8 +1635,7 @@ class TestModelExecution:
         # Unwrapped, so no roots: the harness reads roots with no wrap as a
         # sandboxed shape missing its wrap, and refuses.
         assert req.fs_read_roots is None and req.fs_write_roots is None
-        assert req.native_sandbox_wrap is None
-        assert req.sandbox_wrap is None
+        assert req.tool_server_wrap is None
 
     def test_an_answer_without_a_bash_call_fails(
         self, make_config, make_user_config, monkeypatch
@@ -1806,7 +1805,7 @@ class TestModelExecution:
         monkeypatch.setattr(executor, "build_bwrap_cmd", _must_not_wrap)
         brain = self._stub(monkeypatch)
         assert self._run(self._config(make_config, make_user_config)).status == OK
-        assert brain.requests[0].native_sandbox_wrap is None
+        assert brain.requests[0].tool_server_wrap is None
 
     def test_wraps_the_tool_server_natively_when_the_sandbox_is_effective(
         self, make_config, make_user_config, monkeypatch
@@ -1832,13 +1831,12 @@ class TestModelExecution:
         assert self._run(config).status == OK
 
         req = brain.requests[0]
-        assert req.native_sandbox_wrap(["tool-server"]) == ["bwrap", "--", "tool-server"]
+        assert req.tool_server_wrap(["tool-server"]) == ["bwrap", "--", "tool-server"]
         assert seen["profile"] == SandboxProfile.NATIVE
         assert seen["task"].user_id == "alice"
         assert seen["user_temp_dir"] == user_temp
         assert req.cwd == user_temp
         assert req.fs_read_roots == req.fs_write_roots == [user_temp]
-        assert req.sandbox_wrap is None
 
     def test_env_comes_from_build_model_cli_env(
         self, make_config, make_user_config, monkeypatch
@@ -6323,58 +6321,6 @@ class TestSandboxMasksUsesTheNativeProfile:
         # `_mask_dir` skips a candidate an earlier mask already covers, so the
         # module root is asserted covered rather than masked on its own.
         assert config.module_db_root().resolve().is_relative_to(db_dir)
-
-    def test_everything_the_probe_reads_is_identical_under_both_profiles(
-        self, make_config, monkeypatch, claude_home, tmp_path,
-    ):
-        """Rebuilds the same argv under CLAUDE and compares the masks and the
-        system binds, so a profile-dependent change shows here before the
-        Linux tier."""
-        import tempfile
-
-        from istota import db
-        from istota.executor import SandboxProfile, build_bwrap_cmd
-
-        _, native_cmd, config = self._run_and_capture(
-            make_config, monkeypatch, tmp_path,
-        )
-        task = db.Task(
-            id=0, status="running", source_type="doctor", user_id="doctor", prompt="",
-        )
-        script = native_cmd[native_cmd.index("--") + 3]
-        with tempfile.TemporaryDirectory(prefix="istota-doctor-probe-") as user_temp:
-            claude_cmd = build_bwrap_cmd(
-                ["/bin/sh", "-c", script], config, task, is_admin=False,
-                user_resources=[], user_temp_dir=Path(user_temp),
-                profile=SandboxProfile.CLAUDE,
-            )
-
-        def _masks(argv):
-            """Every tmpfs/remount-ro after the last bind. Not every `--tmpfs`:
-            `/tmp` is mounted early, and under CLAUDE so is the `~/.claude`
-            base this profile deliberately drops."""
-            last_bind = max(
-                (i for i, a in enumerate(argv) if a in ("--bind", "--ro-bind")),
-                default=-1,
-            )
-            return [
-                (argv[i], argv[i + 1]) for i in range(last_bind + 1, len(argv) - 1)
-                if argv[i] in ("--tmpfs", "--remount-ro")
-            ]
-
-        def _system_binds(argv):
-            return [
-                (argv[i], argv[i + 1], argv[i + 2])
-                for i, a in enumerate(argv)
-                if a in ("--ro-bind", "--symlink")
-                and argv[i + 1].startswith(("/usr", "/bin", "/lib", "/sbin", "/etc"))
-            ]
-
-        # The user temp dir differs between the two calls, so compare the two
-        # families the verdict actually reads.
-        assert _masks(native_cmd) == _masks(claude_cmd)
-        assert _system_binds(native_cmd) == _system_binds(claude_cmd)
-        assert native_cmd[native_cmd.index("--"):][:3] == ["--", "/bin/sh", "-c"]
 
 
 class TestVerdict:

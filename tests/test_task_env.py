@@ -1109,7 +1109,7 @@ class TestBrokerTrustSplit:
         for path in runtime.sandbox_env.values():
             assert Path(path).is_relative_to(runtime_inputs["control_dir"])
             assert "PRIVATE KEY" not in Path(path).read_text()
-        for profile in (SandboxProfile.CLAUDE, SandboxProfile.NATIVE):
+        for profile in (SandboxProfile.NATIVE,):
             argv = executor.build_bwrap_cmd(
                 ["echo", "ok"], config, runtime_inputs["task"], True, [],
                 runtime_inputs["user_temp_dir"], net_proxy_sock=runtime.net_proxy_sock,

@@ -3,9 +3,8 @@
 Since cli-brain-tools part 2, Stage 5, no task env carries the CLI's
 credential: `executor.build_clean_env` names the mode only, and the CLI's own
 env builders add the credential through `llm.providers.cli_credential_env`.
-While `[brain] tool_harness` is off the old in-sandbox CLI still gets it in
-`req.env`, and the strips below stay as defence in depth either way. The
-history they answer follows.
+The CLI runs outside the sandbox on the tool harness, and the strips below
+stay as defence in depth. The history they answer follows.
 
 `executor.build_clean_env` copied `CLAUDE_CODE_OAUTH_TOKEN` out of the daemon's
 environment into **every** task's env, for every brain, because
@@ -18,10 +17,9 @@ route out: `echo "$CLAUDE_CODE_OAUTH_TOKEN"` in a Bash call comes back as a
 is a provider boundary wherever that is not the credential's own issuer
 (ISSUE-390).
 
-This is the environment counterpart of the Claude-only *mount* block. ISSUE-389
-split those, putting `~/.claude/.credentials.json` and its neighbours behind
-`SandboxProfile.CLAUDE`; mounts and environment are separate mechanisms and the
-mount split never addressed the second one.
+This is the environment counterpart of the Claude-only *mount* block that
+ISSUE-389 split out and the CLI harness removed; mounts and environment are
+separate mechanisms and the mount split never addressed the second one.
 
 **A name list rather than a `CLAUDE_*` prefix rule.** A prefix would also
 swallow an operator's own `security.passthrough_env_vars` entry, and what an

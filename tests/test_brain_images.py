@@ -19,7 +19,7 @@ from unittest.mock import patch
 import pytest
 
 from istota.brain import BrainRequest, ClaudeCodeBrain
-from istota.brain._types import ImageInput
+from istota.brain._types import HarnessSpec, ImageInput
 from istota.brain.claude_code import (
     IMAGE_DIRECTIVE_HEADER,
     IMAGE_OMITTED_HEADER,
@@ -27,6 +27,8 @@ from istota.brain.claude_code import (
     build_image_prompt,
     is_image_payload_rejection,
 )
+
+pytestmark = pytest.mark.usefixtures("cli_without_tool_server")
 
 
 def _image(tmp_path: Path, name: str = "shot.png") -> ImageInput:
@@ -46,6 +48,11 @@ def _req(tmp_path, *, images=(), allowed_tools=("Read", "Bash"), prompt="What is
         timeout_seconds=60,
         streaming=False,
         images=list(images),
+        # A tool grant runs on the harness; `cli_without_tool_server` runs the
+        # CLI's own path in its place, against the stubbed subprocess.
+        harness=(
+            HarnessSpec(cli_env={}, harness_root=tmp_path) if allowed_tools else None
+        ),
     )
 
 

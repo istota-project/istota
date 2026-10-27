@@ -99,10 +99,6 @@ features = []
 # it to its own. Formerly a top-level key, which still loads.
 # custom_system_prompt = false
 #
-# Temporary, to be removed: run a claude_code task's tools in the tool server
-# under the sandbox while the claude CLI itself runs outside it. Off by default.
-# tool_harness = false
-#
 # Native-brain settings (only used when kind = "native", or via a routing
 # override below). The endpoint and its key are a provider's ([providers.<id>]
 # further down); native names the one it uses, and has no default.
