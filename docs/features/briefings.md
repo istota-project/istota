@@ -179,6 +179,69 @@ A briefing consumes a shared block with a `shared_block` source:
 
 `max_age_hours` is a **freshness window** independent of the block's own generation cron: if the shared block hasn't regenerated in time, the consuming section is simply omitted (fail-soft), never blocked-on. Omit it for no freshness check.
 
+### Agent blocks
+
+A synthesis block makes one model call over text gathered beforehand. It cannot follow a link into an article, check a detail, or retry a page that failed. An agent block can. Its directive is a task prompt, and the block is whatever the task answers. Use one for a digest that today runs as a CRON.md prompt job publishing to `shared_kv`.
+
+```toml
+[[briefings.shared_blocks]]
+name = "world-headlines-agent"
+cron = "50 5,17 * * *"            # in [briefings] shared_block_timezone
+title = "World headlines"
+render_mode = "agent"
+directive = """
+Read the front pages listed below and write a linked digest of the top stories...
+"""
+```
+
+An agent block has a non-empty directive, no sources and no `trusted` flag. Its content is always stored untrusted, because it is model text written over arbitrary web pages. An entry that breaks these rules is dropped when the config loads, and refused by the web editor, `istota briefings shared ensure` and `istota apply`.
+
+In the web UI, choose Agent as the render mode in Briefings → Settings → Shared blocks. The editor hides the sources and the trusted toggle and shows a Task prompt field. Edits made there, or from chat, take effect at the next cron slot without a restart.
+
+#### What the task has
+
+The block's cron queues an ordinary background task under the reserved `__briefings__` identity, the same kind of sandboxed research task group briefings use. The task has:
+
+- the browse skill, limited to `render`, `get`, `links`, `extract` and `close`, on the anonymous Briefings browser profile;
+- its own temp directory for scratch files;
+- the date and time in `[briefings] shared_block_timezone`, the clock the block's cron runs on, rather than UTC.
+
+It does not have scroll or any other interactive browsing, a user's workspace, `kv`, memory, USER.md, room context or email. A prompt that needs any of those, such as one that reads a workspace file or deduplicates through `kv` across weeks, has to stay a cron job.
+
+The task's answer is published verbatim as the block. The system prompt already tells the task this, and tells it to answer with the content only: no preamble, no JSON envelope, no closing remarks. A converted prompt does not need to repeat that.
+
+#### Runs and failures
+
+A finished task is picked up on the scheduler's next pass. A non-empty answer replaces the block. An empty answer, an answer with no final response, or a failed task keeps the prior content. If the block was deleted or switched away from agent mode while its task ran, nothing is written. A cron slot or Run now that arrives while the previous task is still running starts no second task.
+
+After three runs in a row that produce nothing usable, the operator gets one alert. The block stays enabled, and a reader's `max_age_hours` drops a stale section in the meantime.
+
+The Shared blocks card shows the task while it runs ("queued, task #N") and then its outcome and time. Run now answers at once that the task was queued, then keeps following the task until its outcome is in.
+
+Every `__briefings__` task shares one background worker: group research, group generation and delivery, and every agent block. A news digest can take 10 to 20 minutes, and anything queued behind it waits. Space agent block crons apart by at least the expected run length.
+
+#### Editing the prompt from chat
+
+An admin can ask the bot to read or change a block's prompt, the way a prompt file for a cron job is tuned today. The bot uses two `briefings_config` verbs:
+
+```bash
+istota-skill briefings_config shared-block show world-headlines-agent
+istota-skill briefings_config shared-block set-prompt world-headlines-agent --prompt-file prompt.md
+```
+
+`show` prints the definition, with the full directive and the last run state. `set-prompt` reads the new directive from a file the task wrote, validates it, and changes only the directive. Both are refused for a user who may not write shared content.
+
+#### Converting a cron digest prompt
+
+Paste the prompt file into the directive, then:
+
+1. Delete any setup of a scratch directory under a user's tmp path. The task has its own temp directory.
+2. Delete instructions about delivery ("the scheduler posts this to the right channel") and about the output envelope (JSON wrapping, no preamble). The system prompt covers both.
+3. Delete fallbacks that use interactive browsing, such as `browse interact --scroll` or a CSS-selector fallback for `browse links`.
+4. Copy into the prompt any USER.md guidance the job relied on, for example how to get past a paywall. The task does not read USER.md.
+
+Run it once with Run now and compare the result with the value the cron job publishes before pointing briefings at the new block and retiring the job.
+
 ### External-script curation (the escape hatch)
 
 For content the module doesn't ship a generator for, write into the shared-block namespace (`briefing_shared_blocks`) directly from an admin CRON `command:` job (running as an admin user):
