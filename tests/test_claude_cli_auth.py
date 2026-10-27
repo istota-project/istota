@@ -30,7 +30,6 @@ from istota.llm.providers import (
     resolve_cli_auth,
     resolve_process_auth,
     strip_model_credentials,
-    strip_unselected_cli_credentials,
 )
 
 OAUTH = "OAUTH-SENTINEL"
@@ -190,20 +189,29 @@ class TestTheCliEnv:
 
 
 class TestTheEnvBuilders:
-    """`build_clean_env` and `build_model_cli_env` agree with `cli_auth_env`
-    and top up no credential or endpoint name from the process environment."""
+    """`build_clean_env` carries the mode's name and no credential; the CLI
+    env builders (`build_model_cli_env`, `build_harness_cli_env`) carry the
+    mode's credential through `cli_credential_env`. None tops up a credential
+    or endpoint name from the process environment."""
 
     def _env(self, config, environ):
-        from istota.executor import build_clean_env, build_model_cli_env
+        from istota.executor import build_clean_env, build_harness_cli_env, build_model_cli_env
 
         with patch.dict(os.environ, {"PATH": "/usr/bin", "HOME": "/home/t", **environ}, clear=True):
-            return build_clean_env(config), build_model_cli_env(config)
+            return (
+                build_clean_env(config),
+                build_model_cli_env(config),
+                build_harness_cli_env(config, "alice", timeout_seconds=60),
+            )
 
     def test_subscription_ignores_every_api_key_in_the_daemon_env(self):
         config = _doc("subscription")
-        for env in self._env(config, {"CLAUDE_CODE_OAUTH_TOKEN": OAUTH, "ANTHROPIC_API_KEY": OTHER,
-                                      "ANTHROPIC_BASE_URL": "http://elsewhere",
-                                      "ANTHROPIC_AUTH_TOKEN": OTHER}):
+        clean, *cli_envs = self._env(config, {"CLAUDE_CODE_OAUTH_TOKEN": OAUTH, "ANTHROPIC_API_KEY": OTHER,
+                                               "ANTHROPIC_BASE_URL": "http://elsewhere",
+                                               "ANTHROPIC_AUTH_TOKEN": OTHER})
+        assert clean["ISTOTA_CLI_AUTH"] == "subscription"
+        assert not any(is_model_credential_name(k) for k in clean)
+        for env in cli_envs:
             assert env["CLAUDE_CODE_OAUTH_TOKEN"] == OAUTH
             assert env["ISTOTA_CLI_AUTH"] == "subscription"
             for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):
@@ -211,14 +219,26 @@ class TestTheEnvBuilders:
 
     def test_api_key_carries_the_config_key_never_the_token(self):
         config = _with_key("api_key")
-        for env in self._env(config, {"CLAUDE_CODE_OAUTH_TOKEN": OAUTH, "ANTHROPIC_API_KEY": OTHER}):
+        clean, *cli_envs = self._env(config, {"CLAUDE_CODE_OAUTH_TOKEN": OAUTH, "ANTHROPIC_API_KEY": OTHER})
+        assert clean["ISTOTA_CLI_AUTH"] == "api_key"
+        assert not any(is_model_credential_name(k) for k in clean)
+        for env in cli_envs:
             assert env["ANTHROPIC_API_KEY"] == KEY
             assert env["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
             assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
 
+    def test_cli_credential_env_is_the_one_answer(self):
+        from istota.llm.providers import cli_credential_env
+
+        config = _with_key("api_key")
+        assert cli_credential_env(config, "api_key") == cli_auth_env(config, "api_key")
+        with patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": OAUTH}, clear=True):
+            assert cli_credential_env(config, "subscription") == {"CLAUDE_CODE_OAUTH_TOKEN": OAUTH}
+        assert cli_credential_env(config, None) == {}
+
     def test_no_credential_still_builds(self):
         config = _doc(brain={"kind": "native", "native": {"provider": "openrouter"}})
-        clean, model = self._env(config, {})
+        clean, model, _harness = self._env(config, {})
         assert clean["PATH"].endswith("/usr/bin")
         assert not any(is_model_credential_name(k) for k in clean)
         assert not any(is_model_credential_name(k) for k in model)
@@ -226,8 +246,8 @@ class TestTheEnvBuilders:
 
     def test_reachability_names_still_come_through(self):
         config = _doc("subscription")
-        _clean, model = self._env(config, {"HTTPS_PROXY": "http://proxy:3128",
-                                            "SSL_CERT_FILE": "/etc/ca.pem"})
+        _clean, model, _harness = self._env(config, {"HTTPS_PROXY": "http://proxy:3128",
+                                                     "SSL_CERT_FILE": "/etc/ca.pem"})
         assert model["HTTPS_PROXY"] == "http://proxy:3128"
         assert model["SSL_CERT_FILE"] == "/etc/ca.pem"
 
@@ -236,11 +256,12 @@ class TestTheEnvBuilders:
         config = _with_key(mode)
         config.security = SecurityConfig(passthrough_env_vars=list(MODEL_NAMES) + ["MY_VAR"])
         with caplog.at_level(logging.WARNING, logger="istota.executor"):
-            clean, _model = self._env(config, {name: OTHER for name in MODEL_NAMES} | {"MY_VAR": "kept"})
+            clean, model, _harness = self._env(config, {name: OTHER for name in MODEL_NAMES} | {"MY_VAR": "kept"})
         assert clean["MY_VAR"] == "kept"
+        assert not {k for k, v in clean.items() if v == OTHER}
         # Under "subscription" the token is the mode's own credential, read
-        # from the environment by `cli_auth_env`; nothing else came through.
-        carried = {k for k, v in clean.items() if v == OTHER}
+        # from the environment by `cli_credential_env`; nothing else came through.
+        carried = {k for k, v in model.items() if v == OTHER}
         assert carried == ({"CLAUDE_CODE_OAUTH_TOKEN"} if mode == "subscription" else set())
         assert "passthrough_env_vars" in caplog.text
 
@@ -251,21 +272,6 @@ class TestTheStrips:
 
         assert {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
                 "ANTHROPIC_BASE_URL"} <= CLAUDE_RUNTIME_ENV_VARS
-
-    def test_unselected_names_go_and_the_modes_value_is_restored(self):
-        env = {
-            "PATH": "/bin",
-            "CLAUDE_CODE_OAUTH_TOKEN": OTHER,         # a hook added it under api_key
-            "ANTHROPIC_API_KEY": OTHER,               # a merge replaced the mode's value
-            "ISTOTA_PROVIDER_OPENROUTER_API_KEY": OTHER,
-        }
-        out = strip_unselected_cli_credentials(env, "api_key", {"ANTHROPIC_API_KEY": KEY})
-        assert out == {"PATH": "/bin", "ANTHROPIC_API_KEY": KEY}
-
-    def test_subscription_keeps_only_the_token(self):
-        env = {"ANTHROPIC_API_KEY": OTHER, "CLAUDE_CODE_OAUTH_TOKEN": OTHER, "X": "1"}
-        out = strip_unselected_cli_credentials(env, "subscription", {"CLAUDE_CODE_OAUTH_TOKEN": OAUTH})
-        assert out == {"CLAUDE_CODE_OAUTH_TOKEN": OAUTH, "X": "1"}
 
     def test_strip_model_credentials_adds_nothing(self):
         env = {name: OTHER for name in MODEL_NAMES} | {"KEEP": "1"}
@@ -620,7 +626,19 @@ class TestTheDoctorCheck:
 
 
 class TestTheAllowlist:
-    def test_api_key_adds_the_providers_host(self):
+    """Under "api_key" the provider's base-URL host was on every task's
+    allowlist so the in-sandbox CLI could reach it. On the harness the CLI is
+    outside the sandbox and nothing in it calls the model (Stage 5)."""
+
+    def test_the_harness_adds_no_provider_host(self):
+        from istota.executor import _build_network_allowlist
+
+        config = _with_key("api_key", base_url="https://gateway.example:8443",
+                           brain={"tool_harness": True})
+        resolve_process_auth(config, {})
+        assert not any("gateway.example" in h for h in _build_network_allowlist(config, []))
+
+    def test_the_old_cli_path_still_adds_it_under_api_key(self):
         from istota.executor import _build_network_allowlist
 
         config = _with_key("api_key", base_url="https://gateway.example:8443")

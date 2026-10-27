@@ -1114,11 +1114,29 @@ class TestBuildNetworkAllowlist:
         network = NetworkConfig(**net_kw) if net_kw else NetworkConfig()
         return Config(security=SecurityConfig(network=network), **overrides)
 
-    def test_default_hosts_always_present(self):
+    def test_no_anthropic_host_on_the_harness(self):
+        """Nothing in the sandbox talks to Anthropic once the CLI runs outside
+        it (cli-brain-tools part 2, Stage 5)."""
+        config = self._make_config(allow_pypi=False)
+        config.brain.tool_harness = True
+        hosts = _build_network_allowlist(config, [])
+        assert not any("anthropic.com" in h for h in hosts)
+        assert hosts == set()
+
+    def test_the_old_cli_path_keeps_them_until_the_switch_goes(self):
+        """With `[brain] tool_harness` off the CLI still runs in the sandbox
+        and reaches the model from there. Removed with the switch (Stage 6)."""
         config = self._make_config()
+        config.brain.tool_harness = False
         hosts = _build_network_allowlist(config, [])
         assert "api.anthropic.com:443" in hosts
         assert "mcp-proxy.anthropic.com:443" in hosts
+
+    def test_extra_hosts_restore_anthropic_for_a_task_that_needs_it(self):
+        config = self._make_config(allow_pypi=False, extra_hosts=["api.anthropic.com:443"])
+        config.brain.tool_harness = True
+        hosts = _build_network_allowlist(config, [])
+        assert hosts == {"api.anthropic.com:443"}
 
     def test_pypi_hosts_when_allowed(self):
         config = self._make_config(allow_pypi=True)

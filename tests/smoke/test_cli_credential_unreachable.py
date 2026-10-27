@@ -25,15 +25,16 @@ shows the CLI did hold it, so an absence in the tools' view is not a
 credential that was never configured.
 
 **Arms.** By default the switch is on (`[brain] tool_harness = true`), and
-everything is green except the connect: `api.anthropic.com:443` is still on
-the default allowlist until the spec's Stage 5 takes it off, so that test is
-a strict xfail. `ISTOTA_CLI_WITNESS_CONTROL=switch-off` runs the same probes
-with the switch off: the negative control, which must go red on the credential
-file (subscription), `env` and `/proc` in both modes.
+everything is green, the connect included: since the spec's Stage 5 the
+Anthropic hosts are on no allowlist while the harness is on, and the task env
+carries no credential. `ISTOTA_CLI_WITNESS_CONTROL=switch-off` runs the same
+probes with the switch off: the negative control, which must go red on the
+credential file (subscription), `env`, `/proc` and the connect in both modes,
+since the old path still hands its wrapped CLI the credential in `req.env`
+and the hosts on the allowlist.
 
-Stage 5 of the cli-brain-tools-only-path spec removes the xfail; Stage 6
-removes the old path, after which the switch-off arm cannot run and moves to
-a negative-control script.
+Stage 6 of the cli-brain-tools-only-path spec removes the old path, after
+which the switch-off arm cannot run and moves to a negative-control script.
 
 The fake and its plan go in `$HOME/.local/bin`, the one directory the CLAUDE
 profile binds that is on the task's `PATH` and holds no system binary, so the
@@ -259,11 +260,6 @@ class TestTheCliCredentialIsOutOfTheToolsReach:
     def test_no_result_carries_it(self, witness):
         assert witness["value"] not in witness["output"], _show(witness)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="api.anthropic.com:443 stays on the default allowlist until the "
-        "cli-brain-tools-only-path spec's Stage 5, which removes this marker",
-    )
     def test_the_anthropic_connect_is_refused(self, witness):
         # `%{http_connect}` is the proxy's answer to CONNECT: 403 is the
         # allowlist's refusal, 200 a tunnel, 502 an allowed host it could not

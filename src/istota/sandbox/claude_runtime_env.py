@@ -1,6 +1,13 @@
 """What a task environment carries only because the outer process is `claude`.
 
-`executor.build_clean_env` copies `CLAUDE_CODE_OAUTH_TOKEN` out of the daemon's
+Since cli-brain-tools part 2, Stage 5, no task env carries the CLI's
+credential: `executor.build_clean_env` names the mode only, and the CLI's own
+env builders add the credential through `llm.providers.cli_credential_env`.
+While `[brain] tool_harness` is off the old in-sandbox CLI still gets it in
+`req.env`, and the strips below stay as defence in depth either way. The
+history they answer follows.
+
+`executor.build_clean_env` copied `CLAUDE_CODE_OAUTH_TOKEN` out of the daemon's
 environment into **every** task's env, for every brain, because
 `ClaudeCodeBrain` authenticates with it: its outer process is the `claude`
 CLI. `NativeBrain` is not —
@@ -20,8 +27,9 @@ mount split never addressed the second one.
 swallow an operator's own `security.passthrough_env_vars` entry, and what an
 operator put in that list on purpose is their decision, not this module's. The
 drift a name list buys is covered mechanically instead:
-`tests/test_security.py::TestBuildCleanEnv` requires every Claude-family or
-credential-shaped key `build_clean_env` puts in a task env to be named here.
+`tests/test_security.py::TestBuildCleanEnv` requires `build_clean_env` to put
+no Claude-family or credential-shaped key in a task env, and every such key
+`build_model_cli_env` adds to be named here.
 
 **What this is not.** It is not a general credential filter. The skill
 credentials — `NC_PASS`, the mail passwords, the forge tokens — are taken out of

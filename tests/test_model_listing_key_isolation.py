@@ -126,6 +126,9 @@ def _every_env(config, make_task, monkeypatch, tmp_path) -> dict[str, dict]:
     envs: dict[str, dict] = {}
     envs["build_clean_env"] = executor.build_clean_env(config)
     envs["build_model_cli_env"] = executor.build_model_cli_env(config)
+    envs["build_harness_cli_env"] = executor.build_harness_cli_env(
+        config, "alice", timeout_seconds=60,
+    )
     envs["build_stripped_env"] = executor.build_stripped_env()
 
     # The hook dispatcher iterates modules with a skill_dir; give the echoer one.
@@ -185,10 +188,11 @@ def test_each_sentinel_appears_only_where_its_mode_carries_it(world, mode, monke
     # Positive controls: the hook and the manifest still deliver what is not a
     # model credential, and the mode's own credential reaches the CLI env.
     assert envs["task_env"].get("HOOK_OK") == "1"
-    if mode == "subscription":
-        assert envs["build_clean_env"]["CLAUDE_CODE_OAUTH_TOKEN"] == OAUTH
-    else:
-        assert envs["build_clean_env"]["ANTHROPIC_API_KEY"] == ANTHROPIC_KEY
+    for cli_env in ("build_model_cli_env", "build_harness_cli_env"):
+        if mode == "subscription":
+            assert envs[cli_env]["CLAUDE_CODE_OAUTH_TOKEN"] == OAUTH
+        else:
+            assert envs[cli_env]["ANTHROPIC_API_KEY"] == ANTHROPIC_KEY
 
     for name, env in envs.items():
         assert not _carries(env, LISTING), name
@@ -201,22 +205,25 @@ def test_each_sentinel_appears_only_where_its_mode_carries_it(world, mode, monke
 
     # The anthropic key: the CLI's own env and the reviewer's copy, under
     # "api_key", and nowhere a skill other than the reviewer runs.
-    allowed_anthropic = {"build_clean_env", "build_model_cli_env", "task_env",
+    allowed_anthropic = {"build_model_cli_env", "build_harness_cli_env",
                          "skill:code_review", "scheduler_skill_task:code_review"}
     for name, env in envs.items():
         if mode == "subscription" or name not in allowed_anthropic:
             assert not _carries(env, ANTHROPIC_KEY), name
 
     # The token: the CLI env and the reviewer's copy, under "subscription".
-    allowed_token = {"build_clean_env", "build_model_cli_env", "task_env",
+    # Neither a task env nor the clean env it starts from carries either
+    # credential since the CLI left the sandbox (cli-brain-tools part 2,
+    # Stage 5).
+    allowed_token = {"build_model_cli_env", "build_harness_cli_env",
                      "skill:code_review", "scheduler_skill_task:code_review"}
     for name, env in envs.items():
         if name not in allowed_token:
             assert not _carries(env, OAUTH), name
 
     # No model credential name survives into an env that carries none.
-    for name in ("build_stripped_env", "heartbeat", "skill_proxy_base_env",
-                 "scheduler_skill_task:kv"):
+    for name in ("build_clean_env", "task_env", "build_stripped_env", "heartbeat",
+                 "skill_proxy_base_env", "scheduler_skill_task:kv"):
         assert not [k for k in envs[name] if is_model_credential_name(k)], name
 
 

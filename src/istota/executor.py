@@ -41,7 +41,7 @@ from istota.sandbox.claude_runtime_env import (
 from .llm.providers import (
     CLI_AUTH_VARIABLE,
     anthropic_spec,
-    cli_auth_env,
+    cli_credential_env,
     is_model_credential_name,
     process_cli_auth,
 )
@@ -3504,14 +3504,16 @@ def _bwrap_supports_remount_ro() -> bool:
     return supported
 
 
-def build_clean_env(config: Config, *, user_id: str | None = None) -> dict[str, str]:
-    """Build minimal environment for Claude subprocess.
+def build_clean_env(config: Config) -> dict[str, str]:
+    """Build the minimal environment every task and model subprocess starts from.
 
     Returns a restricted env (PATH, HOME, PYTHONUNBUFFERED) plus any
-    configured passthrough vars, plus the `claude` CLI's credential for this
-    process's auth mode (`llm.providers.cli_auth_env`; ``user_id``'s own
-    `anthropic` key under "api_key"). Skill credentials are injected per-task
-    by execute_task() and routed through the skill proxy.
+    configured passthrough vars and the CLI's auth mode (`ISTOTA_CLI_AUTH`,
+    a name, not a secret). Never the CLI's credential: a task env is built
+    from this, and the CLI env builders (`build_model_cli_env`,
+    `build_harness_cli_env`) add it through `llm.providers.cli_credential_env`.
+    Skill credentials are injected per-task by execute_task() and routed
+    through the skill proxy.
     """
     # Ensure the active Python venv bin dir is on PATH so skills can run
     # as `python -m istota.skills.*` inside the sandbox. Use sys.prefix
@@ -3564,15 +3566,10 @@ def build_clean_env(config: Config, *, user_id: str | None = None) -> dict[str, 
         val = os.environ.get(key)
         if val is not None:
             env[key] = val
-    # The CLI's credential for this process's auth mode, by allowlist:
-    # the OAuth token under "subscription", the `anthropic` provider's key and
-    # base URL under "api_key", nothing without a mode. Set for every task
-    # whatever brain will run it, because two of the three brains authenticate
-    # with it; the one that does not takes it back out
-    # (`claude_runtime_env.CLAUDE_RUNTIME_ENV_VARS` names every name this adds,
-    # and `tests/test_security.py` holds that).
+    # The mode's name only. `llm.providers.resolve_cli_auth` reads it in
+    # host-side skill processes; the credential itself stays out of every
+    # task env (cli-brain-tools part 2, Stage 5).
     mode = process_cli_auth(config)
-    env.update(cli_auth_env(config, mode, user_id))
     if mode is not None:
         env[CLI_AUTH_VARIABLE] = mode
     # Propagate the admins-file path (a path, not a secret) so subprocess
@@ -3649,7 +3646,7 @@ _MODEL_CLI_PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
 _MODEL_CLI_TLS_VARS = ("SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
                        "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
 # Where the provider is and how to authenticate to it are not topped up from
-# the daemon's environment: they come from config, through `cli_auth_env`
+# the daemon's environment: they come from config, through `cli_credential_env`
 # (the model-catalogue spec's "CLI auth"). An `ANTHROPIC_API_KEY` exported for
 # another tool used to move a subscription deployment onto API billing here.
 
@@ -3848,9 +3845,12 @@ def build_model_cli_env(config: Config) -> dict[str, str]:
     was counted). The rule rather than the roster: if it sends a prompt to a
     model and there is no task behind it, its env comes from here.
 
-    It is `build_clean_env`'s allowlist plus the names below. Everything else
-    in the daemon environment — the master Fernet key, the Nextcloud app
-    password, every configured service token — stays out.
+    It is `build_clean_env`'s allowlist plus the names below, plus the CLI's
+    credential for this process's auth mode (`llm.providers.cli_credential_env`,
+    the deployment's key under "api_key"), which `build_clean_env` no longer
+    carries. Everything else in the daemon environment — the master Fernet
+    key, the Nextcloud app password, every configured service token — stays
+    out.
 
     **The extra names are a regression fix, not a widening** (ISSUE-395).
     These calls all run in the daemon's own network namespace: they build no
@@ -3870,6 +3870,7 @@ def build_model_cli_env(config: Config) -> dict[str, str]:
         # Presence, not truthiness — see `_MODEL_CLI_PROXY_VARS`.
         if name not in env and name in os.environ:
             env[name] = os.environ[name]
+    env.update(cli_credential_env(config, process_cli_auth(config)))
     return env
 
 
@@ -3903,12 +3904,12 @@ def build_harness_cli_env(
 
     `build_model_cli_env` (the clean allowlist, the proxy and TLS names, the
     mode's credential) with the user's own `anthropic` key laid over it under
-    "api_key", as `sandbox.task_env` does for the task env, plus
+    "api_key" (the same `cli_credential_env`, asked for the user), plus
     `HARNESS_CLI_SWITCHES` and `MCP_TOOL_TIMEOUT`. None of the task's
     `ISTOTA_*` names or proxy sockets: those go to the tool server's hello.
     """
     env = build_model_cli_env(config)
-    env.update(cli_auth_env(config, process_cli_auth(config), user_id))
+    env.update(cli_credential_env(config, process_cli_auth(config), user_id))
     env.update(HARNESS_CLI_SWITCHES)
     timeout_ms = (int(timeout_seconds) + HARNESS_MCP_TIMEOUT_MARGIN_SECONDS) * 1000
     env["MCP_TOOL_TIMEOUT"] = str(timeout_ms)
@@ -4088,10 +4089,39 @@ HOOK_PATH_PREPEND_KEY = "ISTOTA_PATH_PREPEND"
 
 # --- Network proxy allowlist ---
 
-_DEFAULT_NETWORK_HOSTS = frozenset({
+#: Where the old in-sandbox `claude` CLI reaches the model. Nothing in the
+#: sandbox talks to Anthropic once the CLI runs on the tool harness, so these
+#: are on no allowlist by default; they are added only while `[brain]
+#: tool_harness` is off, and go with the switch (cli-brain-tools part 2,
+#: Stage 6). A task that calls Anthropic itself names them in `extra_hosts`.
+_OLD_CLI_PATH_HOSTS = frozenset({
     "api.anthropic.com:443",
     "mcp-proxy.anthropic.com:443",
 })
+
+
+def _old_cli_path_hosts(config: Config) -> set[str]:
+    """The hosts the in-sandbox CLI needs, while the old path still runs.
+
+    Empty with `[brain] tool_harness` on. Off, `_OLD_CLI_PATH_HOSTS` and,
+    under "api_key", the `anthropic` provider's base-URL host, which may be a
+    gateway in front of Anthropic.
+    """
+    if getattr(config.brain, "tool_harness", False):
+        return set()
+    hosts = set(_OLD_CLI_PATH_HOSTS)
+    if process_cli_auth(config) == "api_key":
+        spec = anthropic_spec(config)
+        if spec is not None and spec.host:
+            from urllib.parse import urlsplit
+
+            try:
+                port = urlsplit(spec.base_url).port
+            except ValueError:
+                port = None
+            scheme_port = 80 if spec.base_url.lower().startswith("http:") else 443
+            hosts.add(f"{spec.host}:{port or scheme_port}")
+    return hosts
 
 _PYPI_HOSTS = frozenset({
     "pypi.org:443",
@@ -4153,21 +4183,7 @@ def _build_network_allowlist(
     GitLab tokens configured can reach gitlab.com even when ``developer``
     wasn't selected — symmetric with credential authorization.
     """
-    hosts: set[str] = set(_DEFAULT_NETWORK_HOSTS)
-
-    # Under "api_key" the CLI talks to the `anthropic` provider's base URL,
-    # which may be a gateway in front of Anthropic.
-    if process_cli_auth(config) == "api_key":
-        spec = anthropic_spec(config)
-        if spec is not None and spec.host:
-            from urllib.parse import urlsplit
-
-            try:
-                port = urlsplit(spec.base_url).port
-            except ValueError:
-                port = None
-            scheme_port = 80 if spec.base_url.lower().startswith("http:") else 443
-            hosts.add(f"{spec.host}:{port or scheme_port}")
+    hosts: set[str] = _old_cli_path_hosts(config)
 
     if config.security.network.allow_pypi:
         hosts |= _PYPI_HOSTS
@@ -9389,6 +9405,19 @@ def execute_task(
                 group_ids=task_group_ids,
             )
 
+        # The task env carries no CLI credential. While `[brain] tool_harness`
+        # is off, the CLI that `sandbox_wrap` runs inside the sandbox still
+        # authenticates from `req.env`, so the request's env gets it; on the
+        # harness `req.env` is the tool server's and the credential is only in
+        # `HarnessSpec.cli_env`. Goes with the switch (cli-brain-tools part 2,
+        # Stage 6). NativeBrain strips it at its seams, as before.
+        request_env = env
+        if not getattr(config.brain, "tool_harness", False):
+            request_env = {
+                **env,
+                **cli_credential_env(config, process_cli_auth(config), task.user_id),
+            }
+
         # Resolve aliases (role, provider) to a canonical model ID. Talk-poller
         # tasks already arrive resolved via the !model prefix path; cron jobs,
         # briefings, email, and operator istota_model defaults can still carry
@@ -9411,7 +9440,7 @@ def execute_task(
                 and not effective_sandboxing(config)
                 else Path(config.temp_dir)
             ),
-            env=env,
+            env=request_env,
             db_path=config.db_path,
             # Which attempt this is, for the brain's own per-attempt artifacts
             # (NativeBrain's session log names its file after them). Read off

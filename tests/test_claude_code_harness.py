@@ -173,6 +173,26 @@ class TestTheRequestBuilder:
         assert req.harness is None
         assert not (Path(config.temp_dir) / HARNESS_DIR_NAME).exists()
 
+    def test_on_the_harness_the_request_env_holds_no_credential(self, tmp_path, monkeypatch):
+        """The tool server's env is `req.env`; the CLI's credential is only in
+        `HarnessSpec.cli_env` (cli-brain-tools part 2, Stage 5)."""
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", OAUTH)
+        _config, _task, req = self._run(tmp_path, on=True)
+
+        assert not [k for k in req.env if providers.is_model_credential_name(k)]
+        assert OAUTH not in req.env.values()
+        assert req.env["ISTOTA_CLI_AUTH"] == "subscription"
+        assert req.harness.cli_env["CLAUDE_CODE_OAUTH_TOKEN"] == OAUTH
+
+    def test_off_the_harness_the_wrapped_cli_still_gets_it(self, tmp_path, monkeypatch):
+        """Until Stage 6 removes the old path, the CLI it wraps in the sandbox
+        authenticates from `req.env`: the credential is added to the request's
+        env, never to the task runtime's."""
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", OAUTH)
+        _config, _task, req = self._run(tmp_path, on=False)
+
+        assert req.env["CLAUDE_CODE_OAUTH_TOKEN"] == OAUTH
+
 
 # -- the CLI's env -------------------------------------------------------------
 

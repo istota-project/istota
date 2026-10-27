@@ -3451,9 +3451,11 @@ def check_skill_model_credential(
     something other than the daemon, and the answer there is a skip.
 
     Presence stays OK wherever it is read, which is the asymmetry that makes
-    the skip narrow rather than a hole. `build_clean_env` copies the token out
-    of the daemon's own environment into every task's, so seeing it inside a
-    task does answer the question; only absence is the unanswerable direction.
+    the skip narrow rather than a hole: a credential seen answers the question
+    whoever's environment it was seen in, and only absence is the unanswerable
+    direction. No task env carries the CLI's credential any more
+    (cli-brain-tools part 2, Stage 5), so inside a task this check now reaches
+    the skip, never the OK arm; the logic does not depend on either.
 
     Spawns nothing, so it is safe under ``probe=False``, and never raises.
     """
