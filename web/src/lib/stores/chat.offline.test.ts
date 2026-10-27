@@ -815,7 +815,7 @@ describe('chat store — the text outbox', () => {
       s.teardown();
     });
 
-    it('reconciles the transcript before it drains, and drains one entry', async () => {
+    it('reconciles the transcript before it drains, and sends the queue as one message', async () => {
       const s = await twoQueuedOffline();
       const order: string[] = [];
       api.getRoomMessages.mockImplementation(async () => {
@@ -833,9 +833,9 @@ describe('chat store — the text outbox', () => {
       // A queued message going out into a transcript this client has not
       // caught up on would answer something that was already answered.
       expect(order[0]).toBe('history');
-      expect(api.sendChatMessage.mock.calls[0][1]).toBe('first');
-      // One entry per drain: the next goes when this turn settles.
-      expect(storedQueue('t1').map((e) => e.text)).toEqual(['second']);
+      // Written in one sitting with no connection, so they go as one (#854).
+      expect(api.sendChatMessage.mock.calls[0][1]).toBe('first\n\nsecond');
+      expect(storedQueue('t1')).toEqual([]);
       s.teardown();
     });
 
@@ -855,13 +855,17 @@ describe('chat store — the text outbox', () => {
       conn.setOnline(true);
       await vi.waitFor(() => expect(api.sendChatMessage).toHaveBeenCalledTimes(1));
 
-      const row = queuedRow(s, 'first');
+      // The two went out as one (#854), and come back as one.
+      const row = queuedRow(s, 'first\n\nsecond');
       expect(row?.sendState).toBe('queued');
       expect(row?.queueReason).toBe('offline');
       expect(row?.queueHeld).toBeUndefined();
-      // Order preserved by doing nothing, which is the point of leaving the
-      // entry in place rather than unshifting it back.
-      expect(storedQueue('t1').map((e) => e.text)).toEqual(['first', 'second']);
+      // Left at the head rather than unshifted back, and marked drained, so
+      // the next drain re-POSTs it unchanged under the same key.
+      const stored = storedQueue('t1');
+      expect(stored.map((e) => e.text)).toEqual(['first\n\nsecond']);
+      expect(stored[0].drained).toBe(true);
+      expect(stored[0].idempotencyKey).toBe(api.sendChatMessage.mock.calls[0][5]);
       // And nothing is held: a gap is not a turn that ended badly.
       expect(storedQueue('t1').every((e) => e.held === false)).toBe(true);
       s.teardown();

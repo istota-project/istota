@@ -187,6 +187,8 @@ export interface StoredQueuedSend {
   /** The email thread the message is linked to (`SendOptions.aboutRoom`). */
   aboutRoom?: string;
   idempotencyKey?: string;
+  /** Handed to a send at least once, so it never absorbs another entry (#854). */
+  drained?: boolean;
   held: boolean;
   queuedAt: number;
   reason: QueueReason;
@@ -345,6 +347,7 @@ function readEntry(value: unknown, now: number): StoredQueuedSend | null {
     ...(replyToMsgId ? { replyToMsgId } : {}),
     ...(typeof e.aboutRoom === 'string' && e.aboutRoom ? { aboutRoom: e.aboutRoom } : {}),
     ...(typeof e.idempotencyKey === 'string' ? { idempotencyKey: e.idempotencyKey } : {}),
+    ...(e.drained === true ? { drained: true } : {}),
     held: e.held === true,
     // Anything that is not the word `offline` is a busy entry, which is what
     // an entry written before this field existed is: the queue only had the
@@ -499,4 +502,35 @@ export function writeQueue(key: string, entries: StoredQueuedSend[]): StoredQueu
   const pruned = prune(map, now, key);
   saveSetting(SEND_QUEUE_STORAGE_KEY, pruned);
   return pruned[key] ?? [];
+}
+
+/** 64-bit FNV-1a over the UTF-8 bytes of `text`, as 16 hex digits. */
+function fnv1a64(text: string): string {
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of new TextEncoder().encode(text)) {
+    hash ^= BigInt(byte);
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return hash.toString(16).padStart(16, '0');
+}
+
+/**
+ * The idempotency key for several queued messages sent as one (#854).
+ *
+ * Derived from the merged entries' own keys, in order, so the same run gets
+ * the same key wherever it is drained: a second drain of it, after a reload or
+ * from a second tab holding the same queue, is answered with the first task. A
+ * run that changed gets a different key, since it is a different message — so
+ * two tabs whose queues differ by an entry send their shared messages twice.
+ *
+ * Synchronous on purpose: `crypto.subtle` would put an await between choosing
+ * the run and claiming it, a window in which a second drain could choose the
+ * same run. Two FNV-1a lanes give 128 bits, which is plenty for keys that only
+ * have to differ from this user's other sends in one room; nothing here is a
+ * secret. Each key is length-prefixed so `['a\nb']` and `['a', 'b']` differ.
+ * 39 characters, under the server's 64.
+ */
+export function mergedIdempotencyKey(keys: string[]): string {
+  const material = keys.map((k) => `${k.length}:${k}`).join('');
+  return `merged-${fnv1a64(`a${material}`)}${fnv1a64(`b${material}`)}`;
 }

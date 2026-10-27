@@ -129,6 +129,20 @@ async function streaming(taskId = 42) {
 
 const queuedRows = (msgs: ChatMessage[]) => msgs.filter((m) => m.sendState === 'queued');
 
+/**
+ * Queue two follow-ups that drain as two sends, not one: the first cites a
+ * message and the second does not, and one POST carries one citation (#854).
+ * For the tests about what happens to the rest of the queue.
+ */
+async function queueTwoSends(
+  s: Awaited<ReturnType<typeof freshSession>>,
+  first = 'first',
+  second = 'second',
+) {
+  await s.send(first, [], { msgId: 7, role: 'assistant', excerpt: 'earlier' });
+  await s.send(second);
+}
+
 // Imported rather than restated: the "nothing was written" assertion below is
 // vacuous against a key nothing writes, so a literal that drifted from the
 // module's own constant would pass whatever the code did.
@@ -244,8 +258,7 @@ describe('chat store — the send queue', () => {
   describe('draining', () => {
     it('sends exactly one queued message when the turn ends done', async () => {
       const s = await streaming();
-      await s.send('first');
-      await s.send('second');
+      await queueTwoSends(s);
       api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
 
       await emit('done');
@@ -261,8 +274,7 @@ describe('chat store — the send queue', () => {
 
     it('sends the second when the first drained turn settles', async () => {
       const s = await streaming();
-      await s.send('first');
-      await s.send('second');
+      await queueTwoSends(s);
       api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
       await emit('done');
       api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 44 });
@@ -314,6 +326,213 @@ describe('chat store — the send queue', () => {
     });
   });
 
+  describe('merging the run at the head (#854)', () => {
+    const postedTexts = () => api.sendChatMessage.mock.calls.map((c: unknown[]) => c[1]);
+
+    it('sends three plain follow-ups as one POST and one user row', async () => {
+      const s = await streaming();
+      await s.send('one');
+      await s.send('two');
+      await s.send('three');
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
+
+      await emit('done');
+
+      expect(postedTexts()).toEqual(['one\n\ntwo\n\nthree']);
+      const users = get(s.messages).filter((m) => m.role === 'user');
+      expect(users.map((m) => m.text)).toEqual(['the first turn', 'one\n\ntwo\n\nthree']);
+      expect(users[1].taskId).toBe(43);
+      expect(users[1].sendState).toBeUndefined();
+      expect(queuedRows(get(s.messages))).toHaveLength(0);
+      // Every merged entry left the queue and storage on the one ack.
+      expect(storedQueue('t1')).toHaveLength(0);
+      expect(get(s.queuedCounts)).toEqual({});
+    });
+
+    it('posts a key derived from the merged entries, not any one of theirs', async () => {
+      const { mergedIdempotencyKey } = await import('./sendQueue');
+      const s = await streaming();
+      await s.send('one');
+      await s.send('two');
+      const keys = storedQueue('t1').map((e) => e.idempotencyKey as string);
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
+
+      await emit('done');
+
+      expect(api.sendChatMessage.mock.calls[0][5]).toBe(mergedIdempotencyKey(keys));
+    });
+
+    it('lets a !command split the run: before it, the command, then after it', async () => {
+      // `!model` is deliberately not in the catalogue, so it queues; a command
+      // keeps its own send whatever the client knows about it.
+      const s = await streaming();
+      await s.send('one');
+      await s.send('!model fast go on');
+      await s.send('three');
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
+
+      await emit('done');
+      expect(postedTexts()).toEqual(['one']);
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 44 });
+      await emit('done');
+      expect(postedTexts()).toEqual(['one', '!model fast go on']);
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 45 });
+      await emit('done');
+
+      expect(postedTexts()).toEqual(['one', '!model fast go on', 'three']);
+    });
+
+    it('stops at a held entry, and what is behind it waits', async () => {
+      const s = await streaming();
+      await s.send('one');
+      await s.send('two');
+      await s.send('three');
+      await emit('cancelled');
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
+
+      // Releasing the head alone sends the head alone.
+      await s.releaseQueued(queuedRows(get(s.messages))[0].cid);
+      await flush();
+
+      expect(postedTexts()).toEqual(['one']);
+      const queued = queuedRows(get(s.messages));
+      expect(queued.map((m) => m.text)).toEqual(['two', 'three']);
+      expect(queued.every((m) => m.queueHeld === true)).toBe(true);
+    });
+
+    it('does not merge entries that cite different messages', async () => {
+      const s = await streaming();
+      await s.send('about seven', [], { msgId: 7, role: 'assistant', excerpt: 'seven' });
+      await s.send('plain');
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
+
+      await emit('done');
+
+      expect(postedTexts()).toEqual(['about seven']);
+      expect(api.sendChatMessage.mock.calls[0][6]).toMatchObject({ replyToMsgId: 7 });
+      expect(queuedRows(get(s.messages)).map((m) => m.text)).toEqual(['plain']);
+    });
+
+    it('merges entries that cite the same message, and keeps the citation', async () => {
+      const s = await streaming();
+      const cite = { msgId: 7, role: 'assistant' as const, excerpt: 'seven' };
+      await s.send('first about seven', [], cite);
+      await s.send('second about seven', [], cite);
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
+
+      await emit('done');
+
+      expect(postedTexts()).toEqual(['first about seven\n\nsecond about seven']);
+      expect(api.sendChatMessage.mock.calls[0][6]).toMatchObject({ replyToMsgId: 7 });
+    });
+
+    it('carries every merged entry’s attachments, in order', async () => {
+      const s = await streaming();
+      await s.send('look', [attachment('a.pdf')]);
+      await s.send('and this', [attachment('b.pdf'), attachment('c.pdf')]);
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
+
+      await emit('done');
+
+      const [, text, paths, names] = api.sendChatMessage.mock.calls[0];
+      expect(text).toBe('look\n\nand this');
+      expect(paths).toEqual(['/host/inbox/a.pdf', '/host/inbox/b.pdf', '/host/inbox/c.pdf']);
+      expect(names).toEqual(['a.pdf', 'b.pdf', 'c.pdf']);
+      const row = get(s.messages).find((m) => m.text === 'look\n\nand this');
+      expect(row?.attachments).toEqual(['a.pdf', 'b.pdf', 'c.pdf']);
+    });
+
+    it('stops the run before the server’s per-message cap', async () => {
+      // Each part is under the server's default 32000 and the two together
+      // are not: merged, two messages it would accept become one it refuses.
+      const s = await streaming();
+      const part = 'x'.repeat(20000);
+      await s.send(part);
+      await s.send(part);
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
+
+      await emit('done');
+
+      expect(postedTexts()).toEqual([part]);
+      expect(queuedRows(get(s.messages))).toHaveLength(1);
+    });
+
+    it('takes the cap from the server’s config', async () => {
+      api.getChatConfig.mockResolvedValue({
+        client_poll_interval_ms: 1500,
+        user_id: 'alice',
+        max_prompt_chars: 10,
+      });
+      const s = await streaming();
+      await s.send('four');
+      await s.send('five');
+      await s.send('sixty');
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
+
+      await emit('done');
+
+      // 'four\n\nfive' is 10; adding 'sixty' would pass it.
+      expect(postedTexts()).toEqual(['four\n\nfive']);
+      expect(queuedRows(get(s.messages)).map((m) => m.text)).toEqual(['sixty']);
+    });
+
+    it('parks a combined send as one row, and does not grow it on the next drain', async () => {
+      const s = await streaming();
+      await s.send('one');
+      await s.send('two');
+      let answer: (v: unknown) => void = () => {};
+      api.sendChatMessage.mockReturnValueOnce(
+        new Promise((r) => {
+          answer = r;
+        }),
+      );
+      await emit('done');
+      // Typed while the combined POST is still open, so it queues behind it.
+      await s.send('three');
+      answer({ ok: false, status: 0, failure: 'timeout' });
+      await flush();
+
+      // One combined row back in the queue, not the two it was made from.
+      const queued = queuedRows(get(s.messages));
+      expect(queued.map((m) => m.text)).toEqual(['one\n\ntwo', 'three']);
+      const stored = storedQueue('t1');
+      expect(stored.map((e) => e.text)).toEqual(['one\n\ntwo', 'three']);
+      const key = api.sendChatMessage.mock.calls[0][5];
+      expect(stored[0].idempotencyKey).toBe(key);
+
+      // `three` must not ride along on the re-POST: the timed-out POST may
+      // have made a task, and only an unchanged re-POST is answered with it.
+      api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
+      await s.releaseQueued(queued[0].cid);
+      await flush();
+
+      expect(postedTexts()).toEqual(['one\n\ntwo', 'one\n\ntwo']);
+      expect(api.sendChatMessage.mock.calls[1][5]).toBe(key);
+      expect(queuedRows(get(s.messages)).map((m) => m.text)).toEqual(['three']);
+    });
+
+    it('fails a refused combined send as one row with one Retry', async () => {
+      const s = await streaming();
+      await s.send('one');
+      await s.send('two');
+      api.sendChatMessage.mockResolvedValue({
+        ok: false,
+        status: 500,
+        failure: 'rejected',
+        error: 'boom',
+      });
+
+      await emit('done');
+
+      const users = get(s.messages).filter((m) => m.role === 'user');
+      expect(users.map((m) => m.text)).toEqual(['the first turn', 'one\n\ntwo']);
+      expect(users[1].sendState).toBe('failed');
+      expect(users[1].retryable).toBe(true);
+      expect(users[1].sendPayload?.text).toBe('one\n\ntwo');
+      expect(storedQueue('t1')).toHaveLength(0);
+    });
+  });
+
   describe('holding', () => {
     it('holds the queue when the turn is cancelled', async () => {
       const s = await streaming();
@@ -353,8 +572,7 @@ describe('chat store — the send queue', () => {
 
     it('holds the rest of the queue when a drained send fails', async () => {
       const s = await streaming();
-      await s.send('first');
-      await s.send('second');
+      await queueTwoSends(s);
       api.sendChatMessage.mockResolvedValue({
         ok: false,
         status: 500,
@@ -375,8 +593,7 @@ describe('chat store — the send queue', () => {
 
     it('holds the rest of the queue when a drained send cites a message that is gone', async () => {
       const s = await streaming();
-      await s.send('first');
-      await s.send('second');
+      await queueTwoSends(s);
       api.sendChatMessage.mockResolvedValue({
         ok: false,
         status: 409,
@@ -998,8 +1215,7 @@ describe('chat store — the send queue', () => {
       // stops being a pending action, so its own placeholder belongs *under*
       // it — and the message still queued behind it stays at the bottom.
       const s = await streaming();
-      await s.send('first queued');
-      await s.send('second queued');
+      await queueTwoSends(s, 'first queued', 'second queued');
       api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
 
       await emit('done');
@@ -1194,8 +1410,7 @@ describe('chat store — the send queue', () => {
 
     it('takes a drained entry out of storage', async () => {
       const s = await streaming();
-      await s.send('first');
-      await s.send('second');
+      await queueTwoSends(s);
       api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 43 });
 
       await emit('done');

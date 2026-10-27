@@ -259,6 +259,107 @@ describe('chat store — attachments in the outbox', () => {
     s.teardown();
   });
 
+  describe('merged sends (#854)', () => {
+    /** Two offline entries, each holding one file still in this browser. */
+    function seedTwoHeldFiles() {
+      seedQueue('t1', [
+        {
+          cid: 1,
+          text: 'first',
+          attachments: [pendingChip('b1', 'one.m4a')],
+          pendingAttachments: [
+            { blobId: 'b1', name: 'one.m4a', mimeType: 'audio/mp4', size: 1024 },
+          ],
+          held: false,
+          queuedAt: Date.now(),
+          reason: 'offline',
+          idempotencyKey: 'key-1',
+        },
+        {
+          cid: 2,
+          text: 'second',
+          attachments: [pendingChip('b2', 'two.m4a')],
+          pendingAttachments: [
+            { blobId: 'b2', name: 'two.m4a', mimeType: 'audio/mp4', size: 1024 },
+          ],
+          held: false,
+          queuedAt: Date.now(),
+          reason: 'offline',
+          idempotencyKey: 'key-2',
+        },
+      ]);
+      db.getBlob.mockImplementation(async (id: string) =>
+        heldBlob(id === 'b1' ? 'one.m4a' : 'two.m4a'),
+      );
+      api.uploadChatAttachment.mockImplementation(async (file: File) => uploaded(file.name));
+    }
+
+    it('sends a message holding a file on its own, so a refused file costs only it', async () => {
+      // Merged, one refused upload would fail the combined send and drop the
+      // bytes of every message in it.
+      seedTwoHeldFiles();
+      api.uploadChatAttachment.mockRejectedValueOnce(new Error('file too large'));
+
+      const s = await freshSession();
+      await s.init();
+      await vi.waitFor(() => expect(rowFor(s, 'first')?.sendState).toBe('failed'));
+
+      expect(api.sendChatMessage).not.toHaveBeenCalled();
+      expect(db.deleteBlob.mock.calls.map((c: any[]) => c[0])).toEqual(['b1']);
+      // The second message and its file wait, held, for the user to release.
+      const stored = storedQueue('t1');
+      expect(stored.map((e) => e.text)).toEqual(['second']);
+      expect(stored[0].pendingAttachments).toHaveLength(1);
+      expect(rowFor(s, 'second')?.queueHeld).toBe(true);
+      s.teardown();
+    });
+
+    it('posts the same key for the same queue after a reload', async () => {
+      const { mergedIdempotencyKey } = await import('./sendQueue');
+      // The same stored queue drained by two sessions, as a second tab or a
+      // reload before the first wrote anything back would: the second POST has
+      // to be recognised as the first send, not a new one.
+      const seedTwoTexts = () =>
+        seedQueue('t1', [
+          {
+            cid: 1,
+            text: 'first',
+            attachments: [],
+            held: false,
+            queuedAt: Date.now(),
+            reason: 'offline',
+            idempotencyKey: 'key-1',
+          },
+          {
+            cid: 2,
+            text: 'second',
+            attachments: [],
+            held: false,
+            queuedAt: Date.now(),
+            reason: 'offline',
+            idempotencyKey: 'key-2',
+          },
+        ]);
+      api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+      seedTwoTexts();
+      const first = await freshSession();
+      await first.init();
+      await vi.waitFor(() => expect(api.sendChatMessage).toHaveBeenCalledTimes(1));
+      first.teardown();
+
+      seedTwoTexts();
+      const second = await freshSession();
+      await second.init();
+      await vi.waitFor(() => expect(api.sendChatMessage).toHaveBeenCalledTimes(2));
+
+      const [a, b] = api.sendChatMessage.mock.calls.map((c: any[]) => c[5]);
+      expect(api.sendChatMessage.mock.calls[0][1]).toBe('first\n\nsecond');
+      expect(a).toBe(mergedIdempotencyKey(['key-1', 'key-2']));
+      expect(b).toBe(a);
+      second.teardown();
+    });
+  });
+
   it('does not re-upload a file an interrupted drain had already landed', async () => {
     // The session that stored this got the first file up and was killed before
     // the second: exactly what the persist-after-each step is for.

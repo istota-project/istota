@@ -60,6 +60,8 @@ import {
   dropQueue as dropStoredQueue,
   readAllQueues,
   writeQueue,
+  mergedIdempotencyKey,
+  MAX_QUEUE_CHARS,
   MAX_QUEUED_PER_ROOM,
   OFFLINE_AUTO_SEND_MAX_AGE_MS,
   type PendingAttachment,
@@ -487,6 +489,10 @@ function createSession(): ChatSession {
   let cidCounter = 0;
   const nextCid = () => ++cidCounter;
   let pollIntervalMs = 1500;
+  // The server's per-message cap (`[web.chat] max_prompt_chars`), which bounds
+  // a merged send (#854). Its default until the config says otherwise. The
+  // server counts code points and `.length` UTF-16 units, so this errs short.
+  let maxPromptChars = 32000;
   // The single in-flight stream for the active room, plus a FIFO of tasks
   // waiting their turn. A room runs one task at a time (the backend's
   // per-channel claim gate serializes them), so the UI streams them in order:
@@ -782,6 +788,9 @@ function createSession(): ChatSession {
     // persistence round trip: two drains of the same restored entry are then
     // answered with one task.
     idempotencyKey?: string;
+    // Handed to a send at least once. Such an entry may already be a task on
+    // the server, so it goes out alone and unchanged from then on (#854).
+    drained?: boolean;
     // True = will not drain on its own; the user has to release it.
     held: boolean;
     queuedAt: number;
@@ -3412,6 +3421,7 @@ function createSession(): ChatSession {
       const cfg = live ?? (await readConfig(storageUserId));
       if (superseded()) return;
       if (cfg?.client_poll_interval_ms) pollIntervalMs = cfg.client_poll_interval_ms;
+      if (cfg?.max_prompt_chars) maxPromptChars = cfg.max_prompt_chars;
       // Who the send queue's storage key belongs to. It rides on the config
       // rather than being pushed down from the page: the page's id used to come
       // from a `getMe()` that resolved after this, which put an ordering hazard
@@ -4525,10 +4535,100 @@ function createSession(): ChatSession {
     return !!head && !head.held;
   }
 
+  /** The separator between merged messages' texts. */
+  const MERGED_TEXT_SEPARATOR = '\n\n';
+
+  const joinTexts = (entries: QueuedSend[]) =>
+    entries
+      .map((e) => e.text)
+      .filter((t) => t !== '')
+      .join(MERGED_TEXT_SEPARATOR);
+
   /**
-   * Send the head of a room's queue, if it may go.
+   * Whether an entry may be one of several sent as one.
    *
-   * One entry per drain: the next one goes when *this* turn settles.
+   * A `!command` keeps its own send whatever the client's catalogue says,
+   * because the endpoint decides that from the leading `!`. An entry that has
+   * been drained before may already be a task, and only an unchanged re-POST
+   * under its own key is answered with that task. An entry with no key cannot
+   * contribute to the merged one. An entry still holding a file's bytes goes
+   * alone: one refused upload fails its whole send and drops the bytes it
+   * holds, and merged, that would take every other message's files with it.
+   */
+  function mergeable(entry: QueuedSend): boolean {
+    return (
+      !entry.text.startsWith('!') &&
+      !entry.drained &&
+      !!entry.idempotencyKey &&
+      !entry.pendingAttachments?.length
+    );
+  }
+
+  /**
+   * The entries at the head of a room's queue that go out as one send (#854).
+   *
+   * Follow-ups typed while a turn runs are usually one thought split across
+   * messages, and sending them as separate turns costs a task each and answers
+   * the first without the context the rest add. So the longest run from the
+   * head that can share one POST goes together: it stops at a held entry, a
+   * command, an entry drained before or holding a file's bytes, a different
+   * citation or email-thread link (one POST carries one of each, and both must
+   * match exactly, unset included), and before the entry that would take the
+   * joined text past the server's per-message cap — messages that would each
+   * have been accepted must not merge into one that is refused.
+   */
+  function runAtHead(entries: QueuedSend[]): QueuedSend[] {
+    const head = entries[0];
+    if (!head || head.held) return [];
+    if (!mergeable(head)) return [head];
+    const run = [head];
+    for (const next of entries.slice(1)) {
+      if (next.held || !mergeable(next)) break;
+      if (next.replyToMsgId !== head.replyToMsgId || next.aboutRoom !== head.aboutRoom) break;
+      if (joinTexts([...run, next]).length > Math.min(maxPromptChars, MAX_QUEUE_CHARS)) break;
+      run.push(next);
+    }
+    return run;
+  }
+
+  /**
+   * Fold a run into its head entry, and its rows into the head's row.
+   *
+   * The merged message *is* the head entry from here on, under a key derived
+   * from the run's keys, so every resolution that follows — the ack, a refusal,
+   * a park, a dead citation — acts on one entry and one row, exactly as for a
+   * message sent alone. A failure leaves one combined row to retry; it does
+   * not split back into the messages it was made from.
+   */
+  function collapseRun(token: string, run: QueuedSend[]): QueuedSend {
+    const [head, ...rest] = run;
+    const gone = new Set(rest.map((e) => e.cid));
+    head.idempotencyKey = mergedIdempotencyKey(run.map((e) => e.idempotencyKey as string));
+    head.text = joinTexts(run);
+    head.attachments = run.flatMap((e) => e.attachments);
+    // A restored `busy` entry comes back held, and text written behind a turn
+    // must keep that rule when it rides in an `offline` head.
+    if (run.some((e) => e.reason === 'busy')) head.reason = 'busy';
+    const entries = sendQueue.get(token) ?? [];
+    sendQueue.set(
+      token,
+      entries.filter((e) => !gone.has(e.cid)),
+    );
+    messages.update((arr) => arr.filter((m) => !gone.has(m.cid)));
+    for (const cid of gone) forgetStrandedRow(token, cid);
+    updateMsg(head.cid, (m) => {
+      m.text = head.text;
+      m.attachments = head.attachments.map((x) => x.name);
+      m.attachmentPaths = head.attachments.map((x) => x.workspace_path ?? null);
+    });
+    return head;
+  }
+
+  /**
+   * Send the head of a room's queue, if it may go, together with the run of
+   * entries behind it that can share its POST (see `runAtHead`).
+   *
+   * One send per drain: whatever is left goes when *this* turn settles.
    *
    * **The entry stays in the queue until the POST resolves** (ISSUE-202), and
    * the resolution is what removes it: the ack through `settleSend`, a refusal
@@ -4550,8 +4650,11 @@ function createSession(): ChatSession {
   async function drainSendQueue(roomId: number) {
     if (!canDrain(roomId)) return;
     const token = roomTokenOf(roomId);
-    const entry = token ? sendQueue.get(token)?.[0] : undefined;
-    if (!token || !entry) return;
+    const run = token ? runAtHead(sendQueue.get(token) ?? []) : [];
+    if (!token || !run.length) return;
+    const entry = run.length > 1 ? collapseRun(token, run) : run[0];
+    entry.drained = true;
+    persistRoomQueue(token);
     await beginSend(roomId, entry.cid, {
       text: entry.text,
       attachments: entry.attachments,

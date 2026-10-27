@@ -49,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Queued web chat messages go out together.** Messages typed while a turn is running are sent as one message when it finishes, so the bot answers them in one turn instead of one turn each. A command, a held message or a reply to a different message still gets its own send.
 - **Model fields read more plainly.** The model pickers in Room settings and on the admin Configuration page list models by their provider/id alone, without the display name after it, and the admin model fields use the regular typeface. The Configuration page explains which models users may pick, the model aliases, and each brain's default model and effort.
 - **Specs the bot drafts are ready for a coding agent.** A new spec has every section an implementer reads, including a survey of the existing code taken from the project's source, and its stages are one checklist line each. Specs drafted before this may lack those sections.
 
