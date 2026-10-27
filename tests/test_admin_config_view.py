@@ -932,3 +932,81 @@ def test_admin_candidates_are_empty_when_the_table_cannot_be_read(tmp_path):
     cfg = Config()
     cfg.db_path = tmp_path / "missing" / "istota.db"
     assert view.build_config_view(cfg)["admins"]["candidates"] == []
+
+
+class TestModelCatalogue:
+    """The one `model_catalogue` block the model pickers read, and each model
+    field's `model_field`."""
+
+    @staticmethod
+    def _config(tmp_path, *, native: bool = False) -> Config:
+        import json
+        import time
+
+        from istota.llm import discovery
+
+        cfg = Config()
+        cfg.db_path = tmp_path / "istota.db"
+        cfg.providers["openrouter"].api_key = "OPENROUTER-KEY-SENTINEL"
+        if native:
+            cfg.brain.native.provider = "openrouter"
+        cache_dir = discovery.config_cache_dir(cfg)
+        cache_dir.mkdir(parents=True)
+        doc = {"provider": "openrouter", "kind": "openrouter", "fetched_at": time.time(),
+               "last_error": "HTTP 503", "models": {}}
+        discovery.cache_file(cache_dir, "openrouter").write_text(json.dumps(doc))
+        return cfg
+
+    @staticmethod
+    def _discover():
+        from istota.llm import catalog
+        from istota.llm.catalog import ModelInfo
+
+        catalog.set_discovered({"openrouter": [ModelInfo(
+            id="moonshotai/kimi-k2.6", context_window=200000, max_output_tokens=8000,
+            provider="openrouter", reasoning=True, name="Kimi K2.6",
+        )]})
+
+    def test_the_block_lists_each_source_with_its_models_and_cache_state(self, tmp_path):
+        cfg = self._config(tmp_path)
+        self._discover()
+        block = view.build_config_view(cfg)["model_catalogue"]
+        sources = {s["id"]: s for s in block["sources"]}
+        assert list(sources)[0] == "anthropic"
+        assert {"anthropic", "openrouter"} <= set(sources)
+        router = sources["openrouter"]
+        assert router["label"] == "OpenRouter" and router["kind"] == "openrouter"
+        assert router["last_error"] == "HTTP 503" and router["discovered_at"]
+        kimi = next(m for m in router["models"] if m["ref"] == "openrouter/moonshotai/kimi-k2.6")
+        assert kimi["name"] == "Kimi K2.6" and kimi["efforts"]
+        anthropic = sources["anthropic"]["models"]
+        assert anthropic and all(m["ref"].startswith("anthropic/") for m in anthropic)
+        assert [m["deprecated"] for m in anthropic] == sorted(m["deprecated"] for m in anthropic)
+        assert {a["name"] for a in block["aliases"]} >= {"fast", "general", "smart", "opus"}
+
+    def test_the_block_appears_once_and_holds_no_key(self, tmp_path):
+        payload = view.build_config_view(self._config(tmp_path))
+        text = str(payload)
+        assert "OPENROUTER-KEY-SENTINEL" not in text
+        sources = payload["model_catalogue"]["sources"]
+        assert text.count("'discovered_at':") == len(sources)
+
+    def test_each_model_field_carries_its_sources(self, tmp_path):
+        cfg = self._config(tmp_path, native=True)
+        payload = view.build_config_view(cfg)
+        claude = _field(payload, "brain.claude_code.model")
+        assert claude["editor"] == "model"
+        assert claude["model_field"] == {"sources": ["anthropic"], "effort": True, "aliases": True}
+        assert _field(payload, "advisor_model")["model_field"]["effort"] is False
+        native = _field(payload, "brain.native.model")["model_field"]
+        assert native["sources"][0] == "openrouter"
+        assert "anthropic" not in native["sources"]  # no anthropic inference key
+        assert "model_field" not in _field(payload, "bot_name")
+
+    def test_enabled_gets_the_patterns_editor_and_its_counts(self, tmp_path):
+        cfg = self._config(tmp_path)
+        cfg.models.enabled = ["anthropic/*", "nosuch/*"]
+        payload = view.build_config_view(cfg)
+        assert _field(payload, "models.enabled")["editor"] == "model_patterns"
+        counts = payload["model_catalogue"]["pattern_counts"]
+        assert counts["anthropic/*"] > 0 and counts["nosuch/*"] == 0

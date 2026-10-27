@@ -163,8 +163,8 @@ def _inherited_model(
     time it is stored, so there is usually no intent left to carry; the
     exception is an operator-declared portable alias that the writing brain's
     table had no entry for, which is passed through by name and would be
-    re-resolvable here. Carrying it would mean reaching into the executor for
-    ``config_alias_portable_names``, and the outcome for the narrow case is the
+    re-resolvable here. Carrying it would mean reading the alias table's
+    ``portable_names`` here too, and the outcome for the narrow case is the
     child's own default either way, so the deviation is stated rather than
     closed.
 
@@ -377,6 +377,9 @@ def _process_deferred_subtasks(
                 # could silently run a different brain from the parent that
                 # spawned it.
                 brain=task.brain,
+                # And its provider, like its brain (model-catalogue D22): the
+                # inherited model is an id within it.
+                provider=task.provider,
                 # The recorded namespace travels with the model it describes
                 # and only with it (ISSUE-420), which after ISSUE-421(b) means
                 # keying on the name that actually lands rather than on the

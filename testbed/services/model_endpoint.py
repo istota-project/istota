@@ -131,15 +131,26 @@ class ScriptedEndpoint(HttpStub):
     def config(self) -> dict:
         """Point the daemon's native brain at this endpoint.
 
-        A `config.toml` fragment, merged over the stack's base config. The API
-        key is not here: both shapes write a fixed placeholder to its secret
-        file, since the endpoint ignores the Authorization header entirely.
+        A `config.toml` fragment, merged over the stack's base config: the
+        endpoint as an operator's own provider, `scripted`, and native named
+        to it. Its key is a placeholder inline, as an operator's own
+        provider's key is (compose declares secrets by fixed name), since the
+        endpoint ignores the Authorization header entirely.
         """
+        from ..stack import SCRIPTED_ENDPOINT_KEY
+
         return {
+            "providers": {
+                "scripted": {
+                    "kind": "openai_compat",
+                    "base_url": self.container_url,
+                    "api_key": SCRIPTED_ENDPOINT_KEY,
+                },
+            },
             "brain": {
                 "kind": "native",
                 "native": {
-                    "base_url": self.container_url,
+                    "provider": "scripted",
                     "model": SCRIPTED_MODEL,
                     # A handful of turns is all a scripted scenario has; a loop
                     # that asked for more should fail loudly rather than grind

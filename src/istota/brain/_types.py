@@ -142,6 +142,13 @@ class BrainRequest:
     # nothing from it; it is carried so a reroute onto a CLI brain keeps it.
     cli_settings_path: Path | None = None
 
+    # The tmux brain's per-attempt directory for the key its `apiKeyHelper`
+    # reads under `[brain.claude_code] auth = "api_key"`
+    # (`{temp_dir}/.cli-keys/{user_id}/task_{id}`, set by the executor). The
+    # CLAUDE wrap binds it read-only; the NATIVE wrap never does. Nothing else
+    # writes there.
+    cli_key_dir: Path | None = None
+
     # Whether the brain should stream events for progress callbacks. When
     # False, the brain may pick a faster non-streaming path if it has one.
     streaming: bool = True
@@ -351,6 +358,12 @@ class BrainResult:
     # the brain has none to report, and the executor then falls back to the
     # requested effort, exactly as it does for the model.
     effort_used: str = ""
+
+    # The effort asked for, after the brain's own default was filled and
+    # before it was clamped to what the model supports. `effort_used` is the
+    # clamped level ("" when the model takes none); the executor records both
+    # in the trace when they differ.
+    effort_requested: str = ""
 
     # True when the run reached the model and may have executed tools before
     # failing, so re-running the same prompt would repeat those side effects

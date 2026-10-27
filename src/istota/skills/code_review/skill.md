@@ -5,7 +5,7 @@ description: How to run a review over a branch diff and what to do with the find
 admin_only: true
 companion_skills: [untrusted_input]
 cli: true
-env: [{"var":"DEVELOPER_REPOS_DIR","from":"setup_env"},{"var":"ISTOTA_BRAIN_NATIVE_API_KEY","from":"config","config_path":"brain.native.api_key","when":["developer.enabled","brain.native.api_key"],"sensitive":true}]
+env: [{"var":"DEVELOPER_REPOS_DIR","from":"setup_env"}]
 ---
 
 # Code review

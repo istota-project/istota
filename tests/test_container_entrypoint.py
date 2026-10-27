@@ -627,16 +627,30 @@ class TestLocalLoginCodesOnlyUnderLocalIngress:
 
 
 class TestClaudeCode:
-    def test_the_token_becomes_a_private_credentials_file_and_is_not_printed(self, tmp_path):
+    """The credentials file is the `cli-auth sync-credentials-file` verb's,
+    which follows `[brain.claude_code] auth` (tests/test_cli_auth.py). The
+    entrypoint only calls it, before the scheduler starts."""
+
+    def test_the_entrypoint_calls_the_verb_before_the_scheduler(self, tmp_path):
         volume = Volume(tmp_path, LOCAL_CONFIG)
 
         result = volume.run(CLAUDE_CODE_OAUTH_TOKEN="tok-not-printed")
 
-        assert result.returncode == 0
-        credentials = volume.home / ".claude" / ".credentials.json"
-        assert stat.S_IMODE(credentials.stat().st_mode) == 0o600
-        assert '"accessToken": "tok-not-printed"' in credentials.read_text()
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = volume.calls()
+        sync = [i for i, c in enumerate(calls) if "cli-auth sync-credentials-file" in c]
+        scheduler = [i for i, c in enumerate(calls) if c.startswith("scheduler")]
+        assert sync and scheduler and sync[0] < scheduler[0]
         assert "tok-not-printed" not in result.stdout + result.stderr
+
+    def test_it_no_longer_writes_the_file_itself(self, tmp_path):
+        volume = Volume(tmp_path, LOCAL_CONFIG)
+
+        volume.run(CLAUDE_CODE_OAUTH_TOKEN="tok-not-printed")
+
+        # `istota` is a stub here, so a file would have come from the shell.
+        assert not (volume.home / ".claude" / ".credentials.json").exists()
+        assert ".credentials.json" not in ENTRYPOINT.read_text()
 
 
 def test_the_entrypoint_is_under_the_spec_target():
@@ -683,6 +697,18 @@ class TestIstotaSecrets:
         seen = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
         assert seen["ISTOTA_NEXTCLOUD_APP_PASSWORD"] == "pw with spaces"
         assert seen["CLAUDE_CODE_OAUTH_TOKEN"] == "tok"
+
+    def test_the_model_listing_key_is_never_exported(self, tmp_path):
+        """Read as a file by the discovery fetch alone, so no process's
+        environment holds it (setup_wizard.DAEMON_ONLY_SECRETS)."""
+        (tmp_path / "istota_anthropic_listing_key").write_text("LISTING-SENTINEL")
+        (tmp_path / "istota_nextcloud_app_password").write_text("pw")
+
+        result = self._run(tmp_path)
+
+        assert result.returncode == 0, result.stderr
+        assert "LISTING-SENTINEL" not in result.stdout
+        assert "ISTOTA_NEXTCLOUD_APP_PASSWORD=pw" in result.stdout.splitlines()
 
     def test_an_empty_file_exports_nothing(self, tmp_path):
         (tmp_path / "anthropic_api_key").write_text("")

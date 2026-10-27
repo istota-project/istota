@@ -36,9 +36,11 @@ _BUNDLED_SKILLS_DIR = Path(__file__).parent
 
 def _parse_env_specs(data: list[dict]) -> list[EnvSpec]:
     """Parse [[env]] entries from a skill.toml into EnvSpec objects."""
+    from istota.skills._env import model_credential_spec
+
     specs = []
     for entry in data:
-        specs.append(EnvSpec(
+        spec = EnvSpec(
             var=entry.get("var", ""),
             source=entry.get("from", ""),
             config_path=entry.get("config_path", ""),
@@ -53,7 +55,16 @@ def _parse_env_specs(data: list[dict]) -> list[EnvSpec]:
             gate_has_discovered_calendars=bool(
                 entry.get("gate_has_discovered_calendars", False)
             ),
-        ))
+        )
+        # A model credential reaches a skill only as `model_caller_env`'s
+        # copy, so a manifest naming one loses that entry, not the skill.
+        if model_credential_spec(spec):
+            logger.warning(
+                "env_spec_refused var=%s config_path=%s: a skill manifest may not "
+                "name a model credential", spec.var, spec.config_path,
+            )
+            continue
+        specs.append(spec)
     return specs
 
 

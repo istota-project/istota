@@ -102,6 +102,7 @@ const sidebars: SidebarsConfig = {
         'configuration/per-user',
         'configuration/credentials',
         'configuration/persona',
+        'configuration/models',
         'configuration/native-brain',
         'EXPERIMENTAL',
       ],

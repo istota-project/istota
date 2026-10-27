@@ -1,0 +1,4 @@
+{
+  "_comment": "Hand-checked corrections and additions to models.dev's Anthropic list, merged by scripts/update-anthropic-catalog.py. Keyed by model id. An entry for a known id patches those fields (family, deprecated, effort_map, prices, limits). An entry for an id models.dev does not list adds that model and must give name, family, released, context_window and max_output_tokens. \"exclude\": true drops a model.",
+  "models": {}
+}

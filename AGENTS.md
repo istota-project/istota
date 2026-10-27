@@ -82,7 +82,7 @@ src/istota/
 ├── config_mapper.py      # Maps a parsed TOML document onto the `Config` dataclass tree → leaf-modules.md
 ├── apply.py              # `istota apply -f plan`: config.toml and the settings plan's other sections, exit 0/2/1 → config.md
 ├── settings_plan/        # The application-settings plan behind `istota apply` and `istota snapshot`: schema, engine (ordering, preconditions, result), report, one adapter per store (profiles, resources, briefings, shared_briefings, files, secrets), paths, snapshot, and role_input (the management role's variables → plan and sidecar) → config.md
-├── config_editor/        # The web config editor's core: reference (example docs, credential files, setup paths), secrets (one secret-path predicate, sentinels), edits (a change set previewed: ops or raw, credentials, admins, the lockout checks, the redacted document diff `istota apply` prints too), schema (read-only and risky keys, table paths, editor kinds), check (`istota apply --check` in a child process), requests (the `config_change_requests` table, credentials sealed until the host takes a row), handoff (the files `istota config-request take` writes for the host applier), applier (whether the host applier is there, the trigger file, `managed.json` read fail-closed) → config.md, web-ui.md
+├── config_editor/        # The web config editor's core: reference (example docs, credential files, setup paths), secrets (one secret-path predicate, sentinels), edits (a change set previewed: ops or raw, credentials, admins, the lockout checks, the redacted document diff `istota apply` prints too), schema (read-only and risky keys, table paths, editor kinds, `MODEL_FIELDS`), check (`istota apply --check` in a child process), models (the `model` / `model_unknown` problems that check reports), requests (the `config_change_requests` table, credentials sealed until the host takes a row), handoff (the files `istota config-request take` writes for the host applier), applier (whether the host applier is there, the trigger file, `managed.json` read fail-closed) → config.md, web-ui.md
 ├── context.py            # Hybrid conversation context selection
 ├── db.py                 # SQLite operations (framework tables)
 ├── executor.py           # Per-task orchestration (memory/skills/sandbox)
@@ -232,6 +232,7 @@ src/istota/
 │   ├── workspace_marker.py  # The `.istota-workspace` a host folder's workspace carries, and whether the host requires it → leaf-modules.md
 │   ├── dav_xml.py        # Hardened DAV multistatus parsing, principal hrefs and path segments, for CardDAV and the web sharing module → leaf-modules.md
 │   ├── url_redact.py     # A configured URL safe to print, userinfo replaced or removed: doctor, the admin cards and the servarr skill → leaf-modules.md
+│   ├── fixed_get.py      # One credentialed GET to a fixed URL, no redirect, no proxy: the usage poll and Anthropic's model list → leaf-modules.md
 │   ├── rate_limit.py     # A sliding-window hit counter per key, in bounded memory, for public routes with no table behind them → leaf-modules.md
 │   └── unix_connect.py   # Connecting to a Unix socket without following a symlink at its leaf → leaf-modules.md
 ├── briefings/            # Personal/group briefings — source grants, generation, edition/delivery ledger, reader/settings routes and migration → briefings.md

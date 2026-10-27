@@ -31,6 +31,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The native brain can be told when its tool calls keep failing (opt-in).** After several failed tool calls in a row, the model gets one notice naming what failed and is told to try another approach or finish with what it has, instead of retrying the same broken sources. Off by default, because evals showed no fewer failed calls with it on; an operator turns it on with `tool_failure_nudge_after`.
 
+- **One model catalogue for every brain.** Istota ships a list of Anthropic's models and fetches each provider's list in the background, so a new model can be picked without an istota release. An admin can pick any listed model in chat, the room settings and the admin configuration page, which now chooses every model field from lists. See docs/configuration/models.md.
+
+- **Providers.** OpenRouter, Anthropic and endpoints of your own are configured side by side as providers, each with its own key. A native room or job runs on its default provider or on one listed in `[brain.native] providers`, and a user can hold their own key for a provider.
+
+- **An admin chooses a native room's provider.** `!room provider`, the room settings and a CRON.md job's `provider` set which listed provider a native room or job runs on, and so whose key is billed; the model picker then lists that provider's models. The provider is stored beside the model, so a model spelled like another provider's reference is never sent there. **Upgrade note:** rooms and jobs from before keep their default provider, and the database moves to schema 2, so a rollback across this release is refused unless you restore a database backup from before the upgrade.
+
+- **A native room reaches only the providers listed for native.** An `anthropic` key held for the `claude` CLI no longer lets native rooms run Anthropic models; list `anthropic` in `[brain.native] providers` for that, and on an OpenRouter-native room an `anthropic/...` model is OpenRouter's and billed by OpenRouter.
+
+- **A key that only lists Anthropic's models (optional).** A deployment on a Claude subscription can give Istota a key used for nothing but fetching Anthropic's model list, so new models and retirements show up before the next release. Create it in a Console workspace with a spend limit of zero.
+
 - **Medications in the health module.** Record prescriptions, over-the-counter drugs and supplements with dose, schedule and start and stop dates, in chat or on the new Health > Medications page, and attach a prescription label or pharmacy printout to each. Medications show up in search and the admin module counts, and the current ones in the new-doctor history summary. A dose change is recorded as a stop and a new entry, so the list shows what you were taking on any past date.
 
 ### Security
@@ -40,6 +50,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Specs the bot drafts are ready for a coding agent.** A new spec has every section an implementer reads, including a survey of the existing code taken from the project's source, and its stages are one checklist line each. Specs drafted before this may lack those sections.
+
+- **The native brain needs a provider.** It no longer falls back to Anthropic when none is named, so a native brain configured with no provider and no endpoint is unavailable. **Upgrade note:** set `provider = "anthropic"` under `[brain.native]` and give the anthropic provider its key. See docs/configuration/models.md.
+
+- **How the claude CLI signs in is a setting.** `[brain.claude_code] auth` chooses the subscription token or the Anthropic API key, and the CLI is never handed the other, so a stray API key can no longer move a subscription install onto API billing. Under the API key the model can read that key. **Upgrade note:** an install that listed `ANTHROPIC_API_KEY` in `passthrough_env_vars` sets `auth = "api_key"` instead; gateways that accept only a bearer token are no longer supported.
+
+- **Settings from before providers are read for one release.** The old native endpoint, its key files and `ANTHROPIC_API_KEY` still work, and `istota doctor` names what to move where; re-running `istota setup` does the move, including after `import-standalone` or `import-bare-metal`, which still write the old key file. **Upgrade note:** to roll back across this release, restore `config.toml.pre-providers` (or the `istota apply --backup` copy) first.
+
+- **Rooms and jobs follow the alias they were set to.** A room or job stores the alias or model you picked and resolves it for each task, so a room set to `smart` moves to a newer Opus by itself. A room set to a native model the catalogue does not list is refused; the tiers still mean it.
+
+- **What non-admins may pick is a setting.** `[models] enabled` lists the models anyone may choose; aliases are always allowed, and the default is what a deployment ran before. A refused room change now answers with a reason, and a non-admin's CRON.md model outside the set is ignored.
+
+- **Effort is matched to the model.** A requested effort the model lacks runs at the nearest level it has, on every brain, while the room keeps what you asked for. On the claude CLI, `xhigh` and `max` on the 4.5 models now run at `high`, and `xhigh` on Opus 4.6 and Sonnet 4.6 at `max`.
+
+- Conversation triage and the speech gate now use the deployment's model key, not the user's own. `istota apply` refuses a CLI-brain or advisor model naming a provider that is not configured. OpenRouter's model list is fetched only when the native brain uses OpenRouter or it has a key, and never inside a task.
 
 ### Fixed
 

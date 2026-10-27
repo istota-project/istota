@@ -108,14 +108,25 @@ def _build_provider(args, native: NativeBrainConfig):
 
         return ReplayProvider(Path(args.fixture), model=native.model)
     if args.provider == "live":
+        from istota.brain import native_provider_spec
+        from istota.config import BrainConfig
         from istota.llm import make_provider
 
-        if native.provider == "openai_compat" and not native.api_key:
+        if args.config:
+            from istota.config import load_config
+
+            spec = native_provider_spec(load_config(Path(args.config)).brain)
+        else:
+            spec = native_provider_spec(BrainConfig(native=native))
+        if spec is None:
+            sys.exit("no provider: set [brain.native] provider and [providers.<id>]")
+        if not spec.inference_key:
             print(
-                "warning: no api_key on [brain.native] — set ISTOTA_BRAIN_NATIVE_API_KEY",
+                f"warning: no key for provider {spec.id!r} — set "
+                f"ISTOTA_PROVIDER_{spec.id.upper()}_API_KEY",
                 file=sys.stderr,
             )
-        return make_provider(native)
+        return make_provider(spec)
     sys.exit(f"unknown provider {args.provider!r}")
 
 

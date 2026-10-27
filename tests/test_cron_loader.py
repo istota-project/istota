@@ -932,6 +932,7 @@ class TestColumnOwnership:
             model="opus",
             effort="high",
             brain="native",
+            provider="local",
             publish_shared_kv="ns/key",
             publish_shared_kv_trusted=True,
         )
@@ -950,6 +951,8 @@ class TestColumnOwnership:
             # `TestSyncBrainToDb` in tests/test_model_override.py is what covers
             # the non-admin leg, where this column is written NULL.
             "brain": "native",
+            # Admin-only like `brain` (`fj_provider_or_none`), so kept here.
+            "provider": "local",
             "publish_shared_kv": "ns/key",
             "publish_shared_kv_trusted": 1,
             **expected_dispatch,

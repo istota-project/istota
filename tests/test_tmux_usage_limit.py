@@ -8,6 +8,7 @@ tmux's own headless fallback — it returns up to the executor.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -105,6 +106,40 @@ class TestWaitForCompletionUsageLimit:
         # No marker matches these scopes; the is_usage_limit_error(pane) fallback
         # in _wait_for_completion catches them.
         status, _ = self._classify(monkeypatch, tmp_path, pane_text)
+        assert status == "usage_limit"
+
+
+#: The TUI's welcome header under `[brain.claude_code] auth = "api_key"`, as
+#: Claude Code 2.1.296 drew it in the vm tier's probe, then a turn in progress.
+API_KEY_PANE = (
+    " ▐▛███▛█   Claude Code v2.1.296\n"
+    "▝▜██████▀  Opus 5.5 · API Usage Billing\n"
+    " ▝▝   ▝▝   /data/tmp/admin\n\n"
+    "❯ User's request\n\n  Reply with the probe answer.\n\n· Flowing…\n"
+)
+
+
+class TestTheApiKeyHeaderIsNoUsageLimit:
+    """Under "api_key" the header names "API Usage Billing", and the broad
+    detector's "billing" keyword read every attempt as a quota outage on the
+    first poll, before the endpoint was asked anything."""
+
+    def _wait(self, monkeypatch, pane_text):
+        import time as _t
+
+        import istota.brain.tmux_claude as mod
+        brain = TmuxClaudeBrain()
+        monkeypatch.setattr(brain, "_capture", lambda name: pane_text)
+        monkeypatch.setattr(brain, "_pane_alive", lambda name: True)
+        monkeypatch.setattr(mod, "_SENTINEL_POLL_S", 0.0)
+        return brain._wait_for_completion("s", Path("/nonexistent/stop.json"), _t.monotonic() + 0.3, None)
+
+    def test_the_header_alone_waits_on(self, monkeypatch):
+        status, _ = self._wait(monkeypatch, API_KEY_PANE)
+        assert status == "timeout"
+
+    def test_a_limit_under_the_header_is_still_one(self, monkeypatch):
+        status, _ = self._wait(monkeypatch, API_KEY_PANE + "You've hit your weekly limit · resets Mon\n")
         assert status == "usage_limit"
 
 

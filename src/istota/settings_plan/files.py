@@ -1,7 +1,7 @@
 """File definitions use the scheduler parser and the shared workspace lock."""
 
 from contextlib import closing, contextmanager
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 import os
 import sqlite3
 import tomllib
@@ -37,7 +37,9 @@ def _read_file(path, field_path):
 
 
 def _cron_definition(job):
-    definition = asdict(job)
+    # compare=False fields (model_refused, model_split) are set at parse and
+    # are not part of what a CRON.md entry says.
+    definition = {item.name: getattr(job, item.name) for item in fields(job) if item.compare}
     # The loader resolves this to text for dispatch; the definition owns only
     # the reference, never a copy of the referenced file.
     if job.prompt_file:
@@ -96,6 +98,8 @@ def _validate_cron(conn, config, user, job, path, previous=None):
     if job.brain and (cron_loader.fj_brain_or_none(job, is_admin) is None
                       or job.brain not in KNOWN_BRAIN_KINDS or job.brain not in config.brain.room_selectable):
         raise ExecutionError("validation_error", [*path, "brain"])
+    if job.provider and cron_loader.fj_provider_or_none(job, is_admin) is None:
+        raise ExecutionError("validation_error", [*path, "provider"])
     if job.publish_shared_kv or job.publish_shared_kv_trusted:
         from istota.scheduler import _parse_shared_kv_target
 
@@ -168,7 +172,7 @@ def plan_cron(plan, user, context, options):
     declarations = plan.users[user].sections["scheduled_jobs"]
     for declaration in declarations:
         identity = declaration["name"]
-        merged = dict(existing.get(identity, asdict(cron_loader.CronJob(identity, ""))))
+        merged = dict(existing.get(identity, _cron_definition(cron_loader.CronJob(identity, ""))))
         merged.update(declaration)
         desired[identity] = merged
     # Parse TOML generated from the complete mappings, not render_jobs_block:

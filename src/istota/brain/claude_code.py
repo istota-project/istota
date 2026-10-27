@@ -39,9 +39,19 @@ from ._events import (
 from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox.peer_process import report_child_reaped, reporting_pid
 from istota.usage import telemetry as usage_types
+from istota.llm.catalog import latest_shipped_id
 from istota.sandbox.process_group import kill_group_if_live
 from ._aliases import CANONICAL_ROLES, split_effort
-from ._roles import get_alias_override_target, get_alias_overrides
+from ._resolve import (
+    DEFAULT_ALIAS,
+    DEFAULT_TIER_TARGETS,
+    FAMILY_SHORTCUTS,
+    Resolution,
+    anthropic_model_info,
+    clamp_effort_level,
+    resolve_selection,
+)
+from ._roles import AliasTable, current_alias_table
 from ._types import BrainRequest, BrainResult
 
 logger = logging.getLogger("istota.brain.claude_code")
@@ -1064,55 +1074,39 @@ def build_claude_cli_flags(
 # ---------------------------------------------------------------------------
 # Anthropic model namespace
 #
-# These tables describe the models *this* brain can run. A future
-# OpenRouter / Anthropic-direct brain ships its own analogous tables in
-# its own module; consumers never reach in here directly — they go through
-# Brain.resolve_alias / Brain.resolve_model_name.
+# Names resolve through ``brain._resolve.resolve_selection`` against the live
+# catalogue snapshot: the tiers name families (``fast`` = ``haiku``, ``general``
+# = ``sonnet``, ``smart`` = ``opus``) and a family shortcut is the newest
+# current ``anthropic`` model of that family, so a model Anthropic's own list
+# reports reaches the tiers without a release. Consumers go through
+# ``Brain.resolve_alias`` / ``Brain.resolve_model_name``, never these names.
 #
-# Versioning: bare aliases like ``opus`` always resolve to a *specific*
-# version constant (``OPUS``) so a model release can't
-# silently re-route us. A model release bumps the constant in one place and
-# ripples through every alias + role that points at it. Prior versions are NOT
-# enumerated as aliases — an operator who needs one types the canonical id with
-# an optional ``:effort`` modifier (``claude-opus-4-7:high``), which resolves via
-# the canonical passthrough below.
+# ``OPUS`` / ``SONNET`` / ``HAIKU`` and ``DEFAULT_ALIASES`` stay importable for
+# one release (D12), read once at import from the shipped file. They are what
+# the shortcuts resolve to on a deployment with no Anthropic discovery.
 # ---------------------------------------------------------------------------
 
-OPUS: str = "claude-opus-5-5"
-SONNET: str = "claude-sonnet-5-5"
-HAIKU: str = "claude-haiku-5-5"
+OPUS: str = latest_shipped_id("opus")
+SONNET: str = latest_shipped_id("sonnet")
+HAIKU: str = latest_shipped_id("haiku")
 
-# The unified alias registry for *this brain* — the code-shipped floor. Maps a
-# base alias name → ``(model_id, default_effort)`` in the Anthropic namespace.
-# Holds the portable tiers (CANONICAL_ROLES) AND the provider shortcuts together,
-# base names only: effort is an orthogonal ``:effort`` modifier applied generically
-# at resolution (``opus:high``), never baked into a name. Operators overlay this
-# via ``[models.aliases]`` TOML; a model release edits one constant here.
-# Every surface (``!model`` prefix, ``!models`` output, scheduled-job overrides)
-# reads through this table via ``Brain.resolve_alias`` / ``.list_aliases``.
+_FAMILY_LATEST: dict[str, str] = {"opus": OPUS, "sonnet": SONNET, "haiku": HAIKU}
+
+# The shipped view of the alias floor: base alias -> ``(model_id, effort)``.
+# Holds the portable tiers (CANONICAL_ROLES), the family shortcuts and the
+# reserved ``default`` (no model: the brain's own). Read for one release.
 DEFAULT_ALIASES: dict[str, tuple[str | None, str | None]] = {
-    # Portable tiers (CANONICAL_ROLES) — code-floor efforts stay None; every
-    # brain must map every canonical role (enforced by the role-contract test),
-    # so a portable intent survives the cross-provider fallback.
-    "fast":    (HAIKU, None),
-    "general": (SONNET, None),
-    "smart":   (OPUS, None),
-    # Provider shortcuts (pins) — base names, no effort variants.
-    "opus":    (OPUS, None),
-    "sonnet":  (SONNET, None),
-    "haiku":   (HAIKU, None),
-    # Explicit "no override — use the brain/config default model".
-    "default": (None, None),
+    **{tier: (_FAMILY_LATEST[family], None) for tier, family in DEFAULT_TIER_TARGETS.items()},
+    **{family: (_FAMILY_LATEST[family], None) for family in FAMILY_SHORTCUTS},
+    DEFAULT_ALIAS: (None, None),
 }
 assert set(CANONICAL_ROLES) <= set(DEFAULT_ALIASES), (
     "ClaudeCodeBrain must map every canonical role tier"
 )
 
-# The non-tier subset of the registry — the provider shortcuts. An operator
-# alias override whose NAME collides with one of these silently changes what
-# ``!model opus`` resolves to (almost always a typo for a tier override), so
-# ``validate_alias_override`` warns on it. Overriding a tier is the normal case
-# and never warns.
+# The non-tier names. An operator alias override whose NAME collides with one
+# of these silently changes what ``!model opus`` resolves to (almost always a
+# typo for a tier override), so ``validate_alias_override`` warns on it.
 _SHORTCUT_NAMES: frozenset[str] = frozenset(set(DEFAULT_ALIASES) - set(CANONICAL_ROLES))
 
 
@@ -1123,31 +1117,69 @@ _CANONICAL_MODEL_ID = re.compile(
 
 
 def _looks_canonical(name: str) -> bool:
-    """Shape check for a versioned Claude ID, including older dated IDs."""
+    """Shape check for a versioned Claude ID, including older dated IDs.
+
+    What the resolver cannot place (a dated id, a model the catalogue has not
+    listed) is still sent to the CLI as written when it has this shape.
+    """
     return _CANONICAL_MODEL_ID.fullmatch(name) is not None
 
 
-def _resolve_target_with_effort(target: str) -> tuple[str, str | None]:
-    """Translate an override RHS through ``DEFAULT_ALIASES`` to ``(model_id, effort)``.
+def _resolve_anthropic(selection: str, *, aliases=None, use_aliases: bool = True):
+    """``resolve_selection`` for the CLI brains: the ``anthropic`` namespace,
+    the ``anthropic`` provider preferred, refused when not runnable here."""
+    return resolve_selection(
+        selection, aliases=aliases, use_aliases=use_aliases, for_brain=BRAIN_KIND,
+    )
 
-    Splits an optional ``:effort`` modifier first, then resolves the base name.
-    Operator wrote e.g. ``smart = "opus:high"`` → ``(OPUS, "high")``
-    (the modifier's effort wins over the alias's default). A bare shortcut
-    ``smart = "opus"`` → ``(OPUS, None)``. An unknown / canonical
-    base passes through unchanged (raw ids like ``claude-opus-4-7`` work as
-    targets), carrying only the modifier effort.
+
+def cli_resolve_alias(alias: str) -> tuple[str | None, str | None] | None:
+    """A selection for the `claude` CLI as ``(model_id, effort)``.
+
+    Through ``brain._resolve.resolve_selection``: operator override > tiers
+    and family shortcuts > the ``anthropic`` provider's ids and refs. The
+    ``:effort`` suffix wins over an override's effort. ``default`` is
+    ``(None, effort)``: the brain's own model. What the resolver cannot place
+    still passes through when it is an override's target or has the shape of a
+    Claude id (a dated id, a model not listed yet), as it always did; anything
+    else is None (unknown).
     """
-    if not target:
-        return target, None
-    base, suffix_effort = split_effort(target)
-    pair = DEFAULT_ALIASES.get(base.lower())
-    if pair is not None and pair[0] is not None:
-        return pair[0], (suffix_effort or pair[1])
-    return base, suffix_effort
+    if not alias:
+        return None
+    resolved = _resolve_anthropic(alias)
+    if isinstance(resolved, Resolution):
+        if resolved.brain_default:
+            return (None, resolved.effort_requested)
+        return (resolved.info.id, resolved.effort_requested)
+    if resolved.target:
+        return (resolved.target, resolved.effort_requested)
+    base, suffix_effort = split_effort(alias)
+    if _looks_canonical(base):
+        return (base, suffix_effort)
+    return None
+
+
+def cli_model_name(name: str | None) -> str:
+    """The model id the `claude` CLI is handed for ``name``.
+
+    Empty/None → ``""`` (caller falls back to brain default). Unknown →
+    pass-through with any ``:effort`` stripped (raw IDs typed into config still
+    work; the effort never leaks into the model id). The callers that run the
+    CLI without a task (conversation triage, the speech gate) use this rather
+    than building a brain to ask.
+    """
+    if not name:
+        return ""
+    resolved = cli_resolve_alias(name)
+    if resolved is not None and resolved[0] is not None:
+        return resolved[0]
+    return split_effort(name)[0]
 
 
 class ClaudeCodeBrain:
     """Brain that delegates to the `claude` CLI as a subprocess."""
+
+    kind = BRAIN_KIND
 
     # The headless `claude -p` subprocess reads its whole prompt on stdin, then
     # stdin closes — there is no open channel to the running model, so mid-flight
@@ -1249,6 +1281,26 @@ class ClaudeCodeBrain:
             return req
         return dataclasses.replace(req, model=model, effort=effort)
 
+    def with_clamped_effort(self, req: BrainRequest) -> BrainRequest:
+        """``req`` with its effort clamped to what its model supports.
+
+        Applied after ``with_defaults``, so the block's own default effort is
+        clamped too. The model's record comes from the catalogue by its
+        `anthropic` ref; a model the catalogue does not list (the CLI's own
+        default when no model is set, a dated id, a release newer than the
+        catalogue) is not checked and keeps the effort as asked. The level, not
+        a wire value, is what ``--effort`` takes.
+        """
+        if not req.effort:
+            return req
+        info = anthropic_model_info(req.model)
+        if info is None:
+            return req
+        effort = clamp_effort_level(info, req.effort) or ""
+        if effort == req.effort:
+            return req
+        return dataclasses.replace(req, effort=effort)
+
     # --- Model resolution (Brain Protocol) ---------------------------------
 
     def resolve_alias(
@@ -1256,47 +1308,13 @@ class ClaudeCodeBrain:
     ) -> tuple[str | None, str | None] | None:
         """Resolve a `!model <alias>` (with optional ``:effort``) to (model_id, effort).
 
-        Splits a ``:effort`` modifier first, then the base name resolves:
-        operator override > ``DEFAULT_ALIASES`` (tiers + shortcuts) > shaped
-        canonical id passthrough > None (unknown). Effort precedence: the
-        ``:effort`` suffix wins over the entry's own default effort. A role
-        override's target is itself resolved through this brain's alias table
-        (``smart = "opus"`` → ``OPUS``), and an explicit
-        ``RoleTarget.effort`` wins over the target's alias-derived effort.
+        ``cli_resolve_alias``; see there.
         """
-        if not alias:
-            return None
-        base, suffix_effort = split_effort(alias)
-        base_lower = base.lower()
-        # 1. Operator-overridden alias (per-namespace, effort-carrying)
-        rt = get_alias_override_target(base_lower, self.model_namespace)
-        if rt is not None:
-            model_id, target_effort = _resolve_target_with_effort(rt.model)
-            return (model_id, suffix_effort or rt.effort or target_effort)
-        # 2. Shipped default (tier or shortcut)
-        pair = DEFAULT_ALIASES.get(base_lower)
-        if pair is not None:
-            model_id, default_effort = pair
-            return (model_id, suffix_effort or default_effort)
-        # 3. Canonical id passthrough (carry the modifier effort)
-        if _looks_canonical(base):
-            return (base, suffix_effort)
-        # 4. Unknown
-        return None
+        return cli_resolve_alias(alias)
 
     def resolve_model_name(self, name: str | None) -> str:
-        """Resolve any name to a canonical Anthropic model ID.
-
-        Empty/None → ``""`` (caller falls back to brain default).
-        Unknown → pass-through with any ``:effort`` stripped (raw IDs typed into
-        config still work; the effort never leaks into the model id).
-        """
-        if not name:
-            return ""
-        resolved = self.resolve_alias(name)
-        if resolved is not None and resolved[0] is not None:
-            return resolved[0]
-        return split_effort(name)[0]
+        """Resolve any name to a canonical Anthropic model ID (``cli_model_name``)."""
+        return cli_model_name(name)
 
     def is_valid_model_reference(self, name: str) -> bool:
         """Whether a reference resolves to a concrete model in this namespace."""
@@ -1313,9 +1331,10 @@ class ClaudeCodeBrain:
            ``[models.aliases] opus = "haiku"`` silently makes ``!model opus``
            resolve to Haiku — usually a typo for a tier override). Overriding a
            tier is the normal case and never warns.
-        2. Override target is neither a known alias nor a shaped canonical id
-           (it'd pass through to the CLI and fail at task time). A ``:effort``
-           modifier on the target is stripped before the check.
+        2. Override target resolves to nothing: neither a shipped alias nor a
+           model the catalogue lists nor a shaped Claude id (it'd pass through
+           to the CLI and fail at task time). A ``:effort`` modifier on the
+           target is stripped before the check.
         """
         warnings: list[str] = []
         name_lower = name.lower()
@@ -1327,18 +1346,18 @@ class ClaudeCodeBrain:
             )
         if target:
             base, _effort = split_effort(target)
-            pair = DEFAULT_ALIASES.get(base.lower())
-            if pair is not None and pair[0] is None:
-                # A known alias that pins no model (the reserved ``default``).
-                # Used as a target it'd be sent to the CLI as the literal string
-                # "default" rather than resolving to a real model.
+            resolved = _resolve_anthropic(base, aliases=AliasTable())
+            if isinstance(resolved, Resolution) and resolved.brain_default:
+                # The reserved ``default`` pins no model. Used as a target it'd
+                # be sent to the CLI as the literal string "default" rather
+                # than resolving to a real model.
                 warnings.append(
                     f"alias override {name!r} target {target!r} resolves to no "
                     f"model (it is the reserved 'use the brain default' alias); "
                     f"tasks using this alias would send it verbatim — pin a "
                     f"concrete model id or tier instead"
                 )
-            elif pair is None and not _looks_canonical(base):
+            elif not isinstance(resolved, Resolution) and not _looks_canonical(base):
                 warnings.append(
                     f"alias override {name!r} target {target!r} is neither a "
                     f"canonical model id nor a known alias; tasks using this "
@@ -1350,24 +1369,21 @@ class ClaudeCodeBrain:
         """Merged alias table for display — base names + resolved default effort.
 
         Tiers sorted first, then the shipped shortcuts in declaration order, then
-        any custom operator aliases (sorted). Operator overrides are reflected
-        (resolved in this brain's own namespace, effort preserved). Used by
-        ``!models`` and the composer autocomplete.
+        any custom operator aliases (sorted). Every name resolves through
+        ``resolve_alias``, so operator overrides and the live catalogue are
+        reflected. Used by ``!models`` and the composer autocomplete.
         """
-        resolved: dict[str, tuple[str | None, str | None]] = dict(DEFAULT_ALIASES)
-        for name in get_alias_overrides():
-            rt = get_alias_override_target(name, self.model_namespace)
-            if rt is not None:
-                model_id, target_effort = _resolve_target_with_effort(rt.model)
-                resolved[name] = (model_id, rt.effort or target_effort)
-        tiers = sorted(n for n in resolved if n in CANONICAL_ROLES)
+        table = current_alias_table()
+        tiers = sorted(n for n in DEFAULT_ALIASES if n in CANONICAL_ROLES)
         shortcuts = [n for n in DEFAULT_ALIASES if n not in CANONICAL_ROLES]
         extras = sorted(
-            n for n in resolved if n not in DEFAULT_ALIASES and n not in CANONICAL_ROLES
+            n for n in table.names()
+            if n not in DEFAULT_ALIASES and table.target(n, self.model_namespace) is not None
         )
         out: list[tuple[str, str | None, str | None]] = []
         for name in tiers + shortcuts + extras:
-            model, effort = resolved[name]
+            pair = self.resolve_alias(name)
+            model, effort = pair if pair is not None else (None, None)
             out.append((name, model, effort))
         return out
 
@@ -1385,8 +1401,11 @@ class ClaudeCodeBrain:
         # below reads `req.model`, so filling it at the single entry point is
         # what keeps the re-issue on the same model as the first attempt.
         req = self.with_defaults(req)
+        requested_effort = req.effort
+        req = self.with_clamped_effort(req)
         result = self._execute(req)
         result.brain_kind = BRAIN_KIND
+        result.effort_requested = requested_effort
         # What this attempt actually ran with, for `task_usage.effort`. Stamped
         # here because `with_defaults` fills the default onto a *copy*, so the
         # executor's own `req` no longer describes the attempt (ISSUE-418) —

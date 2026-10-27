@@ -33,10 +33,12 @@ Production hardening (``Specs/Active/claude-tmux-production-readiness.md``):
 Ansible or Docker deploy writes in for a ``tmux_claude`` primary.
 """
 
+import dataclasses
 import itertools
 import json
 import logging
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -53,6 +55,7 @@ from ._events import (
     ThinkingEvent,
     ToolUseEvent,
 )
+from ..llm.providers import CLI_AUTH_VARIABLE, is_model_credential_name
 from ..sandbox.peer_process import report_child_reaped
 from ._types import BrainRequest, BrainResult
 from .claude_code import (
@@ -63,12 +66,55 @@ from .claude_code import (
     advisor_active,
     build_claude_cli_flags,
     build_image_prompt,
+    cli_settings_document,
     is_transient_api_error,
     _success_frame_stop_reason,
     is_usage_limit_error,
 )
 
 logger = logging.getLogger("istota.brain.tmux_claude")
+
+#: The private tmux socket (`tmux -L`), so the brain's server is never the
+#: default one an operator's own sessions share.
+TMUX_SOCKET = "istota"
+
+
+def _tmux_argv(*args: str) -> list[str]:
+    """Every tmux argv this module builds: UTF-8 forced (the server starts with
+    no locale variables) and the private socket."""
+    return ["tmux", "-u", "-L", TMUX_SOCKET, *args]
+
+
+def _tmux_server_env() -> dict[str, str]:
+    """The environment every tmux call runs with.
+
+    The first call starts the server, whose environment becomes every pane's
+    global environment, and `-e` only adds to it. Without this the daemon's
+    whole environment reached the pane, the `claude` CLI in it and the model's
+    Bash. A pane gets what `-e` hands it and nothing else.
+
+    SHELL is named rather than inherited: without it tmux runs the pane through
+    the account's shell, which for the image's uid 10001 is nologin, and the
+    session closes before the CLI is typed into it. `/bin/sh` reads no rc file.
+    """
+    return {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "SHELL": "/bin/sh",
+    }
+
+
+def pane_env(env: dict[str, str]) -> dict[str, str]:
+    """The task env minus every model credential name, which is what the pane
+    gets on `-e`. A value there is on tmux's argv, readable from `/proc` by the
+    same uid; the CLI reads its credential from a file instead (the bound
+    `.credentials.json`, or the `apiKeyHelper`'s key file)."""
+    return {k: v for k, v in env.items() if not is_model_credential_name(k)}
+
+
+#: The files the `apiKeyHelper` path writes into ``BrainRequest.cli_key_dir``.
+_KEY_FILE = "key"
+_KEY_SETTINGS_FILE = "settings.json"
 
 
 def pasted_prompt_text(req: BrainRequest) -> str:
@@ -266,6 +312,11 @@ _USAGE_LIMIT_MARKERS = (
     "usage limit reached",
     "Claude usage limit",
 )
+
+#: The welcome header's billing line under "api_key" ("Opus 5.5 · API Usage
+#: Billing"). Its "Billing" is the broad detector's keyword, so the line is
+#: left out of what that detector reads.
+_BILLING_HEADER_RE = re.compile(r"^.*·\s*API Usage Billing\s*$", re.MULTILINE)
 
 # Flags the interactive TUI rejects vs the headless `-p` path. Stage 1 verifies
 # this against the pinned CLI; the prototype passed --effort and
@@ -710,6 +761,7 @@ class TmuxClaudeBrain:
     # the "anthropic" namespace by delegation (an operator's anthropic role value
     # covers both CLI brains).
     model_namespace = ClaudeCodeBrain.model_namespace
+    kind = "tmux_claude"
 
     def __init__(self, config=None) -> None:
         # Composed, not inherited: we forward the four resolution methods and
@@ -768,7 +820,10 @@ class TmuxClaudeBrain:
         # `_execute` has ~20 return sites and the effort stamp has to reach all
         # of them, so it is applied on the way out rather than at each one.
         req = self.with_defaults(req)
+        requested_effort = req.effort
+        req = self._cli.with_clamped_effort(req)
         result = self._execute(req)
+        result.effort_requested = requested_effort
         if not result.effort_used:
             result.effort_used = req.effort
         return result
@@ -858,6 +913,7 @@ class TmuxClaudeBrain:
         # session is killed, which SIGHUPs the pane ahead of the server's reap.
         pid_reported = False
         session_killed = False
+        key_dir_written = False
         try:
             base_dir.mkdir(parents=True, exist_ok=True)
             # No exist_ok: a directory, file or link already at this name was
@@ -884,6 +940,29 @@ class TmuxClaudeBrain:
             session_dir = _SessionDir(workdir)
             self._write_hooks(config_dir, sentinel, started_sentinel)
             self._seed_onboarding(config_dir, base_dir)
+
+            # The CLI's credential, by `[brain.claude_code] auth`; never in the
+            # pane's environment (`pane_env` below).
+            cli_mode = (req.env.get(CLI_AUTH_VARIABLE) or "").strip()
+            launch_req = req
+            if cli_mode == "api_key":
+                key_dir_written = True
+                launch_req = self._write_key_helper(req)
+                if launch_req is None:
+                    outcome = "no_key"
+                    return (
+                        BrainResult(
+                            success=False,
+                            result_text=(
+                                'tmux under [brain.claude_code] auth = "api_key" needs the '
+                                "anthropic provider's key and a key directory"
+                            ),
+                            stop_reason="error",
+                        ),
+                        False,
+                    )
+            elif cli_mode == "subscription":
+                self._link_credentials(config_dir, req.env.get("HOME") or os.environ.get("HOME", ""))
 
             env = dict(req.env)
             env["CLAUDE_CONFIG_DIR"] = str(config_dir)
@@ -912,7 +991,7 @@ class TmuxClaudeBrain:
                 env.pop("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", None)
             else:
                 env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] = "1"
-            self._new_session(session, env)
+            self._new_session(session, pane_env(env))
             # Register the pane shell before it launches Claude: startup
             # requests already need the network proxy, which admits only
             # descendants of a registered root. The same callback registers
@@ -931,7 +1010,7 @@ class TmuxClaudeBrain:
                     except Exception:
                         logger.warning("on_pid callback raised", exc_info=True)
 
-            self._launch_claude(session, req, base_dir)
+            self._launch_claude(session, launch_req, base_dir)
 
             ready_t0 = time.monotonic()
             ready_deadline = ready_t0 + min(self._p.ready_timeout_seconds, req.timeout_seconds)
@@ -1079,7 +1158,11 @@ class TmuxClaudeBrain:
                 session_dir.close()
             if created_workdir:
                 shutil.rmtree(workdir, ignore_errors=True)
-            dialogs = self._last_dialogs
+            # The key file goes when the attempt ends, before any reroute, so a
+            # native attempt that follows finds nothing to read.
+            if key_dir_written and req.cli_key_dir is not None:
+                shutil.rmtree(req.cli_key_dir, ignore_errors=True)
+            dialogs = getattr(self, "_last_dialogs", [])
             logger.info(
                 "tmux_brain session=%s outcome=%s ready_ms=%d wait_ms=%d "
                 "dialogs=%s tools=%d retries=%d",
@@ -1326,19 +1409,74 @@ class TmuxClaudeBrain:
         except OSError:
             pass
 
+    @staticmethod
+    def _link_credentials(config_dir: Path, home: str) -> None:
+        """Point the session's `CLAUDE_CONFIG_DIR` at the subscription token.
+
+        The CLI reads `$CLAUDE_CONFIG_DIR/.credentials.json`, not
+        `~/.claude/.credentials.json`, once `CLAUDE_CONFIG_DIR` is set (the
+        Stage 3 probe), so with the token off the pane's environment the
+        session needs a way to the file. A link at that name to the home copy,
+        which the CLAUDE wrap binds read-only at the same path under
+        "subscription". Nothing when there is no file (a Mac checkout, where
+        the CLI keeps its login in the keychain).
+        """
+        if not home:
+            return
+        target = Path(home) / ".claude" / ".credentials.json"
+        if not target.is_file():
+            return
+        try:
+            os.symlink(target, Path(config_dir) / ".credentials.json")
+        except OSError as e:
+            logger.warning("tmux_brain: could not link the credentials file: %s", type(e).__name__)
+
+    @staticmethod
+    def _write_key_helper(req: BrainRequest) -> BrainRequest | None:
+        """Under "api_key": the key in a 0600 file in ``req.cli_key_dir`` and a
+        settings document naming an `apiKeyHelper` that reads it, with the
+        base URL in its `env`. Returns the request pointing `--settings` at
+        that document, or None when there is no key or no directory.
+
+        The settings name the helper and hold no key. The directory is beside
+        the control dir, not in it, because the control dir is bound under the
+        NATIVE profile too; only the CLAUDE wrap binds this one, and the
+        attempt removes it when it ends.
+        """
+        key = (req.env.get("ANTHROPIC_API_KEY") or "").strip()
+        key_dir = Path(req.cli_key_dir) if req.cli_key_dir is not None else None
+        if not key or key_dir is None:
+            return None
+        if key_dir.is_symlink() or key_dir.exists():
+            shutil.rmtree(key_dir, ignore_errors=True)
+        key_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        key_dir.mkdir(mode=0o700)
+        key_file = key_dir / _KEY_FILE
+        _write_new_file(key_file, key)
+        document = cli_settings_document()
+        document["apiKeyHelper"] = f"cat {shlex.quote(str(key_file))}"
+        base_url = (req.env.get("ANTHROPIC_BASE_URL") or "").strip()
+        if base_url:
+            document["env"] = {"ANTHROPIC_BASE_URL": base_url}
+        settings = key_dir / _KEY_SETTINGS_FILE
+        _write_new_file(settings, json.dumps(document))
+        return dataclasses.replace(req, cli_settings_path=settings)
+
     def _tmux(self, *args: str) -> subprocess.CompletedProcess:
+        argv = _tmux_argv(*args)
         try:
             return subprocess.run(
-                ["tmux", *args],
+                argv,
                 capture_output=True,
                 text=True,
                 check=False,
                 timeout=self._p.tmux_command_timeout,
+                env=_tmux_server_env(),
             )
         except subprocess.TimeoutExpired:
             logger.warning("tmux_brain: tmux %s timed out", args[0] if args else "")
             cp: subprocess.CompletedProcess = subprocess.CompletedProcess(
-                ["tmux", *args], returncode=1, stdout="", stderr="tmux timeout"
+                argv, returncode=1, stdout="", stderr="tmux timeout"
             )
             return cp
 
@@ -1351,26 +1489,27 @@ class TmuxClaudeBrain:
         is no file to plant."""
         try:
             subprocess.run(
-                ["tmux", "load-buffer", "-b", buf, "-"],
+                _tmux_argv("load-buffer", "-b", buf, "-"),
                 input=text,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 check=False,
                 timeout=self._p.tmux_command_timeout,
+                env=_tmux_server_env(),
             )
         except subprocess.TimeoutExpired:
             logger.warning("tmux_brain: tmux load-buffer timed out")
 
     def _new_session(self, name: str, env: dict[str, str]) -> None:
-        # -e passes env into the session so the detached pane doesn't inherit a
-        # stale tmux-server environment (the Stage 1 auth gotcha): the OAuth
-        # token must reach the pane or claude runs unauthenticated.
+        # -e is the pane's whole environment beyond PATH and HOME, since the
+        # server starts emptied (`_tmux_server_env`). No model credential goes
+        # on it: a value here is on tmux's argv.
         args = [
             "new-session", "-d", "-s", name,
             "-x", str(_PANE_WIDTH), "-y", str(_PANE_HEIGHT),
         ]
-        for k, v in env.items():
+        for k, v in pane_env(env).items():
             args += ["-e", f"{k}={v}"]
         self._tmux(*args)
 
@@ -1526,7 +1665,9 @@ class TmuxClaudeBrain:
             # Marker substrings first (fast, config-tunable); then the shared
             # keyword detector as a CLI-reword-resilient fallback, so a weekly /
             # Opus limit (or a future scope word) is caught without a marker edit.
-            if any(m in pane for m in self._p.usage_limit_markers) or is_usage_limit_error(pane):
+            if any(m in pane for m in self._p.usage_limit_markers) or is_usage_limit_error(
+                _BILLING_HEADER_RE.sub("", pane)
+            ):
                 return ("usage_limit", pane)
             if any(m in pane for m in self._p.error_markers):
                 return ("error", pane)

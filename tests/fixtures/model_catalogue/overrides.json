@@ -1,0 +1,19 @@
+{
+  "models": {
+    "claude-opus-4-7": {"deprecated": true},
+    "claude-haiku-4-5": {"effort_map": {"low": null}},
+    "claude-sonnet-4-5": {"exclude": true},
+    "claude-opus-6": {
+      "name": "Claude Opus 6",
+      "family": "opus",
+      "released": "2027-01-01",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input": ["text", "image"],
+      "reasoning": true,
+      "effort_map": {"xhigh": "xhigh", "max": "max"},
+      "input_price_per_mtok": 5.0,
+      "output_price_per_mtok": 25.0
+    }
+  }
+}

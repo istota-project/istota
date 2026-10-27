@@ -74,8 +74,8 @@ def test_cli_canonical_sidecar_and_check_stdin(tmp_path, monkeypatch, capsys):
     import pytest
     from istota import cli
 
-    envelope = {"istota_plan": {"config": {"brain": {"native": {"extra_headers": {"x.tenant": "<unchanged>"}}}}},
-                "istota_plan_secrets": {"config": [{"path": ["brain", "native", "extra_headers", "x.tenant"],
+    envelope = {"istota_plan": {"config": {"providers": {"openrouter": {"extra_headers": {"x.tenant": "<unchanged>"}}}}},
+                "istota_plan_secrets": {"config": [{"path": ["providers", "openrouter", "extra_headers", "x.tenant"],
                                                    "value": "private-role-value"}]}}
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(envelope)))
     monkeypatch.setattr("sys.argv", ["istota", "apply", "--input-format", "role-vars", "-f", "-", "--check", "--json"])
@@ -92,7 +92,7 @@ def test_cli_canonical_sidecar_and_check_stdin(tmp_path, monkeypatch, capsys):
     assert exc.value.code == 2
     captured = capsys.readouterr()
     assert "private-role-value" not in captured.out + captured.err
-    assert tomllib.loads(target.read_text())["brain"]["native"]["extra_headers"]["x.tenant"] == "private-role-value"
+    assert tomllib.loads(target.read_text())["providers"]["openrouter"]["extra_headers"]["x.tenant"] == "private-role-value"
 
 
 def test_role_errors_are_safe_and_preflight(tmp_path):

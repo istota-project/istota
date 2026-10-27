@@ -872,6 +872,225 @@ class TestTheBinaryChecksFollowTheReachableSet:
             assert named in r.detail
 
 
+class TestModelsCatalogue:
+    """`models.catalogue`, the Stage 4 arms: the shipped file, the discovery
+    caches and the config that names models. Reads files only."""
+
+    NOW = time.time()
+
+    def _run(self, config):
+        return run_checks(config, only=("models.catalogue",))[0]
+
+    def _cache(self, config, provider, **fields):
+        from istota.llm import discovery
+
+        cache_dir = discovery.config_cache_dir(config)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        doc = {"provider": provider, "kind": fields.pop("kind", provider), "models": {}, **fields}
+        (cache_dir / f"{provider}.json").write_text(json.dumps(doc))
+
+    def _listing_key(self, tmp_path, value="LISTING-SENTINEL", mode=0o600):
+        path = tmp_path / "listing-key"
+        path.write_text(value)
+        os.chmod(path, mode)
+        return path
+
+    def _with_key(self, make_config, tmp_path, **kwargs):
+        from istota.config import ModelsConfig
+
+        path = self._listing_key(tmp_path, **kwargs)
+        return make_config(models=ModelsConfig(anthropic_listing_key_file=str(path)))
+
+    def test_ok_with_a_summary(self, make_config):
+        result = self._run(make_config())
+        assert result.status == OK
+        assert "providers" in result.detail and "models" in result.detail
+        assert "no model-listing key file" in result.detail
+
+    def test_an_empty_listing_key_file_is_discovery_off_not_a_warning(self, make_config, tmp_path):
+        result = self._run(self._with_key(make_config, tmp_path, value=""))
+        assert result.status == OK
+
+    def test_a_family_with_no_current_model_fails(self, make_config, monkeypatch):
+        from dataclasses import replace
+
+        from istota.llm import catalog
+
+        shipped = catalog.shipped_anthropic_models()
+        monkeypatch.setattr(
+            catalog, "shipped_anthropic_models",
+            lambda: tuple(replace(m, deprecated=True) if m.family == "opus" else m for m in shipped),
+        )
+        result = self._run(make_config())
+        assert result.status == FAIL
+        assert "no current opus model" in result.detail
+        assert result.remedy
+
+    def test_a_refused_provider_table_fails(self, make_config, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text(
+            '[providers.local]\nkind = "openai_compat"\n\n'
+            '[providers.anthropic]\nkind = "openrouter"\n\n'
+            '[providers.fine]\nkind = "openai_compat"\nbase_url = "http://192.0.2.1/v1"\n'
+        )
+        from istota.config import ProviderConfig, builtin_provider_configs
+
+        providers = {**builtin_provider_configs(), "fine": ProviderConfig(kind="openai_compat", base_url="http://192.0.2.1/v1")}
+        result = self._run(make_config(config_path=path, providers=providers))
+        assert result.status == FAIL
+        assert "[providers.local]" in result.detail and "[providers.anthropic]" in result.detail
+        assert "[providers.fine]" not in result.detail
+
+    def test_a_401_on_anthropics_list_fails_and_names_no_key(self, make_config, tmp_path):
+        config = self._with_key(make_config, tmp_path)
+        self._cache(config, "anthropic", fetched_at=self.NOW, last_status=401, last_error="HTTP 401")
+        result = self._run(config)
+        assert result.status == FAIL
+        assert "HTTP 401" in result.detail
+        assert "LISTING-SENTINEL" not in result.detail + result.remedy
+
+    def test_a_listing_key_file_with_a_loose_mode_fails(self, make_config, tmp_path):
+        result = self._run(self._with_key(make_config, tmp_path, mode=0o644))
+        assert result.status == FAIL
+        assert "0644" in result.detail
+
+    def test_a_listing_key_file_with_no_cache_warns(self, make_config, tmp_path):
+        result = self._run(self._with_key(make_config, tmp_path))
+        assert result.status == WARN
+        assert "provider anthropic has no model cache yet" in result.detail
+
+    def test_a_stale_cache_warns(self, make_config):
+        from istota.config import BrainConfig, NativeBrainConfig
+
+        config = make_config(brain=BrainConfig(native=NativeBrainConfig(provider="openrouter")))
+        self._cache(config, "openrouter", fetched_at=self.NOW - 3 * 86400)
+        result = self._run(config)
+        assert result.status == WARN
+        assert "past twice its TTL" in result.detail
+        fresh = make_config(brain=BrainConfig(native=NativeBrainConfig(provider="openrouter")))
+        self._cache(fresh, "openrouter", fetched_at=self.NOW - 3600)
+        assert self._run(fresh).status == OK
+
+    def test_a_renamed_catalogue_key_warns(self, make_config, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text("[brain.native]\nmodel_catalog_fetch = false\n")
+        result = self._run(make_config(config_path=path))
+        assert result.status == WARN
+        assert "model_catalog_fetch" in result.detail and "discover" in result.detail
+
+    def test_an_override_naming_nothing_warns(self, make_config):
+        from istota.llm import catalog
+
+        catalog.set_config_layers(operator={}, overrides={
+            "anthropic/claude-nope-1": {"context_window": 5},
+            "anthropic/claude-opus-5-5": {"context_window": 5},
+        })
+        result = self._run(make_config())
+        assert result.status == WARN
+        assert "claude-nope-1" in result.detail
+        assert "claude-opus-5-5" not in result.detail
+
+    def test_an_api_model_with_no_shipped_price_warns(self, make_config, tmp_path):
+        config = self._with_key(make_config, tmp_path)
+        self._cache(config, "anthropic", fetched_at=self.NOW, last_status=200, models={
+            "claude-sonnet-6": {"family": "sonnet", "released": "2026-10-20", "last_seen": self.NOW},
+        })
+        result = self._run(config)
+        assert result.status == WARN
+        assert "claude-sonnet-6" in result.detail
+        assert "update-anthropic-catalog.py" in result.remedy
+
+    def test_it_spawns_nothing(self, make_config, monkeypatch):
+        def _no(*a, **k):
+            raise AssertionError("models.catalogue spawned a process")
+
+        monkeypatch.setattr(subprocess, "run", _no)
+        monkeypatch.setattr(subprocess, "Popen", _no)
+        assert run_checks(make_config(), only=("models.catalogue",), probe=False)[0].status == OK
+
+    def test_it_is_deployment_scoped(self):
+        assert doctor.CHECK_SCOPES["models.catalogue"] == doctor.DEPLOYMENT
+
+    # --- the Stage 5 arms, through the resolver ---------------------------------
+
+    @staticmethod
+    def _brain(kind="claude_code", **blocks):
+        from istota.config import BrainConfig
+
+        return BrainConfig(kind=kind, **blocks)
+
+    def test_the_summary_counts_what_a_non_admin_may_pick(self, make_config):
+        result = self._run(make_config())
+        assert result.status == OK
+        assert " enabled" in result.detail
+
+    def test_a_configured_model_that_resolves_to_nothing_fails(self, make_config):
+        from istota.config import ClaudeCodeBrainConfig
+
+        config = make_config(brain=self._brain(claude_code=ClaudeCodeBrainConfig(model="sonet")))
+        result = self._run(config)
+        assert result.status == FAIL
+        assert "[brain.claude_code] model = 'sonet' resolves to no model" in result.detail
+        assert result.remedy
+
+    def test_an_internal_field_is_checked_on_the_base_brain(self, make_config):
+        from istota.config import SleepCycleConfig
+
+        config = make_config(sleep_cycle=SleepCycleConfig(extraction_model="openrouter/z-ai/glm-5"))
+        result = self._run(config)
+        assert result.status == FAIL
+        assert "[sleep_cycle] extraction_model" in result.detail
+
+    def test_an_unlisted_claude_id_is_a_warning(self, make_config):
+        from istota.config import ClaudeCodeBrainConfig
+
+        config = make_config(brain=self._brain(
+            claude_code=ClaudeCodeBrainConfig(model="claude-opus-4-1-20250805"),
+        ))
+        result = self._run(config)
+        assert result.status == WARN
+        assert "sent to the CLI as written" in result.detail
+
+    def test_a_native_model_its_provider_does_not_list_fails(self, make_config):
+        from istota.config import NativeBrainConfig
+
+        config = make_config(brain=self._brain(
+            kind="native", native=NativeBrainConfig(provider="openrouter", model="z-ai/nope"),
+        ))
+        self._cache(config, "openrouter", kind="openrouter", fetched_at=self.NOW, models={
+            "z-ai/glm-5": {"context_window": 1000, "max_output_tokens": 100, "last_seen": self.NOW},
+        })
+        result = self._run(config)
+        assert result.status == FAIL
+        assert "[brain.native] model = 'z-ai/nope'" in result.detail
+
+    def test_a_native_model_is_not_checked_without_a_model_list(self, make_config):
+        from istota.config import NativeBrainConfig
+
+        config = make_config(brain=self._brain(
+            kind="native", native=NativeBrainConfig(provider="openrouter", model="z-ai/nope"),
+        ))
+        result = self._run(config)
+        assert "[brain.native] model" not in result.detail
+
+    def test_an_alias_resolving_to_a_deprecated_model_warns(self, make_config, monkeypatch):
+        from dataclasses import replace
+
+        from istota.config import ModelsConfig
+        from istota.llm import catalog
+
+        shipped = catalog.shipped_anthropic_models()
+        old = next(m for m in shipped if m.family == "opus" and m.id != catalog.latest_shipped_id("opus"))
+        monkeypatch.setattr(
+            catalog, "shipped_anthropic_models",
+            lambda: tuple(replace(m, deprecated=True) if m.id == old.id else m for m in shipped),
+        )
+        config = make_config(models=ModelsConfig(aliases={"legacy": {"anthropic": old.id}}))
+        result = self._run(config)
+        assert result.status == WARN
+        assert f"[models.aliases] legacy (anthropic) resolves to the deprecated anthropic/{old.id}" in result.detail
+
+
 class TestNativeBrainCredential:
     """`runtime.native_brain` — buildable is not runnable.
 
@@ -937,22 +1156,56 @@ class TestNativeBrainCredential:
         if named:
             assert named in r.detail
 
-    def test_the_env_var_satisfies_it(self, make_config, monkeypatch):
-        """Asked separately from the field: `load_config` folds the variable
-        into `api_key`, but a Config assembled any other way holds one and not
-        the other."""
-        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "sk-env")
-        assert self._run(self._native(make_config)).status == OK
+    def test_the_providers_variable_satisfies_it(self, monkeypatch, tmp_path):
+        """`load_config` folds `ISTOTA_PROVIDER_<ID>_API_KEY` into the provider
+        native names, which is what the check reads."""
+        from istota.config import load_config
 
-    def _stored(self, make_config, monkeypatch, tmp_path, owner="alice", service="native_brain"):
-        """A native-brain config whose only key may be a stored secret row."""
+        monkeypatch.setenv("ISTOTA_PROVIDER_ANTHROPIC_API_KEY", "sk-env")
+        path = tmp_path / "config.toml"
+        path.write_text('[brain]\nkind = "native"\n[brain.native]\nprovider = "anthropic"\n')
+        r = self._run(load_config(path))
+        assert r.status == OK
+        assert "anthropic" in r.detail
+
+    def test_no_provider_is_named_as_the_reason(self, monkeypatch, tmp_path):
+        """Native has no default provider (D18): with none named it is not
+        configured, and the check says which field to set."""
+        from istota.config import load_config
+
+        path = tmp_path / "config.toml"
+        path.write_text('[brain]\nkind = "native"\n')
+        r = self._run(load_config(path))
+        assert r.status == FAIL
+        assert "[brain.native] provider" in r.detail
+
+    def test_a_legacy_source_is_named_with_its_replacement(self, monkeypatch, tmp_path):
+        """Nothing says so at load (D20); doctor names each legacy source."""
+        from istota.config import load_config
+
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "sk-legacy")
+        path = tmp_path / "config.toml"
+        path.write_text(
+            '[brain]\nkind = "native"\n[brain.native]\n'
+            'base_url = "https://openrouter.ai/api/v1"\n'
+        )
+        r = self._run(load_config(path))
+        assert r.status == OK
+        assert "brain.native.base_url -> [providers.<id>] base_url" in r.detail
+        assert "ISTOTA_BRAIN_NATIVE_API_KEY -> ISTOTA_PROVIDER_<ID>_API_KEY" in r.detail
+        assert "sk-legacy" not in r.detail
+
+    def _stored(self, make_config, monkeypatch, tmp_path, owner="alice", service="provider_keys"):
+        """A native-brain config whose only key may be a stored secret row:
+        a user's own key for native's provider (`provider_keys/anthropic`)."""
         from istota import db
         from istota.config import UserConfig
 
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 40)
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
-        secrets_store.set_secret(db_path, owner, service, "api_key", "sk-u")
+        key = "anthropic" if service == "provider_keys" else "api_key"
+        secrets_store.set_secret(db_path, owner, service, key, "sk-u")
         config = self._native(make_config)
         config.db_path = db_path
         config.users = {"alice": UserConfig()}
@@ -963,12 +1216,12 @@ class TestNativeBrainCredential:
         [
             # The executor overlays this per task, so a deployment where every
             # user brings their own key needs no instance-wide one.
-            ("alice", "native_brain", OK),
+            ("alice", "provider_keys", OK),
             # A row for a service that is not the native brain must not count.
             ("alice", "ntfy", FAIL),
             # A row left behind by a removed user is not a credential any
             # current user has.
-            ("gone", "native_brain", FAIL),
+            ("gone", "provider_keys", FAIL),
         ],
         ids=["own-native-key", "another-service", "unlisted-user"],
     )
@@ -2750,12 +3003,27 @@ class TestSkillModelCredential:
         assert results[self.WIRING].status == OK
         assert results[self.VALUE].status == FAIL
 
-    def test_an_api_key_counts(self, make_config, monkeypatch):
-        _clear_env(monkeypatch, "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-test")
-        value = self._run(make_config())[self.VALUE]
+    def test_an_api_key_stack_passes(self, make_config, monkeypatch):
+        """Under `auth = "api_key"` the copy is the anthropic provider's key,
+        named by its provider variable and never by value."""
+        _clear_env(monkeypatch, *_MODEL_CREDENTIALS, *_NON_DAEMON_MARKERS)
+        config = make_config()
+        config.brain.claude_code.auth = "api_key"
+        config.providers["anthropic"].api_key = "sk-ant-api-test"
+        value = self._run(config)[self.VALUE]
         assert value.status == OK
-        assert "ANTHROPIC_API_KEY" in value.detail
+        assert "ISTOTA_PROVIDER_ANTHROPIC_API_KEY" in value.detail
+        assert "sk-ant-api-test" not in value.detail
+
+    def test_the_legacy_variable_alone_counts_through_the_transition_row(self, make_config, monkeypatch):
+        """With no token and auth unset, `ANTHROPIC_API_KEY` derives "api_key";
+        the loader reads it as the anthropic provider's key."""
+        _clear_env(monkeypatch, *_MODEL_CREDENTIALS, *_NON_DAEMON_MARKERS)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-test")
+        config = make_config()
+        config.providers["anthropic"].api_key = "sk-ant-api-test"
+        value = self._run(config)[self.VALUE]
+        assert value.status == OK
 
     def test_the_value_half_skips_on_the_native_brain(self, make_config, monkeypatch):
         """code_review runs on the configured brain, and on native it

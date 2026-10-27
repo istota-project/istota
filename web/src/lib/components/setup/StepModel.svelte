@@ -200,6 +200,16 @@
       {/if}
     {/snippet}
   </OptionCards>
+  <SetupMore open={draft.isSet('anthropic_listing_key')}>
+    <SecretField
+      label="Key for listing Anthropic models (optional)"
+      hint="A key used only to list Anthropic's models, so a new model shows up without an update. Create it in an Anthropic Console workspace with a spend limit of zero. Leave it empty to use the list Istota ships."
+      configured={draft.isSet('anthropic_listing_key')}
+      value={draft.text('anthropic_listing_key')}
+      error={shown.anthropic_listing_key}
+      onValueChange={(v) => draft.setSecret('anthropic_listing_key', v)}
+    />
+  </SetupMore>
 </div>
 
 <style>

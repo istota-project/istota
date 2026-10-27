@@ -304,7 +304,11 @@ def _answers(old: dict, user_id: str, hostname: str) -> wizard.ContainerAnswers:
         ingress="local",
         host_folder=True,
         brain_kind=kind,
-        native_base_url=str(native.get("base_url") or wizard.DEFAULT_ANTHROPIC_BASE_URL),
+        # No base_url meant Anthropic under the old default; native's provider
+        # has none now (D18), so the import names it. A base_url names its
+        # provider the way `config.LEGACY_PROVIDER_SOURCES` reads it.
+        native_provider="" if native.get("base_url") else "anthropic",
+        native_base_url=str(native.get("base_url") or ""),
         native_model=str(native.get("model") or ""),
         email_enabled=bool(email.get("enabled")),
         imap_host=str(email.get("imap_host") or ""),
@@ -327,6 +331,42 @@ def _merge(base, over):
             merged[key] = _merge(base.get(key), value)
         return merged
     return copy.deepcopy(over)
+
+
+def _native_to_provider(old, answers, doc, carried, credentials, changes) -> None:
+    """Write the standalone native endpoint in the current shape: its key in
+    the provider's secret file (inline for an operator's own provider) and
+    every other legacy `[brain.native]` field on the provider's table, read
+    through `config.LEGACY_PROVIDER_SOURCES`."""
+    from istota.config import LEGACY_PROVIDER_SOURCES  # noqa: PLC0415
+
+    provider_id, _kind, _url = wizard.native_provider_choice(answers)
+    old_brain = old.get("brain") if isinstance(old.get("brain"), dict) else {}
+    old_native = old_brain.get("native") if isinstance(old_brain.get("native"), dict) else {}
+    if not old_native.get("base_url"):
+        changes.append(
+            'brain.native.provider: "anthropic" (the old default endpoint; a native provider '
+            "has no default now)"
+        )
+    key = credentials.pop("istota_brain_native_api_key", "")
+    if key:
+        answers.native_api_key = key
+        key_file = wizard.native_key_file(answers)
+        if key_file:
+            credentials[key_file] = key
+        else:
+            doc.setdefault("providers", {}).setdefault(provider_id, {})["api_key"] = key
+    carried_native = carried.get("brain", {}).get("native", {})
+    for row in LEGACY_PROVIDER_SOURCES:
+        if row.source.startswith("env:"):
+            continue
+        field_name = row.source.rsplit(".", 1)[1]
+        if field_name not in carried_native:
+            continue
+        value = carried_native.pop(field_name)
+        if row.target in ("base_url", "api_key"):
+            continue
+        doc.setdefault("providers", {}).setdefault(provider_id, {})[row.target] = value
 
 
 def rewrite_config(old: dict, *, source: Source, hostname: str) -> ConfigRewrite:
@@ -364,6 +404,8 @@ def rewrite_config(old: dict, *, source: Source, hostname: str) -> ConfigRewrite
         value = bmi._pop(carried, path)
         if value:
             credentials[name] = str(value)
+    if answers.brain_kind == "native":
+        _native_to_provider(old, answers, doc, carried, credentials, changes)
 
     def outside(node) -> bool:
         return any(

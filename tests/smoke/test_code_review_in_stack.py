@@ -295,11 +295,15 @@ def claude_review_command(stack) -> str:
 
     Through `docker compose exec` rather than a task's Bash call, so the daemon
     keeps its native brain and no task turn shares the script. The CLI reads a
-    copy of the rendered config with `[brain] kind` switched; the daemon's own
-    is untouched. `ANTHROPIC_BASE_URL` and the key reach the `claude` process
-    through `build_model_cli_env`'s top-up from this process's environment, the
-    route the skill proxy feeds in production. The proxy's own env assembly is
-    the native scenario's to cover, not this one's.
+    copy of the rendered config with `[brain] kind` switched and
+    `[brain.claude_code] auth = "api_key"` against a `[providers.anthropic]`
+    pointing at the scripted endpoint; the daemon's own is untouched. The key
+    arrives as `ISTOTA_PROVIDER_ANTHROPIC_API_KEY`, the variable the skill
+    proxy's `model_caller_env` copy carries in production, and
+    `build_model_cli_env` builds the CLI env from that config: nothing reaches
+    the `claude` process from this process's `ANTHROPIC_*` variables any more.
+    The proxy's own env assembly is the native scenario's to cover, not this
+    one's.
 
     This is outside testbed rule 1 on purpose. That rule is about how a service
     points the *daemon* at itself; the daemon never reads this copy, and its
@@ -313,6 +317,8 @@ set -eu
 cp /data/config/config.toml {CLAUDE_CONFIG}
 sed -i '0,/^kind = "native"$/s//kind = "claude_code"/' {CLAUDE_CONFIG}
 grep -qx 'kind = "claude_code"' {CLAUDE_CONFIG}
+printf '\n[brain.claude_code]\nauth = "api_key"\n\n[providers.anthropic]\nbase_url = "%s"\n' \
+    {stack.endpoint.anthropic_container_url} >> {CLAUDE_CONFIG}
 mkdir -p /data/repos/testuser
 rm -rf {repo}
 git init -q -b main {repo}
@@ -325,8 +331,7 @@ printf "%s-%s\\n" {head} {tail} >> {CHANGED_FILE}
 cd /app
 env ISTOTA_CONFIG_PATH={CLAUDE_CONFIG} ISTOTA_USER_ID=testuser \\
     DEVELOPER_REPOS_DIR=/data/repos/testuser \\
-    ANTHROPIC_BASE_URL={stack.endpoint.anthropic_container_url} \\
-    ANTHROPIC_API_KEY=unused-by-the-scripted-endpoint \\
+    ISTOTA_PROVIDER_ANTHROPIC_API_KEY=unused-by-the-scripted-endpoint \\
     uv run python -m istota.skills.code_review run \\
     --worktree {repo} --base HEAD~1 --intent "smoke witness" \\
     --timeout {CLAUDE_REVIEW_TIMEOUT}

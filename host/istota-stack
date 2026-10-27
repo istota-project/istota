@@ -1576,6 +1576,13 @@ cmd_setup() {
         var="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
         if [ -n "${!var:-}" ]; then pass+=(-e "$var"); fi
     done
+    # An operator's own provider has no secret file; the wizard reads its key
+    # from ISTOTA_PROVIDER_<ID>_API_KEY and keeps it inline in config.toml.
+    for var in $(compgen -v ISTOTA_PROVIDER_); do
+        if [[ "$var" =~ ^ISTOTA_PROVIDER_[A-Z0-9_]+_API_KEY$ ]] && [ -n "${!var:-}" ]; then
+            pass+=(-e "$var")
+        fi
+    done
     ISTOTA_CONFIG_READ_ONLY=false oneshot "${pass[@]}" \
         -v "${staging}:/vm" -v "${SECRETS_DIR}:/vm/secrets" \
         "$(main_service)" istota setup --vm-dir /vm "$@"

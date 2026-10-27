@@ -3284,7 +3284,8 @@ class TestRoomModelWriterFollowsTheRoomsBrain:
         simply stopped resolving anything."""
         with _brain_room(make_config, db_path, "native") as (config, conn):
             await cmd_room(_ctx(config, conn, args="model sonnet"))
-            assert _room1(conn).model == SONNET
+            # The alias is stored; it resolves at each task (D6).
+            assert _room1(conn).model == "sonnet"
 
 
 class TestCmdBrain:

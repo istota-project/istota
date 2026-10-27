@@ -7,7 +7,6 @@ that drops the `null` a strict model sends for an optional key.
 
 import copy
 import logging
-from types import SimpleNamespace
 
 import pytest
 
@@ -135,12 +134,12 @@ class TestModes:
         assert strict_tools_enabled("nonsense", "m") is False
 
     def test_auto_follows_the_model_capability(self, monkeypatch):
-        monkeypatch.setattr(catalog, "_OVERRIDES", {"yes/m": {"supports_structured_outputs": True}})
+        catalog.set_model_overrides({"yes/m": {"supports_structured_outputs": True}})
         assert strict_tools_enabled("auto", "yes/m") is True
         assert strict_tools_enabled("auto", "no/m") is False
 
     def test_model_overrides_can_set_the_flag(self, monkeypatch):
-        monkeypatch.setattr(catalog, "_OVERRIDES", {})
+        catalog.set_model_overrides({})
         catalog.set_model_overrides({"x/y": {"supports_structured_outputs": True}})
         try:
             assert catalog.get_model_info("x/y").supports_structured_outputs is True
@@ -197,19 +196,22 @@ class TestToolWire:
         assert "strict" not in fn
 
     def test_auto_reads_the_request_model(self, monkeypatch):
-        monkeypatch.setattr(catalog, "_OVERRIDES", {"m": {"supports_structured_outputs": True}})
+        catalog.set_model_overrides({"m": {"supports_structured_outputs": True}})
         provider = OpenAICompatibleProvider(api_key="k", strict_tool_schemas="auto")
         assert _body(provider)["tools"][0]["function"]["strict"] is True
-        monkeypatch.setattr(catalog, "_OVERRIDES", {})
+        catalog.set_model_overrides({})
         assert "strict" not in _body(provider)["tools"][0]["function"]
 
     def test_the_default_config_sends_nothing_strict_without_the_catalog_flag(self, monkeypatch):
         from istota.config import NativeBrainConfig
 
-        monkeypatch.setattr(catalog, "_OVERRIDES", {})
-        monkeypatch.setattr(catalog, "_FETCHED", {})
-        config = NativeBrainConfig(api_key="k")
-        provider = make_provider(config)
+        catalog.set_model_overrides({})
+        catalog.set_fetched_catalog(None)
+        from istota.brain import native_provider_spec
+        from istota.config import BrainConfig
+
+        config = NativeBrainConfig(provider="anthropic", api_key="k")
+        provider = make_provider(native_provider_spec(BrainConfig(native=config)))
         assert provider.strict_tool_schemas == "auto"
         body = provider._build_chat_completion_request("sys", [], _tools(), config.model, 100)
         assert "strict" not in body["tools"][0]["function"]
@@ -234,9 +236,17 @@ class TestToolWire:
         assert any("strict_tool_schemas" in r.getMessage() for r in caplog.records)
 
     def test_make_provider_passes_the_mode(self):
-        cfg = SimpleNamespace(api_key="k", base_url="https://x/v1", strict_tool_schemas="on")
-        assert make_provider(cfg).strict_tool_schemas == "on"
-        assert make_provider(SimpleNamespace(api_key="k")).strict_tool_schemas == "auto"
+        from istota.llm.providers import InferenceKey, ProviderSpec, resolve_compat
+
+        def spec(**settings):
+            return ProviderSpec(
+                id="p", kind="openai_compat", base_url="https://x/v1",
+                inference_key=InferenceKey("k"),
+                compat=resolve_compat("openai_compat", "https://x/v1", settings),
+            )
+
+        assert make_provider(spec(strict_tool_schemas="on")).strict_tool_schemas == "on"
+        assert make_provider(spec()).strict_tool_schemas == "auto"
 
     def test_carries_strict_tools(self):
         assert carries_strict_tools(_tools(), "m", "on") is True

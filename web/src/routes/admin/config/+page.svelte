@@ -30,6 +30,8 @@
   import ReviewDialog from '$lib/admin/config/ReviewDialog.svelte';
   import ConfigSecretField from '$lib/admin/config/ConfigSecretField.svelte';
   import ServarrAppsEditor from '$lib/admin/config/ServarrAppsEditor.svelte';
+  import ModelAliasesEditor from '$lib/admin/config/ModelAliasesEditor.svelte';
+  import { aliasesDraft, aliasesForm, type AliasesForm } from '$lib/admin/config/modelAliases';
   import {
     appProblems,
     rebaseApps,
@@ -92,6 +94,11 @@
   let appsForm = $state<ServarrAppsForm | null>(null);
   let appsProblems = $state<Record<string, string>>({});
 
+  /** `[models.aliases]` has a row per alias with a model picker per
+   *  namespace rather than a TOML table, when the view carries a catalogue. */
+  let aliasesInitial = $state<AliasesForm | null>(null);
+  let aliasesEdit = $state<AliasesForm | null>(null);
+
   let editable = $derived(!!view?.editable);
   let configManaged = $derived(!!view?.managed.config.managed);
   /** The form's fields, locked while the raw editor holds the whole file. */
@@ -114,8 +121,24 @@
     return Array.isArray(value) ? value.map(String) : [];
   });
 
-  /** Everything the review sends: the page's draft and the apps editor's part. */
-  let combined = $derived(mergeDrafts(draft, appsDraft));
+  let catalogue = $derived(view?.model_catalogue ?? null);
+  let modelsFields = $derived(view?.sections.find((s) => s.key === 'models')?.fields ?? []);
+  let aliasesField = $derived(modelsFields.find((f) => f.key === 'models.aliases') ?? null);
+  let aliasesEditable = $derived(
+    formEditable && !!aliasesField && aliasesField.editor !== 'readonly',
+  );
+  let nativeSources = $derived(
+    view?.sections.flatMap((s) => s.fields).find((f) => f.key === 'brain.native.model')?.model_field
+      ?.sources ?? [],
+  );
+  let aliasesPart = $derived(
+    aliasesEdit && aliasesInitial && aliasesEditable
+      ? aliasesDraft(aliasesEdit, aliasesInitial)
+      : emptyDraft(),
+  );
+
+  /** Everything the review sends: the page's draft and the structured editors' parts. */
+  let combined = $derived(mergeDrafts(mergeDrafts(draft, appsDraft), aliasesPart));
   let count = $derived(changeCount(combined));
   /** Form changes the raw editor cannot be combined with: ops, and moves. */
   let opCount = $derived(Object.keys(combined.ops).length + combined.move_to_file.length);
@@ -288,7 +311,28 @@
     } finally {
       loading = false;
     }
+    loadAliases();
     await Promise.all([loadServarr(), loadHistory()]);
+  }
+
+  /** The aliases editor's starting point. A pending edit is kept across a
+   *  reload while the field is still editable; with no catalogue the table
+   *  editor stands in. */
+  function loadAliases() {
+    const field = view?.sections.flatMap((s) => s.fields).find((f) => f.key === 'models.aliases');
+    if (!view?.model_catalogue || !field) {
+      aliasesEdit = aliasesInitial = null;
+      return;
+    }
+    const after = aliasesForm(field.value);
+    const dirty =
+      aliasesEdit && aliasesInitial && changeCount(aliasesDraft(aliasesEdit, aliasesInitial)) > 0;
+    if (!dirty) aliasesEdit = structuredClone(after);
+    aliasesInitial = after;
+  }
+
+  function resetAliases() {
+    if (aliasesInitial) aliasesEdit = structuredClone($state.snapshot(aliasesInitial));
   }
 
   /** The apps editor's starting point, rebased so pending edits survive a reload.
@@ -409,6 +453,7 @@
   function discard() {
     draft = emptyDraft();
     resetApps();
+    resetAliases();
     restored = null;
     pageNotice = '';
   }
@@ -422,6 +467,7 @@
   async function onConflict() {
     closeReview();
     const appChanges = changeCount(appsDraft);
+    const aliasChanges = changeCount(aliasesPart);
     await load();
     if (!view) return;
     const kept = retainExisting(draft, view);
@@ -430,6 +476,10 @@
     if (!appsEditable && appChanges) {
       dropped += appChanges;
       resetApps();
+    }
+    if (!aliasesEditable && aliasChanges) {
+      dropped += aliasChanges;
+      resetAliases();
     }
     pageNotice =
       'config.toml changed on the host since this page loaded. The page now shows the new values' +
@@ -443,6 +493,7 @@
     closeReview();
     draft = emptyDraft();
     resetApps();
+    resetAliases();
     pageNotice = '';
     requestId = id;
     void loadHistory();
@@ -582,6 +633,7 @@
             {requestId}
             onApplied={(fresh) => {
               view = fresh;
+              loadAliases();
               void loadHistory();
               void loadServarr();
             }}
@@ -644,6 +696,14 @@
                 readOnlyReason={field.read_only_reason}
                 onAllowHost={allowHost}
               />
+            {:else if field.key === 'models.aliases' && aliasesEdit && catalogue}
+              <ModelAliasesEditor
+                bind:form={aliasesEdit}
+                {catalogue}
+                {nativeSources}
+                editable={aliasesEditable}
+                readOnlyReason={field.read_only_reason}
+              />
             {:else}
               <FieldControl
                 {field}
@@ -652,6 +712,7 @@
                 secretSource={secretByKey.get(field.key)?.source}
                 editable={formEditable}
                 problem={problemByKey.get(field.path.join('.'))}
+                {catalogue}
                 onOp={setOp}
                 onSecret={setSecret}
               />

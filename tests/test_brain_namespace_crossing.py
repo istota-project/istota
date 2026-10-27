@@ -539,3 +539,66 @@ class TestTheProducersThatDoNotMeetThePremise:
         child = _Task("claude-opus-5", source_type="subtask")
         assert _pin_origin_namespace(child, config) == "openai_compat"
         assert _request_model(child, config, _brain("native")) == "claude-opus-5"
+
+
+class TestARefCarriesItsProvider:
+    """A qualified reference crosses a brain boundary when the target brain can
+    run its provider's model (`llm.providers.brain_can_run`), not by namespace.
+    A bare legacy value keeps the namespace rule above."""
+
+    @staticmethod
+    def _native_config(native_provider):
+        from istota.config import NativeBrainConfig
+
+        return NativeBrainConfig(provider=native_provider, model="native-model")
+
+    def _config(self, kind, native_provider):
+        return Config(brain=BrainConfig(kind=kind, native=self._native_config(native_provider)))
+
+    def _native(self, native_provider):
+        return make_brain(BrainConfig(kind="native", native=self._native_config(native_provider)))
+
+    def test_an_anthropic_ref_survives_a_fallback_to_native_on_anthropic(self):
+        result = _resolve_crossing_model_effort(
+            _Task("anthropic/claude-opus-5:high"), self._config("claude_code", "anthropic"),
+            self._native("anthropic"), "", origin_namespace="anthropic",
+        )
+        assert result == ("claude-opus-5", "high", None)
+
+    def test_it_is_dropped_where_native_uses_another_provider(self):
+        result = _resolve_crossing_model_effort(
+            _Task("anthropic/claude-opus-5"), self._config("claude_code", "openrouter"),
+            self._native("openrouter"), "", origin_namespace="anthropic",
+        )
+        assert result == ("", "", "anthropic/claude-opus-5")
+
+    def test_a_bare_id_crosses_to_a_brain_that_reaches_its_provider(self):
+        # The pin is an id of the provider the task ran on (D22): `anthropic`
+        # for the CLI brain, which native reaches here, so it carries.
+        result = _resolve_crossing_model_effort(
+            _Task("claude-opus-5"), self._config("claude_code", "anthropic"),
+            self._native("anthropic"), "", origin_namespace="anthropic",
+        )
+        assert result == ("claude-opus-5", "", None)
+
+    def test_a_bare_id_is_dropped_where_native_uses_another_provider(self):
+        result = _resolve_crossing_model_effort(
+            _Task("claude-opus-5"), self._config("claude_code", "openrouter"),
+            self._native("openrouter"), "", origin_namespace="anthropic",
+        )
+        assert result == ("", "", "claude-opus-5")
+
+    def test_an_id_natives_provider_lists_is_its_own_not_a_ref(self):
+        """`anthropic/claude-opus-5` written on a native brain that uses
+        OpenRouter, where OpenRouter lists it: OpenRouter's id, so it does not
+        carry to the CLI brain."""
+        from istota.llm.catalog import ModelInfo, set_fetched_catalog
+
+        set_fetched_catalog({"anthropic/claude-opus-5": ModelInfo(
+            id="anthropic/claude-opus-5", context_window=1000, max_output_tokens=100,
+        )})
+        result = _resolve_crossing_model_effort(
+            _Task("anthropic/claude-opus-5"), self._config("native", "openrouter"),
+            _brain("claude_code"), "", origin_namespace="openai_compat",
+        )
+        assert result == ("", "", "anthropic/claude-opus-5")

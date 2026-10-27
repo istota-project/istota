@@ -417,8 +417,17 @@ def build_mount_plan(
     workspace_dir: Path | None = None,
     withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
     group_ids: "list[str] | None" = None,
+    cli_auth_mode: str | None = None,
+    cli_key_dir: Path | None = None,
 ) -> MountPlan:
     """Every bind, mask and namespace flag this task's sandbox gets, in order.
+
+    ``cli_auth_mode`` is the `claude` CLI's auth mode
+    (`llm.providers.process_cli_auth`): `~/.claude/.credentials.json` is bound
+    under ``"subscription"`` only, so an API-key deployment's CLI never sees a
+    token. ``cli_key_dir`` is the tmux brain's per-attempt directory holding the
+    key its `apiKeyHelper` reads, bound read-only under ``"api_key"`` and the
+    ``CLAUDE`` profile only, so a native attempt cannot read it.
 
     ``group_ids`` is the task's resolved group set
     (``room_scopes.task_group_ids``); each existing ``{mount}/Groups/<id>`` is
@@ -659,8 +668,9 @@ def build_mount_plan(
         if claude_dir.exists():
             _tmpfs(claude_dir, "claude_home")
             creds = claude_dir / ".credentials.json"
-            if creds.exists():
-                # RO: prevents token persistence attacks
+            if creds.exists() and cli_auth_mode == "subscription":
+                # RO: prevents token persistence attacks. Only under
+                # "subscription": an API-key CLI carries no token.
                 _ro(creds, "claude_credentials")
             settings = claude_dir / "settings.json"
             if settings.exists():
@@ -673,6 +683,11 @@ def build_mount_plan(
                 d = claude_dir / subdir
                 if d.exists():
                     _rw(d, f"claude_{subdir}")
+        # The key the tmux brain's `apiKeyHelper` reads, under "api_key": in a
+        # daemon-only directory beside `.control`, never in the control dir,
+        # which the NATIVE profile binds too.
+        if cli_auth_mode == "api_key" and cli_key_dir is not None and cli_key_dir.is_dir():
+            _ro(cli_key_dir, "claude_cli_key")
 
     # --- User workspace (RW) ---
     _rw(user_temp_dir.resolve(), "user_temp_dir", user_data=True, protected=True)

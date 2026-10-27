@@ -166,6 +166,60 @@ def model_namespace_for_kind(kind) -> str | None:
     return None
 
 
+def brain_unconfigured_reason(kind: str, config) -> str | None:
+    """Why ``kind`` cannot run on this deployment, or ``None``.
+
+    The one predicate for brain availability by configuration, read by
+    ``resolve_brain_kind``, ``room_selectable_kinds``, ``effective_fallback_kind``
+    and doctor's ``runtime.native_brain``. It reads
+    ``BrainConfig.unconfigured``, which the loader fills (empty means nothing
+    is unconfigured). Takes a ``Config`` or a ``BrainConfig``. Never raises.
+    """
+    brain = getattr(config, "brain", config)
+    try:
+        reason = (getattr(brain, "unconfigured", None) or {}).get(kind)
+    except Exception:  # noqa: BLE001 - a routing read must not raise
+        return None
+    return reason or None
+
+
+def native_provider_spec(brain_config: BrainConfig):
+    """The provider record native's requests go to, or ``None``.
+
+    Read from ``BrainConfig.provider_specs``, which ``load_config`` fills. A
+    ``BrainConfig`` built without the loader has none, and gets the built-ins
+    plus whatever its ``[brain.native]`` legacy fields imply, through the same
+    transition table the loader reads.
+    """
+    native = brain_config.native
+    specs = getattr(brain_config, "provider_specs", None) or {}
+    if not specs:
+        from istota.config import providers_for_native
+
+        specs, provider_id = providers_for_native(native)
+    else:
+        provider_id = native.provider
+    if not provider_id or provider_id == "openai_compat":
+        return None
+    return specs.get(provider_id)
+
+
+def native_providers(brain_config: BrainConfig) -> dict:
+    """Every configured provider record, by id: native routes a request to
+    one of them when `[brain.native] providers` lists it (D4).
+
+    ``BrainConfig.provider_specs`` where ``load_config`` filled it, else the
+    built-ins plus what ``[brain.native]``'s legacy fields imply.
+    """
+    specs = getattr(brain_config, "provider_specs", None) or {}
+    if specs:
+        return dict(specs)
+    from istota.config import providers_for_native
+
+    specs, _provider_id = providers_for_native(brain_config.native)
+    return dict(specs)
+
+
 def make_brain(brain_config: BrainConfig) -> Brain:
     """Construct a brain instance from config.
 
@@ -178,7 +232,11 @@ def make_brain(brain_config: BrainConfig) -> Brain:
     if kind == "native":
         from .native import NativeBrain
 
-        return NativeBrain(brain_config.native)
+        return NativeBrain(
+            brain_config.native,
+            spec=native_provider_spec(brain_config),
+            providers=native_providers(brain_config),
+        )
     if kind == "tmux_claude":
         from .tmux_claude import TmuxClaudeBrain
 
@@ -204,7 +262,7 @@ def room_selectable_kinds(brain_config) -> frozenset[str]:
         return frozenset()
     return frozenset(
         name for name in (str(entry).strip() for entry in configured)
-        if name in KNOWN_BRAIN_KINDS
+        if name in KNOWN_BRAIN_KINDS and brain_unconfigured_reason(name, brain_config) is None
     )
 
 
@@ -450,6 +508,14 @@ def resolve_brain_kind(source_type, brain_config, override: str | None = None):
                     "brain routing: unknown kind %r pinned for source_type %r; "
                     "ignoring it and resolving from config",
                     _shown(pinned), source_type,
+                )
+        elif brain_unconfigured_reason(pinned, brain_config) is not None:
+            if _refusal_is_unreported("unconfigured-pin", pinned, source_type):
+                logger.warning(
+                    "brain routing: kind %r pinned for source_type %r is not "
+                    "configured (%s); ignoring it and resolving from config",
+                    _shown(pinned), source_type,
+                    _shown(brain_unconfigured_reason(pinned, brain_config)),
                 )
         elif pinned not in room_selectable_kinds(brain_config):
             if _refusal_is_unreported("unlisted-pin", pinned, source_type):

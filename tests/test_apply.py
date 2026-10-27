@@ -394,6 +394,92 @@ class TestCheck:
         assert tomllib.loads(config_path.read_text()) == PLAN_CONFIG
 
 
+class TestModelFields:
+    """A model field naming a provider no config has is refused (`model`, in
+    `BLOCKING_KINDS`); anything else that does not resolve is `model_unknown`,
+    a warning, so no config written before providers existed is refused."""
+
+    @staticmethod
+    def _config(**extra) -> dict:
+        return {**PLAN_CONFIG, **extra}
+
+    def _kinds(self, result) -> set[tuple[str, tuple]]:
+        return {(p["kind"], tuple(p["path"])) for p in result.problems}
+
+    def test_an_unconfigured_provider_prefix_is_a_model_problem(self):
+        result = apply.collect(self._config(brain={"claude_code": {"model": "nosuch/claude-x"}}))
+        assert ("model", ("brain", "claude_code", "model")) in self._kinds(result)
+        assert result.refused
+
+    def test_apply_refuses_an_unconfigured_provider_and_writes_nothing(
+        self, monkeypatch, capsys, tmp_path, config_path,
+    ):
+        config_path.write_text('bot_name = "Before"\n')
+        before = config_path.read_bytes()
+        plan = _write_plan(tmp_path / "p.toml", self._config(brain={"claude_code": {"model": "nosuch/claude-x"}}))
+        code, _, err = _invoke(monkeypatch, capsys, config_path, "-f", str(plan))
+        assert code == apply.EXIT_ERROR, err
+        assert config_path.read_bytes() == before
+
+    def test_check_json_answers_1_for_a_model_problem(self, monkeypatch, capsys):
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(
+            {"config": self._config(advisor_model="nosuch/claude-x")})))
+        monkeypatch.delenv("ISTOTA_CONFIG_PATH", raising=False)
+        monkeypatch.setattr("sys.argv", ["istota", "apply", "--check", "-f", "-", "--json"])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        kinds = [p["kind"] for p in json.loads(capsys.readouterr().out)["problems"]]
+        assert "model" in kinds
+
+    @pytest.mark.parametrize("extra", [
+        {"brain": {"claude_code": {"model": "anthropic/claude-nope-9"}}},
+        {"brain": {"claude_code": {"model": "claude-opus"}}},
+        {"advisor_model": "opus:high"},
+    ], ids=["unknown_ref", "pattern", "effort_on_effortless_field"])
+    def test_other_unresolvable_values_warn_and_do_not_refuse(self, extra):
+        result = apply.collect(self._config(**extra))
+        kinds = {kind for kind, _ in self._kinds(result)}
+        assert "model_unknown" in kinds
+        assert "model" not in kinds
+        assert not result.refused
+
+    @pytest.mark.parametrize("extra", [
+        {"brain": {"claude_code": {"model": "sonnet"}}},
+        {"brain": {"claude_code": {"model": "smart:high"}}},
+        {"brain": {"claude_code": {"model": "claude-sonnet-5-5"}}},
+        {"brain": {"claude_code": {"model": "anthropic/claude-sonnet-5-5:low"}}},
+        {"developer": {"review": {"model": "general:medium"}}},
+    ], ids=["shortcut", "tier_effort", "bare_id", "ref", "review_alias_effort"])
+    def test_pre_provider_shapes_and_refs_raise_no_model_problem(self, extra):
+        result = apply.collect(self._config(**extra))
+        assert not [p for p in result.problems if p["kind"].startswith("model")], result.problems
+        assert not result.refused
+
+    def test_an_openrouter_id_on_native_is_never_refused(self):
+        """OpenRouter ids carry a `/` whose head is a vendor, not a provider,
+        so the unconfigured-prefix rule cannot apply to a native field."""
+        result = apply.collect(self._config(brain={"native": {"provider": "openrouter", "model": "z-ai/glm-5.3-flash"}}))
+        assert not result.refused, result.problems
+
+    def test_check_result_refuses_by_kind(self):
+        def result(kind):
+            return apply.CheckResult(problems=[{"kind": kind, "path": [], "message": ""}])
+
+        assert result("model").refused
+        assert result("discarded").refused
+        assert apply.CheckResult(error="boom").refused
+        assert not result("model_unknown").refused
+        assert not result("warning").refused
+
+    def test_check_and_apply_read_one_blocking_set(self):
+        from istota.config_editor import check
+
+        assert check.BLOCKING_KINDS is apply.BLOCKING_KINDS
+        assert {"discarded", "error", "model"} <= apply.BLOCKING_KINDS
+        assert "model_unknown" not in apply.BLOCKING_KINDS
+
+
 class TestTheManagementMarker:
     def test_snapshot_preserves_management_marker(self, monkeypatch, capsys, tmp_path, config_path):
         plan = _write_plan(tmp_path / "p.toml", meta={"managed": True, "source": "ansible"})

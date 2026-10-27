@@ -62,7 +62,7 @@ def wrapper_run(istota_image, tmp_path_factory) -> WrapperRun:
     work = tmp_path_factory.mktemp("row5-exec")
     with boot_shipped_stack(
         istota_image.tag, work,
-        setup_env={"ISTOTA_BRAIN_NATIVE_API_KEY": "row5-unused-key"},
+        setup_env={"ISTOTA_PROVIDER_ANTHROPIC_API_KEY": "row5-unused-key"},
         project_prefix="istota-row5",
     ) as stack:
         env = {

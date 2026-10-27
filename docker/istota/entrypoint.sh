@@ -230,18 +230,10 @@ fi
 
 # --- Claude Code ---
 #
-# The claude_code and tmux_claude brains authenticate the `claude` CLI, which
-# reads an OAuth token from this file (an API key works from the environment
-# alone). Never printed.
-if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-    mkdir -p "${HOME}/.claude"
-    ( umask 077 && python3 -c '
-import json, os, sys
-json.dump({"claudeAiOauth": {"accessToken": os.environ["CLAUDE_CODE_OAUTH_TOKEN"],
-           "expiresAt": "9999-12-31T23:59:59.999Z"}}, sys.stdout)
-' > "${HOME}/.claude/.credentials.json" )
-    log "Claude Code OAuth token configured."
-fi
+# The CLI's credentials file follows [brain.claude_code] auth: written under
+# "subscription" with a token, removed otherwise. Never printed.
+istota -c "$CONFIG_FILE" cli-auth sync-credentials-file \
+    || log "Warning: the Claude Code credentials file could not be synced."
 
 # From the venv, never through `uv run`, which would try to sync the read-only
 # root. The image puts /app/.venv/bin first on PATH.

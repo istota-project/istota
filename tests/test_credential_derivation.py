@@ -12,8 +12,6 @@ from pathlib import Path
 
 
 from istota.executor import (
-    _PROXY_LOOKUP_BLOCKED,
-    SKILL_MODEL_CREDENTIAL_VARS,
     derive_authorized_skills,
     derive_credential_set,
     derive_lookup_allowlist,
@@ -345,14 +343,20 @@ class TestDeriveLookupAllowlistHelpers:
         proxy can inject them into the one skill CLI that calls a model
         (ISSUE-409). Injection is scoped per skill; this endpoint is scoped to
         nothing — its allowlist is a union and the socket is bound into the
-        sandbox, so a name in it is one the model can ask for by hand."""
-        assert SKILL_MODEL_CREDENTIAL_VARS <= _PROXY_LOOKUP_BLOCKED
+        sandbox, so a name in it is one the model can ask for by hand.
+        Every name `is_model_credential_name` accepts is refused, a provider
+        added later included."""
+        names = (
+            "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL", "ISTOTA_PROVIDER_ANTHROPIC_API_KEY",
+            "ISTOTA_PROVIDER_SOMEDAY_EXTRA_HEADERS", "ISTOTA_BRAIN_NATIVE_API_KEY",
+        )
         idx = {
             "greedy": SkillMeta(
                 name="greedy", description="",
                 env_specs=[
                     EnvSpec(var=name, source="setup_env", sensitive=True)
-                    for name in SKILL_MODEL_CREDENTIAL_VARS
+                    for name in names
                 ],
             ),
         }

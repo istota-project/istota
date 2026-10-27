@@ -2,7 +2,7 @@
 
 import json
 import os
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -620,7 +620,7 @@ class TestChatRoomsApi:
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body["model"] == "claude-opus-5"
+        assert body["model"] == "claude-opus-5"  # stored as the id within its provider (D22)
         assert body["effort"] == "high"
         # Surfaced in the room listing too.
         rooms = (await chat_client.get(
@@ -679,7 +679,7 @@ class TestChatRoomsApi:
             json={"model": "gpt-9"}, cookies=cookies,
             headers={"origin": "https://example.com"},
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 422  # a resolver refusal, with its code
 
     async def test_invalid_effort_rejected(self, chat_client):
         cookies = await _login(chat_client, "alice")
@@ -3245,7 +3245,7 @@ class TestTheRoomPatchValidatesInTheRoomsNamespace:
             json={"model": "claude-opus-5"}, cookies=cookies,
             headers={"origin": "https://example.com"},
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 422
         with db.get_db(config.db_path) as conn:
             assert db.get_room(conn, created["token"]).model is None
 
@@ -3267,52 +3267,43 @@ class TestTheRoomPatchValidatesInTheRoomsNamespace:
 
 
 @_needs_web_deps
-class TestRoomModelAllowed:
+class TestRoomModelSelection:
+    """`_room_model_selection`: the PATCH's one resolver call (D6, D9)."""
+
     def test_it_answers_for_the_brain_it_is_given(self, tmp_path):
         import istota.webui.app as mod
-        from istota.config import BrainConfig, NativeBrainConfig
+        from istota.config import BrainConfig
 
         _patch_app(_make_config(tmp_path))
         anthropic = BrainConfig(kind="claude_code")
-        native = BrainConfig(kind="native", native=NativeBrainConfig(model="endpoint/m"))
-        assert mod._room_model_allowed(anthropic, OPUS)
-        assert not mod._room_model_allowed(native, OPUS)
-        assert mod._room_model_allowed(native, "endpoint/m")
-        # Native has no canonical passthrough: an id it was not configured with
-        # resolves to nothing, so the second half cannot widen the PATCH there.
-        assert not mod._room_model_allowed(native, "vendor/other-model")
+        native = BrainConfig(kind="native")
+        picked, refusal = mod._room_model_selection(anthropic, OPUS, is_admin=True)
+        assert refusal is None
+        assert (picked.model, picked.provider) == (OPUS, None)
+        stored, refusal = mod._room_model_selection(native, OPUS, is_admin=True)
+        assert stored is None
+        assert refusal["code"] == "model_not_runnable"
 
-    def test_a_canonical_id_no_alias_targets_is_accepted(self, tmp_path):
-        """#548: a deployment default no alias pointed at could not be pinned
-        from web, while `!room model` accepted it through the same brain's
-        canonical passthrough. The two writers now agree."""
+    def test_an_alias_is_stored_as_the_alias(self, tmp_path):
         import istota.webui.app as mod
         from istota.config import BrainConfig
 
         _patch_app(_make_config(tmp_path))
         anthropic = BrainConfig(kind="claude_code")
-        assert "claude-opus-4-7" != OPUS
-        assert mod._room_model_allowed(anthropic, "claude-opus-4-7")
+        picked, refusal = mod._room_model_selection(anthropic, "opus", is_admin=False)
+        assert (picked.model, refusal) == ("opus", None)
 
-    def test_alias_names_and_effort_suffixes_are_refused(self, tmp_path):
-        """The PATCH stores a canonical id; effort is its own field."""
+    def test_effort_suffixes_and_unknown_ids_are_refused(self, tmp_path):
+        """Effort is its own field on the PATCH."""
         import istota.webui.app as mod
         from istota.config import BrainConfig
 
         _patch_app(_make_config(tmp_path))
         anthropic = BrainConfig(kind="claude_code")
-        assert not mod._room_model_allowed(anthropic, "opus")
-        assert not mod._room_model_allowed(anthropic, f"{OPUS}:high")
-        assert not mod._room_model_allowed(anthropic, "gpt-4o")
-
-    def test_an_unbuildable_brain_rejects_everything(self, tmp_path):
-        """The validator degrades to "reject all" rather than to "accept all" —
-        an unusable answer must not widen what may be written."""
-        import istota.webui.app as mod
-        from istota.config import BrainConfig
-
-        _patch_app(_make_config(tmp_path))
-        assert not mod._room_model_allowed(BrainConfig(kind="no-such-brain"), OPUS)
+        assert mod._room_model_selection(anthropic, f"{OPUS}:high", is_admin=True)[0] is None
+        stored, refusal = mod._room_model_selection(anthropic, "gpt-4o", is_admin=True)
+        assert stored is None
+        assert refusal["code"] == "unknown"
 
 
 @_needs_web_deps
@@ -3581,7 +3572,7 @@ class TestBrainAndModelInOneBody:
             json={"brain": "native", "model": "claude-opus-5"},
             cookies=cookies, headers=self.HDRS,
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 422
         # Nothing was written: the refusal happens before `_chat_update_room`.
         with db.get_db(config.db_path) as conn:
             stored = db.get_room(conn, room["token"])
@@ -3598,18 +3589,29 @@ class TestBrainAndModelInOneBody:
         where the user previously had to save the brain, wait, and come back to
         pick a model.
         """
+        from istota.llm.catalog import ModelInfo, set_discovered
+
         client, config = client_and_config
+        config.brain.native.provider = "openrouter"
         config.brain.native.model = "vendor/some-model"
+        set_discovered({"openrouter": [ModelInfo(
+            id="vendor/some-model", context_window=1000, max_output_tokens=100,
+            provider="openrouter",
+        )]})
         cookies = await _login(client, "alice")
         room = await self._room(client, cookies)
-        resp = await client.patch(
-            f"/istota/api/chat/rooms/{room['id']}",
-            json={"brain": "native", "model": "vendor/some-model"},
-            cookies=cookies, headers=self.HDRS,
-        )
+        # No discovery cache on disk: keep the layer installed above rather
+        # than let the PATCH take up an empty one.
+        with patch("istota.llm.discovery.install_from_cache_dir", return_value=False):
+            resp = await client.patch(
+                f"/istota/api/chat/rooms/{room['id']}",
+                json={"brain": "native", "model": "vendor/some-model"},
+                cookies=cookies, headers=self.HDRS,
+            )
         assert resp.status_code == 200
         body = resp.json()
         assert body["brain"] == "native"
+        # The bare id is stored as the id within its provider (D6, D22).
         assert body["model"] == "vendor/some-model"
         # Replaced, not lost, so the report says nothing was cleared.
         assert "cleared" not in body

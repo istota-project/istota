@@ -88,11 +88,11 @@ def stack(local_stack, release):
                    " && apparmor_parser -r /etc/apparmor.d/istota")
         return
     if name == "secret-owned-by-root":
-        vm.run(f"chown 0:0 {lima.STACK}/secrets/anthropic_api_key")
+        vm.run(f"chown 0:0 {lima.STACK}/secrets/istota_provider_anthropic_api_key")
         try:
             yield vm
         finally:
-            vm.run(f"chown 10001:10001 {lima.STACK}/secrets/anthropic_api_key")
+            vm.run(f"chown 10001:10001 {lima.STACK}/secrets/istota_provider_anthropic_api_key")
         return
     yield vm
 

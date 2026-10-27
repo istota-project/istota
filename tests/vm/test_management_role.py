@@ -103,7 +103,7 @@ class _RoleChecks:
 
     def test_the_vault_value_is_the_file(self, stack):
         _, variables = _last(self.mode)
-        name = "istota_brain_native_api_key"
+        name = "istota_web_session_secret_key"
         on_disk = stack.out(f"cat {shlex.quote(f'{lima.STACK}/secrets/{name}')}")
         assert on_disk == variables["istota_secrets"][name]
 
@@ -132,7 +132,7 @@ class TestTheRoleInProxiedMode(_RoleChecks):
         where a secret and the admins file go, by 10001, must be replaced, and
         nothing may land in a directory only root can write."""
         _, variables = _last(self.mode)
-        name = "istota_brain_native_api_key"
+        name = "istota_web_session_secret_key"
         plant = f"{lima.SCRATCH}/planted"
         targets = [f"{lima.STACK}/secrets/{name}", f"{lima.STACK}/config/admins"]
         as_10001 = "setpriv --reuid=10001 --regid=10001 --clear-groups"

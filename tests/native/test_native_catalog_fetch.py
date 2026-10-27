@@ -1,41 +1,31 @@
-"""Stage 3 — NativeBrain live OpenRouter model-catalog fetch wiring."""
+"""NativeBrain reads the discovered model lists from their caches and never
+fetches (model-catalogue spec, Stage 4; the fetch is the scheduler gate's)."""
 
 import asyncio
-import threading
+import json
+import os
 import time
 
-import pytest
-
-import istota.llm.openrouter_catalog as orc
 from istota.brain import BrainRequest
-from istota.brain import native as native_mod
 from istota.brain.native import NativeBrain
 from istota.config import NativeBrainConfig
-from istota.llm.catalog import ModelInfo, get_model_info, set_fetched_catalog
+from istota.llm import discovery
+from istota.llm.catalog import ModelInfo, get_model_info
 from istota.llm.types import AssistantMessage, TextContent, Usage
 
 from ._mock_provider import MockProvider
 
-
-@pytest.fixture(autouse=True)
-def _reset_catalog():
-    # Process-global state must be clean before + after each test (suite -n auto).
-    native_mod._reset_catalog_fetch_state()
-    set_fetched_catalog(None)
-    yield
-    native_mod._reset_catalog_fetch_state()
-    set_fetched_catalog(None)
+_MODEL = "anthropic/claude-opus-4.8"
 
 
-def _brain(**cfg) -> NativeBrain:
-    config = NativeBrainConfig(model="anthropic/claude-opus-4.8", **cfg)
-    return NativeBrain(config, provider=MockProvider([]))
+def _brain(provider=None) -> NativeBrain:
+    config = NativeBrainConfig(model=_MODEL, base_url="https://openrouter.ai/api/v1")
+    return NativeBrain(config, provider=provider or MockProvider([]))
 
 
 def _req(tmp_path, *, db_path=True) -> BrainRequest:
     # The cache dir comes from BrainRequest.db_path, not from ISTOTA_DB_PATH in
-    # the task env — that var is routed to the skill proxy and never reaches
-    # the sandbox env the brain carries.
+    # the task env, which never reaches the sandbox env the brain carries.
     return BrainRequest(
         prompt="hi",
         allowed_tools=[],
@@ -43,169 +33,68 @@ def _req(tmp_path, *, db_path=True) -> BrainRequest:
         env={},
         db_path=(tmp_path / "istota.db") if db_path else None,
         timeout_seconds=30,
-        model="anthropic/claude-opus-4.8",
+        model=_MODEL,
     )
 
 
-_FETCHED = {
-    "anthropic/claude-opus-4.8": ModelInfo(
-        id="anthropic/claude-opus-4.8",
-        context_window=500_000,
-        max_output_tokens=64000,
-        supports_thinking=True,
-    )
-}
+def _write_openrouter_cache(tmp_path, *, window=500_000, fetched_at=None) -> None:
+    info = ModelInfo(id=_MODEL, context_window=window, max_output_tokens=64000, supports_thinking=True)
+    fetched_at = time.time() if fetched_at is None else fetched_at
+    doc = {
+        "provider": "openrouter",
+        "kind": "openrouter",
+        "fetched_at": fetched_at,
+        "models": {_MODEL: {**discovery._record_json(info), "last_seen": fetched_at}},
+    }
+    cache_dir = tmp_path / discovery.CACHE_DIRNAME
+    cache_dir.mkdir(exist_ok=True)
+    (cache_dir / "openrouter.json").write_text(json.dumps(doc))
 
 
-class TestSkip:
-    def test_skips_non_openrouter_endpoint(self, tmp_path, monkeypatch):
-        calls = []
+class TestItReadsTheCacheOnly:
+    def test_a_cache_is_installed(self, tmp_path):
+        _write_openrouter_cache(tmp_path)
+        asyncio.run(_brain()._ensure_fetched_catalog(_req(tmp_path)))
+        assert get_model_info(_MODEL).context_window == 500_000
 
-        async def _fake_fetch(*a, **k):
-            calls.append(1)
-            return _FETCHED
+    def test_no_cache_installs_nothing_and_fetches_nothing(self, tmp_path):
+        # The conftest refuses both real transports, so a fetch would raise
+        # inside the brain and be swallowed; the cache dir staying absent is
+        # the evidence no refresh ran here.
+        asyncio.run(_brain()._ensure_fetched_catalog(_req(tmp_path)))
+        assert get_model_info(_MODEL).context_window == 200_000
+        assert not (tmp_path / discovery.CACHE_DIRNAME).exists()
 
-        monkeypatch.setattr(orc, "fetch_openrouter_catalog", _fake_fetch)
-        brain = _brain(base_url="https://api.anthropic.com/v1", model_catalog_fetch=True)
-        asyncio.run(brain._ensure_fetched_catalog(_req(tmp_path)))
-        assert calls == []
-        # nothing installed → default resolution
-        assert get_model_info("anthropic/claude-opus-4.8").context_window == 200_000
+    def test_a_stale_cache_still_serves(self, tmp_path):
+        _write_openrouter_cache(tmp_path, fetched_at=1.0)
+        asyncio.run(_brain()._ensure_fetched_catalog(_req(tmp_path)))
+        assert get_model_info(_MODEL).context_window == 500_000
 
-    def test_skips_when_disabled(self, tmp_path, monkeypatch):
-        calls = []
+    def test_no_db_path_leaves_the_installed_layer(self, tmp_path):
+        asyncio.run(_brain()._ensure_fetched_catalog(_req(tmp_path, db_path=False)))
+        assert get_model_info(_MODEL).context_window == 200_000
 
-        async def _fake_fetch(*a, **k):
-            calls.append(1)
-            return _FETCHED
+    def test_a_rewritten_cache_is_picked_up_at_the_next_task(self, tmp_path):
+        _write_openrouter_cache(tmp_path)
+        asyncio.run(_brain()._ensure_fetched_catalog(_req(tmp_path)))
+        _write_openrouter_cache(tmp_path, window=600_000)
+        path = tmp_path / discovery.CACHE_DIRNAME / "openrouter.json"
+        stamp = time.time() + 5
+        os.utime(path, (stamp, stamp))
+        asyncio.run(_brain()._ensure_fetched_catalog(_req(tmp_path)))
+        assert get_model_info(_MODEL).context_window == 600_000
 
-        monkeypatch.setattr(orc, "fetch_openrouter_catalog", _fake_fetch)
-        brain = _brain(base_url="https://openrouter.ai/api/v1", model_catalog_fetch=False)
-        asyncio.run(brain._ensure_fetched_catalog(_req(tmp_path)))
-        assert calls == []
-
-
-class TestFetchOnce:
-    def test_fetches_installs_and_caches(self, tmp_path, monkeypatch):
-        calls = []
-
-        async def _fake_fetch(base_url, *, api_key="", **k):
-            calls.append(base_url)
-            return _FETCHED
-
-        monkeypatch.setattr(orc, "fetch_openrouter_catalog", _fake_fetch)
-        brain = _brain(base_url="https://openrouter.ai/api/v1")
-
-        asyncio.run(brain._ensure_fetched_catalog(_req(tmp_path)))
-        assert len(calls) == 1
-        # installed → real window
-        assert get_model_info("anthropic/claude-opus-4.8").context_window == 500_000
-        # disk cache written
-        assert orc.cache_path(tmp_path).exists()
-
-        # second call within TTL: no refetch (module timestamp guard)
-        asyncio.run(brain._ensure_fetched_catalog(_req(tmp_path)))
-        assert len(calls) == 1
-
-    def test_fresh_disk_cache_used_without_fetch(self, tmp_path, monkeypatch):
-        # pre-seed a fresh cache; a fresh process (reset timestamp) reads it
-        orc.write_cache(orc.cache_path(tmp_path), _FETCHED, now_ts=time.time())
-        calls = []
-
-        async def _fake_fetch(*a, **k):
-            calls.append(1)
-            return {}
-
-        monkeypatch.setattr(orc, "fetch_openrouter_catalog", _fake_fetch)
-        brain = _brain(base_url="https://openrouter.ai/api/v1")
-        asyncio.run(brain._ensure_fetched_catalog(_req(tmp_path)))
-        assert calls == []
-        assert get_model_info("anthropic/claude-opus-4.8").context_window == 500_000
-
-    def test_no_db_path_still_fetches_memory_only(self, tmp_path, monkeypatch):
-        calls = []
-
-        async def _fake_fetch(*a, **k):
-            calls.append(1)
-            return _FETCHED
-
-        monkeypatch.setattr(orc, "fetch_openrouter_catalog", _fake_fetch)
-        brain = _brain(base_url="https://openrouter.ai/api/v1")
-        asyncio.run(brain._ensure_fetched_catalog(_req(tmp_path, db_path=False)))
-        assert len(calls) == 1
-        assert get_model_info("anthropic/claude-opus-4.8").context_window == 500_000
-        # no cache file written (no data dir)
-        assert not orc.cache_path(tmp_path).exists()
-
-
-class TestFailureFallback:
-    def test_fetch_fails_uses_stale_cache(self, tmp_path, monkeypatch):
-        # stale cache present (written long ago)
-        orc.write_cache(orc.cache_path(tmp_path), _FETCHED, now_ts=1.0)
-
-        async def _boom(*a, **k):
-            raise RuntimeError("network down")
-
-        monkeypatch.setattr(orc, "fetch_openrouter_catalog", _boom)
-        brain = _brain(base_url="https://openrouter.ai/api/v1", model_catalog_cache_ttl_hours=24.0)
-        asyncio.run(brain._ensure_fetched_catalog(_req(tmp_path)))
-        # stale cache installed rather than raising
-        assert get_model_info("anthropic/claude-opus-4.8").context_window == 500_000
-
-    def test_fetch_fails_no_cache_falls_to_default(self, tmp_path, monkeypatch):
-        async def _boom(*a, **k):
-            raise RuntimeError("network down")
-
-        monkeypatch.setattr(orc, "fetch_openrouter_catalog", _boom)
-        brain = _brain(base_url="https://openrouter.ai/api/v1")
-        asyncio.run(brain._ensure_fetched_catalog(_req(tmp_path)))
-        assert get_model_info("anthropic/claude-opus-4.8").context_window == 200_000
-        # timestamp NOT stamped → a later task retries
-        assert native_mod._CATALOG_FETCHED_AT is None
-
-    def test_empty_payload_treated_as_failure(self, tmp_path, monkeypatch):
-        async def _empty(*a, **k):
-            return {}
-
-        monkeypatch.setattr(orc, "fetch_openrouter_catalog", _empty)
-        brain = _brain(base_url="https://openrouter.ai/api/v1")
-        asyncio.run(brain._ensure_fetched_catalog(_req(tmp_path)))
-        assert get_model_info("anthropic/claude-opus-4.8").context_window == 200_000
-        assert native_mod._CATALOG_FETCHED_AT is None
-
-
-class TestConcurrency:
-    def test_concurrent_first_tasks_fetch_at_most_once(self, tmp_path, monkeypatch):
-        calls = []
-
-        async def _slow_fetch(*a, **k):
-            calls.append(1)
-            await asyncio.sleep(0.05)
-            return _FETCHED
-
-        monkeypatch.setattr(orc, "fetch_openrouter_catalog", _slow_fetch)
-
-        def _run():
-            brain = _brain(base_url="https://openrouter.ai/api/v1")
-            asyncio.run(brain._ensure_fetched_catalog(_req(tmp_path)))
-
-        threads = [threading.Thread(target=_run) for _ in range(4)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        assert len(calls) == 1
+    def test_a_corrupt_cache_never_fails_the_task(self, tmp_path):
+        cache_dir = tmp_path / discovery.CACHE_DIRNAME
+        cache_dir.mkdir()
+        (cache_dir / "openrouter.json").write_text("{nope")
+        asyncio.run(_brain()._ensure_fetched_catalog(_req(tmp_path)))
+        assert get_model_info(_MODEL).context_window == 200_000
 
 
 class TestExecuteWiring:
-    def test_execute_triggers_fetch(self, tmp_path, monkeypatch):
-        calls = []
-
-        async def _fake_fetch(*a, **k):
-            calls.append(1)
-            return _FETCHED
-
-        monkeypatch.setattr(orc, "fetch_openrouter_catalog", _fake_fetch)
+    def test_execute_installs_the_cache_before_the_loop(self, tmp_path):
+        _write_openrouter_cache(tmp_path)
         provider = MockProvider(
             [
                 AssistantMessage(
@@ -215,11 +104,6 @@ class TestExecuteWiring:
                 )
             ]
         )
-        config = NativeBrainConfig(
-            model="anthropic/claude-opus-4.8", base_url="https://openrouter.ai/api/v1"
-        )
-        brain = NativeBrain(config, provider=provider)
-        result = brain.execute(_req(tmp_path))
+        result = _brain(provider).execute(_req(tmp_path))
         assert result.success is True
-        assert len(calls) == 1
-        assert get_model_info("anthropic/claude-opus-4.8").context_window == 500_000
+        assert get_model_info(_MODEL).context_window == 500_000

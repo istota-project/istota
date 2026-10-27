@@ -295,15 +295,15 @@ class TestTheCompleterAndItsUsage:
         )
         seen = []
 
-        def _fake(native, timeout, *, on_usage=None, close_after_call=False):
+        def _fake(native, timeout, *, spec=None, on_usage=None, close_after_call=False):
             seen.append((native.model, timeout, close_after_call))
             return lambda _p: None
 
         config.speech_gate.model = "small/model"
         config.speech_gate.timeout_seconds = 4.0
         with patch("istota.executor._build_native_completer", side_effect=_fake), \
-                patch("istota.executor._native_with_user_key",
-                      side_effect=lambda nc, *a, **k: nc):
+                patch("istota.llm.providers.user_provider_key",
+                      side_effect=AssertionError("an internal call never reads a user's key")):
             build_speech_gate_completer(config, user_id="alice", source_type="talk")
             # An unoverridden role collapses to the configured native model.
             build_oneshot_completer(
@@ -340,8 +340,8 @@ class TestTheCompleterAndItsUsage:
         )
         provider = _Closing([AssistantMessage(content=[TextContent(text='{"speak": true}')])])
         with patch("istota.llm.make_provider", return_value=provider), \
-                patch("istota.executor._native_with_user_key",
-                      side_effect=lambda nc, *a, **k: nc):
+                patch("istota.llm.providers.user_provider_key",
+                      side_effect=AssertionError("an internal call never reads a user's key")):
             completer = build_speech_gate_completer(
                 config, user_id="alice", source_type="talk",
             )

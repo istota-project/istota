@@ -255,6 +255,19 @@ def _no_subscription_usage_lookups(monkeypatch):
     monkeypatch.setattr(subscription_usage, "get_snapshot", _no_credential)
     monkeypatch.setattr(subscription_usage, "_urllib_transport", _refuse)
 
+    # Model discovery's two default transports, for the same reason: a test
+    # that reaches a provider's model list injects a transport.
+    try:
+        from istota.llm import discovery
+    except Exception:
+        return
+
+    def _refuse_discovery(url, headers, timeout):
+        raise AssertionError("a test reached a real model list; inject a transport")
+
+    monkeypatch.setattr(discovery, "_anthropic_transport", _refuse_discovery)
+    monkeypatch.setattr(discovery, "_http_transport", _refuse_discovery)
+
 
 def _init_db_inputs() -> dict:
     """Everything `db.init_db` runs, by identity, so a patched one is visible."""
@@ -559,7 +572,7 @@ def _reset_expunge_warning_latch():
 
 @pytest.fixture(autouse=True)
 def _reset_brain_refusal_latch():
-    """Isolate ``brain._WARNED_REFUSALS``.
+    """Isolate ``brain._WARNED_REFUSALS`` and ``brain._resolve._warned_unlisted``.
 
     Same shape and same reason as the latch above: a process-global set of
     routing refusals already warned about, so any test that resolves a refused
@@ -567,10 +580,13 @@ def _reset_brain_refusal_latch():
     on the warning passes or fails on who ran first.
     """
     from istota import brain as brain_mod
+    from istota.brain import _resolve
 
     brain_mod._WARNED_REFUSALS.clear()
+    _resolve._warned_unlisted.clear()
     yield
     brain_mod._WARNED_REFUSALS.clear()
+    _resolve._warned_unlisted.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -583,7 +599,8 @@ def _reset_process_globals():
     that, and each one has been observed producing a failure:
 
     1. The ``[models.aliases]`` table (``brain._roles``) and
-    2. the per-model capability overrides (``llm.catalog._OVERRIDES``).
+    2. the per-model capability overrides (the override layer of
+       ``llm.catalog``'s ``Catalogue`` snapshot).
 
        Both are installed as a **side effect of ``load_config``** (``config.py``,
        at the end of the parse), so the leak is not confined to tests that reach
@@ -619,10 +636,13 @@ def _reset_process_globals():
     from istota.brain._fallback import reset_availability_breaker
     from istota.brain._roles import set_alias_overrides
     from istota.llm import catalog as catalog_mod
+    from istota.llm import discovery as discovery_mod
 
     def _clear():
         set_alias_overrides({})
-        catalog_mod._OVERRIDES = {}
+        catalog_mod.set_config_layers(operator={}, overrides={})
+        catalog_mod.set_discovered({})
+        discovery_mod.reset_install_state()
         reset_availability_breaker()
 
     _clear()

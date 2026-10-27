@@ -182,13 +182,14 @@ class TestTheServarrKeys:
         assert reply.get("reason") == "not_authorized_credential"
 
 
-class TestTheNativeExtraHeaders:
-    """`code_review` builds the native brain from its own `load_config`, so the
-    headers it sends come from `ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS` once they
-    live in their secret file. The daemon's copy reaches that skill alone."""
+class TestTheNativeReviewersProvider:
+    """`code_review` builds the native brain from its own `load_config`, so its
+    provider's key and headers reach it as `model_caller_env`'s copy, built
+    from config: `ISTOTA_PROVIDER_<ID>_API_KEY` and `_EXTRA_HEADERS`, to that
+    skill alone, never fetchable."""
 
-    VAR = "ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS"
-    VALUE = '{"Authorization": "Bearer header-test"}'
+    KEY_VAR = "ISTOTA_PROVIDER_OPENROUTER_API_KEY"
+    HEADERS_VAR = "ISTOTA_PROVIDER_OPENROUTER_EXTRA_HEADERS"
 
     def _inputs(self, runtime_inputs):
         return {
@@ -196,23 +197,32 @@ class TestTheNativeExtraHeaders:
             "skill_index": {"code_review": _skill("code_review"), "kv": _skill("kv")},
         }
 
-    def test_code_review_gets_the_headers_from_the_daemon_env(
+    def _native(self, tmp_path):
+        config = _config(tmp_path)
+        config.brain.kind = "native"
+        config.brain.native.provider = "openrouter"
+        config.providers["openrouter"].api_key = "or-key-test"
+        config.providers["openrouter"].extra_headers = {"X-Title": "header-test"}
+        return config
+
+    def test_code_review_gets_its_providers_key_and_headers(
         self, tmp_path, runtime_inputs, monkeypatch,
     ):
         monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
-        monkeypatch.setenv(self.VAR, self.VALUE)
-        runtime = task_env.build_task_runtime(_config(tmp_path), **self._inputs(runtime_inputs))
+        runtime = task_env.build_task_runtime(self._native(tmp_path), **self._inputs(runtime_inputs))
 
         proxy = runtime.proxy_ctx
-        assert proxy.credential_env[self.VAR] == self.VALUE
-        assert self.VAR in proxy.skill_credential_map["code_review"]
-        assert self.VAR not in proxy.skill_credential_map.get("kv", set())
-        assert self.VAR not in runtime.env
-        assert self.VAR not in runtime.proxy_ctx.allowed_credentials
+        assert proxy.credential_env[self.KEY_VAR] == "or-key-test"
+        assert proxy.credential_env[self.HEADERS_VAR] == '{"X-Title": "header-test"}'
+        for var in (self.KEY_VAR, self.HEADERS_VAR):
+            assert var in proxy.skill_credential_map["code_review"]
+            assert var not in proxy.skill_credential_map.get("kv", set())
+            assert var not in runtime.env
+            assert var not in proxy.base_env
+            assert var not in proxy.allowed_credentials
 
-    def test_the_name_is_mapped_and_blocked_from_lookup(self):
-        assert self.VAR in executor.SKILL_DAEMON_CREDENTIAL_VARS["code_review"]
-        assert self.VAR in executor._PROXY_LOOKUP_BLOCKED
+    def test_no_daemon_env_copy_is_left_for_it(self):
+        assert "code_review" not in executor.SKILL_DAEMON_CREDENTIAL_VARS
 
 
 class TestTheSandboxedMarker:
@@ -344,33 +354,37 @@ class TestTheClaudeRuntimeCredential:
 
         assert "CLAUDE_CODE_OAUTH_TOKEN" not in runtime.proxy_ctx.allowed_credentials
 
-    def test_a_skill_the_task_never_authorized_gets_nothing(
+    def test_a_skill_the_task_cannot_run_gets_nothing(
         self, tmp_path, runtime_inputs, monkeypatch,
     ):
+        # Gated on what the proxy will run for this task (`cli_skills`), since
+        # the manifest declares no credential to authorize the skill by.
         monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
         config = _config(tmp_path)
         runtime_inputs = {
             **runtime_inputs,
             "selected_skills": [],
-            "skill_index": {"code_review": _skill("code_review")},
+            "skill_index": {"code_review": _skill("code_review", cli=False)},
         }
 
         runtime = task_env.build_task_runtime(config, **runtime_inputs)
 
         assert "code_review" not in runtime.proxy_ctx.skill_credential_map
 
-    def test_an_api_key_deployment_is_authenticated_the_same_way(
+    def test_an_api_key_deployment_is_authenticated_from_config(
         self, tmp_path, runtime_inputs, monkeypatch,
     ):
-        # `build_model_cli_env` runs *inside* the skill subprocess, so the
-        # `os.environ` it reads is the proxy's snapshot rather than the
-        # daemon's — and the API-key names are in a task env by no route at
-        # all. Broken on that shape before ISSUE-390 broke the other one.
+        # `build_model_cli_env` runs *inside* the skill subprocess and builds
+        # the CLI env from that process's own config: the copy carries the
+        # mode and the `anthropic` provider's key under its provider variable,
+        # and the model's own env carries the key the CLI reads.
         monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-test")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-from-the-daemon-env")
         config = _config(tmp_path)
+        config.brain.claude_code.auth = "api_key"
+        config.providers["anthropic"].api_key = "sk-ant-api-test"
         runtime_inputs = {
             **runtime_inputs,
             "selected_skills": ["code_review"],
@@ -380,11 +394,16 @@ class TestTheClaudeRuntimeCredential:
         runtime = task_env.build_task_runtime(config, **runtime_inputs)
 
         proxy = runtime.proxy_ctx
-        assert proxy.credential_env["ANTHROPIC_API_KEY"] == "sk-ant-api-test"
-        assert "ANTHROPIC_API_KEY" in proxy.skill_credential_map["code_review"]
-        assert "ANTHROPIC_API_KEY" not in proxy.allowed_credentials
+        assert proxy.credential_env["ISTOTA_PROVIDER_ANTHROPIC_API_KEY"] == "sk-ant-api-test"
+        assert proxy.credential_env["ISTOTA_CLI_AUTH"] == "api_key"
+        assert "ISTOTA_PROVIDER_ANTHROPIC_API_KEY" in proxy.skill_credential_map["code_review"]
+        assert "ISTOTA_PROVIDER_ANTHROPIC_API_KEY" not in proxy.allowed_credentials
         # Never in the shared snapshot: it reaches one skill, not all of them.
+        assert "ISTOTA_PROVIDER_ANTHROPIC_API_KEY" not in proxy.base_env
         assert "ANTHROPIC_API_KEY" not in proxy.base_env
+        # The model's env carries the config key, never the daemon's variable.
+        assert runtime.env["ANTHROPIC_API_KEY"] == "sk-ant-api-test"
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in runtime.env
 
     def test_nothing_is_injected_when_the_daemon_has_no_token(
         self, tmp_path, runtime_inputs, monkeypatch,
@@ -412,13 +431,14 @@ class TestTheClaudeRuntimeCredential:
         # there — and a deployment with a `NO_PROXY` set now legitimately puts
         # one in, as does every test in this suite, since
         # `tests/support/env_isolation.py` forces that name into `os.environ`.
+        from istota.llm.providers import is_model_credential_name
+
         proxy = runtime.proxy_ctx
-        for name in executor.SKILL_MODEL_CREDENTIAL_VARS:
-            assert name not in proxy.credential_env, name
-        assert not (
-            executor.SKILL_MODEL_CREDENTIAL_VARS
-            & proxy.skill_credential_map.get("code_review", set())
-        )
+        assert not [name for name in proxy.credential_env if is_model_credential_name(name)]
+        assert not [
+            name for name in proxy.skill_credential_map.get("code_review", set())
+            if is_model_credential_name(name)
+        ]
 
 
 class TestTheOrderOfTheTwoCredentialSplits:
@@ -575,11 +595,10 @@ class TestTheReachabilityNames:
         assert proxy.credential_env["HTTPS_PROXY"] == (
             "http://egress.example:3128"
         )
-        assert proxy.credential_env["ANTHROPIC_BASE_URL"] == (
-            "https://gateway.example/v1"
-        )
         assert "HTTPS_PROXY" in proxy.skill_credential_map["code_review"]
-        assert "ANTHROPIC_BASE_URL" in proxy.skill_credential_map["code_review"]
+        # The gateway URL is not read from the daemon's environment any more:
+        # the child derives it from the `anthropic` provider's config.
+        assert "ANTHROPIC_BASE_URL" not in proxy.credential_env
 
     def test_no_other_skill_gets_the_proxy_triple(
         self, tmp_path, runtime_inputs, monkeypatch,
@@ -699,12 +718,12 @@ class TestTheReachabilityNames:
         # shared TLS names land in `proxy_base_env` first. A name on two of
         # these lists would be handled twice under two different rules —
         # notably the empty-value rule, which differs between them.
+        from istota.llm.providers import is_model_credential_name
+
         tls = set(executor.SKILL_CLI_TLS_VARS)
         reach = set(executor.SKILL_MODEL_REACHABILITY_VARS)
-        creds = set(executor.SKILL_MODEL_CREDENTIAL_VARS)
         assert not tls & reach
-        assert not tls & creds
-        assert not reach & creds
+        assert not [name for name in tls | reach if is_model_credential_name(name)]
 
     def test_the_scoped_names_are_blocked_from_lookup_by_name(self):
         # `_PROXY_LOOKUP_BLOCKED` is the endpoint-side half of the same rule
@@ -726,8 +745,11 @@ class TestTheReachabilityNames:
         monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
         monkeypatch.setenv("HTTPS_PROXY", "http://egress.example:3128")
         monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/etc/ssl/private-ca.pem")
-        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/v1")
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://elsewhere.example/v1")
         config = _config(tmp_path)
+        config.brain.claude_code.auth = "api_key"
+        config.providers["anthropic"].api_key = "sk-ant-api-test"
+        config.providers["anthropic"].base_url = "https://gateway.example"
 
         runtime = task_env.build_task_runtime(
             config, **_code_review_inputs(runtime_inputs)
@@ -740,13 +762,20 @@ class TestTheReachabilityNames:
         for var in proxy.skill_credential_map["code_review"]:
             cli_env[var] = proxy.credential_env[var]
         monkeypatch.setattr(os, "environ", cli_env)
-        reviewer_env = executor.build_model_cli_env(config)
+        # The child loads its own config, which here is the same file; its
+        # mode comes from the copy's `ISTOTA_CLI_AUTH`.
+        from istota.llm.providers import resolve_process_auth
+        child = Config(
+            db_path=config.db_path, temp_dir=config.temp_dir,
+            security=config.security, providers=config.providers,
+        )
+        resolve_process_auth(child, cli_env)
+        reviewer_env = executor.build_model_cli_env(child)
 
         assert reviewer_env["HTTPS_PROXY"] == "http://egress.example:3128"
         assert reviewer_env["REQUESTS_CA_BUNDLE"] == "/etc/ssl/private-ca.pem"
-        assert reviewer_env["ANTHROPIC_BASE_URL"] == (
-            "https://gateway.example/v1"
-        )
+        assert reviewer_env["ANTHROPIC_BASE_URL"] == "https://gateway.example"
+        assert reviewer_env["ANTHROPIC_API_KEY"] == "sk-ant-api-test"
 
 
 class TestThePathPrepend:

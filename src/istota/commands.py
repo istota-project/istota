@@ -28,6 +28,7 @@ from .brain import (
     resolve_brain_kind,
     room_selectable_kinds,
 )
+from .brain._aliases import split_effort
 from .memory import search as memory_search_mod
 from istota.sandbox.process_group import signal_task_worker
 from .config import Config
@@ -205,27 +206,83 @@ class ModelPrefix:
     effort: str | None
     remainder: str
     unknown_alias: str | None = None
+    # Why the selection was refused, for a person: set beside `unknown_alias`
+    # when the resolver gave a reason (not enabled, ambiguous, not runnable).
+    refusal: str | None = None
+    # The provider `model` is an id of (model-catalogue D22): "" for the
+    # brain's default, None to take the room's standing provider.
+    provider: str | None = None
 
 
-def parse_model_prefix(content: str, brain: Brain) -> ModelPrefix | None:
-    """Parse a `!model <alias> <prompt>` prefix using ``brain`` for alias lookup.
+def parse_model_prefix(
+    content: str, brain: Brain, *, config: Config | None = None, user_id: str | None = None,
+    room_provider: str | None = None,
+) -> ModelPrefix | None:
+    """Parse a `!model <selection> <prompt>` prefix.
 
     Returns None when `content` is not a `!model` prefix at all (so the
-    caller's normal command-dispatch path runs unchanged). The active
-    brain owns the alias namespace, so this parser is pure syntax and
-    delegates resolution.
+    caller's normal command-dispatch path runs unchanged). With ``config``,
+    the selection is a person's (`brain._resolve.resolve_for_person`): an
+    admin picks from the whole catalogue, anyone else from `[models]
+    enabled`, aliases are open to both, and a pattern is accepted. The model
+    returned is what the task stores, an alias name or a ref, which
+    `record_inbound` resolves at task creation. ``room_provider`` is the
+    room's stored provider: the selection is resolved within it, and an
+    admin's ``provider/id`` of another listed provider names that provider
+    for this one task. Without ``config`` the brain's own alias table answers,
+    as before.
     """
     stripped = content.strip()
     match = _MODEL_PREFIX_RE.match(stripped)
     if not match:
         return None
-    alias = (match.group(1) or "").lower()
+    raw = (match.group(1) or "").strip()
+    alias = raw.lower()
     remainder = match.group(2).strip()
-    resolved = brain.resolve_alias(alias) if alias else None
+    if not alias:
+        return ModelPrefix(model=None, effort=None, remainder=remainder, unknown_alias=alias)
+    if config is not None:
+        return _person_model_prefix(raw, remainder, brain, config, user_id, room_provider)
+    resolved = brain.resolve_alias(alias)
     if resolved is None:
         return ModelPrefix(model=None, effort=None, remainder=remainder, unknown_alias=alias)
     model, effort = resolved
     return ModelPrefix(model=model, effort=effort, remainder=remainder)
+
+
+def _person_model_prefix(
+    raw: str, remainder: str, brain: Brain, config: Config, user_id: str | None,
+    room_provider: str | None = None,
+) -> ModelPrefix:
+    from .brain._resolve import (
+        DEFAULT_ALIAS,
+        ResolveError,
+        describe_resolve_error,
+        select_for_person,
+    )
+
+    base, suffix_effort = split_effort(raw)
+    if base.lower() == DEFAULT_ALIAS:
+        # `!model default`: the brain's own model, escaping the room's pin.
+        return ModelPrefix(model=None, effort=suffix_effort, remainder=remainder)
+    picked = select_for_person(
+        raw, config,
+        kind=getattr(brain, "kind", None),
+        provider=room_provider,
+        is_admin=bool(user_id) and config.is_admin(user_id),
+        allow_patterns=True,
+    )
+    if isinstance(picked, ResolveError):
+        return ModelPrefix(
+            model=None, effort=None, remainder=remainder,
+            unknown_alias=raw.lower(), refusal=describe_resolve_error(picked),
+        )
+    return ModelPrefix(
+        model=picked.model,
+        effort=picked.effort,
+        remainder=remainder,
+        provider=picked.provider or "",
+    )
 
 
 def model_prefix_usage(brain: Brain) -> str:
@@ -251,24 +308,50 @@ class ModelPrefixOutcome:
     model: str | None = None
     effort: str | None = None
     usage: str | None = None
+    # See `ModelPrefix.provider`.
+    provider: str | None = None
 
 
 def resolve_model_prefix(
     content: str, brain: Brain, *, has_attachments: bool = False,
+    config: Config | None = None, user_id: str | None = None,
+    room_provider: str | None = None,
 ) -> ModelPrefixOutcome:
-    """Apply the shared `!model <alias> <prompt>` rule across surfaces."""
-    prefix = parse_model_prefix(content, brain)
+    """Apply the shared `!model <selection> <prompt>` rule across surfaces.
+
+    Pass ``config`` and the sender's ``user_id`` so the selection is bounded
+    by who is choosing, and the room's stored ``room_provider`` (see
+    `parse_model_prefix`).
+    """
+    prefix = parse_model_prefix(
+        content, brain, config=config, user_id=user_id, room_provider=room_provider,
+    )
     if prefix is None:
         return ModelPrefixOutcome(matched=False, content=content)
     if prefix.unknown_alias is not None:
-        return ModelPrefixOutcome(matched=True, content=content, usage=model_prefix_usage(brain))
+        usage = model_prefix_usage(brain)
+        if prefix.refusal:
+            usage = f"{prefix.refusal}\n{usage}"
+        return ModelPrefixOutcome(matched=True, content=content, usage=usage)
     # "!model opus" with no prompt is only meaningful when there's an attachment
     # to act on; otherwise there's nothing to do — show usage.
     if not prefix.remainder.strip() and not has_attachments:
         return ModelPrefixOutcome(matched=True, content=content, usage=model_prefix_usage(brain))
     return ModelPrefixOutcome(
         matched=True, content=prefix.remainder, model=prefix.model, effort=prefix.effort,
+        provider=prefix.provider,
     )
+
+
+def room_provider(conn, room_token: str) -> str | None:
+    """The room's stored provider (model-catalogue D22), or None. Never raises."""
+    try:
+        room = db.get_room(conn, room_token) if room_token else None
+    except Exception:  # noqa: BLE001 — a room read must not raise into a poll loop
+        logger.debug("room_provider: room read failed", exc_info=True)
+        return None
+    value = getattr(room, "provider", None) if room is not None else None
+    return value if isinstance(value, str) and value else None
 
 
 def brain_for_room(config: Config, conn, room_token: str, source_type: str):
@@ -1233,12 +1316,31 @@ def _ctx_brain(ctx: CommandContext):
     return brain_for_room(ctx.config, ctx.conn, _room_token(ctx), ctx.surface)
 
 
-@command("models", "List available model aliases (and what they resolve to)")
+#: How many models `!models all <provider>` lists before it says how many more.
+_MODELS_LIST_CAP = 200
+
+
+@command(
+    "models",
+    "List the model aliases and the models you can pick, by provider "
+    "(admins: `!models all <provider>` for a provider's whole list)",
+)
 async def cmd_models(ctx: CommandContext):
-    lines = ["**Model aliases**", "", "Use `!model <alias> <prompt>` to override the model for a single task.", ""]
     # The room's own brain, not the deployment default: offering a room names it
     # cannot run is the same defect as writing one, one step earlier.
-    for alias, model, effort in make_brain(_ctx_brain(ctx)).list_aliases():
+    room_brain_config = _ctx_brain(ctx)
+    brain = make_brain(room_brain_config)
+    is_admin = ctx.config.is_admin(ctx.user_id)
+    args = ctx.args.strip().split()
+    if args and args[0].lower() == "all":
+        if not is_admin:
+            return "Only an admin can list a provider's whole model list. `!models` shows what you can pick."
+        if len(args) < 2:
+            return "Usage: `!models all <provider>`."
+        return _models_all(ctx.config, room_brain_config.kind, args[1].lower())
+
+    lines = ["**Model aliases**", "", "Use `!model <name> <prompt>` to override the model for a single task.", ""]
+    for alias, model, effort in brain.list_aliases():
         if model is None:
             target = "(no override — use default)"
         elif effort:
@@ -1246,11 +1348,88 @@ async def cmd_models(ctx: CommandContext):
         else:
             target = f"`{model}`"
         lines.append(f"- `{alias}` → {target}")
+    lines.extend(_models_by_provider(
+        ctx.config, room_brain_config.kind, is_admin,
+        provider=room_provider(ctx.conn, _room_token(ctx)),
+    ))
     lines.append("")
     lines.append(
         "Append `:low|:medium|:high|:xhigh|:max` to any name to set effort, "
         "e.g. `!model opus:high`."
     )
+    return "\n".join(lines)
+
+
+def runnable_models(config: Config, kind: str) -> list:
+    """The catalogue's current models the brain ``kind`` can run, in order."""
+    from .brain._resolve import config_providers, native_provider_id, native_reach_ids
+    from .llm.catalog import current_catalogue
+    from .llm.providers import brain_can_run
+
+    providers = config_providers(config)
+    native = native_provider_id(config)
+    reach = native_reach_ids(config)
+    return [
+        info for info in current_catalogue().models()
+        if not info.deprecated
+        and brain_can_run(kind, info.ref, providers, native_provider=native, native_reach=reach)
+    ]
+
+
+def _models_by_provider(
+    config: Config, kind: str, is_admin: bool, *, provider: str | None = None,
+) -> list[str]:
+    """`!models`' model section: the viewer's set, grouped by provider.
+
+    A non-admin sees the enabled models of the room's provider (``provider``,
+    the stored column; D22). An admin sees every provider the room's brain
+    can run, enabled models marked, and a count of the rest per provider with
+    the command that lists them (D9).
+    """
+    from .brain._resolve import effective_provider, enabled_patterns, enabled_refs
+    from .llm.catalog import current_catalogue
+
+    enabled = set(enabled_refs(current_catalogue(), enabled_patterns(config)))
+    current = effective_provider(config, kind, provider)
+    groups: dict[str, list] = {}
+    for info in runnable_models(config, kind):
+        if not is_admin and current and info.provider != current:
+            continue
+        groups.setdefault(info.provider, []).append(info)
+    lines: list[str] = []
+    for provider in sorted(groups):
+        picked = [i for i in groups[provider] if i.ref in enabled]
+        others = len(groups[provider]) - len(picked)
+        if not picked and not (is_admin and others):
+            continue
+        lines += ["", f"**{provider}**"]
+        for info in picked:
+            label = f" ({info.name})" if info.name and info.name != info.id else ""
+            mark = " · enabled" if is_admin else ""
+            lines.append(f"- `{info.ref}`{label}{mark}")
+        if is_admin and others:
+            lines.append(f"- {others} more: `!models all {provider}`")
+    if not lines:
+        return ["", "No models to pick beyond the aliases."]
+    return ["", "**Models**", *lines]
+
+
+def _models_all(config: Config, kind: str, provider: str) -> str:
+    """`!models all <provider>`, for an admin: every current model of it."""
+    from .brain._resolve import enabled_patterns, enabled_refs
+    from .llm.catalog import current_catalogue
+
+    enabled = set(enabled_refs(current_catalogue(), enabled_patterns(config)))
+    models = [i for i in runnable_models(config, kind) if i.provider == provider]
+    if not models:
+        return f"No models of `{provider}` that this room's brain can run."
+    models.sort(key=lambda i: (i.ref not in enabled, i.ref))
+    lines = [f"**{provider}** ({len(models)} models)", ""]
+    for info in models[:_MODELS_LIST_CAP]:
+        mark = " · enabled" if info.ref in enabled else ""
+        lines.append(f"- `{info.ref}`{mark}")
+    if len(models) > _MODELS_LIST_CAP:
+        lines.append(f"- and {len(models) - _MODELS_LIST_CAP} more")
     return "\n".join(lines)
 
 
@@ -1497,14 +1676,26 @@ def _clear_pin_across_namespaces(
 
     Returns the lines to add to the reply, empty when nothing was cleared, so
     the caller says what it did rather than doing it silently. Writes nothing
-    when there is no pin to lose.
+    when there is no pin to lose. A room's provider (D22) is native's only, so
+    a move to a CLI brain clears it too, with the model it named.
 
     Clears when either namespace could not be determined. That is the safe
     direction here and the opposite of this module's usual "behave as before":
     leaving a pin whose portability is unknown is the failure being prevented,
     while a cleared pin costs one command to set again.
     """
+    provider_lines: list[str] = []
+    stored_provider = (getattr(room, "provider", None) or "").strip()
+    if stored_provider:
+        incoming_kind = resolve_brain_kind(source_type, config.brain, override=incoming or None).kind
+        if incoming_kind != "native":
+            db.set_room_provider(conn, token, None)
+            provider_lines.append(
+                f"Its provider (`{stored_provider}`) was cleared — only a native room has one."
+            )
     if not room.model:
+        if provider_lines:
+            return provider_lines
         # With no model pin there is nothing namespaced to lose: an effort level
         # on its own is a semantic rung every brain reads, so it survives the
         # change. This is the *only* case in which effort survives — below, it
@@ -1526,7 +1717,7 @@ def _clear_pin_across_namespaces(
     after = _model_namespace(
         resolve_brain_kind(source_type, config.brain, override=incoming or None)
     )
-    if before is not None and after is not None and before == after:
+    if before is not None and after is not None and before == after and not provider_lines:
         return []
     logger.info(
         "room %s: clearing model pin %r across a brain namespace change "
@@ -1539,15 +1730,17 @@ def _clear_pin_across_namespaces(
         # that mentioned only the model would under-report what it just did.
         dropped += f" and effort (`{room.effort}`)"
     return [
+        *provider_lines,
         f"Its {dropped} was cleared — that id belongs to the previous brain's "
-        "namespace. Set a new one with `!room model <alias>`."
+        "namespace. Set a new one with `!room model <alias>`.",
     ]
 
 
 @command(
     "room",
     "Show or set this room's standing model/effort default: "
-    "`!room`, `!room model <alias>`, `!room effort <level>` "
+    "`!room`, `!room model <alias>`, `!room effort <level>`, "
+    "`!room provider <id>` (admin, native rooms) "
     "(applies to every message here, on Talk and web; `default` clears)",
 )
 async def cmd_room(ctx: CommandContext):
@@ -1570,8 +1763,14 @@ async def cmd_room(ctx: CommandContext):
         # Read-only on the brain: `!brain` is the single writer, and this line
         # exists so somebody reading a room's settings sees which brain the
         # model figures below were resolved against.
-        return _describe_room_default(room.model, room.effort) + "\n" + \
-            _describe_room_brain(config, room, ctx.surface)
+        return "\n".join(filter(None, [
+            _describe_room_default(room.model, room.effort),
+            _describe_room_provider(config, conn, token, room, ctx.surface),
+            _describe_room_brain(config, room, ctx.surface),
+        ]))
+
+    if sub == "provider":
+        return _room_provider_command(ctx, token, room, rest)
 
     if sub in ("model", "effort"):
         refusal = room_policy.settings_refusal(conn, token, ctx.user_id)
@@ -1579,7 +1778,7 @@ async def cmd_room(ctx: CommandContext):
             return refusal
 
     if sub == "model":
-        alias = rest.lower()
+        alias = rest.strip()
         # Resolved through the *room's* brain. A room pinned to a brain in
         # another model namespace must not have an id it cannot run written into
         # its standing default — that is not one bad turn, it is every turn in
@@ -1598,36 +1797,60 @@ async def cmd_room(ctx: CommandContext):
                 "Usage: `!room model <alias>` (or `default` to clear). "
                 f"Aliases: {', '.join(f'`{a}`' for a in aliases)}."
             )
-        if alias == "default":
+        if alias.lower() == "default":
             # The reserved `default` keyword always clears the room's model +
             # effort, independent of any operator override that may have given
             # the `default` alias a concrete resolution.
             db.set_room_model_effort(conn, token, None, None)
             return "Room model reset — this room now uses the instance default."
-        resolved = room_brain.resolve_alias(alias)
-        if resolved is None:
+        # The selection is the sender's: an admin picks from the whole
+        # catalogue, anyone else from `[models] enabled` (D9). What is stored
+        # is the alias or the ref it matched, resolved again at each task (D6).
+        from .brain._resolve import (
+            ResolveError,
+            describe_resolve_error,
+            select_for_person,
+        )
+
+        picked = select_for_person(
+            alias, config,
+            kind=getattr(room_brain, "kind", None),
+            provider=room.provider,
+            is_admin=config.is_admin(ctx.user_id),
+            allow_patterns=True,
+        )
+        if isinstance(picked, ResolveError):
             return (
-                f"Unknown model alias `{alias}`. "
-                f"Aliases: {', '.join(f'`{a}`' for a in aliases)}."
+                f"{describe_resolve_error(picked)} "
+                f"Aliases: {', '.join(f'`{a}`' for a in aliases)}. "
+                "`!models` lists what you can pick."
             )
-        model, effort = resolved
-        if model is None:
-            # `!room model default` — a full reset of the model dimension,
-            # effort included.
+        resolved = picked.resolution
+        if resolved.brain_default and resolved.alias == "default":
             db.set_room_model_effort(conn, token, None, None)
             return "Room model reset — this room now uses the instance default."
-        if effort is not None:
-            # An effort-bearing alias (e.g. `opus-high`) is an explicit
-            # both-pick, so it sets effort too.
+        model = picked.model
+        moved = ""
+        if picked.provider_changed:
+            # An admin's `provider/id` of another listed provider: split into
+            # the two columns (D22).
+            db.set_room_provider(conn, token, picked.provider)
+            moved = f" Provider set to `{picked.provider or 'default'}`."
+        typed_effort = split_effort(alias)[1]
+        if typed_effort is not None:
+            # A `:effort` on the selection is an explicit both-pick, so it
+            # sets effort too.
             db.set_room_model_effort(
-                conn, token, model, effort, namespace=room_namespace,
+                conn, token, model, typed_effort, namespace=room_namespace,
             )
+            effort = typed_effort
         else:
-            # A plain model alias leaves any separately-set `!room effort` intact
-            # (the two knobs are orthogonal).
+            # A plain selection leaves any separately-set `!room effort` intact
+            # (the two knobs are orthogonal); an alias's own effort applies at
+            # each task while the room sets none.
             db.set_room_model(conn, token, model, namespace=room_namespace)
             effort = db.get_room(conn, token).effort
-        return _describe_room_default(model, effort)
+        return _describe_room_default(model, effort) + moved
 
     if sub == "effort":
         level = rest.lower()
@@ -1665,12 +1888,112 @@ async def cmd_room(ctx: CommandContext):
 
     return (
         "Usage: `!room` (show), `!room model <alias>`, `!room effort <level>`, "
+        "`!room provider [<id>|default]` (admin, native rooms), "
         "`!room host`, `!room guests <off|held|direct>`, "
         "`!room speak [mention|classifier|off|default]`, "
         "`!room disposition [reserved|friendly|default]`, "
         "`!room group [<id>|none]`, `!room notes [<room>]`. "
         "Use `default` to clear."
     )
+
+
+def provider_default_model(config: Config, provider_id: str | None) -> str:
+    """The model a native room on ``provider_id`` runs with no model pin:
+    `[brain.native] model` (else the provider's own) on native's default
+    provider, the provider's `default_model` on another listed one."""
+    from .brain import native_providers
+    from .brain._resolve import native_provider_id
+
+    spec = native_providers(config.brain).get(provider_id or "")
+    own = (getattr(spec, "default_model", "") or "").strip()
+    if provider_id and provider_id == native_provider_id(config):
+        return (config.brain.native.model or "").strip() or own
+    return own
+
+
+def _describe_room_provider(config: Config, conn, token: str, room, surface: str) -> str:
+    """`!room`'s provider line, for a room whose brain is native; else ''."""
+    from .brain._resolve import effective_provider
+
+    kind = brain_for_room(config, conn, token, surface).kind
+    if kind != "native":
+        return ""
+    stored = (getattr(room, "provider", None) or "").strip()
+    running = effective_provider(config, kind, stored or None)
+    if not stored:
+        return f"Provider: `{running}` (native's default)."
+    if stored != running:
+        return (
+            f"Provider: this room is set to `{stored}`, which `[brain.native] providers` "
+            f"no longer lists; it is running `{running}`."
+        )
+    return f"Provider: `{stored}`."
+
+
+def _room_provider_command(ctx: CommandContext, token: str, room, value: str) -> str:
+    """`!room provider [<id>|default]`: which provider a native room runs on.
+
+    Admin-only, because the provider decides which key is billed (D22), and
+    offered only from `[brain.native] providers`. The room's model stays when
+    it resolves within the new provider and is cleared otherwise; a switch
+    that would leave the room with neither a model nor the provider's default
+    model is refused.
+    """
+    from .brain._resolve import (
+        ResolveError,
+        effective_provider,
+        native_provider_id,
+        native_reach_ids,
+        select_for_person,
+        stored_provider,
+    )
+
+    config, conn = ctx.config, ctx.conn
+    kind = brain_for_room(config, conn, token, ctx.surface).kind
+    listed = native_reach_ids(config)
+    wanted = value.strip()
+    if not wanted:
+        line = _describe_room_provider(config, conn, token, room, ctx.surface)
+        if not line:
+            return "Only a native room has a provider; this room runs the `anthropic` provider."
+        offered = ", ".join(f"`{p}`" for p in listed)
+        return f"{line}\nProviders: {offered}."
+    if not config.is_admin(ctx.user_id):
+        return "Only an admin can change this room's provider. `!room provider` shows it."
+    refusal = room_policy.settings_refusal(conn, token, ctx.user_id)
+    if refusal:
+        return refusal
+    if kind != "native":
+        return "Only a native room has a provider. Set the room's brain first with `!brain native`."
+    target = native_provider_id(config) if wanted.lower() == "default" else wanted
+    if not target or target not in listed:
+        offered = ", ".join(f"`{p}`" for p in listed) or "none"
+        return f"`{wanted}` isn't one of native's providers. Providers: {offered}."
+    current = effective_provider(config, kind, room.provider)
+    if target == current and stored_provider(config, kind, target) == (room.provider or None):
+        return f"This room already runs on `{target}`."
+    keep_model = False
+    if room.model:
+        picked = select_for_person(
+            room.model, config, kind=kind, provider=stored_provider(config, kind, target),
+            is_admin=True,
+        )
+        keep_model = not isinstance(picked, ResolveError) and not picked.provider_changed
+    if not keep_model and not provider_default_model(config, target):
+        return (
+            f"`{target}` has no default model, so this room would have nothing to run. "
+            f"Set `[providers.{target}] default_model`, or set the provider and a model "
+            "together in the room settings."
+        )
+    db.set_room_provider(conn, token, stored_provider(config, kind, target))
+    lines = [f"Room provider set to `{target}`."]
+    if room.model and not keep_model:
+        db.set_room_model_effort(conn, token, None, None)
+        lines.append(
+            f"Its model default (`{room.model}`) was cleared — it is not a `{target}` model. "
+            "Set a new one with `!room model <name>`."
+        )
+    return "\n".join(lines)
 
 
 #: What `!room notes` says in a shared room, whatever was asked: the request
@@ -3130,7 +3453,7 @@ def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
     / ``skill``) are copied so the retry lands on the same surface as the
     original. ``brain`` is copied for the neighbouring reason: the retry re-runs
     the original attempt, so it runs the brain that attempt ran even if the room
-    has since been pointed at another one.
+    has since been pointed at another one, and ``provider`` with it.
 
     ``guest_participant_id`` and ``audience`` go with it (multiplayer D2/D3):
     the prompt is a guest's fenced words, and without the guest a retry would
@@ -3154,6 +3477,7 @@ def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
         model=original.model,
         effort=original.effort,
         brain=original.brain,
+        provider=original.provider,
         model_namespace=original.model_namespace,
         skill=original.skill,
         skill_args=original.skill_args,

@@ -6,9 +6,16 @@ from istota.llm.types import REASONING_REPLAY_MODES
 
 
 def _native(raw: dict):
+    """The legacy field loaded, and its problems other than the one saying it
+    is a legacy source (`config.LEGACY_PROVIDER_SOURCES`), which every
+    `[brain.native]` wire setting now records."""
     with collect_problems() as problems:
         config = config_from_document({"brain": {"native": raw}})
-    return config.brain.native, problems
+    return config.brain.native, [p for p in problems if not _is_legacy_note(p)]
+
+
+def _is_legacy_note(problem) -> bool:
+    return problem["kind"] == "warning" and "is read for one release" in problem["message"]
 
 
 def test_the_default_is_auto():

@@ -118,7 +118,8 @@ _WITHHELD_LEAVES = frozenset({"log_channel", "alerts_channel", "email_addresses"
 #: the field is an auth channel by construction and a header nobody has thought
 #: of should not be the thing standing between a container log and a live
 #: provider key.
-_ALWAYS_WITHHELD_PREFIXES = ("brain.native.extra_headers",)
+#: A `*` segment matches any one segment, as in the admin view's list.
+_ALWAYS_WITHHELD_PREFIXES = ("brain.native.extra_headers", "providers.*.extra_headers")
 
 #: Long enough for a model name, a URL or a room token; short enough that a
 #: pasted blob cannot bury the rest of the report.
@@ -141,8 +142,13 @@ def is_sensitive(key: str) -> bool:
     dotted key per header and the header is the leaf.
     """
     lowered = key.lower()
+    segments = lowered.split(".")
     for prefix in _ALWAYS_WITHHELD_PREFIXES:
-        if lowered == prefix or lowered.startswith((prefix + ".", prefix + "[")):
+        parts = prefix.split(".")
+        head = segments[: len(parts)]
+        if len(head) == len(parts) and head[-1].split("[", 1)[0] == parts[-1] and all(
+            part in ("*", segment) for part, segment in zip(parts[:-1], head[:-1])
+        ):
             return True
     leaf = lowered.rsplit(".", 1)[-1].replace("-", "_")
     if leaf in _WITHHELD_LEAVES:

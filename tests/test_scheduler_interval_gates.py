@@ -89,6 +89,9 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     ("doctor-request", None),
     # Added after the baseline extraction: the admin Browsers page's snapshot.
     ("browser-instances", None),
+    # Added after the baseline extraction: model discovery (model-catalogue
+    # spec, Stage 4), a fixed 15-minute look; each provider's TTL decides.
+    ("model-catalogue", None),
     ("worktree-reap", "worktree_reap_interval"),
     ("sandbox-cache-sweep", "sandbox_cache_sweep_interval"),
     ("avatar-import", "avatar_import_interval"),
@@ -143,6 +146,7 @@ EXPECTED_BACKGROUND = {
     "db-health",
     "doctor",
     "browser-instances",
+    "model-catalogue",
     "worktree-reap",
     "sandbox-cache-sweep",
     "avatar-import",
@@ -243,6 +247,20 @@ class TestTheFieldBindings:
         assert gate.background
         assert not gate.overlap_expected
         assert gate.one_shot
+
+    def test_the_model_catalogue_gate_looks_every_fifteen_minutes_in_the_background(self, monkeypatch):
+        from istota.llm import discovery
+
+        gate = _by_name()["model-catalogue"]
+        assert gate.interval(Config()) == 15 * 60 == discovery.REFRESH_INTERVAL_SECONDS
+        assert gate.background
+        assert not gate.one_shot
+        assert gate.enabled(Config()) is True
+        seen = []
+        monkeypatch.setattr(discovery, "refresh_all", lambda config: seen.append(config))
+        config = Config()
+        {g.name: g for g in build_interval_gates(config)}["model-catalogue"].run(0.0)
+        assert seen == [config]
 
     def test_the_operator_persona_gate_needs_a_file_root(self, tmp_path):
         gate = _by_name()["operator-persona"]
@@ -1329,3 +1347,13 @@ def test_credential_maintenance_prunes_history_and_audit(db_path):
     with db.get_db(db_path) as conn:
         assert conn.execute("SELECT count(*) FROM credential_audit").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM config_change_requests").fetchone()[0] == 0
+
+
+def test_the_daemon_installs_the_model_lists_before_any_worker_exists():
+    """The boot refresh runs before the pool is created, so no task reads an
+    empty discovered layer at a cold start (model-catalogue spec, Stage 4)."""
+    from tests.support.drift import source_of
+
+    body = source_of(sched.run_daemon)
+    assert "boot_refresh(config)" in body
+    assert body.index("boot_refresh(config)") < body.index("pool = WorkerPool(config)")

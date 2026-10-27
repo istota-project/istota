@@ -58,9 +58,25 @@ SECRET_NAME_PATTERNS = frozenset({
 # dict would also catch those three spellings, but the field is an auth channel
 # by construction and a header we have not thought of should not be the thing
 # standing between a config page and a live provider key.
+#
+# A `*` segment matches any one segment: a provider's id is the operator's.
 _ALWAYS_SECRET_KEYS = frozenset({
     "brain.native.extra_headers",
+    "providers.*.extra_headers",
 })
+
+
+def _always_secret(key: str) -> bool:
+    if key in _ALWAYS_SECRET_KEYS:
+        return True
+    segments = key.split(".")
+    for pattern in _ALWAYS_SECRET_KEYS:
+        parts = pattern.split(".")
+        if "*" in parts and len(parts) == len(segments) and all(
+            part in ("*", segment) for part, segment in zip(parts, segments)
+        ):
+            return True
+    return False
 
 # Fields the patterns above flag but which carry no credential. Keyed on the
 # full dotted path rather than the bare name, so an allowlist entry can never
@@ -86,7 +102,12 @@ NON_SECRET_KEYS = frozenset({
     "brain.native.max_tokens",        # a count
     "brain.native.compaction_reserve_tokens",
     "brain.native.compaction_keep_recent_tokens",
+    "brain.native.compaction_background_tokens",
     "security.passthrough_env_vars",  # a list of var *names*
+    # The claude CLI's auth mode ("subscription" | "api_key"); `AUTH` catches it.
+    "brain.claude_code.auth",
+    # A path to the model-listing key's file, never the key itself.
+    "models.anthropic_listing_key_file",
     "brain.tmux.bypass_accept_marker",   # a TUI dialog substring; the config
     "brain.tmux.bypass_warning_marker",  # hotfix knob when a CLI reword lands
 })
@@ -152,7 +173,7 @@ def is_secret_name(name: str) -> bool:
 
 def is_secret_field(key: str, name: str) -> bool:
     """Whether the field at dotted ``key`` must be redacted."""
-    if key in _ALWAYS_SECRET_KEYS:
+    if _always_secret(key):
         return True
     if key in NON_SECRET_KEYS:
         return False
@@ -175,7 +196,7 @@ def is_secret_path(path: tuple[str, ...] | list[str]) -> bool:
     section: Any = Config
     for index, name in enumerate(segments):
         key = ".".join(segments[: index + 1])
-        if key in _ALWAYS_SECRET_KEYS:
+        if _always_secret(key):
             return True
         field = None
         if section is not None:
@@ -279,6 +300,18 @@ _MISSING = object()
 _SECRET_LABELS = {
     "anthropic_api_key": "Anthropic API key",
     "claude_code_oauth_token": "Claude Code OAuth token",
+    "istota_anthropic_listing_key": "Anthropic model-listing key",
+}
+
+#: Files this page never writes, with how they are set instead. The
+#: model-listing key is mounted on the daemon alone, so this process cannot
+#: even see whether it is there.
+_DAEMON_ONLY_REASONS = {
+    "istota_anthropic_listing_key": (
+        "Read by the daemon alone, which this page cannot see. Set it with "
+        "`istota setup --anthropic-model-listing-key-file PATH`, or on the VM with "
+        "`istota-stack put-files`."
+    ),
 }
 
 # The section a file no config key reads belongs with: both are the Claude
@@ -286,6 +319,7 @@ _SECRET_LABELS = {
 _STANDALONE_SECTIONS = {
     "anthropic_api_key": "brain.claude_code",
     "claude_code_oauth_token": "brain.claude_code",
+    "istota_anthropic_listing_key": "models",
 }
 
 
@@ -390,7 +424,156 @@ def _editor_keys(
     })
     if path in schema.TABLE_PATHS and path not in schema.READ_ONLY:
         entry["toml"] = _snippet(ctx["redacted"], path)
+    model_field = schema.model_field_for(path)
+    if model_field is not None:
+        entry["model_field"] = {
+            "sources": _model_sources(ctx["config"], model_field.sources),
+            "effort": model_field.effort,
+            "aliases": model_field.aliases,
+        }
     return entry
+
+
+def _model_sources(config: "Config", sources: str) -> list[str]:
+    """The provider ids a model field may name, for the picker's source list.
+
+    `anthropic` is the CLI brains'; `native` is `[brain.native] model`'s,
+    which is native's default provider's default model and so names that
+    provider alone (D22: another provider's default is its own
+    `default_model`); `any` is `anthropic` plus every provider `[brain.native]
+    providers` lists (`llm.providers.brain_can_run`).
+    """
+    from istota.brain._resolve import config_providers, native_provider_id, native_reach_ids
+    from istota.llm.catalog import SHIPPED_PROVIDER
+    from istota.llm.providers import brain_can_run
+
+    found: list[str] = []
+    if sources in ("anthropic", "any"):
+        found.append(SHIPPED_PROVIDER)
+    if sources in ("native", "any"):
+        try:
+            providers = config_providers(config)
+            native_id = native_provider_id(config)
+        except Exception:  # noqa: BLE001 - a view never fails on a model list
+            return found
+        if native_id and sources == "native":
+            if native_id not in found:
+                found.append(native_id)
+        elif native_id:
+            for provider_id in sorted(providers, key=lambda p: (p != native_id, p)):
+                if provider_id not in found and brain_can_run(
+                    "native", f"{provider_id}/-", providers, native_provider=native_id,
+                    native_reach=native_reach_ids(config),
+                ):
+                    found.append(provider_id)
+    return found
+
+
+#: How the picker names the built-in providers; any other id is shown as is.
+_PROVIDER_LABELS = {"anthropic": "Anthropic", "openrouter": "OpenRouter"}
+
+
+def model_catalogue(config: "Config") -> dict | None:
+    """What the config page's model pickers choose from: one source per
+    configured provider with its models, and the aliases.
+
+    Read from the process's catalogue snapshot (the caller takes up the
+    discovery caches first) and the caches' fetch state; no fetch, no key.
+    Deprecated models are included, marked, and sorted last. Never raises:
+    with no catalogue the fields fall back to text.
+    """
+    try:
+        return _model_catalogue(config)
+    except Exception as exc:  # noqa: BLE001 - the page still renders without pickers
+        logger.warning("model catalogue unavailable for the config view: %s", type(exc).__name__)
+        return None
+
+
+def _model_catalogue(config: "Config") -> dict:
+    from istota.brain._resolve import (
+        DEFAULT_ALIAS,
+        DEFAULT_TIER_TARGETS,
+        FAMILY_SHORTCUTS,
+        Resolution,
+        config_providers,
+        enabled_patterns,
+        enabled_refs,
+        resolve_selection,
+        supported_efforts,
+    )
+    from istota.brain._roles import parse_alias_overrides
+    from istota.llm import discovery
+    from istota.llm.catalog import SHIPPED_PROVIDER, current_catalogue
+    from istota.llm.providers import build_providers
+
+    catalogue = current_catalogue()
+    enabled = set(enabled_refs(catalogue, enabled_patterns(config)))
+    cache_dir = discovery.config_cache_dir(config)
+    sources = []
+    specs = sorted(build_providers(config).values(), key=lambda s: (s.id != SHIPPED_PROVIDER, s.id))
+    for spec in specs:
+        fetched_at, last_error = discovery.cache_state(cache_dir, spec.id)
+        models = sorted(
+            catalogue.models(spec.id),
+            key=lambda m: (m.deprecated, m.ref not in enabled, m.family or "", m.ref),
+        )
+        sources.append({
+            "id": spec.id,
+            "kind": spec.kind,
+            "label": _PROVIDER_LABELS.get(spec.id, spec.id),
+            "discovered_at": _iso_from_epoch(fetched_at),
+            "last_error": last_error,
+            "models": [
+                {
+                    "ref": m.ref,
+                    "name": m.name,
+                    "family": m.family,
+                    "deprecated": m.deprecated,
+                    "reasoning": m.reasoning,
+                    "efforts": supported_efforts(m),
+                    "context_window": m.context_window,
+                    "enabled": m.ref in enabled,
+                }
+                for m in models
+            ],
+        })
+
+    aliases_table = parse_alias_overrides(config.models.aliases, log=False)
+    providers = config_providers(config)
+    names = [*sorted(DEFAULT_TIER_TARGETS), *FAMILY_SHORTCUTS]
+    names += sorted(n for n in aliases_table.names() if n not in names and n != DEFAULT_ALIAS)
+    aliases = []
+    for name in names:
+        resolved = resolve_selection(
+            name, catalogue, aliases=aliases_table, namespace="anthropic",
+            prefer_provider=SHIPPED_PROVIDER, providers=providers,
+        )
+        ok = isinstance(resolved, Resolution)
+        aliases.append({
+            "name": name,
+            "target": (resolved.ref or None) if ok else None,
+            "effort": resolved.effort_requested if ok else None,
+            "efforts": supported_efforts(resolved.info) if ok and resolved.info is not None else None,
+        })
+    # The count beside each stored `[models] enabled` entry, by the rule that
+    # decides what a non-admin may pick; the page counts a typed one itself.
+    pattern_counts = {
+        pattern: len(enabled_refs(catalogue, [pattern]))
+        for pattern in (config.models.enabled or [])
+        if isinstance(pattern, str)
+    }
+    return {"sources": sources, "aliases": aliases, "pattern_counts": pattern_counts}
+
+
+def _iso_from_epoch(value: float | None) -> str | None:
+    from datetime import datetime, timezone
+
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _walk(
@@ -592,7 +775,11 @@ def _secret_files(config: "Config", ctx: dict) -> list[dict]:
             # the uppercase variable, in the web process too.
             is_set = bool(os.environ.get(name.upper(), "").strip())
         source = _secret_source(name, path, ctx["document"], ctx["secrets_dir"])
-        reason = (schema.READ_ONLY.get(path) if path else None) or ctx["managed_reasons"]["secrets"]
+        reason = (
+            _DAEMON_ONLY_REASONS.get(name)
+            or (schema.READ_ONLY.get(path) if path else None)
+            or ctx["managed_reasons"]["secrets"]
+        )
         if reason is None and source == "environment":
             reason = _env_override_reason(name.upper())
         # A move writes both resources but keeps the value, so `READ_ONLY`,
@@ -656,6 +843,7 @@ def build_config_view(
         docs = {}
     ctx = {
         "schema": schema,
+        "config": config,
         "document": parsed,
         "redacted": secrets.redact_document(parsed) if parsed is not None else None,
         "docs": docs,
@@ -702,6 +890,7 @@ def build_config_view(
         "raw_toml": _raw_document(ctx["redacted"]),
         "has_comments": edits.has_comments(document) if document is not None else False,
         "secrets": _secret_files(config, ctx),
+        "model_catalogue": model_catalogue(config),
         "admins": {
             "users": sorted(str(user) for user in (getattr(config, "admin_users", None) or ())),
             "candidates": _admin_candidates(config),

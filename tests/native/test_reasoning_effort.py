@@ -1,12 +1,14 @@
 """Stage 1 — reasoning/effort budgets for the native brain.
 
 Three sub-changes:
-- ``reasoning_effort`` plumbed into the OpenAI-compatible request body, with the
-  ``xhigh`` / ``max`` tiers folded to ``high`` (the only knob the compat field
-  exposes).
-- A capability gate in ``NativeBrain``: effort is forwarded only when the target
-  model ``supports_thinking``; otherwise it's dropped (no ``reasoning_effort``
-  reaches the provider) so a non-reasoning endpoint never 400s.
+- ``reasoning_effort`` plumbed into the OpenAI-compatible request body, sent as
+  the brain gives it.
+- The clamp in ``NativeBrain`` (`brain._resolve.clamp_effort`): effort is
+  forwarded only when the target model has reasoning, otherwise dropped (no
+  ``reasoning_effort`` reaches the provider) so a non-reasoning endpoint never
+  400s; ``xhigh`` / ``max`` reach the wire only where the model's
+  ``effort_map`` names them and clamp to ``high`` elsewhere, which is what the
+  provider's retired fold sent.
 - Extended-thinking deltas (``reasoning_content`` / ``reasoning``) parsed into a
   ``ThinkingContent`` block that never leaks into ``result_text``.
 """
@@ -73,17 +75,14 @@ class TestRequestBodyEffort:
             )
             assert body["reasoning_effort"] == tier
 
-    def test_xhigh_maps_to_high(self):
-        body = _provider()._build_chat_completion_request(
-            "", [], [], "m", 100, reasoning_effort="xhigh"
-        )
-        assert body["reasoning_effort"] == "high"
-
-    def test_max_maps_to_high(self):
-        body = _provider()._build_chat_completion_request(
-            "", [], [], "m", 100, reasoning_effort="max"
-        )
-        assert body["reasoning_effort"] == "high"
+    def test_the_provider_no_longer_folds_what_the_brain_clamped(self):
+        # The brain sends `xhigh` only for a model whose `effort_map` names it,
+        # so the provider passes it on rather than folding it to `high`.
+        for wire in ("xhigh", "max", "budget-max"):
+            body = _provider()._build_chat_completion_request(
+                "", [], [], "m", 100, reasoning_effort=wire
+            )
+            assert body["reasoning_effort"] == wire
 
 
 class TestThinkingParse:
@@ -173,14 +172,21 @@ class TestCapabilityGate:
         self._brain(provider, "claude-sonnet-4-6", "high", tmp_path, supports_thinking=True)
         assert provider.calls[0]["reasoning_effort"] == "high"
 
-    def test_raw_tier_forwarded_provider_maps_it(self, tmp_path):
-        # The brain forwards the raw tier; the OpenAI-compatible provider folds
-        # xhigh→high at the wire boundary, not the brain.
+    def test_xhigh_is_clamped_to_high_by_the_brain(self, tmp_path):
+        # A model with reasoning and no `effort_map` tops out at `high`: the
+        # brain clamps, so the wire carries what the old provider fold sent.
         provider = MockProvider(
             [AssistantMessage(content=[TextContent(text="ok")], stop_reason="end_turn")]
         )
         self._brain(provider, "claude-sonnet-4-6", "xhigh", tmp_path, supports_thinking=True)
-        assert provider.calls[0]["reasoning_effort"] == "xhigh"
+        assert provider.calls[0]["reasoning_effort"] == "high"
+
+    def test_max_is_clamped_to_high_by_the_brain(self, tmp_path):
+        provider = MockProvider(
+            [AssistantMessage(content=[TextContent(text="ok")], stop_reason="end_turn")]
+        )
+        self._brain(provider, "claude-sonnet-4-6", "max", tmp_path, supports_thinking=True)
+        assert provider.calls[0]["reasoning_effort"] == "high"
 
     def test_effort_dropped_on_non_thinking_model(self, tmp_path):
         provider = MockProvider(

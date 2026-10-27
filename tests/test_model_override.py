@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from istota import db
+from istota import db, executor
 from istota.config import (
     BrainConfig,
     ClaudeCodeBrainConfig,
@@ -211,7 +211,7 @@ class TestSchedulerPropagatesModel:
             db_path, config, name="feed-digest", prompt="Run feed digest",
             model="claude-sonnet-4-6",
         )
-        assert task.model == "claude-sonnet-4-6"
+        assert task.model == "claude-sonnet-4-6"  # the id within its provider (D6, D22)
 
 
 # ---------------------------------------------------------------------------
@@ -765,8 +765,11 @@ class TestSchedulerPropagatesBrain:
             room_selectable=[],
         ))
         task = _fire_one_job(db_path, config, brain="native", model="smart")
-        assert task.model == OPUS
-        assert task.model != NATIVE_MODEL
+        # A portable tier is kept by name on the row, so a fallback can
+        # re-resolve it; it resolves on the brain that runs (claude_code).
+        assert task.model == "smart"
+        brain = executor._task_brain(task, config)[1]
+        assert executor._request_model(task, config, brain) == OPUS
 
 
 @patch("istota.scheduler._sync_cron_files")
@@ -788,7 +791,9 @@ class TestSchedulerResolvesTheModelThroughTheJobsBrain:
             room_selectable=["native"],
         ))
         task = _fire_one_job(db_path, config, brain="native", model="smart")
-        assert task.model == NATIVE_MODEL, (
+        assert task.model == "smart", "a portable tier is kept by name on the row"
+        brain = executor._task_brain(task, config)[1]
+        assert executor._request_model(task, config, brain) == NATIVE_MODEL, (
             "a portable tier must resolve in the pinned brain's namespace, not "
             "the deployment default's"
         )
@@ -816,7 +821,9 @@ class TestSchedulerResolvesTheModelThroughTheJobsBrain:
         ))
         task = _fire_one_job(db_path, config, model="smart")
         assert task.brain is None, "no per-job pin in this case"
-        assert task.model == NATIVE_MODEL
+        assert task.model == "smart", "a portable tier is kept by name on the row"
+        brain = executor._task_brain(task, config)[1]
+        assert executor._request_model(task, config, brain) == NATIVE_MODEL
 
     def test_an_effort_bearing_model_reference_carries_its_effort(
         self, _sync, db_path
@@ -868,8 +875,14 @@ class TestSchedulerResolvesTheModelThroughTheJobsBrain:
             room_selectable=["native"],
         ))
         task = _fire_one_job(db_path, config, brain="native", model="general:high")
-        assert task.model is None, "an unset native model means brain default"
+        # A portable tier is kept by name; on native with no model it is the
+        # brain's default at execution, and the effort travels with it.
+        assert task.model == "general"
         assert task.effort == "high"
+        brain = executor._task_brain(task, config)[1]
+        assert executor._request_model(task, config, brain) == "", (
+            "an unset native model means brain default"
+        )
 
     def test_a_name_no_brain_resolves_is_used_as_written_and_warns(
         self, _sync, db_path, caplog
@@ -917,8 +930,11 @@ class TestSchedulerResolvesTheModelThroughTheJobsBrain:
             room_selectable=["native"],
         ))
         with caplog.at_level(logging.ERROR, logger="istota.scheduler"):
-            task = _fire_one_job(db_path, config, brain="native", model="smart")
-        assert task.model == "smart", "passed through unresolved, not dropped"
+            # Not a portable tier, which is kept by name before any brain is
+            # built: `opus` names an `anthropic` model native's provider lacks,
+            # so the brain is asked, and building it raises.
+            task = _fire_one_job(db_path, config, brain="native", model="opus")
+        assert task.model == "opus", "passed through unresolved, not dropped"
         assert task.brain == "native"
         assert any("could not resolve model" in r.message for r in caplog.records)
 
@@ -953,7 +969,7 @@ class TestSchedulerResolvesTheModelThroughTheJobsBrain:
         assert len(created) == 2, "the sibling job is not collateral"
         with db.get_db(db_path) as conn:
             tasks = [db.get_task(conn, t) for t in created]
-        assert sorted(t.model for t in tasks) == [OPUS, OPUS]
+        assert sorted(t.model for t in tasks) == [OPUS] * 2
         # Neither row carries a pin: `5` coerces to `"5"`, which names no known
         # kind and so is never admitted. The guard being pinned here is that the
         # coercion happens at all — without it the `.strip()` raises and the

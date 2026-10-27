@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import tomli
@@ -147,8 +147,60 @@ def fj_brain_or_none(job: "CronJob", is_admin: bool) -> str | None:
     return job.brain
 
 
-def _validate_model(name: str, user_id: str, model: str, config=None, pinned_brain: str = "") -> None:
-    """Warn on suspicious model names; never reject.
+def fj_provider_or_none(job: "CronJob", is_admin: bool) -> str | None:
+    """A CRON.md job's provider, or None where the author may not set one.
+
+    The same rule as ``fj_brain_or_none``, for the same reason and one more:
+    the provider decides which key a job's requests are billed to
+    (model-catalogue D22). Dropped at sync for a non-admin. Judged again at
+    dispatch, where `brain._resolve.effective_provider` runs a provider
+    `[brain.native] providers` does not list on native's default instead.
+    """
+    if not job.provider:
+        return None
+    if not is_admin:
+        return None
+    return job.provider
+
+
+def _split_model(model: str, config, pinned_brain: str, provider: str, is_admin: bool):
+    """``(model, provider)`` a job stores for ``model``: an alias or the id
+    within its provider, and the provider column, split as a room's are
+    (`brain._resolve.select_for_person`). What does not resolve is kept as
+    written with ``provider``. Never raises."""
+    from .brain import resolve_brain_kind
+    from .brain._aliases import split_effort
+    from .brain._resolve import ResolveError, select_for_person
+
+    try:
+        kind = resolve_brain_kind("scheduled", config.brain, override=pinned_brain or None).kind
+        picked = select_for_person(
+            model, config, kind=kind, provider=provider or None, is_admin=is_admin,
+        )
+    except Exception:  # noqa: BLE001 — one job's model must not stop the file
+        logger.debug("cron model split failed", exc_info=True)
+        return model, provider or None
+    if isinstance(picked, ResolveError) or picked.resolution.brain_default:
+        return model, provider or None
+    typed_effort = split_effort(model)[1]
+    stored = picked.model
+    if typed_effort and stored:
+        stored = f"{stored}:{typed_effort}"
+    return stored, picked.provider
+
+
+def _validate_model(
+    name: str, user_id: str, model: str, config=None, pinned_brain: str = "",
+    errors: list[str] | None = None, provider: str = "",
+) -> bool:
+    """Whether the job keeps its ``model``; warns on a suspicious one.
+
+    The job's owner chooses, so the rule is a person's (D9): an admin may
+    name any model and an unresolvable one is only warned about, as before,
+    since the brain sends it as written. A non-admin's model must resolve
+    to an alias or to a model in ``[models] enabled`` that the job's brain
+    runs; otherwise the field is dropped, like a non-admin's ``brain``, and
+    the job runs on the brain's default. No patterns in a file (D10).
 
     Select the scheduled brain's namespace without constructing its runtime
     client. A malformed endpoint must not abort loading the whole CRON.md file.
@@ -160,12 +212,38 @@ def _validate_model(name: str, user_id: str, model: str, config=None, pinned_bra
             "Job '%s' (user %s): model %r contains whitespace — likely a typo",
             name, user_id, model,
         )
-        return
+        return True
 
     brain_config = config.brain if config is not None else BrainConfig()
     resolved_config = resolve_brain_kind(
         "scheduled", brain_config, override=pinned_brain or None,
     )
+    is_admin = config is None or config.is_admin(user_id)
+    if config is not None:
+        from .brain._resolve import ResolveError, describe_resolve_error, select_for_person
+
+        try:
+            resolved = select_for_person(
+                model, config, kind=resolved_config.kind, provider=provider or None,
+                is_admin=is_admin,
+            )
+        except Exception:  # noqa: BLE001 — one job's model must not stop the file
+            logger.debug("cron model resolution failed", exc_info=True)
+            resolved = None
+        if isinstance(resolved, ResolveError) and not is_admin:
+            reason = describe_resolve_error(resolved)
+            logger.warning(
+                "Job '%s' (user %s): dropping model %r: %s", name, user_id, model, reason,
+            )
+            if errors is not None:
+                errors.append(
+                    f"Job '{name}': model {model!r} is not one you can pick ({reason}); "
+                    "the job runs on the default model"
+                )
+            return False
+        if resolved is not None and not isinstance(resolved, ResolveError):
+            return True
+
     if resolved_config.kind == "native":
         from .brain.native import NativeBrain
 
@@ -175,12 +253,13 @@ def _validate_model(name: str, user_id: str, model: str, config=None, pinned_bra
 
         valid = ClaudeCodeBrain().is_valid_model_reference(model)
     if valid:
-        return
+        return True
 
     logger.warning(
         "Job '%s' (user %s): invalid model reference %r for %s — likely a typo",
         name, user_id, model, resolved_config.kind,
     )
+    return True
 
 
 def _validate_effort(name: str, user_id: str, effort: str) -> None:
@@ -343,11 +422,22 @@ class CronJob:
     # resolve from config. Admin-only: `fj_brain_or_none` drops it at sync
     # time for a non-admin author.
     brain: str = ""
+    # Per-job provider for a native job (model-catalogue D22); empty = native's
+    # default. Admin-only: `fj_provider_or_none` drops it at sync.
+    provider: str = ""
     # admin-shared-briefing-blocks: publish this job's result text into shared_kv
     # on success. "<ns>/<key>" or bare "<key>" (→ briefing_shared_blocks). Empty =
     # no publish. Gated on is_shared_kv_writer at write time (admin-only).
     publish_shared_kv: str = ""
     publish_shared_kv_trusted: bool = False
+    # Set at parse when the owner may not pick ``model`` (a non-admin naming a
+    # model outside `[models] enabled`). The file keeps the field, so a rewrite
+    # never deletes what the user wrote; the sync stores no model for it.
+    model_refused: bool = field(default=False, compare=False)
+    # ``(model, provider)`` the sync stores, set at parse: ``model`` split
+    # into an id within its provider and the provider column (D22). None
+    # stores ``model`` and ``provider`` as written.
+    model_split: tuple | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -711,10 +801,21 @@ def _parse_jobs(
         brain = _str_field(name, user_id, "brain", j.get("brain", ""), errors)
         if brain:
             _validate_brain(name, user_id, brain)
-        if model:
-            _validate_model(
-                name, user_id, model, config,
-                brain if config.is_admin(user_id) else "",
+        # Admin-only like `brain` (`fj_provider_or_none`); read here so the
+        # model is resolved within the provider the job will run on.
+        provider = _str_field(name, user_id, "provider", j.get("provider", ""), errors)
+        owner_is_admin = config.is_admin(user_id)
+        model_refused = bool(model) and not _validate_model(
+            name, user_id, model, config,
+            brain if owner_is_admin else "",
+            errors,
+            provider=provider if owner_is_admin else "",
+        )
+        model_split = None
+        if model and not model_refused:
+            model_split = _split_model(
+                model, config, brain if owner_is_admin else "",
+                provider if owner_is_admin else "", owner_is_admin,
             )
         target = _str_field(name, user_id, "target", j.get("target", ""), errors)
         if target:
@@ -744,6 +845,7 @@ def _parse_jobs(
             model=model,
             effort=effort,
             brain=brain,
+            provider=provider,
             # Through `_str_field` like its neighbours rather than `str()`:
             # this one names a shared_kv namespace, so `publish_shared_kv = 5`
             # coerced to the namespace "5" is the one string field where a
@@ -754,6 +856,8 @@ def _parse_jobs(
             publish_shared_kv_trusted=_coerce_bool(
                 name, user_id, "publish_shared_kv_trusted",
                 j.get("publish_shared_kv_trusted", False), False, errors),
+            model_refused=model_refused,
+            model_split=model_split,
         )
         if config is not None and fj_is_disallowed_command(job, config.is_admin(user_id)):
             errors.append(
@@ -893,6 +997,8 @@ def render_jobs_block(jobs: list[CronJob]) -> str:
             lines.append(_toml_string("effort", job.effort))
         if job.brain:
             lines.append(_toml_string("brain", job.brain))
+        if job.provider:
+            lines.append(_toml_string("provider", job.provider))
         if job.publish_shared_kv:
             lines.append(_toml_string("publish_shared_kv", job.publish_shared_kv))
         if job.publish_shared_kv_trusted:
@@ -1141,6 +1247,7 @@ FILE_OWNED_COLUMNS = frozenset({
     "model",
     "effort",
     "brain",
+    "provider",
     "publish_shared_kv",
     "publish_shared_kv_trusted",
 })
@@ -1207,6 +1314,7 @@ def _file_owned_values(
     skill_val: str | None,
     skill_args_val: str | None,
     brain_val: str | None,
+    provider_val: str | None = None,
 ) -> dict[str, object]:
     """What the file now says, for every column CRON.md authors.
 
@@ -1236,15 +1344,28 @@ def _file_owned_values(
         "silent_unless_action": 1 if fj.silent_unless_action else 0,
         "skip_log_channel": 1 if fj.skip_log_channel else 0,
         "once": 1 if fj.once else 0,
-        "model": fj.model or None,
+        "model": None if fj.model_refused else (_stored_model(fj, provider_val)[0] or None),
         "effort": fj.effort or None,
         # Already gated by `fj_brain_or_none` at the call site — a non-admin's
         # pin arrives here as None and is written as NULL like any other
         # cleared field, rather than surviving by omission.
         "brain": brain_val,
+        # Gated like `brain` (`fj_provider_or_none`); an admin's `provider/id`
+        # in `model` may name it too (D22).
+        "provider": None if fj.model_refused else _stored_model(fj, provider_val)[1],
         "publish_shared_kv": fj.publish_shared_kv or None,
         "publish_shared_kv_trusted": 1 if fj.publish_shared_kv_trusted else 0,
     }
+
+
+def _stored_model(fj: "CronJob", provider_val: str | None) -> tuple[str, str | None]:
+    """``(model, provider)`` the row stores for ``fj``: the split made at
+    parse, with the owner's authority (a non-admin's never names a provider,
+    since `select_for_person` refuses that), else the model as written beside
+    ``provider_val``."""
+    if fj.model_split is not None:
+        return fj.model_split
+    return fj.model, provider_val
 
 
 def sync_cron_jobs_to_db(
@@ -1302,11 +1423,18 @@ def sync_cron_jobs_to_db(
                 "brain is admin-only; the job will run the configured brain",
                 fj.brain, fj.name, user_id,
             )
+        provider_val = fj_provider_or_none(fj, is_admin)
+        if fj.provider and provider_val is None:
+            logger.warning(
+                "Dropping provider %r on CRON.md job '%s' for %s: choosing a "
+                "provider is admin-only; the job will run native's default",
+                fj.provider, fj.name, user_id,
+            )
         # The definition, as the file now states it. Both paths below write
         # exactly the file-owned columns and name no other, which is what
         # leaves the daemon's state columns alone.
         file_values = _file_owned_values(
-            fj, cmd_val, skill_val, skill_args_val, brain_val,
+            fj, cmd_val, skill_val, skill_args_val, brain_val, provider_val,
         )
         if publisher_retired(conn, user_id, fj.name):
             file_values["enabled"] = 0
@@ -1517,6 +1645,7 @@ def _migrate_db_jobs_locked(conn, config, user_id: str, config_dir, overwrite: b
             model=j.model or "",
             effort=j.effort or "",
             brain=j.brain or "",
+            provider=j.provider or "",
             publish_shared_kv=j.publish_shared_kv or "",
             publish_shared_kv_trusted=bool(j.publish_shared_kv_trusted),
         ))

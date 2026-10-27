@@ -78,6 +78,7 @@ CREDENTIAL_FIELDS = frozenset({
     "nextcloud_app_password",
     "native_api_key",
     "claude_code_oauth_token",
+    "anthropic_listing_key",
     "imap_password",
     "caldav_password",
     PASSWORD_FIELD,
@@ -92,7 +93,10 @@ _MODULE_FIELDS = tuple(name for name, _module, _question in setup_wizard._OPT_OU
 SETUP_STEPS: dict[str, tuple[str, ...]] = {
     "welcome": ("bot_name", "display_name", "user_email", "timezone", "user_id"),
     "account": (PASSWORD_FIELD,),
-    "model": ("brain_kind", "native_base_url", "native_model", "native_api_key", "claude_code_oauth_token"),
+    "model": (
+        "brain_kind", "native_base_url", "native_model", "native_api_key", "claude_code_oauth_token",
+        "anthropic_listing_key",
+    ),
     "address": ("hostname", "ingress", "upstream_proxy", "listen_addr", "listen_port", "tls_cert_source"),
     "nextcloud": (
         "storage", "workspace", "nextcloud_url", "nextcloud_public_url", "nextcloud_username",
@@ -421,6 +425,9 @@ _WEB_MESSAGES: dict[str, str] = {
     "nextcloud_public_url": "Enter the address you open Nextcloud at.",
     "talk_enabled": "Choose whether to chat with Istota in Nextcloud Talk.",
     "brain_kind": "Choose an AI service.",
+    "native_provider": "Choose an AI service.",
+    "native_provider_kind": "Choose an AI service.",
+    "native_base_url": "Enter the service's address, starting with https://.",
     "native_model": "Enter a model name.",
     "native_api_key": "Enter your API key.",
     "authserv_id": "Enter only the name before the first semicolon, like mx.example.com.",
@@ -465,11 +472,16 @@ def _same_host(value: object) -> str:
 
 def _host_moved(state: SetupState, credential: str, draft: dict) -> bool:
     """Whether the draft names another host than the one ``credential`` was
-    stored for. A host the draft does not hold is the prior's."""
+    stored for. A host the draft does not hold is the prior's.
+
+    The prior is compared as the page saw it (`payload_from_answers`): native's
+    provider reaches the draft as its preset URL, not as the answer field.
+    """
     if state.prior is None:
         return False
+    seen = setup_wizard.payload_from_answers(state.prior)
     return any(
-        host in draft and _same_host(draft[host]) != _same_host(getattr(state.prior, host))
+        host in draft and _same_host(draft[host]) != _same_host(seen.get(host, ""))
         for host in _CREDENTIAL_HOSTS[credential]
     )
 
@@ -687,11 +699,11 @@ async def openrouter_model_ids(seconds: float) -> list[str]:
     """OpenRouter's model ids, for the model field's suggestions; ``[]`` on
     any failure, since the list is a convenience and the Test button is what
     checks a model."""
-    from istota.llm import openrouter_catalog  # noqa: PLC0415
+    from istota.llm import discovery  # noqa: PLC0415
 
     try:
         catalog = await asyncio.wait_for(
-            openrouter_catalog.fetch_openrouter_catalog(
+            discovery.fetch_openrouter_catalog(
                 setup_wizard.DEFAULT_OPENROUTER_BASE_URL, timeout=seconds,
             ),
             timeout=seconds + _CHECK_GRACE_SECONDS,
@@ -837,11 +849,11 @@ def create_setup_app(
                 "models": {
                     "anthropic": {
                         "base_url": setup_wizard.DEFAULT_ANTHROPIC_BASE_URL,
-                        "model": setup_wizard.DEFAULT_ANTHROPIC_MODEL,
+                        "model": setup_wizard.default_anthropic_model(),
                     },
                     "openrouter": {
                         "base_url": setup_wizard.DEFAULT_OPENROUTER_BASE_URL,
-                        "model": setup_wizard.DEFAULT_OPENROUTER_MODEL,
+                        "model": setup_wizard.default_openrouter_model(),
                     },
                 },
             },

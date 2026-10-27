@@ -13,7 +13,7 @@ Commands prefixed with `!` are intercepted before task creation and handled sync
 | `!resume [#ID]` | Re-run a failed or cancelled task, continuing from its captured progress |
 | `!status` | Show running/pending tasks and system stats |
 | `!usage` | Show token usage; adds a by-brain split and the Claude Code plan's rate-limit windows for admins (hidden alias: `!limits`) |
-| `!room` | Show this room's standing model/effort default and the brain it runs; `!room model ALIAS` / `!room effort LEVEL` set the first two, `default` clears |
+| `!room` | Show this room's standing model/effort default, its provider and the brain it runs; `!room model ALIAS` / `!room effort LEVEL` set the first two, `!room provider ID` (admin, native rooms) the provider, `default` clears |
 | `!room host` | Take over a shared room that has lost its host |
 | `!room guests [off\|held\|direct]` | Show how guests are answered here; the host sets it |
 | `!room speak [mention\|classifier\|off\|default]` | Show [when the bot answers](../features/shared-rooms.md#when-the-bot-speaks) a message nobody addressed to it here; the host sets it, `default` follows the deployment |
@@ -92,6 +92,8 @@ That block appears when a reading is available, not when `brain.kind` is `claude
 ## Room model default
 
 `!room` shows the room's standing model/effort default; `!room model <alias>` and `!room effort <level>` set it, and `default` clears it. The default lives on the shared room registry, so it applies to every message in that room on Talk, web and, for an SMS or WhatsApp room, texts, and to every participant. Precedence: an inline `!model` prefix wins over the room default, which wins over the instance `model` config.
+
+`!room provider` shows which provider a native room runs on and the providers it may use; `!room provider <id>` moves it to one `[brain.native] providers` lists, and `!room provider default` back to native's default. It is admin-only, because the provider decides whose key the room is billed to. The room keeps its model only if the new provider has it; a move that would leave the room with no model and no default model for that provider is refused. An admin's `!room model <provider>/<id>` sets the provider and the model together; anyone else picks a model of the room's current provider. See [Models and providers](../configuration/models.md#a-rooms-provider).
 
 ## Shared rooms
 

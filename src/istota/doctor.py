@@ -59,7 +59,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Collection, Iterable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -522,8 +522,9 @@ def check_gws(config: "Config", probe: bool) -> CheckResult:
     )
 
 
-def _native_key_holders(config: "Config") -> int:
-    """How many configured users have a ``native_brain``/``api_key`` secret.
+def _native_key_holders(config: "Config", provider_id: str) -> int:
+    """How many configured users have their own key for ``provider_id``
+    (a ``provider_keys``/``<provider_id>`` secret).
 
     **Its own read-only query rather than ``secrets_store.secret_exists``**:
     that helper opens the database read-write *and commits*, and against a
@@ -572,7 +573,7 @@ def _native_key_holders(config: "Config") -> int:
         conn = sqlite_util.connect_read_only(db_path)
         rows = conn.execute(
             "SELECT DISTINCT user_id FROM secrets WHERE service = ? AND key = ?",
-            ("native_brain", "api_key"),
+            ("provider_keys", provider_id),
         ).fetchall()
         return len({str(row[0]) for row in rows} & users)
     except Exception:  # noqa: BLE001 — a check reports, it does not propagate
@@ -613,39 +614,589 @@ def _native_endpoint_is_local(base_url: object) -> bool:
     return address.is_loopback or address.is_private or address.is_link_local
 
 
+def _legacy_native_sources(config: "Config") -> list:
+    """The `config.LEGACY_PROVIDER_SOURCES` rows this install still uses.
+
+    Read from the config file as a document plus this process's environment,
+    since the loaded `Config` has already folded them into a provider.
+    """
+    from istota.config import legacy_provider_sources_in_use
+
+    document: dict = {}
+    path = getattr(config, "config_path", None)
+    if path:
+        try:
+            import tomllib
+
+            document = tomllib.loads(Path(path).read_text())
+        except Exception:  # noqa: BLE001 - an unreadable file names no legacy source
+            document = {}
+    try:
+        # The CLI's legacy key is `models.cli_auth`'s to report, not native's.
+        return [row for row in legacy_provider_sources_in_use(document, os.environ) if not row.provider]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+#: Variables the CLI would read if they reached it, none of which any CLI env
+#: carries from the daemon's environment now: set, they are ignored.
+_IGNORED_CLI_VARIABLES = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
+
+#: How long an API-key source seen under "subscription" keeps the check red.
+_API_KEY_SOURCE_WINDOW = timedelta(hours=24)
+
+
+def check_cli_auth(config: "Config", probe: bool) -> CheckResult:
+    """How the `claude` CLI authenticates (`[brain.claude_code] auth`).
+
+    OK names the mode and whether it was written or derived from the
+    environment, with the setting to write for a derived one. FAIL when a CLI
+    brain is reachable with no credential at all, when
+    `~/.claude/.credentials.json` exists under "api_key" (a token beside an API
+    key), and when the API-key-source backstop recorded the CLI billing an API
+    key under "subscription". WARN while the legacy `ANTHROPIC_API_KEY` is what
+    supplies the key, naming the file to move it to. Names only, never a
+    value; reads the environment, one file's existence and one `shared_kv` row.
+    """
+    from .llm.providers import (
+        LEGACY_CLI_API_KEY,
+        OAUTH_TOKEN_VARIABLE,
+        anthropic_spec,
+        cli_unconfigured_reason,
+        process_cli_auth,
+    )
+    from .sandbox.claude_runtime_env import credentials_file_path
+
+    name = "models.cli_auth"
+    reachable = _reachable_kinds(config)
+    if not reachable & _CLI_BRAIN_KINDS:
+        return CheckResult(
+            name, SKIP,
+            f"no task on this deployment runs the claude CLI (reachable: {', '.join(sorted(reachable)) or 'none'})",
+        )
+    mode = process_cli_auth(config)
+    written = getattr(config.brain.claude_code, "auth", "") in ("subscription", "api_key")
+    notes: list[str] = []
+    for variable in _IGNORED_CLI_VARIABLES:
+        if os.environ.get(variable):
+            notes.append(f"{variable} is set and ignored by the CLI")
+    if mode != "api_key" and os.environ.get(LEGACY_CLI_API_KEY):
+        notes.append(f"{LEGACY_CLI_API_KEY} is set and ignored by the CLI")
+    note = f"; {'; '.join(notes)}" if notes else ""
+
+    reason = cli_unconfigured_reason(config, mode)
+    if reason is not None:
+        return CheckResult(
+            name, FAIL, f"the claude CLI cannot run: {reason}{note}",
+            remedy=(
+                'Set [brain.claude_code] auth = "subscription" with the token in the '
+                'claude_code_oauth_token secret file, or "api_key" with the key in '
+                "istota_provider_anthropic_api_key."
+            ),
+        )
+    stale = credentials_file_path()
+    if mode == "api_key" and (stale.exists() or stale.is_symlink()):
+        return CheckResult(
+            name, FAIL,
+            f'{stale} exists under [brain.claude_code] auth = "api_key"; a subscription '
+            f"token sits beside the API key{note}",
+            remedy="Remove it: `istota cli-auth sync-credentials-file`, or restart the daemon.",
+        )
+    seen = _api_key_source_seen(config)
+    if mode == "subscription" and seen is not None:
+        return CheckResult(
+            name, FAIL,
+            f'the claude CLI reported an API key as its credential at {seen} under '
+            f'[brain.claude_code] auth = "subscription", so some path put an API key in '
+            f"front of it and the plan is not what is billed{note}",
+            remedy=(
+                "Find what sets ANTHROPIC_API_KEY or an apiKeyHelper for the CLI "
+                "(a settings.json, the environment of an older release) and remove it."
+            ),
+        )
+    if mode == "api_key" and not written and os.environ.get(LEGACY_CLI_API_KEY):
+        spec = anthropic_spec(config)
+        from_legacy = spec is not None and not os.environ.get("ISTOTA_PROVIDER_ANTHROPIC_API_KEY")
+        if from_legacy:
+            return CheckResult(
+                name, WARN,
+                f"{LEGACY_CLI_API_KEY} is read for one release as the anthropic provider's "
+                "key and makes the CLI mode api_key; move it to the "
+                "istota_provider_anthropic_api_key secret file and write "
+                f'[brain.claude_code] auth = "api_key"{note}',
+                remedy=(
+                    "Put the key in istota_provider_anthropic_api_key (or "
+                    'ISTOTA_PROVIDER_ANTHROPIC_API_KEY), set [brain.claude_code] auth = "api_key", '
+                    "and empty the anthropic_api_key file."
+                ),
+            )
+    if written:
+        source = "written in [brain.claude_code] auth"
+    elif mode == "subscription":
+        source = (
+            f"derived from {OAUTH_TOKEN_VARIABLE} in the environment; write "
+            '[brain.claude_code] auth = "subscription" to fix it'
+        )
+    else:
+        source = 'derived from the environment; write [brain.claude_code] auth = "api_key" to fix it'
+    if mode == "api_key":
+        spec = anthropic_spec(config)
+        if spec is not None and not spec.inference_key:
+            return CheckResult(
+                name, WARN,
+                f'auth = "api_key" ({source}) and the anthropic provider has no key, so '
+                f"only a user's own key authenticates the CLI{note}",
+                remedy="Put the key in the istota_provider_anthropic_api_key secret file.",
+            )
+    return CheckResult(name, OK, f"auth = {mode!r}, {source}{note}")
+
+
+def _api_key_source_seen(config: "Config") -> str | None:
+    """When the backstop last recorded an API-key source, if inside the window."""
+    from .executor import API_KEY_SOURCE_KV_KEY, CLI_AUTH_KV_NAMESPACE
+
+    try:
+        import sqlite3
+
+        from .lib.sqlite_util import connect_read_only
+
+        path = getattr(config, "db_path", None)
+        if not path or not Path(path).is_file():
+            return None
+        conn = connect_read_only(path)
+        try:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT updated_at FROM shared_kv WHERE namespace = ? AND key = ?",
+                (CLI_AUTH_KV_NAMESPACE, API_KEY_SOURCE_KV_KEY),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - a check never raises
+        return None
+    if row is None:
+        return None
+    try:
+        seen = datetime.fromisoformat(str(row["updated_at"]).replace(" ", "T")).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    if datetime.now(timezone.utc) - seen > _API_KEY_SOURCE_WINDOW:
+        return None
+    return seen.strftime("%Y-%m-%d %H:%M UTC")
+
+
+#: The families the default tiers name; each must have a current model.
+_REQUIRED_FAMILIES = ("opus", "sonnet", "haiku")
+#: `[brain.native]` catalogue keys renamed onto the provider and `[models]`.
+_RENAMED_CATALOGUE_KEYS = {
+    "model_catalog_fetch": "[providers.<id>] discover",
+    "model_catalog_cache_ttl_hours": "[providers.<id>] discover_ttl_hours",
+    "model_overrides": '[models.overrides."<provider>/<id>"]',
+}
+_UPDATE_SCRIPT = "scripts/update-anthropic-catalog.py"
+_DISCOVERY_REMEDY = (
+    "Check the daemon reaches the provider's /models (Anthropic's list bypasses any "
+    "HTTPS_PROXY) and its key; the model-catalogue gate retries every 15 minutes."
+)
+
+
+def _config_document(config: "Config") -> dict:
+    """The config file as a TOML document, or `{}` when there is none to read."""
+    path = getattr(config, "config_path", None)
+    if not path:
+        return {}
+    try:
+        import tomllib
+
+        document = tomllib.loads(Path(path).read_text())
+    except Exception:  # noqa: BLE001 - an unreadable file says nothing here
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
+def _refused_provider_tables(config: "Config", document: dict) -> list[str]:
+    """`[providers.<id>]` tables the loader left out (or, for a built-in, ignored)."""
+    from .llm.providers import BUILTIN_PROVIDERS
+
+    tables = document.get("providers")
+    if not isinstance(tables, dict):
+        return []
+    loaded = getattr(config, "providers", None) or {}
+    refused = []
+    for provider_id, table in tables.items():
+        provider_id = str(provider_id)
+        builtin = BUILTIN_PROVIDERS.get(provider_id)
+        if builtin is not None:
+            kind = table.get("kind") if isinstance(table, dict) else None
+            if not isinstance(table, dict) or (kind is not None and kind != builtin[0]):
+                refused.append(provider_id)
+        elif provider_id not in loaded:
+            refused.append(provider_id)
+    return refused
+
+
+def _listing_key_file_problem(path: Path) -> str | None:
+    """Why the model-listing key file is held wrongly, or `None`. Stats only."""
+    try:
+        metadata = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode):
+        return f"{path} is not a regular file"
+    if stat.S_IMODE(metadata.st_mode) not in (0o400, 0o600):
+        return f"{path} has mode {stat.S_IMODE(metadata.st_mode):04o}, not 0400 or 0600"
+    if metadata.st_uid != os.geteuid():
+        return f"{path} is not owned by this process's user"
+    return None
+
+
+def _cache_age(seconds: float) -> str:
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 172800:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
+#: Model fields every brain's internal callers read (sleep cycle, triage, the
+#: speech gate, review), checked in the namespace of `[brain] kind`.
+_INTERNAL_MODEL_FIELDS = (
+    ("[conversation] selection_model", ("conversation", "selection_model")),
+    ("[speech_gate] model", ("speech_gate", "model")),
+    ("[sleep_cycle] extraction_model", ("sleep_cycle", "extraction_model")),
+    ("[sleep_cycle] curation_model", ("sleep_cycle", "curation_model")),
+    ("[channel_sleep_cycle] extraction_model", ("channel_sleep_cycle", "extraction_model")),
+    ("[developer.review] model", ("developer", "review", "model")),
+)
+_SHOWN_MODEL_CHARS = 80
+
+
+def _config_value(config: "Config", path: tuple[str, ...]) -> str:
+    value = config
+    for part in path:
+        value = getattr(value, part, None)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _model_fields_to_check(config: "Config") -> list[tuple[str, str, str]]:
+    """``(label, value, brain kind)`` for every configured model field a brain
+    on this deployment would run, with an empty value left out."""
+    brain = config.brain
+    reachable = _reachable_kinds(config)
+    fields: list[tuple[str, str, str]] = []
+    if "claude_code" in reachable:
+        fields.append(("[brain.claude_code] model", brain.claude_code.model, "claude_code"))
+    if "tmux_claude" in reachable:
+        fields.append(("[brain.tmux] model", brain.tmux.model, "tmux_claude"))
+    if reachable & {"claude_code", "tmux_claude"}:
+        fields.append(("advisor_model", config.advisor_model, "claude_code"))
+    if "native" in reachable:
+        fields.append(("[brain.native] model", brain.native.model, "native"))
+    base = getattr(brain, "kind", "")
+    for label, path in _INTERNAL_MODEL_FIELDS:
+        fields.append((label, _config_value(config, path), base))
+    return [(label, (value or "").strip(), kind) for label, value, kind in fields if (value or "").strip()]
+
+
+def _configured_model_findings(config: "Config", catalogue) -> tuple[list[str], list[str]]:
+    """The Stage 5 arms of `models.catalogue`, through the resolver.
+
+    FAIL for a configured model field that resolves to nothing on the brain
+    that runs it. Two shapes are let through, because the brain sends them as
+    written and they can work: a Claude-shaped id the catalogue does not list
+    (a dated id, a model newer than the shipped file) is a WARN, and a native
+    model is not checked while native's provider has no model list at all
+    (the cache arms above report that). WARN for an alias that resolves to a
+    deprecated model. Never raises.
+    """
+    from .brain._resolve import (
+        BRAIN_NAMESPACES,
+        Resolution,
+        ResolveError,
+        config_providers,
+        native_provider_id,
+        native_reach_ids,
+        preferred_provider,
+        resolve_selection,
+    )
+    from .brain._aliases import split_effort
+    from .brain._roles import LEGACY_NAMESPACE, parse_alias_overrides
+    from .brain.claude_code import _looks_canonical
+
+    fails: list[str] = []
+    warns: list[str] = []
+    try:
+        aliases = parse_alias_overrides(config.models.aliases, log=False)
+        providers = config_providers(config)
+        native_id = native_provider_id(config)
+        reach = native_reach_ids(config)
+    except Exception:  # noqa: BLE001 - a doctor check never raises
+        return fails, warns
+
+    warns.extend(_unlisted_provider_rows(config, reach))
+
+    for label, value, kind in _model_fields_to_check(config):
+        if kind == "native" and not native_id:
+            continue
+        shown = value[:_SHOWN_MODEL_CHARS]
+        resolved = resolve_selection(
+            value, catalogue, aliases=aliases, for_brain=kind,
+            providers=providers, native_provider=native_id,
+            native_reach=native_reach_ids(config),
+        )
+        if isinstance(resolved, Resolution):
+            continue
+        written = split_effort(resolved.target or value)[0]
+        if kind == "native":
+            if resolved.code in ("unknown", "ambiguous") and not catalogue.models(native_id):
+                continue
+        elif resolved.code == "unknown" and _looks_canonical(written):
+            warns.append(f"{label} = {shown!r} is not in the catalogue; it is sent to the CLI as written")
+            continue
+        fails.append(f"{label} = {shown!r} resolves to no model: {resolved.message[:200]}")
+
+    for name in aliases.names():
+        for namespace in aliases.overrides.get(name, {}):
+            effective = "anthropic" if namespace == LEGACY_NAMESPACE else namespace
+            if effective not in BRAIN_NAMESPACES.values():
+                continue
+            resolved = resolve_selection(
+                name, catalogue, aliases=aliases, namespace=effective,
+                prefer_provider=preferred_provider(effective, config), providers=providers,
+            )
+            if isinstance(resolved, ResolveError) or resolved.info is None:
+                continue
+            if resolved.info.deprecated:
+                warns.append(
+                    f"[models.aliases] {name} ({namespace}) resolves to the deprecated {resolved.ref}"
+                )
+    return fails, warns
+
+
+#: How many rooms or jobs pinned to an unlisted provider the detail names.
+_SHOWN_UNLISTED_ROWS = 10
+
+
+def _unlisted_provider_rows(config: "Config", reach: tuple[str, ...]) -> list[str]:
+    """One WARN per room and scheduled job whose stored provider (D22) is not
+    in `[brain.native] providers`, which runs on native's default provider
+    instead. Rooms by token, jobs by owner and name. Reads the framework
+    database read-only; nothing when it is absent. Never raises."""
+    from contextlib import closing
+
+    from .db import database_present
+
+    db_path = getattr(config, "db_path", None)
+    if not database_present(db_path):
+        return []
+    listed = set(reach)
+    found: list[str] = []
+    try:
+        with closing(sqlite_util.connect_read_only(Path(db_path))) as conn:
+            rooms = conn.execute(
+                "SELECT token, provider FROM rooms WHERE provider IS NOT NULL AND provider != '' "
+                "ORDER BY token"
+            ).fetchall()
+            jobs = conn.execute(
+                "SELECT user_id, name, provider FROM scheduled_jobs "
+                "WHERE provider IS NOT NULL AND provider != '' ORDER BY user_id, name"
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - a doctor check never raises
+        return [f"the rooms' and jobs' providers could not be read ({type(exc).__name__})"]
+    for token, provider in rooms:
+        if provider not in listed:
+            found.append(f"room {token}")
+    for user_id, job_name, provider in jobs:
+        if provider not in listed:
+            found.append(f"job {user_id}/{job_name}")
+    if not found:
+        return []
+    shown = ", ".join(found[:_SHOWN_UNLISTED_ROWS])
+    if len(found) > _SHOWN_UNLISTED_ROWS:
+        shown += f" and {len(found) - _SHOWN_UNLISTED_ROWS} more"
+    return [
+        f"{len(found)} room(s) or job(s) name a provider [brain.native] providers does not "
+        f"list, and run on native's default provider instead: {shown}"
+    ]
+
+
+def check_models_catalogue(config: "Config", probe: bool) -> CheckResult:
+    """The model catalogue: the shipped file, each provider's discovery cache,
+    and the config that names models.
+
+    OK with a summary (providers, models, how many a non-admin may pick, the
+    oldest cache). FAIL for a family the default tiers name with no current
+    model, a `[providers.<id>]` table the loader refused, a 401/403 on
+    Anthropic's model list, a model-listing key file that is not a 0400/0600
+    regular file owned by this user, and a configured model field that
+    resolves to nothing (`_configured_model_findings`). WARN for a cache past
+    twice its TTL, a discovering provider with no cache yet or whose last fetch
+    failed, an Anthropic model the API lists with no shipped price, a renamed
+    `[brain.native]` catalogue key, an override naming no model, a Claude id
+    the catalogue does not list, and an alias resolving to a deprecated model.
+    Reads the caches and the config file only; spawns nothing and
+    opens no socket, so it is the same under `probe=False`. Names only, never
+    a key or a cache body.
+    """
+    from .config import anthropic_listing_key_path
+    from .llm import discovery
+    from .llm.providers import build_providers
+
+    name = "models.catalogue"
+    fails: list[str] = []
+    warns: list[str] = []
+    notes: list[str] = []
+    remedies: list[str] = []
+    now = time.time()
+
+    cache_dir = discovery.config_cache_dir(config)
+    catalogue = discovery.catalogue_from_caches(config)
+
+    for family in _REQUIRED_FAMILIES:
+        if catalogue.latest(family) is None:
+            fails.append(f"no current {family} model, so the {family!r} shortcut resolves to nothing")
+            remedies.append(f"Run {_UPDATE_SCRIPT} or mark a {family} model current in anthropic_overrides.json.")
+
+    document = _config_document(config)
+    refused = _refused_provider_tables(config, document)
+    if refused:
+        fails.append("refused [providers] table(s): " + ", ".join(f"[providers.{p}]" for p in refused))
+        remedies.append("`istota apply --check -f` on the config names why each table was refused.")
+
+    native = (document.get("brain") or {}).get("native") if isinstance(document.get("brain"), dict) else None
+    if isinstance(native, dict):
+        for key, replacement in _RENAMED_CATALOGUE_KEYS.items():
+            if key in native:
+                warns.append(f"[brain.native] {key} is read for one release; write {replacement}")
+                remedies.append("Move each renamed [brain.native] catalogue key to the setting named.")
+
+    refs = set(catalogue.refs())
+    ids = {m.id for m in catalogue.models()}
+    for key in catalogue.overrides:
+        if key in catalogue.legacy_override_keys:
+            continue
+        if key not in refs and key not in ids:
+            warns.append(f"[models.overrides.{key!r}] names no model the catalogue has")
+            remedies.append("Key each [models.overrides] entry by a provider/id the catalogue lists, or remove it.")
+
+    specs = build_providers(config)
+    listing_path = anthropic_listing_key_path(config)
+    listing_problem = _listing_key_file_problem(listing_path)
+    if listing_problem:
+        fails.append(f"the model-listing key file: {listing_problem}")
+        remedies.append(f"Make {listing_path} a regular file, mode 0400 or 0600, owned by the daemon's user.")
+    try:
+        listing_present = listing_problem is None and listing_path.is_file() and listing_path.stat().st_size > 0
+    except OSError:
+        listing_present = False
+
+    ages: list[float] = []
+    for spec in specs.values():
+        if not discovery.wants_discovery(spec, config):
+            continue
+        if spec.kind == "anthropic":
+            if spec.id != "anthropic":
+                continue
+            if not listing_present:
+                notes.append("Anthropic discovery off (no model-listing key file); the shipped list serves")
+                continue
+        doc = discovery.read_cache(cache_dir, spec.id) if cache_dir is not None else None
+        if doc is None:
+            warns.append(f"provider {spec.id} has no model cache yet; only its declared models are known")
+            remedies.append(_DISCOVERY_REMEDY)
+            continue
+        fetched_at = doc.get("fetched_at")
+        if isinstance(fetched_at, (int, float)):
+            age = max(0.0, now - float(fetched_at))
+            ages.append(age)
+            ttl = float(spec.discover_ttl_hours or 0.0) * 3600
+            if ttl > 0 and age > 2 * ttl:
+                warns.append(f"provider {spec.id}'s model cache is {_cache_age(age)} old, past twice its TTL")
+                remedies.append(_DISCOVERY_REMEDY)
+        status = doc.get("last_status")
+        error = doc.get("last_error")
+        if spec.id == "anthropic" and status in (401, 403):
+            fails.append(f"Anthropic's model list answered HTTP {status} to the model-listing key")
+            remedies.append(
+                "Replace the key in the istota_anthropic_listing_key file with a key from a "
+                "zero-spend Console workspace."
+            )
+        elif error:
+            warns.append(f"provider {spec.id}'s last model-list fetch failed ({error})")
+            remedies.append(_DISCOVERY_REMEDY)
+
+    unpriced = sorted(
+        m.id for m in catalogue.models("anthropic") if m.price_source == "unknown" and not m.deprecated
+    )
+    if unpriced:
+        warns.append(f"Anthropic lists {', '.join(unpriced)} with no shipped price; cost is estimated at zero")
+        remedies.append(f"Run {_UPDATE_SCRIPT} and commit the result.")
+
+    model_fails, model_warns = _configured_model_findings(config, catalogue)
+    if model_fails:
+        fails.extend(model_fails)
+        remedies.append(
+            "Name a model the catalogue lists: an alias, a provider/id reference or "
+            "a bare id one provider lists (`!models` shows the aliases)."
+        )
+    if model_warns:
+        warns.extend(model_warns)
+        remedies.append("Point each alias at a current model, or name a current model where one is written.")
+
+    from .brain._resolve import enabled_patterns, enabled_refs, unmatched_patterns
+
+    patterns = enabled_patterns(config)
+    if getattr(config.models, "enabled", None) is not None:
+        unmatched = unmatched_patterns(catalogue, patterns)
+        if unmatched:
+            warns.append(
+                "[models] enabled names patterns that match no model: "
+                + ", ".join(repr(p) for p in unmatched[:10])
+            )
+            remedies.append(
+                "Correct or remove those [models] enabled entries; a pattern is a glob "
+                "over provider/id refs (`!models` as an admin lists them)."
+            )
+    enabled_count = len(enabled_refs(catalogue, patterns))
+    model_count = len(catalogue.refs())
+    summary = f"{len(specs)} providers, {model_count} models, {enabled_count} enabled"
+    summary += f", oldest cache {_cache_age(max(ages))}" if ages else ", no discovery cache"
+    if notes:
+        summary += "; " + "; ".join(notes)
+    if fails or warns:
+        status = FAIL if fails else WARN
+        detail = "; ".join(fails + warns) + f" ({summary})"
+        remedy = " ".join(dict.fromkeys(remedies))
+        return CheckResult(name, status, detail, remedy=remedy)
+    return CheckResult(name, OK, summary)
+
+
 def check_native_brain(config: "Config", probe: bool) -> CheckResult:
-    """The native brain has a provider credential to run on.
+    """The native brain names a provider, and that provider has a key.
 
-    Buildable is not runnable. ``make_brain("native")`` constructs a defaulted
-    dataclass and asserts nothing about a key, and the per-user overlay falls
-    back to the instance key rather than refusing — so a deployment that can
-    reach the native brain with no credential anywhere is one where every
-    native task fails at the provider, with nothing in the registry naming it.
-    ``claude`` and ``tmux`` have had a check since they were added; this one
-    did not.
-
-    Any one of three sources satisfies it: ``[brain.native] api_key``, the
-    ``ISTOTA_BRAIN_NATIVE_API_KEY`` variable that normally populates that field
-    at load, and a per-user ``native_brain``/``api_key`` secret, which the
-    executor overlays per task. The variable is asked separately even though
-    ``load_config`` folds it in, because a ``Config`` assembled any other way
-    holds the variable and not the field, and telling a process that is holding
-    a credential it has none is how a check stops being believed.
+    ``[brain.native] provider`` has no default (D18), so an unset or unknown
+    provider is the first answer, through ``brain_unconfigured_reason``, the
+    predicate routing reads. Then the key: the provider's own (from
+    ``[providers.<id>] api_key`` or ``ISTOTA_PROVIDER_<ID>_API_KEY``), or a
+    per-user ``provider_keys``/``<id>`` secret, which the executor overlays
+    per task.
 
     **Two shapes resolve no key and are not defects**, and both WARN rather than
     FAIL, because a FAIL here is not inert: it reaches the start-up report, the
     scheduler's sweep and the ``self-check`` heartbeat, all of which alert on
-    ``FAIL`` and none of which alert on ``WARN`` — so a working deployment would
-    get a permanently red Health pane and a repeating alert. An
-    ``openai_compat`` endpoint on this machine (Ollama, vLLM, llama.cpp) takes
-    no key, and an operator can authenticate through ``extra_headers`` instead,
-    which the provider merges over the ``Authorization`` header it builds. This
-    check cannot confirm either is really a credential, so it says what it found
-    rather than passing them as OK.
+    ``FAIL``. An endpoint on this machine (Ollama, vLLM, llama.cpp) takes no
+    key, and an operator can authenticate through ``extra_headers`` instead,
+    which the provider merges over the ``Authorization`` header it builds.
+
+    Every legacy source still in use (``[brain.native] base_url`` and the rest
+    of ``config.LEGACY_PROVIDER_SOURCES``) is named in the detail with what to
+    write instead, since nothing says so at load (D20).
 
     SKIPs where ``native`` is not reachable, so it stays silent on the
-    deployments it does not describe — which is most of them.
+    deployments it does not describe.
     """
+    from istota.brain import brain_unconfigured_reason, native_provider_spec
+
     name = "runtime.native_brain"
     reachable = _reachable_kinds(config)
     if "native" not in reachable:
@@ -655,47 +1206,69 @@ def check_native_brain(config: "Config", probe: bool) -> CheckResult:
             "no task on this deployment can run the native brain "
             f"(reachable: {', '.join(sorted(reachable)) or 'none'})",
         )
-    native = getattr(getattr(config, "brain", None), "native", None)
-    if str(getattr(native, "api_key", "") or "").strip():
-        return CheckResult(name, OK, "[brain.native] api_key is set")
-    if (os.environ.get("ISTOTA_BRAIN_NATIVE_API_KEY") or "").strip():
-        return CheckResult(name, OK, "ISTOTA_BRAIN_NATIVE_API_KEY is set")
-    holders = _native_key_holders(config)
+    legacy = _legacy_native_sources(config)
+    legacy_note = ""
+    if legacy:
+        moves = "; ".join(f"{row.source.removeprefix('env:')} -> {row.replacement}" for row in legacy)
+        legacy_note = f"; legacy sources read for one release: {moves}"
+    brain = getattr(config, "brain", None)
+    # The predicate routing reads, filled by `resolve_process_auth`; in a
+    # process that never resolved it (a check run at config load, a test) the
+    # same native reason is computed directly, since it needs no CLI mode.
+    reason = brain_unconfigured_reason("native", config)
+    if reason is None and not getattr(config, "_cli_mode_resolved", False):
+        from istota.llm.providers import native_provider_reason
+
+        reason = native_provider_reason(config)
+    spec = native_provider_spec(brain) if brain is not None and reason is None else None
+    if reason is not None or spec is None:
+        return CheckResult(
+            name,
+            FAIL,
+            f"the native brain is reachable but not configured: "
+            f"{reason or '[brain.native] provider names no configured provider'}{legacy_note}",
+            remedy=(
+                'Set [brain.native] provider = "<id>" (anthropic, openrouter, or a '
+                "[providers.<id>] table of your own) and that provider's key."
+            ),
+        )
+    variable = f"ISTOTA_PROVIDER_{spec.id.upper()}_API_KEY"
+    if spec.inference_key:
+        return CheckResult(name, OK, f"provider {spec.id!r} has a key{legacy_note}")
+    holders = _native_key_holders(config, spec.id)
     if holders:
         return CheckResult(
             name,
             OK,
-            f"a per-user native_brain/api_key secret is stored for {holders} user(s)",
+            f"provider {spec.id!r}: a per-user provider_keys/{spec.id} secret is stored "
+            f"for {holders} user(s){legacy_note}",
         )
     remedy = (
-        "Set ISTOTA_BRAIN_NATIVE_API_KEY, or store one per user with "
-        "`istota secret ensure -s native_brain -k api_key`."
+        f"Set {variable} (the stack secret {variable.lower()} for a built-in "
+        f"provider), [providers.{spec.id}] api_key, or one per user with "
+        f"`istota secret ensure -s provider_keys -k {spec.id}`."
     )
-    unresolved = (
-        "no provider API key resolves from config, the environment or the "
-        "secrets store"
-    )
-    if getattr(native, "extra_headers", None):
+    unresolved = f"provider {spec.id!r} has no API key from config, the environment or the secrets store"
+    if spec.extra_headers:
         return CheckResult(
             name,
             WARN,
-            f"{unresolved}; [brain.native] extra_headers is set, so a credential "
-            "may be travelling there — this check cannot tell",
+            f"{unresolved}; its extra_headers are set, so a credential may be "
+            f"travelling there — this check cannot tell{legacy_note}",
             remedy=remedy,
         )
-    base_url = getattr(native, "base_url", "")
-    if _native_endpoint_is_local(base_url):
+    if _native_endpoint_is_local(spec.base_url):
         return CheckResult(
             name,
             WARN,
-            f"{unresolved}; base_url names a local endpoint, which commonly "
-            "needs none",
+            f"{unresolved}; its base_url names a local endpoint, which commonly "
+            f"needs none{legacy_note}",
             remedy=remedy,
         )
     return CheckResult(
         name,
         FAIL,
-        f"the native brain is reachable but {unresolved}",
+        f"the native brain is reachable but {unresolved}{legacy_note}",
         remedy=remedy,
     )
 
@@ -2891,7 +3464,11 @@ def check_skill_model_credential(
         from .executor import (  # noqa: PLC0415
             SKILL_DAEMON_CREDENTIAL_VARS,
             SKILL_MODEL_CALLERS,
-            SKILL_MODEL_CREDENTIAL_VARS,
+        )
+        from .llm.providers import (  # noqa: PLC0415
+            model_caller_env,
+            model_caller_provider,
+            process_cli_auth,
         )
         from .skills._loader import (  # noqa: PLC0415
             effective_disabled_skills,
@@ -2971,27 +3548,36 @@ def check_skill_model_credential(
         return results
 
     # code_review runs on the configured brain, and on tmux on claude_code, so
-    # these Anthropic names authenticate it only there. On native the brain's
-    # own key does, which `brain.native` checks.
+    # the CLI credential authenticates it only there. On native the brain's
+    # own provider key does, which `brain.native` checks.
     brain_kind = getattr(getattr(config, "brain", None), "kind", "claude_code")
     if brain_kind not in ("claude_code", "tmux_claude"):
         results.append(
             CheckResult(
                 f"{prefix}.value",
                 SKIP,
-                f"{', '.join(live)} runs on the {brain_kind} brain, which needs "
-                f"none of {', '.join(sorted(SKILL_MODEL_CREDENTIAL_VARS))}",
+                f"{', '.join(live)} runs on the {brain_kind} brain, which "
+                f"authenticates with its own provider's key",
             )
         )
         return results
 
-    present = sorted(n for n in SKILL_MODEL_CREDENTIAL_VARS if os.environ.get(n))
+    # What the proxy would inject: `model_caller_env`'s copy for this
+    # process's auth mode, names only. Under "subscription" the credential is
+    # the token, under "api_key" the `anthropic` provider's key.
+    try:
+        mode = process_cli_auth(config)
+        provider_id, cli_reviewer = model_caller_provider(config)
+        copy = model_caller_env(config, mode, provider_id, cli_reviewer=cli_reviewer)
+    except Exception:  # noqa: BLE001 - a check never raises
+        mode, copy = None, {}
+    present = sorted(name for name in copy if name != "ISTOTA_CLI_AUTH")
     if present:
         results.append(
             CheckResult(
                 f"{prefix}.value",
                 OK,
-                f"the daemon holds {', '.join(present)} to inject",
+                f"the proxy injects {', '.join(present)} ({mode})",
             )
         )
     elif not getattr(config.security, "skill_proxy_enabled", True):
@@ -3033,12 +3619,12 @@ def check_skill_model_credential(
             CheckResult(
                 f"{prefix}.value",
                 FAIL,
-                "the daemon holds none of "
-                f"{', '.join(sorted(SKILL_MODEL_CREDENTIAL_VARS))}, so "
+                f"no Claude Code credential for auth mode {mode or 'none'}, so "
                 f"{', '.join(live)} will fail unauthenticated",
                 remedy=(
-                    "Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in the "
-                    "daemon's environment."
+                    'Set [brain.claude_code] auth: "subscription" with the token in '
+                    'the claude_code_oauth_token secret file, or "api_key" with the '
+                    "key in istota_provider_anthropic_api_key."
                 ),
             )
         )
@@ -10248,6 +10834,8 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.gitleaks", check_gitleaks),
     ("runtime.gws", check_gws),
     ("runtime.native_brain", check_native_brain),
+    ("models.cli_auth", check_cli_auth),
+    ("models.catalogue", check_models_catalogue),
     ("runtime.pdf_tools", check_pdf_tools),
     ("runtime.framework_db", check_framework_db),
     ("runtime.task_failure_rate", check_task_failure_rate),
@@ -10358,6 +10946,9 @@ CHECK_SCOPES: dict[str, str] = {
     # per-user arm reads the install's own secrets table. A bare `docker run`
     # has neither and would report a missing key about nothing.
     "runtime.native_brain": DEPLOYMENT,
+    "models.cli_auth": DEPLOYMENT,
+    # Deployment: it reads the install's discovery caches and config file.
+    "models.catalogue": DEPLOYMENT,
     "runtime.pdf_tools": IMAGE,
     "runtime.framework_db": DEPLOYMENT,
     # Deployment, not image: it queries the `tasks` table of an install's own

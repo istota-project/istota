@@ -20,7 +20,7 @@ import sys
 import tomllib
 from collections.abc import Mapping
 
-from istota.apply import CheckResult
+from istota.apply import BLOCKING_KINDS, CheckResult
 from istota.lib import toml_write
 
 logger = logging.getLogger(__name__)
@@ -29,9 +29,6 @@ TIMEOUT_SECONDS = 30.0
 
 #: The error a check that did not finish, or answered nonsense, reports.
 INCOMPLETE = "the configuration check did not complete"
-
-#: Problem kinds that stop a change. A loader exception (`error`) does too.
-BLOCKING_KINDS = frozenset({"discarded", "error"})
 
 
 def problems_of(result: CheckResult) -> list[dict]:

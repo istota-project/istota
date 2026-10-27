@@ -42,6 +42,7 @@
   import Message from '$lib/components/chat/Message.svelte';
   import Composer from '$lib/components/chat/Composer.svelte';
   import RoomSettings from '$lib/components/chat/RoomSettings.svelte';
+  import { modelRefusalOf, type ModelRefusal } from '$lib/components/chat/modelPicker';
   import RoomMemory from '$lib/components/chat/RoomMemory.svelte';
   import { roomMenuItems } from '$lib/components/chat/roomMenu';
   import {
@@ -238,6 +239,11 @@
 
   // The room whose settings modal is open (null = closed).
   let settingsRoom = $state<ChatRoom | null>(null);
+  // The room PATCH's 422 for a model, for the open settings modal.
+  let settingsModelRefusal = $state<ModelRefusal | null>(null);
+  $effect(() => {
+    if (!settingsRoom) settingsModelRefusal = null;
+  });
   let memoryRoom = $state<ChatRoom | null>(null);
   // The room whose "My notes" pane is open: the caller's private notes about
   // it. A separate slot from `memoryRoom` so the two panes never share a buffer.
@@ -1149,9 +1155,17 @@
     if (!settingsRoom) return;
     // A refusal (a setting only the host may change) keeps the modal open
     // with the server's reason, rather than closing as though it had saved.
+    settingsModelRefusal = null;
     try {
       await session.updateRoomSettings(settingsRoom.id, patch);
     } catch (e) {
+      // A refused model is a field error: shown beside the model, with the
+      // server's candidates, rather than as a notice.
+      const refusal = patch.model !== undefined ? modelRefusalOf(e) : null;
+      if (refusal) {
+        settingsModelRefusal = refusal;
+        return;
+      }
       notifyError(e instanceof Error ? e.message : 'Couldn’t save the room settings.', {
         key: 'chat:room-settings',
       });
@@ -1722,6 +1736,7 @@
       userId={userId ?? undefined}
       onMembersChanged={membersChanged}
       onLeft={leftRoom}
+      modelRefusal={settingsModelRefusal}
     />
   {/if}
 

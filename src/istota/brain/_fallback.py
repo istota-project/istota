@@ -86,6 +86,10 @@ def effective_fallback_kind(brain_config) -> str | None:
     configured = (getattr(brain_config, "fallback", "") or "").strip()
     if not configured or configured == getattr(brain_config, "kind", ""):
         return None
+    # An unconfigured kind (`BrainConfig.unconfigured`, the store
+    # `brain.brain_unconfigured_reason` reads) is skipped as a target.
+    if (getattr(brain_config, "unconfigured", None) or {}).get(configured):
+        return None
     return configured
 
 

@@ -3090,6 +3090,8 @@ class TestSandboxProfiles:
         self, sandbox_config, make_sandbox_task, claude_home,
     ):
         (sandbox_config.temp_dir / "alice").mkdir(parents=True)
+        # The credentials file is bound under "subscription" only.
+        sandbox_config.brain.claude_code.auth = "subscription"
         claude, _ = self._both(sandbox_config, make_sandbox_task())
 
         ro = {src for src, _ in _get_bind_pairs(claude, "--ro-bind")}

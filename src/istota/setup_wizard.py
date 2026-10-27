@@ -36,10 +36,36 @@ logger = logging.getLogger("istota.setup")
 
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
-DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-#: The same model as `DEFAULT_ANTHROPIC_MODEL`, by OpenRouter's name for it.
-DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.6"
+
+
+def default_anthropic_model() -> str:
+    """The native brain's suggested model on Anthropic: the newest current
+    Sonnet in the shipped catalogue, so a catalogue refresh moves it."""
+    from istota.llm.catalog import latest_shipped_id  # noqa: PLC0415
+
+    return latest_shipped_id("sonnet")
+
+
+def default_openrouter_model() -> str:
+    """The same model as `default_anthropic_model`, by OpenRouter's name for it.
+
+    OpenRouter writes the version with a dot (`claude-sonnet-5-5` is
+    `anthropic/claude-sonnet-5.5`). When the process's catalogue has an
+    OpenRouter list, the spelling it lists wins; setup usually has none, and
+    then the dotted form is the answer.
+    """
+    import re  # noqa: PLC0415
+
+    from istota.llm.catalog import current_catalogue  # noqa: PLC0415
+
+    anthropic_id = default_anthropic_model()
+    dotted = "anthropic/" + re.sub(r"-(\d+)-(\d+)$", r"-\1.\2", anthropic_id)
+    listed = {info.id for info in current_catalogue().models("openrouter")}
+    for candidate in (dotted, "anthropic/" + anthropic_id):
+        if candidate in listed:
+            return candidate
+    return dotted
 
 
 # Reduced from web/static/octopus-sigil.webp; no image assets needed at runtime.
@@ -439,8 +465,21 @@ SECRET_NAMES: tuple[str, ...] = (
     "istota_whatsapp_access_token",
     "istota_whatsapp_app_secret",
     "istota_whatsapp_verify_token",
+    # Read only through `config.LEGACY_PROVIDER_SOURCES` for one release; setup
+    # writes the provider files below instead and leaves these as they are.
     "istota_brain_native_extra_headers",
+    "istota_provider_anthropic_api_key",
+    "istota_provider_anthropic_extra_headers",
+    "istota_provider_openrouter_api_key",
+    "istota_provider_openrouter_extra_headers",
+    # The key used only to list Anthropic's models. Read as a file by the
+    # discovery fetch and never as a variable: `istota-secrets` skips it, and
+    # compose mounts it on the daemon alone (DAEMON_ONLY_SECRETS).
+    "istota_anthropic_listing_key",
 )
+
+#: Secret files compose mounts on the `daemon` service only.
+DAEMON_ONLY_SECRETS: frozenset[str] = frozenset({"istota_anthropic_listing_key"})
 
 #: Ingress modes, as `host.env`'s INGRESS names them, mapped to the hop count the
 #: web app subtracts from X-Forwarded-For: one for the compose nginx, plus one
@@ -495,8 +534,20 @@ class ContainerAnswers:
     # Brain.
     brain_kind: str = "claude_code"
     claude_code_oauth_token: str = ""
+    #: The `claude` CLI's API key: the `anthropic` provider's key, written to
+    #: `istota_provider_anthropic_api_key` (`[brain.claude_code] auth = "api_key"`).
     anthropic_api_key: str = ""
-    native_base_url: str = DEFAULT_ANTHROPIC_BASE_URL
+    #: The key used only to list Anthropic's models, on either auth path. A
+    #: file only (`istota_anthropic_listing_key`), never a variable.
+    anthropic_listing_key: str = ""
+    #: The provider native uses: "anthropic", "openrouter" or an operator's own
+    #: id. No default (D18). Empty with a `native_base_url` reads that URL the
+    #: way `config.LEGACY_PROVIDER_SOURCES` does, which is what the web setup's
+    #: presets and a pre-provider config give.
+    native_provider: str = ""
+    #: An operator's own provider only: its kind and base URL.
+    native_provider_kind: str = ""
+    native_base_url: str = ""
     native_model: str = ""
     native_api_key: str = ""
     # Email.
@@ -587,14 +638,81 @@ class ContainerAnswers:
         return [name for name in CONTAINER_PROFILES if name in chosen]
 
 
+def native_provider_choice(a: ContainerAnswers) -> tuple[str, str, str]:
+    """``(id, kind, base_url)`` of the provider native uses; empty when none.
+
+    A built-in id needs no kind or URL. Another id is the operator's own, with
+    its kind (``openai_compat`` when unset) and base URL. With no id, a base URL
+    names the provider the way ``config.LEGACY_PROVIDER_SOURCES`` reads a
+    legacy ``[brain.native] base_url``: a built-in by its host, else an own
+    provider called ``native``.
+    """
+    from istota.llm.providers import BUILTIN_PROVIDERS, implied_provider_id  # noqa: PLC0415
+
+    provider_id = a.native_provider.strip()
+    base_url = a.native_base_url.strip()
+    if not provider_id and base_url:
+        provider_id = implied_provider_id(base_url)
+    if not provider_id:
+        return "", "", ""
+    if provider_id in BUILTIN_PROVIDERS:
+        kind, builtin_url = BUILTIN_PROVIDERS[provider_id]
+        return provider_id, kind, builtin_url
+    return provider_id, a.native_provider_kind.strip() or "openai_compat", base_url
+
+
+def native_key_file(a: ContainerAnswers) -> str:
+    """The stack secret file native's key goes in, or "" for an operator's own
+    provider, whose key stays inline in config.toml."""
+    from istota.llm.providers import BUILTIN_PROVIDERS, provider_key_variable  # noqa: PLC0415
+
+    provider_id, _kind, _url = native_provider_choice(a)
+    if a.brain_kind != "native" or provider_id not in BUILTIN_PROVIDERS:
+        return ""
+    return provider_key_variable(provider_id).lower()
+
+
+def _native_payload_url(a: ContainerAnswers) -> str:
+    """The base URL the web setup's draft carries for native's provider: a
+    built-in's preset, or an own provider's URL."""
+    provider_id, _kind, base_url = native_provider_choice(a)
+    if provider_id == "anthropic":
+        return DEFAULT_ANTHROPIC_BASE_URL
+    if provider_id == "openrouter":
+        return DEFAULT_OPENROUTER_BASE_URL
+    return base_url
+
+
+def cli_auth_answer(a: ContainerAnswers) -> str:
+    """`[brain.claude_code] auth` for these answers: the token wins, then the
+    key, else unset (derived per process from the environment)."""
+    if a.brain_kind == "native":
+        return ""
+    if a.claude_code_oauth_token:
+        return "subscription"
+    if a.anthropic_api_key:
+        return "api_key"
+    return ""
+
+
+def _anthropic_key_file_value(a: ContainerAnswers) -> str:
+    if native_key_file(a) == "istota_provider_anthropic_api_key":
+        return a.native_api_key
+    return a.anthropic_api_key if cli_auth_answer(a) == "api_key" else ""
+
+
 def container_secret_values(a: ContainerAnswers) -> dict[str, str]:
     """Every file under ``secrets/``, name to content, empty when unused."""
     values = {
-        "anthropic_api_key": a.anthropic_api_key if a.brain_kind != "native" else "",
+        # Legacy: read through `config.LEGACY_PROVIDER_SOURCES` for one
+        # release; the CLI's key is the anthropic provider's file now. An
+        # empty value keeps a non-empty file.
+        "anthropic_api_key": "",
         "claude_code_oauth_token": (
             a.claude_code_oauth_token if a.brain_kind != "native" else ""
         ),
-        "istota_brain_native_api_key": a.native_api_key if a.brain_kind == "native" else "",
+        # Legacy: kept as it is (an empty value keeps a non-empty file).
+        "istota_brain_native_api_key": "",
         "istota_nextcloud_app_password": a.nextcloud_app_password if a.uses_nextcloud else "",
         "istota_web_oauth2_client_secret": (
             a.oauth_client_secret if "nextcloud" in a.web_auth else ""
@@ -625,6 +743,13 @@ def container_secret_values(a: ContainerAnswers) -> dict[str, str]:
         "istota_whatsapp_app_secret": "",
         "istota_whatsapp_verify_token": "",
         "istota_brain_native_extra_headers": "",
+        "istota_provider_anthropic_api_key": _anthropic_key_file_value(a),
+        "istota_provider_anthropic_extra_headers": "",
+        "istota_provider_openrouter_api_key": (
+            a.native_api_key if native_key_file(a) == "istota_provider_openrouter_api_key" else ""
+        ),
+        "istota_provider_openrouter_extra_headers": "",
+        "istota_anthropic_listing_key": a.anthropic_listing_key,
     }
     assert tuple(values) == SECRET_NAMES
     return values
@@ -662,10 +787,25 @@ def container_config_document(a: ContainerAnswers, *, inline_credentials: bool) 
 
     brain: dict = {"kind": a.brain_kind}
     if a.brain_kind == "native":
-        native = {"base_url": a.native_base_url, "model": a.native_model}
-        if credential("istota_brain_native_api_key"):
-            native["api_key"] = secret["istota_brain_native_api_key"]
-        brain["native"] = native
+        provider_id, kind, base_url = native_provider_choice(a)
+        brain["native"] = {"provider": provider_id, "model": a.native_model}
+        key_file = native_key_file(a)
+        if key_file:
+            if credential(key_file):
+                doc["providers"] = {provider_id: {"api_key": secret[key_file]}}
+        elif provider_id:
+            # An operator's own provider: compose declares secrets by fixed
+            # name, so its key is inline in the 0600 config.
+            own = {"kind": kind, "base_url": base_url}
+            if a.native_api_key:
+                own["api_key"] = a.native_api_key
+            doc["providers"] = {provider_id: own}
+    else:
+        auth = cli_auth_answer(a)
+        if auth:
+            brain["claude_code"] = {"auth": auth}
+        if auth == "api_key" and credential("istota_provider_anthropic_api_key"):
+            doc["providers"] = {"anthropic": {"api_key": secret["istota_provider_anthropic_api_key"]}}
     doc["brain"] = brain
 
     if a.uses_nextcloud:
@@ -1042,12 +1182,43 @@ def prior_answers(data_dir: Path, vm_dir: Path | None) -> ContainerAnswers | Non
         raise cannot_write("brain.kind", a.brain_kind)
     native = table("brain", "native")
     if a.brain_kind == "native":
-        a.native_base_url = string(native, "base_url", DEFAULT_ANTHROPIC_BASE_URL)
+        from istota.llm.providers import (  # noqa: PLC0415
+            BUILTIN_PROVIDERS,
+            implied_provider_id,
+            provider_key_variable,
+        )
+
         a.native_model = string(native, "model")
-        a.native_api_key = credential("istota_brain_native_api_key", native, "api_key")
+        provider_id = string(native, "provider").strip()
+        if provider_id == "openai_compat":
+            provider_id = ""
+        legacy_url = string(native, "base_url").strip()
+        if not provider_id and legacy_url:
+            # A config from before providers: read through the transition
+            # table's rule, so this run writes the current shape.
+            provider_id = implied_provider_id(legacy_url)
+        a.native_provider = provider_id
+        own = table("providers", provider_id) if provider_id else {}
+        if provider_id and provider_id not in BUILTIN_PROVIDERS:
+            a.native_provider_kind = string(own, "kind", "openai_compat")
+            a.native_base_url = string(own, "base_url") or legacy_url
+            a.native_api_key = string(own, "api_key")
+        elif provider_id:
+            a.native_api_key = credential(
+                provider_key_variable(provider_id).lower(), own, "api_key",
+            )
+        if not a.native_api_key:
+            a.native_api_key = credential("istota_brain_native_api_key", native, "api_key")
     else:
         a.claude_code_oauth_token = credential("claude_code_oauth_token", {}, "")
-        a.anthropic_api_key = credential("anthropic_api_key", {}, "")
+        # The provider's file, then the legacy one a pre-provider stack holds
+        # (`config.LEGACY_PROVIDER_SOURCES`); this run writes the current shape.
+        a.anthropic_api_key = (
+            credential("istota_provider_anthropic_api_key", table("providers", "anthropic"), "api_key")
+            or credential("anthropic_api_key", {}, "")
+        )
+    if secrets_dir is not None:
+        a.anthropic_listing_key = _read_secret_file(secrets_dir / "istota_anthropic_listing_key")
 
     mounted = "workspace_mount_path" in doc
     nextcloud = table("nextcloud")
@@ -1279,10 +1450,36 @@ def validate_container_answers(a: ContainerAnswers) -> list[FieldError]:
     if a.brain_kind not in _BRAIN_KINDS:
         refuse("brain_kind", f"Unknown model backend {a.brain_kind!r}; use claude_code or native.")
     if a.brain_kind == "native":
-        needs = (
-            "The native brain needs a model (--native-model) and an API key "
-            "(ISTOTA_BRAIN_NATIVE_API_KEY)."
+        from istota.llm.providers import (  # noqa: PLC0415
+            BUILTIN_PROVIDERS,
+            PROVIDER_KINDS,
+            is_provider_id,
+            provider_key_variable,
         )
+
+        provider_id, kind, base_url = native_provider_choice(a)
+        if not provider_id:
+            refuse(
+                "native_provider",
+                "The native brain needs a provider (--native-provider anthropic, openrouter, "
+                "or an id of your own with --native-provider-kind and --native-base-url).",
+            )
+        elif provider_id not in BUILTIN_PROVIDERS:
+            if not is_provider_id(provider_id):
+                refuse(
+                    "native_provider",
+                    f"{provider_id!r} is not a provider id: lowercase letters, digits and _, "
+                    "starting with a letter.",
+                )
+            if kind not in PROVIDER_KINDS:
+                refuse(
+                    "native_provider_kind",
+                    f"Unknown provider kind {kind!r}; use one of {', '.join(PROVIDER_KINDS)}.",
+                )
+            if not base_url.startswith(("http://", "https://")):
+                refuse("native_base_url", "An own provider needs an http(s) base URL (--native-base-url).")
+        variable = provider_key_variable(provider_id) if provider_id in BUILTIN_PROVIDERS else "the API key"
+        needs = f"The native brain needs a model (--native-model) and an API key ({variable})."
         if not a.native_model:
             refuse("native_model", needs)
         if not a.native_api_key:
@@ -1347,6 +1544,7 @@ WEB_SETUP_FIELDS: dict[str, type] = {
     "native_model": str,
     "native_api_key": str,
     "claude_code_oauth_token": str,
+    "anthropic_listing_key": str,
     "email_enabled": bool,
     "imap_host": str,
     "imap_user": str,
@@ -1472,11 +1670,18 @@ def answers_from_payload(payload: dict, base: ContainerAnswers | None = None) ->
 
     a.brain_kind = text("brain_kind", "claude_code")
     if a.brain_kind == "native":
-        a.native_base_url = text("native_base_url", DEFAULT_ANTHROPIC_BASE_URL)
+        # The page chooses a provider by its preset URL; a URL that is not the
+        # one the base already had is a new choice, read by its host.
+        url = text("native_base_url", DEFAULT_ANTHROPIC_BASE_URL)
+        if base is None or url != _native_payload_url(base):
+            a.native_provider = ""
+            a.native_provider_kind = ""
+            a.native_base_url = url
         a.native_model = text("native_model")
         a.native_api_key = text("native_api_key")
     else:
         a.claude_code_oauth_token = text("claude_code_oauth_token")
+    a.anthropic_listing_key = text("anthropic_listing_key")
 
     a.email_enabled = flag("email_enabled", False)
     if a.email_enabled:
@@ -1542,10 +1747,11 @@ def payload_from_answers(a: ContainerAnswers) -> dict:
         "nextcloud_app_password": a.nextcloud_app_password,
         "talk_enabled": a.talk_enabled,
         "brain_kind": a.brain_kind,
-        "native_base_url": a.native_base_url,
+        "native_base_url": _native_payload_url(a),
         "native_model": a.native_model,
         "native_api_key": a.native_api_key,
         "claude_code_oauth_token": a.claude_code_oauth_token,
+        "anthropic_listing_key": a.anthropic_listing_key,
         "email_enabled": a.email_enabled,
         "imap_host": a.imap_host,
         "imap_user": a.imap_user,
@@ -1794,20 +2000,76 @@ def collect_container_answers(
         kind = _ask_choice(input_fn, "Model backend", ("claude_code", "native"), a.brain_kind, out=out)
     a.brain_kind = kind or a.brain_kind
     if a.brain_kind == "native":
-        a.native_base_url = text("native_base_url", "API base URL", a.native_base_url)
-        a.native_model = text(
-            "native_model", "Model id", a.native_model or (DEFAULT_ANTHROPIC_MODEL if interactive else ""),
-        )
-        a.native_api_key = secret("istota_brain_native_api_key", "API key", a.native_api_key)
+        from istota.llm.providers import BUILTIN_PROVIDERS, provider_key_variable  # noqa: PLC0415
+
+        provider = flag("native_provider")
+        if provider is None and interactive:
+            current, _kind, _url = native_provider_choice(a)
+            choice = current if current in BUILTIN_PROVIDERS else ("own" if current else "anthropic")
+            out("  Provider: anthropic or openrouter, or own for an endpoint of your own")
+            out("  (a local server, a gateway).")
+            choice = _ask_choice(input_fn, "Model provider", ("anthropic", "openrouter", "own"), choice, out=out)
+            provider = choice if choice != "own" else text(
+                "native_provider_id", "Provider id (lowercase letters, digits and _)",
+                current if current and current not in BUILTIN_PROVIDERS else "local",
+            )
+        if provider is not None:
+            if provider != a.native_provider:
+                a.native_api_key = ""
+            a.native_provider = provider.strip()
+        if a.native_provider and a.native_provider not in BUILTIN_PROVIDERS:
+            a.native_provider_kind = text(
+                "native_provider_kind", "Provider kind (openai_compat, anthropic, openrouter)",
+                a.native_provider_kind or "openai_compat",
+            )
+            a.native_base_url = text("native_base_url", "API base URL", a.native_base_url)
+        elif not a.native_provider:
+            # `--native-base-url` alone names a provider by its host, as a
+            # pre-provider config did.
+            a.native_base_url = (flag("native_base_url") or a.native_base_url).strip()
+        _refuse_on(a, "native_provider", "native_provider_kind", "native_base_url")
+        provider_id, _kind, _url = native_provider_choice(a)
+        suggested = ""
+        if interactive:
+            suggested = default_openrouter_model() if provider_id == "openrouter" else default_anthropic_model()
+        a.native_model = text("native_model", "Model id", a.native_model or suggested)
+        key_name = provider_key_variable(provider_id).lower() if provider_id else "istota_brain_native_api_key"
+        # The provider's own variable first, then the legacy one a pre-provider
+        # environment holds (`config.LEGACY_PROVIDER_SOURCES`).
+        key = _env_credential(key_name) or _env_credential("istota_brain_native_api_key")
+        if not key and interactive:
+            key = _ask_secret_optional(getpass_fn, "API key", keeps=bool(a.native_api_key))
+        a.native_api_key = key or a.native_api_key
         _refuse_on(a, "brain_kind", "native_model", "native_api_key")
     else:
         a.claude_code_oauth_token = secret(
             "claude_code_oauth_token", "Claude Code OAuth token", a.claude_code_oauth_token,
         )
         if not a.claude_code_oauth_token:
-            a.anthropic_api_key = secret("anthropic_api_key", "Anthropic API key", a.anthropic_api_key)
+            # The provider's variable, then the legacy one a pre-provider
+            # environment holds (`config.LEGACY_PROVIDER_SOURCES`).
+            key = _env_credential("istota_provider_anthropic_api_key") or _env_credential("anthropic_api_key")
+            if not key and interactive:
+                key = _ask_secret_optional(getpass_fn, "Anthropic API key", keeps=bool(a.anthropic_api_key))
+            a.anthropic_api_key = key or a.anthropic_api_key
         if not (a.claude_code_oauth_token or a.anthropic_api_key):
             out("  No Claude credential given; add one to secrets/ before the first task.")
+    # The model-listing key, on either path. Never from the environment: a
+    # `--yes` run reads it from a file it is pointed at.
+    listing_file = flag("anthropic_model_listing_key_file")
+    if listing_file:
+        try:
+            a.anthropic_listing_key = Path(listing_file).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise SetupError(
+                f"--anthropic-model-listing-key-file: cannot read {listing_file} ({type(exc).__name__})"
+            ) from None
+    elif interactive:
+        out("  Optional: a key used only to list Anthropic's models (create it in a")
+        out("  Console workspace with a spend limit of zero); leave empty to use the")
+        out("  list istota ships.")
+        key = _ask_secret_optional(getpass_fn, "Model-listing key", keeps=bool(a.anthropic_listing_key))
+        a.anthropic_listing_key = key or a.anthropic_listing_key
 
     # Email.
     if flag("email", False):
@@ -2014,6 +2276,28 @@ def _stage_rclone_conf(a: ContainerAnswers, vm_dir: Path, secrets_dir: Path, out
     _write_private(path, text)
 
 
+def _keep_pre_providers_copy(config_path: Path) -> None:
+    """Copy a config that still names native's endpoint in ``[brain.native]``
+    to ``config.toml.pre-providers``, once, before it is replaced.
+
+    The release before providers reads neither ``[providers]`` nor a provider
+    id in ``[brain.native] provider``, so a rollback across it restores this.
+    """
+    import tomllib  # noqa: PLC0415
+
+    copy_path = config_path.with_name("config.toml.pre-providers")
+    if copy_path.exists() or not config_path.is_file():
+        return
+    try:
+        text = config_path.read_text(encoding="utf-8")
+        native = tomllib.loads(text).get("brain", {}).get("native", {})
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, AttributeError):
+        return
+    if not isinstance(native, dict) or "base_url" not in native:
+        return
+    _write_private(copy_path, text)
+
+
 def write_container_setup(
     a: ContainerAnswers, *, data_dir: Path, vm_dir: Path | None, out, backup: int | None = None,
 ) -> None:
@@ -2036,6 +2320,7 @@ def write_container_setup(
     from istota import apply
 
     text = render_container_config(a, inline_credentials=inline)
+    _keep_pre_providers_copy(config_path)
     if backup and config_path.exists():
         apply.write_config_with_backup(config_path, text, backup, scrub=False)
     else:
@@ -2064,11 +2349,17 @@ def write_container_setup(
             path.write_text(render(a, existing), encoding="utf-8")
         if a.workspace_is_mount:
             _stage_rclone_conf(a, vm_dir, secrets_dir, out)
-    elif a.brain_kind != "native" and (a.claude_code_oauth_token or a.anthropic_api_key):
-        out(
-            "  The Claude credential has no config key; without --vm-dir it was not "
-            "written. Put it in the stack's secrets/ directory."
-        )
+    else:
+        if a.brain_kind != "native" and a.claude_code_oauth_token:
+            out(
+                "  The Claude Code token has no config key; without --vm-dir it was not "
+                "written. Put it in the stack's secrets/ directory."
+            )
+        if a.anthropic_listing_key:
+            out(
+                "  The model-listing key is read from a file only; without --vm-dir it was "
+                "not written. Put it in the stack's secrets/istota_anthropic_listing_key."
+            )
 
 
 # ===========================================================================

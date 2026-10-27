@@ -27,6 +27,10 @@ from istota.webui.admin_config_view import is_secret_path
 #: them; the arr apps are a closed set.
 COLLECTION_KEYS: dict[str, tuple[str, ...]] = {
     "servarr.apps": config_module.SERVARR_APPS,
+    # The built-in providers, which have stack secret files. An operator's own
+    # provider has none (compose declares secrets by fixed name), so its key
+    # stays inline in config.toml and is not walked here.
+    "providers": tuple(config_module.BUILTIN_PROVIDERS),
 }
 
 #: Collections of dataclasses the walk does not enter, each with the reason.

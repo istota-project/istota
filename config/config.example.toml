@@ -30,7 +30,7 @@ bot_name = "Istota"
 
 # Deprecated (ISSUE-418). Set `model` and `effort` under [brain.claude_code] and
 # [brain.tmux] instead; these still load and are moved there with a warning.
-# model = "claude-opus-5-5"
+# model = "opus"
 # effort = "high"
 
 # Advisor model for the anthropic-namespace brains: an ID or alias, resolved
@@ -104,18 +104,40 @@ features = []
 # room_selectable = []                # e.g. ["claude_code", "native"]
 #
 # Native-brain settings (only used when kind = "native", or via a routing
-# override below). The API key stays out of this file — set it via the
-# ISTOTA_BRAIN_NATIVE_API_KEY env override.
+# override below). The endpoint and its key are a provider's ([providers.<id>]
+# further down); native names the one it uses, and has no default.
 # [brain.native]
-# provider = "openai_compat"                 # only provider currently
-# model = "claude-sonnet-4-6"                # explicit id for openai_compat
+# provider = "openrouter"                    # a [providers.<id>] id: anthropic,
+#                                            #   openrouter or your own. Unset, the
+#                                            #   native brain is unavailable.
+# providers = []                             # the providers a native room or job
+#                                            #   may run on, opt-in. An admin picks
+#                                            #   one per room (`!room provider`, the
+#                                            #   room settings) or per job (CRON.md
+#                                            #   `provider`), and it is billed to that
+#                                            #   provider's key. `provider` is always
+#                                            #   one of them; empty means it alone. A
+#                                            #   key held for the CLI does not add
+#                                            #   `anthropic`.
+# model ="z-ai/glm-5.3-flash"               # an id that provider lists (`!models all
+#                                            #   <provider>`). The tiers (fast,
+#                                            #   general, smart) mean this model on
+#                                            #   native unless [models.aliases] remaps them.
 # effort = ""                                # default effort: low/medium/high/xhigh/max.
-#                                            #   Sent as `reasoning_effort` only to a
-#                                            #   thinking-capable model; xhigh/max fold
-#                                            #   to high over the compat endpoint. Empty
+#                                            #   Clamped to what the model supports
+#                                            #   (xhigh/max only where its effort_map
+#                                            #   names them, else high) and sent as
+#                                            #   `reasoning_effort` only to a reasoning
+#                                            #   model. Empty
 #                                            #   = no reasoning_effort field. Per-task
 #                                            #   effort (e.g. !model opus:high) overrides.
-# base_url = "https://api.anthropic.com/v1"  # any OpenAI-compatible endpoint
+# base_url = ""                              # legacy, read for one release: the
+#                                            #   endpoint is [providers.<id>] base_url.
+#                                            #   So are api_key, extra_headers,
+#                                            #   prompt_caching, prompt_cache_key,
+#                                            #   prompt_cache_ttl, strict_tool_schemas,
+#                                            #   reasoning_replay and model_catalog_*,
+#                                            #   below; doctor names each one in use.
 # context_window = 0                         # 0 = resolve from the live-fetched
 #                                            #   OpenRouter catalog (below) or the
 #                                            #   conservative 200k default. A NON-
@@ -205,7 +227,7 @@ features = []
 # bash_spill_full_output = true              # write Bash output past the per-tool cap to a
 #                                            #   temp file the model can Read, rather than
 #                                            #   dropping the tail.
-# api_key = ""                               # prefer the ISTOTA_BRAIN_NATIVE_API_KEY override
+# api_key = ""                               # legacy: the provider's key, below
 #
 # The native brain's WebFetch tool, available to every user. It runs in the
 # daemon's network namespace, outside the sandbox allowlist, so the fields
@@ -258,7 +280,7 @@ features = []
 # pane-text heuristics pinned to a claude CLI version; override one if a CLI
 # reword breaks readiness detection.
 # [brain.tmux]
-# model = "claude-opus-5-5"         # this brain's own default model (ISSUE-418);
+# model = "opus"                   # this brain's own default model (ISSUE-418);
 # effort = "high"                   #   same values as [brain.claude_code] above,
 #                                   #   same anthropic namespace, same binary.
 #                                   #   "" = the CLI's own default
@@ -285,8 +307,17 @@ features = []
 # This brain's default model and effort when the task pins none. A canonical
 # id, a shortcut ("opus"), a role tier ("smart"), optionally with ":high".
 # Empty = the CLI's own default.
-# model = "claude-opus-5-5"
+# model = "opus"
 # effort = "high"
+#
+# How the `claude` CLI authenticates, for this brain and tmux. "subscription"
+# carries the OAuth token (CLAUDE_CODE_OAUTH_TOKEN, the claude_code_oauth_token
+# secret file) and never an API key; "api_key" carries the [providers.anthropic]
+# key and base_url and never the token. Unset: "subscription" when the token is
+# in the environment, else nothing (an API key alone never switches a
+# deployment to API billing). Under "api_key" the model can read the key from
+# its Bash tool, as it can read the token under "subscription".
+# auth = "subscription"
 #
 # Poll the Claude plan's utilization for /admin and `istota doctor`. The
 # credential is only read. Off = no admin card and the doctor check skips.
@@ -601,9 +632,9 @@ enabled = true
 lookback_count = 25
 # Include all messages without selection if history <= this threshold (faster for short threads)
 skip_selection_threshold = 3
-# Model for selecting relevant context. Accepts canonical IDs ("claude-haiku-4-5"),
-# shortcuts ("haiku"), or role tiers ("fast" — default; resolves to Haiku via
-# brain.claude_code.DEFAULT_ALIASES, operator-overridable via [models.aliases] below).
+# Model for selecting relevant context. Accepts a model id or provider/id ref,
+# a shortcut ("haiku"), or a role tier ("fast", the default: the newest Haiku in
+# the catalogue, operator-overridable via [models.aliases] below).
 selection_model = "fast"
 # Timeout for context selection
 selection_timeout = 30.0
@@ -965,14 +996,85 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # history_prompt_chars = 12000         # cap on earlier wake summaries in a wake's prompt
 
 # ============================================================================
+# Model providers [providers.<id>] — optional
+# ============================================================================
+# A provider is one endpoint and the key for it; a request to a provider
+# carries that provider's key, whichever brain sends it. Two are built in and
+# exist without a table: anthropic (https://api.anthropic.com) and openrouter
+# (https://openrouter.ai/api/v1). A table with a built-in id sets fields on it.
+# A provider existing does not make any brain use it: [brain.native] provider
+# names native's.
+#
+# The key is api_key here, or better the variable ISTOTA_PROVIDER_<ID>_API_KEY
+# (the stack secret istota_provider_<id>_api_key for a built-in provider);
+# headers likewise, ISTOTA_PROVIDER_<ID>_EXTRA_HEADERS, a JSON object that
+# replaces the table. An operator's own provider keeps its key here, in this
+# 0600 file. A user may hold their own key for a provider:
+# `istota secret ensure -s provider_keys -k <id>`.
+#      [providers.openrouter]
+#      api_key = ""                  # prefer the stack secret
+#
+#      [providers.local]             # an id of your own: lowercase letters, digits, _
+#      kind = "openai_compat"        # anthropic | openrouter | openai_compat
+#      base_url = "http://192.0.2.10:8080/v1"
+#      api_key = ""
+#      extra_headers = {}
+#      discover = true               # the daemon lists the provider's models in the background
+#      discover_ttl_hours = 24
+#      models = [ { id = "qwen3-32b", context_window = 32768, supports_thinking = true } ]
+#      default_model = "qwen3-32b"   # what a native room on this provider runs with no
+#                                    #   model of its own; native's default provider uses
+#                                    #   [brain.native] model instead
+#
+# What the endpoint accepts. Omitted, each takes the kind's default: caching on
+# for anthropic; prompt_cache_key on for openrouter and for api.openai.com;
+# reported cost and the attribution headers for openrouter.
+#      prompt_caching = true         # cache_control breakpoints
+#      prompt_cache_key = true       # a random per-attempt prompt_cache_key
+#      prompt_cache_ttl = "5m"       # "5m" or "1h"
+#      strict_tool_schemas = "auto"  # "off" | "auto" | "on"
+#      reasoning_replay = "auto"     # "auto" | "on" | "off"
+#      [providers.local.compat]
+#      cost_accounting = false       # send usage.include for a reported cost
+#      attribution_headers = false   # OpenRouter's HTTP-Referer / X-Title
+#      max_completion_tokens = false # send max_completion_tokens, not max_tokens
+#      reasoning_effort = true       # send reasoning_effort at all
+#
+# Per-model patches over the catalogue, keyed by provider/id. One naming a
+# model no catalogue layer has is ignored.
+#      [models.overrides."local/qwen3-32b"]
+#      context_window = 65536
+
+# ============================================================================
+# Model catalogue [models]
+# ============================================================================
+# The file holding a key used only to list Anthropic's models (GET /v1/models),
+# so a new model shows up without a release. A path, never the key: the key is
+# read from the file at each fetch and is in no environment. Empty is the
+# stack's secret file, /run/secrets/istota_anthropic_listing_key. Create the key
+# in an Anthropic Console workspace with a spend limit of zero.
+#
+# enabled: what a non-admin may pick with !model, !room model, the room
+# settings and a CRON.md job. Globs over provider/id refs, case-insensitive;
+# an entry may carry :effort, which is the effort offered with that model and
+# does not narrow the match. An admin picks from the whole catalogue, and an
+# alias is always selectable. Unset, it is anthropic/* plus native's own model
+# when native has a provider. A deprecated model is matched only by an entry
+# naming it exactly. `istota doctor` warns about a pattern matching nothing.
+# [models]
+# anthropic_listing_key_file = ""
+# enabled = ["anthropic/*", "openrouter/z-ai/glm-5*"]
+
+# ============================================================================
 # Model alias registry [models.aliases] (operator override) — optional
 # ============================================================================
-# Shipped defaults:
-#   fast    → claude-haiku-5-5    (used by: context triage, skill classification)
-#   general → claude-sonnet-5-5   (used by: sleep cycle extraction + USER.md curation)
-#   smart   → claude-opus-5-5     (exists for `!model smart` from Talk + any code
-#                                  path that wants "the best model")
-#   opus / sonnet / haiku         (shortcuts → the current latest of each)
+# Shipped defaults, by family (each the newest current model of that family in
+# the catalogue; `!models` shows what they resolve to today):
+#   fast    → haiku    (used by: context triage, skill classification)
+#   general → sonnet   (used by: sleep cycle extraction + USER.md curation)
+#   smart   → opus     (exists for `!model smart` from Talk + any code
+#                       path that wants "the best model")
+#   opus / sonnet / haiku   (shortcuts → the newest current model of each)
 # docs/configuration/reference.md describes both forms below in full.
 
 # Rebind a model alias, or add one for `!model <name>`. A target may carry
@@ -981,18 +1083,31 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #      smart = "claude-opus-4-7:high"   # rebind "smart" to Opus 4.7, effort high
 #      deep  = "opus:max"               # a custom alias for deep-thinking tasks
 #
-# Per-namespace form: one value for the CLI brains (anthropic) and one for the
-# native endpoint (openai_compat), so a fallback across them stays correct.
+# Per-provider form: one target per provider, keyed by its id. `anthropic` is
+# the CLI brains' (and native's on the anthropic provider); any other id is a
+# native room's on that provider. A room whose provider has no target for an
+# alias cannot use it: the alias never resolves into another provider. The old
+# `openai_compat` key is read, for one release, as native's default provider.
 #      [models.aliases.smart]
-#      anthropic     = "opus:high"                                   # CLI brains (claude_code / tmux_claude)
-#      openai_compat = { model = "anthropic/claude-opus-4.8", effort = "high" }  # native
+#      anthropic  = "opus:high"                                      # CLI brains (claude_code / tmux_claude)
+#      openrouter = { model = "anthropic/claude-opus-4.8", effort = "high" }  # native on openrouter
 #      [models.aliases.general]
-#      anthropic     = "claude-sonnet-5"
-#      openai_compat = "anthropic/claude-sonnet-4.6"                 # bare string = no effort
+#      anthropic  = "claude-sonnet-5"
+#      openrouter = "anthropic/claude-sonnet-4.6"                    # bare string = no effort
+#      local      = "qwen3-32b"                                      # native on your own provider
 #      [models.aliases.deep]
-#      anthropic     = "opus:max"
-#      openai_compat = "anthropic/claude-opus-4.8"
-#      portable      = true                                          # a cross-brain custom tier
+#      anthropic  = "opus:max"
+#      openrouter = "anthropic/claude-opus-4.8"
+#      portable   = true                                             # a cross-brain custom tier
+#
+# Effort only: keep the alias's own target and change its effort, without
+# naming a model.
+#      [models.aliases.general]
+#      anthropic     = { effort = "medium" }
+#
+# The tiers name families (fast = haiku, general = sonnet, smart = opus), and a
+# family is the newest current model the catalogue lists, so a model Anthropic's
+# own list reports reaches them before the next release.
 #
 # An alias uses one form, not both. The old [models.roles] key is no longer read.
 

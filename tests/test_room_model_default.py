@@ -15,7 +15,6 @@ from istota.config import (
     Config, NextcloudConfig, SchedulerConfig, TalkConfig, UserConfig,
 )
 from istota.transport.ingest import record_inbound
-from istota.brain.claude_code import OPUS, SONNET
 
 
 @pytest.fixture
@@ -103,7 +102,7 @@ class TestRecordInboundRoomDefault:
             _tok, task_id = _inbound.room_token, _inbound.task_id
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
-        assert task.model == "claude-opus-4-8"
+        assert task.model == "claude-opus-4-8"  # the id within its provider (D22)
         assert task.effort == "high"
 
     def test_room_default_applies_across_talk_surface(self, config, db_path):
@@ -442,7 +441,9 @@ class TestRoomCommand:
             db.add_room_binding(conn, "room1", "web", "room1")
             out = await cmd_room(_ctx(config, conn, "model opus"))
             room = db.get_room(conn, "room1")
-        assert room.model == OPUS
+        # The selection is stored, not its id, so a later alias or catalogue
+        # change reaches the room (D6).
+        assert room.model == "opus"
         assert "opus" in out.lower()
 
     async def test_set_model_with_effort_modifier(self, config, db_path):
@@ -451,7 +452,7 @@ class TestRoomCommand:
             db.add_room_binding(conn, "room1", "web", "room1")
             await cmd_room(_ctx(config, conn, "model opus:high"))
             room = db.get_room(conn, "room1")
-        assert room.model == OPUS
+        assert room.model == "opus"
         assert room.effort == "high"
 
     async def test_model_alias_preserves_separate_effort(self, config, db_path):
@@ -463,7 +464,7 @@ class TestRoomCommand:
             await cmd_room(_ctx(config, conn, "effort high"))
             await cmd_room(_ctx(config, conn, "model opus"))
             room = db.get_room(conn, "room1")
-        assert room.model == OPUS
+        assert room.model == "opus"
         assert room.effort == "high"
 
     async def test_unknown_alias_shows_usage(self, config, db_path):
@@ -538,5 +539,5 @@ class TestRoomCommand:
                 _ctx(config, conn, "model sonnet", surface="web")
             )
             room = db.get_room(conn, "room1")
-        assert room.model == SONNET
+        assert room.model == "sonnet"
         assert isinstance(out, str)

@@ -175,7 +175,7 @@ istota-stack restore --date 2026-10-01     # a given day
 `secrets/` is never copied into the folder, so after a restore the stack's own credentials (the model key, mail and Nextcloud passwords) are empty. Write them again as files, one per credential (the names are in [Credentials](../deployment/running-the-stack.md#credentials)), with `put-files`, which takes JSON on stdin:
 
 ```bash
-istota-stack put-files < credentials.json    # {"secrets": {"anthropic_api_key": "sk-..."}}
+istota-stack put-files < credentials.json    # {"secrets": {"istota_provider_anthropic_api_key": "sk-..."}}
 istota-stack down && istota-stack up
 ```
 

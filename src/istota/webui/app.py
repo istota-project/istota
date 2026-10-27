@@ -138,6 +138,10 @@ def _reload_config(launch_app: FastAPI | None = None):
     """
     global _config, _oauth
     config = load_config()
+    # Two callers build a CLI env here: the speech gate (inside
+    # `record_inbound`) and the biomarker explainer.
+    from istota.llm.providers import resolve_process_auth
+    resolve_process_auth(config)
     _assert_no_auth_launch_safe(config.web.auth, launch_app or app)
     oauth = OAuth()
     if config.web.oauth2_client_id:
@@ -3477,8 +3481,12 @@ def _admin_models_section() -> dict:
         }
 
         if brain_config.kind == "native":
-            section["endpoint"] = brain_config.native.base_url
-            section["provider"] = brain_config.native.provider
+            from istota.brain import native_provider_spec
+            spec = native_provider_spec(brain_config)
+            section["endpoint"] = spec.base_url if spec is not None else ""
+            # The provider id native sends to, legacy `base_url` installs
+            # included, rather than the raw field, which those leave empty.
+            section["provider"] = spec.id if spec is not None else brain_config.native.provider
 
         if brain_config.source_type_overrides:
             section["source_type_overrides"] = dict(brain_config.source_type_overrides)
@@ -3493,10 +3501,54 @@ def _admin_models_section() -> dict:
         if selectable:
             section["room_selectable"] = selectable
 
+        section["providers"] = _admin_provider_rows()
         return section
     except Exception as exc:  # noqa: BLE001 — never fail the stats payload
         logger.exception("admin models section failed")
         return {"error": str(exc)}
+
+
+def _admin_provider_rows() -> list[dict]:
+    """One row per configured provider for the Models card.
+
+    Kind, the base URL's host (never the URL, which may carry a path or a
+    query an operator would not publish), whether the daemon fetches its model
+    list, when it last did and what the last fetch reported, how many current
+    models the catalogue holds for it and how many of those `[models] enabled`
+    admits. Reads the caches; never fetches and never touches a key.
+    """
+    from urllib.parse import urlparse
+
+    from istota.brain._resolve import enabled_patterns, enabled_refs
+    from istota.llm import discovery
+    from istota.llm.catalog import current_catalogue
+    from istota.llm.providers import build_providers
+
+    _install_model_caches()
+    catalogue = current_catalogue()
+    enabled = set(enabled_refs(catalogue, enabled_patterns(_config)))
+    cache_dir = discovery.config_cache_dir(_config)
+    rows = []
+    for spec in sorted(build_providers(_config).values(), key=lambda s: s.id):
+        models = [m for m in catalogue.models(spec.id) if not m.deprecated]
+        fetched_at, last_error = discovery.cache_state(cache_dir, spec.id)
+        try:
+            host = urlparse(spec.base_url or "").hostname or ""
+        except ValueError:
+            host = ""
+        rows.append({
+            "id": spec.id,
+            "kind": spec.kind,
+            "host": host,
+            "discovers": discovery.wants_discovery(spec, _config),
+            "discovered_at": (
+                _iso_utc_from_epoch(fetched_at) if isinstance(fetched_at, (int, float)) else None
+            ),
+            "last_error": str(last_error) if last_error else None,
+            "models": len(models),
+            "enabled": sum(1 for m in models if m.ref in enabled),
+        })
+    return rows
 
 
 def _admin_system_section(version: str, db_path: Path) -> dict:
@@ -5655,6 +5707,7 @@ async def admin_config(_: dict = Depends(_require_admin)):
             text = data.decode("utf-8", errors="replace")
             check = await config_check.check_current(text, digest)
         managed = await asyncio.to_thread(applier.read_managed, config_path.parent)
+    await asyncio.to_thread(_install_model_caches)
     view = await asyncio.to_thread(
         admin_config_view.build_config_view, _config,
         document=text, document_digest=digest, check=check, managed=managed,
@@ -7037,6 +7090,34 @@ def _brain_for_room_token(room_token: str, source_type: str):
         return resolve_brain_kind(source_type, _config.brain)
 
 
+def _room_provider_for_token(room_token: str) -> str | None:
+    """The room's stored provider (model-catalogue D22), or None. Blocking;
+    async callers thread it like `_brain_for_room_token`. Never raises."""
+    from istota import commands, db
+
+    try:
+        with db.get_db(_config.db_path) as conn:
+            return commands.room_provider(conn, room_token)
+    except Exception:  # noqa: BLE001 — a provider read must not fail a send
+        logger.debug("room provider read failed", exc_info=True)
+        return None
+
+
+def _model_within_provider(conn, room_token: str, model: str, provider: str | None) -> bool:
+    """Whether a room's stored ``model`` resolves within ``provider`` on the
+    room's brain, so a provider change can keep it. Never raises."""
+    from istota import commands
+    from istota.brain._resolve import ResolveError, select_for_person
+
+    try:
+        kind = commands.brain_for_room(_config, conn, room_token, "web").kind
+        picked = select_for_person(model, _config, kind=kind, provider=provider, is_admin=True)
+    except Exception:  # noqa: BLE001 — unknown is not kept
+        logger.debug("model_within_provider: resolution failed", exc_info=True)
+        return False
+    return not isinstance(picked, ResolveError) and not picked.provider_changed
+
+
 def _pin_namespace_for_room(conn, room_token: str) -> str | None:
     """The namespace a model pin written into this room right now lands in.
 
@@ -7064,33 +7145,249 @@ def _pin_namespace_for_room(conn, room_token: str) -> str | None:
         return None
 
 
-def _room_model_allowed(brain_config, model: str) -> bool:
-    """Whether `model` may be written as a room's default under `brain_config`.
+def _room_stored_model(room_token: str) -> str | None:
+    """`rooms.model` for a canonical token, or None. Never raises."""
+    from istota import db
 
-    Accepted: any id the brain's alias table targets, or an id the brain's own
-    `resolve_alias` passes through unchanged as a canonical id. The second half
-    is what `!room model` has always accepted (#548) — without it the PATCH
-    could only write ids some alias happened to point at, so a deployment
-    default no alias targeted could not be pinned from web at all while Talk
-    pinned it fine. A value carrying an effort modifier resolves to something
-    other than itself and is refused; effort is its own field on the PATCH.
+    try:
+        with db.get_db(_config.db_path) as conn:
+            room = db.get_room(conn, room_token)
+    except Exception:  # noqa: BLE001 — an unread value is judged like a new one
+        logger.debug("room_stored_model: read failed", exc_info=True)
+        return None
+    return getattr(room, "model", None) if room is not None else None
+
+
+def _room_model_selection(brain_config, model: str, *, is_admin: bool, provider: str | None = None):
+    """`model` as a room's default under `brain_config`: what to store, or why not.
+
+    Returns ``(selection, None)`` or ``(None, refusal)``, where ``selection``
+    is a `brain._resolve.Selection` (the model column and the provider column,
+    D22) and ``refusal`` is ``{"error", "code", "candidates"}``. Through the
+    one resolver (`brain._resolve.select_for_person`): an alias, a
+    `provider/id` ref or a bare id, resolved within the room's provider
+    (``provider``, the stored column), runnable on the room's brain, with tool
+    calling, and for a non-admin within `[models] enabled` (D9) and the room's
+    provider. No patterns: the settings pick from a list. What is stored is
+    the alias or the id within its provider (D6). A value carrying an effort
+    modifier is refused; effort is its own field on the PATCH.
 
     `brain_config` is **required**, and is the *room's* own resolved brain
-    (`_brain_for_room_token`). It used to be implicit and was the deployment
-    default, which let the PATCH accept an anthropic id for a room pinned to a
-    brain in another namespace — the same defect `!room model` had. Every caller
-    of this validator is a writer of `rooms.model`, so there is no caller for
-    whom the deployment default is the right answer, and an optional parameter
-    would be a path nothing exercises and the wrong one if somebody took it.
+    (`_brain_for_room_token`), or the incoming one when the body moves the
+    brain too: a room must never be handed a model its own brain cannot run.
     """
+    from istota.brain._aliases import split_effort
+    from istota.brain._resolve import (
+        ResolveError,
+        describe_resolve_error,
+        select_for_person,
+    )
+
+    if split_effort(model)[1] is not None:
+        return None, {
+            "error": "set effort with the effort field, not on the model",
+            "code": "unknown", "candidates": [],
+        }
     try:
-        brain = make_brain(brain_config)
-        if any(target == model for _alias, target, _effort in brain.list_aliases()):
-            return True
-        return brain.resolve_alias(model) == (model, None)
-    except Exception:  # noqa: BLE001 — validation degrades to "reject all" safely
-        logger.warning("room_model_allowed: brain aliases unavailable", exc_info=True)
+        resolved = select_for_person(
+            model, _config, kind=getattr(brain_config, "kind", None),
+            provider=provider, is_admin=is_admin,
+        )
+    except Exception:  # noqa: BLE001 — validation degrades to "reject" safely
+        logger.warning("room_model_selection: resolution failed", exc_info=True)
+        return None, {"error": "unknown model", "code": "unknown", "candidates": []}
+    if isinstance(resolved, ResolveError):
+        return None, {
+            "error": describe_resolve_error(resolved),
+            "code": resolved.code,
+            "candidates": list(resolved.candidates),
+        }
+    if resolved.resolution.brain_default and resolved.resolution.alias == "default":
+        return None, {
+            "error": "clear the model to use the brain's default",
+            "code": "unknown", "candidates": [],
+        }
+    return resolved, None
+
+
+def _keeps_model_within(room_token: str, model: str, provider: str | None) -> bool:
+    """`_model_within_provider` on its own connection, for the route."""
+    from istota import db
+
+    try:
+        with db.get_db(_config.db_path) as conn:
+            return _model_within_provider(conn, room_token, model, provider)
+    except Exception:  # noqa: BLE001 — unknown is not kept
+        logger.debug("keeps_model_within: read failed", exc_info=True)
         return False
+
+
+def _room_stored_provider(room_token: str) -> str | None:
+    """`rooms.provider` for a canonical token, or None. Never raises."""
+    return _room_provider_for_token(room_token)
+
+
+def _native_provider_choices(username: str, brain_config) -> list[dict]:
+    """The providers a native room may run on, for an admin's provider select.
+
+    `[brain.native] providers`, native's default first, each with its kind and
+    its default model; empty for a non-admin (choosing the provider is
+    admin-only, D22) and for a room whose brain is not native.
+    """
+    from istota.brain import native_providers
+    from istota.brain._resolve import native_provider_id, native_reach_ids
+    from istota.commands import provider_default_model
+
+    if getattr(brain_config, "kind", None) != "native" or not _config.is_admin(username):
+        return []
+    specs = native_providers(_config.brain)
+    default = native_provider_id(_config)
+    out = []
+    for provider_id in native_reach_ids(_config):
+        spec = specs.get(provider_id)
+        if spec is None:
+            continue
+        out.append({
+            "id": provider_id,
+            "kind": spec.kind,
+            "default": provider_id == default,
+            "default_model": provider_default_model(_config, provider_id) or None,
+        })
+    return out
+
+
+def _install_model_caches() -> None:
+    """Take up a discovery cache the daemon rewrote since this process last looked.
+
+    The web process never fetches (D11); the scheduler's `model-catalogue` gate
+    does, and this swaps the new lists in. One stat per cache file when nothing
+    changed. Never raises.
+    """
+    from istota.llm import discovery
+
+    discovery.install_from_cache_dir(discovery.config_cache_dir(_config))
+
+
+def _model_entry(info, *, enabled: bool) -> dict:  # noqa: ANN001
+    from istota.brain._resolve import supported_efforts
+
+    price = None
+    if info.price_source != "unknown":
+        price = {
+            "input": info.input_price_per_mtok,
+            "output": info.output_price_per_mtok,
+        }
+    return {
+        "ref": info.ref,
+        "name": info.name,
+        "provider": info.provider,
+        "family": info.family,
+        "reasoning": info.reasoning,
+        "efforts": supported_efforts(info),
+        "context_window": info.context_window,
+        "input": list(info.input),
+        "price": price,
+        "enabled": enabled,
+    }
+
+
+def _chat_model_choices(brain_config, username: str, provider: str | None = None) -> list[dict]:
+    """The models the room picker offers this viewer on ``brain_config``'s brain.
+
+    An admin gets every current model the brain can run with tool calling,
+    each marked `enabled` or not, across every provider a native room may be
+    moved to (the picker fills from the provider chosen); anyone else gets the
+    enabled ones of the room's own provider only (``provider``, the stored
+    column; D9, D22), the set `_room_model_selection` admits. Grouped by
+    provider, enabled first within each.
+    """
+    from istota.brain._resolve import effective_provider, enabled_patterns, enabled_refs
+    from istota.commands import runnable_models
+    from istota.llm.catalog import current_catalogue
+
+    is_admin = _config.is_admin(username)
+    enabled = set(enabled_refs(current_catalogue(), enabled_patterns(_config)))
+    current = effective_provider(_config, brain_config.kind, provider)
+    out = []
+    for info in runnable_models(_config, brain_config.kind):
+        if not info.supports_tools:
+            continue
+        if not is_admin and current and info.provider != current:
+            continue
+        is_enabled = info.ref in enabled
+        if not is_admin and not is_enabled:
+            continue
+        out.append(_model_entry(info, enabled=is_enabled))
+    out.sort(key=lambda m: (m["provider"], not m["enabled"], m["ref"].lower()))
+    return out
+
+
+def _alias_efforts(brain_config, alias: str) -> list[str] | None:
+    """The effort levels the model an alias names takes on this brain, or
+    None when that is not known (the brain's own model, an id the catalogue
+    lacks)."""
+    from istota.brain._resolve import (
+        Resolution,
+        config_providers,
+        native_provider_id,
+        native_reach_ids,
+        resolve_selection,
+        supported_efforts,
+    )
+
+    try:
+        resolved = resolve_selection(
+            alias,
+            for_brain=brain_config.kind,
+            providers=config_providers(_config),
+            native_provider=native_provider_id(_config),
+            native_reach=native_reach_ids(_config),
+        )
+    except Exception:  # noqa: BLE001 — an unknown answer, never a failed list
+        return None
+    if isinstance(resolved, Resolution) and resolved.info is not None and not resolved.brain_default:
+        return supported_efforts(resolved.info)
+    return None
+
+
+def _room_model_status(brain_config, model: str, username: str, provider: str | None = None) -> dict:
+    """What the picker says about a room's stored model for this viewer.
+
+    `listed` when the viewer may pick it, `set_by_admin` when it resolves but
+    is outside the viewer's enabled set (an admin pinned it, and it still runs
+    for every member), `unavailable` when it does not resolve on the room's
+    brain at all. `efforts` are its model's levels where the catalogue knows
+    them. The model is read within the room's provider (``provider``, D22).
+    """
+    from istota.brain._resolve import (
+        ResolveError,
+        effective_provider,
+        resolve_for_person,
+        supported_efforts,
+    )
+
+    kind = getattr(brain_config, "kind", None)
+    scope = effective_provider(_config, kind, provider)
+    entry: dict = {"value": model, "status": "unavailable", "ref": None, "efforts": None}
+    try:
+        as_admin = resolve_for_person(model, _config, kind=kind, is_admin=True, provider=scope)
+    except Exception:  # noqa: BLE001 — report it as unavailable rather than fail the list
+        logger.debug("room_model_status: resolution failed", exc_info=True)
+        return entry
+    if isinstance(as_admin, ResolveError):
+        return entry
+    if as_admin.ref and scope and as_admin.provider != scope:
+        return entry
+    if as_admin.ref:
+        entry["ref"] = as_admin.ref
+    if as_admin.info is not None and not as_admin.brain_default:
+        entry["efforts"] = supported_efforts(as_admin.info)
+    entry["status"] = "listed"
+    if not _config.is_admin(username):
+        as_member = resolve_for_person(model, _config, kind=kind, is_admin=False, provider=scope)
+        if isinstance(as_member, ResolveError) and as_member.code == "model_not_enabled":
+            entry["status"] = "set_by_admin"
+    return entry
 
 
 def _chat_list_rooms(username: str) -> list[dict]:
@@ -7489,6 +7786,7 @@ def _chat_update_room(
     speech_mode=_UNSET,
     disposition=_UNSET,
     push_notifications=_UNSET,
+    provider=_UNSET,
 ) -> dict | None:
     """Apply a room PATCH. `_UNSET` on a field means its key was absent.
 
@@ -7522,6 +7820,13 @@ def _chat_update_room(
     report, since it was replaced rather than lost. A bare effort on a room
     with no model pin survives, because the rule returns early with nothing to
     lose.
+
+    **`provider` follows `brain` and precedes `model`** (D22): the provider is
+    native's, so it is set once the brain is known, and the model the body
+    names is an id within it (the route has already resolved and split it).
+    Moved without a model, the room keeps its model only where that resolves
+    within the new provider; otherwise it is cleared and reported in
+    `cleared`.
     """
     from istota import db
     from istota.rooms import policy as room_policy
@@ -7534,7 +7839,7 @@ def _chat_update_room(
         # Name, model, effort and brain are the room's, not this handle's, so
         # in a shared room they are the host's. Colour and hiding stay per
         # member. Checked before any write, so a refused body changes nothing.
-        if name is not None or any(v is not _UNSET for v in (model, effort, brain)):
+        if name is not None or any(v is not _UNSET for v in (model, effort, brain, provider)):
             refusal = room_policy.settings_refusal(conn, room.token, username)
             if refusal:
                 raise _RoomSettingsRefused(refusal)
@@ -7593,9 +7898,18 @@ def _chat_update_room(
                         outgoing=str(reg.brain or "").strip(),
                         incoming=brain,
                     )
-                    if dropped:
+                    if dropped and reg.model:
                         cleared = ["model"] + (["effort"] if reg.effort else [])
                 db.set_room_brain(conn, updated.token, brain)
+            if provider is not _UNSET:
+                reg = db.get_room(conn, updated.token)
+                if reg is not None and (reg.provider or None) != provider:
+                    db.set_room_provider(conn, updated.token, provider)
+                    if model is _UNSET and reg.model and not _model_within_provider(
+                        conn, updated.token, reg.model, provider,
+                    ):
+                        db.set_room_model_effort(conn, updated.token, None, None)
+                        cleared = sorted(set(cleared) | {"model"} | ({"effort"} if reg.effort else set()))
             if model is not _UNSET or effort is not _UNSET:
                 # Re-read: the clearing rule above may have just nulled both
                 # columns, and an absent key must merge against that rather
@@ -10000,6 +10314,7 @@ def _chat_create_web_task(
     about_room: str | None = None,
     *,
     report_replay: bool = False,
+    provider: str | None = None,
 ) -> tuple[str, int | None]:
     """Rate-limited web-task creation. Returns ``("ok", task_id)``,
     ``("recorded", message_id)`` when the speech gate stored the turn without
@@ -10158,6 +10473,7 @@ def _chat_create_web_task(
             conn, _config, surface="web", surface_ref=token, user_id=username,
             text=text, source_type="web", output_target="room", priority=5,
             attachments=attachments or None, model=model, effort=effort,
+            provider=provider,
             apply_room_default=apply_room_default,
             attachment_names=attachment_names or None,
             client_msg_id=client_msg_id,
@@ -10728,6 +11044,13 @@ async def chat_commands(
     the fallback is about a room this user cannot see, not about a client
     sending something that is not an integer.
 
+    **`models` is the viewer's pickable set** on that same brain
+    (`_chat_model_choices`: the whole catalogue for an admin, marked
+    `enabled`, the enabled set for anyone else), each with the effort levels
+    its model takes. With `room_id`, `room_model` says what the picker should
+    make of the room's stored model (`_room_model_status`). The discovery
+    caches are re-read first when the daemon has rewritten one.
+
     The three brain fields are `_brain_catalogue`'s, published to admins only,
     which is what lets the settings modal decide by emptiness alone. Writing
     the pin is admin-gated (D8), so kinds a non-admin cannot select are not
@@ -10757,12 +11080,16 @@ async def chat_commands(
         for alias, target in sorted(commands._COMMAND_ALIASES.items())
     ]
     brain_config = _config.brain
+    room_token: str | None = None
+    room_provider: str | None = None
     if room_id is not None:
         room = await asyncio.to_thread(_chat_owned_room, user["username"], room_id)
         if room is not None:
+            room_token = room.token
             brain_config = await asyncio.to_thread(
                 _brain_for_room_token, room.token, "web",
             )
+            room_provider = await asyncio.to_thread(_room_stored_provider, room.token)
     # `brain` scopes the aliases to a kind the caller is *considering*, which
     # `room_id` cannot express: the room still holds its old brain until the
     # save lands, so the settings modal asks for the pending selection's models
@@ -10783,27 +11110,57 @@ async def chat_commands(
             brain_config = _dc_replace(_config.brain, kind=brain)
         else:
             logger.debug("chat_commands: ignoring brain=%r", brain)
+    await asyncio.to_thread(_install_model_caches)
     aliases: list[dict] = []
     # What an unpinned room runs, resolved the way the admin Models card
     # resolves it, so the room picker can name it instead of the bare "Default
     # model" that hid #548. None = the backend's own default.
     default_model: str | None = None
     try:
+        from istota.brain._resolve import effective_provider
+
         model_brain = make_brain(brain_config)
+        bind = getattr(model_brain, "bound_to", None)
+        if callable(bind):
+            model_brain = bind(effective_provider(_config, brain_config.kind, room_provider))
         aliases = [
-            {"alias": alias, "target": model, "effort": effort}
+            {
+                "alias": alias, "target": model, "effort": effort,
+                "efforts": _alias_efforts(brain_config, alias),
+            }
             for alias, model, effort in model_brain.list_aliases()
         ]
         default_model = model_brain.effective_default_model() or None
     except Exception as e:  # noqa: BLE001 — aliases degrade independently
         logger.warning("chat_commands: model aliases unavailable: %s", e)
-    return {
+    models: list[dict] = []
+    try:
+        models = await asyncio.to_thread(
+            _chat_model_choices, brain_config, user["username"], room_provider,
+        )
+    except Exception as e:  # noqa: BLE001 — the model list degrades independently
+        logger.warning("chat_commands: model list unavailable: %s", e)
+    payload = {
         "commands": cmds,
         "command_aliases": cmd_aliases,
         "model_aliases": aliases,
+        "models": models,
         "default_model": default_model,
+        # A native room's provider (D22): the stored value (null is native's
+        # default) and, for an admin, the providers it may be moved to.
+        "room_provider": room_provider,
+        "providers": _native_provider_choices(user["username"], brain_config),
         **_brain_catalogue(user["username"]),
     }
+    # Only for a room the caller asked about: the picker shows a pin the
+    # viewer's list does not hold as an admin's pin or as gone.
+    if room_token is not None:
+        stored = await asyncio.to_thread(_room_stored_model, room_token)
+        if stored:
+            payload["room_model"] = await asyncio.to_thread(
+                _room_model_status, brain_config, stored, user["username"], room_provider,
+            )
+    return payload
 
 
 def _brain_catalogue(username: str) -> dict:
@@ -11060,6 +11417,37 @@ async def chat_update_room(
             from istota.brain import room_selectable_kinds
             if brain not in room_selectable_kinds(_config.brain):
                 return JSONResponse({"error": "brain not selectable"}, status_code=400)
+    # The room's provider (model-catalogue D22): which of `[brain.native]
+    # providers` a native room runs on. Admin-only like `brain`, keyed on the
+    # key's presence, because the provider decides which key is billed;
+    # "" / null is native's default.
+    provider = _UNSET
+    if "provider" in data:
+        if not _config.is_admin(user["username"]):
+            return JSONResponse(
+                {"error": "only an admin can change this room's provider"},
+                status_code=403,
+            )
+        from istota.brain._resolve import native_reach_ids, stored_provider
+
+        wanted = str(data["provider"] or "").strip() or None
+        if wanted is not None and wanted not in native_reach_ids(_config):
+            return JSONResponse({"error": "provider not selectable"}, status_code=400)
+        target_room = await asyncio.to_thread(_chat_owned_room, user["username"], room_id)
+        if target_room is None:
+            return JSONResponse({"error": "room not found"}, status_code=404)
+        if brain is not _UNSET:
+            from istota.brain import resolve_brain_kind
+            provider_kind = (brain or resolve_brain_kind("web", _config.brain).kind)
+        else:
+            provider_kind = (await asyncio.to_thread(
+                _brain_for_room_token, target_room.token, "web",
+            )).kind
+        if wanted is not None and provider_kind != "native":
+            return JSONResponse(
+                {"error": "only a native room has a provider"}, status_code=400,
+            )
+        provider = stored_provider(_config, provider_kind, wanted)
     # Per-room model/effort default (canonical model id + effort level). A key's
     # presence signals intent: absent → leave untouched, "" / null → clear.
     #
@@ -11093,12 +11481,55 @@ async def chat_update_room(
                 model_brain = await asyncio.to_thread(
                     _brain_for_room_token, room.token, "web",
                 )
-            if not _room_model_allowed(model_brain, model):
-                return JSONResponse({"error": "unknown model"}, status_code=400)
+            # A value the room already holds is not judged again: the settings
+            # send back what they loaded, and an admin's pin outside a
+            # member's set must not stop that member saving another field.
+            current = await asyncio.to_thread(_room_stored_model, room.token)
+            room_provider_now = (
+                provider if provider is not _UNSET
+                else await asyncio.to_thread(_room_stored_provider, room.token)
+            )
+            if model != current or provider is not _UNSET:
+                # Judged against the lists the picker offered from, within
+                # the provider this body leaves the room on (D22).
+                await asyncio.to_thread(_install_model_caches)
+                picked, refusal = _room_model_selection(
+                    model_brain, model, is_admin=_config.is_admin(user["username"]),
+                    provider=room_provider_now,
+                )
+                if refusal is not None:
+                    return JSONResponse(refusal, status_code=422)
+                model = picked.model
+                if picked.provider_changed:
+                    # An admin's `provider/id`: the two columns, split.
+                    provider = picked.provider
+    # A provider moved with no model the room could keep and no default model
+    # of its own would leave the room nothing to run (D22).
+    if provider is not _UNSET and (model is _UNSET or model is None):
+        from istota.commands import provider_default_model
+        from istota.brain._resolve import native_provider_id
+
+        target_room = await asyncio.to_thread(_chat_owned_room, user["username"], room_id)
+        keeps = False
+        if model is _UNSET and target_room is not None:
+            held = await asyncio.to_thread(_room_stored_model, target_room.token)
+            if held:
+                keeps = await asyncio.to_thread(
+                    _keeps_model_within, target_room.token, held, provider,
+                )
+        if not keeps and not provider_default_model(_config, provider or native_provider_id(_config)):
+            return JSONResponse(
+                {
+                    "error": "that provider has no default model; pick a model for the room too",
+                    "code": "no_default_model", "candidates": [],
+                },
+                status_code=422,
+            )
     try:
         updated = await asyncio.to_thread(
             _chat_update_room, user["username"], room_id, name, archived, model,
             effort, brain, color, guest_reply, listed, speech_mode, disposition, push_notifications,
+            provider,
         )
     except _RoomSettingsRefused as refused:
         return JSONResponse({"error": str(refused)}, status_code=403)
@@ -12179,6 +12610,7 @@ async def chat_send_message(
     # across surfaces.
     model_override: str | None = None
     effort_override: str | None = None
+    provider_override: str | None = None
     # An explicit `!model` prefix (any alias, incl. `default`) suppresses the
     # per-room model default so a per-message choice always wins.
     model_prefix_used = False
@@ -12215,6 +12647,8 @@ async def chat_send_message(
         ))
         prefix = commands.resolve_model_prefix(
             text, brain, has_attachments=bool(attachments),
+            config=_config, user_id=username,
+            room_provider=await asyncio.to_thread(_room_provider_for_token, room.token),
         )
         if prefix.usage is not None:
             return {"task_id": None, "inline_result": prefix.usage}
@@ -12222,6 +12656,7 @@ async def chat_send_message(
             model_prefix_used = True
             model_override = prefix.model
             effort_override = prefix.effort
+            provider_override = prefix.provider
             text = prefix.content
 
         if text.startswith("!"):
@@ -12283,6 +12718,7 @@ async def chat_send_message(
         # changed the text, so only an unprefixed send keeps its raw form.
         text if model_prefix_used else raw_text,
         about_room,
+        provider=provider_override,
     )
     if outcome == "about_room_refused":
         return JSONResponse({"error": ABOUT_ROOM_REFUSED}, status_code=400)
@@ -16655,8 +17091,9 @@ async def settings_set_secret(
     schema = _all_known_services().get(service)
     if not schema:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
-    valid_keys = {f["key"] for f in schema["fields"]}
-    if key not in valid_keys:
+    from istota.credentials.schema import service_accepts_key
+
+    if not service_accepts_key(service, key):
         raise HTTPException(
             status_code=400,
             detail=f"Unknown key '{key}' for service '{service}'",

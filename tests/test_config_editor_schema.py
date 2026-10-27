@@ -123,6 +123,59 @@ class TestEditorKind:
         assert schema.multi_choices_for(("bot_name",)) is None
 
 
+def _string_model_fields() -> list[tuple[str, ...]]:
+    """Every `str` field of the `Config` tree named `model` or `*_model`."""
+    import dataclasses
+    import typing
+
+    found: list[tuple[str, ...]] = []
+
+    def walk(owner: type, prefix: tuple[str, ...]) -> None:
+        hints = typing.get_type_hints(owner)
+        for f in dataclasses.fields(owner):
+            declared = schema._unwrap_optional(hints.get(f.name))
+            path = prefix + (f.name,)
+            if dataclasses.is_dataclass(declared):
+                walk(declared, path)
+            elif declared is str and (f.name == "model" or f.name.endswith("_model")):
+                found.append(path)
+
+    walk(Config, ())
+    return found
+
+
+class TestModelFields:
+    def test_every_model_path_is_a_string_field(self):
+        for path in schema.MODEL_FIELDS:
+            _resolve(path)
+        for path in schema.MODEL_PATTERN_FIELDS:
+            _resolve(path)
+
+    def test_no_model_field_is_left_out(self):
+        """A `model` / `*_model` string field is a picker or exempted with a reason."""
+        listed = set(schema.MODEL_FIELDS) | set(schema.MODEL_FIELD_EXEMPT)
+        missing = [".".join(p) for p in _string_model_fields() if p not in listed]
+        assert not missing, f"add these to MODEL_FIELDS or MODEL_FIELD_EXEMPT: {missing}"
+        assert all(reason.strip() for reason in schema.MODEL_FIELD_EXEMPT.values())
+
+    @pytest.mark.parametrize("path", sorted(schema.MODEL_FIELDS))
+    def test_every_model_path_gets_the_model_editor(self, path):
+        assert schema.editor_kind(path, str, "") == "model"
+
+    def test_enabled_gets_the_patterns_editor(self):
+        assert schema.editor_kind(("models", "enabled"), list[str] | None, None) == "model_patterns"
+
+    def test_the_deprecated_root_model_stays_a_text_field(self):
+        assert schema.editor_kind(("model",), str, "") == "str"
+
+    def test_doctors_internal_fields_are_model_fields(self):
+        from istota import doctor
+
+        for _, path in doctor._INTERNAL_MODEL_FIELDS:
+            assert path in schema.MODEL_FIELDS
+            assert schema.MODEL_FIELDS[path].brain is None
+
+
 class TestEnvOverride:
     def test_a_set_non_secret_override_is_named(self):
         assert schema.env_override_for(("web", "auth"), {"ISTOTA_WEB_AUTH": "email"}) == "ISTOTA_WEB_AUTH"

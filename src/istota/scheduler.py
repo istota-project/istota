@@ -2670,9 +2670,16 @@ def _execute_skill_task(
     """
     from .executor import (
         SKILL_DAEMON_CREDENTIAL_VARS,
+        SKILL_MODEL_CALLERS,
         build_clean_env,
         get_user_temp_dir,
         skill_model_credentials,
+    )
+    from .llm.providers import (
+        model_caller_env,
+        model_caller_provider,
+        process_cli_auth,
+        strip_model_credentials,
     )
     from .skills._env import EnvContext, build_skill_env, dispatch_setup_env_hooks
     from .skills._loader import load_skill_index
@@ -2761,6 +2768,18 @@ def _execute_skill_task(
     # Resolved from the live user_profiles DB row so it tracks travel
     # without a daemon restart (ISSUE-099).
     env["ISTOTA_USER_TZ"] = config.resolve_user_timezone(task.user_id)
+
+    # A skill task runs a trusted CLI, not a model, so it carries no model
+    # credential: after the last merge every model credential name goes, then
+    # a skill that calls a model gets `model_caller_env`'s copy, the one the
+    # skill proxy injects, so a `code_review` cron job keeps its key.
+    env = strip_model_credentials(env)
+    if skill_name in SKILL_MODEL_CALLERS:
+        caller_provider, cli_reviewer = model_caller_provider(config)
+        env.update(model_caller_env(
+            config, process_cli_auth(config), caller_provider, task.user_id,
+            cli_reviewer=cli_reviewer,
+        ))
 
     # The copy `build_task_runtime` makes for the proxy: a skill whose CLI needs
     # an operator credential only the daemon's environment holds gets it here
@@ -9684,6 +9703,7 @@ def _resolve_job_model_effort(job, app_config, pinned_brain, job_effort):
         pinned_brain=pinned_brain,
         label=f"Scheduled job '{job.name}' (user: {job.user_id})",
         warn_key=f"cron_model:{job.id}",
+        provider=job.provider,
     )
 
 
@@ -9696,21 +9716,57 @@ def resolve_pinned_model_effort(
     pinned_brain: str,
     label: str,
     warn_key: str,
+    provider: str | None = None,
 ) -> tuple[str, str]:
     """``(model, effort)`` for a task created from a stored row, resolved by
     the brain that will run it. ``_resolve_job_model_effort`` states the rules;
     an assignment's wake (`assignments.wakes`) is the second caller.
+
+    ``provider`` is the row's stored provider: the model is an id within it,
+    resolved there and nowhere else (D22); ``None`` is the brain's default.
 
     ``warn_key`` must be built from the row id, never from a model-writable
     value: ``_warned_keys`` is process-global with no eviction. Never raises.
     """
     raw_base, raw_effort = split_effort(model)
     try:
-        row_brain = make_brain(
-            resolve_brain_kind(
-                source_type, app_config.brain, override=(pinned_brain or None),
-            )
+        row_config = resolve_brain_kind(
+            source_type, app_config.brain, override=(pinned_brain or None),
         )
+        # The one resolver first, so the task records the ref that runs (D6);
+        # what it cannot place falls to the brain's own lenient resolution.
+        from istota.brain._resolve import (
+            Resolution,
+            config_providers,
+            effective_provider,
+            is_portable_selection,
+            native_provider_id,
+            native_reach_ids,
+            resolve_selection,
+            stored_selection_id,
+        )
+
+        scope = effective_provider(app_config, row_config.kind, provider)
+        resolved = resolve_selection(
+            model, for_brain=row_config.kind,
+            providers=config_providers(app_config),
+            native_provider=native_provider_id(app_config),
+            native_reach=native_reach_ids(app_config),
+            alias_provider=scope,
+            scope_provider=scope,
+        )
+        if isinstance(resolved, Resolution) and resolved.alias and is_portable_selection(
+            app_config, resolved.alias,
+        ):
+            # Kept by name, so a fallback to a brain on another provider
+            # re-resolves it there; the model that ran is `tasks.model_used`.
+            return resolved.alias, effort or (resolved.effort_requested or "")
+        if isinstance(resolved, Resolution) and not resolved.brain_default:
+            return stored_selection_id(resolved), effort or (resolved.effort_requested or "")
+        row_brain = make_brain(row_config)
+        bind = getattr(row_brain, "bound_to", None)
+        if callable(bind):
+            row_brain = bind(scope)
         pair = row_brain.resolve_alias(model)
         if pair:
             effort = effort or (pair[1] or "")
@@ -9817,6 +9873,9 @@ def _create_scheduled_job_task(
             model=job_model or None,
             effort=job_effort or None,
             brain=admitted_brain or None,
+            # Copied like `brain` (D22); `effective_provider` judges it at
+            # dispatch, so a provider the operator dropped falls back there.
+            provider=job.provider or None,
             parent_task_id=parent_task_id,
         )
 
@@ -10194,6 +10253,8 @@ def build_interval_gates(
     gate it runs reads any, and building the closures costs nothing since they
     are never called.
     """
+    from .llm.discovery import REFRESH_INTERVAL_SECONDS as model_catalogue_interval
+
     keeper: dict[str, threading.Thread] = (
         background_checks if background_checks is not None else {}
     )
@@ -10328,6 +10389,11 @@ def build_interval_gates(
 
     def _browser_instances(now: float) -> None:
         check_browser_instances(config)
+
+    def _model_catalogue(now: float) -> None:
+        from .llm import discovery
+
+        discovery.refresh_all(config)
 
     def _shared_block_request(now: float) -> None:
         poll_shared_block_requests(config, keeper)
@@ -10677,6 +10743,16 @@ def build_interval_gates(
             background=True,
             overlap_expected=True,
         ),
+        # Each `discover = true` provider's model list, refreshed when its cache
+        # is older than the provider's TTL; this is only the look's cadence.
+        # Network I/O, so off the loop thread. Every other process reads the
+        # caches (`llm/discovery.py`). Never raises.
+        IntervalGate(
+            name="model-catalogue",
+            run=_model_catalogue,
+            fixed_interval=model_catalogue_interval,
+            background=True,
+        ),
         # ISSUE-288. Seeded to 0 for the reason the sweeps below share: the
         # accumulation it clears is the state a restart usually arrives into,
         # and there is no boot run to double up with.
@@ -11012,6 +11088,9 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
     Returns number of tasks processed.
     """
     processed = 0
+    # This process builds CLI envs and routes tasks between brains.
+    from .llm.providers import resolve_process_auth
+    resolve_process_auth(config)
 
     # Hydrate user configs from Nextcloud API
     try:
@@ -11392,6 +11471,19 @@ def run_daemon(
     # the cancel paths may signal them here and nowhere else (ISSUE-701).
     process_group.own_task_pids(True)
 
+    # The `claude` CLI's auth mode, once for this process, which also fills the
+    # unconfigured brain kinds routing reads. Under "api_key" a credentials file
+    # left from a token is removed: the web container may have seen it in the
+    # window before this start.
+    from .llm.providers import resolve_process_auth
+    from .sandbox.claude_runtime_env import remove_stale_credentials_file
+    if resolve_process_auth(config) == "api_key" and remove_stale_credentials_file():
+        logger.error(
+            "STARTUP Removed a Claude Code credentials file under "
+            '[brain.claude_code] auth = "api_key"; a subscription token must not '
+            "sit beside an API key"
+        )
+
     # Set up signal handlers (main-thread only; the serve launcher opts out).
     if install_signal_handlers:
         signal.signal(signal.SIGTERM, _signal_handler)
@@ -11603,6 +11695,13 @@ def run_daemon(
         recover_orphaned_tasks_on_startup(config)
     except Exception as e:  # noqa: BLE001
         logger.warning("Startup orphan recovery skipped: %s", e)
+
+    # The model lists, before any worker takes a task: the caches installed,
+    # and a provider with no cache yet fetched, all of them within one
+    # 10-second budget. One unfinished is left to the `model-catalogue` gate
+    # and reported by doctor. Never raises.
+    from .llm import discovery as _discovery
+    _discovery.boot_refresh(config)
 
     # Start the persistent asyncio runtime that hosts all Talk (and other) I/O
     # on one loop with one pooled httpx client. Explicit start here surfaces a

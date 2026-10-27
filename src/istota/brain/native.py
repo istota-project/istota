@@ -46,7 +46,6 @@ import json
 import logging
 import re
 import statistics
-import threading
 import time
 import uuid
 from collections import Counter
@@ -113,7 +112,8 @@ from istota.session.session_log import (
 from istota.session.usage import TaskUsage, cache_write_multiplier_for_ttl
 
 from ._aliases import CANONICAL_ROLES, split_effort
-from ._roles import get_alias_override_target, get_alias_overrides
+from ._resolve import Resolution, alias_keys, clamp_effort_level, effort_wire_value, resolve_selection
+from ._roles import current_alias_table
 from ._types import BrainRequest, BrainResult, ImageInput
 from .claude_code import is_usage_limit_error
 
@@ -121,24 +121,6 @@ logger = logging.getLogger("istota.brain.native")
 
 # What a usage row records as the brain that ran. One of KNOWN_BRAIN_KINDS.
 BRAIN_KIND = "native"
-
-# Process-global coordinator for the live OpenRouter model-catalog fetch
-# (ISSUE-182). Each task runs on its own worker thread + event loop, so without
-# a guard every first task would stampede OpenRouter's /models endpoint. The
-# lock serializes the first-use fetch (held across the network call — simple,
-# and the stampede window at process start is tiny given low task concurrency);
-# ``_CATALOG_FETCHED_AT`` records the wall time of the last successful install
-# so a task within the TTL skips the fetch entirely. Reset in tests.
-_CATALOG_FETCH_LOCK = threading.Lock()
-_CATALOG_FETCHED_AT: float | None = None
-
-
-def _reset_catalog_fetch_state() -> None:
-    """Test hook: forget the process-global fetch timestamp so a test can drive
-    ``_ensure_fetched_catalog`` from a clean slate."""
-    global _CATALOG_FETCHED_AT
-    _CATALOG_FETCHED_AT = None
-
 
 # What the model is told instead of an image it will not receive. Both name the
 # image, because "attached" alone is not evidence of sight: the failure this
@@ -708,6 +690,21 @@ def make_session_log(req: BrainRequest, cfg) -> SessionLogWriter:
     return SessionLogWriter(resolve_session_log_dir(req.db_path, cfg.dir), ident, policy)
 
 
+def _spec_from_native_config(config):
+    """The provider spec a bare `NativeBrainConfig` implies, or `None`. Never raises."""
+    try:
+        from istota.config import BrainConfig, NativeBrainConfig
+
+        from . import native_provider_spec
+
+        if not isinstance(config, NativeBrainConfig):
+            return None
+        return native_provider_spec(BrainConfig(native=config))
+    except Exception:  # noqa: BLE001 - a missing spec means "not configured"
+        logger.debug("could not derive the native provider spec", exc_info=True)
+        return None
+
+
 def _base_url_host(base_url: str) -> str:
     """The host of the configured endpoint, and nothing else.
 
@@ -1031,23 +1028,148 @@ class NativeBrain:
     # value written here is an endpoint slug and is sent verbatim, never
     # translated from the Anthropic namespace.
     model_namespace = "openai_compat"
+    kind = BRAIN_KIND
 
-    def __init__(self, config, provider=None):
+    def __init__(self, config, provider=None, spec=None, providers=None, *, route=True, home=None):
         self._config = config
-        # ``provider`` injectable for tests; production builds from config.
-        self._provider = provider if provider is not None else make_provider(config)
+        # The provider record native's requests go to (`[brain.native]
+        # provider`), with the key for it. `None` means native is not
+        # configured: construction still succeeds (config load builds a brain
+        # to validate aliases), and a task fails with the reason. A brain built
+        # without `make_brain` reads it off the config's legacy fields.
+        if spec is None:
+            spec = _spec_from_native_config(config)
+        self._spec = spec
+        # Every configured provider, by id, so a request for another
+        # provider's ref goes to that provider with its key (D4), when
+        # `[brain.native] providers` lists it. `route` is off on the brain a
+        # routed request runs on, so a wire id that itself reads as a ref is
+        # never routed a second time.
+        self._providers = dict(providers or {})
+        if spec is not None:
+            self._providers.setdefault(spec.id, spec)
+        self._route_requests = route
+        # Native's default provider (`[brain.native] provider`). A brain built
+        # for a task on another listed provider (`make_brain(..., bind=True)`)
+        # has that provider as `_spec` and this as its home: its default
+        # model is the provider's `default_model`, and its aliases are read
+        # under the provider's own key (D22).
+        self._home_id = home if home is not None else (spec.id if spec is not None else None)
+        # `(wire id, ref)` on a routed attempt's brain; see `_model_info`.
+        self._info_ref: tuple[str, str] | None = None
+        # ``provider`` injectable for tests; production builds from the spec.
+        if provider is not None:
+            self._provider = provider
+        elif spec is not None:
+            self._provider = make_provider(spec)
+        else:
+            self._provider = None
         # We own (and must close) a provider we built ourselves; an injected one
         # belongs to the caller (NB-17). A fresh NativeBrain + provider is built
         # per task, so its httpx client is closed at task end rather than leaked.
-        self._owns_provider = provider is None
+        self._owns_provider = provider is None and self._provider is not None
 
     # --- Model resolution --------------------------------------------------
     #
-    # The only provider is ``openai_compat``, which can point at any endpoint
-    # (Anthropic, OpenRouter, a local qwen, …). Anthropic aliases must NOT be
-    # translated — sending "claude-opus-5" to a qwen endpoint would fail — so
-    # explicit ids pass through and only operator [models.aliases] overrides
-    # resolve.
+    # Native sends every request to one provider (``self._spec``), which can be
+    # any endpoint (Anthropic, OpenRouter, a local qwen, …). Anthropic aliases
+    # must NOT be translated — sending "claude-opus-5" to a qwen endpoint would
+    # fail — so explicit ids pass through as written and only operator
+    # [models.aliases] overrides and the tiers resolve. The resolver
+    # (``brain._resolve``) is asked about refs: ``<native's provider>/<id>``
+    # goes to the wire as ``<id>``. A ref of another provider that
+    # `[brain.native] providers` lists is routed there (`_route`); anything
+    # else is sent as written, as it always was, and the catalogue is asked
+    # by that wire id, so a bare Claude id on native keeps the metadata (and
+    # so the wire features) it had.
+
+    @property
+    def _provider_id(self) -> str | None:
+        return self._spec.id if self._spec is not None else None
+
+    def bound_to(self, provider_id: str | None) -> "NativeBrain":
+        """This brain as a task runs it (D22): on ``provider_id``, the task's
+        effective provider (``brain._resolve.effective_provider`` has checked
+        it against `[brain.native] providers`), reading no provider out of a
+        model id. Without a binding native runs on its default provider and
+        still routes a listed provider's ``provider/id`` ref, which is how an
+        internal model field in config names one. Returns this brain when the
+        provider is its own, else a brain on that provider's record."""
+        self._route_requests = False
+        spec = self._providers.get(provider_id) if provider_id else None
+        if spec is None or self._spec is None or spec.id == self._spec.id:
+            return self
+        return NativeBrain(
+            self._config, spec=spec, providers=self._providers, route=False, home=self._home_id,
+        )
+
+    @property
+    def _bound_elsewhere(self) -> bool:
+        """Whether this brain runs on a listed provider other than its home."""
+        return bool(self._spec is not None and self._home_id and self._spec.id != self._home_id)
+
+    def _alias_keys(self) -> tuple[str, ...]:
+        return alias_keys(BRAIN_KIND, self._provider_id, self._home_id)
+
+    def _wire_id(self, name: str) -> str:
+        """``name`` as native's provider takes it: its own ref without the
+        ``<provider>/`` prefix, anything else as written."""
+        provider_id = self._provider_id
+        if not provider_id or not name.startswith(provider_id + "/"):
+            return name
+        resolved = resolve_selection(
+            name, use_aliases=False, for_brain="native",
+            native_provider=provider_id, providers={provider_id: self._spec.kind},
+        )
+        if isinstance(resolved, Resolution) and resolved.source == "ref":
+            return resolved.info.id
+        return name
+
+    def _reach(self) -> tuple[str, ...]:
+        """`[brain.native] providers`, this brain's own provider first."""
+        own = self._provider_id
+        if not own:
+            return ()
+        out = [own]
+        for provider_id in getattr(self._config, "providers", None) or ():
+            if isinstance(provider_id, str) and provider_id.strip() and provider_id.strip() not in out:
+                out.append(provider_id.strip())
+        return tuple(out)
+
+    def _route(self, model: str):
+        """``(spec, wire id)`` when ``model`` is a ref of another provider
+        `[brain.native] providers` lists, else ``(None, model)``.
+
+        Only a ref the catalogue holds is routed, read the way the resolver
+        reads it: native's own provider is asked for the whole string first,
+        so an OpenRouter id such as ``anthropic/claude-opus-5`` stays
+        OpenRouter's when OpenRouter lists it, and a provider off the list is
+        never read as a ref at all, cached list or not. A key held for a
+        provider does not put it on the list. Never raises.
+        """
+        own = self._provider_id
+        if not self._route_requests or not own or not model:
+            return None, model
+        head, sep, tail = model.partition("/")
+        if not sep or not tail or head == own:
+            return None, model
+        reach = self._reach()
+        spec = self._providers.get(head)
+        if spec is None or head not in reach:
+            return None, model
+        try:
+            resolved = resolve_selection(
+                model, use_aliases=False, for_brain="native",
+                native_provider=own, native_reach=reach, providers=self._providers,
+            )
+        except Exception:  # noqa: BLE001 - routing falls back to native's own provider
+            logger.debug("native routing lookup failed for %r", model, exc_info=True)
+            return None, model
+        if not isinstance(resolved, Resolution) or resolved.source != "ref":
+            return None, model
+        if resolved.provider != head or resolved.info is None:
+            return None, model
+        return spec, resolved.info.id
 
     def resolve_alias(self, alias):
         if not alias:
@@ -1058,34 +1180,35 @@ class NativeBrain:
         base_lower = base.lower()
         # 1. Operator-overridden alias — read THIS brain's namespace only, so an
         # anthropic-namespace value (e.g. "opus") never leaks onto the OpenRouter
-        # wire. The slug passes through verbatim; no translation. The suffix
-        # modifier wins over the override's own effort.
-        rt = get_alias_override_target(base_lower, self.model_namespace)
+        # wire. Effort precedence: request suffix > explicit RoleTarget.effort >
+        # an effort baked into the target (``smart = "opus:high"`` as a legacy
+        # flat value). An effort-only override (no model) keeps the alias's own
+        # target, which on native is the configured model for a tier.
+        rt = current_alias_table().target_in(base_lower, self._alias_keys())
         if rt is not None:
-            # A legacy-flat value may carry a baked ``:effort`` (``smart =
-            # "opus:high"``); peel it so native resolves the same flat string
-            # claude_code does, instead of gluing ``:high`` onto the wire model.
-            # A provider slug's ``/`` is untouched by split_effort. Effort
-            # precedence: request suffix > explicit RoleTarget.effort > baked.
             target_model, target_effort = (
-                split_effort(rt.model) if rt.model else (rt.model, None)
+                split_effort(rt.model) if rt.model else ("", None)
             )
-            return (target_model, suffix_effort or rt.effort or target_effort)
+            effort = suffix_effort or rt.effort or target_effort
+            if not target_model:
+                return (self.default_model or None, effort)
+            return (self._wire_id(target_model), effort)
         # A built-in role alias with no operator override resolves to the single
-        # model this endpoint is configured for (NB-3). The native brain speaks
-        # to one endpoint with one model, so fast/general/smart all mean "the
-        # configured model" unless the operator remapped them via [models.aliases].
-        # This must come BEFORE the generic ``:effort`` passthrough below, or a
-        # role tier + effort with an unset model (``general:high``) would fall
-        # through and leak the literal "general" onto the wire (NB-3). An empty
-        # model collapses to None → resolve_model_name treats it as brain default.
-        # Provider shortcuts (opus/sonnet/haiku) are NOT roles and pass through
-        # untranslated (None unless an explicit effort modifier was given).
+        # model this endpoint is configured for (NB-3). This must come BEFORE
+        # the generic ``:effort`` passthrough below, or a role tier + effort
+        # with an unset model (``general:high``) would leak the literal
+        # "general" onto the wire. An empty model collapses to None →
+        # resolve_model_name treats it as brain default. Provider shortcuts
+        # (opus/sonnet/haiku) are NOT roles and pass through untranslated.
         if base_lower in _BUILTIN_ROLE_NAMES:
-            return (self._config.model or None, suffix_effort)
+            return (self.default_model or None, suffix_effort)
+        # A ref of native's own provider goes to the wire as the provider's id.
+        wire = self._wire_id(base)
+        if wire != base:
+            return (wire, suffix_effort)
         # An explicit id/slug carrying a ``:effort`` modifier passes through with
-        # the effort applied; a plain unknown id stays None (unchanged — the
-        # caller's resolve_model_name handles bare-id passthrough).
+        # the effort applied; a plain unknown id stays None (the caller's
+        # resolve_model_name handles bare-id passthrough).
         if suffix_effort is not None:
             return (base, suffix_effort)
         return None
@@ -1097,10 +1220,15 @@ class NativeBrain:
         A property on the Brain protocol rather than a reach into each brain's
         own config block, so a surface that displays a deployment's effective
         default asks the brain that would run the task (ISSUE-418). This brain
-        applies it at the wire (``req.model or self._config.model``); the
-        property is the read-only view of the same value.
+        applies it at the wire (``req.model or self.default_model``). On a
+        listed provider other than native's default it is that provider's
+        ``default_model``; on the default provider ``[brain.native] model``,
+        else the provider's ``default_model``.
         """
-        return (getattr(self._config, "model", "") or "").strip()
+        provider_default = (getattr(self._spec, "default_model", "") or "").strip()
+        if self._bound_elsewhere:
+            return provider_default
+        return (getattr(self._config, "model", "") or "").strip() or provider_default
 
     @property
     def default_effort(self) -> str:
@@ -1151,30 +1279,31 @@ class NativeBrain:
         # the wire as the literal "general"/"fast"/"smart" — collapse to the
         # (empty) configured model, which downstream treats as "brain default".
         if base.lower() in _BUILTIN_ROLE_NAMES:
-            return self._config.model
+            return self.default_model
         return base  # explicit id pass-through (effort stripped); no translation
 
     def list_aliases(self):
-        overrides = get_alias_overrides()
+        table = current_alias_table()
         listed: list[tuple[str, str | None, str | None]] = []
         seen: set[str] = set()
         # Built-in roles first: operator override (in THIS brain's namespace) if
         # present, else the native model. So `!models` shows the truthful
         # resolved table on native.
+        keys = self._alias_keys()
         for role in _BUILTIN_ROLE_NAMES:
-            rt = get_alias_override_target(role, self.model_namespace)
+            rt = table.target_in(role, keys)
             if rt is not None:
-                listed.append((role, rt.model, rt.effort))
+                listed.append((role, rt.model or self.default_model, rt.effort))
             else:
-                listed.append((role, self._config.model, None))
+                listed.append((role, self.default_model, None))
             seen.add(role)
         # Any custom operator alias names beyond the three defaults.
-        for name in overrides:
+        for name in table.names():
             if name in seen:
                 continue
-            rt = get_alias_override_target(name, self.model_namespace)
+            rt = table.target_in(name, keys)
             if rt is not None:
-                listed.append((name, rt.model, rt.effort))
+                listed.append((name, rt.model or self.default_model, rt.effort))
         return listed
 
     def validate_alias_override(self, name, target):
@@ -1192,12 +1321,69 @@ class NativeBrain:
         # Idempotent with `_run`'s own two `or`s; applied here so the stamp
         # below reports the effort this attempt really used (ISSUE-418).
         req = self.with_defaults(req)
-        result = self._execute_sync(req)
+        if self._provider is None:
+            reason = (
+                "[brain.native] provider is not set or names no configured provider"
+            )
+            logger.warning("native brain unavailable: %s", reason)
+            result = BrainResult(
+                success=False,
+                result_text=f"The native brain is not configured: {reason}.",
+                stop_reason="error",
+                model_used=req.model or self.default_model,
+            )
+        else:
+            self._install_catalog_caches(req)
+            routed, wire = self._route(req.model)
+            own_wire = self._wire_id(req.model) if req.model else req.model
+            if own_wire != req.model:
+                # A stored ref of native's own provider, reaching here unresolved.
+                import dataclasses as _dc
+
+                req = _dc.replace(req, model=own_wire)
+            if routed is not None:
+                result = self._execute_routed(req, routed, wire)
+            else:
+                result = self._execute_sync(req)
         # Stamped on the way out, so a return added later cannot forget it.
         result.brain_kind = BRAIN_KIND
-        if not result.effort_used:
-            result.effort_used = req.effort
+        # A clamp that dropped the effort leaves `effort_used` empty on purpose;
+        # only a run that never reached the clamp takes the request's.
+        if not result.effort_requested:
+            result.effort_requested = req.effort
+            if not result.effort_used:
+                result.effort_used = req.effort
         return result
+
+    def _execute_routed(self, req: BrainRequest, spec, wire: str) -> BrainResult:
+        """Run ``req`` against another provider: its record, its key, its id.
+
+        A brain of its own for the attempt, so the provider client, the session
+        log header and every compat setting are that provider's, and it is
+        closed with the attempt like any brain this one builds.
+        """
+        import dataclasses as _dc
+
+        logger.info("native request routed to provider %s for model %s", spec.id, wire)
+        routed_brain = NativeBrain(
+            self._config, spec=spec, providers=self._providers, route=False,
+            home=self._home_id,
+        )
+        # The record is asked for by ref: a bare Claude id is `_DEFAULT` in
+        # the catalogue (Stage 5), which would drop every routed effort.
+        routed_brain._info_ref = (wire, f"{spec.id}/{wire}")
+        return routed_brain._execute_sync(_dc.replace(req, model=wire))
+
+    def _model_info(self, model: str):
+        """The catalogue record for the model this attempt sends."""
+        pinned = self._info_ref
+        if pinned is not None and model == pinned[0]:
+            return get_model_info(pinned[1])
+        if self._bound_elsewhere:
+            # By ref, as a routed attempt is: a listed provider's bare id is
+            # that provider's model, not one the catalogue guesses by id.
+            return get_model_info(f"{self._spec.id}/{model}")
+        return get_model_info(model)
 
     def _max_turns(self, req: BrainRequest) -> int:
         """The turn cap for this request: the configured one, lowered by
@@ -1243,6 +1429,9 @@ class NativeBrain:
         try:
             try:
                 result = asyncio.run(_run_and_close())
+                if "effort_requested" in stats:
+                    result.effort_requested = stats["effort_requested"]
+                    result.effort_used = stats["effort_used"]
             except Exception as e:  # noqa: BLE001 — never let the brain crash the worker
                 logger.exception("NativeBrain.execute raised")
                 # Both records, in this order: `error` says what went wrong,
@@ -1252,7 +1441,7 @@ class NativeBrain:
                     success=False,
                     result_text=f"Execution error: {e}",
                     stop_reason="error",
-                    model_used=req.model or self._config.model,
+                    model_used=req.model or self.default_model,
                 )
             except BaseException as e:
                 # `CancelledError`, `KeyboardInterrupt`, `SystemExit`. The
@@ -1286,7 +1475,7 @@ class NativeBrain:
 
     @staticmethod
     def _catalog_cache_dir(req: BrainRequest) -> Path | None:
-        """Local, writable dir for the OpenRouter cache = ``db_path.parent``.
+        """The directory holding the model caches' directory: ``db_path.parent``.
 
         Taken from ``BrainRequest.db_path``, which the executor sets from
         ``config.db_path``. It used to read ``ISTOTA_DB_PATH`` out of the task
@@ -1294,9 +1483,8 @@ class NativeBrain:
         the skill proxy instead), and this is a daemon-side path anyway.
 
         Absent (a direct brain call that built no task env, e.g. some
-        sleep-cycle paths) → ``None``: the in-memory ``_FETCHED`` table + the
-        process-global TTL guard still prevent refetch storms, only the
-        cross-process disk cache is skipped.
+        sleep-cycle paths) → ``None``: whatever discovered layer the process
+        already installed serves.
         """
         if not req.db_path:
             return None
@@ -1306,91 +1494,25 @@ class NativeBrain:
             return None
 
     async def _ensure_fetched_catalog(self, req: BrainRequest) -> None:
-        """Install the live OpenRouter model catalog into ``istota.llm.catalog``.
+        self._install_catalog_caches(req)
 
-        Gated on ``model_catalog_fetch`` + an OpenRouter ``base_url``. Fetches at
-        most once per process per TTL (module-level guard). Resolution order:
-        fresh disk cache → live fetch (+write cache) → stale disk cache → leave
-        the default. Never raises into task execution — a metadata-resolution
-        problem must not fail a task.
+    def _install_catalog_caches(self, req: BrainRequest) -> None:
+        """Install the discovered model lists from their caches.
+
+        Reads only: the scheduler's ``model-catalogue`` gate fetches (D11), so
+        a task never waits on a provider's ``/models``. One stat per cache file
+        when nothing changed. Never raises into task execution. Also called
+        before routing, which reads the same lists.
         """
-        try:
-            await self._ensure_fetched_catalog_inner(req)
-        except Exception:  # noqa: BLE001 — a fetch bug must never break a task
-            logger.debug("catalog fetch coordinator raised; using default/overrides", exc_info=True)
-
-    async def _ensure_fetched_catalog_inner(self, req: BrainRequest) -> None:
-        global _CATALOG_FETCHED_AT
-        cfg = self._config
-        if not getattr(cfg, "model_catalog_fetch", False):
+        data_dir = self._catalog_cache_dir(req)
+        if data_dir is None:
             return
-        base_url = cfg.base_url or ""
-        if "openrouter.ai" not in base_url:
-            return
-
-        from ..llm import catalog as _catalog
-        from ..llm import openrouter_catalog as orc
-
-        ttl = float(getattr(cfg, "model_catalog_cache_ttl_hours", 24.0) or 0.0)
-        now = time.time()
-
-        # Serialize the first-use stampede across worker threads. Held across the
-        # network call by design (see the module-level note); a loser thread
-        # blocks until the winner installs, then the freshness gate short-circuits
-        # it. Off-loop blocking of a waiting thread is acceptable — it has nothing
-        # else to do until the catalog is ready.
-        _CATALOG_FETCH_LOCK.acquire()
         try:
-            # Already installed within TTL this process → nothing to do.
-            if _CATALOG_FETCHED_AT is not None:
-                if ttl <= 0 or (now - _CATALOG_FETCHED_AT) <= ttl * 3600:
-                    return
+            from ..llm import discovery
 
-            data_dir = self._catalog_cache_dir(req)
-            path = orc.cache_path(data_dir) if data_dir is not None else None
-
-            # 1) fresh disk cache
-            if path is not None:
-                fresh = orc.read_cache(path, ttl, now_ts=now)
-                if fresh:
-                    _catalog.set_fetched_catalog(fresh)
-                    _CATALOG_FETCHED_AT = now
-                    return
-
-            # 2) live fetch
-            entries: dict = {}
-            try:
-                entries = await orc.fetch_openrouter_catalog(
-                    base_url, api_key=cfg.api_key or ""
-                )
-            except Exception:  # noqa: BLE001 — network/HTTP; fall through
-                logger.warning("openrouter model-catalog fetch failed", exc_info=True)
-                entries = {}
-            if entries:
-                _catalog.set_fetched_catalog(entries)
-                if path is not None:
-                    orc.write_cache(path, entries, now)
-                _CATALOG_FETCHED_AT = now
-                return
-
-            # 3) stale disk cache — keep serving it, stamp so we don't refetch
-            # every task while the endpoint is down (TTL still governs the next
-            # attempt).
-            if path is not None:
-                stale = orc.read_cache_any_age(path)
-                if stale:
-                    _catalog.set_fetched_catalog(stale)
-                    _CATALOG_FETCHED_AT = now
-                    logger.warning("using stale openrouter model-catalog cache")
-                    return
-
-            # 4) nothing available: leave _FETCHED as-is (→ conservative default),
-            # do NOT stamp so the next task retries the network.
-            logger.warning(
-                "no openrouter model catalog available; using conservative default"
-            )
-        finally:
-            _CATALOG_FETCH_LOCK.release()
+            discovery.install_from_cache_dir(data_dir / discovery.CACHE_DIRNAME)
+        except Exception:  # noqa: BLE001 - metadata must never fail a task
+            logger.debug("model cache install raised; using what is installed", exc_info=True)
 
     async def _maybe_close_provider(self) -> None:
         if not self._owns_provider:
@@ -1472,7 +1594,7 @@ class NativeBrain:
                 log.steer(raw)
             return drained
 
-        model = req.model or self._config.model
+        model = req.model or self.default_model
         # One random key per attempt, never derived from the user or the task:
         # it goes to a third party, and an attempt is what a cached prefix
         # lives for. Minted only where the provider sends it, which also keeps
@@ -1522,30 +1644,34 @@ class NativeBrain:
             nonlocal turns_accumulated, turns_costed
             if summary_usage.total_tokens > 0 or summary_usage.cost_usd is not None:
                 # Summary calls are sent with prompt_caching=False, so no TTL.
-                usage.add(summary_usage, get_model_info(model), count_turn=False)
+                usage.add(summary_usage, self._model_info(model), count_turn=False)
                 turns_accumulated += 1
                 if summary_usage.cost_usd is not None:
                     turns_costed += 1
 
-        # Live model-catalog enrichment (ISSUE-182). Populate the per-model
-        # metadata catalog from OpenRouter before the loop resolves windows /
-        # capabilities / prices. No-ops for a non-OpenRouter endpoint or when
-        # disabled; never fatal.
+        # The discovered model lists (ISSUE-182), read from the caches the
+        # scheduler's gate writes, before the loop resolves windows,
+        # capabilities and prices. Never fatal.
         await self._ensure_fetched_catalog(req)
 
-        # Resolve the effort tier and capability-gate it. The compat field
-        # (``reasoning_effort``) only makes sense for a reasoning model; sending
-        # it to a non-thinking endpoint (a local qwen) would 400. The raw tier
-        # passes through — the provider folds xhigh/max → high at the wire.
+        # Clamp the effort to what the model supports and map it to its wire
+        # value (`brain._resolve.clamp_effort_level`). A model without
+        # reasoning gets none: sending ``reasoning_effort`` to a non-thinking
+        # endpoint (a local qwen) would 400, and a model the catalogue does not
+        # know has the conservative default, which has no reasoning. `xhigh`
+        # and `max` reach the wire only where the model's `effort_map` names
+        # them; elsewhere they clamp to `high`, which is what the provider's
+        # old fold sent.
         effort = (req.effort or self._config.effort or "").strip()
-        reasoning_effort: str | None = None
-        if effort:
-            if get_model_info(model).supports_thinking:
-                reasoning_effort = effort
-            else:
-                logger.debug(
-                    "native effort ignored: model=%s does not support thinking", model
-                )
+        model_info = self._model_info(model)
+        effort_level = clamp_effort_level(model_info, effort)
+        reasoning_effort = effort_wire_value(model_info, effort_level)
+        if effort and effort_level is None:
+            logger.debug(
+                "native effort ignored: model=%s does not support thinking", model
+            )
+        stats["effort_requested"] = effort
+        stats["effort_used"] = effort_level or ""
 
         # --- session log --------------------------------------------------
         # Opened here, once the model and the effort are resolved, so the
@@ -1568,15 +1694,15 @@ class NativeBrain:
                 # fallback, so its absence means a log from before the field
                 # existed and not a primary run.
                 "is_fallback": bool(req.is_fallback),
-                "provider": self._config.provider,
-                "base_url_host": _base_url_host(self._config.base_url),
+                "provider": self._spec.id if self._spec is not None else "",
+                "base_url_host": _base_url_host(self._spec.base_url if self._spec is not None else ""),
                 "model": model,
                 "effort": effort,
                 "reasoning_effort": reasoning_effort,
                 "max_turns": self._max_turns(req),
                 "max_tokens": self._config.max_tokens,
                 "context_window": (
-                    self._config.context_window or get_model_info(model).context_window
+                    self._config.context_window or self._model_info(model).context_window
                 ),
                 # The provider's resolved answer, not the config's tri-state:
                 # `make_provider` reads `None` as "on for api.anthropic.com",
@@ -1771,7 +1897,7 @@ class NativeBrain:
                     # token counts (some OpenRouter free/BYOK responses) would
                     # otherwise silently drop its charge from the task total.
                     if msg.usage.total_tokens > 0 or msg.usage.cost_usd is not None:
-                        usage.add(msg.usage, get_model_info(model), write_multiplier)
+                        usage.add(msg.usage, self._model_info(model), write_multiplier)
                         turns_accumulated += 1
                         if msg.usage.cost_usd is not None:
                             turns_costed += 1
@@ -2087,7 +2213,7 @@ class NativeBrain:
                 for n in (_next_budget_nudge(new_messages), _next_failure_nudge(new_messages))
                 if n is not None
             ]
-            info = get_model_info(model)
+            info = self._model_info(model)
             window = self._config.context_window or info.context_window
             reserve = self._config.compaction_reserve_tokens or derive_reserve_tokens(window)
             keep_recent = (
@@ -2296,7 +2422,7 @@ class NativeBrain:
         # One capability answer for both consumers: whether a tool result's
         # images render, and whether this task's own attachments become image
         # blocks at all. Reading it twice invites the two halves disagreeing.
-        supports_vision = get_model_info(model).supports_vision
+        supports_vision = self._model_info(model).supports_vision
 
         loop_config = AgentLoopConfig(
             provider=provider,
@@ -2445,7 +2571,7 @@ class NativeBrain:
                     recoveries,
                     _MAX_OVERFLOW_RECOVERIES,
                 )
-                _rec_window = self._config.context_window or get_model_info(model).context_window
+                _rec_window = self._config.context_window or self._model_info(model).context_window
                 # Preserve the overflow error before clearing, so an unusable
                 # recovery can fail with the real cause instead of a wrong answer.
                 overflow_error = last_error_message

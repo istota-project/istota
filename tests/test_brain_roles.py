@@ -76,8 +76,14 @@ class TestNormalizePerNamespace:
         assert get_alias_override_target("smart", "anthropic") == RoleTarget("opus-high", None)
         assert get_alias_override_target("smart", "openai_compat") == RoleTarget("x/y", "max")
 
-    def test_table_missing_model_dropped(self):
+    def test_an_effort_only_table_keeps_the_target_and_sets_the_effort(self):
+        # Effort-only overrides (model-catalogue spec, Stage 5): an empty model
+        # means "the alias's own target", resolved by the brain.
         set_alias_overrides({"smart": {"openai_compat": {"effort": "high"}}})
+        assert get_alias_override_target("smart", "openai_compat") == RoleTarget("", "high")
+
+    def test_table_with_neither_model_nor_effort_dropped(self):
+        set_alias_overrides({"smart": {"openai_compat": {"note": "x"}}})
         assert get_alias_override_target("smart", "openai_compat") is None
 
     def test_table_blank_model_dropped(self):

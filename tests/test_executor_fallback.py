@@ -126,7 +126,7 @@ def _run(
     results = []
     patches = _patch_executor() + [
         patch("istota.executor.make_brain", side_effect=fake_make_brain),
-        patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
+        patch("istota.executor._with_user_provider_key", side_effect=lambda bc, *a, **k: bc),
         patch("istota.notifications.delivery.send_notification", side_effect=fake_send),
     ]
     with contextmanager_chain(patches):
@@ -282,9 +282,10 @@ class TestModelResolution:
                 task_model="opus-high",
                 primary_result=BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
             )
-        # opus-high can't cross the boundary → fallback uses its own default (empty model).
+        # opus-high is an exact pin of the `anthropic` provider, which the
+        # native fallback does not reach → it uses its own default (D22).
         assert fb.received_reqs[0].model == ""
-        assert any("non-portable" in r.message for r in caplog.records)
+        assert any("cannot run on the target brain" in r.message for r in caplog.records)
 
 
 class TestVisibleNote:
@@ -648,7 +649,7 @@ class TestFallbackIsVisibleOnStreamSurfaces:
         patches = _patch_executor() + [
             patch("istota.executor.make_brain",
                   side_effect=lambda bc: primary if getattr(bc, "kind", "") == "claude_code" else fb),
-            patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
+            patch("istota.executor._with_user_provider_key", side_effect=lambda bc, *a, **k: bc),
             patch("istota.notifications.delivery.send_notification", side_effect=lambda *a, **k: None),
         ]
         with contextmanager_chain(patches):
@@ -736,7 +737,7 @@ class TestFallbackIsVisibleOnStreamSurfaces:
 
         patches = _patch_executor() + [
             patch("istota.executor.make_brain", side_effect=_make),
-            patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
+            patch("istota.executor._with_user_provider_key", side_effect=lambda bc, *a, **k: bc),
             patch("istota.notifications.delivery.send_notification", side_effect=lambda *a, **k: None),
         ]
         with contextmanager_chain(patches):
@@ -789,7 +790,7 @@ class TestFallbackIsVisibleOnStreamSurfaces:
 
         with contextmanager_chain([
             patch("istota.executor.make_brain", return_value=fb),
-            patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
+            patch("istota.executor._with_user_provider_key", side_effect=lambda bc, *a, **k: bc),
         ]):
             result, _pin, _effort = _run_fallback(
                 config, config.brain, "native", task, req,
@@ -829,7 +830,7 @@ class TestFallbackIsVisibleOnStreamSurfaces:
 
         with contextmanager_chain([
             patch("istota.executor.make_brain", return_value=fb),
-            patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
+            patch("istota.executor._with_user_provider_key", side_effect=lambda bc, *a, **k: bc),
         ]):
             _run_fallback(config, config.brain, "native", task, req)
 
@@ -867,7 +868,7 @@ class TestFallbackIsVisibleOnStreamSurfaces:
         patches = _patch_executor() + [
             patch("istota.executor.make_brain",
                   side_effect=lambda bc: primary if getattr(bc, "kind", "") == "claude_code" else fb),
-            patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
+            patch("istota.executor._with_user_provider_key", side_effect=lambda bc, *a, **k: bc),
             patch("istota.transport.registry.task_is_stream_surface", return_value=True),
             patch("istota.notifications.delivery.send_notification", side_effect=lambda *a, **k: None),
         ]
@@ -911,7 +912,7 @@ class TestTheRequestSaysWhichBrainRunItIs:
 
         with contextmanager_chain([
             patch("istota.executor.make_brain", return_value=fb),
-            patch("istota.executor._native_with_user_key", side_effect=lambda nc, *a, **k: nc),
+            patch("istota.executor._with_user_provider_key", side_effect=lambda bc, *a, **k: bc),
         ]):
             _run_fallback(config, config.brain, "native", task, req)
 
@@ -1040,7 +1041,7 @@ class TestExecuteTaskSurvivesAFailoverRaise:
 
         with contextmanager_chain(_patch_executor() + [
             patch("istota.executor.make_brain", return_value=primary),
-            patch("istota.executor._native_with_user_key",
+            patch("istota.executor._with_user_provider_key",
                   side_effect=lambda nc, *a, **k: nc),
             patch.object(
                 TaskStreamAdapter, "finish",
@@ -1156,7 +1157,7 @@ class TestOneNoticePerTurn:
                     primary if getattr(bc, "kind", "") == "claude_code" else fb
                 ),
             ),
-            patch("istota.executor._native_with_user_key",
+            patch("istota.executor._with_user_provider_key",
                   side_effect=lambda nc, *a, **k: nc),
             patch("istota.notifications.delivery.send_notification",
                   side_effect=lambda *a, **k: None),
@@ -1293,7 +1294,7 @@ class TestTheCrossingRuleAtTheRealSeam:
         patches = _patch_executor() + [
             patch("istota.executor.make_brain", side_effect=fake_make_brain),
             patch(
-                "istota.executor._native_with_user_key",
+                "istota.executor._with_user_provider_key",
                 side_effect=lambda nc, *a, **k: nc,
             ),
             patch("istota.notifications.delivery.send_notification"),
@@ -1329,7 +1330,7 @@ class TestTheCrossingRuleAtTheRequestBuild:
         patches = _patch_executor() + [
             patch("istota.executor.make_brain", return_value=brain),
             patch(
-                "istota.executor._native_with_user_key",
+                "istota.executor._with_user_provider_key",
                 side_effect=lambda nc, *a, **k: nc,
             ),
         ]

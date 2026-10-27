@@ -20,6 +20,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from istota import setup_wizard  # noqa: E402
+from istota.llm.catalog import ModelInfo, latest_shipped_id, set_discovered  # noqa: E402
 from istota.webui import setup_app  # noqa: E402
 
 CODE = "7KQ2M-X9D4F-H3T8W-QP6ZA"
@@ -1014,11 +1015,13 @@ class TestTheMailboxCheck:
 class TestConfigFromDocument:
     def test_it_maps_what_the_setup_would_write(self):
         a = setup_wizard.ContainerAnswers(
-            user_id="ada", brain_kind="native", native_model="m", native_api_key=SENTINEL,
+            user_id="ada", brain_kind="native", native_provider="openrouter", native_model="m",
+            native_api_key=SENTINEL,
             nextcloud_url="https://cloud.example.com", nextcloud_app_password="pw",
         )
         config = config_from_document(setup_wizard.container_config_document(a, inline_credentials=True))
-        assert config.brain.native.api_key == SENTINEL
+        assert config.brain.native.provider == "openrouter"
+        assert config.providers["openrouter"].api_key == SENTINEL
         assert config.brain.native.model == "m"
         assert config.nextcloud.url == "https://cloud.example.com"
         assert config.nextcloud.app_password == "pw"
@@ -1336,20 +1339,31 @@ class TestTheModelDefaults:
         assert models == {
             "anthropic": {
                 "base_url": setup_wizard.DEFAULT_ANTHROPIC_BASE_URL,
-                "model": setup_wizard.DEFAULT_ANTHROPIC_MODEL,
+                "model": setup_wizard.default_anthropic_model(),
             },
             "openrouter": {
                 "base_url": "https://openrouter.ai/api/v1",
-                "model": setup_wizard.DEFAULT_OPENROUTER_MODEL,
+                "model": setup_wizard.default_openrouter_model(),
             },
         }
 
+    def test_the_anthropic_default_is_the_catalogues_newest_sonnet(self):
+        # No model id is written in setup; a catalogue refresh moves the default.
+        assert setup_wizard.default_anthropic_model() == latest_shipped_id("sonnet")
+
     def test_the_openrouter_default_is_the_same_model_by_its_openrouter_name(self):
-        # OpenRouter writes the version with a dot: claude-sonnet-4-6 is
-        # anthropic/claude-sonnet-4.6. Bumping one default without the other
-        # turns this red.
-        expected = "anthropic/" + re.sub(r"-(\d+)-(\d+)$", r"-\1.\2", setup_wizard.DEFAULT_ANTHROPIC_MODEL)
-        assert setup_wizard.DEFAULT_OPENROUTER_MODEL == expected
+        # OpenRouter writes the version with a dot: claude-sonnet-5-5 is
+        # anthropic/claude-sonnet-5.5.
+        expected = "anthropic/" + re.sub(r"-(\d+)-(\d+)$", r"-\1.\2", latest_shipped_id("sonnet"))
+        assert setup_wizard.default_openrouter_model() == expected
+
+    def test_the_openrouter_default_takes_the_spelling_openrouter_lists(self):
+        anthropic_id = latest_shipped_id("sonnet")
+        listed = ModelInfo(
+            id=f"anthropic/{anthropic_id}", context_window=200_000, max_output_tokens=8192, provider="openrouter",
+        )
+        set_discovered({"openrouter": [listed]})
+        assert setup_wizard.default_openrouter_model() == f"anthropic/{anthropic_id}"
 
     def test_the_terminal_wizard_offers_the_same_anthropic_default(self, tmp_path, monkeypatch):
         monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
@@ -1376,8 +1390,8 @@ class TestTheModelDefaults:
         a = setup_wizard.collect_container_answers(
             args, input_fn=answer, out=lambda *_: None, getpass_fn=lambda _prompt: "a-native-key",
         )
-        assert a.native_model == setup_wizard.DEFAULT_ANTHROPIC_MODEL
-        assert any(setup_wizard.DEFAULT_ANTHROPIC_MODEL in p for p in prompts)
+        assert a.native_model == setup_wizard.default_anthropic_model()
+        assert any(setup_wizard.default_anthropic_model() in p for p in prompts)
 
 
 class _Catalog:
@@ -1396,10 +1410,10 @@ class _Catalog:
 
 @pytest.fixture
 def catalog(monkeypatch):
-    from istota.llm import openrouter_catalog
+    from istota.llm import discovery
 
     fake = _Catalog()
-    monkeypatch.setattr(openrouter_catalog, "fetch_openrouter_catalog", fake)
+    monkeypatch.setattr(discovery, "fetch_openrouter_catalog", fake)
     return fake
 
 
@@ -1647,7 +1661,8 @@ class TestPlainWordsOnTheWeb:
         a = setup_wizard.answers_from_payload({"user_id": "ada", "brain_kind": "native"})
         messages = {e.field: e.message for e in setup_wizard.validate_container_answers(a)}
         assert "--native-model" in messages["native_model"]
-        assert "ISTOTA_BRAIN_NATIVE_API_KEY" in messages["native_api_key"]
+        # The page's preset URL names Anthropic, so the key is that provider's.
+        assert "ISTOTA_PROVIDER_ANTHROPIC_API_KEY" in messages["native_api_key"]
 
 
 class TestTheForwardedPort:
@@ -1751,7 +1766,7 @@ def _rerun(dirs, clock, *, local=False):
 
 _NATIVE_STACK = dict(
     hostname="localhost:8080", ingress="local", brain_kind="native",
-    native_model="model-x", native_api_key="native-key",
+    native_provider="anthropic", native_model="model-x", native_api_key="native-key",
 )
 _EMAIL_STACK = dict(
     hostname="localhost:8080", ingress="local", claude_code_oauth_token="oauth-token",

@@ -22,6 +22,7 @@ from istota import apply, setup_wizard
 from istota.config import SchedulerConfig, load_config
 from istota.lib import rclone_conf
 from istota.setup_wizard import (
+    DAEMON_ONLY_SECRETS,
     SECRET_NAMES,
     ContainerAnswers,
     container_secret_values,
@@ -58,6 +59,8 @@ def _full_answers(**overrides) -> ContainerAnswers:
         oauth_client_id="client-id",
         oauth_client_secret="client-secret",
         brain_kind="native",
+        native_provider="local",
+        native_provider_kind="openai_compat",
         native_base_url="https://llm.example.test/v1",
         native_model="model-x",
         native_api_key="native-key",
@@ -126,9 +129,16 @@ class TestEveryAnswerReachesItsKey:
         assert config.talk.signaling.url == "http://signaling:8080"
 
         assert config.brain.kind == "native"
-        assert config.brain.native.base_url == "https://llm.example.test/v1"
+        assert config.brain.native.provider == "local"
         assert config.brain.native.model == "model-x"
-        assert config.brain.native.api_key == "native-key"
+        # An operator's own provider: its key is inline, since compose declares
+        # secrets by fixed name.
+        assert config.providers["local"].kind == "openai_compat"
+        assert config.providers["local"].base_url == "https://llm.example.test/v1"
+        assert config.providers["local"].api_key == "native-key"
+        # Nothing the native brain needs is missing (the CLI half is a
+        # per-process answer, `resolve_process_auth`).
+        assert "native" not in config.brain.unconfigured
 
         assert config.email.enabled is True
         assert config.email.imap_host == "imap.example.test"
@@ -182,7 +192,7 @@ class TestEveryAnswerReachesItsKey:
         config = _load(tmp_path, render_container_config(a, inline_credentials=True), monkeypatch)
 
         assert config.nextcloud.app_password == "nc-app-password"
-        assert config.brain.native.api_key == "native-key"
+        assert config.providers["local"].api_key == "native-key"
         assert config.email.imap_password == "imap-password"
         assert config.web.oauth2_client_secret == "client-secret"
         assert config.web.session_secret_key == "s" * 64
@@ -229,7 +239,15 @@ class TestTheSecretFilesMatchCompose:
     @pytest.mark.parametrize("service", ["daemon", "web"])
     def test_every_istota_image_service_mounts_every_secret(self, service):
         mounted = self._compose()["services"][service].get("secrets", [])
-        assert sorted(mounted) == sorted(SECRET_NAMES)
+        # The model-listing key is read by the discovery fetch, which runs in
+        # the daemon alone, so `web` never mounts it.
+        expected = SECRET_NAMES if service == "daemon" else tuple(
+            name for name in SECRET_NAMES if name not in DAEMON_ONLY_SECRETS
+        )
+        assert sorted(mounted) == sorted(expected)
+
+    def test_only_the_model_listing_key_is_daemon_only(self):
+        assert DAEMON_ONLY_SECRETS == {"istota_anthropic_listing_key"}
 
     def test_each_secret_file_is_read_from_the_stack_secrets_dir(self):
         for name, spec in self._compose()["secrets"].items():
@@ -242,18 +260,37 @@ class TestTheSecretFilesMatchCompose:
         `istota-secrets`; every one but the two Claude Code credentials is a
         `load_config` override, and those two are read by the `claude` CLI.
         """
-        from istota.config import SERVARR_APPS, servarr_key_variable
+        from istota.config import (
+            BUILTIN_PROVIDERS,
+            SERVARR_APPS,
+            provider_headers_variable,
+            provider_key_variable,
+            servarr_key_variable,
+        )
 
         source = (REPO / "src" / "istota" / "config.py").read_text(encoding="utf-8")
         # Built per app; tests/test_config_servarr.py loads a key from each.
         servarr = {servarr_key_variable(app) for app in SERVARR_APPS}
+        # Built per provider; tests/test_llm_providers.py loads each one.
+        providers = {
+            variable(provider_id)
+            for provider_id in BUILTIN_PROVIDERS
+            for variable in (provider_key_variable, provider_headers_variable)
+        }
         for name in SECRET_NAMES:
-            if name in ("anthropic_api_key", "claude_code_oauth_token"):
+            # The `claude` CLI reads the token. `anthropic_api_key` needs no
+            # exemption: `load_config` reads it as `ANTHROPIC_API_KEY`, the
+            # transition row of `LEGACY_PROVIDER_SOURCES`.
+            if name == "claude_code_oauth_token":
                 continue
-            if name.upper() in servarr:
+            # Read as a file and never as a variable.
+            if name in DAEMON_ONLY_SECRETS:
+                continue
+            if name.upper() in servarr | providers:
                 continue
             assert f'"{name.upper()}"' in source, name
         assert servarr <= {name.upper() for name in SECRET_NAMES}
+        assert providers <= {name.upper() for name in SECRET_NAMES}
 
 
 def _args(tmp_path: Path, **kw):
@@ -266,6 +303,7 @@ def _args(tmp_path: Path, **kw):
         nextcloud_dav_prefix=None, no_nextcloud_auto_share=False, no_talk=False,
         workspace=None,
         oauth_client_id=None, no_email_login=False, brain="native",
+        native_provider="anthropic", native_provider_kind=None,
         native_base_url=None, native_model="model-x", email=False,
         imap_host=None, imap_user=None, smtp_host=None, bot_email=None, authserv_id=None,
         caldav_url=None, caldav_username=None, location=False, developer=False,
@@ -278,6 +316,78 @@ def _args(tmp_path: Path, **kw):
 
 def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
+
+
+class TestTheCliCredential:
+    """The CLI's API key is the `anthropic` provider's (`istota_provider_
+    anthropic_api_key`), the mode is written, and the model-listing key comes
+    from a file and never from the environment (the model-catalogue spec,
+    Stage 3)."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        for name in ("ISTOTA_BRAIN_NATIVE_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
+                     "ISTOTA_PROVIDER_ANTHROPIC_API_KEY", "ISTOTA_ANTHROPIC_LISTING_KEY",
+                     "ISTOTA_SETUP_SHAPE"):
+            monkeypatch.delenv(name, raising=False)
+
+    def _setup(self, tmp_path, **kw):
+        args = _args(tmp_path, brain="claude_code", native_provider=None, native_model=None, **kw)
+        assert setup_wizard.run_setup(args, out=lambda *_: None) == 0
+        secrets = tmp_path / "vm" / "secrets"
+        doc = tomllib.loads((tmp_path / "data" / "config" / "config.toml").read_text())
+        return doc, secrets
+
+    def test_an_api_key_goes_to_the_providers_file_with_the_mode(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_PROVIDER_ANTHROPIC_API_KEY", "cli-key")
+        doc, secrets = self._setup(tmp_path)
+        assert doc["brain"]["claude_code"]["auth"] == "api_key"
+        assert (secrets / "istota_provider_anthropic_api_key").read_text() == "cli-key"
+        assert (secrets / "anthropic_api_key").read_text() == ""
+
+    def test_the_legacy_variable_is_read_into_the_current_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "legacy-key")
+        doc, secrets = self._setup(tmp_path)
+        assert doc["brain"]["claude_code"]["auth"] == "api_key"
+        assert (secrets / "istota_provider_anthropic_api_key").read_text() == "legacy-key"
+
+    def test_a_token_is_subscription(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+        doc, secrets = self._setup(tmp_path)
+        assert doc["brain"]["claude_code"]["auth"] == "subscription"
+        assert (secrets / "istota_provider_anthropic_api_key").read_text() == ""
+
+    def test_a_rerun_carries_a_legacy_key_file_into_the_providers(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "legacy-key")
+        self._setup(tmp_path)
+        secrets = tmp_path / "vm" / "secrets"
+        (secrets / "istota_provider_anthropic_api_key").chmod(0o600)
+        (secrets / "istota_provider_anthropic_api_key").write_text("")
+        (secrets / "anthropic_api_key").chmod(0o600)
+        (secrets / "anthropic_api_key").write_text("stack-legacy")
+        monkeypatch.delenv("ANTHROPIC_API_KEY")
+        doc, secrets = self._setup(tmp_path, force=True)
+        assert (secrets / "istota_provider_anthropic_api_key").read_text() == "stack-legacy"
+        assert doc["brain"]["claude_code"]["auth"] == "api_key"
+
+    def test_the_listing_key_comes_from_the_named_file(self, tmp_path, monkeypatch):
+        key_file = tmp_path / "listing"
+        key_file.write_text("LIST-KEY\n")
+        _doc, secrets = self._setup(tmp_path, anthropic_model_listing_key_file=str(key_file))
+        assert (secrets / "istota_anthropic_listing_key").read_text() == "LIST-KEY"
+
+    def test_the_listing_key_is_never_read_from_the_environment(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_ANTHROPIC_LISTING_KEY", "FROM-ENV")
+        _doc, secrets = self._setup(tmp_path)
+        assert (secrets / "istota_anthropic_listing_key").read_text() == ""
+
+    def test_without_a_vm_dir_the_api_key_is_inline(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_PROVIDER_ANTHROPIC_API_KEY", "cli-key")
+        args = _args(tmp_path, vm_dir=None, brain="claude_code", native_provider=None, native_model=None)
+        assert setup_wizard.run_setup(args, out=lambda *_: None) == 0
+        doc = tomllib.loads((tmp_path / "data" / "config" / "config.toml").read_text())
+        assert doc["providers"]["anthropic"]["api_key"] == "cli-key"
+        assert doc["brain"]["claude_code"]["auth"] == "api_key"
 
 
 class TestTheRun:
@@ -298,8 +408,12 @@ class TestTheRun:
         assert _mode(vm / "secrets") == 0o700
         for name in SECRET_NAMES:
             assert _mode(vm / "secrets" / name) == 0o400, name
-        assert (vm / "secrets" / "istota_brain_native_api_key").read_text() == "native-key"
+        # The legacy variable is read as native's provider's key, and written
+        # to that provider's file; the legacy file is left empty.
+        assert (vm / "secrets" / "istota_provider_anthropic_api_key").read_text() == "native-key"
+        assert (vm / "secrets" / "istota_brain_native_api_key").read_text() == ""
         assert (vm / "secrets" / "anthropic_api_key").read_text() == ""
+        assert 'provider = "anthropic"' in config.read_text()
         assert "native-key" not in config.read_text()
         env = (vm / ".env").read_text()
         assert "COMPOSE_PROFILES=" in env and "ISTOTA_SECRETS_DIR=./secrets" in env
@@ -420,7 +534,8 @@ class TestTheRun:
             "y", "http://nextcloud", "", "", "", "Shared Files", "n", "y", "",
             "claude_code", "n", "n", "y", "y", "y", "y", "n", "n", "y", "n",
         ])
-        secrets = iter(["nc-pass", "oauth-token"])
+        # The last one is the optional model-listing key, left empty.
+        secrets = iter(["nc-pass", "oauth-token", ""])
         monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY")
         # Every opt-out module asked about, whatever extras this venv has.
         monkeypatch.setattr("istota.modules.module_available", lambda _name: True)
@@ -1660,7 +1775,10 @@ class TestARerunWritesWhatIsThere:
             _bare_args(tmp_path, yes=True, hostname="localhost:9090"), out=lambda *_: None,
         )
 
-        assert (tmp_path / "vm" / "secrets" / "istota_brain_native_api_key").read_text() == "rotated-key"
+        # This case's endpoint is an operator's own provider (no secret file),
+        # so the rotated key is written inline on its table.
+        written = tomllib.loads((tmp_path / "data" / "config" / "config.toml").read_text())
+        assert written["providers"]["native"]["api_key"] == "rotated-key"
         assert _env((tmp_path / "vm" / ".env").read_text())["NGINX_PUBLISH"] == "127.0.0.1:9090:80"
 
 

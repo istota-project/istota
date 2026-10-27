@@ -498,6 +498,9 @@ def build_argv(case: Case, root: Path, monkeypatch, *, raw: bool = False) -> lis
     root.mkdir(parents=True, exist_ok=True)
     world = _make_world(root, case)
     config = _make_config(case, world)
+    # Every golden is a subscription deployment, whose CLAUDE wrap binds the
+    # credentials file; under "api_key" it does not (tests/test_claude_cli_auth.py).
+    config.brain.claude_code.auth = "subscription"
 
     monkeypatch.setenv("HOME", str(world["home"]))
     task = db.Task(

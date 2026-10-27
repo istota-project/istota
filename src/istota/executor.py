@@ -31,13 +31,24 @@ from istota.sandbox import task_env
 from istota.rooms import speech_gate
 from istota.rooms.scopes import CHANNEL_NOTES_LABEL as CHANNEL_MEMORY_LABEL
 from istota.sandbox.claude_runtime_env import (
-    CLAUDE_RUNTIME_ENV_VARS,  # used by `_PROXY_LOOKUP_BLOCKED` below, and
-    # re-exported: the drift guard reads it beside `build_clean_env`.
+    CLAUDE_RUNTIME_ENV_VARS,  # noqa: F401 - re-exported: the drift guard
+    # reads it beside `build_clean_env`.
     without_claude_runtime_env,  # noqa: F401  — re-exported; `task_env` owns
     # the only remaining call, and `tests/test_security.py` imports both names
     # from here beside `build_clean_env`.
 )
-from .config import SERVARR_APPS, Config, servarr_key_variable
+from .llm.providers import (
+    CLI_AUTH_VARIABLE,
+    anthropic_spec,
+    cli_auth_env,
+    is_model_credential_name,
+    process_cli_auth,
+)
+from .config import (
+    SERVARR_APPS,
+    Config,
+    servarr_key_variable,
+)
 from istota.prompts import persona as operator_persona
 from istota.sandbox.plan import (
     Mount,
@@ -66,13 +77,12 @@ from .storage import (
     read_user_memory_v2,
 )
 from .brain import (
-    CANONICAL_ROLES,
     is_portable_alias,
     make_brain,
     model_namespace_for_kind,
     resolve_brain_kind,
 )
-from .brain._roles import PORTABLE_KEY
+from .brain._roles import parse_alias_overrides
 from .brain._fallback import (
     COOLDOWN_STOP_REASONS,
     TRIGGER_STOP_REASONS,
@@ -1145,6 +1155,7 @@ def build_daemon_sandbox(
     *,
     extra_ro_binds: Iterable[Path] | None = None,
     withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
+    cli_auth_mode: object = None,
 ) -> DaemonSandbox:
     """Bubblewrap for a model call that has no task behind it (ISSUE-397).
 
@@ -1244,9 +1255,15 @@ def build_daemon_sandbox(
     set of single characters, non-empty (so some binds drop) and missing
     every real scope name (so the workspace stays bound).
 
+    ``cli_auth_mode`` is the `claude` CLI's auth mode for the call, which
+    decides whether `~/.claude/.credentials.json` is bound; ``None`` takes the
+    mode this process resolved (`llm.providers.process_cli_auth`).
+
     Never raises; a failure to read the user's resources costs the resource
     binds, not the wrap.
     """
+    if cli_auth_mode is None:
+        cli_auth_mode = process_cli_auth(config)
     root, work_dir = _daemon_dirs(config, user_id)
     if isinstance(withheld_scopes, str):
         logger.error(
@@ -1307,7 +1324,7 @@ def build_daemon_sandbox(
         return build_bwrap_cmd(
             raw_cmd, config, task, is_admin, user_resources, work_dir,
             extra_ro_binds=binds, profile=SandboxProfile.CLAUDE,
-            withheld_scopes=withheld,
+            withheld_scopes=withheld, cli_auth_mode=cli_auth_mode,
         )
 
     return DaemonSandbox(_wrap, work_dir, scratch=scratch)
@@ -1476,12 +1493,45 @@ def _resolve_effort(task, config: Config) -> str:
 
     `config` is still taken, and still read by nothing here. Kept because every
     caller has it and the signature is the seam ISSUE-417 widens.
+
+    The level returned is the one asked for, never clamped: the stored effort
+    stays what the person chose (D7). Each brain clamps it to what its model
+    supports at its `execute` seam, after filling its own default, because only
+    there are the model and a defaulted effort known, on the primary and the
+    fallback alike; `_with_effort_note` records both in the trace.
     """
     task_model = (task.model or "").strip()
     task_effort = (task.effort or "").strip()
     if task_model and not task_effort:
         return ""
     return task_effort
+
+
+def _with_effort_note(trace_json: str | None, requested: str, used: str) -> str | None:
+    """``trace_json`` with an ``effort`` entry first when the clamp changed the level.
+
+    The stored effort (`tasks.effort`, `rooms.effort`) stays what was asked
+    (D7); the brain clamps it to what the model supports and reports both. This
+    is where a reader of the task sees that they differed. First in the list so
+    the composer's walk over the final turn never meets it; every trace reader
+    skips a type it does not know.
+    """
+    requested = (requested or "").strip()
+    used = (used or "").strip()
+    if not requested or requested.lower() == used.lower():
+        return trace_json
+    try:
+        entries = json.loads(trace_json) if trace_json else []
+    except (json.JSONDecodeError, TypeError):
+        return trace_json
+    if not isinstance(entries, list):
+        return trace_json
+    if used:
+        text = f"Effort {requested} was clamped to {used} for this model."
+    else:
+        text = f"Effort {requested} was dropped: this model takes no effort."
+    note = {"type": "effort", "requested": requested, "used": used, "text": text}
+    return json.dumps([note, *entries])
 
 
 def _resolve_advisor(task, config: Config) -> str:
@@ -1550,6 +1600,7 @@ def persist_brain_usage(
     """
     if usage is None:
         return
+    _note_api_key_source(config, conn, usage=usage, brain_kind=brain_kind)
     logger.info(
         "brain_usage origin=%s task_id=%s brain=%s model=%s billed_input=%d "
         "cache_read=%d cache_write=%d output=%d cost=%s basis=%s",
@@ -1583,6 +1634,43 @@ def persist_brain_usage(
         )
 
 
+#: Where the backstop records an API-key source seen under "subscription",
+#: read by doctor's `models.cli_auth`. A reserved (`_`) namespace.
+CLI_AUTH_KV_NAMESPACE = "_cli_auth"
+API_KEY_SOURCE_KV_KEY = "api_key_source_seen"
+_API_KEY_SOURCE_LOG_SECONDS = 3600
+_api_key_source_logged_at: float | None = None
+
+
+def _note_api_key_source(config: Config, conn, *, usage, brain_kind: str) -> None:
+    """The backstop: the CLI reported an API key as its credential (cost basis
+    `api`) while `[brain.claude_code] auth = "subscription"`, so some path put a
+    key in front of it. Logged at ERROR once an hour and recorded for doctor.
+    `claude_code` only: tmux reports no usage. Never raises."""
+    global _api_key_source_logged_at
+    from .usage.telemetry import COST_BASIS_API
+
+    try:
+        if brain_kind != "claude_code" or usage.cost_basis != COST_BASIS_API:
+            return
+        if process_cli_auth(config) != "subscription":
+            return
+        now = time.monotonic()
+        if _api_key_source_logged_at is None or now - _api_key_source_logged_at >= _API_KEY_SOURCE_LOG_SECONDS:
+            _api_key_source_logged_at = now
+            logger.error(
+                "The claude CLI billed an API key while [brain.claude_code] auth = "
+                '"subscription": something put an API key in front of it'
+            )
+        if conn is not None:
+            db.shared_kv_set(conn, CLI_AUTH_KV_NAMESPACE, API_KEY_SOURCE_KV_KEY, "api", "executor")
+        elif config.db_path:
+            with db.get_db(config.db_path) as own:
+                db.shared_kv_set(own, CLI_AUTH_KV_NAMESPACE, API_KEY_SOURCE_KV_KEY, "api", "executor")
+    except Exception:  # noqa: BLE001 - telemetry never fails a task
+        logger.debug("api key source backstop could not record", exc_info=True)
+
+
 def _insert_usage_row(conn, **kwargs) -> None:
     db.insert_task_usage(conn, **kwargs)
 
@@ -1612,31 +1700,74 @@ def _persist_task_usage(
     )
 
 
-def _native_with_user_key(native_config, config: Config, user_id: str):
-    """Overlay the user's per-user native-brain API key onto the native config.
+def _with_user_provider_key(brain_config, config: Config, user_id: str, provider: str | None = None):
+    """``brain_config`` with the user's own keys for the providers this task may call.
 
-    Looks up the encrypted ``native_brain``/``api_key`` secret for ``user_id``;
-    when present it replaces the instance-wide key (`[brain.native] api_key` /
-    `ISTOTA_BRAIN_NATIVE_API_KEY`), enabling per-user provider credentials in a
-    multi-user deployment. Falls back to the instance key on absence/error so a
-    missing secret never blocks the task. Returns a copy — never mutates input.
+    The provider key rule applied per user (D16): a request to provider P in
+    user U's task carries U's ``provider_keys/<P>`` secret when U has one, and
+    the deployment's key otherwise. The providers are native's own and
+    ``provider``, the task's effective provider (D22), when `[brain.native]
+    providers` lists it. A failed lookup keeps the deployment's key, so a
+    missing secret never blocks the task. Returns a copy; never mutates.
+    Internal operator calls (triage, the speech gate) never come through here.
     """
     import dataclasses
 
-    try:
-        from istota.credentials import store as secrets_store
+    from .brain import native_provider_spec, native_providers
+    from .brain._resolve import native_reach_ids
+    from .llm.providers import user_provider_key, with_user_key
 
-        key = secrets_store.get_secret(
-            config.db_path, user_id, "native_brain", "api_key"
-        )
-    except Exception:
-        logger.debug(
-            "native api key secret lookup failed for user=%s", user_id, exc_info=True
-        )
-        key = None
-    if key:
-        return dataclasses.replace(native_config, api_key=key)
-    return native_config
+    spec = native_provider_spec(brain_config)
+    if spec is None:
+        return brain_config
+    specs = native_providers(brain_config)
+    wanted = [spec.id]
+    other = provider.strip() if isinstance(provider, str) else ""
+    if other and other in specs and other != spec.id and other in native_reach_ids(brain_config):
+        wanted.append(other)
+    keys = {pid: user_provider_key(config, user_id, pid) for pid in wanted}
+    keys = {pid: key for pid, key in keys.items() if key}
+    if not keys:
+        return brain_config
+    native = brain_config.native
+    if not brain_config.provider_specs:
+        from .config import providers_for_native
+
+        _specs, provider_id = providers_for_native(native)
+        native = dataclasses.replace(native, provider=provider_id)
+    for pid, key in keys.items():
+        specs[pid] = with_user_key(specs[pid], key)
+    return dataclasses.replace(brain_config, native=native, provider_specs=specs)
+
+
+def _task_brain(task, config: Config):
+    """``(brain_config, brain)`` a task runs on: its brain kind and, for native,
+    its provider.
+
+    The kind is `tasks.brain` (the room's or job's standing pick, frozen at
+    creation), then `[brain.source_type_overrides]`, then `[brain] kind`; an
+    admitted pin also clears `fallback`. The provider is `tasks.provider`
+    through ``brain._resolve.effective_provider``: the stored provider when
+    `[brain.native] providers` lists it, else native's default, with a
+    WARNING for one the list dropped (D22). Native is bound to it, so no
+    provider is read out of the model id. The user's own key for that
+    provider (`provider_keys/<id>`) replaces the deployment's.
+    """
+    from .brain import resolve_brain_kind
+    from .brain._resolve import effective_provider
+
+    brain_config = resolve_brain_kind(task.source_type, config.brain, override=task.brain)
+    provider = effective_provider(config, brain_config.kind, getattr(task, "provider", None))
+    if brain_config.kind == "native":
+        brain_config = _with_user_provider_key(brain_config, config, task.user_id, provider)
+    return brain_config, _bound_brain(make_brain(brain_config), provider)
+
+
+def _bound_brain(brain, provider: str | None):
+    """``brain`` bound to the task's provider; a brain with no providers
+    (the CLI brains, a test's stand-in) is returned as it is."""
+    bind = getattr(brain, "bound_to", None)
+    return bind(provider) if callable(bind) else brain
 
 
 #: Stands in for a provider so ``NativeBrain`` can resolve a model name without
@@ -1674,30 +1805,51 @@ def _native_with_model(native_config, model: str):
 # the same-attempt/no-increment rerun already lives here.
 
 
-def config_alias_portable_names(config) -> set[str]:
-    """The portable alias names for the cross-brain fallback check.
+def _kind_for_namespace(namespace: str | None) -> str | None:
+    """The brain kind a pin written in ``namespace`` came from, for its provider."""
+    from .brain._resolve import BRAIN_NAMESPACES
 
-    The canonical tiers (``fast``/``general``/``smart``) plus any custom alias an
-    operator flagged ``portable = true`` in ``[models.aliases]``. A shortcut
-    (``opus``) or canonical id is deliberately absent — it pins one provider and
-    can't cross the boundary. Derived from the config's raw alias mapping so it's
-    independent of global load-order state.
-    """
-    def _truthy(raw):
-        if isinstance(raw, bool):
-            return raw
-        if isinstance(raw, str):
-            return raw.strip().lower() in {"true", "1", "yes", "on"}
+    if namespace == BRAIN_NAMESPACES["native"]:
+        return "native"
+    if namespace == BRAIN_NAMESPACES["claude_code"]:
+        return "claude_code"
+    return None
+
+
+def _target_reaches(config, target_kind: str | None, provider_id: str | None) -> bool:
+    """Whether brain ``target_kind`` can run models of ``provider_id``."""
+    from .brain._resolve import config_providers, native_provider_id, native_reach_ids
+    from .llm.providers import brain_can_run
+
+    if not provider_id or not target_kind:
         return False
+    return brain_can_run(
+        target_kind, f"{provider_id}/-", config_providers(config),
+        native_provider=native_provider_id(config), native_reach=native_reach_ids(config),
+    )
 
-    names = set(CANONICAL_ROLES)
-    aliases = getattr(getattr(config, "models", None), "aliases", None) or {}
-    for name, value in aliases.items():
-        if isinstance(value, Mapping):
-            for key, raw in value.items():
-                if str(key).lower() == PORTABLE_KEY and _truthy(raw):
-                    names.add(str(name).strip().lower())
-    return names
+
+def _crossing_provider(task, config, origin_kind: str | None, target_kind: str | None) -> str | None:
+    """The provider a fallback to ``target_kind`` runs on (D22).
+
+    Fallback between brains is always a provider change. An exact pin keeps
+    its provider when the target reaches it (``_resolve_crossing_model_effort``
+    keeps the pin then); anything else runs on the target's provider for the
+    task: the room's native provider when the target is native and the room
+    has one listed, else the target's default.
+    """
+    from .brain._resolve import effective_provider
+
+    stored = getattr(task, "provider", None)
+    raw = (getattr(task, "model", None) or "").strip()
+    portable = parse_alias_overrides(
+        getattr(getattr(config, "models", None), "aliases", None), log=False,
+    ).portable_names()
+    if raw and not is_portable_alias(raw, portable):
+        origin = effective_provider(config, origin_kind, stored)
+        if _target_reaches(config, target_kind, origin):
+            return origin
+    return effective_provider(config, target_kind, stored)
 
 
 def _resolve_crossing_model_effort(
@@ -1747,7 +1899,34 @@ def _resolve_crossing_model_effort(
     # portability is unknown rather than sending it to a wire that may not
     # take it. Same direction `commands._clear_pin_across_namespaces` takes.
     crossing = origin_namespace is None or origin_namespace != target_namespace
-    if not crossing or is_portable_alias(raw, config_alias_portable_names(config)):
+    portable = parse_alias_overrides(
+        getattr(getattr(config, "models", None), "aliases", None), log=False,
+    ).portable_names()
+    if crossing and not is_portable_alias(raw, portable):
+        # An exact pin is an id of the provider the task ran on (its stored
+        # column, D22), so the question is whether the target brain reaches
+        # that provider, not whether the namespaces match: a `claude_code`
+        # pin survives a fallback to native only when `[brain.native]
+        # providers` lists `anthropic`. A pin the target cannot reach is
+        # dropped, never carried to another provider.
+        from .brain._resolve import effective_provider
+
+        origin = effective_provider(
+            config, _kind_for_namespace(origin_namespace), getattr(task, "provider", None),
+        )
+        if _target_reaches(config, getattr(target_brain, "kind", None), origin):
+            pinned = raw[len(origin) + 1:] if origin and raw.startswith(origin + "/") else raw
+            pair = target_brain.resolve_alias(pinned)
+            if pair and pair[0]:
+                return (pair[0], pair[1] or effort, None)
+            return (target_brain.resolve_model_name(pinned), effort, None)
+        logger.info(
+            "fallback_model: %r cannot run on the target brain (%s -> %s); "
+            "using the target brain's default",
+            raw, origin_namespace, target_namespace,
+        )
+        return ("", effort, raw)
+    if not crossing or is_portable_alias(raw, portable):
         # Resolve through the target brain's own alias table. Two cases share
         # this arm, and folding them is what keeps the non-crossing branch
         # honest: a portable intent crossing a boundary must land on a valid
@@ -1892,7 +2071,7 @@ def _request_model(task, config, brain) -> str:
     not ask for and is worth a note; this is a pin that was never runnable on
     the brain the room or the routing selected, and the note has no action
     behind it — the model surfaces already refuse an id the room's brain cannot
-    run (`_room_model_allowed`), so this is the residue of a room whose brain
+    run (`webui.app._room_model_selection`), so this is the residue of a room whose brain
     moved out from under a stored pin. It is logged by the rule itself.
     """
     raw = (task.model or "").strip()
@@ -1952,12 +2131,10 @@ def _run_fallback(config, brain_config, fallback_kind, task, req, *, on_start=No
 
     try:
         fb_config = _dc.replace(brain_config, kind=fallback_kind)
+        fb_provider = _crossing_provider(task, config, brain_config.kind, fallback_kind)
         if fallback_kind == "native":
-            fb_config = _dc.replace(
-                fb_config,
-                native=_native_with_user_key(fb_config.native, config, task.user_id),
-            )
-        fb_brain = make_brain(fb_config)
+            fb_config = _with_user_provider_key(fb_config, config, task.user_id, fb_provider)
+        fb_brain = _bound_brain(make_brain(fb_config), fb_provider)
     except Exception as e:  # noqa: BLE001 — misconfigured nested block
         logger.warning("brain fallback: could not construct %s: %s", fallback_kind, e)
         return None, None, ""
@@ -2541,7 +2718,7 @@ def fallback_notice_text(primary_kind, reason, fallback_kind, model, dropped_pin
 
 
 def _build_native_completer(
-    native_config, timeout: float, *, on_usage=None, close_after_call: bool = False,
+    native_config, timeout: float, *, spec=None, on_usage=None, close_after_call: bool = False,
 ):
     """A `prompt -> raw_output | None` one-shot completer over the native provider.
 
@@ -2563,7 +2740,12 @@ def _build_native_completer(
         from istota.llm import make_provider
         from istota.llm.oneshot import make_message_completer
 
-        provider = make_provider(native_config)
+        if spec is None:
+            from .brain import native_provider_spec
+            from .config import BrainConfig
+
+            spec = native_provider_spec(BrainConfig(native=native_config))
+        provider = make_provider(spec)
         # Generous output budget: a JSON id array is short, but reasoning
         # models burn tokens thinking first and would otherwise return empty.
         completer = make_message_completer(
@@ -2734,7 +2916,7 @@ def build_oneshot_completer(
     writes a task-less ``task_usage`` row under ``origin``.
 
     ``model`` is a role alias or id resolved in the native namespace; None keeps
-    the native brain's own model, which is what context triage has always used.
+    the native brain's own model.
     ``close_after_call`` closes the native provider after each call, for a
     caller that builds a completer per call and uses it once.
     """
@@ -2744,12 +2926,17 @@ def build_oneshot_completer(
     if routed.kind != "native":
         return None
 
-    native = _native_with_user_key(routed.native, config, user_id)
+    from .brain import native_provider_spec
+
+    # The deployment's key: an internal operator call never carries a user's
+    # own provider key (D16).
+    native = routed.native
     if model:
         native = _native_with_model(native, model)
     completer = _build_native_completer(
         native,
         timeout,
+        spec=native_provider_spec(routed),
         on_usage=_oneshot_usage_sink(
             config, user_id=user_id, source_type=source_type, origin=origin,
         ),
@@ -2766,6 +2953,10 @@ def _build_triage_completer(task: "db.Task", config: Config):
     ``build_oneshot_completer`` with the task's fields: None means the CLI path,
     and an unbuildable native completer yields None so triage fails open. The
     CLI path's sink is passed separately — see ``_build_triage_usage_sink``.
+
+    ``[conversation] selection_model`` applies on native as it does on the CLI
+    path; its default ``fast`` is an unoverridden tier there, so it is still the
+    native brain's own model unless the operator remapped the tier.
     """
     return build_oneshot_completer(
         config,
@@ -2774,6 +2965,7 @@ def _build_triage_completer(task: "db.Task", config: Config):
         brain_kind=task.brain,
         timeout=config.conversation.selection_timeout,
         origin="context_triage",
+        model=config.conversation.selection_model,
     )
 
 
@@ -2846,10 +3038,10 @@ def build_speech_gate_completer(
     )
 
     def _cli(prompt: str) -> str | None:
-        from .brain import ClaudeCodeBrain
+        from .brain.claude_code import cli_model_name
         from .context import _claude_cli_triage
 
-        model = ClaudeCodeBrain().resolve_model_name(gate.model)
+        model = cli_model_name(gate.model)
         return _claude_cli_triage(
             prompt, model, gate.timeout_seconds, config, sink,
             label="Speech gate classifier",
@@ -3266,12 +3458,14 @@ def _bwrap_supports_remount_ro() -> bool:
     return supported
 
 
-def build_clean_env(config: Config) -> dict[str, str]:
+def build_clean_env(config: Config, *, user_id: str | None = None) -> dict[str, str]:
     """Build minimal environment for Claude subprocess.
 
     Returns a restricted env (PATH, HOME, PYTHONUNBUFFERED) plus any
-    configured passthrough vars. Credentials are injected per-task by
-    execute_task() and optionally routed through the skill proxy.
+    configured passthrough vars, plus the `claude` CLI's credential for this
+    process's auth mode (`llm.providers.cli_auth_env`; ``user_id``'s own
+    `anthropic` key under "api_key"). Skill credentials are injected per-task
+    by execute_task() and routed through the skill proxy.
     """
     # Ensure the active Python venv bin dir is on PATH so skills can run
     # as `python -m istota.skills.*` inside the sandbox. Use sys.prefix
@@ -3311,20 +3505,30 @@ def build_clean_env(config: Config) -> dict[str, str]:
                 "control — ignoring it. Remove it from the config.", key,
             )
             continue
+        # A model credential reaches the CLI from config alone
+        # (`[brain.claude_code] auth` and the provider's key), never because
+        # the daemon's environment happened to hold it.
+        if is_model_credential_name(key):
+            logger.warning(
+                "[security] passthrough_env_vars names %s, a model credential, "
+                "which comes from [brain.claude_code] auth and the provider's key "
+                "— ignoring it. Remove it from the config.", key,
+            )
+            continue
         val = os.environ.get(key)
         if val is not None:
             env[key] = val
-    # Pass through Claude Code auth token if present.
-    #
-    # Set for every task whatever brain will run it, because two of the three
-    # brains authenticate with it. The one that does not takes it back out —
-    # `claude_runtime_env.CLAUDE_RUNTIME_ENV_VARS` names it, `NativeBrain`
-    # applies that on the way into its tools, and `execute_task` applies it to
-    # `proxy_base_env` (ISSUE-390). A second variable hand-set here belongs in
-    # that set too, unless a model-facing subprocess has business reading it.
-    oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-    if oauth_token:
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
+    # The CLI's credential for this process's auth mode, by allowlist:
+    # the OAuth token under "subscription", the `anthropic` provider's key and
+    # base URL under "api_key", nothing without a mode. Set for every task
+    # whatever brain will run it, because two of the three brains authenticate
+    # with it; the one that does not takes it back out
+    # (`claude_runtime_env.CLAUDE_RUNTIME_ENV_VARS` names every name this adds,
+    # and `tests/test_security.py` holds that).
+    mode = process_cli_auth(config)
+    env.update(cli_auth_env(config, mode, user_id))
+    if mode is not None:
+        env[CLI_AUTH_VARIABLE] = mode
     # Propagate the admins-file path (a path, not a secret) so subprocess
     # config loads — the feeds/money skill facades call load_config() —
     # resolve the namespace-correct admins file instead of the hardcoded
@@ -3398,10 +3602,10 @@ _MODEL_CLI_PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
 #: trust, never redirect a request or carry a credential.
 _MODEL_CLI_TLS_VARS = ("SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
                        "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
-#: Where the provider *is*, on a gateway deployment, and how to authenticate
-#: to it. `ANTHROPIC_API_KEY` is the long-standing member of this group.
-_MODEL_CLI_ENDPOINT_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
-                            "ANTHROPIC_BASE_URL")
+# Where the provider is and how to authenticate to it are not topped up from
+# the daemon's environment: they come from config, through `cli_auth_env`
+# (the model-catalogue spec's "CLI auth"). An `ANTHROPIC_API_KEY` exported for
+# another tool used to move a subscription deployment onto API billing here.
 
 
 #: The reachability half of ISSUE-410, and the axis it is split on.
@@ -3440,8 +3644,8 @@ _MODEL_CLI_ENDPOINT_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
 #: through the same per-skill map ISSUE-409 used — which is the structure for
 #: a value that must reach exactly one subprocess and stay out of the
 #: manifest-lookup union, and that is what these need. `ANTHROPIC_BASE_URL`
-#: travels with them because no other skill reads it and a gateway URL can
-#: carry a key in its path.
+#: used to travel with them; the child now derives it from the `anthropic`
+#: provider's config (`llm.providers.model_caller_env`).
 #:
 #: What this leaves undone is deliberate and is **not** what ISSUE-410 filed:
 #: `feeds` fetches external URLs and would want an egress proxy. Giving it one
@@ -3456,9 +3660,7 @@ _MODEL_CLI_ENDPOINT_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
 SKILL_CLI_TLS_VARS = _MODEL_CLI_TLS_VARS
 
 #: The half that is scoped rather than shared — see above.
-SKILL_MODEL_REACHABILITY_VARS = frozenset(
-    (*_MODEL_CLI_PROXY_VARS, "ANTHROPIC_BASE_URL")
-)
+SKILL_MODEL_REACHABILITY_VARS = frozenset(_MODEL_CLI_PROXY_VARS)
 
 
 def _reachability_env(
@@ -3536,26 +3738,11 @@ def skill_model_reachability(*present: Mapping[str, str]) -> dict[str, str]:
 #: its own credential, which is a much wider door than one reader needs.
 SKILL_MODEL_CALLERS = frozenset({"code_review"})
 
-#: What such a CLI needs in order to *authenticate*, as opposed to reach.
-#:
-#: `build_model_cli_env` runs inside the skill subprocess, so the `os.environ`
-#: it reads is `proxy_base_env` plus whatever the proxy injected — not the
-#: daemon's own. The two API-key names are in that env by no route at all
-#: (`build_clean_env` is an allowlist and does not carry them), so this was
-#: broken on an API-key deployment before ISSUE-390 broke it on a subscription
-#: one; same failure, one shape earlier (ISSUE-409). Naming all three keeps
-#: the fix from being true only of the deployment it was found on.
-#:
-#: Deliberately not the rest of `_MODEL_CLI_*`: a base URL, a CA bundle and an
-#: outbound proxy are *reachability*, which ISSUE-410 handled separately —
-#: :data:`SKILL_CLI_TLS_VARS` shared with every host-side CLI, and
-#: :data:`SKILL_MODEL_REACHABILITY_VARS` scoped here beside these. This set is
-#: what a CLI needs to *authenticate*, and it stays a set of its own because
-#: the empty-value rule differs: an empty credential is not a credential,
-#: while an empty `NO_PROXY` is meaningful.
-SKILL_MODEL_CREDENTIAL_VARS = CLAUDE_RUNTIME_ENV_VARS | frozenset(
-    {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
-)
+# What such a CLI needs in order to *authenticate* is `llm.providers.
+# model_caller_env`'s copy: the mode, the CLI credential for it and the key of
+# the provider it calls. It replaced a fixed name list read out of the daemon's
+# environment (ISSUE-409's fix), and `is_model_credential_name` replaced that
+# list at its readers.
 
 
 #: Skills whose CLI needs an operator credential the daemon holds only in its
@@ -3570,21 +3757,18 @@ SKILL_MODEL_CREDENTIAL_VARS = CLAUDE_RUNTIME_ENV_VARS | frozenset(
 #: manifest value is served to the sandbox by the proxy's `credential`
 #: request wherever reveal enforcement is off (the servarr spec's decision).
 #:
-#: `code_review` builds the native brain from its own `load_config`, so the
-#: headers in the `istota_brain_native_extra_headers` secret file reach its
-#: model calls only through this copy.
+#: A model-calling skill (`code_review`) is not here: its credentials are
+#: `llm.providers.model_caller_env`'s copy, built from config.
 SKILL_DAEMON_CREDENTIAL_VARS: dict[str, frozenset[str]] = {
     "servarr": frozenset(servarr_key_variable(app) for app in SERVARR_APPS),
-    "code_review": frozenset({"ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS"}),
 }
 
 
 def skill_model_credentials(
-    *sources: Mapping[str, str], names: frozenset[str] = SKILL_MODEL_CREDENTIAL_VARS,
+    *sources: Mapping[str, str], names: frozenset[str],
 ) -> dict[str, str]:
-    """``names`` (:data:`SKILL_MODEL_CREDENTIAL_VARS` unless given), read from
-    the first source that has each one. An entry of
-    :data:`SKILL_DAEMON_CREDENTIAL_VARS` is read the same way.
+    """``names`` (an entry of :data:`SKILL_DAEMON_CREDENTIAL_VARS`), read from
+    the first source that has each one.
 
     A *copy* out of its sources, never a split, and that is the shape of the
     whole fix. Everything else in the proxy's `credential_env` got there by
@@ -3637,8 +3821,7 @@ def build_model_cli_env(config: Config) -> dict[str, str]:
     applied by `build_clean_env` and are only filled in here when absent.
     """
     env = build_clean_env(config)
-    for name in (*_MODEL_CLI_PROXY_VARS, *_MODEL_CLI_TLS_VARS,
-                 *_MODEL_CLI_ENDPOINT_VARS):
+    for name in (*_MODEL_CLI_PROXY_VARS, *_MODEL_CLI_TLS_VARS):
         # Presence, not truthiness — see `_MODEL_CLI_PROXY_VARS`.
         if name not in env and name in os.environ:
             env[name] = os.environ[name]
@@ -3672,6 +3855,9 @@ def build_stripped_env() -> dict[str, str]:
         if not any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
         and k.upper() not in _SHELL_STARTUP_ENV_VARS
         and k.upper() not in secret_file_vars
+        # An operator provider's `_EXTRA_HEADERS` matches no pattern and has
+        # no secret file, and can reach the daemon through host.env.
+        and not is_model_credential_name(k)
     }
     env["PRECOMMIT_SCANS_REQUIRED"] = "1"
     return env
@@ -3690,16 +3876,16 @@ def build_stripped_env() -> dict[str, str]:
 # ``istota-credential env ISTOTA_SECRET_KEY`` is rejected by the proxy even if
 # the var sneaks into ``credential_env``.
 #
-# ``SKILL_MODEL_CREDENTIAL_VARS`` joins it for the same reason from the other
-# direction: `task_env` puts those in ``credential_env`` on purpose, so the
-# proxy can inject them into the one skill CLI that calls a model. Injection
+# Every model credential name (`is_model_credential_name`, applied in
+# `derive_lookup_allowlist`) is refused the same way from the other direction:
+# `task_env` puts the model-caller copy in ``credential_env`` on purpose, so
+# the proxy can inject it into the one skill CLI that calls a model. Injection
 # is scoped to that skill; the lookup endpoint is not scoped to anything — its
 # allowlist is a union, and the socket is bound into the sandbox, so a name in
 # it is a name the model can ask for by hand. That would put the credential
 # back on the route ISSUE-390 closed, through a different door.
 _PROXY_LOOKUP_BLOCKED = (
     frozenset({"ISTOTA_SECRET_KEY"})
-    | SKILL_MODEL_CREDENTIAL_VARS
     # The proxy triple and the gateway URL are injected per skill for the same
     # reason the credentials are, so they need the same second door shut: an
     # outbound proxy URL can carry basic-auth userinfo, and the lookup
@@ -3787,6 +3973,20 @@ def _build_network_allowlist(
     """
     hosts: set[str] = set(_DEFAULT_NETWORK_HOSTS)
 
+    # Under "api_key" the CLI talks to the `anthropic` provider's base URL,
+    # which may be a gateway in front of Anthropic.
+    if process_cli_auth(config) == "api_key":
+        spec = anthropic_spec(config)
+        if spec is not None and spec.host:
+            from urllib.parse import urlsplit
+
+            try:
+                port = urlsplit(spec.base_url).port
+            except ValueError:
+                port = None
+            scheme_port = 80 if spec.base_url.lower().startswith("http:") else 443
+            hosts.add(f"{spec.host}:{port or scheme_port}")
+
     if config.security.network.allow_pypi:
         hosts |= _PYPI_HOSTS
 
@@ -3864,6 +4064,20 @@ def _build_network_allowlist(
 # --- Manifest-derived credential / authorization helpers (Phase 3) ---
 
 
+def _usable_specs(meta) -> list:  # noqa: ANN001
+    """A manifest's env specs minus any naming a model credential.
+
+    The manifest loader already drops those (`skills._loader._parse_env_specs`),
+    and `build_skill_env` refuses them; the derivations below read
+    `meta.env_specs` directly, so they skip them too, or a sensitive spec named
+    after a model credential would split the CLI's own credential out of the
+    task env and hand it to that skill.
+    """
+    from .skills._env import model_credential_spec  # noqa: PLC0415
+
+    return [spec for spec in meta.env_specs if not model_credential_spec(spec)]
+
+
 def derive_credential_set(skill_index: dict) -> frozenset[str]:
     """All sensitive env-var names declared by any skill manifest.
 
@@ -3876,7 +4090,7 @@ def derive_credential_set(skill_index: dict) -> frozenset[str]:
     return frozenset(
         spec.var
         for meta in skill_index.values()
-        for spec in meta.env_specs
+        for spec in _usable_specs(meta)
         if spec.sensitive and spec.var
     )
 
@@ -3914,7 +4128,7 @@ def derive_proxy_only_set(skill_index: dict) -> frozenset[str]:
     return frozenset(
         spec.var
         for meta in skill_index.values()
-        for spec in meta.env_specs
+        for spec in _usable_specs(meta)
         if spec.proxy_only and spec.var
     ) | _EXECUTOR_PROXY_ONLY_VARS
 
@@ -3971,7 +4185,7 @@ def derive_authorized_skills(
     for name, meta in skill_index.items():
         if name in authorized:
             continue
-        sensitive_specs = [s for s in meta.env_specs if s.sensitive]
+        sensitive_specs = [s for s in _usable_specs(meta) if s.sensitive]
         if not sensitive_specs:
             continue
         for spec in sensitive_specs:
@@ -4002,7 +4216,7 @@ def derive_skill_credential_map(
         meta = skill_index.get(skill)
         if not meta:
             continue
-        creds = {s.var for s in meta.env_specs if s.sensitive and s.var}
+        creds = {s.var for s in _usable_specs(meta) if s.sensitive and s.var}
         if creds:
             result[skill] = creds
     return result
@@ -4027,7 +4241,10 @@ def derive_lookup_allowlist(
     allowed: set[str] = set()
     for creds in derive_skill_credential_map(authorized_skills, skill_index).values():
         allowed |= creds
-    return allowed - _PROXY_LOOKUP_BLOCKED
+    return {
+        name for name in allowed - _PROXY_LOOKUP_BLOCKED
+        if not is_model_credential_name(name)
+    }
 
 
 def _split_credential_env(
@@ -4982,6 +5199,30 @@ def custom_system_prompt_path(config: Config) -> Path | None:
     return Path(os.path.abspath(path))
 
 
+#: `build_bwrap_cmd`'s default for ``cli_auth_mode``: this process's mode.
+_MODE_FROM_PROCESS = object()
+
+#: The root of the tmux brain's per-attempt key directories, a sibling of
+#: `.control` under the temp root, which no sandbox binds.
+CLI_KEY_DIR_NAME = ".cli-keys"
+
+
+def cli_key_dir_for_task(config: Config, task: db.Task) -> Path | None:
+    """`{temp_dir}/.cli-keys/{user_id}/task_{id}`, or None for an id that
+    cannot name its own directory or a process not under "api_key"."""
+    from .sandbox.user_scope import is_scopable_user_id
+
+    if process_cli_auth(config) != "api_key":
+        return None
+    if not is_scopable_user_id(task.user_id) or task.user_id.casefold() == CLI_KEY_DIR_NAME:
+        return None
+    try:
+        task_id = int(task.id)
+    except (TypeError, ValueError):
+        return None
+    return Path(config.temp_dir) / CLI_KEY_DIR_NAME / task.user_id / f"task_{task_id}"
+
+
 def build_bwrap_cmd(
     cmd: list[str],
     config: Config,
@@ -4999,6 +5240,8 @@ def build_bwrap_cmd(
     withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
     group_ids: "list[str] | None" = None,
     sandbox_env: dict[str, str] | None = None,
+    cli_auth_mode: object = _MODE_FROM_PROCESS,
+    cli_key_dir: Path | None = None,
 ) -> list[str]:
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
@@ -5033,6 +5276,12 @@ def build_bwrap_cmd(
         workspace_dir=workspace_dir,
         withheld_scopes=withheld_scopes,
         group_ids=group_ids,
+        # The CLI's credentials file follows the auth mode. Unless a caller
+        # names one, it is the mode this process resolved.
+        cli_auth_mode=(
+            process_cli_auth(config) if cli_auth_mode is _MODE_FROM_PROCESS else cli_auth_mode
+        ),
+        cli_key_dir=cli_key_dir,
     )
     return render_bwrap_argv(
         plan, cmd, net_proxy_sock=net_proxy_sock, user_temp_dir=user_temp_dir,
@@ -8845,6 +9094,11 @@ def execute_task(
         # mounts to NativeBrain on the shipped `claude_code -> native` reroute.
         # Everything else about the two is identical, which is why the plan is
         # built once and the profile is the only argument that differs.
+        #
+        # The tmux brain's key directory under "api_key" is named here and
+        # created by that brain alone; the plan binds it only for the CLAUDE
+        # profile, and only when it exists at wrap time.
+        _cli_key_dir = cli_key_dir_for_task(config, task)
         def _build_wrap(sandbox_profile: SandboxProfile):
             def _wrap(raw_cmd: list[str]) -> list[str]:
                 if not config.security.sandbox_enabled:
@@ -8865,6 +9119,7 @@ def execute_task(
                     withheld_scopes=_withheld,
                     group_ids=task_group_ids,
                     sandbox_env=_runtime.sandbox_env,
+                    cli_key_dir=_cli_key_dir,
                 )
 
             return _wrap
@@ -8922,32 +9177,13 @@ def execute_task(
         # the sandbox — the CLI opens it there.
         sp_path = custom_system_prompt_path(config)
 
-        from .brain import BrainRequest, resolve_brain_kind
-        # Brain routing. `tasks.brain` is the room's standing pick, frozen
-        # onto this row at creation; below it, an operator can map this task's
-        # source_type to a different kind via [brain.source_type_overrides].
-        # No-op for the common case, where both are unset. An admitted room pin
-        # also clears `fallback`, so the failover machinery below collapses to a
-        # plain primary call for that task.
-        _brain_config = resolve_brain_kind(
-            task.source_type, config.brain, override=task.brain,
-        )
+        from .brain import BrainRequest
+        _brain_config, brain = _task_brain(task, config)
         if _brain_config.kind != config.brain.kind:
             logger.info(
                 "brain routing: task %d source_type=%s -> kind=%s (default %s)",
                 task.id, task.source_type, _brain_config.kind, config.brain.kind,
             )
-        # Overlay the per-user native-brain API key (encrypted secrets) so a
-        # multi-user deployment can give each user their own provider credential.
-        if _brain_config.kind == "native":
-            import dataclasses as _dc
-            _brain_config = _dc.replace(
-                _brain_config,
-                native=_native_with_user_key(
-                    _brain_config.native, config, task.user_id
-                ),
-            )
-        brain = make_brain(_brain_config)
 
         # Filesystem confinement roots for NativeBrain's in-process file tools
         # (NB-1). Only when effective sandboxing is active — same predicate the
@@ -9084,6 +9320,7 @@ def execute_task(
             # construction — see the `.resolve()` at the write above.
             composed_system_prompt_path=system_prompt_file,
             cli_settings_path=cli_settings_file,
+            cli_key_dir=_cli_key_dir,
             # The prepared images, as paths and media types — never bytes. Each
             # brain converts at the last moment, so nothing large reaches a task
             # row or a log line and the executor learns no provider wire format.
@@ -9168,7 +9405,11 @@ def execute_task(
         success = brain_result.success
         result = brain_result.result_text
         actions = brain_result.actions_taken
-        trace = brain_result.execution_trace
+        trace = _with_effort_note(
+            brain_result.execution_trace,
+            brain_result.effort_requested,
+            brain_result.effort_used,
+        )
 
         # What the model had written when a cancel or a timeout ended the run
         # (ISSUE-372). It rides on the task rather than in the return tuple:

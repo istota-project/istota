@@ -130,7 +130,8 @@ class TestBuildCleanEnv:
             env = build_clean_env(config)
         assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-secret"
 
-    def test_every_credential_shaped_var_it_injects_is_named_in_the_strip_set(self):
+    @pytest.mark.parametrize("mode", ["subscription", "api_key"])
+    def test_every_credential_shaped_var_it_injects_is_named_in_the_strip_set(self, mode):
         """ISSUE-390's drift guard.
 
         The failure it exists to catch is a second credential-shaped variable
@@ -173,7 +174,11 @@ class TestBuildCleanEnv:
 
             __iter__ = keys
 
+        # An explicit mode, both of them: what `build_clean_env` adds is the
+        # mode's credential (`cli_auth_env`), and each mode adds different names.
         config = Config()
+        config.brain.claude_code.auth = mode
+        config.providers["anthropic"].api_key = "sentinel-provider-key"
         with patch.object(os, "environ", _AnswersEverything()):
             env = build_clean_env(config)
 
@@ -1056,9 +1061,17 @@ class TestPhase1MasterKeyEgress:
 
 class TestBuildModelCliEnv:
     """`build_model_cli_env` is the env every daemon-side `claude` spawn
-    uses: the clean allowlist plus the CLI's own auth credential."""
+    uses: the clean allowlist plus the CLI's credential for its auth mode,
+    from config (`llm.providers.cli_auth_env`), never topped up from the
+    daemon's environment."""
 
-    def test_is_clean_env_plus_api_key(self):
+    def _api_key_config(self, **kw):
+        config = Config(**kw)
+        config.brain.claude_code.auth = "api_key"
+        config.providers["anthropic"].api_key = "sk-ant-config"
+        return config
+
+    def test_is_clean_env_plus_the_config_key(self):
         with patch.dict(os.environ, {
             "PATH": "/usr/bin",
             "HOME": "/home/test",
@@ -1066,46 +1079,35 @@ class TestBuildModelCliEnv:
             "ISTOTA_SECRET_KEY": "k" * 64,
             "NC_PASS": "nextcloud-app-password",
         }, clear=True):
-            env = build_model_cli_env(Config())
-        assert env["ANTHROPIC_API_KEY"] == "sk-ant-parent"
+            env = build_model_cli_env(self._api_key_config())
+        assert env["ANTHROPIC_API_KEY"] == "sk-ant-config"
         assert env["HOME"] == "/home/test"
         assert "ISTOTA_SECRET_KEY" not in env
         assert "NC_PASS" not in env
 
-    def test_omits_api_key_when_parent_has_none(self):
-        with patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=True):
-            env = build_model_cli_env(Config())
-        assert "ANTHROPIC_API_KEY" not in env
-
-    def test_does_not_override_a_key_already_on_the_clean_env(self):
-        """The inheritance is a fallback, not an override.
-
-        Stubbing `build_clean_env` is the only way to make the two sources
-        differ: its passthrough loop reads `os.environ` too, so through the
-        public API both values are the same string by construction and the
-        guard cannot be observed.
-        """
+    def test_the_daemon_variable_is_never_topped_up_under_subscription(self):
+        config = Config()
+        config.brain.claude_code.auth = "subscription"
         with patch.dict(os.environ, {
             "PATH": "/usr/bin",
             "ANTHROPIC_API_KEY": "sk-ant-parent",
+            "ANTHROPIC_BASE_URL": "http://elsewhere",
         }, clear=True):
-            with patch(
-                "istota.executor.build_clean_env",
-                return_value={"PATH": "/usr/bin", "ANTHROPIC_API_KEY": "sk-ant-resolved"},
-            ):
-                env = build_model_cli_env(Config())
-        assert env["ANTHROPIC_API_KEY"] == "sk-ant-resolved"
+            env = build_model_cli_env(config)
+        assert "ANTHROPIC_API_KEY" not in env
+        assert "ANTHROPIC_BASE_URL" not in env
 
-    def test_passthrough_listed_key_survives(self):
+    def test_a_passthrough_listed_key_is_refused(self):
         config = Config(security=SecurityConfig(
             passthrough_env_vars=["ANTHROPIC_API_KEY"],
         ))
+        config.brain.claude_code.auth = "subscription"
         with patch.dict(os.environ, {
             "PATH": "/usr/bin",
             "ANTHROPIC_API_KEY": "sk-ant-parent",
         }, clear=True):
             env = build_model_cli_env(config)
-        assert env["ANTHROPIC_API_KEY"] == "sk-ant-parent"
+        assert "ANTHROPIC_API_KEY" not in env
 
 
 class TestClaudeCliTriageEnv:
@@ -1151,14 +1153,14 @@ class TestClaudeCliTriageEnv:
         """The triage spawn is a `claude` invocation — stripping the model
         credential along with everything else would leave it permanently
         unauthenticated, and triage fails open, so the breakage would be
-        silent. Both auth shapes have to survive."""
+        silent. The mode's own credential survives, and only that one."""
         env = self._triage_env({
             "PATH": "/usr/bin",
             "ANTHROPIC_API_KEY": "sk-ant-parent",
             "CLAUDE_CODE_OAUTH_TOKEN": "oauth-parent",
         })
-        assert env["ANTHROPIC_API_KEY"] == "sk-ant-parent"
         assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-parent"
+        assert "ANTHROPIC_API_KEY" not in env
 
     def test_child_keeps_what_it_needs_to_run(self):
         env = self._triage_env({"PATH": "/usr/bin", "HOME": "/home/test"})

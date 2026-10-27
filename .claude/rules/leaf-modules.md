@@ -93,7 +93,24 @@ The Claude Code plan's rate-limit windows, from `GET https://api.anthropic.com/a
 - **The credential is read, never written or refreshed.** The server's `setup-token` has a string sentinel expiry where the keychain blob holds epoch milliseconds, it has no refresh token, and a daemon rewriting `~/.claude/.credentials.json` would race the `claude` subprocesses it spawns.
 - **Nothing raises.** Every other entry point returns a `UsageSnapshot`, and a failure is a snapshot with a non-empty `error`, because one caller is the daemon's boot sequence. A failure is recorded beside the cache so the TTL is also the retry interval. Only failures the endpoint produced go in that shared file; "no credential here" is a fact about the calling process and is bounded process-locally.
 
-stdlib-only leaf, paths are parameters.
+stdlib-only leaf, paths are parameters. Its no-redirect, no-proxy opener is `lib/fixed_get.py`'s; `_NoRedirect`, `_build_opener` and `_urllib_transport` stay here as names its tests address.
+
+## lib/fixed_get.py
+
+One credentialed GET to a fixed URL: `get(url, headers, timeout, *, max_body, opener)` returning `(status, body, headers)`, with `NoRedirect`, `build_opener` and `describe_failure`. Shared by the two requests istota sends to `api.anthropic.com` with a credential in a header, the subscription usage poll and Anthropic's model list (`llm/discovery.py`). No redirect is followed, because `urllib`'s handler copies the credential header to the new host; the 30x comes back as its status. No proxy is read from the environment (`ProxyHandler({})`), so on a deployment that reaches the internet only through `HTTPS_PROXY` both requests fail as a transport error, which each caller reports as one. An `HTTPError` is a response, so a 401 or 403 takes the caller's status branch. A transport failure is described by its exception class alone. stdlib-only leaf.
+
+## llm/discovery.py
+
+Each provider's model list, fetched off the task path and cached (the model-catalogue spec, Stage 4). Three parsers: `parse_openrouter_models` (OpenRouter's rich `/models`), `parse_openai_models` (ids only, conservative defaults) and `parse_anthropic_models` (`GET /v1/models`: line, lifecycle, limits, capabilities, no prices; partial records, merged over the shipped file by `merge_anthropic` at install time, so the shipped prices, tiers and effort wire values stay). One cache per provider at `{db_path.parent}/model-catalogue/<id>.json`, written atomically 0600: the last successful fetch, the `ETag` (sent back as `If-None-Match`), the last error as a status or an exception class, and each model's `last_seen`.
+
+- **Who fetches.** The scheduler's `model-catalogue` gate (`refresh_all`, background, every `REFRESH_INTERVAL_SECONDS`) fetches each provider `wants_discovery` accepts whose last success is older than its `discover_ttl_hours`; `run_daemon` calls `boot_refresh` before the pool exists, fetching the providers with no cache together inside one `BOOT_BUDGET_SECONDS`. Everything else (NativeBrain, the web process) calls `install_from_cache_dir`, which swaps the catalogue's discovered layer when a cache file's mtime or size moved.
+- **`wants_discovery`.** `discover` on, then: an operator's own provider always; the built-in `openrouter` only when native names it or it has a deployment key, since every install has the built-ins and an unused one would be a request to a third party nobody configured; `anthropic` by its own rule, the model-listing key file, checked at the fetch. An `anthropic`-kind provider under another id lists nothing: the shipped file describes the built-in.
+- **Failures keep the list.** An empty 200, a non-200 (401 and 403 included) or a transport failure records the reason and keeps the cached models and `fetched_at`, so the next gate tick retries. A model missing from a later list is kept for `LAST_SEEN_WINDOW_SECONDS` (seven days) measured against the last successful fetch, so a provider down for a week loses nothing.
+- **The model-listing key.** `_read_listing_key` opens the file (`O_NOFOLLOW`) at each fetch and is the only place a `ModelListingKey` is built; `fetch_anthropic_models` is the only place it is revealed, and sends it with `anthropic-version` and `limit`/`after_id` to `ANTHROPIC_MODELS_URL`, whatever the provider's `base_url` says, through `lib/fixed_get`. `tests/test_model_listing_key_isolation.py` holds both call sites by scanning `src/istota/`. An inference key never turns Anthropic discovery on.
+- The anthropic discovered layer is reached by ref only, like the shipped one (`catalog.build_catalogue`).
+- `fetch_openrouter_catalog` (async) stays for the setup server's model suggestions, which run before any config or cache exists.
+
+Never raises into the gate or a task. `tests/conftest.py` refuses both default transports (`_anthropic_transport`, `_http_transport`), so a test injects one.
 
 ## lib/image_sniff.py
 
