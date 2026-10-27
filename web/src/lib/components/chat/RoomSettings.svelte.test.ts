@@ -138,9 +138,12 @@ const CLAUDE: SelectableBrain = {
   label: 'Claude Code',
   model_namespace: 'anthropic',
 };
-const TMUX: SelectableBrain = {
-  kind: 'tmux_claude',
-  label: 'Tmux Claude',
+/** No two shipped kinds share a namespace, but the modal reads namespaces from
+ *  the server rather than knowing the kinds, so a same-namespace move is still
+ *  a case it must get right. This stands in for a second anthropic brain. */
+const SECOND_ANTHROPIC: SelectableBrain = {
+  kind: 'second_anthropic',
+  label: 'Second Anthropic',
   model_namespace: 'anthropic',
 };
 const NATIVE: SelectableBrain = {
@@ -150,7 +153,7 @@ const NATIVE: SelectableBrain = {
 };
 /** Every kind the server knows, which is what `brain_namespaces` carries —
  *  deliberately wider than whatever a given test puts on the menu. */
-const ALL_BRAINS = [CLAUDE, TMUX, NATIVE];
+const ALL_BRAINS = [CLAUDE, SECOND_ANTHROPIC, NATIVE];
 
 /** Pick an option out of a `Select`, the way bits-ui actually listens for it.
  *  A plain `click` on the item opens nothing and selects nothing — the item
@@ -419,12 +422,12 @@ describe('RoomSettings — brain', () => {
 
   it('leaves the model select alone for a move inside one namespace', async () => {
     // The converse, and what stops the assertion above passing against a modal
-    // that disables on any brain change at all. `claude_code` and `tmux_claude`
-    // share the anthropic namespace, so the pin survives the move.
-    offer([CLAUDE, TMUX]);
+    // that disables on any brain change at all. Both brains here share the
+    // anthropic namespace, so the pin survives the move.
+    offer([CLAUDE, SECOND_ANTHROPIC]);
     models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
     await mountSettled(room({ brain: 'claude_code', model: 'claude-opus-5' }));
-    await pick(BRAIN, 'Tmux Claude');
+    await pick(BRAIN, 'Second Anthropic');
     const model = modelField();
     expect(model.disabled).toBe(false);
     expect(screen.queryByText(CROSSING_NOTE)).toBeNull();
@@ -439,7 +442,7 @@ describe('RoomSettings — brain', () => {
     // The commonest change there is, and the one the first cut got wrong: the
     // server resolves an absent pin through `resolve_brain_kind` to the
     // deployment's real namespace, so anthropic to anthropic clears nothing.
-    offer([CLAUDE, TMUX], CLAUDE);
+    offer([CLAUDE, SECOND_ANTHROPIC], CLAUDE);
     models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
     await mountSettled(room({ brain: null, model: 'claude-opus-5' }));
     await pick(BRAIN, 'Claude Code');
@@ -476,11 +479,11 @@ describe('RoomSettings — brain', () => {
   });
 
   it('reads a pin the operator dropped from the allowlist off the wider map', async () => {
-    // `tmux_claude` is not on the menu, and the server still resolves it — so
+    // `second_anthropic` is not on the menu, and the server still resolves it — so
     // moving to `claude_code` stays inside anthropic and keeps the pin.
     offer([CLAUDE, NATIVE], CLAUDE);
     models.mockResolvedValue(catalogue(['anthropic/claude-opus-5']));
-    await mountSettled(room({ brain: 'tmux_claude', model: 'claude-opus-5' }));
+    await mountSettled(room({ brain: 'second_anthropic', model: 'claude-opus-5' }));
     await pick(BRAIN, 'Claude Code');
     const model = modelField();
     expect(model.disabled).toBe(false);

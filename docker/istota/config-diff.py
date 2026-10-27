@@ -76,8 +76,8 @@ from typing import Any
 #: field, and withholding an OAuth2 *client id* is the accepted cost of the rule
 #: above — ``admin_config_view`` redacts it too, for the same reason. It also
 #: catches ``developer.author_credit`` and ``email.authserv_id`` on the letters
-#: rather than the meaning, and ``pass`` catches ``passthrough_env_vars`` and the
-#: two ``bypass_*`` tmux markers. Those five are accepted false positives, named
+#: rather than the meaning, and ``pass`` catches ``passthrough_env_vars``. Those
+#: three are accepted false positives, named
 #: here so the next reader does not read one as a defect: ``admin_config_view``
 #: buys them back with a ``NON_SECRET_KEYS`` allowlist and this module
 #: deliberately has none, because an allowlist is fail-open and the thing it

@@ -1,7 +1,7 @@
 """Three top-level keys moved into the section that reads them.
 
-`advisor_model` is the claude CLI's (`[brain.claude_code]`, read by that brain
-and tmux), `custom_system_prompt` is every brain's (`[brain]`), and
+`advisor_model` is the claude CLI's (`[brain.claude_code]`, read by that
+brain), `custom_system_prompt` is every brain's (`[brain]`), and
 `[[briefing_shared_blocks]]` is the briefings module's
 (`[[briefings.shared_blocks]]`). The old spellings still load, rewritten before
 the walk by `normalize_legacy_document`.

@@ -417,10 +417,10 @@ class TestRecordInboundRoomBrain:
             tid = ingest_message(conn, config, IncomingMessage(
                 user_id="alice", text="hi", source_type="talk", surface="talk",
                 channel_token="tk1", channel_name="#room",
-                brain="tmux_claude",
+                brain="claude_code",
             ))
         with db.get_db(db_path) as conn:
-            assert db.get_task(conn, tid).brain == "tmux_claude"
+            assert db.get_task(conn, tid).brain == "claude_code"
 
 
 # =============================================================================

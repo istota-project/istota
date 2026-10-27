@@ -138,9 +138,8 @@ _COMMAND_ALIASES: dict[str, str] = {
 }
 
 # Brain kinds that can actually be steered mid-flight today (`!steer`). A brain
-# may *declare* `supports_steering` before its live wiring lands (tmux), so the
-# command layer gates on this explicit v1 allowlist as well: flipping tmux on
-# later is a one-line change once its paste path exists.
+# may *declare* `supports_steering` before its live wiring lands, so the
+# command layer gates on this explicit v1 allowlist as well.
 _STEERABLE_KINDS: frozenset[str] = frozenset({"native"})
 
 
@@ -407,10 +406,7 @@ def _model_namespace(brain_config) -> str | None:
     clearing rule is to drop a pin whose portability could not be established.
 
     A **lookup** since ISSUE-417: `model_namespace` is a class attribute, and
-    constructing a brain to read one is not free — `TmuxClaudeBrain.__init__`
-    shells out to the installed `claude` and warns on a version mismatch, so
-    running `!brain` on a tmux deployment emitted operator-facing noise about a
-    question that never needed an instance. The `try` stays because this is
+    constructing a brain to read one is not free. The `try` stays because this is
     reached from the Talk poll loop, but `model_namespace_for_kind` does not
     raise; it is a belt for a caller passing something odd.
     """
@@ -726,9 +722,9 @@ def _cancel_one(ctx: CommandContext, task_id: int) -> str:
         # visibly stopped the task (ISSUE-257). kill_process_group falls back
         # to the single process when the pid leads no group of its own, so a
         # recorded pid that is somebody else's child can never resolve to their
-        # group. The streaming CLI child and a tmux pane lead their groups, so
-        # a tmux `!stop` takes the pane's whole command tree; the non-streaming
-        # CLI child does not, and is signalled alone. Only the scheduler's own
+        # group. The streaming CLI child leads its group, so `!stop` takes its
+        # whole command tree; the non-streaming CLI child does not, and is
+        # signalled alone. Only the scheduler's own
         # process signals: from the web container the pid is another PID
         # namespace's, and `cancel_requested` carries the stop (ISSUE-701).
         signal_task_worker(pid_row["worker_pid"], signal.SIGTERM)
@@ -1093,12 +1089,6 @@ def _steer_refusal(kind: str) -> str:
             "can't be steered mid-flight. Use `!stop` to cancel, or wait for it "
             "to finish and reply normally."
         )
-    if kind == "tmux_claude":
-        return (
-            "This task is running under the tmux brain, which isn't steerable "
-            "yet. Use `!stop` to cancel, or wait for it to finish and reply "
-            "normally."
-        )
     return (
         f"This task's brain (`{kind}`) can't be steered mid-flight. Use `!stop` "
         "to cancel, or wait for it to finish and reply normally."
@@ -1140,8 +1130,8 @@ async def cmd_steer(ctx: CommandContext):
     # Steerability. Resolve the brain this task actually runs under — its own
     # pinned kind first (`tasks.brain`, filled from the room when the task was
     # created), then `source_type_overrides` — and gate on the v1 allowlist, since
-    # a brain may declare `supports_steering` before its live wiring exists
-    # (tmux). Reading the task's column rather than the deployment default is
+    # a brain may declare `supports_steering` before its live wiring exists.
+    # Reading the task's column rather than the deployment default is
     # what makes the refusal name the brain this room actually runs.
     #
     # Not a one-way improvement, and the residue is recorded rather than implied.
@@ -1671,8 +1661,8 @@ def _clear_pin_across_namespaces(
     `rooms.model` holds a canonical id resolved in one brain's namespace, and
     the room does not store the alias that produced it — so an id that crossed
     from `anthropic` to `openai_compat` is not re-resolvable, only unrunnable.
-    A move *within* a namespace (`claude_code` ⇄ `tmux_claude`) keeps the pin,
-    which is correct: the same id runs under both.
+    A move *within* a namespace keeps the pin, which is correct: the same id
+    runs under both.
 
     Returns the lines to add to the reply, empty when nothing was cleared, so
     the caller says what it did rather than doing it silently. Writes nothing

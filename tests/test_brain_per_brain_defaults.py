@@ -18,7 +18,6 @@ The `_RecordingBrain` + `_config` + `_run` trio is the one from
 `BrainRequest` the executor built.
 """
 
-import re
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,7 +41,6 @@ from istota.config import (
     Config,
     NativeBrainConfig,
     SecurityConfig,
-    TmuxBrainConfig,
     load_config,
 )
 
@@ -335,15 +333,13 @@ class TestTheLegacyKeysMigrate:
     upgrade.
     """
 
-    def test_the_top_level_model_fills_both_cli_brains(self, tmp_path):
+    def test_the_top_level_model_fills_the_cli_brain(self, tmp_path):
         config = _load(tmp_path, 'model = "claude-opus-5"\n')
         assert config.brain.claude_code.model == "claude-opus-5"
-        assert config.brain.tmux.model == "claude-opus-5"
 
-    def test_the_top_level_effort_fills_both_cli_brains(self, tmp_path):
+    def test_the_top_level_effort_fills_the_cli_brain(self, tmp_path):
         config = _load(tmp_path, 'effort = "high"\n')
         assert config.brain.claude_code.effort == "high"
-        assert config.brain.tmux.effort == "high"
 
     def test_an_explicit_block_value_wins(self, tmp_path):
         """The new spelling always wins; the migration only fills a gap."""
@@ -356,7 +352,6 @@ class TestTheLegacyKeysMigrate:
             """,
         )
         assert config.brain.claude_code.model == "claude-haiku-4-5"
-        assert config.brain.tmux.model == "claude-opus-5"
 
     def test_the_migration_warns(self, tmp_path, caplog):
         with caplog.at_level("WARNING", logger="istota.config"):
@@ -388,14 +383,13 @@ class TestTheLegacyKeysMigrate:
     def test_an_absent_top_level_leaves_the_blocks_empty(self, tmp_path):
         config = _load(tmp_path, "[brain]\nkind = \"claude_code\"\n")
         assert config.brain.claude_code.model == ""
-        assert config.brain.tmux.model == ""
 
 
 class TestTheConfiguredDefaultLookup:
     """`configured_default_model_effort` — a lookup, not a construction.
 
-    Its callers only report the default; building a brain to ask costs a CLI
-    version probe per task on the tmux kind and a provider client on native.
+    Its callers only report the default; building a brain to ask can probe its
+    binary, and costs a provider client on native.
     """
 
     def test_it_reads_the_block_the_kind_names(self):
@@ -404,13 +398,6 @@ class TestTheConfiguredDefaultLookup:
             claude_code=ClaudeCodeBrainConfig(model="claude-opus-5", effort="high"),
         )
         assert configured_default_model_effort(cfg) == ("claude-opus-5", "high")
-
-    def test_tmux_reads_the_tmux_block(self):
-        """The one place kind and block name disagree."""
-        cfg = BrainConfig(
-            kind="tmux_claude", tmux=TmuxBrainConfig(model="claude-opus-5")
-        )
-        assert configured_default_model_effort(cfg) == ("claude-opus-5", "")
 
     def test_native_reads_the_native_block(self):
         cfg = BrainConfig(
@@ -488,46 +475,6 @@ class TestTheProtocolAndTheLookupAgree:
         getattr(cfg, block).model = "smart" if kind != "native" else "vendor/model"
         brain = make_brain(cfg)
         assert brain.effective_default_model() == brain.resolve_model_name(brain.default_model)
-
-
-class TestTheTmuxBrainBorrowsOnlyModelAndEffort:
-    """`TmuxClaudeBrain` hands its own `[brain.tmux]` block to `ClaudeCodeBrain`.
-
-    That works because the only attributes `ClaudeCodeBrain` reads off a config
-    are `model` and `effort`, and `TmuxBrainConfig` declares both. Every read is
-    a `getattr` with a swallowing default, so if it later reads anything else —
-    `subscription_usage` is the obvious candidate, and it lives on the *other*
-    dataclass — the tmux-composed instance would silently take the default
-    instead of the operator's value, with no attribute error and nothing red.
-
-    This pins the premise rather than the consequence: it fails when the set of
-    attributes read off `_config` grows, which is the moment to decide whether
-    to pass a narrower object instead.
-    """
-
-    def test_it_reads_only_model_and_effort_off_its_config(self):
-        from istota.brain import claude_code as cc
-        from tests.support.drift import source_of
-
-        source = source_of(cc.ClaudeCodeBrain)
-        read = set(re.findall(r'self\._config,\s*"([a-z_]+)"', source))
-        read |= set(re.findall(r"self\._config\.([a-z_]+)", source))
-        assert read <= {"model", "effort"}, (
-            "ClaudeCodeBrain now reads "
-            f"{sorted(read - {'model', 'effort'})} off its config, which "
-            "TmuxClaudeBrain does not supply — it passes a TmuxBrainConfig. "
-            "Pass a narrower object, or add the field to both blocks."
-        )
-
-    def test_the_tmux_block_supplies_what_is_read(self):
-        brain = make_brain(
-            BrainConfig(
-                kind="tmux_claude",
-                tmux=TmuxBrainConfig(model="claude-opus-5", effort="high"),
-            )
-        )
-        assert brain.default_model == "claude-opus-5"
-        assert brain.default_effort == "high"
 
 
 class TestTheEffortTheAttemptRanWith:

@@ -39,7 +39,8 @@ MAX_OUTPUT_CHARS = 64 * 1024
 
 REMOVED_LINE = "[a line holding a credential value was removed]"
 
-#: The brain kinds that run Claude Code in the image.
+#: The brain kinds that run Claude Code in the image. The handoff reads the raw
+#: document, where the retired `tmux_claude` still means `claude_code`.
 _CLAUDE_CODE_KINDS = frozenset({"claude_code", "tmux_claude"})
 
 

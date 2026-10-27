@@ -1,7 +1,7 @@
 """`WebFetch` is available to every user, and an operator can take it back.
 
 The native brain's `WebFetch` runs in the daemon's own network namespace,
-outside the CONNECT allowlist a `claude_code` or `tmux_claude` task is held to.
+outside the CONNECT allowlist a `claude_code` task is held to.
 That asymmetry used to be answered with an identity gate: `build_allowed_tools`
 withheld the tool from a non-admin whatever `[brain.native.web_fetch] enabled`
 said, and `NativeBrain._build_tools` filters its in-process tool surface by

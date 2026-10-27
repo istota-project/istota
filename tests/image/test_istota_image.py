@@ -377,7 +377,6 @@ class TestGroupBTheRuntime:
         [
             "bwrap --version",
             "claude --version",
-            "tmux -V",
             "sqlite3 --version",
             "uv --version",
             "gitleaks git --help",
@@ -393,10 +392,8 @@ class TestGroupBTheRuntime:
 
     @pytest.mark.parametrize("script", CONSOLE_SCRIPTS)
     def test_the_console_script_resolves_on_the_default_path(self, istota_image, script):
-        # This pins the purpose of the Dockerfile's `ENV PATH` line. Without it
-        # the tmux brain shells out and sees "istota-skill: command not found",
-        # because a per-process PATH injection does not survive the interactive
-        # TUI re-initializing its profile. No `uv run`, no profile, on purpose.
+        # This pins the purpose of the Dockerfile's `ENV PATH` line: a console
+        # script resolves on the default PATH. No `uv run`, no profile, on purpose.
         #
         # `command -v` rather than `--help`: `istota-skill` is a dispatcher that
         # takes a skill name, so it exits 1 on `--help` while resolving

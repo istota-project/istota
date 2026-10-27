@@ -721,7 +721,7 @@ class TestGrouping:
 
 class TestUnmeasuredTaskCount:
     def test_counts_tasks_with_no_usage_row(self, db_conn):
-        """A tmux_claude task spends real tokens and writes no row. Counting it
+        """A task that wrote no usage row still spent real tokens. Counting it
         as zero-cost would make every average lie."""
         measured = db.create_task(db_conn, prompt="p", user_id="alice")
         unmeasured = _ran(db_conn, db.create_task(db_conn, prompt="p", user_id="alice"))
@@ -796,15 +796,16 @@ class TestUnmeasuredTaskCount:
             db_conn, since=since, source_type="talk") == 1
 
     def test_scopes_by_resolved_brain_kind(self, db_conn):
-        """ISSUE-681: `--brain native` must not count a tmux task. The kind
-        is the resolver's answer, so a source-type override and a room pin
-        both count, and a pin the operator does not offer falls through."""
+        """ISSUE-681: `--brain native` must not count a claude_code task. The
+        kind is the resolver's answer, so a source-type override and a room pin
+        both count, and a pin the operator does not offer falls through: here a
+        stale row still holding the retired `tmux_claude`."""
         from istota.config import BrainConfig
 
         brain = BrainConfig(
             kind="native",
-            source_type_overrides={"scheduled": "tmux_claude"},
-            room_selectable=["tmux_claude"],
+            source_type_overrides={"scheduled": "claude_code"},
+            room_selectable=["claude_code"],
         )
         _ran(db_conn, db.create_task(
             db_conn, prompt="p", user_id="alice", source_type="talk"))
@@ -812,19 +813,19 @@ class TestUnmeasuredTaskCount:
             db_conn, prompt="p", user_id="alice", source_type="scheduled"))
         _ran(db_conn, db.create_task(
             db_conn, prompt="p", user_id="alice", source_type="talk",
-            brain="tmux_claude"))
+            brain="claude_code"))
         _ran(db_conn, db.create_task(
             db_conn, prompt="p", user_id="alice", source_type="talk",
-            brain="claude_code"))  # not room_selectable: resolves to native
+            brain="tmux_claude"))  # not room_selectable: resolves to native
         db_conn.commit()
 
         since = _sql_datetime(NOW - timedelta(days=7))
         count = db.unmeasured_task_count
         assert count(db_conn, since=since, brain_kind="native",
                      brain_config=brain) == 2
-        assert count(db_conn, since=since, brain_kind="tmux_claude",
+        assert count(db_conn, since=since, brain_kind="claude_code",
                      brain_config=brain) == 2
-        assert count(db_conn, since=since, brain_kind="tmux_claude",
+        assert count(db_conn, since=since, brain_kind="claude_code",
                      brain_config=brain, source_type="talk") == 1
 
     def test_a_brain_filter_needs_the_config_it_resolves_against(self, db_conn):

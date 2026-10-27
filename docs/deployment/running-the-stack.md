@@ -192,16 +192,6 @@ smart = "..."
 
 This only changes behaviour if you pointed a role at something other than `[brain.native] model` — an unmapped role already falls back to the single configured model, so an install that left all three the same loses only the warning.
 
-The same goes for any install running `kind = "tmux_claude"` created before ISSUE-362. That brain used to fail over to `claude_code` with nothing configured; failover is explicit now, for every brain kind. A `[brain]` block with no `fallback` key has no failover at all — a tmux launch failure or a usage limit fails the task — and logs one INFO line per process start saying so. To keep the old behaviour, write:
-
-```toml
-[brain]
-kind = "tmux_claude"
-fallback = "claude_code"
-```
-
-Having no failover is a valid choice now, which is why the INFO line exists.
-
 ### The repository-layout migration does not apply here
 
 `python -m istota.maintenance.repos_relocate` moves developer clones from one shared tree into per-user subtrees. The old bare-metal role ran it on every deploy. The stack does not, and does not need to: the old environment-rendered config left `repos_dir` empty and never shipped a value, so a stack installed before the per-user split has no clones in the old layout to move. A bare-metal install brought over with `istota-stack import-bare-metal` was already in the per-user layout, since its role ran the migration, and the import copies the clones as they are. `istota setup` writes `repos_dir = "/data/repos"` when the developer skill is on, which is the per-user layout from the start.

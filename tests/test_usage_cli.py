@@ -421,7 +421,7 @@ class TestFiltersAndWindow:
     def test_the_trailer_survives_a_window_with_no_usage_rows(
         self, seeded, capsys
     ):
-        """An all-tmux window has no usage rows, which is exactly when the
+        """A window whose tasks all wrote no usage row is exactly when the
         unmeasured count matters; the early return used to skip it."""
         with db.get_db(seeded.db_path) as conn:
             _ran_task(conn, user_id="dave")
@@ -432,18 +432,18 @@ class TestFiltersAndWindow:
 
     def test_the_counter_takes_the_source_and_brain_filters(self, seeded, capsys):
         """ISSUE-681: the trailer describes the same tasks as the table, so
-        `--brain native` does not count a task that resolves to tmux."""
+        `--brain native` does not count a task that resolves to claude_code."""
         seeded.brain.kind = "native"
-        seeded.brain.source_type_overrides = {"scheduled": "tmux_claude"}
+        seeded.brain.source_type_overrides = {"scheduled": "claude_code"}
         with db.get_db(seeded.db_path) as conn:
             _ran_task(conn, user_id="alice", source_type="talk")
             _ran_task(conn, user_id="alice", source_type="scheduled")
 
         _, out = _run(capsys, brain="native", json=True)
         assert json.loads(out)["unmeasured_tasks"] == 1
-        _, out = _run(capsys, brain="tmux_claude", json=True)
+        _, out = _run(capsys, brain="claude_code", json=True)
         assert json.loads(out)["unmeasured_tasks"] == 1
-        _, out = _run(capsys, source="talk", brain="tmux_claude", json=True)
+        _, out = _run(capsys, source="talk", brain="claude_code", json=True)
         assert json.loads(out)["unmeasured_tasks"] == 0
         _, out = _run(capsys, source="talk", origin="task", json=True)
         assert json.loads(out)["unmeasured_tasks"] == 1

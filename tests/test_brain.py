@@ -332,18 +332,6 @@ class TestCliSettingsFlags:
         )
         assert flags[flags.index("--setting-sources") + 1] == "user"
 
-    def test_the_tmux_launch_carries_both(self, tmp_path):
-        from istota.brain.claude_code import build_claude_cli_flags
-        from istota.brain.tmux_claude import _TMUX_UNSUPPORTED_FLAGS
-
-        path = tmp_path / "cli_settings.json"
-        flags = build_claude_cli_flags(
-            self._req(tmp_path, settings_path=path),
-            unsupported=_TMUX_UNSUPPORTED_FLAGS,
-        )
-        assert flags[flags.index("--settings") + 1] == str(path)
-        assert "--setting-sources" in flags
-
 
 class TestComposedSystemPromptFlag:
     """`--append-system-prompt-file` carries Istota's composed system half.
@@ -455,24 +443,6 @@ class TestComposedSystemPromptFlag:
         assert "--disallowedTools" not in flags
         assert flags[flags.index("--append-system-prompt-file") + 1] == str(composed)
 
-    def test_unsupported_drops_the_flag_and_warns(self, tmp_path, caplog):
-        """Exercised independently of the production tmux set, which keeps the
-        flag supported. This is the shared helper's own drop behaviour."""
-        import logging
-
-        from istota.brain import claude_code
-
-        claude_code._WARNED_UNSUPPORTED_FLAGS.clear()
-        _, composed = self._files(tmp_path)
-        with caplog.at_level(logging.WARNING):
-            flags = claude_code.build_claude_cli_flags(
-                self._req(tmp_path, composed=composed),
-                unsupported=frozenset({"--append-system-prompt-file"}),
-            )
-        assert "--append-system-prompt-file" not in flags
-        assert str(composed) not in flags
-        assert any("unsupported_flag" in r.message for r in caplog.records)
-
     @pytest.mark.parametrize("streaming", [False, True])
     def test_the_headless_argv_carries_both_flags(self, tmp_path, streaming):
         custom, composed = self._files(tmp_path)
@@ -492,7 +462,7 @@ class TestRootSkipPermissionsEnv:
     """`claude --dangerously-skip-permissions` is refused under root/sudo unless
     IS_SANDBOX=1 signals an external isolation boundary (the Docker
     container-as-sandbox case). The headless brain sets it for tool-bearing
-    tasks, mirroring the tmux brain."""
+    tasks."""
 
     def _execute_capturing_env(self, tmp_path, *, root, allowed_tools, env=None):
         from unittest.mock import patch

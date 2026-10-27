@@ -95,12 +95,11 @@ ERROR_CODES = (
 )
 
 #: The brain kinds that run the `claude` CLI, and so only the `anthropic` provider.
-CLI_KINDS = frozenset({"claude_code", "tmux_claude"})
+CLI_KINDS = frozenset({"claude_code"})
 
 #: The alias namespace each brain kind resolves names in.
 BRAIN_NAMESPACES: dict[str, str] = {
     "claude_code": "anthropic",
-    "tmux_claude": "anthropic",
     "native": "openai_compat",
 }
 

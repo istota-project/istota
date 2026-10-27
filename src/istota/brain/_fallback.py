@@ -11,12 +11,7 @@ Two pieces live here:
   instead of paying a failed primary attempt each time; the cooldown auto-resets
   when a primary probe succeeds.
 
-This breaker is deliberately distinct from ``tmux_claude._BREAKER`` (which
-governs tmux's launch-failure fast-fail). The two compose: tmux fails fast →
-executor sees ``fallback`` (not a cooldown reason) → keeps probing tmux;
-a ``usage_limit`` from *any* primary opens *this* breaker → skips the primary
-for the cooldown. Kept executor-agnostic (no ``Config``) so the executor owns
-alert dispatch.
+Kept executor-agnostic (no ``Config``) so the executor owns alert dispatch.
 """
 
 from __future__ import annotations
@@ -34,13 +29,12 @@ logger = logging.getLogger(__name__)
 
 # The stop_reasons that reroute *this attempt* to the fallback brain.
 # ``transient_api_error`` is added conditionally (fallback_on_transient).
-TRIGGER_STOP_REASONS: frozenset[str] = frozenset({"usage_limit", "not_found", "fallback"})
+TRIGGER_STOP_REASONS: frozenset[str] = frozenset({"usage_limit", "not_found"})
 
 # The stop_reasons that open the availability breaker (skip the primary on
 # subsequent tasks). Only genuinely persistent conditions — a quota window is
-# hours; a missing binary won't reappear mid-run. ``fallback`` is excluded so
-# tmux's own probing cadence (its launch _CircuitBreaker) is preserved;
-# ``transient_api_error`` is excluded (transient by definition).
+# hours; a missing binary won't reappear mid-run. ``transient_api_error`` is
+# excluded (transient by definition).
 COOLDOWN_STOP_REASONS: frozenset[str] = frozenset({"usage_limit", "not_found"})
 
 # The shortest window a caller-supplied deadline may produce. A quota that
@@ -53,23 +47,17 @@ COOLDOWN_STOP_REASONS: frozenset[str] = frozenset({"usage_limit", "not_found"})
 MIN_COOLDOWN_SECONDS: float = 60.0
 
 # The brain kinds whose ``usage_limit`` is the Claude subscription's. The reset
-# hint comes from Anthropic's own usage endpoint, so it describes these two and
+# hint comes from Anthropic's own usage endpoint, so it describes these and
 # nothing else — a ``native`` brain's provider has its own quota on its own
 # clock, and reading this one for it would be a guess wearing a number.
-SUBSCRIPTION_BRAIN_KINDS: frozenset[str] = frozenset({"claude_code", "tmux_claude"})
+SUBSCRIPTION_BRAIN_KINDS: frozenset[str] = frozenset({"claude_code"})
 
 
 def effective_fallback_kind(brain_config) -> str | None:
     """The configured ``[brain] fallback`` for ``brain_config``, or None.
 
     Failover happens only where an operator named a kind; every brain kind is
-    treated alike. ``tmux_claude`` used to resolve to ``claude_code`` here with
-    nothing configured — a shim from before ``[brain] fallback`` existed — which
-    inverted what an empty setting meant (there was no value of ``fallback``
-    that turned failover off on a tmux deployment) and made
-    ``_validate_brain_fallback``'s two "disabling fallback" warnings false:
-    blanking the field is what activated the implicit target. Removed in
-    ISSUE-362. Kept out of ``config.py`` so brain-kind logic doesn't leak into
+    treated alike (ISSUE-362 removed the last implicit target). Kept out of ``config.py`` so brain-kind logic doesn't leak into
     config.
 
     A fallback equal to this config's own ``kind`` resolves to None, because
@@ -77,7 +65,7 @@ def effective_fallback_kind(brain_config) -> str | None:
     only at config load, because ``brain_config`` may be a *routed* config:
     ``resolve_brain_kind`` returns ``replace(brain_config, kind=target)`` for a
     ``source_type_overrides`` entry, inheriting ``fallback``. So
-    ``kind = "claude_code"`` routing ``scheduled`` to tmux with
+    ``kind = "claude_code"`` routing ``scheduled`` to native with
     ``fallback = "claude_code"`` is a self-fallback for an interactive task and a
     real target for a scheduled one, and only the resolved config can tell them
     apart. Config load keeps its own warning for the case where *no* kind the

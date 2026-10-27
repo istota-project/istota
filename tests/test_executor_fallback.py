@@ -47,10 +47,10 @@ class _FakeBrain:
         self._resolve_map = resolve_map or {}
         # name -> (model, effort) — the fallback brain's namespace resolution.
         self._resolve_alias_map = resolve_alias_map or {}
-        # Mirrors the real brains: claude_code/tmux_claude share "anthropic",
-        # native is "openai_compat".
+        # Mirrors the real brains: claude_code is "anthropic", native is
+        # "openai_compat".
         self.model_namespace = (
-            "anthropic" if kind in ("claude_code", "tmux_claude") else "openai_compat"
+            "anthropic" if kind == "claude_code" else "openai_compat"
         )
 
     def execute(self, req):
@@ -528,67 +528,6 @@ class TestPrimaryHealthyClosesBreaker:
         assert fb.calls == 0
         # record_success cleared the entry entirely.
         assert get_availability_breaker().should_skip("claude_code", 1) is False
-
-
-class TestTmuxFolding:
-    def test_tmux_reruns_configured_fallback_breaker_closed(self, tmp_path):
-        results, primary, fb, alerts = _run(
-            tmp_path,
-            primary_kind="tmux_claude",
-            fallback="claude_code",
-            primary_result=BrainResult(False, "not ready", stop_reason="fallback"),
-        )
-        assert results[0][0] is True
-        assert fb.calls == 1  # claude_code fallback ran
-        # "fallback" is not in the cooldown set → availability breaker stays closed.
-        assert get_availability_breaker().should_skip("tmux_claude", 900) is False
-
-    @pytest.mark.parametrize(
-        "fallback,expected,forbidden",
-        [
-            ("claude_code", "falling back.", "no fallback configured"),
-            ("", "no fallback configured, so tasks keep failing.", "falling back."),
-        ],
-    )
-    def test_the_circuit_open_alert_says_whether_anything_takes_over(
-        self, tmp_path, fallback, expected, forbidden
-    ):
-        """ISSUE-362: the alert used to promise a reroute unconditionally.
-
-        It reaches an operator, and on a deployment with no fallback the old
-        wording told them their tasks were being served when they were failing.
-        """
-        with patch(
-            "istota.brain.tmux_claude.consume_circuit_open_alert", return_value=True
-        ):
-            _results, _primary, _fb, alerts = _run(
-                tmp_path,
-                primary_kind="tmux_claude",
-                fallback=fallback,
-                primary_result=BrainResult(
-                    False, "not ready", stop_reason="fallback"
-                ),
-            )
-        circuit = [m for m, _p in alerts if "circuit opened" in m]
-        assert len(circuit) == 1
-        assert expected in circuit[0]
-        assert forbidden not in circuit[0]
-
-    def test_tmux_without_a_configured_fallback_does_not_reroute(self, tmp_path):
-        """ISSUE-362: the implicit tmux -> claude_code target is gone.
-
-        This is the pairing that was unconfigurable before: an empty `fallback`
-        on a tmux primary now means what it says.
-        """
-        results, primary, fb, _alerts = _run(
-            tmp_path,
-            primary_kind="tmux_claude",
-            fallback="",
-            primary_result=BrainResult(False, "not ready", stop_reason="fallback"),
-        )
-        assert results[0][0] is False
-        assert primary.calls == 1
-        assert fb.calls == 0
 
 
 class TestFallbackIsVisibleOnStreamSurfaces:
@@ -1097,7 +1036,6 @@ class TestFallbackNoticeText:
         [
             ("not_found", "I can't find its CLI"),
             ("transient_api_error", "its provider returned an error"),
-            ("fallback", "it couldn't start"),
         ],
     )
     def test_non_quota_failures_are_straightforward(self, reason, plain_language_reason):
@@ -1221,34 +1159,7 @@ class TestTheCrossingRuleAtTheRealSeam:
     wired, and the second fails if it is read from the wrong config.
     """
 
-    def test_a_same_namespace_fallback_keeps_the_pin(self, tmp_path):
-        """claude_code -> tmux_claude: same binary, same namespace, valid id."""
-        _results, _primary, fb, _alerts = _run(
-            tmp_path,
-            primary_kind="claude_code",
-            fallback="tmux_claude",
-            task_model="claude-opus-5",
-            primary_result=BrainResult(
-                False, "usage limit reached", stop_reason="usage_limit"
-            ),
-        )
-        assert fb.received_reqs[0].model == "claude-opus-5"
-
-    def test_a_same_namespace_fallback_reports_no_dropped_pin(self, tmp_path):
-        """The user was being told about a drop that did not need to happen."""
-        results, _primary, _fb, _alerts = _run(
-            tmp_path,
-            primary_kind="claude_code",
-            fallback="tmux_claude",
-            task_model="claude-opus-5",
-            primary_result=BrainResult(
-                False, "usage limit reached", stop_reason="usage_limit"
-            ),
-        )
-        assert "claude-opus-5" not in results[0][1]
-
     def test_a_cross_namespace_fallback_still_drops(self, tmp_path):
-        """The half that was already right, at the same seam."""
         _results, _primary, fb, _alerts = _run(
             tmp_path,
             primary_kind="claude_code",
@@ -1265,31 +1176,32 @@ class TestTheCrossingRuleAtTheRealSeam:
     ):
         """The distinction the call site's comment says is load-bearing.
 
-        `[brain] kind` is `native` while `source_type_overrides` routes this
-        task's lane to `claude_code`, so the *primary that ran* is anthropic and
-        the tmux fallback is the same namespace — the pin must survive. Read the
-        origin off `config.brain.kind` instead and it is openai_compat, the move
-        reads as a crossing, and the pin is dropped.
+        `[brain] kind` is `claude_code` while `source_type_overrides` routes
+        this task's lane to `native`, so the *primary that ran* is openai_compat
+        and the `claude_code` fallback is a crossing — the non-portable pin is
+        dropped. Read the origin off `config.brain.kind` instead and it is
+        anthropic, the move reads as staying in one namespace, and the pin
+        survives.
         """
         config = _make_config(tmp_path)
         config.brain = BrainConfig(
-            kind="native",
-            fallback="tmux_claude",
-            source_type_overrides={"cli": "claude_code"},
+            kind="claude_code",
+            fallback="claude_code",
+            source_type_overrides={"cli": "native"},
         )
         config.security.sandbox_enabled = False
 
         primary = _FakeBrain(
-            "claude_code",
+            "native",
             BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
         )
         fb = _FakeBrain(
-            "tmux_claude",
+            "claude_code",
             BrainResult(True, "ok", stop_reason="completed", model_used="fb"),
         )
 
         def fake_make_brain(bc):
-            return primary if getattr(bc, "kind", "") == "claude_code" else fb
+            return primary if getattr(bc, "kind", "") == "native" else fb
 
         patches = _patch_executor() + [
             patch("istota.executor.make_brain", side_effect=fake_make_brain),
@@ -1304,7 +1216,7 @@ class TestTheCrossingRuleAtTheRealSeam:
             execute_task(task, config, [])
 
         assert fb.received_reqs, "the fallback never ran"
-        assert fb.received_reqs[0].model == "claude-opus-5"
+        assert fb.received_reqs[0].model == ""
 
 
 class TestTheCrossingRuleAtTheRequestBuild:

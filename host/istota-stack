@@ -575,6 +575,7 @@ brain = document.get("brain", {})
 kinds = {brain.get("kind", "claude_code"), brain.get("fallback", "")}
 kinds |= set((brain.get("source_type_overrides") or {}).values())
 kinds |= set(brain.get("room_selectable") or [])
+# tmux_claude is retired, and a config still naming it runs claude_code.
 print(1 if kinds & {"claude_code", "tmux_claude"} else 0)
 PY
 }

@@ -111,11 +111,11 @@ class TestTheRoundTrip:
             """
             [brain]
             kind = "native"
-            room_selectable = ["tmux_claude"]
+            room_selectable = ["claude_code"]
             """,
         )
         assert reachable_brain_kinds(config.brain) == frozenset(
-            {"native", "tmux_claude"}
+            {"native", "claude_code"}
         )
 
     def test_an_empty_list_is_honoured_as_written(self, tmp_path):

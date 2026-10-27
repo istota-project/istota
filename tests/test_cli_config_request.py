@@ -433,9 +433,11 @@ class TestClaudeCodeRule:
         {},
         {"brain": {"kind": "native"}},
         {"brain": {"kind": "native", "fallback": "claude_code"}},
-        {"brain": {"kind": "native", "source_type_overrides": {"cron": "tmux_claude"}}},
+        {"brain": {"kind": "native", "source_type_overrides": {"cron": "claude_code"}}},
         {"brain": {"kind": "native", "room_selectable": ["claude_code"]}},
         {"brain": {"kind": "native", "room_selectable": ["native"]}},
+        {"brain": {"kind": "tmux_claude"}},
+        {"brain": {"kind": "native", "source_type_overrides": {"cron": "tmux_claude"}}},
     ]
 
     def test_the_two_copies_agree(self, tmp_path):
@@ -452,3 +454,8 @@ class TestClaudeCodeRule:
             )
             assert shell.returncode == 0, shell.stderr
             assert shell.stdout.strip() == ("1" if handoff.needs_claude_code(document) else "0"), document
+
+    def test_the_retired_tmux_kind_still_needs_claude_code(self):
+        """A config naming `tmux_claude` loads as `claude_code`, so the image it
+        runs in has to carry the CLI."""
+        assert handoff.needs_claude_code({"brain": {"kind": "tmux_claude"}})

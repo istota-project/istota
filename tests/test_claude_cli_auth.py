@@ -280,13 +280,12 @@ class TestTheStrips:
 
 
 class TestAvailability:
-    def test_no_cli_credential_makes_the_cli_brains_unavailable(self):
+    def test_no_cli_credential_makes_the_cli_brain_unavailable(self):
         config = _doc(brain={"kind": "native", "native": {"provider": "openrouter"},
-                             "room_selectable": ["native", "claude_code", "tmux_claude"]})
+                             "room_selectable": ["native", "claude_code"]})
         resolve_process_auth(config, {})
-        for kind in ("claude_code", "tmux_claude"):
-            reason = brain_unconfigured_reason(kind, config)
-            assert reason and "[brain.claude_code] auth" in reason
+        reason = brain_unconfigured_reason("claude_code", config)
+        assert reason and "[brain.claude_code] auth" in reason
         assert brain_unconfigured_reason("native", config) is None
         assert room_selectable_kinds(config.brain) == frozenset({"native"})
 
@@ -463,8 +462,7 @@ class TestTheCredentialsFile:
 
 class TestTheCredentialsBind:
     """`.credentials.json` is bound only under "subscription", for a task and
-    for `build_daemon_sandbox`; the tmux key directory only for a CLAUDE wrap
-    under "api_key"."""
+    for `build_daemon_sandbox`."""
 
     @pytest.fixture
     def world(self, tmp_path, monkeypatch, make_task):
@@ -474,18 +472,16 @@ class TestTheCredentialsBind:
         monkeypatch.setenv("HOME", str(home))
         user_temp = tmp_path / "temp" / "alice"
         user_temp.mkdir(parents=True)
-        keys = tmp_path / "temp" / ".cli-keys" / "alice" / "task_1"
-        keys.mkdir(parents=True)
         config = Config(db_path=tmp_path / "db" / "istota.db", temp_dir=tmp_path / "temp")
-        return config, make_task(id=1, user_id="alice"), user_temp, keys
+        return config, make_task(id=1, user_id="alice"), user_temp
 
-    def _reasons(self, world, mode, profile, key_dir=None):
+    def _reasons(self, world, mode, profile):
         from istota.sandbox.plan import SandboxProfile, build_mount_plan
 
-        config, task, user_temp, _keys = world
+        config, task, user_temp = world
         plan = build_mount_plan(
             config, task, True, [], user_temp, profile=getattr(SandboxProfile, profile),
-            cli_auth_mode=mode, cli_key_dir=key_dir,
+            cli_auth_mode=mode,
         )
         return {m.reason for m in plan.mounts}
 
@@ -496,16 +492,10 @@ class TestTheCredentialsBind:
     def test_any_other_mode_does_not(self, world, mode):
         assert "claude_credentials" not in self._reasons(world, mode, "CLAUDE")
 
-    def test_the_key_directory_is_bound_under_api_key_for_claude_only(self, world):
-        keys = world[3]
-        assert "claude_cli_key" in self._reasons(world, "api_key", "CLAUDE", keys)
-        assert "claude_cli_key" not in self._reasons(world, "api_key", "NATIVE", keys)
-        assert "claude_cli_key" not in self._reasons(world, "subscription", "CLAUDE", keys)
-
     def test_the_daemon_sandbox_passes_its_mode(self, world, monkeypatch):
         from istota import executor
 
-        config, _task, _user_temp, _keys = world
+        config, _task, _user_temp = world
         config.security.sandbox_enabled = True
         seen = {}
 

@@ -461,7 +461,7 @@ class TestCleanupOldTempFiles:
         victim = elsewhere / "old.txt"
         victim.write_text("x")
         self._age(victim, 30)
-        link = user_dir / ".tmux-istota-99-0"
+        link = user_dir / ".planted-dir"
         link.symlink_to(elsewhere)
         file_link = user_dir / "task_5_result.txt"
         file_link.symlink_to(victim)

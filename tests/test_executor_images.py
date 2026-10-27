@@ -408,7 +408,7 @@ class TestAttachmentStatus:
         say how the pixels arrive, from the layer that knows.
         """
         img = _png(tmp_path / "inbox" / "shot.png")
-        for kind in ("claude_code", "native", "tmux_claude"):
+        for kind in ("claude_code", "native"):
             prompt = self._prompt(tmp_path, ocr, [str(img)], brain_kind=kind)
             line = [
                 ln for ln in prompt.splitlines()

@@ -3335,7 +3335,7 @@ class TestTheRoomPatchWritesTheBrain:
     async def selectable(self, tmp_path):
         async for pair in self._client(
             tmp_path, kind="claude_code",
-            room_selectable=["native", "tmux_claude", "claude_code"],
+            room_selectable=["native", "claude_code"],
         ):
             yield pair
 
@@ -3410,17 +3410,17 @@ class TestTheRoomPatchWritesTheBrain:
     async def test_a_buildable_kind_the_operator_did_not_list_is_refused(
         self, tmp_path,
     ):
-        """A separate branch from the unknown-kind one: `tmux_claude` builds
+        """A separate branch from the unknown-kind one: `claude_code` builds
         fine and is simply not on offer here. Refusing only unknown names would
         pass every case above while leaving the allowlist inert."""
         async for client, config in self._client(
-            tmp_path, kind="claude_code", room_selectable=["native"],
+            tmp_path, kind="native", room_selectable=["native"],
         ):
             cookies = await _login(client, "alice")
             room = await self._room(client, cookies)
             resp = await client.patch(
                 f"/istota/api/chat/rooms/{room['id']}",
-                json={"brain": "tmux_claude"}, cookies=cookies, headers=self.HDRS,
+                json={"brain": "claude_code"}, cookies=cookies, headers=self.HDRS,
             )
             assert resp.status_code == 400
             assert self._brain(config, room["token"]) is None
@@ -3539,7 +3539,7 @@ class TestBrainAndModelInOneBody:
         config = _make_config(tmp_path)
         config.admin_users = {"alice"}
         config.brain = BrainConfig(
-            kind="claude_code", room_selectable=["native", "tmux_claude"],
+            kind="claude_code", room_selectable=["native"],
         )
         app = _patch_app(config)
         transport = ASGITransport(app=app)
@@ -3643,20 +3643,22 @@ class TestBrainAndModelInOneBody:
         self, client_and_config,
     ):
         """The converse, which is what stops the assertion above passing against
-        an implementation that clears unconditionally. `claude_code` and
-        `tmux_claude` share the `anthropic` namespace, so the same id runs under
-        both and there is nothing to lose."""
+        an implementation that clears unconditionally. Pinning `claude_code`
+        over the inherited `claude_code` changes the brain column but not the
+        `anthropic` namespace, so the same id runs and there is nothing to
+        lose."""
         client, config = client_and_config
+        config.brain.room_selectable = ["native", "claude_code"]
         cookies = await _login(client, "alice")
         room = await self._room(client, cookies)
         resp = await client.patch(
             f"/istota/api/chat/rooms/{room['id']}",
-            json={"brain": "tmux_claude", "model": "claude-opus-5"},
+            json={"brain": "claude_code", "model": "claude-opus-5"},
             cookies=cookies, headers=self.HDRS,
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body["brain"] == "tmux_claude"
+        assert body["brain"] == "claude_code"
         assert body["model"] == "claude-opus-5"
         assert "cleared" not in body
         with db.get_db(config.db_path) as conn:

@@ -322,7 +322,6 @@
   const BRAIN_LABELS: Record<string, string> = {
     claude_code: 'Claude Code',
     native: 'Native',
-    tmux_claude: 'Tmux Claude',
   };
 
   // host-folder doubles as the install shape: only the Mac installer writes it.
@@ -804,9 +803,9 @@
               </StatTile>
             </div>
 
-            <!-- Two honesty counters. A tmux-brain task spends real tokens and
-               writes no row, and the native brain records no context; a synthetic
-               zero for either would make this pane complete and wrong. -->
+            <!-- Two honesty counters. A task can run and write no usage row, and the
+               native brain records no context; a synthetic zero for either would
+               make this pane complete and wrong. -->
             {#if (stats.usage.unmeasured_tasks_24h ?? 0) > 0 || (stats.usage.context_unmeasured_rows_30d ?? 0) > 0}
               <p class="usage-note caption">
                 {#if (stats.usage.unmeasured_tasks_24h ?? 0) > 0}

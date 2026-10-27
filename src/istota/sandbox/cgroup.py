@@ -704,9 +704,8 @@ def place(pid: int, path: Path) -> bool:
     the cgroup permanently (ISSUE-285).
 
     So this remains only for a pid the daemon did not spawn itself and cannot
-    reach a ``preexec_fn`` for: TmuxClaudeBrain reports a pane pid it learns
-    from the tmux server after the fact. Containing its group leader is worth
-    more than containing nothing, and it is all that path can do.
+    reach a ``preexec_fn`` for. Containing its group leader is worth more than
+    containing nothing.
 
     False rather than an exception for the ordinary misses. A process that
     exited between spawn and this write gives ``ESRCH``, which is a race the

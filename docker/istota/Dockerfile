@@ -39,8 +39,6 @@ RUN --mount=type=cache,id=istota-apt-archives,target=/var/cache/apt-build,sharin
     && echo 'Dir::Cache::Archives "/var/cache/apt-build";' > /etc/apt/apt.conf.d/zz-build-cache \
     && apt-get update && apt-get install -y --no-install-recommends \
     curl git sqlite3 \
-    # tmux — required by the tmux_claude brain (drives the interactive claude TUI)
-    tmux \
     # Bubblewrap sandbox (per-invocation filesystem isolation)
     bubblewrap \
     # WeasyPrint (accounting/invoicing)
@@ -61,10 +59,10 @@ RUN --mount=type=cache,id=istota-apt-archives,target=/var/cache/apt-build,sharin
     && apt-get install -y --no-install-recommends nodejs \
     && rm -f /etc/apt/apt.conf.d/zz-build-cache
 
-# Claude Code, for the claude_code and tmux_claude brains only, at a pinned
+# Claude Code, for the claude_code brain only, at a pinned
 # version. Proprietary, so the operator's own build fetches it and no artifact
 # this project distributes contains it. `istota-stack` passes
-# INSTALL_CLAUDE_CODE=0 when config.toml names neither brain, and
+# INSTALL_CLAUDE_CODE=0 when config.toml does not name it, and
 # CLAUDE_CODE_VERSION from host.env; the defaults here are what every other
 # build (the test tiers, a checkout's `docker compose build`) gets. The
 # autoupdater is off so the pinned version stays the one that runs, and doctor
@@ -218,9 +216,7 @@ RUN uv sync --frozen --no-dev --extra all
 
 # Put the venv bin dir on the default PATH so the console scripts (istota,
 # istota-scheduler, istota-skill, money) resolve from any shell or subprocess
-# without relying on `uv run` or a per-process PATH injection surviving the
-# interactive TUI's profile re-initialization (the tmux_claude brain otherwise
-# sees "istota-skill: command not found" when it shells out).
+# without relying on `uv run` or a per-process PATH injection.
 ENV PATH="/app/.venv/bin:${PATH}"
 
 # SvelteKit static build (from web-builder stage)

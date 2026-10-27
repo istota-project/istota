@@ -7,9 +7,8 @@ works across brains.
 
 **What "unmeasured" means here.** `task_usage.cost_usd` is `NOT NULL DEFAULT
 0.0`, so an unmeasured run cannot be told apart by its cost. A finished wake is
-unmeasured when no usage row for its task has `has_totals = 1`: either the
-brain wrote no row at all (`TmuxClaudeBrain`) or the run ended before a result
-frame, which `usage.telemetry` records with `has_totals = 0`. Its cost counts
+unmeasured when no usage row for its task has `has_totals = 1`: either no
+row was written at all or the run ended before a result frame, which `usage.telemetry` records with `has_totals = 0`. Its cost counts
 as zero; `max_wakes` still binds, so an unmeasured brain cannot run forever. A
 wake that ended `not_active` never reached a brain and is not counted.
 

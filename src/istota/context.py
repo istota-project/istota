@@ -199,9 +199,8 @@ def _claude_cli_triage(
 
     ``ClaudeCodeBrain`` is named rather than ``make_brain(config.brain)`` on
     purpose: a native deployment never reaches here (the executor injects a
-    provider completer), and a tmux deployment must not — driving an
-    interactive TUI session to triage a prompt is not what that brain is for.
-    So this is the CLI path for every brain that isn't native, exactly as before.
+    provider completer), so this is the CLI path for every brain that isn't
+    native.
 
     ``on_usage`` receives this attempt's ``BrainUsage`` whether the attempt
     succeeded or not: a run that reached the model and then failed spent real
