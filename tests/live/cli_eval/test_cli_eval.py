@@ -1,11 +1,10 @@
-"""The CLI-brain tool eval: the CLI's own tools against tools served over MCP.
+"""The CLI-brain tool eval: `ClaudeCodeBrain` with the CLI's own tools against the tool harness.
 
 Live, costs money (or subscription quota), and never a merge gate. Run with
 ``-n0``:
 
     ISTOTA_EVAL_ENV_FILE=~/.config/istota/eval.env \\
     ISTOTA_CLI_EVAL_CLAUDE=/path/to/claude \\
-    ISTOTA_CLI_EVAL_SPIKE_SERVER=/path/to/spike_mcp_server.py \\
     uv run pytest tests/live/cli_eval -m live -n0
 
 Settings, from the environment or the env file:
@@ -15,10 +14,7 @@ Settings, from the environment or the env file:
   and ``ANTHROPIC_AUTH_TOKEN`` is never forwarded.
 - ``ISTOTA_CLI_EVAL_CLAUDE``: the ``claude`` binary, default the one on PATH.
   Its version must equal the image's ``CLAUDE_CODE_VERSION`` pin.
-- ``ISTOTA_CLI_EVAL_SPIKE_SERVER``: the Stage 2 spike server; the spike arm
-  skips without it.
-- ``ISTOTA_CLI_EVAL_ARMS`` (default ``builtin,spike``; ``spike_cwd`` is the
-  diagnostic arm the runner describes), ``ISTOTA_CLI_EVAL_CASES``
+- ``ISTOTA_CLI_EVAL_ARMS`` (default ``builtin,harness``), ``ISTOTA_CLI_EVAL_CASES``
   (default all), ``ISTOTA_EVAL_RUNS`` (default 1), ``ISTOTA_EVAL_OUT`` (the JSON
   report; stream files go in ``<stem>-streams/`` beside it),
   ``ISTOTA_EVAL_BUDGET_USD`` (default 15, against the CLI's own
@@ -104,11 +100,7 @@ def cli_settings(tmp_path_factory) -> runner.Settings:
     if found != pinned:
         pytest.fail(f"{claude} is {found or 'unknown'}, the image pins {pinned}")
     model, effort = runner.general_model()
-    server = _ENV.get("ISTOTA_CLI_EVAL_SPIKE_SERVER")
-    return runner.Settings(
-        claude=claude, model=model, effort=effort, auth={},
-        spike_server=Path(server).expanduser() if server else None,
-    )
+    return runner.Settings(claude=claude, model=model, effort=effort, auth={})
 
 
 @pytest.fixture(scope="session")
@@ -145,23 +137,19 @@ def eval_report(cli_settings, auth, tmp_path_factory):
     return report, path, budget
 
 
-def _skip_unless_spike_ready(arm: str, settings: runner.Settings) -> None:
-    if arm in runner.SPIKE_ARMS and (settings.spike_server is None or not settings.spike_server.is_file()):
-        _unavailable("ISTOTA_CLI_EVAL_SPIKE_SERVER does not name the spike server")
-
-
 @pytest.mark.parametrize("arm", ARMS)
 def test_init_frame(arm, cli_settings, tmp_path):
     """No model call: the arm's tool set and MCP server, as `system/init` lists them."""
-    _skip_unless_spike_ready(arm, cli_settings)
     smoke = runner.init_smoke(arm, tmp_path, cli_settings)
     assert smoke["init_tools"] is not None, f"no system/init frame: {smoke}"
     assert smoke["tool_calls"] == 0
-    if arm in runner.SPIKE_ARMS:
-        assert set(smoke["init_tools"]) == runner.expected_spike_tools()
+    if arm == "harness":
+        assert set(smoke["init_tools"]) == runner.expected_harness_tools()
         assert smoke["init_mcp_servers"] == [
-            {"name": runner.SPIKE_SERVER_KEY, "status": "connected"}
+            {"name": runner.HARNESS_SERVER_KEY, "status": "connected"}
         ]
+        # The brain's own init check passed: a failure there names the tool set.
+        assert "did not load the tool set" not in smoke["brain_text"], smoke["brain_text"]
     else:
         assert "Bash" in smoke["init_tools"]
         assert not any(t.startswith("mcp__") for t in smoke["init_tools"])
@@ -173,14 +161,13 @@ def test_init_frame(arm, cli_settings, tmp_path):
     ids=[f"{a}-{c}-{r}" for c in CASE_NAMES for r in range(1, RUNS + 1) for a in ARMS],
 )
 def test_case(case_name, run, arm, cli_settings, auth, eval_report, tmp_path):
-    _skip_unless_spike_ready(arm, cli_settings)
     report, path, budget = eval_report
     allowed, reason = native_runner.budget_allows(report, budget)
     if not allowed:
         pytest.skip(reason)
     settings = runner.Settings(
         claude=cli_settings.claude, model=cli_settings.model, effort=cli_settings.effort,
-        auth=auth[1], spike_server=cli_settings.spike_server,
+        auth=auth[1], auth_mode=auth[0],
     )
     keep = Path(path).with_name(f"{Path(path).stem}-streams")
     result = runner.run_case(by_name(case_name), arm, run, tmp_path, settings, keep_dir=keep)
@@ -189,6 +176,6 @@ def test_case(case_name, run, arm, cli_settings, auth, eval_report, tmp_path):
     native_runner.write_report(path, report)
     # A failed case is a metric, not a test failure. A run that never reached
     # the model is a broken arm, and says so.
-    assert result.metrics.get("stop_reason"), (
-        f"no result frame (rc={result.returncode}, timed_out={result.timed_out}): {result.stream}"
+    assert result.metrics.get("stop_reason") or result.brain_stop_reason == "timeout", (
+        f"no result frame (brain {result.brain_stop_reason}: {result.brain_text[:300]!r}): {result.stream}"
     )
