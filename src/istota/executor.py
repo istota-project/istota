@@ -3853,6 +3853,8 @@ HARNESS_CLI_SWITCHES = {
     "DISABLE_AUTOUPDATER": "1",
     # With it a run connects only to the model endpoint (Stage 1 probe).
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    # Else the CLI reads `.claude/scheduled_tasks.json` in its cwd (Stage 7).
+    "CLAUDE_CODE_DISABLE_CRON": "1",
 }
 
 #: Added to the task timeout for `MCP_TOOL_TIMEOUT`, so the tool server's own

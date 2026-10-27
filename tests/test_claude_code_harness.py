@@ -204,6 +204,8 @@ class TestTheCliEnv:
         assert env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] == "1"
         assert env["DISABLE_AUTOUPDATER"] == "1"
         assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+        # Else the CLI reads `.claude/scheduled_tasks.json` in its cwd.
+        assert env["CLAUDE_CODE_DISABLE_CRON"] == "1"
         assert env["MCP_TOOL_TIMEOUT"] == str(630 * 1000)
         assert env["ISTOTA_CLI_AUTH"] == "subscription"
 
@@ -412,6 +414,38 @@ class TestTheCliConfigDir:
         assert names == [".claude.json", ".credentials.json", "settings.json"]
         assert str(handle.cwd) in seeded["projects"]
 
+    def test_the_harness_holds_a_stub_git_that_exits_128(self, tmp_path):
+        """The unwrapped CLI runs `git` in its cwd at start-up; the stub it
+        finds first answers "not a repository" and reads nothing."""
+        import subprocess
+
+        from istota.brain._tool_harness import tool_harness
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        root = tmp_path / "harness-root"
+        root.mkdir()
+        req = BrainRequest(
+            prompt="", allowed_tools=["Read"], cwd=workspace,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            timeout_seconds=60, task_id=7, attempt=1,
+            harness=HarnessSpec(cli_env={}, harness_root=root),
+        )
+        with tool_harness(req, brain_label="test brain", on_failure=lambda: None) as handle:
+            assert handle.failure is None
+            stub = handle.bin_dir / "git"
+            assert handle.bin_dir.parent == handle.config_dir.parent
+            assert sorted(p.name for p in handle.bin_dir.iterdir()) == ["git"]
+            assert stat.S_IMODE(handle.bin_dir.stat().st_mode) == 0o700
+            assert stat.S_IMODE(stub.lstat().st_mode) == 0o700
+            assert stat.S_ISREG(stub.lstat().st_mode)
+            ran = subprocess.run(
+                [str(stub), "-C", str(workspace), "ls-files"], cwd=workspace,
+                capture_output=True, timeout=10,
+            )
+        assert ran.returncode == 128
+        assert ran.stdout == b"" and ran.stderr == b""
+
 
 # ============================================================================
 # ClaudeCodeBrain on the harness (Stage 7)
@@ -610,6 +644,30 @@ class TestTheHarnessRun:
         # `on_pid` saw the tool server and then its reap, never the CLI.
         assert len(h.pids) == 2 and h.pids[1] == 0
         assert seen["pid"] not in h.pids
+
+    def test_the_stub_git_is_first_on_the_cli_path_and_absent_from_bash(self, tmp_path):
+        """The CLI finds the harness's stub `git` first; the model's Bash runs
+        in the tool server with the task's own PATH and its real git."""
+        h = _Harnessed(tmp_path, plan={"calls": [
+            {"name": "Bash", "args": {"command": "echo BASHPATH=$PATH", "description": "probe"}},
+        ]})
+
+        result = h.run()
+
+        assert result.success, result.result_text
+        env = h.recorded()["env"]
+        bin_dir = Path(env["CLAUDE_CONFIG_DIR"]).parent / "bin"
+        cli_path = env["PATH"].split(os.pathsep)
+        assert cli_path[0] == str(bin_dir)
+        assert cli_path[1:] == h.req.harness.cli_env["PATH"].split(os.pathsep)
+
+        bash_path = next(
+            line.split("=", 1)[1] for line in result.result_text.splitlines()
+            if line.startswith("BASHPATH=")
+        )
+        assert str(bin_dir) not in bash_path
+        assert bash_path == h.req.env["PATH"]
+        assert str(bin_dir) not in h.req.env["PATH"]
 
     def test_an_unexpected_tool_in_init_kills_the_cli_before_any_call(self, tmp_path):
         marker = tmp_path / "ws" / "ran"

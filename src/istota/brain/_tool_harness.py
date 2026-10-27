@@ -207,6 +207,7 @@ class HarnessHandle:
     config_dir: Path        # CLAUDE_CONFIG_DIR
     home_dir: Path          # HOME
     tmp_dir: Path           # TMPDIR
+    bin_dir: Path           # first on the CLI's PATH: the stub git
     cwd: Path               # the CLI's cwd: the tool server's cwd
     offered: tuple[str, ...]  # canonical names tools/list offers
     failure: str | None = None  # the tool server died or the harness failed
@@ -230,6 +231,24 @@ def write_mcp_config(path: Path, socket_path: str) -> None:
         }
     }
     _write_new_file(path, json.dumps(document))
+
+
+#: What the CLI runs as `git`: git's own "not a git repository" status.
+GIT_STUB = "#!/bin/sh\nexit 128\n"
+
+
+def write_git_stub(bin_dir: Path) -> Path:
+    """Create ``bin_dir`` 0700 holding a ``git`` that exits 128, and return it.
+
+    The unwrapped CLI runs ``git`` in its cwd at start-up, outside the sandbox,
+    in a folder the model can write to; with this first on its PATH no real git
+    reads that folder's config. The tool server keeps its own PATH.
+    """
+    bin_dir.mkdir(mode=0o700)
+    stub = bin_dir / "git"
+    _write_new_file(stub, GIT_STUB)
+    os.chmod(stub, 0o700)
+    return stub
 
 
 def _socket_path(task_id: int) -> str:
@@ -306,6 +325,7 @@ class _Bridge:
             config_dir=harness_dir / "config",
             home_dir=harness_dir / "home",
             tmp_dir=harness_dir / "tmp",
+            bin_dir=harness_dir / "bin",
             cwd=cwd,
             offered=(),
             _bridge=self,
@@ -316,6 +336,7 @@ class _Bridge:
             harness_dir.mkdir(mode=0o700)
             for sub in (handle.home_dir, handle.tmp_dir):
                 sub.mkdir(mode=0o700)
+            write_git_stub(handle.bin_dir)
         except OSError as exc:
             return self._start_failed(f"could not create the harness directory: {exc}")
         try:
@@ -353,6 +374,7 @@ class _Bridge:
             config_dir=harness_dir / "config",
             home_dir=harness_dir / "home",
             tmp_dir=harness_dir / "tmp",
+            bin_dir=harness_dir / "bin",
             cwd=cwd,
             offered=(),
             failure=f"could not start the tool harness: {reason}",

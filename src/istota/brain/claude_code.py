@@ -1266,13 +1266,15 @@ class _HarnessRun:
 
 
 def _harness_cli_env(req: BrainRequest, handle: HarnessHandle) -> dict[str, str]:
-    """``HarnessSpec.cli_env`` plus the per-harness dirs, and the two switches
+    """``HarnessSpec.cli_env`` plus the per-harness dirs, the stub ``git`` first
+    on PATH, and the two switches
     that depend on this process's uid and on ``req.advisor``. ``req.env`` is
     the tool server's and is neither read nor written here."""
     env = dict(req.harness.cli_env)
     env["CLAUDE_CONFIG_DIR"] = str(handle.config_dir)
     env["HOME"] = str(handle.home_dir)
     env["TMPDIR"] = str(handle.tmp_dir)
+    env["PATH"] = os.pathsep.join([str(handle.bin_dir), env.get("PATH") or os.defpath])
     if _is_root():
         env.setdefault("IS_SANDBOX", "1")
     if advisor_active(req):
