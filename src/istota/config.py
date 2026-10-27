@@ -2345,6 +2345,10 @@ class BrainConfig:
     # brains take it in place of Claude Code's default, the native brain appends
     # it to its own. Read at the root until it moved here.
     custom_system_prompt: bool = False
+    # Temporary switch for the CLI tool harness (cli-brain-tools spec, part 1):
+    # a `claude_code` task with tools runs the CLI outside the sandbox and its
+    # tools in the tool server. Read by the executor; part 2 removes it.
+    tool_harness: bool = False
     # Availability failover (brain-fallback spec). When the primary brain is
     # unavailable (usage limit / not_found), the task runs
     # on ``fallback`` with that brain's own configured settings. "" = no

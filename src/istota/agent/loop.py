@@ -37,7 +37,8 @@ from istota.llm.types import (
     ToolSchema,
 )
 
-from .coercion import coerce_arguments, drop_null_optionals
+# `_missing_required` stays importable from here for its existing tests.
+from .coercion import _missing_required, prepare_tool_arguments  # noqa: F401
 from .events import AgentEvent, AgentEventSink
 from .hooks import (
     AfterToolCallContext,
@@ -662,30 +663,15 @@ async def _prepare_tool_call(
             is_error=True,
         )
 
-    # Argument coercion / the app's prepare_arguments hook must never crash the
-    # loop or orphan the call — a raise becomes an immediate error result the
+    # Preparation must never crash the loop or orphan the call: a raising hook
+    # or a missing required argument becomes an immediate error result the
     # model sees, and the batch keeps going (NB-8).
-    try:
-        raw_args = drop_null_optionals(tc.arguments, tool.schema)
-        if tool.prepare_arguments is not None:
-            args = tool.prepare_arguments(raw_args)
-        else:
-            args = coerce_arguments(raw_args, tool.schema)
-    except Exception as exc:  # noqa: BLE001 — contain into an error result
-        logger.warning("tool_prepare_error tool=%s id=%s: %s", tc.name, tc.id, exc)
+    args, error = prepare_tool_arguments(tool, tc.arguments)
+    if error is not None:
         return _Prepared(
             tool_call=tc,
             immediate=True,
-            result=_error_result(f"Argument preparation failed: {exc}"),
-            is_error=True,
-        )
-
-    missing = _missing_required(args, tool.schema)
-    if missing:
-        return _Prepared(
-            tool_call=tc,
-            immediate=True,
-            result=_error_result(f"Missing required argument(s): {', '.join(missing)}"),
+            result=_error_result(error),
             is_error=True,
         )
 
@@ -838,15 +824,6 @@ def _truncated_tool_results(message: AssistantMessage) -> list[ToolResultMessage
         )
         for tc in message.tool_calls
     ]
-
-
-def _missing_required(args: dict, schema: ToolSchema) -> list[str]:
-    """Required schema parameters absent from (or null in) ``args``."""
-    missing = []
-    for param in schema.parameters:
-        if param.required and (param.name not in args or args[param.name] is None):
-            missing.append(param.name)
-    return missing
 
 
 def _has_path_overlap(tool_calls: list[ToolCallContent]) -> bool:

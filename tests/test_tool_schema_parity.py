@@ -101,3 +101,40 @@ def test_the_proxy_table_is_the_only_place_a_tool_could_be_dropped(proxy, real):
 
     assert [s.name for s, _ in remote._PROXIED] == list(proxy)
     assert set(s.name for s, _ in remote._PROXIED) == set(real)
+
+
+# ---- The JSON Schema rendering: one renderer, two consumers ---------------
+#
+# The OpenAI-compatible provider sends `parameters` and the MCP codec lists
+# `inputSchema`; both come from `llm/tool_json_schema.py`. These hold the two
+# renderings of the six equal, so the CLI's model and native's model are
+# shown the same arguments.
+
+_SIX = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+
+
+@pytest.mark.parametrize("name", _SIX)
+def test_the_provider_wire_uses_the_shared_renderer(proxy, name):
+    from istota.llm.openai_compat import OpenAICompatibleProvider
+    from istota.llm.tool_json_schema import tool_parameters
+
+    schema = proxy[name].schema
+    wire = OpenAICompatibleProvider._tool_to_wire(schema)["function"]["parameters"]
+    assert wire == tool_parameters(schema)
+
+
+@pytest.mark.parametrize("name", _SIX)
+def test_the_mcp_input_schema_is_the_provider_rendering(proxy, name):
+    """Bash is the one difference, and it is deliberate: the CLI is not shown
+    `exclude_from_context`, whose stub claims the output reached the user,
+    which nothing forwards on that path."""
+    from istota.llm.tool_json_schema import tool_parameters
+    from istota.session.tools.dispatch import ToolDispatcher
+
+    (entry,) = ToolDispatcher(proxy, offered=[name], text_cap=None).mcp_tool_list()
+    expected = tool_parameters(proxy[name].schema)
+    if name == "Bash":
+        del expected["properties"]["exclude_from_context"]
+    assert entry["input_schema"] == expected
+    assert entry["description"] == proxy[name].schema.description
+    assert entry["read_only"] == (proxy[name].execution_mode == "parallel")

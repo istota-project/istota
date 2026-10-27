@@ -25,6 +25,7 @@ from pathlib import Path
 
 from ._events import (
     ContextManagementEvent,
+    InitEvent,
     RateLimitEvent,
     RequestUsageEvent,
     ResultEvent,
@@ -36,6 +37,7 @@ from ._events import (
     ToolUseEvent,
     make_stream_parser,
 )
+from istota.agent.events import HARNESS_MCP_SERVER
 from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox.peer_process import report_child_reaped, reporting_pid
 from istota.usage import telemetry as usage_types
@@ -52,6 +54,7 @@ from ._resolve import (
     resolve_selection,
 )
 from ._roles import AliasTable, current_alias_table
+from ._tool_harness import HarnessHandle, release_calls, set_cli_root, tool_harness
 from ._types import BrainRequest, BrainResult
 
 logger = logging.getLogger("istota.brain.claude_code")
@@ -929,12 +932,44 @@ _READ_ONLY_DENIED_TOOLS = (
 )
 
 
-def build_claude_cli_flags(req: BrainRequest) -> list[str]:
+#: The built-ins a harness run may keep: none acts on the machine. ``WebSearch``
+#: runs on Anthropic's side. Only the ones the grant names are passed, so a
+#: guest turn, which ``build_allowed_tools`` leaves without WebSearch, stays
+#: without it. 2.1.296 has no TodoWrite tool (cli-brain-tools Stage 1).
+HARNESS_BUILTIN_TOOLS = ("WebSearch",)
+
+#: Denied on a harness run, behind ``--tools``: every built-in that acts on the
+#: machine. Not ``_READ_ONLY_DENIED_TOOLS``, which names WebSearch: deny wins
+#: over ``--tools`` and would kill the one built-in the harness keeps. 2.1.296
+#: names its subagent tool ``Task``, which ``Agent`` may not cover.
+HARNESS_DENIED_TOOLS = (
+    "Bash", "BashOutput", "KillShell", "Monitor", "Read", "Write", "Edit",
+    "MultiEdit", "NotebookEdit", "Glob", "Grep", "LS", "WebFetch", "Skill",
+    "TodoWrite", "Task", "TaskStop",
+)
+
+#: How a tool-server failure names this brain (`attempt_failure_text`).
+_HARNESS_BRAIN_LABEL = "Claude Code brain"
+
+
+def harness_builtin_tools(req: BrainRequest) -> tuple[str, ...]:
+    """The ``--tools`` list of a harness run: the harness built-ins granted."""
+    return tuple(tool for tool in HARNESS_BUILTIN_TOOLS if tool in req.allowed_tools)
+
+
+def build_claude_cli_flags(
+    req: BrainRequest, *, mcp_config_path: Path | None = None,
+) -> list[str]:
     """Build the model / effort / tool / system-prompt flags of a `claude` call.
 
     It deliberately does NOT add ``-p -``, the ``--output-format stream-json``
     flags or ``--dangerously-skip-permissions``, which ``_build_command``
     appends around this core.
+
+    ``mcp_config_path`` is the tool harness's MCP config, which only
+    ``ClaudeCodeBrain`` passes, on a harness run. With it and tools granted the
+    CLI gets the granted harness built-ins, the harness's one MCP server and
+    every machine-acting built-in denied; the read-only branch is skipped.
     """
     flags: list[str] = []
     # Empty allowed_tools means text-only invocation (e.g. sleep cycle): skip the
@@ -976,7 +1011,17 @@ def build_claude_cli_flags(req: BrainRequest) -> list[str]:
         # Probed on Claude Code 2.1.280: the deny list alone still left Monitor,
         # Skill, SendMessage, Cron*, RemoteTrigger and the connectors; with both
         # flags `system/init` lists the granted tools and no MCP server.
-        if all(tool in READ_ONLY_TOOLS for tool in req.allowed_tools):
+        #
+        # A harness run: `--tools ""` is the CLI's empty built-in set, and
+        # `--tools` drops names it does not know, which is why the brain reads
+        # `system/init` rather than trusting this argv.
+        if mcp_config_path is not None:
+            flags += list(HARNESS_DENIED_TOOLS)
+            flags += [
+                "--tools", ",".join(harness_builtin_tools(req)),
+                "--mcp-config", str(mcp_config_path), "--strict-mcp-config",
+            ]
+        elif all(tool in READ_ONLY_TOOLS for tool in req.allowed_tools):
             granted = [t for t in _READ_ONLY_TOOL_ORDER if t in req.allowed_tools]
             flags += list(_READ_ONLY_DENIED_TOOLS)
             flags += ["--tools", ",".join(granted), "--strict-mcp-config"]
@@ -1126,6 +1171,117 @@ def cli_model_name(name: str | None) -> str:
     if resolved is not None and resolved[0] is not None:
         return resolved[0]
     return split_effort(name)[0]
+
+
+# ---------------------------------------------------------------------------
+# The tool harness (cli-brain-tools spec): the CLI unwrapped, its tools in the
+# tool server. Reached only through `tool_harness`, `HarnessHandle`,
+# `set_cli_root` and `release_calls`; the relay behind them is what the
+# unified tool server (#862) replaces.
+# ---------------------------------------------------------------------------
+
+# Distinct init-check failures already logged at ERROR, so a CLI release that
+# adds a tool fails every attempt loudly once rather than flooding the log.
+_LOGGED_INIT_FAILURES: set[tuple] = set()
+
+
+def _harness_refusal(req: BrainRequest) -> str | None:
+    """Why this harness request must not run, or None.
+
+    A sandboxed shape with no NATIVE wrap would run the tool server, and so
+    every tool call, unwrapped. The executor never builds such a request; this
+    is the brain's own refusal for one that arrives anyway.
+    """
+    if req.native_sandbox_wrap is not None:
+        return None
+    sandboxed = (
+        req.sandbox_wrap is not None
+        or req.fs_read_roots is not None
+        or (req.env or {}).get("ISTOTA_SANDBOXED") == "1"
+    )
+    if not sandboxed:
+        return None
+    return (
+        "The Claude Code brain's tool harness was given no sandbox wrap for its "
+        "tool server on a sandboxed shape; refusing to run tools unwrapped"
+    )
+
+
+class _HarnessRun:
+    """One harness attempt as the streaming path sees it: the handle, the CLI's
+    env, the tools ``system/init`` must list, and the CLI process for
+    ``on_failure`` to kill."""
+
+    def __init__(self) -> None:
+        self.handle: HarnessHandle | None = None
+        self.env: dict[str, str] = {}
+        self.expected_tools: frozenset[str] = frozenset()
+        self._process: subprocess.Popen | None = None
+        self._lock = threading.Lock()
+
+    def started(self, process: subprocess.Popen) -> None:
+        """The CLI (re)spawned: admit its descendants, and kill it at once if
+        the tool server is already gone."""
+        with self._lock:
+            self._process = process
+        set_cli_root(self.handle, process.pid)
+        if self.handle.failure is not None:
+            kill_group_if_live(process)
+
+    def kill_cli(self) -> None:
+        """``on_failure``: the tool server died, so the CLI's group goes too."""
+        with self._lock:
+            process = self._process
+        if process is not None:
+            kill_group_if_live(process)
+
+    def init_problem(self, event: InitEvent) -> str | None:
+        """None when ``system/init`` lists exactly what the harness asked for:
+        the ``--tools`` built-ins, the offered MCP tools and one MCP server,
+        ``istota``, connected. Bundled skills, agents and plugins are not read;
+        with Skill and Task off they are unreachable."""
+        tools = set(event.tools)
+        unexpected = sorted(tools - self.expected_tools)
+        missing = sorted(self.expected_tools - tools)
+        servers = list(event.mcp_servers)
+        if not unexpected and not missing and servers == [(HARNESS_MCP_SERVER, "connected")]:
+            return None
+        parts = []
+        if unexpected:
+            parts.append(f"unexpected tools {unexpected}")
+        if missing:
+            parts.append(f"missing tools {missing}")
+        if servers != [(HARNESS_MCP_SERVER, "connected")]:
+            shown = [f"{name} ({status})" for name, status in servers] or ["none"]
+            parts.append(f"MCP servers {shown}, expected {HARNESS_MCP_SERVER} (connected)")
+        problem = (
+            "The Claude Code CLI did not load the tool set the harness asked "
+            "for: " + "; ".join(parts)
+        )
+        key = (tuple(unexpected), tuple(missing), tuple(servers))
+        if key not in _LOGGED_INIT_FAILURES:
+            _LOGGED_INIT_FAILURES.add(key)
+            logger.error("tool harness init check failed: %s", problem)
+        return problem
+
+
+def _harness_cli_env(req: BrainRequest, handle: HarnessHandle) -> dict[str, str]:
+    """``HarnessSpec.cli_env`` plus the per-harness dirs, the stub ``git`` first
+    on PATH, and the two switches
+    that depend on this process's uid and on ``req.advisor``. ``req.env`` is
+    the tool server's and is neither read nor written here."""
+    env = dict(req.harness.cli_env)
+    env["CLAUDE_CONFIG_DIR"] = str(handle.config_dir)
+    env["HOME"] = str(handle.home_dir)
+    env["TMPDIR"] = str(handle.tmp_dir)
+    env["PATH"] = os.pathsep.join([str(handle.bin_dir), env.get("PATH") or os.defpath])
+    if _is_root():
+        env.setdefault("IS_SANDBOX", "1")
+    if advisor_active(req):
+        env.pop("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", None)
+    else:
+        env["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] = "1"
+    return env
 
 
 class ClaudeCodeBrain:
@@ -1445,6 +1601,11 @@ class ClaudeCodeBrain:
 
     def _execute_attempt(self, req: BrainRequest) -> BrainResult:
         try:
+            # First, and before `req.env` is touched: on a harness run that env
+            # is the tool server's, and the CLI gets `HarnessSpec.cli_env`.
+            if req.harness is not None and req.allowed_tools:
+                return self._execute_harness_attempt(req)
+
             # --dangerously-skip-permissions (added by _build_command for
             # tool-bearing tasks) is refused under root/sudo unless IS_SANDBOX=1
             # signals an external isolation boundary. That's the Docker
@@ -1492,9 +1653,47 @@ class ClaudeCodeBrain:
                 stop_reason="error",
             )
 
+    def _execute_harness_attempt(self, req: BrainRequest) -> BrainResult:
+        """One attempt with the CLI unwrapped and its tools in the tool server.
+
+        Always the streaming path, whatever ``req.streaming`` says: that path
+        leads a process group and is where ``system/init`` arrives, and no
+        tool call runs until that frame has passed its check. ``req.sandbox_wrap``
+        is not applied. A second ``_execute_attempt`` (the image re-issue, a
+        reroute back) gets a harness of its own.
+        """
+        refusal = _harness_refusal(req)
+        if refusal is not None:
+            logger.error("claude_code: %s", refusal)
+            return BrainResult(success=False, result_text=refusal, stop_reason="error")
+
+        from istota.session.tools.remote import attempt_failure_text
+
+        run = _HarnessRun()
+        with tool_harness(
+            req, brain_label=_HARNESS_BRAIN_LABEL, on_failure=run.kill_cli,
+        ) as handle:
+            run.handle = handle
+            if handle.failure is not None:
+                return BrainResult(
+                    success=False,
+                    result_text=attempt_failure_text(handle.failure, _HARNESS_BRAIN_LABEL),
+                    stop_reason="error",
+                )
+            run.env = _harness_cli_env(req, handle)
+            run.expected_tools = frozenset(harness_builtin_tools(req)) | {
+                f"mcp__{HARNESS_MCP_SERVER}__{name}" for name in handle.offered
+            }
+            cmd = self._build_command(req, mcp_config_path=handle.mcp_config_path)
+            return self._execute_streaming(cmd, req, harness=run)
+
     @staticmethod
-    def _build_command(req: BrainRequest) -> list[str]:
-        cmd = ["claude", "-p", "-"] + build_claude_cli_flags(req)
+    def _build_command(
+        req: BrainRequest, *, mcp_config_path: Path | None = None,
+    ) -> list[str]:
+        cmd = ["claude", "-p", "-"] + build_claude_cli_flags(
+            req, mcp_config_path=mcp_config_path,
+        )
         if req.allowed_tools:
             # Run non-interactively without per-tool permission prompts (which
             # can't be answered in -p mode and would otherwise auto-deny tools).
@@ -1502,7 +1701,7 @@ class ClaudeCodeBrain:
             # nothing here. Skipped for text-only invocations (no tools), so
             # those stay tool-less.
             cmd += ["--dangerously-skip-permissions"]
-        if req.streaming:
+        if req.streaming or mcp_config_path is not None:
             # --include-partial-messages emits content deltas as they arrive so
             # the final answer streams token-by-token on stream surfaces instead
             # of landing as one whole block. Without it the CLI only emits
@@ -1772,7 +1971,9 @@ class ClaudeCodeBrain:
 
     # --- streaming path ---
 
-    def _execute_streaming(self, cmd: list[str], req: BrainRequest) -> BrainResult:
+    def _execute_streaming(
+        self, cmd: list[str], req: BrainRequest, *, harness: "_HarnessRun | None" = None,
+    ) -> BrainResult:
         """Popen + stream-json parsing with auto-retry on transient API errors.
 
         Only the final attempt's usage is carried, which is the documented
@@ -1790,8 +1991,11 @@ class ClaudeCodeBrain:
         last_usage = None
         last_partial = ""
 
+        # Passed only when set, so a test patching the attempt with the old
+        # two-argument shape keeps working on every other path.
+        harness_kw = {"harness": harness} if harness is not None else {}
         for attempt in range(API_RETRY_MAX_ATTEMPTS):
-            result = self._execute_streaming_once(cmd, req)
+            result = self._execute_streaming_once(cmd, req, **harness_kw)
             if result.usage is not None:
                 last_usage = result.usage
 
@@ -1848,7 +2052,9 @@ class ClaudeCodeBrain:
         )
 
     @staticmethod
-    def _execute_streaming_once(cmd: list[str], req: BrainRequest) -> BrainResult:
+    def _execute_streaming_once(
+        cmd: list[str], req: BrainRequest, *, harness: "_HarnessRun | None" = None,
+    ) -> BrainResult:
         """One streaming attempt, with its usage attached to whatever it returns.
 
         The accounting is collected into a dict the inner function fills as it
@@ -1861,7 +2067,7 @@ class ClaudeCodeBrain:
         accounting: dict = {}
         try:
             result = ClaudeCodeBrain._execute_streaming_once_inner(
-                cmd, req, accounting
+                cmd, req, accounting, harness=harness,
             )
         except Exception as e:
             # A raise past the inner body would otherwise discard everything
@@ -1887,8 +2093,18 @@ class ClaudeCodeBrain:
 
     @staticmethod
     def _execute_streaming_once_inner(
-        cmd: list[str], req: BrainRequest, accounting: dict
+        cmd: list[str], req: BrainRequest, accounting: dict,
+        *, harness: "_HarnessRun | None" = None,
     ) -> BrainResult:
+        """One streaming CLI run.
+
+        With ``harness`` the CLI runs unwrapped in the tool server's cwd with
+        the harness env, ``on_pid`` is not given the CLI's pid (the tool server
+        reported its own, and the harness reports the reap), calls are released
+        only once ``system/init`` passed its check, and the outcome is read in
+        this order: cancel, a dead tool server, a failed init check, timeout,
+        signal. A SIGKILL from ``on_failure`` would otherwise read as ``oom``.
+        """
         actions_descriptions: list[str] = []
         execution_trace: list[dict] = []
         last_text = ""
@@ -1909,8 +2125,8 @@ class ClaudeCodeBrain:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                cwd=str(req.cwd),
-                env=req.env,
+                cwd=str(harness.handle.cwd if harness is not None else req.cwd),
+                env=harness.env if harness is not None else req.env,
                 # Own process group so a timeout, a `!stop` or a web cancel can
                 # signal the whole tree. The CLI's bash grandchildren are where
                 # the work actually is — a `pytest -n auto` run survived a bare
@@ -1950,10 +2166,14 @@ class ClaudeCodeBrain:
         stdin_thread = threading.Thread(target=_write_stdin, daemon=True)
         stdin_thread.start()
 
+        if harness is not None:
+            # `on_pid` already names the tool server, which is what the proxies
+            # must admit and `!stop` must signal; the CLI runs no tool.
+            harness.started(process)
         # Notify caller of PID (used for !stop). The stdin write is already in
         # flight on its own thread, so a slow DB write here no longer delays
         # prompt delivery.
-        if req.on_pid is not None:
+        elif req.on_pid is not None:
             try:
                 req.on_pid(process.pid)
             except Exception:
@@ -1990,6 +2210,7 @@ class ClaudeCodeBrain:
         # budget each, in one skill-CLI process.
         stdout_line_count = 0
         cancelled = False
+        init_failure: str | None = None
         # The model the CLI actually used. The stream-json ``system``/``init``
         # frame carries it (it reflects the resolved default when --model was
         # omitted), so this is more accurate than req.model for the default case.
@@ -2053,6 +2274,14 @@ class ClaudeCodeBrain:
                     continue
                 if isinstance(event, RateLimitEvent):
                     accounting["rate_limit"] = event.info
+                    continue
+                if isinstance(event, InitEvent):
+                    if harness is not None:
+                        init_failure = harness.init_problem(event)
+                        if init_failure is not None:
+                            kill_group_if_live(process)
+                            break
+                        release_calls(harness.handle)
                     continue
 
                 if isinstance(event, ResultEvent):
@@ -2120,8 +2349,10 @@ class ClaudeCodeBrain:
             timer.cancel()
 
         # After the timer is cancelled, so a slow write cannot turn a finished
-        # run into a timeout (ISSUE-823).
-        report_child_reaped(req.on_pid)
+        # run into a timeout (ISSUE-823). A harness run reported the tool
+        # server's pid, and leaving the harness reports its reap.
+        if harness is None:
+            report_child_reaped(req.on_pid)
 
         actions_json = json.dumps(actions_descriptions) if actions_descriptions else None
         trace_json = json.dumps(execution_trace) if execution_trace else None
@@ -2143,6 +2374,30 @@ class ClaudeCodeBrain:
                 execution_trace=trace_json,
                 stop_reason="cancelled",
                 partial_text=last_text or None,
+            )
+
+        if harness is not None and harness.handle.failure is not None:
+            from istota.session.tools.remote import attempt_failure_text
+
+            return BrainResult(
+                success=False,
+                # A signal death keeps its prefix at the front; see
+                # `attempt_failure_text`.
+                result_text=attempt_failure_text(
+                    harness.handle.failure, _HARNESS_BRAIN_LABEL,
+                ),
+                actions_taken=actions_json,
+                execution_trace=trace_json,
+                stop_reason="error",
+                partial_text=last_text or None,
+            )
+
+        if init_failure is not None:
+            return BrainResult(
+                success=False,
+                result_text=init_failure,
+                execution_trace=trace_json,
+                stop_reason="error",
             )
 
         if timed_out.is_set():

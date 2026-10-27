@@ -5,6 +5,10 @@ the daemon creates fresh each task needs its files written without following a
 planted link, its onboarding state pre-seeded so the CLI does not stop at the
 first-run dialogs, and a way to the subscription token, which the CLI reads
 from ``$CLAUDE_CONFIG_DIR`` rather than the home copy once that is set.
+
+``make_cli_config_dir`` is the CLI tool harness's use of them: the config dir
+of one harness, which keeps the daemon's own ``~/.claude`` out of a CLI that
+runs outside the sandbox.
 """
 
 from __future__ import annotations
@@ -82,3 +86,25 @@ def _link_credentials(config_dir: Path, home: str) -> None:
         os.symlink(target, Path(config_dir) / ".credentials.json")
     except OSError as e:
         logger.warning("cli_config_dir: could not link the credentials file: %s", type(e).__name__)
+
+
+def make_cli_config_dir(
+    harness_dir: Path, auth_mode: str | None, *, home: str, launch_cwd: Path,
+) -> Path:
+    """Create ``{harness_dir}/config`` 0700 and fill it for one CLI run.
+
+    The directory is created with no ``exist_ok``: anything already at the
+    name fails the harness rather than being adopted. It holds an empty
+    ``settings.json`` (``--settings`` carries istota's document, so nothing of
+    the operator's own settings applies), a seeded ``.claude.json`` for
+    ``launch_cwd``, and under "subscription" a link to the daemon's
+    ``{home}/.claude/.credentials.json``. Nothing else of ``{home}/.claude``
+    is read or linked. Raises ``OSError``; the caller reports it.
+    """
+    config_dir = Path(harness_dir) / "config"
+    config_dir.mkdir(mode=0o700)
+    _write_new_file(config_dir / "settings.json", "{}")
+    _seed_onboarding(config_dir, launch_cwd)
+    if auth_mode == "subscription":
+        _link_credentials(config_dir, home)
+    return config_dir

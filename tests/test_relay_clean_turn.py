@@ -28,10 +28,15 @@ setup = test_relay_questions.setup
 RELAY_ARGS = {"command": "istota-skill relay ask bob --request-key q 'What time?'"}
 
 
-def bash_call(command, call_id="relay-1"):
+def bash_call(command, call_id="relay-1", name="Bash"):
     """A Bash call as the Claude Code brain reads it off an `assistant` frame."""
     return parse_stream_line(json.dumps({"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "id": call_id, "name": "Bash", "input": {"command": command}}]}}))
+        {"type": "tool_use", "id": call_id, "name": name, "input": {"command": command}}]}}))
+
+
+def mcp_relay_call(call_id="relay-1"):
+    """The same ask as the CLI tool harness's MCP server names it."""
+    return bash_call(RELAY_ARGS["command"], call_id, name="mcp__istota__Bash")
 
 
 def relay_call(call_id="relay-1"):
@@ -124,6 +129,14 @@ class TestTheCounter:
         config, ident, _, _ = setup
         event = parse_stream_line(json.dumps({"type": "assistant", "message": {"content": [
             {"type": "tool_use", "id": "tool-1", "name": "Bash", "input": RELAY_ARGS}]}}))
+        assert event.description == PRIVATE_RELAY_TOOL_DESCRIPTION
+        adapter_for(config, ident).on_event(event)
+        assert counts(config, ident) == (1, True)
+
+    def test_the_tool_harness_frame_reaches_the_counter(self, setup):
+        config, ident, _, _ = setup
+        event = mcp_relay_call()
+        assert event.tool_name == "Bash"
         assert event.description == PRIVATE_RELAY_TOOL_DESCRIPTION
         adapter_for(config, ident).on_event(event)
         assert counts(config, ident) == (1, True)
@@ -311,6 +324,17 @@ class TestTheRule:
         assert len(sent) == 1
         with db.get_db(config.db_path) as conn:
             assert relays.get_relay(conn, actor_user_id="alice", relay_id=result["relay_id"])["state"] == "waiting"
+
+    def test_a_clean_turn_through_the_tool_harness_is_queued(self, setup):
+        result = queue_with(setup, "Ask Bob what time dinner is", [mcp_relay_call()])
+        assert result["status"] == "queued"
+        assert result["approval"] == "clean_turn"
+
+    def test_a_harness_compound_ask_is_held(self, setup):
+        event = bash_call(COMPOUND["command"], name="mcp__istota__Bash")
+        assert event.description == PRIVATE_RELAY_TOOL_DESCRIPTION
+        result = queue_with(setup, "Ask Bob what time dinner is", [event])
+        assert result["status"] == "held"
 
     def test_the_display_name_counts_and_so_does_case(self, setup):
         assert queue_with(setup, "can you ask BOB for me", [relay_call()])["status"] == "queued"

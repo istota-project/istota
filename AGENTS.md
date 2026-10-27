@@ -68,13 +68,16 @@ Boundaries and operations:
 ```
 src/istota/
 ├── brain/                # Pluggable model invocation (Brain protocol)
+│   ├── _cli_config_dir.py  # A fresh per-run `CLAUDE_CONFIG_DIR`: the O_EXCL writer, the onboarding seed, the credentials link, `make_cli_config_dir` → brain.md
+│   └── _tool_harness.py  # The shared tool-server start (native and CLI) and the CLI tool harness: `tool_harness`, `HarnessHandle`, `set_cli_root`, `release_calls` → brain.md
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
 ├── assignments/          # Goals Istota carries across days: store.py (row access), charter.py, validators.py, lifecycle.py (the one state writer), caller.py (user turn, wake or neither), budget.py (the ledger and ceilings), wakes.py (due wakes, the wake task, pickup, orphan reaping), scratchpad.py (snapshots, user edits, repair), prompt.py (the wake prompt) → assignments.md
 ├── skills/               # Self-contained skills (skill.md + optional CLI)
 │   └── _group_access.py  # The one gate for `kv --group` and `memory --group`: current member and in the task's resolved group set → memory.md
 ├── session/              # The native brain's application layer: compaction, results, transcripts
 │   ├── session_log.py       # Append-only JSONL transcript of one NativeBrain task attempt, and its sweep → maintenance.md
-│   └── session_log_read.py  # Reading a transcript back: one set of parsing rules, two consumers → maintenance.md
+│   ├── session_log_read.py  # Reading a transcript back: one set of parsing rules, two consumers → maintenance.md
+│   └── tools/dispatch.py # `ToolDispatcher`: the per-call policy for MCP tool calls (subset, argument preparation, readers-writer lock, text cap); no brain or daemon imports → brain.md
 ├── cli.py                # Local CLI (task, resource, briefing, secret, user, run, serve, setup, …)
 ├── serve.py              # Combined local launcher (`istota serve`): scheduler thread + uvicorn in one process
 ├── setup_wizard.py       # First-run setup of the stack (`istota setup`, inside the image) → install.md
@@ -129,6 +132,8 @@ src/istota/
 │   ├── claude_runtime_env.py  # What a task env carries only because the outer process is the `claude` CLI → sandbox.md
 │   ├── tool_server.py    # The native brain's tool server, one process per task attempt, inside the sandbox → sandbox.md
 │   ├── tool_server_protocol.py  # The wire format between the two, stdlib-only → sandbox.md
+│   ├── mcp_stdio.py      # MCP over stdio for the `claude` CLI: `serve_stdio`, the method table, version negotiation, content mapping; stdlib-only → brain.md
+│   ├── mcp_adapter.py    # The MCP server the CLI spawns in tool-harness mode: drops its env, relays calls to the daemon's bridge socket; interim, deleted by #862 → brain.md
 │   ├── skill_proxy.py    # Unix-socket proxy for credential isolation
 │   ├── network_proxy.py  # CONNECT proxy for network isolation
 │   ├── kv_namespaces.py  # Which `istota_kv` namespaces the model may not touch → sandbox.md

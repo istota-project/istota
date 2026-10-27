@@ -52,6 +52,23 @@ class ImageInput:
     display_name: str
 
 
+@dataclass(frozen=True)
+class HarnessSpec:
+    """What the executor hands a CLI brain to run its tools in the tool server.
+
+    Built by the executor because ``ClaudeCodeBrain`` sees only its own config
+    block. ``BrainRequest.harness`` is ``None`` for the old path.
+    """
+
+    # The CLI's whole environment.
+    cli_env: dict[str, str]
+    # `{temp_dir}/.harness/{user_id}/task_{id}`, created by the executor; each
+    # harness makes its own directory under it.
+    harness_root: Path
+    bash_spill_full_output: bool = True
+    cli_version: str = ""
+
+
 @dataclass
 class BrainRequest:
     """Inputs the brain needs to execute one task attempt.
@@ -205,6 +222,12 @@ class BrainRequest:
     # tool the credential the split exists to withhold (ISSUE-389). Two names
     # each carry across harmlessly, because each brain reads only its own.
     native_sandbox_wrap: Callable[[list[str]], list[str]] | None = None
+
+    # Run the CLI unwrapped with its tools in the tool server
+    # (`brain/_tool_harness.py`). `None` is the old path. The reroute's
+    # `dataclasses.replace` does not name it, so it crosses unchanged and only
+    # ClaudeCodeBrain reads it.
+    harness: HarnessSpec | None = None
 
     # Filesystem confinement for in-process file tools (NativeBrain only; NB-1).
     # ClaudeCodeBrain ignores these — its tools run inside

@@ -133,8 +133,9 @@ class ToolServerError(Exception):
     """The server could not be started, or died. Fails the attempt."""
 
 
-def attempt_failure_text(failure: str) -> str:
-    """The `result_text` a tool-server failure becomes.
+def attempt_failure_text(failure: str, brain_label: str) -> str:
+    """The `result_text` a tool-server failure becomes, naming the brain by
+    ``brain_label`` ("native brain", "Claude Code brain").
 
     Ordinarily it names the tool server, because a bare provider-shaped string
     in the task's error column would send the reader looking in the wrong
@@ -150,7 +151,7 @@ def attempt_failure_text(failure: str) -> str:
     """
     if failure.startswith(_TERMINATED_PREFIX):
         return failure
-    return f"The native brain's tool server failed: {failure}"
+    return f"The {brain_label}'s tool server failed: {failure}"
 
 
 def content_to_wire(content) -> list[dict[str, Any]]:

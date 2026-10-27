@@ -25,6 +25,7 @@ from .provider import (
     ThinkingDelta,
     ToolCallDelta,
 )
+from .tool_json_schema import tool_parameters
 from .types import (
     PROMPT_CACHE_TTLS,
     REASONING_REPLAY_MODES,
@@ -35,7 +36,6 @@ from .types import (
     TextContent,
     ThinkingContent,
     ToolCallContent,
-    ToolParameter,
     ToolSchema,
     Usage,
 )
@@ -293,7 +293,7 @@ def carries_strict_tools(tools: list[ToolSchema], model: str, mode: str) -> bool
     if not tools or not strict_tools_enabled(mode, model):
         return False
     return any(
-        strictify_schema(OpenAICompatibleProvider._tool_parameters(t)) is not None
+        strictify_schema(tool_parameters(t)) is not None
         for t in tools
     )
 
@@ -724,18 +724,8 @@ class OpenAICompatibleProvider:
             _mark(wire[-1])
 
     @staticmethod
-    def _tool_parameters(tool: ToolSchema) -> dict:
-        properties: dict = {}
-        required: list[str] = []
-        for p in tool.parameters:
-            properties[p.name] = OpenAICompatibleProvider._param_to_schema(p)
-            if p.required:
-                required.append(p.name)
-        return {"type": "object", "properties": properties, "required": required}
-
-    @staticmethod
     def _tool_to_wire(tool: ToolSchema, strict: bool = False) -> dict:
-        parameters = OpenAICompatibleProvider._tool_parameters(tool)
+        parameters = tool_parameters(tool)
         function: dict = {
             "name": tool.name,
             "description": tool.description,
@@ -747,30 +737,6 @@ class OpenAICompatibleProvider:
                 function["parameters"] = strict_parameters
                 function["strict"] = True
         return {"type": "function", "function": function}
-
-    @staticmethod
-    def _param_to_schema(p: ToolParameter) -> dict:
-        """Render a ``ToolParameter`` as a JSON-Schema property.
-
-        Recurses into ``properties`` (objects) and ``items`` (arrays). Strict
-        providers — Google Gemini via OpenRouter in particular — reject an
-        array that omits ``items`` (``...items: missing field``), and an
-        object whose nested ``properties`` are absent, so both are emitted
-        whenever they are declared.
-        """
-        schema: dict = {"type": p.type}
-        if p.description:
-            schema["description"] = p.description
-        if p.enum:
-            schema["enum"] = p.enum
-        if p.properties:
-            schema["properties"] = {
-                sub.name: OpenAICompatibleProvider._param_to_schema(sub)
-                for sub in p.properties.values()
-            }
-        if p.items is not None:
-            schema["items"] = OpenAICompatibleProvider._param_to_schema(p.items)
-        return schema
 
     async def _parse_sse_lines(
         self, lines: AsyncIterator[str], model: str = ""
