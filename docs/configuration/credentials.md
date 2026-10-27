@@ -207,7 +207,6 @@ The proxy strips these env vars from the Claude subprocess and injects them serv
 - `MONARCH_SESSION_ID`, `MONARCH_CSRFTOKEN`
 - `NTFY_TOKEN`, `NTFY_PASSWORD`
 - `TUMBLR_API_KEY`
-- `ISTOTA_BRAIN_NATIVE_API_KEY` — declared by `code_review`, which calls a model itself. It is therefore in this set on a `claude_code` deployment where the native brain is otherwise unused. The built-in providers' `ISTOTA_PROVIDER_<ID>_API_KEY` and `_EXTRA_HEADERS` are copied to the same skill from the daemon's environment
 - `ISTOTA_SECRET_KEY` — routed to module-skill subprocesses that need to decrypt per-user secrets, but blocked at the lookup endpoint via `_PROXY_LOOKUP_BLOCKED` so `istota-credential env ISTOTA_SECRET_KEY` from inside Claude is rejected
 
 See [environment variables](../reference/environment-variables.md) for the complete env var reference.

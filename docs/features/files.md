@@ -22,6 +22,8 @@ Hidden files are off by default. Show hidden remembers your choice in this brows
 
 A PDF in the viewer zooms with a pinch, a double tap, Ctrl+wheel or a trackpad pinch, the `+`, `-` and `0` keys, or the zoom buttons, and the page is redrawn sharp at the new size. This works in the iOS app too, where the page itself does not zoom.
 
+A CSV or TSV file opens as a table, with Rendered and Source to switch between the table and the raw text, as for Markdown. Click a header to sort by that column; a column of numbers sorts by value. Drag a column's edge to resize it, use the arrow keys on it, or double-click it to fit. Web and mail addresses in cells are links. The table shows the first 2,000 rows of the preview and says so when there are more. A malformed file is still shown rather than refused.
+
 A large directory shows at most 2,000 entries and a notice. This is a slice of the directory's enumeration order, sorted with folders first; it is not necessarily the alphabetically first 2,000 entries. Entries whose names cannot be represented as text are skipped and counted below the listing. A folder that cannot be read shows an error and a Retry button.
 
 ## Adding files
