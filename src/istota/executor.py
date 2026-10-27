@@ -2883,7 +2883,13 @@ def _report_native_usage(on_usage, message, requested_model: str) -> None:
 def _native_web_fetch_enabled(
     task: "db.Task", config: Config, is_admin: bool = True,
 ) -> bool:
-    """True when this task will actually have the native WebFetch tool.
+    """True when this task will actually have the daemon-side WebFetch tool.
+
+    A native task builds it in `NativeBrain`; a `claude_code` task on the tool
+    harness gets it from the bridge (`HarnessSpec.web_fetch`), since the
+    harness denies the CLI's own. Asked at prompt time, so the harness half
+    reads the switch and the routed kind only, as `harness_denies_web_fetch`
+    does.
 
     Used to fold `untrusted_input` into the eager skill set — the native
     WebFetch tool ingests untrusted web content but, as a core tool, doesn't
@@ -2915,7 +2921,8 @@ def _native_web_fetch_enabled(
         )
     except Exception:  # noqa: BLE001 — never let routing lookup fail selection
         return False
-    if routed.kind != "native":
+    harnessed = routed.kind == "claude_code" and getattr(config.brain, "tool_harness", False)
+    if routed.kind != "native" and not harnessed:
         return False
     wf = getattr(routed.native, "web_fetch", None)
     if not (wf and wf.enabled):
@@ -3965,11 +3972,13 @@ def build_daemon_harness(
 
 
 def harness_denies_web_fetch(task: "db.Task", config: Config) -> bool:
-    """Whether this task's brain is the harnessed CLI, which has no WebFetch.
+    """Whether this task is the harnessed CLI with no fetch tool at all.
 
-    Asked at prompt time, before the tool grant and the wrap exist, so it reads
-    the switch and the routed kind only: `HARNESS_DENIED_TOOLS` names WebFetch
-    and the harness offers no fetch of its own until part 2.
+    The harness denies the CLI's own WebFetch (`HARNESS_DENIED_TOOLS`) and
+    offers the daemon-side one only when `[brain.native.web_fetch]` is enabled,
+    so with that off the task has none. Asked at prompt time, before the tool
+    grant and the wrap exist, so it reads the switch and the routed kind only.
+    `admin_only` is not this question: the prompt states that case itself.
     """
     if not getattr(config.brain, "tool_harness", False):
         return False
@@ -3979,7 +3988,26 @@ def harness_denies_web_fetch(task: "db.Task", config: Config) -> bool:
         routed = resolve_brain_kind(task.source_type, config.brain, override=task.brain)
     except Exception:  # noqa: BLE001 — never let routing lookup fail assembly
         return False
-    return routed.kind == "claude_code"
+    if routed.kind != "claude_code":
+        return False
+    wf = getattr(routed.native, "web_fetch", None)
+    return not (wf and wf.enabled)
+
+
+def harness_web_fetch_policy(config: Config, allowed_tools: list[str]):
+    """`HarnessSpec.web_fetch`: the daemon-side WebFetch's policy, or None.
+
+    None when the grant leaves `WebFetch` out (`build_allowed_tools` drops it
+    for a non-admin under `admin_only`, and a guest turn's grant has none) or
+    the tool is disabled. This widens a CLI task's egress on purpose: the
+    CLI's own WebFetch ran inside the CONNECT allowlist, this one reaches any
+    public host under the SSRF rules, as a native task's always has.
+    """
+    if "WebFetch" not in allowed_tools:
+        return None
+    from .session.tools import web_fetch_policy_from_config
+
+    return web_fetch_policy_from_config(config.brain.native.web_fetch)
 
 
 def build_stripped_env() -> dict[str, str]:
@@ -7680,16 +7708,19 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     #
     # **The withheld predicate asks the routing question and the tool list does
     # not**, which is a disagreement on purpose rather than drift. `admin_only`
-    # only ever removes the *daemon-side* tool, since native is the only brain
-    # that builds one; a `claude_code` task keeps the CLI's own
-    # `WebFetch` whatever this list says, because that list never reaches the
-    # CLI as an allowlist. So a prompt that told a non-admin on a CLI-brain
-    # deployment "you have no fetch tool" would be stating an absence that is
-    # not there, which is the same defect as naming a tool that is not
-    # registered, pointing the other way. `_native_web_fetch_enabled` with its
-    # permissive `is_admin` default is exactly the "would this task have had the
-    # daemon-side tool" question, and it is asked last so a deployment leaving
-    # `admin_only` off never resolves a brain here at all.
+    # only ever removes the *daemon-side* tool, which native builds and the
+    # tool harness's bridge offers; a `claude_code` task off the harness keeps
+    # the CLI's own `WebFetch` whatever this list says, because that list
+    # never reaches the CLI as an allowlist. So a prompt that told a non-admin
+    # there "you have no fetch tool" would be stating an absence that is not
+    # there, which is the same defect as naming a tool that is not registered,
+    # pointing the other way. On the harness the CLI's own is denied, so
+    # `admin_only` does withhold the only fetch tool, and
+    # `harness_denies_web_fetch` covers the tool switched off.
+    # `_native_web_fetch_enabled` with its permissive `is_admin` default is
+    # exactly the "would this task have had the daemon-side tool" question,
+    # and it is asked last so a deployment leaving `admin_only` off never
+    # resolves a brain here at all.
     web_fetch_withheld = (
         not is_admin
         and config.brain.native.web_fetch.admin_only
@@ -8633,10 +8664,11 @@ def execute_task(
 
     # The native WebFetch tool ingests untrusted external content, but as a
     # *core tool* it doesn't drive companion-skill selection the way ingest
-    # *skills* do. So when this task routes to the native brain with WebFetch
-    # enabled, fold `untrusted_input` into the eager set explicitly — mirroring
-    # how the ingest skills pull it in via companion expansion — so its
-    # inbound-handling guardrails reach the prompt whenever the tool is present.
+    # *skills* do. So when this task will carry the daemon-side WebFetch
+    # (native, or `claude_code` on the tool harness), fold `untrusted_input`
+    # into the eager set explicitly — mirroring how the ingest skills pull it
+    # in via companion expansion — so its inbound-handling guardrails reach
+    # the prompt whenever the tool is present.
     if (
         _native_web_fetch_enabled(task, config, is_admin)
         and "untrusted_input" in skill_index
@@ -9504,6 +9536,7 @@ def execute_task(
                 harness_root=ensure_task_harness_dir(config, task.user_id, task.id),
                 bash_spill_full_output=config.brain.native.bash_spill_full_output,
                 cli_version=os.environ.get("ISTOTA_CLAUDE_CODE_VERSION", "").strip(),
+                web_fetch=harness_web_fetch_policy(config, allowed),
             )
         if req.advisor:
             logger.info(

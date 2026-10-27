@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Protocol
 from ._events import StreamEvent
 
 if TYPE_CHECKING:
+    from istota.session.tools import WebFetchPolicy
     from istota.usage.telemetry import BrainUsage
 
 
@@ -67,6 +68,9 @@ class HarnessSpec:
     harness_root: Path
     bash_spill_full_output: bool = True
     cli_version: str = ""
+    # The daemon-side WebFetch the bridge offers, from `[brain.native.web_fetch]`;
+    # `None` when the grant leaves it out or the tool is disabled.
+    web_fetch: "WebFetchPolicy | None" = None
 
 
 @dataclass

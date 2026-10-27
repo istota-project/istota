@@ -416,6 +416,11 @@ class Case:
     #: eagerly and a native route reaches `_build_native_completer`. No case
     #: does that today; the `_no_sockets` guard is what would catch it.
     brain: str | None = None
+    #: `[brain] tool_harness` on, on the shipped `claude_code` default. The
+    #: harness offers the daemon-side WebFetch (cli-brain-tools part 2, Stage
+    #: 2), so `_native_web_fetch_enabled` folds `untrusted_input` in as it does
+    #: for a native task. Removed with the switch in that spec's Stage 6.
+    tool_harness: bool = False
     #: Seeds one `vault_entries` row for the user, which is what the prompt's
     #: shared-credential lines are gated on, and sets `ISTOTA_SECRET_KEY` for
     #: the duration — the gate refuses without one, because the read the proxy
@@ -574,6 +579,12 @@ CASES: tuple[Case, ...] = (
         conversation_token="room-token",
         brain="native",
     ),
+    # The CLI on the tool harness. Against `base_nextcloud`, which it differs
+    # from in nothing but the switch: the diff is `untrusted_input` moving from
+    # the menu into a body section, because the harness offers the daemon-side
+    # WebFetch. The page-reading line is the same in both, since a CLI task off
+    # the harness has the CLI's own WebFetch.
+    Case("tool_harness", tool_harness=True),
     # A user with something in the shared-credential namespace. Against
     # `base_nextcloud`, which it differs from in nothing else, so the diff
     # between the two goldens is exactly the two lines the namespace buys —
@@ -728,7 +739,10 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
         # `room_selectable` is the operator gate `resolve_brain_kind` checks,
         # so a case that pins a brain has to name it here or the pin is refused
         # and the golden quietly becomes a copy of its sibling.
-        brain=BrainConfig(room_selectable=[case.brain] if case.brain else []),
+        brain=BrainConfig(
+            room_selectable=[case.brain] if case.brain else [],
+            tool_harness=case.tool_harness,
+        ),
         emissaries_enabled=case.emissaries,
         admin_users=set() if case.admin else {OTHER_USER},
         users={

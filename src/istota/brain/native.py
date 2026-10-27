@@ -113,7 +113,13 @@ from istota.session.usage import TaskUsage, cache_write_multiplier_for_ttl
 from ._aliases import CANONICAL_ROLES, split_effort
 from ._resolve import Resolution, alias_keys, clamp_effort_level, effort_wire_value, resolve_selection
 from ._roles import current_alias_table
-from ._tool_harness import request_hello, request_tool_workspace, start_request_tool_server
+from ._tool_harness import (
+    extract_urls as _extract_urls,  # noqa: F401 — the provenance corpus, read by tests here
+    request_hello,
+    request_tool_workspace,
+    request_web_fetch_tool,
+    start_request_tool_server,
+)
 from ._types import BrainRequest, BrainResult, ImageInput
 from .claude_code import is_usage_limit_error
 
@@ -255,15 +261,6 @@ _API_RETRY_MAX_DELAY = 120.0
 # portable role survives a cross-provider fallback.
 _BUILTIN_ROLE_NAMES = CANONICAL_ROLES
 
-# URL harvester for require_url_provenance (Stage 3b). Matches http(s) URLs in
-# free text; trailing punctuation the wrapping prose contributes is trimmed.
-_URL_RE = re.compile(r"https?://[^\s<>\"'`\])}]+", re.IGNORECASE)
-
-
-def _extract_urls(text: str) -> frozenset[str]:
-    if not text:
-        return frozenset()
-    return frozenset(m.rstrip(".,;:!?") for m in _URL_RE.findall(text))
 
 # The BrainResult.stop_reason vocabulary the executor documents. The loop's raw
 # agent_end reasons are normalized into this set so a future stop_reason-keyed
@@ -2914,26 +2911,12 @@ class NativeBrain:
         """
         if not req.allowed_tools:
             return []
-        from istota.session.tools import ToolEnv, build_remote_tools, make_web_fetch_tool
+        from istota.session.tools import build_remote_tools
 
         tools = list(build_remote_tools(server)) if server is not None else []
-
-        policy = self._web_fetch_policy()
-        if policy is not None and policy.enabled:
-            # Provenance corpus (Stage 3b): only assembled when the knob is on,
-            # so the default path threads nothing new. v1 corpus = URLs present
-            # in the task prompt (task text + prior conversation context already
-            # folded into req.prompt by the executor).
-            corpus = _extract_urls(req.prompt) if policy.require_url_provenance else None
-            cwd, read_roots, write_roots, write_denied_roots = self._tool_workspace(req)
-            tools.append(make_web_fetch_tool(ToolEnv(
-                cwd=cwd,
-                read_roots=read_roots,
-                write_roots=write_roots,
-                write_denied_roots=write_denied_roots,
-                web_fetch=policy,
-                web_fetch_url_corpus=corpus,
-            )))
+        web_fetch = request_web_fetch_tool(req, self._web_fetch_policy())
+        if web_fetch is not None:
+            tools.append(web_fetch)
 
         allowed = set(req.allowed_tools)
         return [t for t in tools if t.schema.name in allowed]
@@ -2945,25 +2928,9 @@ class NativeBrain:
         The native harness has no other web-reaching tool once Bash is confined
         behind the CONNECT allowlist, so this is the daemon-side fetch path.
         """
-        from istota.session.tools import WebFetchPolicy
+        from istota.session.tools import web_fetch_policy_from_config
 
-        cfg = getattr(self._config, "web_fetch", None)
-        if cfg is None or not cfg.enabled:
-            return None
-        return WebFetchPolicy(
-            enabled=True,
-            timeout_seconds=cfg.timeout_seconds,
-            max_bytes=cfg.max_bytes,
-            max_content_chars=cfg.max_content_chars,
-            max_redirects=cfg.max_redirects,
-            allow_http=cfg.allow_http,
-            allowed_ports=tuple(cfg.allowed_ports),
-            user_agent=cfg.user_agent,
-            allow_hosts=tuple(cfg.allow_hosts),
-            block_hosts=tuple(cfg.block_hosts),
-            extra_blocked_cidrs=tuple(cfg.extra_blocked_cidrs),
-            require_url_provenance=cfg.require_url_provenance,
-        )
+        return web_fetch_policy_from_config(getattr(self._config, "web_fetch", None))
 
     def _convert_to_llm(self, messages: list[AgentMessage]) -> list[Message]:
         """Render AgentMessages to provider wire format, then repair tool pairs.

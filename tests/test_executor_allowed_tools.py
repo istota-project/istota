@@ -258,20 +258,38 @@ class TestTheWithheldCaseIsStated:
         assert "lightweight fallback" not in system
         assert "restricted to administrators" not in system
 
-    def test_a_harnessed_cli_task_is_not_told_it_has_webfetch(self, tmp_path):
-        """The tool harness denies the CLI's WebFetch and offers none (part 1)."""
+    def test_a_harnessed_cli_task_is_told_it_has_webfetch(self, tmp_path):
+        """The harness offers the daemon-side WebFetch (part 2, Stage 2), so a
+        harnessed task gets the native line."""
         config = self._config(tmp_path, kind="claude_code")
+        config.brain.tool_harness = True
+        system = build_prompt(self._task(), [], config, is_admin=True).system
+        assert "Reading web pages: WebFetch fetches a URL" in system
+        assert "no fetch tool" not in system
+
+    def test_a_harnessed_cli_task_with_the_browser_keeps_the_fallback(self, tmp_path):
+        config = self._config(tmp_path, kind="claude_code", browser=True)
+        config.brain.tool_harness = True
+        system = build_prompt(self._task(), [], config, is_admin=True).system
+        assert "prefer the browse skill" in system
+        assert "lightweight fallback" in system
+
+    def test_a_harnessed_cli_task_with_webfetch_off_has_no_fetch_tool(self, tmp_path):
+        """The CLI's own WebFetch is denied on the harness, so with the
+        daemon-side tool switched off there is none."""
+        config = self._config(tmp_path, kind="claude_code", enabled=False)
         config.brain.tool_harness = True
         system = build_prompt(self._task(), [], config, is_admin=True).system
         assert "WebFetch fetches a URL" not in system
         assert "you have no fetch tool on this deployment" in system
 
-    def test_a_harnessed_cli_task_with_the_browser_drops_the_fallback(self, tmp_path):
-        config = self._config(tmp_path, kind="claude_code", browser=True)
+    def test_a_harnessed_cli_non_admin_under_admin_only_is_told_why(self, tmp_path):
+        """`admin_only` now removes the only fetch tool a harnessed task has."""
+        config = self._config(tmp_path, kind="claude_code", admin_only=True)
         config.brain.tool_harness = True
-        system = build_prompt(self._task(), [], config, is_admin=True).system
-        assert "prefer the browse skill" in system
-        assert "lightweight fallback" not in system
+        system = build_prompt(self._task(), [], config, is_admin=False).system
+        assert "restricted to administrators" in system
+        assert "Reading web pages: WebFetch fetches a URL" not in system
 
     def test_the_switch_on_leaves_a_native_task_its_webfetch(self, tmp_path):
         config = self._config(tmp_path)
@@ -332,3 +350,53 @@ class TestTheUntrustedInputGuardrailsFollowTheTool:
         config = self._config(tmp_path, enabled=False)
         assert not _native_web_fetch_enabled(self._task(), config, True)
         assert not _native_web_fetch_enabled(self._task(), config, False)
+
+    def test_a_harnessed_cli_task_folds_it_in(self, tmp_path):
+        """The harness offers the daemon-side tool, so the guardrails follow."""
+        from istota.executor import _native_web_fetch_enabled
+
+        config = self._config(tmp_path)
+        config.brain.kind = "claude_code"
+        config.brain.tool_harness = True
+        task = self._task(brain=None)
+        assert _native_web_fetch_enabled(task, config, False)
+        config.brain.native.web_fetch.admin_only = True
+        assert not _native_web_fetch_enabled(task, config, False)
+        assert _native_web_fetch_enabled(task, config, True)
+
+    def test_a_cli_task_off_the_harness_folds_nothing_in(self, tmp_path):
+        from istota.executor import _native_web_fetch_enabled
+
+        config = self._config(tmp_path)
+        config.brain.kind = "claude_code"
+        assert not _native_web_fetch_enabled(self._task(brain=None), config, True)
+
+
+class TestTheHarnessWebFetchPolicy:
+    """`HarnessSpec.web_fetch`: the native policy where the grant names the tool."""
+
+    def _config(self, **web_fetch) -> Config:
+        config = Config()
+        for k, v in web_fetch.items():
+            setattr(config.brain.native.web_fetch, k, v)
+        return config
+
+    def test_granted_and_enabled_gives_the_configured_policy(self):
+        from istota.executor import harness_web_fetch_policy
+
+        config = self._config(block_hosts=["blocked.test"], require_url_provenance=True)
+        policy = harness_web_fetch_policy(config, ["Read", "WebFetch"])
+        assert policy is not None and policy.enabled
+        assert policy.block_hosts == ("blocked.test",)
+        assert policy.require_url_provenance is True
+
+    def test_a_grant_without_webfetch_gives_none(self):
+        from istota.executor import harness_web_fetch_policy
+
+        assert harness_web_fetch_policy(self._config(), ["Read", "Bash"]) is None
+
+    def test_a_disabled_tool_gives_none(self):
+        from istota.executor import harness_web_fetch_policy
+
+        config = self._config(enabled=False)
+        assert harness_web_fetch_policy(config, ["Read", "WebFetch"]) is None
