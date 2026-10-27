@@ -187,14 +187,17 @@ Defaults to `"claude_code"`, so existing deployments need no changes. `source_ty
 
 ### Native brain request and context options
 
-`[brain.native]` carries the native loop's own options. These came in with the pi 1.x comparison round, and their defaults were set from that round's evals (stage 8):
+These came in with the pi 1.x comparison round, and their defaults were set from that round's evals (stage 8). The loop's own options are on `[brain.native]`:
 
 - `compaction_background` (default `false`) and `compaction_background_tokens` (0 = an eighth of the window, at most 32768): start the compaction summary before the blocking threshold and swap it in at a later turn boundary. Kept off because the primary eval model got slower with it.
-- `reasoning_replay` (default `"auto"`): send structured reasoning back on later turns of the same attempt. `"on"` adds plain reasoning text, `"off"` sends none.
-- `prompt_cache_key` (unset = on for OpenRouter and OpenAI, off elsewhere): a random per-attempt key, so an attempt's requests reach one cache.
-- `prompt_cache_ttl` (default `"5m"`, or `"1h"`): lifetime of the cache breakpoints. Kept at 5m because both eval providers cache implicitly and ignore the field.
-- `strict_tool_schemas` (default `"auto"`): send tool definitions strict for models whose catalog entry says they support structured outputs. Moved from `"off"` because the weaker eval model made fewer failed edits with it.
 - `tool_failure_nudge_after` (default 0 = off): after this many failed tool calls in a row, tell the model once to change approach. Shipped off because it did not reduce failed calls.
+
+What the endpoint is sent is the provider's, on `[providers.<id>]`; unset, each takes the provider kind's default. The same names on `[brain.native]` are read for one release as native's provider's:
+
+- `reasoning_replay` (default `"auto"`): send structured reasoning back on later turns of the same attempt. `"on"` adds plain reasoning text, `"off"` sends none.
+- `prompt_cache_key` (unset = on for an `openrouter` provider and for `api.openai.com`, off elsewhere): a random per-attempt key, so an attempt's requests reach one cache.
+- `prompt_cache_ttl` (default `"5m"`, or `"1h"`): lifetime of the cache breakpoints. Kept at 5m because both eval providers cache implicitly and ignore the field.
+- `strict_tool_schemas` (default `"auto"`): send tool definitions strict for models whose catalogue entry says they support structured outputs. Moved from `"off"` because the weaker eval model made fewer failed edits with it.
 
 A refused reasoning replay or strict schema is re-sent once without the feature, which stays off for the rest of the attempt. A failed compaction summary never drops context: the proactive path keeps the messages and tries again later, and overflow recovery fails the attempt when its own summary fails. The [native brain operator runbook](../configuration/native-brain.md) has the details.
 
