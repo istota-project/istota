@@ -21,7 +21,7 @@ def install(tmp_path, monkeypatch):
     db.init_db(database)
     path = tmp_path / "config.toml"
     path.write_text(toml_write.dumps({"db_path": str(database), "workspace_path": str(tmp_path / "workspace"),
-                                    "default_briefings": [], "briefing_shared_blocks": []}))
+                                    "default_briefings": [], "briefings": {"shared_blocks": []}}))
     for user in ("alice", "bob", "admin"):
         user_profiles.provision_user(database, user, {})
     with db.get_db(database) as conn:

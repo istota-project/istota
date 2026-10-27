@@ -795,7 +795,7 @@ class TestARehearsalIsNotASecondLiveBot:
             assert name not in enabled, name
         assert config.talk.enabled is False
         assert config.scheduler.push_notification_sources == []
-        assert all(not b.enabled for b in config.briefing_shared_blocks)
+        assert all(not b.enabled for b in config.briefings.shared_blocks)
         assert config.default_briefings == []
 
     def test_ntfy_credentials_are_removed_and_others_kept(self, imported):

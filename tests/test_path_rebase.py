@@ -85,6 +85,7 @@ def test_selectors_include_seeds_and_leave_other_strings_alone():
     document = {"meta": {"source": "/old/meta"}, "users": {"alice": user}, "config": {
         "users": {"alice": user}, "default_briefings": [briefing],
         "briefing_shared_blocks": [{"sources": [source]}],
+        "briefings": {"shared_blocks": [{"sources": [source]}]},
         "workspace_mount_path": "/old/mount", "nextcloud_mount_path": "/old/alias",
         "scheduler": {"db_backup_dir": "/old/backups"},
         "brain": {"native": {"session_log": {"dir": "/old/logs"}, "extra_headers": {"path": "/old/private"}}},
@@ -103,6 +104,7 @@ def test_selectors_include_seeds_and_leave_other_strings_alone():
         assert node["heartbeat"]["checks"][1] == user["heartbeat"]["checks"][1]
     assert changed["config"]["default_briefings"][0]["blocks"][0]["sources"][0]["config"]["path"] == "/new/notes"
     assert changed["config"]["briefing_shared_blocks"][0]["sources"][0]["config"]["path"] == "/new/notes"
+    assert changed["config"]["briefings"]["shared_blocks"][0]["sources"][0]["config"]["path"] == "/new/notes"
     assert changed["config"]["brain"]["native"]["session_log"]["dir"] == "/new/logs"
     assert changed["config"]["brain"]["native"]["extra_headers"] == original["config"]["brain"]["native"]["extra_headers"]
     assert changed["config"]["workspace_mount_path"] == "/new/mount"

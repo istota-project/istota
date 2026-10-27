@@ -904,7 +904,7 @@ def _model_fields_to_check(config: "Config") -> list[tuple[str, str, str]]:
     if "tmux_claude" in reachable:
         fields.append(("[brain.tmux] model", brain.tmux.model, "tmux_claude"))
     if reachable & {"claude_code", "tmux_claude"}:
-        fields.append(("advisor_model", config.advisor_model, "claude_code"))
+        fields.append(("[brain.claude_code] advisor_model", brain.claude_code.advisor_model, "claude_code"))
     if "native" in reachable:
         fields.append(("[brain.native] model", brain.native.model, "native"))
     base = getattr(brain, "kind", "")

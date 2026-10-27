@@ -215,7 +215,7 @@ def _shared_kv_key_exists(ctx: SourceContext, name: str) -> bool:
 def _shared_block_names(ctx: SourceContext) -> set[str] | None:
     """The configured shared-block names, or None if the config has none/absent
     (Stage 5 config attribute; guarded so Stage 4 works standalone)."""
-    blocks = getattr(ctx.app_config, "briefing_shared_blocks", None)
+    blocks = getattr(getattr(ctx.app_config, "briefings", None), "shared_blocks", None)
     if not blocks:
         return None
     names = set()

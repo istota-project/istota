@@ -1215,7 +1215,7 @@ class TestGroupBriefingsUpgrade:
         config.pop("workspace_mount_path", None)
         config["nextcloud"]["url"] = ""
         config["email"].update(enabled=True, bot_email="bot@example.com")
-        config["briefing_shared_blocks"] = []
+        config.setdefault("briefings", {})["shared_blocks"] = []
         config["default_briefings"] = [{"name": "daily", "cron": "0 7 * * *", "output": "email",
             "blocks": [{"title": "News", "render_mode": "structured", "sources": [
                 {"kind": "shared_block", "config": {"name": "retained"}}]}]}]

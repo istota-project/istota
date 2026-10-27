@@ -46,7 +46,7 @@ Defaults live in `[brain.claude_code]`, `[brain.tmux]`, `[brain.native]` `model`
 
 **No model id is written outside the catalogue.** `src/istota/llm/data/anthropic.json` is the one place an Anthropic model is named; `scripts/update-anthropic-catalog.py` regenerates it from models.dev plus `anthropic_overrides.json`, and `--check` gates `scripts/release.sh`. `OPUS`, `SONNET` and `HAIKU` in `claude_code` are computed at import as the newest non-deprecated model of each family in that file (`catalog.latest_shipped_id`), kept importable for one release; the live resolver reads `Catalogue.latest` instead, so Anthropic discovery moves the shortcuts and tiers. The setup defaults are functions over the same file (`setup_wizard.default_anthropic_model`). Documents name a family or an alias, never a current id: `tests/test_model_id_docs.py` fails on any family's newest id (or its OpenRouter spelling) in `docs/`, `.claude/rules/`, `config/config.example.toml`, `README.md` or `AGENTS.md` (#548 was those restated ids drifting). A prior version is still written as its id plus modifier (`claude-opus-4-7:high`).
 
-`Config.advisor_model` is top-level (no `[brain.advisor_model]`), resolved via `resolve_model_name` (no effort). Anthropic namespace only; native ignores it. See `.claude/rules/executor.md` § Brain invocation.
+`advisor_model` is `[brain.claude_code] advisor_model` (top-level before, still read with a warning), resolved via `resolve_model_name` (no effort); the tmux brain reads it too. Anthropic namespace only; native ignores it. See `.claude/rules/executor.md` § Brain invocation.
 
 ## BrainRequest fields
 | Field | Notes |

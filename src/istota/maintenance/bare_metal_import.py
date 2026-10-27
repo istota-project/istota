@@ -367,10 +367,16 @@ def rewrite_config(
         # the database switches below would not reach either.
         if new.get("default_briefings"):
             changes.append(f"default_briefings: dropped ({len(new.pop('default_briefings'))} briefing(s))")
-        for block in new.get("briefing_shared_blocks") or []:
-            if isinstance(block, dict) and block.get("enabled", True) is not False:
-                block["enabled"] = False
-                changes.append(f"briefing_shared_blocks {block.get('name', '?')!r}: enabled -> False")
+        briefings = new.get("briefings")
+        blocks = [
+            ("briefing_shared_blocks", new.get("briefing_shared_blocks")),
+            ("briefings.shared_blocks", briefings.get("shared_blocks") if isinstance(briefings, dict) else None),
+        ]
+        for label, entries in blocks:
+            for block in entries or []:
+                if isinstance(block, dict) and block.get("enabled", True) is not False:
+                    block["enabled"] = False
+                    changes.append(f"{label} {block.get('name', '?')!r}: enabled -> False")
 
     scan = [prefix for prefix, _ in prefixes]
     if old_home:

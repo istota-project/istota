@@ -27,7 +27,7 @@ def legacy(tmp_path, monkeypatch, *, fresh=False, private=False):
                    {"kind": "calendar" if private else "shared_block", "config": {} if private else {"name": "news"}}
                ]}]}
     document = {"db_path": str(database), "workspace_path": str(tmp_path / "workspace"),
-                "default_briefings": [default], "briefing_shared_blocks": [], "email": {"enabled": True}}
+                "default_briefings": [default], "briefings": {"shared_blocks": []}, "email": {"enabled": True}}
     path = tmp_path / "config.toml"
     path.write_text(toml_write.dumps(document))
     return path, document

@@ -46,7 +46,7 @@ If the optional [Ansible management role](../deployment/ansible.md) (or a plan w
 
 ## Tables, the whole file, and ignored keys
 
-A table such as `[models.aliases]` or `[[briefing_shared_blocks]]` is edited as TOML that defines that one key, starting from what the file holds. "Reset to default" removes the key; `briefing_shared_blocks = []` is a different edit, and means no shared blocks rather than the shipped ones.
+A table such as `[models.aliases]` or `[[briefings.shared_blocks]]` is edited as TOML that defines that one key, starting from what the file holds. "Reset to default" removes the key; `shared_blocks = []` is a different edit, and means no shared blocks rather than the shipped ones.
 
 The whole of `config.toml` can also be edited as text. Every credential in it reads `"<unchanged>"`, which keeps the stored value; typing over it sets a new one. The text replaces the whole file, so it cannot be combined with field edits in one change. `[users.*]` can be edited there, but it only seeds users on first start; per-user settings belong on the Users page.
 

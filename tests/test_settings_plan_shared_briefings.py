@@ -19,7 +19,7 @@ def install(tmp_path):
     database = tmp_path / "framework.db"
     db.init_db(database)
     config = tmp_path / "config.toml"
-    config.write_text(toml_write.dumps({"db_path": str(database), "briefing_shared_blocks": [], "default_briefings": []}))
+    config.write_text(toml_write.dumps({"db_path": str(database), "briefings": {"shared_blocks": []}, "default_briefings": []}))
     for user in ("alice", "bob"):
         user_profiles.provision_user(database, user, {})
     return config, database
@@ -131,12 +131,12 @@ def test_user_scope_ignores_shared_updates_but_checks_references(install):
 
 def test_seed_conflict_and_config_seed_reference(install):
     shared(install)
-    raw = {"db_path": str(install[1]), "briefing_shared_blocks": [{"name": "news", "cron": "0 7 * * *"}], "default_briefings": []}
+    raw = {"db_path": str(install[1]), "briefings": {"shared_blocks": [{"name": "news", "cron": "0 7 * * *"}]}, "default_briefings": []}
     install[0].write_text(toml_write.dumps(raw))
     with pytest.raises(engine.ExecutionError, match="shared_block_seed_conflict") as error:
         preview(install, {"shared_briefing_blocks": []}, prune=True)
-    assert error.value.path == ["config", "briefing_shared_blocks", 0]
-    raw["briefing_shared_blocks"] = []
+    assert error.value.path == ["config", "briefings", "shared_blocks", 0]
+    raw["briefings"]["shared_blocks"] = []
     raw["default_briefings"] = [{"name": "morning", "cron": "0 7 * * *", "blocks": [{"title": "News", "sources": [{"kind": "shared_block", "config": {"name": "news"}}]}]}]
     install[0].write_text(toml_write.dumps(raw))
     # Legacy defaults are migration declarations, not new personal consumers.

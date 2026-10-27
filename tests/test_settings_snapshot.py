@@ -22,7 +22,7 @@ def install(tmp_path, monkeypatch):
     path = tmp_path / "config.toml"
     path.write_text(toml_write.dumps({
         "db_path": str(database), "workspace_path": str(tmp_path / "workspace"),
-        "temp_dir": str(tmp_path / "temp"), "default_briefings": [], "briefing_shared_blocks": [],
+        "temp_dir": str(tmp_path / "temp"), "default_briefings": [], "briefings": {"shared_blocks": []},
     }))
     user_profiles.provision_user(database, "alice", {}, mode="managed")
     config = load_config(path, apply_db_overlays=False)

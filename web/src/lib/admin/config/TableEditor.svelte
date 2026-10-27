@@ -22,7 +22,7 @@
   let emptyError = $state('');
   let holdsSentinel = $derived(text.includes(`"${SENTINEL}"`));
   let sharedBlocks = $derived(
-    field.path.length === 1 && field.path[0] === 'briefing_shared_blocks',
+    field.path.length === 2 && field.path[0] === 'briefings' && field.path[1] === 'shared_blocks',
   );
 
   // Behind the label's "?", as every other field's guidance is, so the row
@@ -38,7 +38,7 @@
       sharedBlocks
         ? 'A shared block saved from the Briefings settings with the same name wins over one ' +
           'here. Without this key the shipped default blocks apply; ' +
-          'briefing_shared_blocks = [] means none.'
+          'shared_blocks = [] means none.'
         : '',
     ]
       .filter(Boolean)

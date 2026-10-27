@@ -318,7 +318,7 @@ class TestSimpleExecution:
     def test_custom_system_prompt_in_command(self, tmp_path):
         """--system-prompt-file is added when custom_system_prompt is True."""
         config = _make_config(tmp_path)
-        config.custom_system_prompt = True
+        config.brain.custom_system_prompt = True
         # Create the system-prompt.md file where executor expects it
         sp_path = config.skills_dir.parent / "system-prompt.md"
         sp_path.write_text("# Test system prompt\n")
@@ -370,7 +370,7 @@ class TestSimpleExecution:
     def test_custom_system_prompt_missing_file(self, tmp_path):
         """--system-prompt-file is skipped when enabled but file doesn't exist."""
         config = _make_config(tmp_path)
-        config.custom_system_prompt = True
+        config.brain.custom_system_prompt = True
         # Don't create the file
         task = _make_task()
 

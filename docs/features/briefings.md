@@ -141,10 +141,10 @@ It has two layers over one storage substrate — the **shared KV store** (`share
 
 The briefings module ships **shared blocks**: one-block briefings it schedules and generates *once globally*, writing the rendered section into `shared_kv`. A fresh deploy ships a canonical set (`world-headlines` via browse presets, `markets-summary` via the markets source) for existing consumers. New group briefings can generate directly, without a shared-block publishing job.
 
-A shared block is defined at the instance level (top-level `[[briefing_shared_blocks]]`):
+A shared block is defined at the instance level, as `[[briefings.shared_blocks]]` (the top-level `[[briefing_shared_blocks]]` it replaced still loads, with a warning):
 
 ```toml
-[[briefing_shared_blocks]]
+[[briefings.shared_blocks]]
 name = "world-headlines"          # → shared_kv key in namespace "briefing_shared_blocks"
 cron = "0 6 * * *"                # generated before the 07:00 briefing window; UTC (global)
 title = "🌍 World headlines"
@@ -152,10 +152,10 @@ directive = "Synthesize the frontpages into ~8 top world stories."
 render_mode = "synthesis"
 enabled = true
 
-  [[briefing_shared_blocks.sources]]
+  [[briefings.shared_blocks.sources]]
   kind = "browse"
   config = { preset = "ap" }
-  [[briefing_shared_blocks.sources]]
+  [[briefings.shared_blocks.sources]]
   kind = "browse"
   config = { preset = "reuters" }
 ```
@@ -163,7 +163,7 @@ enabled = true
 - Generation runs off the dispatch thread (sleep-cycle-style: one non-streaming, no-sandbox model call) under the reserved `__system__` identity, so it needs **no admin configured** and never blocks task processing.
 - Only **user-agnostic** source kinds are allowed: `browse`, `markets`, and `email` (the shared/unowned pool). `rss` (needs a real feeds user), the personal built-ins (`calendar`/`todos`/`reminders`/`notes`), and `shared_block` (no chaining) are dropped with a warning.
 - If every source fails/empties (a transient AP/Reuters outage), the write is **skipped** and the prior value kept (last-known-good) rather than blanking the section.
-- Omit or set `enabled = false` to disable one; an explicit empty `[[briefing_shared_blocks]]` list opts out entirely.
+- Omit or set `enabled = false` to disable one; an explicit empty list (`[briefings] shared_blocks = []`) opts out entirely.
 
 A briefing consumes a shared block with a `shared_block` source:
 

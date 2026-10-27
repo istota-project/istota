@@ -71,9 +71,9 @@ def plan_shared_blocks(plan, user, context, options):
     retained = {item["name"] for item in plan.shared_briefing_blocks}
     removed = existing.keys() - retained if options.prune else set()
     if options.prune:
-        for index, seed in enumerate(config.briefing_shared_blocks):
+        for index, seed in enumerate(config.briefings.shared_blocks):
             if seed.name not in retained and seed.cron:
-                raise ExecutionError("shared_block_seed_conflict", ["config", "briefing_shared_blocks", index])
+                raise ExecutionError("shared_block_seed_conflict", ["config", "briefings", "shared_blocks", index])
 
     @contextmanager
     def transaction():
@@ -132,7 +132,7 @@ def _check_blocks(blocks, available, removed, path, *, retained_only=False):
 
 def _available_names(config, conn, available):
     available = set(available)
-    available.update(seed.name for seed in config.briefing_shared_blocks)
+    available.update(seed.name for seed in config.briefings.shared_blocks)
     # Custom publishers have no definition row; keep their live keys valid.
     available.update(row[0] for row in conn.execute(
         "SELECT key FROM shared_kv WHERE namespace = 'briefing_shared_blocks'"))

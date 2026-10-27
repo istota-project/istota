@@ -456,16 +456,16 @@ class TestTables:
 
     def test_an_absent_table_is_an_empty_snippet(self):
         payload = view.build_config_view(Config(), document=_EDITOR_DOCUMENT)
-        assert _field(payload, "briefing_shared_blocks")["toml"] == ""
+        assert _field(payload, "briefings.shared_blocks")["toml"] == ""
 
     def test_an_empty_list_of_tables_stays_distinct_from_absent(self):
-        payload = view.build_config_view(Config(), document="briefing_shared_blocks = []\n")
-        assert _field(payload, "briefing_shared_blocks")["toml"] == "briefing_shared_blocks = []\n"
+        payload = view.build_config_view(Config(), document="[briefings]\nshared_blocks = []\n")
+        assert _field(payload, "briefings.shared_blocks")["toml"] == "shared_blocks = []\n"
 
     def test_a_list_of_tables_renders_as_an_array_of_tables(self):
-        document = '[[briefing_shared_blocks]]\nname = "markets"\nprompt = "Summarise"\n'
-        field = _field(view.build_config_view(Config(), document=document), "briefing_shared_blocks")
-        assert field["toml"].startswith("[[briefing_shared_blocks]]\n")
+        document = '[[briefings.shared_blocks]]\nname = "markets"\nprompt = "Summarise"\n'
+        field = _field(view.build_config_view(Config(), document=document), "briefings.shared_blocks")
+        assert field["toml"].startswith("[[shared_blocks]]\n")
         assert field["value"] == 0  # the loaded config's count, unchanged
 
     def test_a_read_only_table_carries_no_snippet(self):
@@ -997,7 +997,7 @@ class TestModelCatalogue:
         claude = _field(payload, "brain.claude_code.model")
         assert claude["editor"] == "model"
         assert claude["model_field"] == {"sources": ["anthropic"], "effort": True, "aliases": True}
-        assert _field(payload, "advisor_model")["model_field"]["effort"] is False
+        assert _field(payload, "brain.claude_code.advisor_model")["model_field"]["effort"] is False
         native = _field(payload, "brain.native.model")["model_field"]
         assert native["sources"][0] == "openrouter"
         assert "anthropic" not in native["sources"]  # no anthropic inference key

@@ -131,7 +131,7 @@ class TestConfigDefaults:
 
     def test_default_custom_system_prompt(self):
         cfg = Config()
-        assert cfg.custom_system_prompt is False
+        assert cfg.brain.custom_system_prompt is False
 
 
 class TestConfigLoading:
@@ -193,15 +193,15 @@ class TestConfigLoading:
 
     def test_load_custom_system_prompt_true(self, tmp_path):
         p = tmp_path / "config.toml"
-        p.write_text('custom_system_prompt = true\n')
+        p.write_text('[brain]\ncustom_system_prompt = true\n')
         cfg = load_config(p)
-        assert cfg.custom_system_prompt is True
+        assert cfg.brain.custom_system_prompt is True
 
     def test_load_custom_system_prompt_default(self, tmp_path):
         p = tmp_path / "config.toml"
         p.write_text('db_path = "test.db"\n')
         cfg = load_config(p)
-        assert cfg.custom_system_prompt is False
+        assert cfg.brain.custom_system_prompt is False
 
     def test_load_nextcloud_section(self, tmp_path):
         p = tmp_path / "config.toml"

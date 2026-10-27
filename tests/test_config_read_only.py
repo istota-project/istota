@@ -76,7 +76,7 @@ def test_read_only_load_preserves_paths_seeds_and_existing_state(installed_confi
     assert alice.briefings == []
     assert [(b.name, b.cron) for b in alice.legacy_briefing_seeds] == [("morning", "0 6 * * *")]
     assert [b.name for b in config.default_briefings] == ["daily"]
-    assert [(b.name, b.title) for b in config.briefing_shared_blocks] == [("news", "File news")]
+    assert [(b.name, b.title) for b in config.briefings.shared_blocks] == [("news", "File news")]
 
 
 @pytest.mark.parametrize("options", [{}, {"apply_db_overlays": True}], ids=["default", "explicit"])
@@ -91,7 +91,7 @@ def test_normal_load_still_overlays_imports_cleans_and_seeds(installed_config, o
     assert [(r.type, r.name) for r in alice.resources] == [("folder", "Stored docs")]
     # Retired default overlay: [[default_briefings]] is migration input only, never copied in.
     assert {b.name: b.cron for b in alice.briefings} == {"morning": "0 8 * * *"}
-    assert config.briefing_shared_blocks[0].title == "Stored news"
+    assert config.briefings.shared_blocks[0].title == "Stored news"
     with db.get_db(config.db_path) as conn:
         assert [r.resource_type for r in db.get_user_resources(conn, "alice")] == ["folder"]
     assert secrets_store.get_secret(config.db_path, "alice", "overland", "ingest_token") == "example-ingest-value"
