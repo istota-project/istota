@@ -20,6 +20,7 @@ import {
   MAX_QUEUE_ROOMS,
   MAX_QUEUE_CHARS,
   MAX_QUEUE_TOTAL_CHARS,
+  mergedIdempotencyKey,
   type PendingAttachment,
   type StoredQueuedSend,
 } from './sendQueue';
@@ -548,5 +549,33 @@ describe('sendQueue — size bounds', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe('sendQueue — a merged send (#854)', () => {
+  it('derives one key from the merged keys, the same every time', () => {
+    const key = mergedIdempotencyKey(['k1', 'k2', 'k3']);
+    expect(mergedIdempotencyKey(['k1', 'k2', 'k3'])).toBe(key);
+    // The server bounds the key at 64 characters (`_MAX_CLIENT_MSG_ID_CHARS`).
+    expect(key.length).toBeLessThanOrEqual(64);
+    // None of the keys it was made from, or a replay of one message alone
+    // would be answered with the merged task.
+    expect(['k1', 'k2', 'k3']).not.toContain(key);
+  });
+
+  it('gives a different key when the run differs', () => {
+    const key = mergedIdempotencyKey(['k1', 'k2', 'k3']);
+    expect(mergedIdempotencyKey(['k1', 'k3'])).not.toBe(key);
+    expect(mergedIdempotencyKey(['k1', 'k3', 'k2'])).not.toBe(key);
+    expect(mergedIdempotencyKey(['k1', 'k2', 'k4'])).not.toBe(key);
+    // Keys that join to the same text are still two different runs.
+    expect(mergedIdempotencyKey(['k1\nk2'])).not.toBe(mergedIdempotencyKey(['k1', 'k2']));
+  });
+
+  it('keeps the drained mark through a write and a read', () => {
+    writeQueue('u:room:t1', [entry('sent once', { drained: true }), entry('not yet', { cid: 2 })]);
+    const [first, second] = readQueue('u:room:t1');
+    expect(first.drained).toBe(true);
+    expect(second.drained).toBeUndefined();
   });
 });
