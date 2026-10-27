@@ -8,11 +8,8 @@ server offered, then makes the planned tool calls through the server, printing
 each as an assistant `tool_use` frame, and ends with a `result` frame holding
 the call results.
 
-Without `--mcp-config` it stands in for the CLI on the old, wrapped path: a
-run with `--dangerously-skip-permissions` makes the same planned calls itself,
-`Bash` as `/bin/sh -c` in its own process (inside whatever bwrap it was
-wrapped in, where the real CLI's Bash would run), and a text-only run answers
-with one `result` frame.
+Without `--mcp-config` it is a text-only run and answers with one `result`
+frame. The old wrapped path, where the CLI ran tools itself, is gone.
 
 What it does is read from a JSON plan named by `FAKE_CLAUDE_PLAN`, or else
 `plan.json` beside this file (the smoke tier's case: the CLI's environment is
@@ -104,51 +101,20 @@ def _plan_path() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "plan.json")
 
 
-def _run_in_process(plan: dict, frames: list[dict]) -> int:
-    """The old path: no MCP server, so the calls run here, as the CLI's own
-    tools would. Frames go to ``frames``, for the caller to print."""
-    frames.append({"type": "system", "subtype": "init", "model": "claude-fake",
-                   "tools": ["Bash"], "mcp_servers": []})
-    texts = []
-    if plan.get("host_probe"):
-        probe = subprocess.run(["/bin/sh", "-c", plan["host_probe"]],
-                               capture_output=True, text=True)
-        texts.append("HOST:\n" + probe.stdout)
-    for index, call in enumerate(plan.get("calls", [])):
-        args = call.get("args", {})
-        frames.append({"type": "assistant", "message": {"id": f"msg_{index}", "content": [{
-            "type": "tool_use", "id": f"toolu_{index}", "name": call["name"], "input": args,
-        }]}})
-        if call["name"] != "Bash":
-            texts.append(f"ERROR: the fake runs only Bash in process, not {call['name']}")
-            continue
-        ran = subprocess.run(["/bin/sh", "-c", args.get("command", "")],
-                             capture_output=True, text=True)
-        texts.append(ran.stdout + ran.stderr)
-    frames.append({"type": "result", "subtype": "success",
-                   "result": plan.get("result", "\n".join(texts) or "done")})
-    return int(plan.get("exit", 0))
-
-
 def _without_mcp(argv: list[str], plan: dict) -> int:
-    """A run with no `--mcp-config`: the old path with tools, or text-only.
+    """A run with no `--mcp-config`: text-only.
 
     `--output-format json` (the non-streaming path) prints the frames as one
     array at the end, as the pinned CLI does with `--verbose`; otherwise one
     frame per line."""
-    frames: list[dict] = []
-    status = 0
-    if "--dangerously-skip-permissions" in argv:
-        status = _run_in_process(plan, frames)
-    else:
-        frames.append({"type": "result", "subtype": "success", "result": "done"})
+    frames = [{"type": "result", "subtype": "success", "result": "done"}]
     if _flag(argv, "--output-format") == "json":
         sys.stdout.write(json.dumps(frames) + "\n")
         sys.stdout.flush()
     else:
         for frame in frames:
             _emit(frame)
-    return status
+    return 0
 
 
 def main(argv: list[str]) -> int:
