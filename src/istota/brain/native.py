@@ -55,7 +55,6 @@ from urllib.parse import urlparse
 
 from istota.build_info import RUNNING_VERSION as _ISTOTA_VERSION
 from istota.usage import telemetry as usage_types
-from istota.sandbox.claude_runtime_env import without_claude_runtime_env
 from istota.agent.events import AgentEvent, _describe_tool_use, _lone_relay_ask, _tool_invocation
 from istota.agent.loop import run_agent_loop, run_agent_loop_continue
 from istota.agent.sanitize import sanitize_tool_pairs
@@ -114,6 +113,7 @@ from istota.session.usage import TaskUsage, cache_write_multiplier_for_ttl
 from ._aliases import CANONICAL_ROLES, split_effort
 from ._resolve import Resolution, alias_keys, clamp_effort_level, effort_wire_value, resolve_selection
 from ._roles import current_alias_table
+from ._tool_harness import request_hello, request_tool_workspace, start_request_tool_server
 from ._types import BrainRequest, BrainResult, ImageInput
 from .claude_code import is_usage_limit_error
 
@@ -142,6 +142,9 @@ _UNREADABLE_NOTICE = "[image {name} omitted: could not be read at send time ({re
 # would close a cycle back through `brain/__init__.py`, so the two are held
 # equal by `tests/native/test_input_images.py` instead.
 _MAX_IMAGE_BYTES = 6 * 1024 * 1024
+
+# How a tool-server failure names this brain (`attempt_failure_text`).
+_BRAIN_LABEL = "native brain"
 
 
 def _read_image_bytes(path: Path) -> bytes:
@@ -2727,7 +2730,7 @@ class NativeBrain:
                 # `is_signal_termination`'s prefix at the *front* of the text,
                 # or a deploy restart fails every in-flight task instead of
                 # requeuing it. See `attempt_failure_text`.
-                attempt_failure_text(tool_server.failure),
+                attempt_failure_text(tool_server.failure, _BRAIN_LABEL),
                 trace, actions, usage, model,
                 cost_reported=_all_turns_costed(),
                 partial_text=last_assistant_text,
@@ -2879,138 +2882,22 @@ class NativeBrain:
         except asyncio.CancelledError:
             return
 
-    def _tool_workspace(self, req: BrainRequest):
-        """The confinement roots and the working directory for one request.
+    # The three below are kept as delegates because tests patch them by name.
+    # The bodies are shared with the CLI brains' tool harness.
 
-        Filesystem confinement (NB-1): when the executor supplies file-access
-        roots, the tools are confined to them. Relative paths then resolve under
-        the user's own writable dir rather than the shared temp root. Shared by
-        the ``hello`` frame and the daemon-side ``ToolEnv`` that ``WebFetch``
-        is bound to, so the two cannot disagree about where a task is.
-        """
-        read_roots = tuple(req.fs_read_roots) if req.fs_read_roots else None
-        write_roots = tuple(req.fs_write_roots) if req.fs_write_roots else None
-        write_denied_roots = tuple(req.fs_write_denied_roots or ())
-        cwd = write_roots[0] if write_roots else Path(req.cwd)
-        return cwd, read_roots, write_roots, write_denied_roots
+    def _tool_workspace(self, req: BrainRequest):
+        return request_tool_workspace(req)
 
     def _hello_payload(self, req: BrainRequest) -> dict:
-        """What the tool server is told about this task.
-
-        ``subprocess_env`` is ``req.env`` minus the Claude runtime names, which
-        is the **environment** route to the subscription token rather than the
-        mount one (ISSUE-390). ``build_clean_env`` copies
-        ``CLAUDE_CODE_OAUTH_TOKEN`` into every task's env whatever brain will
-        run it, and nothing on this path reads it — the provider key comes from
-        the config — so its only effect here would be that
-        ``echo "$CLAUDE_CODE_OAUTH_TOKEN"`` comes back as a ``ToolResultMessage``
-        addressed to whatever provider native is pointed at.
-
-        **The strip happens here and at the spawn, and both are needed.** This
-        frame decides what a Bash child is handed; ``_start_tool_server`` decides
-        what the *server process itself* carries. Stripping only this one leaves
-        the token in the server's own environment inside the namespace, where a
-        Bash child — same uid, same PID namespace — reads it out of
-        ``/proc/<server-pid>/environ``.
-
-        **The empty case is the one to be careful with, and it is why neither
-        strip is followed by ``or None``.** ``ToolEnv`` reads ``None`` as
-        "inherit the parent environment" and ``create_subprocess_exec`` reads it
-        the same way, so collapsing a stripped ``{}`` back to ``None`` would not
-        merely undo this strip — it would hand the server, and through
-        ``merge_proxy_env`` the Bash child, the daemon's *whole* environment:
-        ``ISTOTA_SECRET_KEY``, the mail passwords, every forge token. That is a
-        much larger hole than the one this function closes, reached by writing
-        three characters that look like a tidy-up. No in-tree caller supplies a
-        falsy ``env`` today — every direct caller passes ``dict(os.environ)`` —
-        so the guard is against a future one rather than a live path.
-
-        ``merge_proxy_env`` is not a second route here: it returns its argument
-        untouched when the bridge set no proxy variable, and builds
-        ``dict(os.environ)`` only from a ``None`` it was already given.
-
-        Stripping further up, where the env is built, looks tidier and is wrong:
-        ``_run_fallback`` rebuilds the request with ``dataclasses.replace`` and
-        never rebuilds ``env``, so a ``native -> claude_code`` reroute would hand
-        the CLI an env with the credential already gone and fail to authenticate
-        on the shape where that token is the only credential there is.
-
-        ``or None`` goes on the **input**, never the output. ``ToolEnv`` reads
-        ``None`` as "inherit the parent environment" and ``{}`` as "an empty
-        environment"; collapsing a fully-stripped ``{}`` back to ``None`` would
-        hand the child an inherited environment and undo the strip.
-
-        The three caps come from ``ToolEnv``'s own defaults rather than from a
-        second set of numbers here, because they were never request-derived:
-        this frame is the only thing that now decides them, and restating them
-        would be a silent second default the day one of them changes.
-        """
-        from istota.session.tools import ToolEnv, hello_payload
-
-        defaults = ToolEnv(cwd=Path(req.cwd))
-        cwd, read_roots, write_roots, write_denied_roots = self._tool_workspace(req)
-        deferred = (req.env or {}).get("ISTOTA_DEFERRED_DIR")
-        return hello_payload(
-            cwd=cwd,
-            subprocess_env=without_claude_runtime_env(req.env or None),
-            read_roots=read_roots,
-            write_roots=write_roots,
-            write_denied_roots=write_denied_roots,
-            deferred_dir=Path(deferred) if deferred else None,
-            bash_timeout_seconds=max(1, req.timeout_seconds),
-            max_output_bytes=defaults.max_output_bytes,
-            max_read_lines=defaults.max_read_lines,
-            max_read_bytes=defaults.max_read_bytes,
-            bash_spill_full_output=getattr(
-                self._config, "bash_spill_full_output", True
-            ),
-        )
+        return request_hello(req, bash_spill_full_output=self._bash_spill_full_output())
 
     async def _start_tool_server(self, req: BrainRequest, abort: asyncio.Event):
-        """One sandboxed tool server for this attempt, or ``None``.
-
-        ``None`` for a text-only invocation (empty ``allowed_tools`` — the sleep
-        cycle, health OCR, briefing synthesis, conversation triage), which is
-        the early return ``_build_tools`` has always had: those callers spawn
-        nothing at all.
-
-        The wrap is ``req.native_sandbox_wrap``, never ``req.sandbox_wrap``:
-        that one builds the `claude` CLI's namespace, credential and all
-        (ISSUE-389). ``None`` where the caller built no task env, which is the
-        unsandboxed posture and where ``build_bwrap_cmd`` hands the command back
-        unchanged anyway.
-
-        A failure raises ``ToolServerError``, which fails the attempt. It
-        deliberately does not fall back to in-process tools: that would be the
-        second execution path this seam exists to remove, and it would run the
-        model's file operations in the daemon on the one deployment that asked
-        for a sandbox and did not get one.
-        """
-        if not req.allowed_tools:
-            return None
-        from istota.session.tools import start_tool_server
-
-        return await start_tool_server(
-            self._hello_payload(req),
-            sandbox_wrap=req.native_sandbox_wrap,
-            task_cgroup_path=req.task_cgroup,
-            cwd=Path(req.cwd),
-            # Stripped here as well as in the `hello` frame, and the two are not
-            # redundant: this is what the server process itself carries, and a
-            # Bash child reads its parent's `/proc/<pid>/environ` from inside the
-            # same namespace at the same uid. See `_hello_payload`.
-            #
-            # `or {}`, never `or None`: `create_subprocess_exec` reads `None` as
-            # "inherit", and what it would inherit is the *daemon's* environment
-            # — `ISTOTA_SECRET_KEY`, the mail passwords, every forge token — put
-            # inside the namespace where the model's own Bash child can read it
-            # back off `/proc`. An empty task env therefore spawns an empty
-            # server env: the tools stop working, which is the correct direction
-            # to fail on a boundary, and no in-tree caller reaches it.
-            env=without_claude_runtime_env(req.env) if req.env else {},
-            on_pid=req.on_pid,
-            loop_abort=abort,
+        return await start_request_tool_server(
+            req, abort, bash_spill_full_output=self._bash_spill_full_output(),
         )
+
+    def _bash_spill_full_output(self) -> bool:
+        return getattr(self._config, "bash_spill_full_output", True)
 
     def _build_tools(self, req: BrainRequest, server=None):
         """The tool surface for one request, filtered by ``allowed_tools``.

@@ -68,6 +68,7 @@ Boundaries and operations:
 ```
 src/istota/
 ├── brain/                # Pluggable model invocation (Brain protocol)
+│   └── _tool_harness.py  # The shared tool-server start (native and CLI) and the CLI tool harness: `tool_harness`, `HarnessHandle`, `set_cli_root`, `release_calls` → brain.md
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
 ├── assignments/          # Goals Istota carries across days: store.py (row access), charter.py, validators.py, lifecycle.py (the one state writer), caller.py (user turn, wake or neither), budget.py (the ledger and ceilings), wakes.py (due wakes, the wake task, pickup, orphan reaping), scratchpad.py (snapshots, user edits, repair), prompt.py (the wake prompt) → assignments.md
 ├── skills/               # Self-contained skills (skill.md + optional CLI)
@@ -131,6 +132,7 @@ src/istota/
 │   ├── tool_server.py    # The native brain's tool server, one process per task attempt, inside the sandbox → sandbox.md
 │   ├── tool_server_protocol.py  # The wire format between the two, stdlib-only → sandbox.md
 │   ├── mcp_stdio.py      # MCP over stdio for the `claude` CLI: `serve_stdio`, the method table, version negotiation, content mapping; stdlib-only → brain.md
+│   ├── mcp_adapter.py    # The MCP server the CLI spawns in tool-harness mode: drops its env, relays calls to the daemon's bridge socket; interim, deleted by #862 → brain.md
 │   ├── skill_proxy.py    # Unix-socket proxy for credential isolation
 │   ├── network_proxy.py  # CONNECT proxy for network isolation
 │   ├── kv_namespaces.py  # Which `istota_kv` namespaces the model may not touch → sandbox.md

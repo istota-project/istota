@@ -115,16 +115,19 @@ class TestHandshake:
         from istota.brain.claude_code import is_signal_termination
 
         killed = remote_mod._TERMINATED_PREFIX + "SIGTERM (signal 15)"
-        assert remote_mod.attempt_failure_text(killed) == killed
-        assert is_signal_termination(remote_mod.attempt_failure_text(killed))
+        assert remote_mod.attempt_failure_text(killed, "native brain") == killed
+        assert is_signal_termination(remote_mod.attempt_failure_text(killed, "native brain"))
 
     async def test_every_other_failure_names_the_tool_server(self):
         """The other arm. Without it the pass-through above would be satisfied
         by a function that never labelled anything, and a task whose sandbox
         broke would report a bare stderr tail with nothing saying where it came
         from."""
-        text = remote_mod.attempt_failure_text("the tool server exited (exit 2)")
+        text = remote_mod.attempt_failure_text("the tool server exited (exit 2)", "native brain")
         assert "tool server" in text
+        assert text.startswith("The native brain's tool server failed:")
+        cli = remote_mod.attempt_failure_text("the tool server exited (exit 2)", "Claude Code brain")
+        assert cli.startswith("The Claude Code brain's tool server failed:")
         assert not is_signal_death(text)
 
 
@@ -316,7 +319,7 @@ class TestFailure:
             failure = server.failure
 
         assert failure is not None, "the server death was never noticed"
-        assert is_signal_termination(remote_mod.attempt_failure_text(failure)), failure
+        assert is_signal_termination(remote_mod.attempt_failure_text(failure, "native brain")), failure
 
     async def test_a_call_after_the_failure_is_refused_without_hanging(self, tmp_path):
         async with _Server(hello=_hello(tmp_path), loop_abort=asyncio.Event()) as server:
