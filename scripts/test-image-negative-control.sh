@@ -46,6 +46,7 @@
 #   scripts/test-image-negative-control.sh devbox
 #   scripts/test-image-negative-control.sh document-render
 #   scripts/test-image-negative-control.sh group-rooms
+#   scripts/test-image-negative-control.sh cli-harness
 #
 # The second form runs only the third half, the daemon container's run
 # contract (the one-deployment-shape spec's parity rows 1, 2, 3, 4, 5, 6, 8,
@@ -67,7 +68,8 @@
 # the built share-map bundle with its `istotaRender` registration removed
 # (needs `web/build-render`). The eighth runs the group-owned-rooms upgrade
 # witness against two broken migrations, one that converts linked rooms and
-# one whose column differs from schema.sql's.
+# one whose column differs from schema.sql's. The ninth runs the CLI harness's
+# `system/init` witnesses with `--tools` dropped from the argv.
 #
 # No arrays anywhere: macOS ships bash 3.2, where `"${empty[@]}"` under `set -u`
 # is fatal, and this script's whole audience is a developer machine.
@@ -109,6 +111,11 @@ fi
 only_group_rooms=""
 if [ "$platform" = "group-rooms" ]; then
     only_group_rooms=1
+    platform=""
+fi
+only_cli_harness=""
+if [ "$platform" = "cli-harness" ]; then
+    only_cli_harness=1
     platform=""
 fi
 control_tag="istota-test/no-forge:control"
@@ -384,6 +391,39 @@ secrets_half() {
 }
 
 # --------------------------------------------------------------------------
+# The CLI harness's `system/init`: the same argv without `--tools`. The deny
+# list alone leaves CronCreate, SendMessage, ToolSearch and others in the frame
+# on the pinned CLI, so both witnesses must go red on the tool set.
+
+CLI_HARNESS_TESTS="tests/image/test_cli_harness_init.py"
+
+cli_harness_half() {
+    echo
+    echo "[control] cli-harness: the harness argv without --tools"
+    cli_out="$(mktemp)"
+    set +e
+    ISTOTA_TEST_CLI_HARNESS_CONTROL=drop-tools \
+        uv run pytest -m image -n0 -q --no-header -p no:randomly "$CLI_HARNESS_TESTS" 2>&1 | tee "$cli_out"
+    set -e
+    for node in \
+        "${CLI_HARNESS_TESTS}::TestTheInitFrameListsOnlyWhatTheHarnessAskedFor::test_websearch_granted" \
+        "${CLI_HARNESS_TESTS}::TestTheInitFrameListsOnlyWhatTheHarnessAskedFor::test_no_builtins_granted"; do
+        if ! grep -Fq "FAILED ${node}" "$cli_out"; then
+            rm -f "$cli_out"
+            echo "[control] FAILED: cli-harness did not turn ${node} red."
+            exit 1
+        fi
+    done
+    if ! grep -Fq "CronCreate" "$cli_out"; then
+        rm -f "$cli_out"
+        echo "[control] FAILED: cli-harness went red, but not on the extra built-ins."
+        exit 1
+    fi
+    rm -f "$cli_out"
+    echo "[control] OK: cli-harness turned both init witnesses red on the tool set."
+}
+
+# --------------------------------------------------------------------------
 # The config is an input: the upgrade case boots the new entrypoint over a
 # config.toml an old release rendered and requires the file unchanged. The
 # control image appends a line to it at boot; only that assertion may go red,
@@ -556,6 +596,10 @@ if [ -n "$only_group_rooms" ]; then
 fi
 if [ -n "$only_secrets" ]; then
     secrets_half
+    exit 0
+fi
+if [ -n "$only_cli_harness" ]; then
+    cli_harness_half
     exit 0
 fi
 if [ -n "$only_web_setup" ]; then
@@ -901,6 +945,7 @@ echo "[control] The five without one all fail closed; the header says which."
 if [ -z "$platform" ] && [ -z "$only_devbox" ]; then
     run_contract_half
     secrets_half
+    cli_harness_half
     rendered_config_half
     group_rooms_half
     web_setup_half
