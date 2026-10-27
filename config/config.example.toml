@@ -138,13 +138,14 @@ features = []
 #                                            #   prompt_cache_ttl, strict_tool_schemas,
 #                                            #   reasoning_replay and model_catalog_*,
 #                                            #   below; doctor names each one in use.
-# context_window = 0                         # 0 = resolve from the live-fetched
-#                                            #   OpenRouter catalog (below) or the
-#                                            #   conservative 200k default. A NON-
-#                                            #   OpenRouter native endpoint (local
-#                                            #   vLLM/Ollama) SHOULD set its real
-#                                            #   window here (or a model_overrides
-#                                            #   entry) — nothing fetches it.
+# context_window = 0                         # 0 = the model's window in the catalogue
+#                                            #   (a provider's discovered list, its
+#                                            #   declared `models`, [models.overrides])
+#                                            #   or the conservative 200k default. An
+#                                            #   endpoint with no model list (local
+#                                            #   vLLM/Ollama) SHOULD declare its models'
+#                                            #   real windows on its [providers.<id>]
+#                                            #   table, or set the window here.
 # max_turns = 100                            # hard cap on assistant turns/task
 # max_tokens = 16384                         # per-completion output cap
 # compaction_reserve_tokens = 0              # headroom compaction leaves free below the context
@@ -165,21 +166,9 @@ features = []
 # compaction_background_tokens = 0           # how far below the blocking threshold the
 #                                            #   background summary starts. 0 derives it:
 #                                            #   an eighth of the window, at most 32768.
-# reasoning_replay = "auto"                  # send a turn's reasoning back on later turns of
-#                                            #   the same attempt. "auto": structured
-#                                            #   reasoning_details only (OpenRouter); "on":
-#                                            #   plain reasoning text as well; "off": never.
-#                                            #   A request the endpoint refuses is re-sent
-#                                            #   once without, and replay stays off for the
-#                                            #   rest of the attempt. "auto" passed as many
-#                                            #   eval cases as "off" or more.
-# model_catalog_fetch = true                 # when base_url is OpenRouter, fetch its
-#                                            #   public model list once/process for real
-#                                            #   window / capabilities / prices (self-
-#                                            #   updating; disk-cached). No effect for a
-#                                            #   non-OpenRouter endpoint. Fetch failure is
-#                                            #   never fatal (stale cache → 200k default).
-# model_catalog_cache_ttl_hours = 24         # disk-cache freshness for the fetch above
+# reasoning_replay = "auto"                  # legacy: [providers.<id>] reasoning_replay
+# model_catalog_fetch = true                 # legacy: [providers.<id>] discover
+# model_catalog_cache_ttl_hours = 24         # legacy: [providers.<id>] discover_ttl_hours
 # turn_budget_nudge = true                   # pace the model as it nears max_turns: inject an
 #                                            #   environment notice so a long tool-bearing run
 #                                            #   delivers a partial answer instead of getting
@@ -200,30 +189,10 @@ features = []
 # soft_deadline_percent = 90                 # stop the loop at this % of scheduler.task_timeout_
 #                                            #   minutes, keeping the model's partial work.
 #                                            #   0 or >= 100 disables.
-# prompt_caching = true                      # cache_control breakpoints. Omit to use the
-#                                            #   default: ON for api.anthropic.com,
-#                                            #   OFF for any other endpoint. Set explicitly
-#                                            #   to force either way (a plain-OpenAI / local
-#                                            #   endpoint that rejects cache_control needs
-#                                            #   `false`).
-# prompt_cache_key = true                    # send a random per-attempt prompt_cache_key so
-#                                            #   an attempt's requests reach one cache. Omit
-#                                            #   to use the default: ON for openrouter.ai and
-#                                            #   api.openai.com, OFF for any other endpoint,
-#                                            #   api.anthropic.com included.
-# prompt_cache_ttl = "5m"                    # cache breakpoint lifetime: "5m" or "1h". "1h"
-#                                            #   keeps the cached prefix through long tool
-#                                            #   runs; its writes cost 2x input, not 1.25x.
-#                                            #   Endpoints that cache implicitly ignore it.
-# strict_tool_schemas = "auto"               # send tool definitions with "strict": true, so
-#                                            #   the endpoint constrains tool arguments to the
-#                                            #   schema. "auto": only for a model whose
-#                                            #   supports_structured_outputs is true (from the
-#                                            #   OpenRouter catalog or model_overrides); "on":
-#                                            #   always; "off": never. A request the endpoint
-#                                            #   refuses is re-sent once without, and strict
-#                                            #   stays off for the rest of the attempt. "auto"
-#                                            #   cut failed edits on the weaker eval model.
+# prompt_caching = true                      # legacy: [providers.<id>] prompt_caching
+# prompt_cache_key = true                    # legacy: [providers.<id>] prompt_cache_key
+# prompt_cache_ttl = "5m"                    # legacy: [providers.<id>] prompt_cache_ttl
+# strict_tool_schemas = "auto"               # legacy: [providers.<id>] strict_tool_schemas
 # bash_spill_full_output = true              # write Bash output past the per-tool cap to a
 #                                            #   temp file the model can Read, rather than
 #                                            #   dropping the tail.
@@ -1033,11 +1002,21 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # What the endpoint accepts. Omitted, each takes the kind's default: caching on
 # for anthropic; prompt_cache_key on for openrouter and for api.openai.com;
 # reported cost and the attribution headers for openrouter.
-#      prompt_caching = true         # cache_control breakpoints
-#      prompt_cache_key = true       # a random per-attempt prompt_cache_key
-#      prompt_cache_ttl = "5m"       # "5m" or "1h"
-#      strict_tool_schemas = "auto"  # "off" | "auto" | "on"
-#      reasoning_replay = "auto"     # "auto" | "on" | "off"
+#      prompt_caching = true         # cache_control breakpoints; a plain-OpenAI or
+#                                    #   local endpoint that rejects them needs false
+#      prompt_cache_key = true       # a random per-attempt prompt_cache_key, so an
+#                                    #   attempt's requests reach one cache
+#      prompt_cache_ttl = "5m"       # "5m" or "1h"; 1h writes cost 2x input, not
+#                                    #   1.25x. Endpoints that cache implicitly ignore it
+#      strict_tool_schemas = "auto"  # "off" | "auto" | "on": send tools with "strict":
+#                                    #   true. "auto" only for a model whose catalogue
+#                                    #   record has supports_structured_outputs. A
+#                                    #   refused request is re-sent once without
+#      reasoning_replay = "auto"     # "auto" | "on" | "off": send a turn's reasoning
+#                                    #   back within the attempt. "auto" structured
+#                                    #   reasoning_details only, "on" plain reasoning
+#                                    #   text too. A refused request is re-sent once
+#                                    #   without
 #      [providers.local.compat]
 #      cost_accounting = false       # send usage.include for a reported cost
 #      attribution_headers = false   # OpenRouter's HTTP-Referer / X-Title
