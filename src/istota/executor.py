@@ -146,10 +146,57 @@ _INTERACTIVE_SOURCE_TYPES = ("talk", "email", "repl", "web", "sms", "whatsapp")
 # what keeps the push surfaces out.
 _SKILLS_CHANGELOG_SOURCE_TYPES = ("talk", "email", "repl", "web")
 
+# An agent shared block's answer is published as the block, unedited. In code
+# rather than `config/guidelines/`, so no deployment's config dir can lack it.
+SHARED_BLOCK_OUTPUT_RULE = (
+    "Your final response is published verbatim as a shared briefing block. "
+    "Write the block's content only: no preamble, no JSON envelope and no "
+    "closing remarks."
+)
+
 
 # Distinct (user_id, tz_str) pairs already warned about, so a persistently
 # invalid timezone config warns once per process rather than on every task.
 _INVALID_TZ_WARNED: set[tuple[str, str]] = set()
+
+
+def _research_task_timezone(
+    config: Config,
+    task: "db.Task | None",
+    conn: "sqlite3.Connection | None" = None,
+) -> str | None:
+    """The zone a briefing research task's clock reads in, or None for any other task.
+
+    `__briefings__` has no profile, so without this a research prompt's date is
+    UTC's while the block or edition it feeds runs on another clock. A shared
+    block's task takes `[briefings] shared_block_timezone`; a group edition's
+    takes its definition's timezone from the run snapshot `briefing_name`
+    names, and the shared-block timezone when that run cannot be read.
+    """
+    from .browser.owner import BRIEFINGS_IDENTITY
+    from .rooms.scopes import BRIEFING_RESEARCH_SOURCE_TYPES
+
+    if (task is None or task.user_id != BRIEFINGS_IDENTITY
+            or task.source_type not in BRIEFING_RESEARCH_SOURCE_TYPES):
+        return None
+    shared_tz = (config.briefings.shared_block_timezone or "").strip() or "UTC"
+    if task.source_type != "group_briefing_research":
+        return shared_tz
+    run_id = (task.briefing_name or "").partition(":")[0]
+    if not run_id.isdigit():
+        return shared_tz
+    try:
+        from .briefings import group_store
+
+        with db.get_db_if_present(config.db_path, conn) as c:
+            run = group_store.get_run(c, int(run_id)) if c is not None else None
+    except Exception:
+        logger.warning("Task %s: group research run %s unreadable, using the "
+                       "shared-block timezone", task.id, run_id, exc_info=True)
+        return shared_tz
+    definition = ((run or {}).get("snapshot") or {}).get("definition") or {}
+    zone = definition.get("timezone")
+    return zone.strip() if isinstance(zone, str) and zone.strip() else shared_tz
 
 
 def _resolve_user_tz(
@@ -157,6 +204,7 @@ def _resolve_user_tz(
     user_id: str,
     *,
     conn: "sqlite3.Connection | None" = None,
+    task: "db.Task | None" = None,
 ) -> tuple[ZoneInfo, str]:
     """Return (ZoneInfo, tz_str) for a user, falling back to UTC.
 
@@ -170,8 +218,11 @@ def _resolve_user_tz(
     name ``America/Los_Angeles``) logs one WARNING per distinct
     ``(user_id, name)`` so a misconfigured timezone is self-diagnosing rather
     than silently rendering every clock in UTC.
+
+    Pass ``task`` where the clock is the task's: a briefing research task
+    reads its zone from `_research_task_timezone` rather than a profile.
     """
-    tz_str = config.resolve_user_timezone(user_id, conn=conn)
+    tz_str = _research_task_timezone(config, task, conn) or config.resolve_user_timezone(user_id, conn=conn)
     try:
         return ZoneInfo(tz_str), tz_str
     except Exception:
@@ -7420,6 +7471,8 @@ def build_prompt(
         assignment_section = "\n" + assignment_system_section(assignment_prompt, channel_guidelines)
     elif channel_guidelines:
         channel_section = f"\n\n## Response format ({task.source_type})\n\n{channel_guidelines}\n"
+    if task.source_type == "shared_block_research":
+        channel_section += f"\n\n## Response format (shared block)\n\n{SHARED_BLOCK_OUTPUT_RULE}\n"
 
     # Build attachments section if present
     attachments_text = ""
@@ -7710,7 +7763,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     # three rendered lines rather than only at the `User timezone:` header:
     # rules 7, 8 and 9 name `Current time` and `Today's date` too, and both
     # carry the same label in parentheses.
-    user_tz, _raw_tz_str = _resolve_user_tz(config, task.user_id, conn=conn)
+    user_tz, _raw_tz_str = _resolve_user_tz(config, task.user_id, conn=conn, task=task)
     user_tz_str = _one_line(_raw_tz_str)
     user_now = datetime.now(user_tz)
     user_time_str = user_now.strftime("%A, %B %-d, %Y at %-I:%M %p") + f" ({user_tz_str})"
@@ -8267,12 +8320,12 @@ def execute_task(
     # the room restricts gets its own (`task_temp_dir`).
     from .skills._loader import load_skill_index
 
-    from .rooms.scopes import is_briefing_research
+    from .rooms.scopes import BRIEFING_RESEARCH_SOURCE_TYPES, is_briefing_research
     from .browser.owner import BRIEFINGS_IDENTITY
 
     research = is_briefing_research(task)
     if research:
-        if (task.user_id != BRIEFINGS_IDENTITY or task.source_type != "group_briefing_research"
+        if (task.user_id != BRIEFINGS_IDENTITY or task.source_type not in BRIEFING_RESEARCH_SOURCE_TYPES
                 or task.conversation_token or task.attachments or workspace_dir is not None
                 or config.get_user(BRIEFINGS_IDENTITY) is not None):
             return False, "briefing_research_identity_refused", None, None
@@ -8758,7 +8811,7 @@ def execute_task(
         )
     else:
         # Resolve user TZ once for context formatting (mirrors prompt header).
-        _ctx_user_tz, _ = _resolve_user_tz(config, task.user_id, conn=conn)
+        _ctx_user_tz, _ = _resolve_user_tz(config, task.user_id, conn=conn, task=task)
 
         # Try Talk API-based context for Talk tasks, fall back to DB on failure
         _used_talk_api = False
