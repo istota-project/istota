@@ -8,6 +8,10 @@ Emits JSON to stdout. A refusal is ``{"status": "error", "reason": <code>,
   unknown kind, conflicting flags).
 - ``invalid_definition``: ``save_block_definition``'s validator refused the
   result; the message is the validator's.
+- ``invalid_source``: :mod:`istota.briefings.source_checks` refused a source
+  config that could never read anything; ``field`` names the config key.
+- ``mail_account_refused``: a ``my_email`` account the user may not pick, with
+  the web's message.
 - ``unavailable``: the tree was invoked without the context it needs.
 
 ``blocks list`` for an unknown briefing still answers ``status: not_found`` at
@@ -28,6 +32,7 @@ import click
 
 from istota.briefings import db as bdb
 from istota.briefings.models import SOURCE_KINDS, BriefingsContext
+from istota.briefings.source_checks import SourceRefused, check_source
 
 
 def _emit(payload) -> None:
@@ -235,10 +240,7 @@ def blocks_remove(ctx, block_id):
 @click.pass_context
 def blocks_reorder(ctx, briefing, ids):
     bctx = _ctx(ctx)
-    try:
-        ordered = [int(x) for x in ids.split(",") if x.strip()]
-    except ValueError:
-        _fail("invalid_argument", "--ids must be a comma-separated list of block ids")
+    ordered = _id_list(ids)
     with bdb.connect(bctx.db_path) as conn:
         try:
             bdb.reorder_blocks(conn, briefing, ordered)
@@ -268,27 +270,90 @@ def sources_list(ctx, block_id):
     _emit({"status": "ok", "sources": [_source_dict(s) for s in rows]})
 
 
+def _check_source(bctx: BriefingsContext, kind: str, config: dict, *, stored=None) -> None:
+    try:
+        check_source(bctx.app_config, bctx.user_id, kind, config, stored=stored)
+    except SourceRefused as e:
+        _fail(e.reason, str(e), field=e.field)
+
+
+def _id_list(raw: str) -> list[int]:
+    try:
+        return [int(x) for x in raw.split(",") if x.strip()]
+    except ValueError:
+        _fail("invalid_argument", "--ids must be a comma-separated list of ids")
+
+
 @sources.command("add")
 @click.option("--block", "block_id", type=int, required=True)
 @click.option("--kind", required=True)
 @click.option("--config", "config_json", default=None, help="JSON config object")
+@click.option("--disabled", is_flag=True, default=False, help="Store the source switched off")
 @click.pass_context
-def sources_add(ctx, block_id, kind, config_json):
+def sources_add(ctx, block_id, kind, config_json, disabled):
     bctx = _ctx(ctx)
     if kind not in SOURCE_KINDS:
         _fail("invalid_argument", f"invalid kind '{kind}' (one of {', '.join(SOURCE_KINDS)})")
-    cfg = {}
-    if config_json:
-        try:
-            cfg = json.loads(config_json)
-        except ValueError as e:
-            _fail("invalid_argument", f"invalid --config JSON: {e}")
+    cfg = _json_object("--config", config_json) if config_json else {}
     with bdb.connect(bctx.db_path) as conn:
         if not bdb.get_block(conn, block_id, with_sources=False):
             _fail("not_found", "block not found")
-        sid = bdb.add_source(conn, block_id=block_id, kind=kind, config=cfg)
+        _check_source(bctx, kind, cfg)
+        sid = bdb.add_source(conn, block_id=block_id, kind=kind, config=cfg, enabled=not disabled)
         conn.commit()
     _emit({"status": "ok", "id": sid})
+
+
+@sources.command("set")
+@click.option("--id", "source_id", type=int, required=True)
+@click.option("--config", "config_json", default=None, help="JSON config object (replaces the stored one)")
+@click.option(
+    "--merge-config", "merge_config", default=None,
+    help="JSON object merged over the stored config; a null value deletes that key",
+)
+@click.option("--enabled/--disabled", "enabled", default=None)
+@click.pass_context
+def sources_set(ctx, source_id, config_json, merge_config, enabled):
+    """Change a source in place; its id and position stay as they are."""
+    bctx = _ctx(ctx)
+    if config_json is not None and merge_config is not None:
+        _fail("invalid_argument", "--config and --merge-config are mutually exclusive")
+    if config_json is None and merge_config is None and enabled is None:
+        _fail("invalid_argument", "nothing to change: pass --config, --merge-config, --enabled or --disabled")
+    replacement = _json_object("--config", config_json) if config_json is not None else None
+    patch = _json_object("--merge-config", merge_config) if merge_config is not None else None
+    with bdb.connect(bctx.db_path) as conn:
+        stored = bdb.get_source(conn, source_id)
+        if stored is None:
+            _fail("not_found", "source not found")
+        config = replacement
+        if patch is not None:
+            config = {**(stored.config or {}), **patch}
+            config = {key: value for key, value in config.items() if value is not None}
+        if config is not None:
+            _check_source(bctx, stored.kind, config, stored=stored.config)
+        bdb.update_source(conn, source_id, config=config, enabled=enabled)
+        conn.commit()
+        updated = bdb.get_source(conn, source_id)
+    _emit({"status": "ok", "source": _source_dict(updated)})
+
+
+@sources.command("reorder")
+@click.option("--block", "block_id", type=int, required=True)
+@click.option("--ids", required=True, help="Comma-separated source ids in the new order")
+@click.pass_context
+def sources_reorder(ctx, block_id, ids):
+    bctx = _ctx(ctx)
+    ordered = _id_list(ids)
+    with bdb.connect(bctx.db_path) as conn:
+        if not bdb.get_block(conn, block_id, with_sources=False):
+            _fail("not_found", "block not found")
+        try:
+            bdb.reorder_sources(conn, block_id, ordered)
+        except ValueError as e:
+            _fail("invalid_argument", str(e))
+        conn.commit()
+    _emit({"status": "ok", "reordered": len(ordered)})
 
 
 @sources.command("remove")

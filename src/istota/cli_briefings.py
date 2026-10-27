@@ -57,12 +57,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     # sources -------------------------------------------------------------
     src = sub.add_parser("sources", help="Manage a block's sources")
-    src.add_argument("action", choices=["list", "add", "remove"])
+    src.add_argument("action", choices=["list", "add", "set", "reorder", "remove"])
     src.add_argument("-u", "--user", required=True)
     src.add_argument("--block", type=int)
     src.add_argument("--kind")
     src.add_argument("--config")
+    src.add_argument("--merge-config", dest="merge_config")
     src.add_argument("--id", type=int)
+    src.add_argument("--ids")
+    src_enabled = src.add_mutually_exclusive_group()
+    src_enabled.add_argument("--enabled", dest="enabled", action="store_const", const=True)
+    src_enabled.add_argument("--disabled", dest="enabled", action="store_const", const=False)
+    src.set_defaults(enabled=None)
 
     # shared --------------------------------------------------------------
     shared = sub.add_parser(
@@ -424,6 +430,18 @@ def _sources_argv(args) -> list[str]:
         argv += ["--block", str(args.block), "--kind", args.kind or ""]
         if args.config:
             argv += ["--config", args.config]
+        if args.enabled is False:
+            argv += ["--disabled"]
+    elif args.action == "set":
+        argv += ["--id", str(args.id)]
+        if args.config is not None:
+            argv += ["--config", args.config]
+        if args.merge_config is not None:
+            argv += ["--merge-config", args.merge_config]
+        if args.enabled is not None:
+            argv += ["--enabled" if args.enabled else "--disabled"]
+    elif args.action == "reorder":
+        argv += ["--block", str(args.block), "--ids", args.ids or ""]
     elif args.action == "remove":
         argv += ["--id", str(args.id)]
     return argv

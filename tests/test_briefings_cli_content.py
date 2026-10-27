@@ -257,3 +257,233 @@ def test_sources_add_unknown_kind_is_invalid_argument(ctx):
 
     assert result.exit_code == 1
     assert output["reason"] == "invalid_argument"
+
+
+# -- source edits and checks ---------------------------------------------------
+
+
+@pytest.fixture
+def app_ctx(ctx, tmp_path):
+    from istota import db
+    from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
+    from istota.config import Config, UserConfig
+
+    config = Config(
+        db_path=tmp_path / "istota.db",
+        workspace_path=tmp_path / "mount",
+        users={"alice": UserConfig(timezone="UTC"), "bob": UserConfig(timezone="UTC")},
+    )
+    db.init_db(config.db_path)
+    with db.get_db(config.db_path) as conn:
+        db.upsert_shared_block_config(conn, name="world-headlines", cron="0 6 * * *")
+        db.shared_kv_set(conn, SHARED_BLOCK_NAMESPACE, "custom-digest", '{"text": "x"}', "root")
+        conn.commit()
+    ctx.app_config = config
+    return ctx
+
+
+def _add_sources(ctx, block_id, specs):
+    with bdb.connect(ctx.db_path) as conn:
+        ids = [bdb.add_source(conn, block_id=block_id, kind=k, config=c) for k, c in specs]
+        conn.commit()
+    return ids
+
+
+def _source(ctx, source_id):
+    with bdb.connect(ctx.db_path) as conn:
+        return bdb.get_source(conn, source_id)
+
+
+def test_sources_set_merge_config_keeps_id_position_and_other_keys(app_ctx):
+    bid = _first_block_id(app_ctx)
+    _, sid, _ = _add_sources(app_ctx, bid, [
+        ("markets", {}),
+        ("shared_block", {"name": "world-headlines", "max_age_hours": 6}),
+        ("calendar", {}),
+    ])
+    before = _source(app_ctx, sid)
+
+    result, output = _invoke(app_ctx, [
+        "sources", "set", "--id", str(sid), "--merge-config", '{"max_age_hours": 14}',
+    ])
+
+    assert result.exit_code == 0, output
+    assert output["status"] == "ok"
+    assert output["source"]["id"] == sid
+    assert output["source"]["position"] == before.position
+    assert output["source"]["config"] == {"name": "world-headlines", "max_age_hours": 14}
+    assert _source(app_ctx, sid).config == {"name": "world-headlines", "max_age_hours": 14}
+
+
+def test_sources_set_merge_config_null_deletes_a_key(app_ctx):
+    bid = _first_block_id(app_ctx)
+    (sid,) = _add_sources(app_ctx, bid, [
+        ("shared_block", {"name": "world-headlines", "max_age_hours": 6}),
+    ])
+
+    result, _ = _invoke(app_ctx, [
+        "sources", "set", "--id", str(sid), "--merge-config", '{"max_age_hours": null}',
+    ])
+
+    assert result.exit_code == 0
+    assert _source(app_ctx, sid).config == {"name": "world-headlines"}
+
+
+def test_sources_set_config_replaces_and_is_checked(app_ctx):
+    bid = _first_block_id(app_ctx)
+    (sid,) = _add_sources(app_ctx, bid, [("shared_block", {"name": "world-headlines"})])
+
+    result, output = _invoke(app_ctx, [
+        "sources", "set", "--id", str(sid), "--config", '{"name": "no-such-block"}',
+    ])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_source"
+    assert output["field"] == "name"
+    assert _source(app_ctx, sid).config == {"name": "world-headlines"}
+
+
+def test_sources_set_toggles_enabled_only(ctx):
+    bid = _first_block_id(ctx)
+    (sid,) = _add_sources(ctx, bid, [("markets", {"indices": ["DAX"]})])
+
+    result, output = _invoke(ctx, ["sources", "set", "--id", str(sid), "--disabled"])
+    assert result.exit_code == 0
+    assert output["source"]["enabled"] is False
+    assert _source(ctx, sid).config == {"indices": ["DAX"]}
+
+    result, output = _invoke(ctx, ["sources", "set", "--id", str(sid), "--enabled"])
+    assert result.exit_code == 0
+    stored = _source(ctx, sid)
+    assert (stored.enabled, stored.config) == (True, {"indices": ["DAX"]})
+
+
+@pytest.mark.parametrize("extra", [
+    [],
+    ["--config", "{}", "--merge-config", "{}"],
+    ["--config", "[1]"],
+])
+def test_sources_set_refuses_bad_flag_sets(ctx, extra):
+    bid = _first_block_id(ctx)
+    (sid,) = _add_sources(ctx, bid, [("markets", {"indices": ["DAX"]})])
+
+    result, output = _invoke(ctx, ["sources", "set", "--id", str(sid), *extra])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_argument"
+    assert _source(ctx, sid).config == {"indices": ["DAX"]}
+
+
+def test_sources_set_on_a_missing_source_is_not_found(ctx):
+    result, output = _invoke(ctx, ["sources", "set", "--id", "9999", "--disabled"])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "not_found"
+
+
+def test_sources_add_disabled_stores_enabled_false(ctx):
+    bid = _first_block_id(ctx)
+    result, output = _invoke(ctx, [
+        "sources", "add", "--block", str(bid), "--kind", "markets", "--disabled",
+    ])
+
+    assert result.exit_code == 0
+    assert _source(ctx, output["id"]).enabled is False
+
+
+def test_sources_add_refuses_a_source_that_reads_nothing(ctx):
+    bid = _first_block_id(ctx)
+    result, output = _invoke(ctx, [
+        "sources", "add", "--block", str(bid), "--kind", "browse", "--config", "{}",
+    ])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_source"
+    with bdb.connect(ctx.db_path) as conn:
+        assert bdb.list_sources(conn, bid) == []
+
+
+def test_sources_reorder_rewrites_positions(ctx):
+    bid = _first_block_id(ctx)
+    a, b, c = _add_sources(ctx, bid, [("markets", {}), ("calendar", {}), ("todos", {"path": "x.md"})])
+
+    result, output = _invoke(ctx, [
+        "sources", "reorder", "--block", str(bid), "--ids", f"{c},{a},{b}",
+    ])
+
+    assert result.exit_code == 0
+    assert output == {"status": "ok", "reordered": 3}
+    with bdb.connect(ctx.db_path) as conn:
+        assert [(s.id, s.position) for s in bdb.list_sources(conn, bid)] == [(c, 0), (a, 1), (b, 2)]
+
+
+@pytest.mark.parametrize("ids", ["{a},{b}", "{a},{b},{c},9999", "{a},{a},{b}", "x,y"])
+def test_sources_reorder_refuses_a_non_permutation(ctx, ids):
+    bid = _first_block_id(ctx)
+    a, b, c = _add_sources(ctx, bid, [("markets", {}), ("calendar", {}), ("todos", {"path": "x.md"})])
+
+    result, output = _invoke(ctx, [
+        "sources", "reorder", "--block", str(bid), "--ids", ids.format(a=a, b=b, c=c),
+    ])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_argument"
+    with bdb.connect(ctx.db_path) as conn:
+        assert [(s.id, s.position) for s in bdb.list_sources(conn, bid)] == [(a, 0), (b, 1), (c, 2)]
+
+
+def test_sources_reorder_on_a_missing_block_is_not_found(ctx):
+    result, output = _invoke(ctx, ["sources", "reorder", "--block", "9999", "--ids", "1"])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "not_found"
+
+
+@pytest.fixture
+def bob_account(app_ctx, monkeypatch):
+    from istota import db
+    from istota.mail import accounts
+
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+    with db.get_db(app_ctx.app_config.db_path) as conn:
+        home, _ = accounts.ensure_account(
+            conn, "bob", slug="home", label="Home", imap_host="imap.bob.example",
+            imap_username="bob@bob.example",
+        )
+        conn.commit()
+    return home.id
+
+
+@pytest.mark.parametrize("which", ["other_user", "unknown"])
+def test_sources_add_my_email_refuses_accounts_the_user_cannot_pick(app_ctx, bob_account, which):
+    from istota.briefings.sources.my_email import account_refusal
+
+    account = f"imap:{bob_account}" if which == "other_user" else "imap:999999"
+    bid = _first_block_id(app_ctx)
+    result, output = _invoke(app_ctx, [
+        "sources", "add", "--block", str(bid), "--kind", "my_email",
+        "--config", json.dumps({"account": account}),
+    ])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "mail_account_refused"
+    assert output["error"] == account_refusal(app_ctx.app_config, "alice", account)
+    with bdb.connect(app_ctx.db_path) as conn:
+        assert bdb.list_sources(conn, bid) == []
+
+
+def test_sources_set_my_email_keeps_a_stale_stored_account(app_ctx, bob_account):
+    account = f"imap:{bob_account}"
+    bid = _first_block_id(app_ctx)
+    (sid,) = _add_sources(app_ctx, bid, [("my_email", {"account": account, "lookback_hours": 24})])
+
+    result, output = _invoke(app_ctx, [
+        "sources", "set", "--id", str(sid), "--merge-config", '{"lookback_hours": 48}',
+    ])
+    assert result.exit_code == 0, output
+
+    result, output = _invoke(app_ctx, [
+        "sources", "set", "--id", str(sid), "--merge-config", '{"account": null}',
+    ])
+    assert result.exit_code == 0, output
+    assert _source(app_ctx, sid).config == {"lookback_hours": 48}

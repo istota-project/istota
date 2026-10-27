@@ -146,6 +146,45 @@ class TestBlocksSources:
         with bdb.connect(ctx.db_path) as conn:
             assert [b.title for b in bdb.list_blocks(conn, "M")] == ["C", "A", "B"]
 
+    def test_sources_set_and_reorder_are_forwarded(self, config, capsys):
+        cli_briefings.dispatch(
+            ["blocks", "add", "-u", "alice", "--briefing", "M", "--title", "News"],
+            config,
+        )
+        bid = json.loads(capsys.readouterr().out)["block"]["id"]
+        ids = []
+        for kind in ("markets", "calendar"):
+            assert cli_briefings.dispatch(
+                ["sources", "add", "-u", "alice", "--block", str(bid), "--kind", kind,
+                 "--disabled"],
+                config,
+            ) == 0
+            ids.append(json.loads(capsys.readouterr().out)["id"])
+
+        assert cli_briefings.dispatch(
+            ["sources", "set", "-u", "alice", "--id", str(ids[0]), "--enabled",
+             "--merge-config", '{"indices": ["DAX"]}'],
+            config,
+        ) == 0
+        capsys.readouterr()
+        assert cli_briefings.dispatch(
+            ["sources", "reorder", "-u", "alice", "--block", str(bid),
+             "--ids", f"{ids[1]},{ids[0]}"],
+            config,
+        ) == 0
+        capsys.readouterr()
+
+        ctx = resolve_for_user("alice", config)
+        with bdb.connect(ctx.db_path) as conn:
+            stored = [(s.id, s.enabled, s.config) for s in bdb.list_sources(conn, bid)]
+        assert stored == [(ids[1], False, {}), (ids[0], True, {"indices": ["DAX"]})]
+
+        rc = cli_briefings.dispatch(
+            ["sources", "set", "-u", "alice", "--id", str(ids[0])], config,
+        )
+        assert rc == 1
+        assert json.loads(capsys.readouterr().out)["reason"] == "invalid_argument"
+
     def test_invalid_kind_errors(self, config, capsys):
         cli_briefings.dispatch(
             ["blocks", "add", "-u", "alice", "--briefing", "M", "--title", "X"],
