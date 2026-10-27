@@ -102,6 +102,10 @@ web = [
     # a fastapi transitive either way, so this changes no install; it is here so
     # the manifest says what the code actually does (ISSUE-437).
     "starlette>=0.37.0",
+    # The admin browser console's websocket relay runs under uvicorn, which
+    # needs a websocket library. It also arrives through `signaling` in `all`;
+    # named here so dropping that extra cannot break the console.
+    "websockets>=14.0",
 ]
 money = [
     "click>=8.0",

@@ -27,9 +27,11 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -149,6 +151,93 @@ class TestTheConsoleIsNotPublishedOnEveryInterface:
         assert _is_loopback(match.group(1)), (
             f"{name} defaults the noVNC bind to {match.group(1)!r}"
         )
+
+
+CONSOLE_VOLUME = "browser-console"
+CONSOLE_DIR = "/run/istota-browser-console"
+NGINX_TEMPLATE = REPO / "docker" / "nginx" / "istota.conf.template"
+
+
+def _mount_sources(service: dict) -> dict[str, str]:
+    """target -> source, for short and long volume syntax alike."""
+    mounts: dict[str, str] = {}
+    for entry in service.get("volumes") or []:
+        if isinstance(entry, dict):
+            mounts[str(entry.get("target", ""))] = str(entry.get("source", ""))
+            continue
+        parts = str(entry).split(":")
+        if len(parts) >= 2:
+            mounts[parts[1]] = parts[0]
+    return mounts
+
+
+class TestTheConsoleSocketVolume:
+    """The web console reaches x11vnc through Unix sockets in one named volume.
+
+    Only `browser` (which writes the sockets) and `web` (which relays them) may
+    mount it. A task sandbox runs in the daemon, so a daemon mount would hand
+    every live user's display to a task.
+    """
+
+    def _services(self, path: Path = COMPOSE_SOURCES["docker-full"]) -> dict:
+        return yaml.safe_load(path.read_text())
+
+    def test_the_volume_is_declared(self):
+        assert CONSOLE_VOLUME in (self._services().get("volumes") or {})
+
+    @pytest.mark.parametrize("name", ["browser", "web"])
+    def test_browser_and_web_mount_it_at_the_console_dir(self, name):
+        service = self._services()["services"][name]
+        assert _mount_sources(service).get(CONSOLE_DIR) == CONSOLE_VOLUME
+
+    def test_no_other_service_mounts_it(self):
+        services = self._services()["services"]
+        assert "daemon" in services, "the compose file has no daemon service"
+        holders = {
+            name for name, service in services.items()
+            if CONSOLE_VOLUME in _mount_sources(service).values()
+            or CONSOLE_DIR in _mount_sources(service)
+        }
+        assert holders == {"browser", "web"}
+
+
+class TestTheConsoleRoute:
+    """The exact-match nginx location for the console's websocket. `nginx -t`
+    over the rendered template is the image tier's
+    (`tests/image/test_nginx_ingress.py`); this reads the template text."""
+
+    def _block(self) -> str:
+        text = NGINX_TEMPLATE.read_text()
+        match = re.search(
+            r"^location = /istota/api/admin/browsers/console \{\n(.*?)^\}",
+            text, re.M | re.S,
+        )
+        assert match, "no exact-match console location in the nginx template"
+        return match.group(1)
+
+    @pytest.mark.parametrize("directive", [
+        "proxy_pass http://$upstream_web;",
+        "proxy_http_version 1.1;",
+        "proxy_set_header Upgrade $http_upgrade;",
+        "proxy_set_header Connection $connection_upgrade;",
+        "proxy_set_header Host $http_host;",
+        "proxy_set_header X-Forwarded-Proto $forwarded_proto;",
+        "proxy_buffering off;",
+        "proxy_read_timeout 3600s;",
+    ])
+    def test_the_location_forwards_the_upgrade(self, directive):
+        assert directive in self._block()
+
+    def test_a_failed_upgrade_is_not_sent_to_the_starting_page(self):
+        assert "error_page" not in self._block()
+
+
+def test_the_web_extra_carries_websockets():
+    """The relay needs a websocket server under uvicorn. Without this the
+    library reached the image only through `signaling` in `all`."""
+    extras = tomllib.loads((REPO / "pyproject.toml").read_text())[
+        "project"]["optional-dependencies"]
+    assert any(re.match(r"websockets\b", dep) for dep in extras["web"])
 
 
 class TestTheEntrypointStillHonoursThePassword:
