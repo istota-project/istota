@@ -10,8 +10,15 @@ Prior art: Hermes-agent's handle_function_call() coercion (model_tools.py).
 from __future__ import annotations
 
 import json
+import logging
+from typing import TYPE_CHECKING
 
 from istota.llm.types import ToolParameter, ToolSchema
+
+if TYPE_CHECKING:
+    from .tools import AgentTool
+
+logger = logging.getLogger("istota.agent.coercion")
 
 _TRUE_STRINGS = ("true", "1", "yes")
 _FALSE_STRINGS = ("false", "0", "no")
@@ -104,3 +111,38 @@ def _drop_nested_nulls(value, param: ToolParameter):
     if param.type == "array" and param.items is not None and isinstance(value, list):
         return [_drop_nested_nulls(item, param.items) for item in value]
     return value
+
+
+def prepare_tool_arguments(tool: AgentTool, raw_args: dict) -> tuple[dict | None, str | None]:
+    """The arguments ``tool`` runs with, or the error text the model sees instead.
+
+    The steps every dispatcher applies before ``execute``, in order: drop the
+    nulls a strict model sends for unset optionals, then the tool's own
+    ``prepare_arguments`` hook or the generic coercion, then the required-key
+    check. The agent loop and ``session/tools/dispatch.py`` both call this, so
+    the native loop and the CLI harness hand a tool the same arguments. A hook
+    that raises is contained here: it becomes an error, never an exception.
+    """
+    try:
+        args = drop_null_optionals(raw_args, tool.schema)
+        if tool.prepare_arguments is not None:
+            args = tool.prepare_arguments(args)
+        else:
+            args = coerce_arguments(args, tool.schema)
+    except Exception as exc:  # noqa: BLE001 — contain into an error result
+        logger.warning("tool_prepare_error tool=%s: %s", tool.schema.name, exc)
+        return None, f"Argument preparation failed: {exc}"
+
+    missing = _missing_required(args, tool.schema)
+    if missing:
+        return None, f"Missing required argument(s): {', '.join(missing)}"
+    return args, None
+
+
+def _missing_required(args: dict, schema: ToolSchema) -> list[str]:
+    """Required schema parameters absent from (or null in) ``args``."""
+    missing = []
+    for param in schema.parameters:
+        if param.required and (param.name not in args or args[param.name] is None):
+            missing.append(param.name)
+    return missing
