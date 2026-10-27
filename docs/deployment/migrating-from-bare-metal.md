@@ -93,7 +93,7 @@ In the written `config.toml`:
 | `scheduler.push_notification_sources = []` | the ntfy push when a long task finishes |
 | `developer.worktree_reap_enabled = false` | the worktree reaper, which fetches from each repository's remote |
 | `web.avatar_import_from_nextcloud = false` | avatar fetches from the Nextcloud |
-| `[[default_briefings]]` dropped, each `[[briefing_shared_blocks]]` `enabled = false` | briefings and shared blocks seeded from the config at start-up |
+| `[[default_briefings]]` dropped, each shared block (`[[briefings.shared_blocks]]`, or the older `[[briefing_shared_blocks]]`) `enabled = false` | briefings and shared blocks seeded from the config at start-up |
 
 An interval of 0 turns those three scheduler checks off; it does not run them every tick.
 

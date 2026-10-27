@@ -114,7 +114,7 @@ Refresh the inventory settings snapshot after deployment, before the next full r
 
 ### Writing the config
 
-The plan's `config` is config.toml written as YAML, key for key: a TOML table is a mapping, an array of tables (`[[briefing_shared_blocks]]`) is a list of mappings, and the key names do not change. `config/config.example.toml` documents every key. Credentials go in `istota_secrets` (the deployment's files) or `istota_plan_secrets` (inline config credentials), never in the plan. A key left out takes the code's default, and the apply validates the whole plan through the config loader before it writes anything, so an unknown key warns and a bad value is refused.
+The plan's `config` is config.toml written as YAML, key for key: a TOML table is a mapping, an array of tables (`[[briefings.shared_blocks]]`) is a list of mappings, and the key names do not change. `config/config.example.toml` documents every key. Credentials go in `istota_secrets` (the deployment's files) or `istota_plan_secrets` (inline config credentials), never in the plan. A key left out takes the code's default, and the apply validates the whole plan through the config loader before it writes anything, so an unknown key warns and a bad value is refused.
 
 ```toml
 # config.toml

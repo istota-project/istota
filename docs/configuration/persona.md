@@ -70,7 +70,7 @@ Loaded by `source_type` — the loader reads `{source_type}.md` generically, so 
 
 ## Custom system prompt
 
-When `custom_system_prompt = true`, `config/system-prompt.md` replaces Claude Code's default system prompt with a minimal one (~1,200 words) focused on tool usage and working practices. This eliminates identity conflicts with persona/emissaries and removes irrelevant interactive/git/IDE instructions.
+When `[brain] custom_system_prompt = true`, `config/system-prompt.md` replaces Claude Code's default system prompt (the native brain appends it to its own instead) with a minimal one (~1,200 words) focused on tool usage and working practices. This eliminates identity conflicts with persona/emissaries and removes irrelevant interactive/git/IDE instructions.
 
 Disabled by default. Toggle via config.
 
