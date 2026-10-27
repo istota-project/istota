@@ -314,19 +314,21 @@ class TestMountScoping:
 
 
 class TestCustomSystemPrompt:
-    def test_bound_read_only_when_configured(self, layout, tmp_path, task, user_temp):
+    """The operator's system prompt is in no namespace, configured or not: the
+    `claude` CLI that opens it runs outside the sandbox on the tool harness,
+    and NativeBrain reads it in the daemon (cli-brain-tools part 2, Stage 6).
+    The CLAUDE profile used to bind it read-only for the in-sandbox CLI."""
+
+    def test_absent_when_configured(self, layout, tmp_path, task, user_temp):
         prompt = tmp_path / "system-prompt.md"
         prompt.write_text("operator system prompt")
         layout.brain.custom_system_prompt = True
 
         result = run_probe(
-            f'cat {_q(prompt)}; '
-            f'echo tampered > {_q(prompt)} 2>/dev/null && echo WRITE_OK || echo WRITE_FAIL',
-            layout, task, user_temp,
+            f'cat {_q(prompt)} 2>/dev/null || echo PROMPT_ABSENT', layout, task, user_temp,
         )
-        out = result.stdout
-        assert "operator system prompt" in out, result.stderr
-        assert "WRITE_FAIL" in out, out
+        assert "PROMPT_ABSENT" in result.stdout, (result.stdout, result.stderr)
+        assert "operator system prompt" not in result.stdout
 
     def test_absent_when_not_configured(self, layout, tmp_path, task, user_temp):
         prompt = tmp_path / "system-prompt.md"
