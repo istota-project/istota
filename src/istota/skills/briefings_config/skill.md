@@ -1,8 +1,8 @@
 ---
 name: briefings_config
-triggers: [briefing config, briefing schedule, briefing setup, configure briefing, set up briefing, change briefing, edit briefing, briefing time]
-description: Read and change a user's briefing schedule (time, room, delivery surface)
-cli: false
+triggers: [shared block, shared briefing block, agent block, briefing config, briefing schedule, briefing setup, configure briefing, set up briefing, change briefing, edit briefing, briefing time]
+description: Read and change a user's briefing schedule (time, room, delivery surface), and show a shared briefing block's definition
+cli: true
 ---
 # Briefing schedule configuration
 
@@ -48,3 +48,15 @@ Standard 5-field cron: `minute hour day-of-month month day-of-week`, evaluated i
 ## Content is separate
 
 What appears in a briefing is built from **content blocks**, edited in the briefings editor in the web UI — not from this schedule. An older format had per-briefing component toggles for markets, news, calendar and so on; those are gone. If a user asks for different content in a briefing, that is the block editor, not the schedule.
+
+## Shared briefing blocks
+
+A shared block is one section generated once for every user, such as the world headlines, and read into personal briefings through a `shared_block` source. Its definition lives in the database. An `agent` block's directive is the whole task prompt the block runs.
+
+Only an administrator can use these commands. Anyone else gets `reason: not_a_shared_content_writer`; say that plainly rather than retrying.
+
+```bash
+istota-skill briefings_config shared-block show <name>
+```
+
+`show` prints the definition (cron, timezone, render mode, sources, the whole directive) and the last run: `run.agent` for an agent block's latest task (`task_id`, `captured`, `outcome`, `answered_at`), and the last Run now request and answer. Read it before suggesting a change to a block's prompt, and quote the part you would change. An unknown name is `reason: not_found`.

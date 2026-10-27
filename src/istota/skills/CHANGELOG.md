@@ -1,5 +1,8 @@
 # Skills Changelog
 
+## 2026-10-27
+- `briefings_config shared-block show <name>`, for administrators: a shared briefing block's definition with its whole directive, and its last run. For an `agent` block that is the latest task and how its result was taken. Read it before suggesting a change to the block's prompt
+
 ## 2026-10-26
 - `health` records medications: prescriptions, over-the-counter drugs and supplements in one list. `medications` shows the current regimen, `--status all` with `--since` / `--until` shows what was taken in a date window, and `medication <id>` shows one row
 - `add-medication`, `update-medication`, `stop-medication` and `delete-medication` write it. Run `medications --name X` before adding X; when `add-medication` returns `active_with_same_name`, tell the user it may be a duplicate
