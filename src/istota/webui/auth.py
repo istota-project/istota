@@ -755,7 +755,7 @@ def authenticate(db_path: Path, policy: Policy, email: str, password: str, *, ip
 
 STEP_UP_ACTIONS = (
     "export", "recovery_reveal", "backup_recipient", "history_restore", "history_purge",
-    "admin_config_change", "admin_briefing_delete", "admin_cron_delete",
+    "admin_config_change", "admin_briefing_delete", "admin_cron_delete", "admin_browser_console",
 )
 
 

@@ -16566,9 +16566,11 @@ _STEP_UP_LABELS = {
     "admin_config_change": "change this instance's configuration",
     "admin_briefing_delete": "delete a briefing",
     "admin_cron_delete": "delete a scheduled job",
+    "admin_browser_console": "open a user's browser console",
 }
 # Codes that guard no vault: an admin may ask for one without the vault gate.
-_ADMIN_STEP_UP_ACTIONS = frozenset({"admin_config_change", "admin_briefing_delete", "admin_cron_delete"})
+_ADMIN_STEP_UP_ACTIONS = frozenset({"admin_config_change", "admin_briefing_delete", "admin_cron_delete",
+                                    "admin_browser_console"})
 # Actions the account password may confirm where the install can mail a code.
 # Opt-in, so a new action takes the code: for the vault the mailbox is the
 # second factor, since a phished password must not export or reveal it

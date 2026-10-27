@@ -6030,7 +6030,8 @@ export type StepUpAction =
   | 'history_purge'
   | 'admin_config_change'
   | 'admin_briefing_delete'
-  | 'admin_cron_delete';
+  | 'admin_cron_delete'
+  | 'admin_browser_console';
 /** How a sensitive action is confirmed: the account password, or a mailed
  *  code. `methods` is every one the account has, the server's default first;
  *  `method` is the one this request opened. */
