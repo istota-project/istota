@@ -258,6 +258,27 @@ class TestTheWithheldCaseIsStated:
         assert "lightweight fallback" not in system
         assert "restricted to administrators" not in system
 
+    def test_a_harnessed_cli_task_is_not_told_it_has_webfetch(self, tmp_path):
+        """The tool harness denies the CLI's WebFetch and offers none (part 1)."""
+        config = self._config(tmp_path, kind="claude_code")
+        config.brain.tool_harness = True
+        system = build_prompt(self._task(), [], config, is_admin=True).system
+        assert "WebFetch fetches a URL" not in system
+        assert "you have no fetch tool on this deployment" in system
+
+    def test_a_harnessed_cli_task_with_the_browser_drops_the_fallback(self, tmp_path):
+        config = self._config(tmp_path, kind="claude_code", browser=True)
+        config.brain.tool_harness = True
+        system = build_prompt(self._task(), [], config, is_admin=True).system
+        assert "prefer the browse skill" in system
+        assert "lightweight fallback" not in system
+
+    def test_the_switch_on_leaves_a_native_task_its_webfetch(self, tmp_path):
+        config = self._config(tmp_path)
+        config.brain.tool_harness = True
+        system = build_prompt(self._task(), [], config, is_admin=True).system
+        assert "Reading web pages: WebFetch fetches a URL" in system
+
 
 class TestTheUntrustedInputGuardrailsFollowTheTool:
     """`untrusted_input` is folded in wherever the tool is actually built.

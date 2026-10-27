@@ -3901,6 +3901,24 @@ def harness_wanted(
     return native_sandbox_wrap is not None or not effective_sandboxing(config)
 
 
+def harness_denies_web_fetch(task: "db.Task", config: Config) -> bool:
+    """Whether this task's brain is the harnessed CLI, which has no WebFetch.
+
+    Asked at prompt time, before the tool grant and the wrap exist, so it reads
+    the switch and the routed kind only: `HARNESS_DENIED_TOOLS` names WebFetch
+    and the harness offers no fetch of its own until part 2.
+    """
+    if not getattr(config.brain, "tool_harness", False):
+        return False
+    from .brain import resolve_brain_kind
+
+    try:
+        routed = resolve_brain_kind(task.source_type, config.brain, override=task.brain)
+    except Exception:  # noqa: BLE001 — never let routing lookup fail assembly
+        return False
+    return routed.kind == "claude_code"
+
+
 def build_stripped_env() -> dict[str, str]:
     """Build os.environ minus credential vars. For heartbeat/cron commands.
 
@@ -7618,15 +7636,22 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
         "\n- Web search: WebSearch — finds result titles and URLs; "
         "it does not fetch page content."
     )
+    no_harness_fetch = harness_denies_web_fetch(task, config)
     if config.browser.enabled:
         read_line = (
             "\n- Reading web pages: prefer the browse skill (istota-skill browse) — "
             "it renders JavaScript and follows links."
         )
-        if not web_fetch_withheld:
+        if not web_fetch_withheld and not no_harness_fetch:
             read_line += (
                 " Use WebFetch only as a lightweight fallback for simple static pages."
             )
+    elif no_harness_fetch:
+        read_line = (
+            "\n- Reading web pages: you have no fetch tool on this deployment. Say "
+            "that plainly when you are asked to read a page, rather than guessing "
+            "at what it says."
+        )
     elif not web_fetch_withheld:
         read_line = (
             "\n- Reading web pages: WebFetch fetches a URL and extracts content "
