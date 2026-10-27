@@ -52,7 +52,7 @@
 # venv is a prerequisite rather than something this script builds: run
 # `uv sync --extra test` first, or the suite reports several hundred
 # ModuleNotFoundError collection errors that read as a code regression. The
-# host also needs `bubblewrap git sqlite3 tmux procps`, which the image
+# host also needs `bubblewrap git sqlite3 procps`, which the image
 # installs and which native mode checks for and names. And the cgroup tests
 # skip unless the run has a delegated subtree of its own: see the note on the
 # cgroup helper further down.
@@ -666,14 +666,14 @@ run_native_tier() {
     # (for `ps`) is the one that bites hardest — the process-group and qtest
     # tests exit 127 without it.
     local tool missing=()
-    for tool in uv git sqlite3 tmux ps; do
+    for tool in uv git sqlite3 ps; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             missing+=("$tool")
         fi
     done
     if [ ${#missing[@]} -gt 0 ]; then
         echo "error: native mode needs these on PATH and they are missing: ${missing[*]}" >&2
-        echo "       Debian: apt install bubblewrap git sqlite3 tmux procps" >&2
+        echo "       Debian: apt install bubblewrap git sqlite3 procps" >&2
         echo "       Or use ISTOTA_LINUX_TIER_MODE=container, which installs them itself." >&2
         exit 1
     fi

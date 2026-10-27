@@ -57,7 +57,7 @@ istota_tls_cert_source: acme
 istota_upstream_proxy: ""
 istota_listen_addr: ""
 istota_listen_port: 8080
-# The Claude Code pin, for the claude_code and tmux_claude brains. Empty builds
+# The Claude Code pin, for the claude_code brain. Empty builds
 # the release's own pin. Whether Claude Code goes in at all follows the config:
 # after the apply, an image lacking what the config needs (or at another pin)
 # is rebuilt at the same tag.
