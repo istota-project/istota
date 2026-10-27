@@ -864,7 +864,7 @@ class TestCustomSystemPromptBind:
         return path
 
     def test_bound_ro_at_its_own_path(self, sandbox_config, make_sandbox_task):
-        sandbox_config.custom_system_prompt = True
+        sandbox_config.brain.custom_system_prompt = True
         sp = self._write_prompt(sandbox_config)
 
         result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
@@ -872,7 +872,7 @@ class TestCustomSystemPromptBind:
         assert (str(sp.resolve()), str(sp)) in _get_bind_pairs(result, "--ro-bind")
 
     def test_not_bound_when_disabled(self, sandbox_config, make_sandbox_task):
-        sandbox_config.custom_system_prompt = False
+        sandbox_config.brain.custom_system_prompt = False
         sp = self._write_prompt(sandbox_config)
 
         result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
@@ -881,7 +881,7 @@ class TestCustomSystemPromptBind:
 
     def test_config_dir_itself_not_bound(self, sandbox_config, make_sandbox_task):
         """config.toml is its neighbour and must stay out of the sandbox."""
-        sandbox_config.custom_system_prompt = True
+        sandbox_config.brain.custom_system_prompt = True
         sp = self._write_prompt(sandbox_config)
         (sp.parent / "config.toml").write_text("nc_pass = 'hunter2'")
 
@@ -892,7 +892,7 @@ class TestCustomSystemPromptBind:
             assert src != config_dir and dest != config_dir
 
     def test_missing_file_binds_nothing(self, sandbox_config, make_sandbox_task):
-        sandbox_config.custom_system_prompt = True
+        sandbox_config.brain.custom_system_prompt = True
         expected = sandbox_config.skills_dir.parent / "system-prompt.md"
 
         result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
@@ -905,7 +905,7 @@ class TestCustomSystemPromptBind:
         The CLI runs with its own --chdir, so a relative path would not open.
         """
         monkeypatch.chdir(tmp_path)
-        sandbox_config.custom_system_prompt = True
+        sandbox_config.brain.custom_system_prompt = True
         sandbox_config.skills_dir = Path("config/skills")
         sp = tmp_path / "config" / "system-prompt.md"
         sp.parent.mkdir(parents=True, exist_ok=True)
@@ -918,7 +918,7 @@ class TestCustomSystemPromptBind:
         assert str(resolved) in result
 
     def test_path_is_none_when_disabled(self, sandbox_config):
-        sandbox_config.custom_system_prompt = False
+        sandbox_config.brain.custom_system_prompt = False
         assert custom_system_prompt_path(sandbox_config) is None
 
 
@@ -3149,7 +3149,7 @@ class TestSandboxProfiles:
         `.developer` re-bind after `user_temp_dir`, the masks last), and an
         equality over the remaining sequence is what says none of them shifted.
         """
-        sandbox_config.custom_system_prompt = True
+        sandbox_config.brain.custom_system_prompt = True
         sp = sandbox_config.skills_dir.parent / "system-prompt.md"
         sp.parent.mkdir(parents=True, exist_ok=True)
         sp.write_text("custom prompt")
@@ -3169,7 +3169,7 @@ class TestSandboxProfiles:
     def test_the_system_prompt_is_bound_under_claude_and_not_under_native(
         self, sandbox_config, make_sandbox_task, claude_home,
     ):
-        sandbox_config.custom_system_prompt = True
+        sandbox_config.brain.custom_system_prompt = True
         sp = sandbox_config.skills_dir.parent / "system-prompt.md"
         sp.parent.mkdir(parents=True, exist_ok=True)
         sp.write_text("custom prompt")

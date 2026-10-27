@@ -101,7 +101,7 @@ BAD_HOOK_VALUES: dict[str, object] = {
     "sharing.ocm.max_pending_per_user": 0,
     "sharing.ocm.pending_days": 0,
     "sharing.ocm.max_discovery_fetches_per_minute": 0,
-    "advisor_model": 5,
+    "brain.claude_code.advisor_model": 5,
     "health.max_document_bytes": -1,
     "security.vault_fetch_limit_per_task": -1,
     "security.vault_writes_per_task": -1,
@@ -189,8 +189,8 @@ class TestHandParsedSections:
         assert ("discarded", ("models", "aliases")) in [(p["kind"], p["path"]) for p in problems]
 
     def test_a_shared_block_with_no_cron_is_discarded(self, tmp_path):
-        problems = _load(tmp_path, {"briefing_shared_blocks": [{"name": "news"}]})
-        assert [(p["kind"], p["path"]) for p in problems] == [("discarded", ("briefing_shared_blocks", "0"))]
+        problems = _load(tmp_path, {"briefings": {"shared_blocks": [{"name": "news"}]}})
+        assert [(p["kind"], p["path"]) for p in problems] == [("discarded", ("briefings", "shared_blocks", "0"))]
 
     def test_a_clamped_percentage_is_discarded(self, tmp_path):
         problems = _load(tmp_path, {"brain": {"claude_code": {"subscription_usage_high_percent": 150.0}}})

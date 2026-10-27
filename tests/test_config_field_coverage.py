@@ -260,7 +260,7 @@ class TestTheWalkItself:
             "brain.source_type_overrides",
             "users",
             "default_briefings",
-            "briefing_shared_blocks",
+            "briefings.shared_blocks",
         ):
             assert section not in found, (
                 f"{section} is written as a TOML header, not as an assignment. "

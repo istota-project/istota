@@ -37,7 +37,7 @@ COLLECTION_KEYS: dict[str, tuple[str, ...]] = {
 NOT_INSTALLATION_SCOPED: dict[str, str] = {
     "users": "per-user config; a user's credentials live in their own vault",
     "default_briefings": "briefing definitions: schedules, sources and room tokens",
-    "briefing_shared_blocks": "briefing text blocks shared between users",
+    "briefings.shared_blocks": "briefing text blocks shared between users",
 }
 
 

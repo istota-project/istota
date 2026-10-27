@@ -49,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Three config keys moved into the section that reads them.** `advisor_model` is now `[brain.claude_code] advisor_model`, `custom_system_prompt` is `[brain] custom_system_prompt` (every brain reads it, not only Claude Code), and `[[briefing_shared_blocks]]` is `[[briefings.shared_blocks]]`, so the admin Configuration page shows them under Brain, Claude Code and Briefings instead of General. The old spellings still load, with a warning naming the new place.
 - **Queued web chat messages go out together.** Messages typed while a turn is running are sent as one message when it finishes, so the bot answers them in one turn instead of one turn each. A command, a held message or a reply to a different message still gets its own send.
 - **Model fields read more plainly.** The model pickers in Room settings and on the admin Configuration page list models by their provider/id alone, without the display name after it, and the admin model fields use the regular typeface. The Configuration page explains which models users may pick, the model aliases, and each brain's default model and effort.
 - **Admin > Configuration can set the Anthropic model-listing key.** It is written to its secret file on the host like the page's other credentials. The page shows whether the key is set as the daemon last found it, and "Unknown here" until the daemon has checked, instead of always "Not set".

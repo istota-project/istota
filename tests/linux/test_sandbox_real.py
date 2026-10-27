@@ -320,7 +320,7 @@ class TestCustomSystemPrompt:
     def test_bound_read_only_when_configured(self, layout, tmp_path, task, user_temp):
         prompt = tmp_path / "system-prompt.md"
         prompt.write_text("operator system prompt")
-        layout.custom_system_prompt = True
+        layout.brain.custom_system_prompt = True
 
         result = run_probe(
             f'cat {_q(prompt)}; '
@@ -334,7 +334,7 @@ class TestCustomSystemPrompt:
     def test_absent_when_not_configured(self, layout, tmp_path, task, user_temp):
         prompt = tmp_path / "system-prompt.md"
         prompt.write_text("operator system prompt")
-        layout.custom_system_prompt = False
+        layout.brain.custom_system_prompt = False
 
         result = run_probe(
             f'cat {_q(prompt)} 2>/dev/null || echo PROMPT_ABSENT', layout, task, user_temp,

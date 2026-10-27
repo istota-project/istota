@@ -423,7 +423,7 @@ class TestModelFields:
 
     def test_check_json_answers_1_for_a_model_problem(self, monkeypatch, capsys):
         monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(
-            {"config": self._config(advisor_model="nosuch/claude-x")})))
+            {"config": self._config(brain={"claude_code": {"advisor_model": "nosuch/claude-x"}})})))
         monkeypatch.delenv("ISTOTA_CONFIG_PATH", raising=False)
         monkeypatch.setattr("sys.argv", ["istota", "apply", "--check", "-f", "-", "--json"])
         with pytest.raises(SystemExit) as exc:
@@ -435,7 +435,7 @@ class TestModelFields:
     @pytest.mark.parametrize("extra", [
         {"brain": {"claude_code": {"model": "anthropic/claude-nope-9"}}},
         {"brain": {"claude_code": {"model": "claude-opus"}}},
-        {"advisor_model": "opus:high"},
+        {"brain": {"claude_code": {"advisor_model": "opus:high"}}},
     ], ids=["unknown_ref", "pattern", "effort_on_effortless_field"])
     def test_other_unresolvable_values_warn_and_do_not_refuse(self, extra):
         result = apply.collect(self._config(**extra))

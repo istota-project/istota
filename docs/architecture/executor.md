@@ -152,5 +152,5 @@ Malformed results are reclassified as failures and retried.
 | `derive_lookup_allowlist()` | Vars the proxy will respond to over `istota-credential env`, minus `_PROXY_LOOKUP_BLOCKED` |
 | `discover_calendars_for_task()` | Best-effort CalDAV discovery; returns `[]` on any failure. Reused across LLM and subprocess dispatch paths |
 | `build_bwrap_cmd()` | Builds bubblewrap sandbox command wrapper |
-| `custom_system_prompt_path()` | `config/system-prompt.md` as an absolute path when `custom_system_prompt` is on — one source for both the `BrainRequest` field and the sandbox bind |
+| `custom_system_prompt_path()` | `config/system-prompt.md` as an absolute path when `[brain] custom_system_prompt` is on — one source for both the `BrainRequest` field and the sandbox bind |
 | `_build_network_allowlist()` | Builds host:port allowlist for CONNECT proxy |

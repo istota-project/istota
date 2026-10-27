@@ -60,7 +60,7 @@ class TestRiskyAndTables:
         assert ("web", "oauth2_client_secret") in schema.RISKY_KEYS
 
     @pytest.mark.parametrize("dotted", [
-        "models.aliases", "default_briefings", "briefing_shared_blocks",
+        "models.aliases", "default_briefings", "briefings.shared_blocks",
         "brain.source_type_overrides", "brain.native.model_overrides",
         "brain.native.extra_headers",
     ])

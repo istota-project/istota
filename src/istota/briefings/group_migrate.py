@@ -454,7 +454,7 @@ def _publisher_consumers(conn, config, outputs, dependent_jobs):
     for row in conn.execute("SELECT id FROM group_briefing_configs WHERE deleted_at IS NULL ORDER BY id"):
         definition = store.get_definition(conn, row[0])
         collect(f"group:{definition['id']}", store.definition_sources(definition))
-    for block in config.briefing_shared_blocks:
+    for block in config.briefings.shared_blocks:
         collect("shared:" + block.name, [asdict(source) for source in block.sources])
     for job_id in dependent_jobs:
         job = db.get_scheduled_job(conn, job_id)
