@@ -134,7 +134,7 @@ Init script (`_STEALTH_SCRIPT` in `browse_api.py`). Sections 1, 4, 5, 7, 8, 9 re
 
 - **Base:** `python:3.12-slim-trixie` with real `google-chrome-stable`
 - **User:** Non-root `browser` user (entrypoint drops from root via `su`), suppresses `--no-sandbox` infobar
-- **Display:** Xvfb 1440x900, x11vnc, noVNC on port 6080
+- **Display:** Xvfb 1440x900, x11vnc, noVNC on port 6080. Each x11vnc also listens on a Unix socket, `/run/istota-browser-console/<sha256(user)[:32]>.sock` (`-unixsock`), which the web container's admin console connects to through the shared `browser-console` volume
 - **Input:** `xdotool` for OS-level X11 mouse/keyboard events (replaces CDP input)
 - **Browser window:** `--window-size=1440,900` (Chrome sizes itself without a WM; `no_viewport=True` ensures viewport matches window). The real X11 window comes out 1439x899 and the page viewport inside it 1439x812 — an 87px UI inset that `visual.py` derives per capture rather than assuming
 - **Visual mode:** `/screenshot` records the coordinate frame it captured in; `/interact` clicks a point on it through xdotool. See the Cloudflare interstitial section below
