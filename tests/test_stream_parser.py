@@ -162,6 +162,36 @@ class TestParseStreamLine:
         assert event.description == "📄 Reading data.csv"
         assert event.invocation == ""  # non-command tool carries no invocation
 
+    def _mcp_tool_use(self, name, tool_input):
+        return parse_stream_line(self._make_line({
+            "type": "assistant",
+            "message": {"stop_reason": "tool_use", "content": [
+                {"type": "tool_use", "id": "toolu_m1", "name": name, "input": tool_input},
+            ]},
+        }))
+
+    def test_harness_mcp_read_reads_as_read(self):
+        event = self._mcp_tool_use("mcp__istota__Read", {"file_path": "/tmp/data.csv"})
+        assert event.tool_name == "Read"
+        assert event.description == "📄 Reading data.csv"
+
+    def test_harness_mcp_bash_carries_invocation(self):
+        event = self._mcp_tool_use("mcp__istota__Bash", {"command": "make check", "description": "run checks"})
+        assert event.tool_name == "Bash"
+        assert event.description == "⚙️ run checks"
+        assert event.invocation == "make check"
+
+    def test_harness_mcp_bash_relay_is_redacted(self):
+        event = self._mcp_tool_use(
+            "mcp__istota__Bash", {"command": "istota-skill room whisper alice 'the code is 1234'"})
+        assert event.description == "Private relay request"
+        assert event.invocation == ""
+
+    def test_another_mcp_servers_tool_is_not_canonicalised(self):
+        event = self._mcp_tool_use("mcp__other__Read", {"file_path": "/tmp/data.csv"})
+        assert event.tool_name == "mcp__other__Read"
+        assert event.description == "🔧 Using mcp__other__Read"
+
     def test_assistant_bash_carries_invocation(self):
         line = self._make_line({
             "type": "assistant",

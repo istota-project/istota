@@ -18,6 +18,7 @@ from dataclasses import dataclass
 # migration (brain-agnostic; reused by the native loop). Re-exported here so
 # existing imports from this module keep working.
 from ..agent.events import _TOOL_EMOJI, _describe_tool_use, _lone_relay_ask, _tool_invocation  # noqa: F401
+from ..agent.events import canonical_tool_name
 
 logger = logging.getLogger("istota.brain.events")
 
@@ -381,7 +382,7 @@ def parse_stream_line(
                     if block_id in _seen:
                         continue
                     _seen.add(block_id)
-                name = block.get("name", "")
+                name = canonical_tool_name(block.get("name", ""))
                 input_data = block.get("input", {})
                 desc = _describe_tool_use(name, input_data)
                 tool_events.append(

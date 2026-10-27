@@ -17,6 +17,24 @@ import re
 import shlex
 from typing import Any
 
+# The CLI tool harness's MCP server key; the CLI names its tools
+# `mcp__istota__<tool>`. `brain/_tool_harness.py` writes it into the MCP config.
+HARNESS_MCP_SERVER = "istota"
+_HARNESS_TOOL_PREFIX = f"mcp__{HARNESS_MCP_SERVER}__"
+
+
+def canonical_tool_name(name: str) -> str:
+    """`mcp__istota__Bash` -> `Bash`; any other name unchanged.
+
+    Every parse site calls this once, before building a `ToolUseEvent`, so the
+    helpers below and everything downstream match the built-in names. Another
+    server's `mcp__other__Bash` stays as it is: it is not our Bash.
+    """
+    if not isinstance(name, str) or not name.startswith(_HARNESS_TOOL_PREFIX):
+        return name
+    return name[len(_HARNESS_TOOL_PREFIX):] or name
+
+
 _TOOL_EMOJI = {
     "Bash": "⚙️",
     "Read": "📄",

@@ -62,6 +62,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import Any
 
+from istota.agent.events import HARNESS_MCP_SERVER
 from istota.async_runtime import AsyncRuntime
 from istota.sandbox import tool_server_protocol as proto
 from istota.sandbox.claude_runtime_env import without_claude_runtime_env
@@ -71,9 +72,6 @@ from istota.session.tools.dispatch import HARNESS_TEXT_CAP_CHARS, ToolDispatcher
 from ._types import BrainRequest
 
 logger = logging.getLogger(__name__)
-
-# The MCP server name the CLI sees, so its tools are `mcp__istota__<name>`.
-HARNESS_MCP_SERVER = "istota"
 
 # How long an accepted connection waits for its CLI to be registered. The CLI
 # spawns the adapter well after `set_cli_root`, so this only covers a race.

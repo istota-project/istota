@@ -47,7 +47,7 @@ import threading
 import time
 from pathlib import Path
 
-from ..agent.events import _describe_tool_use, _lone_relay_ask, _tool_invocation
+from ..agent.events import _describe_tool_use, _lone_relay_ask, _tool_invocation, canonical_tool_name
 from ._events import (
     ResultEvent,
     StreamEvent,
@@ -401,7 +401,7 @@ def parse_transcript(path: Path) -> list[StreamEvent]:
                     continue
                 if block_id:
                     seen_tool_ids.add(block_id)
-                name = block.get("name", "")
+                name = canonical_tool_name(block.get("name", ""))
                 block_input = block.get("input", {})
                 desc = _describe_tool_use(name, block_input)
                 events.append(
@@ -708,7 +708,7 @@ class _TranscriptTailer(threading.Thread):
                 return
             if block_id:
                 self._seen_tool_ids.add(block_id)
-            name = block.get("name", "")
+            name = canonical_tool_name(block.get("name", ""))
             block_input = block.get("input", {})
             desc = _describe_tool_use(name, block_input)
             ev = ToolUseEvent(
