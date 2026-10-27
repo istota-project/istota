@@ -1591,7 +1591,7 @@ class ClaudeCodeBrain:
 
             # Close the settings-file advisor channel whenever this request
             # won't emit --advisor itself: a host's ~/.claude/settings.json
-            # advisorModel is honored in -p mode (RO-bound into the sandbox),
+            # advisorModel is honored in -p mode (a text-only call reads it),
             # so without this, any host carrying that key would turn on an
             # advisor Istota's config never asked for. advisor_active(req) is
             # the same predicate build_claude_cli_flags uses for --advisor, so

@@ -164,9 +164,10 @@ def request_hello(req: BrainRequest, *, bash_spill_full_output: bool) -> dict:
     """What the tool server is told about this task.
 
     ``subprocess_env`` is ``req.env`` minus the Claude runtime names
-    (ISSUE-390): ``build_clean_env`` puts the CLI's credential in every task
-    env whatever brain runs it, and nothing in the tool server reads it, so its
-    only effect would be a Bash ``echo`` that returns it to the model.
+    (ISSUE-390). No task env carries the CLI's credential any more
+    (``build_clean_env`` names the mode only), so this is defence in depth: a
+    future env builder that put it back would hand it to a Bash ``echo``,
+    since nothing in the tool server reads it.
 
     **The strip happens here and at the spawn, and both are needed.** This
     frame decides what a Bash child is handed; the spawn decides what the

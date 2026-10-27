@@ -2159,7 +2159,8 @@ class NativeBrainConfig:
     # since the round's stage 8 evals: fewer failed edits on the weaker model.
     strict_tool_schemas: str = "auto"
     # Daemon-side WebFetch tool ([brain.native.web_fetch]). Enabled by default
-    # with safe caps; the tool is native-only (added to build_default_tools).
+    # with safe caps; native adds it to its tools and the CLI tool harness
+    # offers it to a claude_code task.
     web_fetch: WebFetchConfig = field(default_factory=WebFetchConfig)
     # When Bash output exceeds the per-tool cap, spill the full captured output
     # to a temp file under ISTOTA_DEFERRED_DIR and name it in the result so the

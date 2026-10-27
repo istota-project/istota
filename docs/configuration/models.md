@@ -75,13 +75,13 @@ A user may hold their own key for a deployment provider: `istota secret ensure -
 `[brain.claude_code] auth` decides how the `claude` CLI signs in:
 
 - `"subscription"` gives the CLI the Claude subscription token (`CLAUDE_CODE_OAUTH_TOKEN`, the `claude_code_oauth_token` secret file) and never an API key. The token is only ever sent to Anthropic, so a non-default `[providers.anthropic] base_url` makes the CLI brains unavailable under this mode.
-- `"api_key"` gives the CLI the `anthropic` provider's key and base URL, and never the token. A gateway in front of Anthropic is the `anthropic` provider with the gateway's `base_url` and key, and the sandbox's network allowlist gains its host.
+- `"api_key"` gives the CLI the `anthropic` provider's key and base URL, and never the token. A gateway in front of Anthropic is the `anthropic` provider with the gateway's `base_url` and key. The CLI runs outside the sandbox, so its host is not added to the sandbox's network allowlist.
 
 Unset, the mode is `"subscription"` when the token is in the environment. An Anthropic key alone never switches an install to API billing; write `auth = "api_key"` for that.
 
 Choose `"subscription"` when the deployment runs on a Claude plan, and `"api_key"` when it pays per token. Two things to know about `"api_key"`:
 
-- The CLI has to hold the key to use it, so a task on `claude_code` can read the key from its Bash tool, as it can read the subscription token under `"subscription"`. Use a key you are prepared to have the model see, ideally from a workspace with a spend limit.
+- The CLI holds the key in its own environment. Its tools run in the sandboxed tool server, which does not hold it, so on a sandboxed deployment the model cannot read it, as it cannot read the subscription token under `"subscription"`. On an unsandboxed deployment a Bash call can read any process of the daemon user, the CLI included, so use a key from a workspace with a spend limit there.
 - A gateway that accepts only a bearer token (`ANTHROPIC_AUTH_TOKEN`) is not supported. The CLI is given `ANTHROPIC_API_KEY` only.
 
 The CLI's environment is built from config alone. Nothing credential-shaped is copied from the daemon's environment, and listing a model credential such as `ANTHROPIC_API_KEY` in `[security] passthrough_env_vars` is refused with a warning. `istota doctor`'s `models.cli_auth` check reports the mode and whether it was written or derived.

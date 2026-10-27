@@ -258,8 +258,9 @@ features = []
 # secret file) and never an API key; "api_key" carries the [providers.anthropic]
 # key and base_url and never the token. Unset: "subscription" when the token is
 # in the environment, else nothing (an API key alone never switches a
-# deployment to API billing). Under "api_key" the model can read the key from
-# its Bash tool, as it can read the token under "subscription".
+# deployment to API billing). Either credential is in the CLI's own env only;
+# the CLI runs outside the sandbox and its tools, in the sandboxed tool server,
+# cannot read it.
 # auth = "subscription"
 #
 # Advisor model for this brain (the CLI's --advisor): an ID or alias,

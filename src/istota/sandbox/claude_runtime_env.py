@@ -33,10 +33,10 @@ no Claude-family or credential-shaped key in a task env, and every such key
 credentials — `NC_PASS`, the mail passwords, the forge tokens — are taken out of
 the model's environment by `_split_credential_env`, gated on
 `security.skill_proxy_enabled`, which defaults on. This set exists because the
-Claude token is the one name that gating never reaches: `build_clean_env` sets
+Claude token was the one name that gating never reached: `build_clean_env` set
 it unconditionally and no skill manifest declares it, so `derive_credential_set`
-cannot see it and it survived on the *sandboxed* production shape where every
-other credential was already gone. That is the whole of the gap, and it is why
+could not see it and it survived on the *sandboxed* production shape where every
+other credential was already gone. That was the whole of the gap, and it is why
 ISSUE-390 was live where it was.
 
 Two neighbouring shapes are deliberately not this module's problem. Where the

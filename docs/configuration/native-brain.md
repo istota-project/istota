@@ -106,7 +106,7 @@ The API key is the provider's, `ISTOTA_PROVIDER_ANTHROPIC_API_KEY`; on a server 
 
 ## `[brain.native.web_fetch]`
 
-The native harness ships its own daemon-side `WebFetch` tool. It runs in the daemon's network namespace, so it is *not* gated by the sandbox CONNECT allowlist — but it is credential-free (no cookies, `trust_env=False`) and SSRF-hardened: every resolved IP is validated against a private/reserved blocklist on each request and each redirect hop, the connection is pinned to the validated IP to close DNS rebinding, and it is GET/text-only with size and time caps. Fetched content is wrapped in an untrusted-content delimiter.
+The native harness ships its own daemon-side `WebFetch` tool, and a `claude_code` task gets the same tool through its tool harness. It runs in the daemon's network namespace, so it is *not* gated by the sandbox CONNECT allowlist — but it is credential-free (no cookies, `trust_env=False`) and SSRF-hardened: every resolved IP is validated against a private/reserved blocklist on each request and each redirect hop, the connection is pinned to the validated IP to close DNS rebinding, and it is GET/text-only with size and time caps. Fetched content is wrapped in an untrusted-content delimiter.
 
 | Setting | Default | Description |
 |---|---|---|
