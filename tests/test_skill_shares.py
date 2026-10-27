@@ -1,7 +1,7 @@
 """The `shares` skill: an accepted Open Cloud Mesh folder share, over WebDAV.
 
-The remote end is a stdlib WebDAV double on loopback that serves one share
-root at Nextcloud's public WebDAV base and answers only Basic auth whose user
+The remote end is `tests/support/ocm_dav.Dav`, a stdlib WebDAV double on
+loopback that serves one share root at Nextcloud's public WebDAV base and answers only Basic auth whose user
 is the share secret, with an empty password. `[sharing] private_hosts` names
 `127.0.0.1`, as every sharing test does.
 
@@ -15,16 +15,12 @@ spawn and the parse are the real ones end to end.
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import tempfile
-import threading
-from email.utils import formatdate
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
-from urllib.parse import quote, unquote, urlsplit
 
 import pytest
 
@@ -34,210 +30,11 @@ from istota.credentials import local
 from istota.sandbox.skill_proxy import SkillProxy
 from istota.sharing import sources
 from tests.support.broker import broker_off
+from tests.support.ocm_dav import BASE, SECRET, Dav
+from tests.support.ocm_dav import seed_share as _seed_share
 from tests.support.skill_cli import run_skill_main
 
-SECRET = "synthetic-share-secret-41c9"
-BASE = "/public.php/webdav/"
 REPO = Path(__file__).resolve().parent.parent
-
-
-# --------------------------------------------------------------------------- #
-# The WebDAV double
-# --------------------------------------------------------------------------- #
-
-
-def _prop_xml(rel: str, *, folder: bool, size: int | None, permissions: str) -> str:
-    href = BASE + "/".join(quote(part) for part in rel.split("/") if part)
-    if folder and rel:
-        href += "/"
-    kind = "<d:collection/>" if folder else ""
-    length = f"<d:getcontentlength>{size}</d:getcontentlength>" if size is not None else ""
-    return (
-        f"<d:response><d:href>{href}</d:href><d:propstat><d:prop>"
-        f"<d:resourcetype>{kind}</d:resourcetype>{length}"
-        f"<d:getlastmodified>{formatdate(1700000000, usegmt=True)}</d:getlastmodified>"
-        f"<oc:permissions>{permissions}</oc:permissions>"
-        "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
-    )
-
-
-class Dav:
-    """One share root, as Nextcloud's public WebDAV endpoint serves it.
-
-    ``files`` maps a path under the root to its bytes and ``dirs`` holds the
-    folders, ``""`` being the root. ``permissions`` is the root's
-    ``oc:permissions``. ``forbid_writes`` answers every write 403 and, as a
-    permission change on the provider would, turns ``permissions`` to ``RG``.
-    ``extra_hrefs`` are raw hrefs added to every listing. Every request is
-    recorded with the Basic user it carried.
-    """
-
-    def __init__(self) -> None:
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-        self.files: dict[str, bytes] = {}
-        self.dirs: set[str] = {""}
-        self.permissions = "RGDNVCK"
-        self.revoked = False
-        self.root_status: int | None = None
-        self.forbid_writes = False
-        self.extra_hrefs: list[str] = []
-        self.received: list[dict] = []
-        dav = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *args):
-                pass
-
-            def _answer(self, status, payload=b"", content_type=None):
-                self.send_response(status)
-                if content_type:
-                    self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                if self.command != "HEAD":
-                    self.wfile.write(payload)
-
-            def _begin(self):
-                length = int(self.headers.get("Content-Length") or 0)
-                body = self.rfile.read(length) if length else b""
-                headers = {k.lower(): v for k, v in self.headers.items()}
-                scheme, _, encoded = (headers.get("authorization") or "").partition(" ")
-                user = password = None
-                if scheme.lower() == "basic":
-                    user, _, password = base64.b64decode(encoded).decode().partition(":")
-                dav.received.append({"method": self.command, "path": self.path,
-                                     "headers": headers, "body": body, "user": user})
-                if not self.path.startswith(BASE):
-                    self._answer(404)
-                    return None
-                if dav.revoked or user != SECRET or password != "":
-                    self._answer(401)
-                    return None
-                return unquote(self.path[len(BASE):]).strip("/"), headers, body
-
-            def _forbidden(self) -> bool:
-                if dav.forbid_writes or not set("CKW") & set(dav.permissions):
-                    dav.permissions = "RG"
-                    self._answer(403)
-                    return True
-                return False
-
-            def do_PROPFIND(self):
-                begun = self._begin()
-                if begun is None:
-                    return
-                rel, headers, _ = begun
-                if rel == "" and dav.root_status is not None:
-                    return self._answer(dav.root_status)
-                if rel in dav.files:
-                    parts = [_prop_xml(rel, folder=False, size=len(dav.files[rel]),
-                                       permissions=dav.permissions)]
-                elif rel in dav.dirs:
-                    parts = [_prop_xml(rel, folder=True, size=None, permissions=dav.permissions)]
-                    if headers.get("depth") == "1":
-                        for path in sorted(dav.dirs):
-                            if path and path.rpartition("/")[0] == rel:
-                                parts.append(_prop_xml(path, folder=True, size=None,
-                                                       permissions=dav.permissions))
-                        for path, data in sorted(dav.files.items()):
-                            if path.rpartition("/")[0] == rel:
-                                parts.append(_prop_xml(path, folder=False, size=len(data),
-                                                       permissions=dav.permissions))
-                        for href in dav.extra_hrefs:
-                            parts.append(
-                                f"<d:response><d:href>{href}</d:href><d:propstat><d:prop>"
-                                "<d:resourcetype/></d:prop>"
-                                "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>")
-                else:
-                    return self._answer(404)
-                payload = ('<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" '
-                           'xmlns:oc="http://owncloud.org/ns">' + "".join(parts)
-                           + "</d:multistatus>").encode()
-                self._answer(207, payload, "application/xml; charset=utf-8")
-
-            def do_GET(self):
-                begun = self._begin()
-                if begun is None:
-                    return
-                rel = begun[0]
-                if rel not in dav.files:
-                    return self._answer(404)
-                self._answer(200, dav.files[rel], "application/octet-stream")
-
-            def do_PUT(self):
-                begun = self._begin()
-                if begun is None or self._forbidden():
-                    return
-                rel, headers, body = begun
-                if rel.rpartition("/")[0] not in dav.dirs:
-                    return self._answer(409)
-                if headers.get("if-none-match") == "*" and rel in dav.files:
-                    return self._answer(412)
-                created = rel not in dav.files
-                dav.files[rel] = body
-                self._answer(201 if created else 204)
-
-            def do_MKCOL(self):
-                begun = self._begin()
-                if begun is None or self._forbidden():
-                    return
-                rel = begun[0]
-                if rel in dav.dirs or rel in dav.files:
-                    return self._answer(405)
-                if rel.rpartition("/")[0] not in dav.dirs:
-                    return self._answer(409)
-                dav.dirs.add(rel)
-                self._answer(201)
-
-            def do_MOVE(self):
-                begun = self._begin()
-                if begun is None or self._forbidden():
-                    return
-                rel, headers, _ = begun
-                target = urlsplit(headers.get("destination") or "")
-                if (target.netloc != f"127.0.0.1:{dav.port}"
-                        or not target.path.startswith(BASE)):
-                    return self._answer(502)
-                to = unquote(target.path[len(BASE):]).strip("/")
-                if headers.get("overwrite") == "F" and (to in dav.files or to in dav.dirs):
-                    return self._answer(412)
-                if rel in dav.files:
-                    dav.files[to] = dav.files.pop(rel)
-                elif rel in dav.dirs and rel:
-                    dav.dirs = {to + p[len(rel):] if p == rel or p.startswith(rel + "/") else p
-                                for p in dav.dirs}
-                    dav.files = {(to + p[len(rel):] if p.startswith(rel + "/") else p): v
-                                 for p, v in dav.files.items()}
-                else:
-                    return self._answer(404)
-                self._answer(201)
-
-            def do_DELETE(self):
-                begun = self._begin()
-                if begun is None or self._forbidden():
-                    return
-                rel = begun[0]
-                if rel in dav.files:
-                    del dav.files[rel]
-                elif rel in dav.dirs and rel:
-                    dav.dirs = {p for p in dav.dirs if p != rel and not p.startswith(rel + "/")}
-                    dav.files = {p: v for p, v in dav.files.items() if not p.startswith(rel + "/")}
-                else:
-                    return self._answer(404)
-                self._answer(204)
-
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.port = self.httpd.server_address[1]
-        self.host = f"127.0.0.1:{self.port}"
-        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
-
-    def methods(self) -> list[str]:
-        return [r["method"] for r in self.received]
-
-    def close(self) -> None:
-        self.httpd.shutdown()
-        self.httpd.server_close()
 
 
 # --------------------------------------------------------------------------- #
@@ -256,26 +53,6 @@ def dav():
     server = Dav()
     yield server
     server.close()
-
-
-def _seed_share(conn, dav, *, user="alice", key="1", access="write", name="Taxes 2026",
-                credential=True) -> int:
-    source_id = sources.create_source(
-        conn, user_id=user, kind="ocm_share", state="pending", remote_host=dav.host,
-        remote_key=f"{dav.host}|{key}", access=access,
-        extras={"name": name, "owner": f"carol@http://{dav.host}", "provider_id": key,
-                "webdav": f"http://{dav.host}{BASE}", "share_path": ""},
-    )
-    if credential:
-        local.create(
-            conn, user,
-            local.LocalCredential(name=sources.credential_name(source_id), value=SECRET,
-                                  url=f"https://{dav.host}"),
-            access={"scope_mode": "all", "allow_scheduled": False},
-            system_prefix="ocm_share_",
-        )
-    sources.set_state(conn, source_id, user, "active")
-    return source_id
 
 
 @pytest.fixture
@@ -370,6 +147,26 @@ class TestReading:
         share.dav.files["top.txt"] = b"x"
         result = share.run("ls", f"{share.ref}:receipts")
         assert [e["path"] for e in result.envelope["entries"]] == [f"{share.ref}:receipts/march.pdf"]
+
+    def test_a_share_of_one_file_lists_and_downloads_as_that_file(self, share):
+        """#849: OCM offers a file and a folder alike; the root's resourcetype decides."""
+        share.dav.files = {"": b"just one file"}
+        share.dav.dirs = set()
+        result = share.run("ls", share.ref)
+        assert result.exit_code == 0, result.stdout
+        [entry] = result.envelope["entries"]
+        assert (entry["path"], entry["type"], entry["size"]) == (share.ref, "file", 13)
+        assert "Taxes 2026" in entry["name"] and entry["name"].startswith(FENCE)
+        assert _row(share).extras["root_kind"] == "file"
+        dest = share.home / "downloads"
+        result = share.run("get", share.ref, "--dest", str(dest))
+        assert result.exit_code == 0, result.stdout
+        assert (dest / "Taxes 2026").read_bytes() == b"just one file"
+
+    def test_get_of_a_folder_share_itself_is_refused(self, share):
+        result = share.run("get", share.ref, "--dest", str(share.home / "downloads"))
+        assert result.envelope["reason"] == "invalid_path"
+        assert [r["method"] for r in share.dav.received] == ["PROPFIND"]
 
     def test_get_downloads_several_files_into_the_destination(self, share):
         share.dav.dirs.add("receipts")

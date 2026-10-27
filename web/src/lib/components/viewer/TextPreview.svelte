@@ -9,6 +9,8 @@
     splitFrontmatter,
     HIGHLIGHT_MAX_CHARS,
   } from '$lib/fileViewer/presentation';
+  import { csvRecords } from '$lib/fileViewer/csv';
+  import CsvTable from './CsvTable.svelte';
 
   let {
     name,
@@ -19,7 +21,7 @@
   }: {
     name: string;
     text: string;
-    /** Show a Markdown document as its readonly source. The caller owns the toggle. */
+    /** Show a Markdown document or a table as its readonly source. The caller owns the toggle. */
     source?: boolean;
     fill?: boolean;
     untrusted?: boolean;
@@ -31,6 +33,9 @@
     language && text.length <= HIGHLIGHT_MAX_CHARS
       ? hljs.highlight(text, { language, ignoreIllegals: true }).value
       : null,
+  );
+  let table = $derived(
+    presentation.kind === 'table' && !source ? csvRecords(text, presentation.delimiter) : null,
   );
 </script>
 
@@ -46,6 +51,8 @@
           {@html (untrusted ? renderUntrustedDocument : renderDocument)(split.body)}
         </div>
       </article>
+    {:else if table}
+      {#key table}<CsvTable {name} records={table} />{/key}
     {:else if highlighted !== null}
       <div class="markdown"><pre><code class="hljs">{@html highlighted}</code></pre></div>
     {:else}

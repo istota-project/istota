@@ -25,6 +25,11 @@
     },
     { href: `${base}/health/history`, label: 'History', active: isActive('/health/history') },
     {
+      href: `${base}/health/medications`,
+      label: 'Medications',
+      active: isActive('/health/medications'),
+    },
+    {
       href: `${base}/health/immunizations`,
       label: 'Immunizations',
       active: isActive('/health/immunizations'),

@@ -16,7 +16,7 @@ from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from istota import db
-from istota.webui import nextcloud_files
+from istota.webui import nextcloud_files, share_files
 from istota.credentials.google_scopes import levels_from_scopes
 from istota.credentials.google_tokens import access_token_for
 from istota.google import drive
@@ -26,7 +26,7 @@ from istota.workspace.pins import validate_pin, workspace_pin_kind
 from istota.webui.request_guards import BodyError, read_bounded_body
 from istota.webui.router_stubs import require_auth, require_session_or_device, verify_origin
 from istota.workspace.listing import ListingError, list_dir, list_file
-from istota.workspace.places import list_places, place_anchor
+from istota.workspace.places import list_places, place_anchor, share_index_shown
 from istota.workspace.reach import deployment_notes, place_reach
 from istota.workspace import config_files, editable, quick_notes, scripts, text_files
 from istota.workspace.quick_notes import QuickNoteError
@@ -54,9 +54,11 @@ async def api_workspace_places(request: Request, user: dict = Depends(require_au
                     "reach": asdict(reach[place.id]),
                 }
                 if place.kind == "share":
-                    entry["remote"] = {"host": place.remote_host, "access": place.remote_access}
+                    entry["remote"] = {"host": place.remote_host, "access": place.remote_access,
+                                       "kind": place.remote_kind}
                 payload.append(entry)
-        return {"places": payload, "notes": deployment_notes(config)}
+        return {"places": payload, "notes": deployment_notes(config),
+                "share_index": share_index_shown(config, places)}
 
     return await asyncio.to_thread(query)
 
@@ -73,6 +75,8 @@ async def api_workspace_list(
     def query():
         if place == "nextcloud":
             return nextcloud_files.list_folder(config, user["username"], parts)
+        if place.startswith("share:"):
+            return share_files.list_folder(config, user["username"], place, parts)
         with db.get_db(config.db_path) as conn:
             places = list_places(config, conn, user["username"])
             selected = next((p for p in places if p.id == place), None)
@@ -98,6 +102,8 @@ async def api_workspace_list(
 
     try:
         return await asyncio.to_thread(query)
+    except share_files.ShareListingError as exc:
+        return _share_refusal(exc)
     except (ListingError, OSError) as exc:
         return _filesystem_error(config, exc, place, write=False)
 
@@ -137,6 +143,11 @@ async def api_workspace_nextcloud_file(
         )
     except ListingError as exc:
         return JSONResponse({"error": exc.message}, status_code=exc.status)
+    return _file_response(download)
+
+
+def _file_response(download):
+    """A download under the `/chat/files` policy: attachment unless a sniffed raster."""
     disposition = "attachment" if download.inline_type is None else "inline"
     headers = {
         **download.headers,
@@ -150,6 +161,49 @@ async def api_workspace_nextcloud_file(
         media_type=nextcloud_files.download_media_type(download),
         background=BackgroundTask(download.close),
     )
+
+
+def _share_refusal(exc: ListingError) -> JSONResponse:
+    body = {"error": exc.message}
+    if isinstance(exc, share_files.ShareListingError):
+        body["code"] = exc.code
+    return JSONResponse(body, status_code=exc.status)
+
+
+@router.get("/share/preview")
+async def api_workspace_share_preview(
+    request: Request, place: str, path: str = "", user: dict = Depends(require_auth),
+):
+    """The viewer's preview of one file in a share from another server (#849)."""
+    config = getattr(request.app.state, "istota_config", None)
+    if config is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+    parts = [part for part in path.split("/") if part]
+    try:
+        preview = await asyncio.to_thread(share_files.preview_file, config, user["username"],
+                                          place, parts)
+    except ListingError as exc:
+        return _share_refusal(exc)
+    return JSONResponse(preview, headers={"Cache-Control": "private, no-store"})
+
+
+@router.get("/share/file")
+async def api_workspace_share_file(
+    request: Request, place: str, path: str = "", user: dict = Depends(require_auth),
+):
+    """Stream one file from a share from another server, as `/nextcloud/file` does."""
+    config = getattr(request.app.state, "istota_config", None)
+    if config is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+    parts = [part for part in path.split("/") if part]
+    try:
+        download = await asyncio.to_thread(
+            share_files.open_file, config, user["username"], place, parts,
+            request.headers.get("range"),
+        )
+    except ListingError as exc:
+        return _share_refusal(exc)
+    return _file_response(download)
 
 
 def _add_nextcloud_shares(config, username, directory, payload):

@@ -10,6 +10,14 @@ describe('presentationFor', () => {
   });
 
   it.each([
+    ['data.csv', ','],
+    ['DATA.CSV', ','],
+    ['data.tsv', '\t'],
+  ])('renders %s as a table', (name, delimiter) => {
+    expect(presentationFor(name)).toEqual({ kind: 'table', delimiter });
+  });
+
+  it.each([
     ['py', 'python'],
     ['ts', 'typescript'],
     ['js', 'javascript'],
@@ -36,7 +44,7 @@ describe('presentationFor', () => {
   it.each([
     'README',
     'file.txt',
-    'file.csv',
+    'file.csv.bak',
     'file.log',
     'file.tar.gz',
     'file.md.bak',

@@ -242,6 +242,22 @@ describe('actions', () => {
     const anchor = container.ownerDocument.querySelector('a[href$="/chat/r/rm_abc/t/31"]');
     expect(anchor?.hasAttribute('data-sveltekit-reload')).toBe(true);
   });
+
+  it("makes an assignment's folder link do a full navigation (#848)", () => {
+    const { container } = open({
+      actions: [
+        action({
+          id: 'open-folder',
+          label: 'Open folder',
+          method: 'LINK',
+          endpoint: null,
+          href: '/files/assignments/7',
+        }),
+      ],
+    });
+    const anchor = container.ownerDocument.querySelector('a[href$="/files/assignments/7"]');
+    expect(anchor?.hasAttribute('data-sveltekit-reload')).toBe(true);
+  });
 });
 
 describe('status note', () => {

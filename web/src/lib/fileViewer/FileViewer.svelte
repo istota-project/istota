@@ -9,6 +9,8 @@
     nextcloudFileUrl,
     previewChatFile,
     previewNextcloudFile,
+    previewShareFile,
+    shareFileUrl,
     type FilePreview,
   } from '$lib/api';
   import { formatBytes } from '$lib/format';
@@ -23,7 +25,10 @@
     onClose,
   }: { path: string; fileSource?: FileSource; onClose: () => void } = $props();
   let nextcloud = $derived(fileSource.kind === 'nextcloud');
-  let fileUrl = $derived(nextcloud ? nextcloudFileUrl : chatFileUrl);
+  let share = $derived(fileSource.kind === 'share' ? fileSource : null);
+  let fileUrl = $derived<(path: string) => string>(
+    share ? (path) => shareFileUrl(share!.place, path) : nextcloud ? nextcloudFileUrl : chatFileUrl,
+  );
   let webUrl = $derived(fileSource.kind === 'nextcloud' ? fileSource.webUrl : null);
   // A `url` source names a PDF endpoint directly: no preview call, no sniffing.
   let direct = $derived(fileSource.kind === 'url' ? fileSource : null);
@@ -33,8 +38,12 @@
   let error = $state('');
   let canDownload = $state(true);
   let source = $state(false);
-  let name = $derived(direct?.name ?? preview?.name ?? path.split('/').pop() ?? 'File');
-  let markdown = $derived(preview?.kind === 'text' && presentationFor(name).kind === 'markdown');
+  let name = $derived(
+    direct?.name ?? preview?.name ?? (path.split('/').pop() || share?.name) ?? 'File',
+  );
+  let rendersView = $derived(
+    preview?.kind === 'text' && ['markdown', 'table'].includes(presentationFor(name).kind),
+  );
   // The year only when it is not this one (at every width), so a phone keeps size and time on one line.
   function shortModified(iso: string): DateFormatOptions {
     const sameYear = new Date(iso).getFullYear() === new Date().getFullYear();
@@ -57,7 +66,12 @@
     reconnect = false;
     missing = false;
     if (direct) return;
-    const load = nextcloud ? previewNextcloudFile : previewChatFile;
+    const shared = share;
+    const load = shared
+      ? (path: string, signal: AbortSignal) => previewShareFile(shared.place, path, signal)
+      : nextcloud
+        ? previewNextcloudFile
+        : previewChatFile;
     const urlFor = fileUrl;
     load(requested, controller.signal)
       .then((result) => {
@@ -100,7 +114,7 @@
     {/if}
   {/snippet}
   {#snippet actions()}
-    {#if markdown}<div class="view-toggle" role="group" aria-label="Document view">
+    {#if rendersView}<div class="view-toggle" role="group" aria-label="Document view">
         <IconButton
           label="Rendered"
           title="Rendered"
@@ -183,7 +197,13 @@
           />
         </div>
       {:else if preview.kind === 'text'}
-        <TextPreview {name} text={preview.text ?? ''} {source} fill untrusted={nextcloud} />
+        <TextPreview
+          {name}
+          text={preview.text ?? ''}
+          {source}
+          fill
+          untrusted={nextcloud || !!share}
+        />
       {/if}
     {/if}
   </div>

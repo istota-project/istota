@@ -180,6 +180,28 @@ class Immunization:
     created_at: str = ""
 
 
+@dataclass
+class Medication:
+    id: int
+    name: str
+    generic_name: str | None
+    dose: str | None
+    dose_unit: str | None
+    frequency: str | None
+    route: str | None
+    category: str
+    prescriber: str | None
+    pharmacy: str | None
+    reason: str | None
+    start_date: str | None
+    end_date: str | None
+    active: bool
+    encounter_id: int | None
+    notes: str | None
+    source: str
+    created_at: str = ""
+
+
 @dataclass(frozen=True)
 class Document:
     """A stored piece of paperwork.

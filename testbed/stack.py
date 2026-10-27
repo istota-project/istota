@@ -57,6 +57,7 @@ logger = logging.getLogger(__name__)
 # slowest thing in this tier.
 UP_TIMEOUT = 900
 DOWN_TIMEOUT = 120
+RESTART_PORT_TIMEOUT = 60
 POLL_INTERVAL = 0.5
 
 #: The compose service the daemon runs as, on both shapes.
@@ -466,10 +467,10 @@ def logs(
         return f"(could not read logs: {exc})"
 
 
-def _service_state(
+def _service_record(
     args: list[str], service: str, *, env: dict | None = None
-) -> tuple[str, str]:
-    """`(state, health)` for one service, both "" when it has no container yet.
+) -> dict | None:
+    """One service's `compose ps` record, None when it has no container yet.
 
     `--all` is load-bearing. Without it `compose ps` omits stopped containers,
     so a service that crashed at boot reads as absent rather than as `exited` —
@@ -491,9 +492,9 @@ def _service_state(
         # the polling loop must not die on one bad `ps` — but logged, because
         # that ambiguity is exactly what hid the interpolation bug.
         logger.debug("compose ps failed: %s", exc)
-        return "", ""
+        return None
     if not raw:
-        return "", ""
+        return None
 
     records: list[dict] = []
     try:
@@ -504,25 +505,55 @@ def _service_state(
             records = [json.loads(line) for line in raw.splitlines() if line.strip()]
         except json.JSONDecodeError:
             logger.debug("compose ps emitted neither JSON nor JSON-lines: %r", raw[:200])
-            return "", ""
+            return None
 
     for record in records:
         # Matched by name only. An earlier version accepted a lone record
         # whatever its service, which is inert on a one-service stack and wrong
         # the moment Layer 4 adds a second.
         if record.get("Service") == service:
-            health = record.get("Health", "")
-            if not health:
-                # Compose leaves `Health` empty on a container whose first
-                # check has not run, and says so only in `Status`. Read as "no
-                # healthcheck", that let `wait_ready` return on a container
-                # about to exit.
-                match = re.search(
-                    r"\((?:health: )?(starting|healthy|unhealthy)\)", record.get("Status", "")
-                )
-                health = match.group(1) if match else ""
-            return record.get("State", ""), health
-    return "", ""
+            return record
+    return None
+
+
+def _service_state(
+    args: list[str], service: str, *, env: dict | None = None
+) -> tuple[str, str]:
+    """`(state, health)` for one service, both "" when it has no container yet."""
+    record = _service_record(args, service, env=env)
+    if record is None:
+        return "", ""
+    health = record.get("Health", "")
+    if not health:
+        # Compose leaves `Health` empty on a container whose first check has
+        # not run, and says so only in `Status`. Read as "no healthcheck", that
+        # let `wait_ready` return on a container about to exit.
+        match = re.search(
+            r"\((?:health: )?(starting|healthy|unhealthy)\)", record.get("Status", "")
+        )
+        health = match.group(1) if match else ""
+    return record.get("State", ""), health
+
+
+def _published_targets(
+    args: list[str], service: str, *, env: dict | None = None
+) -> set[int]:
+    """The container ports `service` has a host port for right now.
+
+    `Publishers` also lists exposed ports nobody published, with
+    `PublishedPort` 0, so a zero is "not published", never "not yet".
+    """
+    record = _service_record(args, service, env=env)
+    if record is None:
+        return set()
+    targets = set()
+    for publisher in record.get("Publishers") or []:
+        try:
+            if int(publisher.get("PublishedPort") or 0) > 0:
+                targets.add(int(publisher["TargetPort"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return targets
 
 
 def wait_ready(
@@ -1863,8 +1894,25 @@ class Stack:
         polls Nextcloud, re-provisions rooms and only then opens the database.
         `wait_healthy` is the other half, and separate so a caller that restarts
         two services waits once.
+
+        It does wait for the ports the service published before the restart to
+        be published again: `compose restart` returns before Docker has
+        re-bound them, and a `published_port` asked in that window reads
+        `0.0.0.0:0` and refuses, which failed the signaling reconnect cases.
         """
+        before = _published_targets(self.args, service)
         _run(self.args + ["restart", service], timeout=DOWN_TIMEOUT + UP_TIMEOUT)
+        deadline = time.monotonic() + RESTART_PORT_TIMEOUT
+        while True:
+            missing = before - _published_targets(self.args, service)
+            if not missing:
+                return
+            if time.monotonic() > deadline:
+                raise StackError(
+                    f"{service} restarted but compose has not re-published "
+                    f"{sorted(missing)} after {RESTART_PORT_TIMEOUT}s"
+                )
+            time.sleep(0.5)
 
     def wait_healthy(self, *, timeout: int | None = None) -> None:
         """Block until the daemon has finished booting, after a restart.

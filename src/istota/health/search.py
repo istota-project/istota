@@ -19,6 +19,8 @@ _TABLES = (
      "name", "icd10", "health_diagnosis", "/health/history/diagnoses/"),
     ("immunizations", ["name", "product_name", "manufacturer", "facility", "notes"], "date_given",
      "name", "COALESCE(product_name, facility)", "health_immunization", "/health/immunizations/detail/"),
+    ("medications", ["name", "generic_name", "reason", "prescriber", "notes"], "COALESCE(start_date, created_at)",
+     "name", "generic_name", "health_medication", "/health/medications/detail/"),
 )
 
 
@@ -36,7 +38,12 @@ def search(ctx, terms, mode, limit, offset):
         if not user.db_path.is_file():
             return ProviderResult([], False)
         with open_with_deadline(lambda **options: connect(user.db_path, **options), ctx.deadline) as conn:
+            # A DB not yet re-initialised after an upgrade lacks the newer
+            # tables; skip them rather than fail the whole group.
+            present = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
             for table, columns, date, title, subtitle, kind, path in _TABLES:
+                if table not in present:
+                    continue
                 predicate, params = like_predicate(columns, terms, mode)
                 rows = conn.execute(
                     f"SELECT *, {date} AS hit_date, {title} AS title, {subtitle} AS subtitle "

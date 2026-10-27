@@ -176,6 +176,8 @@ export interface User {
     health: boolean;
     briefings: boolean;
     workspace?: boolean;
+    /** The Files page: a workspace, a connection, or shares from other servers (#849). */
+    files?: boolean;
     groups?: boolean;
     google_workspace: boolean;
     google_workspace_enabled: boolean;
@@ -2699,6 +2701,7 @@ export interface HistorySummary {
   chronic_diagnoses: Diagnosis[];
   recent_encounters: Encounter[];
   recent_procedures: Encounter[];
+  medications: Medication[];
 }
 
 async function healthFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -3037,6 +3040,7 @@ export async function getEncounter(id: number): Promise<{
   diagnoses: Diagnosis[];
   panels: HealthPanel[];
   documents: HealthDocument[];
+  medications: Medication[];
 }> {
   return healthFetch(`/encounters/${id}`);
 }
@@ -3337,9 +3341,107 @@ export async function getImmunizationExplainer(name: string): Promise<Immunizati
   return healthFetch(`/immunizations/${encodeURIComponent(name)}/explainer`);
 }
 
+// ---- Medications ---------------------------------------------------------
+
+export type MedicationCategory = 'prescription' | 'otc' | 'supplement';
+export type MedicationStatus = 'active' | 'stopped' | 'all';
+
+/** `medication_to_dict` in `src/istota/health/serialize.py`, in its key order. */
+export interface Medication {
+  id: number;
+  name: string;
+  generic_name: string | null;
+  dose: string | null;
+  dose_unit: string | null;
+  frequency: string | null;
+  route: string | null;
+  category: MedicationCategory;
+  prescriber: string | null;
+  pharmacy: string | null;
+  reason: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  active: boolean;
+  encounter_id: number | null;
+  notes: string | null;
+  source: string;
+  created_at: string;
+  /** Attached-document count; present on list responses. */
+  document_count?: number;
+}
+
+/** The writable fields. `null` clears a nullable one; an absent key leaves it alone. */
+export type MedicationFields = Partial<
+  Omit<Medication, 'id' | 'source' | 'created_at' | 'document_count'>
+>;
+
+export async function listMedications(
+  params: {
+    status?: MedicationStatus;
+    category?: MedicationCategory;
+    name?: string;
+    since?: string;
+    until?: string;
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<{ medications: Medication[] }> {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== '') q.set(k, String(v));
+  }
+  const suffix = q.toString() ? `?${q.toString()}` : '';
+  return healthFetch(`/medications${suffix}`);
+}
+
+export async function createMedication(
+  body: MedicationFields & { name: string },
+): Promise<{ status: string; id: number }> {
+  return healthFetch('/medications', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function getMedication(id: number): Promise<{
+  medication: Medication;
+  encounter: Encounter | null;
+  documents: HealthDocument[];
+}> {
+  return healthFetch(`/medications/${id}`);
+}
+
+export async function updateMedication(
+  id: number,
+  body: MedicationFields,
+): Promise<{ status: string }> {
+  return healthFetch(`/medications/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Without `endDate` the server uses today in the user's timezone. */
+export async function discontinueMedication(
+  id: number,
+  endDate?: string,
+): Promise<{ status: string; end_date: string }> {
+  return healthFetch(`/medications/${id}/discontinue`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(endDate ? { end_date: endDate } : {}),
+  });
+}
+
+export async function deleteMedication(id: number): Promise<{ status: string }> {
+  return healthFetch(`/medications/${id}`, { method: 'DELETE' });
+}
+
 // ---- Documents -----------------------------------------------------------
 
-export type DocumentEntity = 'encounter' | 'diagnosis' | 'immunization';
+export type DocumentEntity = 'encounter' | 'diagnosis' | 'immunization' | 'medication';
 
 export interface HealthDocument {
   id: number;
@@ -5061,6 +5163,19 @@ export function previewNextcloudFile(path: string, signal?: AbortSignal): Promis
   return apiFetch(`/workspace/nextcloud/preview?path=${encodeURIComponent(path)}`, { signal });
 }
 
+/** Bytes of a file in a share from another server; `path` is relative to the share, `''` for a file share. */
+export function shareFileUrl(place: string, path: string): string {
+  return `${base}/api/workspace/share/file?${new URLSearchParams({ place, path })}`;
+}
+
+export function previewShareFile(
+  place: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<FilePreview> {
+  return apiFetch(`/workspace/share/preview?${new URLSearchParams({ place, path })}`, { signal });
+}
+
 /**
  * What the file picker offers for a profile picture.
  *
@@ -5649,11 +5764,14 @@ export function isSafeActionPath(path: string | null | undefined): path is strin
 }
 
 /** Whether an action path is answered by the server rather than by a page.
- *  `/chat/r/<room>[/t/<task>]` is the deep-link redirect (#624): the
- *  frontend is prerendered with no route there, so its link must make the
- *  client do a full navigation. */
+ *  `/chat/r/<room>[/t/<task>]` is the deep-link redirect (#624) and
+ *  `/files/assignments/<id>` an assignment's folder (#848), `/files/shares` the
+ *  index of shares from other servers (#849): the frontend is prerendered with
+ *  no route there, so their links must make the client do a full navigation. */
+const SERVER_ACTION_PREFIXES = ['/chat/r/', '/files/assignments/', '/files/shares'];
+
 export function isServerActionPath(path: string | null | undefined): boolean {
-  return isSafeActionPath(path) && path.startsWith('/chat/r/');
+  return isSafeActionPath(path) && SERVER_ACTION_PREFIXES.some((prefix) => path.startsWith(prefix));
 }
 
 /** The deep link into a room by its token, or null for a token that cannot be
@@ -6189,12 +6307,20 @@ export interface IstotaCalendarSettings {
   reachable_elsewhere: boolean;
 }
 
-/** A folder someone offered to Istota over Open Cloud Mesh. Every field is the sender's words. */
-export interface SharedFolderOffer {
-  id: number;
-  name: string | null;
+/** Who offered a share, by federated id and display name. Every field is the sender's words. */
+export interface SharedFolderPeople {
   /** The owner's federated id, as the sender gave it. */
   owner: string | null;
+  owner_display_name?: string | null;
+  /** Who shared it, when that is not the owner; null otherwise. */
+  shared_by?: string | null;
+  shared_by_display_name?: string | null;
+}
+
+/** A folder someone offered to Istota over Open Cloud Mesh. Every field is the sender's words. */
+export interface SharedFolderOffer extends SharedFolderPeople {
+  id: number;
+  name: string | null;
   host: string;
   /** True for a new offer of a folder that is already shared. */
   reoffer: boolean;
@@ -6202,16 +6328,18 @@ export interface SharedFolderOffer {
 }
 
 /** A folder share the user accepted. Name and owner are the sender's words. */
-export interface SharedFolder {
+export interface SharedFolder extends SharedFolderPeople {
   id: number;
   name: string | null;
-  owner: string | null;
   host: string;
   /** What the provider last said the share allows. */
   access: 'read' | 'write';
   state: 'active' | 'error';
+  /** A file or a folder, once its root has been read; null before. */
+  kind?: 'file' | 'folder' | null;
   last_reason: string | null;
   created_at: string | null;
+  accepted_at?: string | null;
 }
 
 /** Folder shares over OCM: the address to share with, the offers waiting, the shares accepted. */
@@ -6620,8 +6748,8 @@ export interface WorkspacePlace {
   label: string;
   browsable: boolean;
   view_root: string | null;
-  /** A shared folder's provider host and last recorded access; `share` places only. */
-  remote?: { host: string; access: 'read' | 'write' };
+  /** A share's provider host, last recorded access, and file or folder once read; `share` places only. */
+  remote?: { host: string; access: 'read' | 'write'; kind?: 'file' | 'folder' | null };
   reach: {
     private: WorkspaceAccess;
     shared_member: WorkspaceAccess;
@@ -6638,6 +6766,8 @@ export interface WorkspaceEntry {
   hidden: boolean;
   share?: { kind: 'user' | 'group' | 'link'; count: number } | null;
   nextcloud_url?: string | null;
+  /** In a share from another server: the path to ask for, relative to the share (`''` for a file share). */
+  share_path?: string;
 }
 export interface WorkspaceListing {
   notes?: string[];
@@ -6646,8 +6776,17 @@ export interface WorkspaceListing {
   entries: WorkspaceEntry[];
   truncated: boolean;
   skipped_names: number;
+  /** A share from another server: what its provider says it allows, read for this listing. */
+  access?: 'read' | 'write';
+  root_kind?: 'file' | 'folder';
 }
-export function getWorkspacePlaces(): Promise<{ places: WorkspacePlace[]; notes: string[] }> {
+export interface WorkspacePlaces {
+  places: WorkspacePlace[];
+  notes: string[];
+  /** Whether the index of shares from other servers is offered; absent from an older server. */
+  share_index?: boolean;
+}
+export function getWorkspacePlaces(): Promise<WorkspacePlaces> {
   return apiFetch('/workspace/places');
 }
 export function getWorkspaceListing(place: string, path = ''): Promise<WorkspaceListing> {

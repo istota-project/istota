@@ -390,6 +390,8 @@ class _Offer:
     shared_by: str
     secret: str
     uri: str | None
+    owner_display_name: str = ""
+    shared_by_display_name: str = ""
 
 
 def _parse_offer(raw: bytes) -> _Offer:
@@ -430,6 +432,8 @@ def _parse_offer(raw: bytes) -> _Offer:
         shared_by=_string(body, "sharedBy"),
         secret=secret,
         uri=uri,
+        owner_display_name=_string(body, "ownerDisplayName", required=False),
+        shared_by_display_name=_string(body, "sharedByDisplayName", required=False),
     )
 
 
@@ -563,6 +567,8 @@ def _store(conn, config, user_id: str, cloud: CloudId, offer: _Offer, base: str,
         "name": offer.name,
         "owner": offer.owner,
         "shared_by": offer.shared_by,
+        "owner_display_name": offer.owner_display_name,
+        "shared_by_display_name": offer.shared_by_display_name,
         "provider_id": offer.provider_id,
         "webdav": base,
         "share_path": share_path,
@@ -695,7 +701,7 @@ _WRITE_LETTERS = frozenset("CKW")
 _PROPFIND_BODY = (
     b'<?xml version="1.0" encoding="utf-8"?>'
     b'<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">'
-    b"<d:prop><oc:permissions/></d:prop></d:propfind>"
+    b"<d:prop><d:resourcetype/><oc:permissions/></d:prop></d:propfind>"
 )
 
 _ACTION_MESSAGES = {
@@ -728,6 +734,14 @@ class ShareActionRefused(Exception):
 
 
 @dataclass(frozen=True)
+class ShareRoot:
+    """What the share root's depth-0 PROPFIND said: its access, and file or folder."""
+
+    access: str
+    kind: str
+
+
+@dataclass(frozen=True)
 class ActionResult:
     source_id: int
     state: str
@@ -753,7 +767,15 @@ def _access_from(permissions: str | None) -> str:
 
 
 def share_access(config, source, secret: str, *, resolve=None) -> str:
-    """PROPFIND the share root with ``secret``; its access, ``read`` or ``write``.
+    """PROPFIND the share root with ``secret``; its access, ``read`` or ``write``."""
+    return share_root(config, source, secret, resolve=resolve).access
+
+
+def share_root(config, source, secret: str, *, resolve=None) -> ShareRoot:
+    """PROPFIND the share root with ``secret``: its access and whether it is a folder.
+
+    OCM sends ``resourceType: file`` for a folder and a single file alike, so
+    the root's own ``resourcetype`` is the only word on which it is.
 
     The proof that the secret opens the share on the verified host:
     `ShareActionRefused` ``share_unopened`` on a 401, 403 or 404, and
@@ -795,8 +817,12 @@ def share_access(config, source, secret: str, *, resolve=None) -> str:
                                  reason="invalid_response") from None
     if not rows:
         raise ShareActionRefused("share_unreachable", status=status, reason="invalid_response")
-    element = rows[0][1].get(_OC_PERMISSIONS)
-    return _access_from(element.text if element is not None else None)
+    props = rows[0][1]
+    element = props.get(_OC_PERMISSIONS)
+    kind = props.get("{DAV:}resourcetype")
+    folder = kind is not None and kind.find("{DAV:}collection") is not None
+    return ShareRoot(_access_from(element.text if element is not None else None),
+                     "folder" if folder else "file")
 
 
 # -------------------------------------------------------- telling the sender
@@ -874,6 +900,12 @@ def _waiting_key(source) -> str | None:
     return None
 
 
+def _utc_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _held_secret(conn, user_id: str, key: str) -> str | None:
     from istota.credentials import store as secrets_store
     from istota.sharing import sources
@@ -883,7 +915,13 @@ def _held_secret(conn, user_id: str, key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _credential_value(conn, user_id: str, source_id: int) -> str | None:
+def share_secret(conn, user_id: str, source_id: int) -> str | None:
+    """An accepted share's secret, from its local credential; None when it is gone.
+
+    Read by the daemon's notification handler and, in the web process, by
+    `remove` and the Files page's browsing (`webui.share_files`), all for the
+    share's own owner. A task reads it only through the private channel.
+    """
     from istota.credentials import store as secrets_store
     from istota.credentials.names import VAULT_ENTRY_SERVICE
     from istota.sharing import sources
@@ -965,7 +1003,8 @@ def accept(
     secret = _held_secret(conn, user_id, key) if key is not None else None
     if key is None or secret is None:
         raise ShareActionRefused("not_waiting")
-    access = share_access(config, source, secret, resolve=resolve)
+    root = share_root(config, source, secret, resolve=resolve)
+    access = root.access
 
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -974,9 +1013,10 @@ def accept(
             raise ShareActionRefused("offer_changed")
         _store_credential(conn, user_id, current, secret, allow_scheduled)
         secrets_store.delete_secret(None, user_id, sources.SECRET_SERVICE, key, connection=conn)
-        if "reoffer_pending" in current.extras:
-            extras = {k: v for k, v in current.extras.items() if k != "reoffer_pending"}
-            sources.set_details(conn, source_id, user_id, extras=extras)
+        extras = {k: v for k, v in current.extras.items() if k != "reoffer_pending"}
+        extras["root_kind"] = root.kind
+        extras["accepted_at"] = _utc_now()
+        sources.set_details(conn, source_id, user_id, extras=extras)
         sources.set_access(conn, source_id, user_id, access)
         if current.state != "active":
             sources.set_state(conn, source_id, user_id, "active")
@@ -1044,7 +1084,7 @@ def remove(conn: sqlite3.Connection, config, source_id: int, user_id: str, *,
         source = _owned_share(conn, source_id, user_id)
         if source.state not in ("active", "error"):
             raise ShareActionRefused("not_active")
-        secret = _credential_value(conn, user_id, source_id)
+        secret = share_secret(conn, user_id, source_id)
         sources.revoke(conn, source_id, user_id, reason="removed")
         conn.commit()
     except BaseException:
@@ -1143,7 +1183,7 @@ def _matching_share(conn, provider_id: str, secret: str):
         if source.state == "pending":
             stored = _held_secret(conn, source.user_id, str(source.id))
         else:
-            stored = _credential_value(conn, source.user_id, source.id)
+            stored = share_secret(conn, source.user_id, source.id)
         if stored is not None and hmac.compare_digest(stored.encode(), given) and found is None:
             found = source
     return found
@@ -1208,7 +1248,7 @@ def receive_notification(
                 conn.rollback()
                 raise
         elif source.state in ("active", "error"):
-            secret = _credential_value(conn, source.user_id, source.id)
+            secret = share_secret(conn, source.user_id, source.id)
             try:
                 access = share_access(config, source, secret, resolve=resolve) if secret else None
             except ShareActionRefused as refused:

@@ -353,9 +353,11 @@ it('lists accepted shares and removes one after confirming', async () => {
   const rows = within(screen.getByRole('list', { name: 'Shared folders' })).getAllByRole(
     'listitem',
   );
-  expect(rows[0]).toHaveTextContent('share:7 · cloud.example.org · read and write');
+  expect(rows[0]).toHaveTextContent('from carol@https://cloud.example.org · cloud.example.org');
+  expect(rows[0]).toHaveTextContent('share:7');
+  expect(rows[0]).toHaveTextContent('Read and write');
   expect(rows[1]).toHaveTextContent('<i>Old</i>');
-  expect(rows[1]).toHaveTextContent('read only');
+  expect(rows[1]).toHaveTextContent('Read only');
   expect(document.querySelector('i')).toBeNull();
   await fireEvent.click(screen.getByRole('button', { name: 'Actions for Taxes 2026' }));
   await fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove' }));

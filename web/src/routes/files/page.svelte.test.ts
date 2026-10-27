@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { __history } from '../../../vitest-stubs/app-navigation';
@@ -334,28 +334,147 @@ it('shows connection reach without requesting a directory listing', async () => 
   expect(screen.queryByRole('checkbox', { name: 'Show hidden' })).toBeNull();
 });
 
-it('lists a shared folder under its own group and never lists it', async () => {
+describe('shares from other servers (#849)', () => {
   const share: WorkspacePlace = {
     ...home,
     id: 'share:7',
     kind: 'share',
     label: 'Taxes 2026',
-    browsable: false,
+    browsable: true,
     view_root: null,
-    remote: { host: 'cloud.example.org', access: 'write' },
+    remote: { host: 'cloud.example.org', access: 'write', kind: 'folder' },
     reach: { private: 'skill', shared_member: 'skill', restricted: 'none', note: null },
   };
-  api.getWorkspacePlaces.mockResolvedValue({ places: [home, share], notes: [] });
-  render(Workspace);
-  await openSection('Shared folders');
-  const sidebar = await screen.findByRole('complementary');
-  await fireEvent.click(within(sidebar).getByRole('link', { name: 'Taxes 2026' }));
-  await screen.findByText(/A read-write folder shared from cloud\.example\.org\./);
-  expect(api.getWorkspaceListing).not.toHaveBeenCalledWith('share:7', expect.anything());
-  expect(screen.getByRole('link', { name: 'Connections' })).toHaveAttribute(
-    'href',
-    '/settings/connections',
-  );
+  const people = {
+    owner: 'carol@cloud.example.org',
+    owner_display_name: 'Carol',
+    shared_by: null,
+    shared_by_display_name: null,
+  };
+  const sharing = (shares: object[], pending: object[] = []) => ({
+    feeds: [],
+    max_feeds: 10,
+    can_add: true,
+    ocm: { enabled: true, federated_id: 'alice@bot.example.com', pending, shares },
+  });
+  const accepted = {
+    id: 7,
+    name: 'Taxes 2026',
+    ...people,
+    host: 'cloud.example.org',
+    access: 'write',
+    state: 'active',
+    kind: 'folder',
+    last_reason: null,
+    created_at: '2026-10-25T10:00:00Z',
+    accepted_at: '2026-10-25T10:05:00Z',
+  };
+
+  beforeEach(() => {
+    api.getWorkspacePlaces.mockResolvedValue({
+      places: [home, share],
+      notes: [],
+      share_index: true,
+    });
+    api.getSharing.mockResolvedValue(sharing([accepted]));
+    api.shareFileUrl.mockImplementation(actualApi.shareFileUrl);
+  });
+
+  it('lists them in one index in the bot section, never one sidebar row each', async () => {
+    api.getSharing.mockResolvedValue(
+      sharing(
+        [accepted, { ...accepted, id: 8, name: 'Lease.pdf', kind: 'file', access: 'read' }],
+        [
+          {
+            id: 9,
+            name: 'Photos',
+            ...people,
+            host: 'cloud.example.org',
+            reoffer: false,
+            created_at: null,
+          },
+        ],
+      ),
+    );
+    render(Workspace);
+    const sidebar = await screen.findByRole('complementary');
+    await openView('From other servers');
+    expect(within(sidebar).queryByRole('link', { name: 'Taxes 2026' })).toBeNull();
+    const shares = await screen.findByRole('list', { name: 'Shared folders' });
+    expect(within(shares).getByRole('link', { name: 'Taxes 2026' })).toHaveAttribute(
+      'href',
+      '/files?place=share%3A7',
+    );
+    // A file share opens as its one file rather than as a folder.
+    expect(within(shares).getByRole('link', { name: 'Lease.pdf' })).toHaveAttribute(
+      'href',
+      '/api/workspace/share/file?place=share%3A8&path=',
+    );
+    await fireEvent.click(within(shares).getByRole('link', { name: 'Lease.pdf' }));
+    expect(openFile).toHaveBeenCalledWith('', {
+      kind: 'share',
+      place: 'share:8',
+      name: 'Lease.pdf',
+    });
+    expect(shares).toHaveTextContent(
+      'Folder · from Carol (carol@cloud.example.org) · cloud.example.org',
+    );
+    // Ruled record rows like the other indexes, without the place id the Settings card shows.
+    expect(within(shares).getAllByRole('listitem')[0]).toHaveClass('record-row--divided');
+    expect(shares).not.toHaveTextContent('share:7');
+    // The last entry in the bot's section.
+    const entries = within(sidebar).getByRole('region', { name: 'Istota' }).querySelectorAll('a');
+    expect(entries[entries.length - 1]).toHaveTextContent('From other servers');
+    const offers = screen.getByRole('list', { name: 'Folder offers' });
+    expect(within(offers).getByRole('button', { name: 'Accept Photos' })).toBeInTheDocument();
+    expect(within(offers).getByRole('button', { name: 'Decline Photos' })).toBeInTheDocument();
+  });
+
+  it('browses a share like a folder and opens its files from the share', async () => {
+    api.getWorkspaceListing.mockResolvedValue({
+      place: 'share:7',
+      path: '',
+      entries: [{ ...entry('notes.txt'), share_path: 'notes.txt' }],
+      truncated: false,
+      skipped_names: 0,
+      access: 'read',
+      root_kind: 'folder',
+    });
+    __history.reset('/istota/files?place=share:7');
+    render(Workspace);
+    await fireEvent.click(await screen.findByRole('button', { name: 'notes.txt' }));
+    expect(api.getWorkspaceListing).toHaveBeenCalledWith('share:7', '');
+    expect(openFile).toHaveBeenCalledWith('notes.txt', {
+      kind: 'share',
+      place: 'share:7',
+      name: 'notes.txt',
+    });
+    // The access the provider gave for this listing, not the one stored before.
+    await screen.findByText(
+      /Read only · from Carol \(carol@cloud\.example\.org\) · cloud\.example\.org/,
+    );
+    const path = screen.getByRole('navigation', { name: 'Folder path' });
+    expect(within(path).getByRole('link', { name: 'From other servers' })).toBeInTheDocument();
+    await openActions('notes.txt');
+    expect(await screen.findByRole('menuitem', { name: 'Download' })).toHaveAttribute(
+      'href',
+      '/api/workspace/share/file?place=share%3A7&path=notes.txt',
+    );
+  });
+
+  it('opens on the index when shares are all there is', async () => {
+    api.getWorkspacePlaces.mockResolvedValue({ places: [], notes: [], share_index: true });
+    api.getSharing.mockResolvedValue(sharing([]));
+    render(Workspace);
+    expect(await screen.findByText('No folder offers are waiting.')).toBeInTheDocument();
+    expect(screen.queryByText('No files or connections are available.')).toBeNull();
+    expect(screen.queryByText('This place is no longer available.')).toBeNull();
+    // Configuration and scripts live in My files, which this user has none of.
+    const section = await screen.findByRole('region', { name: 'Istota' });
+    expect(within(section).queryByRole('link', { name: 'Configuration' })).toBeNull();
+    expect(within(section).queryByRole('link', { name: 'Scripts' })).toBeNull();
+    expect(within(section).getByRole('link', { name: 'From other servers' })).toBeInTheDocument();
+  });
 });
 
 it.each([

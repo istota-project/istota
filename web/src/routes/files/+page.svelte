@@ -25,6 +25,11 @@
     Meter,
   } from '@minot/ui';
   import {
+    AuthError,
+    getSharing,
+    shareFileUrl,
+    type SharedFolder,
+    type SharingSettings,
     getWorkspacePins,
     putWorkspacePin,
     deleteWorkspacePin,
@@ -63,6 +68,7 @@
   import { configFileDescription } from '$lib/components/workspace/configFiles';
   import {
     INDEX_VIEW_LABELS,
+    INDEX_VIEWS,
     indexViewForKind,
     parseIndexView,
     type IndexView,
@@ -82,6 +88,9 @@
   } from '$lib/components/workspace/reach';
   import { BotOff } from '@lucide/svelte';
   import PinnedList from '$lib/components/workspace/PinnedList.svelte';
+  import IndexCaption from '$lib/components/workspace/IndexCaption.svelte';
+  import FolderShares from '$lib/components/sharing/FolderShares.svelte';
+  import { accessLabel, sharedFrom } from '$lib/components/sharing/folderShares';
   import FileTable from '$lib/components/workspace/FileTable.svelte';
 
   let pins = $state<WorkspacePin[]>([]);
@@ -229,6 +238,56 @@
   type Selection = { place: string; path: string; view?: IndexView };
   let places = $state<WorkspacePlace[]>([]);
   let notes = $state<string[]>([]);
+  // Shares from other servers (#849): one index in the bot's section, not a sidebar row each.
+  let shareIndex = $state(false);
+  let sharing = $state<SharingSettings | null>(null);
+  let sharingError = $state('');
+  async function loadSharing() {
+    sharingError = '';
+    try {
+      const result = await getSharing();
+      if (active) sharing = result;
+    } catch (e) {
+      if (e instanceof AuthError) return identity.expireSession();
+      if (active) sharingError = 'Could not load your shares from other servers.';
+    }
+  }
+  function sharingFailed(e: unknown) {
+    if (e instanceof AuthError) identity.expireSession();
+    else
+      notifyError(e instanceof Error && e.message ? e.message : 'The share could not be changed.');
+  }
+  // An accept adds a place and a remove takes one away, so both lists are read again.
+  async function sharingChanged() {
+    await loadSharing();
+    try {
+      const result = await getWorkspacePlaces();
+      if (active) {
+        places = result.places;
+        shareIndex = result.share_index ?? false;
+      }
+    } catch {
+      // The index above already says what it could not load.
+    }
+  }
+  function openShare(event: MouseEvent, share: SharedFolder) {
+    if (share.kind === 'file') {
+      if (!plainClick(event)) return;
+      event.preventDefault();
+      viewer.openFile('', {
+        kind: 'share',
+        place: `share:${share.id}`,
+        name: share.name || 'File',
+      });
+      return;
+    }
+    navigate(event, `share:${share.id}`);
+  }
+  function shareHref(share: SharedFolder) {
+    return share.kind === 'file'
+      ? shareFileUrl(`share:${share.id}`, '')
+      : href(`share:${share.id}`);
+  }
   let loading = $state(true);
   let error = $state('');
   let sidebarOpen = $state(false);
@@ -240,16 +299,22 @@
   let selected = $state<Selection | null>(null);
   let place = $derived(places.find((item) => item.id === selected?.place));
   let view = $derived(selected?.view ?? null);
+  let openSharedFolder = $derived(
+    place?.kind === 'share'
+      ? (sharing?.ocm?.shares ?? []).find((share) => `share:${share.id}` === place!.id)
+      : undefined,
+  );
   let botViews = $derived(
-    (['rooms', 'groups', 'config', 'skills', 'scripts', 'prompts'] as IndexView[]).filter(
-      (item) => {
-        if (item === 'rooms') return places.some((p) => p.kind === 'room');
-        if (item === 'groups') return places.some((p) => p.kind === 'group');
-        if (item === 'skills') return configFiles.some((file) => file.kind === 'skill');
-        if (item === 'prompts') return !!scriptsIndex?.files.some((file) => file.kind === 'prompt');
-        return true;
-      },
-    ),
+    INDEX_VIEWS.filter((item) => {
+      if (item === 'rooms') return places.some((p) => p.kind === 'room');
+      if (item === 'groups') return places.some((p) => p.kind === 'group');
+      if (item === 'shares') return shareIndex;
+      // The rest live in My files, so they need it.
+      if (!places.some((p) => p.kind === 'home')) return false;
+      if (item === 'skills') return configFiles.some((file) => file.kind === 'skill');
+      if (item === 'prompts') return !!scriptsIndex?.files.some((file) => file.kind === 'prompt');
+      return true;
+    }),
   );
   // Configuration, skills, scripts and prompts all live in the user's own folder, so they reach as it does.
   let botReach = $derived.by(() => {
@@ -265,6 +330,8 @@
     if (roomAccess) result.rooms = { access: roomAccess, scope: 'rooms' };
     const groupAccess = sharedAccess(places.filter((item) => item.kind === 'group'));
     if (groupAccess) result.groups = { access: groupAccess, scope: 'group' };
+    const shareAccess = sharedAccess(places.filter((item) => item.kind === 'share'));
+    if (shareAccess) result.shares = { access: shareAccess };
     return result;
   });
   function indexReachNote(item: IndexView): string | null {
@@ -272,7 +339,7 @@
     return entry ? taskReachNote(entry.access, botName, entry.scope) : null;
   }
   let parentView = $derived(indexViewForKind(place?.kind));
-  const sidebarKinds: string[] = ['linked', 'share', 'drive', 'nextcloud', 'talk'];
+  const sidebarKinds: string[] = ['linked', 'drive', 'nextcloud', 'talk'];
   let botCurrent = $derived<IndexView | 'home' | null>(
     view ?? (place?.kind === 'home' ? 'home' : indexViewForKind(place?.kind)),
   );
@@ -383,6 +450,9 @@
     decode: (params) => {
       const view = parseIndexView(params.view);
       if (view) return { place: '', path: '', view };
+      // With nothing but shares from other servers, their index is the page.
+      if (!params.place && !places.length && shareIndex)
+        return { place: '', path: '', view: 'shares' };
       return { place: params.place || places[0]?.id || 'home', path: params.path || '' };
     },
     read: () => selected,
@@ -547,7 +617,9 @@
       if (!active) return;
       places = result.places;
       notes = result.notes;
-      if (places.length) void loadFolder(selection.current()!);
+      shareIndex = result.share_index ?? false;
+      if (shareIndex) void loadSharing();
+      if (places.length || shareIndex) void loadFolder(selection.current()!);
     } catch {
       error = 'Could not load your files.';
     } finally {
@@ -581,7 +653,7 @@
     </ShellHeader>
   {/snippet}
   {#snippet sidebar()}
-    {#if places.length || pins.length || configFiles.length || configError}
+    {#if places.length || shareIndex || pins.length || configFiles.length || configError}
       <Sidebar title="Files" open={sidebarOpen} onClose={() => (sidebarOpen = false)}>
         <PinnedList
           {pins}
@@ -626,7 +698,13 @@
         >{/if}
     </div>
   {/if}
-  <LoadState {loading} {error} loadingLabel="Loading files…" onRetry={load} empty={!places.length}>
+  <LoadState
+    {loading}
+    {error}
+    loadingLabel="Loading files…"
+    onRetry={load}
+    empty={!places.length && !shareIndex}
+  >
     {#snippet emptyState()}
       <EmptyState>No files or connections are available.</EmptyState>
     {/snippet}
@@ -666,6 +744,31 @@
             {href}
             onNavigate={navigate}
           />
+        {:else if view === 'shares'}
+          <section class="index share-index" aria-label="From other servers">
+            <IndexCaption
+              caption="Files and folders people shared with you from their own servers."
+              reachNote={indexReachNote('shares')}
+            />
+            {#if sharingError}
+              <div class="center-msg error stacked">
+                <p>{sharingError}</p>
+                <Button variant="secondary" onclick={loadSharing}>Retry</Button>
+              </div>
+            {:else if !sharing}
+              <PageLoading label="Loading shares…" />
+            {:else if sharing.ocm}
+              <FolderShares
+                layout="index"
+                ocm={sharing.ocm}
+                onSaved={sharingChanged}
+                onError={sharingFailed}
+                open={{ href: shareHref, onOpen: openShare }}
+              />
+            {:else}
+              <EmptyState>This server does not receive shares from other servers.</EmptyState>
+            {/if}
+          </section>
         {:else if view === 'scripts' || view === 'prompts'}
           <ScriptIndex
             label={INDEX_VIEW_LABELS[view]}
@@ -794,6 +897,15 @@
           {/if}
         </div>
       </div>
+      {#if place.kind === 'share'}
+        {@const shared = openSharedFolder}
+        {@const from = shared ? sharedFrom(shared) : ''}
+        <p class="caption share-caption">
+          {accessLabel(listing?.access ?? place.remote?.access ?? 'read')}{from
+            ? ` · from ${from}`
+            : ''} · {place.remote?.host}
+        </p>
+      {/if}
       <ReachPanel {place} {notes} {botName} />
       {#if uploads.length}
         <section class="uploads" aria-label="Uploads">
@@ -841,26 +953,27 @@
       >
         {#if !place.browsable}
           <div class="center-msg">
-            {#if place.kind === 'share'}
-              <p>
-                {place.remote?.access === 'write' ? 'A read-write' : 'A read-only'} folder shared from
-                {place.remote?.host}. Tasks reach it through the shares skill; it cannot be browsed
-                here.
-              </p>
-              <Button variant="secondary" href={`${base}/settings/connections`}>Connections</Button>
-            {:else}
-              {place.kind === 'talk'
-                ? 'Talk attachments are available to tasks, but cannot be browsed here.'
-                : 'This connection is reached through a skill during a task.'}
-            {/if}
+            {place.kind === 'talk'
+              ? 'Talk attachments are available to tasks, but cannot be browsed here.'
+              : 'This connection is reached through a skill during a task.'}
           </div>
         {:else if listingLoading}
           <PageLoading label="Loading folder…" />
         {:else if listingError}
-          <div class="center-msg error">
+          <div class="center-msg error stacked">
             {#if (place.kind === 'drive' || place.kind === 'nextcloud') && needsConnection(listingError)}
               <p>{listingError === 'drive_not_granted' ? 'Drive access is off' : listingError}</p>
               <Button variant="secondary" href={`${base}/settings/connections`}>Connections</Button>
+            {:else if place.kind === 'share'}
+              <p>{listingError}</p>
+              <div class="hstack wrap">
+                <Button variant="secondary" onclick={() => loadFolder(selected!)}>Retry</Button>
+                <Button
+                  variant="secondary"
+                  href={viewHref('shares')}
+                  onclick={(event) => navigateView(event, 'shares')}>From other servers</Button
+                >
+              </div>
             {:else}
               <p>{listingError}</p>
               <Button variant="secondary" onclick={() => loadFolder(selected!)}>Retry</Button>
@@ -1003,6 +1116,24 @@
     gap: var(--space-2);
     padding: var(--space-2) 0;
     font-size: var(--text-sm);
+  }
+  .share-index {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow-y: auto;
+  }
+  .share-caption {
+    margin: 0;
+    padding: var(--space-2) var(--space-3) 0;
+    overflow-wrap: anywhere;
+  }
+  .center-msg.stacked {
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+  .center-msg.stacked p {
+    margin: 0;
   }
   .upload-name {
     display: flex;

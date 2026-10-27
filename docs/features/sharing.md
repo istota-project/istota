@@ -50,13 +50,15 @@ When someone sends the bot's address a meeting invitation, and the mail is not h
 
 When the operator has turned this on, the card shows your federated sharing address, such as `alice@istota.example.com`. Copy it, then share a folder with it from your own Nextcloud (or any server with federated sharing) the way you share with anyone on another server. Choose edit rights if Istota should be able to write.
 
-The offer arrives as a waiting offer on the card, and the bell shows "A folder was shared with you. Review it in Istota." The bell's text never includes the folder's name or the sender's words. Istota can reach nothing in the folder until you accept it.
+The offer arrives as a waiting offer on the card and on the Files page under From other servers, and the bell shows "A folder was shared with you. Review it in Istota." The bell's text never includes the folder's name or the sender's words, and its Review link opens From other servers. Istota can reach nothing in the folder until you accept it. A single file can be shared the same way; Istota treats it as a share of one file.
 
 - **Accept** opens the folder once to check that the share works and to read what it allows. The dialog asks whether scheduled jobs and briefings may use the folder; that is off unless you tick it. When exactly one offer is waiting, the bell's detail view has an Accept as well, with scheduled use off.
 - **Decline** tells the sender's server, which removes the share. The owner has to share it again before Istota can reach it.
 - An offer nobody answers is declined after 14 days, without telling the sender.
 
-An accepted folder appears on the card with an id, such as `share:7`, and on the Files page under Shared folders. The Files page lists it but cannot browse it; tasks reach it through the shares skill:
+An accepted folder appears on the card with an id, such as `share:7`, and on the Files page under From other servers, in the section named after the bot. That page lists every share you accepted and every offer waiting, with its name, whether it is a file or a folder, who shared it (the display name and federated id the sender gave, and the owner too when someone else shared it), the server it comes from, whether it can be written, and when you accepted it. Open a folder to browse it like any other folder in Files: open its subfolders, see names, sizes and dates, preview a file or download it. A file share opens as its one file. The Files page reads the share only; uploading, new folders and deleting are for tasks. Downloads are limited to 64 MB, the same limit tasks have. Names in a share are the sharer's words, and the page shows them as plain text.
+
+Tasks reach a share through the shares skill:
 
 ```bash
 istota-skill shares list
@@ -65,17 +67,17 @@ istota-skill shares get share:7:receipts/march.pdf --dest <folder in your files>
 istota-skill shares put <file in your files> --to share:7:reports
 ```
 
-The skill also has `mkdir`, `move` and `delete`; `delete` needs confirmation. File and folder names are the sharer's words and reach tasks marked as untrusted. A share accepted while a task is running is usable from the next task.
+The skill also has `mkdir`, `move` and `delete`; `delete` needs confirmation. A share of one file is listed with `ls share:7` and fetched with `get share:7`, saved under the share's name. File and folder names are the sharer's words and reach tasks marked as untrusted. A share accepted while a task is running is usable from the next task.
 
-What a share allows comes from the sharer's server. Changing a share from read-only to edit, or back, sends Istota no notice; the next time a task uses the folder, Istota asks the server and uses the answer. Until then the card shows what it last saw.
+What a share allows comes from the sharer's server. Changing a share from read-only to edit, or back, sends Istota no notice; each time a task uses the folder or you open it on the Files page, Istota asks the server and uses the answer. Until then the card shows what it last saw.
 
-Each accepted folder has a credential named `ocm_share_<id>` in Settings > Credentials. Its grant there decides which rooms may use the folder and whether scheduled jobs may. You can delete it; the folder is then removed the next time a task tries it. You cannot edit its value.
+Each accepted folder has a credential named `ocm_share_<id>` in Settings > Credentials. Its grant there decides which rooms may use the folder and whether scheduled jobs may. The grant is about tasks: you can always open your own shares on the Files page. You can delete the credential; the folder is then removed the next time a task tries it or you open it. You cannot edit its value.
 
 Ending a share works from either side:
 
 - **Unsharing it on your Nextcloud** tells Istota, which removes the folder and its credential.
 - **Remove** in the row menu on the card removes it in Istota and tells the sender's server, which deletes the share.
-- A share the sender's server no longer accepts is removed the next time a task tries it.
+- A share the sender's server no longer accepts is removed the next time a task tries it or you open it on the Files page.
 
 Accepting is refused, with the reason on the card, on a multi-user server whose tasks run without a sandbox, since a task there could read another user's credentials.
 

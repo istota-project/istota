@@ -60,6 +60,8 @@ function linkDestination(href: string): string {
 // (`chatFileUrl`), which must keep working.
 export const CHAT_FILES_PREFIX = `${base}/api/chat/files?`;
 
+const SAFE_URL = /^(https?:\/\/|mailto:|\/)/i;
+
 /**
  * Is this token inside an `<a>`? Walk left for an unmatched `link_open`.
  *
@@ -173,8 +175,6 @@ function createRenderer(opts: { breaks: boolean; imageAffordance: boolean; untru
   // (Moldova) — chat text is full of `something.md` filenames that must stay
   // plain text. Bare URLs that carry an explicit http(s)://  scheme still linkify.
   md.linkify.set({ fuzzyLink: false, fuzzyEmail: false });
-
-  const SAFE_URL = /^(https?:\/\/|mailto:|\/)/i;
 
   // Restrict link + image hrefs to a safe scheme allowlist. markdown-it already
   // blocks javascript:/vbscript:/etc.; this tightens it to exactly what chat
@@ -359,6 +359,7 @@ function createRenderer(opts: { breaks: boolean; imageAffordance: boolean; untru
   };
 
   return {
+    linkify: md.linkify,
     parse: (src: string, env: Record<string, unknown>) => md.parse(src, env),
     render: (
       src: string,
@@ -376,6 +377,19 @@ function createRenderer(opts: { breaks: boolean; imageAffordance: boolean; untru
  *  is shown; without it nothing is styled as a mention. */
 const chatRenderer = createRenderer({ breaks: true, imageAffordance: true });
 export const renderMarkdown = chatRenderer.render;
+
+const SCHEMED_URL = /^(https?:\/\/|mailto:)/i;
+
+/** The links in plain text, found by the renderers' linkify: http, https or
+ *  mailto, the scheme written out. Stricter than `SAFE_URL`, whose relative
+ *  branch would let linkify's `//host` matches through. `[start, end)` index
+ *  into `text`. */
+export function findLinks(text: string): { start: number; end: number; url: string }[] {
+  const matches = chatRenderer.linkify.match(text) ?? [];
+  return matches
+    .filter((m) => SCHEMED_URL.test(m.url))
+    .map((m) => ({ start: m.index, end: m.lastIndex, url: m.url }));
+}
 
 /** Render a document without chat's hard line breaks or image controls. */
 export const renderDocument = createRenderer({ breaks: false, imageAffordance: false }).render;

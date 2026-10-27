@@ -274,6 +274,30 @@ class TestAttachDocument:
         assert doc.source == "agent"
         assert [d.id for d in linked] == [doc.id]
 
+    def test_a_medication_takes_documents_and_its_delete_clears_them(
+        self, tmp_path,
+    ):
+        ctx = _ctx(tmp_path)
+        with health_db.connect(ctx.db_path) as conn:
+            mid = health_db.insert_medication(conn, name="Atorvastatin")
+            doc, _ = health_documents.attach_document(
+                conn, ctx, raw=PDF, filename="label.pdf",
+                mime="application/pdf", entity_type="medication",
+                entity_id=mid,
+            )
+            conn.commit()
+            assert [
+                d.id for d in health_db.documents_for_entity(
+                    conn, "medication", mid,
+                )
+            ] == [doc.id]
+
+            assert health_db.delete_medication(conn, mid) == 1
+            conn.commit()
+            assert health_db.entity_links_for_document(conn, doc.id) == []
+            # The document itself stays for the orphan sweep to judge.
+            assert health_db.get_document(conn, doc.id) is not None
+
 
 class TestDeleteDocumentFully:
     def test_removes_row_links_bytes_and_directory(self, tmp_path):
@@ -650,6 +674,76 @@ class TestDeferredAttachOps:
             encs = health_db.list_encounters(conn)
             docs = health_db.documents_for_entity(conn, "encounter", encs[0].id)
         assert [d.filename for d in docs] == ["letter.pdf"]
+
+    def test_medication_ref_resolves_within_the_batch(self, tmp_path):
+        ctx = self._ctx(tmp_path)
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        src = deferred / "label.pdf"
+        src.write_bytes(PDF)
+
+        count = self._replay(ctx, deferred, [
+            {
+                "op": "insert_medication",
+                "dedup_key": "k1",
+                "name": "Atorvastatin",
+                "ref": "statin",
+            },
+            {
+                "op": "attach_document",
+                "source_path": str(src),
+                "filename": "label.pdf",
+                "entity_type": "medication",
+                "medication_ref": "statin",
+            },
+        ])
+
+        assert count == 2
+        with health_db.connect(ctx.db_path) as conn:
+            (med,) = health_db.list_medications(conn)
+            docs = health_db.documents_for_entity(conn, "medication", med.id)
+        assert [d.filename for d in docs] == ["label.pdf"]
+
+    @pytest.mark.parametrize("op_fields,fragment", [
+        ({"entity_type": "medication", "medication_ref": "nope"},
+         "unresolved medication_ref"),
+        # An encounter's ref must not resolve a medication target, or the
+        # paperwork would land on whichever record shares that id.
+        ({"entity_type": "medication", "encounter_ref": "visit"},
+         "encounter_ref on a medication target"),
+    ])
+    def test_a_bad_medication_ref_fails_that_op_only(
+        self, tmp_path, op_fields, fragment,
+    ):
+        import json
+
+        ctx = self._ctx(tmp_path)
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        src = deferred / "label.pdf"
+        src.write_bytes(PDF)
+
+        count = self._replay(ctx, deferred, [
+            {
+                "op": "insert_encounter",
+                "encounter_date": "2026-06-29",
+                "encounter_type": "visit",
+                "ref": "visit",
+            },
+            {
+                "op": "attach_document",
+                "source_path": str(src),
+                "filename": "label.pdf",
+                **op_fields,
+            },
+        ])
+
+        assert count == 1
+        failures = json.loads(
+            (deferred / "task_99_health_op_failures.json").read_text(),
+        )
+        assert len(failures) == 1
+        assert fragment in failures[0]["error"]
 
     def test_unresolved_encounter_ref_lands_in_failures(self, tmp_path):
         import json

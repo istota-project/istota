@@ -1274,6 +1274,8 @@ def _process_deferred_health_ops(
     # encounter created earlier in the same batch. Kept in its own dict so a
     # panel ref and an encounter ref sharing a name can't cross-resolve.
     encounter_refs: dict[str, int] = {}
+    # And for medications (`add-medication --ref`), for the same reason.
+    medication_refs: dict[str, int] = {}
     with health_db.connect(ctx.db_path) as conn:
         for entry in data:
             if not isinstance(entry, dict):
@@ -1404,7 +1406,12 @@ def _process_deferred_health_ops(
                             f"unknown entity type: {entity_type!r}"
                         )
                     enc_ref = entry.get("encounter_ref")
+                    med_ref = entry.get("medication_ref")
                     if enc_ref is not None:
+                        if entity_type != "encounter":
+                            raise ValueError(
+                                f"encounter_ref on a {entity_type} target"
+                            )
                         resolved = encounter_refs.get(str(enc_ref))
                         if resolved is None:
                             # Fail loudly rather than mis-file paperwork
@@ -1412,6 +1419,18 @@ def _process_deferred_health_ops(
                             raise KeyError(
                                 f"unresolved encounter_ref {enc_ref!r} "
                                 f"(known refs: {sorted(encounter_refs)})"
+                            )
+                        entity_id = resolved
+                    elif med_ref is not None:
+                        if entity_type != "medication":
+                            raise ValueError(
+                                f"medication_ref on a {entity_type} target"
+                            )
+                        resolved = medication_refs.get(str(med_ref))
+                        if resolved is None:
+                            raise KeyError(
+                                f"unresolved medication_ref {med_ref!r} "
+                                f"(known refs: {sorted(medication_refs)})"
                             )
                         entity_id = resolved
                     else:
@@ -1631,6 +1650,65 @@ def _process_deferred_health_ops(
                 elif op == "delete_immunization":
                     health_db.delete_immunization(
                         conn, int(entry["immunization_id"]),
+                    )
+                    count += 1
+                elif op == "insert_medication":
+                    enc_id = entry.get("encounter_id")
+                    source = entry.get("source")
+                    mid = health_db.insert_medication(
+                        conn,
+                        name=entry["name"],
+                        category=entry.get("category", "prescription"),
+                        generic_name=entry.get("generic_name"),
+                        dose=entry.get("dose"),
+                        dose_unit=entry.get("dose_unit"),
+                        frequency=entry.get("frequency"),
+                        route=entry.get("route"),
+                        prescriber=entry.get("prescriber"),
+                        pharmacy=entry.get("pharmacy"),
+                        reason=entry.get("reason"),
+                        start_date=entry.get("start_date"),
+                        end_date=entry.get("end_date"),
+                        active=bool(entry.get("active", True)),
+                        encounter_id=(
+                            int(enc_id) if enc_id is not None else None
+                        ),
+                        notes=entry.get("notes"),
+                        source=(
+                            source if source in ("agent", "manual") else "agent"
+                        ),
+                        dedup_key=entry.get("dedup_key"),
+                    )
+                    med_ref = entry.get("ref")
+                    if med_ref:
+                        medication_refs[str(med_ref)] = mid
+                    count += 1
+                elif op == "update_medication":
+                    update_kwargs = {
+                        k: entry[k] for k in (
+                            "name", "generic_name", "dose", "dose_unit",
+                            "frequency", "route", "category", "prescriber",
+                            "pharmacy", "reason", "start_date", "end_date",
+                            "active", "encounter_id", "notes",
+                        ) if k in entry
+                    }
+                    if update_kwargs.get("encounter_id") is not None:
+                        update_kwargs["encounter_id"] = int(
+                            update_kwargs["encounter_id"],
+                        )
+                    health_db.update_medication(
+                        conn, int(entry["medication_id"]), **update_kwargs,
+                    )
+                    count += 1
+                elif op == "discontinue_medication":
+                    health_db.discontinue_medication(
+                        conn, int(entry["medication_id"]),
+                        end_date=entry["end_date"],
+                    )
+                    count += 1
+                elif op == "delete_medication":
+                    health_db.delete_medication(
+                        conn, int(entry["medication_id"]),
                     )
                     count += 1
                 elif op == "bulk_insert_immunizations":

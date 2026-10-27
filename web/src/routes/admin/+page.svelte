@@ -231,6 +231,7 @@
     biomarkers_total: 'Biomarkers',
     encounters_total: 'Encounters',
     immunizations_total: 'Immunizations',
+    medications_total: 'Medications',
     blocks_total: 'Blocks',
     sources_total: 'Sources',
     archived_total: 'Archived',

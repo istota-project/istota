@@ -11,6 +11,7 @@ export const ROUTE_PATHS = [
   '/health/history/encounter/',
   '/health/history/diagnoses/',
   '/health/immunizations/detail/',
+  '/health/medications/detail/',
   '/location/',
   '/money/transactions/',
 ] as const;

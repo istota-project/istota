@@ -195,6 +195,90 @@ describe('workspace file viewer through the host', () => {
     expect(screen.getByRole('heading', { name: 'Hello' })).toBeTruthy();
     expect(screen.queryByRole('textbox')).toBeNull();
   });
+  it('renders a CSV as a table, with its source a toggle away', async () => {
+    const body = 'name,note\nAda,"likes <b>, commas"\n';
+    preview.mockResolvedValue(text('data.csv', body));
+    open('/data.csv');
+    const table = await screen.findByRole('table', { name: 'data.csv' });
+    expect(table.closest('.csv-scroll')).not.toBeNull();
+    expect(screen.getByRole('columnheader', { name: /note/ })).toBeTruthy();
+    expect(screen.getByRole('cell', { name: 'likes <b>, commas' })).toBeTruthy();
+    expect(table.querySelector('b')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Source' }));
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Source of data.csv' })).toHaveValue(body);
+    await fireEvent.click(screen.getByRole('button', { name: 'Rendered' }));
+    expect(screen.getByRole('table', { name: 'data.csv' })).toBeTruthy();
+  });
+  it('sorts a CSV by a clicked header and links the URLs in its cells', async () => {
+    const body = 'name,count,site\nBo,10,see https://example.com/bo now\nAda,9,report.md\n';
+    preview.mockResolvedValue(text('data.csv', body));
+    open('/data.csv');
+    const table = await screen.findByRole('table', { name: 'data.csv' });
+    const firstCell = () => table.querySelector('tbody tr td')?.textContent;
+    expect(firstCell()).toBe('Bo');
+    const header = screen.getByRole('columnheader', { name: /count/ });
+    expect(header).toHaveAttribute('aria-sort', 'none');
+    await fireEvent.click(screen.getByRole('button', { name: 'Sort by count' }));
+    expect(header).toHaveAttribute('aria-sort', 'ascending');
+    expect(firstCell()).toBe('Ada');
+    await fireEvent.click(screen.getByRole('button', { name: /Sorted by count, ascending/ }));
+    expect(header).toHaveAttribute('aria-sort', 'descending');
+    expect(firstCell()).toBe('Bo');
+
+    const link = screen.getByRole('link', { name: 'https://example.com/bo' });
+    expect(link).toHaveAttribute('href', 'https://example.com/bo');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(link.closest('td')).toHaveTextContent('see https://example.com/bo now');
+    expect(screen.queryByRole('link', { name: 'report.md' })).toBeNull();
+  });
+  it('resizes a CSV column from the keyboard, and opens the next file unsorted', async () => {
+    preview.mockResolvedValue(text('data.csv', 'name,count\nBo,10\nAda,9\n'));
+    open('/data.csv');
+    const table = await screen.findByRole('table', { name: 'data.csv' });
+    const handle = screen.getByRole('separator', { name: 'Resize count column' });
+    await fireEvent.keyDown(handle, { key: 'ArrowRight' });
+    const cols = table.querySelectorAll('col');
+    expect(cols).toHaveLength(2);
+    expect(handle).toHaveAttribute('aria-valuenow', String(parseInt(cols[1].style.width)));
+    const widened = parseInt(cols[1].style.width);
+    await fireEvent.keyDown(handle, { key: 'ArrowRight' });
+    expect(parseInt(cols[1].style.width)).toBe(widened + 16);
+    await fireEvent.keyDown(handle, { key: 'ArrowLeft' });
+    await fireEvent.keyDown(handle, { key: 'ArrowLeft' });
+    await fireEvent.keyDown(handle, { key: 'ArrowLeft' });
+    await fireEvent.keyDown(handle, { key: 'ArrowLeft' });
+    expect(parseInt(cols[1].style.width)).toBe(48);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Sort by count' }));
+    preview.mockResolvedValue(text('other.csv', 'name,count\nBo,10\nAda,9\n'));
+    viewer.openFile('/other.csv');
+    const next = await screen.findByRole('table', { name: 'other.csv' });
+    expect(next.querySelector('tbody tr td')?.textContent).toBe('Bo');
+    expect(next.querySelector('col')).toBeNull();
+  });
+  it('fits a widened CSV column back down to its content on double click', async () => {
+    // jsdom lays nothing out: the content measures 100px, whatever the box.
+    const rect = { width: 100 } as DOMRect;
+    Range.prototype.getBoundingClientRect = () => rect;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(rect);
+    try {
+      preview.mockResolvedValue(text('data.csv', 'name,count\nBo,10\n'));
+      open('/data.csv');
+      const table = await screen.findByRole('table', { name: 'data.csv' });
+      const handle = screen.getByRole('separator', { name: 'Resize count column' });
+      for (let i = 0; i < 20; i++) await fireEvent.keyDown(handle, { key: 'ArrowRight' });
+      const col = () => parseInt(table.querySelectorAll('col')[1].style.width);
+      expect(col()).toBeGreaterThan(200);
+      await fireEvent.dblClick(handle);
+      const style = getComputedStyle(table.querySelector('td')!);
+      const padding = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+      expect(col()).toBe(Math.round(100 + padding));
+    } finally {
+      delete (Range.prototype as Partial<Range>).getBoundingClientRect;
+    }
+  });
   it('draws the header actions as named icons, with the view toggle reporting its state', async () => {
     preview.mockResolvedValue(text('note.md', '# Hello'));
     open('/note.md');

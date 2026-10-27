@@ -25,6 +25,7 @@ istota-skill shares delete share:7:old.txt --confirmed
 ```
 
 - `get` saves under `--dest`, a folder in the user's workspace, keeping each file's name. It will not replace a local file unless you pass `--overwrite`.
+- A share can be a single file rather than a folder. Then `ls share:<id>` lists that one file at `share:<id>`, and `get share:<id> --dest <folder>` saves it under the share's name.
 - `put` uploads files from the user's workspace into the folder `--to` names. It will not replace a file in the share unless you pass `--overwrite`. Files in a room's shared folder or a Talk attachment must be copied into the workspace first.
 - `move` refuses to replace what is at the new path unless you pass `--overwrite`.
 - `delete` needs `--confirmed`, which you pass only once the user has confirmed. Without it nothing is deleted and the answer lists what would be.

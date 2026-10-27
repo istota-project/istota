@@ -942,6 +942,8 @@ class TestApiMe:
         response = await client.get("/istota/api/me", cookies=login.cookies)
         assert response.status_code == 200
         assert response.json()["features"]["workspace"] is expected
+        # With OCM off, the Files page is offered exactly where a workspace or a connection is.
+        assert response.json()["features"]["files"] is expected
 
     async def test_workspace_router_mounted(self, client):
         import istota.webui.app as mod
@@ -1704,6 +1706,7 @@ class TestAdminStats:
                 "VALUES (?, ?, ?, ?)",
                 ("2026-07-10", "weight", 70.0, "kg"),
             )
+            conn.execute("INSERT INTO medications (name) VALUES ('Atorvastatin')")
             conn.commit()
 
         app = _patch_app(config)
@@ -1717,6 +1720,7 @@ class TestAdminStats:
             assert health["users_configured"] >= 1
             assert health["panels_total"] == 1
             assert health["biomarkers_total"] == 0
+            assert health["medications_total"] == 1
             assert health["last_update"] == "2026-07-10T00:00:00Z"
 
     async def test_admin_stats_includes_briefings_module(self, tmp_path):

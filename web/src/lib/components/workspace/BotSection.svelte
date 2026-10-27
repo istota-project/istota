@@ -4,6 +4,7 @@
     BookOpen,
     FileCode,
     FileText,
+    Globe,
     House,
     MessageSquare,
     SlidersHorizontal,
@@ -49,6 +50,7 @@
     { view: 'skills', label: 'Skill instructions', icon: BookOpen },
     { view: 'scripts', label: 'Scripts', icon: FileCode },
     { view: 'prompts', label: 'Prompt files', icon: FileText },
+    { view: 'shares', label: 'From other servers', icon: Globe },
   ];
 </script>
 

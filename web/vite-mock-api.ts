@@ -434,6 +434,7 @@ const user = {
     chat: true,
     briefings: true,
     workspace: true,
+    files: true,
     groups: true,
     feeds: true,
     location: true,
@@ -883,7 +884,18 @@ let mockChatTaskSeq = 1000;
     ['Images', ['image.png', 'image.jpg', 'image.gif', 'image.webp']],
     ['Audio and video', ['tone.mp3', 'tone.wav', 'voice.ogg', 'tone.webm', 'clip.mp4']],
     ['PDF documents', ['document.pdf', 'scanned.pdf', 'cjk-cmap.pdf']],
-    ['Text and source', ['note.md', 'note.txt', 'source.html', 'drawing.svg', 'binary.bin']],
+    [
+      'Text and source',
+      [
+        'note.md',
+        'note.txt',
+        'orders.csv',
+        'readings.tsv',
+        'source.html',
+        'drawing.svg',
+        'binary.bin',
+      ],
+    ],
   ] as const;
   for (const [index, [label, names]] of viewerAttachments.entries()) {
     const id = 214 + index;
@@ -4016,11 +4028,16 @@ const mockSharing: SharingSettings = {
         id: 7,
         name: 'Taxes 2026',
         owner: 'carol@https://cloud.example.org',
+        owner_display_name: 'Carol',
+        shared_by: null,
+        shared_by_display_name: null,
         host: 'cloud.example.org',
         access: 'write',
         state: 'active',
+        kind: 'folder',
         last_reason: null,
         created_at: '2026-10-22 10:00:00',
+        accepted_at: '2026-10-22T10:05:00Z',
       },
     ],
     accept_refusal: null,
@@ -5800,7 +5817,68 @@ const VIEWER_TEXT: Record<string, string> = {
     '#!/bin/sh\n# Prune read feed entries older than 90 days.\nistota-skill feeds prune --days 90\n',
   'scratch.py': 'print("scratch")\n',
   'monthly_review.md': '# Monthly review\n\nLook back over the last month.\n',
+  'orders.csv': mockOrdersCsv(),
+  'readings.tsv':
+    'date\tsystolic\tdiastolic\tpulse\tnote\n' +
+    '2026-10-01\t118\t76\t62\tmorning\n' +
+    '2026-10-02\t121\t79\t65\t\n' +
+    '2026-10-03\t116\t74\t60\tafter a run, "felt fine"\n',
 };
+/* A wide CSV for the file viewer's table: quoted commas, an embedded newline,
+ * doubled quotes, a ragged row and enough rows to scroll both ways. */
+function mockOrdersCsv(): string {
+  const header = [
+    'order_id',
+    'placed_at',
+    'customer',
+    'email',
+    'city',
+    'country',
+    'item',
+    'quantity',
+    'unit_price',
+    'total',
+    'status',
+    'carrier',
+    'tracking',
+    'notes',
+  ];
+  const cities = ['Springfield', 'Riverton', 'Lakeside', 'Hill Valley', 'Fairview'];
+  const items = ['Desk lamp', 'Notebook, A5 (pack of 3)', 'USB-C cable', 'Kettle', 'Plant pot'];
+  const statuses = ['shipped', 'pending', 'delivered', 'refunded'];
+  const quote = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  const rows = [header.join(',')];
+  for (let i = 1; i <= 80; i++) {
+    const quantity = (i % 4) + 1;
+    const price = 4.5 + (i % 7) * 3.25;
+    const notes =
+      i === 3
+        ? 'Leave at the "blue" door'
+        : i === 5
+          ? 'Two lines:\nring twice'
+          : i % 9 === 0
+            ? 'A long note that runs well past the width of its column so the cell has to cut it off and show the rest on hover'
+            : '';
+    const row = [
+      `A-${1000 + i}`,
+      `2026-10-${String((i % 28) + 1).padStart(2, '0')} 09:${String(i % 60).padStart(2, '0')}`,
+      `Customer ${i}`,
+      `customer${i}@example.com`,
+      cities[i % cities.length],
+      'Exampleland',
+      items[i % items.length],
+      String(quantity),
+      price.toFixed(2),
+      (price * quantity).toFixed(2),
+      statuses[i % statuses.length],
+      i % 2 ? 'Acme Post' : 'Example Freight',
+      `TRK${String(i * 7919).padStart(10, '0')}`,
+      notes,
+    ];
+    rows.push((i === 7 ? row.slice(0, 6) : row).map(quote).join(','));
+  }
+  return rows.join('\n') + '\n';
+}
 /* The Scripts index for the Files page. Paths are relative to
  * `scripts_view_path`; VIEWER_TEXT holds a body for each, keyed by name. */
 const mockScriptsIndex = {
@@ -6763,14 +6841,14 @@ const workspacePlaces: WorkspacePlace[] = [
     id: 'share:7',
     kind: 'share',
     label: 'Taxes 2026',
-    browsable: false,
+    browsable: true,
     view_root: null,
-    remote: { host: 'cloud.example.org', access: 'write' },
+    remote: { host: 'cloud.example.org', access: 'write', kind: 'folder' },
     reach: {
       private: 'skill',
       shared_member: 'skill',
       restricted: 'none',
-      note: 'Shared from cloud.example.org. Tasks can read and change it through the shares skill as share:7; it cannot be browsed here. Its grant in Settings > Credentials can limit which rooms and scheduled jobs may use it.',
+      note: 'Shared from cloud.example.org. Tasks can read and change it through the shares skill as share:7. Its grant in Settings > Credentials can limit which rooms and scheduled jobs may use it.',
     },
   },
 ];
@@ -6800,6 +6878,8 @@ const workspaceTree: Record<string, WorkspaceEntry[]> = {
     { ...workspaceEntry('recording.mp3'), size: 3_400_000 },
     { ...workspaceEntry('backup.zip'), size: 1_800_000 },
     workspaceEntry('note.md'),
+    workspaceEntry('orders.csv'),
+    workspaceEntry('readings.tsv'),
     workspaceEntry('outside-link', 'link'),
     workspaceEntry('task-socket', 'other'),
   ],
@@ -8430,6 +8510,7 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
   if (path === '/istota/api/workspace/places')
     return {
       places: workspacePlaces,
+      share_index: true,
       notes: [
         'Tasks run in a sandbox.',
         'Files are stored in your Nextcloud at cloud.example.com.',
@@ -8457,12 +8538,13 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
         : folder === 'istota'
           ? [workspaceEntry('config', 'dir')]
           : undefined;
+  const shared = place.startsWith('share:');
   const entries =
     place === 'home'
       ? (configEntries ?? workspaceTree[folder])
       : folder
         ? undefined
-        : [workspaceEntry('note.md')];
+        : [{ ...workspaceEntry('note.md'), ...(shared ? { share_path: 'note.md' } : {}) }];
   if (!entries) return { __status: 404, error: 'Folder not found.' };
   return {
     place,
@@ -8471,6 +8553,7 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
     truncated: folder === 'Archive',
     skipped_names: folder === 'Archive' ? 2 : 0,
     notes: folder === 'Archive' ? ['Nextcloud share state is unavailable.'] : [],
+    ...(shared ? { access: 'write', root_kind: 'folder' } : {}),
   };
 };
 
@@ -11596,7 +11679,7 @@ const handlers: MockHandler[] = [
     }
     interface MockDocumentLink {
       document_id: number;
-      entity_type: 'encounter' | 'diagnosis' | 'immunization';
+      entity_type: 'encounter' | 'diagnosis' | 'immunization' | 'medication';
       entity_id: number;
     }
     const documents: MockDocument[] = [
@@ -11690,6 +11773,12 @@ const handlers: MockHandler[] = [
               label = `${record.encounter_date} · ${record.reason || record.encounter_type}`;
           } else if (link.entity_type === 'diagnosis') {
             label = diagnoses.find((row) => row.id === link.entity_id)?.name ?? label;
+          } else if (link.entity_type === 'medication') {
+            const record = medications.find((row) => row.id === link.entity_id);
+            if (record)
+              label = record.dose
+                ? `${record.name} ${record.dose}${record.dose_unit ?? ''}`
+                : record.name;
           } else {
             label = immunizations.find((row) => row.id === link.entity_id)?.name ?? label;
           }
@@ -12027,6 +12116,164 @@ const handlers: MockHandler[] = [
         created_at: new Date().toISOString(),
       },
     ];
+
+    interface Medication {
+      id: number;
+      name: string;
+      generic_name: string | null;
+      dose: string | null;
+      dose_unit: string | null;
+      frequency: string | null;
+      route: string | null;
+      category: 'prescription' | 'otc' | 'supplement';
+      prescriber: string | null;
+      pharmacy: string | null;
+      reason: string | null;
+      start_date: string | null;
+      end_date: string | null;
+      active: boolean;
+      encounter_id: number | null;
+      notes: string | null;
+      source: string;
+      created_at: string;
+    }
+    const medicationBase = {
+      generic_name: null,
+      dose: null,
+      dose_unit: null,
+      frequency: null,
+      route: null,
+      prescriber: null,
+      pharmacy: null,
+      reason: null,
+      start_date: null,
+      end_date: null,
+      encounter_id: null,
+      notes: null,
+      source: 'manual',
+      created_at: new Date().toISOString(),
+    };
+    const daysAgo = (n: number) => iso(n).slice(0, 10);
+    let nextMedicationId = 1;
+    const medications: Medication[] = [
+      {
+        ...medicationBase,
+        id: nextMedicationId++,
+        name: 'Lipitor',
+        generic_name: 'Atorvastatin',
+        dose: '20',
+        dose_unit: 'mg',
+        frequency: 'daily',
+        route: 'oral',
+        category: 'prescription',
+        prescriber: 'Dr. Example',
+        reason: 'High cholesterol',
+        start_date: daysAgo(280),
+        end_date: daysAgo(120),
+        active: false,
+        source: 'agent',
+      },
+      {
+        ...medicationBase,
+        id: nextMedicationId++,
+        name: 'Lipitor',
+        generic_name: 'Atorvastatin',
+        dose: '40',
+        dose_unit: 'mg',
+        frequency: 'daily',
+        route: 'oral',
+        category: 'prescription',
+        prescriber: 'Dr. Example',
+        reason: 'High cholesterol',
+        start_date: daysAgo(120),
+        active: true,
+        source: 'agent',
+      },
+      {
+        ...medicationBase,
+        id: nextMedicationId++,
+        name: 'Vitamin D3',
+        dose: '5000',
+        dose_unit: 'IU',
+        frequency: 'daily',
+        route: 'oral',
+        category: 'supplement',
+        start_date: daysAgo(60),
+        active: true,
+      },
+      {
+        ...medicationBase,
+        id: nextMedicationId++,
+        name: 'Ibuprofen',
+        dose: '200',
+        dose_unit: 'mg',
+        frequency: 'as_needed',
+        route: 'oral',
+        category: 'otc',
+        active: true,
+      },
+      {
+        ...medicationBase,
+        id: nextMedicationId++,
+        name: 'Amoxicillin',
+        dose: '500',
+        dose_unit: 'mg',
+        frequency: 'three_times_daily',
+        route: 'oral',
+        category: 'prescription',
+        start_date: daysAgo(400),
+        active: false,
+      },
+    ];
+    const MEDICATION_CATEGORIES = ['prescription', 'otc', 'supplement'] as const;
+    const MEDICATION_TEXT_FIELDS = [
+      'name',
+      'generic_name',
+      'dose',
+      'dose_unit',
+      'frequency',
+      'route',
+      'category',
+      'prescriber',
+      'pharmacy',
+      'reason',
+      'start_date',
+      'end_date',
+      'notes',
+    ] as const;
+    /** The writable fields in `body`, or an error, as the route's `_medication_fields`. */
+    function medicationFields(body: any): { fields: Partial<Medication>; error?: string } {
+      const fields: any = {};
+      for (const k of MEDICATION_TEXT_FIELDS) {
+        if (!(k in body)) continue;
+        const raw = body[k];
+        const value = typeof raw === 'string' ? raw.trim() || null : raw;
+        if ((k === 'name' || k === 'category') && value == null) {
+          return { fields, error: `${k} cannot be empty` };
+        }
+        fields[k] = value;
+      }
+      if (
+        fields.category &&
+        !(MEDICATION_CATEGORIES as readonly string[]).includes(fields.category)
+      ) {
+        return { fields, error: `unknown category: ${fields.category}` };
+      }
+      if ('active' in body) fields.active = Boolean(body.active);
+      if ('encounter_id' in body) fields.encounter_id = body.encounter_id ?? null;
+      return { fields };
+    }
+    const medicationDict = (m: Medication) => ({
+      ...m,
+      document_count: documentCount('medication', m.id),
+    });
+    const sortMedications = (rows: Medication[]) =>
+      rows.sort(
+        (a, b) =>
+          Number(b.active) - Number(a.active) ||
+          (b.start_date ?? '').localeCompare(a.start_date ?? '') ||
+          b.id - a.id,
+      );
 
     let nextStatId = 1;
     const stats: Stat[] = [];
@@ -12484,7 +12731,7 @@ const handlers: MockHandler[] = [
         }
         const entityType = body?.entity_type;
         const entityId = Number(body?.entity_id);
-        if (!['encounter', 'diagnosis', 'immunization'].includes(entityType)) {
+        if (!['encounter', 'diagnosis', 'immunization', 'medication'].includes(entityType)) {
           return { error: `unknown entity type: ${entityType}`, __status: 400 };
         }
         const exists = documentLinks.some(
@@ -13314,6 +13561,7 @@ const handlers: MockHandler[] = [
             diagnoses: linkedDiag,
             panels: linkedPanels,
             documents: documentsFor('encounter', id),
+            medications: sortMedications(medications.filter((m) => m.encounter_id === id)),
           };
         }
         const u = new URL(url, 'http://x');
@@ -13386,6 +13634,9 @@ const handlers: MockHandler[] = [
         }
         for (const p of panels) {
           if (p.encounter_id === id) p.encounter_id = null;
+        }
+        for (const m of medications) {
+          if (m.encounter_id === id) m.encounter_id = null;
         }
         return { status: 'ok' };
       }
@@ -13572,11 +13823,21 @@ const handlers: MockHandler[] = [
           .filter((e) => e.encounter_type === 'procedure' && e.encounter_date >= fiveYearsAgo)
           .sort((a, b) => b.encounter_date.localeCompare(a.encounter_date))
           .slice(0, 5);
+        const categoryOrder = ['prescription', 'otc', 'supplement'];
+        const regimen = medications
+          .filter((m) => m.active)
+          .sort(
+            (a, b) =>
+              categoryOrder.indexOf(a.category) - categoryOrder.indexOf(b.category) ||
+              a.name.toLowerCase().localeCompare(b.name.toLowerCase()) ||
+              a.id - b.id,
+          );
         return {
           active_diagnoses: active,
           chronic_diagnoses: chronic,
           recent_encounters: recent,
           recent_procedures: procs,
+          medications: regimen.map(medicationDict),
         };
       }
 
@@ -13996,6 +14257,94 @@ const handlers: MockHandler[] = [
         const idx = immunizations.findIndex((x) => x.id === id);
         if (idx < 0) return { error: 'immunization not found' };
         immunizations.splice(idx, 1);
+        return { status: 'ok' };
+      }
+
+      // ---- Medications -----------------------------------------------
+      if (url.startsWith('/istota/api/health/medications') && method === 'GET') {
+        const idMatch = url.match(/^\/istota\/api\/health\/medications\/(\d+)$/);
+        if (idMatch) {
+          const id = Number(idMatch[1]);
+          const row = medications.find((m) => m.id === id);
+          if (!row) return { error: 'medication not found' };
+          const enc = row.encounter_id
+            ? encounters.find((e) => e.id === row.encounter_id) || null
+            : null;
+          return {
+            medication: row,
+            encounter: enc,
+            documents: documentsFor('medication', id),
+          };
+        }
+        const u = new URL(url, 'http://x');
+        const status = u.searchParams.get('status') || 'active';
+        const category = u.searchParams.get('category');
+        const name = u.searchParams.get('name')?.trim().toLowerCase();
+        const since = u.searchParams.get('since');
+        const until = u.searchParams.get('until');
+        let rows = [...medications];
+        if (status === 'active') rows = rows.filter((m) => m.active);
+        else if (status === 'stopped') rows = rows.filter((m) => !m.active);
+        if (category) rows = rows.filter((m) => m.category === category);
+        if (name) {
+          rows = rows.filter(
+            (m) => m.name.toLowerCase() === name || m.generic_name?.toLowerCase() === name,
+          );
+        }
+        if (until) rows = rows.filter((m) => !m.start_date || m.start_date <= until);
+        if (since) rows = rows.filter((m) => !m.end_date || m.end_date >= since);
+        return { medications: sortMedications(rows).map(medicationDict) };
+      }
+      if (url === '/istota/api/health/medications' && method === 'POST') {
+        if (!body || typeof body.name !== 'string' || !body.name.trim()) {
+          return { error: 'name is required' };
+        }
+        const { fields, error } = medicationFields(body);
+        if (error) return { error };
+        const med: Medication = {
+          ...medicationBase,
+          category: 'prescription',
+          active: true,
+          ...fields,
+          id: nextMedicationId++,
+          name: String(fields.name),
+          source: 'manual',
+          created_at: new Date().toISOString(),
+        };
+        medications.push(med);
+        return { status: 'ok', id: med.id };
+      }
+      const medStopMatch = url.match(/^\/istota\/api\/health\/medications\/(\d+)\/discontinue$/);
+      if (medStopMatch && method === 'POST') {
+        const med = medications.find((m) => m.id === Number(medStopMatch[1]));
+        if (!med) return { error: 'medication not found' };
+        const endDate = body?.end_date || new Date().toISOString().slice(0, 10);
+        if (med.start_date && endDate < med.start_date) {
+          return { error: 'end_date is before start_date' };
+        }
+        med.active = false;
+        med.end_date = endDate;
+        return { status: 'ok', end_date: endDate };
+      }
+      const medUpdMatch = url.match(/^\/istota\/api\/health\/medications\/(\d+)$/);
+      if (medUpdMatch && method === 'PUT') {
+        const med = medications.find((m) => m.id === Number(medUpdMatch[1]));
+        if (!med) return { error: 'medication not found' };
+        const { fields, error } = medicationFields(body ?? {});
+        if (error) return { error };
+        Object.assign(med, fields);
+        return { status: 'ok' };
+      }
+      if (medUpdMatch && method === 'DELETE') {
+        const idx = medications.findIndex((m) => m.id === Number(medUpdMatch[1]));
+        if (idx < 0) return { error: 'medication not found' };
+        const [removed] = medications.splice(idx, 1);
+        for (let i = documentLinks.length - 1; i >= 0; i--) {
+          const link = documentLinks[i];
+          if (link.entity_type === 'medication' && link.entity_id === removed.id) {
+            documentLinks.splice(i, 1);
+          }
+        }
         return { status: 'ok' };
       }
 

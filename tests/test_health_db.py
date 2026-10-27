@@ -1603,3 +1603,279 @@ class TestBulkDocumentLinks:
                 conn, "encounter", [*range(eid + 1, eid + 900), eid],
             )
         assert list(out) == [eid]
+
+
+class TestMedications:
+    """The regimen: prescriptions, OTC drugs and supplements in one table."""
+
+    @pytest.fixture
+    def conn(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            yield conn
+
+    def _ids(self, meds):
+        return [m.id for m in meds]
+
+    def test_insert_with_defaults_reads_back_every_column(self, conn):
+        mid = health_db.insert_medication(conn, name="  Atorvastatin ")
+        conn.commit()
+        m = health_db.get_medication(conn, mid)
+        assert m.id == mid
+        assert m.name == "Atorvastatin"
+        assert m.category == "prescription"
+        assert m.active is True
+        assert m.source == "manual"
+        for field in (
+            "generic_name", "dose", "dose_unit", "frequency", "route",
+            "prescriber", "pharmacy", "reason", "start_date", "end_date",
+            "encounter_id", "notes",
+        ):
+            assert getattr(m, field) is None, field
+        assert m.created_at
+
+    def test_insert_with_every_field(self, conn):
+        eid = health_db.insert_encounter(
+            conn, encounter_date="2026-01-15", encounter_type="office_visit",
+        )
+        mid = health_db.insert_medication(
+            conn, name="Lipitor", generic_name="Atorvastatin", dose="20",
+            dose_unit="mg", frequency="daily", route="oral", category="Rx",
+            prescriber="Dr Fixture", pharmacy="Fixture Pharmacy",
+            reason="cholesterol", start_date="2026-01-15",
+            end_date="2026-12-31", active=False, encounter_id=eid,
+            notes="with food", source="agent", dedup_key="k1",
+        )
+        m = health_db.get_medication(conn, mid)
+        assert (m.generic_name, m.dose, m.dose_unit, m.frequency, m.route) == (
+            "Atorvastatin", "20", "mg", "daily", "oral",
+        )
+        assert m.category == "prescription"
+        assert (m.prescriber, m.pharmacy, m.reason) == (
+            "Dr Fixture", "Fixture Pharmacy", "cholesterol",
+        )
+        assert (m.start_date, m.end_date) == ("2026-01-15", "2026-12-31")
+        assert m.active is False
+        assert m.encounter_id == eid
+        assert (m.notes, m.source) == ("with food", "agent")
+
+    def test_get_missing_is_none(self, conn):
+        assert health_db.get_medication(conn, 999) is None
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("Rx", "prescription"),
+        (" PRESCRIPTION ", "prescription"),
+        ("otc", "otc"),
+        ("over-the-counter", "otc"),
+        ("Over_The_Counter", "otc"),
+        ("Supplement", "supplement"),
+        ("vitamin", None),
+        ("", None),
+        (None, None),
+        (3, None),
+    ])
+    def test_normalize_category(self, raw, expected):
+        assert health_db.normalize_medication_category(raw) == expected
+
+    def test_insert_refuses_unknown_category(self, conn):
+        with pytest.raises(ValueError, match="category"):
+            health_db.insert_medication(conn, name="D3", category="vitamin")
+        assert health_db.list_medications(conn, status="all") == []
+
+    def test_insert_refuses_empty_name(self, conn):
+        with pytest.raises(ValueError, match="name"):
+            health_db.insert_medication(conn, name="   ")
+
+    def test_insert_refuses_impossible_date(self, conn):
+        with pytest.raises(ValueError, match="start_date"):
+            health_db.insert_medication(conn, name="X", start_date="2026-02-31")
+        with pytest.raises(ValueError, match="end_date"):
+            health_db.insert_medication(conn, name="X", end_date="nope")
+
+    def test_insert_normalizes_a_us_date(self, conn):
+        mid = health_db.insert_medication(conn, name="X", start_date="1/5/2026")
+        assert health_db.get_medication(conn, mid).start_date == "2026-01-05"
+
+    def test_insert_refuses_end_before_start(self, conn):
+        with pytest.raises(ValueError, match="end_date"):
+            health_db.insert_medication(
+                conn, name="X", start_date="2026-03-01", end_date="2026-02-01",
+            )
+
+    def test_dedup_key_returns_the_same_row(self, conn):
+        a = health_db.insert_medication(conn, name="X", dedup_key="abc")
+        b = health_db.insert_medication(conn, name="Y", dedup_key="abc")
+        assert a == b
+        rows = health_db.list_medications(conn, status="all")
+        assert [m.name for m in rows] == ["X"]
+
+    def test_same_name_twice_is_two_rows(self, conn):
+        a = health_db.insert_medication(conn, name="Atorvastatin", dose="20")
+        b = health_db.insert_medication(conn, name="Atorvastatin", dose="40")
+        assert a != b
+        assert len(health_db.active_medications_named(conn, "atorvastatin")) == 2
+
+    def test_list_by_status(self, conn):
+        on = health_db.insert_medication(conn, name="On")
+        off = health_db.insert_medication(conn, name="Off", active=False)
+        assert self._ids(health_db.list_medications(conn)) == [on]
+        assert self._ids(health_db.list_medications(conn, status="active")) == [on]
+        assert self._ids(health_db.list_medications(conn, status="stopped")) == [off]
+        assert set(self._ids(health_db.list_medications(conn, status="all"))) == {on, off}
+        with pytest.raises(ValueError, match="status"):
+            health_db.list_medications(conn, status="current")
+
+    def test_list_by_category(self, conn):
+        rx = health_db.insert_medication(conn, name="A")
+        sup = health_db.insert_medication(conn, name="B", category="supplement")
+        assert self._ids(health_db.list_medications(conn, category="Supplement")) == [sup]
+        assert self._ids(health_db.list_medications(conn, category="rx")) == [rx]
+        with pytest.raises(ValueError, match="category"):
+            health_db.list_medications(conn, category="vitamin")
+
+    def test_name_matches_through_generic_name(self, conn):
+        mid = health_db.insert_medication(
+            conn, name="Lipitor", generic_name="Atorvastatin",
+        )
+        health_db.insert_medication(conn, name="Metformin")
+        assert self._ids(health_db.list_medications(conn, name=" atorvastatin.")) == [mid]
+        assert self._ids(health_db.list_medications(conn, name="LIPITOR")) == [mid]
+        assert health_db.list_medications(conn, name="ator") == []
+
+    def test_overlap_window(self, conn):
+        before = health_db.insert_medication(
+            conn, name="Before", start_date="2025-01-01", end_date="2025-06-30",
+            active=False,
+        )
+        inside = health_db.insert_medication(
+            conn, name="Inside", start_date="2025-08-01", end_date="2026-02-15",
+            active=False,
+        )
+        current = health_db.insert_medication(
+            conn, name="Current", start_date="2026-01-10",
+        )
+        undated_stop = health_db.insert_medication(
+            conn, name="Undated", start_date="2025-03-01", active=False,
+        )
+
+        def window(**kw):
+            return set(self._ids(health_db.list_medications(conn, status="all", **kw)))
+
+        assert window(since="2026-02-01") == {inside, current, undated_stop}
+        assert window(until="2025-12-31") == {before, inside, undated_stop}
+        assert window(since="2026-02-01", until="2026-03-31") == {
+            inside, current, undated_stop,
+        }
+        assert window(since="2025-07-01", until="2025-07-31") == {undated_stop}
+
+    def test_list_order_active_first_then_newest(self, conn):
+        old_on = health_db.insert_medication(conn, name="A", start_date="2024-01-01")
+        new_on = health_db.insert_medication(conn, name="B", start_date="2026-01-01")
+        undated_on = health_db.insert_medication(conn, name="C")
+        new_off = health_db.insert_medication(
+            conn, name="D", start_date="2026-05-01", active=False,
+        )
+        assert self._ids(health_db.list_medications(conn, status="all")) == [
+            new_on, old_on, undated_on, new_off,
+        ]
+
+    def test_update_clears_a_nullable_field_and_skips_none_name(self, conn):
+        mid = health_db.insert_medication(
+            conn, name="X", notes="n", dose="5", category="otc",
+        )
+        n = health_db.update_medication(
+            conn, mid, name=None, category=None, notes=None, dose="10",
+            bogus="ignored",
+        )
+        assert n == 1
+        m = health_db.get_medication(conn, mid)
+        assert (m.name, m.category, m.notes, m.dose) == ("X", "otc", None, "10")
+
+    def test_update_normalizes_category_and_active(self, conn):
+        mid = health_db.insert_medication(conn, name="X")
+        health_db.update_medication(conn, mid, category="Over-the-counter", active=0)
+        m = health_db.get_medication(conn, mid)
+        assert (m.category, m.active) == ("otc", False)
+        with pytest.raises(ValueError, match="category"):
+            health_db.update_medication(conn, mid, category="vitamin")
+
+    def test_update_validates_dates_against_stored_values(self, conn):
+        mid = health_db.insert_medication(conn, name="X", start_date="2026-03-01")
+        with pytest.raises(ValueError, match="end_date"):
+            health_db.update_medication(conn, mid, end_date="2026-02-01")
+        with pytest.raises(ValueError, match="start_date"):
+            health_db.update_medication(conn, mid, start_date="2026-02-31")
+        health_db.update_medication(conn, mid, end_date="2026-04-01")
+        with pytest.raises(ValueError, match="end_date"):
+            health_db.update_medication(conn, mid, start_date="2026-05-01")
+        # Clearing the start removes the constraint.
+        health_db.update_medication(conn, mid, start_date=None)
+        assert health_db.get_medication(conn, mid).start_date is None
+
+    def test_update_with_nothing_is_zero(self, conn):
+        mid = health_db.insert_medication(conn, name="X")
+        assert health_db.update_medication(conn, mid) == 0
+        assert health_db.update_medication(conn, 999, notes="x") == 0
+
+    def test_discontinue_sets_both_columns(self, conn):
+        mid = health_db.insert_medication(conn, name="X", start_date="2026-01-01")
+        assert health_db.discontinue_medication(conn, mid, end_date="2026-04-02") == 1
+        m = health_db.get_medication(conn, mid)
+        assert (m.active, m.end_date) == (False, "2026-04-02")
+        # Stopping again corrects the date.
+        assert health_db.discontinue_medication(conn, mid, end_date="2026-04-03") == 1
+        assert health_db.get_medication(conn, mid).end_date == "2026-04-03"
+        assert health_db.discontinue_medication(conn, 999, end_date="2026-04-03") == 0
+
+    def test_discontinue_refuses_end_before_start_and_bad_date(self, conn):
+        mid = health_db.insert_medication(conn, name="X", start_date="2026-03-01")
+        with pytest.raises(ValueError, match="end_date"):
+            health_db.discontinue_medication(conn, mid, end_date="2026-02-01")
+        with pytest.raises(ValueError, match="end_date"):
+            health_db.discontinue_medication(conn, mid, end_date="2026-02-31")
+        assert health_db.get_medication(conn, mid).active is True
+
+    def test_delete(self, conn):
+        mid = health_db.insert_medication(conn, name="X")
+        assert health_db.delete_medication(conn, mid) == 1
+        assert health_db.get_medication(conn, mid) is None
+        assert health_db.delete_medication(conn, mid) == 0
+
+    def test_medications_for_encounter_and_delete_nulls_fk(self, conn):
+        eid = health_db.insert_encounter(
+            conn, encounter_date="2026-01-15", encounter_type="office_visit",
+        )
+        mid = health_db.insert_medication(conn, name="X", encounter_id=eid)
+        health_db.insert_medication(conn, name="Y")
+        conn.commit()
+        assert self._ids(health_db.medications_for_encounter(conn, eid)) == [mid]
+        health_db.delete_encounter(conn, eid)
+        conn.commit()
+        assert health_db.get_medication(conn, mid).encounter_id is None
+
+    def test_current_regimen_order(self, conn):
+        sup = health_db.insert_medication(conn, name="Vitamin D3", category="supplement")
+        otc = health_db.insert_medication(conn, name="Ibuprofen", category="otc")
+        rx_b = health_db.insert_medication(conn, name="metformin")
+        rx_a = health_db.insert_medication(conn, name="Atorvastatin")
+        health_db.insert_medication(conn, name="Aspirin", active=False)
+        assert self._ids(health_db.current_regimen(conn)) == [rx_a, rx_b, otc, sup]
+
+    def test_init_db_on_a_version_4_db_creates_the_table(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            conn.execute("DROP TABLE medications")
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', '4')",
+            )
+            conn.commit()
+        health_db.init_db(ctx.db_path)
+        with health_db.connect(ctx.db_path) as conn:
+            version = conn.execute(
+                "SELECT value FROM schema_meta WHERE key = 'version'",
+            ).fetchone()["value"]
+            mid = health_db.insert_medication(conn, name="X")
+            assert health_db.get_medication(conn, mid).name == "X"
+        assert version == "5"
