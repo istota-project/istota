@@ -152,6 +152,11 @@ CASES: dict[tuple[str, str, str], Case] = {
         main="istota.skills.kv",
         patch=("istota.skills.kv", "cmd_set"),
     ),
+    ("briefings_config", "shared-block.set-prompt", "prompt_file"): Case(
+        argv=lambda p: ["shared-block", "set-prompt", "world", "--prompt-file", p],
+        main="istota.skills.briefings_config",
+        patch=("istota.skills.briefings_config", "cmd_set_prompt"),
+    ),
     ("health", "export-csv", "output"): Case(
         argv=lambda p: ["export-csv", "--output", p],
         main="istota.skills.health",
@@ -368,7 +373,7 @@ CASES: dict[tuple[str, str, str], Case] = {
 #: How many resolving stamps this file expects to find at the very least.
 #: A parametrization that shrinks is a green run, so the count is asserted
 #: rather than trusted — the same reason the coverage walk asserts a floor.
-STAMP_FLOOR = 39
+STAMP_FLOOR = 40
 
 
 def _skill_parser_modules() -> dict[str, str]:

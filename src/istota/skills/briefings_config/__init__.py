@@ -1,10 +1,13 @@
-"""Shared briefing blocks, read from chat by a shared-content writer.
+"""Shared briefing blocks, read and re-prompted from chat by a shared-content writer.
 
 ``shared-block show <name>`` prints one ``shared_block_configs`` definition,
 its whole directive, and the block's run state from
-``briefings.shared_block_runs.run_state``. An agent block's prompt
-lives only in that table, so this is how a conversation reads it before
-proposing a change.
+``briefings.shared_block_runs.run_state``. ``shared-block set-prompt <name>
+--prompt-file PATH`` replaces the directive and nothing else. An agent block's
+prompt lives only in that table, so this is how a conversation changes it.
+
+The new directive comes from a file rather than stdin because the skill proxy
+forwards argv only; a proxied CLI never sees the task's stdin.
 
 Runs host-side through the skill proxy, where the framework database is. The
 identity is ``ISTOTA_USER_ID`` and the gate is ``Config.is_shared_kv_writer``,
@@ -14,6 +17,10 @@ the one the admin routes use, so a blank admins file lets nobody in.
 import os
 
 from istota.skills._cli import error_envelope, fail, parse_and_resolve, run_skill_cli
+from istota.skills._hostpath import READ, ReadRefused, host_path, read_resolved_text
+
+# Far above any real task prompt; bounds what one call reads into memory.
+MAX_PROMPT_FILE_BYTES = 256 * 1024
 
 
 def _user_id() -> str:
@@ -99,6 +106,64 @@ def cmd_show(args):
     }
 
 
+def cmd_set_prompt(args):
+    from istota import db
+    from istota.briefings.models import validate_shared_block_payload
+
+    refusal = _writer_refusal(_load_config(), _user_id())
+    if refusal is not None:
+        return refusal
+
+    try:
+        directive = read_resolved_text(
+            args.prompt_file, flag="--prompt-file", max_bytes=MAX_PROMPT_FILE_BYTES,
+        )
+    except ReadRefused as exc:
+        return error_envelope(str(exc), reason="prompt_file_unreadable")
+    if not directive.strip():
+        return error_envelope(
+            "--prompt-file is empty; the directive was not changed",
+            reason="empty_prompt",
+        )
+
+    with db.get_db(_db_path()) as conn:
+        # One write transaction from read to write, so a web edit landing in
+        # between is not overwritten with the values read before it.
+        conn.execute("BEGIN IMMEDIATE")
+        row = db.get_shared_block_config(conn, args.name)
+        if row is None:
+            return error_envelope(
+                f"no shared block named {args.name!r}", reason="not_found",
+            )
+        try:
+            validate_shared_block_payload({
+                "name": row.name, "cron": row.cron, "title": row.title,
+                "directive": directive, "render_mode": row.render_mode,
+                "enabled": row.enabled, "trusted": row.trusted,
+                "sources": row.sources,
+            })
+        except ValueError as exc:
+            return error_envelope(
+                f"the block would not be valid with this prompt: {exc}",
+                reason="invalid_definition",
+            )
+        updated = db.upsert_shared_block_config(
+            conn, name=row.name, cron=row.cron, title=row.title,
+            directive=directive, render_mode=row.render_mode,
+            enabled=row.enabled, trusted=row.trusted, sources=row.sources,
+        )
+
+    return {
+        "status": "ok",
+        "name": updated.name,
+        "render_mode": updated.render_mode,
+        "directive_chars": len(directive),
+        "previous_directive_chars": len(row.directive or ""),
+        "updated_at": updated.updated_at,
+        "note": "The block's next run uses the new prompt.",
+    }
+
+
 def build_parser():
     import argparse
 
@@ -115,6 +180,16 @@ def build_parser():
         "show", help="The definition, its whole directive, and its last run",
     )
     p_show.add_argument("name", help="The shared block's name (a slug)")
+
+    p_set = block_sub.add_parser(
+        "set-prompt", help="Replace the directive with a file's contents",
+    )
+    p_set.add_argument("name", help="The shared block's name (a slug)")
+    host_path(
+        p_set, "--prompt-file", mode=READ, required=True,
+        help="A UTF-8 file holding the whole new directive. Must live under "
+             "$ISTOTA_DEFERRED_DIR or your workspace",
+    )
     return parser
 
 
@@ -122,7 +197,11 @@ def main(argv=None):
     parser = build_parser()
     args = parse_and_resolve(parser, argv)
     run_skill_cli(
-        {("shared-block", "show"): cmd_show}, args,
+        {
+            ("shared-block", "show"): cmd_show,
+            ("shared-block", "set-prompt"): cmd_set_prompt,
+        },
+        args,
         command=(args.command, args.action),
     )
 

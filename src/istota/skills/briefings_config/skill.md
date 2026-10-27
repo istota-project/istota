@@ -57,6 +57,15 @@ Only an administrator can use these commands. Anyone else gets `reason: not_a_sh
 
 ```bash
 istota-skill briefings_config shared-block show <name>
+istota-skill briefings_config shared-block set-prompt <name> --prompt-file <path>
 ```
 
 `show` prints the definition (cron, timezone, render mode, sources, the whole directive) and the last run: `run.agent` for an agent block's latest task (`task_id`, `captured`, `outcome`, `answered_at`), and the last Run now request and answer. Read it before suggesting a change to a block's prompt, and quote the part you would change. An unknown name is `reason: not_found`.
+
+`set-prompt` replaces the block's directive with the whole contents of a file and changes nothing else. To change a prompt from chat:
+
+1. `show` the block and copy its `directive`.
+2. Write the complete new prompt to a file in your temp directory (`$ISTOTA_DEFERRED_DIR`) or the user's workspace. The file replaces the directive, so it must hold the whole prompt, not only the changed part.
+3. Show the user what changes, and run `set-prompt` once they agree.
+
+The next run of the block uses the new prompt; nothing is regenerated straight away. An empty file is refused (`reason: empty_prompt`), a path outside your directories is `reason: host_path_refused`, and a prompt that would leave the block invalid is `reason: invalid_definition`. In each case the directive is unchanged.

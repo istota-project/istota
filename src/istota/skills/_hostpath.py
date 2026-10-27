@@ -555,6 +555,43 @@ def egress_roots() -> list[Path]:
     return _roots_for(EGRESS, writable=False)
 
 
+class ReadRefused(ValueError):
+    """`read_resolved_text` could not read the file; the message says why."""
+
+
+def read_resolved_text(path: str | Path, *, flag: str, max_bytes: int) -> str:
+    """Read a UTF-8 file a `READ` stamp resolved, refusing a link at the leaf.
+
+    The read half of a stamped file argument (`kv set --value-file`,
+    `briefings_config shared-block set-prompt --prompt-file`). The stamp
+    resolved the path at parse, but the leaf can still be swapped for a symlink
+    before the open, so the open is `O_NOFOLLOW` and the size comes from the
+    same descriptor, which describes the file actually read. `flag` names the
+    argument in each refusal.
+    """
+    import os
+
+    resolved = Path(path)
+    if not resolved.is_file():
+        raise ReadRefused(f"{flag} is not a regular file: {resolved}")
+    try:
+        fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as e:
+        raise ReadRefused(f"could not open {flag}: {e}") from None
+    try:
+        size = os.fstat(fd).st_size
+        if size > max_bytes:
+            raise ReadRefused(f"{flag} is {size} bytes, over the {max_bytes}-byte cap")
+        with os.fdopen(fd, encoding="utf-8") as fh:
+            fd = -1  # fdopen owns it now
+            return fh.read()
+    except (OSError, UnicodeDecodeError) as e:
+        raise ReadRefused(f"could not read {flag}: {e}") from None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def _operation(dotted: str, action: argparse.Action) -> str:
     """How the refusal names what was refused: the verb and the flag.
 

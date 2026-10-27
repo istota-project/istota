@@ -1,4 +1,5 @@
-"""`istota-skill briefings_config shared-block show`: an admin reads a shared block."""
+"""`istota-skill briefings_config shared-block show|set-prompt`: an admin reads
+and re-prompts a shared block."""
 
 import json
 
@@ -20,10 +21,21 @@ def db_path(tmp_path):
     return path
 
 
+@pytest.fixture
+def deferred(tmp_path):
+    path = tmp_path / "deferred"
+    path.mkdir()
+    return path
+
+
 @pytest.fixture(autouse=True)
-def _env(monkeypatch, db_path):
+def _env(monkeypatch, db_path, deferred):
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
     monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+    monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(deferred))
+    monkeypatch.delenv("ISTOTA_WORKSPACE_PATH", raising=False)
+    monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
+    monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)
 
 
 def _writers(monkeypatch, db_path, admins):
@@ -100,6 +112,139 @@ class TestShow:
         assert code == 1
         assert out["reason"] == "not_a_shared_content_writer"
         assert PROMPT not in json.dumps(out)
+
+
+NEW_PROMPT = "Read the front pages in three languages.\nLink every story.\n"
+
+
+def _row(db_path, name="world-agent"):
+    with db.get_db(db_path) as conn:
+        return db.get_shared_block_config(conn, name)
+
+
+def _set_prompt(capsys, path, name="world-agent"):
+    return _run(capsys, ["shared-block", "set-prompt", name, "--prompt-file", str(path)])
+
+
+class TestSetPrompt:
+    def test_a_writer_replaces_only_the_directive(self, db_path, deferred, monkeypatch, capsys):
+        _writers(monkeypatch, db_path, {"alice"})
+        _agent_block(db_path)
+        with db.get_db(db_path) as conn:
+            conn.execute(
+                "UPDATE shared_block_configs SET enabled = 0 WHERE name = 'world-agent'",
+            )
+        before = _row(db_path)
+        prompt = deferred / "prompt.md"
+        prompt.write_text(NEW_PROMPT)
+
+        out, code = _set_prompt(capsys, prompt)
+
+        assert code == 0, out
+        after = _row(db_path)
+        assert after.directive == NEW_PROMPT
+        assert (after.name, after.cron, after.title, after.render_mode,
+                after.enabled, after.trusted, after.sources) == (
+            before.name, before.cron, before.title, before.render_mode,
+            before.enabled, before.trusted, before.sources)
+        assert after.enabled is False
+
+    def test_a_non_writer_is_refused(self, db_path, deferred, monkeypatch, capsys):
+        _writers(monkeypatch, db_path, {"bob"})
+        _agent_block(db_path)
+        prompt = deferred / "prompt.md"
+        prompt.write_text(NEW_PROMPT)
+
+        out, code = _set_prompt(capsys, prompt)
+
+        assert code == 1
+        assert out["reason"] == "not_a_shared_content_writer"
+        assert _row(db_path).directive == PROMPT
+
+    @pytest.mark.parametrize("content", ["", "  \n\t\n"])
+    def test_an_empty_file_is_refused(self, db_path, deferred, monkeypatch, capsys, content):
+        _writers(monkeypatch, db_path, {"alice"})
+        _agent_block(db_path)
+        prompt = deferred / "prompt.md"
+        prompt.write_text(content)
+
+        out, code = _set_prompt(capsys, prompt)
+
+        assert code == 1
+        assert out["reason"] == "empty_prompt"
+        assert _row(db_path).directive == PROMPT
+
+    def test_a_path_outside_the_task_is_refused(self, tmp_path, db_path, monkeypatch, capsys):
+        _writers(monkeypatch, db_path, {"alice"})
+        _agent_block(db_path)
+        outside = tmp_path / "elsewhere" / "prompt.md"
+        outside.parent.mkdir()
+        outside.write_text(NEW_PROMPT)
+
+        out, code = _set_prompt(capsys, outside)
+
+        assert code == 1
+        assert out["reason"] == "host_path_refused"
+        assert _row(db_path).directive == PROMPT
+
+    def test_a_symlink_at_the_leaf_is_not_followed(
+        self, tmp_path, db_path, deferred, monkeypatch, capsys,
+    ):
+        _writers(monkeypatch, db_path, {"alice"})
+        _agent_block(db_path)
+        secret = tmp_path / "secret.txt"
+        secret.write_text("not a prompt")
+        (deferred / "prompt.md").symlink_to(secret)
+
+        out, code = _set_prompt(capsys, deferred / "prompt.md")
+
+        assert code == 1
+        assert _row(db_path).directive == PROMPT
+
+    def test_a_definition_the_validator_refuses_is_left_unchanged(
+        self, db_path, deferred, monkeypatch, capsys,
+    ):
+        # A stored agent row with sources (written past the validator) cannot
+        # be saved again, so the new prompt must not land either.
+        _writers(monkeypatch, db_path, {"alice"})
+        with db.get_db(db_path) as conn:
+            db.upsert_shared_block_config(
+                conn, name="world-agent", cron="50 5 * * *", directive=PROMPT,
+                render_mode="agent", sources=[{"kind": "markets", "config": {}}],
+            )
+        before = _row(db_path)
+        prompt = deferred / "prompt.md"
+        prompt.write_text(NEW_PROMPT)
+
+        out, code = _set_prompt(capsys, prompt)
+
+        assert code == 1
+        assert out["reason"] == "invalid_definition"
+        assert "no sources" in out["error"]
+        assert _row(db_path) == before
+
+    def test_an_unknown_name_is_not_found(self, db_path, deferred, monkeypatch, capsys):
+        _writers(monkeypatch, db_path, {"alice"})
+        prompt = deferred / "prompt.md"
+        prompt.write_text(NEW_PROMPT)
+
+        out, code = _set_prompt(capsys, prompt, name="nope")
+
+        assert code == 1
+        assert out["reason"] == "not_found"
+        assert _row(db_path, "nope") is None
+
+    def test_show_reads_back_what_set_prompt_wrote(self, db_path, deferred, monkeypatch, capsys):
+        _writers(monkeypatch, db_path, {"alice"})
+        _agent_block(db_path)
+        prompt = deferred / "prompt.md"
+        prompt.write_text(NEW_PROMPT)
+        _set_prompt(capsys, prompt)
+
+        out, code = _run(capsys, ["shared-block", "show", "world-agent"])
+
+        assert code == 0
+        assert out["shared_block"]["directive"] == NEW_PROMPT
 
 
 class TestTheRealConfigLoad:
