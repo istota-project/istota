@@ -392,7 +392,7 @@ secrets_half() {
 
 # --------------------------------------------------------------------------
 # The CLI harness's `system/init`: the same argv without `--tools`. The deny
-# list alone leaves CronCreate, SendMessage, ToolSearch and others in the frame
+# list alone leaves SendMessage, ListAgents, EnterWorktree and others in the frame
 # on the pinned CLI, so both witnesses must go red on the tool set.
 
 CLI_HARNESS_TESTS="tests/image/test_cli_harness_init.py"
@@ -426,12 +426,12 @@ cli_harness_control() {
 
 cli_harness_half() {
     # The harness argv without --tools: the extra built-ins reach the frame.
-    cli_harness_control drop-tools CronCreate \
+    cli_harness_control drop-tools SendMessage \
         TestTheInitFrameListsOnlyWhatTheHarnessAskedFor::test_websearch_granted \
         TestTheInitFrameListsOnlyWhatTheHarnessAskedFor::test_no_builtins_granted
-    # The cwd witness has no control yet: it is an expected failure until the
-    # spec decides what the unwrapped CLI may do in its cwd, and a control is
-    # added (`open-cwd` in the driver) once it is green.
+    # The stub git off the CLI's PATH: the image's real git runs in the cwd.
+    cli_harness_control stub-off "a git other than the harness stub" \
+        TestWhatTheUnwrappedCliTouches::test_it_runs_no_real_git_and_only_looks_at_its_cwd
     # No TMPDIR on the CLI's env: its per-uid directories land in /tmp.
     cli_harness_control tmp-unset /tmp/claude- \
         TestWhatTheUnwrappedCliTouches::test_nothing_appears_under_tmp

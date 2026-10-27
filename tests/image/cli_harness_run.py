@@ -13,7 +13,8 @@ Configured by environment:
 - `HARNESS_CONTROL`: a negative control. `drop-tools` takes `--tools` out of
   the argv; `open-cwd` plants a `CLAUDE.md` in the cwd and drops
   `--setting-sources user` and `CLAUDE_CODE_DISABLE_CLAUDE_MDS`; `tmp-unset`
-  leaves `TMPDIR` off the CLI's env.
+  leaves `TMPDIR` off the CLI's env; `stub-off` leaves the harness's stub
+  `git` off the CLI's PATH, so the image's real git runs in the cwd.
 
 The daemon's own temp dir is moved off `/tmp` first, so the bridge socket does
 not count against the `/tmp` check. The last stdout line is a JSON report.
@@ -61,7 +62,7 @@ def main() -> int:
     wrapper.write_text(
         "#!/bin/sh\n"
         f"exec strace -f -qq -o {strace_log} "
-        "-e trace=%file,bind,connect "
+        "-e trace=%file,bind,connect,clone,clone3,fork,vfork "
         f"-- {real_claude} \"$@\"\n"
     )
     wrapper.chmod(stat.S_IRWXU)
@@ -103,6 +104,9 @@ def main() -> int:
         env = harness_env(req, handle)
         if CONTROL == "tmp-unset":
             env.pop("TMPDIR", None)
+        if CONTROL == "stub-off":
+            parts = env["PATH"].split(os.pathsep)
+            env["PATH"] = os.pathsep.join(p for p in parts if p != str(handle.bin_dir))
         return env
 
     claude_code._harness_cli_env = controlled_env
@@ -156,11 +160,16 @@ def main() -> int:
         "harness_dirs": harness_dirs,
         "tmp_new": sorted(set(after) - set(before)),
         "strace_lines": len(lines),
-        # Every line naming the cwd, a relative path, or /tmp; the test decides.
+        "real_claude": real_claude,
+        "python": sys.executable,
+        # Every exec, clone and inotify watch, and every line naming the cwd,
+        # a relative path, or /tmp; the test decides.
         "strace": [
             line for line in lines
             if str(ws) in line or "/tmp" in line
             or ('AT_FDCWD, "' in line and 'AT_FDCWD, "/' not in line)
+            or "execve(" in line or "inotify_add_watch(" in line
+            or "clone" in line or "fork" in line
         ],
         "pids": pids,
     }

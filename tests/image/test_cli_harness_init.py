@@ -11,9 +11,11 @@ API key", so no tool call runs and three things are read:
 - the init frame lists exactly the harness built-ins plus
   `mcp__istota__<name>` for the six offered tools, and one MCP server,
   `istota`, connected, and the brain's own init check passed;
-- under `strace`, the unwrapped CLI and the adapter it spawns open nothing
-  under their cwd, which is the tool server's cwd and so the user's workspace,
-  beyond stat-family calls;
+- under `strace`, the unwrapped CLI runs no real `git`: every exec is the
+  CLI, its MCP adapter, the harness's stub `git` or the bundled rg; and in its
+  cwd, which is the tool server's cwd and so the user's workspace, it and its
+  children only stat, list (rg), and watch (inotify), with nothing opened
+  under `.claude/`;
 - nothing appears under `/tmp`: the CLI's `claude-<uid>/` and `cc-socks/`
   follow the per-harness `TMPDIR`.
 
@@ -25,12 +27,13 @@ through `ISTOTA_TEST_CLI_HARNESS_CONTROL` (an `ISTOTA_TEST_*` name, which the
 suite's env scrub keeps):
 
 - `drop-tools`: `--tools` out of the argv. The deny list alone leaves
-  CronCreate, SendMessage, ToolSearch and others in the frame; both init cases
+  SendMessage, ListAgents, EnterWorktree and others in the frame; both init cases
   go red.
+- `stub-off`: the stub `git` left off the CLI's PATH; the image's real git
+  runs in the cwd and the cwd case goes red.
 - `open-cwd`: a `CLAUDE.md` in the cwd, `--setting-sources user` and
-  `CLAUDE_CODE_DISABLE_CLAUDE_MDS` dropped; for the cwd case once it is green.
-  It is an expected failure today (see its marker), so the script runs no
-  control for it yet.
+  `CLAUDE_CODE_DISABLE_CLAUDE_MDS` dropped. The driver supports it; the script
+  does not run it.
 - `tmp-unset`: no `TMPDIR` on the CLI's env; the `/tmp` case goes red.
 """
 
@@ -121,6 +124,60 @@ def _calls(report: dict):
             yield match.group(1), paths[0], line
 
 
+def _pid(line: str) -> int | None:
+    match = re.match(r"^(\d+)\s", line)
+    return int(match.group(1)) if match else None
+
+
+def _execs(report: dict) -> list[tuple[int | None, str, bool, str]]:
+    """`(pid, path, succeeded, line)` for each execve strace saw. A call left
+    `<unfinished ...>` is counted as run: the check errs toward red."""
+    found = []
+    for syscall, path, line in _calls(report):
+        if syscall != "execve":
+            continue
+        failed = re.search(r"\)\s+=\s+-1\s", line) is not None
+        found.append((_pid(line), path, not failed, line))
+    return found
+
+
+CLAUDE_PACKAGE = "/node_modules/@anthropic-ai/claude-code/"
+
+
+def _is_bundled_rg(path: str, line: str) -> bool:
+    """The CLI's own ripgrep, never one from PATH. 2.1.296 execs its own
+    `claude.exe` from the package with `rg` as argv[0]."""
+    if CLAUDE_PACKAGE not in path:
+        return False
+    argv0 = re.search(r'execve\("[^"]*",\s*\["([^"]*)"', line)
+    return bool(argv0) and argv0.group(1) == "rg"
+
+
+_CLONED = re.compile(r"^(\d+)\s+.*\b(?:clone3?|v?fork)\b.*=\s+(\d+)\s*$")
+
+
+def _rg_family(report: dict) -> set[int]:
+    """The pids of the bundled rg and of every thread or child it cloned after
+    its exec, in log order. rg walks the cwd from worker threads, which strace
+    names by their own tids."""
+    family: set[int] = set()
+    for line in report["strace"]:
+        pid = _pid(line)
+        if pid is None:
+            continue
+        exec_call = _CALL.match(line)
+        if exec_call and exec_call.group(1) == "execve":
+            paths = _QUOTED.findall(exec_call.group(2))
+            failed = re.search(r"\)\s+=\s+-1\s", line) is not None
+            if paths and not failed and _is_bundled_rg(paths[0], line):
+                family.add(pid)
+            continue
+        cloned = _CLONED.match(line)
+        if cloned and pid in family:
+            family.add(int(cloned.group(2)))
+    return family
+
+
 def _assert_init(report: dict, builtins: tuple[str, ...]) -> None:
     frame = report["init"]
     assert frame is not None, report
@@ -142,33 +199,65 @@ class TestTheInitFrameListsOnlyWhatTheHarnessAskedFor:
 
 
 class TestWhatTheUnwrappedCliTouches:
-    # Red on 2.1.296, and left red on purpose until the spec decides (Stage 7
-    # stop condition): at start-up the unwrapped CLI runs `git` three times in
-    # its cwd (one `git -C <cwd> ls-files`), lists the whole cwd with
-    # `rg --files --hidden`, puts an inotify watch on it, opens `.claude/` as
-    # a directory and reads `.claude/scheduled_tasks.json` (the last goes with
-    # CLAUDE_CODE_DISABLE_CRON=1). The cwd is the tool server's, so all of it
-    # runs outside the sandbox over a tree the model can write. Strict, so the
-    # decision that clears it turns this red and the marker comes off.
-    @pytest.mark.xfail(
-        strict=True,
-        reason="the unwrapped CLI runs git and rg in its cwd; awaiting the spec's decision",
-    )
-    def test_it_opens_nothing_under_its_cwd(self, strace_image):
+    # On 2.1.296 the unwrapped CLI runs `git` three times in its cwd at
+    # start-up, lists the cwd with its bundled `rg --files --hidden`, puts an
+    # inotify watch on it, and with cron on reads `.claude/scheduled_tasks.json`.
+    # The cwd is the tool server's, a tree the model can write, so the harness
+    # puts a stub `git` (exit 128) first on the CLI's PATH and sets
+    # CLAUDE_CODE_DISABLE_CRON=1. This case holds the CLI to that: every exec
+    # is the CLI, its MCP adapter, the stub or the bundled rg, and in the cwd
+    # it only stats, lists (rg) and watches.
+    def test_it_runs_no_real_git_and_only_looks_at_its_cwd(self, strace_image):
         report = _run(strace_image, ("WebSearch",))
         assert report["strace_lines"] > 0, "strace recorded nothing; the check would pass on no data"
         cwd = report["cwd"]
+        assert len(report["harness_dirs"]) == 1, report["harness_dirs"]
+        stub = f"{report['harness_dirs'][0]}/bin/git"
+
+        execs = _execs(report)
+        shown = "\n".join(line for _, _, _, line in execs)
+        assert not [e for e in execs if e[1] != stub and os.path.basename(e[1]) == "git"], (
+            "a git other than the harness stub was run:\n" + shown
+        )
+        ran = [e for e in execs if e[2]]
+        assert any(path == stub for _, path, _, _ in ran), "the stub was never run:\n" + shown
+        rg_pids = _rg_family(report)
+        assert rg_pids, "the bundled rg was never run; the allowlist below would be vacuous:\n" + shown
+        unexpected = [
+            line for pid, path, _, line in ran
+            if not (
+                path == stub
+                or _is_bundled_rg(path, line)
+                or path == report["real_claude"]
+                or (path == report["python"] and "istota.sandbox.mcp_adapter" in line)
+            )
+        ]
+        assert unexpected == [], "\n".join(unexpected)
+
         opened = []
         stats = 0
         for syscall, path, line in _calls(report):
+            if syscall == "execve":
+                continue
             under = path == cwd or path.startswith(cwd + "/") or (
                 not path.startswith("/") and ("AT_FDCWD" in line or not syscall.endswith("at"))
             )
             if not under:
                 continue
+            if path == f"{cwd}/.claude" or path.startswith(f"{cwd}/.claude/"):
+                # The CLI tries `.claude` itself as a directory (a listing at
+                # most); nothing below it may be opened.
+                directory = path == f"{cwd}/.claude" and "O_DIRECTORY" in line
+                if not (syscall in STAT_LIKE or "O_PATH" in line or directory):
+                    opened.append(line)
+                continue
             # An `O_PATH` open reads nothing: it is how the CLI stats.
             if syscall in STAT_LIKE or (syscall == "openat" and "O_PATH" in line):
                 stats += 1
+            elif syscall == "inotify_add_watch":
+                continue
+            elif _pid(line) in rg_pids and "O_DIRECTORY" in line:
+                continue
             else:
                 opened.append(line)
         assert opened == [], "\n".join(opened)
