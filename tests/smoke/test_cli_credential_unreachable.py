@@ -1,20 +1,19 @@
 """Whether a `claude_code` task's tools can read the CLI's credential.
 
-GitLab #860. On the old path bwrap wraps the `claude` CLI and the model's Bash
-is its child in the same namespace, so the credential the CLI authenticates
-with is one `env` or one `cat ~/.claude/.credentials.json` away. On the tool
-harness the CLI runs outside the sandbox and the tools run in the tool server,
+GitLab #860. On the old path bwrap wrapped the `claude` CLI and the model's
+Bash was its child in the same namespace, so the credential the CLI
+authenticates with was one `env` or one `cat ~/.claude/.credentials.json` away.
+On the tool harness, the only path since the cli-brain-tools-only-path spec's
+Stage 6, the CLI runs outside the sandbox and the tools run in the tool server,
 which holds no credential. This file asks the question from inside a live task
 in the shipped image, in both auth modes.
 
 No model runs. The task runs through `istota task -x` in the daemon container
 against a copy of the rendered config switched to the `claude_code` brain,
-with `claude` on `PATH` being `tests/support/fake_claude_cli.py`. On the
-harness path (`--mcp-config` given) the fake spawns the real adapter and sends
-the probe as an `mcp__istota__Bash` call through the bridge into the tool
-server; on the old path it runs the probe itself, inside the bwrap the
-executor wrapped it in, where the real CLI's Bash runs. Its result frame is
-the probe's output, and the task's result is that frame.
+with `claude` on `PATH` being `tests/support/fake_claude_cli.py`. The fake
+spawns the real adapter and sends the probe as an `mcp__istota__Bash` call
+through the bridge into the tool server. Its result frame is the probe's
+output, and the task's result is that frame.
 
 The probe, in one Bash call: the CLI's credentials file, `env`, every readable
 `/proc/*/environ` grepped for the credential, and a CONNECT to
@@ -24,21 +23,18 @@ line from the fake's own view (the CLI's process, unwrapped on the harness)
 shows the CLI did hold it, so an absence in the tools' view is not a
 credential that was never configured.
 
-**Arms.** By default the switch is on (`[brain] tool_harness = true`), and
-everything is green, the connect included: since the spec's Stage 5 the
-Anthropic hosts are on no allowlist while the harness is on, and the task env
-carries no credential. `ISTOTA_CLI_WITNESS_CONTROL=switch-off` runs the same
-probes with the switch off: the negative control, which must go red on the
-credential file (subscription), `env`, `/proc` and the connect in both modes,
-since the old path still hands its wrapped CLI the credential in `req.env`
-and the hosts on the allowlist.
+Everything is green, the connect included: the Anthropic hosts are on no
+allowlist and the task env carries no credential.
 
-Stage 6 of the cli-brain-tools-only-path spec removes the old path, after
-which the switch-off arm cannot run and moves to a negative-control script.
+**The negative control** is `scripts/test-image-negative-control.sh
+cli-witness`, which sets `ISTOTA_CLI_WITNESS_CONTROL=cli-runs-tools`: the fake
+runs the probe in its own process, unwrapped and holding the credential, as a
+CLI whose own Bash were left on would. It must go red on `env`, `/proc`, the
+result and the connect in both modes. It replaced the old path's switch-off
+arm, which the old path's removal ended.
 
-The fake and its plan go in `$HOME/.local/bin`, the one directory the CLAUDE
-profile binds that is on the task's `PATH` and holds no system binary, so the
-wrapped CLI finds them too. The fixture removes them again.
+The fake and its plan go in `$HOME/.local/bin`, on the task's `PATH` and
+holding no system binary. The fixture removes them again.
 """
 
 from __future__ import annotations
@@ -60,9 +56,9 @@ CONFIG = "/data/config/config.toml"
 WITNESS_CONFIG = "/tmp/cli-witness-config.toml"
 USER = "testuser"
 
-#: `switch-off` selects the negative control: the same probes on the old path.
+#: `cli-runs-tools` selects the negative control: the fake runs the probe in
+#: the CLI's own process, where the credential is.
 CONTROL = os.environ.get("ISTOTA_CLI_WITNESS_CONTROL", "")
-HARNESS_ON = CONTROL != "switch-off"
 
 #: The dummy credential's prefix. The probes grep for it, so the whole value
 #: is in no command text; only a leak can put it in a result.
@@ -103,6 +99,7 @@ echo WITNESS_END
 PLAN = {
     "host_probe": HOST_PROBE,
     "calls": [{"name": "Bash", "args": {"command": PROBE}}],
+    "run_in_cli": CONTROL == "cli-runs-tools",
 }
 
 #: The witness config: the rendered one with the brain switched. Through
@@ -111,13 +108,12 @@ PLAN = {
 RENDER = """
 import sys, tomllib
 from istota.lib import toml_write
-mode, harness, base_url, out = sys.argv[1:5]
+mode, base_url, out = sys.argv[1:4]
 with open(%r, "rb") as fh:
     doc = tomllib.load(fh)
 brain = doc.setdefault("brain", {})
 brain["kind"] = "claude_code"
 brain["fallback"] = ""
-brain["tool_harness"] = harness == "on"
 brain.setdefault("claude_code", {})["auth"] = mode
 if mode == "api_key":
     doc.setdefault("providers", {}).setdefault("anthropic", {})["base_url"] = base_url
@@ -125,8 +121,8 @@ with open(out, "w") as fh:
     fh.write(toml_write.dumps(doc))
 """ % CONFIG
 
-#: One run per stack, auth mode and arm, shared by the tests below.
-_RUNS: dict[tuple[int, str, bool], dict] = {}
+#: One run per stack and auth mode, shared by the tests below.
+_RUNS: dict[tuple[int, str], dict] = {}
 
 
 def _b64_write(path: str, content: str, mode: str) -> str:
@@ -163,12 +159,12 @@ def fake_cli(stack):
 
 
 def _run(stack, mode: str) -> dict:
-    key = (id(stack), mode, HARNESS_ON)
+    key = (id(stack), mode)
     if key in _RUNS:
         return _RUNS[key]
     value = PREFIX + secrets.token_hex(12)
     render = stack.exec(
-        ["uv", "run", "python", "-c", RENDER, mode, "on" if HARNESS_ON else "off",
+        ["uv", "run", "python", "-c", RENDER, mode,
          stack.endpoint.anthropic_container_url, WITNESS_CONFIG],
         timeout=120,
     )
@@ -226,10 +222,9 @@ class TestTheCliCredentialIsOutOfTheToolsReach:
         """The control: an absence below is not a probe that never ran or a
         credential that never reached the CLI."""
         assert set(witness["sections"]) >= {"credfile", "env", "proc", "connect"}, _show(witness)
-        # The harness gives the CLI a per-run CLAUDE_CONFIG_DIR; the old path
-        # sets none. Without this an arm could be the other one.
-        assert witness["host"].get("host_harness") == ("yes" if HARNESS_ON else ""), (
-            f"the task did not run the arm this session asked for\n{_show(witness)}"
+        # The harness gives the CLI a per-run CLAUDE_CONFIG_DIR.
+        assert witness["host"].get("host_harness") == "yes", (
+            f"the task did not run on the tool harness\n{_show(witness)}"
         )
         assert witness["host"].get("host_env_cred", "0") != "0", (
             "the CLI's own environment does not hold the dummy credential, so "

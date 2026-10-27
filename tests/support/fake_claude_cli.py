@@ -24,6 +24,10 @@ built from an allowlist and carries no variable of ours):
 - `calls`: `[{"name": "Bash", "args": {...}}]`.
 - `host_probe`: a shell command the fake runs itself first, from the CLI's
   unwrapped view, its output put ahead of the call results.
+- `run_in_cli`: on a harness run, make the planned `Bash` calls in the fake's
+  own process rather than through the MCP server, as a CLI whose own Bash were
+  left on would. The smoke witness's negative control
+  (`scripts/test-image-negative-control.sh cli-witness`).
 
 `{socket}` and `{harness_dir}` in a call's arguments or the host probe are
 replaced with the bridge socket and the harness directory, read from the MCP
@@ -209,6 +213,11 @@ def main(argv: list[str]) -> int:
             "type": "tool_use", "id": call_id, "name": f"mcp__{mcp.name}__{call['name']}",
             "input": args,
         }]}})
+        if plan.get("run_in_cli") and call["name"] == "Bash":
+            ran = subprocess.run(["/bin/sh", "-c", args.get("command", "")],
+                                 capture_output=True, text=True)
+            texts.append(ran.stdout + ran.stderr)
+            continue
         reply = mcp.request("tools/call", {"name": call["name"], "arguments": args})
         result = reply.get("result") or {}
         text = "".join(b.get("text", "") for b in result.get("content", []) if b.get("type") == "text")
