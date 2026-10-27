@@ -144,7 +144,7 @@ class TestRefusalWarningsSayItOnce:
         with caplog.at_level(logging.WARNING, logger="istota.brain"):
             resolve_brain_kind("scheduled", base, override="native")
             resolve_brain_kind("talk", base, override="native")
-            resolve_brain_kind("scheduled", base, override="tmux_claude")
+            resolve_brain_kind("scheduled", base, override="claude_code")
         refusals = [r for r in caplog.records if "room_selectable" in r.getMessage()]
         assert len(refusals) == 3
 

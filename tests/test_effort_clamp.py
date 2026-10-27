@@ -169,13 +169,6 @@ class TestTheCliBrains:
         argv, _ = _cli_argv(brain, _req(model="claude-opus-9-20990101", effort="xhigh"))
         assert _flag(argv, "--effort") == "xhigh"
 
-    def test_the_tmux_brain_clamps_through_the_same_rule(self):
-        from istota.brain.claude_code import ClaudeCodeBrain
-
-        cli = ClaudeCodeBrain()
-        clamped = cli.with_clamped_effort(_req(model="claude-opus-4-5", effort="max"))
-        assert clamped.effort == "high"
-
 
 class TestTheNativeBrain:
     def teardown_method(self):

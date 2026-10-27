@@ -39,7 +39,6 @@ cheap to import and so tests can patch them at their real home.
 """
 
 import argparse
-import dataclasses
 import time
 import logging
 import os
@@ -266,13 +265,7 @@ def cmd_run(args):
     if error:
         _fail("path_not_allowed", error)
 
-    # The tmux brain drives one interactive session, which is busy running the
-    # task that asked for this review, and has no one-shot path. A tmux
-    # deployment runs Claude Code on a subscription, so `claude -p` through the
-    # claude_code brain reviews with the same credential.
     review_brain = config.brain
-    if review_brain.kind == "tmux_claude":
-        review_brain = dataclasses.replace(review_brain, kind="claude_code")
 
     # Before the cap and the breaker, so an operator whose budget cannot fit
     # learns about it even on a run those short-circuit — a warning that only

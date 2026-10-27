@@ -87,7 +87,7 @@ def pipefail_env() -> dict[str, str]:
 
     ``shell_argv`` can only fix a shell istota spawns itself, and the largest
     consumer of shells in the deployment spawns its own: a ``ClaudeCodeBrain``
-    or ``TmuxClaudeBrain`` task runs its commands through the Claude Code CLI's
+    task runs its commands through the Claude Code CLI's
     Bash tool, which builds ``bash -c 'source <shell-snapshot> && eval <cmd>'``
     in a process istota launches but does not instrument. So that shell started
     with ``pipefail`` off and reported a pipeline's *last* stage — ``gh auth

@@ -418,7 +418,7 @@ class CronJob:
     once: bool = False
     model: str = ""  # Per-job Claude model override; empty = use config default
     effort: str = ""  # Per-job effort override (low/medium/high/xhigh/max); empty = use config default
-    # Per-job brain kind pin (claude_code / native / tmux_claude); empty =
+    # Per-job brain kind pin (claude_code / native); empty =
     # resolve from config. Admin-only: `fj_brain_or_none` drops it at sync
     # time for a non-admin author.
     brain: str = ""

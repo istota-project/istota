@@ -261,7 +261,7 @@ class TestParityWithTheAdminConfigView:
 
         The other direction is deliberately not asserted: `admin_config_view`
         carries a `NON_SECRET_KEYS` allowlist (`web.token_storage`,
-        `security.passthrough_env_vars`, the two tmux markers) and this module
+        `security.passthrough_env_vars`) and this module
         does not, so it withholds a handful of operational values it need not.
         That is the safe direction on a log line, and an allowlist on the boot
         path is a fail-open surface for the sake of legibility.

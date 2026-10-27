@@ -21,14 +21,12 @@ since carrying a field nothing reads proves nothing.
 
 import asyncio
 import dataclasses
-from pathlib import Path
 
 import pytest
 
 from istota.brain._types import BrainRequest, BrainResult
 from istota.brain.claude_code import ClaudeCodeBrain
 from istota.brain.native import NativeBrain
-from istota.brain.tmux_claude import TmuxClaudeBrain, reset_circuit_breaker
 from istota.config import NativeBrainConfig
 
 
@@ -233,7 +231,7 @@ class TestNativeBrainReadsTheNativeWrap:
         assert server is None and spawned == []
 
 
-class TestTheClaudeBrainsReadTheClaudeWrap:
+class TestTheClaudeBrainReadsTheClaudeWrap:
     def test_claude_code_wraps_with_the_claude_profile(self, monkeypatch, tmp_path):
         brain = ClaudeCodeBrain()
         captured = {}
@@ -259,33 +257,3 @@ class TestTheClaudeBrainsReadTheClaudeWrap:
 
         assert "NATIVE-PROFILE" not in captured["cmd"]
         assert captured["cmd"][0] != "bwrap"
-
-    @pytest.fixture(autouse=True)
-    def _tmux_preconditions(self, monkeypatch):
-        import istota.brain.tmux_claude as mod
-
-        monkeypatch.setattr(mod, "_VERSION_CHECKED", True)
-        reset_circuit_breaker()
-        yield
-        reset_circuit_breaker()
-
-    def _launch(self, monkeypatch, req):
-        class _CP:
-            stdout = ""
-            returncode = 0
-
-        brain = TmuxClaudeBrain()
-        sent = []
-        monkeypatch.setattr(brain, "_tmux", lambda *a: sent.append(a) or _CP())
-        brain._launch_claude("s1", req, Path(req.cwd))
-        literal = next(a for a in sent if a[:4] == ("send-keys", "-t", "s1", "-l"))
-        return literal[4]
-
-    def test_tmux_wraps_with_the_claude_profile(self, monkeypatch, tmp_path):
-        cmd = self._launch(monkeypatch, _req(tmp_path))
-        assert "bwrap CLAUDE-PROFILE --" in cmd
-
-    def test_tmux_ignores_the_native_wrap(self, monkeypatch, tmp_path):
-        cmd = self._launch(monkeypatch, _req(tmp_path, sandbox_wrap=None))
-        assert "bwrap" not in cmd
-        assert "NATIVE-PROFILE" not in cmd

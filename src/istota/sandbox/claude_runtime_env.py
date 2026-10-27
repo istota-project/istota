@@ -1,9 +1,9 @@
 """What a task environment carries only because the outer process is `claude`.
 
 `executor.build_clean_env` copies `CLAUDE_CODE_OAUTH_TOKEN` out of the daemon's
-environment into **every** task's env, for every brain, because two of the three
-brains authenticate with it: `ClaudeCodeBrain`'s outer process is the `claude`
-CLI and `TmuxClaudeBrain`'s is the same binary in a pane. `NativeBrain` is not —
+environment into **every** task's env, for every brain, because
+`ClaudeCodeBrain` authenticates with it: its outer process is the `claude`
+CLI. `NativeBrain` is not —
 it authenticates from its own configured provider key (`NativeBrainConfig`) and
 reads nothing here — so on that path the variable has no reader at all, only a
 route out: `echo "$CLAUDE_CODE_OAUTH_TOKEN"` in a Bash call comes back as a

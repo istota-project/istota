@@ -106,14 +106,6 @@ class TestSteerability:
             assert "headless" in out.lower()
             assert db.count_pending_steers(conn, tid) == 0
 
-    async def test_tmux_refuses_not_yet(self, make_config):
-        config = make_config(brain_kind="tmux_claude")
-        with db.get_db(config.db_path) as conn:
-            tid = _running_task(conn)
-            out = await cmd_steer(_ctx(config, conn, args="focus on auth"))
-            assert "isn't steerable yet" in out or "not steerable" in out.lower()
-            assert db.count_pending_steers(conn, tid) == 0
-
     async def test_native_accepts(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:
@@ -330,3 +322,18 @@ class TestSteerabilityFollowsTheTasksOwnBrain:
             out = await cmd_steer(_ctx(config, conn, args="focus on auth"))
             assert "headless" in out.lower()
             assert db.count_pending_steers(conn, tid) == 0
+
+    async def test_a_row_still_pinned_to_the_retired_tmux_kind_follows_the_deployment(
+        self, make_config,
+    ):
+        config = make_config()  # kind="native"
+        config.brain = self._brain_config("native", "claude_code")
+        with db.get_db(config.db_path) as conn:
+            tid = db.create_task(
+                conn, prompt="p", user_id="alice", source_type="talk",
+                conversation_token="room1", brain="tmux_claude",
+            )
+            db.update_task_status(conn, tid, "running")
+            out = await cmd_steer(_ctx(config, conn, args="focus on auth"))
+            assert "Steering" in out
+            assert db.count_pending_steers(conn, tid) == 1

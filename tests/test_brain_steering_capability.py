@@ -2,17 +2,12 @@
 
 from istota.brain.claude_code import ClaudeCodeBrain
 from istota.brain.native import NativeBrain
-from istota.brain.tmux_claude import TmuxClaudeBrain
 from istota.commands import _STEERABLE_KINDS
 
 
 class TestSupportsSteering:
     def test_claude_code_false(self):
         assert ClaudeCodeBrain().supports_steering is False
-
-    def test_tmux_true(self):
-        # Truthful even though the paste wiring is post-v1.
-        assert TmuxClaudeBrain().supports_steering is True
 
     def test_native_true(self):
         from istota.config import BrainConfig, NativeBrainConfig
@@ -28,7 +23,7 @@ class TestSupportsSteering:
         native = NativeBrain(
             BrainConfig(kind="native", native=NativeBrainConfig()), provider=object()
         )
-        for brain in (ClaudeCodeBrain(), TmuxClaudeBrain(), native):
+        for brain in (ClaudeCodeBrain(), native):
             assert isinstance(brain.supports_steering, bool)
 
 

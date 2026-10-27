@@ -231,7 +231,7 @@ class TestEmptyUser:
         assert row["usage_cache_hit_rate_24h"] == 0.0
 
     def test_the_unmeasured_counter_names_the_gap(self, conn):
-        """A tmux-brain task spends real tokens and writes no row."""
+        """A prompt task that wrote no usage row is counted, not zeroed."""
         _add_task(conn, user="alice", at=NOW - timedelta(hours=2))
         conn.commit()
 

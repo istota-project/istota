@@ -4044,9 +4044,9 @@ def _admin_usage_section(conn: sqlite3.Connection, now: datetime) -> dict:
         "by_model_30d_omitted": max(0, len(by_model) - 5),
         "by_brain_30d": _groups("brain", since_30d),
         "by_origin_24h": _groups("origin", since_24h),
-        # Two honesty counters. A tmux-brain task spends real tokens and writes
-        # no row, and the native brain records no context — recording synthetic
-        # zeroes for either would make the dashboard complete and wrong. The
+        # Two honesty counters. A prompt task can end with no usage row, and the
+        # native brain records no context — recording synthetic zeroes for
+        # either would make the dashboard complete and wrong. The
         # second counts task-origin rows only; see the query above.
         "unmeasured_tasks_24h": _db.unmeasured_task_count(
             conn, since=tasks_since_24h
@@ -11229,9 +11229,7 @@ def _brain_catalogue(username: str) -> dict:
         # class attribute, answered by a lookup: `brain_namespaces` has to cover
         # every buildable kind — including the one a room is being moved *away*
         # from, which need not be on the menu — and answering it by construction
-        # ran `make_brain` once per known kind on every catalogue fetch, which
-        # for `tmux_claude` shells out to the installed `claude` and put a
-        # `tmux_brain cli_version_mismatch` WARNING in the operator's log every
+        # ran `make_brain` once per known kind on every catalogue fetch, every
         # time a room-settings modal opened.
         namespaces = {
             kind: ns

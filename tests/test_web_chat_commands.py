@@ -215,17 +215,17 @@ class TestSelectableBrains:
     ):
         """`room_selectable_kinds` strips each entry and dedupes; building the
         list off the raw setting instead offers `native` twice and drops
-        ` tmux_claude ` entirely — a kind the operator configured and the PATCH
+        ` claude_code ` entirely — a kind the operator configured and the PATCH
         accepts, missing from the only control that can set it."""
         import istota.webui.app as mod
         mod._config.brain = _brain_config(
             kind="claude_code",
-            room_selectable=["native", "native", " tmux_claude "],
+            room_selectable=["native", "native", " claude_code "],
         )
         cookies = await _login(chat_client, "alice")
         resp = await chat_client.get("/istota/api/chat/commands", cookies=cookies)
         assert [b["kind"] for b in resp.json()["selectable_brains"]] == [
-            "native", "tmux_claude",
+            "claude_code", "native",
         ]
 
     async def test_the_catalogue_offers_exactly_what_the_patch_accepts(
@@ -239,7 +239,7 @@ class TestSelectableBrains:
         import istota.webui.app as mod
         mod._config.brain = _brain_config(
             kind="claude_code",
-            room_selectable=["native", "tmux_claude", "no-such-brain"],
+            room_selectable=["native", "claude_code", "no-such-brain"],
         )
         cookies = await _login(chat_client, "alice")
         resp = await chat_client.get("/istota/api/chat/commands", cookies=cookies)
@@ -257,18 +257,19 @@ class TestSelectableBrains:
         would have kept."""
         import istota.webui.app as mod
         mod._config.brain = _brain_config(
-            kind="claude_code", room_selectable=["native"],
+            kind="native", room_selectable=["native"],
         )
         cookies = await _login(chat_client, "alice")
         resp = await chat_client.get("/istota/api/chat/commands", cookies=cookies)
         body = resp.json()
-        # `tmux_claude` is on neither the menu nor the deployment's own kind,
+        # `claude_code` is on neither the menu nor the deployment's own kind,
         # and is exactly the shape a dropped-from-the-allowlist pin takes.
-        assert body["brain_namespaces"]["tmux_claude"] == "anthropic"
-        assert body["brain_namespaces"]["native"] == "openai_compat"
+        assert body["brain_namespaces"] == {
+            "claude_code": "anthropic", "native": "openai_compat",
+        }
         assert [b["kind"] for b in body["selectable_brains"]] == ["native"]
-        assert body["inherited_brain"]["kind"] == "claude_code"
-        assert body["inherited_brain"]["model_namespace"] == "anthropic"
+        assert body["inherited_brain"]["kind"] == "native"
+        assert body["inherited_brain"]["model_namespace"] == "openai_compat"
 
     async def test_the_inherited_brain_follows_the_lane_rule(self, chat_client):
         """`resolve_brain_kind("web", …)`, not the bare `[brain] kind`: a
@@ -305,17 +306,17 @@ class TestSelectableBrains:
         self, chat_client, monkeypatch,
     ):
         """The per-kind guard, which the allowlist filter cannot stand in for:
-        a name it admits can still fail to build (a `tmux_claude` on a host
-        with no tmux). One bad kind must not empty the picker."""
+        a name it admits can still fail to build (a broken nested block). One
+        bad kind must not empty the picker."""
         import istota.webui.app as mod
         mod._config.brain = _brain_config(
-            kind="claude_code", room_selectable=["native", "tmux_claude"],
+            kind="native", room_selectable=["native", "claude_code"],
         )
         real = mod.make_brain
 
         def _sometimes(cfg):
-            if getattr(cfg, "kind", None) == "tmux_claude":
-                raise RuntimeError("no tmux here")
+            if getattr(cfg, "kind", None) == "claude_code":
+                raise RuntimeError("cannot build here")
             return real(cfg)
 
         monkeypatch.setattr(mod, "make_brain", _sometimes)

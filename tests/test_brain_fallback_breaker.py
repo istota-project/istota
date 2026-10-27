@@ -52,7 +52,7 @@ class TestBreaker:
         b = PrimaryAvailabilityBreaker()
         b.open("claude_code", 300)
         assert b.should_skip("claude_code", 300) is True
-        assert b.should_skip("tmux_claude", 300) is False
+        assert b.should_skip("native", 300) is False
 
     def test_reopen_after_cooldown_arms_new_alert(self, monkeypatch):
         import istota.brain._fallback as mod
@@ -178,14 +178,11 @@ class TestProcessGlobal:
 
 class TestConstantsAndHelper:
     def test_trigger_and_cooldown_sets(self):
-        assert TRIGGER_STOP_REASONS == frozenset({"usage_limit", "not_found", "fallback"})
+        assert TRIGGER_STOP_REASONS == frozenset({"usage_limit", "not_found"})
         assert COOLDOWN_STOP_REASONS == frozenset({"usage_limit", "not_found"})
-        # fallback triggers a reroute but never opens the breaker.
-        assert "fallback" in TRIGGER_STOP_REASONS
-        assert "fallback" not in COOLDOWN_STOP_REASONS
 
     def test_effective_fallback_kind(self):
-        # ISSUE-362: no implicit target for any kind, tmux_claude included.
-        assert effective_fallback_kind(BrainConfig(kind="tmux_claude")) is None
+        # ISSUE-362: no implicit target for any kind.
+        assert effective_fallback_kind(BrainConfig(kind="native")) is None
         assert effective_fallback_kind(BrainConfig(kind="claude_code")) is None
         assert effective_fallback_kind(BrainConfig(kind="claude_code", fallback="native")) == "native"

@@ -1212,7 +1212,7 @@ describe('the [models.aliases] editor', () => {
     const general = within(await screen.findByTestId('alias-general'));
     expect(screen.getByTestId('alias-fast')).toBeInTheDocument();
     expect(screen.getByTestId('alias-smart')).toBeInTheDocument();
-    await fireEvent.focus(general.getByRole('combobox', { name: 'Claude Code and tmux model' }));
+    await fireEvent.focus(general.getByRole('combobox', { name: 'Claude Code model' }));
     await fireEvent.mouseDown(
       screen.getByRole('option', {
         name: 'anthropic/claude-sonnet-5-5 · enabled',

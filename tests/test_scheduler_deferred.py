@@ -54,8 +54,6 @@ def config(db_path, tmp_path):
     cfg.brain = BrainConfig(
         kind="claude_code",
         native=NativeBrainConfig(model="claude-sonnet-4-6"),
-        # The thing the inheritance has to beat.
-        source_type_overrides={"subtask": "tmux_claude"},
         room_selectable=["native"],
     )
     return cfg
@@ -98,9 +96,9 @@ class TestSubtaskBrainInheritance:
 
         child = _subtask(db_path)
         assert child.brain == "native"
-        # And that the inheritance is what decided it: the source-type layer
+        # And that the inheritance is what decided it: the `subtask` lane
         # would have sent this task somewhere else entirely.
-        assert resolve_brain_kind("subtask", config.brain).kind == "tmux_claude"
+        assert resolve_brain_kind("subtask", config.brain).kind == "claude_code"
         assert resolve_brain_kind(
             child.source_type, config.brain, override=child.brain,
         ).kind == "native"
@@ -125,10 +123,9 @@ def _lane_namespace(config, source_type):
 class TestSubtaskModelInheritanceAcrossNamespaces:
     """A parent's `model` only travels where the child will read it right.
 
-    The fixture's own override (`subtask` -> `tmux_claude`) is deliberately not
-    a namespace change — `tmux_claude` and `claude_code` share `anthropic`,
-    which ISSUE-417 settled — so each case below states the two lanes it needs
-    and asserts they differ, or don't, before asserting on the row.
+    The fixture routes `subtask` nowhere of its own, so both lanes are the
+    base kind's `anthropic`; each case below states the two lanes it needs and
+    asserts they differ, or don't, before asserting on the row.
     """
 
     def _child_of(self, config, db_path, *, parent_kwargs, entries=None):
@@ -184,9 +181,9 @@ class TestSubtaskModelInheritanceAcrossNamespaces:
     ):
         """The control against a blanket drop.
 
-        The fixture routes `subtask` to `tmux_claude`, which is a different
-        *kind* reading the same vocabulary, so the name is as valid on the child
-        as on the parent and dropping it would discard a working pin.
+        The fixture's `subtask` lane reads the same vocabulary as `talk`, so
+        the name is as valid on the child as on the parent and dropping it
+        would discard a working pin.
         """
         assert _lane_namespace(config, "talk") == _lane_namespace(config, "subtask")
         child = self._child_of(

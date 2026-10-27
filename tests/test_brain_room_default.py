@@ -122,7 +122,7 @@ def config(db_path, tmp_path):
     )
     cfg.scheduler = SchedulerConfig()
     cfg.users = {"alice": UserConfig()}
-    cfg.brain = _brain("claude_code", selectable=["native", "tmux_claude"])
+    cfg.brain = _brain("claude_code", selectable=["native"])
     return cfg
 
 
@@ -233,10 +233,10 @@ class TestOverrideAdmission:
     def test_override_beats_a_source_type_override(self):
         base = _brain(
             "claude_code",
-            overrides={"talk": "tmux_claude"},
-            selectable=["native"],
+            overrides={"talk": "native"},
+            selectable=["claude_code"],
         )
-        assert resolve_brain_kind("talk", base, override="native").kind == "native"
+        assert resolve_brain_kind("talk", base, override="claude_code").kind == "claude_code"
 
     def test_override_none_reproduces_the_source_type_answer(self):
         base = _brain("claude_code", overrides={"talk": "native"})
@@ -273,12 +273,13 @@ class TestOverrideRefusals:
         """A distinct branch from the unknown one: the kind is real, the
         operator has not offered it. This is what makes an operator shortening
         `room_selectable` take effect at the next dispatch with no sweep."""
-        base = _brain("claude_code", overrides={"talk": "tmux_claude"}, selectable=[])
+        base = _brain("claude_code", overrides={"talk": "native"}, selectable=[])
         routed, logged = _warnings(
-            lambda: resolve_brain_kind("talk", base, override="native"),
+            lambda: resolve_brain_kind("talk", base, override="claude_code"),
         )
-        assert routed.kind == "tmux_claude"  # the source-type answer
-        assert "native" in logged
+        assert routed.kind == "native"  # the source-type answer
+        assert "claude_code" in logged
+        assert "room_selectable" in logged
 
     def test_a_refused_override_returns_the_base_object_when_nothing_else_applies(self):
         base = _brain("claude_code", selectable=[])
@@ -291,20 +292,11 @@ class TestOverrideRefusals:
 
 class TestPinnedRoomHasNoFailover:
     def test_admission_clears_a_configured_fallback(self):
-        base = _brain("claude_code", selectable=["native"], fallback="tmux_claude")
+        base = _brain("native", selectable=["claude_code"], fallback="claude_code")
         # The precondition: this deployment does have failover to lose.
-        assert effective_fallback_kind(base) == "tmux_claude"
-        routed = resolve_brain_kind("talk", base, override="native")
+        assert effective_fallback_kind(base) == "claude_code"
+        routed = resolve_brain_kind("talk", base, override="claude_code")
         assert routed.fallback == ""
-        assert effective_fallback_kind(routed) is None
-
-    def test_a_tmux_override_has_no_implicit_claude_code_fallback(self):
-        """The regression guard for ISSUE-362 staying deleted. `tmux_claude`
-        used to reach `claude_code` here with nothing configured, so clearing
-        `fallback` alone would not have been enough."""
-        base = _brain("claude_code", selectable=["tmux_claude"], fallback="native")
-        routed = resolve_brain_kind("talk", base, override="tmux_claude")
-        assert routed.kind == "tmux_claude"
         assert effective_fallback_kind(routed) is None
 
     def test_pinning_the_base_kind_also_disables_failover(self):
@@ -381,20 +373,13 @@ class TestReachableBrainKinds:
         assert reachable_brain_kinds(_brain("claude_code")) == frozenset({"claude_code"})
 
     def test_a_source_type_override_target_is_reachable(self):
-        """The case the spec's test strategy names, with the value the code
-        actually yields.
-
-        The spec asked for this pair on the grounds that `claude_code` would
-        arrive "by way of the tmux back-compat default" and that a single fold
-        over the base config would therefore miss it. ISSUE-362 deleted that
-        default, so `claude_code` is in this set as the base kind and for no
-        other reason, and with `fallback` unset the fold contributes nothing at
-        all. The pair is kept because it is still the plainest statement that a
+        """The case the spec's test strategy names. With `fallback` unset the
+        fold contributes nothing, so this is the plainest statement that a
         routing target is reachable; the fold's own shape is pinned below,
         where it can actually fail.
         """
-        base = _brain("claude_code", overrides={"scheduled": "tmux_claude"})
-        assert reachable_brain_kinds(base) == frozenset({"claude_code", "tmux_claude"})
+        base = _brain("native", overrides={"scheduled": "claude_code"})
+        assert reachable_brain_kinds(base) == frozenset({"native", "claude_code"})
 
     def test_an_unknown_override_target_is_not_reachable(self):
         """`resolve_brain_kind` logs and ignores it, so no task runs it."""
@@ -440,16 +425,18 @@ class TestReachableBrainKinds:
             seen.append(getattr(brain_config, "kind", None))
             return None
 
-        base = _brain(
-            "claude_code",
-            overrides={"scheduled": "native"},
-            selectable=["tmux_claude"],
-            fallback="native",
+        routed = _brain(
+            "claude_code", overrides={"scheduled": "native"}, fallback="native",
         )
         with patch.object(brain_pkg, "effective_fallback_kind", _recording):
-            reachable_brain_kinds(base)
+            reachable_brain_kinds(routed)
         assert sorted(seen) == ["claude_code", "native"]
-        assert "tmux_claude" not in seen
+
+        seen.clear()
+        selectable = _brain("claude_code", selectable=["native"], fallback="native")
+        with patch.object(brain_pkg, "effective_fallback_kind", _recording):
+            reachable_brain_kinds(selectable)
+        assert seen == ["claude_code"]
 
     def test_it_never_raises_on_a_malformed_config(self):
         """Three shapes, and the second is the one a narrow guard missed.
@@ -535,7 +522,7 @@ class TestExecutorCallSites:
         db.init_db(cfg.db_path)
         # A deployment that does have failover, so clearing it is observable.
         cfg.brain = _brain(
-            "claude_code", selectable=["native"], fallback="tmux_claude",
+            "native", selectable=["claude_code"], fallback="claude_code",
         )
 
         handed: list = []
@@ -548,7 +535,7 @@ class TestExecutorCallSites:
             task_id = db.create_task(
                 conn, prompt="do the thing", user_id="alice",
                 source_type="talk", conversation_token="a1b2c3d4",
-                brain="native",
+                brain="claude_code",
             )
             task = db.get_task(conn, task_id)
             with patch("istota.executor.make_brain", side_effect=_record):
@@ -558,7 +545,7 @@ class TestExecutorCallSites:
 
         assert handed, "make_brain was never called"
         routed = handed[-1]
-        assert routed.kind == "native"
+        assert routed.kind == "claude_code"
         # D12: the pin took the deployment's failover with it.
         assert routed.fallback == ""
         assert effective_fallback_kind(routed) is None
@@ -581,7 +568,7 @@ class TestExecutorCallSites:
         (tmp_path / "temp" / "alice").mkdir(parents=True)
         db.init_db(cfg.db_path)
         cfg.brain = _brain(
-            "claude_code", selectable=["native"], fallback="tmux_claude",
+            "claude_code", selectable=["native"], fallback="native",
         )
 
         handed: list = []
@@ -602,7 +589,7 @@ class TestExecutorCallSites:
                 execute_task(task, cfg, [], conn=conn)
 
         assert handed, "make_brain was never called"
-        assert effective_fallback_kind(handed[-1]) == "tmux_claude"
+        assert effective_fallback_kind(handed[-1]) == "native"
 
     def test_a_claude_code_pin_turns_it_off_over_a_native_lane_rule(self, config):
         from istota.executor import _native_web_fetch_enabled

@@ -69,6 +69,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Conversation triage and the speech gate now use the deployment's model key, not the user's own. `istota apply` refuses a CLI-brain or advisor model naming a provider that is not configured. OpenRouter's model list is fetched only when the native brain uses OpenRouter or it has a key, and never inside a task.
 
+### Removed
+
+- **The tmux brain.** `tmux_claude`, which drove the interactive `claude` interface inside tmux, is gone; the native brain covers what it was kept for. A config that still names it loads as `claude_code` with a warning, and a `[brain.tmux]` block is ignored except that its model fills an unset `[brain.claude_code]` model on a deployment that ran on tmux. A room or scheduled job pinned to it runs on the deployment's brain.
+
 ### Fixed
 
 - The model suggestions in Room settings open directly under the field again. Inside a dialog the list opened offset down and to the side, past the dialog's edge, most visibly on a phone. The admin Configuration page no longer cuts a field's suggestions off at the edge of its section.

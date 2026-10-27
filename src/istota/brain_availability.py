@@ -23,7 +23,7 @@ from istota.lib.atomic_write import write_text_atomic
 def _path(config, primary: str) -> Path | None:
     db_path = getattr(config, "db_path", None)
     kind = str(primary).strip().lower()
-    if db_path is None or kind not in {"claude_code", "native", "tmux_claude"}:
+    if db_path is None or kind not in {"claude_code", "native"}:
         return None
     return Path(db_path).parent / f"brain_availability.{kind}.json"
 

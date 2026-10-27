@@ -17,7 +17,7 @@ export const ALIAS_NAMESPACES = ['anthropic', 'openai_compat'] as const;
 export type AliasNamespace = (typeof ALIAS_NAMESPACES)[number];
 
 export const NAMESPACE_LABELS: Record<AliasNamespace, string> = {
-  anthropic: 'Claude Code and tmux',
+  anthropic: 'Claude Code',
   openai_compat: 'Native',
 };
 

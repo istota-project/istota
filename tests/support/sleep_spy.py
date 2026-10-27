@@ -12,8 +12,8 @@ Both directions of wrong follow, and the repo has one of each:
 
 - ``assert slept == []`` — a false **red**. Any foreign sleep during the test
   fails it. Observed once in a full run, green on its own, which is the
-  signature (`tests/test_tmux_transcript.py::TestParseSettled`, since fixed to
-  count the loop's own condition instead).
+  signature (a transcript-settling test since removed, which had been fixed
+  to count the loop's own condition instead).
 - ``assert slept`` — a false **green**, and the worse of the two. One foreign
   sleep satisfies it whether or not the code under test slept at all, so the
   assertion cannot fail for the reason it was written.

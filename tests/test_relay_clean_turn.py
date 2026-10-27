@@ -249,19 +249,6 @@ class TestTheLoneRelayAsk:
         _brain(provider).execute(req)
         assert [ev.lone_relay_ask for ev in seen] == [flag]
 
-    @pytest.mark.parametrize("args,flag", [(RELAY_ARGS, True), (COMPOUND, False)])
-    def test_tmux_transcript_and_tailer(self, args, flag, tmp_path):
-        from istota.brain.tmux_claude import _TranscriptTailer, parse_transcript
-
-        path = tmp_path / "t.jsonl"
-        path.write_text(json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "id": "t1", "name": "Bash", "input": args}]}}) + "\n")
-        parsed = [ev for ev in parse_transcript(path) if isinstance(ev, ToolUseEvent)]
-        assert [ev.lone_relay_ask for ev in parsed] == [flag]
-        tailed = []
-        _TranscriptTailer(path, tailed.append)._drain_once()
-        assert [ev.lone_relay_ask for ev in tailed if isinstance(ev, ToolUseEvent)] == [flag]
-
 
 class TestTheAttemptReset:
     @patch("istota.scheduler.asyncio.run", return_value=None)

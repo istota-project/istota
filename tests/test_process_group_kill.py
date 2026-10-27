@@ -10,11 +10,10 @@ The safety property matters as much as the fix: a pid that does **not** lead
 its own group shares one with whoever spawned it, and for a child the daemon
 started without ``start_new_session`` that group is the daemon's. Signalling it
 would kill the scheduler. `kill_process_group` therefore signals a group only
-when the pid leads it, and falls back to the single process otherwise. Both of
-today's writers of ``worker_pid`` record leaders (ClaudeCodeBrain's own child
-after this change, and a tmux pane pid, which tmux ``setsid``s already), so the
-fallback is what keeps the helper safe for a caller that records a pid it did
-not spawn rather than something either brain reaches today.
+when the pid leads it, and falls back to the single process otherwise.
+ClaudeCodeBrain's own child leads its group after this change, so the fallback
+is what keeps the helper safe for a caller that records a pid it did not spawn
+rather than something that brain reaches today.
 """
 
 import json

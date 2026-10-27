@@ -340,8 +340,8 @@ def user_provider_key(config, user_id: str, provider_id: str) -> str | None:  # 
 
 # --- CLI auth -----------------------------------------------------------------
 #
-# `[brain.claude_code] auth` decides how the `claude` CLI authenticates, for
-# `claude_code` and `tmux_claude` alike: "subscription" carries the OAuth token
+# `[brain.claude_code] auth` decides how the `claude` CLI authenticates:
+# "subscription" carries the OAuth token
 # and no API key or endpoint, "api_key" carries the `anthropic` provider's key
 # and base URL and never the token. The CLI env is built from config by
 # allowlist (`cli_auth_env`); nothing here reads a credential or an endpoint out
@@ -459,7 +459,6 @@ def resolve_process_auth(config, env: Mapping[str, str] | None = None) -> str | 
         cli = cli_unconfigured_reason(config, mode)
         if cli:
             reasons["claude_code"] = cli
-            reasons["tmux_claude"] = cli
         config.brain.unconfigured = LoaderMap(reasons)
     return mode
 
@@ -521,8 +520,8 @@ def cli_auth_env(
 def model_caller_provider(config) -> tuple[str, bool]:  # noqa: ANN001
     """The provider a model-calling skill reaches, and whether it runs the CLI.
 
-    `code_review` runs on the configured brain, and on `claude_code` where that
-    is `tmux_claude`: the CLI brains reach `anthropic`, native its own provider.
+    `code_review` runs on the configured brain: `claude_code` reaches
+    `anthropic`, native its own provider.
     """
     brain = getattr(config, "brain", None)
     if getattr(brain, "kind", "claude_code") == "native":
@@ -621,7 +620,7 @@ def brain_can_run(
     provider_id = ref.split("/", 1)[0]
     if provider_id not in provider_kinds(providers):
         return False
-    if kind in ("claude_code", "tmux_claude"):
+    if kind == "claude_code":
         return provider_id == CLI_PROVIDER
     if kind == "native":
         if not native_provider:
