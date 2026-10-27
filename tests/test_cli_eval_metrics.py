@@ -8,6 +8,7 @@ stream-json, in the shapes the pinned CLI emits for each arm.
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -128,17 +129,54 @@ def test_auth_prefers_the_subscription_token_and_never_forwards_an_auth_token():
         runner.anthropic_auth({"ANTHROPIC_AUTH_TOKEN": "x"})
 
 
-def test_the_spike_argv_widens_the_deny_list_and_restricts_builtins(tmp_path):
+def _request(arm, tmp_path):
+    work = tmp_path / "repo"
+    work.mkdir()
     system = tmp_path / "system.md"
     system.write_text("x")
-    req = runner.base_request(system, "claude-x", None, 60)
-    argv = runner.build_argv("spike", "claude", req, mcp_config=tmp_path / "mcp.json")
-    deny = argv[argv.index("--disallowedTools") + 1:argv.index("--tools")]
-    assert set(deny) == set(runner.HARNESS_DENIED_TOOLS)
-    assert "WebSearch" not in deny
-    assert argv[argv.index("--tools") + 1] == "WebSearch"
-    assert "--strict-mcp-config" in argv
-    assert argv.count("--disallowedTools") == 1
-    builtin = runner.build_argv("builtin", "claude", req)
-    assert builtin[builtin.index("--disallowedTools") + 1:][:2] == ["Agent", "Workflow"]
-    assert "--tools" not in builtin
+    dirs = runner.scratch_dirs(tmp_path / "scratch")
+    return runner.build_request(
+        arm, prompt="go", workdir=work, system_file=system, model="claude-x",
+        effort=None, timeout=60, run=2, path_value="/shim:/usr/bin", dirs=dirs,
+        auth_mode="subscription", auth={"CLAUDE_CODE_OAUTH_TOKEN": "t"},
+    )
+
+
+def test_the_builtin_arm_has_no_harness_and_gives_the_cli_its_env(tmp_path):
+    req = _request("builtin", tmp_path)
+    assert req.harness is None
+    assert req.sandbox_wrap is None and req.native_sandbox_wrap is None
+    assert req.env["CLAUDE_CODE_OAUTH_TOKEN"] == "t"
+    assert req.env["CLAUDE_CODE_DISABLE_CRON"] == "1"
+    assert req.env["SHELLOPTS"] == "pipefail"
+    assert "WebSearch" in req.allowed_tools and req.streaming
+
+
+def test_the_harness_arm_keeps_the_credential_off_the_tool_server_env(tmp_path):
+    req = _request("harness", tmp_path)
+    assert req.harness is not None
+    cli = req.harness.cli_env
+    assert cli["CLAUDE_CODE_OAUTH_TOKEN"] == "t"
+    assert cli["ISTOTA_CLI_AUTH"] == "subscription"
+    assert cli["MCP_TOOL_TIMEOUT"] == str((60 + 30) * 1000)
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in req.env
+    assert req.harness.harness_root.is_dir()
+    assert req.fs_read_roots is None and req.native_sandbox_wrap is None
+    assert req.attempt == 2
+
+
+def test_the_tee_shim_passes_output_and_exit_status_through(tmp_path):
+    fake = tmp_path / "real-claude"
+    fake.write_text('#!/bin/sh\necho "argv=$*"\necho "path=$PATH"\nexit 3\n')
+    fake.chmod(0o755)
+    stream = tmp_path / "out.jsonl"
+    shim_dir = tmp_path / "shim"
+    runner.write_tee_shim(shim_dir, str(fake), stream)
+    proc = subprocess.run(
+        [str(shim_dir / "claude"), "-p", "-"], capture_output=True, text=True,
+        env={"PATH": f"/first:{shim_dir}:/usr/bin:/bin"},
+    )
+    assert proc.returncode == 3
+    assert proc.stdout == stream.read_text()
+    assert "argv=-p -" in proc.stdout
+    assert "path=/first:/usr/bin:/bin" in proc.stdout
