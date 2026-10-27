@@ -68,6 +68,7 @@ Boundaries and operations:
 ```
 src/istota/
 ├── brain/                # Pluggable model invocation (Brain protocol)
+│   ├── _cli_config_dir.py  # A fresh per-run `CLAUDE_CONFIG_DIR`: the O_EXCL writer, the onboarding seed, the credentials link, `make_cli_config_dir` → brain.md
 │   └── _tool_harness.py  # The shared tool-server start (native and CLI) and the CLI tool harness: `tool_harness`, `HarnessHandle`, `set_cli_root`, `release_calls` → brain.md
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
 ├── assignments/          # Goals Istota carries across days: store.py (row access), charter.py, validators.py, lifecycle.py (the one state writer), caller.py (user turn, wake or neither), budget.py (the ledger and ceilings), wakes.py (due wakes, the wake task, pickup, orphan reaping), scratchpad.py (snapshots, user edits, repair), prompt.py (the wake prompt) → assignments.md

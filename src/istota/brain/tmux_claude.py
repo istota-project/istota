@@ -57,6 +57,7 @@ from ._events import (
 )
 from ..llm.providers import CLI_AUTH_VARIABLE, is_model_credential_name
 from ..sandbox.peer_process import report_child_reaped
+from ._cli_config_dir import _link_credentials, _seed_onboarding, _write_new_file
 from ._types import BrainRequest, BrainResult
 from .claude_code import (
     API_RETRY_DELAY_SECONDS,
@@ -145,26 +146,6 @@ def _workdir_name(session: str) -> str:
     for a later task and which a re-run at the same attempt count reuses
     (`confirm_task`, a restart release); the tail makes it neither."""
     return f".tmux-{session}-{secrets.token_hex(8)}"
-
-
-def _write_new_file(path: Path, text: str) -> None:
-    """Create ``path`` 0600 and write it; refuse anything already there.
-
-    ``O_EXCL`` refuses an existing file and a symlink alike, so a link planted
-    between the daemon's ``mkdir`` and this write fails the attempt instead of
-    being written through. The descriptor is closed by hand only where
-    ``os.fdopen`` itself raises, as in ``executor._write_control_file``.
-    """
-    fd = os.open(
-        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
-    )
-    try:
-        handle = os.fdopen(fd, "w", encoding="utf-8")
-    except BaseException:
-        os.close(fd)
-        raise
-    with handle:
-        handle.write(text)
 
 
 class _SessionDir:
@@ -1365,35 +1346,7 @@ class TmuxClaudeBrain:
         }
         _write_new_file(config_dir / "settings.json", json.dumps(settings))
 
-    @staticmethod
-    def _seed_onboarding(config_dir: Path, launch_cwd: Path) -> None:
-        """Pre-seed ``<CLAUDE_CONFIG_DIR>/.claude.json`` so the interactive TUI
-        skips first-run onboarding — the theme picker, the workspace-trust dialog,
-        and the Bypass-Permissions warning.
-
-        The per-session config dir (the §2 clobber fix) is empty each task, so
-        without this the TUI re-runs onboarding every time and blocks at the
-        theme picker (the docker repro). These keys (verified present in the CLI
-        binary) mark the install + this project as already-onboarded. Best-effort
-        + a documented fallback: ``_wait_ready`` still scripts past the dialogs if
-        a CLI version renames a key, so a stale seed degrades to dialog-scripting
-        rather than a hang.
-
-        Not best-effort about the write itself: a failure here means something
-        is already at that name in a directory the daemon just created, and a
-        ``.claude.json`` the CLI then reads is not one to start a session on."""
-        cfg = {
-            "theme": "dark",
-            "hasCompletedOnboarding": True,
-            "bypassPermissionsModeAccepted": True,
-            "projects": {
-                str(launch_cwd): {
-                    "hasTrustDialogAccepted": True,
-                    "hasCompletedProjectOnboarding": True,
-                }
-            },
-        }
-        _write_new_file(config_dir / ".claude.json", json.dumps(cfg))
+    _seed_onboarding = staticmethod(_seed_onboarding)
 
     @staticmethod
     def _cleanup_legacy_hook(req: BrainRequest) -> None:
@@ -1409,27 +1362,7 @@ class TmuxClaudeBrain:
         except OSError:
             pass
 
-    @staticmethod
-    def _link_credentials(config_dir: Path, home: str) -> None:
-        """Point the session's `CLAUDE_CONFIG_DIR` at the subscription token.
-
-        The CLI reads `$CLAUDE_CONFIG_DIR/.credentials.json`, not
-        `~/.claude/.credentials.json`, once `CLAUDE_CONFIG_DIR` is set (the
-        Stage 3 probe), so with the token off the pane's environment the
-        session needs a way to the file. A link at that name to the home copy,
-        which the CLAUDE wrap binds read-only at the same path under
-        "subscription". Nothing when there is no file (a Mac checkout, where
-        the CLI keeps its login in the keychain).
-        """
-        if not home:
-            return
-        target = Path(home) / ".claude" / ".credentials.json"
-        if not target.is_file():
-            return
-        try:
-            os.symlink(target, Path(config_dir) / ".credentials.json")
-        except OSError as e:
-            logger.warning("tmux_brain: could not link the credentials file: %s", type(e).__name__)
+    _link_credentials = staticmethod(_link_credentials)
 
     @staticmethod
     def _write_key_helper(req: BrainRequest) -> BrainRequest | None:

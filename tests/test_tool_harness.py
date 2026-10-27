@@ -127,7 +127,9 @@ def test_the_harness_lays_out_its_directory_socket_and_config(tmp_path, pids, fa
         for path in (harness_dir, handle.config_dir, handle.home_dir, handle.tmp_dir):
             assert stat.S_IMODE(path.stat().st_mode) == 0o700
             assert path.is_dir()
-        assert list(handle.config_dir.iterdir()) == []
+        assert sorted(p.name for p in handle.config_dir.iterdir()) == [
+            ".claude.json", "settings.json",
+        ]
 
         config = json.loads(handle.mcp_config_path.read_text())
         server = config["mcpServers"][HARNESS_MCP_SERVER]

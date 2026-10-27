@@ -64,11 +64,13 @@ from typing import Any
 
 from istota.agent.events import HARNESS_MCP_SERVER
 from istota.async_runtime import AsyncRuntime
+from istota.llm.providers import CLI_AUTH_VARIABLE
 from istota.sandbox import tool_server_protocol as proto
 from istota.sandbox.claude_runtime_env import without_claude_runtime_env
 from istota.sandbox.peer_process import PeerRoots, peer_pid
 from istota.session.tools.dispatch import HARNESS_TEXT_CAP_CHARS, ToolDispatcher
 
+from ._cli_config_dir import _write_new_file, make_cli_config_dir
 from ._types import BrainRequest
 
 logger = logging.getLogger(__name__)
@@ -216,8 +218,6 @@ def write_mcp_config(path: Path, socket_path: str) -> None:
     The CLI passes its own env to the adapter whatever ``env`` says, which is
     why the adapter clears it first thing.
     """
-    from istota.brain.tmux_claude import _write_new_file
-
     document = {
         "mcpServers": {
             HARNESS_MCP_SERVER: {
@@ -313,10 +313,19 @@ class _Bridge:
 
         try:
             harness_dir.mkdir(mode=0o700)
-            for sub in (handle.config_dir, handle.home_dir, handle.tmp_dir):
+            for sub in (handle.home_dir, handle.tmp_dir):
                 sub.mkdir(mode=0o700)
         except OSError as exc:
             return self._start_failed(f"could not create the harness directory: {exc}")
+        try:
+            make_cli_config_dir(
+                harness_dir,
+                spec.cli_env.get(CLI_AUTH_VARIABLE),
+                home=spec.cli_env.get("HOME") or os.environ.get("HOME", ""),
+                launch_cwd=cwd,
+            )
+        except OSError as exc:
+            return self._start_failed(f"could not create the CLI config directory: {exc}")
 
         try:
             self._runtime.start()
