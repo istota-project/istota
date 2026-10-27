@@ -186,11 +186,17 @@ def _run_shared(args, config) -> int:
             print(f"Error: no shared block named {args.name!r}", file=sys.stderr)
             return 1
         from istota.config import shared_block_from_row
-        from istota.briefings.shared_block_runs import REGENERATED
+        from istota.briefings.shared_block_runs import IN_FLIGHT, QUEUED, REGENERATED, run_state
         outcome = _generate_shared_block(config, shared_block_from_row(row))
         with db.get_db(config.db_path) as conn:
             val = db.shared_kv_get(conn, "briefing_shared_blocks", row.name)
-        if outcome == REGENERATED and val:
+            agent = run_state(conn, row.name)["agent"] if outcome in (QUEUED, IN_FLIGHT) else None
+        if agent:
+            print(
+                f"ran {row.name}: {outcome}, task #{agent.get('task_id')}; "
+                "the daemon writes the block when the task finishes"
+            )
+        elif outcome == REGENERATED and val:
             print(f"ran {row.name}: {len(val['value'])} bytes, updated {val['updated_at']}")
         else:
             print(f"ran {row.name}: {outcome}, no content written")

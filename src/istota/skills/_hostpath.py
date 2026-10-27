@@ -570,16 +570,21 @@ def read_resolved_text(path: str | Path, *, flag: str, max_bytes: int) -> str:
     argument in each refusal.
     """
     import os
+    import stat
 
     resolved = Path(path)
     if not resolved.is_file():
         raise ReadRefused(f"{flag} is not a regular file: {resolved}")
     try:
-        fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as e:
         raise ReadRefused(f"could not open {flag}: {e}") from None
     try:
-        size = os.fstat(fd).st_size
+        st = os.fstat(fd)
+        # The leaf can become a FIFO between is_file() and the open.
+        if not stat.S_ISREG(st.st_mode):
+            raise ReadRefused(f"{flag} is not a regular file: {resolved}")
+        size = st.st_size
         if size > max_bytes:
             raise ReadRefused(f"{flag} is {size} bytes, over the {max_bytes}-byte cap")
         with os.fdopen(fd, encoding="utf-8") as fh:

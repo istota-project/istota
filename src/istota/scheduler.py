@@ -11124,6 +11124,15 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
     except Exception as e:
         logger.warning("User config hydration failed: %s", e)
 
+    # check_shared_blocks reads only shared_block_configs, so a one-shot run
+    # seeds it as daemon boot does, or a config-only block never fires here.
+    try:
+        from . import shared_blocks_store as _sbs  # noqa: PLC0415
+
+        _sbs.import_from_config(config.db_path, config.briefings.shared_blocks)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Shared block seeding skipped: %s", e)
+
     # Poll Talk conversations.
     #
     # Gated on signaling the same way `run_daemon` is, and for a sharper reason

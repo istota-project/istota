@@ -205,6 +205,28 @@ class TestSharedEnsure:
         assert self._ensure(config, "--render-mode", "weird") == 1
         assert "--render-mode must be one of" in capsys.readouterr().err
 
+    def test_run_on_an_agent_block_names_the_queued_task(self, config, capsys, monkeypatch):
+        from istota import scheduler
+        from istota.briefings import shared_block_runs
+
+        assert self._ensure(config, "--render-mode", "agent", "--directive", self.PROMPT) == 0
+        capsys.readouterr()
+
+        def fake_generate(cfg, block):
+            with db.get_db(cfg.db_path) as conn:
+                db.shared_kv_set(
+                    conn, shared_block_runs.RUN_NAMESPACE,
+                    shared_block_runs.AGENT_PREFIX + block.name,
+                    json.dumps({"task_id": 41, "captured": False}), "daemon",
+                )
+            return shared_block_runs.QUEUED
+
+        monkeypatch.setattr(scheduler, "_generate_shared_block", fake_generate)
+        assert cli_briefings.dispatch(["shared", "run", "--name", "news"], config) == 0
+        out = capsys.readouterr().out
+        assert "queued, task #41" in out
+        assert "no content written" not in out
+
 
 class TestArchive:
     def test_archive_list_show(self, config, capsys):

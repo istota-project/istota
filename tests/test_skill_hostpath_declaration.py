@@ -971,3 +971,20 @@ class TestEverySkillMainGoesThroughIt:
 
 def test_the_modes_are_the_six_the_spec_names():
     assert set(MODES) == {READ, EGRESS, WRITE, REPO, REMOTE, NOT_A_PATH}
+
+
+class TestReadResolvedTextRefusesAFifo:
+    """A leaf swapped for a FIFO after the ``is_file`` check must be refused
+    on the descriptor, not block the skill CLI until the proxy times out."""
+
+    def test_a_fifo_past_the_name_check_is_refused_without_blocking(self, tmp_path, monkeypatch):
+        import os
+        import pathlib
+
+        from istota.skills import _hostpath
+
+        fifo = tmp_path / "prompt.md"
+        os.mkfifo(fifo)
+        monkeypatch.setattr(pathlib.Path, "is_file", lambda self: True)
+        with pytest.raises(_hostpath.ReadRefused, match="not a regular file"):
+            _hostpath.read_resolved_text(fifo, flag="--prompt-file", max_bytes=1024)
