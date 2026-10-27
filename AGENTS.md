@@ -108,6 +108,7 @@ src/istota/
 ├── logging_setup.py
 ├── transport/            # Transport seam: IncomingMessage, registry, ingest, routing, talk/ email/ sms/ whatsapp/ ntfy/ istota_file/ repl/ web/
 │   ├── participants.py   # Who wrote a turn: principal / guest / agent, and the one multi-human predicate → transport.md
+│   ├── route_checks.py   # Save-time checks on a route a user picked: which rooms and surfaces a descriptor or a briefing's token may name; `RouteRefused` → transport.md
 │   ├── whatsapp/groups.py  # A Baileys group as a room: roster, registration, addressing, D14 leave → whatsapp.md
 │   ├── email/threads.py  # A multi-party email thread as a room: minting, participants, reply-all → transport.md
 │   └── email/private_room.py  # The user's private email room's ref: mail between the user and the bot alone → transport.md
