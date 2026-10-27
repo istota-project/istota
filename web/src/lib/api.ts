@@ -5590,8 +5590,27 @@ export async function getBriefingPathSuggestions(q = ''): Promise<{ paths: strin
 
 export interface SharedBlockRunAnswer {
   id: string;
-  outcome: 'regenerated' | 'kept_prior' | 'brain_unavailable' | 'failed' | 'not_found';
+  // An agent block answers `queued` or `in_flight`; its task's outcome arrives
+  // later, in `SharedBlockStatus.agent`.
+  outcome:
+    | 'regenerated'
+    | 'kept_prior'
+    | 'brain_unavailable'
+    | 'failed'
+    | 'not_found'
+    | 'queued'
+    | 'in_flight';
   at: string;
+}
+
+export interface SharedBlockAgentRun {
+  task_id: number;
+  briefing_name: string;
+  queued_at: string;
+  captured: boolean;
+  outcome?: 'regenerated' | 'kept_prior' | 'failed' | 'discarded';
+  answered_at?: string;
+  consecutive_failures?: number;
 }
 
 export interface SharedBlockStatus {
@@ -5599,6 +5618,8 @@ export interface SharedBlockStatus {
   // the daemon's last answer to one.
   run_pending: { id: string; name: string; at: string } | null;
   run_answered: SharedBlockRunAnswer | null;
+  // An agent block's last task, queued by cron or Run now.
+  agent: SharedBlockAgentRun | null;
   last_run_at: string | null;
   value_updated_at: string | null;
   value_preview: string | null;

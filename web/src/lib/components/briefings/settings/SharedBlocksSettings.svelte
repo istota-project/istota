@@ -8,6 +8,7 @@
     deleteSharedBlock,
     runSharedBlock,
     type SharedBlock,
+    type SharedBlockAgentRun,
     type SharedBlockRunAnswer,
   } from '$lib/api';
   import {
@@ -61,6 +62,7 @@
   }
   let sharedBlocks = $state<SharedBlock[]>([]);
   let sharedAllowedKinds = $state<string[]>(['browse', 'markets', 'email']);
+  let sharedRenderModes = $state<string[]>(['synthesis', 'structured']);
   let sharedBlockTimezone = $state<string>('UTC');
   let sharedDraft = $state<SharedDraft | null>(null);
   let sharedEditingName = $state<string | null>(null); // non-null = editing existing
@@ -83,6 +85,7 @@
     const resp = await getSharedBlocks();
     sharedBlocks = resp.shared_blocks;
     if (resp.allowed_source_kinds?.length) sharedAllowedKinds = resp.allowed_source_kinds;
+    if (resp.render_modes?.length) sharedRenderModes = resp.render_modes;
     if (resp.shared_block_timezone) sharedBlockTimezone = resp.shared_block_timezone;
   }
 
@@ -186,7 +189,12 @@
       sharedError = 'Name is required.';
       return;
     }
-    const sources = sharedDraft.sources.map((s) => ({ kind: s.kind, config: s.config }));
+    // An agent block takes no sources and is never trusted; the draft keeps
+    // both so switching back to synthesis loses nothing.
+    const agent = sharedDraft.render_mode === 'agent';
+    const sources = agent
+      ? []
+      : sharedDraft.sources.map((s) => ({ kind: s.kind, config: s.config }));
     sharedSaving = true;
     try {
       await putSharedBlock({
@@ -195,7 +203,7 @@
         title: sharedDraft.title.trim(),
         directive: sharedDraft.directive.trim() || null,
         render_mode: sharedDraft.render_mode,
-        trusted: sharedDraft.trusted,
+        trusted: agent ? false : sharedDraft.trusted,
         enabled: sharedDraft.enabled,
         sources,
       });
@@ -229,6 +237,25 @@
     brain_unavailable: 'model unavailable, kept prior content',
     failed: 'failed',
     not_found: 'block was missing',
+    queued: 'task queued',
+    in_flight: 'a run was already in progress',
+  };
+
+  // An agent block's task runs for minutes after Run now is answered, so the
+  // wait follows the task until the daemon captures its result.
+  const AGENT_RUN_POLL_MS = 3000;
+  const AGENT_RUN_WAIT_MS = 1_800_000;
+  const AGENT_RUN_OUTCOMES: Record<string, string> = {
+    kept_prior: 'The task gave no usable answer; the previous content was kept.',
+    failed: 'The task failed; the previous content was kept. See the daemon log.',
+    discarded:
+      'The block was deleted or left agent mode before the task finished; nothing was written.',
+  };
+  const AGENT_RUN_LABELS: Record<NonNullable<SharedBlockAgentRun['outcome']>, string> = {
+    regenerated: 'regenerated',
+    kept_prior: 'no usable answer, kept prior content',
+    failed: 'failed, kept prior content',
+    discarded: 'discarded',
   };
 
   async function doRunShared(name: string) {
@@ -275,6 +302,11 @@
       }
       const answer = block.status.run_answered;
       if (answer?.id === id) {
+        if (answer.outcome === 'queued' || answer.outcome === 'in_flight') {
+          const taskId = block.status.agent?.task_id;
+          if (taskId !== undefined) await waitForAgentRun(name, taskId);
+          return;
+        }
         const message = SHARED_RUN_OUTCOMES[answer.outcome];
         if (answer.outcome === 'failed') notifyError(`${name}: ${message}`);
         else if (message) notifyWarning(`${name}: ${message}`);
@@ -285,6 +317,31 @@
       `${name}: the daemon has not answered yet. It may still be generating; ` +
         'if this persists, check that the daemon is running.',
     );
+  }
+
+  async function waitForAgentRun(name: string, taskId: number) {
+    const until = Date.now() + AGENT_RUN_WAIT_MS;
+    while (Date.now() < until) {
+      const block = sharedBlocks.find((b) => b.name === name);
+      if (!block) {
+        notifyWarning(`${name}: ${SHARED_RUN_OUTCOMES.not_found}`);
+        return;
+      }
+      const run = block.status.agent;
+      // A later run replaced this one; the block's own line reports it.
+      if (!run || run.task_id !== taskId) return;
+      if (run.captured) {
+        const message = run.outcome ? AGENT_RUN_OUTCOMES[run.outcome] : undefined;
+        if (run.outcome === 'failed') notifyError(`${name}: ${message}`);
+        else if (message) notifyWarning(`${name}: ${message}`);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, AGENT_RUN_POLL_MS));
+      if (!active) return;
+      await reloadSharedBlocks();
+      if (!active) return;
+    }
+    notifyWarning(`${name}: task #${taskId} is still running. Its outcome will show on the block.`);
   }
 
   async function doDeleteShared(name: string) {
@@ -298,10 +355,14 @@
     }
   }
 
-  const RENDER_OPTIONS: SelectOption[] = [
-    { value: 'synthesis', label: 'Synthesis (summarize)' },
-    { value: 'structured', label: 'Structured (verbatim)' },
-  ];
+  const RENDER_LABELS: Record<string, string> = {
+    synthesis: 'Synthesis (summarize)',
+    structured: 'Structured (verbatim)',
+    agent: 'Agent (research task)',
+  };
+  const renderOptions: SelectOption[] = $derived(
+    sharedRenderModes.map((m) => ({ value: m, label: RENDER_LABELS[m] ?? m })),
+  );
 
   $effect(() => {
     reloadSharedBlocks()
@@ -317,7 +378,7 @@
 
 <Card
   title="Shared blocks ({sharedBlocks.length})"
-  description="Structured blocks are stored verbatim with no model call. Only user-agnostic sources are allowed."
+  description="Structured blocks are stored verbatim with no model call. Only user-agnostic sources are allowed. Agent blocks run their task prompt as a sandboxed research task."
 >
   {#snippet actions()}
     <Button size="sm" onclick={startNewShared}>New shared block</Button>
@@ -375,6 +436,22 @@
                     />
                   </div>
                 {/if}
+                {#if b.status.agent}
+                  {@const run = b.status.agent}
+                  <div class="caption sb-agent">
+                    {#if !run.captured}
+                      Agent: queued, task #{run.task_id}
+                    {:else}
+                      Agent: <span class:sb-run-failed={run.outcome === 'failed'}
+                        >{run.outcome ? AGENT_RUN_LABELS[run.outcome] : 'finished'}</span
+                      >,
+                      <Timestamp value={run.answered_at} format="datetime" options={LAST_RUN} />
+                      {#if run.outcome !== 'regenerated' && (run.consecutive_failures ?? 0) > 1}
+                        ({run.consecutive_failures} in a row)
+                      {/if}
+                    {/if}
+                  </div>
+                {/if}
               </td>
               <td class="col-actions">
                 <KebabMenu items={sharedMenu(b)} ariaLabel="Shared block actions" />
@@ -418,7 +495,7 @@
       <Field label="Render mode">
         <Select
           value={sharedDraft.render_mode}
-          options={RENDER_OPTIONS}
+          options={renderOptions}
           onValueChange={(v) => sharedDraft && (sharedDraft.render_mode = v)}
           ariaLabel="Render mode"
           fullWidth
@@ -428,54 +505,65 @@
         <Field label="Directive" hint="How to synthesize the sources.">
           <TextArea rows={2} bind:value={sharedDraft.directive} />
         </Field>
+      {:else if sharedDraft.render_mode === 'agent'}
+        <Field
+          label="Task prompt"
+          hint="Runs as a sandboxed research task with the browse skill. Its answer is published verbatim as the block."
+        >
+          <TextArea rows={16} bind:value={sharedDraft.directive} />
+        </Field>
       {/if}
       <div class="sb-grid">
-        <Field label="Trusted" checkbox hint="Only for injection-safe content.">
-          <Checkbox bind:checked={sharedDraft.trusted} />
-        </Field>
+        {#if sharedDraft.render_mode !== 'agent'}
+          <Field label="Trusted" checkbox hint="Only for injection-safe content.">
+            <Checkbox bind:checked={sharedDraft.trusted} />
+          </Field>
+        {/if}
         <Field label="Enabled" checkbox>
           <Checkbox bind:checked={sharedDraft.enabled} />
         </Field>
       </div>
 
-      <div class="vstack" style:--vstack-gap="var(--space-2)">
-        <div class="shared-sources-head">
-          <span class="field-label muted">Sources</span>
-          <Button variant="secondary" size="sm" onclick={addSharedSource}>+ Add source</Button>
-        </div>
-        {#if sharedDraft.sources.length === 0}
-          <p class="caption">No sources — add at least one browse/markets/email source.</p>
-        {/if}
-        {#each sharedDraft.sources as src, i (i)}
-          <div class="sb-source">
-            <span class="sb-source-remove">
-              <IconButton
-                label="Remove source {i + 1}"
-                title="Remove source"
-                size="sm"
-                danger
-                onclick={() => removeSharedSource(i)}
-                icon={X}
-              />
-            </span>
-            <Field label="Type">
-              <Select
-                value={src.kind}
-                options={sharedKindOptions}
-                onValueChange={(v) => setSharedSourceKind(i, v)}
-                ariaLabel="Source kind"
-                fullWidth
-              />
-            </Field>
-            <SourceConfigFields
-              kind={src.kind}
-              config={src.config}
-              onChange={(patch) => patchSharedSourceConfig(i, patch)}
-              {browseOptions}
-            />
+      {#if sharedDraft.render_mode !== 'agent'}
+        <div class="vstack" style:--vstack-gap="var(--space-2)">
+          <div class="shared-sources-head">
+            <span class="field-label muted">Sources</span>
+            <Button variant="secondary" size="sm" onclick={addSharedSource}>+ Add source</Button>
           </div>
-        {/each}
-      </div>
+          {#if sharedDraft.sources.length === 0}
+            <p class="caption">No sources — add at least one browse/markets/email source.</p>
+          {/if}
+          {#each sharedDraft.sources as src, i (i)}
+            <div class="sb-source">
+              <span class="sb-source-remove">
+                <IconButton
+                  label="Remove source {i + 1}"
+                  title="Remove source"
+                  size="sm"
+                  danger
+                  onclick={() => removeSharedSource(i)}
+                  icon={X}
+                />
+              </span>
+              <Field label="Type">
+                <Select
+                  value={src.kind}
+                  options={sharedKindOptions}
+                  onValueChange={(v) => setSharedSourceKind(i, v)}
+                  ariaLabel="Source kind"
+                  fullWidth
+                />
+              </Field>
+              <SourceConfigFields
+                kind={src.kind}
+                config={src.config}
+                onChange={(patch) => patchSharedSourceConfig(i, patch)}
+                {browseOptions}
+              />
+            </div>
+          {/each}
+        </div>
+      {/if}
     </div>
     {#snippet footer()}
       <Button variant="secondary" onclick={cancelShared}>Cancel</Button>
@@ -524,7 +612,8 @@
     min-width: 9rem;
   }
   /* The cell is nowrap for the timestamp; the outcome line may be long. */
-  .sb-run {
+  .sb-run,
+  .sb-agent {
     white-space: normal;
   }
   .sb-run-failed {
