@@ -55,10 +55,8 @@ export function pickerOptions(
   const models = provider ? choices.models.filter((m) => m.provider === provider) : choices.models;
   const mixed = models.some((m) => m.enabled) && models.some((m) => !m.enabled);
   for (const m of models) {
-    const id = m.ref.slice(m.provider.length + 1);
-    const name = m.name && m.name !== id ? ` (${m.name})` : '';
     out.push({
-      label: `${m.ref}${name}${mixed && m.enabled ? ENABLED_MARK : ''}`,
+      label: `${m.ref}${mixed && m.enabled ? ENABLED_MARK : ''}`,
       value: m.ref,
       efforts: m.efforts,
     });

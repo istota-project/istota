@@ -21,6 +21,8 @@
     /** False when nothing on the page can be changed, or the field is read-only. */
     editable: boolean;
     readOnlyReason?: string | null;
+    /** The `[models.aliases]` doc from the example, shown above the aliases. */
+    hint?: string | null;
   }
 
   let {
@@ -29,6 +31,7 @@
     nativeSources,
     editable,
     readOnlyReason = null,
+    hint = null,
   }: Props = $props();
 
   let newName = $state('');
@@ -53,6 +56,7 @@
   one set_toml op.
 -->
 <div class="model-aliases">
+  {#if hint}<p class="caption">{hint}</p>{/if}
   {#each form as row (row.name)}
     <div class="alias vstack" style:--vstack-gap="var(--space-2)" data-testid={`alias-${row.name}`}>
       <h3 class="micro-label">{row.name}</h3>
@@ -80,7 +84,6 @@
     <div class="alias-add control-row">
       <Input
         bind:value={newName}
-        monospace
         autocomplete="off"
         spellcheck="false"
         placeholder="new alias name"
@@ -120,7 +123,6 @@
     display: flex;
     align-items: center;
     min-height: var(--control-height-lg);
-    font-family: var(--font-mono);
     font-size: var(--text-xs);
     overflow-wrap: anywhere;
   }

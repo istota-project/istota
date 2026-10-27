@@ -56,7 +56,7 @@ describe('pickerOptions', () => {
       'openrouter/vendor/x',
     ]);
     expect(options[0].label).toBe('smart → claude-opus-5-5');
-    expect(options[1].label).toBe('anthropic/claude-opus-5-5 (Claude Opus 5.5) · enabled');
+    expect(options[1].label).toBe('anthropic/claude-opus-5-5 · enabled');
   });
 
   it("marks the enabled models only on a list that mixes them, an admin's", () => {

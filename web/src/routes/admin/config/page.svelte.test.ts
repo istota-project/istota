@@ -1089,7 +1089,7 @@ describe('model fields', () => {
     await fireEvent.focus(screen.getByRole('combobox', { name: 'model model' }));
     expect(
       screen.getByRole('option', {
-        name: 'anthropic/claude-sonnet-5-5 (Claude Sonnet 5.5) · enabled',
+        name: 'anthropic/claude-sonnet-5-5 · enabled',
       }),
     ).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: /kimi/ })).toBeNull();
@@ -1193,7 +1193,7 @@ describe('the [models.aliases] editor', () => {
     await fireEvent.focus(general.getByRole('combobox', { name: 'Claude Code and tmux model' }));
     await fireEvent.mouseDown(
       screen.getByRole('option', {
-        name: 'anthropic/claude-sonnet-5-5 (Claude Sonnet 5.5) · enabled',
+        name: 'anthropic/claude-sonnet-5-5 · enabled',
       }),
     );
     expect(await reviewedOps()).toEqual([

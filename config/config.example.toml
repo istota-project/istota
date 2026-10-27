@@ -280,10 +280,12 @@ features = []
 # pane-text heuristics pinned to a claude CLI version; override one if a CLI
 # reword breaks readiness detection.
 # [brain.tmux]
-# model = "opus"                   # this brain's own default model (ISSUE-418);
-# effort = "high"                   #   same values as [brain.claude_code] above,
-#                                   #   same anthropic namespace, same binary.
-#                                   #   "" = the CLI's own default
+# This brain's default model when the task pins none, with the same values as
+# [brain.claude_code] model. Empty = the CLI's own default.
+# model = "opus"
+# This brain's default effort when the task pins none: low, medium, high,
+# xhigh or max. Empty = the CLI's own default.
+# effort = "high"
 # fallback_trip_threshold = 5       # consecutive launch failures before the circuit opens
 # fallback_cooldown_seconds = 300   # how long the circuit stays open (routes to the
 #                                   # configured [brain] fallback, if any)
@@ -304,10 +306,12 @@ features = []
 # subscription usage poll. Read whatever `kind` is set to, since a fallback or
 # a routing override can reach it.
 # [brain.claude_code]
-# This brain's default model and effort when the task pins none. A canonical
-# id, a shortcut ("opus"), a role tier ("smart"), optionally with ":high".
+# This brain's default model when the task pins none: a canonical id, a
+# shortcut ("opus") or a role tier ("smart"), optionally with ":high".
 # Empty = the CLI's own default.
 # model = "opus"
+# This brain's default effort when the task pins none: low, medium, high,
+# xhigh or max. Empty = the CLI's own default.
 # effort = "high"
 #
 # How the `claude` CLI authenticates, for this brain and tmux. "subscription"
@@ -1048,22 +1052,29 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # ============================================================================
 # Model catalogue [models]
 # ============================================================================
+# The models each provider lists, which users may pick, and per-model patches.
+# [models]
+#
 # The file holding a key used only to list Anthropic's models (GET /v1/models),
 # so a new model shows up without a release. A path, never the key: the key is
 # read from the file at each fetch and is in no environment. Empty is the
 # stack's secret file, /run/secrets/istota_anthropic_listing_key. Create the key
 # in an Anthropic Console workspace with a spend limit of zero.
-#
-# enabled: what a non-admin may pick with !model, !room model, the room
-# settings and a CRON.md job. Globs over provider/id refs, case-insensitive;
-# an entry may carry :effort, which is the effort offered with that model and
-# does not narrow the match. An admin picks from the whole catalogue, and an
-# alias is always selectable. Unset, it is anthropic/* plus native's own model
-# when native has a provider. A deprecated model is matched only by an entry
-# naming it exactly. `istota doctor` warns about a pattern matching nothing.
-# [models]
 # anthropic_listing_key_file = ""
+#
+# Which models a non-admin may pick with !model, !room model, the room settings
+# and a CRON.md job. Globs over provider/id refs, case-insensitive; an entry may
+# carry :effort, which is the effort offered with that model and does not narrow
+# the match. An admin picks from the whole catalogue, and an alias is always
+# selectable. Unset, it is anthropic/* plus native's own model when native has a
+# provider. A deprecated model is matched only by an entry naming it exactly.
+# `istota doctor` warns about a pattern matching nothing.
 # enabled = ["anthropic/*", "openrouter/z-ai/glm-5*"]
+#
+# Per-model patches over the catalogue, keyed by provider/id, such as a context
+# window a provider reports wrongly. One naming a model no catalogue layer has
+# is ignored. Usually written as [models.overrides."<provider/id>"] tables.
+# overrides = {}
 
 # ============================================================================
 # Model alias registry [models.aliases] (operator override) — optional

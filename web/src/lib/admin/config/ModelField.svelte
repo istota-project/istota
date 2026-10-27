@@ -143,7 +143,6 @@
         {#if other}
           <Input
             value={otherText}
-            monospace
             autocomplete="off"
             spellcheck="false"
             placeholder={source === ALIASES ? 'alias' : 'model id'}
@@ -159,7 +158,6 @@
             options={labels}
             filter={filterOptions(options, text)}
             limit={500}
-            monospace
             ariaLabel={`${label} model`}
             placeholder={source === ALIASES ? 'An alias' : 'A model'}
             onValueChange={onText}

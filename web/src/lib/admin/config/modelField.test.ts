@@ -81,7 +81,7 @@ describe('modelOptions', () => {
   it('ends a provider’s list with Other…, marking enabled and deprecated models', () => {
     const labels = modelOptions(catalogue, 'anthropic').map((o) => o.label);
     expect(labels).toEqual([
-      'anthropic/claude-sonnet-5-5 (Claude Sonnet 5.5) · enabled',
+      'anthropic/claude-sonnet-5-5 · enabled',
       'anthropic/claude-sonnet-4-5 · deprecated',
       OTHER_LABEL,
     ]);

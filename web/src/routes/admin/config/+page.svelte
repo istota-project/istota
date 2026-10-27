@@ -703,6 +703,7 @@
                 {nativeSources}
                 editable={aliasesEditable}
                 readOnlyReason={field.read_only_reason}
+                hint={field.doc}
               />
             {:else}
               <FieldControl

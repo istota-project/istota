@@ -85,7 +85,6 @@
         <span class="pattern-input">
           <Input
             value={pattern}
-            monospace
             autocomplete="off"
             spellcheck="false"
             aria-label={`${label} entry ${index + 1}`}
@@ -121,7 +120,6 @@
           options={options.map((o) => o.label)}
           filter={filterOptions(options)}
           limit={500}
-          monospace
           ariaLabel={`${label} model to add`}
           placeholder="Add a model"
           onSelect={addRef}

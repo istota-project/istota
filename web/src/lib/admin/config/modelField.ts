@@ -126,13 +126,11 @@ export function modelOptions(catalogue: ConfigModelCatalogue, source: string): P
 function providerOptions(source: ConfigCatalogueSource): PickerOption[] {
   const mixed = source.models.some((m) => m.enabled) && source.models.some((m) => !m.enabled);
   return source.models.map((m) => {
-    const id = m.ref.slice(source.id.length + 1);
-    const name = m.name && m.name !== id ? ` (${m.name})` : '';
     const marks = [mixed && m.enabled ? 'enabled' : '', m.deprecated ? 'deprecated' : '']
       .filter(Boolean)
       .map((mark) => ` · ${mark}`)
       .join('');
-    return { label: `${m.ref}${name}${marks}`, value: m.ref, efforts: m.efforts };
+    return { label: `${m.ref}${marks}`, value: m.ref, efforts: m.efforts };
   });
 }
 

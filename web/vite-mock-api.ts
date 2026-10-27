@@ -4870,6 +4870,16 @@ const MOCK_DOCS: Record<string, string> = {
   'sms.twilio.auth_token': 'The Twilio auth token. Stored sealed, never shown.',
   'logging.max_size_mb': 'The size at which the log file rotates.',
   'web.session_secret_key': 'Signs web session cookies. Changing it signs everyone out.',
+  'models.enabled':
+    'Which models a non-admin may pick with !model, !room model, the room settings and a CRON.md job. Globs over provider/id refs. An admin picks from the whole catalogue, and an alias is always selectable.',
+  'models.aliases':
+    'Rebind a model alias, or add one for `!model <name>`. A target may carry effort as a modifier ("opus:high").',
+  'brain.native.model':
+    'An id the provider lists. The tiers (fast, general, smart) mean this model on native unless [models.aliases] remaps them.',
+  'brain.claude_code.model':
+    "This brain's default model when the task pins none. Empty = the CLI's own default.",
+  'brain.claude_code.effort':
+    "This brain's default effort when the task pins none. Empty = the CLI's own default.",
 };
 
 function mockIso(ms = Date.now()): string {
