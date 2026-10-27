@@ -504,7 +504,10 @@ class TestTheCredentialsBind:
             return cmd
 
         monkeypatch.setattr(executor, "build_bwrap_cmd", fake)
-        box = executor.build_daemon_sandbox(config, "alice", cli_auth_mode="api_key")
+        box = executor.build_daemon_sandbox(
+            config, "alice", cli_auth_mode="api_key",
+            profile=executor.SandboxProfile.CLAUDE,
+        )
         box.wrap(["claude"])
         assert seen["cli_auth_mode"] == "api_key"
 

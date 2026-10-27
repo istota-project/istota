@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
     from .assignments.prompt import WakePrompt as AssignmentWakePrompt
     from .brain import BrainResult
+    from .brain._types import HarnessSpec
 
 from . import db
 from istota.mail import support as email_support
@@ -1105,10 +1106,11 @@ def _write_control_file(path: Path, text: str) -> None:
 class DaemonSandbox(NamedTuple):
     """What a task-less daemon-side model call needs to run confined.
 
-    ``wrap`` goes on the request's ``sandbox_wrap`` and ``work_dir`` on its
-    ``cwd``; the two travel together because bwrap chdirs into ``work_dir``
-    inside the namespace, so a request naming a different directory would
-    disagree with its own wrap.
+    ``wrap`` goes on the request (``native_sandbox_wrap`` for a NATIVE wrap,
+    through :attr:`tool_server_wrap`) and ``work_dir`` on its ``cwd``; the two
+    travel together because bwrap chdirs into ``work_dir`` inside the
+    namespace, so a request naming a different directory would disagree with
+    its own wrap.
 
     ``wrap`` is ``None`` where there is no namespace to build, and
     ``refused`` is what tells the two reasons apart. ``False`` means nothing
@@ -1126,6 +1128,26 @@ class DaemonSandbox(NamedTuple):
     #: scopes withheld), and the caller removes it with
     #: :func:`release_daemon_sandbox` once the model call is over.
     scratch: bool = False
+
+    @property
+    def tool_server_wrap(self) -> Callable[[list[str]], list[str]] | None:
+        """The wrap for a request's tool server, or ``None`` when refused.
+
+        On a deployment with ``sandbox_enabled = false`` this is the identity
+        rather than ``None``: the tool harness refuses a request carrying
+        ``fs_read_roots`` and no wrap, because on the task path that pairing
+        only arises on a sandboxed shape. A direct caller always names its
+        roots, so it says "nothing is sandboxed here" explicitly.
+        """
+        if self.wrap is not None:
+            return self.wrap
+        if self.refused:
+            return None
+        return _no_namespace
+
+
+def _no_namespace(cmd: list[str]) -> list[str]:
+    return cmd
 
 
 def daemon_work_dir(config: Config | None, user_id: str) -> Path:
@@ -1209,6 +1231,7 @@ def build_daemon_sandbox(
     user_id: str,
     *,
     extra_ro_binds: Iterable[Path] | None = None,
+    profile: SandboxProfile,
     withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
     cli_auth_mode: object = None,
 ) -> DaemonSandbox:
@@ -1224,15 +1247,17 @@ def build_daemon_sandbox(
     their filesystem boundary from bubblewrap and ignore ``fs_read_roots``
     entirely, so without a wrap that toolset ran host-side as the daemon user.
 
-    ``SandboxProfile.CLAUDE``, following ``heartbeat.py``'s task-less
-    ``claude -p``: the process being wrapped is that CLI, which needs its own
-    binary, its credential and its state directory. The synthetic ``db.Task``
-    is what the per-user binds key on; ``conversation_token`` stays empty, so no
-    channel directory is bound.
+    ``profile`` is required, as on ``build_bwrap_cmd``, so a forgotten one is a
+    ``TypeError``. The shipped callers pass ``SandboxProfile.NATIVE``: the
+    process being wrapped is the tool server, the CLI runs outside on the tool
+    harness, and the namespace holds no Claude runtime and no credential.
+    ``CLAUDE`` remains for a caller that wraps the CLI itself, until the old
+    path is removed. The synthetic ``db.Task`` is what the per-user binds key
+    on; ``conversation_token`` stays empty, so no channel directory is bound.
 
-    No ``net_proxy_sock``, so no ``--unshare-net``: these calls run in the
-    daemon's own network namespace and have to reach the provider. That is the
-    same posture ``heartbeat.py`` takes, and it is why
+    No ``net_proxy_sock``, so no ``--unshare-net``: the tool server runs in the
+    daemon's own network namespace, as the wrapped CLI did before it. That is
+    the same posture ``heartbeat.py`` takes, and it is why
     :func:`build_model_cli_env` carries the proxy and CA-bundle names forward.
 
     ``extra_ro_binds`` is how the caller names the document. The
@@ -1311,8 +1336,9 @@ def build_daemon_sandbox(
     every real scope name (so the workspace stays bound).
 
     ``cli_auth_mode`` is the `claude` CLI's auth mode for the call, which
-    decides whether `~/.claude/.credentials.json` is bound; ``None`` takes the
-    mode this process resolved (`llm.providers.process_cli_auth`).
+    decides whether `~/.claude/.credentials.json` is bound under ``CLAUDE``;
+    ``None`` takes the mode this process resolved
+    (`llm.providers.process_cli_auth`). ``NATIVE`` binds no credential either way.
 
     Never raises; a failure to read the user's resources costs the resource
     binds, not the wrap.
@@ -1378,7 +1404,7 @@ def build_daemon_sandbox(
     def _wrap(raw_cmd: list[str]) -> list[str]:
         return build_bwrap_cmd(
             raw_cmd, config, task, is_admin, user_resources, work_dir,
-            extra_ro_binds=binds, profile=SandboxProfile.CLAUDE,
+            extra_ro_binds=binds, profile=profile,
             withheld_scopes=withheld, cli_auth_mode=cli_auth_mode,
         )
 
@@ -3899,6 +3925,43 @@ def harness_wanted(
     if not allowed_tools:
         return False
     return native_sandbox_wrap is not None or not effective_sandboxing(config)
+
+
+#: The task id a direct caller's harness root is named under. No task stands
+#: behind these calls; `build_daemon_sandbox`'s synthetic task is id 0 too.
+DAEMON_HARNESS_TASK_ID = 0
+
+
+def build_daemon_harness(
+    config: Config,
+    user_id: str,
+    *,
+    brain_kind: str,
+    timeout_seconds: int,
+    harness_root: Path | None = None,
+) -> "HarnessSpec | None":
+    """The `HarnessSpec` for a direct caller's tool-granting request, or None.
+
+    The direct callers (health OCR, the code reviewer, the doctor's probe)
+    build their own `BrainRequest`. On a `claude_code` brain their CLI runs on
+    the tool harness like a task's, its tools in a tool server under the
+    caller's NATIVE wrap, and this is their one builder. ``None`` for any other
+    kind, which reads no harness. The root is
+    ``{temp_dir}/.harness/{user_id}/task_0`` unless the caller names one; each
+    harness makes its own directory under it, so concurrent calls do not
+    collide. Raises ``RuntimeError`` when that root cannot be made.
+    """
+    if brain_kind != "claude_code":
+        return None
+    from .brain._types import HarnessSpec
+
+    if harness_root is None:
+        harness_root = ensure_task_harness_dir(config, user_id, DAEMON_HARNESS_TASK_ID)
+    return HarnessSpec(
+        cli_env=build_harness_cli_env(config, user_id, timeout_seconds=timeout_seconds),
+        harness_root=harness_root,
+        bash_spill_full_output=config.brain.native.bash_spill_full_output,
+    )
 
 
 def harness_denies_web_fetch(task: "db.Task", config: Config) -> bool:

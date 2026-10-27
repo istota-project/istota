@@ -11,16 +11,19 @@ six builders; the roots and the sandbox wrap cover the three that grant a tool,
 since the other three grant none and have nothing to confine.
 
 The roots and the wrap are not two spellings of one boundary. ``fs_read_roots``
-is read by ``NativeBrain`` and by nothing else; the two Claude brains ignore it
-and take their filesystem boundary from bubblewrap, which is what
-``sandbox_wrap`` supplies (ISSUE-397). Closing only the first left the default
-deployment running the CLI's whole default toolset host-side as the daemon user.
+is what the tool server enforces in the error-message layer, and bubblewrap,
+which ``native_sandbox_wrap`` supplies, is the namespace it runs in
+(ISSUE-397). Before the tool harness the Claude CLI ignored the roots and was
+wrapped itself; closing only the first left the default deployment running the
+CLI's whole default toolset host-side as the daemon user. Now every brain's
+tools run in the tool server, and on ``claude_code`` the CLI runs outside it on
+the harness (cli-brain-tools-only-path, Stage 1).
 
 The AST guards are what keep the *class* closed rather than the six instances.
 They walk the source for ``BrainRequest(...)`` construction sites and require,
 of each one, that ``env=`` is not the daemon's own environment and that a site
 granting a file tool also passes ``fs_read_roots`` and a non-``None``
-``sandbox_wrap``. A seventh builder that reproduces any part of ISSUE-395 or
+``native_sandbox_wrap``. A seventh builder that reproduces any part of ISSUE-395 or
 ISSUE-397 fails here rather than shipping.
 
 What the guards do **not** catch, stated so nobody reads more into a green run:
@@ -137,7 +140,7 @@ def _wrapped(req: BrainRequest, cmd: list[str]) -> list[str]:
     assertions below would pass against an unwrapped command.
     """
     with patch("istota.executor._bwrap_available", return_value=True):
-        return req.sandbox_wrap(list(cmd))
+        return req.native_sandbox_wrap(list(cmd))
 
 
 def _mounts(argv: list[str]) -> list[tuple[int, str, str, str]]:
@@ -238,17 +241,99 @@ class TestTheOcrRequestNamesItsDocument:
 
 
 class TestTheOcrRequestRunsInANamespace:
-    """ISSUE-397: the Claude brains take their boundary from bubblewrap.
+    """ISSUE-397: the tools take their boundary from bubblewrap.
 
-    ``fs_read_roots`` above is read by ``NativeBrain`` alone.
-    ``ClaudeCodeBrain`` ignores it, and
-    ``build_claude_cli_flags`` reads a non-empty ``allowed_tools`` as the signal
-    to add ``--dangerously-skip-permissions`` with no ``--allowedTools``
-    allowlist at all — so ``allowed_tools=["Read"]`` gets the CLI's whole
-    default toolset, ``Bash`` and ``Write`` included. On the default deployment
-    that ran host-side as the daemon user, driven by a prompt whose input is an
-    uploaded document.
+    Before it, ``allowed_tools=["Read"]`` on a Claude brain was the CLI's whole
+    default toolset, ``Bash`` and ``Write`` included, host-side as the daemon
+    user. The wrap is now NATIVE and goes round the tool server; on
+    ``claude_code`` the CLI runs outside it on the tool harness.
     """
+
+    @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
+    def test_the_wrap_is_the_native_profile(
+        self, module, capture_request, make_config, tmp_path, monkeypatch,
+        _bwrap_flag_cache,
+    ):
+        """No Claude runtime, credential or state directory in the namespace.
+
+        The control is the same sandbox under CLAUDE, which does bind them, so
+        an argv that names no Claude directory for some other reason cannot
+        pass. ``HOME`` is a scratch one holding both, since the plan binds
+        only what exists.
+        """
+        from istota.executor import SandboxProfile, build_daemon_sandbox
+
+        home = tmp_path / "home"
+        claude_paths = {str(home / ".claude"), str(home / ".local" / "bin")}
+        for path in claude_paths:
+            Path(path).mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        config = make_config()
+        module._call_brain(
+            "extract this", config, read_path=_document(tmp_path), user_id="alice"
+        )
+
+        argv = _wrapped(capture_request[0], ["tool-server"])
+        assert not claude_paths & set(argv), argv
+        claude_box = build_daemon_sandbox(
+            config, "alice", profile=SandboxProfile.CLAUDE
+        )
+        with patch("istota.executor._bwrap_available", return_value=True):
+            control = claude_box.wrap(["claude"])
+        assert claude_paths <= set(control)
+
+    @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
+    def test_a_claude_code_brain_gets_the_harness(
+        self, module, monkeypatch, make_config, tmp_path
+    ):
+        """The CLI runs on the tool harness, so its ``Read`` is the tool
+        server's under the NATIVE wrap and the document root."""
+        import istota.brain as brain_mod
+        import istota.executor as executor_mod
+
+        captured: list[BrainRequest] = []
+        brain = _CapturingBrain(captured)
+        brain.kind = "claude_code"
+        monkeypatch.setattr(brain_mod, "make_brain", lambda _cfg: brain)
+        monkeypatch.setattr(executor_mod, "persist_brain_usage", lambda *a, **k: None)
+        config = make_config()
+        document = _document(tmp_path)
+
+        module._call_brain("extract this", config, read_path=document, user_id="alice")
+
+        req = captured[0]
+        assert req.harness is not None
+        assert req.harness.harness_root == (
+            config.temp_dir.resolve() / ".harness" / "alice" / "task_0"
+        )
+        assert req.harness.harness_root.is_dir()
+        assert req.harness.cli_env["MCP_TOOL_TIMEOUT"] == str((180 + 30) * 1000)
+        assert req.native_sandbox_wrap is not None
+        assert req.fs_read_roots == [document]
+
+    @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
+    def test_no_harness_without_a_tool_or_on_another_brain(
+        self, module, monkeypatch, make_config, tmp_path
+    ):
+        import istota.brain as brain_mod
+        import istota.executor as executor_mod
+
+        captured: list[BrainRequest] = []
+        cli = _CapturingBrain(captured)
+        cli.kind = "claude_code"
+        native = _CapturingBrain(captured)
+        native.kind = "native"
+        monkeypatch.setattr(executor_mod, "persist_brain_usage", lambda *a, **k: None)
+
+        monkeypatch.setattr(brain_mod, "make_brain", lambda _cfg: cli)
+        module._call_brain("extract this", make_config(), user_id="alice")
+        monkeypatch.setattr(brain_mod, "make_brain", lambda _cfg: native)
+        module._call_brain(
+            "extract this", make_config(), read_path=_document(tmp_path), user_id="alice"
+        )
+
+        assert [r.harness for r in captured] == [None, None]
+        assert captured[1].native_sandbox_wrap is not None
 
     @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
     def test_the_request_carries_a_wrap(
@@ -260,7 +345,7 @@ class TestTheOcrRequestRunsInANamespace:
             "extract this", make_config(), read_path=document, user_id="alice"
         )
 
-        assert capture_request[0].sandbox_wrap is not None
+        assert capture_request[0].native_sandbox_wrap is not None
 
     @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
     def test_the_text_native_branch_is_wrapped_too(
@@ -275,7 +360,7 @@ class TestTheOcrRequestRunsInANamespace:
         """
         module._call_brain("extract this", make_config(), user_id="alice")
 
-        assert capture_request[0].sandbox_wrap is not None
+        assert capture_request[0].native_sandbox_wrap is not None
 
     @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
     def test_the_wrap_builds_a_bubblewrap_argv(
@@ -378,8 +463,8 @@ class TestTheOcrRequestRunsInANamespace:
         assert Path(req.cwd) == user_temp
 
     @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
-    def test_no_wrap_where_there_is_no_sandbox(
-        self, module, capture_request, make_config, tmp_path
+    def test_no_namespace_where_there_is_no_sandbox(
+        self, module, capture_request, make_config, tmp_path, _bwrap_flag_cache
     ):
         """The operator switched it off, so nothing here is confined either.
 
@@ -387,7 +472,9 @@ class TestTheOcrRequestRunsInANamespace:
         Docker stack the flag reads true and the wrap is a non-``None`` closure
         that `build_bwrap_cmd` renders inert when the bwrap probe fails. Either
         way OCR ends up equal to an ordinary task on that host, which is the
-        whole claim.
+        whole claim. The wrap is the identity rather than ``None``, because the
+        tool harness refuses roots with no wrap (the task path pairs those only
+        on a sandboxed shape), and it builds no argv even with bwrap present.
         """
         config = make_config()
         config.security.sandbox_enabled = False
@@ -396,7 +483,7 @@ class TestTheOcrRequestRunsInANamespace:
             "extract this", config, read_path=_document(tmp_path), user_id="alice"
         )
 
-        assert capture_request[0].sandbox_wrap is None
+        assert _wrapped(capture_request[0], ["tool-server"]) == ["tool-server"]
 
     @pytest.mark.parametrize("module", _ocr_modules(), ids=_ocr_module_ids())
     def test_a_tool_grant_that_cannot_be_confined_does_not_run(
@@ -464,12 +551,12 @@ class TestTheDaemonWorkDir:
         The fallback value is also the refusal signal — ``build_daemon_sandbox``
         declines to wrap when it gets the root back.
         """
-        from istota.executor import build_daemon_sandbox, daemon_work_dir
+        from istota.executor import SandboxProfile, build_daemon_sandbox, daemon_work_dir
 
         config = make_config()
 
         assert daemon_work_dir(config, user_id) == config.temp_dir.resolve()
-        sandbox = build_daemon_sandbox(config, user_id)
+        sandbox = build_daemon_sandbox(config, user_id, profile=SandboxProfile.NATIVE)
         assert sandbox.wrap is None
         assert sandbox.refused, "a wanted namespace that could not be built"
 
@@ -482,7 +569,7 @@ class TestTheDaemonWorkDir:
         scratch directory in alice's namespace. ``get_user_repos_dir`` runs
         both halves for this reason and so does this.
         """
-        from istota.executor import build_daemon_sandbox, daemon_work_dir
+        from istota.executor import SandboxProfile, build_daemon_sandbox, daemon_work_dir
 
         config = make_config()
         root = config.temp_dir
@@ -491,7 +578,7 @@ class TestTheDaemonWorkDir:
         (root / "alice").symlink_to(root / "bob")
 
         assert daemon_work_dir(config, "alice") == root.resolve()
-        assert build_daemon_sandbox(config, "alice").refused
+        assert build_daemon_sandbox(config, "alice", profile=SandboxProfile.NATIVE).refused
 
     def test_the_sandbox_flag_being_off_is_not_a_refusal(self, make_config):
         """Two reasons for a ``None`` wrap, and only one of them fails closed.
@@ -499,14 +586,15 @@ class TestTheDaemonWorkDir:
         ``sandbox_enabled = false`` is a deployment that confines no task at
         all; extraction runs there the way everything else does.
         """
-        from istota.executor import build_daemon_sandbox
+        from istota.executor import SandboxProfile, build_daemon_sandbox
 
         config = make_config()
         config.security.sandbox_enabled = False
 
-        sandbox = build_daemon_sandbox(config, "alice")
+        sandbox = build_daemon_sandbox(config, "alice", profile=SandboxProfile.NATIVE)
         assert sandbox.wrap is None
         assert not sandbox.refused
+        assert sandbox.tool_server_wrap(["x"]) == ["x"]
 
 
 class TestTheOcrRequestEnvironment:
@@ -771,7 +859,7 @@ class TestNoBuilderGrantsAFileToolWithoutASandbox:
             tools = _keyword(node, "allowed_tools")
             if not _grants_file_tool(tools):
                 continue
-            value = _keyword(node, "sandbox_wrap")
+            value = _keyword(node, "native_sandbox_wrap")
             if value is None or _is_literal_none(value):
                 rel = path.relative_to(SRC.parent.parent)
                 offenders.append(f"{rel}:{node.lineno}")

@@ -987,7 +987,10 @@ class TestTheReviewerRequest:
         assert run_dir.resolve().parent == (tmp_path / "temp" / ".review" / "admin").resolve()
         assert run_dir.name.startswith("run-")
         assert Path(req.cwd) == run_dir / "tree"
-        assert req.sandbox_wrap is not None
+        assert req.native_sandbox_wrap is not None
+        assert req.sandbox_wrap is None
+        # The stub brain is no `claude_code` one, so no harness is built.
+        assert req.harness is None
         assert seen["tree_files"] == ["AGENTS.md", "app.py"]
         assert envelope["reviewer"]["tools"] is True
         assert envelope["snapshot"]["files"] == 2
@@ -1012,6 +1015,7 @@ class TestTheReviewerRequest:
         assert len(calls) == 1
         user_id, kwargs = calls[0]
         assert user_id == "admin"
+        assert kwargs["profile"] is executor.SandboxProfile.NATIVE
         withheld = kwargs["withheld_scopes"]
         assert {"files", "memory", "developer"} <= withheld
         # The whole scope list, not the three named: every private skill too.
@@ -1030,7 +1034,31 @@ class TestTheReviewerRequest:
         assert tooled.allowed_tools == ["Read", "Grep", "Glob"]
         assert reformat.allowed_tools == []
         assert reformat.sandbox_wrap is None
+        assert reformat.native_sandbox_wrap is None
+        assert reformat.harness is None
         assert not reformat.fs_read_roots
+
+    def test_a_claude_code_reviewer_runs_on_the_tool_harness(
+        self, capsys, tmp_path, worktree, review_env, developer_config, stub_brain
+    ):
+        """The CLI runs outside the namespace and its Read, Grep and Glob in the
+        tool server under the NATIVE wrap. The spec is built here, in the skill
+        process, from config: no task stands behind the call, so its root is
+        `task_0`. The text-only reformat gets none."""
+        developer_config()
+        stub_brain.kind = "claude_code"
+        stub_brain.replies["reviewer"] = ["prose, not json", findings_json(finding())]
+        code, envelope = drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+
+        assert code == 0, envelope
+        tooled, reformat = stub_brain.requests
+        assert tooled.harness is not None
+        assert tooled.harness.harness_root == (
+            (tmp_path / "temp").resolve() / ".harness" / "admin" / "task_0"
+        )
+        assert tooled.native_sandbox_wrap is not None
+        assert tooled.fs_read_roots and Path(tooled.fs_read_roots[0]).name.startswith("run-")
+        assert reformat.harness is None
 
     def test_a_refused_namespace_reviews_text_only(
         self, capsys, tmp_path, worktree, review_env, developer_config, stub_brain

@@ -407,6 +407,8 @@ def cmd_run(args):
     # `briefings.generate`, and a top-level import from any of these callers
     # risks closing a cycle back through it.
     from istota.executor import (
+        SandboxProfile,
+        build_daemon_harness,
         build_daemon_sandbox,
         build_model_cli_env,
         persist_brain_usage,
@@ -444,6 +446,7 @@ def cmd_run(args):
             user_id,
             extra_ro_binds=[snap.run_dir],
             withheld_scopes=_reviewer_withheld_scopes(config),
+            profile=SandboxProfile.NATIVE,
         )
         built["sandbox"] = box
         return box
@@ -477,19 +480,34 @@ def cmd_run(args):
         # and returns `partial_text`. Token totals still come only from the
         # terminal frame, which a timed-out run never emits.
         if tools:
-            # The engine passes both only when the namespace was built. A
-            # `None` wrap here means the deployment confines no task
-            # (`sandbox_enabled = false`); `fs_read_roots` still bounds the
-            # native brain, and the read-only grant keeps the Claude CLI to
-            # Read, Grep and Glob.
-            sandbox_wrap = sandbox.wrap
+            # The engine passes both only when the namespace was built. The
+            # tool server runs in it on every brain; on `claude_code` the CLI
+            # runs outside on the tool harness, built here from config because
+            # this process is the skill CLI and holds `ISTOTA_CLI_AUTH` and
+            # the reviewer's credential in its own env. On a deployment that
+            # confines no task the wrap is the identity and `fs_read_roots`
+            # bounds the tools.
+            try:
+                harness = build_daemon_harness(
+                    config, user_id,
+                    brain_kind=getattr(brain, "kind", ""),
+                    timeout_seconds=timeout,
+                )
+            except RuntimeError as exc:
+                logger.error("code_review %s could not start: %s", agent, exc)
+                return engine.ReviewerReply(
+                    ok=False, error=f"{agent} failed: the tool harness: {exc}",
+                    model=model,
+                )
+            tool_server_wrap = sandbox.tool_server_wrap
             req = BrainRequest(
                 prompt=prompt,
                 allowed_tools=["Read", "Grep", "Glob"],
                 cwd=snapshot.tree_dir,
                 env=build_model_cli_env(config),
                 fs_read_roots=[snapshot.run_dir],
-                sandbox_wrap=sandbox_wrap,
+                native_sandbox_wrap=tool_server_wrap,
+                harness=harness,
                 timeout_seconds=timeout,
                 model=model,
                 effort=effort or "",

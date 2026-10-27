@@ -168,7 +168,9 @@ def _every_env(config, make_task, monkeypatch, tmp_path) -> dict[str, dict]:
         envs[f"scheduler_skill_task:{skill}"] = captured.pop("env")
     envs["heartbeat"] = heartbeat._build_heartbeat_skill_env(config, "alice")
 
-    box = executor.build_daemon_sandbox(config, "alice")
+    box = executor.build_daemon_sandbox(
+        config, "alice", profile=executor.SandboxProfile.CLAUDE,
+    )
     envs["daemon_sandbox_argv"] = {str(i): part for i, part in enumerate(box.wrap(["claude"]) if box.wrap else [])}
     assert skills_env  # imported for the dispatcher the runtime used
     return envs

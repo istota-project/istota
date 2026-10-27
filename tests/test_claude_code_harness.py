@@ -255,6 +255,38 @@ class TestTheHarnessRoot:
         for level in (path, path.parent, path.parent.parent):
             assert stat.S_IMODE(level.stat().st_mode) == 0o700
 
+    def test_a_direct_caller_gets_a_spec_on_claude_code_only(self, root_config):
+        """`build_daemon_harness`: health OCR, the code reviewer and the doctor's
+        probe have no task, so their root is `task_0`; any other brain kind
+        reads no harness and gets none."""
+        spec = executor.build_daemon_harness(
+            root_config, "alice", brain_kind="claude_code", timeout_seconds=100,
+        )
+        assert spec.harness_root == get_task_harness_dir(root_config, "alice", 0)
+        assert spec.harness_root.is_dir()
+        assert spec.cli_env["MCP_TOOL_TIMEOUT"] == str(130 * 1000)
+        for name, value in HARNESS_CLI_SWITCHES.items():
+            assert spec.cli_env[name] == value
+        assert executor.build_daemon_harness(
+            root_config, "alice", brain_kind="native", timeout_seconds=100,
+        ) is None
+
+    def test_a_direct_caller_may_name_its_own_root(self, root_config, tmp_path):
+        mine = tmp_path / "doctor-root"
+        mine.mkdir()
+        spec = executor.build_daemon_harness(
+            root_config, "alice", brain_kind="claude_code", timeout_seconds=10,
+            harness_root=mine,
+        )
+        assert spec.harness_root == mine
+        assert not (root_config.temp_dir / ".harness").exists()
+
+    def test_a_direct_caller_with_no_root_to_make_raises(self, root_config):
+        with pytest.raises(RuntimeError):
+            executor.build_daemon_harness(
+                root_config, "", brain_kind="claude_code", timeout_seconds=10,
+            )
+
     @pytest.mark.parametrize("user_id", [".harness", ".HARNESS", ".control", "", "..", "a/b"])
     def test_a_user_id_that_names_a_root_or_escapes_is_refused(self, root_config, user_id):
         assert get_task_harness_dir(root_config, user_id, 1) is None

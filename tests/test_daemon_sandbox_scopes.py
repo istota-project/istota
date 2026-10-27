@@ -22,9 +22,12 @@ import pytest
 from istota.config import DeveloperConfig
 from istota.executor import (
     DAEMON_SCRATCH_DIR_NAME,
+    SandboxProfile,
     build_daemon_sandbox,
     release_daemon_sandbox,
 )
+
+NATIVE = SandboxProfile.NATIVE
 
 WITHHELD = frozenset({"files", "memory", "developer"})
 
@@ -87,6 +90,7 @@ def test_withheld_scopes_drop_the_repos_workspace_and_talk_binds(
 
     sandbox = build_daemon_sandbox(
         dev_config, "alice", extra_ro_binds=[run_dir], withheld_scopes=WITHHELD,
+        profile=NATIVE,
     )
     argv = _argv(sandbox)
 
@@ -113,7 +117,7 @@ def test_control_without_withheld_scopes_binds_them_all(
     user_dir = (dev_config.workspace_path / "Users" / "alice").resolve()
     talk = (dev_config.workspace_path / "Talk").resolve()
 
-    sandbox = build_daemon_sandbox(dev_config, "alice", extra_ro_binds=[run_dir])
+    sandbox = build_daemon_sandbox(dev_config, "alice", extra_ro_binds=[run_dir], profile=NATIVE)
     argv = _argv(sandbox)
 
     dests = _dests(argv)
@@ -135,7 +139,7 @@ def test_withheld_scopes_bind_a_private_work_dir_not_the_shared_one(
     or ``emissary-task-0`` directory: ``task_temp_dir`` makes that choice and
     only ``execute_task`` calls it.
     """
-    sandbox = build_daemon_sandbox(dev_config, "alice", withheld_scopes=WITHHELD)
+    sandbox = build_daemon_sandbox(dev_config, "alice", withheld_scopes=WITHHELD, profile=NATIVE)
     argv = _argv(sandbox)
 
     dests = _dests(argv)
@@ -155,8 +159,8 @@ def test_withheld_scopes_bind_a_private_work_dir_not_the_shared_one(
 
 
 def test_each_call_gets_its_own_work_dir_and_release_removes_it(dev_config):
-    first = build_daemon_sandbox(dev_config, "alice", withheld_scopes=WITHHELD)
-    second = build_daemon_sandbox(dev_config, "alice", withheld_scopes=WITHHELD)
+    first = build_daemon_sandbox(dev_config, "alice", withheld_scopes=WITHHELD, profile=NATIVE)
+    second = build_daemon_sandbox(dev_config, "alice", withheld_scopes=WITHHELD, profile=NATIVE)
     assert first.work_dir != second.work_dir
     (first.work_dir / "left-by-the-model").write_text("x")
 
@@ -167,7 +171,7 @@ def test_each_call_gets_its_own_work_dir_and_release_removes_it(dev_config):
 
 
 def test_release_leaves_the_shared_work_dir_alone(dev_config):
-    sandbox = build_daemon_sandbox(dev_config, "alice")
+    sandbox = build_daemon_sandbox(dev_config, "alice", profile=NATIVE)
     release_daemon_sandbox(sandbox)
     assert sandbox.work_dir.is_dir()
 
@@ -178,7 +182,7 @@ def test_a_planted_symlink_at_the_scratch_root_refuses(dev_config, tmp_path):
     dev_config.temp_dir.mkdir(parents=True, exist_ok=True)
     (dev_config.temp_dir / DAEMON_SCRATCH_DIR_NAME).symlink_to(elsewhere)
 
-    sandbox = build_daemon_sandbox(dev_config, "alice", withheld_scopes=WITHHELD)
+    sandbox = build_daemon_sandbox(dev_config, "alice", withheld_scopes=WITHHELD, profile=NATIVE)
 
     assert sandbox.refused
     assert sandbox.wrap is None
@@ -186,6 +190,53 @@ def test_a_planted_symlink_at_the_scratch_root_refuses(dev_config, tmp_path):
 
 
 def test_a_bare_string_is_refused_rather_than_read_as_characters(dev_config):
-    sandbox = build_daemon_sandbox(dev_config, "alice", withheld_scopes="files")
+    sandbox = build_daemon_sandbox(dev_config, "alice", withheld_scopes="files", profile=NATIVE)
     assert sandbox.refused
     assert sandbox.wrap is None
+    assert sandbox.tool_server_wrap is None
+
+
+# -- the profile -----------------------------------------------------------------
+
+
+def test_the_profile_is_required(dev_config):
+    """As on `build_bwrap_cmd`: a forgotten profile is a TypeError, not CLAUDE."""
+    with pytest.raises(TypeError):
+        build_daemon_sandbox(dev_config, "alice")
+
+
+@pytest.mark.parametrize("profile", list(SandboxProfile))
+def test_the_profile_reaches_the_bwrap_builder(dev_config, monkeypatch, profile):
+    from istota import executor
+
+    seen = {}
+
+    def _fake(cmd, *args, **kwargs):
+        seen.update(kwargs)
+        return cmd
+
+    monkeypatch.setattr(executor, "build_bwrap_cmd", _fake)
+    build_daemon_sandbox(dev_config, "alice", profile=profile).wrap(["x"])
+    assert seen["profile"] is profile
+
+
+def test_the_tool_server_wrap_is_the_wrap_when_one_was_built(dev_config):
+    sandbox = build_daemon_sandbox(dev_config, "alice", profile=NATIVE)
+    assert sandbox.wrap is not None
+    assert sandbox.tool_server_wrap is sandbox.wrap
+
+
+def test_the_tool_server_wrap_is_the_identity_with_the_sandbox_off(dev_config):
+    """Not `None`: the harness refuses roots with no wrap, and a direct caller
+    always names its roots. Nothing is sandboxed here, so nothing wraps."""
+    dev_config.security.sandbox_enabled = False
+    sandbox = build_daemon_sandbox(dev_config, "alice", profile=NATIVE)
+    assert sandbox.wrap is None and not sandbox.refused
+    with patch("istota.executor._bwrap_available", return_value=True):
+        assert sandbox.tool_server_wrap(["tool-server"]) == ["tool-server"]
+
+
+def test_a_refused_sandbox_has_no_tool_server_wrap(dev_config):
+    sandbox = build_daemon_sandbox(dev_config, "", profile=NATIVE)
+    assert sandbox.refused
+    assert sandbox.tool_server_wrap is None

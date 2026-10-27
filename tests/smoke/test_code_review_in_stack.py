@@ -3,7 +3,7 @@
 `code_review run` hands its one reviewer `Read`, `Grep` and `Glob` over a
 snapshot of the reviewed commit (`{temp_dir}/.review/{user}/run-<hex>/`). The
 unit tier checks the request: `allowed_tools`, `fs_read_roots=[run_dir]`, a
-`sandbox_wrap` built with every scope withheld. None of that says what a tool
+NATIVE `native_sandbox_wrap` built with every scope withheld. None of that says what a tool
 call actually returns once the daemon runs it, which is what this file asks.
 
 In the native class, a task commits a change in its own repos subtree and runs
@@ -16,18 +16,17 @@ answer (the claude class's shape is described on the class and its script):
    database, which must both come back as tool errors without their content;
 3. a fixed JSON answer, which must arrive in the envelope the task reads.
 
-**Which boundary this witnesses depends on the brain, so there are two
-scenarios.** `NativeBrain` ignores `sandbox_wrap` (that is the Claude CLI's
-namespace, ISSUE-389) and is given no `native_sandbox_wrap` on this path, as in
-`health/_brain_call.py`; its tool server is confined by `fs_read_roots`, and
-the refusals in the first class are that rule's ("path is outside the allowed
-workspace"). That class does not exercise the namespace
-`build_daemon_sandbox(withheld_scopes=...)` builds, which only the Claude
-brains enter. The second class does (ISSUE-614): it runs the same CLI on the
-`claude_code` brain, with the image's own `claude` talking to the scripted
-endpoint's Anthropic half, so the reviewer's reads are refused by bubblewrap
-and by nothing else. The recorded negative controls are in the commit messages
-of the two classes.
+**Two scenarios, one tool server.** On both brains the reviewer's tools run
+in a tool server under the NATIVE wrap `build_daemon_sandbox(withheld_scopes=...)`
+builds, confined by `fs_read_roots=[run_dir]` inside it, and the refusals are
+that rule's ("path is outside the allowed workspace"). The first class runs it
+on `NativeBrain`. The second (ISSUE-614, moved onto the tool harness by the
+cli-brain-tools-only-path spec, Stage 1) runs the same CLI on the `claude_code`
+brain, with the image's own `claude` running outside the namespace and talking
+to the scripted endpoint's Anthropic half: its calls are the harness's
+`mcp__istota__*` tools, relayed into the tool server. The bubblewrap layer
+under the roots is the linux tier's to witness
+(`tests/linux/test_daemon_sandbox_real.py`, `tests/linux/test_cli_harness_real.py`).
 
 **The native class's reads are relative to `tree/`**, not absolute as `reviewer.md` asks,
 because the run directory's name is random and a script is fixed before the
@@ -254,8 +253,8 @@ CLAUDE_CONFIG = "/tmp/review-witness-claude.toml"
 
 READ_TEMP = "review-read-temp"
 
-#: What the `claude` CLI's Read answers for a path that is not there.
-CLAUDE_NOT_FOUND = "File does not exist."
+#: The harness's MCP tool names, as the CLI calls them.
+HARNESS_PREFIX = "mcp__istota__"
 
 #: The reviewer's own budget, passed as `--timeout` so a hung review ends
 #: inside the exec bound below rather than as a `TimeoutExpired` with a
@@ -263,28 +262,23 @@ CLAUDE_NOT_FOUND = "File does not exist."
 CLAUDE_REVIEW_TIMEOUT = 120
 CLAUDE_EXEC_TIMEOUT = 300
 
-#: Where `build_snapshot` puts run dirs on the lean shape
-#: (`{temp_dir}/.review/{user}/run-<hex>/`).
-REVIEW_ROOT = "/data/tmp/.review/testuser"
-
 #: Both turns are the reviewer's: there is no task here, so nothing precedes
-#: or follows them on the endpoint. The tree witness is a `Grep` over the
-#: review root rather than a `Read`, because the run dir's name is random and
-#: a relative path does not work here: inside the wrap the CLI's working
-#: directory is the scratch work dir, not `tree/` (bwrap's `--chdir` wins over
-#: `req.cwd`, which is why `reviewer.md` asks for absolute paths). The pattern
-#: is the sentinel's first half, so the whole sentinel can only come back from
-#: the file.
+#: or follows them on the endpoint. The tree witness is a `Grep` relative to
+#: the tool server's working directory, which is `req.cwd`, the snapshot's
+#: `tree/`, because the run dir's name is random. The pattern is the
+#: sentinel's first half, so the whole sentinel can only come back from the
+#: file.
 CLAUDE_SCRIPT = [
     {"tool_calls": [
-        {"id": READ_TREE, "name": "Grep", "arguments": {
+        {"id": READ_TREE, "name": HARNESS_PREFIX + "Grep", "arguments": {
             "pattern": TREE_SENTINEL.rsplit("-", 1)[0],
-            "path": REVIEW_ROOT,
+            "path": ".",
             "output_mode": "content",
         }},
-        {"id": READ_WORKSPACE, "name": "Read", "arguments": {"file_path": WORKSPACE_FILE}},
-        {"id": READ_DB, "name": "Read", "arguments": {"file_path": DB_FILE}},
-        {"id": READ_TEMP, "name": "Read", "arguments": {"file_path": TEMP_FILE}},
+        {"id": READ_WORKSPACE, "name": HARNESS_PREFIX + "Read",
+         "arguments": {"file_path": WORKSPACE_FILE}},
+        {"id": READ_DB, "name": HARNESS_PREFIX + "Read", "arguments": {"file_path": DB_FILE}},
+        {"id": READ_TEMP, "name": HARNESS_PREFIX + "Read", "arguments": {"file_path": TEMP_FILE}},
     ]},
     {"text": REVIEWER_ANSWER},
 ]
@@ -355,14 +349,15 @@ def planted_with_temp(planted):
 
 @pytest.mark.profile(profiles.FORGE.name)
 class TestTheClaudeReviewerIsConfinedByItsNamespace:
-    """The reviewer's `claude` process, inside `build_daemon_sandbox`'s wrap.
+    """The reviewer's `claude` process on the tool harness.
 
-    The CLI runs with `--dangerously-skip-permissions` and ignores
-    `fs_read_roots`, so every refusal here is bubblewrap's: the workspace is
-    unbound because `files` is withheld, the database directory is masked, and
-    the per-user temp dir is unbound because a withheld scope moves the work
-    dir to a fresh scratch dir. The tree read coming back shows the namespace
-    binds the snapshot and that the CLI could read at all.
+    The CLI runs outside `build_daemon_sandbox`'s NATIVE wrap; its Read, Grep
+    and Glob are the harness's MCP tools, relayed into a tool server inside
+    the wrap and confined by `fs_read_roots=[run_dir]`. The tree read coming
+    back shows the calls reached the tool server and that it binds the
+    snapshot; the three refusals are its roots', in the image, on the path the
+    CLI's calls take. A result at all for the `mcp__istota__` calls is the
+    witness that the harness ran: the CLI has no tool by that name otherwise.
     """
 
     @pytest.mark.script(CLAUDE_SCRIPT)
@@ -392,7 +387,7 @@ class TestTheClaudeReviewerIsConfinedByItsNamespace:
         )
 
         # The tree line, not just the sentinel: `meta/diff.patch` carries it too.
-        assert f"/tree/{CHANGED_FILE}:2:{TREE_SENTINEL}" in results[READ_TREE], (
+        assert f"{CHANGED_FILE}:2:{TREE_SENTINEL}" in results[READ_TREE], (
             "the changed file did not come back from tree/, so the refusals "
             "below could be a namespace that binds nothing\n"
             f"--- result ---\n{results[READ_TREE]}"
@@ -407,12 +402,11 @@ class TestTheClaudeReviewerIsConfinedByItsNamespace:
                 f"the claude reviewer read {path}: it is inside the reviewer's "
                 f"namespace\n--- result ---\n{content}"
             )
-            # "Does not exist" is the namespace's answer: an unbound path and
-            # the database mask both read as absent. A CLI-side refusal would
-            # be an error with a different text.
-            assert content.startswith(ERROR_PREFIX + CLAUDE_NOT_FOUND), (
-                f"reading {path} did not fail as a path absent from the "
-                f"namespace\n--- result ---\n{content}"
+            # The tool server's roots refuse it, as in the native class. A
+            # CLI-side refusal would be an error with a different text.
+            assert content.startswith(ERROR_PREFIX) and REFUSAL in content, (
+                f"reading {path} did not fail at the tool server's roots"
+                f"\n--- result ---\n{content}"
             )
 
         assert answer["status"] == "ok", answer
