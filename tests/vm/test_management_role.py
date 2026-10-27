@@ -305,7 +305,8 @@ def _daemon_starts(vm: lima.Vm, since: str, until: str) -> int:
     listing = vm.out(
         f"docker events --since {since} --until {until} --filter event=start "
         f"--filter label=com.docker.compose.project=istota "
-        f"--filter label=com.docker.compose.service=daemon --format '{{{{.ID}}}}'")
+        f"--filter label=com.docker.compose.service=daemon "
+        f"--filter label=com.docker.compose.oneoff=False --format '{{{{.Actor.ID}}}}'")
     return len(listing.split())
 
 

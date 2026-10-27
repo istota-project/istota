@@ -541,7 +541,8 @@ def container(vm: Vm, service: str) -> str:
     """The running container of a stack service, or ''."""
     return vm.out(
         f"docker ps -q --filter label=com.docker.compose.project=istota "
-        f"--filter label=com.docker.compose.service={shlex.quote(service)} | head -1"
+        f"--filter label=com.docker.compose.service={shlex.quote(service)} "
+        f"--filter label=com.docker.compose.oneoff=False | head -1"
     )
 
 
@@ -802,13 +803,17 @@ def _deep_merge(base: dict, over: dict) -> dict:
     return out
 
 
+def stack_config(vm: Vm) -> dict:
+    """The stack's config.toml, parsed."""
+    return json.loads(vm.out(
+        f"python3 -c 'import json,tomllib;print(json.dumps(tomllib.load(open(\"{STACK}/config/config.toml\",\"rb\"))))'"
+    ))
+
+
 def apply_config(vm: Vm, delta: dict, *, drop: tuple[str, ...] = ()) -> int:
     """Merge `delta` over config.toml, less the top-level keys in `drop`,
     through `istota-stack apply`; its exit code."""
-    current = json.loads(vm.out(
-        f"python3 -c 'import json,tomllib;print(json.dumps(tomllib.load(open(\"{STACK}/config/config.toml\",\"rb\"))))'"
-    ))
-    merged = _deep_merge(current, delta)
+    merged = _deep_merge(stack_config(vm), delta)
     for key in drop:
         merged.pop(key, None)
     plan = {"config": merged}
