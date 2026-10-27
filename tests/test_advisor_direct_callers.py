@@ -59,6 +59,11 @@ _KNOWN_SITES = {
     # for on every turn. Before ISSUE-272 this site spawned `claude` directly
     # and never set the disable var at all — the channel really was open.
     "context.py",
+    # The doctor's model probe, moved off its own `claude -p` spawn onto the
+    # tool harness (cli-brain-tools-only-path, Stage 1). It grants Bash and
+    # leaves `advisor=""`, so `ClaudeCodeBrain` sets
+    # `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` as for every other direct caller.
+    "doctor.py",
 }
 
 
