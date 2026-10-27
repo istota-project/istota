@@ -13,9 +13,9 @@ anything is refused here instead of being answered ``ok``. The resolvers in
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from urllib.parse import urlsplit
 
+from istota.briefings import pickers
 from istota.briefings.models import (
     _SLUG_RE,
     SOURCE_KINDS,
@@ -44,23 +44,12 @@ def _positive_number(value: object) -> bool:
     return type(value) in (int, float) and value > 0
 
 
-def _picker_request(app_config) -> SimpleNamespace:
-    # The picker routes read the config off `request.app.state`; they are called
-    # here as they stand until they move out of the web layer.
-    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(istota_config=app_config)))
-
-
 def _feed_options(app_config, user_id: str) -> dict:
-    from istota.briefings.routes import get_feed_options
-
-    return get_feed_options(_picker_request(app_config), user={"username": user_id})
+    return pickers.feed_options(app_config, user_id)
 
 
 def _shared_block_names(app_config) -> set[str]:
-    from istota.briefings.routes import get_shared_block_options
-
-    options = get_shared_block_options(_picker_request(app_config), user={})["options"]
-    return {option["name"] for option in options}
+    return {option["name"] for option in pickers.shared_block_options(app_config)}
 
 
 def _check_rss(app_config, user_id: str, config: dict) -> None:

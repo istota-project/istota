@@ -118,6 +118,13 @@ REGISTRY: dict[tuple[str, str, str], Entry] = {
         note="one dest for every op flag, so their order survives; only --set-file and "
              "--insert-file name a host file, inside the value, resolved by parse_ops",
     ),
+    ("briefings", "options", "query"): Entry(
+        SCOPED, guard="istota.briefings.pickers.path_check", helper="_resolve_user_path",
+        note="a path relative to the user's own folder, resolved as the todos/notes "
+             "resolver does and read with read_owner_text; a READ stamp would rewrite "
+             "it to an absolute path the source config cannot store. The same value "
+             "filters path_suggestions, which walks only workspace_root(user)",
+    ),
 
     # -- Remote: the path names somewhere else -------------------------------
     ("nextcloud", "share.list", "path"): Entry(REMOTE, note="Nextcloud path"),

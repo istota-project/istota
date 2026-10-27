@@ -34,6 +34,7 @@ from typing import NoReturn
 import click
 
 from istota.briefings import db as bdb
+from istota.briefings import pickers
 from istota.briefings.models import (
     BLOCK_TEMPLATES,
     RENDER_MODES,
@@ -224,6 +225,45 @@ def briefings_kinds():
         "render_modes": list(RENDER_MODES),
         "block_templates": BLOCK_TEMPLATES,
     })
+
+
+_PATH_KINDS = ("todos", "reminders", "notes")
+
+
+@cli.command("options")
+@click.option("--kind", required=True, help="Source kind to list choices for")
+@click.option(
+    "--q", "query", default="",
+    help="For todos/reminders/notes: a substring to filter by, or a path relative "
+         "to the user's own folder, which is also checked",
+)
+@click.pass_context
+def briefings_options(ctx, kind, query):
+    """What the editor offers to pick for a source of this kind."""
+    bctx = _ctx(ctx)
+    if kind not in SOURCE_KINDS:
+        _fail("invalid_argument", f"invalid kind '{kind}' (one of {', '.join(SOURCE_KINDS)})")
+    if kind == "browse":
+        _emit({"status": "ok", "kind": kind, "options": pickers.browse_presets()})
+        return
+    if kind not in ("rss", "my_email", "shared_block", *_PATH_KINDS):
+        _emit({"status": "ok", "kind": kind, "options": None, "note": "no options for this kind"})
+        return
+    cfg = bctx.app_config
+    if cfg is None:
+        _fail("unavailable", "the istota config is unavailable")
+    if kind == "rss":
+        options = pickers.feed_options(cfg, bctx.user_id)
+    elif kind == "my_email":
+        options = pickers.email_accounts(cfg, bctx.user_id)
+    elif kind == "shared_block":
+        options = pickers.shared_block_options(cfg)
+    else:
+        options = pickers.path_suggestions(cfg, bctx.user_id, query)
+    payload = {"status": "ok", "kind": kind, "options": options}
+    if kind in _PATH_KINDS and query.strip():
+        payload["check"] = pickers.path_check(cfg, bctx.user_id, query)
+    _emit(payload)
 
 
 # -- blocks -------------------------------------------------------------------

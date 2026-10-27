@@ -277,7 +277,7 @@ def _audience(conn, config, actor, group_id, name):
 
 
 def _resources(conn, config, actor, group_id, query):
-    from istota.briefings.routes import _walk_text_files
+    from istota.briefings.pickers import _walk_text_files
     from istota.briefings.sources.contributions import _calendar_client
     from istota.skills.calendar import owned_calendars
     _access(conn, config, actor, group_id)

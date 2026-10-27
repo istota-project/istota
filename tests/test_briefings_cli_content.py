@@ -734,3 +734,104 @@ def test_kinds_equals_the_config_route_lists(ctx):
         "render_modes": list(RENDER_MODES),
         "block_templates": route["block_templates"],
     }
+
+
+# -- options: the editor's pickers, one answer per kind -----------------------
+
+
+@pytest.fixture
+def picker_ctx(app_ctx, tmp_path, monkeypatch):
+    from istota import feeds
+    from istota.feeds import db as feeds_db
+    from istota.feeds.workspace import synthesize_feeds_context
+
+    user_root = app_ctx.app_config.workspace_path / "Users" / "alice"
+    (user_root / "shared").mkdir(parents=True, exist_ok=True)
+    (user_root / "shared" / "team-todo.md").write_text("- [ ] x\n")
+    (user_root / "notes.bin").write_text("ignore me")
+
+    fctx = synthesize_feeds_context("alice", tmp_path / "feeds-ws", db_path=tmp_path / "feeds.db")
+    feeds_db.init_db(fctx.db_path)
+    with feeds_db.connect(fctx.db_path) as conn:
+        category = feeds_db.upsert_category(conn, "news", "News")
+        feeds_db.upsert_feed(
+            conn, url="https://example.com/feed.xml", title="Example", site_url=None,
+            source_type="rss", category_id=category, poll_interval_minutes=60,
+        )
+        conn.commit()
+    monkeypatch.setattr(feeds, "resolve_for_user", lambda user_id, cfg: fctx)
+    return app_ctx
+
+
+def _picker_route(ctx):
+    client = _route_client(ctx)
+    client.app.state.istota_config = ctx.app_config
+    return client
+
+
+@pytest.mark.parametrize("kind, route, key", [
+    ("rss", "/istota/api/briefings/feed-options", None),
+    ("browse", "/istota/api/briefings/browse-presets", "presets"),
+    ("my_email", "/istota/api/briefings/email-accounts", "accounts"),
+    ("shared_block", "/istota/api/briefings/shared-block-options", "options"),
+    ("notes", "/istota/api/briefings/path-suggest", "paths"),
+])
+def test_options_match_the_picker_route(picker_ctx, kind, route, key):
+    body = _picker_route(picker_ctx).get(route).json()
+    expected = body if key is None else body[key]
+
+    result, output = _invoke(picker_ctx, ["options", "--kind", kind])
+
+    assert result.exit_code == 0
+    assert output == {"status": "ok", "kind": kind, "options": expected}
+    assert expected, f"the {kind} picker answered nothing, so parity says nothing"
+
+
+def test_options_rss_lists_the_users_feeds(picker_ctx):
+    _, output = _invoke(picker_ctx, ["options", "--kind", "rss"])
+
+    assert output["options"]["available"] is True
+    assert [s["label"] for s in output["options"]["subscriptions"]] == ["Example"]
+    assert [c["label"] for c in output["options"]["categories"]] == ["News"]
+
+
+def test_options_path_query_filters_and_checks_like_the_routes(picker_ctx):
+    client = _picker_route(picker_ctx)
+    suggested = client.get("/istota/api/briefings/path-suggest", params={"q": "shared/team-todo.md"}).json()
+    checked = client.get("/istota/api/briefings/path-check", params={"path": "shared/team-todo.md"}).json()
+
+    result, output = _invoke(picker_ctx, ["options", "--kind", "todos", "--q", "shared/team-todo.md"])
+
+    assert result.exit_code == 0
+    assert output["options"] == suggested["paths"] == ["shared/team-todo.md"]
+    assert output["check"] == checked == {"ok": True, "resolved": "Users/alice/shared/team-todo.md"}
+
+
+def test_options_path_check_refuses_a_path_outside_the_users_folder(picker_ctx):
+    (picker_ctx.app_config.workspace_path / "secret.md").write_text("nope")
+
+    _, output = _invoke(picker_ctx, ["options", "--kind", "notes", "--q", "../secret.md"])
+
+    assert output["options"] == []
+    assert output["check"]["ok"] is False
+
+
+def test_options_for_a_kind_with_no_picker(picker_ctx):
+    result, output = _invoke(picker_ctx, ["options", "--kind", "markets"])
+
+    assert result.exit_code == 0
+    assert output == {"status": "ok", "kind": "markets", "options": None, "note": "no options for this kind"}
+
+
+def test_options_unknown_kind_is_invalid_argument(picker_ctx):
+    result, output = _invoke(picker_ctx, ["options", "--kind", "banana"])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "invalid_argument"
+
+
+def test_options_without_the_istota_config_is_unavailable(ctx):
+    result, output = _invoke(ctx, ["options", "--kind", "rss"])
+
+    assert result.exit_code == 1
+    assert output["reason"] == "unavailable"
