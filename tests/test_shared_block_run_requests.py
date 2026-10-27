@@ -29,7 +29,8 @@ def _define(cfg, name="mk", **fields):
     with db.get_db(cfg.db_path) as conn:
         db.upsert_shared_block_config(
             conn, name=name, cron="0 6 * * *", title="Markets",
-            directive=None, render_mode=fields.get("render_mode", "structured"),
+            directive=fields.get("directive"),
+            render_mode=fields.get("render_mode", "structured"),
             enabled=True, trusted=True,
             sources=fields.get("sources", [{"kind": "markets", "config": {}}]),
         )
@@ -185,3 +186,35 @@ class TestPoll:
         with db.get_db(cfg.db_path) as conn:
             state = shared_block_runs.run_state(conn, "mk")
         assert state["answered"]["outcome"] == shared_block_runs.REGENERATED
+
+
+class TestAgentRunNow:
+    def _agent(self, cfg, monkeypatch):
+        _define(cfg, name="ag", render_mode="agent", sources=[],
+                directive="Read the pages.")
+        monkeypatch.setattr(
+            "istota.brain.primary_brain_unavailable", lambda brain_cfg: (True, None),
+        )
+
+    def test_run_now_on_an_agent_block_answers_queued(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path)
+        self._agent(cfg, monkeypatch)
+        shared_block_runs.request_run(cfg, "ag")
+
+        scheduler.check_shared_block_requests(cfg)
+
+        with db.get_db(cfg.db_path) as conn:
+            state = shared_block_runs.run_state(conn, "ag")
+        assert state["answered"]["outcome"] == shared_block_runs.QUEUED
+        assert state["agent"]["captured"] is False
+
+    def test_run_now_during_a_run_answers_in_flight(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path)
+        self._agent(cfg, monkeypatch)
+        for _ in range(2):
+            shared_block_runs.request_run(cfg, "ag")
+            scheduler.check_shared_block_requests(cfg)
+
+        with db.get_db(cfg.db_path) as conn:
+            state = shared_block_runs.run_state(conn, "ag")
+        assert state["answered"]["outcome"] == shared_block_runs.IN_FLIGHT

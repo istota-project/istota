@@ -7,9 +7,10 @@ thereafter, so an admin's web edit survives operator re-runs — the same
 seed-once + edit-preservation contract as ``default_briefings`` /
 ``briefing_configs`` (see ``user_briefings.py``).
 
-The DB rows are overlaid onto ``config.briefing_shared_blocks`` at config-load
-time by ``config._apply_shared_blocks``; ``check_shared_blocks`` then reads the
-DB-authoritative definitions.
+The DB rows are overlaid onto ``config.briefings.shared_blocks`` at config-load
+time by ``config._apply_shared_blocks``. ``check_shared_blocks`` does not use
+that overlay: it reads the table on every pass, so an edit made since boot
+takes effect on the next cron slot.
 """
 
 from __future__ import annotations

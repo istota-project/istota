@@ -12,7 +12,9 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 
 from istota.apply import Meta, PlanError, _check_meta
-from istota.briefings.models import ALLOWED_SHARED_SOURCE_KINDS, RENDER_MODES, SOURCE_KINDS, validate_block_options
+from istota.briefings.models import (
+    ALLOWED_SHARED_SOURCE_KINDS, RENDER_MODES, SHARED_RENDER_MODES, SOURCE_KINDS, validate_block_options,
+)
 from istota.lib.user_ids import user_id_index
 from istota.sandbox.user_scope import is_scopable_user_id
 
@@ -315,7 +317,7 @@ def parse_plan(document: dict) -> Plan:
         _values(document["shared_briefing_blocks"], ["shared_briefing_blocks"])
         for block, path in _entries(document["shared_briefing_blocks"], SHARED_FIELDS, ["shared_briefing_blocks"]):
             if "render_mode" in block:
-                _choice(block["render_mode"], RENDER_MODES, [*path, "render_mode"])
+                _choice(block["render_mode"], SHARED_RENDER_MODES, [*path, "render_mode"])
             if "sources" in block:
                 _sources(block["sources"], [*path, "sources"], shared=True)
     if "group_briefings" in document:

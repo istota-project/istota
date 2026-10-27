@@ -145,7 +145,8 @@ def _run_shared(args, config) -> int:
     from istota import db
     from istota.briefings.models import (
         ALLOWED_SHARED_SOURCE_KINDS,
-        RENDER_MODES,
+        SHARED_RENDER_MODES,
+        validate_shared_block_payload,
     )
 
     action = args.action
@@ -185,11 +186,17 @@ def _run_shared(args, config) -> int:
             print(f"Error: no shared block named {args.name!r}", file=sys.stderr)
             return 1
         from istota.config import shared_block_from_row
-        from istota.briefings.shared_block_runs import REGENERATED
+        from istota.briefings.shared_block_runs import IN_FLIGHT, QUEUED, REGENERATED, run_state
         outcome = _generate_shared_block(config, shared_block_from_row(row))
         with db.get_db(config.db_path) as conn:
             val = db.shared_kv_get(conn, "briefing_shared_blocks", row.name)
-        if outcome == REGENERATED and val:
+            agent = run_state(conn, row.name)["agent"] if outcome in (QUEUED, IN_FLIGHT) else None
+        if agent:
+            print(
+                f"ran {row.name}: {outcome}, task #{agent.get('task_id')}; "
+                "the daemon writes the block when the task finishes"
+            )
+        elif outcome == REGENERATED and val:
             print(f"ran {row.name}: {len(val['value'])} bytes, updated {val['updated_at']}")
         else:
             print(f"ran {row.name}: {outcome}, no content written")
@@ -199,9 +206,9 @@ def _run_shared(args, config) -> int:
     if not args.name or not args.cron:
         print("Error: --name and --cron required for ensure", file=sys.stderr)
         return 1
-    if args.render_mode not in RENDER_MODES:
+    if args.render_mode not in SHARED_RENDER_MODES:
         print(
-            f"Error: --render-mode must be one of {sorted(RENDER_MODES)}",
+            f"Error: --render-mode must be one of {sorted(SHARED_RENDER_MODES)}",
             file=sys.stderr,
         )
         return 1
@@ -223,6 +230,16 @@ def _run_shared(args, config) -> int:
             )
             return 1
         sources.append(parsed)
+    if args.render_mode == "agent":
+        try:
+            validate_shared_block_payload({
+                "name": args.name, "cron": args.cron, "directive": args.directive,
+                "render_mode": args.render_mode, "trusted": args.trusted,
+                "sources": sources,
+            })
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
     with db.get_db(config.db_path) as conn:
         row = db.upsert_shared_block_config(
             conn,

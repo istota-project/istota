@@ -22,12 +22,11 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
 
 from istota.sandbox.kv_namespaces import is_reserved_namespace
 from istota.skills._cli import fail as _fail, parse_and_resolve, run_skill_cli
 from istota.skills._group_access import group_access_denied, group_refusal
-from istota.skills._hostpath import READ, host_path
+from istota.skills._hostpath import READ, ReadRefused, host_path, read_resolved_text
 from istota.lib.untrusted import frame_untrusted
 
 # `list` decodes and prints every value in a namespace. The natural command for
@@ -250,32 +249,12 @@ def _resolve_set_value(args) -> str:
         # The resolved path, and the only one there is: the `READ` stamp on
         # the declaration resolved it at parse time and wrote it back, so
         # there is no original left to re-open and re-walk.
-        resolved = Path(value_file)
-        if not resolved.is_file():
-            _fail(f"--value-file is not a regular file: {resolved}")
-        # O_NOFOLLOW on the leaf: resolving stripped the symlinks that existed
-        # at check time, but the final component could still be swapped for one
-        # before this open. Size is taken from the same descriptor, so it
-        # describes the file actually being read.
         try:
-            fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW)
-        except OSError as e:
-            _fail(f"could not open --value-file: {e}")
-        try:
-            size = os.fstat(fd).st_size
-            if size > MAX_VALUE_FILE_BYTES:
-                _fail(
-                    f"--value-file is {size} bytes, over the "
-                    f"{MAX_VALUE_FILE_BYTES}-byte cap"
-                )
-            with os.fdopen(fd, encoding="utf-8") as fh:
-                fd = -1  # fdopen owns it now
-                value = fh.read()
-        except (OSError, UnicodeDecodeError) as e:
-            _fail(f"could not read --value-file: {e}")
-        finally:
-            if fd >= 0:
-                os.close(fd)
+            value = read_resolved_text(
+                value_file, flag="--value-file", max_bytes=MAX_VALUE_FILE_BYTES,
+            )
+        except ReadRefused as e:
+            _fail(str(e))
 
     try:
         json.loads(value)

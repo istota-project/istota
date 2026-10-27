@@ -294,6 +294,9 @@ SKILLS: dict[str, tuple[list[str], str]] = {
 CALENDAR_SKILL = {"calendar": ([], "CALENDAR BODY")}
 #: Likewise for `Case.shared_folder`.
 SHARES_SKILL = {"shares": ([], "SHARES BODY")}
+#: Likewise for `Case.shared_block_research`; the research gate refuses a task
+#: that has no `browse` selected.
+BROWSE_SKILL = {"browse": (["source_types: [shared_block_research]"], "BROWSE BODY")}
 
 
 def _write_skills(bundled: Path, extra_skills: dict | None = None) -> None:
@@ -478,6 +481,18 @@ class Case:
     #: untrusted event, a thrashing target, a scratchpad and one earlier wake.
     #: Every timestamp is fixed.
     assignment: bool = False
+    #: An agent shared block's task: `__briefings__`, the research gate's
+    #: capabilities on (browser, network, skill proxy, sandbox), a `browse`
+    #: skill selected for the source type, and a non-UTC shared-block
+    #: timezone, so the header's clock is visibly not the profile-less UTC.
+    shared_block_research: bool = False
+
+
+#: The research identity, which has no profile.
+BRIEFINGS_USER = "__briefings__"
+#: Not UTC, and not the base user's zone, so the `User timezone:` line shows
+#: where the clock came from.
+SHARED_BLOCK_TZ = "America/Los_Angeles"
 
 
 CASES: tuple[Case, ...] = (
@@ -657,6 +672,12 @@ CASES: tuple[Case, ...] = (
     # request, with the untrusted inbox event fenced. Memory is seeded and
     # loads, since a wake reads USER.md as a private task does.
     Case("source_assignment", source_type="assignment", memory=True, assignment=True),
+    # An agent shared block (shared-block agent mode, stage 3): the header in
+    # the shared-block timezone, the standing instruction that the answer is
+    # published verbatim, and the research withholding (no workspace, no
+    # memory, `browse` eager).
+    Case("shared_block_research", source_type="shared_block_research",
+         admin=False, shared_block_research=True),
 )
 
 CASES_BY_NAME = {c.name: c for c in CASES}
@@ -668,7 +689,8 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
     skills_dir.mkdir(parents=True, exist_ok=True)
     bundled = tmp_path / "bundled"
     _write_skills(bundled, {**(CALENDAR_SKILL if case.shared_feed else {}),
-                            **(SHARES_SKILL if case.shared_folder else {})})
+                            **(SHARES_SKILL if case.shared_folder else {}),
+                            **(BROWSE_SKILL if case.shared_block_research else {})})
     if case.skills_changelog:
         (bundled / "CHANGELOG.md").write_text(SKILLS_CHANGELOG + "\n")
 
@@ -691,7 +713,7 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
     nextcloud_backed = case.backend == "nextcloud"
     url = "https://cloud.example.test" if nextcloud_backed else ""
 
-    return Config(
+    config = Config(
         db_path=tmp_path / "framework.db",
         temp_dir=tmp_path / "temp",
         skills_dir=skills_dir,
@@ -739,6 +761,10 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
             )
         },
     )
+    if case.shared_block_research:
+        config.browser.enabled = True
+        config.briefings.shared_block_timezone = SHARED_BLOCK_TZ
+    return config
 
 
 def _build_task(case: Case) -> db.Task:
@@ -746,7 +772,7 @@ def _build_task(case: Case) -> db.Task:
         assignment_id=ASSIGNMENT_ID if case.assignment else None,
         id=1,
         status="running",
-        user_id=USER,
+        user_id=BRIEFINGS_USER if case.shared_block_research else USER,
         source_type=case.source_type,
         prompt="Summarize what changed in my notes this week.",
         conversation_token=case.conversation_token,

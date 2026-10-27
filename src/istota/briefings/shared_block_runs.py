@@ -10,8 +10,9 @@ the shape the Health pane's doctor request already has (``doctor.request_run``,
 it is answered.
 
 A reserved ``shared_kv`` namespace, written by the web route and the daemon,
-never by a task. Keys are ``request:<name>`` and ``answered:<name>``; block
-names are slugs, so neither prefix can collide with one.
+never by a task. Keys are ``request:<name>``, ``answered:<name>`` and, for an
+agent block's research task, ``agent:<name>`` (``shared_block_agent``); block
+names are slugs, so no prefix can collide with one.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 RUN_NAMESPACE = "_shared_block_run"
 _REQUEST_PREFIX = "request:"
 _ANSWERED_PREFIX = "answered:"
+AGENT_PREFIX = "agent:"
 # The poll runs on the scheduler's dispatch loop every tick, so a held write
 # lock skips the tick rather than stalling it.
 _POLL_BUSY_MS = 2000
@@ -41,6 +43,11 @@ KEPT_PRIOR = "kept_prior"
 BRAIN_UNAVAILABLE = "brain_unavailable"
 FAILED = "failed"
 NOT_FOUND = "not_found"
+# An agent block's run: its task was queued, one was already running, or the
+# block was deleted or left agent mode before its task's result was captured.
+QUEUED = "queued"
+IN_FLIGHT = "in_flight"
+DISCARDED = "discarded"
 
 
 def _now() -> str:
@@ -114,20 +121,26 @@ def record_answered(config: "Config", request: dict, outcome: str) -> None:
 
 
 def forget(conn, name: str) -> None:
-    """Drop a block's pending request and last answer, on the caller's
-    connection, so a block made again under the name starts with neither."""
+    """Drop a block's pending request, last answer and agent run, on the
+    caller's connection, so a block made again under the name starts with none.
+
+    Tidy-up only for the agent run: capture discards a run whose block has no
+    live row, since not every door that deletes a block calls this."""
     from istota import db
 
-    for prefix in (_REQUEST_PREFIX, _ANSWERED_PREFIX):
+    for prefix in (_REQUEST_PREFIX, _ANSWERED_PREFIX, AGENT_PREFIX):
         db.shared_kv_delete(conn, RUN_NAMESPACE, prefix + name)
 
 
 def run_state(conn, name: str) -> dict:
-    """The pending request and the last answer for one block, each or None."""
+    """The pending request, the last answer and the agent run for one block,
+    each or None."""
     from istota import db
 
-    out: dict = {"pending": None, "answered": None}
-    for field, prefix in (("pending", _REQUEST_PREFIX), ("answered", _ANSWERED_PREFIX)):
+    out: dict = {"pending": None, "answered": None, "agent": None}
+    for field, prefix in (
+        ("pending", _REQUEST_PREFIX), ("answered", _ANSWERED_PREFIX), ("agent", AGENT_PREFIX),
+    ):
         row = db.shared_kv_get(conn, RUN_NAMESPACE, prefix + name)
         if row is not None:
             out[field] = json.loads(row["value"])

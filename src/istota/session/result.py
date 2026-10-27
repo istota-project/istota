@@ -115,7 +115,9 @@ _TRAILING_REGION_MIN_CHARS = 500
 
 # Source types whose tasks emit structured / programmatic output and never
 # benefit from terse-recovery (Mechanism B). Mechanism A still runs for these.
-_AUTOMATED_SOURCE_TYPES = frozenset({"scheduled", "briefing", "assignment"})
+# `shared_block_research` is an agent shared block, published verbatim like a
+# cron job's `publish_shared_kv` result, so an empty answer must stay empty.
+_AUTOMATED_SOURCE_TYPES = frozenset({"scheduled", "briefing", "assignment", "shared_block_research"})
 
 # Result texts that are clearly references rather than the answer itself,
 # regardless of length.

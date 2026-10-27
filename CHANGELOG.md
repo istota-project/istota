@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Agent shared blocks.** A shared briefing block can use the `agent` render mode: its directive is a task prompt that runs on the block's cron as a sandboxed browsing task, and the answer becomes the block, never trusted. A failed or empty run keeps the last good content, and three in a row send one operator alert. Choose Agent in the Shared blocks card to write the task prompt and follow each run to its outcome; docs/features/briefings.md covers what the task can reach and how to convert a cron digest prompt.
 - The file viewer shows CSV and TSV files as a table, with the header kept in view and wide tables scrolling sideways. A toggle switches to the raw source, the same way it does for Markdown; a very long file shows its first 2,000 rows as a table. Clicking a column header sorts the whole file by it, numbers by value; a column's edge drags, or steps with the arrow keys, to resize it, and a double click fits it to its contents. Web addresses in cells open as links in a new tab.
 - Istota can read a calendar from any provider. Paste its secret iCal address under Settings > Connections > Shared with Istota, and tasks can list its events beside your other calendars; the calendar stays read-only and nothing else on that account is reachable.
 - Istota has a calendar of its own. A task can put an event on it, move it or cancel it, and you see those events by subscribing once to a private feed address from Settings > Connections; it needs no CalDAV account.
@@ -75,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A shared briefing block created or edited on the briefings settings page now runs on its schedule without a restart. Before, a new block ran only through Run now, and an edited one kept its old definition on its schedule until the daemon restarted.
 - The model suggestions in Room settings open directly under the field again. Inside a dialog the list opened offset down and to the side, past the dialog's edge, most visibly on a phone. The admin Configuration page no longer cuts a field's suggestions off at the edge of its section.
 - `browse render` and `browse get` read a PDF instead of returning an empty success. They return the document's text page by page, pageable by offset, and say plainly when a PDF cannot be read, such as a scanned one. The file is parsed in a separate process with memory and time limits. Needs a rebuilt browser image.
 - In Files, the notice for a folder shared from another server, and the "Drive access is off" message, now show their button below the text, as other notices do, instead of beside it.
