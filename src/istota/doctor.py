@@ -839,6 +839,10 @@ def _listing_key_file_problem(path: Path) -> str | None:
     """Why the model-listing key file is held wrongly, or `None`. Stats only."""
     try:
         metadata = os.lstat(path)
+    except ValueError:
+        # A NUL in the configured path; `record_report` runs this outside any
+        # `try` at start-up.
+        return "the configured path is not a usable path"
     except OSError:
         return None
     if not stat.S_ISREG(metadata.st_mode):
@@ -848,6 +852,17 @@ def _listing_key_file_problem(path: Path) -> str | None:
     if metadata.st_uid != os.geteuid():
         return f"{path} is not owned by this process's user"
     return None
+
+
+def _listing_key_state(path: Path) -> tuple[bool, str | None]:
+    """Whether the model-listing key file is held rightly and is non-empty,
+    and why it is held wrongly, if it is. Stats only."""
+    problem = _listing_key_file_problem(path)
+    try:
+        present = problem is None and path.is_file() and path.stat().st_size > 0
+    except OSError:
+        present = False
+    return present, problem
 
 
 def _cache_age(seconds: float) -> str:
@@ -1081,14 +1096,10 @@ def check_models_catalogue(config: "Config", probe: bool) -> CheckResult:
 
     specs = build_providers(config)
     listing_path = anthropic_listing_key_path(config)
-    listing_problem = _listing_key_file_problem(listing_path)
+    listing_present, listing_problem = _listing_key_state(listing_path)
     if listing_problem:
         fails.append(f"the model-listing key file: {listing_problem}")
         remedies.append(f"Make {listing_path} a regular file, mode 0400 or 0600, owned by the daemon's user.")
-    try:
-        listing_present = listing_problem is None and listing_path.is_file() and listing_path.stat().st_size > 0
-    except OSError:
-        listing_present = False
 
     ages: list[float] = []
     for spec in specs.values():
@@ -11515,8 +11526,14 @@ def record_report(
         return
     from istota import db
 
-    value = json.dumps({"at": _report_now(), "request_id": request_id,
-                        "checks": check_payload(results)})
+    report = {"at": _report_now(), "request_id": request_id, "checks": check_payload(results)}
+    if not deep:
+        # Only the daemon mounts the model-listing key file, so Admin >
+        # Configuration shows this answer rather than its own (#859).
+        from .config import anthropic_listing_key_path
+
+        report["listing_key_present"] = _listing_key_state(anthropic_listing_key_path(config))[0]
+    value = json.dumps(report)
     try:
         with db.get_db(config.db_path) as conn:
             db.shared_kv_set(conn, REPORT_NAMESPACE,
@@ -11558,6 +11575,19 @@ def daemon_sandbox_verdict(config: "Config") -> bool | None:
     if row is None:
         return None
     return bool(json.loads(row["value"]).get("effective"))
+
+
+def daemon_listing_key_present(config: "Config") -> bool | None:
+    """Whether the daemon's last run found a model-listing key, or None when
+    no run has said. Never raises."""
+    try:
+        report = read_reports(config)["report"]
+    except Exception as exc:  # noqa: BLE001 - the caller shows "unknown"
+        logger.warning("doctor_listing_key_unread err=%s", exc)
+        return None
+    if not report or not isinstance(report.get("listing_key_present"), bool):
+        return None
+    return report["listing_key_present"]
 
 
 def read_reports(config: "Config") -> dict:

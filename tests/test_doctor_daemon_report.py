@@ -36,6 +36,23 @@ class TestTheStore:
         assert report["at"]
         assert report["request_id"] is None
 
+    def test_a_shallow_run_carries_whether_the_listing_key_file_holds_a_key(self, config, tmp_path):
+        """#859: only the daemon mounts the file, so the web reads its answer."""
+        key_file = tmp_path / "listing"
+        key_file.write_text("LISTING-SENTINEL")
+        key_file.chmod(0o400)
+        config.models.anthropic_listing_key_file = str(key_file)
+        doctor.record_report(config, [_ok()])
+        doctor.record_report(config, [_ok("sandbox.masks")], deep=True)
+        reports = doctor.read_reports(config)
+        assert reports["report"]["listing_key_present"] is True
+        assert "listing_key_present" not in reports["deep_report"]
+        assert "LISTING-SENTINEL" not in str(reports)
+
+        key_file.chmod(0o644)
+        doctor.record_report(config, [_ok()])
+        assert doctor.read_reports(config)["report"]["listing_key_present"] is False
+
     def test_a_deep_run_is_kept_apart_from_the_shallow_one(self, config):
         doctor.record_report(config, [_ok()])
         doctor.record_report(config, [_ok("sandbox.masks")], deep=True, request_id="r1")

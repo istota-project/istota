@@ -276,6 +276,67 @@ class TestAChangeFromTheWeb:
         assert field["in_file"], field
 
 
+LISTING_KEY = "istota_anthropic_listing_key"
+
+
+def _listing_entry(view: dict) -> dict:
+    return next(entry for entry in view["secrets"] if entry["name"] == LISTING_KEY)
+
+
+class TestTheModelListingKeyFromTheWeb:
+    """#859: the web process does not mount the file, and need not to write it.
+    The value goes through the same handoff, lands as 10001's 0400 file, and
+    the page then shows the daemon's answer from its start-up doctor run."""
+
+    def test_it_is_written_by_the_host_and_reported_by_the_daemon(self, editor):
+        vm, web = editor.vm, editor.web
+        path = f"{lima.STACK}/secrets/{LISTING_KEY}"
+        if vm.out(f"stat -c %s {path}") != "0":
+            pytest.skip("this VM holds a model-listing key; the case would replace it")
+        if lima.control():
+            pytest.skip("a negative control is applied")
+        _settle_open_requests(web)
+        view = web.answer(CONFIG, timeout=RESTART_SECONDS)
+        assert _listing_entry(view)["read_only_reason"] is None, _listing_entry(view)
+        value = f"listing-vm-{secrets.token_hex(8)}"
+        body = {"base_digest": view["document_digest"], "secrets": {LISTING_KEY: value}}
+        try:
+            preview = web.post(f"{CONFIG}/preview", json=body)
+            assert preview.status_code == 200, preview.text[:3000]
+            assert not preview.json()["errors"], preview.json()
+            body["step_up"] = _step_up(vm, web)
+            response = web.post(f"{CONFIG}/requests", json=body)
+            assert response.status_code == 202, response.text[:3000]
+            row = _wait_status(web, response.json()["id"], lambda s: s in TERMINAL, timeout=APPLY_SECONDS)
+            assert row["status"] == "applied", row
+            assert value not in json.dumps(row)
+            # The restart follows `finish`, so the daemon's start-up report is newer than this.
+            applied_at = vm.out("date -u +%Y-%m-%dT%H:%M:%SZ")
+
+            assert vm.out(f"stat -c '%F %a %u' {path}") == "regular file 400 10001"
+            assert vm.out(f"cat {path}") == value
+            mounted = vm.out(
+                f"istota-stack compose exec -T web sh -c "
+                f"'test -e /run/secrets/{LISTING_KEY} && echo mounted || echo absent'")
+            assert mounted.splitlines()[-1] == "absent", "the web container mounts the file"
+
+            _wait_restarted(web, row["finished_at"])
+            report_sql = "SELECT value FROM shared_kv WHERE namespace = '_doctor' AND key = 'report'"
+            report = {}
+            deadline = time.monotonic() + RESTART_SECONDS
+            while not (report.get("at") or "") > applied_at and time.monotonic() < deadline:
+                time.sleep(2)
+                raw = _db_read(vm, report_sql)
+                report = json.loads(raw) if raw else {}
+            assert (report.get("at") or "") > applied_at, f"no daemon report after {applied_at}: {report.get('at')}"
+            assert report.get("listing_key_present") is True, {
+                k: v for k, v in report.items() if k != "checks"}
+            entry = _listing_entry(web.answer(CONFIG, timeout=RESTART_SECONDS))
+            assert (entry["source"], entry["set"]) == ("file", True), entry
+        finally:
+            vm.run(f"printf '%s' '{{\"secrets\": {{\"{LISTING_KEY}\": \"\"}}}}' | istota-stack put-files || true")
+
+
 class TestTwoRequestsInQuickSuccession:
     def test_both_are_applied_by_the_path_unit_and_the_loop(self, editor, first_change):
         vm, web = editor.vm, editor.web
