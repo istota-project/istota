@@ -159,7 +159,8 @@ class TestAFolderThatWentAwayIsNotWritten:
                       timeout=600)
             cid = stack.out(
                 "docker ps -aq --filter label=com.docker.compose.project=istota "
-                "--filter label=com.docker.compose.service=daemon | head -1")
+                "--filter label=com.docker.compose.service=daemon "
+                "--filter label=com.docker.compose.oneoff=False | head -1")
             state = ""
             deadline = time.monotonic() + 150
             while time.monotonic() < deadline:

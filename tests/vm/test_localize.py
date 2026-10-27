@@ -31,6 +31,8 @@ import uuid
 
 import pytest
 
+from istota.config import Config
+
 from . import lima
 
 pytestmark = pytest.mark.vm
@@ -60,9 +62,9 @@ def moved(vm, release, model) -> dict:
         vm, release, lima.nextcloud_wizard_mode(model.vm_url, fixture["url"], fixture["BOT_PASSWORD"]),
         prepare=place_rclone_conf,
     )
-    bot = lima.stack_exec(
-        vm, f"for d in /mnt/shared/Users/{lima.USER}/*/; do if [ -d \"$d/config\" ]; then basename \"$d\"; fi; done"
-    ).stdout.split()[0]
+    # From the config, not the folders: an earlier module's bot name can leave
+    # its own bot folder behind under the user (#857).
+    bot = Config(bot_name=lima.stack_config(vm).get("bot_name", Config.bot_name)).bot_dir_name
     name = f"vmtier-{uuid.uuid4().hex[:10]}.txt"
     lima.stack_exec(vm, f"mkdir -p /mnt/shared/Users/{lima.USER}/{bot}/notes && "
                         f"echo before-the-move > /mnt/shared/Users/{lima.USER}/{bot}/notes/{name}")

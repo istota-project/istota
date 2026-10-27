@@ -115,7 +115,8 @@ class TestNothingIsWrittenIntoAnUnmountedStore:
                       timeout=600)
             cid = stack.out(
                 "docker ps -aq --filter label=com.docker.compose.project=istota "
-                "--filter label=com.docker.compose.service=daemon | head -1")
+                "--filter label=com.docker.compose.service=daemon "
+                "--filter label=com.docker.compose.oneoff=False | head -1")
             # Until it has either refused (exited, and restarted by its policy)
             # or come up healthy; a daemon that starts is healthy within this.
             state = ""
