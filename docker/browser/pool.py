@@ -11,16 +11,22 @@ from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit, parse_qsl
 import logging
 import socket
+import stat
 import subprocess
 import threading
 import time
 
 import chrome
+from lib.istota_browser_console import console_socket_name
 from lib.istota_user_scope import scoped_user_dir
 
 log = logging.getLogger(__name__)
 
 RUNTIME_DIR = Path("/run/istota-browser")
+# Shared with the web container's console relay. Absent where the compose file
+# predates the console volume; the browser then runs without the socket.
+CONSOLE_DIR = Path("/run/istota-browser-console")
+CONSOLE_SOCKET_WAIT_S = 15
 PROFILE_ROOT = chrome.PROFILE_ROOT
 MAX_INSTANCES = int(os.environ.get("BROWSER_MAX_INSTANCES", "2"))
 INSTANCE_IDLE_S = int(os.environ.get("BROWSER_INSTANCE_IDLE_S", "900"))
@@ -70,6 +76,7 @@ class LaunchFailed(RuntimeError):
 
 
 _instances: dict[str, BrowserInstance] = {}
+_console_disabled_logged = False
 _registry_lock = threading.Lock()
 
 
@@ -169,7 +176,48 @@ def _wait_for_vnc(inst):
     raise RuntimeError("x11vnc listener did not become ready")
 
 
+def _console_socket(inst):
+    return CONSOLE_DIR / console_socket_name(inst.user_id)
+
+
+def _unlink_console_socket(inst):
+    # x11vnc leaves its socket behind when killed.
+    try:
+        _console_socket(inst).unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("Could not remove browser console socket in slot %d: %s", inst.slot, exc)
+
+
+def _wait_for_console_socket(inst):
+    """Wait for x11vnc's Unix socket, then open it to the web container's group.
+
+    The console is optional, so a socket that never appears is logged and the
+    instance still starts; only x11vnc exiting stops the launch.
+    """
+    path = _console_socket(inst)
+    deadline = time.monotonic() + CONSOLE_SOCKET_WAIT_S
+    while True:
+        if inst.x11vnc_proc.poll() is not None:
+            raise RuntimeError("x11vnc exited before its console socket was ready")
+        try:
+            is_socket = stat.S_ISSOCK(os.lstat(path).st_mode)
+        except OSError:
+            is_socket = False
+        if is_socket:
+            break
+        if time.monotonic() >= deadline:
+            log.warning("console_socket_missing slot=%d", inst.slot)
+            return
+        time.sleep(0.2)
+    # x11vnc creates it 0755 under the setgid directory; the relay needs write.
+    try:
+        os.chmod(path, 0o660)
+    except OSError as exc:
+        log.warning("console_socket_chmod_failed slot=%d: %s", inst.slot, exc)
+
+
 def _start_display(inst):
+    global _console_disabled_logged
     width = int(os.environ.get("SCREEN_WIDTH", "1440"))
     height = int(os.environ.get("SCREEN_HEIGHT", "900"))
     inst.xvfb_proc = subprocess.Popen(
@@ -181,6 +229,12 @@ def _start_display(inst):
         "x11vnc", "-display", inst.display, "-forever", "-shared",
         "-rfbport", str(inst.vnc_port),
     ]
+    console = CONSOLE_DIR.is_dir()
+    if console:
+        args.extend(["-unixsock", str(_console_socket(inst))])
+    elif not _console_disabled_logged:
+        _console_disabled_logged = True
+        log.info("console_socket_disabled dir=%s", CONSOLE_DIR)
     password = os.environ.get("VNC_PASSWORD", "")
     if password:
         args.extend(["-passwd", password])
@@ -189,6 +243,8 @@ def _start_display(inst):
         start_new_session=True,
     )
     _wait_for_vnc(inst)
+    if console:
+        _wait_for_console_socket(inst)
 
 
 def evictable(exclude=()):
@@ -263,6 +319,7 @@ def acquire(user_id, *, on_acquire=None, exclude=(), memory_pct=None,
         # A failed removal during an earlier release must not route its old
         # address to this slot while the replacement browser is starting.
         (RUNTIME_DIR / "vnc-tokens" / str(inst.slot)).unlink(missing_ok=True)
+        _unlink_console_socket(inst)
         _start_display(inst)
         chrome.launch_chrome(inst)
         chrome.connect_cdp(inst)
@@ -297,6 +354,7 @@ def release_slot(inst, *, require_stopped=False):
         (RUNTIME_DIR / "vnc-tokens" / str(inst.slot)).unlink(missing_ok=True)
     except OSError as exc:
         log.warning("Could not remove browser console route: %s", exc)
+    _unlink_console_socket(inst)
     try:
         chrome.cleanup(inst)
     except Exception as exc:
