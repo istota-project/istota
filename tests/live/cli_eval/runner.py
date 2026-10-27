@@ -1,24 +1,26 @@
-"""Run one eval case through the `claude` CLI and measure it from its stream-json.
+"""Run one eval case through `ClaudeCodeBrain.execute` and measure it from its stream-json.
 
-Two arms over the same cases, model, prompt and timeout:
+Two arms over the same cases, model, prompt and timeout, both on the brain's
+real code path:
 
-- ``builtin``: today's tool argv (`build_claude_cli_flags`), the CLI's own tools,
-  cwd the case's working directory.
-- ``spike``: every machine-acting built-in off (`--tools WebSearch`, the harness
-  deny list), the six core tools served by one stdio MCP server named ``spike``,
-  and the CLI's cwd an empty directory, as the harness will run it. The server
-  is the throwaway from the spec's Stage 2 and is not in the tree; its path
-  comes from ``ISTOTA_CLI_EVAL_SPIKE_SERVER``. Stage 7 replaces this arm with
-  `ClaudeCodeBrain` on the real harness.
-- ``spike_cwd``: the spike with the CLI's cwd the case's working directory, a
-  diagnostic. The CLI's own prompt names its cwd as the working directory and
-  the model builds absolute paths from it, so this separates that cost from
-  the cost of the tools themselves.
+- ``builtin``: no harness. The brain runs the CLI unwrapped with its own
+  tools, cwd the case's working directory, as the stack runs it today minus
+  the bwrap wrap.
+- ``harness``: ``BrainRequest.harness`` set. The brain runs the CLI unwrapped
+  with every machine-acting built-in off and the six core tools served through
+  the real adapter, bridge and tool server; the tool server runs unwrapped
+  with the working directory as its cwd and no file roots, as the native eval
+  runs native.
 
-Both arms get a scratch ``HOME``, ``TMPDIR`` and ``CLAUDE_CONFIG_DIR`` and the
-CLI switches the spec lists, and nothing of the test process's environment but
-``PATH`` and the one Anthropic credential. Auth is first-party only: a CLI run
-of a third-party endpoint measures something production never runs.
+Both arms get a scratch ``HOME``, ``TMPDIR`` and ``CLAUDE_CONFIG_DIR`` (the
+harness makes its own per attempt) and the CLI switches the harness sets, and
+nothing of the test process's environment but ``PATH`` and the one Anthropic
+credential. Auth is first-party only: a CLI run of a third-party endpoint
+measures something production never runs.
+
+The brain consumes the CLI's stdout, so a per-run ``claude`` shim, first on
+the CLI's PATH, tees it to a file for ``metrics_from_stream``; the shim takes
+its own directory back off PATH before it starts the real CLI.
 
 The case machinery (`prepare_workdir`, `run_check`, `task_env`, the report and
 the spend cap) is the native eval's, imported rather than copied.
@@ -30,17 +32,18 @@ import dataclasses
 import json
 import os
 import re
-import signal
+import shlex
 import subprocess
-import sys
 import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-from istota.brain._types import BrainRequest
-from istota.brain.claude_code import build_claude_cli_flags, cli_resolve_alias
+from istota.brain._types import BrainRequest, BrainResult, HarnessSpec
+from istota.brain.claude_code import ClaudeCodeBrain, cli_resolve_alias
+from istota.executor import HARNESS_CLI_SWITCHES, HARNESS_MCP_TIMEOUT_MARGIN_SECONDS
+from istota.llm.providers import CLI_AUTH_VARIABLE
 from istota.session.tools.bash import bash_result_failed
 
 from ..native_eval import runner as native_runner
@@ -49,32 +52,17 @@ from ..native_eval.runner import EvalCase, prepare_workdir, run_check, task_env
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DOCKERFILE = REPO_ROOT / "docker" / "istota" / "Dockerfile"
 
-ARMS = ("builtin", "spike")
-SPIKE_ARMS = ("spike", "spike_cwd")
-SPIKE_SERVER_KEY = "spike"
+ARMS = ("builtin", "harness")
 MODEL_TIER = "general"
+EVAL_USER = "eval"
 
 ANTHROPIC_HOSTS = frozenset({"api.anthropic.com"})
 
-# The spec's HARNESS_DENIED_TOOLS plus today's Agent and Workflow. Stage 6 adds
-# the constant to `brain/claude_code.py`; this copy goes then.
-HARNESS_DENIED_TOOLS = (
-    "Agent", "Workflow",
-    "Bash", "BashOutput", "KillShell", "Monitor", "Read", "Write", "Edit",
-    "MultiEdit", "NotebookEdit", "Glob", "Grep", "LS", "WebFetch", "Skill",
-    "TodoWrite", "Task", "TaskStop",
-)
-SPIKE_BUILTINS = ("WebSearch",)
-OFFERED_TOOLS = ("Read", "Write", "Edit", "Grep", "Glob", "Bash")
-
-# What the spec's `cli_env` sets on every harness CLI, and so on both arms here.
-CLI_SWITCHES = {
-    "CLAUDE_CODE_DISABLE_ATTACHMENTS": "1",
-    "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-    "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1",
-    "DISABLE_AUTOUPDATER": "1",
-}
+# What a member's task is granted on a CLI brain: the six core tools and
+# WebSearch, which the harness keeps as the CLI's one built-in.
+CORE_TOOLS = ("Read", "Write", "Edit", "Grep", "Glob", "Bash")
+GRANTED_TOOLS = (*CORE_TOOLS, "WebSearch")
+HARNESS_SERVER_KEY = "istota"
 
 _MCP_PREFIX = re.compile(r"\Amcp__[^_]+(?:_[^_]+)*?__")
 
@@ -134,89 +122,123 @@ def cli_version(claude: str, env: dict[str, str]) -> str:
 
 
 # --------------------------------------------------------------------------
-# Argv and environment
+# The request and the CLI's environment
 # --------------------------------------------------------------------------
 
 
-def base_request(system_file: Path, model: str, effort: str | None, timeout: int) -> BrainRequest:
-    return BrainRequest(
-        prompt="",
-        allowed_tools=list(OFFERED_TOOLS),
-        cwd=system_file.parent,
-        env={},
-        model=model,
-        effort=effort or "",
-        timeout_seconds=timeout,
-        composed_system_prompt_path=system_file.resolve(),
-        streaming=True,
-    )
-
-
-def build_argv(
-    arm: str, claude: str, req: BrainRequest, *, mcp_config: Path | None = None
-) -> list[str]:
-    """The arm's argv: today's flags, and for the spike the harness changes."""
-    flags = build_claude_cli_flags(req)
-    if arm in SPIKE_ARMS:
-        if mcp_config is None:
-            raise ValueError("the spike arm needs an MCP config")
-        # Today's flags open with the deny list; the harness widens it.
-        if flags[:3] != ["--disallowedTools", "Agent", "Workflow"]:
-            raise RuntimeError(f"unexpected flag order from build_claude_cli_flags: {flags[:3]}")
-        flags = [
-            "--disallowedTools", *HARNESS_DENIED_TOOLS,
-            "--tools", ",".join(SPIKE_BUILTINS),
-            "--mcp-config", str(mcp_config), "--strict-mcp-config",
-            *flags[3:],
-        ]
-    elif arm != "builtin":
-        raise ValueError(f"unknown arm {arm!r}")
-    return [
-        claude, "-p", "-", *flags, "--dangerously-skip-permissions",
-        "--output-format", "stream-json", "--verbose",
-    ]
-
-
-def expected_spike_tools() -> set[str]:
-    return set(SPIKE_BUILTINS) | {f"mcp__{SPIKE_SERVER_KEY}__{name}" for name in OFFERED_TOOLS}
-
-
 def scratch_dirs(root: Path) -> dict[str, Path]:
-    dirs = {name: root / name for name in ("home", "tmp", "config", "work")}
+    dirs = {name: root / name for name in ("home", "tmp", "config", "harness")}
     for path in dirs.values():
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
     return dirs
 
 
+def cli_switches(timeout: int) -> dict[str, str]:
+    """The harness's own CLI switches, from the executor, for both arms."""
+    timeout_ms = (int(timeout) + HARNESS_MCP_TIMEOUT_MARGIN_SECONDS) * 1000
+    return {**HARNESS_CLI_SWITCHES, "MCP_TOOL_TIMEOUT": str(timeout_ms)}
+
+
 def cli_env(path_value: str, dirs: dict[str, Path], auth: dict[str, str], timeout: int) -> dict[str, str]:
-    """The CLI's whole environment: built from nothing, never inherited."""
+    """The built-in arm's CLI environment: built from nothing, never inherited.
+
+    ``SHELLOPTS=pipefail`` is what `build_clean_env` gives every task env, so
+    the CLI's own Bash fails a pipeline as the tool server's Bash does.
+    """
     env = {
         "PATH": path_value,
         "LANG": "C.UTF-8",
         "HOME": str(dirs["home"]),
         "TMPDIR": str(dirs["tmp"]),
         "CLAUDE_CONFIG_DIR": str(dirs["config"]),
-        "MCP_TOOL_TIMEOUT": str((timeout + 30) * 1000),
-        **CLI_SWITCHES,
+        "SHELLOPTS": "pipefail",
+        **cli_switches(timeout),
     }
     env.update(auth)
     return env
 
 
-def write_spike_config(
-    path: Path, server: Path, workdir: Path, env_file: Path, call_log: Path, spill_dir: Path
-) -> Path:
-    doc = {"mcpServers": {SPIKE_SERVER_KEY: {
-        "type": "stdio",
-        "command": sys.executable,
-        "args": [
-            str(server), "--root", str(workdir), "--env-file", str(env_file),
-            "--log", str(call_log), "--spill-dir", str(spill_dir),
-        ],
-        "env": {},
-    }}}
-    path.write_text(json.dumps(doc))
-    return path
+def harness_cli_env(
+    path_value: str, home: Path, auth_mode: str, auth: dict[str, str], timeout: int,
+) -> dict[str, str]:
+    """``HarnessSpec.cli_env``: what `build_harness_cli_env` gives the CLI,
+    less the proxy names and the allowlist a deployment adds. The brain sets
+    ``CLAUDE_CONFIG_DIR``, ``HOME`` and ``TMPDIR`` per harness; ``HOME`` here
+    only decides where the config dir looks for a credentials file, and the
+    scratch one has none."""
+    env = {
+        "PATH": path_value,
+        "LANG": "C.UTF-8",
+        "HOME": str(home),
+        CLI_AUTH_VARIABLE: auth_mode,
+        **cli_switches(timeout),
+    }
+    env.update(auth)
+    return env
+
+
+def build_request(
+    arm: str, *, prompt: str, workdir: Path, system_file: Path, model: str,
+    effort: str | None, timeout: int, run: int, path_value: str,
+    dirs: dict[str, Path], auth_mode: str, auth: dict[str, str],
+) -> BrainRequest:
+    """One case's `BrainRequest` in ``arm``. Neither arm is sandbox-wrapped."""
+    base = dict(
+        prompt=prompt,
+        allowed_tools=list(GRANTED_TOOLS),
+        cwd=workdir.resolve(),
+        model=model,
+        effort=effort or "",
+        timeout_seconds=timeout,
+        composed_system_prompt_path=system_file.resolve(),
+        task_id=1,
+        attempt=run,
+        user_id=EVAL_USER,
+        source_type="eval",
+        streaming=True,
+    )
+    if arm == "builtin":
+        return BrainRequest(env=cli_env(path_value, dirs, auth, timeout), **base)
+    if arm == "harness":
+        # `req.env` is the tool server's: the model's Bash gets the native
+        # eval's task env, and the CLI gets `HarnessSpec.cli_env`.
+        return BrainRequest(
+            env=task_env(workdir),
+            harness=HarnessSpec(
+                cli_env=harness_cli_env(path_value, dirs["home"], auth_mode, auth, timeout),
+                harness_root=dirs["harness"],
+            ),
+            **base,
+        )
+    raise ValueError(f"unknown arm {arm!r}")
+
+
+def expected_harness_tools() -> set[str]:
+    return {"WebSearch"} | {f"mcp__{HARNESS_SERVER_KEY}__{name}" for name in CORE_TOOLS}
+
+
+def write_tee_shim(bin_dir: Path, claude: str, stream_path: Path) -> Path:
+    """``{bin_dir}/claude``: runs ``claude`` with ``bin_dir`` off PATH and
+    appends its stdout to ``stream_path`` on the way through.
+
+    Appends, so a CLI the brain respawns (the transient-API retry) adds to the
+    same file. A signal death of the real CLI is passed on as one, so the
+    brain's signal classification sees what it would have seen without the
+    shim.
+    """
+    bin_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    shim = bin_dir / "claude"
+    shim.write_text(
+        "#!/bin/bash\n"
+        f"shim_dir={shlex.quote(str(bin_dir))}\n"
+        'p=":$PATH:"; p="${p//:$shim_dir:/:}"; p="${p#:}"; export PATH="${p%:}"\n'
+        f'{shlex.quote(claude)} "$@" | /usr/bin/tee -a {shlex.quote(str(stream_path))}\n'
+        "rc=${PIPESTATUS[0]}\n"
+        'if [ "$rc" -gt 128 ]; then kill -s "$(kill -l $((rc - 128)))" $$; fi\n'
+        'exit "$rc"\n'
+    )
+    shim.chmod(0o700)
+    return shim
 
 
 # --------------------------------------------------------------------------
@@ -354,21 +376,6 @@ def metrics_from_stream(path: Path, success_marker: str | None = None) -> dict:
     return out
 
 
-def max_concurrency(call_log: Path) -> int:
-    """The most spike tool calls that were running at once, from its call log."""
-    if not call_log.is_file():
-        return 0
-    peak = 0
-    for line in call_log.read_text().splitlines():
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        if record.get("event") == "start":
-            peak = max(peak, int(record.get("concurrent") or 0))
-    return peak
-
-
 # --------------------------------------------------------------------------
 # One run
 # --------------------------------------------------------------------------
@@ -380,7 +387,7 @@ class Settings:
     model: str
     effort: str | None
     auth: dict[str, str]
-    spike_server: Path | None = None
+    auth_mode: str = ""
 
 
 @dataclass
@@ -389,11 +396,12 @@ class CliEvalResult:
     arm: str
     run: int
     passed: bool = False
+    check_passed: bool = False
     check_detail: str = ""
-    returncode: int | None = None
-    timed_out: bool = False
+    brain_success: bool | None = None
+    brain_stop_reason: str = ""
+    brain_text: str = ""
     wall_seconds: float = 0.0
-    max_concurrent_calls: int = 0
     stream: str = ""
     error: str = ""
     metrics: dict = field(default_factory=dict)
@@ -402,15 +410,9 @@ class CliEvalResult:
         row = dataclasses.asdict(self)
         metrics = row.pop("metrics")
         metrics["result_text"] = (metrics.get("result_text") or "")[:2000]
+        row["brain_text"] = (row.get("brain_text") or "")[:2000]
         row.update(metrics)
         return row
-
-
-def _kill_group(process: subprocess.Popen) -> None:
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
 
 
 def run_case(
@@ -418,8 +420,8 @@ def run_case(
 ) -> CliEvalResult:
     """Run ``case`` once in ``arm`` under ``root`` (created here) and measure it.
 
-    ``keep_dir`` receives the stream-json and, for the spike, its call log, so
-    the report can name files that outlive pytest's basetemp.
+    ``keep_dir`` receives the tee'd stream-json, so the report can name files
+    that outlive pytest's basetemp.
     """
     root = Path(root)
     workdir = root / "repo"
@@ -435,63 +437,65 @@ def run_case(
     keep_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{arm}-{case.name}-{run}"
     stream_path = keep_dir / f"{stem}.jsonl"
-    call_log = keep_dir / f"{stem}.calls.jsonl"
+    stream_path.unlink(missing_ok=True)
     result = CliEvalResult(case=case.name, arm=arm, run=run, stream=str(stream_path))
 
-    req = base_request(system_file, settings.model, settings.effort, case.timeout)
-    if arm in SPIKE_ARMS:
-        if settings.spike_server is None:
-            raise ValueError("ISTOTA_CLI_EVAL_SPIKE_SERVER is not set")
-        env_file = control / "tool_env.json"
-        env_file.write_text(json.dumps(tools_env))
-        mcp_config = write_spike_config(
-            control / "mcp.json", settings.spike_server, workdir, env_file,
-            call_log, workdir.parent / "tmp",
-        )
-        argv = build_argv(arm, settings.claude, req, mcp_config=mcp_config)
-        cwd = dirs["work"] if arm == "spike" else workdir
-    else:
-        argv = build_argv(arm, settings.claude, req)
-        cwd = workdir
-    env = cli_env(tools_env["PATH"], dirs, settings.auth, case.timeout)
+    shim_dir = root / "shim"
+    write_tee_shim(shim_dir, settings.claude, stream_path)
+    req = build_request(
+        arm, prompt=native_runner._prompt_text(case.prompt), workdir=workdir,
+        system_file=system_file, model=settings.model, effort=settings.effort,
+        timeout=case.timeout, run=run,
+        path_value=os.pathsep.join([str(shim_dir), tools_env["PATH"]]),
+        dirs=dirs, auth_mode=settings.auth_mode, auth=settings.auth,
+    )
 
-    prompt = native_runner._prompt_text(case.prompt)
     started = time.monotonic()
-    with stream_path.open("w", encoding="utf-8") as out, open(os.devnull, "w") as devnull:
-        process = subprocess.Popen(
-            argv, stdin=subprocess.PIPE, stdout=out, stderr=devnull, text=True,
-            cwd=str(cwd), env=env, start_new_session=True,
-        )
-        try:
-            process.stdin.write(prompt)
-            process.stdin.close()
-            result.returncode = process.wait(timeout=case.timeout)
-        except subprocess.TimeoutExpired:
-            result.timed_out = True
-            _kill_group(process)
-            result.returncode = process.wait()
+    try:
+        brain_result: BrainResult = ClaudeCodeBrain().execute(req)
+    except Exception as exc:  # noqa: BLE001 — the brain is not meant to raise
+        result.wall_seconds = round(time.monotonic() - started, 2)
+        result.error = f"{type(exc).__name__}: {exc}"
+        result.metrics = metrics_from_stream(stream_path, case.success_marker) if stream_path.exists() else {}
+        return result
     result.wall_seconds = round(time.monotonic() - started, 2)
-    # The CLI leaves the stdio server to exit on stdin EOF; nothing else to reap.
+    result.brain_success = bool(brain_result.success)
+    result.brain_stop_reason = brain_result.stop_reason or ""
+    result.brain_text = brain_result.result_text or ""
 
-    result.metrics = metrics_from_stream(stream_path, case.success_marker)
-    result.max_concurrent_calls = max_concurrency(call_log)
+    if stream_path.exists():
+        result.metrics = metrics_from_stream(stream_path, case.success_marker)
+    else:
+        result.metrics = metrics_from_stream(_empty(control / "empty.jsonl"), case.success_marker)
+    timed_out = result.brain_stop_reason == "timeout"
     passed, detail = run_check(case, workdir, result.metrics["result_text"], env=tools_env)
-    result.passed = passed and not result.timed_out
-    result.check_detail = detail if not result.timed_out else f"timed out; {detail}"
-    if result.metrics["is_error"]:
-        result.error = result.metrics["result_text"][:500]
+    result.check_passed = passed
+    # Passed means the user got an answer: the check holds, and the brain
+    # neither timed out nor reported a failure.
+    result.passed = passed and not timed_out and bool(result.brain_success)
+    result.check_detail = detail if not timed_out else f"timed out; {detail}"
+    if not result.brain_success:
+        result.error = result.brain_text[:500]
     return result
 
 
+def _empty(path: Path) -> Path:
+    path.write_text("")
+    return path
+
+
 def init_smoke(arm: str, root: Path, settings: Settings) -> dict:
-    """One no-model run: a bogus key, the arm's argv, and the ``system/init`` it gets.
+    """One no-model run: a bogus key, the arm's request, and the ``system/init`` it gets.
 
     The CLI emits ``system/init`` before its first API request (Stage 1), so
-    this checks the tool set and the server's connection for free.
+    this checks the tool set and, on the harness, the server's connection and
+    the brain's own init check, for free.
     """
     case = EvalCase(name="init_smoke", fixture=Path(__file__).parent / "fixtures" / "read_image",
                     prompt="Say hello.", timeout=120)
-    smoke = dataclasses.replace(settings, auth={"ANTHROPIC_API_KEY": "sk-ant-bogus-init-smoke"})
+    smoke = dataclasses.replace(
+        settings, auth={"ANTHROPIC_API_KEY": "sk-ant-bogus-init-smoke"}, auth_mode="api_key",
+    )
     result = run_case(case, arm, 1, root, smoke, keep_dir=root / "kept")
     return {
         "init_tools": result.metrics["init_tools"],
@@ -499,4 +503,6 @@ def init_smoke(arm: str, root: Path, settings: Settings) -> dict:
         "is_error": result.metrics["is_error"],
         "result_text": result.metrics["result_text"],
         "tool_calls": result.metrics["tool_calls"],
+        "brain_stop_reason": result.brain_stop_reason,
+        "brain_text": result.brain_text,
     }
