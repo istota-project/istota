@@ -10,8 +10,7 @@ its own canonical model ID.
 
 The override for an alias is stored **per model namespace** so one ``smart``
 abstraction can cover multiple brain families at once. A brain resolves an alias
-in *its own* namespace (``ClaudeCodeBrain`` / ``TmuxClaudeBrain`` →
-``"anthropic"``; ``NativeBrain`` → ``"openai_compat"``), so a value written for
+in *its own* namespace (``ClaudeCodeBrain`` → ``"anthropic"``; ``NativeBrain`` → ``"openai_compat"``), so a value written for
 one namespace can never leak onto another brain's wire. This is the fix for the
 cross-namespace bug: an operator writing ``smart = "opus"`` under ``anthropic``
 and ``anthropic/claude-opus-4.8`` under ``openai_compat`` gets each brain

@@ -1,6 +1,6 @@
 """ISSUE-263 — the docker image shipped neither `gh` nor `glab`.
 
-The image's apt line installed `curl git sqlite3 tmux bubblewrap` and the
+The image's apt line installed `curl git sqlite3 bubblewrap` and the
 WeasyPrint/tesseract libraries, but no forge CLI. Meanwhile the entrypoint
 renders a `[developer]` block whenever `ISTOTA_DEVELOPER_ENABLED=true`, which
 compose defaults to. Once an operator also set `repos_dir` and a token — the

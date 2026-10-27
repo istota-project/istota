@@ -241,7 +241,7 @@ class TestTheOcrRequestRunsInANamespace:
     """ISSUE-397: the Claude brains take their boundary from bubblewrap.
 
     ``fs_read_roots`` above is read by ``NativeBrain`` alone.
-    ``ClaudeCodeBrain`` and ``TmuxClaudeBrain`` ignore it, and
+    ``ClaudeCodeBrain`` ignores it, and
     ``build_claude_cli_flags`` reads a non-empty ``allowed_tools`` as the signal
     to add ``--dangerously-skip-permissions`` with no ``--allowedTools``
     allowlist at all — so ``allowed_tools=["Read"]`` gets the CLI's whole
@@ -777,7 +777,7 @@ class TestNoBuilderGrantsAFileToolWithoutASandbox:
                 offenders.append(f"{rel}:{node.lineno}")
         assert not offenders, (
             "These BrainRequest builders grant a file tool with no bubblewrap "
-            "wrap. On claude_code / tmux_claude that is the CLI's whole default "
+            "wrap. On claude_code that is the CLI's whole default "
             "toolset running host-side as the daemon user — fs_read_roots is "
             "read by NativeBrain alone. Use executor.build_daemon_sandbox "
             "(ISSUE-397): " + ", ".join(offenders)

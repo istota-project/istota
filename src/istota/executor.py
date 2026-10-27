@@ -511,10 +511,9 @@ def _record_worker_pid(
     # thread group — not the children it already forked (ISSUE-285). The
     # brains that spawn their own subprocess place it from `preexec_fn`
     # instead, off `req.task_cgroup`, and by the time they call back
-    # here the pid is already a member and this write is a no-op. What
-    # it is still load-bearing for is TmuxClaudeBrain, which reports a
-    # pane pid the tmux server spawned: there is no `preexec_fn` to
-    # reach, so containing the group leader is all that path can do.
+    # here the pid is already a member and this write is a no-op. It
+    # stays as the backstop for a brain that reports a pid it did not
+    # spawn through a `preexec_fn`.
     if task_cg is not None:
         task_cgroup.place(pid, task_cg)
     try:
@@ -1629,9 +1628,8 @@ def persist_brain_usage(
 ) -> None:
     """Record one brain attempt's token/cost usage. Best-effort throughout.
 
-    ``usage`` is a ``BrainUsage`` or None (``TmuxClaudeBrain`` leaves it None —
-    it reconstructs events from a transcript and has no result frame, so a row
-    would be a synthetic zero dragging every average).
+    ``usage`` is a ``BrainUsage`` or None (no row: a synthetic zero would drag
+    every average).
 
     ``model`` is the model the attempt actually ran, and it wins over
     ``usage.model``. The two differ where it matters: ``usage.model`` is the
@@ -1702,7 +1700,7 @@ def _note_api_key_source(config: Config, conn, *, usage, brain_kind: str) -> Non
     """The backstop: the CLI reported an API key as its credential (cost basis
     `api`) while `[brain.claude_code] auth = "subscription"`, so some path put a
     key in front of it. Logged at ERROR once an hour and recorded for doctor.
-    `claude_code` only: tmux reports no usage. Never raises."""
+    `claude_code` only. Never raises."""
     global _api_key_source_logged_at
     from .usage.telemetry import COST_BASIS_API
 
@@ -1854,9 +1852,8 @@ def _native_with_model(native_config, model: str):
 
 
 # --- Brain fallback (availability failover) --------------------------------
-# Generalizes the old tmux→claude_code in-attempt fallback so an operator can
-# configure any brain as a fallback for any primary, triggered when the primary
-# is unavailable (usage limit / missing binary / tmux launch failure). Stays at
+# An operator can configure any brain as a fallback for any primary, triggered
+# when the primary is unavailable (usage limit / missing binary). Stays at
 # the executor level: brains have no Config (needed for the operator alert), and
 # the same-attempt/no-increment rerun already lives here.
 
@@ -1914,15 +1911,10 @@ def _resolve_crossing_model_effort(
     """Resolve (model, effort, dropped_pin) for a pin meeting another brain.
 
     The question is whether the model name **crossed into a brain that speaks a
-    different vocabulary**, and until ISSUE-417 nothing asked it. This function
-    crossed unconditionally, so a `claude_code -> tmux_claude` fallback — the
-    same `claude` binary, the same ``anthropic`` namespace, the same valid
-    ``claude-opus-5`` — dropped the pin anyway *and* put a "your pin was
-    dropped" note in front of the user, for no reason. Measured both ways
-    before the fix::
-
-        claude_code -> native       ns=openai_compat  dropped_pin='claude-opus-5'
-        claude_code -> tmux_claude  ns=anthropic      dropped_pin='claude-opus-5'
+    different vocabulary**, and until ISSUE-417 nothing asked it: this function
+    crossed unconditionally, so a fallback between two brains of one namespace
+    dropped a valid pin and put a "your pin was dropped" note in front of the
+    user for no reason.
 
     Where the namespace is **unchanged** the name is used exactly as it arrived,
     which is what the primary path does and must stay byte-identical to. Where
@@ -2154,9 +2146,7 @@ FALLBACK_EXHAUSTED_MARKER = "[brain-fallback-exhausted]"
 # installed. That is an operator misconfiguration, and telling the user to "try
 # again shortly" would be false — it will never resolve on its own. It flows
 # through the ordinary failure path so the real cause stays visible.
-_FALLBACK_UNAVAILABLE_REASONS = frozenset(
-    {"usage_limit", "fallback", "transient_api_error"}
-)
+_FALLBACK_UNAVAILABLE_REASONS = frozenset({"usage_limit", "transient_api_error"})
 
 
 def _run_fallback(config, brain_config, fallback_kind, task, req, *, on_start=None):
@@ -2198,8 +2188,7 @@ def _run_fallback(config, brain_config, fallback_kind, task, req, *, on_start=No
     # The origin is where the *pin* was written, which on this path is the
     # primary brain — `brain_config.kind` is the routed kind this attempt ran,
     # not `[brain] kind` (ISSUE-417). A move within one namespace is not a
-    # crossing and the pin is kept; `claude_code -> tmux_claude` is the case
-    # that was dropping a valid id and reporting it to the user.
+    # crossing and the pin is kept.
     fb_model, fb_effort, dropped_pin = _resolve_crossing_model_effort(
         task, config, fb_brain, req.effort,
         origin_namespace=model_namespace_for_kind(brain_config.kind),
@@ -2399,8 +2388,7 @@ def run_with_failover(
 ) -> FailoverOutcome:
     """Run one attempt through the primary brain, rerouting when it is down.
 
-    Generalizes the old tmux->claude_code in-attempt fallback: when the primary
-    brain is unavailable (usage limit / missing binary / tmux launch failure)
+    When the primary brain is unavailable (usage limit / missing binary)
     and a fallback is configured, re-run this same attempt through the fallback
     brain — no new DB row, no attempt increment. Stickiness: once the primary
     reports a persistent unavailability, subsequent tasks skip it for a
@@ -2472,9 +2460,7 @@ def run_with_failover(
             _triggers.add("transient_api_error")
         if brain_result.stop_reason in _triggers:
             # Open the availability breaker only for persistent
-            # conditions (usage_limit / not_found). "fallback" is
-            # excluded so tmux keeps being probed per-task (its own
-            # launch _CircuitBreaker governs when to stop).
+            # conditions (usage_limit / not_found).
             #
             # Deliberately not gated on a fallback being configured
             # (ISSUE-362). The breaker is a shared signal: the
@@ -2525,34 +2511,6 @@ def run_with_failover(
                     task.id, _primary_kind,
                     brain_result.stop_reason,
                 )
-            # Preserve tmux's own launch alert: its _CircuitBreaker
-            # governs fallback/not_found (which are NOT in the
-            # availability breaker's cooldown set), so its
-            # 5-consecutive-launch-failure alert still routes here.
-            if _primary_kind == "tmux_claude":
-                try:
-                    from .brain.tmux_claude import (
-                        consume_circuit_open_alert,
-                    )
-                    if consume_circuit_open_alert():
-                        from istota.notifications import delivery as notifications
-                        _tail = (
-                            "falling back."
-                            if _fallback_kind is not None
-                            else "no fallback configured, so tasks "
-                                 "keep failing."
-                        )
-                        notifications.send_notification(
-                            config, task.user_id,
-                            "⚠️ tmux_claude brain circuit opened — "
-                            f"{_tail} Check the claude CLI "
-                            "version / readiness markers.",
-                            purpose="alert",
-                        )
-                except Exception:
-                    logger.debug(
-                        "tmux circuit-open alert failed", exc_info=True
-                    )
             _fb = None
             if _fallback_kind is not None:
                 _fb, _dropped_pin, _fb_effort = _run_fallback(
@@ -2714,7 +2672,7 @@ def brain_delivers_vision(kind: str, model: str) -> bool | None:
     a negative — claiming an answer was written blind when it may not have been
     is the same class of false statement this whole change removes.
     """
-    if kind in ("claude_code", "tmux_claude"):
+    if kind == "claude_code":
         # Delivery is Claude Code's own `Read`, available on any model the CLI
         # runs. Whether the model actually called it is what `unread_images`
         # answers, and that is a different question.
@@ -2736,7 +2694,6 @@ _FALLBACK_REASON_PHRASES = {
     "usage_limit": "overheated when it hit its usage limit",
     "not_found": "is unavailable because I can't find its CLI",
     "transient_api_error": "is unavailable because its provider returned an error",
-    "fallback": "is unavailable because it couldn't start",
 }
 
 
@@ -2959,7 +2916,7 @@ def build_oneshot_completer(
     override=brain_kind)``, so ``brain_kind`` is a task's pinned kind and goes
     through the same allowlist a task's does.
 
-    - claude_code (and tmux) → None. None is the routing answer, not a failure:
+    - claude_code → None. None is the routing answer, not a failure:
       the caller runs its tool-less ``claude`` CLI path (``context._run_triage``).
     - native → a native provider completer. If it can't be built (missing key /
       bad config), a completer that always yields None, so the caller treats the
@@ -3067,7 +3024,7 @@ def build_speech_gate_completer(
     """The speech gate's classifier completer. Always returns a completer.
 
     ``build_oneshot_completer`` with ``[speech_gate] model`` and
-    ``timeout_seconds``; where it answers None (claude_code, tmux) this wraps
+    ``timeout_seconds``; where it answers None (claude_code) this wraps
     the tool-less ``claude`` CLI path context triage uses, with the model
     resolved in the CLI's namespace. Either way the spend is a task-less
     ``task_usage`` row with ``origin="speech_gate"``. A failed call returns
@@ -3606,7 +3563,7 @@ def build_clean_env(config: Config, *, user_id: str | None = None) -> dict[str, 
     #
     # Here rather than in the brains because this is the env every model
     # subprocess is built from, and the defect is not one brain's: a
-    # `ClaudeCodeBrain` or `TmuxClaudeBrain` task runs its commands through the
+    # `ClaudeCodeBrain` task runs its commands through the
     # CLI's own Bash tool, which istota launches and does not instrument, so
     # `shell_exec.shell_argv` — which fixes the shells istota spawns itself —
     # cannot reach it. `NativeBrain` already passes `-o pipefail` on its own
@@ -3830,8 +3787,7 @@ def skill_model_credentials(
     whole fix. Everything else in the proxy's `credential_env` got there by
     `_split_credential_env`, which moves a name out of the model's environment
     and into the proxy's; the Claude token has to end up in both, because
-    `ClaudeCodeBrain` and `TmuxClaudeBrain` authenticate the task's own brain
-    with it. Taking it out of the model's env here would unauthenticate the
+    `ClaudeCodeBrain` authenticates the task's own brain with it. Taking it out of the model's env here would unauthenticate the
     task in order to fix the skill.
 
     An absent or empty value yields no entry, so a deployment configured with
@@ -4392,8 +4348,8 @@ def build_allowed_tools(
 ) -> list[str]:
     """Build the per-task tool list.
 
-    The CLI brains (ClaudeCodeBrain / TmuxClaudeBrain) no longer pass this as an
-    ``--allowedTools`` allowlist — they run with ``--dangerously-skip-permissions``
+    ClaudeCodeBrain no longer passes this as an
+    ``--allowedTools`` allowlist — it runs with ``--dangerously-skip-permissions``
     and the model gets its full default toolset. The security boundary is the
     bwrap sandbox + network proxy + clean env (credential stripping), not an
     interactive permission prompt; Bash is permitted anyway, which is effectively
@@ -5317,27 +5273,6 @@ def custom_system_prompt_path(config: Config) -> Path | None:
 #: `build_bwrap_cmd`'s default for ``cli_auth_mode``: this process's mode.
 _MODE_FROM_PROCESS = object()
 
-#: The root of the tmux brain's per-attempt key directories, a sibling of
-#: `.control` under the temp root, which no sandbox binds.
-CLI_KEY_DIR_NAME = ".cli-keys"
-
-
-def cli_key_dir_for_task(config: Config, task: db.Task) -> Path | None:
-    """`{temp_dir}/.cli-keys/{user_id}/task_{id}`, or None for an id that
-    cannot name its own directory or a process not under "api_key"."""
-    from .sandbox.user_scope import is_scopable_user_id
-
-    if process_cli_auth(config) != "api_key":
-        return None
-    if not is_scopable_user_id(task.user_id) or task.user_id.casefold() == CLI_KEY_DIR_NAME:
-        return None
-    try:
-        task_id = int(task.id)
-    except (TypeError, ValueError):
-        return None
-    return Path(config.temp_dir) / CLI_KEY_DIR_NAME / task.user_id / f"task_{task_id}"
-
-
 def build_bwrap_cmd(
     cmd: list[str],
     config: Config,
@@ -5356,7 +5291,6 @@ def build_bwrap_cmd(
     group_ids: "list[str] | None" = None,
     sandbox_env: dict[str, str] | None = None,
     cli_auth_mode: object = _MODE_FROM_PROCESS,
-    cli_key_dir: Path | None = None,
 ) -> list[str]:
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
@@ -5396,7 +5330,6 @@ def build_bwrap_cmd(
         cli_auth_mode=(
             process_cli_auth(config) if cli_auth_mode is _MODE_FROM_PROCESS else cli_auth_mode
         ),
-        cli_key_dir=cli_key_dir,
     )
     return render_bwrap_argv(
         plan, cmd, net_proxy_sock=net_proxy_sock, user_temp_dir=user_temp_dir,
@@ -7665,7 +7598,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     # **The withheld predicate asks the routing question and the tool list does
     # not**, which is a disagreement on purpose rather than drift. `admin_only`
     # only ever removes the *daemon-side* tool, since native is the only brain
-    # that builds one; a `claude_code` or `tmux_claude` task keeps the CLI's own
+    # that builds one; a `claude_code` task keeps the CLI's own
     # `WebFetch` whatever this list says, because that list never reaches the
     # CLI as an allowlist. So a prompt that told a non-admin on a CLI-brain
     # deployment "you have no fetch tool" would be stating an absence that is
@@ -9063,9 +8996,8 @@ def execute_task(
     # directory.
     #
     # The user half is a debugging artifact and nothing in the product reads it
-    # back — the prompt reaches ClaudeCodeBrain on stdin, TmuxClaudeBrain
-    # through a tmux buffer loaded over stdin, and NativeBrain as the initial user
-    # message. It is kept as one, and it is the half that had to move: it
+    # back — the prompt reaches ClaudeCodeBrain on stdin and NativeBrain as the
+    # initial user message. It is kept as one, and it is the half that had to move: it
     # carries retrieved memory, knowledge facts, playbooks, conversation
     # history and the request itself, it differs per task, and where it used to
     # sit every later task of that user could read it for the length of the
@@ -9209,11 +9141,6 @@ def execute_task(
         # mounts to NativeBrain on the shipped `claude_code -> native` reroute.
         # Everything else about the two is identical, which is why the plan is
         # built once and the profile is the only argument that differs.
-        #
-        # The tmux brain's key directory under "api_key" is named here and
-        # created by that brain alone; the plan binds it only for the CLAUDE
-        # profile, and only when it exists at wrap time.
-        _cli_key_dir = cli_key_dir_for_task(config, task)
         def _build_wrap(sandbox_profile: SandboxProfile):
             def _wrap(raw_cmd: list[str]) -> list[str]:
                 if not config.security.sandbox_enabled:
@@ -9234,7 +9161,6 @@ def execute_task(
                     withheld_scopes=_withheld,
                     group_ids=task_group_ids,
                     sandbox_env=_runtime.sandbox_env,
-                    cli_key_dir=_cli_key_dir,
                 )
 
             return _wrap
@@ -9376,10 +9302,10 @@ def execute_task(
             # alone — a first run has no prior attempt"). The session log's
             # numbering is 1-based, as `task_usage.attempt_seq` is, so a first
             # run has to be attempt 1 and a retry attempt 2. This deliberately
-            # disagrees with the task cgroup directory and the tmux session
-            # label, which are named from the raw counter: those are within-run
-            # identifiers with no reader outside the process, while an operator
-            # reads a log file name against the usage table.
+            # disagrees with the task cgroup directory, which is named from the
+            # raw counter: that is a within-run identifier with no reader outside
+            # the process, while an operator reads a log file name against the
+            # usage table.
             #
             # The same binding as `ISTOTA_TASK_ATTEMPT` above, deliberately: the
             # floor that withholds a live transcript is an equality between the
@@ -9435,7 +9361,6 @@ def execute_task(
             # construction — see the `.resolve()` at the write above.
             composed_system_prompt_path=system_prompt_file,
             cli_settings_path=cli_settings_file,
-            cli_key_dir=_cli_key_dir,
             # The prepared images, as paths and media types — never bytes. Each
             # brain converts at the last moment, so nothing large reaches a task
             # row or a log line and the executor learns no provider wire format.
@@ -9469,10 +9394,6 @@ def execute_task(
             fs_write_roots=_fs_write_roots,
             fs_write_denied_roots=_fs_write_denied_roots,
             result_file=result_file,
-            # Task-derived tmux session label (no-op for other brains): threads
-            # the task id into the session name, structured log line, and
-            # on_pid/!stop correlation.
-            session_label=f"istota-{task.id}-{task.attempt_count}",
         )
         # The CLI tool harness, behind `[brain] tool_harness`. Set here only:
         # the direct callers build their own requests and keep the old path.
@@ -9655,7 +9576,7 @@ def execute_task(
                     actual_model,
                     rerouted=_ran_fallback,
                 )
-            elif _ran_kind in ("claude_code", "tmux_claude"):
+            elif _ran_kind == "claude_code":
                 # The directive required one `Read` per image. Check the trace
                 # rather than trusting it.
                 _unread = unread_images(req.images, trace)

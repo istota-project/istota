@@ -69,8 +69,7 @@ class ResultEvent:
     text: str
     # The whole terminal frame, uninterpreted. `_events` stays a parser and
     # `istota.usage.telemetry` owns the interpretation, so a CLI schema change touches one
-    # pure, unit-tested function rather than this module. The default keeps
-    # `tmux_claude.py`'s keyword construction compiling.
+    # pure, unit-tested function rather than this module.
     raw: dict | None = None
 
 

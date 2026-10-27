@@ -182,8 +182,10 @@ class TestBrainCanRun:
             native_reach=("anthropic",),
         )
 
-    def test_the_cli_brains_run_only_anthropic(self):
+    def test_the_cli_brain_runs_only_anthropic(self):
         providers = _cfg().providers
-        for kind in ("claude_code", "tmux_claude"):
-            assert brain_can_run(kind, "anthropic/x", providers)
-            assert not brain_can_run(kind, "openrouter/x", providers)
+        assert brain_can_run("claude_code", "anthropic/x", providers)
+        assert not brain_can_run("claude_code", "openrouter/x", providers)
+
+    def test_the_retired_tmux_kind_runs_nothing(self):
+        assert not brain_can_run("tmux_claude", "anthropic/x", _cfg().providers)

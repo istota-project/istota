@@ -224,7 +224,7 @@ def _initial_user_content(
 # tool-bearing tasks (empty allowed_tools — e.g. the sleep cycle — gets no
 # coding prompt). Generic hygiene only: project-specific conventions come from
 # the executor's storage framing and the repo's own guidance files, not here.
-# The claude_code/tmux brains take their prompt from the CLI, so this never
+# The claude_code brain takes its prompt from the CLI, so this never
 # reaches them — the coding steering is scoped to exactly the native path.
 CODING_SYSTEM_PROMPT = """\
 You are operating as a coding agent. Work carefully and verify your changes.

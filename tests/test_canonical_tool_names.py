@@ -22,8 +22,7 @@ from istota.agent.events import (
     canonical_tool_name,
 )
 from istota.brain import _events as stream_events
-from istota.brain import tmux_claude
-from istota.brain._events import ToolUseEvent, parse_stream_line
+from istota.brain._events import parse_stream_line
 
 PREFIX = f"mcp__{HARNESS_MCP_SERVER}__"
 
@@ -79,24 +78,8 @@ def _via_stream(name, args):
     return parse_stream_line(json.dumps(_frame(name, args)))
 
 
-def _via_transcript(name, args, tmp_path):
-    path = tmp_path / f"t-{len(list(tmp_path.iterdir()))}.jsonl"
-    path.write_text(json.dumps(_frame(name, args)) + "\n")
-    return [ev for ev in tmux_claude.parse_transcript(path) if isinstance(ev, ToolUseEvent)][0]
-
-
-def _via_tailer(name, args, tmp_path):
-    path = tmp_path / f"t-{len(list(tmp_path.iterdir()))}.jsonl"
-    path.write_text(json.dumps(_frame(name, args)) + "\n")
-    seen = []
-    tmux_claude._TranscriptTailer(path, seen.append)._drain_once()
-    return [ev for ev in seen if isinstance(ev, ToolUseEvent)][0]
-
-
 SITES = {
     "stream": lambda name, args, tmp_path: _via_stream(name, args),
-    "transcript": _via_transcript,
-    "tailer": _via_tailer,
 }
 
 
@@ -138,7 +121,7 @@ class TestTheParseSites:
 
 
 class TestTheGuard:
-    """No helper ever sees `mcp__istota__…` from any of the three parse sites."""
+    """No helper ever sees `mcp__istota__…` from a parse site."""
 
     def test_no_helper_receives_an_unstripped_name(self, monkeypatch, tmp_path):
         received = []
@@ -151,8 +134,7 @@ class TestTheGuard:
 
         for helper in ("_describe_tool_use", "_tool_invocation", "_lone_relay_ask"):
             real = getattr(agent_events, helper)
-            for module in (stream_events, tmux_claude):
-                monkeypatch.setattr(module, helper, recording(helper, real))
+            monkeypatch.setattr(stream_events, helper, recording(helper, real))
         monkeypatch.setattr(agent_events, "_private_relay_tool",
                             recording("_private_relay_tool", agent_events._private_relay_tool))
 

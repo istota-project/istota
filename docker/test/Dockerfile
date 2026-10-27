@@ -20,7 +20,7 @@ ENV LANG=C.UTF-8
 
 # bubblewrap is the point of the image. The rest mirrors what the runtime image
 # installs for the same tests: git and sqlite3 for the developer and skill
-# paths, tmux for the tmux brain, curl + ca-certificates for anything that
+# paths, curl + ca-certificates for anything that
 # resolves a URL.
 # procps is not decoration: tests/test_qtest_semaphore.py and the process-group
 # tests shell out to `ps` to prove a grandchild died with its group, and a
@@ -29,7 +29,7 @@ ENV LANG=C.UTF-8
 # openssh-client for `ssh-keygen`: tests/test_mac_istota_stack.py signs and
 # verifies release manifests with a throwaway SSH key.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bubblewrap git sqlite3 curl tmux ca-certificates procps openssh-client \
+    bubblewrap git sqlite3 curl ca-certificates procps openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Pinned, not `:latest`. The Python dependencies are pinned by `uv sync

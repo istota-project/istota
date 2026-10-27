@@ -220,7 +220,8 @@ class TestFallbackDropsAdvisor:
 
         reset_availability_breaker()
 
-    def test_anthropic_to_anthropic_fallback_keeps_advisor(self, tmp_path):
+    def _run_fallback_with(self, tmp_path, *, task_model):
+        """Primary hits a usage limit; return the request the native fallback got."""
         from istota.brain._fallback import reset_availability_breaker
         from istota.brain._types import BrainResult
 
@@ -229,51 +230,10 @@ class TestFallbackDropsAdvisor:
         primary.execute = lambda req: BrainResult(
             False, "usage limit", stop_reason="usage_limit"
         )
-        fallback = _FakeAnthropicBrain()
+        fallback = _FakeNativeBrain()
 
         config = _make_config(tmp_path)
-        config.brain = BrainConfig(kind="claude_code", fallback="tmux_claude")
-        config.brain.claude_code.advisor_model = "opus"
-        config.security.sandbox_enabled = False
-
-        def fake_make_brain(bc):
-            return primary if getattr(bc, "kind", "") == "claude_code" else fallback
-
-        patches = _patch_executor() + [
-            patch("istota.executor.make_brain", side_effect=fake_make_brain),
-            patch("istota.executor._with_user_provider_key", side_effect=lambda bc, *a, **k: bc),
-            patch("istota.notifications.delivery.send_notification"),
-        ]
-        with contextmanager_chain(patches):
-            task = _task(source_type="cli", model="")
-            execute_task(task, config, [])
-
-        assert fallback.received_reqs
-        assert fallback.received_reqs[0].advisor == "opus"
-
-        reset_availability_breaker()
-
-    def _run_fallback_with(self, tmp_path, *, task_model, fallback_kind="tmux_claude"):
-        """Primary hits a usage limit; return the request the fallback got.
-
-        `fallback_kind` decides whether the reroute crosses a namespace, which
-        since ISSUE-417 is what decides whether the pin carries: `tmux_claude`
-        is the same `anthropic` namespace as the primary, `native` is not.
-        """
-        from istota.brain._fallback import reset_availability_breaker
-        from istota.brain._types import BrainResult
-
-        reset_availability_breaker()
-        primary = _FakeAnthropicBrain()
-        primary.execute = lambda req: BrainResult(
-            False, "usage limit", stop_reason="usage_limit"
-        )
-        fallback = (
-            _FakeNativeBrain() if fallback_kind == "native" else _FakeAnthropicBrain()
-        )
-
-        config = _make_config(tmp_path)
-        config.brain = BrainConfig(kind="claude_code", fallback=fallback_kind)
+        config.brain = BrainConfig(kind="claude_code", fallback="native")
         config.brain.claude_code.advisor_model = "sonnet"
         config.security.sandbox_enabled = False
 
@@ -305,42 +265,6 @@ class TestFallbackDropsAdvisor:
         # executor substituted into every request; since ISSUE-418 a request
         # carries a genuine per-task pin or nothing, which is the only case
         # this rule was ever written for.
-        req = self._run_fallback_with(
-            tmp_path, task_model="opus", fallback_kind="native",
-        )
+        req = self._run_fallback_with(tmp_path, task_model="opus")
         assert req.model == ""  # dropped_pin: fb default
         assert req.advisor == ""
-
-    def test_a_same_namespace_fallback_keeps_the_pin(self, tmp_path):
-        """ISSUE-417: `claude_code -> tmux_claude` crosses nothing.
-
-        The same `claude` binary and the same `anthropic` namespace, so `opus`
-        is valid on the target and carries. This used to drop it and tell the
-        user their pin had been dropped, for no reason — which is what the old
-        version of the test above asserted on this pairing.
-
-        Nothing is claimed about the advisor here, and that is not an omission:
-        `_resolve_advisor` drops it at the *request build* for any task carrying
-        a model pin, so it is already empty on the primary request and there is
-        none for the fallback to keep. The pairing rule and the crossing rule
-        cannot both be exercised by one task.
-        """
-        req = self._run_fallback_with(
-            tmp_path, task_model="opus", fallback_kind="tmux_claude",
-        )
-        assert req.model == "opus"
-        assert req.advisor == ""
-
-    def test_an_unpinned_task_keeps_its_advisor_across_the_fallback(self, tmp_path):
-        """The ISSUE-418 half: no pin means nothing to drop.
-
-        The deployment default used to stand in as a pin here, so an unpinned
-        task reached the fallback carrying a non-portable id, had it dropped,
-        lost its advisor, and showed the user a "your pin was dropped" note
-        about a pin they never set. With no pin the fallback applies its own
-        default and the advisor survives — the same condition that keeps it on
-        the primary, which is also unpinned.
-        """
-        req = self._run_fallback_with(tmp_path, task_model="")
-        assert req.model == ""
-        assert req.advisor == "sonnet"

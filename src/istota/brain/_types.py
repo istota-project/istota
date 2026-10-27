@@ -76,7 +76,7 @@ class BrainRequest:
     Three text channels reach the model, and they are distinct on purpose:
 
     - ``prompt`` — the task material, sent as the model's user turn (stdin on
-      the headless CLI path, the pane injection on tmux, the initial
+      the headless CLI path, the initial
       ``UserMessage`` on the native path). Native compaction may summarize it.
     - ``composed_system_prompt_path`` — Istota's own standing instructions,
       composed by the executor and sent with *system* authority, outside
@@ -148,8 +148,8 @@ class BrainRequest:
     # relative value names a different file on each backend and would survive a
     # reroute between them. NativeBrain opens it in the *daemon* process, so it
     # would resolve against the daemon's cwd; the Claude CLI resolves it itself,
-    # inside the sandbox, against the task's chdir target — and the tmux path
-    # puts another `cd` in front of that. `custom_system_prompt_path` never had
+    # inside the sandbox, against the task's chdir target.
+    # `custom_system_prompt_path` never had
     # the problem because it comes from a resolved config path.
     composed_system_prompt_path: Path | None = None
 
@@ -158,13 +158,6 @@ class BrainRequest:
     # Same rules as that path: absolute, required once set. NativeBrain reads
     # nothing from it; it is carried so a reroute onto a CLI brain keeps it.
     cli_settings_path: Path | None = None
-
-    # The tmux brain's per-attempt directory for the key its `apiKeyHelper`
-    # reads under `[brain.claude_code] auth = "api_key"`
-    # (`{temp_dir}/.cli-keys/{user_id}/task_{id}`, set by the executor). The
-    # CLAUDE wrap binds it read-only; the NATIVE wrap never does. Nothing else
-    # writes there.
-    cli_key_dir: Path | None = None
 
     # Whether the brain should stream events for progress callbacks. When
     # False, the brain may pick a faster non-streaming path if it has one.
@@ -201,8 +194,7 @@ class BrainRequest:
     # the executor's `on_pid` callback arrives too late to catch anything the
     # child forked on the way up, and bwrap forks every time (ISSUE-285).
     # NativeBrain spawns a fresh child per Bash execution and never calls
-    # `on_pid` at all; TmuxClaudeBrain has no spawn of its own to hook and stays
-    # on the `on_pid` path.
+    # `on_pid` at all.
     task_cgroup: Path | None = None
 
     # Wraps a command list (e.g. for bubblewrap sandboxing). The brain
@@ -212,8 +204,8 @@ class BrainRequest:
     # This one is the *Claude* profile: the namespace it builds carries the
     # `claude` CLI's own runtime state — its binary directory, its installed
     # versions, its lock directory, its credential and its session logs —
-    # because the process being wrapped is that CLI. ClaudeCodeBrain and
-    # TmuxClaudeBrain read it; nothing else should.
+    # because the process being wrapped is that CLI. ClaudeCodeBrain reads it;
+    # nothing else should.
     sandbox_wrap: Callable[[list[str]], list[str]] | None = None
 
     # The same sandbox under the *native* profile: istota's own code is the
@@ -238,7 +230,7 @@ class BrainRequest:
     harness: HarnessSpec | None = None
 
     # Filesystem confinement for in-process file tools (NativeBrain only; NB-1).
-    # ClaudeCodeBrain / TmuxClaudeBrain ignore these — their tools run inside
+    # ClaudeCodeBrain ignores these — its tools run inside
     # bwrap, which already confines the filesystem. NativeBrain's Read/Write/
     # Edit/Grep/Glob run in the daemon process (no bwrap), so the executor
     # passes the same user-data roots bwrap would bind and the file tools
@@ -302,11 +294,6 @@ class BrainRequest:
     # final result to when stream parsing fails. Other brains may ignore.
     result_file: Path | None = None
 
-    # Optional human-readable session label. TmuxClaudeBrain uses it to name
-    # its tmux session (for !stop correlation + log readability); other brains
-    # ignore it. Empty = the brain derives a name locally. Additive — the
-    # executor may leave it unset.
-    session_label: str = ""
 
     # Prepared image attachments for this task, in sender order
     # (``image_attachments.prepare_image_attachments`` produces them). Empty for
@@ -344,10 +331,7 @@ class BrainResult:
     # completed/cancelled/timeout/oom/transient_api_error/error/not_found,
     # plus "usage_limit" (the brain hit a subscription/quota/billing limit — a
     # persistent "brain unavailable" condition the executor reroutes to the
-    # configured fallback brain and which opens the availability breaker) and
-    # "fallback" (TmuxClaudeBrain: this attempt couldn't be driven via tmux —
-    # the executor reruns it once through the fallback brain within the same
-    # attempt).
+    # configured fallback brain and which opens the availability breaker).
     stop_reason: str = "completed"
 
     # Per-attempt token + cost telemetry, normalized across brains
@@ -355,9 +339,7 @@ class BrainResult:
     # *every* return, success or failure — tokens are spent either way.
     # ClaudeCodeBrain builds it from the CLI's terminal frame plus the
     # per-request `message_delta` frames; NativeBrain converts its `TaskUsage`
-    # at the boundary. TmuxClaudeBrain leaves it None: it drives the interactive
-    # TUI and reconstructs events from a JSONL transcript, so there is no result
-    # frame to read, and a synthetic zero would drag every average.
+    # at the boundary.
     usage: "BrainUsage | None" = None
 
     # Which brain produced this result, for the usage row's `brain_kind`. Set by
@@ -428,11 +410,10 @@ class Brain(Protocol):
 
     # The model namespace this brain resolves alias names in. Operators
     # key a per-namespace alias override on this string (``[models.aliases.<name>]``
-    # sub-table). ``ClaudeCodeBrain`` / ``TmuxClaudeBrain`` share ``"anthropic"``
-    # (same `claude` binary, same Anthropic model IDs); ``NativeBrain`` uses
-    # ``"openai_compat"`` (its provider label). Keeping this a namespace *label*
-    # rather than the brain *kind* collapses the two CLI brains to one key so an
-    # operator writes an ``anthropic`` value once for both.
+    # sub-table). ``ClaudeCodeBrain`` uses ``"anthropic"`` (Anthropic model
+    # IDs); ``NativeBrain`` uses ``"openai_compat"`` (its provider label). A
+    # namespace *label* rather than the brain *kind*, so brains that speak one
+    # vocabulary share one key.
     model_namespace: str
 
     def execute(self, req: BrainRequest) -> BrainResult: ...
@@ -454,10 +435,9 @@ class Brain(Protocol):
         """This brain's own configured default model, unresolved.
 
         The model a request that pins none runs on, read from this brain's own
-        config block (``[brain.native] model``, ``[brain.claude_code] model``,
-        ``[brain.tmux] model``). Empty means the backend's own idea of a
-        default — the CLI's for the two ``claude`` brains, the endpoint's for
-        native.
+        config block (``[brain.native] model``, ``[brain.claude_code] model``).
+        Empty means the backend's own idea of a default — the CLI's for
+        ``claude_code``, the endpoint's for native.
 
         It is on the protocol because the *question* is per-brain and the
         answer used to be deployment-wide: a single top-level `model` was

@@ -128,12 +128,12 @@ describe('chat store — saving a room brain', () => {
   });
 
   it('says nothing when nothing was cleared', async () => {
-    api.updateChatRoom.mockResolvedValue(room({ brain: 'tmux_claude' }));
+    api.updateChatRoom.mockResolvedValue(room({ brain: 'claude_code' }));
     const s = await freshSession();
     await s.init();
     const notices = await freshNotices();
     notices.clearNotices();
-    await s.updateRoomSettings(1, { brain: 'tmux_claude' });
+    await s.updateRoomSettings(1, { brain: 'claude_code' });
     expect(get(notices.currentNotice)).toBeNull();
   });
 

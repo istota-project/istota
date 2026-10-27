@@ -4361,8 +4361,8 @@ const _MOCK_APP_LOG = [
   [
     '2026-07-31T09:14:31',
     'WARNING',
-    'istota.brain.tmux_claude',
-    'tmux_brain session=t-9f21 outcome=fallback ready_ms=30012 dialogs=0 retries=2',
+    'istota.executor',
+    'brain fallback: primary claude_code unavailable (reason=usage_limit), rerunning on native',
   ],
   [
     '2026-07-31T09:14:31',
@@ -4801,8 +4801,8 @@ const MOCK_CHOICES: Record<string, string[]> = {
   'logging.output': ['console', 'file', 'both'],
   'logging.level': ['DEBUG', 'INFO', 'WARNING', 'ERROR'],
   'web.token_storage': ['encrypted', 'plaintext'],
-  'brain.kind': ['claude_code', 'native', 'tmux'],
-  'brain.fallback': ['', 'claude_code', 'native', 'tmux'],
+  'brain.kind': ['claude_code', 'native'],
+  'brain.fallback': ['', 'claude_code', 'native'],
 };
 const MOCK_MULTI: Record<string, string[]> = { 'web.auth': ['email', 'nextcloud'] };
 /** The model pickers' fields, as `config_editor.schema.MODEL_FIELDS` names them. */

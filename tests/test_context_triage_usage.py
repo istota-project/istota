@@ -8,7 +8,7 @@ so no usage row — the one origin whose absence from the totals could actually
 move them.
 
 Two inference paths reach the model, and both are covered here: the `claude`
-CLI (claude_code / tmux deployments) and an injected native completer. The
+CLI (claude_code deployments) and an injected native completer. The
 fail-open contract is what everything else here must not break — a triage
 hiccup adds context, it never silently drops it.
 """

@@ -161,25 +161,12 @@ def _executable(path: str | Path) -> bool:
     return p.is_file() and os.access(p, os.X_OK)
 
 
-def _binary_status(
-    path: str, *, probe: bool, version_flag: str = "--version"
-) -> tuple[str, str]:
+def _binary_status(path: str, *, probe: bool) -> tuple[str, str]:
     """``(status, detail)`` for "is this binary usable", honouring `probe`.
 
     Under ``probe=False`` the answer comes from the filesystem alone and says
     so, because an operator reading the result otherwise cannot tell whether
     anything was actually executed.
-
-    ``version_flag`` is the flag the binary answers to: ``tmux`` takes ``-V``
-    and everything else here takes ``--version``. A parameter rather than a
-    second copy of this function, because the copy `check_tmux` carried lost
-    the two arms above ``probe``: under ``probe=False`` it reported FAIL beneath
-    a detail saying the file *was* executable, and under ``probe`` it reported
-    "could not be executed" for a binary that ran and exited non-zero. It also
-    read its banner from ``stdout`` alone and unsplit, so a version printed to
-    stderr came back as a bare ``"{path}: "`` — a third difference, invisible
-    for a real ``tmux -V`` (one line, on stdout), recorded here rather than in
-    the stage's stated behaviour change for that reason.
     """
     p = Path(path)
     if not p.exists():
@@ -188,11 +175,11 @@ def _binary_status(
         return FAIL, f"{path} is present but not executable"
     if not probe:
         return OK, f"{path} exists and is executable (not executed: probe disabled)"
-    result = _run([str(p), version_flag])
+    result = _run([str(p), "--version"])
     if result is None:
         return FAIL, f"{path} could not be executed"
     if result.returncode != 0:
-        return FAIL, f"{path} exited {result.returncode} on {version_flag}"
+        return FAIL, f"{path} exited {result.returncode} on --version"
     banner = (result.stdout or result.stderr or "").strip().splitlines()
     return OK, f"{path}: {banner[0] if banner else 'ran, no version output'}"
 
@@ -345,19 +332,18 @@ def _reachable_kinds(config: "Config") -> frozenset[str]:
 #: them needs the binary. Restated here rather than asked of a brain instance,
 #: which would mean constructing one to answer a question about a name.
 #:
-#: **Not imported from ``brain``, and the two members are not the point.** Four
-#: other constants in the tree hold the same pair — ``brain._fallback``'s
+#: **Not imported from ``brain``, and the members are not the point.** Four
+#: other constants in the tree hold the same set — ``brain._fallback``'s
 #: ``SUBSCRIPTION_BRAIN_KINDS``, ``config._ANTHROPIC_BRAIN_KINDS`` and two
 #: inline tuples in ``executor`` — and between them they answer three
 #: *different* questions: which quota a usage limit belongs to, which kinds the
 #: Anthropic-only advisor tool can reach, and which deliver image pixels through
 #: the CLI's own ``Read`` (both ``executor`` tuples ask that last one). They
-#: agree today by coincidence of there being two CLI brains, and
-#: collapsing them would make one of those questions answer for the others the
+#: agree today by coincidence, and collapsing them would make one of those questions answer for the others the
 #: next time a kind moves. Importing would also cost the config-load path: this
 #: module is reached from ``load_config`` and ``istota.brain`` pulls in every
 #: brain implementation, which is why ``_reachable_kinds`` imports lazily.
-_CLI_BRAIN_KINDS = frozenset({"claude_code", "tmux_claude"})
+_CLI_BRAIN_KINDS = frozenset({"claude_code"})
 
 
 def check_model_cli(config: "Config", probe: bool) -> CheckResult:
@@ -419,42 +405,6 @@ def check_model_cli(config: "Config", probe: bool) -> CheckResult:
         status,
         detail,
         remedy="" if status == OK else "Reinstall the Claude Code CLI.",
-        scope=IMAGE,
-    )
-
-
-def check_tmux(config: "Config", probe: bool) -> CheckResult:
-    """``tmux``, needed only by the brain that drives the interactive TUI.
-
-    Reachability rather than ``brain.kind``, for the reason
-    ``check_model_cli`` gives: a routing entry, a fallback or a room allowlist
-    can put a task on ``tmux_claude`` without it being the base kind.
-    """
-    reachable = _reachable_kinds(config)
-    if "tmux_claude" not in reachable:
-        return CheckResult(
-            "runtime.tmux",
-            SKIP,
-            "no reachable brain kind uses tmux "
-            f"(reachable: {', '.join(sorted(reachable)) or 'none'})",
-            scope=IMAGE,
-        )
-    path = shutil.which("tmux")
-    if path is None:
-        return CheckResult(
-            "runtime.tmux",
-            FAIL,
-            "tmux_claude is reachable on this deployment but there is no `tmux` on PATH",
-            remedy="Install tmux, or stop routing tasks to tmux_claude.",
-            scope=IMAGE,
-        )
-    # tmux answers `-V`, not `--version`.
-    status, detail = _binary_status(path, probe=probe, version_flag="-V")
-    return CheckResult(
-        "runtime.tmux",
-        status,
-        detail,
-        remedy="" if status == OK else "Install a working tmux.",
         scope=IMAGE,
     )
 
@@ -901,9 +851,7 @@ def _model_fields_to_check(config: "Config") -> list[tuple[str, str, str]]:
     fields: list[tuple[str, str, str]] = []
     if "claude_code" in reachable:
         fields.append(("[brain.claude_code] model", brain.claude_code.model, "claude_code"))
-    if "tmux_claude" in reachable:
-        fields.append(("[brain.tmux] model", brain.tmux.model, "tmux_claude"))
-    if reachable & {"claude_code", "tmux_claude"}:
+    if "claude_code" in reachable:
         fields.append(("[brain.claude_code] advisor_model", brain.claude_code.advisor_model, "claude_code"))
     if "native" in reachable:
         fields.append(("[brain.native] model", brain.native.model, "native"))
@@ -2099,7 +2047,7 @@ def check_session_log_dir(config: "Config", probe: bool) -> CheckResult:
     ``probe=False``**, and that is deliberate rather than an oversight. The
     module's convention for a probe it may not run is to answer from the
     filesystem and say so in the ``detail`` while still passing —
-    `_binary_status` and `check_tmux` return ``OK``, `check_subscription_usage`
+    `_binary_status` returns ``OK``, `check_subscription_usage`
     and `check_sandbox_masks` return ``SKIP``. Here the subject *is* a
     boundary, and the defect being fixed was this check reporting a protection
     that was not in place; a status an operator reads as "fine" on a run that
@@ -3558,11 +3506,11 @@ def check_skill_model_credential(
     if not live:
         return results
 
-    # code_review runs on the configured brain, and on tmux on claude_code, so
-    # the CLI credential authenticates it only there. On native the brain's
+    # code_review runs on the configured brain, so the CLI credential
+    # authenticates it only on claude_code. On native the brain's
     # own provider key does, which `brain.native` checks.
     brain_kind = getattr(getattr(config, "brain", None), "kind", "claude_code")
-    if brain_kind not in ("claude_code", "tmux_claude"):
+    if brain_kind != "claude_code":
         results.append(
             CheckResult(
                 f"{prefix}.value",
@@ -10841,7 +10789,6 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.platform", check_platform),
     ("runtime.bwrap", check_bwrap),
     ("runtime.model_cli", check_model_cli),
-    ("runtime.tmux", check_tmux),
     ("runtime.gitleaks", check_gitleaks),
     ("runtime.gws", check_gws),
     ("runtime.native_brain", check_native_brain),
@@ -10950,7 +10897,6 @@ CHECK_SCOPES: dict[str, str] = {
     "runtime.platform": IMAGE,
     "runtime.bwrap": IMAGE,
     "runtime.model_cli": IMAGE,
-    "runtime.tmux": IMAGE,
     "runtime.gitleaks": IMAGE,
     "runtime.gws": IMAGE,
     # Deployment, not image: a credential is a property of an install, and the

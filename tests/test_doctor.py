@@ -580,6 +580,37 @@ class TestBwrap:
         r = run_checks(make_config(), only=("runtime.bwrap",), probe=probe)[0]
         assert r.status == status
 
+    @pytest.mark.parametrize(
+        "probe,wrong_reason",
+        [(False, "exists and is executable"), (True, "could not be executed")],
+        ids=["probe-false", "probe-true"],
+    )
+    def test_an_unrunnable_binary_names_the_missing_bit(
+        self, make_config, tmp_path, monkeypatch, probe, wrong_reason
+    ):
+        """A binary on disk with no execute bit for anyone.
+
+        An inlined `OK if _executable(path) else FAIL` under one fixed detail
+        reported FAIL beneath "exists and is executable" under `probe=False`,
+        the opposite of the fault, and `setup_wizard` runs the registry that
+        way. With probing on, the spawn's own failure sent an operator to
+        reinstall a binary that is installed.
+
+        `shutil.which` filters on the execute bit, so the arm is reached when it
+        goes away between the lookup and the check, which is why `which` is
+        patched rather than a file put on PATH. `os.access(X_OK)` answers False
+        for a mode with no execute bit even as root, so no `requires_dac`.
+        """
+        fake = _fake_bin(tmp_path / "bin" / "bwrap", "bubblewrap 0.8.0")
+        fake.chmod(0o644)
+        _which_only(monkeypatch, "bwrap", fake)
+
+        r = run_checks(make_config(), only=("runtime.bwrap",), probe=probe)[0]
+
+        assert r.status == FAIL
+        assert "present but not executable" in r.detail
+        assert wrong_reason not in r.detail
+
 
 class TestPdfTools:
     """#696: the image shipped without poppler-utils and health PDF uploads
@@ -647,93 +678,6 @@ class TestModelCli:
         assert r.status == FAIL
         assert "built without Claude Code" in r.detail
         assert "istota-stack update" in r.remedy
-
-
-class TestTmux:
-    @staticmethod
-    def _tmux_brain(make_config):
-        from istota.config import BrainConfig
-
-        return make_config(brain=BrainConfig(kind="tmux_claude"))
-
-    def test_skips_unless_tmux_brain(self, make_config):
-        r = run_checks(make_config(), only=("runtime.tmux",))[0]
-        assert r.status == SKIP
-
-    def test_missing_tmux_fails_under_the_tmux_brain(self, make_config, monkeypatch):
-        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
-        r = run_checks(self._tmux_brain(make_config), only=("runtime.tmux",))[0]
-        assert r.status == FAIL
-
-    @pytest.mark.parametrize(
-        "probe,wrong_reason",
-        [(False, "exists and is executable"), (True, "could not be executed")],
-        ids=["probe-false", "probe-true"],
-    )
-    def test_an_unrunnable_tmux_names_the_missing_bit(
-        self, make_config, tmp_path, monkeypatch, probe, wrong_reason
-    ):
-        """A tmux on disk with no execute bit for anyone.
-
-        The inlined copy of `_binary_status` this replaced answered `OK if
-        _executable(path) else FAIL` under one fixed detail, so under
-        `probe=False` it reported FAIL beneath "exists and is executable" — the
-        opposite of the fault. That is a shipped caller's mode: `setup_wizard`
-        runs the registry with `probe=False`. With probing on it tried the spawn
-        and reported what the spawn said, so an operator was sent to reinstall
-        a tmux that is installed.
-
-        `shutil.which` filters on the execute bit, so the arm is reached when it
-        goes away between the lookup and the check, which is why `which` is
-        patched rather than a file put on PATH. `os.access(X_OK)` answers False
-        for a mode with no execute bit even as root, so no `requires_dac`.
-        """
-        tmux = tmp_path / "bin" / "tmux"
-        tmux.parent.mkdir(parents=True, exist_ok=True)
-        tmux.write_text("#!/bin/sh\necho 'tmux 3.4'\n")
-        tmux.chmod(0o644)
-        _which_only(monkeypatch, "tmux", tmux)
-
-        r = run_checks(self._tmux_brain(make_config), only=("runtime.tmux",), probe=probe)[0]
-
-        assert r.status == FAIL
-        assert "present but not executable" in r.detail
-        assert wrong_reason not in r.detail
-        assert r.remedy == "Install a working tmux."
-
-    def test_the_version_probe_asks_tmux_for_dash_v(
-        self, make_config, tmp_path, monkeypatch
-    ):
-        """`tmux --version` is an error, which is the whole reason a fork of
-        `_binary_status` existed to inline.
-
-        Asserted from the binary's own side rather than by recording an argv, so
-        a `_run` that stopped forwarding the flag fails this too.
-        """
-        tmux = tmp_path / "bin" / "tmux"
-        tmux.parent.mkdir(parents=True, exist_ok=True)
-        tmux.write_text('#!/bin/sh\ntest "$1" = "-V" || exit 64\necho "tmux 3.4"\n')
-        tmux.chmod(0o755)
-        _which_only(monkeypatch, "tmux", tmux)
-
-        r = run_checks(self._tmux_brain(make_config), only=("runtime.tmux",))[0]
-
-        assert r.status == OK, r.detail
-        assert "tmux 3.4" in r.detail
-
-    def test_a_tmux_that_ran_and_exited_non_zero_names_the_status(
-        self, make_config, tmp_path, monkeypatch
-    ):
-        """Second thing the inlined copy flattened: it reported "could not be
-        executed" for a binary that executed perfectly well and answered
-        non-zero, which sends an operator to reinstall rather than to read the
-        status."""
-        _which_only(monkeypatch, "tmux", _fake_bin(tmp_path / "bin" / "tmux", "nope", exit_code=3))
-
-        r = run_checks(self._tmux_brain(make_config), only=("runtime.tmux",))[0]
-
-        assert r.status == FAIL
-        assert "exited 3 on -V" in r.detail
 
 
 class TestGitleaks:
@@ -823,8 +767,8 @@ class TestGws:
 
 
 class TestTheBinaryChecksFollowTheReachableSet:
-    """`runtime.model_cli` and `runtime.tmux` ask which kinds a task could run
-    under, not which one is the base kind.
+    """`runtime.model_cli` asks which kinds a task could run under, not which
+    one is the base kind.
 
     Both halves are here on purpose. A test that only asserts the widening
     passes just as happily against a check that widened unconditionally — which
@@ -842,9 +786,6 @@ class TestTheBinaryChecksFollowTheReachableSet:
             ("runtime.model_cli", {"room_selectable": ["claude_code"]}, FAIL, "claude_code"),
             ("runtime.model_cli", {"room_selectable": []}, SKIP, None),
             ("runtime.model_cli", {"room_selectable": ["claude_kode"]}, SKIP, None),
-            ("runtime.tmux", {"room_selectable": ["tmux_claude"]}, FAIL, "tmux_claude"),
-            ("runtime.tmux", {"room_selectable": []}, SKIP, None),
-            ("runtime.tmux", {"room_selectable": ["claude_code"]}, SKIP, None),
             ("runtime.model_cli", {"source_type_overrides": {"scheduled": "claude_code"}}, FAIL, None),
             ("runtime.model_cli", {"fallback": "claude_code"}, FAIL, None),
         ],
@@ -852,9 +793,6 @@ class TestTheBinaryChecksFollowTheReachableSet:
             "model_cli-room-may-pin-claude_code",
             "model_cli-empty-allowlist",
             "model_cli-unbuildable-allowlist-entry",
-            "tmux-room-may-pin-tmux_claude",
-            "tmux-empty-allowlist",
-            "tmux-unmoved-by-another-kind",
             "model_cli-source-type-route",
             "model_cli-configured-fallback",
         ],
@@ -1545,7 +1483,7 @@ class _NoModel:
     """A `subprocess.run` stand-in that fails the test if the *model probe* runs.
 
     It discriminates on the probe's own marker rather than refusing everything,
-    because `runtime.model_cli`, `runtime.tmux` and the forge checks all spawn a
+    because `runtime.model_cli` and the forge checks all spawn a
     real `--version` in a whole-registry run. Everything else is delegated.
     """
 
@@ -3035,15 +2973,6 @@ class TestSkillModelCredential:
         value = self._run(make_config(brain=BrainConfig(kind="native")))[self.VALUE]
         assert value.status == SKIP
         assert "native" in value.detail
-
-    def test_the_value_half_still_fails_on_tmux(self, make_config, monkeypatch):
-        """On tmux code_review reviews through claude_code, so it needs the
-        Anthropic credential as claude_code does."""
-        from istota.config import BrainConfig
-
-        _clear_env(monkeypatch, *_MODEL_CREDENTIALS, *_NON_DAEMON_MARKERS)
-        config = make_config(brain=BrainConfig(kind="tmux_claude"))
-        assert self._run(config)[self.VALUE].status == FAIL
 
     def test_the_value_half_skips_with_the_proxy_off(self, make_config, monkeypatch):
         """No injection and no strip: the CLI is re-exec'd with the daemon's

@@ -8,19 +8,14 @@ never crossed at all.
 
 ISSUE-418 removed the second half structurally — a request carries a genuine
 per-task pin or nothing, so an unpinned task reaches its brain's own default
-with no namespace reasoning involved. What is left is the first half, and it is
-wrong in the opposite direction: `claude_code -> tmux_claude` is a move *within*
-the `anthropic` namespace, running the same `claude` binary, so `claude-opus-5`
-is valid on the target — and the fallback dropped it anyway and told the user
-their pin had been dropped, for no reason.
+with no namespace reasoning involved. What is left is the first half, and it was
+wrong in the opposite direction: a move *within* the `anthropic` namespace kept
+the same model vocabulary, so `claude-opus-5` was valid on the target — and the
+fallback dropped it anyway and told the user their pin had been dropped, for no
+reason.
 
-Measured before the fix, both directions:
-
-    claude_code -> native       ns=openai_compat  dropped_pin='claude-opus-5'
-    claude_code -> tmux_claude  ns=anthropic      dropped_pin='claude-opus-5'
-
-The second line is the defect. The first must stay exactly as it is, which is
-why every crossing test here has a same-namespace twin.
+The crossing must stay exactly as it is, which is why every crossing test here
+has a same-namespace twin.
 """
 
 import logging
@@ -67,15 +62,13 @@ class TestTheNamespaceLookup:
 
     Three sites answered this by building a brain: `commands._model_namespace`,
     `web_app._brain_catalogue` (once per known kind, on every catalogue fetch)
-    and the executor. Constructing `TmuxClaudeBrain` runs `_warn_cli_version_once`,
-    which shells out to the installed `claude` — so asking a pure question about
-    a class attribute emitted a `tmux_brain cli_version_mismatch` WARNING, and on
+    and the executor. Constructing a brain can probe its binary, so asking a
+    pure question about a class attribute did work it had no need to, and on
     the native kind it builds a provider client.
     """
 
-    def test_the_two_cli_brains_share_one_namespace(self):
+    def test_the_cli_brain_reads_anthropic(self):
         assert model_namespace_for_kind("claude_code") == "anthropic"
-        assert model_namespace_for_kind("tmux_claude") == "anthropic"
 
     def test_native_reads_its_own(self):
         assert model_namespace_for_kind("native") == "openai_compat"
@@ -83,6 +76,7 @@ class TestTheNamespaceLookup:
     def test_an_unknown_kind_is_not_established(self):
         """`None` means "could not be answered", never "the same namespace"."""
         assert model_namespace_for_kind("nope") is None
+        assert model_namespace_for_kind("tmux_claude") is None
         assert model_namespace_for_kind("") is None
         assert model_namespace_for_kind(None) is None
 
@@ -99,30 +93,32 @@ class TestTheNamespaceLookup:
     def test_it_constructs_nothing(self, monkeypatch):
         """The property this exists for, asserted rather than assumed.
 
-        Both doors are shut, because patching `make_brain` alone cannot fail
-        for the regression this names: the function reads class attributes and
-        imports `TmuxClaudeBrain` directly, so a revert that constructs it
-        *without* going through `make_brain` — which is the thing that shells
-        out to `claude` — would stay green.
+        Every door is shut, because patching `make_brain` alone cannot fail
+        for the regression this names: the function reads class attributes, so
+        a revert that constructs a brain class *without* going through
+        `make_brain` would stay green.
         """
         import istota.brain as brain_pkg
-        from istota.brain import tmux_claude as tmux_mod
+        from istota.brain.claude_code import ClaudeCodeBrain
+        from istota.brain.native import NativeBrain
 
         def _boom(*a, **k):
             raise AssertionError("model_namespace_for_kind constructed a brain")
 
         monkeypatch.setattr(brain_pkg, "make_brain", _boom)
-        monkeypatch.setattr(tmux_mod.TmuxClaudeBrain, "__init__", _boom)
+        monkeypatch.setattr(ClaudeCodeBrain, "__init__", _boom)
+        monkeypatch.setattr(NativeBrain, "__init__", _boom)
         for kind in sorted(KNOWN_BRAIN_KINDS):
             assert model_namespace_for_kind(kind)
 
 
 class TestAMoveWithinANamespaceKeepsThePin:
-    """The reported defect. `claude_code -> tmux_claude` is not a crossing."""
+    """The reported defect: an `anthropic` pin on an `anthropic` brain is not a
+    crossing."""
 
     def test_a_canonical_id_survives(self):
         model, effort, dropped = _resolve_crossing_model_effort(
-            _Task("claude-opus-5"), Config(), _brain("tmux_claude"), "high",
+            _Task("claude-opus-5"), Config(), _brain("claude_code"), "high",
             origin_namespace="anthropic",
         )
         assert model == "claude-opus-5"
@@ -130,7 +126,7 @@ class TestAMoveWithinANamespaceKeepsThePin:
 
     def test_the_effort_survives_with_it(self):
         _model, effort, _dropped = _resolve_crossing_model_effort(
-            _Task("claude-opus-5"), Config(), _brain("tmux_claude"), "high",
+            _Task("claude-opus-5"), Config(), _brain("claude_code"), "high",
             origin_namespace="anthropic",
         )
         assert effort == "high"
@@ -139,7 +135,7 @@ class TestAMoveWithinANamespaceKeepsThePin:
         """The user was being told about a drop that did not need to happen."""
         with caplog.at_level(logging.INFO):
             _resolve_crossing_model_effort(
-                _Task("claude-opus-5"), Config(), _brain("tmux_claude"), "high",
+                _Task("claude-opus-5"), Config(), _brain("claude_code"), "high",
                 origin_namespace="anthropic",
             )
         assert not [r for r in caplog.records if "non-portable" in r.getMessage()]
@@ -155,7 +151,7 @@ class TestAMoveWithinANamespaceKeepsThePin:
         from istota.brain.claude_code import OPUS
 
         model, _e, dropped = _resolve_crossing_model_effort(
-            _Task("opus"), Config(), _brain("tmux_claude"), "",
+            _Task("opus"), Config(), _brain("claude_code"), "",
             origin_namespace="anthropic",
         )
         assert model == OPUS
@@ -174,7 +170,7 @@ class TestAMoveWithinANamespaceKeepsThePin:
         set_alias_overrides({"smart": "opus:high"})
         try:
             model, effort, dropped = _resolve_crossing_model_effort(
-                _Task("smart"), Config(), _brain("tmux_claude"), "",
+                _Task("smart"), Config(), _brain("claude_code"), "",
                 origin_namespace="anthropic",
             )
             assert model != "smart", "the alias reached the wire unresolved"
@@ -186,7 +182,7 @@ class TestAMoveWithinANamespaceKeepsThePin:
     def test_an_effort_suffix_is_not_passed_through(self):
         """`resolve_model_name` strips the modifier; the raw string did not."""
         model, _e, _d = _resolve_crossing_model_effort(
-            _Task("claude-opus-5:high"), Config(), _brain("tmux_claude"), "",
+            _Task("claude-opus-5:high"), Config(), _brain("claude_code"), "",
             origin_namespace="anthropic",
         )
         assert model == "claude-opus-5"
@@ -212,7 +208,7 @@ class TestAMoveAcrossANamespaceStillDrops:
         assert dropped is None
 
     def test_an_unpinned_task_carries_nothing_either_way(self):
-        for kind in ("native", "tmux_claude"):
+        for kind in ("native", "claude_code"):
             model, _e, dropped = _resolve_crossing_model_effort(
                 _Task(""), Config(), _brain(kind), "high",
                 origin_namespace="anthropic",
@@ -230,7 +226,7 @@ class TestAnUnknownOriginIsTreatedAsACrossing:
 
     def test_an_unknown_origin_drops_a_non_portable_pin(self):
         model, _e, dropped = _resolve_crossing_model_effort(
-            _Task("claude-opus-5"), Config(), _brain("tmux_claude"), "",
+            _Task("claude-opus-5"), Config(), _brain("claude_code"), "",
             origin_namespace=None,
         )
         assert model == ""
@@ -239,7 +235,7 @@ class TestAnUnknownOriginIsTreatedAsACrossing:
     def test_two_unknowns_do_not_compare_equal(self):
         """Both ends unknown is still not evidence they match."""
         model, _e, dropped = _resolve_crossing_model_effort(
-            _Task("claude-opus-5"), Config(), _brain("tmux_claude"), "",
+            _Task("claude-opus-5"), Config(), _brain("claude_code"), "",
             origin_namespace=None,
         )
         assert dropped == "claude-opus-5"
@@ -271,7 +267,7 @@ class TestTheClearingRuleAnswersOnTheKind:
             raise RuntimeError("no claude on this host")
 
         monkeypatch.setattr(cmd, "make_brain", _boom)
-        assert cmd._model_namespace(BrainConfig(kind="tmux_claude")) == "anthropic"
+        assert cmd._model_namespace(BrainConfig(kind="claude_code")) == "anthropic"
 
     def test_an_unknown_kind_is_still_not_established(self):
         import istota.commands as cmd

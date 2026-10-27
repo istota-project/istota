@@ -152,7 +152,7 @@ class Task:
     model: str | None = None  # Per-task model override; empty/None = use config default
     effort: str | None = None  # Per-task effort override; empty/None = use config default
     model_used: str | None = None  # Model the brain actually ran (resolved canonical ID), set post-run
-    # Per-task brain override (a kind: claude_code / native / tmux_claude);
+    # Per-task brain override (a kind: claude_code / native);
     # None = resolve from config. Frozen here at creation from `rooms.brain` so
     # a room edited while this task runs cannot change what it is, and copied by
     # retries and subtasks. Outranks `[brain.source_type_overrides]`.
@@ -10973,8 +10973,8 @@ def get_running_task_pids(conn: sqlite3.Connection) -> list[tuple[int, int]]:
     **Every running task is returned, including one with no pid**, which is
     reported as ``0``. Filtering those out would have printed ``sandbox
     none-running`` on a host that was running work: the column is NULL until
-    the brain reports a pid, and ``TmuxClaudeBrain`` reports one only once its
-    REPL is ready, so a running task can legitimately have none. The caller renders a ``0`` as "no worker pid recorded" — which
+    the brain reports a pid, so a running task can legitimately have none.
+    The caller renders a ``0`` as "no worker pid recorded" — which
     is the true answer, and unlike an omission it does not read as an
     idle host.
     """
@@ -14238,9 +14238,9 @@ def unmeasured_task_count(
 ) -> int:
     """Prompt tasks in the window with no `task_usage` row at all.
 
-    An honesty counter: `TmuxClaudeBrain` spends real tokens and writes no row,
-    and recording a synthetic zero for it would drag every average down while
-    making the dashboard look complete. Command and skill tasks call no model
+    An honesty counter: a prompt task that wrote no row is counted rather than
+    given a synthetic zero, which would drag every average down while making
+    the dashboard look complete. Command and skill tasks call no model
     and are not counted.
 
     It reads `tasks`, so it sees only `task_retention_days` back whatever

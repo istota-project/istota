@@ -108,8 +108,6 @@ NON_SECRET_KEYS = frozenset({
     "brain.claude_code.auth",
     # A path to the model-listing key's file, never the key itself.
     "models.anthropic_listing_key_file",
-    "brain.tmux.bypass_accept_marker",   # a TUI dialog substring; the config
-    "brain.tmux.bypass_warning_marker",  # hotfix knob when a CLI reword lands
 })
 
 # Fields excluded from the view entirely, with the reason each is out.
@@ -304,7 +302,7 @@ _SECRET_LABELS = {
 }
 
 # The section a file no config key reads belongs with: both are the Claude
-# Code CLI's, which the claude_code and tmux brains run.
+# Code CLI's, which the claude_code brain runs.
 _STANDALONE_SECTIONS = {
     "anthropic_api_key": "brain.claude_code",
     "claude_code_oauth_token": "brain.claude_code",

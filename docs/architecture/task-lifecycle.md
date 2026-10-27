@@ -64,7 +64,7 @@ For all other tasks, `execute_task()` handles the full pipeline:
 4. **Context loading** (Talk message cache or email thread)
 5. **Memory loading** (USER.md, CHANNEL.md, dated memories, recalled memories)
 6. **Prompt assembly** (see [executor docs](executor.md) for section order)
-7. **Brain execution** — the executor picks the brain with `resolve_brain_kind(task.source_type, config.brain)`, so a deployment can route (say) briefings to a cheaper brain than Talk, builds a `BrainRequest`, and calls `brain.execute(req)`. If the primary brain is unavailable, the fallback brain reruns the same request. The default `ClaudeCodeBrain` spawns `claude -p - --output-format stream-json` and parses the stream. `NativeBrain` runs an in-process agent loop over HTTP against any OpenAI-compatible model; `TmuxClaudeBrain` drives the interactive Claude TUI in a detached tmux session (not HTTP). See [brain](brain.md).
+7. **Brain execution** — the executor picks the brain with `resolve_brain_kind(task.source_type, config.brain)`, so a deployment can route (say) briefings to a cheaper brain than Talk, builds a `BrainRequest`, and calls `brain.execute(req)`. If the primary brain is unavailable, the fallback brain reruns the same request. The default `ClaudeCodeBrain` spawns `claude -p - --output-format stream-json` and parses the stream. `NativeBrain` runs an in-process agent loop over HTTP against any OpenAI-compatible model. See [brain](brain.md).
 8. **Result composition** (still in executor) — `_compose_full_result(text, trace)` handles context-management boundaries and terse-result recovery; both brains produce the same `(result_text, execution_trace)` shape.
 
 The executor returns `(success, result_text, actions_taken_json, execution_trace_json)`.

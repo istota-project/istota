@@ -43,7 +43,6 @@ _CONTAIN = frozenset({
 # have not each been reviewed. Move one onto `confined` when its module is
 # touched, and take it off here.
 RESOLVE_THEN_COMPARE_ALLOWED = frozenset({
-    "istota/brain/tmux_claude.py::transcript",
     "istota/build_info.py::_git_dir",
     "istota/build_info.py::checkout_revision",
     "istota/cli.py::cmd_workspace_localize",
@@ -105,7 +104,7 @@ RESOLVE_THEN_COMPARE_ALLOWED = frozenset({
 
 # The allowlist's size when the guard landed. Lower it as entries come off;
 # never raise it.
-ALLOWLIST_CEILING = 57
+ALLOWLIST_CEILING = 56
 
 
 def _call_name(node: ast.Call) -> str | None:

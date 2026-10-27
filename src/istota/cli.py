@@ -650,8 +650,7 @@ def _print_unmeasured(unmeasured, unmeasured_since, since, applicable=True):
         )
         print(
             f"\n{unmeasured} prompt task(s) {where} recorded no usage "
-            "(a tmux-brain run reports none; a synthetic zero would drag every "
-            "average)."
+            "(a synthetic zero would drag every average)."
         )
     elif unmeasured is None:
         print(

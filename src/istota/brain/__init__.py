@@ -88,19 +88,17 @@ KNOWN_BRAIN_KINDS = frozenset(BRAIN_KINDS)
 BRAIN_KIND_LABELS = {
     "claude_code": "Claude Code",
     "native": "Native",
-    "tmux_claude": "Tmux Claude",
 }
 
 
 BRAIN_CONFIG_BLOCK = {
     "claude_code": "claude_code",
     "native": "native",
-    "tmux_claude": "tmux",
 }
 """Which nested config block holds each kind's own settings.
 
-``tmux_claude`` reads ``[brain.tmux]``, which is the one place kind and block
-name disagree — the reason this is a table rather than `getattr(cfg, kind)`.
+A table rather than `getattr(cfg, kind)` so an unknown kind off a database row
+answers nothing instead of reaching an arbitrary attribute.
 """
 
 
@@ -113,9 +111,7 @@ def configured_default_model_effort(brain_config) -> tuple[str, str]:
     since it has constructed one anyway. This is for a caller that wants only to
     *report* the default and would otherwise construct a brain to ask: the
     scheduler's log-channel line, which runs per task, where building one costs
-    a `claude` CLI version probe (a `tmux_brain cli_version_mismatch` WARNING
-    each time — exactly the cost `web_app`'s per-kind `make_brain` loop already
-    pays) and, for native, a provider client.
+    a provider client for native.
 
     Returns the value **unresolved**: it may be an alias, and resolving it needs
     the brain's own table. A caller rendering it for a human wants what the
@@ -137,17 +133,13 @@ def model_namespace_for_kind(kind) -> str | None:
     """The model namespace a brain kind resolves alias names in.
 
     A **lookup, not a construction** (ISSUE-417). `model_namespace` is a class
-    attribute, so answering this needs no instance — and building one to ask is
-    not free: `TmuxClaudeBrain.__init__` runs `_warn_cli_version_once`, which
-    shells out to the installed `claude` and emits a
-    `tmux_brain cli_version_mismatch` WARNING, so a pure question about a
-    constant produced operator-facing noise. `web_app._brain_catalogue` asked it
-    once per known kind on every catalogue fetch.
+    attribute, so answering this needs no instance, and building one to ask is
+    not free (native builds a provider client). `web_app._brain_catalogue` asks
+    it once per known kind on every catalogue fetch.
 
-    Structured as `make_brain`'s ladder rather than a dict, so a fourth kind is
+    Structured as `make_brain`'s ladder rather than a dict, so a new kind is
     added in two adjacent places and a class that has moved cannot leave a stale
-    literal behind. `tmux_claude` is imported lazily for the reason `make_brain`
-    imports it lazily.
+    literal behind.
 
     ``None`` for anything unbuildable, and every caller must read that as **not
     established** rather than as "the same namespace" — the safe direction for
@@ -159,10 +151,6 @@ def model_namespace_for_kind(kind) -> str | None:
         return ClaudeCodeBrain.model_namespace
     if kind == "native":
         return NativeBrain.model_namespace
-    if kind == "tmux_claude":
-        from .tmux_claude import TmuxClaudeBrain
-
-        return TmuxClaudeBrain.model_namespace
     return None
 
 
@@ -237,10 +225,6 @@ def make_brain(brain_config: BrainConfig) -> Brain:
             spec=native_provider_spec(brain_config),
             providers=native_providers(brain_config),
         )
-    if kind == "tmux_claude":
-        from .tmux_claude import TmuxClaudeBrain
-
-        return TmuxClaudeBrain(getattr(brain_config, "tmux", None))
     raise ValueError(f"Unknown brain kind: {kind!r}")
 
 

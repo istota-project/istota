@@ -1,7 +1,7 @@
-"""Image delivery on the two Claude Code brains (image-attachment-vision, Stage 3).
+"""Image delivery on the Claude Code brain (image-attachment-vision, Stage 3).
 
-Neither CLI brain can be handed image bytes: `claude -p` takes text on stdin and
-the tmux brain submits a bracketed paste. Their provider-supported image path is
+The CLI brain cannot be handed image bytes: `claude -p` takes text on stdin.
+Its provider-supported image path is
 Claude Code's own `Read` tool, which returns visual content rather than raw
 bytes — so the delivery mechanism here is a prompt directive that *requires* one
 `Read` per prepared image, plus the executor's post-run audit of the trace
@@ -448,44 +448,6 @@ class TestReissueWithoutImages:
         _execute(_req(tmp_path, images=[_image(tmp_path)]), runner)
 
         assert len(runner.prompts) == 1
-
-
-# --------------------------------------------------------------------------
-# tmux
-# --------------------------------------------------------------------------
-
-
-class TestTmuxPromptFile:
-    """The same directive, delivered through the text the paste loads."""
-
-    def test_the_prompt_file_carries_the_directive_before_the_request(self, tmp_path):
-        from istota.brain import tmux_claude
-
-        img = _image(tmp_path)
-        req = _req(tmp_path, images=[img], prompt="MARKER-REQUEST")
-
-        text = tmux_claude.pasted_prompt_text(req)
-
-        assert IMAGE_DIRECTIVE_HEADER in text
-        assert text.index(IMAGE_DIRECTIVE_HEADER) < text.index("MARKER-REQUEST")
-        assert str(img.path) in text
-
-    def test_a_request_with_no_images_writes_the_prompt_unchanged(self, tmp_path):
-        from istota.brain import tmux_claude
-
-        req = _req(tmp_path, images=[], prompt="plain request")
-
-        assert tmux_claude.pasted_prompt_text(req) == "plain request"
-
-    def test_the_brain_writes_that_text_to_the_prompt_file(self, tmp_path):
-        """One file, one bracketed paste — the directive rides in, not beside."""
-        from istota.brain import tmux_claude
-        from tests.support.drift import source_of
-
-        src = source_of(tmux_claude.TmuxClaudeBrain)
-        assert "self._inject_prompt(session, pasted_prompt_text(req)" in src
-        # Still exactly one load-buffer submission per run.
-        assert src.count("self._load_buffer(") == 1
 
 
 @pytest.mark.parametrize("header", [

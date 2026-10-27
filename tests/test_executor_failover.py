@@ -31,7 +31,7 @@ class FakeBrain:
         self.received = []
         self._alias_map = alias_map or {}
         self.model_namespace = (
-            "anthropic" if kind in ("claude_code", "tmux_claude") else "openai_compat"
+            "anthropic" if kind == "claude_code" else "openai_compat"
         )
 
     def execute(self, req):

@@ -1,6 +1,6 @@
 """A room's brain sets the providers its models come from.
 
-A room or job on `claude_code` or `tmux` uses the `anthropic` provider only; a
+A room or job on `claude_code` uses the `anthropic` provider only; a
 room or job on `native` uses the providers `[brain.native] providers` lists,
 its default provider always among them. An `anthropic` key held for the CLI
 does not make Anthropic a native provider. Every reading of a model for the

@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Distinct from `model`: stays NULL for default-model tasks so retries
     -- re-resolve the current default; surfaces (web-chat meta) read this.
     model_used TEXT,
-    -- Per-task brain override (a kind: claude_code / native / tmux_claude);
+    -- Per-task brain override (a kind: claude_code / native);
     -- NULL = no override, resolve from config. Frozen at task creation from
     -- `rooms.brain`, or from `scheduled_jobs.brain` for a scheduled job, so a
     -- room or a CRON.md edit mid-flight does not change a running task,
@@ -1402,8 +1402,8 @@ CREATE TABLE IF NOT EXISTS rooms (
     -- NULL = inherit the instance default.
     model       TEXT,
     effort      TEXT,
-    -- Standing per-room brain default (a kind: claude_code / native /
-    -- tmux_claude). NULL = inherit. Copied onto `tasks.brain` by record_inbound
+    -- Standing per-room brain default (a kind: claude_code / native).
+    -- NULL = inherit. Copied onto `tasks.brain` by record_inbound
     -- for a room-member surface, and resolved
     -- `tasks.brain > [brain.source_type_overrides] > [brain] kind`. Admitted
     -- only for a kind the operator listed in `[brain] room_selectable`.

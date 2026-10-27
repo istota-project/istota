@@ -2307,9 +2307,9 @@ brain = "nonsense"
 name = "nightly"
 cron = "0 3 * * *"
 prompt = "Summarize"
-brain = "tmux_claude"
+brain = "claude_code"
 """)
-        assert jobs[0].brain == "tmux_claude"
+        assert jobs[0].brain == "claude_code"
         assert not caplog.records
 
     # An array and a scalar fail differently without the coercion — the array

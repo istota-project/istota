@@ -13,7 +13,6 @@ from istota.brain._aliases import CANONICAL_ROLES
 from istota.brain._roles import set_alias_overrides
 from istota.brain.claude_code import ClaudeCodeBrain
 from istota.brain.native import NativeBrain
-from istota.brain.tmux_claude import TmuxClaudeBrain
 from istota.config import NativeBrainConfig
 from istota.brain.claude_code import OPUS
 
@@ -25,15 +24,13 @@ def _make_brain(kind):
     if kind == "native":
         # Native speaks to one endpoint/model, so roles resolve to it.
         return NativeBrain(NativeBrainConfig(model="test-endpoint-model"))
-    if kind == "tmux_claude":
-        return TmuxClaudeBrain()
     raise AssertionError(f"unhandled brain kind {kind!r}")
 
 
 class TestRoleContract:
     def test_all_kinds_covered(self):
         # Guard: if a new brain kind is registered, this test must construct it.
-        assert set(KNOWN_BRAIN_KINDS) == {"claude_code", "native", "tmux_claude"}
+        assert set(KNOWN_BRAIN_KINDS) == {"claude_code", "native"}
 
     @pytest.mark.parametrize("kind", sorted(KNOWN_BRAIN_KINDS))
     @pytest.mark.parametrize("role", CANONICAL_ROLES)
@@ -50,14 +47,11 @@ class TestRoleContract:
 class TestModelNamespace:
     def test_each_brain_declares_a_namespace(self):
         assert ClaudeCodeBrain().model_namespace == "anthropic"
-        assert TmuxClaudeBrain().model_namespace == "anthropic"
         assert NativeBrain(NativeBrainConfig(model="m")).model_namespace == "openai_compat"
 
-    def test_cli_brains_share_a_namespace_native_differs(self):
+    def test_native_differs_from_the_cli_brain(self):
         cli = ClaudeCodeBrain().model_namespace
-        tmux = TmuxClaudeBrain().model_namespace
         native = NativeBrain(NativeBrainConfig(model="m")).model_namespace
-        assert cli == tmux
         assert native != cli
 
 

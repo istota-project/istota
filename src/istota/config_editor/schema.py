@@ -146,7 +146,6 @@ class ModelField:
 #: tests/test_config_editor_schema.py holds this to the `Config` tree.
 MODEL_FIELDS: dict[tuple[str, ...], ModelField] = {
     ("brain", "claude_code", "model"): ModelField("anthropic", effort=True, brain="claude_code"),
-    ("brain", "tmux", "model"): ModelField("anthropic", effort=True, brain="tmux_claude"),
     # Resolved through the alias table with no effort (`executor._resolve_advisor`).
     ("brain", "claude_code", "advisor_model"): ModelField("anthropic", effort=False, brain="claude_code"),
     ("brain", "native", "model"): ModelField("native", effort=True, brain="native"),
@@ -162,7 +161,7 @@ MODEL_FIELDS: dict[tuple[str, ...], ModelField] = {
 #: `model` / `*_model` string fields that are not edited with the picker.
 MODEL_FIELD_EXEMPT: dict[tuple[str, ...], str] = {
     ("model",): (
-        "Deprecated: migrated onto [brain.claude_code] and [brain.tmux] model at load. "
+        "Deprecated: migrated onto [brain.claude_code] model at load. "
         "A plain text field until it is removed."
     ),
 }

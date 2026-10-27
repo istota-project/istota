@@ -167,9 +167,8 @@ _CLI_ENVELOPE_KEYS = ("modelUsage", "total_cost_usd", "session_id")
 # images
 # --------------------------------------------------------------------------
 #
-# Neither CLI brain can be handed image bytes: `claude -p` reads text on stdin
-# and the tmux brain submits a bracketed paste. Their provider-supported image
-# path is Claude Code's own `Read` tool, which returns visual content to the
+# The CLI brain cannot be handed image bytes: `claude -p` reads text on stdin.
+# Its provider-supported image path is Claude Code's own `Read` tool, which returns visual content to the
 # model rather than raw bytes and does its own final recompression — so
 # delivery here is a directive requiring one `Read` per prepared image, and the
 # executor's post-run trace audit is what stops the vision claim resting on the
@@ -510,8 +509,7 @@ def is_transient_api_error(text: str) -> bool:
     Two signals: a capacity/gateway *status code* (429 + 5xx + 529), or a
     network-level failure. The network branch is gated on the ``API Error``
     marker (or an unambiguous errno) so ordinary prose mentioning a connection
-    reset can't route a task onto the retry/fallback path — this predicate is
-    also run against arbitrary tmux pane text.
+    reset can't route a task onto the retry/fallback path.
 
     A 429 whose body signals *quota/subscription exhaustion* is NOT transient —
     ``is_usage_limit_error`` catches that case first at every call site, so a
@@ -591,7 +589,7 @@ def api_error_stop_reason(text: str) -> str | None:
 # a *persistent* "brain unavailable until the window resets" condition, distinct
 # from a transient overload 429. Kept as a plain keyword set rather than tied to
 # the ``API Error: NNN`` shape so the same detector works on ClaudeCodeBrain's
-# CLI output, the tmux TUI transcript/pane text, and NativeBrain's arbitrary
+# CLI output and NativeBrain's arbitrary
 # OpenAI-compatible error bodies. Best-effort and tunable against real output
 # (see the spec's "Real usage-limit output samples" open question).
 _USAGE_LIMIT_KEYWORDS: tuple[str, ...] = (
@@ -880,16 +878,10 @@ def _signal_result(returncode: int | None, execution_trace: str | None) -> Brain
 
 def _is_root() -> bool:
     """True when the process runs as uid 0 (Unix). `claude` refuses
-    --dangerously-skip-permissions as root unless IS_SANDBOX=1 is set. Shared by
-    both the headless and tmux launch paths."""
+    --dangerously-skip-permissions as root unless IS_SANDBOX=1 is set."""
     geteuid = getattr(os, "geteuid", None)
     return geteuid is not None and geteuid() == 0
 
-
-# Flags already warned-about as unsupported, so the "dropped a flag" WARNING
-# fires once per flag per process rather than every task. Module-global on
-# purpose (the warning is operator-facing, not per-request).
-_WARNED_UNSUPPORTED_FLAGS: set[str] = set()
 
 CLI_SETTINGS_FILENAME = "cli_settings.json"
 
@@ -898,8 +890,7 @@ def cli_settings_document() -> dict:
     """The settings every `claude` run of ours carries, built here and only here.
 
     Passed as `--settings`, which outranks the user source the CLI still reads
-    (`--setting-sources user`): the host's `~/.claude/settings.json` under the
-    headless brain, the session `CLAUDE_CONFIG_DIR` under tmux. The executor
+    (`--setting-sources user`): the host's `~/.claude/settings.json`. The executor
     writes it into the task control directory; a direct caller with no control
     directory gets the same document inline.
 
@@ -910,34 +901,17 @@ def cli_settings_document() -> dict:
     return {"attribution": {"commit": "", "pr": ""}}
 
 
-def advisor_active(
-    req: BrainRequest, *, unsupported: frozenset[str] = frozenset()
-) -> bool:
+def advisor_active(req: BrainRequest) -> bool:
     """True iff ``--advisor`` will actually reach the model for this request:
-    an advisor is set, there are tools for it to have judgement moments about
-    (a text-only call has none — see ``build_claude_cli_flags``), and
-    ``--advisor`` itself isn't in ``unsupported`` (the tmux brain's
-    target-CLI-surface dropped-flag set — pass ``_TMUX_UNSUPPORTED_FLAGS``
-    there so a future "the interactive TUI accepts but ignores --advisor"
-    finding doesn't reopen the settings-file channel it was meant to close).
+    an advisor is set and there are tools for it to have judgement moments
+    about (a text-only call has none — see ``build_claude_cli_flags``).
 
-    ``build_claude_cli_flags`` itself calls this with the default empty
-    ``unsupported`` — it always attempts ``_add("--advisor", ...)`` like every
-    other flag and lets ``_add``'s own ``unsupported`` check drop it (with the
-    same operator-facing WARNING every other dropped flag gets). The
-    ``unsupported``-aware form is for the env-suppression decision in
-    ``ClaudeCodeBrain.execute`` / ``TmuxClaudeBrain``'s session env, which sits
-    outside flag-building and has no ``_add`` to fall back on: it must decide
-    for itself whether the flag will land, so the two stay structurally
-    exclusive — either the flag fires, or the settings-file channel is
-    suppressed, never both, never neither (advisor-model spec, "Env
-    exclusivity" test).
+    One predicate for both the flag and the env-suppression decision in
+    ``ClaudeCodeBrain.execute``, so the two stay structurally exclusive —
+    either the flag fires, or the settings-file channel is suppressed, never
+    both, never neither (advisor-model spec, "Env exclusivity" test).
     """
-    return (
-        bool(req.advisor)
-        and bool(req.allowed_tools)
-        and "--advisor" not in unsupported
-    )
+    return bool(req.advisor) and bool(req.allowed_tools)
 
 
 #: A grant made only of these reads files and nothing else. Daemon-side calls
@@ -984,26 +958,13 @@ def harness_builtin_tools(req: BrainRequest) -> tuple[str, ...]:
 
 
 def build_claude_cli_flags(
-    req: BrainRequest,
-    *,
-    unsupported: frozenset[str] = frozenset(),
-    mcp_config_path: Path | None = None,
+    req: BrainRequest, *, mcp_config_path: Path | None = None,
 ) -> list[str]:
-    """Build the `claude` CLI flags shared by both the headless (`-p`) and the
-    interactive (tmux) launch paths.
+    """Build the model / effort / tool / system-prompt flags of a `claude` call.
 
-    Covers the model / effort / tool / system-prompt flags both brains need; it
-    deliberately does NOT add ``-p -`` or the ``--output-format stream-json``
-    flags (headless-only) nor ``--dangerously-skip-permissions`` (which both
-    brains append themselves) — each brain appends its own path-specific flags
-    around this common core.
-
-    ``unsupported`` names flags the *target* CLI surface rejects (the interactive
-    TUI may not accept every ``-p`` flag; Stage 1 of the tmux production spec
-    verifies which). A flag in this set is dropped from the argv and warned about
-    once per process rather than passed through to a launch failure. The default
-    (empty set) reproduces the headless argv exactly, so ``ClaudeCodeBrain``'s
-    output is byte-for-byte unchanged.
+    It deliberately does NOT add ``-p -``, the ``--output-format stream-json``
+    flags or ``--dangerously-skip-permissions``, which ``_build_command``
+    appends around this core.
 
     ``mcp_config_path`` is the tool harness's MCP config, which only
     ``ClaudeCodeBrain`` passes, on a harness run. With it and tools granted the
@@ -1016,8 +977,8 @@ def build_claude_cli_flags(
     # prompt itself, plus the absence of --dangerously-skip-permissions, is what
     # keeps the call text-only.
     if req.allowed_tools:
-        # Both brains run non-interactively with --dangerously-skip-permissions
-        # (added per-brain), so the model gets its full default toolset and an
+        # The brain runs non-interactively with --dangerously-skip-permissions
+        # (added by `_build_command`), so the model gets its full default toolset and an
         # --allowedTools allowlist would only restrict it below that, blocking
         # tools we didn't think to enumerate. The bwrap sandbox + network proxy
         # are the security boundary, not an interactive permission prompt; Bash
@@ -1039,9 +1000,8 @@ def build_claude_cli_flags(
         # implicitly blocks Workflow, so it must be denied explicitly again.
         flags += ["--disallowedTools", "Agent", "Workflow"]
         # A grant of read tools alone would still get the whole default toolset
-        # under skip-permissions. Not through `_add`: a surface that dropped
-        # one of these as unsupported would run the read-only grant with every
-        # tool. Any other grant keeps the argv above byte for byte.
+        # under skip-permissions. Any other grant keeps the argv above byte for
+        # byte.
         #
         # `--tools` restricts which built-ins exist at all, so a tool a later
         # CLI release adds is absent rather than allowed; it is not the
@@ -1067,11 +1027,6 @@ def build_claude_cli_flags(
             flags += ["--tools", ",".join(granted), "--strict-mcp-config"]
 
     def _add(flag: str, *values: str) -> None:
-        if flag in unsupported:
-            if flag not in _WARNED_UNSUPPORTED_FLAGS:
-                _WARNED_UNSUPPORTED_FLAGS.add(flag)
-                logger.warning("tmux_brain unsupported_flag flag=%s (dropped)", flag)
-            return
         flags.extend([flag, *values])
 
     # `user` alone: the CLI's cwd is the per-user temp dir, which every task of
@@ -1090,10 +1045,6 @@ def build_claude_cli_flags(
         _add("--model", req.model)
     if req.effort:
         _add("--effort", req.effort)
-    # Unconditional call, like --model/--effort above: _add itself drops an
-    # unsupported flag (and warns once) rather than advisor_active silently
-    # pre-filtering it, so the operator-facing "dropped a flag" WARNING still
-    # fires for --advisor exactly like every other flag.
     if advisor_active(req):
         _add("--advisor", req.advisor)
     if req.custom_system_prompt_path and req.custom_system_prompt_path.exists():
@@ -1342,8 +1293,7 @@ class ClaudeCodeBrain:
     supports_steering = False
 
     # This brain speaks the Anthropic model namespace. Operators key an
-    # ``[models.aliases.<name>]`` sub-table on this string; TmuxClaudeBrain shares
-    # it (same `claude` binary), so an ``anthropic`` value covers both.
+    # ``[models.aliases.<name>]`` sub-table on this string.
     model_namespace = "anthropic"
 
     def __init__(self, config=None) -> None:
@@ -1352,10 +1302,7 @@ class ClaudeCodeBrain:
         Optional because this class is constructed bare in several places, and
         None is honest for each: they have no deployment default to apply.
         Most only resolve model *names* — the web brain catalogue and the two
-        alias validators in ``config.py``. ``TmuxClaudeBrain`` composes one and
-        hands it the ``[brain.tmux]`` block instead, which works because the
-        only fields read off a config here are ``model`` and ``effort`` and that
-        block declares both.
+        alias validators in ``config.py``.
 
         One bare-constructing caller does *execute*: ``context._claude_cli_triage``
         builds one for conversation triage. It is unaffected because that request
@@ -1662,7 +1609,7 @@ class ClaudeCodeBrain:
             # signals an external isolation boundary. That's the Docker
             # container-as-sandbox case (bwrap off, runs as root); on the
             # non-root prod VM service user the flag is allowed without it, so we
-            # leave it unset. Mirrors the tmux brain's root handling.
+            # leave it unset.
             if req.allowed_tools and _is_root() and "IS_SANDBOX" not in req.env:
                 req.env["IS_SANDBOX"] = "1"
 
@@ -1750,7 +1697,7 @@ class ClaudeCodeBrain:
             # can't be answered in -p mode and would otherwise auto-deny tools).
             # The sandbox + network proxy are the boundary; an allowlist buys
             # nothing here. Skipped for text-only invocations (no tools), so
-            # those stay tool-less. Mirrors the tmux brain.
+            # those stay tool-less.
             cmd += ["--dangerously-skip-permissions"]
         if req.streaming or mcp_config_path is not None:
             # --include-partial-messages emits content deltas as they arrive so

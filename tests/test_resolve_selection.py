@@ -9,8 +9,6 @@ patterns, and the refusals (`model_not_runnable`, `model_not_enabled`,
 
 from __future__ import annotations
 
-import pytest
-
 from istota.brain._resolve import (
     Resolution,
     ResolveError,
@@ -240,10 +238,9 @@ class TestTheEnabledSet:
 
 
 class TestBrainCanRun:
-    @pytest.mark.parametrize("kind", ["claude_code", "tmux_claude"])
-    def test_the_cli_brains_run_anthropic_only(self, kind):
-        assert brain_can_run(kind, "anthropic/claude-opus-5")
-        assert not brain_can_run(kind, "openrouter/z-ai/glm-5")
+    def test_the_cli_brain_runs_anthropic_only(self):
+        assert brain_can_run("claude_code", "anthropic/claude-opus-5")
+        assert not brain_can_run("claude_code", "openrouter/z-ai/glm-5")
 
     def test_native_runs_its_own_provider(self):
         assert brain_can_run("native", "openrouter/x", native_provider="openrouter")

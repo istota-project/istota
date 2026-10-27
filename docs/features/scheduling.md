@@ -76,7 +76,7 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `skip_log_channel` | no | Suppress log channel output for frequent jobs |
 | `model` | no | Model override for this job (e.g. `"general"` for the active brain's current general model) |
 | `effort` | no | Effort override: `low`, `medium`, `high`, `xhigh`, or `max` |
-| `brain` | no | Brain kind this job runs on: `claude_code`, `native` or `tmux_claude`. Admin-only, and bounded by `[brain] room_selectable`. See below |
+| `brain` | no | Brain kind this job runs on: `claude_code` or `native`. Admin-only, and bounded by `[brain] room_selectable`. See below |
 | `publish_shared_kv` | no | On success, publish the result text to the shared KV store as `"<namespace>/<key>"` (a bare key means the `briefing_shared_blocks` namespace) |
 | `publish_shared_kv_trusted` | no | Mark the published value trusted, so consuming briefings splice it without the untrusted-content wrapper |
 
@@ -123,7 +123,7 @@ Writing the field is admin-only. CRON.md is a file on the mount and is also writ
 
 The sync answers who may write the field, not what they may write. `!cron` shows the stored value, so the listing never shows a pin the author was not allowed to write — but an admin's pin is stored whatever it names, and a kind the operator has not allowlisted is refused later, at dispatch. A kind that is not a real brain kind is warned about when the file is read; an unlisted one is warned about when the job fires. Neither fails the job, and neither is visible in the listing: it falls through to whatever the deployment would have run anyway.
 
-**A pinned job does not fail over.** If the pinned brain is unavailable — a usage limit, a missing binary, a tmux launch failure — the run fails with that brain's own reason instead of being answered by the deployment's backup brain, which for unattended work is the safer of the two. The failure is not silent: the task's retries run out, at 1, 4 and 16 minutes or immediately for an error that cannot be retried, `consecutive_failures` climbs, the job auto-disables at five and raises a notice in the inbox. `!cron enable <name>` restarts it once the brain is back.
+**A pinned job does not fail over.** If the pinned brain is unavailable — a usage limit, a missing binary — the run fails with that brain's own reason instead of being answered by the deployment's backup brain, which for unattended work is the safer of the two. The failure is not silent: the task's retries run out, at 1, 4 and 16 minutes or immediately for an error that cannot be retried, `consecutive_failures` climbs, the job auto-disables at five and raises a notice in the inbox. `!cron enable <name>` restarts it once the brain is back.
 
 `model` is resolved by whichever brain the job will actually run. A portable name like `smart` therefore lands on that brain's own model rather than on the deployment default's, which is what makes a per-job brain and a per-job model usable together. The loader checks the name in that brain's namespace and logs a warning for one that cannot resolve (usually a typo); the job still loads. An admin's `brain` pin selects the namespace checked; for anyone else it is the scheduled default brain's.
 

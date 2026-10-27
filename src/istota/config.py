@@ -1502,7 +1502,7 @@ WEB_TOKEN_STORAGE_MODES = ("ephemeral", "encrypted")
 
 LOGGING_OUTPUTS = ("console", "file", "both")
 
-BRAIN_KINDS = ("claude_code", "native", "tmux_claude")
+BRAIN_KINDS = ("claude_code", "native")
 """Every brain kind ``make_brain`` builds. ``brain.KNOWN_BRAIN_KINDS`` is this.
 
 Here rather than in :mod:`istota.brain` so the config's own vocabulary does
@@ -2236,73 +2236,6 @@ class LoaderMap(Mapping):
 
 
 @dataclass
-class TmuxBrainConfig:
-    """Settings for the tmux-driven interactive-TUI brain (``brain.kind =
-    "tmux_claude"``). All fields default to the values the prototype hardcoded,
-    so an empty (or absent) ``[brain.tmux]`` block behaves exactly like the
-    pre-config prototype.
-
-    Operability knobs (``fallback_*``) drive the §4 circuit breaker; the marker
-    lists let a ``claude`` CLI reword be a config hotfix rather than a code
-    release (the readiness / dialog / error heuristics are pane-text substring
-    matches pinned to a CLI version — see ``cli_version_pin``).
-
-    ``model`` and ``effort`` are this brain's own defaults, on the same footing
-    as ``[brain.claude_code]``'s and ``[brain.native]``'s (ISSUE-418). This
-    brain shares ``ClaudeCodeBrain``'s ``anthropic`` namespace and runs the same
-    binary, so the two blocks accept the same values and the retired top-level
-    keys migrate onto **both** — which is what makes the migration exactly
-    behaviour-preserving for a deployment running either CLI brain. They are
-    still separate fields rather than one shared with ``[brain.claude_code]``:
-    an operator running both (a ``tmux_claude`` primary with a ``claude_code``
-    fallback is a shipped pairing) has no way to say "the same model" that does
-    not also mean "and I can never differ".
-    """
-
-    # This brain's own default model / effort, used when the task pins none.
-    model: str = ""
-    effort: str = ""  # low/medium/high/xhigh/max (empty = the model's own default)
-    # Operability / fallback (§4)
-    fallback_trip_threshold: int = 5          # consecutive launch failures before the circuit opens
-    fallback_cooldown_seconds: float = 300.0  # how long the circuit stays open
-    ready_timeout_seconds: float = 30.0       # REPL-ready deadline
-    tmux_command_timeout: float = 10.0        # per-tmux-subprocess timeout
-    # CLI pinning (§6) — mismatch logs a WARNING at brain construction.
-    cli_version_pin: str = "2.1.168"
-    # Dialog / readiness / error markers (§6). Defaults match the pinned CLI.
-    ready_markers: list[str] = field(
-        default_factory=lambda: ["bypass permissions on", "? for shortcuts", "for shortcuts"]
-    )
-    trust_markers: list[str] = field(
-        default_factory=lambda: ["trust this folder", "Is this a project you"]
-    )
-    theme_markers: list[str] = field(
-        default_factory=lambda: ["Choose the text style", "run /theme"]
-    )
-    bypass_warning_marker: str = "Bypass Permissions mode"
-    bypass_accept_marker: str = "Yes, I accept"
-    # "session limit reached" is intentionally not here — it's a usage-limit
-    # signal handled by usage_limit_markers (checked first), not a generic error.
-    error_markers: list[str] = field(
-        default_factory=lambda: ["API Error", "Context low"]
-    )
-    # Pane substrings that mark a subscription/quota usage limit (checked before
-    # error_markers so a limit hit that aborts the turn before a transcript is
-    # written classifies as stop_reason="usage_limit" — reroutes to the fallback
-    # brain — rather than a generic error). CLI-version-pinned like the others.
-    # The real TUI text is "You've hit your <scope> limit"; "session limit" is
-    # the stable session substring, and the weekly/Opus scopes are caught by the
-    # is_usage_limit_error(pane) fallback in _wait_for_completion.
-    usage_limit_markers: list[str] = field(
-        default_factory=lambda: [
-            "session limit",
-            "usage limit reached",
-            "Claude usage limit",
-        ]
-    )
-
-
-@dataclass
 class ClaudeCodeBrainConfig:
     """Settings for the headless ``claude -p`` brain (``brain.kind =
     "claude_code"``, the default).
@@ -2316,8 +2249,8 @@ class ClaudeCodeBrainConfig:
     ``[brain.native] model`` set ran the *Claude Code* model against the native
     endpoint — billed per token, and a hard failure rather than a wrong bill
     anywhere the endpoint does not happen to serve Anthropic ids (ISSUE-418).
-    The top-level keys still load and are migrated onto this block and
-    ``[brain.tmux]`` by ``_apply_legacy_brain_defaults``, with a warning; they
+    The top-level keys still load and are migrated onto this block by
+    ``_apply_legacy_brain_defaults``, with a warning; they
     are not read anywhere else. Per-brain rather than deployment-wide is what
     ``[brain.native]`` already did, and the ``or`` chain in each brain is now
     the single place a default is applied.
@@ -2349,12 +2282,12 @@ class ClaudeCodeBrainConfig:
     # through this brain's alias table at the point of use, not here.
     model: str = ""
     effort: str = ""  # low/medium/high/xhigh/max (empty = the model's own default)
-    # How the `claude` CLI authenticates, for this brain and tmux:
+    # How the `claude` CLI authenticates:
     # "subscription" (the OAuth token, never an API key) or "api_key" (the
     # `anthropic` provider's key, never the token). Empty derives it once per
     # process from the environment (`llm.providers.resolve_cli_auth`).
     auth: str = ""
-    # The advisor model, for this brain and tmux (the claude CLI's `--advisor`):
+    # The advisor model (the claude CLI's `--advisor`):
     # an ID or alias resolved like `model`, carrying no effort. Empty = none.
     # Dropped whenever a task pins its own model (`executor._resolve_advisor`).
     # It must be a model able to act as an advisor; Istota does not check that.
@@ -2386,8 +2319,7 @@ class BrainConfig:
     ``"claude_code"`` (default) wraps the ``claude`` CLI subprocess.
     ``"native"`` runs istota's own agent loop in-process; its settings live in
     the nested ``native`` block (``[brain.native]`` in TOML).
-    ``"tmux_claude"`` drives the interactive ``claude`` TUI via tmux; its
-    settings live in ``[brain.tmux]``. ``[brain.claude_code]`` holds the
+    ``[brain.claude_code]`` holds the
     subscription usage poll, which is read regardless of ``kind`` — a native
     primary with a ``claude_code`` fallback burns the same plan.
 
@@ -2406,7 +2338,6 @@ class BrainConfig:
     """
     kind: str = "claude_code"
     native: NativeBrainConfig = field(default_factory=NativeBrainConfig)
-    tmux: TmuxBrainConfig = field(default_factory=TmuxBrainConfig)
     claude_code: ClaudeCodeBrainConfig = field(default_factory=ClaudeCodeBrainConfig)
     source_type_overrides: dict[str, str] = field(default_factory=dict)
     room_selectable: list[str] = field(default_factory=list)
@@ -2419,7 +2350,7 @@ class BrainConfig:
     # tools in the tool server. Read by the executor; part 2 removes it.
     tool_harness: bool = False
     # Availability failover (brain-fallback spec). When the primary brain is
-    # unavailable (usage limit / not_found / tmux launch failure), the task runs
+    # unavailable (usage limit / not_found), the task runs
     # on ``fallback`` with that brain's own configured settings. "" = no
     # fallback, for every brain kind — no implicit target (ISSUE-362; see
     # brain._fallback.effective_fallback_kind).
@@ -2649,12 +2580,12 @@ class Config:
     # DEPRECATED (ISSUE-418): these were the *claude_code* brain's defaults
     # living at the root, where they read as deployment-wide and were applied to
     # every brain — shadowing each other brain's own configured default. They
-    # are migrated onto `[brain.claude_code]` and `[brain.tmux]` by
+    # are migrated onto `[brain.claude_code]` by
     # `_apply_legacy_brain_defaults` and are read nowhere else. Kept as fields
     # because every existing deployment sets them; a rollback has to load a
     # config written by the newer version and vice versa.
-    model: str = ""  # deprecated alias for [brain.claude_code] / [brain.tmux] model
-    effort: str = ""  # deprecated alias for [brain.claude_code] / [brain.tmux] effort
+    model: str = ""  # deprecated alias for [brain.claude_code] model
+    effort: str = ""  # deprecated alias for [brain.claude_code] effort
     max_memory_chars: int = 0  # cap total memory in prompts (0 = unlimited)
     max_knowledge_facts: int = 50  # cap knowledge graph facts per prompt (0 = unlimited)
     db_path: Path = field(default_factory=lambda: Path("data/istota.db"))
@@ -3853,9 +3784,7 @@ EXEC_SOCKET_NAME = "exec.sock"
 #: restates the cache subdirectory names.
 _CONTROL_DIR_NAME = ".control"
 
-#: Said once per process per entry, not once per ``load_config`` — same
-#: mechanism as ``_TMUX_NO_FALLBACK_NOTICE_SAID`` below, and for a sharper
-#: reason: the skill proxy spawns a host-side CLI per model tool call and each
+#: Said once per process per entry, not once per ``load_config``: the skill proxy spawns a host-side CLI per model tool call and each
 #: one loads the config. Keyed on the entry as written, so an operator who
 #: narrows one of two overlapping entries still hears about the other.
 _RO_PATH_CONTROL_TREE_WARNED: set[str] = set()
@@ -4178,6 +4107,8 @@ _RETIRED = frozenset({
     "rooms",
     "devbox.docker_cli",
     "scheduler.vault_sync_interval",
+    # The tmux brain's block; `_retire_tmux_brain` warns about it.
+    "brain.tmux",
     # Still honoured, by `_apply_renamed_keys`, which warns in its own terms.
     "scheduler.istota_file_poll_interval",
 })
@@ -4581,22 +4512,72 @@ def _migrate_web_login_link_ttl(data: dict) -> None:
     )
 
 
-_LEGACY_BRAIN_DEFAULT_TARGETS = ("claude_code", "tmux")
+_LEGACY_BRAIN_DEFAULT_TARGETS = ("claude_code",)
 """The blocks the retired top-level ``model`` / ``effort`` migrate onto.
-
-Both, not just ``claude_code``, and that is what makes the migration exactly
-behaviour-preserving rather than approximately. The top-level value *was* the
-default for whichever brain ran, and both of these are the same ``anthropic``
-namespace running the same ``claude`` binary, so the value is equally valid in
-either. A deployment with ``kind = "tmux_claude"`` and a top-level ``model``
-would otherwise lose its model on upgrade — silently, since an empty model is a
-legal request meaning "the CLI's own default".
 
 ``native`` is deliberately absent. That is the whole defect: the top-level value
 is written in the Anthropic vocabulary and cannot carry to an
 ``openai_compat`` endpoint, so migrating it there would re-create ISSUE-418
 inside the fix.
 """
+
+
+RETIRED_TMUX_KIND = "tmux_claude"
+"""The tmux brain's kind. It ran the same `claude` binary on the same
+credential as ``claude_code``, so a config naming it loads as ``claude_code``."""
+
+
+def _retire_tmux_brain(data: dict, config: "Config") -> None:
+    """Load a config written for the retired tmux brain onto ``claude_code``.
+
+    A ``tmux_claude`` left in ``kind`` would stop the daemon at ``make_brain``,
+    so every place a kind is named moves to ``claude_code`` with a ``retired``
+    warning: ``kind``, ``fallback``, the ``source_type_overrides`` values and
+    ``room_selectable``. ``[brain.tmux]`` is ignored, except that its ``model``
+    and ``effort`` fill an unset ``[brain.claude_code]`` one when the
+    deployment ran on tmux, since that is the model it was running. A room,
+    job or task row that still names the kind falls through as any unknown pin
+    does (``brain.resolve_brain_kind``).
+    """
+    brain = config.brain
+    brain_doc = data.get("brain")
+    tmux_doc = brain_doc.get("tmux") if isinstance(brain_doc, dict) else None
+    if tmux_doc is not None:
+        report_problem(
+            "retired", ("brain", "tmux"),
+            "[brain.tmux] is retired with the tmux brain and ignored; remove it",
+        )
+
+    def retired(path: tuple[str, ...]) -> None:
+        report_problem(
+            "retired", path,
+            "[brain] %s names the retired %r brain; it runs as %r. Write %r.",
+            ".".join(path[1:]), RETIRED_TMUX_KIND, "claude_code", "claude_code",
+        )
+
+    if (brain.kind or "").strip() == RETIRED_TMUX_KIND:
+        brain.kind = "claude_code"
+        retired(("brain", "kind"))
+        if isinstance(tmux_doc, dict):
+            for key in ("model", "effort"):
+                value = tmux_doc.get(key)
+                if isinstance(value, str) and value.strip() and not getattr(brain.claude_code, key):
+                    setattr(brain.claude_code, key, value.strip())
+    if (brain.fallback or "").strip() == RETIRED_TMUX_KIND:
+        brain.fallback = "claude_code"
+        retired(("brain", "fallback"))
+    for source_type, target in list((brain.source_type_overrides or {}).items()):
+        if str(target).strip() == RETIRED_TMUX_KIND:
+            brain.source_type_overrides[source_type] = "claude_code"
+            retired(("brain", "source_type_overrides", source_type))
+    if RETIRED_TMUX_KIND in (brain.room_selectable or []):
+        kept: list[str] = []
+        for name in brain.room_selectable:
+            name = "claude_code" if name == RETIRED_TMUX_KIND else name
+            if name not in kept:
+                kept.append(name)
+        brain.room_selectable = kept
+        retired(("brain", "room_selectable"))
 
 
 def _apply_legacy_brain_defaults(data: dict, config: "Config") -> None:
@@ -4629,7 +4610,7 @@ def _apply_legacy_brain_defaults(data: dict, config: "Config") -> None:
             "[config] top-level `%s` is deprecated: it is the claude_code "
             "brain's default, not a deployment-wide one, and setting it here "
             "shadowed every other brain's own (ISSUE-418). Move it to "
-            "[brain.claude_code] %s and/or [brain.tmux] %s.", old, old, old,
+            "[brain.claude_code] %s.", old, old,
         )
         if not value:
             continue
@@ -5776,6 +5757,9 @@ def _map_document(data: dict, config: Config) -> list[str]:
     if config.workspace_path is None:
         config.workspace_path = config.workspace_mount_path
     _apply_renamed_keys(data, config)
+    # Before the legacy defaults, so a `[brain.tmux]` model the deployment ran
+    # on outranks the top-level key both used to inherit.
+    _retire_tmux_brain(data, config)
     # After the walk, so a `[brain.claude_code] model` in the same file wins
     # over the top-level key it replaces, and before anything reads a brain
     # block: `_validate_alias_overrides` in `load_config` resolves names
@@ -7061,7 +7045,7 @@ def _validate_forge_clis(config: "Config") -> None:
 
 # Anthropic-namespace brain kinds — the only ones the advisor tool can ever
 # reach (it's an Anthropic Messages beta tool with no wire over openai_compat).
-_ANTHROPIC_BRAIN_KINDS = frozenset({"claude_code", "tmux_claude"})
+_ANTHROPIC_BRAIN_KINDS = frozenset({"claude_code"})
 
 
 def _validate_configured_model_references(config: "Config") -> None:
@@ -7071,7 +7055,6 @@ def _validate_configured_model_references(config: "Config") -> None:
     brain = ClaudeCodeBrain()
     for block, model in (
         ("brain.claude_code", config.brain.claude_code.model),
-        ("brain.tmux", config.brain.tmux.model),
     ):
         if model and not brain.is_valid_model_reference(model):
             report_problem(
@@ -7137,11 +7120,6 @@ def _validate_advisor_model(config: "Config") -> None:
         )
 
 
-# Said once per process, not once per `load_config` — see the notice at the end
-# of `_validate_brain_fallback` for why.
-_TMUX_NO_FALLBACK_NOTICE_SAID = False
-
-
 def _fallback_scoped_kinds(config: "Config") -> set[str]:
     """The brain kinds ``[brain] fallback`` still governs.
 
@@ -7153,10 +7131,7 @@ def _fallback_scoped_kinds(config: "Config") -> set[str]:
     ``brain.reachable_brain_kinds``: a room may pin any kind in
     ``[brain] room_selectable``, and those are deliberately absent here. An
     admitted room override clears ``fallback``, so a pinned room has no failover
-    — counting those kinds would keep a fallback alive that no task could use,
-    and would fire the tmux notice below recommending one for a shape that is
-    meant to have none. Widen this and both guards start answering a question
-    neither caller asked.
+    — counting those kinds would keep a fallback alive that no task could use.
     """
     from .brain import KNOWN_BRAIN_KINDS
 
@@ -7174,30 +7149,12 @@ def _validate_brain_fallback(config: "Config") -> None:
        runs, so no task could benefit. Deliberately not the bare
        ``fallback == kind`` comparison it used to be: a ``source_type_overrides``
        entry routing to another kind makes the same value a real target for those
-       tasks, and that combination is the only way to spell "route scheduled work
-       to tmux and fail it over to the CLI". The per-task half of the rule lives
+       tasks. The per-task half of the rule lives
        in ``brain._fallback.effective_fallback_kind``, which sees the resolved
        config and returns None where the fallback equals its kind.
-
-    Then one INFO line, once per process, where ``tmux_claude`` runs with no
-    fallback. That combination was unconfigurable before ISSUE-362 (it always
-    resolved to ``claude_code``), so an operator who upgrades past it and keeps
-    an empty field loses failover; the notice is informational, not a
-    correction, since "no failover" is now a legitimate thing to want.
-
-    Two things about it are deliberate. It covers a ``source_type_overrides``
-    entry routing to tmux as well as a tmux primary, because
-    ``resolve_brain_kind`` returns a ``replace(brain_config, kind=target)`` that
-    inherits ``fallback`` — so a ``claude_code`` primary routing ``scheduled``
-    to tmux is the same lost failover with nothing in ``kind`` to see it by, and
-    the Ansible default that writes the target back in covers that shape too.
-    And it fires once per process rather than per call: ``load_config`` runs in
-    every CLI invocation and in every host-side skill CLI the proxy spawns, so a
-    per-call line would be one per skill call rather than one per start-up.
     """
     from .brain import KNOWN_BRAIN_KINDS
 
-    _logger = logging.getLogger("istota.config")
     fb = (config.brain.fallback or "").strip()
     if fb and fb not in KNOWN_BRAIN_KINDS:
         report_problem(
@@ -7222,19 +7179,6 @@ def _validate_brain_fallback(config: "Config") -> None:
             fb,
         )
         config.brain.fallback = ""
-    global _TMUX_NO_FALLBACK_NOTICE_SAID
-    if (
-        "tmux_claude" in _fallback_scoped_kinds(config)
-        and not (config.brain.fallback or "").strip()
-        and not _TMUX_NO_FALLBACK_NOTICE_SAID
-    ):
-        _TMUX_NO_FALLBACK_NOTICE_SAID = True
-        _logger.info(
-            'tmux_claude runs with no [brain] fallback configured: a tmux launch '
-            "failure or usage limit fails the task rather than rerouting. Set "
-            'fallback = "claude_code" to keep the behaviour it had before '
-            "ISSUE-362.",
-        )
 
 
 def _validate_wordpress_private_hosts(config: "Config") -> None:

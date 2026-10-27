@@ -28,8 +28,8 @@ bot_name = "Istota"
 # (no need to also set `effort =`); the modifier's effort wins.
 # =============================================================================
 
-# Deprecated (ISSUE-418). Set `model` and `effort` under [brain.claude_code] and
-# [brain.tmux] instead; these still load and are moved there with a warning.
+# Deprecated (ISSUE-418). Set `model` and `effort` under [brain.claude_code]
+# instead; these still load and are moved there with a warning.
 # model = "opus"
 # effort = "high"
 
@@ -76,15 +76,15 @@ temp_dir = "/tmp/istota"
 features = []
 
 # Which backend runs tasks: "claude_code" (the headless `claude -p` CLI, the
-# default), "native" (istota's own agent loop against an OpenAI-compatible
-# endpoint) or "tmux_claude" (the interactive `claude` TUI in tmux).
+# default) or "native" (istota's own agent loop against an OpenAI-compatible
+# endpoint).
 # [brain]
 # kind = "claude_code"
 #
 # Availability failover: rerun a task on this brain when the primary is
-# unavailable (usage limit, missing binary, tmux launch failure). "" is no
+# unavailable (usage limit, missing binary). "" is no
 # fallback. A pinned room or job never fails over.
-# fallback = ""                       # "" | "claude_code" | "native" | "tmux_claude"
+# fallback = ""                       # "" | "claude_code" | "native"
 # fallback_on_transient = true        # also reroute a persistent transient_api_error
 #                                     # (429 / 5xx / 529 / network) after the primary's
 #                                     # own retries are exhausted. Set false to opt out.
@@ -245,32 +245,6 @@ features = []
 #                                 #   marker. 0 = no cap.
 # include_thinking = true         # reasoning traces in the written log; the bulkiest part.
 #
-# The tmux_claude brain. Every field defaults in code. The marker lists are
-# pane-text heuristics pinned to a claude CLI version; override one if a CLI
-# reword breaks readiness detection.
-# [brain.tmux]
-# This brain's default model when the task pins none, with the same values as
-# [brain.claude_code] model. Empty = the CLI's own default.
-# model = "opus"
-# This brain's default effort when the task pins none: low, medium, high,
-# xhigh or max. Empty = the CLI's own default.
-# effort = "high"
-# fallback_trip_threshold = 5       # consecutive launch failures before the circuit opens
-# fallback_cooldown_seconds = 300   # how long the circuit stays open (routes to the
-#                                   # configured [brain] fallback, if any)
-# ready_timeout_seconds = 30        # REPL-ready deadline
-# tmux_command_timeout = 10         # per-tmux-subprocess timeout
-# cli_version_pin = "2.1.168"       # supported claude CLI; mismatch logs a WARNING
-# ready_markers = ["bypass permissions on", "? for shortcuts", "for shortcuts"]
-# trust_markers = ["trust this folder", "Is this a project you"]
-# theme_markers = ["Choose the text style", "run /theme"]   # first-run theme picker
-# bypass_warning_marker = "Bypass Permissions mode"
-# bypass_accept_marker = "Yes, I accept"
-# error_markers = ["API Error", "session limit reached", "Context low"]
-# usage_limit_markers = ["session limit reached", "usage limit reached", "Claude usage limit"]
-#                                   # pane substrings → stop_reason=usage_limit → the
-#                                   # configured [brain] fallback, if any
-#
 # The headless `claude -p` brain: its default model and effort, and the
 # subscription usage poll. Read whatever `kind` is set to, since a fallback or
 # a routing override can reach it.
@@ -283,7 +257,7 @@ features = []
 # xhigh or max. Empty = the CLI's own default.
 # effort = "high"
 #
-# How the `claude` CLI authenticates, for this brain and tmux. "subscription"
+# How the `claude` CLI authenticates. "subscription"
 # carries the OAuth token (CLAUDE_CODE_OAUTH_TOKEN, the claude_code_oauth_token
 # secret file) and never an API key; "api_key" carries the [providers.anthropic]
 # key and base_url and never the token. Unset: "subscription" when the token is
@@ -292,7 +266,7 @@ features = []
 # its Bash tool, as it can read the token under "subscription".
 # auth = "subscription"
 #
-# Advisor model for this brain and tmux (the CLI's --advisor): an ID or alias,
+# Advisor model for this brain (the CLI's --advisor): an ID or alias,
 # resolved like `model` but carrying no effort. Empty = no advisor. It must be a
 # model that can act as an advisor; a cheap tier fails every task it runs on.
 # Formerly a top-level key, which still loads.
@@ -1081,12 +1055,12 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #      deep  = "opus:max"               # a custom alias for deep-thinking tasks
 #
 # Per-provider form: one target per provider, keyed by its id. `anthropic` is
-# the CLI brains' (and native's on the anthropic provider); any other id is a
+# claude_code's (and native's on the anthropic provider); any other id is a
 # native room's on that provider. A room whose provider has no target for an
 # alias cannot use it: the alias never resolves into another provider. The old
 # `openai_compat` key is read, for one release, as native's default provider.
 #      [models.aliases.smart]
-#      anthropic  = "opus:high"                                      # CLI brains (claude_code / tmux_claude)
+#      anthropic  = "opus:high"                                      # claude_code
 #      openrouter = { model = "anthropic/claude-opus-4.8", effort = "high" }  # native on openrouter
 #      [models.aliases.general]
 #      anthropic  = "claude-sonnet-5"

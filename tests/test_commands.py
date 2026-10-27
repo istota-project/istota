@@ -3337,12 +3337,11 @@ class TestCmdBrain:
     async def test_a_buildable_kind_the_operator_did_not_list_is_refused(
         self, make_config, db_path,
     ):
-        """A separate branch from the unknown one: `tmux_claude` is a kind
+        """A separate branch from the unknown one: `claude_code` is a kind
         `make_brain` builds, so only the allowlist stands between it and the
         room."""
-        # tmux deliberately absent from the allowlist
         with _brain_room(make_config, db_path, "native") as (config, conn):
-            out = await cmd_brain(_ctx(config, conn, args="tmux_claude"))
+            out = await cmd_brain(_ctx(config, conn, args="claude_code"))
             assert _room1(conn).brain is None
         assert "native" in out  # names what *is* on offer
 
@@ -3447,16 +3446,16 @@ class TestBrainChangeClearsACrossNamespacePin:
     async def test_a_move_inside_one_namespace_keeps_the_pin(
         self, make_config, db_path,
     ):
-        """`claude_code` and `tmux_claude` share `model_namespace ==
-        "anthropic"`, so the same id runs under both and there is nothing to
-        clear."""
+        """Pinning the inherited `claude_code` keeps `model_namespace ==
+        "anthropic"`, so the same id runs before and after and there is
+        nothing to clear."""
         with _brain_room(
-            make_config, db_path, "claude_code", "tmux_claude", brain="claude_code",
+            make_config, db_path, "claude_code", "native",
         ) as (config, conn):
             db.set_room_model_effort(conn, "room1", OPUS, "high")
-            out = await cmd_brain(_ctx(config, conn, args="tmux_claude"))
+            out = await cmd_brain(_ctx(config, conn, args="claude_code"))
             room = _room1(conn)
-        assert room.brain == "tmux_claude"
+        assert room.brain == "claude_code"
         assert room.model == OPUS
         assert room.effort == "high"
         assert OPUS not in out

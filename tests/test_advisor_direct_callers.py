@@ -13,7 +13,7 @@ none of them ever sets ``BrainRequest.advisor``, so without the brain-layer fix
 each would inherit the host's ``~/.claude/settings.json`` ``advisorModel`` the
 way the sandboxed executor path did before Stage 1 — and the fix covers them
 "for free" because the suppression predicate lives in
-``ClaudeCodeBrain.execute`` / ``TmuxClaudeBrain``, not at any of these call
+``ClaudeCodeBrain.execute``, not at any of these call
 sites.
 
 This file proves that structurally, not by importing and running each module

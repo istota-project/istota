@@ -1,7 +1,7 @@
 """Building a per-task ``CLAUDE_CONFIG_DIR`` for the ``claude`` CLI.
 
-The three helpers came out of the tmux brain unchanged: a config dir the
-daemon creates fresh each task needs its files written without following a
+The three helpers came out of the retired tmux brain unchanged: a config dir
+the daemon creates fresh each task needs its files written without following a
 planted link, its onboarding state pre-seeded so the CLI does not stop at the
 first-run dialogs, and a way to the subscription token, which the CLI reads
 from ``$CLAUDE_CONFIG_DIR`` rather than the home copy once that is set.
