@@ -229,3 +229,78 @@ class TestDefinitionsReadPerPass:
         _stub_generation(monkeypatch, {"text": "news"})
 
         assert scheduler.check_shared_blocks(cfg, run_inline=True) == []
+
+
+class TestAgentBlocks:
+    def _agent(self):
+        return BriefingSharedBlock(
+            name="ag", cron="0 6 * * *", directive="Read the pages.",
+            render_mode="agent", sources=[],
+        )
+
+    def test_a_due_agent_block_queues_a_research_task(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path, [self._agent()])
+        _at(monkeypatch, NOW_0605)
+        monkeypatch.setattr(
+            "istota.brain.primary_brain_unavailable", lambda brain_cfg: (True, None),
+        )
+
+        def _boom(*a, **k):
+            raise AssertionError("an agent block reached the synthesis pipeline")
+
+        monkeypatch.setattr("istota.briefings.shared_blocks.run_shared_block", _boom)
+
+        assert scheduler.check_shared_blocks(cfg, run_inline=True) == ["ag"]
+        with db.get_db(cfg.db_path) as conn:
+            rows = conn.execute(
+                "SELECT prompt FROM tasks WHERE source_type = 'shared_block_research'"
+            ).fetchall()
+        assert [r["prompt"] for r in rows] == ["Read the pages."]
+
+    def test_capture_runs_before_the_due_scan(self, tmp_path, monkeypatch):
+        from istota.briefings import shared_block_agent
+
+        cfg = _config(tmp_path, [
+            BriefingSharedBlock(name="hl", cron="0 6 * * *", sources=[]),
+        ])
+        _at(monkeypatch, NOW_0605)
+        order = []
+        monkeypatch.setattr(
+            shared_block_agent, "capture", lambda config: order.append("capture") or [],
+        )
+
+        def _generate(block, config, now=None):
+            order.append("generate")
+            return {"text": "news"}
+
+        monkeypatch.setattr("istota.briefings.shared_blocks.run_shared_block", _generate)
+
+        scheduler.check_shared_blocks(cfg, run_inline=True)
+        assert order == ["capture", "generate"]
+
+    def test_capture_runs_with_no_blocks_defined(self, tmp_path, monkeypatch):
+        from istota.briefings import shared_block_agent
+
+        cfg = _config(tmp_path, [])
+        _at(monkeypatch, NOW_0605)
+        calls = []
+        monkeypatch.setattr(
+            shared_block_agent, "capture", lambda config: calls.append(config) or [],
+        )
+        assert scheduler.check_shared_blocks(cfg, run_inline=True) == []
+        assert calls == [cfg]
+
+    def test_a_capture_that_raises_does_not_stop_the_scan(self, tmp_path, monkeypatch):
+        from istota.briefings import shared_block_agent
+
+        cfg = _config(tmp_path, [
+            BriefingSharedBlock(name="hl", cron="0 6 * * *", sources=[]),
+        ])
+        _at(monkeypatch, NOW_0605)
+
+        def _boom(config):
+            raise RuntimeError("locked")
+
+        monkeypatch.setattr(shared_block_agent, "capture", _boom)
+        _stub_generation(monkeypatch, {"text": "news"})
+        assert scheduler.check_shared_blocks(cfg, run_inline=True) == ["hl"]

@@ -584,6 +584,7 @@ def _shared_block_status(conn, name: str, tz_name: str) -> dict:
     return {
         "run_pending": runs["pending"],
         "run_answered": runs["answered"],
+        "agent": runs["agent"],
         "last_run_at": last_run_at,
         "value_updated_at": updated_at,
         "value_preview": preview,

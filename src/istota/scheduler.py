@@ -6122,9 +6122,19 @@ def check_shared_blocks(config: Config, *, run_inline: bool = False) -> list[str
     web edit or a block created since boot would otherwise wait for a restart.
     The config's entries reach the table through the seed at daemon boot.
 
+    Agent blocks' finished research tasks are captured first, before the due
+    scan and whether or not any block is defined, so a block deleted since its
+    task was queued is still settled.
+
     Returns the list of due block names.
     """
+    from istota.briefings import shared_block_agent
     from istota.config import shared_block_from_row
+
+    try:
+        shared_block_agent.capture(config)
+    except Exception:  # noqa: BLE001 - capture never raises; the scan must run regardless
+        logger.warning("shared_block_agent_capture_raised", exc_info=True)
 
     tz_str = (config.briefings.shared_block_timezone or "").strip() or "UTC"
     try:
@@ -6194,11 +6204,19 @@ def _generate_shared_block(config: Config, block) -> str:
     prior shared_kv value is kept (last-known-good); one operator alert already
     fired when the breaker opened. ``structured`` blocks never touch the brain
     (verbatim source concatenation), so they still generate when degraded.
+
+    An ``agent`` block generates nothing here: its directive is queued as a
+    research task, and ``check_shared_blocks`` captures the result later.
     """
     from istota.brain import primary_brain_unavailable
     from istota.briefings import shared_block_runs as runs
     from istota.briefings.shared_blocks import SYSTEM_IDENTITY, run_shared_block
     from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
+
+    if getattr(block, "render_mode", "synthesis") == "agent":
+        from istota.briefings import shared_block_agent
+
+        return shared_block_agent.dispatch(config, block)
 
     if getattr(block, "render_mode", "synthesis") != "structured":
         available, _reason = primary_brain_unavailable(config.brain)

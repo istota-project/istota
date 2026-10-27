@@ -256,6 +256,25 @@ class TestRunNow:
         assert status["run_answered"] is None
         assert status["run_pending"] is None
 
+    def test_an_agent_run_reaches_the_listing(self, client, monkeypatch):
+        from istota import scheduler
+
+        monkeypatch.setattr(
+            "istota.brain.primary_brain_unavailable", lambda brain_cfg: (True, None),
+        )
+        client.put(
+            "/istota/api/briefings/shared-blocks",
+            json={"name": "ag", "cron": "0 6 * * *", "render_mode": "agent",
+                  "directive": "Read the pages.", "sources": []},
+        )
+        client.post("/istota/api/briefings/shared-blocks/ag/run")
+        scheduler.check_shared_block_requests(client.app.state.istota_config)
+
+        status = client.get("/istota/api/briefings/shared-blocks").json()["shared_blocks"][0]["status"]
+        assert status["run_answered"]["outcome"] == "queued"
+        assert status["agent"]["captured"] is False
+        assert isinstance(status["agent"]["task_id"], int)
+
     def test_run_missing_404(self, client):
         assert client.post("/istota/api/briefings/shared-blocks/nope/run").status_code == 404
 
