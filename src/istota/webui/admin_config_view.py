@@ -300,18 +300,7 @@ _MISSING = object()
 _SECRET_LABELS = {
     "anthropic_api_key": "Anthropic API key",
     "claude_code_oauth_token": "Claude Code OAuth token",
-    "istota_anthropic_listing_key": "Anthropic model-listing key",
-}
-
-#: Files this page never writes, with how they are set instead. The
-#: model-listing key is mounted on the daemon alone, so this process cannot
-#: even see whether it is there.
-_DAEMON_ONLY_REASONS = {
-    "istota_anthropic_listing_key": (
-        "Read by the daemon alone, which this page cannot see. Set it with "
-        "`istota setup --anthropic-model-listing-key-file PATH`, or on the VM with "
-        "`istota-stack put-files`."
-    ),
+    "istota_anthropic_listing_key": "Anthropic model-listing key, used only to list Anthropic's models",
 }
 
 # The section a file no config key reads belongs with: both are the Claude
@@ -753,13 +742,38 @@ def _admin_candidates(config: "Config") -> list[str]:
     return [identity.user_id for identity in identities if not identity.disabled]
 
 
+def _listing_key_path_reason(config: "Config") -> str | None:
+    """Why the page cannot write the model-listing key: the config points the
+    daemon at another file than the stack secret the host applier writes."""
+    from istota.config import DEFAULT_ANTHROPIC_LISTING_KEY_FILE
+
+    configured = (config.models.anthropic_listing_key_file or "").strip()
+    if not configured or configured == DEFAULT_ANTHROPIC_LISTING_KEY_FILE:
+        return None
+    return (
+        "`[models] anthropic_listing_key_file` names another file, which this page "
+        "does not write. Put the key in that file on the host."
+    )
+
+
+def _daemon_only_secret(config: "Config") -> tuple[bool, str]:
+    """`set` and `source` for the model-listing key, from the daemon's last
+    doctor run: `unknown` until one has said."""
+    from istota import doctor
+
+    present = doctor.daemon_listing_key_present(config)
+    if present is None:
+        return False, "unknown"
+    return present, "file" if present else "none"
+
+
 def _secret_files(config: "Config", ctx: dict) -> list[dict]:
     """One entry per stack secrets file: whether it is set, where from, and
     never its value."""
     import os
 
     from istota.config_editor.reference import credential_files
-    from istota.setup_wizard import SECRET_NAMES
+    from istota.setup_wizard import DAEMON_ONLY_SECRETS, SECRET_NAMES
 
     schema = ctx["schema"]
     config_keys = {name: dotted for dotted, name in credential_files().items() if name}
@@ -774,14 +788,20 @@ def _secret_files(config: "Config", ctx: dict) -> list[dict]:
             # No config key reads it; `istota-secrets` exports each file as
             # the uppercase variable, in the web process too.
             is_set = bool(os.environ.get(name.upper(), "").strip())
-        source = _secret_source(name, path, ctx["document"], ctx["secrets_dir"])
+        if name in DAEMON_ONLY_SECRETS:
+            # The model-listing key: mounted on the daemon alone, so this
+            # process shows the daemon's last answer, never its own guess.
+            is_set, source = _daemon_only_secret(config)
+        else:
+            source = _secret_source(name, path, ctx["document"], ctx["secrets_dir"])
         reason = (
-            _DAEMON_ONLY_REASONS.get(name)
-            or (schema.READ_ONLY.get(path) if path else None)
+            (schema.READ_ONLY.get(path) if path else None)
             or ctx["managed_reasons"]["secrets"]
         )
         if reason is None and source == "environment":
             reason = _env_override_reason(name.upper())
+        if reason is None and name in DAEMON_ONLY_SECRETS:
+            reason = _listing_key_path_reason(config)
         # A move writes both resources but keeps the value, so `READ_ONLY`,
         # which refuses a new value, does not stop it.
         movable = (

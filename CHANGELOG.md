@@ -50,6 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Model fields read more plainly.** The model pickers in Room settings and on the admin Configuration page list models by their provider/id alone, without the display name after it, and the admin model fields use the regular typeface. The Configuration page explains which models users may pick, the model aliases, and each brain's default model and effort.
+- **Admin > Configuration can set the Anthropic model-listing key.** It is written to its secret file on the host like the page's other credentials. The page shows whether the key is set as the daemon last found it, and "Unknown here" until the daemon has checked, instead of always "Not set".
 - **Specs the bot drafts are ready for a coding agent.** A new spec has every section an implementer reads, including a survey of the existing code taken from the project's source, and its stages are one checklist line each. Specs drafted before this may lack those sections.
 
 - **The native brain needs a provider.** It no longer falls back to Anthropic when none is named, so a native brain configured with no provider and no endpoint is unavailable. **Upgrade note:** set `provider = "anthropic"` under `[brain.native]` and give the anthropic provider its key. See docs/configuration/models.md.

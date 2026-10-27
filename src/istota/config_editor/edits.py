@@ -504,7 +504,7 @@ def restore_change_set(document_toml: str, current_text: str, base_digest: str) 
 def _read_secrets(raw: Any) -> tuple[dict[str, str], dict[str, str]]:
     """The change set's credentials, split into file and inline ones."""
     from istota.config_editor import schema
-    from istota.setup_wizard import DAEMON_ONLY_SECRETS, SECRET_NAMES
+    from istota.setup_wizard import SECRET_NAMES
 
     if raw is None:
         return {}, {}
@@ -518,13 +518,6 @@ def _read_secrets(raw: Any) -> tuple[dict[str, str], dict[str, str]]:
             raise ChangeError(
                 'a credential value is not a string; "" clears one, and an '
                 "omitted name is unchanged"
-            )
-        if name in DAEMON_ONLY_SECRETS:
-            # The model-listing key: no config path holds it, and the web
-            # process never sees the file (only the daemon mounts it).
-            raise ChangeError(
-                f"{name} is set with `istota setup --anthropic-model-listing-key-file` "
-                "or `istota-stack put-files`, not here"
             )
         if name in SECRET_NAMES:
             files[name] = value

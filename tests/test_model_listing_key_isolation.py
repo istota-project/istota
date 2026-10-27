@@ -228,27 +228,56 @@ def test_each_provider_carries_its_own_key_only(world, mode):
         assert LISTING not in reveal_inference_key(spec.inference_key)
 
 
-def test_the_config_editor_never_writes_the_listing_key():
-    """It moves credentials only through config paths, and this file has none
-    whose value is the key; a change set naming it is refused."""
-    from istota.config_editor.edits import ChangeError, _read_secrets
+def test_the_config_editor_writes_the_listing_key_as_a_file_secret():
+    """#859: a change set naming it goes to its secret file through the host
+    handoff, like every other file credential; no config path holds it."""
+    from istota.config_editor.edits import _read_secrets
 
-    with pytest.raises(ChangeError):
-        _read_secrets({"istota_anthropic_listing_key": LISTING})
-    files, _inline = _read_secrets({"istota_provider_anthropic_api_key": "k"})
-    assert files == {"istota_provider_anthropic_api_key": "k"}
+    files, inline = _read_secrets({"istota_anthropic_listing_key": LISTING})
+    assert files == {"istota_anthropic_listing_key": LISTING}
+    assert inline == {}
 
 
-def test_the_admin_view_names_the_two_ways_to_set_it(tmp_path):
+def _listing_entry(config, tmp_path):
     from istota.webui.admin_config_view import build_config_view
 
-    config = Config(db_path=tmp_path / "istota.db", temp_dir=tmp_path / "temp")
-    view = build_config_view(config)
-    entry = next(e for e in view["secrets"] if e["name"] == "istota_anthropic_listing_key")
-    assert entry["read_only_reason"]
-    assert "--anthropic-model-listing-key-file" in entry["read_only_reason"]
-    assert "put-files" in entry["read_only_reason"]
+    view = build_config_view(config, secrets_dir=tmp_path / "secrets")
     assert LISTING not in str(view)
+    return next(e for e in view["secrets"] if e["name"] == "istota_anthropic_listing_key")
+
+
+@pytest.fixture
+def daemon_config(tmp_path):
+    config = Config(db_path=tmp_path / "istota.db", temp_dir=tmp_path / "temp")
+    db.init_db(config.db_path)
+    return config
+
+
+def test_the_admin_view_says_unknown_until_the_daemon_has_answered(daemon_config, tmp_path):
+    """The web process never sees the file, so it shows no guess."""
+    entry = _listing_entry(daemon_config, tmp_path)
+    assert entry["read_only_reason"] is None
+    assert entry["source"] == "unknown"
+    assert entry["set"] is False
+    assert "list" in entry["label"].lower()
+
+
+@pytest.mark.parametrize("held, source", [(LISTING, "file"), ("", "none")])
+def test_the_admin_view_shows_the_daemons_answer(daemon_config, tmp_path, held, source):
+    from istota import doctor
+
+    key_file = tmp_path / "daemon-listing"
+    key_file.write_text(held)
+    key_file.chmod(0o400)
+    daemon_config.models.anthropic_listing_key_file = str(key_file)
+    doctor.record_report(daemon_config, [])
+    # The stack's shape: the web process's config names the default secret
+    # path, which only the daemon mounts.
+    daemon_config.models.anthropic_listing_key_file = ""
+    entry = _listing_entry(daemon_config, tmp_path)
+    assert entry["source"] == source
+    assert entry["set"] is bool(held)
+    assert entry["read_only_reason"] is None
 
 
 def test_a_manifest_naming_the_listing_key_or_a_provider_is_refused():
@@ -381,3 +410,20 @@ def test_a_redirect_is_reported_and_its_target_never_reached():
         server.server_close()
     assert status == 302
     assert hits == ["/models"]
+
+
+def test_a_configured_key_path_makes_the_field_read_only(daemon_config, tmp_path):
+    """The host applier writes the stack's secret file, which the daemon does
+    not read when the config names another one."""
+    daemon_config.models.anthropic_listing_key_file = str(tmp_path / "elsewhere")
+    entry = _listing_entry(daemon_config, tmp_path)
+    assert "anthropic_listing_key_file" in entry["read_only_reason"]
+
+
+def test_a_nul_in_the_key_path_does_not_raise_from_the_report(daemon_config):
+    """`record_report` runs outside the start-up run's `try`."""
+    from istota import doctor
+
+    daemon_config.models.anthropic_listing_key_file = "x\x00"
+    doctor.record_report(daemon_config, [])
+    assert doctor.daemon_listing_key_present(daemon_config) is False

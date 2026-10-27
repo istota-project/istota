@@ -14,6 +14,7 @@ export function credentialStatus(set: boolean, source?: ConfigSecretSource): Cre
   if (source === 'file') return { label: 'Set', variant: 'success' };
   if (source === 'inline') return { label: 'In config.toml', variant: 'warn' };
   if (source === 'environment') return { label: 'Set outside the stack', variant: 'info' };
+  if (source === 'unknown') return { label: 'Unknown here', variant: 'neutral' };
   return set ? { label: 'Set', variant: 'success' } : { label: 'Not set', variant: 'neutral' };
 }
 
