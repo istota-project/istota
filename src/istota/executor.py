@@ -745,6 +745,9 @@ def stage_restricted_attachments(
 
 
 CONTROL_DIR_NAME = ".control"
+#: The CLI tool harness's per-task directories, beside `.control`; never bound.
+HARNESS_DIR_NAME = ".harness"
+_DAEMON_TEMP_ROOTS = (CONTROL_DIR_NAME, HARNESS_DIR_NAME)
 
 
 def get_task_control_dir(
@@ -830,13 +833,28 @@ def get_task_control_dir(
     not for one of the wrong type, which is why the join is inside the ``try``
     and ``TypeError`` is caught beside ``OSError`` and ``ValueError``.
     """
+    return _task_dir_under(config, CONTROL_DIR_NAME, user_id, task_id, what="task control dir")
+
+
+def _task_dir_under(
+    config: Config, root_name: str, user_id: str, task_id: int, *, what: str,
+) -> Path | None:
+    """``{temp_dir}/{root_name}/{user_id}/task_{task_id}``, or ``None``.
+
+    The body of :func:`get_task_control_dir`, shared with
+    :func:`get_task_harness_dir`; the reasoning is in the former's docstring.
+    A user id that casefolds to *any* daemon-owned root under ``temp_dir`` is
+    refused, since that user's temp dir would be that root.
+    """
     temp_dir = getattr(config, "temp_dir", None)
     if not temp_dir or not user_id:
         return None
-    if isinstance(user_id, str) and user_id.casefold() == CONTROL_DIR_NAME.casefold():
+    if isinstance(user_id, str) and any(
+        user_id.casefold() == name.casefold() for name in _DAEMON_TEMP_ROOTS
+    ):
         return None
     try:
-        root = Path(temp_dir).resolve() / CONTROL_DIR_NAME
+        root = Path(temp_dir).resolve() / root_name
         candidate = root / user_id
         # Two checks, because neither catches the other's cases. The lexical
         # one refuses a component that never became a child (`.` is dropped by
@@ -849,9 +867,9 @@ def get_task_control_dir(
         leaf = f"task_{int(task_id)}"
     except (OSError, ValueError, TypeError):
         logger.warning(
-            "task control dir: cannot name a directory under %s for user id "
+            "%s: cannot name a directory under %s for user id "
             "%r, task id %r; not using it.",
-            temp_dir, user_id, task_id,
+            what, temp_dir, user_id, task_id,
         )
         return None
     if not contained:
@@ -859,18 +877,18 @@ def get_task_control_dir(
         # looks, so they are not collapsed into a single sentence.
         if root.is_symlink() or (root.exists() and not root.is_dir()):
             logger.warning(
-                "task control dir: %s is not a directory the daemon owns "
+                "%s: %s is not a directory the daemon owns "
                 "(a symlink or a non-directory is in its place); refusing to "
                 "use it for user id %r.",
-                root, user_id,
+                what, root, user_id,
             )
         else:
             logger.warning(
-                "task control dir: %s does not resolve to the subtree named "
+                "%s: %s does not resolve to the subtree named "
                 "by user id %r; not using it. A symlink or a path component "
                 "in the user id would reach outside that user's own control "
                 "directory.",
-                candidate, user_id,
+                what, candidate, user_id,
             )
         return None
     return candidate / leaf
@@ -976,12 +994,24 @@ def ensure_task_control_dir(config: Config, user_id: str, task_id: int) -> Path:
 
     The message names the path and never the contents of anything found there.
     """
-    control_dir = get_task_control_dir(config, user_id, task_id)
+    return _ensure_task_dir(
+        get_task_control_dir(config, user_id, task_id),
+        config, CONTROL_DIR_NAME, user_id, task_id, noun="task control directory",
+    )
+
+
+def _ensure_task_dir(
+    control_dir: Path | None, config: Config, root_name: str,
+    user_id: str, task_id: int, *, noun: str,
+) -> Path:
+    """The body of :func:`ensure_task_control_dir`, shared with
+    :func:`ensure_task_harness_dir`; the reasoning is in the former's
+    docstring. ``control_dir`` is the resolver's answer for ``root_name``."""
     if control_dir is None:
         raise RuntimeError(
-            f"cannot name a task control directory for user {user_id!r}, "
+            f"cannot name a {noun} for user {user_id!r}, "
             f"task {task_id!r}: the user id is empty, is not a child of "
-            f"{getattr(config, 'temp_dir', None)}/{CONTROL_DIR_NAME}, or that "
+            f"{getattr(config, 'temp_dir', None)}/{root_name}, or that "
             f"directory is not one the daemon owns"
         )
     user_level = control_dir.parent
@@ -1001,17 +1031,43 @@ def ensure_task_control_dir(config: Config, user_id: str, task_id: int) -> Path:
             # again once; a second occurrence is not a sweep race.
             if attempt == 2:
                 raise RuntimeError(
-                    f"task control directory {control_dir} kept disappearing "
+                    f"{noun} {control_dir} kept disappearing "
                     f"while it was being created: {exc.strerror or exc}"
                 ) from exc
             continue
         except OSError as exc:
             raise RuntimeError(
-                f"task control directory {level} is unusable: "
+                f"{noun} {level} is unusable: "
                 f"{exc.strerror or exc}"
             ) from exc
         return control_dir
     return control_dir
+
+
+def get_task_harness_dir(
+    config: Config, user_id: str, task_id: int
+) -> Path | None:
+    """``{temp_dir}/.harness/{user_id}/task_{task_id}``: the CLI tool
+    harness's root for one task, or ``None``.
+
+    The same resolver and refusals as :func:`get_task_control_dir`, under a
+    sibling root. Each harness makes its own ``h-{attempt}-{hex}`` directory
+    below it (``brain/_tool_harness.py``), holding the CLI's config dir,
+    ``HOME``, ``TMPDIR`` and MCP config. No sandbox binds anything under it:
+    bwrap gets its own tmpfs ``/tmp`` and binds only named paths under
+    ``temp_dir``, and ``cleanup_old_temp_files`` sweeps it with the rest.
+    """
+    return _task_dir_under(config, HARNESS_DIR_NAME, user_id, task_id, what="task harness dir")
+
+
+def ensure_task_harness_dir(config: Config, user_id: str, task_id: int) -> Path:
+    """Create the directory :func:`get_task_harness_dir` names, 0700 at each
+    level, owned by the daemon. Raises ``RuntimeError`` as
+    :func:`ensure_task_control_dir` does."""
+    return _ensure_task_dir(
+        get_task_harness_dir(config, user_id, task_id),
+        config, HARNESS_DIR_NAME, user_id, task_id, noun="task harness directory",
+    )
 
 
 def _write_control_file(path: Path, text: str) -> None:
@@ -3826,6 +3882,65 @@ def build_model_cli_env(config: Config) -> dict[str, str]:
         if name not in env and name in os.environ:
             env[name] = os.environ[name]
     return env
+
+
+#: What the CLI tool harness adds to the `claude` CLI's env, beyond
+#: `build_model_cli_env`. `CLAUDE_CONFIG_DIR`, `HOME` and `TMPDIR` are the
+#: brain's, per harness; `IS_SANDBOX` and the advisor switch stay the brain's
+#: per-attempt decision, as on the old path.
+HARNESS_CLI_SWITCHES = {
+    # `@path` in a `-p` prompt attaches that file otherwise (#861).
+    "CLAUDE_CODE_DISABLE_ATTACHMENTS": "1",
+    # Behind `--setting-sources user` and `--strict-mcp-config`.
+    "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
+    # The image sets it; `build_clean_env` starts from nothing and drops it.
+    "DISABLE_AUTOUPDATER": "1",
+    # With it a run connects only to the model endpoint (Stage 1 probe).
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+}
+
+#: Added to the task timeout for `MCP_TOOL_TIMEOUT`, so the tool server's own
+#: Bash timeout decides how long a call may run, not the CLI.
+HARNESS_MCP_TIMEOUT_MARGIN_SECONDS = 30
+
+
+def build_harness_cli_env(
+    config: Config, user_id: str, *, timeout_seconds: int,
+) -> dict[str, str]:
+    """The whole env of a `claude` CLI that runs outside the sandbox with its
+    tools in the tool server (`HarnessSpec.cli_env`).
+
+    `build_model_cli_env` (the clean allowlist, the proxy and TLS names, the
+    mode's credential) with the user's own `anthropic` key laid over it under
+    "api_key", as `sandbox.task_env` does for the task env, plus
+    `HARNESS_CLI_SWITCHES` and `MCP_TOOL_TIMEOUT`. None of the task's
+    `ISTOTA_*` names or proxy sockets: those go to the tool server's hello.
+    """
+    env = build_model_cli_env(config)
+    env.update(cli_auth_env(config, process_cli_auth(config), user_id))
+    env.update(HARNESS_CLI_SWITCHES)
+    timeout_ms = (int(timeout_seconds) + HARNESS_MCP_TIMEOUT_MARGIN_SECONDS) * 1000
+    env["MCP_TOOL_TIMEOUT"] = str(timeout_ms)
+    return env
+
+
+def harness_wanted(
+    config: Config, *, brain_kind: str, allowed_tools: list[str],
+    native_sandbox_wrap: object,
+) -> bool:
+    """Whether a task request gets a `HarnessSpec`: the four conditions.
+
+    `[brain] tool_harness` on, a `claude_code` brain, tools granted, and the
+    tool server can be wrapped (a NATIVE wrap) or nothing is sandboxed. Never
+    an unwrapped tool server on a shape that sandboxes.
+    """
+    if not getattr(config.brain, "tool_harness", False):
+        return False
+    if brain_kind != "claude_code":
+        return False
+    if not allowed_tools:
+        return False
+    return native_sandbox_wrap is not None or not effective_sandboxing(config)
 
 
 def build_stripped_env() -> dict[str, str]:
@@ -9359,6 +9474,26 @@ def execute_task(
             # on_pid/!stop correlation.
             session_label=f"istota-{task.id}-{task.attempt_count}",
         )
+        # The CLI tool harness, behind `[brain] tool_harness`. Set here only:
+        # the direct callers build their own requests and keep the old path.
+        # A harness root that cannot be made raises, which the handler below
+        # turns into a failed task.
+        if harness_wanted(
+            config,
+            brain_kind=_brain_config.kind,
+            allowed_tools=allowed,
+            native_sandbox_wrap=req.native_sandbox_wrap,
+        ):
+            from .brain._types import HarnessSpec
+
+            req.harness = HarnessSpec(
+                cli_env=build_harness_cli_env(
+                    config, task.user_id, timeout_seconds=req.timeout_seconds,
+                ),
+                harness_root=ensure_task_harness_dir(config, task.user_id, task.id),
+                bash_spill_full_output=config.brain.native.bash_spill_full_output,
+                cli_version=os.environ.get("ISTOTA_CLAUDE_CODE_VERSION", "").strip(),
+            )
         if req.advisor:
             logger.info(
                 "task %d: model=%s advisor=%s", task.id, req.model, req.advisor,
