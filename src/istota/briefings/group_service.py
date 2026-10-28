@@ -18,6 +18,13 @@ from istota.groups.policy import GroupError, group_capabilities, is_group_admin,
 from istota.groups.system import eligible_user_ids
 from istota.user_briefings import hold_view
 
+# The request bodies both doors accept, field to allowed types.
+DEFINITION_FIELDS = {"revision": (int,), "name": (str,), "title": (str,), "cron": (str,),
+                     "timezone": (str,), "enabled": (bool,), "generation_mode": (str,),
+                     "generation": (dict,), "channel": (str,), "excluded_user_ids": (list,)}
+DEFINITION_REQUIRED = {"revision", "name", "generation", "generation_mode"}
+PREFERENCE_FIELDS = {"outbound_muted": (bool,), "in_app_muted": (bool,)}
+
 
 def access(conn, config, actor, group_id, name=None, *, author=False, deleted_ok=False):
     # The admin answer is the Groups summary's, which owns the host's local-mode exception.

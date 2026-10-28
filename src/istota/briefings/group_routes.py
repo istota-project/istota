@@ -3,15 +3,12 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
 
 from istota.briefings import group_service
+from istota.briefings.group_service import DEFINITION_FIELDS, DEFINITION_REQUIRED, PREFERENCE_FIELDS
 from istota.groups.policy import GroupError
 from istota.groups.routes import _payload, _run
 from istota.webui.router_stubs import require_auth, verify_origin
 
 router = APIRouter()
-DEFINITION_FIELDS = {"revision": (int,), "name": (str,), "title": (str,), "cron": (str,),
-                     "timezone": (str,), "enabled": (bool,), "generation_mode": (str,),
-                     "generation": (dict,), "channel": (str,), "excluded_user_ids": (list,)}
-PREFERENCE_FIELDS = {"outbound_muted": (bool,), "in_app_muted": (bool,)}
 
 
 def _download(conn, config, actor, group_id, name, run_id):
@@ -51,7 +48,7 @@ async def definitions(group_id: str, request: Request, name: str = None, user: d
 @router.put("/groups/{group_id}/briefings/{name}")
 async def save_definition(group_id: str, request: Request, name: str = None, user: dict = Depends(require_auth),
                           _csrf: None = Depends(verify_origin)):
-    payload = await _payload(request, DEFINITION_FIELDS, {"revision", "name", "generation", "generation_mode"})
+    payload = await _payload(request, DEFINITION_FIELDS, DEFINITION_REQUIRED)
     return await _run(request, user, group_service.save, group_id, payload, name)
 
 

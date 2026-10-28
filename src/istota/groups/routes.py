@@ -11,7 +11,9 @@ from istota import db, storage
 from istota.config import refresh_user_profiles_if_changed
 from istota.groups import memory, service
 from istota.groups import rooms as group_rooms
-from istota.groups.policy import GroupError, group_capabilities, is_group_admin, require_group_member
+from istota.groups.policy import (
+    GroupError, group_capabilities, is_group_admin, payload_problem, require_group_member,
+)
 from istota.groups.policy import user_label as _user
 from istota.webui.request_guards import BodyError, read_bounded_body
 from istota.webui.router_stubs import require_auth, verify_origin
@@ -38,11 +40,9 @@ async def _payload(request, fields, required, *, limit=BODY_LIMIT):
         data = json.loads(raw)
     except (ValueError, UnicodeError):
         raise HTTPException(422, "Invalid JSON object") from None
-    if not isinstance(data, dict) or data.keys() - fields.keys() or required - data.keys():
-        raise HTTPException(422, "Missing or unknown fields")
-    for field, value in data.items():
-        if type(value) not in fields[field]:
-            raise HTTPException(422, f"Invalid {field}")
+    problem = payload_problem(data, fields, required)
+    if problem is not None:
+        raise HTTPException(422, problem)
     return data
 
 

@@ -10,6 +10,19 @@ class GroupError(ValueError):
         self.details = details
 
 
+def payload_problem(data, fields: dict, required: set) -> str | None:
+    """Why a request body does not fit `fields` (name to allowed types), or None.
+
+    The group routes and the `briefings_config` skill check bodies with this.
+    """
+    if not isinstance(data, dict) or data.keys() - fields.keys() or required - data.keys():
+        return "Missing or unknown fields"
+    for field, value in data.items():
+        if type(value) not in fields[field]:
+            return f"Invalid {field}"
+    return None
+
+
 def group_capabilities(conn, group_id: str, actor_id: str, *, is_admin: bool) -> dict:
     group = db.get_group(conn, group_id)
     member = bool(group) and db.is_group_member(conn, group_id, actor_id)
