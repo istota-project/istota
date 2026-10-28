@@ -1,19 +1,19 @@
 """Run one eval case through `ClaudeCodeBrain.execute` and measure it from its stream-json.
 
-Two arms over the same cases, model, prompt and timeout, both on the brain's
-real code path:
+One arm, ``harness``, on the brain's real code path: ``BrainRequest.harness``
+set, so the brain runs the CLI unwrapped with every machine-acting built-in off
+and the six core tools served through the real adapter, bridge and tool server.
+The tool server runs unwrapped with the working directory as its cwd and no
+file roots, as the native eval runs native.
 
-- ``builtin``: no harness. The brain runs the CLI unwrapped with its own
-  tools, cwd the case's working directory, as the stack runs it today minus
-  the bwrap wrap.
-- ``harness``: ``BrainRequest.harness`` set. The brain runs the CLI unwrapped
-  with every machine-acting built-in off and the six core tools served through
-  the real adapter, bridge and tool server; the tool server runs unwrapped
-  with the working directory as its cwd and no file roots, as the native eval
-  runs native.
+There is no ``builtin`` arm any more (#869). It ran the CLI with its own tools
+and no harness, and since cli-brain tools part 2 (#860) the brain refuses a
+tool grant without one, so the arm failed every case. The comparison between
+the two is part 1's Stage 8 report, from the driver at ``cf7e75ef8``; a
+report's rows still carry ``arm`` so they line up with it.
 
-Both arms get a scratch ``HOME``, ``TMPDIR`` and ``CLAUDE_CONFIG_DIR`` (the
-harness makes its own per attempt) and the CLI switches the harness sets, and
+The CLI gets the harness's own ``HOME``, ``TMPDIR`` and ``CLAUDE_CONFIG_DIR``
+per attempt, the CLI switches the harness sets, and
 nothing of the test process's environment but ``PATH`` and the one Anthropic
 credential. Auth is first-party only: a CLI run of a third-party endpoint
 measures something production never runs.
@@ -52,7 +52,7 @@ from ..native_eval.runner import EvalCase, prepare_workdir, run_check, task_env
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DOCKERFILE = REPO_ROOT / "docker" / "istota" / "Dockerfile"
 
-ARMS = ("builtin", "harness")
+ARMS = ("harness",)
 MODEL_TIER = "general"
 EVAL_USER = "eval"
 
@@ -134,28 +134,21 @@ def scratch_dirs(root: Path) -> dict[str, Path]:
 
 
 def cli_switches(timeout: int) -> dict[str, str]:
-    """The harness's own CLI switches, from the executor, for both arms."""
+    """The harness's own CLI switches, from the executor."""
     timeout_ms = (int(timeout) + HARNESS_MCP_TIMEOUT_MARGIN_SECONDS) * 1000
     return {**HARNESS_CLI_SWITCHES, "MCP_TOOL_TIMEOUT": str(timeout_ms)}
 
 
-def cli_env(path_value: str, dirs: dict[str, Path], auth: dict[str, str], timeout: int) -> dict[str, str]:
-    """The built-in arm's CLI environment: built from nothing, never inherited.
-
-    ``SHELLOPTS=pipefail`` is what `build_clean_env` gives every task env, so
-    the CLI's own Bash fails a pipeline as the tool server's Bash does.
-    """
-    env = {
+def version_env(path_value: str, dirs: dict[str, Path]) -> dict[str, str]:
+    """The environment ``claude --version`` runs in: built from nothing, never inherited."""
+    return {
         "PATH": path_value,
         "LANG": "C.UTF-8",
         "HOME": str(dirs["home"]),
         "TMPDIR": str(dirs["tmp"]),
         "CLAUDE_CONFIG_DIR": str(dirs["config"]),
-        "SHELLOPTS": "pipefail",
-        **cli_switches(timeout),
+        **HARNESS_CLI_SWITCHES,
     }
-    env.update(auth)
-    return env
 
 
 def harness_cli_env(
@@ -182,7 +175,7 @@ def build_request(
     effort: str | None, timeout: int, run: int, path_value: str,
     dirs: dict[str, Path], auth_mode: str, auth: dict[str, str],
 ) -> BrainRequest:
-    """One case's `BrainRequest` in ``arm``. Neither arm is sandbox-wrapped."""
+    """One case's `BrainRequest` in ``arm``. No arm is sandbox-wrapped."""
     base = dict(
         prompt=prompt,
         allowed_tools=list(GRANTED_TOOLS),
@@ -197,8 +190,6 @@ def build_request(
         source_type="eval",
         streaming=True,
     )
-    if arm == "builtin":
-        return BrainRequest(env=cli_env(path_value, dirs, auth, timeout), **base)
     if arm == "harness":
         # `req.env` is the tool server's: the model's Bash gets the native
         # eval's task env, and the CLI gets `HarnessSpec.cli_env`.
@@ -272,8 +263,8 @@ def metrics_from_stream(path: Path, success_marker: str | None = None) -> dict:
 
     A tool error is a ``tool_result`` with ``is_error``, or a Bash result whose
     text reports a failed command (the tool server's Bash leaves ``is_error``
-    off on a non-zero exit, as native's does). Names are canonicalised, so the
-    two arms count alike. Lines that are not JSON objects are skipped.
+    off on a non-zero exit, as native's does). Names are canonicalised, so a
+    harness run counts like a CLI-built-in one. Lines that are not JSON objects are skipped.
     """
     out: dict = {
         "init_tools": None,

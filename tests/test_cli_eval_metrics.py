@@ -2,7 +2,8 @@
 
 The live eval is the only thing that produces a real transcript and it costs
 quota, so the counting it rests on is held here against hand-written
-stream-json, in the shapes the pinned CLI emits for each arm.
+stream-json, in the shapes the pinned CLI emits for its own tools and for
+the harness's MCP tools.
 """
 
 from __future__ import annotations
@@ -142,14 +143,13 @@ def _request(arm, tmp_path):
     )
 
 
-def test_the_builtin_arm_has_no_harness_and_gives_the_cli_its_env(tmp_path):
-    req = _request("builtin", tmp_path)
-    assert req.harness is None
-    assert req.tool_server_wrap is None
-    assert req.env["CLAUDE_CODE_OAUTH_TOKEN"] == "t"
-    assert req.env["CLAUDE_CODE_DISABLE_CRON"] == "1"
-    assert req.env["SHELLOPTS"] == "pipefail"
-    assert "WebSearch" in req.allowed_tools and req.streaming
+@pytest.mark.parametrize("arm", runner.ARMS)
+def test_every_arm_is_one_the_brain_runs(arm, tmp_path):
+    # `ClaudeCodeBrain` refuses a tool grant with no harness (#860), so an arm
+    # without one fails every case instead of measuring anything (#869).
+    req = _request(arm, tmp_path)
+    assert req.allowed_tools
+    assert req.harness is not None
 
 
 def test_the_harness_arm_keeps_the_credential_off_the_tool_server_env(tmp_path):
