@@ -31,6 +31,7 @@ from . import db
 from .config import Config
 from .brain import model_namespace_for_kind, resolve_brain_kind
 from istota.sandbox.kv_namespaces import is_reserved_namespace
+from istota.sandbox.skill_proxy import _owners_own_turn
 from istota.notifications.store import deliver_pending
 from istota.sandbox.host_paths import path_under_roots, workspace_roots
 from istota.sandbox.user_scope import is_scopable_user_id
@@ -766,6 +767,15 @@ def _process_deferred_kv_ops(
                 if not config.is_shared_kv_writer(task.user_id):
                     logger.warning(
                         "shared KV write denied for task %d user %s (%s %s/%s)",
+                        task.id, task.user_id, op, namespace, key,
+                    )
+                    continue
+                # A correspondent's mail on an email thread room runs as the
+                # host; the skill's own refusal never ran for a sandboxed task.
+                if not _owners_own_turn(conn, task.id, task.user_id):
+                    logger.warning(
+                        "shared KV write denied for task %d user %s: not the "
+                        "user's own turn (%s %s/%s)",
                         task.id, task.user_id, op, namespace, key,
                     )
                     continue
