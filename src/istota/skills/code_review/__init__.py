@@ -49,6 +49,7 @@ from istota.sandbox import skill_proxy
 from istota.sandbox.host_paths import developer_repos_root, resolve_under_repos
 from istota.skills._cli import emit, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import REPO, host_path
+from istota.skills._turn_access import calling_task_id as _task_id
 
 from . import engine
 from . import snapshot as review_snapshot
@@ -165,14 +166,6 @@ def _failure_error(agent: str, stop_reason: str, text: str | None) -> str:
     head = " ".join((text or "").split())[:_ERROR_TEXT_CHARS].strip()
     base = f"{agent} failed (stop_reason={stop_reason})"
     return f"{base}: {head}" if head else base
-
-
-def _task_id() -> int | None:
-    raw = os.environ.get("ISTOTA_TASK_ID", "").strip()
-    try:
-        return int(raw) if raw else None
-    except ValueError:
-        return None
 
 
 def _db_path() -> str:

@@ -442,19 +442,27 @@ def add_fact(
 
 def invalidate_fact(
     conn: sqlite3.Connection,
+    user_id: str,
     fact_id: int,
     ended: str | None = None,
+    *,
+    source_task_id: int | None = None,
 ) -> bool:
-    """Mark a fact as no longer valid. Returns True if updated."""
+    """Mark one of `user_id`'s facts as no longer valid. Returns True if updated.
+
+    Another user's fact answers False, the same as a missing one, so the
+    call cannot test whether an id is in use (ISSUE-875).
+    """
     ended = ended or date.today().isoformat()
     before_row = conn.execute(
-        "SELECT * FROM knowledge_facts WHERE id = ? AND valid_until IS NULL",
-        (fact_id,),
+        "SELECT * FROM knowledge_facts "
+        "WHERE id = ? AND user_id = ? AND valid_until IS NULL",
+        (fact_id, user_id),
     ).fetchone()
     cursor = conn.execute(
         "UPDATE knowledge_facts SET valid_until = ?, updated_at = datetime('now') "
-        "WHERE id = ? AND valid_until IS NULL",
-        (ended, fact_id),
+        "WHERE id = ? AND user_id = ? AND valid_until IS NULL",
+        (ended, fact_id, user_id),
     )
     if cursor.rowcount > 0 and before_row is not None:
         before_fact = _row_to_fact(before_row)
@@ -463,28 +471,41 @@ def invalidate_fact(
         ).fetchone()
         after_fact = _row_to_fact(after_row) if after_row else None
         _write_audit_row(
-            conn, before_fact.user_id, fact_id, "invalidate",
+            conn, user_id, fact_id, "invalidate",
             before_json=_fact_to_json(before_fact),
             after_json=_fact_to_json(after_fact),
-            source_task_id=None,
+            source_task_id=source_task_id,
             source_type=None,
         )
     return cursor.rowcount > 0
 
 
-def delete_fact(conn: sqlite3.Connection, fact_id: int) -> bool:
-    """Hard delete a fact. Returns True if deleted."""
+def delete_fact(
+    conn: sqlite3.Connection,
+    user_id: str,
+    fact_id: int,
+    *,
+    source_task_id: int | None = None,
+) -> bool:
+    """Hard delete one of `user_id`'s facts. Returns True if deleted.
+
+    Scoped like `invalidate_fact`: another user's fact answers False.
+    """
     before_row = conn.execute(
-        "SELECT * FROM knowledge_facts WHERE id = ?", (fact_id,)
+        "SELECT * FROM knowledge_facts WHERE id = ? AND user_id = ?",
+        (fact_id, user_id),
     ).fetchone()
-    cursor = conn.execute("DELETE FROM knowledge_facts WHERE id = ?", (fact_id,))
+    cursor = conn.execute(
+        "DELETE FROM knowledge_facts WHERE id = ? AND user_id = ?",
+        (fact_id, user_id),
+    )
     if cursor.rowcount > 0 and before_row is not None:
         before_fact = _row_to_fact(before_row)
         _write_audit_row(
-            conn, before_fact.user_id, fact_id, "delete",
+            conn, user_id, fact_id, "delete",
             before_json=_fact_to_json(before_fact),
             after_json=None,
-            source_task_id=None,
+            source_task_id=source_task_id,
             source_type=None,
         )
     return cursor.rowcount > 0
