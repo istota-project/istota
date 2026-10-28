@@ -1,4 +1,4 @@
-"""The caller's briefing schedule, and shared briefing blocks for a shared-content writer.
+"""The caller's briefing schedule, shared briefing blocks, and group briefings.
 
 ``schedule list|set|remove`` read and change the caller's own
 ``briefing_configs`` rows. A write runs through
@@ -18,6 +18,14 @@ state from ``briefings.shared_block_runs.run_state``. ``shared-block set`` and
 ``run`` and ``remove`` are the web routes' sequences; ``remove`` needs
 ``--confirmed``. An agent block's prompt lives only in that table, so this is
 how a conversation changes it.
+
+``group …`` reads and changes group briefing definitions, runs, editions,
+the caller's own delivery mutes and their own source approvals, through
+``briefings.group_service``, the functions the web group routes call. It runs
+only from the caller's own turn in a private read (``_private_chat_refusal``),
+which answers ``private_chat_only`` before any group id is read; then
+``group_service.access`` applies the web's authority. Granting a source
+approval and retrying deliveries stay on the web.
 
 The new directive comes from a file rather than stdin because the skill proxy
 forwards argv only; a proxied CLI never sees the task's stdin.
@@ -543,12 +551,470 @@ def cmd_remove(args):
     return {"status": "ok", "removed": args.name, "deleted_value": bool(args.delete_value)}
 
 
+# -- group briefings ---------------------------------------------------------
+
+EDITION_LABEL = "group briefing edition"
+_PERSONAL_SOURCE_KINDS = ("personal_file", "personal_calendar")
+
+
+def _private_chat_refusal(user_id: str) -> dict | None:
+    """The first two group checks: the caller's own turn, in a private read.
+
+    Both run before any group id is read, so the refusal says nothing about
+    which groups exist. Anything unanswerable (no task, a read error) refuses.
+    """
+    from pathlib import Path
+
+    from istota import db
+    from istota.rooms.scopes import channel_notes_shared
+    from istota.sandbox.skill_proxy import _owners_own_turn
+
+    refusal = error_envelope(
+        "group briefings are read and changed from the user's private chat only; "
+        "ask the user to continue there",
+        reason="private_chat_only",
+    )
+    task_id = os.environ.get("ISTOTA_TASK_ID", "")
+    db_path = _db_path()
+    if not task_id.isdigit() or not Path(db_path).is_file():
+        return refusal
+    try:
+        with db.get_db(Path(db_path)) as conn:
+            if not _owners_own_turn(conn, int(task_id), user_id):
+                return refusal
+            task = db.get_task(conn, int(task_id))
+            if channel_notes_shared(
+                conn, task.conversation_token,
+                guest_turn=task.guest_participant_id is not None,
+                is_group_chat=bool(task.is_group_chat),
+            ):
+                return refusal
+    except Exception as exc:  # noqa: BLE001 — an unreadable task refuses
+        logger.warning("briefings_config: could not read the calling task: %s", exc)
+        return refusal
+    return None
+
+
+def _group(args, operation: str, body, *, read: bool) -> dict:
+    """Run ``body(conn, config, actor)`` behind the gate, as the web's `_run` does.
+
+    A read runs in one ``BEGIN`` snapshot. A write opens no transaction here:
+    each store function owns its own, as on the web, and `group set` opens the
+    operator CLI's ``BEGIN IMMEDIATE`` itself.
+    """
+    import sqlite3
+
+    from istota import db
+    from istota.groups.policy import GroupError
+
+    actor = _user_id()
+    refusal = _private_chat_refusal(actor)
+    if refusal is not None:
+        return refusal
+    config = _load_config()
+    if config is None:
+        return _unavailable()
+    group_id = getattr(args, "group_id", None)
+    try:
+        with db.get_db(_db_path()) as conn:
+            if read:
+                conn.execute("BEGIN")
+            result = body(conn, config, actor)
+    except GroupError as exc:
+        logger.info("Group request actor=%s group=%r operation=%s outcome=%s",
+                    actor, group_id, operation, exc.code)
+        return error_envelope(str(exc), reason=exc.code, **exc.details)
+    except sqlite3.Error:
+        logger.warning("Group request actor=%s group=%r operation=%s outcome=unavailable",
+                       actor, group_id, operation)
+        return error_envelope("group briefings are unavailable", reason="groups_unavailable")
+    if result.get("status") == "error":
+        return result
+    if not read:
+        logger.info("Group request actor=%s group=%s operation=%s outcome=ok",
+                    actor, group_id, operation)
+    return {"status": "ok", **result}
+
+
+def _fenced(view: dict) -> dict:
+    """An edition with its generated text fenced; `document` repeats it, so it goes."""
+    from istota.lib.untrusted import frame_untrusted
+
+    view = dict(view)
+    view.pop("document", None)
+    for key in ("subject", "body_md"):
+        if view.get(key):
+            view[key] = frame_untrusted(view[key], EDITION_LABEL)
+    return view
+
+
+def _read_file_text(path, flag: str, reason: str) -> tuple[str | None, dict | None]:
+    try:
+        return read_resolved_text(path, flag=flag, max_bytes=MAX_PROMPT_FILE_BYTES), None
+    except ReadRefused as exc:
+        return None, error_envelope(str(exc), reason=reason)
+
+
+def cmd_group_list(args):
+    from istota.briefings import group_service
+
+    def body(conn, config, actor):
+        if args.group_id is not None:
+            return group_service.definitions(conn, config, actor, args.group_id)
+        groups = []
+        for target in group_service.targets(conn, config, actor)["targets"]:
+            if target["scope"] != "group":
+                continue
+            listed = group_service.definitions(conn, config, actor, target["group_id"])
+            groups.append({"label": target["label"], **listed})
+        return {"groups": groups}
+
+    return _group(args, "list", body, read=True)
+
+
+def cmd_group_show(args):
+    from istota.briefings import group_service
+
+    def body(conn, config, actor):
+        return {"definition": group_service.definitions(
+            conn, config, actor, args.group_id, args.name)}
+
+    return _group(args, "show", body, read=True)
+
+
+def cmd_group_save(args):
+    import json
+
+    from istota.briefings import group_service
+    from istota.groups.policy import payload_problem
+
+    def body(conn, config, actor):
+        text, refusal = _read_file_text(args.file, "--file", "invalid_argument")
+        if refusal is not None:
+            return refusal
+        try:
+            definition = json.loads(text)
+        except ValueError as exc:
+            return error_envelope(f"--file is not JSON: {exc}", reason="invalid_argument")
+        if isinstance(definition, dict) and "revision" in definition:
+            return error_envelope(
+                "the file holds the definition only; pass the revision as --revision",
+                reason="invalid_argument",
+            )
+        payload = {**definition, "revision": args.revision} if isinstance(definition, dict) else definition
+        problem = payload_problem(payload, group_service.DEFINITION_FIELDS,
+                                  group_service.DEFINITION_REQUIRED)
+        if problem is not None:
+            return error_envelope(f"--file: {problem}", reason="invalid_argument")
+        name = None if args.revision == 0 else payload["name"]
+        return {"definition": group_service.save(
+            conn, config, actor, args.group_id, payload, name)}
+
+    return _group(args, "save", body, read=False)
+
+
+_GROUP_SET_FIELDS = ("title", "cron", "timezone", "channel", "enabled", "prompt_file",
+                     "exclude", "include")
+
+
+def cmd_group_set(args):
+    from copy import deepcopy
+
+    from istota.briefings import group_service
+    from istota.briefings import group_store as store
+    from istota.settings_plan.group_briefings import prepare_definition
+
+    if all(getattr(args, field) is None for field in _GROUP_SET_FIELDS):
+        return error_envelope(
+            "nothing to change; pass at least one of --title, --cron, --timezone, "
+            "--channel, --enabled/--disabled, --prompt-file, --exclude or --include",
+            reason="invalid_argument",
+        )
+
+    def body(conn, config, actor):
+        prompt = None
+        if args.prompt_file is not None:
+            prompt, refusal = _read_file_text(args.prompt_file, "--prompt-file", "prompt_file_unreadable")
+            if refusal is not None:
+                return refusal
+            if not prompt.strip():
+                return error_envelope("--prompt-file is empty; nothing was changed",
+                                      reason="empty_prompt")
+        # The operator CLI's sequence, in one write transaction.
+        conn.execute("BEGIN IMMEDIATE")
+        caps, _ = group_service.access(conn, config, actor, args.group_id, author=True)
+        row = conn.execute("SELECT id FROM group_briefing_configs WHERE group_id=? AND name=?",
+                           (args.group_id, args.name)).fetchone()
+        old = store.get_definition(conn, row["id"]) if row else None
+
+        patch = {}
+        for field in ("title", "cron", "timezone", "channel", "enabled"):
+            if getattr(args, field) is not None:
+                patch[field] = getattr(args, field)
+        if prompt is not None:
+            if old is None:
+                return error_envelope(
+                    f"there is no definition named {args.name!r}; create one with `group save`",
+                    reason="invalid_argument",
+                )
+            if old["generation_mode"] != "prompt":
+                return error_envelope(
+                    "this definition is built from blocks, not one prompt; change its "
+                    "blocks with `group save`",
+                    reason="invalid_argument",
+                )
+            generation = deepcopy(old["generation"])
+            generation["prompt"] = prompt
+            patch["generation"] = generation
+        if args.exclude or args.include:
+            excluded = set(old["excluded_user_ids"]) if old else set()
+            excluded |= set(args.exclude or [])
+            excluded -= set(args.include or [])
+            patch["excluded_user_ids"] = sorted(excluded)
+
+        value, old = prepare_definition(
+            conn, config, {"group_id": args.group_id, "name": args.name, **patch},
+            actor=actor, expected_revision=args.revision, is_admin=caps["author_briefings"],
+        )
+        definition = store.save_definition(
+            conn, config, args.group_id, value, actor_id=actor, expected_revision=args.revision,
+            definition_id=old["id"] if old else None, is_admin=caps["author_briefings"],
+            caller_transaction=True,
+        )
+        return {"definition": group_service.definition_view(config, definition, caps)}
+
+    return _group(args, "set", body, read=False)
+
+
+def cmd_group_run(args):
+    import uuid
+
+    from istota.briefings import group_service
+
+    def body(conn, config, actor):
+        request_id = str(uuid.uuid4())
+        view = group_service.runs(conn, config, actor, args.group_id, args.name,
+                                  payload={"request_id": request_id, "mode": args.mode})
+        return {
+            "request_id": request_id,
+            "edition": _fenced(view),
+            "note": "The daemon generates the edition. Read it later with `group edition "
+                    "--run-id` once its state is preview_ready or published.",
+        }
+
+    return _group(args, "run", body, read=False)
+
+
+def cmd_group_runs(args):
+    from istota.briefings import group_service
+
+    def body(conn, config, actor):
+        listed = group_service.runs(conn, config, actor, args.group_id, args.name,
+                                    limit=args.limit)
+        return {**listed, "items": [_fenced(item) for item in listed["items"]]}
+
+    return _group(args, "runs", body, read=True)
+
+
+def cmd_group_edition(args):
+    from istota.briefings import group_service
+
+    def body(conn, config, actor):
+        view = group_service.read_edition(conn, config, actor, args.group_id, args.name,
+                                          args.run_id)
+        return {"edition": _fenced(view)}
+
+    return _group(args, "edition", body, read=True)
+
+
+def cmd_group_audience(args):
+    from istota.briefings import group_service
+
+    def body(conn, config, actor):
+        return group_service.audience(conn, config, actor, args.group_id, args.name)
+
+    return _group(args, "audience", body, read=True)
+
+
+def cmd_group_delete(args):
+    from istota.briefings import group_service
+
+    def body(conn, config, actor):
+        if args.confirmed:
+            return group_service.delete(conn, config, actor, args.group_id, args.name,
+                                        args.revision)
+        _, definition = group_service.access(conn, config, actor, args.group_id, args.name,
+                                             author=True)
+        return error_envelope(
+            "deleting a group briefing needs --confirmed; show the user what would be "
+            "removed and ask first",
+            reason="confirmation_required",
+            would={"group_id": args.group_id, "name": definition["name"],
+                   "enabled": definition["enabled"], "revision": definition["revision"]},
+            note="Only a disabled definition can be deleted. Published editions stay "
+                 "readable to members.",
+        )
+
+    return _group(args, "delete", body, read=not args.confirmed)
+
+
+def cmd_group_delivery(args):
+    from istota.briefings import group_service
+
+    changes = {key: getattr(args, key) for key in group_service.PREFERENCE_FIELDS
+               if getattr(args, key) is not None}
+
+    def body(conn, config, actor):
+        current = group_service.preferences(conn, config, actor, args.group_id, args.name)
+        if not changes:
+            return current
+        merged = {key: current[key] for key in group_service.PREFERENCE_FIELDS}
+        merged.update(changes)
+        return group_service.preferences(conn, config, actor, args.group_id, args.name,
+                                         payload=merged)
+
+    return _group(args, "delivery", body, read=not changes)
+
+
+def cmd_group_approvals(args):
+    from istota.briefings import group_service
+    from istota.briefings import group_store as store
+    from istota.groups.policy import GroupError
+
+    def body(conn, config, actor):
+        _, definition = group_service.access(conn, config, actor, args.group_id, args.name)
+        approvals = []
+        for source in store.definition_sources(definition):
+            if source["kind"] not in _PERSONAL_SOURCE_KINDS:
+                continue
+            try:
+                approvals.append(group_service.approval(
+                    conn, config, actor, args.group_id, args.name, source["id"]))
+            except GroupError as exc:
+                # The web answers this actor no approval for someone else's source.
+                if exc.code != "source_not_found":
+                    raise
+        return {"group_id": args.group_id, "name": args.name, "approvals": approvals}
+
+    return _group(args, "approvals", body, read=True)
+
+
+def cmd_group_revoke_approval(args):
+    from istota.briefings import group_service
+
+    def body(conn, config, actor):
+        if not args.confirmed:
+            group_service.approval(conn, config, actor, args.group_id, args.name,
+                                   args.source_id)
+            return error_envelope(
+                "revoking a source approval needs --confirmed; tell the user and ask first",
+                reason="confirmation_required",
+                would={"group_id": args.group_id, "name": args.name,
+                       "source_id": args.source_id},
+                note="The briefing's next run will refuse this source until it is "
+                     "approved again on the web.",
+            )
+        return group_service.approval(
+            conn, config, actor, args.group_id, args.name, args.source_id,
+            payload={"expected_grant_revision": args.grant_revision}, revoke=True,
+        )
+
+    return _group(args, "revoke-approval", body, read=not args.confirmed)
+
+
+def _add_group_parser(sub):
+    p_group = sub.add_parser(
+        "group", help="Group briefings, from the user's private chat only",
+    )
+    group_sub = p_group.add_subparsers(dest="action", required=True)
+
+    def named(name, help_text, *, needs_name=True):
+        parser = group_sub.add_parser(name, help=help_text)
+        parser.add_argument("--group-id", required=True, help="The group's id")
+        if needs_name:
+            parser.add_argument("--name", required=True, help="The definition's name")
+        return parser
+
+    p_list = group_sub.add_parser("list", help="Definitions in every group you can read")
+    p_list.add_argument("--group-id", help="Only this group")
+
+    named("show", "One definition; authors also see its generation")
+
+    p_save = named("save", "Create or replace a definition from a JSON file",
+                   needs_name=False)
+    host_path(
+        p_save, "--file", mode=READ, required=True,
+        help="A JSON file holding the definition (the web editor's body, without "
+             "revision). Must live under $ISTOTA_DEFERRED_DIR or your workspace",
+    )
+    p_save.add_argument("--revision", type=int, required=True,
+                        help="The revision you last read; 0 creates a disabled draft")
+
+    p_gset = named("set", "Change some fields of a definition; flags not given keep their value")
+    p_gset.add_argument("--revision", type=int, required=True,
+                        help="The revision you last read")
+    p_gset.add_argument("--title")
+    p_gset.add_argument("--cron", help="5-field cron in the definition's timezone")
+    p_gset.add_argument("--timezone", help="An IANA timezone name")
+    p_gset.add_argument("--channel", help="in_app, email, talk or ntfy")
+    genabled = p_gset.add_mutually_exclusive_group()
+    genabled.add_argument("--enabled", dest="enabled", action="store_true", default=None)
+    genabled.add_argument("--disabled", dest="enabled", action="store_false")
+    host_path(
+        p_gset, "--prompt-file", mode=READ,
+        help="A UTF-8 file holding the whole new generation prompt (prompt mode "
+             "only). Must live under $ISTOTA_DEFERRED_DIR or your workspace",
+    )
+    p_gset.add_argument("--exclude", action="append", metavar="USER",
+                        help="Stop delivering to this member; repeatable")
+    p_gset.add_argument("--include", action="append", metavar="USER",
+                        help="Deliver to this member again; repeatable")
+
+    p_grun = named("run", "Generate a preview, or publish to every member")
+    p_grun.add_argument("--mode", required=True, choices=("preview", "publish"))
+
+    p_runs = named("runs", "Recent runs and editions")
+    p_runs.add_argument("--limit", type=int, default=20, choices=range(1, 101),
+                        metavar="N", help="1 to 100, default 20")
+
+    p_edition = named("edition", "One edition with its body")
+    p_edition.add_argument("--run-id", type=int, required=True)
+
+    named("audience", "Who the definition delivers to")
+
+    p_gdelete = named("delete", "Delete a disabled definition")
+    p_gdelete.add_argument("--revision", type=int, required=True,
+                           help="The revision you last read")
+    p_gdelete.add_argument("--confirmed", action="store_true",
+                           help="Delete it. Without this, prints what would be deleted")
+
+    p_delivery = named("delivery", "Read or set your own delivery mutes", needs_name=False)
+    p_delivery.add_argument("--name", help="One definition; without it, the whole group")
+    outbound = p_delivery.add_mutually_exclusive_group()
+    outbound.add_argument("--outbound-muted", dest="outbound_muted", action="store_true",
+                          default=None)
+    outbound.add_argument("--outbound-unmuted", dest="outbound_muted", action="store_false")
+    in_app = p_delivery.add_mutually_exclusive_group()
+    in_app.add_argument("--in-app-muted", dest="in_app_muted", action="store_true",
+                        default=None)
+    in_app.add_argument("--in-app-unmuted", dest="in_app_muted", action="store_false")
+
+    named("approvals", "Source approvals you can see on a definition")
+
+    p_revoke = named("revoke-approval", "Revoke your own approval of a personal source")
+    p_revoke.add_argument("--source-id", required=True)
+    p_revoke.add_argument("--grant-revision", type=int, required=True,
+                          help="grant_revision from `group approvals`")
+    p_revoke.add_argument("--confirmed", action="store_true",
+                          help="Revoke it. Without this, prints what would change")
+
+
 def build_parser():
     import argparse
 
     parser = argparse.ArgumentParser(
         prog="python -m istota.skills.briefings_config",
-        description="Your briefing schedule, and shared briefing blocks",
+        description="Your briefing schedule, shared briefing blocks, and group briefings",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -639,6 +1105,8 @@ def build_parser():
         help="A UTF-8 file holding the whole new directive. Must live under "
              "$ISTOTA_DEFERRED_DIR or your workspace",
     )
+
+    _add_group_parser(sub)
     return parser
 
 
@@ -656,6 +1124,18 @@ def main(argv=None):
             ("shared-block", "set-prompt"): cmd_set_prompt,
             ("shared-block", "run"): cmd_run,
             ("shared-block", "remove"): cmd_remove,
+            ("group", "list"): cmd_group_list,
+            ("group", "show"): cmd_group_show,
+            ("group", "save"): cmd_group_save,
+            ("group", "set"): cmd_group_set,
+            ("group", "run"): cmd_group_run,
+            ("group", "runs"): cmd_group_runs,
+            ("group", "edition"): cmd_group_edition,
+            ("group", "audience"): cmd_group_audience,
+            ("group", "delete"): cmd_group_delete,
+            ("group", "delivery"): cmd_group_delivery,
+            ("group", "approvals"): cmd_group_approvals,
+            ("group", "revoke-approval"): cmd_group_revoke_approval,
         },
         args,
         command=(args.command, args.action),

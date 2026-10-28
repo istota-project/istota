@@ -162,6 +162,17 @@ CASES: dict[tuple[str, str, str], Case] = {
         main="istota.skills.briefings_config",
         patch=("istota.skills.briefings_config", "cmd_set"),
     ),
+    ("briefings_config", "group.save", "file"): Case(
+        argv=lambda p: ["group", "save", "--group-id", "team", "--file", p, "--revision", "0"],
+        main="istota.skills.briefings_config",
+        patch=("istota.skills.briefings_config", "cmd_group_save"),
+    ),
+    ("briefings_config", "group.set", "prompt_file"): Case(
+        argv=lambda p: ["group", "set", "--group-id", "team", "--name", "weekly",
+                        "--revision", "1", "--prompt-file", p],
+        main="istota.skills.briefings_config",
+        patch=("istota.skills.briefings_config", "cmd_group_set"),
+    ),
     ("health", "export-csv", "output"): Case(
         argv=lambda p: ["export-csv", "--output", p],
         main="istota.skills.health",
