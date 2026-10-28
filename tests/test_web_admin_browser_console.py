@@ -8,6 +8,8 @@ the app's loop in its own thread, so a server on the test's loop would never
 be serviced.
 """
 
+import asyncio
+import errno
 import logging
 import queue
 import shutil
@@ -625,3 +627,161 @@ def test_an_unexpected_relay_error_closes_1011(admin_ws, vnc, monkeypatch, caplo
         assert _wait_released()
     assert "browser_console_error admin='alice' user='bob' err=ValueError" in caplog.text
     assert "secret detail" not in caplog.text
+
+
+# ---- Connect failures: not running against worth a retry ----
+
+
+@pytest.mark.parametrize("error, code", [
+    (FileNotFoundError(errno.ENOENT, "gone"), 4404),
+    (ConnectionRefusedError(errno.ECONNREFUSED, "refused"), 4404),
+    (OSError(errno.ENOTSOCK, "not a socket"), 4404),
+    (OSError(errno.ELOOP, "a symlink"), 4404),
+    (TimeoutError("timed out"), 1011),
+    (BlockingIOError(errno.EAGAIN, "backlog full"), 1011),
+    (OSError(errno.EACCES, "denied"), 1011),
+])
+def test_a_connect_failure_closes_by_whether_a_retry_can_help(admin_ws, monkeypatch, caplog, error, code):
+    def failing(sock, path):
+        raise error
+
+    monkeypatch.setattr(console, "connect_no_follow", failing)
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        with admin_ws.websocket_connect(CONSOLE, headers=ORIGIN) as ws:
+            ws.send_text(_ticket(admin_ws))
+            assert _closed_with(ws) == code
+    assert _wait_released()
+    if code == 4404:
+        assert "browser_console_refused admin='alice' user='bob' code=4404" in caplog.text
+    else:
+        assert f"browser_console_error admin='alice' user='bob' err={type(error).__name__}" in caplog.text
+        assert "code=4404" not in caplog.text
+
+
+# ---- The ticket route's refusals are logged ----
+
+
+def _refused_lines(caplog):
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("browser_console_refused")]
+
+
+async def test_ticket_refusals_before_validation_log_no_user(alice, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        await alice.post(TICKET, content=b"not json", headers={**ORIGIN, "Content-Type": "application/json"})
+        await alice.post(TICKET, json={"user": "bob\nadmin"}, headers=ORIGIN)
+    assert _refused_lines(caplog) == [
+        "browser_console_refused admin='alice' user=- code=invalid_body",
+        "browser_console_refused admin='alice' user=- code=invalid_user",
+    ]
+
+
+async def test_ticket_refusals_after_validation_log_the_user(alice, setup, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        setup.browser.enabled = False
+        await alice.post(TICKET, json={"user": "bob"}, headers=ORIGIN)
+        setup.browser.enabled = True
+        for _ in range(console.MAX_RELAYS):
+            console.RELAYS.try_acquire()
+        await alice.post(TICKET, json={"user": "bob"}, headers=ORIGIN)
+        for _ in range(console.MAX_RELAYS):
+            console.RELAYS.release()
+        await alice.post(TICKET, json={"user": "bob"}, headers=ORIGIN)
+    assert _refused_lines(caplog) == [
+        "browser_console_refused admin='alice' user='bob' code=browser_disabled",
+        "browser_console_refused admin='alice' user='bob' code=console_limit",
+        "browser_console_refused admin='alice' user='bob' code=step_up_dead",
+    ]
+
+
+async def test_a_missing_identity_refusal_is_logged(setup, caplog):
+    client = await _client("dave")
+    try:
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            await client.post(TICKET, json={"user": "bob"}, headers=ORIGIN)
+    finally:
+        await client.aclose()
+    assert _refused_lines(caplog) == [
+        "browser_console_refused admin='dave' user='bob' code=admin_identity_required",
+    ]
+
+
+# ---- The page closing while screen updates stream ----
+
+
+class _StreamingVnc(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+    def __init__(self, path):
+        super().__init__(str(path), _StreamingVncHandler)
+
+
+class _StreamingVncHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        frame = b"\x00" * 4096
+        while True:
+            try:
+                self.request.sendall(frame)
+            except OSError:
+                return
+
+
+class _ClosingPage:
+    """A page that closes after three frames. A send after that fails at once,
+    and the receive side reports the close a little later, or never."""
+
+    def __init__(self, close_code):
+        self.close_code = close_code
+        self.frames = 0
+        self.gone = False
+        self.close_calls = []
+
+    async def send_text(self, text):
+        pass
+
+    async def send_bytes(self, data):
+        if self.gone:
+            raise RuntimeError('Cannot call "send" once a close message has been sent.')
+        self.frames += 1
+        self.gone = self.frames >= 3
+
+    async def receive(self):
+        while not self.gone:
+            await asyncio.sleep(0.005)
+        if self.close_code is None:
+            await asyncio.Event().wait()
+        await asyncio.sleep(0.05)
+        return {"type": "websocket.disconnect", "code": self.close_code}
+
+    async def close(self, code):
+        self.close_calls.append(code)
+
+
+@pytest.fixture
+def streaming_vnc(console_dir):
+    server = _StreamingVnc(console_dir / console_socket_name("bob"))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize("close_code, expected", [(1001, 1001), (None, 1006)])
+async def test_a_page_closing_mid_stream_is_a_page_close(streaming_vnc, monkeypatch, caplog,
+                                                         close_code, expected):
+    monkeypatch.setattr(console, "PAGE_CLOSE_WAIT_SECONDS", 0.3)
+    page = _ClosingPage(close_code)
+
+    async def authorized():
+        return True
+
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        code = await console.relay(page, "alice", "bob", authorized=authorized)
+    assert code == expected
+    assert page.frames == 3
+    assert page.close_calls == []
+    assert "browser_console_error" not in caplog.text
+    closed = [r.getMessage() for r in caplog.records if "browser_console_closed" in r.getMessage()]
+    assert len(closed) == 1 and closed[0].endswith(f" code={expected}")

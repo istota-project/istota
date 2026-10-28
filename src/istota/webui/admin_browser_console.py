@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import logging
 import os
 import secrets
@@ -124,7 +125,8 @@ CLOSE_TOO_MANY = 4429
 # holds the wording for every row in `web/src/lib/admin/browsers/consoleClose.ts`.
 CLOSE_CODES: dict[int, CloseCode] = {
     CLOSE_NORMAL: CloseCode("x11vnc ended the stream", retry=True),
-    CLOSE_ERROR: CloseCode("unexpected relay error", retry=True),
+    CLOSE_ERROR: CloseCode("unexpected relay error, or a connect that timed out "
+                                "or met a full backlog", retry=True),
     CLOSE_BAD_FRAME: CloseCode("no ticket text frame within 5s, or malformed", retry=True),
     CLOSE_UNAUTHORIZED: CloseCode("ticket unknown, expired, used or for another session; "
                                   "or the periodic re-check failed", retry=False),
@@ -144,14 +146,20 @@ CONNECT_TIMEOUT_SECONDS = 5.0
 RECHECK_SECONDS = 30.0
 LIFETIME_SECONDS = 3600.0
 READ_SIZE = 64 * 1024
+PAGE_CLOSE_WAIT_SECONDS = 1.0
+
+# A connect failing with one of these means nothing is listening for this user.
+# Anything else (a timeout, EAGAIN on a full backlog) is worth a retry.
+_NOT_RUNNING_ERRNOS = frozenset({errno.ENOENT, errno.ECONNREFUSED, errno.ENOTSOCK, errno.ELOOP})
 
 
 def _id(value: str | None) -> str:
     return "-" if value is None else repr(value)
 
 
-def log_refused(admin: str | None, target: str | None, code: int) -> None:
-    logger.info("browser_console_refused admin=%s user=%s code=%d", _id(admin), _id(target), code)
+def log_refused(admin: str | None, target: str | None, code: int | str) -> None:
+    """A close code from the relay, or the `error` of a ticket-route refusal."""
+    logger.info("browser_console_refused admin=%s user=%s code=%s", _id(admin), _id(target), code)
 
 
 async def read_ticket(websocket) -> str | None:
@@ -172,7 +180,8 @@ def _connect_blocking(path: Path) -> socket.socket:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         # The timeout is on the socket, not a wait_for around the thread, so a
-        # connect that lands late is closed here rather than leaked.
+        # connect that lands late is closed here rather than leaked. With it set,
+        # a full x11vnc backlog fails fast with EAGAIN rather than waiting.
         sock.settimeout(CONNECT_TIMEOUT_SECONDS)
         connect_no_follow(sock, str(path))
         sock.setblocking(False)
@@ -182,8 +191,14 @@ def _connect_blocking(path: Path) -> socket.socket:
     return sock
 
 
+def _not_running(exc: OSError) -> bool:
+    if isinstance(exc, (BlockingIOError, TimeoutError)):
+        return False
+    return exc.errno in _NOT_RUNNING_ERRNOS
+
+
 async def _connect(target: str) -> socket.socket:
-    # A blocking AF_UNIX connect waits while x11vnc's backlog is full.
+    # A thread, so the connect and its lstat stay off the event loop.
     return await asyncio.to_thread(_connect_blocking, CONSOLE_DIR / console_socket_name(target))
 
 
@@ -191,6 +206,10 @@ class _ClientClosed(Exception):
     def __init__(self, code: int):
         super().__init__(code)
         self.code = code
+
+
+class _PageGone(Exception):
+    """A send to the page failed: it closed while screen updates were going out."""
 
 
 async def _copy_to_socket(websocket, writer: asyncio.StreamWriter) -> None:
@@ -211,7 +230,10 @@ async def _copy_to_page(reader: asyncio.StreamReader, websocket) -> int:
         data = await reader.read(READ_SIZE)
         if not data:
             return CLOSE_NORMAL
-        await websocket.send_bytes(data)
+        try:
+            await websocket.send_bytes(data)
+        except Exception as exc:
+            raise _PageGone() from exc
 
 
 async def _recheck(authorized: Callable[[], Awaitable[bool]]) -> int:
@@ -229,6 +251,16 @@ async def _close(websocket, code: int) -> None:
         pass
 
 
+async def _page_close_code(receiving: asyncio.Task) -> int:
+    """The page's own close code once its receive side sees it, else 1006."""
+    done, _ = await asyncio.wait([receiving], timeout=PAGE_CLOSE_WAIT_SECONDS)
+    if receiving in done and not receiving.cancelled():
+        error = receiving.exception()
+        if isinstance(error, _ClientClosed):
+            return error.code
+    return 1006
+
+
 async def relay(websocket, admin: str, target: str, *,
                 authorized: Callable[[], Awaitable[bool]]) -> int:
     """Connect to `target`'s x11vnc socket and copy bytes both ways until one
@@ -239,10 +271,14 @@ async def relay(websocket, admin: str, target: str, *,
     """
     try:
         sock = await _connect(target)
-    except (OSError, asyncio.TimeoutError):
-        log_refused(admin, target, CLOSE_NOT_RUNNING)
-        await _close(websocket, CLOSE_NOT_RUNNING)
-        return CLOSE_NOT_RUNNING
+    except OSError as exc:
+        if _not_running(exc):
+            log_refused(admin, target, CLOSE_NOT_RUNNING)
+            await _close(websocket, CLOSE_NOT_RUNNING)
+            return CLOSE_NOT_RUNNING
+        logger.info("browser_console_error admin=%r user=%r err=%s", admin, target, type(exc).__name__)
+        await _close(websocket, CLOSE_ERROR)
+        return CLOSE_ERROR
 
     started = time.monotonic()
     code = CLOSE_ERROR
@@ -266,7 +302,9 @@ async def relay(websocket, admin: str, target: str, *,
             # The page's close outranks anything that finished beside it.
             first = tasks[0] if tasks[0] in done else done.pop()
             error = first.exception()
-            if isinstance(error, _ClientClosed):
+            if isinstance(error, _PageGone):
+                code, client_closed = await _page_close_code(tasks[0]), True
+            elif isinstance(error, _ClientClosed):
                 code, client_closed = error.code, True
             elif error is not None:
                 logger.info("browser_console_error admin=%r user=%r err=%s",

@@ -5709,33 +5709,41 @@ async def admin_browser_console_ticket(request: Request, user: dict = Depends(_r
     """
     from . import admin_browser_console as console
 
+    admin = user["username"]
+    target = None
+
+    def refuse(status: int, error: str, detail: str) -> JSONResponse:
+        console.log_refused(admin, target, error)
+        return _console_refusal(status, error, detail)
+
     try:
         raw = await read_bounded_body(request, _CONSOLE_TICKET_BODY_LIMIT)
     except BodyError as exc:
         if exc.status == 413:
-            return _console_refusal(413, "too_large", "The request is larger than 4 KiB.")
-        return _console_refusal(400, "invalid_body", "The request was interrupted.")
+            return refuse(413, "too_large", "The request is larger than 4 KiB.")
+        return refuse(400, "invalid_body", "The request was interrupted.")
     try:
         body = json.loads(raw)
     except (ValueError, UnicodeDecodeError, RecursionError):
-        return _console_refusal(400, "invalid_body", "The request body is not JSON.")
+        return refuse(400, "invalid_body", "The request body is not JSON.")
     if not isinstance(body, dict):
-        return _console_refusal(400, "invalid_body", "The request body must be a JSON object.")
+        return refuse(400, "invalid_body", "The request body must be a JSON object.")
     target = _console_user(body.get("user"))
     if target is None:
-        return _console_refusal(400, "invalid_user", "That is not a user id.")
+        return refuse(400, "invalid_user", "That is not a user id.")
     if not _config.browser.enabled:
-        return _console_refusal(404, "browser_disabled", "The browser is not enabled on this instance.")
-    admin = user["username"]
+        return refuse(404, "browser_disabled", "The browser is not enabled on this instance.")
     if not await _live_identity(admin):
-        return _console_refusal(
+        return refuse(
             403, "admin_identity_required",
             "Opening a browser console needs an admin with a live email sign-in identity.",
         )
     if console.RELAYS.full():
-        return _console_refusal(429, "console_limit", "Too many consoles are open. Close one and try again.")
+        return refuse(429, "console_limit", "Too many consoles are open. Close one and try again.")
     refusal = await _require_step_up(request, body, "admin_browser_console")
     if refusal is not None:
+        reason = json.loads(refusal.body).get("reason")
+        console.log_refused(admin, target, f"step_up_{reason}")
         return refusal
     ticket = console.TICKETS.mint(admin, _step_up_session(request), target)
     console.logger.info("browser_console_ticket admin=%r user=%r", admin, target)
