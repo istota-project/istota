@@ -81,6 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The stack's web service now writes its own log lines, such as admin browser console opens and closes, step-up and config editor actions, to its container output in the daemon's format. Before, only uvicorn's lines reached `docker compose logs web`. The web service still never writes to the daemon's log file.
+
 - `kv set --shared` and `kv delete --shared` now run only on a turn the user wrote, as the shared briefing block commands already did, so an administrator's task answering a correspondent's mail on an email thread cannot change shared KV content that every user reads. Outside a task, use `istota kv`.
 
 - A message containing `@` followed by a file path can no longer pull that file into a model call. The `claude` CLI attaches any file a prompt names that way, and the daemon's own text-only model calls, such as conversation triage, the sleep cycle and shared briefing blocks, put other people's text in the prompt and run with the daemon's file access. Every `claude` call the daemon makes now runs with attachments turned off.
