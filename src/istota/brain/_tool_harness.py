@@ -40,7 +40,9 @@ lock and the text cap. Nothing in the daemon accepts a connection.
   process that was read, and fails the attempt. A checked pid goes to
   ``req.on_pid``; the CLI's never does.
 - **Calls are held** by each server until ``release_calls`` writes one byte
-  to its gate, once the brain's init check passed.
+  to its gate, once the brain's init check passed and the tool server's pid
+  was accepted. A server that has not reported within 5 s fails the attempt
+  with its gate shut: it was never authorized and is not ``worker_pid``.
 - **The watcher** fails the attempt when the server exits while the CLI is
   still running 2 s later and ``close`` has not begun. The pinned CLI ends a
   session by SIGINTing its server ~5 ms after the ``result`` line and exits
@@ -101,6 +103,9 @@ _ROOT_GRACE_SECONDS = 2.0
 _EXIT_GRACE_SECONDS = 2.0
 # How long `close` waits for the server to go on its own before killing it.
 _CLOSE_WAIT_SECONDS = 5.0
+# How long `release_calls` waits for the tool server's report. The launcher
+# reports before it execs, so by the CLI's `system/init` it is normally in.
+_REPORT_WAIT_SECONDS = 5.0
 _POLL_SECONDS = 0.25
 
 
@@ -368,6 +373,8 @@ class _DirectHarness:
         self._root_changed = threading.Condition(self._lock)
         self._root: tuple[int, int] | None = None
         self._server: _Server | None = None
+        # Set once a report was accepted or refused, or close began.
+        self._report_settled = threading.Event()
         self._closing = threading.Event()
         self._done = threading.Event()
         self._files: list[Path] = []
@@ -610,6 +617,7 @@ class _DirectHarness:
                 self._server = server
         if server is None:
             self._refuse(pid, seen_start, verdict, fail=not self._closing.is_set())
+            self._report_settled.set()
             return
         on_pid = self._req.on_pid
         if on_pid is not None:
@@ -620,6 +628,7 @@ class _DirectHarness:
         threading.Thread(
             target=self._watch, args=(server,), daemon=True, name="tool-harness-watch",
         ).start()
+        self._report_settled.set()
 
     def _refuse(self, pid: int, seen_start: int | None, reason: str, *, fail: bool) -> None:
         logger.warning("tool harness (%s) refused pid %d: %s", self._label, pid, reason)
@@ -750,6 +759,15 @@ class _DirectHarness:
             logger.warning("tool harness: could not rewrite the env file: %s", exc)
 
     def release(self) -> None:
+        # A server that never reported was never authorized and is not
+        # `worker_pid`: no cancel reaches it and no proxy admits it. The gate
+        # stays shut and the attempt fails.
+        self._report_settled.wait(_REPORT_WAIT_SECONDS)
+        with self._lock:
+            authorized = self._server is not None
+        if not authorized:
+            self._fail("the tool server never reported its pid")
+            return
         for gate_path in self._gate_paths:
             self._open_gate(gate_path)
 
@@ -781,6 +799,7 @@ class _DirectHarness:
 
     def _close(self) -> None:
         self._closing.set()
+        self._report_settled.set()
         with self._lock:
             self._root_changed.notify_all()
             server = self._server

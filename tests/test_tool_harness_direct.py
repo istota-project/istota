@@ -369,10 +369,14 @@ def _gate_has_reader(path: str) -> bool:
     return True
 
 
-def test_the_web_server_waits_for_release_and_reports_no_pid(tmp_path, rec):
+def test_the_web_server_waits_for_release_and_reports_no_pid(tmp_path, rec, clis):
     policy = WebFetchPolicy(block_hosts=("blocked.example",))
     req = _req(tmp_path, tools=["Read", "WebFetch"], web_fetch=policy)
     with _harness(req, rec) as handle:
+        # The tool server reports, as it must before calls are released; the
+        # web server is spawned by hand here and never does.
+        _start_cli(handle, clis).handshake()
+        server_pid = rec.wait_for_pid()
         entry = _web_entry(handle)
         proc = subprocess.Popen(
             [entry["command"], *entry["args"]],
@@ -407,7 +411,7 @@ def test_the_web_server_waits_for_release_and_reports_no_pid(tmp_path, rec):
         finally:
             proc.kill()
             proc.wait(timeout=_TIMEOUT)
-    assert rec.pids == []
+        assert rec.pids == [server_pid]
     assert not rec.failed.is_set()
 
 
@@ -487,6 +491,34 @@ def test_a_report_from_outside_the_cli_is_refused_killed_and_fails_the_attempt(
                 str(stranger.pid) in r.getMessage() and r.levelname == "WARNING"
                 for r in caplog.records
             )
+    finally:
+        cli.kill()
+        cli.wait()
+    assert rec.pids == []
+
+
+def test_releasing_calls_with_no_server_reported_fails_the_attempt(tmp_path, rec, monkeypatch):
+    """A server that never reported was never authorized with the proxies and
+    is not `worker_pid`; the gate stays shut and the attempt fails."""
+    monkeypatch.setattr(harness_mod, "_REPORT_WAIT_SECONDS", 0.3)
+    req = _req(tmp_path)
+    cli = subprocess.Popen(["sleep", "60"])
+    try:
+        with _harness(req, rec) as handle:
+            set_cli_root(handle, cli.pid)
+            gate = json.loads(Path(_arg_after(
+                _server_entry(handle)["args"][_server_entry(handle)["args"].index("--") + 1:],
+                "--hello",
+            )).read_text())["gate"]
+            reader = os.open(gate, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                release_calls(handle)
+                assert rec.failed.is_set()
+                assert "never reported" in handle.failure
+                # No writer has ever opened it: end-of-file, no byte.
+                assert os.read(reader, 1) == b""
+            finally:
+                os.close(reader)
     finally:
         cli.kill()
         cli.wait()
