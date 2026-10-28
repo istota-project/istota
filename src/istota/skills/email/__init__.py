@@ -7,7 +7,6 @@ Also provides a CLI for sending email directly from Claude Code:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import mimetypes
 import os
@@ -22,6 +21,7 @@ from email.message import EmailMessage
 from email.utils import formataddr, formatdate, getaddresses, parsedate_to_datetime
 from pathlib import Path
 
+from istota.sandbox import deferred
 from istota.mail import connect as mail_connect
 from istota.lib.filenames import (
     filename_parts, numbered_name, safe_filename,
@@ -2731,8 +2731,7 @@ def cmd_output(args):
     }
 
     out_path = Path(deferred_dir) / f"task_{task_id}_email_output.json"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    deferred.write_json(out_path, data)
 
     return {"status": "ok", "file": str(out_path)}
 
@@ -2866,16 +2865,7 @@ def _write_deferred_sent_email(
         entry["markdown"] = True
 
     path = Path(deferred_dir) / f"task_{task_id}_sent_emails.json"
-    # Append to existing file if multiple sends in one task
-    existing = []
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-            existing = []
-    existing.append(entry)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
+    deferred.append_json(path, [entry])
 
 
 def _read_body(args) -> str:

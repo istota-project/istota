@@ -15,6 +15,7 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
+from istota.sandbox import deferred
 from istota import db
 from istota.rooms import veto as room_veto
 from istota.mail.support import get_email_config
@@ -134,21 +135,23 @@ def _load_deferred_email_output(
     """
     from ...executor import task_deferred_dir
     path = task_deferred_dir(config, task) / f"task_{task.id}_email_output.json"
-    if not path.exists():
-        return None
-
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = deferred.read_json(path, missing=deferred.MISSING)
+        if data is deferred.MISSING:
+            return None
         if consume:
-            path.unlink(missing_ok=True)
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+            deferred.unlink(path)
+    except (ValueError, UnicodeDecodeError, OSError, RecursionError) as e:
         # Same encoding contract as scheduler_deferred._load_deferred_json: the
         # producer (skills/email cmd_output) dumps with ensure_ascii=False, so
         # this is the one deferred file that reliably holds multi-byte UTF-8,
         # and UnicodeDecodeError is neither a JSONDecodeError nor an OSError.
         logger.warning("Bad deferred email output file for task %d: %s", task.id, e)
         if consume:
-            path.unlink(missing_ok=True)
+            try:
+                deferred.unlink(path)
+            except OSError:
+                pass
         return None
 
     if not isinstance(data, dict) or "body" not in data or "format" not in data:
@@ -176,7 +179,7 @@ def _consume_deferred_email_output(config: "Config", task: db.Task) -> None:
     from ...executor import task_deferred_dir
     path = task_deferred_dir(config, task) / f"task_{task.id}_email_output.json"
     try:
-        path.unlink(missing_ok=True)
+        deferred.unlink(path)
     except OSError as e:
         # Losing the delete costs a stale file and a warning from
         # `_warn_unconsumed_deferred_files`, never a resend: nothing re-reads it

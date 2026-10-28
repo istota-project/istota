@@ -839,7 +839,8 @@ def cmd_import_garmin_tracks(args):
             "tracks' button under Settings → Connections."
         )
     path = Path(deferred) / f"task_{task_id}_garmin_import.json"
-    path.write_text(json.dumps({"days_back": days_back}), encoding="utf-8")
+    from istota.sandbox import deferred as deferred_files
+    deferred_files.write_json(path, {"days_back": days_back})
     print(json.dumps({
         "status": "ok",
         "queued": True,

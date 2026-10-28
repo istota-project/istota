@@ -17,6 +17,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from istota.sandbox import deferred
 from istota.skills._cli import parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import EGRESS, host_path
 from istota.skills._turn_access import calling_task_id
@@ -335,14 +336,7 @@ def _defer_kg_op(entry: dict) -> bool:
 
     path = Path(deferred_dir) / f"task_{task_id}_kg_ops.json"
 
-    ops = []
-    if path.exists():
-        try:
-            ops = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-            ops = []
-    ops.append(entry)
-    path.write_text(json.dumps(ops), encoding="utf-8")
+    deferred.append_json(path, [entry])
     return True
 
 
