@@ -69,9 +69,8 @@ class HarnessSpec:
     harness_root: Path
     bash_spill_full_output: bool = True
     # The daemon-side WebFetch policy, from `[brain.native.web_fetch]`; `None`
-    # when the grant leaves it out or the tool is disabled. Not served to the
-    # CLI between #862's Stage 5 and Stage 6, which serves it from a second
-    # MCP server.
+    # when the grant leaves it out or the tool is disabled. The harness serves
+    # it to the CLI from a second MCP server, `istota_web`.
     web_fetch: "WebFetchPolicy | None" = None
     # The control directory the tool server's wrap binds read-only: the task's,
     # or a direct caller's `DaemonSandbox.control_dir`. The harness puts the

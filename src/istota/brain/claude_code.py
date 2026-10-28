@@ -1191,6 +1191,7 @@ class _HarnessRun:
         self.handle: HarnessHandle | None = None
         self.env: dict[str, str] = {}
         self.expected_tools: frozenset[str] = frozenset()
+        self.expected_servers: tuple[str, ...] = (HARNESS_MCP_SERVER,)
         self._process: subprocess.Popen | None = None
         self._lock = threading.Lock()
 
@@ -1212,23 +1213,28 @@ class _HarnessRun:
 
     def init_problem(self, event: InitEvent) -> str | None:
         """None when ``system/init`` lists exactly what the harness asked for:
-        the ``--tools`` built-ins, the offered MCP tools and one MCP server,
-        ``istota``, connected. Bundled skills, agents and plugins are not read;
-        with Skill and Task off they are unreachable."""
+        the ``--tools`` built-ins, the offered MCP tools and exactly the MCP
+        servers the harness configured (``istota``, and ``istota_web`` with
+        WebFetch), each connected, in any order. Bundled skills, agents and
+        plugins are not read; with Skill and Task off they are unreachable."""
         tools = set(event.tools)
         unexpected = sorted(tools - self.expected_tools)
         missing = sorted(self.expected_tools - tools)
         servers = list(event.mcp_servers)
-        if not unexpected and not missing and servers == [(HARNESS_MCP_SERVER, "connected")]:
+        servers_ok = sorted(servers) == sorted(
+            (name, "connected") for name in self.expected_servers
+        )
+        if not unexpected and not missing and servers_ok:
             return None
         parts = []
         if unexpected:
             parts.append(f"unexpected tools {unexpected}")
         if missing:
             parts.append(f"missing tools {missing}")
-        if servers != [(HARNESS_MCP_SERVER, "connected")]:
+        if not servers_ok:
             shown = [f"{name} ({status})" for name, status in servers] or ["none"]
-            parts.append(f"MCP servers {shown}, expected {HARNESS_MCP_SERVER} (connected)")
+            expected = ", ".join(f"{name} (connected)" for name in self.expected_servers)
+            parts.append(f"MCP servers {shown}, expected {expected}")
         problem = (
             "The Claude Code CLI did not load the tool set the harness asked "
             "for: " + "; ".join(parts)
@@ -1653,9 +1659,8 @@ class ClaudeCodeBrain:
                     stop_reason="error",
                 )
             run.env = _harness_cli_env(req, handle)
-            run.expected_tools = frozenset(harness_builtin_tools(req)) | {
-                f"mcp__{HARNESS_MCP_SERVER}__{name}" for name in handle.offered
-            }
+            run.expected_tools = frozenset(harness_builtin_tools(req)) | set(handle.mcp_tools)
+            run.expected_servers = handle.mcp_servers
             cmd = self._build_command(req, mcp_config_path=handle.mcp_config_path)
             return self._execute_streaming(cmd, req, harness=run)
 

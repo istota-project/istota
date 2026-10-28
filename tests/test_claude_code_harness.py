@@ -17,6 +17,7 @@ it under bwrap.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import json
 import os
 import signal
@@ -50,6 +51,7 @@ from istota.executor import (
 )
 from istota.llm import providers
 from istota.llm.providers import resolve_process_auth
+from istota.session.tools import WebFetchPolicy
 from tests.support.drift import source_of
 
 OAUTH = "OAUTH-SENTINEL"
@@ -762,6 +764,53 @@ class TestTheHarnessRun:
 
         assert result.success, result.result_text
         assert _flag_values(h.recorded()["argv"], "--tools") == ["WebSearch"]
+
+    def _web(self, tmp_path, plan=None):
+        h = _Harnessed(tmp_path, tools=[*_SIX, "WebFetch"], plan=plan)
+        h.req.harness = dataclasses.replace(
+            h.req.harness, web_fetch=WebFetchPolicy(block_hosts=("blocked.example",)),
+        )
+        return h
+
+    def test_webfetch_runs_in_its_own_server(self, tmp_path):
+        h = self._web(tmp_path, plan={"calls": [
+            {"server": "istota_web", "name": "WebFetch", "args": {"url": "https://blocked.example/x"}},
+        ]})
+
+        result = h.run()
+
+        assert result.success, result.result_text
+        assert "host blocked.example is blocked" in result.result_text
+        tools = [e for e in json.loads(result.execution_trace) if e["type"] == "tool"]
+        assert tools and "mcp__" not in result.execution_trace
+        # The CLI's own WebFetch stays off; ours is the MCP tool.
+        assert _flag_values(h.recorded()["argv"], "--tools") == [""]
+        # Only the tool server was reported, then reaped.
+        assert len(h.pids) == 2 and h.pids[1] == 0
+
+    def test_a_missing_web_server_fails_the_init_check(self, tmp_path):
+        h = self._web(tmp_path, plan={"init_drop_servers": ["istota_web"]})
+
+        result = h.run()
+
+        assert result.stop_reason == "error"
+        assert "expected istota (connected), istota_web (connected)" in result.result_text
+
+    def test_a_web_server_that_is_not_connected_fails_the_init_check(self, tmp_path):
+        h = self._web(tmp_path, plan={"init_server_status": "failed"})
+
+        result = h.run()
+
+        assert result.stop_reason == "error"
+        assert "istota_web (failed)" in result.result_text
+
+    def test_an_extra_server_fails_the_init_check(self, tmp_path):
+        h = _Harnessed(tmp_path, plan={"init_extra_servers": ["istota_web"]})
+
+        result = h.run()
+
+        assert result.stop_reason == "error"
+        assert "MCP servers" in result.result_text
 
     def test_a_sandboxed_request_without_a_wrap_is_refused(self, tmp_path):
         h = _Harnessed(tmp_path, fs_read_roots=[tmp_path], tool_server_wrap=None)

@@ -20,19 +20,28 @@ from typing import Any
 # The CLI tool harness's MCP server key; the CLI names its tools
 # `mcp__istota__<tool>`. `brain/_tool_harness.py` writes it into the MCP config.
 HARNESS_MCP_SERVER = "istota"
-_HARNESS_TOOL_PREFIX = f"mcp__{HARNESS_MCP_SERVER}__"
+# The harness's second server, the daemon-side WebFetch (`brain/_web_fetch_mcp.py`).
+WEB_FETCH_MCP_SERVER = "istota_web"
+_HARNESS_TOOL_PREFIXES = (
+    f"mcp__{HARNESS_MCP_SERVER}__",
+    f"mcp__{WEB_FETCH_MCP_SERVER}__",
+)
 
 
 def canonical_tool_name(name: str) -> str:
-    """`mcp__istota__Bash` -> `Bash`; any other name unchanged.
+    """`mcp__istota__Bash` -> `Bash`, `mcp__istota_web__WebFetch` -> `WebFetch`;
+    any other name unchanged.
 
     Every parse site calls this once, before building a `ToolUseEvent`, so the
     helpers below and everything downstream match the built-in names. Another
     server's `mcp__other__Bash` stays as it is: it is not our Bash.
     """
-    if not isinstance(name, str) or not name.startswith(_HARNESS_TOOL_PREFIX):
+    if not isinstance(name, str):
         return name
-    return name[len(_HARNESS_TOOL_PREFIX):] or name
+    for prefix in _HARNESS_TOOL_PREFIXES:
+        if name.startswith(prefix):
+            return name[len(prefix):] or name
+    return name
 
 
 _TOOL_EMOJI = {

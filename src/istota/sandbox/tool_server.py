@@ -568,19 +568,21 @@ def _server_version() -> str:
         return "0"
 
 
-def _main_mcp(hello_path: str) -> int:
+def serve_mcp(dispatcher: Any, gate: Any = None, *, label: str = "tool server") -> int:
+    """Serve ``dispatcher`` as an MCP server on this process's stdio until
+    stdin ends, holding every ``tools/call`` behind ``gate`` (a FIFO path) when
+    one is named. Returns the exit status.
+
+    The ``--mcp`` front end, and the CLI harness's WebFetch server
+    (``brain/_web_fetch_mcp.py``), which serves its one tool the same way.
+    """
     mcp_in, mcp_out = _take_stdio()
     gate_fd = None
     try:
-        hello = read_hello_file(hello_path)
-        dispatcher = build_dispatcher(hello)
-        if hello.get("gate") is not None:
-            gate_fd = _open_gate(hello.get("gate"))
-    except (_StartError, proto.ProtocolError) as exc:
-        print(f"tool server: {exc}", file=sys.stderr)
-        return 2
-    except Exception as exc:  # noqa: BLE001
-        print(f"tool server: cannot start: {type(exc).__name__}: {exc}", file=sys.stderr)
+        if gate is not None:
+            gate_fd = _open_gate(gate)
+    except _StartError as exc:
+        print(f"{label}: {exc}", file=sys.stderr)
         return 2
     try:
         return asyncio.run(_McpServer(dispatcher, gate_fd).run(mcp_in, mcp_out))
@@ -589,6 +591,19 @@ def _main_mcp(hello_path: str) -> int:
     except Exception:  # noqa: BLE001
         traceback.print_exc()
         return 2
+
+
+def _main_mcp(hello_path: str) -> int:
+    try:
+        hello = read_hello_file(hello_path)
+        dispatcher = build_dispatcher(hello)
+    except (_StartError, proto.ProtocolError) as exc:
+        print(f"tool server: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"tool server: cannot start: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    return serve_mcp(dispatcher, hello.get("gate"))
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:

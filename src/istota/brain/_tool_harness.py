@@ -27,13 +27,20 @@ lock and the text cap. Nothing in the daemon accepts a connection.
   FIFO and the MCP config; in the task's control dir (bound read-only into the
   tool server's namespace) the hello and the call-gate FIFO. All 0600, all
   removed at close.
+- **WebFetch** is a second MCP server, ``istota_web``
+  (``brain/_web_fetch_mcp.py``), when the grant names it and
+  ``HarnessSpec.web_fetch`` is on: unwrapped, in the daemon's network
+  namespace as native's runs, reading its policy, corpus and gate from 0600
+  files in the harness dir. It is never reported to the proxies.
+  ``HarnessHandle.mcp_servers`` and ``mcp_tools`` are what ``system/init``
+  must then list.
 - **The pid report** is the one input that grants proxy access, so it fails
   closed: a pid that does not descend from the CLI ``set_cli_root`` named, or
   a second pid under the same CLI, is refused, SIGKILLed if it is still the
   process that was read, and fails the attempt. A checked pid goes to
   ``req.on_pid``; the CLI's never does.
-- **Calls are held** by the tool server until ``release_calls`` writes one byte
-  to the gate, once the brain's init check passed.
+- **Calls are held** by each server until ``release_calls`` writes one byte
+  to its gate, once the brain's init check passed.
 - **The watcher** fails the attempt when the server exits while the CLI is
   still running 2 s later and ``close`` has not begun. The pinned CLI ends a
   session by SIGINTing its server ~5 ms after the ``result`` line and exits
@@ -68,7 +75,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import Any
 
-from istota.agent.events import HARNESS_MCP_SERVER
+from istota.agent.events import HARNESS_MCP_SERVER, WEB_FETCH_MCP_SERVER
 from istota.llm.providers import CLI_AUTH_VARIABLE
 from istota.sandbox.claude_runtime_env import without_claude_runtime_env
 from istota.sandbox.peer_process import (
@@ -140,13 +147,18 @@ def extract_urls(text: str) -> frozenset[str]:
     return frozenset(m.rstrip(".,;:!?") for m in _URL_RE.findall(text))
 
 
+def _web_fetch_corpus(req: BrainRequest, policy) -> frozenset[str] | None:
+    """The provenance corpus: the URLs in ``req.prompt``, the user half only,
+    and only when the policy asks for one."""
+    return extract_urls(req.prompt) if policy.require_url_provenance else None
+
+
 def request_web_fetch_tool(req: BrainRequest, policy):
     """The daemon-side ``WebFetch`` for one request, or ``None``.
 
-    ``None`` when ``policy`` is absent or disabled. NativeBrain's, and the
-    builder the CLI brain's WebFetch is to share (#862, Stage 6), so both bind
-    it to the same workspace and the same provenance corpus: the URLs in
-    ``req.prompt``, the user half only.
+    ``None`` when ``policy`` is absent or disabled. NativeBrain's; the CLI
+    harness's ``istota_web`` server (``_web_fetch_mcp``) is bound to the same
+    workspace and the same corpus (``_web_fetch_corpus``).
     It runs in the daemon, not the tool server: a credential-free request
     whose hardening is about the addresses it resolves.
     """
@@ -154,7 +166,7 @@ def request_web_fetch_tool(req: BrainRequest, policy):
         return None
     from istota.session.tools import ToolEnv, make_web_fetch_tool
 
-    corpus = extract_urls(req.prompt) if policy.require_url_provenance else None
+    corpus = _web_fetch_corpus(req, policy)
     cwd, read_roots, write_roots, write_denied_roots = request_tool_workspace(req)
     return make_web_fetch_tool(ToolEnv(
         cwd=cwd,
@@ -261,36 +273,50 @@ class HarnessHandle:
     tmp_dir: Path           # TMPDIR
     bin_dir: Path           # first on the CLI's PATH: the stub git
     cwd: Path               # the CLI's cwd: the tool server's cwd
-    offered: tuple[str, ...]  # canonical names tools/list offers
+    offered: tuple[str, ...]  # canonical names the tool server's tools/list offers
     failure: str | None = None  # the tool server died or the harness failed
+    # What `system/init` must list: every MCP server in the config, and every
+    # tool they offer by its `mcp__<server>__<tool>` name.
+    mcp_servers: tuple[str, ...] = ()
+    mcp_tools: tuple[str, ...] = ()
     _harness: Any = field(default=None, repr=False, compare=False)
 
 
 def write_mcp_config(
     path: Path, *, report_fifo: Path, env_file: Path, command: list[str],
+    web_fetch_config: Path | None = None,
 ) -> None:
-    """The ``--mcp-config`` file: one stdio server, the launcher, no env.
+    """The ``--mcp-config`` file: the tool server's launcher, and with
+    ``web_fetch_config`` the WebFetch server beside it. No env for either.
 
-    The CLI passes its own env to the launcher whatever ``env`` says, which is
-    why the launcher clears it first thing. ``command`` is the wrapped tool
-    server argv with an absolute ``argv[0]``: the launcher does not search.
+    The CLI passes its own env to every server whatever ``env`` says, which is
+    why both clear it first thing. ``command`` is the wrapped tool server argv
+    with an absolute ``argv[0]``: the launcher does not search.
     """
-    document = {
-        "mcpServers": {
-            HARNESS_MCP_SERVER: {
-                "type": "stdio",
-                "command": sys.executable,
-                "args": [
-                    "-I", "-m", "istota.sandbox.tool_launcher",
-                    "--report", str(report_fifo),
-                    "--env-file", str(env_file),
-                    "--", *command,
-                ],
-                "env": {},
-            }
+    servers = {
+        HARNESS_MCP_SERVER: {
+            "type": "stdio",
+            "command": sys.executable,
+            "args": [
+                "-I", "-m", "istota.sandbox.tool_launcher",
+                "--report", str(report_fifo),
+                "--env-file", str(env_file),
+                "--", *command,
+            ],
+            "env": {},
         }
     }
-    _write_new_file(path, json.dumps(document))
+    if web_fetch_config is not None:
+        servers[WEB_FETCH_MCP_SERVER] = {
+            "type": "stdio",
+            "command": sys.executable,
+            "args": [
+                "-I", "-m", "istota.brain._web_fetch_mcp",
+                "--config", str(web_fetch_config),
+            ],
+            "env": {},
+        }
+    _write_new_file(path, json.dumps({"mcpServers": servers}))
 
 
 #: What the CLI runs as `git`: git's own "not a git repository" status.
@@ -347,7 +373,7 @@ class _DirectHarness:
         self._files: list[Path] = []
         self._env_file: Path | None = None
         self._env_text = ""
-        self._gate_path: Path | None = None
+        self._gate_paths: list[Path] = []
         self._read_fd: int | None = None
         self._keep_fd: int | None = None
         self._reader: threading.Thread | None = None
@@ -439,12 +465,19 @@ class _DirectHarness:
         hello["text_cap"] = HARNESS_TEXT_CAP_CHARS
         hello["gate"] = str(gate_path)
         handle.offered = tuple(hello.get("tools") or ())
+        handle.mcp_servers = (HARNESS_MCP_SERVER,)
+        handle.mcp_tools = tuple(f"mcp__{HARNESS_MCP_SERVER}__{name}" for name in handle.offered)
 
         os.mkfifo(gate_path, 0o600)
         self._files.append(gate_path)
-        self._gate_path = gate_path
+        self._gate_paths.append(gate_path)
         _write_new_file(hello_path, json.dumps(hello))
         self._files.append(hello_path)
+
+        web_fetch_config = self._write_web_fetch_files(harness_dir)
+        if web_fetch_config is not None:
+            handle.mcp_servers += (WEB_FETCH_MCP_SERVER,)
+            handle.mcp_tools += (f"mcp__{WEB_FETCH_MCP_SERVER}__WebFetch",)
 
         env_file = harness_dir / "tool-env.json"
         self._env_text = json.dumps(server_env)
@@ -464,6 +497,7 @@ class _DirectHarness:
         write_mcp_config(
             handle.mcp_config_path,
             report_fifo=pid_fifo, env_file=env_file, command=command,
+            web_fetch_config=web_fetch_config,
         )
         self._files.append(handle.mcp_config_path)
 
@@ -471,6 +505,32 @@ class _DirectHarness:
             target=self._read_reports, daemon=True, name="tool-harness-pids",
         )
         self._reader.start()
+
+    def _write_web_fetch_files(self, harness_dir: Path) -> Path | None:
+        """The ``istota_web`` server's config and gate, both in the harness dir,
+        which no sandbox binds: that server runs outside every sandbox. Only
+        when the grant names WebFetch and the policy is on. Not the tool
+        server's control dir: nothing in a sandbox reads these."""
+        from ._web_fetch_mcp import config_document
+
+        req = self._req
+        policy = req.harness.web_fetch
+        if policy is None or not policy.enabled or "WebFetch" not in req.allowed_tools:
+            return None
+        gate_path = harness_dir / "web-gate.fifo"
+        os.mkfifo(gate_path, 0o600)
+        self._files.append(gate_path)
+        self._gate_paths.append(gate_path)
+        config_path = harness_dir / "web-fetch.json"
+        document = config_document(
+            policy,
+            cwd=request_tool_workspace(req)[0],
+            url_corpus=_web_fetch_corpus(req, policy),
+            gate=gate_path,
+        )
+        _write_new_file(config_path, json.dumps(document))
+        self._files.append(config_path)
+        return config_path
 
     def _failed_handle(self, cwd: Path, harness_dir: Path, reason: str) -> HarnessHandle:
         self.handle = HarnessHandle(
@@ -690,10 +750,12 @@ class _DirectHarness:
             logger.warning("tool harness: could not rewrite the env file: %s", exc)
 
     def release(self) -> None:
-        if self._gate_path is None:
-            return
+        for gate_path in self._gate_paths:
+            self._open_gate(gate_path)
+
+    def _open_gate(self, gate_path: Path) -> None:
         try:
-            fd = os.open(self._gate_path, os.O_WRONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+            fd = os.open(gate_path, os.O_WRONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
         except OSError as exc:
             logger.warning("tool harness: could not open the call gate: %s", exc.strerror)
             return
@@ -776,6 +838,7 @@ def set_cli_root(handle: HarnessHandle, pid: int) -> None:
 
 
 def release_calls(handle: HarnessHandle) -> None:
-    """The CLI's init check passed; the tool server may run calls."""
+    """The CLI's init check passed; the tool server, and the WebFetch server
+    where there is one, may run calls."""
     if handle._harness is not None:
         handle._harness.release()

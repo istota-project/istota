@@ -25,7 +25,9 @@ from pathlib import Path
 
 import pytest
 
+from istota.agent.events import WEB_FETCH_MCP_SERVER
 from istota.brain import _tool_harness as harness_mod
+from istota.brain import _web_fetch_mcp as web_mcp
 from istota.brain._tool_harness import (
     HARNESS_MCP_SERVER,
     release_calls,
@@ -283,13 +285,130 @@ def test_the_harness_writes_the_launcher_config_the_hello_and_the_fifos(tmp_path
     assert not rec.failed.is_set()
 
 
-def test_webfetch_is_not_offered_by_the_tool_server(tmp_path, rec):
-    """Until Stage 6 serves it from a second MCP server, the CLI brain has no
-    WebFetch: the istota server offers only the six."""
-    req = _req(tmp_path, tools=["Read", "WebFetch"], web_fetch=WebFetchPolicy())
+def test_without_webfetch_there_is_one_server(tmp_path, rec):
+    req = _req(tmp_path, tools=["Read", "Bash"])
+    with _harness(req, rec) as handle:
+        assert handle.failure is None
+        servers = json.loads(handle.mcp_config_path.read_text())["mcpServers"]
+        assert list(servers) == [HARNESS_MCP_SERVER]
+        assert handle.mcp_servers == (HARNESS_MCP_SERVER,)
+        assert handle.mcp_tools == ("mcp__istota__Read", "mcp__istota__Bash")
+
+
+@pytest.mark.parametrize("tools,policy", [
+    (["Read", "WebFetch"], None),  # the grant has it, the policy is off
+    (["Read"], WebFetchPolicy()),  # a policy, but the grant left it out
+    (["Read", "WebFetch"], WebFetchPolicy(enabled=False)),
+], ids=["no-policy", "not-granted", "disabled"])
+def test_webfetch_needs_both_the_grant_and_the_policy(tmp_path, rec, tools, policy):
+    req = _req(tmp_path, tools=tools, web_fetch=policy)
+    with _harness(req, rec) as handle:
+        assert handle.failure is None
+        assert handle.mcp_servers == (HARNESS_MCP_SERVER,)
+        assert not any(name.startswith("mcp__istota_web__") for name in handle.mcp_tools)
+        assert not list(handle.mcp_config_path.parent.glob("web-*"))
+
+
+def _web_entry(handle) -> dict:
+    return json.loads(handle.mcp_config_path.read_text())["mcpServers"][WEB_FETCH_MCP_SERVER]
+
+
+def test_webfetch_is_a_second_server_outside_the_sandbox(tmp_path, rec):
+    """The tool server offers the six; WebFetch is `istota_web`, spawned by the
+    CLI unwrapped, with its policy and URL corpus in a 0600 file."""
+    wrapped = []
+
+    def wrap(cmd):
+        wrapped.append(cmd)
+        return cmd
+
+    policy = WebFetchPolicy(require_url_provenance=True, block_hosts=("blocked.example",))
+    req = _req(
+        tmp_path, tools=["Read", "WebFetch"], web_fetch=policy,
+        prompt="please read https://example.org/a and nothing else",
+        tool_server_wrap=wrap,
+    )
     with _harness(req, rec) as handle:
         assert handle.failure is None
         assert handle.offered == ("Read",)
+        assert handle.mcp_servers == (HARNESS_MCP_SERVER, WEB_FETCH_MCP_SERVER)
+        assert handle.mcp_tools == ("mcp__istota__Read", "mcp__istota_web__WebFetch")
+
+        harness_dir = handle.mcp_config_path.parent
+        entry = _web_entry(handle)
+        assert entry["type"] == "stdio"
+        assert entry["command"] == sys.executable
+        assert entry["env"] == {}
+        assert entry["args"][:4] == ["-I", "-m", "istota.brain._web_fetch_mcp", "--config"]
+        assert len(entry["args"]) == 5
+        config = Path(entry["args"][4])
+        assert config.parent == harness_dir
+        assert stat.S_IMODE(config.lstat().st_mode) == 0o600
+        # Only the tool server is wrapped.
+        assert len(wrapped) == 1 and "istota.sandbox.tool_server" in " ".join(wrapped[0])
+
+        document = web_mcp.read_config(str(config))
+        assert web_mcp.policy_from_document(document) == policy
+        assert web_mcp.corpus_from_document(document) == frozenset({"https://example.org/a"})
+        gate = Path(document["gate"])
+        assert gate.parent == harness_dir
+        assert stat.S_ISFIFO(gate.lstat().st_mode)
+        assert stat.S_IMODE(gate.lstat().st_mode) == 0o600
+        assert "not-for-the-tool-server" not in config.read_text()
+        files = [config, gate]
+    for path in files:
+        assert not os.path.lexists(path), path
+
+
+def _gate_has_reader(path: str) -> bool:
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return False
+    os.close(fd)
+    return True
+
+
+def test_the_web_server_waits_for_release_and_reports_no_pid(tmp_path, rec):
+    policy = WebFetchPolicy(block_hosts=("blocked.example",))
+    req = _req(tmp_path, tools=["Read", "WebFetch"], web_fetch=policy)
+    with _harness(req, rec) as handle:
+        entry = _web_entry(handle)
+        proc = subprocess.Popen(
+            [entry["command"], *entry["args"]],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            env={**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": "the-cli-credential"},
+        )
+        lines: queue.Queue = queue.Queue()
+
+        def pump():
+            for line in proc.stdout:
+                lines.put(json.loads(line))
+
+        threading.Thread(target=pump, daemon=True).start()
+
+        def send(request_id, method, params=None):
+            message = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}}
+            proc.stdin.write(json.dumps(message).encode() + b"\n")
+            proc.stdin.flush()
+
+        try:
+            send(0, "initialize", {"protocolVersion": "2025-11-25"})
+            assert "result" in lines.get(timeout=_TIMEOUT)
+            send(1, "tools/call", {"name": "WebFetch", "arguments": {"url": "https://blocked.example/"}})
+            with pytest.raises(queue.Empty):
+                lines.get(timeout=0.6)
+            gate = json.loads(Path(entry["args"][4]).read_text())["gate"]
+            assert _wait(lambda: _gate_has_reader(gate))
+            release_calls(handle)
+            reply = lines.get(timeout=_TIMEOUT)
+            text = "".join(block["text"] for block in reply["result"]["content"])
+            assert "host blocked.example is blocked" in text
+        finally:
+            proc.kill()
+            proc.wait(timeout=_TIMEOUT)
+    assert rec.pids == []
+    assert not rec.failed.is_set()
 
 
 # ---- The happy path ---------------------------------------------------------
