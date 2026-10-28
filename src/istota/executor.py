@@ -7135,7 +7135,7 @@ def build_rules_section(
     if is_admin:
         rules.append((
             "6a.",
-            "Your execution JSONL logs (full conversation traces including subagent output) are stored under ~/.claude/projects/. If a user reports missing or truncated output from a previous task, search these logs for the full assistant message content.",
+            "If a user reports missing or truncated output from a previous task, read that task's transcript with `istota-skill tasks transcript <id>` (add `--turns` for the whole conversation) to find the full assistant message content. Transcripts are kept for native-brain tasks only.",
         ))
 
     rules += [

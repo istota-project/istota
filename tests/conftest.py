@@ -1068,6 +1068,10 @@ def cli_without_tool_server(monkeypatch):
     the CLI's own streaming or simple path in place of the harness attempt.
     The harness itself is tested in `tests/test_claude_code_harness.py`, the
     linux tier and the image tier.
+
+    The argv and env this spawns are not production's (no harness flags, no
+    `_harness_cli_env`), so an assertion on the CLI's argv or env does not
+    belong in a module that uses this fixture.
     """
     from istota.brain.claude_code import ClaudeCodeBrain
 

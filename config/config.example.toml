@@ -260,7 +260,8 @@ features = []
 # in the environment, else nothing (an API key alone never switches a
 # deployment to API billing). Either credential is in the CLI's own env only;
 # the CLI runs outside the sandbox and its tools, in the sandboxed tool server,
-# cannot read it.
+# cannot read it. Without the sandbox, a Bash call runs as the same user and
+# can still read the CLI's process environment.
 # auth = "subscription"
 #
 # Advisor model for this brain (the CLI's --advisor): an ID or alias,
