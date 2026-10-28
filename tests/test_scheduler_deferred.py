@@ -560,6 +560,21 @@ class TestDeferredHealthOpBatchIsolation(_HealthOpsReplay):
         assert recorded[0]["op"]["source_path"] == 123
         assert recorded[0]["error"].startswith("TypeError:")
 
+    def test_failure_sidecar_link_cannot_overwrite_private_file(self, tmp_path):
+        ctx = self._ctx(tmp_path)
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        canary = tmp_path / "private.json"
+        canary.write_text('[{"private": true}]')
+        (deferred / "task_7_health_op_failures.json").symlink_to(canary)
+
+        assert self._replay(ctx, deferred, [
+            {"op": "import_csv", "source_path": 123},
+        ], task_id=7) == 0
+
+        assert json.loads(canary.read_text()) == [{"private": True}]
+        assert not (deferred / "task_7_health_ops.json").exists()
+
     def test_a_non_numeric_value_leaves_the_batch_running(self, tmp_path):
         """The same failure class away from the path arms.
 

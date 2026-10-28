@@ -84,7 +84,7 @@ Sandboxed tasks have no DB, so they and skill CLIs write JSON to the temp dir an
 
 **Retry replay safety (ISSUE-074).** Files are keyed by `task.id`, which requeues keep, so `process_one_task` calls `_purge_deferred_files_for_retry()` after the claim when `attempt_count > 0`, covering all four requeue paths. The retry and shutdown-collateral branches also purge (the latter charges no attempt). Confirmation re-runs are exempt (`task.confirmation_prompt is None`): held ops wait for the answer and `confirm_task` keeps `attempt_count`; the stale-`email_output` cleanup prevents a double-send.
 
-Unconsumed files are warned about and left on disk (ISSUE-073). All reads and writes name `utf-8`.
+Unconsumed files are warned about and left on disk (ISSUE-073). Deferred JSON, including email output and health failure sidecars, uses `sandbox/deferred.py`: no-follow directory walks from the filesystem root, regular-file reads through the opened descriptor, an 8 MiB byte cap, and exclusive staging plus fd-relative atomic replacement. Cleanup and listing use the same directory walk. A configured deferred path must contain real directories throughout; symlink components are refused. All reads and writes use UTF-8.
 
 **The drain is guarded per handler (ISSUE-469)**; no `Exception` escapes `_drain_deferred_ops`.
 - Per handler, not one `try`, which would skip every later handler. The table is built inside the function so tests can patch handlers.

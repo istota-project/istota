@@ -39,6 +39,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from istota.sandbox import deferred
 from istota.skills._cli import emit, error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import EGRESS, READ, WRITE, host_path
 
@@ -121,14 +122,7 @@ def _defer_op(op: dict) -> bool:
     if not deferred_dir or not task_id:
         return False
     path = Path(deferred_dir) / _DEFER_FILENAME.format(task_id=task_id)
-    ops: list[dict] = []
-    if path.exists():
-        try:
-            ops = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-            ops = []
-    ops.append(op)
-    path.write_text(json.dumps(ops), encoding="utf-8")
+    deferred.append_json(path, [op])
     return True
 
 

@@ -940,12 +940,10 @@ def _op_file(context: _TaskContext):
 
 
 def _read_ops(path) -> list:
-    import json
+    from istota.sandbox import deferred
 
-    if not path.exists():
-        return []
     try:
-        ops = json.loads(path.read_text(encoding="utf-8"))
+        ops = deferred.read_json(path)
     except (ValueError, UnicodeDecodeError, OSError, RecursionError):
         return []
     return ops if isinstance(ops, list) else []
@@ -982,8 +980,6 @@ def _queue_istota_op(user_id: str, build) -> dict:
     ``build(conn, ops, config)`` returns the op or a refusal. The scheduler
     applies the file after the task succeeds and counts the cap again there.
     """
-    import json
-
     from istota import db
 
     reach = _istota_reach(user_id)
@@ -1004,7 +1000,8 @@ def _queue_istota_op(user_id: str, build) -> dict:
     if "status" in op:
         return op
     ops.append(op)
-    path.write_text(json.dumps(ops), encoding="utf-8")
+    from istota.sandbox import deferred
+    deferred.write_json(path, ops)
     return {"status": "ok", "calendar": ISTOTA_CALENDAR, "uid": op["uid"], "queued": True,
             "note": "Saved to Istota's calendar when this task finishes."}
 

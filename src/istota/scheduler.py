@@ -28,6 +28,7 @@ from croniter import croniter
 # Top-level rather than imported where used: the admission gate consults it on
 # every dispatch tick (~0.5s), and it is a stdlib-only leaf with no import of
 # its own back into the package, so there is no cycle to avoid.
+from istota.sandbox import deferred
 from istota.maintenance import host_pressure as host_pressure_mod
 from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox import attachment_source
@@ -2469,7 +2470,7 @@ def _deliver_deferred_email_output(
         # Normal path will deliver via post_email flag — nothing to do here.
         return
     path = user_temp_dir / f"task_{task.id}_email_output.json"
-    if not path.exists():
+    if not deferred.exists(path):
         return
 
     logger.warning(
@@ -2478,7 +2479,7 @@ def _deliver_deferred_email_output(
         "The email was NOT delivered. Removing file.",
         task.id, task.source_type,
     )
-    path.unlink(missing_ok=True)
+    deferred.unlink(path)
 
 
 def _purge_obsolete_skill_jobs(conn, skill_index: dict) -> None:
@@ -3539,9 +3540,9 @@ def _process_one_task(
     if task.confirmation_prompt is not None:
         from .executor import task_deferred_dir
         _stale = task_deferred_dir(config, task) / f"task_{task.id}_email_output.json"
-        if _stale.exists():
+        if deferred.exists(_stale):
             logger.debug("Removing stale email output file from prior execution of task %d", task.id)
-            _stale.unlink(missing_ok=True)
+            deferred.unlink(_stale)
 
     # Command and skill tasks skip Talk ack, attachment download, and
     # resource loading (cron-driven, no live user behind a Talk session).

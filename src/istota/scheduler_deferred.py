@@ -27,6 +27,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from istota.sandbox import deferred
+
 from . import db
 from .config import Config
 from .brain import model_namespace_for_kind, resolve_brain_kind
@@ -120,14 +122,16 @@ def _load_deferred_json(
     that loop coerces model-authored values twenty times over.
     """
     path = user_temp_dir / f"task_{task_id}_{suffix}.json"
-    if not path.exists():
-        return None
-
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError, RecursionError) as e:
+        data = deferred.read_json(path, missing=deferred.MISSING)
+        if data is deferred.MISSING:
+            return None
+    except (ValueError, UnicodeDecodeError, OSError, RecursionError) as e:
         logger.warning("Bad deferred %s file for task %d: %s", suffix, task_id, e)
-        path.unlink(missing_ok=True)
+        try:
+            deferred.unlink(path)
+        except OSError:
+            pass
         return None
 
     if not isinstance(data, expected_type):
@@ -135,7 +139,10 @@ def _load_deferred_json(
             "Deferred %s for task %d is not a %s",
             suffix, task_id, expected_type.__name__,
         )
-        path.unlink(missing_ok=True)
+        try:
+            deferred.unlink(path)
+        except OSError:
+            pass
         return None
 
     return path, data
@@ -234,7 +241,7 @@ def _process_deferred_subtasks(
             "Non-admin user %s attempted deferred subtask creation (task %d), ignoring",
             task.user_id, task.id,
         )
-        path.unlink(missing_ok=True)
+        deferred.unlink(path)
         return 0
 
     # A wake's children would run outside its queue with no assignment_id, so
@@ -245,7 +252,7 @@ def _process_deferred_subtasks(
             "a wake may not spawn subtasks, ignoring",
             task.id, len(data),
         )
-        path.unlink(missing_ok=True)
+        deferred.unlink(path)
         if task.assignment_id is not None:
             from istota.assignments import store as assignment_store
             with db.get_db(config.db_path) as conn:
@@ -267,7 +274,7 @@ def _process_deferred_subtasks(
             "per-user directory",
             task.id, task.user_id,
         )
-        path.unlink(missing_ok=True)
+        deferred.unlink(path)
         return 0
 
     max_subtasks = config.scheduler.max_subtasks_per_task
@@ -290,7 +297,7 @@ def _process_deferred_subtasks(
                     "refusing %d deferred subtask(s)",
                     task.id, parent_depth, max_depth, len(data),
                 )
-                path.unlink(missing_ok=True)
+                deferred.unlink(path)
                 return 0
 
         for entry in data:
@@ -404,7 +411,7 @@ def _process_deferred_subtasks(
             count, task.id,
             ", ".join(repr(e.get("prompt", "")[:80]) for e in data[:count]),
         )
-    path.unlink(missing_ok=True)
+    deferred.unlink(path)
     return count
 
 
@@ -440,7 +447,7 @@ def _process_deferred_istota_events(
                 "Task %d: the calendar scope is withheld, %d queued event op(s) dropped",
                 task.id, len(data),
             )
-            path.unlink(missing_ok=True)
+            deferred.unlink(path)
             return 0
         report = events.apply_ops(conn, config, task, data)
         conn.commit()
@@ -453,7 +460,7 @@ def _process_deferred_istota_events(
         )
     if report.applied:
         logger.info("Applied %d istota event op(s) for task %d", report.applied, task.id)
-    path.unlink(missing_ok=True)
+    deferred.unlink(path)
     if report.invitations:
         # After the commit, so no SMTP exchange runs under the write lock.
         from istota.sharing import itip
@@ -479,16 +486,14 @@ def _process_retired_deferred_files(
 
     Returns the number of files removed.
     """
-    if not user_temp_dir.is_dir():
-        return 0
 
     count = 0
     for suffix in _RETIRED_DEFERRED_SUFFIXES:
         path = user_temp_dir / f"task_{task.id}_{suffix}.json"
-        if not path.exists():
+        if not deferred.exists(path):
             continue
         try:
-            path.unlink()
+            deferred.unlink(path, missing_ok=False)
         except OSError as e:
             # Reachable: the per-user temp dir is writable from the sandbox, so
             # a task can plant a *directory* under this name and `unlink` raises
@@ -580,7 +585,7 @@ def _process_deferred_sent_emails(
 
     if count:
         logger.info("Recorded %d deferred sent emails for task %d", count, task.id)
-    path.unlink(missing_ok=True)
+    deferred.unlink(path)
     return count
 
 
@@ -852,7 +857,7 @@ def _process_deferred_kv_ops(
 
     if count:
         logger.info("Processed %d deferred KV ops for task %d", count, task.id)
-    path.unlink(missing_ok=True)
+    deferred.unlink(path)
     return count
 
 
@@ -981,7 +986,7 @@ def _process_deferred_user_alerts(
         )
 
     if recorded:
-        path.unlink(missing_ok=True)
+        deferred.unlink(path)
     else:
         # Nothing holds this alert now: no row was written and no destination
         # accepted the fallback push. Deleting the file here is exactly the
@@ -1175,7 +1180,7 @@ def _process_deferred_kg_ops(
 
     if count:
         logger.info("Processed %d deferred KG ops for task %d", count, task.id)
-    path.unlink(missing_ok=True)
+    deferred.unlink(path)
     return count
 
 
@@ -1275,7 +1280,7 @@ def _process_deferred_health_ops(
             "Health module unavailable for deferred ops on task %d: %s",
             task.id, e,
         )
-        path.unlink(missing_ok=True)
+        deferred.unlink(path)
         return 0
 
     try:
@@ -1284,7 +1289,7 @@ def _process_deferred_health_ops(
         logger.warning(
             "Skipping health ops for task %d: %s", task.id, e,
         )
-        path.unlink(missing_ok=True)
+        deferred.unlink(path)
         return 0
 
     _health.ensure_initialised(ctx)
@@ -1830,24 +1835,13 @@ def _process_deferred_health_ops(
             user_temp_dir / f"task_{task.id}_health_op_failures.json"
         )
         try:
-            existing: list[Any] = []
-            if failure_path.exists():
-                try:
-                    existing = json.loads(failure_path.read_text(encoding="utf-8"))
-                    if not isinstance(existing, list):
-                        existing = []
-                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                    existing = []
-            failure_path.write_text(
-                json.dumps(existing + failures, indent=2),
-                encoding="utf-8",
-            )
-        except OSError as e:
+            deferred.append_json(failure_path, failures)
+        except (OSError, ValueError, RecursionError) as e:
             logger.error(
                 "Failed to write health op failure sidecar for task %d: %s",
                 task.id, e,
             )
-    path.unlink(missing_ok=True)
+    deferred.unlink(path)
     return count
 
 
@@ -1878,7 +1872,7 @@ def _process_deferred_garmin_import(
             "Skipping deferred garmin import for task %d: location module disabled",
             task.id,
         )
-        path.unlink(missing_ok=True)
+        deferred.unlink(path)
         return 0
 
     try:
@@ -1893,7 +1887,7 @@ def _process_deferred_garmin_import(
         from istota.location.garmin_import import ImportOptions, import_tracks
     except ImportError as e:
         logger.warning("Garmin import unavailable for task %d: %s", task.id, e)
-        path.unlink(missing_ok=True)
+        deferred.unlink(path)
         return 0
 
     try:
@@ -1908,7 +1902,7 @@ def _process_deferred_garmin_import(
             "Connect it in Settings → Connections.",
             purpose="alert",
         )
-        path.unlink(missing_ok=True)
+        deferred.unlink(path)
         return 0
     except gm.GarminRateLimited:
         send_notification(
@@ -1916,7 +1910,7 @@ def _process_deferred_garmin_import(
             "🗺️ Garmin track import was rate-limited by Garmin — try again later.",
             purpose="alert",
         )
-        path.unlink(missing_ok=True)
+        deferred.unlink(path)
         return 0
     except Exception as e:  # noqa: BLE001 — a bad import must not wedge the drain
         logger.warning("Deferred garmin import failed for task %d: %s", task.id, e)
@@ -1926,14 +1920,14 @@ def _process_deferred_garmin_import(
             f"🗺️ Garmin track import failed: {type(e).__name__}: {detail}",
             purpose="alert",
         )
-        path.unlink(missing_ok=True)
+        deferred.unlink(path)
         return 0
 
     logger.info(
         "Deferred garmin import task %d: inserted=%d activities=%d",
         task.id, result.inserted_total, result.activities,
     )
-    path.unlink(missing_ok=True)
+    deferred.unlink(path)
     # A scheduled import is quiet on success, as `silent_unless_action` is for
     # a prompt job; that flag cannot reach this notice, sent after the task.
     if task.source_type == "scheduled":
@@ -1970,14 +1964,12 @@ def _purge_deferred_files_for_retry(task: db.Task, user_temp_dir: Path) -> None:
     (``{temp_dir}/.control/{user_id}/task_{id}``), which this function has
     never walked.
     """
-    if not user_temp_dir.is_dir():
-        return
     purged: list[str] = []
     for suffix in _KNOWN_DEFERRED_SUFFIXES:
         path = user_temp_dir / f"task_{task.id}_{suffix}.json"
-        if path.exists():
+        if deferred.exists(path):
             try:
-                path.unlink()
+                deferred.unlink(path, missing_ok=False)
                 purged.append(suffix)
             except OSError as e:
                 logger.warning(
@@ -2006,8 +1998,6 @@ def _warn_unconsumed_deferred_files(task: db.Task, user_temp_dir: Path) -> None:
       the id is delimited by ``_`` so it can't collide with another task's id
       as a substring.
     """
-    if not user_temp_dir.is_dir():
-        return
     known_filenames = {
         f"task_{task.id}_{suffix}.json" for suffix in _KNOWN_DEFERRED_SUFFIXES
     }
@@ -2038,17 +2028,13 @@ def _warn_unconsumed_deferred_files(task: db.Task, user_temp_dir: Path) -> None:
             seen.add(path)
             suspicious.append(path)
 
-    # Shape 1: missing the ``task_`` prefix entirely (id as a leading token).
-    for path in user_temp_dir.glob(f"{task.id}_*"):
-        _flag(path)
-    # Shape 2: canonical prefix but unknown suffix.
-    for path in user_temp_dir.glob(f"task_{task.id}_*"):
-        if path.name not in known_filenames:
-            _flag(path)
-    # Shape 3: descriptive name with the id as a trailing token (ISSUE-135).
-    for path in user_temp_dir.glob(f"*_{task.id}.json"):
-        if path.name not in known_filenames:
-            _flag(path)
+    for name in deferred.names(user_temp_dir):
+        if name in known_filenames:
+            continue
+        if (name.startswith(f"{task.id}_")
+                or name.startswith(f"task_{task.id}_")
+                or name.endswith(f"_{task.id}.json")):
+            _flag(user_temp_dir / name)
 
     # The hint names what a caller should write, so a retired suffix is left
     # out of it — recognized enough not to be called a hallucination above,

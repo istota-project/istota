@@ -23,6 +23,7 @@ import json
 import os
 import sys
 
+from istota.sandbox import deferred
 from istota.sandbox.kv_namespaces import is_reserved_namespace
 from istota.skills._cli import fail as _fail, parse_and_resolve, run_skill_cli
 from istota.skills._group_access import group_access_denied, group_refusal
@@ -76,15 +77,7 @@ def _defer_op(entry: dict) -> bool:
 
     path = Path(deferred_dir) / f"task_{task_id}_kv_ops.json"
 
-    ops = []
-    if path.exists():
-        try:
-            ops = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-            ops = []
-
-    ops.append(entry)
-    path.write_text(json.dumps(ops), encoding="utf-8")
+    deferred.append_json(path, [entry])
     return True
 
 
