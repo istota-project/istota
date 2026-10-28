@@ -280,6 +280,9 @@ class HarnessHandle:
     cwd: Path               # the CLI's cwd: the tool server's cwd
     offered: tuple[str, ...]  # canonical names the tool server's tools/list offers
     failure: str | None = None  # the tool server died or the harness failed
+    # Set by the brain on the CLI's `result`: a server exit after it is the
+    # normal end, however long the CLI then takes to exit.
+    result_seen: bool = False
     # What `system/init` must list: every MCP server in the config, and every
     # tool they offer by its `mcp__<server>__<tool>` name.
     mcp_servers: tuple[str, ...] = ()
@@ -462,10 +465,11 @@ class _DirectHarness:
             )
         if not os.path.isabs(command[0]):
             # `build_bwrap_cmd` returns a bare `bwrap`, and `execve` searches
-            # nothing (Stage 1).
-            found = shutil.which(command[0], path=server_env.get("PATH") or os.defpath)
+            # nothing (Stage 1). The daemon's PATH, never the task's: the
+            # task's starts with directories under the model-writable temp dir.
+            found = shutil.which(command[0], path=os.environ.get("PATH") or os.defpath)
             if found is None:
-                raise _StartFailed(f"{command[0]!r} is not on the tool server's PATH")
+                raise _StartFailed(f"{command[0]!r} is not on the daemon's PATH")
             command[0] = os.path.abspath(found)
 
         hello = request_hello(req, bash_spill_full_output=spec.bash_spill_full_output)
@@ -650,6 +654,8 @@ class _DirectHarness:
             return
         with self._lock:
             current = self._server is server
+        if self.handle is not None and self.handle.result_seen:
+            return
         if current and self._cli_alive():
             self._fail("the tool server exited")
 
@@ -702,7 +708,8 @@ class _DirectHarness:
         try:
             exited = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         except ChildProcessError:
-            return True
+            # Reaped since the start-time read, or not our child: ask again.
+            return start_time(pid) == started
         except (OSError, AttributeError):
             return True
         return exited is None
@@ -727,6 +734,10 @@ class _DirectHarness:
             old = self._server
             self._server = None
             self._root = None
+            # The new CLI's report is still to come, and its result too.
+            self._report_settled.clear()
+            if self.handle is not None:
+                self.handle.result_seen = False
             report_old = old is not None and not old.reap_reported
             if report_old:
                 old.reap_reported = True

@@ -882,6 +882,17 @@ class TestTheFailureOrder:
         )
         assert h.pids[-1] == 0
 
+    def test_a_slow_exit_after_the_result_keeps_the_answer(self, tmp_path):
+        # The servers are gone once the result is out; a CLI slower to exit
+        # than the watcher's 2 s grace must not turn the answer into a failure.
+        h = _Harnessed(tmp_path, plan={"result": "the answer", "sleep_after_result": 3.5})
+
+        result = h.run()
+
+        assert result.success, result.result_text
+        assert result.stop_reason == "completed"
+        assert result.result_text == "the answer"
+
     def test_a_cancel_outranks_the_dead_tool_server(self, tmp_path):
         h = _Harnessed(tmp_path, plan={"calls": [{"name": "Bash", "args": {"command": "sleep 30"}}]})
         self._kill_server_when_running(h, first=h.cancel.set)

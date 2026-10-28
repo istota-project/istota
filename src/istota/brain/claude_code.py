@@ -1144,8 +1144,8 @@ def cli_model_name(name: str | None) -> str:
 # ---------------------------------------------------------------------------
 # The tool harness (cli-brain-tools spec): the CLI unwrapped, its tools in the
 # tool server. Reached only through `tool_harness`, `HarnessHandle`,
-# `set_cli_root` and `release_calls`; the relay behind them is what the
-# unified tool server (#862) replaces.
+# `set_cli_root` and `release_calls`; the CLI spawns the tool server itself
+# through the launcher (#862).
 # ---------------------------------------------------------------------------
 
 #: A ``claude_code`` request granting tools with no ``harness``. The executor
@@ -2264,6 +2264,8 @@ class ClaudeCodeBrain:
                 if isinstance(event, ResultEvent):
                     final_result = event
                     accounting["result_frame"] = event.raw
+                    if harness is not None:
+                        harness.handle.result_seen = True
                 elif isinstance(event, ContextManagementEvent):
                     execution_trace.append({"type": "cm_boundary"})
                     continue  # don't stream CM markers

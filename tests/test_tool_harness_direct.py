@@ -649,6 +649,60 @@ def test_a_respawned_cli_gets_its_own_server_and_the_old_one_goes(tmp_path, rec,
     assert first_cli.pid not in rec.pids and second_cli.pid not in rec.pids
 
 
+def test_a_respawned_clis_release_waits_for_its_own_report(tmp_path, rec, clis):
+    """The first CLI's accepted report does not stand for the second's: release
+    waits until the new server is authorized before it opens the gate."""
+    entered = []
+    record = rec.on_pid
+
+    def slow_on_pid(pid):
+        # Authorization of the second server is slow; the gate must wait for it.
+        if pid:
+            entered.append(pid)
+            if len(entered) == 2:
+                time.sleep(1.0)
+        record(pid)
+
+    req = _req(tmp_path)
+    with _harness(req, rec) as handle:
+        req.on_pid = slow_on_pid
+        first_cli = _start_cli(handle, clis)
+        first_cli.handshake()
+        rec.wait_for_pid()
+
+        second_cli = _start_cli(handle, clis)
+        second_cli.handshake()
+        release_calls(handle)
+        assert handle.failure is None
+        assert len([p for p in rec.pids if p]) == 2
+        second_cli.end()
+        first_cli.kill()
+    assert not rec.failed.is_set()
+
+
+def test_bwrap_is_found_on_the_daemons_path_not_the_tasks(tmp_path, rec, monkeypatch):
+    """The task's PATH starts with directories the model can write."""
+    def plant(directory):
+        directory.mkdir()
+        tool = directory / "a-wrapper"
+        tool.write_text("#!/bin/sh\nexec \"$@\"\n")
+        tool.chmod(0o755)
+        return tool
+
+    planted = plant(tmp_path / "task-bin")
+    real = plant(tmp_path / "daemon-bin")
+    monkeypatch.setenv("PATH", f"{real.parent}{os.pathsep}{os.environ['PATH']}")
+
+    def wrap(cmd):
+        return ["a-wrapper", *cmd]
+
+    task_env = {"PATH": f"{planted.parent}{os.pathsep}{os.environ['PATH']}"}
+    with _harness(_req(tmp_path, tool_server_wrap=wrap, env=task_env), rec) as handle:
+        assert handle.failure is None
+        args = _server_entry(handle)["args"]
+        assert args[args.index("--") + 1] == str(real)
+
+
 # ---- Start failures -----------------------------------------------------------
 
 

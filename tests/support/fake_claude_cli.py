@@ -30,7 +30,7 @@ built from an allowlist and carries no variable of ours):
 
 `{harness_dir}` in a call's arguments or the host probe is replaced with the
 harness directory, read from the MCP config.
-- `sleep_before_calls`, `sleep_before_result`: seconds.
+- `sleep_before_calls`, `sleep_before_result`, `sleep_after_result`: seconds.
 - `exit`: the exit status, 0 by default.
 
 Run as `python3 fake_claude_cli.py <argv>` from a `claude` shim on PATH.
@@ -205,6 +205,7 @@ def main(argv: list[str]) -> int:
 
     _emit({"type": "result", "subtype": "success",
            "result": plan.get("result", "\n".join(texts) or "done")})
+    time.sleep(plan.get("sleep_after_result", 0))
     return int(plan.get("exit", 0))
 
 
