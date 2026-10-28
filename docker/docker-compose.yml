@@ -284,6 +284,10 @@ services:
       - *data_mount
       - *config_mount
       - *workspace_mount
+      # x11vnc's Unix sockets, for the admin browser console's relay. Shared
+      # with `browser` alone: the daemon, and so every task sandbox, never
+      # mounts it. Empty when the browser profile is off.
+      - browser-console:/run/istota-browser-console
     # Internal-only — nginx routes /istota/ to web:${WEB_PORT}. To bypass nginx,
     # uncomment the ports block below.
     # ports:
@@ -439,6 +443,9 @@ services:
       retries: 3
     volumes:
       - browser_profile:/data/browser-profile
+      # One x11vnc socket per live display, for the web console's relay. The
+      # web container reaches the displays through these and not the network.
+      - browser-console:/run/istota-browser-console
     # Its own network, joined by the daemon alone: a page the browser renders
     # runs attacker-chosen code, and from the default network it could reach
     # the web app, the webhook receiver and the signaling server directly.
@@ -703,3 +710,4 @@ secrets:
 volumes:
   data:
   browser_profile:
+  browser-console:

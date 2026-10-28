@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -98,6 +99,115 @@ def test_a_pdf_in_chromes_viewer_is_read_as_text(browser_image):
     assert report["bomb"]["error"] in ("pdf_too_complex", "pdf_unreadable"), report
     assert report["unbombed"]["ok"] is True, report
     assert "Padded but readable" in report["unbombed"]["text"], report
+
+
+# --- the console socket -------------------------------------------------------
+#
+# The web container's console relay reaches each live instance's x11vnc
+# through a Unix socket in the `browser-console` volume. A named volume, as
+# compose mounts it, not a host bind: a socket on a Docker Desktop bind is not
+# the shipped shape. The probe runs as uid and gid 10001 with no supplementary
+# groups, which is what `istota-drop` makes the web process.
+
+CONSOLE_DIR = "/run/istota-browser-console"
+CONSOLE_USER = "console-check"
+
+CONSOLE_PROBE = r"""
+import json, os, socket, stat, sys
+directory, name = sys.argv[1], sys.argv[2]
+path = os.path.join(directory, name)
+out = {}
+try:
+    os.listdir(directory)
+    out["listdir"] = "allowed"
+except OSError as exc:
+    out["listdir"] = type(exc).__name__
+try:
+    st = os.lstat(path)
+    out["mode"] = oct(stat.S_IMODE(st.st_mode))
+    out["gid"] = st.st_gid
+    out["socket"] = stat.S_ISSOCK(st.st_mode)
+except OSError as exc:
+    out["lstat"] = type(exc).__name__
+conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+conn.settimeout(10)
+try:
+    conn.connect(path)
+    out["banner"] = conn.recv(12).decode("ascii", "replace")
+except OSError as exc:
+    out["connect"] = type(exc).__name__
+finally:
+    conn.close()
+print("PROBE=" + json.dumps(out))
+"""
+
+
+def _docker(*argv: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(["docker", *argv], capture_output=True, text=True, timeout=timeout)
+
+
+def test_the_web_uid_reads_x11vnc_through_the_console_socket(browser_image):
+    """The entrypoint's directory, x11vnc's `-unixsock` and the pool's chmod, together.
+
+    Negative control: `scripts/test-image-negative-control.sh browser-console`
+    runs this against `docker/test/Dockerfile.browser-no-console-socket`, the
+    image with the `-unixsock` argument removed, and requires it red.
+    """
+    from istota.lib.browser_console import console_socket_name
+
+    volume = f"istota-test-console-{uuid.uuid4().hex[:10]}"
+    platform = ["--platform", browser_image.platform] if browser_image.platform else []
+    assert _docker("volume", "create", volume).returncode == 0
+    started = _docker(
+        "run", "-d", "--rm", "--init", "--shm-size", "1g", *platform,
+        "-v", f"{volume}:{CONSOLE_DIR}", browser_image.tag,
+    )
+    try:
+        assert started.returncode == 0, started.stderr
+        container = started.stdout.strip()
+
+        deadline = time.monotonic() + 180
+        live = None
+        while time.monotonic() < deadline:
+            live = _docker("exec", container, "curl", "-sf", "http://localhost:9224/live", timeout=30)
+            if live.returncode == 0:
+                break
+            time.sleep(2)
+        assert live is not None and live.returncode == 0, _docker("logs", container).stderr[-3000:]
+
+        # Any page request starts the user's instance; the page itself is not the point.
+        browsed = _docker(
+            "exec", container, "curl", "-s", "-X", "POST", "http://localhost:9223/browse",
+            "-H", "Content-Type: application/json", "-H", f"X-Istota-User: {CONSOLE_USER}",
+            "-d", json.dumps({"url": "http://localhost:9224/live", "timeout": 60}),
+            timeout=300,
+        )
+        listed = _docker("exec", container, "curl", "-sf", "http://localhost:9223/instances")
+        users = [row.get("user") for row in json.loads(listed.stdout or "{}").get("instances", [])]
+        assert CONSOLE_USER in users, (
+            f"no live instance for {CONSOLE_USER}: {listed.stdout}\nbrowse: {browsed.stdout[-2000:]}"
+            f"\n{_docker('logs', container).stderr[-3000:]}"
+        )
+
+        probed = _docker(
+            "run", "--rm", *platform, "--user", "10001:10001",
+            "-v", f"{volume}:{CONSOLE_DIR}", "--entrypoint", "python", browser_image.tag,
+            "-c", CONSOLE_PROBE, CONSOLE_DIR, console_socket_name(CONSOLE_USER),
+            timeout=180,
+        )
+        line = next((row for row in probed.stdout.splitlines() if row.startswith("PROBE=")), "")
+        assert line, f"exit {probed.returncode}\n{probed.stdout}\n{probed.stderr}"
+        report = json.loads(line[len("PROBE="):])
+
+        assert report.get("banner", "").startswith("RFB 003.0"), report
+        assert report["socket"] is True, report
+        assert report["mode"] == "0o660", report
+        assert report["gid"] == 10001, report
+        assert report["listdir"] == "PermissionError", report
+    finally:
+        if started.returncode == 0:
+            _docker("rm", "-f", started.stdout.strip())
+        _docker("volume", "rm", "-f", volume)
 
 
 def test_browser_card_checkout(browser_image):

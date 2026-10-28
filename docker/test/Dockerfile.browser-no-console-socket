@@ -1,0 +1,17 @@
+# Negative control for tests/image/test_browser_image.py's console socket test:
+# the shipped browser image with x11vnc's `-unixsock` argument removed.
+#
+# The entrypoint still makes the console directory and the pool still waits
+# for the socket, logs `console_socket_missing` and starts the instance, so
+# the instance is live and only the socket is missing.
+#
+#   docker build -f docker/test/Dockerfile.browser-no-console-socket \
+#       --build-arg BASE=<browser image tag> -t istota-test/browser-no-console-socket:<suffix> docker/test
+#
+# Expected: tests/image/test_browser_image.py::
+# test_the_web_uid_reads_x11vnc_through_the_console_socket fails on the banner.
+ARG BASE
+FROM ${BASE}
+
+RUN sed -i 's|^        args.extend(\["-unixsock", str(_console_socket(inst))\])$|        pass|' /app/pool.py \
+    && ! grep -q -- '"-unixsock"' /app/pool.py

@@ -1,6 +1,6 @@
 """The tool harness's bridge, with a real tool server, unwrapped.
 
-No bwrap here: `native_sandbox_wrap` is `None`, so the tool server runs as a
+No bwrap here: `tool_server_wrap` is `None`, so the tool server runs as a
 plain subprocess, as it does on a developer machine. What is held is the
 relay: calls held until `release_calls`, the peer check and `set_cli_root`'s
 revocation, a dead tool server failing calls and firing `on_failure`, the
@@ -39,12 +39,13 @@ from istota.brain._tool_harness import (
 )
 from istota.brain._types import BrainRequest, HarnessSpec
 from istota.sandbox import tool_server_protocol as proto
+from istota.session.tools import WebFetchPolicy
 
 _TIMEOUT = 30.0
 _SIX = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
 
 
-def _req(tmp_path, *, tools=None, harness=True, **kw):
+def _req(tmp_path, *, tools=None, harness=True, harness_spec=None, **kw):
     workspace = tmp_path / "ws"
     workspace.mkdir(exist_ok=True)
     root = tmp_path / "harness-root"
@@ -57,7 +58,7 @@ def _req(tmp_path, *, tools=None, harness=True, **kw):
         timeout_seconds=60,
         task_id=7,
         attempt=1,
-        harness=HarnessSpec(cli_env={}, harness_root=root) if harness else None,
+        harness=harness_spec or (HarnessSpec(cli_env={}, harness_root=root) if harness else None),
     )
     base.update(kw)
     return BrainRequest(**base)
@@ -220,6 +221,54 @@ def test_a_name_the_grant_left_out_is_refused_and_not_run(tmp_path, failures):
             assert not marker.exists()
         finally:
             client.close()
+
+
+def _web_fetch_req(tmp_path, *, tools, policy, prompt=""):
+    root = tmp_path / "harness-root"
+    root.mkdir(exist_ok=True)
+    spec = HarnessSpec(cli_env={}, harness_root=root, web_fetch=policy)
+    return _req(tmp_path, tools=tools, harness=False, harness_spec=spec, prompt=prompt)
+
+
+def test_webfetch_is_offered_and_runs_in_the_daemon_under_the_policy(tmp_path, failures):
+    """The spec's policy is the one the tool applies: provenance on and a URL
+    the prompt never named is refused before anything is resolved."""
+    policy = WebFetchPolicy(require_url_provenance=True)
+    req = _web_fetch_req(
+        tmp_path, tools=["Read", "WebFetch"], policy=policy,
+        prompt="Read https://named.example.test/page",
+    )
+    with _harness(req, failures) as handle:
+        assert handle.failure is None
+        assert handle.offered == ("Read", "WebFetch")
+        set_cli_root(handle, os.getpid())
+        release_calls(handle)
+        client = _Client(_socket_of(handle))
+        try:
+            ready = client.hello()
+            fetch = next(t for t in ready["tools"] if t["name"] == "WebFetch")
+            assert fetch["read_only"] is True
+            client.send({"type": proto.MSG_CALL, "id": "1", "tool": "WebFetch",
+                         "args": {"url": "https://other.example.test/", "prompt": "x"}})
+            result = client.next_frame()
+            assert result["is_error"] is True
+            assert "require_url_provenance" in result["content"][0]["text"]
+        finally:
+            client.close()
+
+
+def test_webfetch_is_not_offered_without_a_policy(tmp_path, failures):
+    req = _web_fetch_req(tmp_path, tools=["Read", "WebFetch"], policy=None)
+    with _harness(req, failures) as handle:
+        assert handle.failure is None
+        assert handle.offered == ("Read",)
+
+
+def test_webfetch_is_not_offered_when_the_grant_leaves_it_out(tmp_path, failures):
+    req = _web_fetch_req(tmp_path, tools=["Read"], policy=WebFetchPolicy())
+    with _harness(req, failures) as handle:
+        assert handle.failure is None
+        assert handle.offered == ("Read",)
 
 
 @pytest.fixture

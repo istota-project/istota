@@ -51,6 +51,7 @@ from fastapi import (
     Query,
     Request,
     UploadFile,
+    WebSocket,
 )
 from fastapi.responses import (
     HTMLResponse,
@@ -5682,6 +5683,128 @@ async def admin_browser_instances(_: dict = Depends(_require_admin)):
     return JSONResponse(await current(_config), headers={"Cache-Control": "no-store"})
 
 
+_CONSOLE_TICKET_BODY_LIMIT = 4096
+_CONSOLE_USER_MAX_CHARS = 256
+
+
+def _console_refusal(status: int, error: str, detail: str) -> JSONResponse:
+    return JSONResponse({"error": error, "detail": detail}, status_code=status, headers=_NO_STORE)
+
+
+def _console_user(value) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > _CONSOLE_USER_MAX_CHARS:
+        return None
+    if any(unicodedata.category(char) == "Cc" for char in value):
+        return None
+    return value
+
+
+@api_router.post("/admin/browsers/console-ticket")
+async def admin_browser_console_ticket(request: Request, user: dict = Depends(_require_admin),
+                                       _csrf: None = Depends(_verify_origin)):
+    """A single-use ticket for the console relay, bound to this admin and session.
+
+    The step-up proof is redeemed last, so a refusal the admin must fix first
+    does not spend it. No refusal echoes the requested user id.
+    """
+    from . import admin_browser_console as console
+
+    admin = user["username"]
+    target = None
+
+    def refuse(status: int, error: str, detail: str) -> JSONResponse:
+        console.log_refused(admin, target, error)
+        return _console_refusal(status, error, detail)
+
+    try:
+        raw = await read_bounded_body(request, _CONSOLE_TICKET_BODY_LIMIT)
+    except BodyError as exc:
+        if exc.status == 413:
+            return refuse(413, "too_large", "The request is larger than 4 KiB.")
+        return refuse(400, "invalid_body", "The request was interrupted.")
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return refuse(400, "invalid_body", "The request body is not JSON.")
+    if not isinstance(body, dict):
+        return refuse(400, "invalid_body", "The request body must be a JSON object.")
+    target = _console_user(body.get("user"))
+    if target is None:
+        return refuse(400, "invalid_user", "That is not a user id.")
+    if not _config.browser.enabled:
+        return refuse(404, "browser_disabled", "The browser is not enabled on this instance.")
+    if not await _live_identity(admin):
+        return refuse(
+            403, "admin_identity_required",
+            "Opening a browser console needs an admin with a live email sign-in identity.",
+        )
+    if console.RELAYS.full():
+        return refuse(429, "console_limit", "Too many consoles are open. Close one and try again.")
+    refusal = await _require_step_up(request, body, "admin_browser_console")
+    if refusal is not None:
+        reason = json.loads(refusal.body).get("reason")
+        console.log_refused(admin, target, f"step_up_{reason}")
+        return refusal
+    ticket = console.TICKETS.mint(admin, _step_up_session(request), target)
+    console.logger.info("browser_console_ticket admin=%r user=%r", admin, target)
+    return JSONResponse({"ticket": ticket, "expires_in": console.TICKET_TTL_SECONDS}, headers=_NO_STORE)
+
+
+@app.websocket("/istota/api/admin/browsers/console")
+async def admin_browser_console_relay(websocket: WebSocket):
+    """Relay RFB bytes between the page and one user's x11vnc socket.
+
+    Accepted first and refused by close code: uvicorn turns a pre-accept close
+    into an HTTP 403 the page sees only as 1006. The checks are inline, since
+    the `Depends` exception handlers answer with a JSON body a websocket never
+    sends. The session id is read, never minted: a websocket cannot write the
+    cookie.
+    """
+    from . import admin_browser_console as console
+
+    await websocket.accept()
+    admin = None
+    try:
+        user = await asyncio.to_thread(_require_api_auth, websocket)
+        admin = user["username"]
+        if not _user_is_web_admin(admin):
+            raise _ForbiddenException("admin only")
+        _verify_origin(websocket)
+    except (_UnauthorizedException, _ForbiddenException):
+        console.log_refused(admin, None, console.CLOSE_FORBIDDEN)
+        await websocket.close(console.CLOSE_FORBIDDEN)
+        return
+
+    # Before the ticket is read, so a refused connect leaves it for a retry.
+    if not console.RELAYS.try_acquire():
+        console.log_refused(admin, None, console.CLOSE_TOO_MANY)
+        await websocket.close(console.CLOSE_TOO_MANY)
+        return
+    try:
+        ticket = await console.read_ticket(websocket)
+        if ticket is None:
+            console.log_refused(admin, None, console.CLOSE_BAD_FRAME)
+            await websocket.close(console.CLOSE_BAD_FRAME)
+            return
+        session_id = websocket.session.get("session_id")
+        # Redeemed even without a session id, so the ticket is spent either way.
+        target = console.TICKETS.redeem(ticket, admin, session_id if isinstance(session_id, str) else "")
+        if target is None:
+            console.log_refused(admin, None, console.CLOSE_UNAUTHORIZED)
+            await websocket.close(console.CLOSE_UNAUTHORIZED)
+            return
+        await console.relay(
+            websocket, admin, target,
+            authorized=lambda: _stream_authorized(websocket, admin=True),
+        )
+    except Exception as exc:
+        console.logger.info("browser_console_error admin=%r user=- err=%s", admin, type(exc).__name__)
+        with contextlib.suppress(Exception):
+            await websocket.close(console.CLOSE_ERROR)
+    finally:
+        console.RELAYS.release()
+
+
 @api_router.get("/admin/config")
 async def admin_config(_: dict = Depends(_require_admin)):
     """The loaded config, sectioned and credential-redacted, plus what the
@@ -5778,9 +5901,14 @@ async def _read_config_change_body(request: Request) -> dict:
     return body
 
 
-async def _require_config_identity(user_id: str) -> None:
+async def _live_identity(user_id: str) -> bool:
+    """Whether the user has a native sign-in identity that is not disabled."""
     identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, user_id)
-    if identity is None or identity.disabled:
+    return identity is not None and not identity.disabled
+
+
+async def _require_config_identity(user_id: str) -> None:
+    if not await _live_identity(user_id):
         raise _ConfigRefusal(
             403, "admin_identity_required",
             "Changing the configuration needs an admin with a live email sign-in identity.",
@@ -16566,9 +16694,11 @@ _STEP_UP_LABELS = {
     "admin_config_change": "change this instance's configuration",
     "admin_briefing_delete": "delete a briefing",
     "admin_cron_delete": "delete a scheduled job",
+    "admin_browser_console": "open a user's browser console",
 }
 # Codes that guard no vault: an admin may ask for one without the vault gate.
-_ADMIN_STEP_UP_ACTIONS = frozenset({"admin_config_change", "admin_briefing_delete", "admin_cron_delete"})
+_ADMIN_STEP_UP_ACTIONS = frozenset({"admin_config_change", "admin_briefing_delete", "admin_cron_delete",
+                                    "admin_browser_console"})
 # Actions the account password may confirm where the install can mail a code.
 # Opt-in, so a new action takes the code: for the vault the mailbox is the
 # second factor, since a phished password must not export or reveal it

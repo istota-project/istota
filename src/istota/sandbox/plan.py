@@ -105,7 +105,7 @@ class Mount:
     #: None means "same as source, as written". For ``symlink`` this is the
     #: in-sandbox path and ``source`` is the link target.
     dest: Path | None
-    #: A short stable id — ``user_temp_dir``, ``claude_credentials``. It
+    #: A short stable id — ``user_temp_dir``, ``developer_dir``. It
     #: appears in no argv; it is what makes the plan dumpable and what the
     #: parity test names its divergences by.
     reason: str
@@ -166,32 +166,14 @@ class MountPlan:
 class SandboxProfile(str, Enum):
     """Which *outer process* a sandbox is being built for.
 
-    The mount plan is otherwise generic: every bind, mask and namespace flag
-    `build_mount_plan` emits is decided by the config, the task and the user,
-    and is identical under both profiles. Two things are not, and both exist
-    only because the process bwrap execs is the `claude` CLI:
-
-    - the Claude runtime block — ``~/.local/bin``, ``~/.local/share/claude``,
-      ``~/.local/state/claude``, and the ``~/.claude`` tmpfs base with
-      ``.credentials.json``, ``settings.json`` and the ``projects``/``debug``/
-      ``todos`` directories through it;
-    - the ``custom_system_prompt_path`` bind, which is there because the CLI
-      opens that file itself, inside the namespace.
-
-    ``NATIVE`` is the profile for a sandbox around istota's own code —
-    NativeBrain's Bash tool today, its tool server next. That process makes no
-    model call from inside the namespace, so it needs neither: it reads the
-    system prompt in the daemon, and handing it the credential file means a
-    `cat` of `~/.claude/.credentials.json` comes back as a tool result to
-    whatever provider native is pointed at (ISSUE-389). Read-only stops the
-    token being *rewritten*, never read.
-
-    There is deliberately no default. A forgotten profile is a ``TypeError``
-    at the call site rather than a silent grant of the Claude mounts, which is
-    the failure this split exists to make impossible.
+    One member. ``CLAUDE`` was the profile for a namespace around the `claude`
+    CLI itself, with the CLI's runtime state, its credential and the operator's
+    system prompt bound in. The CLI now runs outside the sandbox with its tools
+    in the tool server (cli-brain-tools part 2), so nothing builds that
+    namespace. The enum is kept for a release so the required ``profile=``
+    keyword on every caller does not change in the same commit.
     """
 
-    CLAUDE = "claude"
     NATIVE = "native"
 
 
@@ -417,14 +399,8 @@ def build_mount_plan(
     workspace_dir: Path | None = None,
     withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
     group_ids: "list[str] | None" = None,
-    cli_auth_mode: str | None = None,
 ) -> MountPlan:
     """Every bind, mask and namespace flag this task's sandbox gets, in order.
-
-    ``cli_auth_mode`` is the `claude` CLI's auth mode
-    (`llm.providers.process_cli_auth`): `~/.claude/.credentials.json` is bound
-    under ``"subscription"`` only, so an API-key deployment's CLI never sees a
-    token.
 
     ``group_ids`` is the task's resolved group set
     (``room_scopes.task_group_ids``); each existing ``{mount}/Groups/<id>`` is
@@ -443,15 +419,13 @@ def build_mount_plan(
     derived inside it (``resolve_sandbox_cache_dir``). The exec socket already
     follows ``authorized_skills``, which the same scope narrowed.
 
-    ``profile`` is required and keyword-only — see :class:`SandboxProfile` for
-    what it decides and why it has no default. Everything else about the plan is
-    generic, including the ordering, which is load-bearing in four places
+    ``profile`` is required and keyword-only — see :class:`SandboxProfile`.
+    The plan is generic, including the ordering, which is load-bearing in four places
     (cache bind before repos bind, ``.developer`` re-bind after
     ``user_temp_dir``, ``extra_ro_binds`` after *every* bind — its two entries
     are a document a daemon-side OCR call names, which lives inside a
     read-write bind that would otherwise bury it, and the task's own control
     directory — and masks last with ``--remount-ro`` after each).
-    Omitting the Claude block under ``NATIVE`` moves none of them.
 
     ``authorized_skills`` is the union of selected skills and skills
     auto-authorized by credential presence — the same set
@@ -600,86 +574,13 @@ def build_mount_plan(
     for base_python in executor.python_base_prefix_binds():
         _ro(base_python, "python_base", protected=True)
 
-    # --- Custom system prompt (RO, this one file) --- CLAUDE only.
-    # The config directory is not in the sandbox and should not be: it holds
-    # config.toml. Everything else in it — emissaries, persona, guidelines,
-    # skill bodies — reaches the model as content the daemon read and put in
-    # the prompt. `system-prompt.md` is the exception, because the CLI opens
-    # the path itself, inside the namespace. Binding the file rather than its
-    # directory keeps config.toml out; bwrap creates the parent as a mount
-    # point and nothing else in it is visible.
-    #
-    # This dependency was met until now only by `sandbox_ro_paths =
-    # ["/srv/app"]`, the same default that exposed the databases; narrowing it
-    # to [] made every task on a custom_system_prompt install exit with
-    # "System prompt file not found".
-    #
-    # `NATIVE` skips it because nothing inside that namespace opens the path:
-    # NativeBrain reads the system prompt in the daemon and puts it on the
-    # wire itself, so the file is already prompt text by the time the sandbox
-    # is built. Which is also why `NATIVE` needs no config-directory bind at
-    # all — this was the only one.
-    if profile is SandboxProfile.CLAUDE:
-        sp_path = executor.custom_system_prompt_path(config)
-        if sp_path is not None:
-            _ro(sp_path, "custom_system_prompt")
-
+    # The config directory is never bound, `system-prompt.md` included: the
+    # `claude` CLI that opened it runs outside the sandbox now, and NativeBrain
+    # reads it in the daemon.
     # Mask other users' config files
     users_config_dir = istota_src / "config" / "users"
     if users_config_dir.exists():
         _tmpfs(users_config_dir, "users_config_dir")
-
-    # --- Claude CLI runtime (selective .local binds) --- CLAUDE only.
-    #
-    # These exist because the process bwrap execs *is* the `claude` CLI: it
-    # resolves its own binary, reads its installed versions, takes a lock in
-    # state/, authenticates with the credential and writes its session JSONL
-    # back out. Under `NATIVE` the outer process is istota's own code, which
-    # does none of that — and binding the block anyway is ISSUE-389's filed
-    # bug, because `cat "$HOME/.claude/.credentials.json"` inside a native
-    # Bash call returns the subscription token as a tool result. Read-only
-    # stops it being rewritten, not read.
-    #
-    # `~/.local/bin` goes with them. On the reference deployment it holds
-    # `claude` and `gws`, and neither is reachable from a native namespace by
-    # design: `gws` is spawned host-side by the skill proxy, never in-sandbox.
-    #
-    # The `~/.claude` tmpfs goes too, and that is the one line worth pausing
-    # on, because it is a mask as well as a mount base. With the shipped
-    # `sandbox_ro_paths = []` nothing puts `$HOME` in the namespace, so under
-    # `NATIVE` the directory is absent rather than shadowed and the mask has
-    # nothing to do. Under a broadened `sandbox_ro_paths` covering `$HOME` it
-    # would have — that is the same default-deny-plus-hardening question the
-    # spec parks for `/etc/{namespace}` and the config directory, and it is
-    # deferred here for the same reason rather than overlooked.
-    home = Path(os.environ.get("HOME", "/tmp"))
-    if profile is SandboxProfile.CLAUDE:
-        # bin/ and share/claude/ are RO (binary + versions)
-        _ro(home / ".local" / "bin", "claude_local_bin")
-        _ro(home / ".local" / "share" / "claude", "claude_share")
-        # state/claude/ is RW (lock files created at runtime)
-        _rw(home / ".local" / "state" / "claude", "claude_state")
-
-        # --- Claude auth (tmpfs base + RW credentials for OAuth refresh) ---
-        claude_dir = home / ".claude"
-        if claude_dir.exists():
-            _tmpfs(claude_dir, "claude_home")
-            creds = claude_dir / ".credentials.json"
-            if creds.exists() and cli_auth_mode == "subscription":
-                # RO: prevents token persistence attacks. Only under
-                # "subscription": an API-key CLI carries no token.
-                _ro(creds, "claude_credentials")
-            settings = claude_dir / "settings.json"
-            if settings.exists():
-                _ro(settings, "claude_settings")
-            # Persist session JSONL logs and debug output across sandbox exits.
-            # Not for a shared-room task: `projects` holds the session JSONL of
-            # every earlier task, USER.md and file contents included, so any
-            # withheld scope would come straight back through it.
-            for subdir in ([] if withheld_scopes else ["projects", "debug", "todos"]):
-                d = claude_dir / subdir
-                if d.exists():
-                    _rw(d, f"claude_{subdir}")
 
     # --- User workspace (RW) ---
     _rw(user_temp_dir.resolve(), "user_temp_dir", user_data=True, protected=True)
@@ -789,7 +690,7 @@ def build_mount_plan(
                 )
 
     # --- Huggingface model cache (RO) ---
-    hf_cache = home / ".cache" / "huggingface"
+    hf_cache = Path(os.environ.get("HOME", "/tmp")) / ".cache" / "huggingface"
     if hf_cache.exists():
         _ro(hf_cache, "huggingface_cache")
 

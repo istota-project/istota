@@ -1,6 +1,12 @@
 """Pool lifecycle and independent browser connections."""
 import importlib
 import json
+import logging
+import os
+import shutil
+import socket
+import stat
+import tempfile
 from urllib.parse import parse_qs, urlsplit, unquote
 import sys
 import threading
@@ -41,6 +47,10 @@ def runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(pool.subprocess, "Popen", popen)
     monkeypatch.setattr(pool.subprocess, "run", lambda *a, **k: types.SimpleNamespace(returncode=0))
     monkeypatch.setattr(pool, "_wait_for_vnc", lambda inst: None)
+    # Absent by default: a test that wants the console socket creates it.
+    monkeypatch.setattr(pool, "CONSOLE_DIR", tmp_path / "console")
+    monkeypatch.setattr(pool, "_console_disabled_logged", False)
+    monkeypatch.setattr(pool, "_wait_for_console_socket", lambda inst: None)
     monkeypatch.setattr(chrome, "_wait_for_chrome_ready", lambda inst: None)
     monkeypatch.setattr(chrome, "_signal_group", lambda *a: False)
     driver = mock.Mock()
@@ -499,3 +509,140 @@ def test_release_attempts_display_cleanup_when_cdp_teardown_raises(runtime, monk
     assert pool.live() == []
     for _, _, proc in processes:
         proc.wait.assert_called()
+
+
+def _x11vnc_argv(processes):
+    return [argv for argv, _, _ in processes if argv[0] == "x11vnc"]
+
+
+def test_x11vnc_listens_on_the_console_socket_when_the_directory_exists(runtime, monkeypatch):
+    pool, _, processes, _ = runtime
+    from lib.istota_browser_console import console_socket_name
+
+    pool.CONSOLE_DIR.mkdir()
+    waited = []
+    monkeypatch.setattr(pool, "_wait_for_console_socket", waited.append)
+    alice = pool.acquire("alice")
+    (argv,) = _x11vnc_argv(processes)
+    expected = str(pool.CONSOLE_DIR / console_socket_name("alice"))
+    assert argv[argv.index("-unixsock") + 1] == expected
+    assert argv[argv.index("-rfbport") + 1] == "5900"
+    assert pool._console_socket(alice) == Path(expected)
+    assert waited == [alice]
+
+
+def test_without_the_console_directory_x11vnc_starts_without_a_socket_and_logs_once(
+        runtime, monkeypatch, caplog):
+    pool, _, processes, _ = runtime
+    waited = []
+    monkeypatch.setattr(pool, "_wait_for_console_socket", waited.append)
+    with caplog.at_level(logging.INFO, logger=pool.log.name):
+        alice, bob = pool.acquire("alice"), pool.acquire("bob")
+    assert pool.live() == [alice, bob]
+    for argv in _x11vnc_argv(processes):
+        assert "-unixsock" not in argv
+    assert waited == []
+    disabled = [r for r in caplog.records if "console_socket_disabled" in r.getMessage()]
+    assert len(disabled) == 1
+
+
+def test_release_and_relaunch_unlink_the_console_socket(runtime):
+    pool, _, _, _ = runtime
+    pool.CONSOLE_DIR.mkdir()
+    alice = pool.acquire("alice")
+    path = pool._console_socket(alice)
+    path.write_text("left by x11vnc")
+    pool.release_slot(alice)
+    assert not path.exists()
+    path.write_text("left by a crashed release")
+    pool.acquire("alice")
+    assert not path.exists()
+
+
+def test_an_unremovable_console_socket_does_not_block_release(runtime, monkeypatch, caplog):
+    pool, _, processes, _ = runtime
+    pool.CONSOLE_DIR.mkdir()
+    alice = pool.acquire("alice")
+    unlink = Path.unlink
+
+    def refuse(path, *args, **kwargs):
+        if path.parent == pool.CONSOLE_DIR:
+            raise PermissionError("socket removal refused")
+        return unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    pool.release_slot(alice)
+    assert pool.live() == []
+    for _, _, proc in processes:
+        proc.wait.assert_called()
+
+
+@pytest.fixture
+def console_pool(monkeypatch):
+    """The pool module with its real socket wait, over a short AF_UNIX dir."""
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent.parent / "docker/browser"))
+    if "patchright.sync_api" not in sys.modules:
+        api = types.ModuleType("patchright.sync_api")
+        api.sync_playwright = mock.Mock()
+        monkeypatch.setitem(sys.modules, "patchright", types.ModuleType("patchright"))
+        monkeypatch.setitem(sys.modules, "patchright.sync_api", api)
+    pool = importlib.import_module("pool")
+    # AF_UNIX paths are capped at 104 bytes on macOS; pytest's tmp_path is longer.
+    directory = Path(tempfile.mkdtemp(dir="/tmp"))
+    monkeypatch.setattr(pool, "CONSOLE_DIR", directory)
+    monkeypatch.setattr(pool, "CONSOLE_SOCKET_WAIT_S", 0.5)
+    inst = pool.BrowserInstance("alice", "/unused", ":100", 9300, 5900, 0)
+    inst.x11vnc_proc = mock.Mock()
+    inst.x11vnc_proc.poll.return_value = None
+    yield pool, inst
+    shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_console_socket_wait_makes_the_socket_group_writable(console_pool):
+    pool, inst = console_pool
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    old_umask = os.umask(0o022)
+    try:
+        listener.bind(str(pool._console_socket(inst)))
+    finally:
+        os.umask(old_umask)
+    try:
+        pool._wait_for_console_socket(inst)
+        mode = os.lstat(pool._console_socket(inst)).st_mode
+        assert stat.S_ISSOCK(mode)
+        assert stat.S_IMODE(mode) == 0o660
+    finally:
+        listener.close()
+
+
+def test_console_socket_chmod_failure_is_logged_and_the_instance_starts(
+        console_pool, monkeypatch, caplog):
+    pool, inst = console_pool
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(pool._console_socket(inst)))
+    monkeypatch.setattr(pool.os, "chmod", mock.Mock(side_effect=PermissionError("no")))
+    try:
+        with caplog.at_level(logging.WARNING, logger=pool.log.name):
+            pool._wait_for_console_socket(inst)
+    finally:
+        listener.close()
+    assert any("console_socket_chmod_failed slot=0" in r.getMessage() for r in caplog.records)
+
+
+def test_console_socket_wait_never_chmods_through_a_symlink(console_pool, monkeypatch, caplog):
+    pool, inst = console_pool
+    target = pool.CONSOLE_DIR / "target"
+    target.write_text("")
+    target.chmod(0o600)
+    pool._console_socket(inst).symlink_to(target)
+    with caplog.at_level(logging.WARNING, logger=pool.log.name):
+        pool._wait_for_console_socket(inst)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert any("console_socket_missing slot=0" in r.getMessage() for r in caplog.records)
+
+
+def test_console_socket_wait_stops_when_x11vnc_exits(console_pool):
+    pool, inst = console_pool
+    inst.x11vnc_proc.poll.return_value = 1
+    with pytest.raises(RuntimeError, match="x11vnc exited"):
+        pool._wait_for_console_socket(inst)

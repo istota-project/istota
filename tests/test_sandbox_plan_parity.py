@@ -572,7 +572,7 @@ def test_the_divergence_list_is_exactly_what_diverges(tmp_path, monkeypatch):
     user_data_answers: dict[str, set[bool]] = {}
 
     for index, case in enumerate(PARITY_CASES):
-        for profile in (SandboxProfile.CLAUDE, SandboxProfile.NATIVE):
+        for profile in (SandboxProfile.NATIVE,):
             built = build_plan(
                 case,
                 tmp_path / f"w{index}-{profile.value}",
@@ -698,11 +698,6 @@ DELIBERATELY_BROADER: dict[str, str] = {
         "{temp_dir}/{user_id}; a cache above the parent would cover all of "
         "them, and the .developer credential helpers with them"
     ),
-    "home/.local": (
-        "the Claude runtime block. bin/, share/claude and state/claude are "
-        "bound; the directory holding them is not, and a cache over it would "
-        "give the model write access to the claude binary the daemon spawns"
-    ),
     "developer.repos_dir": (
         "the *global* repos root. The plan binds one user's "
         "{repos_dir}/{user_id}, and the root is the stricter test on purpose: "
@@ -714,10 +709,19 @@ DELIBERATELY_BROADER: dict[str, str] = {
     ),
 }
 
-#: The one target that can name a path with nothing on disk behind it, so no
-#: bind could name it either — `build_mount_plan` gates the `~/.claude` tmpfs on
-#: `claude_dir.exists()`. Bounded here so the escape hatch cannot widen.
-MAY_BE_ABSENT = {"home/.claude"}
+#: Targets the plan mounts nothing at, on purpose. They are on the list
+#: because the daemon itself reads or runs them outside the sandbox: the
+#: `claude` CLI on the tool harness is spawned unwrapped from `~/.local/bin`,
+#: authenticates from `~/.claude/.credentials.json` and opens the operator's
+#: system prompt. A cache mounted at or above one would hand the model write
+#: access to it. Asserted to be no destination at all, which is the opposite of
+#: the rule for every other entry (cli-brain-tools part 2, Stage 6 removed the
+#: CLAUDE profile that used to bind them).
+HOST_STATE: dict[str, str] = {
+    "home/.local": "the claude binary the daemon spawns unwrapped",
+    "home/.claude": "the CLI's credential and the daemon's own Claude state",
+    "custom_system_prompt": "the operator's system prompt, opened by the CLI",
+}
 
 #: Every label `_sandbox_bind_targets` produces unconditionally. Asserted as an
 #: equality rather than walked, because a walk only constrains the targets that
@@ -809,14 +813,9 @@ def _destinations(plan: MountPlan) -> set[Path]:
 
 
 def _both_profiles(built: Built) -> set[Path]:
-    """Destinations under both profiles, from one world.
-
-    ``_sandbox_bind_targets`` takes no profile, so the custom system prompt — a
-    CLAUDE-only bind — would read as an uncovered target under NATIVE alone.
-    """
-    return _destinations(built.plan) | _destinations(
-        other_profile_plan(built, SandboxProfile.NATIVE)
-    )
+    """Destinations of the one profile left. Named for its history: it
+    unioned the CLAUDE plan's too, until that profile was removed."""
+    return _destinations(built.plan)
 
 
 class TestTheCacheAncestorList:
@@ -845,7 +844,7 @@ class TestTheCacheAncestorList:
     ):
         """The deletion direction. An entry that disappears fails here."""
         built = build_plan(case, tmp_path / "world", monkeypatch,
-                           profile=SandboxProfile.CLAUDE)
+                           profile=SandboxProfile.NATIVE)
         labels = _labelled_targets(built.config, Path(str(built.world["home"])))
         targets = _sandbox_bind_targets(built.config)
 
@@ -869,15 +868,19 @@ class TestTheCacheAncestorList:
     ):
         """The dead-entry direction, per case."""
         built = build_plan(case, tmp_path / "world", monkeypatch,
-                           profile=SandboxProfile.CLAUDE)
+                           profile=SandboxProfile.NATIVE)
         destinations = _both_profiles(built)
         labels = _labelled_targets(built.config, Path(str(built.world["home"])))
 
         for target in _sandbox_bind_targets(built.config):
             label = labels[target]
-            if label in DELIBERATELY_BROADER:
+            if label in HOST_STATE:
+                assert target not in destinations, (
+                    f"{target} ({label}) is host state the daemon reads "
+                    f"outside the sandbox, and the plan now mounts it."
+                )
                 continue
-            if label in MAY_BE_ABSENT and not target.exists():
+            if label in DELIBERATELY_BROADER:
                 continue
             assert target in destinations, (
                 f"{target} ({label}) is on the cache-ancestor list and the "
@@ -914,7 +917,7 @@ class TestTheCacheAncestorList:
         ancestor_of_something: set[str] = set()
         for index, case in enumerate(CASES):
             built = build_plan(case, tmp_path / f"c{index}", monkeypatch,
-                               profile=SandboxProfile.CLAUDE)
+                               profile=SandboxProfile.NATIVE)
             destinations = _both_profiles(built)
             labels = _labelled_targets(built.config, Path(str(built.world["home"])))
             for target in _sandbox_bind_targets(built.config):

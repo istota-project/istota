@@ -213,7 +213,6 @@ def _run_sleep_cycle_brain(
         on_progress=None,
         cancel_check=None,
         on_pid=None,
-        sandbox_wrap=None,
         result_file=None,
     )
     # The call runs for up to minutes; a pending write would hold the lock

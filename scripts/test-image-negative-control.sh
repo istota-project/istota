@@ -47,6 +47,8 @@
 #   scripts/test-image-negative-control.sh document-render
 #   scripts/test-image-negative-control.sh group-rooms
 #   scripts/test-image-negative-control.sh cli-harness
+#   scripts/test-image-negative-control.sh cli-witness
+#   scripts/test-image-negative-control.sh browser-console
 #
 # The second form runs only the third half, the daemon container's run
 # contract (the one-deployment-shape spec's parity rows 1, 2, 3, 4, 5, 6, 8,
@@ -69,7 +71,11 @@
 # (needs `web/build-render`). The eighth runs the group-owned-rooms upgrade
 # witness against two broken migrations, one that converts linked rooms and
 # one whose column differs from schema.sql's. The ninth runs the CLI harness's
-# `system/init` witnesses with `--tools` dropped from the argv.
+# `system/init` witnesses with `--tools` dropped from the argv. The tenth runs
+# the smoke tier's CLI credential witness with the probe run in the CLI's own
+# process, where the credential is, as a CLI whose own Bash were left on would.
+# The eleventh runs the browser image's console socket witness against an image
+# whose x11vnc has no `-unixsock` (needs the tier's browser image built).
 #
 # No arrays anywhere: macOS ships bash 3.2, where `"${empty[@]}"` under `set -u`
 # is fatal, and this script's whole audience is a developer machine.
@@ -116,6 +122,16 @@ fi
 only_cli_harness=""
 if [ "$platform" = "cli-harness" ]; then
     only_cli_harness=1
+    platform=""
+fi
+only_cli_witness=""
+if [ "$platform" = "cli-witness" ]; then
+    only_cli_witness=1
+    platform=""
+fi
+only_browser_console=""
+if [ "$platform" = "browser-console" ]; then
+    only_browser_console=1
     platform=""
 fi
 control_tag="istota-test/no-forge:control"
@@ -438,6 +454,52 @@ cli_harness_half() {
 }
 
 # --------------------------------------------------------------------------
+# The CLI credential witness (cli-brain-tools-only-path spec, Stage 6). A smoke
+# test: a live task in the shipped image, on the tool harness, probing for the
+# CLI's credential from the model's Bash. The control has the fake `claude`
+# run that probe in its own process, unwrapped and holding the credential,
+# which is where the old in-sandbox path ran the CLI's Bash. The credential
+# and the open connect must then show up in both auth modes. The credentials
+# file stays green: the harness CLI's HOME is empty and its file is under
+# CLAUDE_CONFIG_DIR, which the probe does not read. The probes-ran test is the
+# control's own control and must stay green.
+
+CLI_WITNESS_TESTS="tests/smoke/test_cli_credential_unreachable.py::TestTheCliCredentialIsOutOfTheToolsReach"
+
+cli_witness_half() {
+    echo
+    echo "[control] cli-witness: cli-runs-tools"
+    witness_out="$(mktemp)"
+    set +e
+    ISTOTA_CLI_WITNESS_CONTROL=cli-runs-tools \
+        uv run pytest -m smoke -n0 -q --no-header -p no:randomly -rfE \
+        tests/smoke/test_cli_credential_unreachable.py 2>&1 | tee "$witness_out"
+    set -e
+    for mode in subscription api_key; do
+        for test in test_the_environment_holds_no_credential \
+                    test_no_readable_process_environment_holds_it \
+                    test_no_result_carries_it \
+                    test_the_anthropic_connect_is_refused; do
+            node="${CLI_WITNESS_TESTS}::${test}[${mode}]"
+            if ! grep -Fq "FAILED ${node}" "$witness_out"; then
+                rm -f "$witness_out"
+                echo "[control] FAILED: cli-witness did not turn ${node} red."
+                exit 1
+            fi
+        done
+        node="${CLI_WITNESS_TESTS}::test_the_probes_ran_and_the_cli_held_the_credential[${mode}]"
+        if grep -Fq "FAILED ${node}" "$witness_out" || grep -Fq "ERROR ${node}" "$witness_out"; then
+            rm -f "$witness_out"
+            echo "[control] FAILED: cli-witness broke the probe itself (${node}),"
+            echo "[control] so the red above says nothing about the credential."
+            exit 1
+        fi
+    done
+    rm -f "$witness_out"
+    echo "[control] OK: cli-witness turned its witnesses red."
+}
+
+# --------------------------------------------------------------------------
 # The config is an input: the upgrade case boots the new entrypoint over a
 # config.toml an old release rendered and requires the file unchanged. The
 # control image appends a line to it at boot; only that assertion may go red,
@@ -592,8 +654,50 @@ document_render_half() {
     echo "[control] OK: document-render turned the render witness red without a renderer."
 }
 
+BROWSER_CONSOLE_NODE="${DOCUMENT_RENDER_TESTS}::test_the_web_uid_reads_x11vnc_through_the_console_socket"
+
+# The browser image with x11vnc's `-unixsock` argument removed: the instance
+# starts, the console directory is there, and the socket never appears.
+browser_console_half() {
+    browser_base="$(uv run python -c '
+import sys
+sys.path.insert(0, ".")
+from tests.image.conftest import REPO, _tag_for
+print(_tag_for(REPO / "docker" / "browser" / "Dockerfile", "linux/amd64", "browser"))
+')"
+    if ! docker image inspect "$browser_base" >/dev/null 2>&1; then
+        echo "[control] not built yet — run \`uv run pytest -m image -n0 ${BROWSER_CONSOLE_NODE}\` first." >&2
+        exit 2
+    fi
+    echo
+    echo "[control] browser-console: x11vnc without -unixsock (base ${browser_base})"
+    browser_console_tag="istota-test/browser-no-console-socket:${browser_base##*:}"
+    docker build -q --platform linux/amd64 -f docker/test/Dockerfile.browser-no-console-socket \
+        --build-arg "BASE=$browser_base" -t "$browser_console_tag" docker/test >/dev/null
+    browser_console_out="$(mktemp)"
+    set +e
+    ISTOTA_BROWSER_IMAGE_TAG="$browser_console_tag" \
+        uv run pytest -m image -n0 -q --no-header -p no:randomly \
+        "$BROWSER_CONSOLE_NODE" 2>&1 | tee "$browser_console_out"
+    set -e
+    # Red on the banner, not on an instance that never started.
+    if ! grep -Fq "FAILED ${BROWSER_CONSOLE_NODE}" "$browser_console_out" \
+            || ! grep -Fq "'connect': 'FileNotFoundError'" "$browser_console_out" \
+            || grep -Fq "AssertionError: no live instance" "$browser_console_out"; then
+        rm -f "$browser_console_out"
+        echo "[control] FAILED: browser-console did not turn ${BROWSER_CONSOLE_NODE} red on the banner."
+        exit 1
+    fi
+    rm -f "$browser_console_out"
+    echo "[control] OK: browser-console turned the socket witness red without -unixsock."
+}
+
 if [ -n "$only_run_contract" ]; then
     run_contract_half
+    exit 0
+fi
+if [ -n "$only_browser_console" ]; then
+    browser_console_half
     exit 0
 fi
 if [ -n "$only_document_render" ]; then
@@ -614,6 +718,10 @@ if [ -n "$only_secrets" ]; then
 fi
 if [ -n "$only_cli_harness" ]; then
     cli_harness_half
+    exit 0
+fi
+if [ -n "$only_cli_witness" ]; then
+    cli_witness_half
     exit 0
 fi
 if [ -n "$only_web_setup" ]; then
@@ -960,8 +1068,10 @@ if [ -z "$platform" ] && [ -z "$only_devbox" ]; then
     run_contract_half
     secrets_half
     cli_harness_half
+    cli_witness_half
     rendered_config_half
     group_rooms_half
     web_setup_half
     document_render_half
+    browser_console_half
 fi

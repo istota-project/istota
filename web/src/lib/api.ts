@@ -1393,6 +1393,23 @@ export async function getAdminBrowsers(): Promise<AdminBrowsers> {
   return apiFetch<AdminBrowsers>('/admin/browsers', undefined, 8_000);
 }
 
+/** A single-use ticket for the browser console relay, valid for `expires_in`
+ *  seconds. Through `groupRequest`, like the other admin step-up routes, so a
+ *  refusal arrives as a `GroupApiError` carrying its `code` (`console_limit`,
+ *  `admin_identity_required`, …) or a step-up `reason`. */
+export function getAdminBrowserConsoleTicket(
+  user: string,
+  stepUp?: StepUpProof,
+): Promise<{ ticket: string; expires_in: number }> {
+  return groupRequest('/admin/browsers/console-ticket', 'POST', { user, step_up: stepUp });
+}
+
+/** The relay's websocket URL, on this page's own origin. */
+export function adminBrowserConsoleUrl(): string {
+  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${scheme}//${location.host}${base}/api/admin/browsers/console`;
+}
+
 export async function getAdminConnections(): Promise<{ connections: AdminConnection[] }> {
   return apiFetch<{ connections: AdminConnection[] }>('/admin/connections');
 }
@@ -6030,7 +6047,8 @@ export type StepUpAction =
   | 'history_purge'
   | 'admin_config_change'
   | 'admin_briefing_delete'
-  | 'admin_cron_delete';
+  | 'admin_cron_delete'
+  | 'admin_browser_console';
 /** How a sensitive action is confirmed: the account password, or a mailed
  *  code. `methods` is every one the account has, the server's default first;
  *  `method` is the one this request opened. */

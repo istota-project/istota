@@ -402,7 +402,7 @@ Substitutes credential placeholders in authentication headers, for hosts a crede
 |---|---|---|
 | `enabled` | `true` | Network isolation via CONNECT proxy |
 | `allow_pypi` | `true` | Allow PyPI access |
-| `extra_hosts` | `[]` | Additional allowed hosts |
+| `extra_hosts` | `[]` | Additional allowed hosts. No Anthropic host is on the default list; a task that calls Anthropic's API from Bash needs `api.anthropic.com:443` here |
 
 ## `[skills]`
 
@@ -482,7 +482,7 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 
 ### `[brain.native.web_fetch]`
 
-The native brain's daemon-side `WebFetch` tool, documented in the [native brain runbook](native-brain.md). Every user gets it; it was admin-only until ISSUE-449, on the grounds that a fetch from the daemon's network namespace is egress the same user's `claude_code` task does not have. That is true, and the policy fields answer it: they bound where a fetch may go, the same way for everybody, where identity bounded nobody's destinations. `enabled = false` withdraws it from everyone, and `admin_only = true` puts the old gate back for a deployment with users whose turns should not reach the network from the daemon's namespace at all. Fields the runbook's table does not list:
+The native brain's daemon-side `WebFetch` tool, documented in the [native brain runbook](native-brain.md). Every user gets it, on either brain: a `claude_code` task is offered this tool through its tool harness rather than the CLI's own WebFetch. It was admin-only until ISSUE-449, on the grounds that a fetch from the daemon's network namespace is egress beyond the sandbox's CONNECT allowlist. That is true, and the policy fields answer it: they bound where a fetch may go, the same way for everybody, where identity bounded nobody's destinations. `enabled = false` withdraws it from everyone, and `admin_only = true` puts the old gate back for a deployment with users whose turns should not reach the network from the daemon's namespace at all. Fields the runbook's table does not list:
 
 | Setting | Default | Description |
 |---|---|---|
@@ -518,7 +518,7 @@ This brain's own default model and effort, plus the subscription usage poll. Eve
 |---|---|---|
 | `model` | `""` | This brain's default model when the task pins none. Same values the top-level key took: a canonical id, a shortcut (`opus`), a role tier (`smart`), any of them plus a `:effort` modifier. Empty = the CLI's own default. A bare shortcut floats to the latest version each release; a canonical id is immutable, so pin a versioned id for stability |
 | `effort` | `""` | This brain's default effort: `low`, `medium`, `high`, `xhigh`, `max`. Empty = the model's own. A task that pins a *model* takes no effort from here, since an effort chosen for one model need not be valid on another |
-| `auth` | `""` | How the `claude` CLI authenticates. `"subscription"`: the OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`, the `claude_code_oauth_token` secret file) and never an API key; the `[providers.anthropic]` base URL must be Anthropic's. `"api_key"`: the `[providers.anthropic]` key and base URL, never the token, and the base URL's host joins the sandbox's network allowlist. Empty is decided by each process from its environment: the token gives `"subscription"`; an API key alone never switches a deployment to API billing. Under either mode the model can read the credential from its Bash tool, as it always could the token. `istota doctor` reports the mode as `models.cli_auth` |
+| `auth` | `""` | How the `claude` CLI authenticates. `"subscription"`: the OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`, the `claude_code_oauth_token` secret file) and never an API key; the `[providers.anthropic]` base URL must be Anthropic's. `"api_key"`: the `[providers.anthropic]` key and base URL, never the token. Empty is decided by each process from its environment: the token gives `"subscription"`; an API key alone never switches a deployment to API billing. Under either mode the credential is in the environment of the `claude` CLI only, which runs outside the sandbox with its tools in the sandboxed tool server; no task env carries it, and on a sandboxed deployment nothing the model drives can read it (on an unsandboxed one a Bash call can read any process of the daemon user). The sandbox's network allowlist names no Anthropic host. `istota doctor` reports the mode as `models.cli_auth` |
 | `advisor_model` | `""` | Advisor model for this brain (the CLI's `--advisor`); resolves through the same alias table as `model` but carries no effort. Must resolve to a model capable of *being* an advisor (a weak/cheap tier fails every task it runs on). Dropped for any task carrying its own model pin (`!model`, `!room model`, a `[[jobs]] model`). Formerly a top-level key, which still loads with a warning |
 | `subscription_usage` | `true` | Poll `api.anthropic.com/api/oauth/usage` for plan utilization at all. Off = the doctor check SKIPs and the admin card is absent rather than showing a reason |
 | `subscription_usage_cache_ttl_seconds` | `1800` | One deployment-wide fetch per this window, and the **minimum** backoff after a failure. A server-stated `Retry-After` overrides it, capped at six hours. Floored at 1 — a 0 would fetch on every read. 30 minutes rather than 5 because the shortest window reported is five hours, so polling faster buys no accuracy for the requests it spends, and the endpoint rate-limits a deployment that tries |
@@ -812,7 +812,7 @@ Set all three fields or none. Each falls back to `[nextcloud]` on its own rather
 |---|---|---|
 | `enabled` | `false` | Enable the headless browser container |
 | `api_url` | `"http://localhost:9223"` | Browser container's Flask API |
-| `vnc_url` | `""` | External noVNC console URL, for operators. The browser service builds each live instance's viewer link from it, and the admin Browsers page shows those links. The admin page ignores a URL that is not absolute `http(s)` or that embeds a VNC password. Do not hand it to users: the console exposes live user IDs to anyone who can reach it (see [browser profiles](../deployment/running-the-stack.md#browser-profiles)) |
+| `vnc_url` | `""` | External noVNC console URL, for operators. The browser service builds each live instance's viewer link from it and passes it to tasks as `BROWSER_VNC_URL`. The admin Browsers page no longer uses it: its console opens in the page. Do not hand it to users: the console exposes live user IDs to anyone who can reach it (see [browser profiles](../deployment/running-the-stack.md#browser-profiles)) |
 
 ## `[wordpress]`
 

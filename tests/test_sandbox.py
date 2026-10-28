@@ -69,7 +69,7 @@ def _patch_linux():
 
 
 def _run_bwrap(config, task, is_admin, resources=None, user_temp=None,
-               profile=SandboxProfile.CLAUDE):
+               profile=SandboxProfile.NATIVE):
     """Helper to call build_bwrap_cmd with Linux patches applied.
 
     ``profile`` defaults to CLAUDE because that is what every assertion in this
@@ -131,7 +131,7 @@ class TestBuildBwrapCmdDisabled:
         with patch("istota.executor._bwrap_available", return_value=False):
             result = build_bwrap_cmd(
                 cmd, sandbox_config, task, False, [], user_temp,
-                profile=SandboxProfile.CLAUDE,
+                profile=SandboxProfile.NATIVE,
             )
 
         assert result == cmd
@@ -536,7 +536,7 @@ class TestBuildBwrapCmdTaskControlDirectory:
         (control / "system_prompt.txt").write_text("standing instructions")
         return control
 
-    def _bind(self, config, task, control, profile=SandboxProfile.CLAUDE):
+    def _bind(self, config, task, control, profile=SandboxProfile.NATIVE):
         user_temp = config.temp_dir / task.user_id
         user_temp.mkdir(parents=True, exist_ok=True)
         with _patch_linux():
@@ -627,7 +627,7 @@ class TestBuildBwrapCmdTaskControlDirectory:
         assert (str(control), str(control)) in ro_pairs, ro_pairs
 
     @pytest.mark.parametrize(
-        "profile", [SandboxProfile.CLAUDE, SandboxProfile.NATIVE]
+        "profile", [SandboxProfile.NATIVE]
     )
     def test_it_is_emitted_under_both_profiles(
         self, sandbox_config, make_sandbox_task, profile,
@@ -703,7 +703,7 @@ class TestBuildBwrapCmdTaskControlDirectory:
                 ["claude", "-p", "test"],
                 sandbox_config, task, False, [], user_temp,
                 extra_ro_binds=[missing],
-                profile=SandboxProfile.CLAUDE,
+                profile=SandboxProfile.NATIVE,
             )
 
         assert str(missing) not in result
@@ -847,14 +847,12 @@ class TestBuildBwrapCmdPathResolution:
 
 
 class TestCustomSystemPromptBind:
-    """`--system-prompt-file` is the one config-dir file the CLI opens itself.
+    """`--system-prompt-file` is opened by the CLI, which runs outside the
+    sandbox on the tool harness, so the file is bound into no namespace.
 
-    Everything else in the config directory (emissaries, persona, guidelines,
-    skill bodies) reaches the model as content the daemon read, so only this
-    one needs to exist in the namespace. It used to arrive via the
-    `sandbox_ro_paths = ["/srv/app"]` default; when that became `[]` every task
-    on a custom_system_prompt install failed with "System prompt file not
-    found". The file is bound, never its directory — config.toml is beside it.
+    It was the one config-dir file the old in-sandbox CLI needed, bound alone
+    under the CLAUDE profile (cli-brain-tools part 2, Stage 6 removed it). The
+    config directory itself, with config.toml in it, was never bound.
     """
 
     def _write_prompt(self, config):
@@ -863,13 +861,14 @@ class TestCustomSystemPromptBind:
         path.write_text("custom prompt")
         return path
 
-    def test_bound_ro_at_its_own_path(self, sandbox_config, make_sandbox_task):
+    def test_not_bound_when_enabled(self, sandbox_config, make_sandbox_task):
         sandbox_config.brain.custom_system_prompt = True
         sp = self._write_prompt(sandbox_config)
 
         result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
 
-        assert (str(sp.resolve()), str(sp)) in _get_bind_pairs(result, "--ro-bind")
+        assert str(sp) not in result
+        assert str(sp.resolve()) not in result
 
     def test_not_bound_when_disabled(self, sandbox_config, make_sandbox_task):
         sandbox_config.brain.custom_system_prompt = False
@@ -900,10 +899,8 @@ class TestCustomSystemPromptBind:
         assert str(expected) not in result
 
     def test_relative_skills_dir_gives_an_absolute_path(self, sandbox_config, make_sandbox_task, monkeypatch, tmp_path):
-        """A relative skills_dir must still produce an absolute bind + flag.
-
-        The CLI runs with its own --chdir, so a relative path would not open.
-        """
+        """A relative skills_dir must still produce an absolute flag: the CLI
+        runs in the tool server's cwd, so a relative path would not open."""
         monkeypatch.chdir(tmp_path)
         sandbox_config.brain.custom_system_prompt = True
         sandbox_config.skills_dir = Path("config/skills")
@@ -915,7 +912,7 @@ class TestCustomSystemPromptBind:
         assert resolved is not None and resolved.is_absolute()
 
         result = _run_bwrap(sandbox_config, make_sandbox_task(), False)
-        assert str(resolved) in result
+        assert str(resolved) not in result
 
     def test_path_is_none_when_disabled(self, sandbox_config):
         sandbox_config.brain.custom_system_prompt = False
@@ -958,7 +955,7 @@ class TestNetworkProxyBwrapIntegration:
             result = build_bwrap_cmd(
                 ["claude", "-p", "-"], sandbox_config, task, False,
                 [], user_temp, net_proxy_sock=sock,
-                profile=SandboxProfile.CLAUDE,
+                profile=SandboxProfile.NATIVE,
             )
         assert "--unshare-net" in result
 
@@ -977,7 +974,7 @@ class TestNetworkProxyBwrapIntegration:
             result = build_bwrap_cmd(
                 ["claude", "-p", "-"], sandbox_config, task, False,
                 [], user_temp, net_proxy_sock=sock,
-                profile=SandboxProfile.CLAUDE,
+                profile=SandboxProfile.NATIVE,
             )
         ro_pairs = _get_bind_pairs(result, "--ro-bind")
         assert any(src == str(sock.resolve()) for src, _ in ro_pairs)
@@ -992,7 +989,7 @@ class TestNetworkProxyBwrapIntegration:
             result = build_bwrap_cmd(
                 ["claude", "-p", "-"], sandbox_config, task, False,
                 [], user_temp, net_proxy_sock=sock,
-                profile=SandboxProfile.CLAUDE,
+                profile=SandboxProfile.NATIVE,
             )
         sep_idx = result.index("--")
         after_sep = result[sep_idx + 1:]
@@ -1027,7 +1024,7 @@ class TestNetworkProxyBwrapIntegration:
                 ["claude", "-p", "-", "--allowedTools", "Read"],
                 sandbox_config, task, False, [], user_temp,
                 net_proxy_sock=sock,
-                profile=SandboxProfile.CLAUDE,
+                profile=SandboxProfile.NATIVE,
             )
         sep_idx = result.index("--")
         after_sep = result[sep_idx + 1:]
@@ -1114,11 +1111,18 @@ class TestBuildNetworkAllowlist:
         network = NetworkConfig(**net_kw) if net_kw else NetworkConfig()
         return Config(security=SecurityConfig(network=network), **overrides)
 
-    def test_default_hosts_always_present(self):
-        config = self._make_config()
+    def test_no_anthropic_host(self):
+        """Nothing in the sandbox talks to Anthropic: the CLI runs outside it
+        (cli-brain-tools part 2, Stages 5 and 6)."""
+        config = self._make_config(allow_pypi=False)
         hosts = _build_network_allowlist(config, [])
-        assert "api.anthropic.com:443" in hosts
-        assert "mcp-proxy.anthropic.com:443" in hosts
+        assert not any("anthropic.com" in h for h in hosts)
+        assert hosts == set()
+
+    def test_extra_hosts_restore_anthropic_for_a_task_that_needs_it(self):
+        config = self._make_config(allow_pypi=False, extra_hosts=["api.anthropic.com:443"])
+        hosts = _build_network_allowlist(config, [])
+        assert hosts == {"api.anthropic.com:443"}
 
     def test_pypi_hosts_when_allowed(self):
         config = self._make_config(allow_pypi=True)
@@ -3062,124 +3066,62 @@ def _touches_claude(op, home, sp_path=None):
 
 
 class TestSandboxProfiles:
-    """`SandboxProfile` decides one thing: whether the Claude CLI's own runtime
-    state is in the namespace.
+    """`SandboxProfile` has one member, NATIVE, and no Claude runtime state
+    reaches any namespace.
 
-    ISSUE-389's filed bug is that NativeBrain's Bash tool got the Claude
-    profile, so `cat "$HOME/.claude/.credentials.json"` inside a sandboxed
-    native task returned the subscription token as a tool result to whatever
-    provider native points at. Read-only stops the token being rewritten, not
-    read.
+    ISSUE-389's filed bug was NativeBrain's Bash tool getting the Claude
+    profile, so `cat "$HOME/.claude/.credentials.json"` returned the token as a
+    tool result. The CLAUDE profile went with the in-sandbox CLI
+    (cli-brain-tools part 2, Stage 6); it is kept as a one-member enum for a
+    release so the required keyword does not ripple.
     """
 
-    def _both(self, config, task, **kwargs):
+    def _argv(self, config, task, **kwargs):
         with _patch_linux():
-            claude = build_bwrap_cmd(
-                ["/bin/sh", "-c", "true"], config, task, False, [],
-                config.temp_dir / task.user_id,
-                profile=SandboxProfile.CLAUDE, **kwargs,
-            )
-            native = build_bwrap_cmd(
+            return build_bwrap_cmd(
                 ["/bin/sh", "-c", "true"], config, task, False, [],
                 config.temp_dir / task.user_id,
                 profile=SandboxProfile.NATIVE, **kwargs,
             )
-        return claude, native
 
-    def test_claude_carries_every_runtime_path(
-        self, sandbox_config, make_sandbox_task, claude_home,
-    ):
-        (sandbox_config.temp_dir / "alice").mkdir(parents=True)
-        # The credentials file is bound under "subscription" only.
-        sandbox_config.brain.claude_code.auth = "subscription"
-        claude, _ = self._both(sandbox_config, make_sandbox_task())
+    def test_one_member(self):
+        assert [p.name for p in SandboxProfile] == ["NATIVE"]
 
-        ro = {src for src, _ in _get_bind_pairs(claude, "--ro-bind")}
-        rw = {src for src, _ in _get_bind_pairs(claude, "--bind")}
-        c = claude_home / ".claude"
-
-        assert str((claude_home / ".local" / "bin").resolve()) in ro
-        assert str((claude_home / ".local" / "share" / "claude").resolve()) in ro
-        assert str((claude_home / ".local" / "state" / "claude").resolve()) in rw
-        assert str((c / ".credentials.json").resolve()) in ro
-        assert str((c / "settings.json").resolve()) in ro
-        for sub in ("projects", "debug", "todos"):
-            assert str((c / sub).resolve()) in rw
-        assert ("--tmpfs", str(c.resolve())) in _ops(claude)
-
-    def test_native_carries_none_of_them_at_any_position(
+    def test_no_claude_path_at_any_position(
         self, sandbox_config, make_sandbox_task, claude_home,
     ):
         """Not "is not a bind source" — not present in the argv at all.
 
         A destination is as good as a source: bwrap would create the path
         inside the namespace either way, and the credential is what is at
-        stake.
+        stake. The system prompt file is held to the same rule.
         """
+        sandbox_config.brain.custom_system_prompt = True
+        sp = sandbox_config.skills_dir.parent / "system-prompt.md"
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text("custom prompt")
+        sandbox_config.brain.claude_code.auth = "subscription"
         (sandbox_config.temp_dir / "alice").mkdir(parents=True)
-        _, native = self._both(sandbox_config, make_sandbox_task())
+        argv = self._argv(sandbox_config, make_sandbox_task())
 
-        for op in _ops(native):
-            assert not _touches_claude(op, claude_home), op
+        for op in _ops(argv):
+            assert not _touches_claude(op, claude_home, sp), op
 
-    def test_native_still_carries_the_generic_paths_under_the_same_home(
+    def test_the_generic_paths_under_the_same_home_are_still_there(
         self, sandbox_config, make_sandbox_task, claude_home,
     ):
-        """The positive control for the two above.
+        """The positive control for the one above.
 
         `~/.cache/huggingface` is under the same fake HOME and belongs to the
-        generic plan. Without this, "no Claude path in the NATIVE argv" would
-        pass just as well on a build that read a different HOME, or on one
-        where the gate had swallowed every home-relative bind.
+        generic plan. Without this, "no Claude path in the argv" would pass
+        just as well on a build that read a different HOME, or on one where a
+        gate had swallowed every home-relative bind.
         """
         (sandbox_config.temp_dir / "alice").mkdir(parents=True)
-        _, native = self._both(sandbox_config, make_sandbox_task())
+        argv = self._argv(sandbox_config, make_sandbox_task())
 
-        ro = {src for src, _ in _get_bind_pairs(native, "--ro-bind")}
+        ro = {src for src, _ in _get_bind_pairs(argv, "--ro-bind")}
         assert str((claude_home / ".cache" / "huggingface").resolve()) in ro
-
-    def test_the_only_difference_is_the_claude_block_and_the_prompt_bind(
-        self, sandbox_config, make_sandbox_task, claude_home,
-    ):
-        """Deleting the Claude operations from the CLAUDE plan yields the NATIVE
-        plan *exactly*, in order.
-
-        This is the assertion that the split moved nothing else. Ordering is
-        load-bearing in three places (cache bind before repos bind, the
-        `.developer` re-bind after `user_temp_dir`, the masks last), and an
-        equality over the remaining sequence is what says none of them shifted.
-        """
-        sandbox_config.brain.custom_system_prompt = True
-        sp = sandbox_config.skills_dir.parent / "system-prompt.md"
-        sp.parent.mkdir(parents=True, exist_ok=True)
-        sp.write_text("custom prompt")
-        user_temp = sandbox_config.temp_dir / "alice"
-        (user_temp / ".developer").mkdir(parents=True)
-
-        claude, native = self._both(sandbox_config, make_sandbox_task())
-
-        claude_ops = _ops(claude)
-        generic = [op for op in claude_ops if not _touches_claude(op, claude_home, sp)]
-        assert generic == _ops(native)
-        # And the removed set is non-empty, or the equality above is vacuous.
-        assert len(claude_ops) > len(generic)
-        # The command itself, and everything after the `--`, is untouched.
-        assert claude[claude.index("--"):] == native[native.index("--"):]
-
-    def test_the_system_prompt_is_bound_under_claude_and_not_under_native(
-        self, sandbox_config, make_sandbox_task, claude_home,
-    ):
-        sandbox_config.brain.custom_system_prompt = True
-        sp = sandbox_config.skills_dir.parent / "system-prompt.md"
-        sp.parent.mkdir(parents=True, exist_ok=True)
-        sp.write_text("custom prompt")
-        (sandbox_config.temp_dir / "alice").mkdir(parents=True)
-
-        claude, native = self._both(sandbox_config, make_sandbox_task())
-
-        assert str(sp) in claude
-        assert str(sp) not in native
-        assert str(sp.resolve()) not in native
 
     def test_a_missing_profile_is_a_typeerror(
         self, sandbox_config, make_sandbox_task,

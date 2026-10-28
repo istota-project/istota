@@ -589,6 +589,11 @@ CASES: tuple[Case, ...] = (
         conversation_token="room-token",
         brain="native",
     ),
+    # The CLI on the tool harness. Against `base_nextcloud`, which it differs
+    # from in nothing but the switch: the diff is `untrusted_input` moving from
+    # the menu into a body section, because the harness offers the daemon-side
+    # WebFetch. The page-reading line is the same in both, since a CLI task off
+    # the harness has the CLI's own WebFetch.
     # A user with something in the shared-credential namespace. Against
     # `base_nextcloud`, which it differs from in nothing else, so the diff
     # between the two goldens is exactly the two lines the namespace buys —
@@ -750,7 +755,9 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
         # `room_selectable` is the operator gate `resolve_brain_kind` checks,
         # so a case that pins a brain has to name it here or the pin is refused
         # and the golden quietly becomes a copy of its sibling.
-        brain=BrainConfig(room_selectable=[case.brain] if case.brain else []),
+        brain=BrainConfig(
+            room_selectable=[case.brain] if case.brain else [],
+        ),
         emissaries_enabled=case.emissaries,
         admin_users=set() if case.admin else {OTHER_USER},
         users={
@@ -1548,34 +1555,34 @@ def test_the_two_rules_blocks_differ_only_where_privilege_requires(tmp_path, mon
     assert "goes in the deliverable" in user["3c."]
 
 
-def test_a_room_pinned_to_native_assembles_a_different_prompt(tmp_path, monkeypatch):
-    """The routed golden is not a copy of its `claude_code` sibling.
+def test_a_room_pinned_to_native_is_admitted_and_folds_the_same_guidance(
+    tmp_path, monkeypatch,
+):
+    """The routed golden and its `claude_code` sibling are now the same prompt.
 
     `room_brain_native` and `source_talk` differ in `tasks.brain` and in
-    nothing else, so an equal pair says the pin was refused rather than
-    admitted — and a golden regenerated from a refusal records the refusal and
-    goes green for ever after. Two ways to get there, neither of which any
-    other assertion in this module can see: `resolve_brain_kind` dropping the
-    override, and `[brain] room_selectable` losing the name the fixture seeds,
-    which is a refusal that looks exactly like a deployment that never opted
-    in.
-
-    Asserted on a fresh assembly rather than on the two files, because the
-    files agree with each other again the moment somebody regenerates them.
-    The specific move is named rather than left to `!=`: the eager set is the
-    only route the brain kind has into the prompt (`_native_web_fetch_enabled`
-    folds `untrusted_input` in for an admin's native task), so a difference
-    anywhere else would be some other change wearing this test's label.
+    nothing else. The eager set was the only route the brain kind had into the
+    prompt (`_native_web_fetch_enabled` folding `untrusted_input` in), and
+    since the CLI brain carries the same daemon-side WebFetch through its
+    harness (cli-brain-tools part 2, Stage 6) both fold it in. So equal files no
+    longer say the pin was refused, and the admission is asserted directly on
+    the fixture's own brain config instead.
     """
+    from istota.brain import resolve_brain_kind
+
     routed = assemble(CASES_BY_NAME["room_brain_native"], tmp_path / "routed", monkeypatch)
     inherited = assemble(CASES_BY_NAME["source_talk"], tmp_path / "inherited", monkeypatch)
 
-    assert routed != inherited
-
     menu_line = "  - untrusted_input: the untrusted_input skill"
     body = "### Untrusted Input"
-    assert menu_line in inherited and body not in inherited
-    assert body in routed and menu_line not in routed
+    for prompt in (routed, inherited):
+        assert body in prompt and menu_line not in prompt
+    assert routed == inherited
+
+    admitted = resolve_brain_kind(
+        "talk", BrainConfig(room_selectable=["native"]), override="native",
+    )
+    assert admitted.kind == "native"
 
 
 def test_every_golden_file_belongs_to_a_case():

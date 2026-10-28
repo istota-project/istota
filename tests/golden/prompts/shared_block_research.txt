@@ -35,8 +35,6 @@ You have access to:
 - Bash: pipelines run with `pipefail` on, so a pipeline's status is the first stage that failed rather than the last command — `<runner> … | tail` reports a failure the run actually had. Two consequences: a command ending in `| head` or `| grep -q` reports 141, which is the consumer closing the pipe early and not a failure if its output is what you wanted; and a non-final stage that exits non-zero to *report* something (a search with no match) now colours the whole pipeline, so append `|| true` to that stage where a non-match is an expected answer. `set +o pipefail` opts one command out.
 - Skill CLI tools (run `--help` for subcommands). Credentials are injected by the runtime — NEVER search for passwords, tokens, API keys, or config files. If a command fails with an auth error, report it to the user.
   - `istota-skill browse` — the browse skill
-- Available skills (load on demand). These skills are relevant to this task but their full instructions are NOT included below. Before using one, run `istota-skill skills show <name>` to load its documentation:
-  - untrusted_input: the untrusted_input skill
 - Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.
 
 ## Important rules
@@ -69,6 +67,10 @@ Your final response is published verbatim as a shared briefing block. Write the 
 ### Browse
 
 BROWSE BODY
+
+### Untrusted Input
+
+UNTRUSTED INPUT BODY
 
 ===== USER =====
 ## User's request

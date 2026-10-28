@@ -139,7 +139,7 @@ def _device_probe(path):
 def _run_probe(script, config, task, user_temp):
     cmd = build_bwrap_cmd(
         ["/bin/sh", "-c", script], config, task, False, [], user_temp,
-        profile=SandboxProfile.CLAUDE,
+        profile=SandboxProfile.NATIVE,
     )
     assert cmd[0] == "bwrap", "sandbox unavailable — probe would have run unsandboxed"
     return subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -339,7 +339,7 @@ class TestTheCacheBindSymlinkRace:
     def _build(config, task, user_temp, script, *, is_admin):
         cmd = build_bwrap_cmd(
             ["/bin/sh", "-c", script], config, task, is_admin, [], user_temp,
-            profile=SandboxProfile.CLAUDE,
+            profile=SandboxProfile.NATIVE,
         )
         assert cmd[0] == "bwrap", "sandbox unavailable — probe would have run unsandboxed"
         return cmd

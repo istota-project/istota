@@ -168,6 +168,75 @@ def test_every_mode_renders_a_configuration_nginx_accepts(
         assert text not in conf, f"{case}: {text!r} present in\n{conf}"
 
 
+CONSOLE_LOCATION = "location = /istota/api/admin/browsers/console {"
+CONSOLE_DIRECTIVES = [
+    "proxy_pass http://$upstream_web;",
+    "proxy_http_version 1.1;",
+    "proxy_set_header Upgrade $http_upgrade;",
+    "proxy_set_header Connection $connection_upgrade;",
+    "proxy_set_header X-Forwarded-Proto $forwarded_proto;",
+    "proxy_buffering off;",
+    "proxy_read_timeout 3600s;",
+]
+#: The one mode whose rendered server does not serve the app: port 80 only,
+#: answering the ACME challenge and redirecting everything else.
+NO_APP_MODES = {"direct-acme-before-the-first-certificate"}
+
+
+def _effective_config(nginx_image, tmp_path, *, env, cert_layout, cert_pair) -> str:
+    """`nginx -T`: every file nginx actually loaded, after the script rendered them."""
+    argv = [
+        "docker", "run", "--rm",
+        "-v", f"{NGINX_DIR}:/etc/istota-nginx:ro",
+        "-v", f"{SCRIPT}:/docker-entrypoint.d/15-istota-ingress.sh:ro",
+        "-v", f"{_cert_dir(tmp_path, cert_pair, cert_layout)}:/etc/nginx/certs:ro",
+    ]
+    for name, value in env.items():
+        argv += ["-e", f"{name}={value}"]
+    argv += ["--entrypoint", "sh", nginx_image, "-c",
+             "/docker-entrypoint.d/15-istota-ingress.sh >/dev/null && nginx -T 2>&1"]
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, f"exit {result.returncode}\n{result.stdout}\n{result.stderr}"
+    assert "test is successful" in result.stdout, result.stdout
+    return result.stdout
+
+
+def _block(config: str, opener: str) -> str:
+    """The text of the block `opener` starts, up to its matching brace."""
+    start = config.index(opener) + len(opener)
+    depth = 1
+    for index in range(start, len(config)):
+        if config[index] == "{":
+            depth += 1
+        elif config[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return config[start:index]
+    raise AssertionError(f"unterminated block after {opener!r}")
+
+
+@pytest.mark.parametrize(
+    "case, env, cert_layout", [mode[:3] for mode in MODES], ids=[mode[0] for mode in MODES],
+)
+def test_every_mode_relays_the_browser_console_as_a_websocket(
+    nginx_image, cert_pair, tmp_path, case, env, cert_layout,
+):
+    """The admin browser console's exact-match location, as nginx loaded it."""
+    config = _effective_config(nginx_image, tmp_path, env=env, cert_layout=cert_layout,
+                               cert_pair=cert_pair)
+    directives = "\n".join(line for line in config.splitlines() if not line.strip().startswith("#"))
+
+    if case in NO_APP_MODES:
+        assert CONSOLE_LOCATION not in directives, f"{case}: served before the certificate"
+        return
+    assert directives.count(CONSOLE_LOCATION) == 1, f"{case}: no single console location"
+    block = _block(directives, CONSOLE_LOCATION)
+    for directive in CONSOLE_DIRECTIVES:
+        assert directive in block, f"{case}: {directive!r} missing from\n{block}"
+    # The upgrade header's value comes from the map istota-ingress.sh writes.
+    assert "map $http_upgrade $connection_upgrade" in directives, case
+
+
 def test_the_tls_floor_is_tls_1_2(nginx_image, cert_pair, tmp_path):
     result = subprocess.run(
         ["docker", "run", "--rm",

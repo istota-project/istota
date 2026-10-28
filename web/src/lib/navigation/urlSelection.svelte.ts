@@ -16,6 +16,8 @@ export interface UrlSelectionSpec<T> {
 }
 export interface UrlSelection<T> {
   push(sel: T): void;
+  /** Apply and write over the current entry, adding none to history. */
+  replace(sel: T): void;
   /** Install effects once during component initialization. */
   start(): void;
   current(): T | null;
@@ -84,15 +86,23 @@ export function createUrlSelection<T>(spec: UrlSelectionSpec<T>): UrlSelection<T
     }
   }
 
-  function push(sel: T): void {
+  function select(sel: T, push: boolean): void {
     try {
       const params = spec.encode(sel);
       if (started && canonical(params, spec.params) === canonical(urlParams(), spec.params)) return;
       apply(sel);
-      if (started) write(params, true);
+      if (started) write(params, push);
     } catch (error) {
       warn(error);
     }
+  }
+
+  function push(sel: T): void {
+    select(sel, true);
+  }
+
+  function replace(sel: T): void {
+    select(sel, false);
   }
 
   function start(): void {
@@ -135,5 +145,5 @@ export function createUrlSelection<T>(spec: UrlSelectionSpec<T>): UrlSelection<T
     });
   }
 
-  return { push, start, current };
+  return { push, replace, start, current };
 }

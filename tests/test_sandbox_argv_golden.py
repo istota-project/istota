@@ -124,7 +124,7 @@ class Case:
     """
 
     name: str
-    profile: SandboxProfile = SandboxProfile.CLAUDE
+    profile: SandboxProfile = SandboxProfile.NATIVE
     is_admin: bool = True
     #: Empty means `Config.is_admin` answers True for everyone, which is what
     #: `sandbox_cache_is_derived` reads — the `is_admin` argument above does
@@ -499,8 +499,8 @@ def build_argv(case: Case, root: Path, monkeypatch, *, raw: bool = False) -> lis
     root.mkdir(parents=True, exist_ok=True)
     world = _make_world(root, case)
     config = _make_config(case, world)
-    # Every golden is a subscription deployment, whose CLAUDE wrap binds the
-    # credentials file; under "api_key" it does not (tests/test_claude_cli_auth.py).
+    # Every golden is a subscription deployment. No profile binds the CLI's
+    # credentials file in either mode any more (tests/test_claude_cli_auth.py).
     config.brain.claude_code.auth = "subscription"
 
     monkeypatch.setenv("HOME", str(world["home"]))
@@ -834,7 +834,6 @@ AXES = {
     "resolved groups": lambda c: bool(c.group_ids),
     "read-only resource": lambda c: any(p == _RO for _, p in c.resources),
     "read-write resource": lambda c: any(p == _RW for _, p in c.resources),
-    "NATIVE profile": lambda c: c.profile is SandboxProfile.NATIVE,
     "network isolation": lambda c: c.net_proxy_sock,
     "extra read-only binds": lambda c: bool(c.extra_ro_binds),
     "custom system prompt": lambda c: c.custom_system_prompt,

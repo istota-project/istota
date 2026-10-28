@@ -33,6 +33,8 @@ from istota.config import (
     SecurityConfig,
 )
 
+pytestmark = pytest.mark.usefixtures("cli_without_tool_server")
+
 
 def _write_skill_md(base_dir: Path, name: str, frontmatter: dict) -> Path:
     skill_dir = base_dir / name

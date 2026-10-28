@@ -31,7 +31,10 @@ What this file pins, and why each is here rather than left to
 from __future__ import annotations
 
 import ast
+import json
 import logging
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -190,7 +193,7 @@ class TestEachCallerKeepsItsRequestShape:
         assert req.timeout_seconds == 180
         assert req.allowed_tools == ["Read"]
         assert req.fs_read_roots == [document]
-        assert req.sandbox_wrap is not None
+        assert req.tool_server_wrap is not None
         assert Path(req.cwd) == (config.temp_dir / "alice").resolve()
         assert req.streaming is False
 
@@ -213,10 +216,11 @@ class TestEachCallerKeepsItsRequestShape:
         assert req.timeout_seconds == 120
         assert req.allowed_tools == []
         assert req.fs_read_roots is None
-        assert req.sandbox_wrap is None, (
+        assert req.tool_server_wrap is None, (
             "the explainer grants no tool and never built a namespace; adding "
             "one here is a runtime change, not a tightening"
         )
+        assert req.harness is None
         assert Path(req.cwd) == config.temp_dir
 
     @pytest.mark.parametrize(
@@ -328,7 +332,7 @@ class TestTheHelperCannotBeAskedForAnUnconfinedGrant:
     it: the explainer had no ``read_path`` parameter and the three extractors
     had no way to skip the namespace. One function with two keywords can, and
     the tree-wide AST guard in ``test_brain_request_confinement.py`` cannot see
-    it — it requires ``sandbox_wrap=`` to be present and not a literal ``None``,
+    it — it requires ``tool_server_wrap=`` to be present and not a literal ``None``,
     and what it now reads is a bare name that is ``None`` on a live branch.
 
     So these go against ``call_health_brain`` directly rather than through a
@@ -355,7 +359,7 @@ class TestTheHelperCannotBeAskedForAnUnconfinedGrant:
 
         assert result is None
         assert requests == [], (
-            "a Read grant with sandbox_wrap=None is the ISSUE-397 exposure "
+            "a Read grant with no wrap is the ISSUE-397 exposure "
             "verbatim; the request must not be built at all"
         )
         assert persisted == []
@@ -386,9 +390,9 @@ class TestTheHelperCannotBeAskedForAnUnconfinedGrant:
 
         assert len(requests) == 2
         assert requests[0].allowed_tools == []
-        assert requests[0].sandbox_wrap is None
+        assert requests[0].tool_server_wrap is None
         assert requests[1].allowed_tools == ["Read"]
-        assert requests[1].sandbox_wrap is not None
+        assert requests[1].tool_server_wrap is not None
 
 
 class TestEachCallerKeepsItsLoggerName:
@@ -483,3 +487,80 @@ class TestTheHelperStillFailsSoft:
 
         assert module._call_brain("extract this", None, user_id="alice") is None
         assert requests == []
+
+
+FAKE_CLI = Path(__file__).parent / "support" / "fake_claude_cli.py"
+
+
+class TestTheExtractorRunsOnTheToolHarness:
+    """Through the real seam: ``call_health_brain`` with the real
+    ``ClaudeCodeBrain`` and ``tests/support/fake_claude_cli.py`` on PATH as
+    ``claude``, which starts the real adapter, so each ``Read`` goes adapter,
+    bridge, dispatcher, tool server.
+
+    ``sandbox_enabled = false`` is the case the identity wrap exists for: the
+    request carries ``fs_read_roots``, and the brain refuses roots with no wrap.
+    The second case keeps the flag on with bwrap unavailable, which is macOS
+    and the web container.
+    """
+
+    def _run(self, monkeypatch, make_config, tmp_path, *, sandbox_enabled):
+        import istota.executor as executor_mod
+        from istota.health._brain_call import call_health_brain
+
+        monkeypatch.setattr(executor_mod, "persist_brain_usage", lambda *a, **k: None)
+        monkeypatch.setattr(executor_mod, "_bwrap_available", lambda: False)
+        document = tmp_path / "uploads" / "7" / "panel.txt"
+        document.parent.mkdir(parents=True)
+        document.write_text("panel-sentinel-4f1c\n")
+        outside = tmp_path / "uploads" / "7" / "other-patient.txt"
+        outside.write_text("other-sentinel-9a7e\n")
+        record = tmp_path / "record.json"
+        plan = tmp_path / "plan.json"
+        plan.write_text(json.dumps({"record": str(record), "calls": [
+            {"name": "Read", "args": {"file_path": str(document.resolve())}},
+            {"name": "Read", "args": {"file_path": str(outside.resolve())}},
+        ]}))
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        shim = bin_dir / "claude"
+        shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_CLI}" "$@"\n')
+        shim.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}")
+        monkeypatch.setenv("FAKE_CLAUDE_PLAN", str(plan))
+        config = make_config()
+        config.security.sandbox_enabled = sandbox_enabled
+        config.security.passthrough_env_vars = [
+            *config.security.passthrough_env_vars, "FAKE_CLAUDE_PLAN",
+        ]
+
+        text = call_health_brain(
+            "extract this", config, origin="health_ocr", user_id="alice",
+            read_path=document.resolve(),
+        )
+        seen = json.loads(record.read_text()) if record.exists() else {}
+        return text, seen, config
+
+    @pytest.mark.parametrize(
+        "sandbox_enabled", [False, True], ids=["sandbox-off", "no-bwrap"]
+    )
+    def test_the_read_runs_in_the_tool_server_under_the_document_root(
+        self, monkeypatch, make_config, tmp_path, sandbox_enabled
+    ):
+        text, seen, config = self._run(
+            monkeypatch, make_config, tmp_path, sandbox_enabled=sandbox_enabled,
+        )
+
+        assert text is not None, "the extraction did not run"
+        assert "panel-sentinel-4f1c" in text
+        assert "other-sentinel-9a7e" not in text, (
+            "the tool server read outside the document root"
+        )
+        assert "outside the allowed workspace" in text
+        argv = seen["argv"]
+        assert "--mcp-config" in argv and "--strict-mcp-config" in argv
+        assert argv[argv.index("--tools") + 1] == ""
+        harness_dir = Path(seen["env"]["CLAUDE_CONFIG_DIR"]).parent
+        assert harness_dir.parent == (
+            config.temp_dir.resolve() / ".harness" / "alice" / "task_0"
+        )

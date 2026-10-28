@@ -15,7 +15,9 @@ with its tools in the tool server. The CLI spawns
 ``python -I -m istota.sandbox.mcp_adapter --socket <path>`` from the
 ``mcp_config.json`` written here; the adapter connects to a Unix socket this
 module listens on, and each call goes through a ``ToolDispatcher`` over
-``build_remote_tools`` to the tool server under the NATIVE profile.
+``build_remote_tools`` to the tool server under the NATIVE profile, or, for
+``WebFetch`` when ``HarnessSpec.web_fetch`` carries a policy, to the
+daemon-side tool native uses (``request_web_fetch_tool``).
 
 ``claude_code.py`` reaches the harness only through ``tool_harness``,
 ``HarnessHandle``, ``set_cli_root`` and ``release_calls``. The listener, the
@@ -53,6 +55,7 @@ import functools
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import sys
@@ -109,7 +112,7 @@ def request_tool_workspace(req: BrainRequest):
     reach (`istota repl --workspace`) keeps it, and one whose cwd is the shared
     temp root does not land there. With no roots, ``req.cwd``.
 
-    Shared by the ``hello`` frame and the daemon-side ``ToolEnv`` that native's
+    Shared by the ``hello`` frame and the daemon-side ``ToolEnv`` that
     ``WebFetch`` is bound to, so the two cannot disagree about where a task is.
     """
     read_roots = tuple(req.fs_read_roots) if req.fs_read_roots else None
@@ -121,13 +124,50 @@ def request_tool_workspace(req: BrainRequest):
     return cwd, read_roots, write_roots, write_denied_roots
 
 
+# URL harvester for require_url_provenance. Matches http(s) URLs in free text;
+# trailing punctuation the wrapping prose contributes is trimmed.
+_URL_RE = re.compile(r"https?://[^\s<>\"'`\])}]+", re.IGNORECASE)
+
+
+def extract_urls(text: str) -> frozenset[str]:
+    if not text:
+        return frozenset()
+    return frozenset(m.rstrip(".,;:!?") for m in _URL_RE.findall(text))
+
+
+def request_web_fetch_tool(req: BrainRequest, policy):
+    """The daemon-side ``WebFetch`` for one request, or ``None``.
+
+    ``None`` when ``policy`` is absent or disabled. Shared by NativeBrain and
+    the CLI harness's bridge, so both bind it to the same workspace and the
+    same provenance corpus: the URLs in ``req.prompt``, the user half only.
+    It runs in the daemon, not the tool server: a credential-free request
+    whose hardening is about the addresses it resolves.
+    """
+    if policy is None or not policy.enabled:
+        return None
+    from istota.session.tools import ToolEnv, make_web_fetch_tool
+
+    corpus = extract_urls(req.prompt) if policy.require_url_provenance else None
+    cwd, read_roots, write_roots, write_denied_roots = request_tool_workspace(req)
+    return make_web_fetch_tool(ToolEnv(
+        cwd=cwd,
+        read_roots=read_roots,
+        write_roots=write_roots,
+        write_denied_roots=write_denied_roots,
+        web_fetch=policy,
+        web_fetch_url_corpus=corpus,
+    ))
+
+
 def request_hello(req: BrainRequest, *, bash_spill_full_output: bool) -> dict:
     """What the tool server is told about this task.
 
     ``subprocess_env`` is ``req.env`` minus the Claude runtime names
-    (ISSUE-390): ``build_clean_env`` puts the CLI's credential in every task
-    env whatever brain runs it, and nothing in the tool server reads it, so its
-    only effect would be a Bash ``echo`` that returns it to the model.
+    (ISSUE-390). No task env carries the CLI's credential any more
+    (``build_clean_env`` names the mode only), so this is defence in depth: a
+    future env builder that put it back would hand it to a Bash ``echo``,
+    since nothing in the tool server reads it.
 
     **The strip happens here and at the spawn, and both are needed.** This
     frame decides what a Bash child is handed; the spawn decides what the
@@ -173,8 +213,7 @@ async def start_request_tool_server(
     ``None`` for a text-only request (empty ``allowed_tools``): those callers
     spawn nothing.
 
-    The wrap is ``req.native_sandbox_wrap``, never ``req.sandbox_wrap``, which
-    builds the CLI's namespace, credential and all (ISSUE-389). A failure raises
+    The wrap is ``req.tool_server_wrap``. A failure raises
     ``ToolServerError``; there is no fallback to in-process tools.
 
     ``start_tool_server`` is looked up on ``istota.session.tools`` at call time,
@@ -186,7 +225,7 @@ async def start_request_tool_server(
 
     return await start_tool_server(
         request_hello(req, bash_spill_full_output=bash_spill_full_output),
-        sandbox_wrap=req.native_sandbox_wrap,
+        sandbox_wrap=req.tool_server_wrap,
         task_cgroup_path=req.task_cgroup,
         cwd=Path(req.cwd),
         # Stripped here as well as in the hello: this is what the server
@@ -406,6 +445,9 @@ class _Bridge:
         self._server = server
 
         tools = {tool.schema.name: tool for tool in build_remote_tools(server)}
+        web_fetch = request_web_fetch_tool(self._req, self._req.harness.web_fetch)
+        if web_fetch is not None:
+            tools[web_fetch.schema.name] = web_fetch
         self._dispatcher = ToolDispatcher(
             tools, offered=self._req.allowed_tools, text_cap=HARNESS_TEXT_CAP_CHARS,
         )

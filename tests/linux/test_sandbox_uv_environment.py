@@ -147,7 +147,7 @@ def run_probe(script, config, task, user_temp, *, is_admin=True, **kwargs):
     """
     cmd = build_bwrap_cmd(
         ["/bin/sh", "-c", script], config, task, is_admin, [], user_temp,
-        profile=SandboxProfile.CLAUDE, **kwargs,
+        profile=SandboxProfile.NATIVE, **kwargs,
     )
     assert cmd[0] == "bwrap", "sandbox unavailable — probe would have run unsandboxed"
     return subprocess.run(cmd, capture_output=True, text=True, timeout=120)

@@ -34,6 +34,15 @@ cp -a /usr/share/novnc/. "$BROWSER_RUNTIME_DIR/web/"
 printf '[]\n' > "$BROWSER_RUNTIME_DIR/web/instances.json"
 chown -R browser:browser "$BROWSER_RUNTIME_DIR"
 
+# The web container's console relay reaches each x11vnc through a socket in
+# this shared volume: browser writes, group 10001 (web's gid) may only traverse.
+# No volume, no directory: the pool then starts x11vnc without the socket.
+CONSOLE_DIR="/run/istota-browser-console"
+if [ -d "$CONSOLE_DIR" ]; then
+    install -d -o browser -g 10001 -m 2710 "$CONSOLE_DIR"
+    find "$CONSOLE_DIR" -mindepth 1 -maxdepth 1 -name '*.sock' -delete
+fi
+
 # One TLS listener routes operator viewers to the requested live instance.
 websockify --web "$BROWSER_RUNTIME_DIR/web" --cert "$CERT_DIR/combined.pem" \
     --token-plugin TokenFile --token-source "$BROWSER_RUNTIME_DIR/vnc-tokens" 6080 &

@@ -12,6 +12,9 @@ from tests.test_executor_streaming import (
     _patch_executor,
     contextmanager_chain,
 )
+import pytest
+
+pytestmark = pytest.mark.usefixtures("cli_without_tool_server")
 
 
 def _task(**kw) -> Task:

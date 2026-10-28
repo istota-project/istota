@@ -121,7 +121,7 @@ No `[ntfy]` block: per-user secrets (`credentials.schema.CONNECTED_SERVICE_SCHEM
 
 `skill_proxy_timeouts` ships empty; the `code_review` ceiling is `sandbox.skill_proxy.DEFAULT_SKILL_TIMEOUTS` (ISSUE-448). `skill_client_wait_seconds` (600) caps every skill budget at it minus 30s (ISSUE-450).
 
-`sandbox_ro_paths` defaults to `[]` and is now parsed; it never was, so every deployment ran `["/srv/app"]`, exposing every DB to every task. DB masks are applied after it. `[brain] custom_system_prompt` no longer needs it: `build_bwrap_cmd` binds the single file (`custom_system_prompt_path`). `sandbox_admin_db_write` is removed; a stale key warns.
+`sandbox_ro_paths` defaults to `[]` and is now parsed; it never was, so every deployment ran `["/srv/app"]`, exposing every DB to every task. DB masks are applied after it. `[brain] custom_system_prompt` does not need it either: no sandbox binds the file, since the native brain reads it in the daemon and the `claude` CLI runs outside the sandbox. `sandbox_admin_db_write` is removed; a stale key warns.
 
 ### Package caches
 
@@ -166,7 +166,7 @@ Sweep (ISSUE-317): `sandbox_cache_sweep_enabled`, `sandbox_cache_max_gb` (10/use
 `[brain]`: `kind` (`claude_code`|`native`), `source_type_overrides` (unknown targets ignored; `brain.resolve_brain_kind`), `room_selectable`, `fallback`, `fallback_on_transient` (ISSUE-212), `fallback_cooldown_seconds`.
 
 - `fallback = ""` means none for every kind (ISSUE-362). `_validate_brain_fallback` neutralizes unknown kinds and a self-fallback unless a `source_type_overrides` entry routes elsewhere. See brain.md "Brain fallback".
-- `room_selectable` (empty) bounds kinds a room (`!brain`, web) or CRON.md job may pin (ISSUE-419), since `resolve_brain_kind` applies it regardless of provenance; a separate `job_selectable` was rejected (rename is a follow-up). `cron_loader.fj_brain_or_none` drops non-admin job pins (CRON.md is model-writable). Empty by default because a kind decides the loop's process, tools and sandbox profile. `_validate_room_selectable` warns on unbuildable names. A pin clears `fallback`; `brain.reachable_brain_kinds` widens doctor. The operator writes it in their own config.
+- `room_selectable` (empty) bounds kinds a room (`!brain`, web) or CRON.md job may pin (ISSUE-419), since `resolve_brain_kind` applies it regardless of provenance; a separate `job_selectable` was rejected (rename is a follow-up). `cron_loader.fj_brain_or_none` drops non-admin job pins (CRON.md is model-writable). Empty by default because a kind decides the loop's process, its credentials and its tools. `_validate_room_selectable` warns on unbuildable names. A pin clears `fallback`; `brain.reachable_brain_kinds` widens doctor. The operator writes it in their own config.
 - The retired `tmux_claude` kind loads as `claude_code` wherever it is named (`kind`, `fallback`, `source_type_overrides` values, `room_selectable`), each with a `retired` warning (`_retire_tmux_brain`). `[brain.tmux]` is ignored with a `retired` warning; its `model`/`effort` fill an unset `[brain.claude_code]` one when `kind` was `tmux_claude`.
 
 `[brain.claude_code]`: own `model`/`effort` (ISSUE-418), `auth`, and the subscription usage poll, read whatever `kind` is.
@@ -190,7 +190,7 @@ Sweep (ISSUE-317): `sandbox_cache_sweep_enabled`, `sandbox_cache_max_gb` (10/use
 - `model_overrides`: legacy, read under `[models.overrides]`, keyed by bare id, and keeps the old reach over the default for a model no layer has (`Catalogue.legacy_override_keys`).
 - `model_catalog_fetch`/`model_catalog_cache_ttl_hours`: legacy names for the provider's `discover` / `discover_ttl_hours`, which the scheduler's `model-catalogue` gate reads (`llm/discovery.py`); doctor's `models.catalogue` names them while they are set. The cache moved from `{db_path.parent}/openrouter_models.json` (read once as `openrouter`'s initial cache) to `{db_path.parent}/model-catalogue/<provider>.json`.
 - `compaction_*_tokens`: 0 derives from the window, capped at 16k/20k (NB-14).
-- `web_fetch`: on by default; all fields but `admin_only` map to `WebFetchPolicy`. `require_url_provenance` only fetches URLs from the prompt. `admin_only` (false since ISSUE-449) is read only by `executor.build_allowed_tools`.
+- `web_fetch`: on by default, for both brains (a `claude_code` task gets it through the tool harness); all fields but `admin_only` map to `WebFetchPolicy`. `require_url_provenance` only fetches URLs from the prompt. `admin_only` (false since ISSUE-449) is read only by `executor.build_allowed_tools`.
 - `session_log`: `retention_days` (14), `max_total_gb` (2.0 across all users, 0.5 floor; 0 drops it, hence the sweep's `or` gate); on the char caps 0 means no cap. `session_log.resolve_session_log_dir` maps `""` to `{db_path.parent}/logs` (bound at no path; the stack masks `db_path.parent` too, a config with the database in the workspace does not). A set `dir` is literal; `/`, `.`, `..` or a null byte fall back, since the sweep deletes under it. Defaults pinned by `tests/test_config_native_session_log.py`.
 - `bash_spill_full_output`: over-cap Bash output goes to a task-scoped file named in the result.
 - `turn_budget_nudge*` (ISSUE-187): one notice at the early percent, one per remaining-steps level, on tool-bearing runs with `max_turns`; since ISSUE-373 also against a wall-clock turn estimate.

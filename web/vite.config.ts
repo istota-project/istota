@@ -39,6 +39,7 @@ export default defineConfig(({ command }) => {
           '/istota/api': {
             target: 'http://localhost:8766',
             changeOrigin: true,
+            ws: true,
           },
         },
       };

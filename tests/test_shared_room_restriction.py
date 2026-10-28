@@ -156,7 +156,7 @@ def _run(
             outcome = execute_task(task, config, [], conn=conn)
         assert captured, f"the brain was never called: {outcome!r}"
         req = captured[0]
-        argv = req.sandbox_wrap(["claude", "-p"])
+        argv = req.tool_server_wrap(["claude", "-p"])
 
     assert mock_proxy.call_args is not None, "no skill proxy was built"
     args, kwargs = mock_proxy.call_args
@@ -376,7 +376,7 @@ class TestTheMountPlanPerScope:
         ), patch("istota.executor.python_base_prefix_binds", return_value=[]):
             plan = build_mount_plan(
                 config, task, True, resources, world["user_temp"],
-                profile=SandboxProfile.CLAUDE, withheld_scopes=withheld,
+                profile=SandboxProfile.NATIVE, withheld_scopes=withheld,
             )
         return {m.reason for m in plan.mounts}
 
@@ -384,16 +384,16 @@ class TestTheMountPlanPerScope:
         reasons = self._plan(tmp_path, monkeypatch, frozenset())
         assert {
             "nextcloud_user_dir", "user_resource", "developer_repos", "package_cache",
-            "claude_projects",
         } <= reasons
+        # The CLI's session JSONL was bound for a member's turn and carved out
+        # for a shared room; with the CLAUDE profile gone it is bound for none.
+        assert not {r for r in reasons if r.startswith("claude_")}
 
     def test_files_withheld_drops_the_workspace_and_resources(
         self, tmp_path, monkeypatch,
     ):
         reasons = self._plan(tmp_path, monkeypatch, frozenset({"files"}))
         assert "nextcloud_user_dir" not in reasons
-        # Every earlier task's CLI session JSONL is under here.
-        assert "claude_projects" not in reasons
         assert "user_resource" not in reasons
         assert {"developer_repos", "package_cache"} <= reasons
 
