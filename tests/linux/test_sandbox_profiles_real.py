@@ -313,13 +313,16 @@ def test_the_probe_helper_refuses_an_unsandboxed_run(layout, task, user_temp):
         run_probe("true", layout, task, user_temp, profile=SandboxProfile.NATIVE)
 
 
+@pytest.mark.parametrize("source_type", ["group_briefing_research", "shared_block_research"])
 @pytest.mark.parametrize("profile", list(SandboxProfile))
-def test_briefing_research_has_scratch_without_personal_or_group_files(layout, claude_home, make_task, profile):
+def test_briefing_research_has_scratch_without_personal_or_group_files(
+    layout, claude_home, make_task, profile, source_type,
+):
     from istota.executor import task_temp_dir
     from istota.rooms.scopes import withheld_for_task
     from istota.skills._loader import load_skill_index
 
-    task = make_task(id=19, user_id="__briefings__", source_type="group_briefing_research")
+    task = make_task(id=19, user_id="__briefings__", source_type=source_type)
     scratch = task_temp_dir(layout, task, restricted=True)
     scratch.mkdir(parents=True)
     targets = [layout.workspace_path / "Users" / "alice" / "private.txt",

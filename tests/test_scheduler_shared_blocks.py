@@ -1,4 +1,8 @@
-"""Tests for check_shared_blocks cron scheduling (configurable TZ, off-dispatch worker)."""
+"""Tests for check_shared_blocks cron scheduling (configurable TZ, off-dispatch worker).
+
+Definitions are read from ``shared_block_configs`` on each pass, so the tests
+store their blocks there rather than on the config.
+"""
 
 import json
 from datetime import datetime, timezone
@@ -7,13 +11,30 @@ from istota import db, scheduler
 from istota.config import BriefingSharedBlock, Config, UserConfig
 
 
+def _store(cfg: Config, block: BriefingSharedBlock) -> None:
+    with db.get_db(cfg.db_path) as conn:
+        db.upsert_shared_block_config(
+            conn,
+            name=block.name,
+            cron=block.cron,
+            title=block.title,
+            directive=block.directive,
+            render_mode=block.render_mode,
+            enabled=block.enabled,
+            trusted=block.trusted,
+            sources=block.sources,
+        )
+
+
 def _config(tmp_path, blocks) -> Config:
     cfg = Config(
         db_path=tmp_path / "istota.db",
         workspace_path=tmp_path / "mount",
         users={"alice": UserConfig(timezone="UTC")},
     )
-    cfg.briefings.shared_blocks = blocks
+    db.init_db(cfg.db_path)
+    for block in blocks:
+        _store(cfg, block)
     return cfg
 
 
@@ -36,7 +57,6 @@ class TestCheckSharedBlocks:
         cfg = _config(tmp_path, [
             BriefingSharedBlock(name="hl", cron="0 6 * * *", sources=[]),
         ])
-        db.init_db(cfg.db_path)
         _at(monkeypatch, NOW_0605)
         _stub_generation(monkeypatch, {"text": "news"})
 
@@ -51,7 +71,6 @@ class TestCheckSharedBlocks:
         cfg = _config(tmp_path, [
             BriefingSharedBlock(name="hl", cron="0 8 * * *", sources=[]),
         ])
-        db.init_db(cfg.db_path)
         _at(monkeypatch, NOW_0605)
         _stub_generation(monkeypatch, {"text": "news"})
 
@@ -63,7 +82,6 @@ class TestCheckSharedBlocks:
         cfg = _config(tmp_path, [
             BriefingSharedBlock(name="hl", cron="0 6 * * *", enabled=False, sources=[]),
         ])
-        db.init_db(cfg.db_path)
         _at(monkeypatch, NOW_0605)
         _stub_generation(monkeypatch, {"text": "news"})
         assert scheduler.check_shared_blocks(cfg, run_inline=True) == []
@@ -72,7 +90,6 @@ class TestCheckSharedBlocks:
         cfg = _config(tmp_path, [
             BriefingSharedBlock(name="hl", cron="0 6 * * *", sources=[]),
         ])
-        db.init_db(cfg.db_path)
         _at(monkeypatch, NOW_0605)
         _stub_generation(monkeypatch, {"text": "news"})
 
@@ -82,7 +99,6 @@ class TestCheckSharedBlocks:
 
     def test_no_blocks_noop(self, tmp_path, monkeypatch):
         cfg = _config(tmp_path, [])
-        db.init_db(cfg.db_path)
         _at(monkeypatch, NOW_0605)
         assert scheduler.check_shared_blocks(cfg, run_inline=True) == []
 
@@ -93,7 +109,6 @@ class TestCheckSharedBlocks:
             BriefingSharedBlock(name="hl", cron="0 6 * * *", sources=[]),
         ])
         cfg.scheduler.cron_max_staleness_minutes = 60
-        db.init_db(cfg.db_path)
         # now = 09:00, next fire from today-start = 06:00 → 180 min stale > 60.
         _at(monkeypatch, datetime(2026, 7, 21, 9, 0, tzinfo=timezone.utc))
         _stub_generation(monkeypatch, {"text": "news"})
@@ -108,7 +123,6 @@ class TestCheckSharedBlocks:
         cfg = _config(tmp_path, [
             BriefingSharedBlock(name="hl", cron="0 6 * * *", sources=[]),
         ])
-        db.init_db(cfg.db_path)
         _at(monkeypatch, NOW_0605)
 
         started = {}
@@ -134,7 +148,6 @@ class TestCheckSharedBlocks:
             BriefingSharedBlock(name="hl", cron="0 6 * * *", sources=[]),
         ])
         cfg.briefings.shared_block_timezone = "America/Los_Angeles"
-        db.init_db(cfg.db_path)
         _at(monkeypatch, datetime(2026, 7, 21, 6, 5, tzinfo=timezone.utc))
         _stub_generation(monkeypatch, {"text": "news"})
 
@@ -151,10 +164,143 @@ class TestCheckSharedBlocks:
             BriefingSharedBlock(name="hl", cron="0 6 * * *", sources=[]),
         ])
         cfg.briefings.shared_block_timezone = "Not/A/Zone"
-        db.init_db(cfg.db_path)
         _at(monkeypatch, NOW_0605)
         _stub_generation(monkeypatch, {"text": "news"})
 
         with caplog.at_level("WARNING"):
             assert scheduler.check_shared_blocks(cfg, run_inline=True) == ["hl"]
         assert any("Not/A/Zone" in r.message for r in caplog.records)
+
+
+class TestDefinitionsReadPerPass:
+    def test_block_created_after_load_fires_on_its_cron(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path, [])
+        _at(monkeypatch, NOW_0605)
+        _stub_generation(monkeypatch, {"text": "news"})
+        assert scheduler.check_shared_blocks(cfg, run_inline=True) == []
+
+        _store(cfg, BriefingSharedBlock(name="late", cron="0 6 * * *", sources=[]))
+
+        assert cfg.briefings.shared_blocks == []
+        assert scheduler.check_shared_blocks(cfg, run_inline=True) == ["late"]
+        with db.get_db(cfg.db_path) as conn:
+            row = db.shared_kv_get(conn, "briefing_shared_blocks", "late")
+            assert json.loads(row["value"]) == {"text": "news"}
+
+    def test_edited_directive_is_used_on_the_next_pass(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path, [
+            BriefingSharedBlock(
+                name="hl", cron="0 6 * * *", directive="old prompt", sources=[],
+            ),
+        ])
+        # The boot-time overlay still holds the old definition.
+        cfg.briefings.shared_blocks = [
+            BriefingSharedBlock(
+                name="hl", cron="0 6 * * *", directive="old prompt", sources=[],
+            ),
+        ]
+        _store(cfg, BriefingSharedBlock(
+            name="hl", cron="0 6 * * *", directive="new prompt", sources=[],
+        ))
+        _at(monkeypatch, NOW_0605)
+        seen = []
+
+        def _generate(block, config, now=None):
+            seen.append(block.directive)
+            return {"text": "news"}
+
+        monkeypatch.setattr(
+            "istota.briefings.shared_blocks.run_shared_block", _generate,
+        )
+
+        assert scheduler.check_shared_blocks(cfg, run_inline=True) == ["hl"]
+        assert seen == ["new prompt"]
+
+    def test_disabling_the_row_stops_a_block_the_config_still_lists(
+        self, tmp_path, monkeypatch,
+    ):
+        block = BriefingSharedBlock(name="hl", cron="0 6 * * *", sources=[])
+        cfg = _config(tmp_path, [block])
+        cfg.briefings.shared_blocks = [block]
+        _store(cfg, BriefingSharedBlock(
+            name="hl", cron="0 6 * * *", enabled=False, sources=[],
+        ))
+        _at(monkeypatch, NOW_0605)
+        _stub_generation(monkeypatch, {"text": "news"})
+
+        assert scheduler.check_shared_blocks(cfg, run_inline=True) == []
+
+
+class TestAgentBlocks:
+    def _agent(self):
+        return BriefingSharedBlock(
+            name="ag", cron="0 6 * * *", directive="Read the pages.",
+            render_mode="agent", sources=[],
+        )
+
+    def test_a_due_agent_block_queues_a_research_task(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path, [self._agent()])
+        _at(monkeypatch, NOW_0605)
+        monkeypatch.setattr(
+            "istota.brain.primary_brain_unavailable", lambda brain_cfg: (True, None),
+        )
+
+        def _boom(*a, **k):
+            raise AssertionError("an agent block reached the synthesis pipeline")
+
+        monkeypatch.setattr("istota.briefings.shared_blocks.run_shared_block", _boom)
+
+        assert scheduler.check_shared_blocks(cfg, run_inline=True) == ["ag"]
+        with db.get_db(cfg.db_path) as conn:
+            rows = conn.execute(
+                "SELECT prompt FROM tasks WHERE source_type = 'shared_block_research'"
+            ).fetchall()
+        assert [r["prompt"] for r in rows] == ["Read the pages."]
+
+    def test_capture_runs_before_the_due_scan(self, tmp_path, monkeypatch):
+        from istota.briefings import shared_block_agent
+
+        cfg = _config(tmp_path, [
+            BriefingSharedBlock(name="hl", cron="0 6 * * *", sources=[]),
+        ])
+        _at(monkeypatch, NOW_0605)
+        order = []
+        monkeypatch.setattr(
+            shared_block_agent, "capture", lambda config: order.append("capture") or [],
+        )
+
+        def _generate(block, config, now=None):
+            order.append("generate")
+            return {"text": "news"}
+
+        monkeypatch.setattr("istota.briefings.shared_blocks.run_shared_block", _generate)
+
+        scheduler.check_shared_blocks(cfg, run_inline=True)
+        assert order == ["capture", "generate"]
+
+    def test_capture_runs_with_no_blocks_defined(self, tmp_path, monkeypatch):
+        from istota.briefings import shared_block_agent
+
+        cfg = _config(tmp_path, [])
+        _at(monkeypatch, NOW_0605)
+        calls = []
+        monkeypatch.setattr(
+            shared_block_agent, "capture", lambda config: calls.append(config) or [],
+        )
+        assert scheduler.check_shared_blocks(cfg, run_inline=True) == []
+        assert calls == [cfg]
+
+    def test_a_capture_that_raises_does_not_stop_the_scan(self, tmp_path, monkeypatch):
+        from istota.briefings import shared_block_agent
+
+        cfg = _config(tmp_path, [
+            BriefingSharedBlock(name="hl", cron="0 6 * * *", sources=[]),
+        ])
+        _at(monkeypatch, NOW_0605)
+
+        def _boom(config):
+            raise RuntimeError("locked")
+
+        monkeypatch.setattr(shared_block_agent, "capture", _boom)
+        _stub_generation(monkeypatch, {"text": "news"})
+        assert scheduler.check_shared_blocks(cfg, run_inline=True) == ["hl"]

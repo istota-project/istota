@@ -3380,6 +3380,17 @@ def _parse_shared_block_specs(entries: "list | None") -> list[BriefingSharedBloc
                 name or "?",
             )
             continue
+        if b.get("render_mode") == "agent":
+            from istota.briefings.models import validate_shared_block_payload
+
+            try:
+                validate_shared_block_payload(b)
+            except ValueError as exc:
+                report_problem(
+                    "discarded", path,
+                    "[[briefings.shared_blocks]] agent entry %r: %s; ignoring", name, exc,
+                )
+                continue
         raw_sources = b.get("sources", [])
         directive = b.get("directive")
         blocks.append(BriefingSharedBlock(
@@ -6211,8 +6222,8 @@ def load_config(
 
         # admin-shared-briefing-blocks: overlay shared_block_configs rows onto
         # config.briefings.shared_blocks. DB wins by name (admin edits survive
-        # operator re-runs); ``check_shared_blocks`` then reads DB-authoritative
-        # definitions.
+        # operator re-runs); ``check_shared_blocks`` reads the table itself on
+        # each pass.
         _apply_shared_blocks(config)
 
     # Apply operator role-alias overrides globally so every downstream call

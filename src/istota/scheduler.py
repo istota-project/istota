@@ -6117,11 +6117,24 @@ def check_shared_blocks(config: Config, *, run_inline: bool = False) -> list[str
     is stamped up front so a slow or failed generation does not re-fire every
     tick. ``run_inline=True`` runs generation synchronously (tests).
 
+    Definitions come from ``shared_block_configs`` on every pass, not from
+    ``config.briefings.shared_blocks``: that list is the boot-time overlay, so a
+    web edit or a block created since boot would otherwise wait for a restart.
+    The config's entries reach the table through the seed at daemon boot.
+
+    Agent blocks' finished research tasks are captured first, before the due
+    scan and whether or not any block is defined, so a block deleted since its
+    task was queued is still settled.
+
     Returns the list of due block names.
     """
-    blocks = getattr(config.briefings, "shared_blocks", None) or []
-    if not blocks:
-        return []
+    from istota.briefings import shared_block_agent
+    from istota.config import shared_block_from_row
+
+    try:
+        shared_block_agent.capture(config)
+    except Exception:  # noqa: BLE001 - capture never raises; the scan must run regardless
+        logger.warning("shared_block_agent_capture_raised", exc_info=True)
 
     tz_str = (config.briefings.shared_block_timezone or "").strip() or "UTC"
     try:
@@ -6134,6 +6147,7 @@ def check_shared_blocks(config: Config, *, run_inline: bool = False) -> list[str
     now_naive = _now(tz).replace(tzinfo=None)
     due = []
     with db.get_db(config.db_path) as conn:
+        blocks = [shared_block_from_row(r) for r in db.list_shared_block_configs(conn)]
         for block in blocks:
             if not getattr(block, "enabled", True) or not block.cron:
                 continue
@@ -6190,11 +6204,19 @@ def _generate_shared_block(config: Config, block) -> str:
     prior shared_kv value is kept (last-known-good); one operator alert already
     fired when the breaker opened. ``structured`` blocks never touch the brain
     (verbatim source concatenation), so they still generate when degraded.
+
+    An ``agent`` block generates nothing here: its directive is queued as a
+    research task, and ``check_shared_blocks`` captures the result later.
     """
     from istota.brain import primary_brain_unavailable
     from istota.briefings import shared_block_runs as runs
     from istota.briefings.shared_blocks import SYSTEM_IDENTITY, run_shared_block
     from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
+
+    if getattr(block, "render_mode", "synthesis") == "agent":
+        from istota.briefings import shared_block_agent
+
+        return shared_block_agent.dispatch(config, block)
 
     if getattr(block, "render_mode", "synthesis") != "structured":
         available, _reason = primary_brain_unavailable(config.brain)
@@ -11101,6 +11123,15 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
         hydrate_user_configs(config)
     except Exception as e:
         logger.warning("User config hydration failed: %s", e)
+
+    # check_shared_blocks reads only shared_block_configs, so a one-shot run
+    # seeds it as daemon boot does, or a config-only block never fires here.
+    try:
+        from . import shared_blocks_store as _sbs  # noqa: PLC0415
+
+        _sbs.import_from_config(config.db_path, config.briefings.shared_blocks)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Shared block seeding skipped: %s", e)
 
     # Poll Talk conversations.
     #

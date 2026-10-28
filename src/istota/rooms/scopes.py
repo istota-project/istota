@@ -46,8 +46,13 @@ logger = logging.getLogger(__name__)
 SYNTHETIC_SCOPES = ("files", "memory")
 
 
+#: Research tasks run as `__briefings__` behind the executor's research gate:
+#: a group edition's research, and an agent shared block's whole run.
+BRIEFING_RESEARCH_SOURCE_TYPES = frozenset({"group_briefing_research", "shared_block_research"})
+
+
 def is_briefing_research(task: "db.Task") -> bool:
-    return task.source_type == "group_briefing_research" or task.user_id == BRIEFINGS_IDENTITY
+    return task.source_type in BRIEFING_RESEARCH_SOURCE_TYPES or task.user_id == BRIEFINGS_IDENTITY
 
 
 def scope_names(skill_index: Mapping[str, object]) -> list[str]:

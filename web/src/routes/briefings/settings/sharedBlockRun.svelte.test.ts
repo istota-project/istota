@@ -248,6 +248,64 @@ describe('Shared block Run now', () => {
     expect(api.runSharedBlock).not.toHaveBeenCalled();
   }, 10_000);
 
+  it('follows an agent block past the queued answer until its task is captured', async () => {
+    notices.notifyWarning.mockClear();
+    notices.notifyError.mockClear();
+    const agentBlock = (
+      answer: SharedBlockRunAnswer | null,
+      agent: SharedBlock['status']['agent'],
+    ) => {
+      const b = block(answer);
+      b.render_mode = 'agent';
+      b.trusted = false;
+      b.sources = [];
+      b.status.agent = agent;
+      return {
+        shared_blocks: [b],
+        allowed_source_kinds: ['markets'],
+        render_modes: ['synthesis', 'structured', 'agent'],
+        shared_block_timezone: 'UTC',
+      };
+    };
+    const queued = { id: 'req-2', outcome: 'queued' as const, at: '2026-10-27T12:50:00Z' };
+    const running = {
+      task_id: 7,
+      briefing_name: 'shared_block:mk:20261027T125000Z',
+      queued_at: '2026-10-27T12:50:00Z',
+      captured: false,
+    };
+    const reads = [
+      agentBlock(null, null),
+      agentBlock(queued, running),
+      agentBlock(queued, {
+        ...running,
+        captured: true,
+        outcome: 'kept_prior',
+        answered_at: '2026-10-27T13:02:00Z',
+        consecutive_failures: 1,
+      }),
+    ];
+    const listing = api.getSharedBlocks.getMockImplementation()!;
+    api.getSharedBlocks.mockImplementation(async () =>
+      reads.length > 1 ? reads.shift()! : reads[0],
+    );
+    page.url = new URL('http://localhost/istota/briefings/settings?view=shared');
+    render(Harness, { component: Page, user: admin });
+    await pressRunNow();
+    // The queued answer is not the outcome: the row shows the task, and no notice yet.
+    expect(await screen.findByText(/Agent: queued, task #7/, {}, { timeout: 4000 })).toBeTruthy();
+    expect(notices.notifyWarning).not.toHaveBeenCalled();
+    await waitFor(
+      () =>
+        expect(notices.notifyWarning).toHaveBeenCalledWith(
+          expect.stringMatching(/^mk: The task gave no usable answer/),
+        ),
+      { timeout: 8000 },
+    );
+    expect(notices.notifyWarning).toHaveBeenCalledTimes(1);
+    api.getSharedBlocks.mockImplementation(listing);
+  }, 15_000);
+
   it('reports nothing when the page goes while a delete is in flight', async () => {
     answers.queue = [null];
     notices.notifyError.mockClear();

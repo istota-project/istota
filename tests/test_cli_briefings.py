@@ -172,6 +172,62 @@ class TestBlocksSources:
         assert "disabled" in capsys.readouterr().err.lower()
 
 
+class TestSharedEnsure:
+    PROMPT = "Read the front pages and write a linked digest."
+
+    def _ensure(self, config, *extra):
+        return cli_briefings.dispatch(
+            ["shared", "ensure", "--name", "news", "--cron", "50 5 * * *", *extra],
+            config,
+        )
+
+    def test_agent_block_with_a_prompt_and_no_sources(self, config, capsys):
+        assert self._ensure(config, "--render-mode", "agent", "--directive", self.PROMPT) == 0
+        with db.get_db(config.db_path) as conn:
+            row = db.get_shared_block_config(conn, "news")
+        assert (row.render_mode, row.directive, row.sources, row.trusted) == (
+            "agent", self.PROMPT, [], False,
+        )
+
+    @pytest.mark.parametrize("extra, message", [
+        (["--source-json", '{"kind": "browse", "config": {}}'], "agent blocks take no sources"),
+        (["--trusted"], "agent blocks are never trusted"),
+        (["--directive", "  "], "agent blocks need a task prompt"),
+    ])
+    def test_agent_block_breaking_the_rules_is_refused(self, config, capsys, extra, message):
+        args = ["--render-mode", "agent", "--directive", self.PROMPT, *extra]
+        assert self._ensure(config, *args) == 1
+        assert message in capsys.readouterr().err
+        with db.get_db(config.db_path) as conn:
+            assert db.get_shared_block_config(conn, "news") is None
+
+    def test_unknown_render_mode_is_refused(self, config, capsys):
+        assert self._ensure(config, "--render-mode", "weird") == 1
+        assert "--render-mode must be one of" in capsys.readouterr().err
+
+    def test_run_on_an_agent_block_names_the_queued_task(self, config, capsys, monkeypatch):
+        from istota import scheduler
+        from istota.briefings import shared_block_runs
+
+        assert self._ensure(config, "--render-mode", "agent", "--directive", self.PROMPT) == 0
+        capsys.readouterr()
+
+        def fake_generate(cfg, block):
+            with db.get_db(cfg.db_path) as conn:
+                db.shared_kv_set(
+                    conn, shared_block_runs.RUN_NAMESPACE,
+                    shared_block_runs.AGENT_PREFIX + block.name,
+                    json.dumps({"task_id": 41, "captured": False}), "daemon",
+                )
+            return shared_block_runs.QUEUED
+
+        monkeypatch.setattr(scheduler, "_generate_shared_block", fake_generate)
+        assert cli_briefings.dispatch(["shared", "run", "--name", "news"], config) == 0
+        out = capsys.readouterr().out
+        assert "queued, task #41" in out
+        assert "no content written" not in out
+
+
 class TestArchive:
     def test_archive_list_show(self, config, capsys):
         ctx = resolve_for_user("alice", config)

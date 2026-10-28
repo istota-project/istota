@@ -46,6 +46,9 @@ SOURCE_KINDS = (
 # Blocks whose gathered content is deterministically pre-formatted and passed to
 # the model for near-verbatim inclusion (markets/calendar), vs. synthesized.
 RENDER_MODES = ("synthesis", "structured")
+# A shared block may also be `agent`: its directive is a whole task prompt,
+# run as a sandboxed research task (rules in validate_shared_block_payload).
+SHARED_RENDER_MODES = (*RENDER_MODES, "agent")
 PRESENTATION_WIDTHS = ("auto", "wide", "full")
 
 logger = logging.getLogger(__name__)
@@ -238,8 +241,8 @@ def validate_shared_block_payload(payload: dict) -> dict:
     if not cron or not croniter.is_valid(cron):
         raise ValueError(f"invalid cron expression: {cron!r}")
     render_mode = payload.get("render_mode") or "synthesis"
-    if render_mode not in RENDER_MODES:
-        raise ValueError(f"render_mode must be one of {list(RENDER_MODES)}")
+    if render_mode not in SHARED_RENDER_MODES:
+        raise ValueError(f"render_mode must be one of {list(SHARED_RENDER_MODES)}")
     raw_sources = payload.get("sources")
     if raw_sources is None:
         raw_sources = []
@@ -256,14 +259,25 @@ def validate_shared_block_payload(payload: dict) -> dict:
                 f"(allowed: {sorted(ALLOWED_SHARED_SOURCE_KINDS)})",
             )
         sources.append({"kind": kind, "config": s.get("config") or {}})
+    trusted = bool(payload.get("trusted", False))
+    directive = payload.get("directive") or None
+    if render_mode == "agent":
+        # Pre-gathered page text would land in the trusted task prompt, and the
+        # output is model text over arbitrary pages, so never trusted either.
+        if sources:
+            raise ValueError("agent blocks take no sources")
+        if trusted:
+            raise ValueError("agent blocks are never trusted")
+        if not isinstance(directive, str) or not directive.strip():
+            raise ValueError("agent blocks need a task prompt")
     return {
         "name": name,
         "cron": cron,
         "title": (payload.get("title") or "").strip(),
-        "directive": payload.get("directive") or None,
+        "directive": directive,
         "render_mode": render_mode,
         "enabled": bool(payload.get("enabled", True)),
-        "trusted": bool(payload.get("trusted", False)),
+        "trusted": trusted,
         "sources": sources,
     }
 
