@@ -26,6 +26,7 @@ from istota.cron_loader import (
     update_job_enabled_in_cron_md,
 )
 from istota.storage import get_user_cron_path
+from istota.transport.routing import PRIVATE_ROOM_SURFACES
 
 
 @pytest.fixture
@@ -284,6 +285,119 @@ prompt = "ok"
         jobs = load_cron_jobs(config, "alice")
         assert len(jobs) == 1
         assert jobs[0].name == "valid"
+
+
+# ---------------------------------------------------------------------------
+# TestTargetSurfaces
+# ---------------------------------------------------------------------------
+
+
+def _unrecognized(caplog) -> list[str]:
+    return [
+        r.getMessage() for r in caplog.records
+        if "not recognized" in r.getMessage()
+    ]
+
+
+class TestTargetSurfaces:
+    """ISSUE-870: a descriptor that delivers must load without the
+    "will be dropped" warning, and one that does not must still get it."""
+
+    @pytest.mark.parametrize("target", ["whatsapp", "sms", "talk,whatsapp"])
+    def test_a_phone_target_loads_without_a_warning(
+        self, target, mount_path, make_config_with_mount, caplog,
+    ):
+        from istota.config import SmsConfig, WhatsAppConfig
+
+        config = make_config_with_mount(
+            sms=SmsConfig(enabled=True), whatsapp=WhatsAppConfig(enabled=True),
+        )
+        _write_cron_md(mount_path, "alice", f'''```toml
+[[jobs]]
+name = "supplements"
+cron = "0 8 * * *"
+prompt = "Remind me to take my supplements"
+target = "{target}"
+```''')
+        with caplog.at_level(logging.WARNING, logger="istota.cron_loader"):
+            jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 1 and jobs[0].target == target
+        assert [r.getMessage() for r in caplog.records] == []
+
+    @pytest.mark.parametrize("surface", ["sms", "whatsapp"])
+    def test_a_phone_target_on_a_deployment_without_it_warns(
+        self, surface, mount_path, make_config_with_mount, caplog,
+    ):
+        config = make_config_with_mount()
+        assert not getattr(config, surface).enabled
+        _write_cron_md(mount_path, "alice", f'''```toml
+[[jobs]]
+name = "supplements"
+cron = "0 8 * * *"
+prompt = "Remind me"
+target = "{surface}"
+```''')
+        with caplog.at_level(logging.WARNING, logger="istota.cron_loader"):
+            load_cron_jobs(config, "alice")
+        warnings = [
+            r.getMessage() for r in caplog.records
+            if "not enabled on this deployment" in r.getMessage()
+        ]
+        assert len(warnings) == 1 and repr(surface) in warnings[0]
+
+    def test_a_surface_with_no_transport_still_warns(self, caplog):
+        from istota.cron_loader import _validate_target
+
+        with caplog.at_level(logging.WARNING, logger="istota.cron_loader"):
+            _validate_target("digest", "alice", "matrix:!room")
+        assert len(_unrecognized(caplog)) == 1
+
+    def test_a_whatsapp_group_target_warns(self, mount_path, make_config_with_mount, caplog):
+        from istota.config import WhatsAppConfig
+
+        config = make_config_with_mount(whatsapp=WhatsAppConfig(enabled=True))
+        _write_cron_md(mount_path, "alice", '''```toml
+[[jobs]]
+name = "supplements"
+cron = "0 8 * * *"
+prompt = "Remind the group"
+target = "whatsapp:120363000000000000@g.us"
+```''')
+        with caplog.at_level(logging.WARNING, logger="istota.cron_loader"):
+            load_cron_jobs(config, "alice")
+        warnings = [r.getMessage() for r in caplog.records]
+        assert len(warnings) == 1 and "WhatsApp group" in warnings[0]
+
+    @pytest.mark.parametrize("surface", PRIVATE_ROOM_SURFACES)
+    def test_every_private_room_descriptor_validates(self, surface, caplog):
+        """What `rooms list` and the prompt header hand the model for a private
+        phone or email room is what it writes into CRON.md."""
+        from istota.cron_loader import _validate_target
+        from istota.transport.routing import room_target_descriptor
+
+        descriptor = room_target_descriptor(
+            "rm_x", "web", phone_surface=surface,
+        )
+        with caplog.at_level(logging.WARNING, logger="istota.cron_loader"):
+            _validate_target("digest", "alice", descriptor)
+        assert _unrecognized(caplog) == []
+
+    def test_every_surface_resolve_one_names_is_known(self):
+        """`_resolve_one` holds the surfaces it delivers by name; the loader's
+        set is a second copy of that list, so the two are held in step here."""
+        import re
+
+        from istota.cron_loader import _KNOWN_TARGET_SURFACES
+        from istota.transport import routing
+        from tests.support.drift import source_of
+
+        body = source_of(routing._resolve_one)
+        named = set(re.findall(r'surface == "([a-z_]+)"', body))
+        for group in re.findall(r"surface in \(([^)]*)\)", body):
+            named.update(re.findall(r'"([a-z_]+)"', group))
+        named |= routing._STREAM_SURFACES
+        assert {"sms", "whatsapp", "talk", "email"} <= named
+        assert named - _KNOWN_TARGET_SURFACES == set()
 
 
 # ---------------------------------------------------------------------------
