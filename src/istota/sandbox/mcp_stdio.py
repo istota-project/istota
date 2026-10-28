@@ -4,9 +4,9 @@ Newline-delimited JSON-RPC 2.0, one message per line, the five methods the
 CLI uses and nothing else. The codec knows nothing about sockets, the bridge
 or the tool server: its host hands ``serve_stdio`` the tool list and two
 callables, ``call(call_id, name, args)`` returning ``{content, is_error}`` in
-the tool server's wire shape, and ``abort(call_id)``. In part 1 of the CLI
-harness the host is ``sandbox/mcp_adapter.py``; the unified tool server (#862)
-hosts this module unchanged. Stdlib only, held by ``tests/test_mcp_stdio.py``.
+the tool server's wire shape, and ``abort(call_id)``. Two hosts: the tool
+server's ``--mcp`` front end (#862) and, until the relay goes,
+``sandbox/mcp_adapter.py``. Stdlib only, held by ``tests/test_mcp_stdio.py``.
 
 The method table:
 
@@ -133,6 +133,19 @@ async def _read_lines(reader: asyncio.StreamReader):
                 yield None
                 continue
             yield line
+
+
+async def stdio_streams(read_file: Any, write_file: Any):
+    """``(StreamReader, StreamWriter)`` over two binary files: a pipe, a FIFO
+    or a socket each, which is what a stdio server is handed."""
+    loop = asyncio.get_running_loop()
+    reader = asyncio.StreamReader(limit=2**16)
+    await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), read_file)
+    transport, protocol = await loop.connect_write_pipe(
+        asyncio.streams.FlowControlMixin, write_file,
+    )
+    writer = asyncio.StreamWriter(transport, protocol, None, loop)
+    return reader, writer
 
 
 async def serve_stdio(

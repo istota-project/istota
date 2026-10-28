@@ -34,7 +34,7 @@ import os
 import sys
 
 from istota.sandbox import tool_server_protocol as proto
-from istota.sandbox.mcp_stdio import serve_stdio
+from istota.sandbox.mcp_stdio import serve_stdio, stdio_streams
 
 _CLOSED_PREFIX = "istota tool bridge closed: "
 _EXIT_BRIDGE_CLOSED = 1
@@ -159,17 +159,6 @@ def _closed_result(reason: str) -> dict:
     return {"content": [{"type": "text", "text": _CLOSED_PREFIX + reason}], "is_error": True}
 
 
-async def _stdio_streams():
-    loop = asyncio.get_running_loop()
-    reader = asyncio.StreamReader(limit=2**16)
-    await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin.buffer)
-    transport, protocol = await loop.connect_write_pipe(
-        asyncio.streams.FlowControlMixin, sys.stdout.buffer,
-    )
-    writer = asyncio.StreamWriter(transport, protocol, None, loop)
-    return reader, writer
-
-
 async def _run(socket_path: str) -> int:
     try:
         sock_reader, sock_writer = await asyncio.open_unix_connection(socket_path)
@@ -186,7 +175,7 @@ async def _run(socket_path: str) -> int:
         return _EXIT_NO_BRIDGE
 
     frames = asyncio.ensure_future(relay.read_frames())
-    stdin, stdout = await _stdio_streams()
+    stdin, stdout = await stdio_streams(sys.stdin.buffer, sys.stdout.buffer)
     try:
         await serve_stdio(
             stdin, stdout,
