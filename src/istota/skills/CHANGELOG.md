@@ -1,6 +1,7 @@
 # Skills Changelog
 
 ## 2026-10-27
+- `briefings_config shared-block list|set|run|remove`, for administrators: list every shared block with its status, change one with `set` (flags not given keep their value; `--create` makes a new one), ask the daemon to regenerate one with `run`, and delete one with `remove --confirmed`. To switch a block to `agent`, pass `--sources '[]'` in the same `set`. After `run`, check `show` once later for `run.run_now_answered.id` matching the id you got; do not poll. The list's content preview arrives fenced as untrusted unless the block is trusted
 - `briefings_config schedule list|set|remove`: read and change the user's own briefing schedule from chat. `set` changes only the flags given; a room or surface the user may not deliver to is `reason: route_refused`. `remove` needs `--confirmed`: show the user the `would` object and ask first. The old instruction to send the user to Briefings → Settings for a schedule change no longer applies
 - `briefings_config shared-block show <name>`, for administrators: a shared briefing block's definition with its whole directive, and its last run. For an `agent` block that is the latest task and how its result was taken. Read it before suggesting a change to the block's prompt
 - `briefings_config shared-block set-prompt <name> --prompt-file <path>`, for administrators: replaces a shared block's directive with the whole contents of a file in your temp directory or the user's workspace, and changes nothing else. Show the user the change first. An empty file is refused

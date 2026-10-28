@@ -157,6 +157,11 @@ CASES: dict[tuple[str, str, str], Case] = {
         main="istota.skills.briefings_config",
         patch=("istota.skills.briefings_config", "cmd_set_prompt"),
     ),
+    ("briefings_config", "shared-block.set", "prompt_file"): Case(
+        argv=lambda p: ["shared-block", "set", "world", "--prompt-file", p],
+        main="istota.skills.briefings_config",
+        patch=("istota.skills.briefings_config", "cmd_set"),
+    ),
     ("health", "export-csv", "output"): Case(
         argv=lambda p: ["export-csv", "--output", p],
         main="istota.skills.health",

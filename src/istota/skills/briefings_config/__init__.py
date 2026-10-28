@@ -8,11 +8,16 @@ surface refusal (``RouteRefused``) answers ``reason: route_refused``; any other
 refusal is ``invalid_definition``. ``remove`` needs ``--confirmed`` and leaves
 the briefing's blocks and archive, as the web delete does.
 
-``shared-block show <name>`` prints one ``shared_block_configs`` definition,
-its whole directive, and the block's run state from
-``briefings.shared_block_runs.run_state``. ``shared-block set-prompt <name>
---prompt-file PATH`` replaces the directive and nothing else. An agent block's
-prompt lives only in that table, so this is how a conversation changes it.
+``shared-block list`` renders what ``GET /shared-blocks`` lists, through
+``briefings.shared_block_view``, with the content preview fenced unless the
+stored value is trusted. ``shared-block show <name>`` prints one
+``shared_block_configs`` definition, its whole directive, and the block's run
+state from ``briefings.shared_block_runs.run_state``. ``shared-block set`` and
+``set-prompt`` write in one ``BEGIN IMMEDIATE`` read-modify-write through
+``validate_shared_block_payload``; ``set`` creates only with ``--create``.
+``run`` and ``remove`` are the web routes' sequences; ``remove`` needs
+``--confirmed``. An agent block's prompt lives only in that table, so this is
+how a conversation changes it.
 
 The new directive comes from a file rather than stdin because the skill proxy
 forwards argv only; a proxied CLI never sees the task's stdin.
@@ -228,6 +233,51 @@ def cmd_schedule_remove(args):
     return {"status": "ok", "removed": name}
 
 
+def _shared_block_timezone(config) -> str:
+    return (config.briefings.shared_block_timezone or "").strip() or "UTC"
+
+
+def _not_found(name: str) -> dict:
+    return error_envelope(f"no shared block named {name!r}", reason="not_found")
+
+
+def _block_view(conn, config, row) -> dict:
+    """``GET /shared-blocks``' entry for one block, with the preview fenced.
+
+    The preview is text an earlier run wrote from pages and mail, so it is
+    fenced unless the stored value says the block is trusted.
+    """
+    from istota.briefings.shared_block_view import _map_shared_block, _shared_block_status
+    from istota.lib.untrusted import frame_untrusted
+
+    status = _shared_block_status(conn, row.name, _shared_block_timezone(config))
+    if status["value_preview"] and not status["stored_trusted"]:
+        status["value_preview"] = frame_untrusted(
+            status["value_preview"], "shared block content",
+        )
+    return _map_shared_block(row, status)
+
+
+def cmd_list(args):
+    from istota import db
+    from istota.briefings.models import ALLOWED_SHARED_SOURCE_KINDS, SHARED_RENDER_MODES
+
+    config = _load_config()
+    refusal = _writer_refusal(config, _user_id())
+    if refusal is not None:
+        return refusal
+
+    with db.get_db(_db_path()) as conn:
+        blocks = [_block_view(conn, config, row) for row in db.list_shared_block_configs(conn)]
+    return {
+        "status": "ok",
+        "shared_blocks": blocks,
+        "allowed_source_kinds": sorted(ALLOWED_SHARED_SOURCE_KINDS),
+        "render_modes": list(SHARED_RENDER_MODES),
+        "shared_block_timezone": config.briefings.shared_block_timezone or "UTC",
+    }
+
+
 def cmd_show(args):
     from istota import db
     from istota.briefings import shared_block_runs
@@ -240,13 +290,12 @@ def cmd_show(args):
     with db.get_db(_db_path()) as conn:
         row = db.get_shared_block_config(conn, args.name)
         if row is None:
-            return error_envelope(
-                f"no shared block named {args.name!r}", reason="not_found",
-            )
+            return _not_found(args.name)
         runs = shared_block_runs.run_state(conn, row.name)
         last_run_at = db.get_briefing_shared_block_last_run(conn, row.name)
 
-    timezone_name = (config.briefings.shared_block_timezone or "").strip() or "UTC"
+    timezone_name = _shared_block_timezone(config)
+    pending = runs["pending"]
     return {
         "status": "ok",
         "shared_block": {
@@ -265,10 +314,29 @@ def cmd_show(args):
             # Wall-clock time in `timezone`, the clock the cron runs on.
             "last_cron_run_at": last_run_at,
             "agent": runs["agent"],
-            "run_now_pending": runs["pending"],
+            # The pending Run now request's id, to match against
+            # `run_now_answered.id` once the daemon has answered it.
+            "requested": pending["id"] if pending else None,
+            "run_now_pending": pending,
             "run_now_answered": runs["answered"],
         },
     }
+
+
+def _read_prompt(path) -> tuple[str | None, dict | None]:
+    """The directive in ``--prompt-file``, or the refusal to answer instead."""
+    try:
+        directive = read_resolved_text(
+            path, flag="--prompt-file", max_bytes=MAX_PROMPT_FILE_BYTES,
+        )
+    except ReadRefused as exc:
+        return None, error_envelope(str(exc), reason="prompt_file_unreadable")
+    if not directive.strip():
+        return None, error_envelope(
+            "--prompt-file is empty; the directive was not changed",
+            reason="empty_prompt",
+        )
+    return directive, None
 
 
 def cmd_set_prompt(args):
@@ -279,17 +347,9 @@ def cmd_set_prompt(args):
     if refusal is not None:
         return refusal
 
-    try:
-        directive = read_resolved_text(
-            args.prompt_file, flag="--prompt-file", max_bytes=MAX_PROMPT_FILE_BYTES,
-        )
-    except ReadRefused as exc:
-        return error_envelope(str(exc), reason="prompt_file_unreadable")
-    if not directive.strip():
-        return error_envelope(
-            "--prompt-file is empty; the directive was not changed",
-            reason="empty_prompt",
-        )
+    directive, refusal = _read_prompt(args.prompt_file)
+    if refusal is not None:
+        return refusal
 
     with db.get_db(_db_path()) as conn:
         # One write transaction from read to write, so a web edit landing in
@@ -329,6 +389,160 @@ def cmd_set_prompt(args):
     }
 
 
+_SET_FIELDS = ("cron", "title", "render_mode", "enabled", "trusted", "sources", "prompt_file")
+
+
+def cmd_set(args):
+    import json
+
+    from istota import db
+    from istota.briefings.models import validate_shared_block_payload
+
+    config = _load_config()
+    user_id = _user_id()
+    refusal = _writer_refusal(config, user_id)
+    if refusal is not None:
+        return refusal
+
+    if not args.create and all(getattr(args, f) is None for f in _SET_FIELDS):
+        return error_envelope(
+            "nothing to change; pass at least one of --cron, --title, "
+            "--render-mode, --enabled/--disabled, --trusted/--no-trusted, "
+            "--sources or --prompt-file",
+            reason="invalid_argument",
+        )
+    sources = None
+    if args.sources is not None:
+        try:
+            sources = json.loads(args.sources)
+        except ValueError as exc:
+            return error_envelope(f"--sources is not JSON: {exc}", reason="invalid_argument")
+    directive = None
+    if args.prompt_file is not None:
+        directive, refusal = _read_prompt(args.prompt_file)
+        if refusal is not None:
+            return refusal
+
+    with db.get_db(_db_path()) as conn:
+        # One write transaction from read to write, so a web edit landing in
+        # between is not overwritten with the values read before it.
+        conn.execute("BEGIN IMMEDIATE")
+        row = db.get_shared_block_config(conn, args.name)
+        if row is None and not args.create:
+            return error_envelope(
+                f"no shared block named {args.name!r}; pass --create to make one",
+                reason="not_found",
+            )
+        if row is not None and args.create:
+            return error_envelope(
+                f"a shared block named {args.name!r} already exists; drop --create "
+                "to change it",
+                reason="invalid_argument",
+            )
+        if row is None and args.cron is None:
+            return error_envelope(
+                "a new shared block needs --cron", reason="invalid_argument",
+            )
+
+        def pick(flag_value, stored_attr, default):
+            if flag_value is not None:
+                return flag_value
+            return getattr(row, stored_attr) if row is not None else default
+
+        payload = {
+            "name": args.name,
+            "cron": pick(args.cron, "cron", ""),
+            "title": pick(args.title, "title", ""),
+            "directive": pick(directive, "directive", None),
+            "render_mode": pick(args.render_mode, "render_mode", "synthesis"),
+            "enabled": pick(args.enabled, "enabled", True),
+            "trusted": pick(args.trusted, "trusted", False),
+            "sources": pick(sources, "sources", []),
+        }
+        try:
+            fields = validate_shared_block_payload(payload)
+        except ValueError as exc:
+            return error_envelope(str(exc), reason="invalid_definition")
+        updated = db.upsert_shared_block_config(conn, **fields)
+        view = _block_view(conn, config, updated)
+
+    _log_write("shared_block.set", user_id, updated.name)
+    return {
+        "status": "ok",
+        "state": "created" if row is None else "updated",
+        "shared_block": view,
+    }
+
+
+def cmd_run(args):
+    from istota import db
+    from istota.briefings import shared_block_runs
+
+    config = _load_config()
+    user_id = _user_id()
+    refusal = _writer_refusal(config, user_id)
+    if refusal is not None:
+        return refusal
+
+    with db.get_db(_db_path()) as conn:
+        row = db.get_shared_block_config(conn, args.name)
+    if row is None:
+        return _not_found(args.name)
+    made = shared_block_runs.request_run(config, row.name)
+    _log_write("shared_block.run", user_id, row.name)
+    return {
+        "status": "ok",
+        "id": made["id"],
+        "note": "The daemon takes the request on its next tick. Run `show` later: "
+                "`run.run_now_answered.id` equal to this id is its answer.",
+    }
+
+
+def cmd_remove(args):
+    from istota import db
+    from istota.briefings import shared_block_runs
+    from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
+
+    config = _load_config()
+    user_id = _user_id()
+    refusal = _writer_refusal(config, user_id)
+    if refusal is not None:
+        return refusal
+
+    if not args.confirmed:
+        with db.get_db(_db_path()) as conn:
+            row = db.get_shared_block_config(conn, args.name)
+            has_content = (
+                row is not None
+                and db.shared_kv_get(conn, SHARED_BLOCK_NAMESPACE, row.name) is not None
+            )
+        if row is None:
+            return _not_found(args.name)
+        return error_envelope(
+            "removing a shared block needs --confirmed; show the user what would "
+            "be removed and ask first",
+            reason="confirmation_required",
+            would={
+                "name": row.name, "render_mode": row.render_mode,
+                "has_content": has_content, "delete_value": bool(args.delete_value),
+            },
+            note="Without --delete-value the last published content stays, and "
+                 "briefings that read it keep using it until it goes stale.",
+        )
+
+    # The web route's sequence (`DELETE /shared-blocks/{name}`), unchanged.
+    with db.get_db(_db_path()) as conn:
+        removed = db.delete_shared_block_config(conn, args.name)
+        if removed:
+            shared_block_runs.forget(conn, args.name)
+        if args.delete_value:
+            db.shared_kv_delete(conn, SHARED_BLOCK_NAMESPACE, args.name)
+    if not removed:
+        return _not_found(args.name)
+    _log_write("shared_block.remove", user_id, args.name)
+    return {"status": "ok", "removed": args.name, "deleted_value": bool(args.delete_value)}
+
+
 def build_parser():
     import argparse
 
@@ -364,8 +578,52 @@ def build_parser():
         help="Remove it. Without this, prints what would be removed",
     )
 
-    p_block = sub.add_parser("shared-block", help="One shared briefing block")
+    p_block = sub.add_parser("shared-block", help="Shared briefing blocks (administrators)")
     block_sub = p_block.add_subparsers(dest="action", required=True)
+
+    block_sub.add_parser("list", help="Every shared block, with its status")
+
+    p_bset = block_sub.add_parser(
+        "set", help="Change a shared block, or make one with --create; flags not "
+                    "given keep their value",
+    )
+    p_bset.add_argument("name", help="The shared block's name (a slug)")
+    p_bset.add_argument("--create", action="store_true",
+                        help="Make a new block; refused when the name exists")
+    p_bset.add_argument("--cron", help="5-field cron in the shared-block timezone; "
+                                       "required with --create")
+    p_bset.add_argument("--title", help="Display title")
+    p_bset.add_argument("--render-mode", help="synthesis, structured or agent")
+    benabled = p_bset.add_mutually_exclusive_group()
+    benabled.add_argument("--enabled", dest="enabled", action="store_true", default=None)
+    benabled.add_argument("--disabled", dest="enabled", action="store_false")
+    btrusted = p_bset.add_mutually_exclusive_group()
+    btrusted.add_argument("--trusted", dest="trusted", action="store_true", default=None)
+    btrusted.add_argument("--no-trusted", dest="trusted", action="store_false")
+    p_bset.add_argument(
+        "--sources",
+        help='JSON list replacing the sources, [{"kind": ..., "config": {...}}]; '
+             "'[]' clears them",
+    )
+    host_path(
+        p_bset, "--prompt-file", mode=READ,
+        help="A UTF-8 file holding the whole new directive. Must live under "
+             "$ISTOTA_DEFERRED_DIR or your workspace",
+    )
+
+    p_run = block_sub.add_parser(
+        "run", help="Ask the daemon to regenerate the block on its next tick",
+    )
+    p_run.add_argument("name", help="The shared block's name (a slug)")
+
+    p_bremove = block_sub.add_parser("remove", help="Delete a shared block's definition")
+    p_bremove.add_argument("name", help="The shared block's name (a slug)")
+    p_bremove.add_argument("--delete-value", action="store_true",
+                           help="Also delete the block's last published content")
+    p_bremove.add_argument(
+        "--confirmed", action="store_true",
+        help="Remove it. Without this, prints what would be removed",
+    )
 
     p_show = block_sub.add_parser(
         "show", help="The definition, its whole directive, and its last run",
@@ -392,8 +650,12 @@ def main(argv=None):
             ("schedule", "list"): cmd_schedule_list,
             ("schedule", "set"): cmd_schedule_set,
             ("schedule", "remove"): cmd_schedule_remove,
+            ("shared-block", "list"): cmd_list,
             ("shared-block", "show"): cmd_show,
+            ("shared-block", "set"): cmd_set,
             ("shared-block", "set-prompt"): cmd_set_prompt,
+            ("shared-block", "run"): cmd_run,
+            ("shared-block", "remove"): cmd_remove,
         },
         args,
         command=(args.command, args.action),
