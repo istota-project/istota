@@ -314,9 +314,21 @@ def _validate_brain(name: str, user_id: str, brain: str) -> None:
 # surface was wrong about the cause and right about the outcome. Since
 # ISSUE-511 the descriptor delivers, and a working one that warns on every sync
 # is worse than no warning at all.
+#
+# `sms` and `whatsapp` were missing on the same grounds (ISSUE-870): the bare
+# descriptor resolves the user's own binding, and it is what `rooms list` and the
+# prompt header hand out for a private phone room. `whatsapp:<id>` ignores the
+# id for that binding, and a group JID never delivers from a cron job (it is
+# answered only from the group's own turns), so that one spelling warns.
+# `tests/test_cron_loader.py` holds this set to the surfaces `_resolve_one` names.
 _KNOWN_TARGET_SURFACES = frozenset({
-    "talk", "email", "ntfy", "istota_file", "stream", "web", "room",
+    "talk", "email", "sms", "whatsapp", "ntfy", "istota_file", "stream", "web",
+    "room",
 })
+
+# The known surfaces `_resolve_one` drops when `make_registry` did not register
+# their transport, which it does only when the transport is enabled.
+_REGISTRY_REQUIRED_TARGET_SURFACES = ("sms", "whatsapp")
 
 
 def _validate_room_pairing(name: str, user_id: str, target: str, room: str) -> None:
@@ -351,19 +363,45 @@ def _validate_room_pairing(name: str, user_id: str, target: str, room: str) -> N
         )
 
 
-def _validate_target(name: str, user_id: str, target: str) -> None:
+def _validate_target(
+    name: str, user_id: str, target: str, config=None,
+) -> None:
     """Warn when a target descriptor names an unknown surface; never reject.
 
     The `target` is an output_target descriptor (talk/email/ntfy/both/all/
     talk:<token>/comma lists). Unknown leaves are dropped at delivery, so a typo
-    is a warning, not a hard failure (mirrors model/effort handling)."""
+    is a warning, not a hard failure (mirrors model/effort handling). With a
+    `config`, a known SMS or WhatsApp leaf on a deployment where that transport
+    is off warns too, since it is dropped all the same, and so does a WhatsApp
+    group JID."""
     from .transport import parse_output_target
+    from .transport.registry import make_registry
+    from .transport.whatsapp.identity import normalize_group_jid
+
+    registered = None
     for dest in parse_output_target(target):
         if dest.surface not in _KNOWN_TARGET_SURFACES:
             logger.warning(
                 "Job '%s' (user %s): target surface %r not recognized; it will "
                 "be dropped at delivery",
                 name, user_id, dest.surface,
+            )
+            continue
+        if config is not None and dest.surface in _REGISTRY_REQUIRED_TARGET_SURFACES:
+            if registered is None:
+                registered = set(make_registry(config).names())
+            if dest.surface not in registered:
+                logger.warning(
+                    "Job '%s' (user %s): target surface %r is not enabled on "
+                    "this deployment; it will be dropped at delivery",
+                    name, user_id, dest.surface,
+                )
+                continue
+        if dest.surface == "whatsapp" and normalize_group_jid(dest.channel):
+            logger.warning(
+                "Job '%s' (user %s): a scheduled job cannot post into a WhatsApp "
+                "group; this target will be dropped at delivery",
+                name, user_id,
             )
 
 
@@ -819,7 +857,7 @@ def _parse_jobs(
             )
         target = _str_field(name, user_id, "target", j.get("target", ""), errors)
         if target:
-            _validate_target(name, user_id, target)
+            _validate_target(name, user_id, target, config)
             _validate_room_pairing(
                 name, user_id, target,
                 _str_field(name, user_id, "room", j.get("room", "")),

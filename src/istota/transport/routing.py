@@ -907,6 +907,11 @@ def is_private_phone_room(conn, surface: str, user_id: str, room_token) -> bool:
     return bool(room_token) and room_token == private_phone_room(conn, surface, user_id)
 
 
+# The surfaces a private room is scheduled into by name, as
+# `room_target_descriptor`'s ``phone_surface``; the cron loader must accept each.
+PRIVATE_ROOM_SURFACES = ("sms", "whatsapp", "email")
+
+
 def private_phone_rooms(conn, user_id: str) -> dict[str, str]:
     """``{room token: surface}`` for ``user_id``'s own SMS, WhatsApp and email
     rooms.
@@ -920,7 +925,7 @@ def private_phone_rooms(conn, user_id: str) -> dict[str, str]:
     found: dict[str, str] = {}
     if not user_id:
         return found
-    for surface in ("sms", "whatsapp", "email"):
+    for surface in PRIVATE_ROOM_SURFACES:
         token = private_surface_room(conn, surface, user_id)
         if token:
             found[token] = surface

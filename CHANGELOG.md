@@ -79,6 +79,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A scheduled job with `target = "whatsapp"` or `target = "sms"` no longer logs on every cron sync that its target will be dropped; both deliver to the user's own phone room. It now warns only when the job really is dropped: that transport is off on the deployment, or the target names a WhatsApp group, which a scheduled job cannot post into.
+
 - A shared briefing block created or edited on the briefings settings page now runs on its schedule without a restart. Before, a new block ran only through Run now, and an edited one kept its old definition on its schedule until the daemon restarted.
 - The model suggestions in Room settings open directly under the field again. Inside a dialog the list opened offset down and to the side, past the dialog's edge, most visibly on a phone. The admin Configuration page no longer cuts a field's suggestions off at the edge of its section.
 - `browse render` and `browse get` read a PDF instead of returning an empty success. They return the document's text page by page, pageable by offset, and say plainly when a PDF cannot be read, such as a scanned one. The file is parsed in a separate process with memory and time limits. Needs a rebuilt browser image.
