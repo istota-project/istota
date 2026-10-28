@@ -5497,6 +5497,38 @@ function adminConnectionsHandler({ url, method }: MockReq): unknown | undefined 
   return undefined;
 }
 
+/**
+ * Admin > Browsers: two live instances and the console ticket. There is no
+ * websocket here, so an opened console ends on the could-not-connect message.
+ */
+function adminBrowsersHandler({ url, method, body }: MockReq): unknown | undefined {
+  if (url === '/istota/api/admin/browsers' && method === 'GET') {
+    return {
+      status: 'ok',
+      console_configured: false,
+      as_of: new Date().toISOString(),
+      instances: [
+        { user: 'carol', slot: 0, idle_seconds: 42, url: '' },
+        { user: '__briefings__', slot: 1, idle_seconds: 310, url: '' },
+      ],
+    };
+  }
+  if (url === '/istota/api/admin/browsers/console-ticket' && method === 'POST') {
+    const proof = (body as { step_up?: { code?: string; password?: string } } | null)?.step_up;
+    const accepted = /^[0-9]{6}$/.test(String(proof?.code ?? '')) || Boolean(proof?.password);
+    if (!accepted) {
+      return {
+        __status: 403,
+        detail: 'That code was not accepted. Try again.',
+        field: proof?.password !== undefined ? 'password' : 'code',
+        reason: 'bad',
+      };
+    }
+    return { ticket: 'mock-ticket', expires_in: 60 };
+  }
+  return undefined;
+}
+
 function configEditorHandler({ url, method, body }: MockReq): unknown | undefined {
   if (url === '/istota/api/settings/step-up' && method === 'POST') {
     // The password first, a code when asked, as the server answers an
@@ -8618,6 +8650,7 @@ const handlers: MockHandler[] = [
   ({ url }) => (url === '/istota/api/admin/logs/sources' ? mockLogSources : undefined),
   configEditorHandler,
   adminConnectionsHandler,
+  adminBrowsersHandler,
   ({ url, method, body }) =>
     url === '/istota/api/admin/doctor/run' && method === 'POST'
       ? mockAdminDoctorRun(body)

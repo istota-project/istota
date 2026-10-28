@@ -1543,6 +1543,7 @@ local = [
     { name = "recurring-ical-events" },
     { name = "starlette" },
     { name = "uvicorn" },
+    { name = "websockets" },
     { name = "yfinance" },
 ]
 location = [
@@ -1624,6 +1625,7 @@ web = [
     { name = "python-multipart" },
     { name = "starlette" },
     { name = "uvicorn" },
+    { name = "websockets" },
 ]
 whatsapp = [
     { name = "pywa" },
@@ -1738,6 +1740,7 @@ requires-dist = [
     { name = "vobject", marker = "extra == 'contacts'", specifier = ">=0.9.8" },
     { name = "weasyprint", marker = "extra == 'money'", specifier = ">=62.0" },
     { name = "websockets", marker = "extra == 'signaling'", specifier = ">=14.0" },
+    { name = "websockets", marker = "extra == 'web'", specifier = ">=14.0" },
     { name = "yfinance", marker = "extra == 'markets'", specifier = ">=0.2.0" },
     { name = "yfinance", marker = "extra == 'money'", specifier = ">=0.2.0" },
 ]

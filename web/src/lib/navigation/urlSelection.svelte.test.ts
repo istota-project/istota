@@ -97,6 +97,19 @@ describe('URL selection', () => {
     expect(navigation.replaceState).not.toHaveBeenCalled();
   });
 
+  it('applies a replace and writes over the current entry', () => {
+    const h = setup();
+    h.start();
+    h.selection.replace({ room: 'B' });
+    flushSync();
+    expect(h.selected).toEqual({ room: 'B' });
+    expect(navigation.replaceState).toHaveBeenCalledExactlyOnceWith('/istota/chat/?room=B', {
+      chat: { room: 'B' },
+    });
+    expect(navigation.pushState).not.toHaveBeenCalled();
+    expect(navigation.__history.entries).toHaveLength(1);
+  });
+
   it('replaces a store-driven change without applying or pushing', () => {
     const h = setup();
     h.start();

@@ -14,7 +14,7 @@ pytest.importorskip("fastapi")
 from istota import db
 from istota.webui import auth as web_auth
 from tests.test_web_auth_routes import (  # noqa: F401 -- fixtures
-    PASSWORD, _cheap_password_hash, client, configured, sign_in,
+    PASSWORD, _cheap_password_hash, client, configured, session_value, sign_in,
 )
 
 ORIGIN = {"Origin": "https://example.com"}
@@ -291,3 +291,41 @@ async def test_the_unavailable_advice_matches_the_sign_in_methods(client, config
     else:
         assert "auth reset" not in detail
         assert "email sign-in" in detail and "mail" in detail
+
+
+class TestTheBrowserConsoleAction:
+    """`admin_browser_console` must be in every registry that names an action:
+    a missing one is a 400 at the start, or a mailed code silently never sent."""
+
+    ACTION = "admin_browser_console"
+
+    def test_it_is_registered_as_an_admin_action(self, configured):
+        assert self.ACTION in web_auth.STEP_UP_ACTIONS
+        assert self.ACTION in configured._ADMIN_STEP_UP_ACTIONS
+        assert configured._STEP_UP_LABELS[self.ACTION] == "open a user's browser console"
+
+    async def test_a_password_request_opens_and_its_password_redeems(self, client, configured, mail):
+        configured._config.email.enabled = True
+        assert (await sign_in(client)).status_code == 302
+        body = await _start(client, action=self.ACTION)
+        assert body["method"] == "password"
+        assert body["methods"] == ["password", "email"]
+        assert mail == []
+        reason = web_auth.redeem_password_step_up(
+            configured._config.db_path, web_auth.policy_from_config(configured._config), body["request_id"],
+            "alice", self.ACTION, session_value(client)["session_id"], PASSWORD, ip=None)
+        assert reason == "ok"
+
+    async def test_a_mailed_code_names_the_action_and_redeems(self, client, configured, mail):
+        configured._config.email.enabled = True
+        assert (await sign_in(client)).status_code == 302
+        body = await _start(client, "email", action=self.ACTION)
+        assert body["method"] == "email"
+        assert len(mail) == 1
+        _config, address, subject, text, _html = mail[-1]
+        assert address == "alice@example.com"
+        assert "open a user's browser console" in text
+        code = re.search(r"[0-9]{6}", subject)[0]
+        reason = web_auth.redeem_step_up(configured._config.db_path, body["request_id"], "alice", self.ACTION,
+                                         session_value(client)["session_id"], code)
+        assert reason == "ok"

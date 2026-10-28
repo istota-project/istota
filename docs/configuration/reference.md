@@ -812,7 +812,7 @@ Set all three fields or none. Each falls back to `[nextcloud]` on its own rather
 |---|---|---|
 | `enabled` | `false` | Enable the headless browser container |
 | `api_url` | `"http://localhost:9223"` | Browser container's Flask API |
-| `vnc_url` | `""` | External noVNC console URL, for operators. The browser service builds each live instance's viewer link from it, and the admin Browsers page shows those links. The admin page ignores a URL that is not absolute `http(s)` or that embeds a VNC password. Do not hand it to users: the console exposes live user IDs to anyone who can reach it (see [browser profiles](../deployment/running-the-stack.md#browser-profiles)) |
+| `vnc_url` | `""` | External noVNC console URL, for operators. The browser service builds each live instance's viewer link from it and passes it to tasks as `BROWSER_VNC_URL`. The admin Browsers page no longer uses it: its console opens in the page. Do not hand it to users: the console exposes live user IDs to anyone who can reach it (see [browser profiles](../deployment/running-the-stack.md#browser-profiles)) |
 
 ## `[wordpress]`
 
