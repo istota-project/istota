@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 import istota.skills.briefing as briefing_mod
+from tests.support.html_mail import TEMPLATE_STYLES, bare, style_values
 from istota.skills.briefing import (
     _strip_html,
     strip_markdown,
@@ -459,11 +460,12 @@ class TestParseBriefingJson:
 
 
 class TestRenderBriefingHtml:
-    """render_briefing_html converts the briefing markdown subset to bare HTML.
+    """render_briefing_html converts the briefing markdown subset to HTML.
 
     The renderer is deliberately not a general markdown engine: anything
-    outside the allowed subset is emitted as escaped literal text, and the
-    output carries no styling at all (see the spec's "no styling" decision).
+    outside the allowed subset is emitted as escaped literal text. The document
+    and every style come from the shared mail template, so most assertions read
+    the output through ``bare``, which removes only the template's styles.
     """
 
     def test_empty_input_returns_empty_string(self):
@@ -471,15 +473,17 @@ class TestRenderBriefingHtml:
         assert render_briefing_html("") == ""
         assert render_briefing_html("   \n\n ") == ""
 
-    def test_wraps_in_bare_html_shell(self):
+    def test_wraps_in_the_mail_template(self):
+        from istota.mail.html_template import wrap_document
         from istota.skills.briefing import render_briefing_html
-        out = render_briefing_html("Hello")
-        assert out.startswith("<html><body>")
+        out = bare(render_briefing_html("Hello"))
+        assert out.startswith("<!DOCTYPE html>")
         assert out.endswith("</body></html>")
         assert "<p>Hello</p>" in out
+        assert render_briefing_html("Hello") == wrap_document(briefing_mod._render_blocks(["Hello"])[0])
 
-    def test_only_the_list_is_styled(self):
-        """Client default typography, except the list's left indent."""
+    def test_only_template_styles(self):
+        """Client default typography: every style is one the template defines."""
         from istota.skills.briefing import render_briefing_html
         md = (
             "\U0001f30d World\n"
@@ -491,15 +495,15 @@ class TestRenderBriefingHtml:
             "- *soft* item\n"
         )
         out = render_briefing_html(md)
-        assert out.count("style=") == out.count("<ul") == 1
-        assert briefing_mod.HTML_LIST_OPEN in out
-        assert "<head" not in out.lower()
+        styles = style_values(out)
+        assert styles and set(styles) <= TEMPLATE_STYLES
+        assert not any("font-family" in s or "color:" in s for s in styles)
         assert "<style" not in out.lower()
         assert "class=" not in out
 
     def test_renders_link(self):
         from istota.skills.briefing import render_briefing_html
-        out = render_briefing_html("See [Semafor](https://semafor.com/a/iran).")
+        out = bare(render_briefing_html("See [Semafor](https://semafor.com/a/iran)."))
         assert '<a href="https://semafor.com/a/iran">Semafor</a>' in out
 
     def test_renders_attribution_bracket_link(self):
@@ -514,79 +518,79 @@ class TestRenderBriefingHtml:
 
     def test_renders_bold_and_italic(self):
         from istota.skills.briefing import render_briefing_html
-        out = render_briefing_html("**bold** and *italic* and _under_")
+        out = bare(render_briefing_html("**bold** and *italic* and _under_"))
         assert "<strong>bold</strong>" in out
         assert "<em>italic</em>" in out
         assert "<em>under</em>" in out
 
     def test_underscore_inside_word_is_not_italic(self):
         from istota.skills.briefing import render_briefing_html
-        out = render_briefing_html("file snake_case_name here")
+        out = bare(render_briefing_html("file snake_case_name here"))
         assert "<em>" not in out
         assert "snake_case_name" in out
 
     def test_link_url_with_underscores_survives(self):
         """Emphasis must not run inside an emitted href."""
         from istota.skills.briefing import render_briefing_html
-        out = render_briefing_html("[AP](https://apnews.com/a_b_c)")
+        out = bare(render_briefing_html("[AP](https://apnews.com/a_b_c)"))
         assert '<a href="https://apnews.com/a_b_c">AP</a>' in out
         assert "<em>" not in out
 
     def test_horizontal_rule(self):
         from istota.skills.briefing import render_briefing_html
-        out = render_briefing_html("before\n\n---\n\nafter")
+        out = bare(render_briefing_html("before\n\n---\n\nafter"))
         assert "<hr>" in out
         assert "<p>before</p>" in out
         assert "<p>after</p>" in out
 
     def test_bullets_become_unordered_list(self):
         from istota.skills.briefing import render_briefing_html
-        out = render_briefing_html("- one\n- two")
-        assert briefing_mod.HTML_LIST_OPEN in out and "</ul>" in out
+        out = bare(render_briefing_html("- one\n- two"))
+        assert "<ul>" in out and "</ul>" in out
         assert "<li>one</li>" in out
         assert "<li>two</li>" in out
 
     def test_label_line_then_bullets(self):
         """A plain section label immediately followed by bullets splits cleanly."""
         from istota.skills.briefing import render_briefing_html
-        out = render_briefing_html("\U0001f4c5 Calendar\n- **10:00 Standup**")
+        out = bare(render_briefing_html("\U0001f4c5 Calendar\n- **10:00 Standup**"))
         assert "<p>\U0001f4c5 Calendar</p>" in out
         assert "<li><strong>10:00 Standup</strong></li>" in out
 
     def test_paragraphs_split_on_blank_line(self):
         from istota.skills.briefing import render_briefing_html
-        out = render_briefing_html("first para\n\nsecond para")
+        out = bare(render_briefing_html("first para\n\nsecond para"))
         assert out.count("<p>") == 2
 
     def test_consecutive_lines_keep_their_breaks(self):
         """Markets quotes are one line each; a soft break must survive."""
         from istota.skills.briefing import render_briefing_html
-        out = render_briefing_html("\U0001f7e2 **S&P**: 1.0\n\U0001f534 **Nasdaq**: 2.0")
+        out = bare(render_briefing_html("\U0001f7e2 **S&P**: 1.0\n\U0001f534 **Nasdaq**: 2.0"))
         assert "<br>" in out
         assert out.count("<p>") == 1
 
     def test_escapes_html_in_text(self):
         from istota.skills.briefing import render_briefing_html
-        out = render_briefing_html("5 < 6 & 7 > 2 <script>alert(1)</script>")
+        out = bare(render_briefing_html("5 < 6 & 7 > 2 <script>alert(1)</script>"))
         assert "&lt;" in out and "&amp;" in out
         assert "<script>" not in out
 
     def test_javascript_scheme_renders_as_plain_text(self):
         from istota.skills.briefing import render_briefing_html
-        out = render_briefing_html("[click](javascript:alert(1))")
+        out = bare(render_briefing_html("[click](javascript:alert(1))"))
         assert "javascript:" not in out
         assert "click" in out
         assert "<a " not in out
 
     def test_data_scheme_renders_as_plain_text(self):
         from istota.skills.briefing import render_briefing_html
-        out = render_briefing_html("[x](data:text/html;base64,AAA)")
+        out = bare(render_briefing_html("[x](data:text/html;base64,AAA)"))
         assert "<a " not in out
         assert "data:text/html" not in out
 
     def test_mailto_is_allowed(self):
         from istota.skills.briefing import render_briefing_html
-        out = render_briefing_html("[mail](mailto:a@b.com)")
+        out = bare(render_briefing_html("[mail](mailto:a@b.com)"))
         assert '<a href="mailto:a@b.com">mail</a>' in out
 
     def test_url_quotes_cannot_break_the_attribute(self):
@@ -599,7 +603,7 @@ class TestRenderBriefingHtml:
 
     def test_atx_heading_is_not_emitted_as_markup(self):
         from istota.skills.briefing import render_briefing_html
-        out = render_briefing_html("## Heading")
+        out = bare(render_briefing_html("## Heading"))
         assert "<h2" not in out
         # The marker is dropped (mirroring strip_markdown) so it doesn't leak
         # literally into the mail; the line is an ordinary paragraph.
@@ -622,12 +626,13 @@ class TestRenderBriefingHtml:
             "*Remember to breathe.*"
         )
         out = render_briefing_html(md)
+        assert set(style_values(out)) <= TEMPLATE_STYLES
+        out = bare(out)
         assert '<a href="https://www.semafor.com/article/iran-us-tensions">Semafor</a>' in out
         assert "<strong>IRAN-US TENSIONS ESCALATE:</strong>" in out
         assert "<strong>S&amp;P 500 E-mini</strong>" in out
         assert "<hr>" in out
         assert "<em>Remember to breathe.</em>" in out
-        assert out.count("style=") == out.count(briefing_mod.HTML_LIST_OPEN)
 
     def test_render_failure_falls_back_to_empty(self, monkeypatch):
         """A renderer exception must never bubble into delivery."""
@@ -659,12 +664,13 @@ class TestDocumentEmailRendering:
         }
         rich = briefing_mod.render_briefing_document_html(document)
         plain = briefing_mod.render_briefing_document_plain(document)
+        assert set(style_values(rich)) <= TEMPLATE_STYLES
+        rich = bare(rich)
         assert '<h2>&lt;img src=&quot;x&quot;&gt; &amp; **literal**</h2>' in rich
         assert "<p><strong>Full</strong> fallback</p>" in rich
         assert "Some sources unavailable." not in rich
         assert plain == '<img src="x"> & **literal**\n\nFull fallback'
-        assert rich.count("style=") == rich.count(briefing_mod.HTML_LIST_OPEN)
-        assert "<style" not in rich and "<head" not in rich
+        assert "style=" not in rich and "<style" not in rich
 
     def test_document_html_failure_returns_empty(self, monkeypatch):
         def fail(lines):

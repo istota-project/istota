@@ -82,7 +82,9 @@
       element.remove();
     const policy = parsed.createElement('meta');
     policy.httpEquiv = 'Content-Security-Policy';
-    policy.content = "default-src 'none'; base-uri 'none'; form-action 'none'";
+    // The mail template's look is inline style attributes; style elements are removed above.
+    policy.content =
+      "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
     parsed.head.prepend(policy);
     return '<!doctype html>' + parsed.documentElement.outerHTML;
   }

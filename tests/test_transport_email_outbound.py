@@ -21,7 +21,7 @@ import pytest
 
 from istota import db
 from istota.config import Config, EmailConfig, NextcloudConfig, UserConfig
-from istota.skills.briefing import HTML_LIST_OPEN
+from tests.support.html_mail import TEMPLATE_STYLES, bare, style_values
 from istota.transport.email.outbound import deliver_email_result
 
 
@@ -609,10 +609,8 @@ class TestBriefingHtmlEmail:
         # HTML part: the article link is a real anchor.
         assert '<a href="https://semafor.com/a/iran">Semafor</a>' in kwargs["html_body"]
         assert "<strong>IRAN:</strong>" in kwargs["html_body"]
-        assert "<li><strong>10:00 Standup</strong> (30 min)</li>" in kwargs["html_body"]
-        assert kwargs["html_body"].count("style=") == kwargs["html_body"].count(
-            HTML_LIST_OPEN
-        ) == 1
+        assert "<li><strong>10:00 Standup</strong> (30 min)</li>" in bare(kwargs["html_body"])
+        assert set(style_values(kwargs["html_body"])) <= TEMPLATE_STYLES
 
     @pytest.mark.asyncio
     async def test_structured_plain_briefing_sends_multipart(self, db_path, tmp_path):
@@ -1248,6 +1246,8 @@ class TestBriefingDocumentEmail:
         parts = list(msg.iter_parts())
         assert [part.get_content_type() for part in parts] == ["text/plain", "text/html"]
         plain, rich = [part.get_content() for part in parts]
+        rich_styles = set(style_values(rich))
+        rich = bare(rich)
         assert str(msg["Subject"]) == "Saved edition"
         assert '<h2>&lt;img src=&quot;x&quot;&gt; &amp; **Headlines**</h2>' in rich
         assert rich.index("Headlines") < rich.index("<h2>Calendar</h2>")
@@ -1261,8 +1261,8 @@ class TestBriefingDocumentEmail:
         assert f'<a href="{url.replace("&", "&amp;")}">Story</a>' in rich
         assert "<script>" not in rich and "<img " not in rich and "javascript:" not in rich
         assert '"onmouseover' not in rich
-        assert rich.count("style=") == rich.count(HTML_LIST_OPEN)
-        assert "<style" not in rich and "<head" not in rich
+        assert rich_styles <= TEMPLATE_STYLES
+        assert "style=" not in rich and "<style" not in rich
         assert "<details" not in rich and "hidden" not in rich
 
     @pytest.mark.asyncio
