@@ -122,6 +122,22 @@ _EXCLUDED_TOP_LEVEL = {
     "_profile_generation",
     "_profile_checked_at",
     "_profile_refresh_failing",
+    # Retired (ISSUE-418): the loader moves them onto [brain.claude_code], so
+    # a field here would read as a deployment-wide model. A file still setting
+    # one gets a `retired` problem with its own remove action.
+    "model",
+    "effort",
+}
+
+#: Root table fields shown as a section of their own rather than in General.
+_OWN_SECTION_TOP_LEVEL = {
+    "providers": (
+        "[providers]",
+        "One endpoint and its key per provider. anthropic and openrouter are "
+        "built in and need no table; a table sets fields on one of them or "
+        "adds a provider of your own. Which brain runs is [brain] kind, and "
+        "each brain's model and effort are in its own section.",
+    ),
 }
 
 # Fields, by dotted key, rendered as a count rather than their contents: lists
@@ -898,6 +914,19 @@ def build_config_view(
     # declaration order says nothing, so alphabetical is easier to scan. A
     # `[section]` keeps its declaration order, which groups related knobs.
     general["fields"].sort(key=lambda f: f["name"])
+    for name, (label, doc) in _OWN_SECTION_TOP_LEVEL.items():
+        moved = [f for f in general["fields"] if f["name"] == name]
+        if not moved:
+            continue
+        general["fields"] = [f for f in general["fields"] if f["name"] != name]
+        for entry in moved:
+            entry["doc"] = entry.get("doc") or doc
+        # Beside the brain and model sections it configures for.
+        after = max(
+            (i for i, s in enumerate(sections) if s["key"].startswith("brain")),
+            default=len(sections) - 1,
+        )
+        sections.insert(after + 1, {"key": name, "label": label, "fields": moved})
 
     return {
         "config_path": str(config.config_path) if config.config_path else None,

@@ -9,27 +9,27 @@ bot_name = "Istota"
 # emissaries_enabled = true
 
 # =============================================================================
-# Model selection — three knobs that interact
+# Model selection
 # =============================================================================
-# `model` + `effort` set the *default* for every task (cron, briefings, talk,
-# email, ...). Both fields are read independently.
-# `[models.aliases]` (further down) is the operator-visible registry overlaying
-# the shipped tier/shortcut defaults.
+# [brain] kind picks the brain that runs tasks. Each brain has its own default
+# `model` and `effort`: [brain.claude_code], and [brain.native] for native's
+# default provider (another provider's is its [providers.<id>] default_model).
+# `[models.aliases]` (further down) overlays the shipped tiers and shortcuts.
 #
 # Resolution chain:
 #   1. Per-task overrides — `!model <alias> <prompt>` from Talk wins, both
 #      model and effort stored on the task row.
-#   2. Otherwise — top-level `model` + `effort` here.
-#   3. Otherwise — brain default.
+#   2. Otherwise — a room's or job's pin.
+#   3. Otherwise — the running brain's own `model` + `effort`.
 #
-# Effort is an ORTHOGONAL :effort modifier on any reference (opus:high,
-# smart:low, opus:xhigh) — it is no longer baked into an alias name.
-# So `model = "opus:high"` here sets BOTH the model and the effort in one token
-# (no need to also set `effort =`); the modifier's effort wins.
+# Effort is an :effort modifier on any reference (opus:high, smart:low), so
+# `model = "opus:high"` sets both in one token; the modifier's effort wins.
+#
 # =============================================================================
 
-# Deprecated (ISSUE-418). Set `model` and `effort` under [brain.claude_code]
-# instead; these still load and are moved there with a warning.
+# Retired (ISSUE-418). Set `model` and `effort` under [brain.claude_code]
+# instead; these still load, are moved there with a warning, and never reach
+# the native brain.
 # model = "opus"
 # effort = "high"
 
