@@ -8,10 +8,10 @@ harness root and its sweep, the per-harness `CLAUDE_CONFIG_DIR`).
 The brain's half, from "ClaudeCodeBrain on the harness" down: the argv, the
 `system/init` check, the failure order, the pid rules and the seam. Those run
 `ClaudeCodeBrain.execute` for real against `tests/support/fake_claude_cli.py`
-on PATH as `claude`, which starts the real adapter from the harness's MCP
-config, so every call goes adapter, bridge, dispatcher, tool server. The tool
-server runs unwrapped here; `tests/linux/test_cli_harness_real.py` runs it
-under bwrap.
+on PATH as `claude`, which starts the real launcher from the harness's MCP
+config, so every call goes CLI, launcher-exec'd tool server, dispatcher. The
+tool server runs unwrapped here; `tests/linux/test_cli_harness_real.py` runs
+it under bwrap.
 """
 
 from __future__ import annotations
@@ -173,6 +173,9 @@ class TestTheRequestBuilder:
             (req.timeout_seconds + 30) * 1000
         )
         assert req.harness.bash_spill_full_output == config.brain.native.bash_spill_full_output
+        # The directory the tool server's wrap binds read-only, where the
+        # harness hands the CLI-spawned server its hello and gate (#862).
+        assert req.harness.control_dir == Path(req.composed_system_prompt_path).parent
 
     def test_the_request_env_holds_no_credential(self, tmp_path, monkeypatch):
         """The tool server's env is `req.env`; the CLI's credential is only in
@@ -802,12 +805,18 @@ class TestTheFailureOrder:
             time.sleep(1.0)
             if first is not None:
                 first()
-            os.killpg(pid, signal.SIGKILL)
+            # The CLI spawns it, so it leads no process group of its own.
+            os.kill(pid, signal.SIGKILL)
 
         threading.Thread(target=go, daemon=True).start()
 
     def test_a_dead_tool_server_reads_as_its_failure_not_oom(self, tmp_path):
-        h = _Harnessed(tmp_path, plan={"calls": [{"name": "Bash", "args": {"command": "sleep 30"}}]})
+        # The CLI outlives its server, as the real one does while the model
+        # takes its next turn after a "Connection closed" result.
+        h = _Harnessed(tmp_path, plan={
+            "calls": [{"name": "Bash", "args": {"command": "sleep 30"}}],
+            "sleep_before_result": 30,
+        })
         self._kill_server_when_running(h)
 
         started = time.monotonic()
@@ -815,10 +824,13 @@ class TestTheFailureOrder:
 
         assert time.monotonic() - started < 25
         # `error`, where the CLI's own SIGKILL from `on_failure` would read as
-        # `oom`. The text is the server's signal death, verbatim, so a deploy
-        # restart is still recognised as one (`attempt_failure_text`).
+        # `oom`. The daemon is not the server's parent since #862, so it sees
+        # the exit and not the signal; a deploy restart, which kills the CLI
+        # too, still reads as the CLI's own signal death.
         assert result.stop_reason == "error", result.result_text
-        assert result.result_text.startswith("Claude Code was terminated by SIGKILL")
+        assert result.result_text == (
+            "The Claude Code brain's tool server failed: the tool server exited"
+        )
         assert h.pids[-1] == 0
 
     def test_a_cancel_outranks_the_dead_tool_server(self, tmp_path):

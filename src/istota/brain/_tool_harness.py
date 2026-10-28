@@ -11,85 +11,90 @@ keeps those names as one-line delegates. The env rules moved with them:
 ``None`` there inherits the daemon's whole environment.
 
 **The tool harness** (``tool_harness``): a ``claude`` CLI running outside bwrap
-with its tools in the tool server. The CLI spawns
-``python -I -m istota.sandbox.mcp_adapter --socket <path>`` from the
-``mcp_config.json`` written here; the adapter connects to a Unix socket this
-module listens on, and each call goes through a ``ToolDispatcher`` over
-``build_remote_tools`` to the tool server under the NATIVE profile, or, for
-``WebFetch`` when ``HarnessSpec.web_fetch`` carries a policy, to the
-daemon-side tool native uses (``request_web_fetch_tool``).
+with its tools in the tool server, which the CLI spawns itself (#862). The
+harness writes ``mcp_config.json`` naming one stdio server,
+``python -I -m istota.sandbox.tool_launcher --report FIFO --env-file PATH --
+<wrapped tool server argv>``; the launcher clears the CLI's environment,
+reports its pid down the FIFO and execs the tool server under the NATIVE wrap
+with ``--mcp --hello``. Every call then goes CLI to tool server and back, two
+processes, with the server's own ``ToolDispatcher`` applying the subset, the
+lock and the text cap. Nothing in the daemon accepts a connection.
 
 ``claude_code.py`` reaches the harness only through ``tool_harness``,
-``HarnessHandle``, ``set_cli_root`` and ``release_calls``. The listener, the
-peer check and the per-harness ``AsyncRuntime`` are private: they are the
-relay the unified tool server (#862) deletes, so nothing outside this module
-may depend on them.
+``HarnessHandle``, ``set_cli_root`` and ``release_calls``.
 
-- **One loop per harness**: an ``AsyncRuntime`` instance on its own thread, not
-  the process-wide Talk runtime and never ``asyncio.run`` on the caller's
-  thread.
-- **The socket** sits in ``tempfile.gettempdir()``, not under the control
-  directory, which is bound read-only into the sandbox and so connectable from
-  inside it. 0600 before ``listen``; ``bind`` fails on an existing path and
-  nothing here unlinks a path it did not create.
-- **Peer check**: a connection is admitted only when its peer descends from the
-  CLI process ``set_cli_root`` named last. A nonce would be readable by the
-  same uid (ISSUE-550). ``PeerRoots.contains`` blocks on a condition, so it
-  runs in an executor, never on the loop.
-- **Calls are held** until ``release_calls``: the brain releases them once the
-  CLI's ``system/init`` frame passed its check, so no tool runs for a CLI that
-  is about to be killed. ``set_cli_root`` holds them again, since a respawned
-  CLI has its own frame to pass.
-- **Failure**: a dead tool server fails every pending and later call, sets
+- **The files**: in the harness dir (bound by no sandbox) the env file, the pid
+  FIFO and the MCP config; in the task's control dir (bound read-only into the
+  tool server's namespace) the hello and the call-gate FIFO. All 0600, all
+  removed at close.
+- **The pid report** is the one input that grants proxy access, so it fails
+  closed: a pid that does not descend from the CLI ``set_cli_root`` named, or
+  a second pid under the same CLI, is refused, SIGKILLed if it is still the
+  process that was read, and fails the attempt. A checked pid goes to
+  ``req.on_pid``; the CLI's never does.
+- **Calls are held** by the tool server until ``release_calls`` writes one byte
+  to the gate, once the brain's init check passed.
+- **The watcher** fails the attempt when the server exits while the CLI is
+  still running 2 s later and ``close`` has not begun. The pinned CLI ends a
+  session by SIGINTing its server ~5 ms after the ``result`` line and exits
+  ~100 ms after that, so an exit followed by the CLI's own is the normal end.
+  The exit is also the reap report (``on_pid(0)``): the daemon is not the
+  server's parent.
+- **Failure**: a refused report or a dead server sets
   ``HarnessHandle.failure`` and calls ``on_failure``, which the brain uses to
-  kill the CLI's group. A start failure is reported the same way: the handle
-  is yielded with ``failure`` set, so the brain needs no exception type from
-  this module.
+  kill the CLI's group. A start failure is reported the same way, without the
+  call: the handle is yielded with ``failure`` set, so the brain needs no
+  exception type from this module.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import functools
 import json
 import logging
 import os
 import re
 import secrets
-import socket
+import select
+import shutil
+import signal
+import stat
 import sys
-import tempfile
+import threading
+import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import Any
 
 from istota.agent.events import HARNESS_MCP_SERVER
-from istota.async_runtime import AsyncRuntime
 from istota.llm.providers import CLI_AUTH_VARIABLE
-from istota.sandbox import tool_server_protocol as proto
 from istota.sandbox.claude_runtime_env import without_claude_runtime_env
-from istota.sandbox.peer_process import PeerRoots, peer_pid
-from istota.session.tools.dispatch import HARNESS_TEXT_CAP_CHARS, ToolDispatcher
+from istota.sandbox.peer_process import (
+    descends_from,
+    report_child_reaped,
+    split_pid_lines,
+    start_time,
+)
+from istota.sandbox.process_group import kill_process_group
+from istota.session.tools.dispatch import HARNESS_TEXT_CAP_CHARS
 
 from ._cli_config_dir import _write_new_file, make_cli_config_dir
 from ._types import BrainRequest
 
 logger = logging.getLogger(__name__)
 
-# How long an accepted connection waits for its CLI to be registered. The CLI
-# spawns the adapter well after `set_cli_root`, so this only covers a race.
-_PEER_GRACE_SECONDS = 2.0
-
-# Bounds on the teardown, which must always complete.
-_CLOSE_TIMEOUT_SECONDS = 30.0
-_RUNTIME_STOP_TIMEOUT_SECONDS = 10.0
-_START_TIMEOUT_SECONDS = proto.STARTUP_TIMEOUT_SECONDS + 15.0
-
-# `sun_path`: 104 bytes on macOS, 108 on Linux, including the terminating NUL.
-_SUN_PATH_MAX = 104 if sys.platform == "darwin" else 108
+# A report that arrives before `set_cli_root` waits this long for the CLI to be
+# registered: the brain registers it as soon as `Popen` returns, and a fast CLI
+# can spawn its server first.
+_ROOT_GRACE_SECONDS = 2.0
+# How long after the server exits the CLI may take to exit too before the exit
+# counts as the server dying mid-attempt (Stage 1: ~100 ms in practice).
+_EXIT_GRACE_SECONDS = 2.0
+# How long `close` waits for the server to go on its own before killing it.
+_CLOSE_WAIT_SECONDS = 5.0
+_POLL_SECONDS = 0.25
 
 
 # ---- The shared tool-server start -------------------------------------------
@@ -138,9 +143,10 @@ def extract_urls(text: str) -> frozenset[str]:
 def request_web_fetch_tool(req: BrainRequest, policy):
     """The daemon-side ``WebFetch`` for one request, or ``None``.
 
-    ``None`` when ``policy`` is absent or disabled. Shared by NativeBrain and
-    the CLI harness's bridge, so both bind it to the same workspace and the
-    same provenance corpus: the URLs in ``req.prompt``, the user half only.
+    ``None`` when ``policy`` is absent or disabled. NativeBrain's, and the
+    builder the CLI brain's WebFetch is to share (#862, Stage 6), so both bind
+    it to the same workspace and the same provenance corpus: the URLs in
+    ``req.prompt``, the user half only.
     It runs in the daemon, not the tool server: a credential-free request
     whose hardening is about the addresses it resolves.
     """
@@ -242,6 +248,8 @@ async def start_request_tool_server(
     )
 
 
+
+
 # ---- The tool harness ---------------------------------------------------------
 
 
@@ -255,21 +263,29 @@ class HarnessHandle:
     cwd: Path               # the CLI's cwd: the tool server's cwd
     offered: tuple[str, ...]  # canonical names tools/list offers
     failure: str | None = None  # the tool server died or the harness failed
-    _bridge: Any = field(default=None, repr=False, compare=False)
+    _harness: Any = field(default=None, repr=False, compare=False)
 
 
-def write_mcp_config(path: Path, socket_path: str) -> None:
-    """The ``--mcp-config`` file: one stdio server, the adapter, no env.
+def write_mcp_config(
+    path: Path, *, report_fifo: Path, env_file: Path, command: list[str],
+) -> None:
+    """The ``--mcp-config`` file: one stdio server, the launcher, no env.
 
-    The CLI passes its own env to the adapter whatever ``env`` says, which is
-    why the adapter clears it first thing.
+    The CLI passes its own env to the launcher whatever ``env`` says, which is
+    why the launcher clears it first thing. ``command`` is the wrapped tool
+    server argv with an absolute ``argv[0]``: the launcher does not search.
     """
     document = {
         "mcpServers": {
             HARNESS_MCP_SERVER: {
                 "type": "stdio",
                 "command": sys.executable,
-                "args": ["-I", "-m", "istota.sandbox.mcp_adapter", "--socket", socket_path],
+                "args": [
+                    "-I", "-m", "istota.sandbox.tool_launcher",
+                    "--report", str(report_fifo),
+                    "--env-file", str(env_file),
+                    "--", *command,
+                ],
                 "env": {},
             }
         }
@@ -295,37 +311,21 @@ def write_git_stub(bin_dir: Path) -> Path:
     return stub
 
 
-def _socket_path(task_id: int) -> str:
-    name = f"istota-tools-{os.getpid()}-{int(task_id)}-{secrets.token_hex(4)}.sock"
-    return os.path.join(tempfile.gettempdir(), name)
+class _StartFailed(Exception):
+    pass
 
 
-def _error_wire(text: str) -> dict:
-    return {"content": [{"type": proto.CONTENT_TEXT, "text": text}], "is_error": True}
+@dataclass(eq=False)
+class _Server:
+    """One reported, authorized tool server."""
+
+    pid: int
+    started: int
+    exited: threading.Event = field(default_factory=threading.Event)
+    reap_reported: bool = False
 
 
-class _Connection:
-    """One admitted adapter connection: its writer and its calls in flight."""
-
-    def __init__(self, writer: asyncio.StreamWriter) -> None:
-        self.writer = writer
-        self.write_lock = asyncio.Lock()
-        self.calls: dict[str, tuple[asyncio.Task, asyncio.Event]] = {}
-
-    async def send(self, message: dict) -> None:
-        async with self.write_lock:
-            self.writer.write(proto.encode(message))
-            await self.writer.drain()
-
-    def close(self) -> None:
-        for task, abort in list(self.calls.values()):
-            abort.set()
-            task.cancel()
-        with contextlib.suppress(Exception):
-            self.writer.close()
-
-
-class _Bridge:
+class _DirectHarness:
     """Everything behind a ``HarnessHandle``. Private to this module."""
 
     def __init__(
@@ -338,32 +338,33 @@ class _Bridge:
         self._req = req
         self._label = brain_label
         self._on_failure = on_failure
-        self._runtime = AsyncRuntime()
-        self._roots = PeerRoots()
-        self._server = None
-        self._dispatcher: ToolDispatcher | None = None
-        self._listener: asyncio.AbstractServer | None = None
-        self._socket_path: str | None = None
-        self._socket_created = False
-        self._connections: set[_Connection] = set()
-        self._handler_tasks: set[asyncio.Task] = set()
-        self._watcher: asyncio.Task | None = None
-        self._released: asyncio.Event | None = None
-        self._failed: asyncio.Event | None = None
+        self._lock = threading.Lock()
+        self._root_changed = threading.Condition(self._lock)
+        self._root: tuple[int, int] | None = None
+        self._server: _Server | None = None
+        self._closing = threading.Event()
+        self._done = threading.Event()
+        self._files: list[Path] = []
+        self._env_file: Path | None = None
+        self._env_text = ""
+        self._gate_path: Path | None = None
+        self._read_fd: int | None = None
+        self._keep_fd: int | None = None
+        self._reader: threading.Thread | None = None
         self.handle: HarnessHandle | None = None
 
     # -- start ---------------------------------------------------------------
 
     def start(self) -> HarnessHandle:
-        """Make the directory, start the server, open the listener, write the
-        config. Never raises: a failure is returned on ``handle.failure``."""
+        """Make the directory and write the files the CLI and the tool server
+        read. Never raises: a failure is returned on ``handle.failure``."""
         spec = self._req.harness
         cwd = request_tool_workspace(self._req)[0]
         if spec is None:
             return self._failed_handle(cwd, Path(), "the request carries no harness spec")
 
-        root = Path(spec.harness_root)
-        harness_dir = root / f"h-{int(self._req.attempt)}-{secrets.token_hex(4)}"
+        token = secrets.token_hex(4)
+        harness_dir = Path(spec.harness_root) / f"h-{int(self._req.attempt)}-{token}"
         handle = HarnessHandle(
             mcp_config_path=harness_dir / "mcp_config.json",
             config_dir=harness_dir / "config",
@@ -372,9 +373,11 @@ class _Bridge:
             bin_dir=harness_dir / "bin",
             cwd=cwd,
             offered=(),
-            _bridge=self,
+            _harness=self,
         )
         self.handle = handle
+        if not self._req.allowed_tools:
+            return self._start_failed("the request grants no tools")
 
         try:
             harness_dir.mkdir(mode=0o700)
@@ -394,23 +397,80 @@ class _Bridge:
             return self._start_failed(f"could not create the CLI config directory: {exc}")
 
         try:
-            self._runtime.start()
-        except Exception as exc:  # noqa: BLE001
-            return self._start_failed(f"could not start the harness loop: {exc}")
-
-        try:
-            self._runtime.submit(
-                self._astart(spec.bash_spill_full_output), timeout=_START_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:  # noqa: BLE001 — every start failure is reported, not raised
-            return self._start_failed(str(exc) or type(exc).__name__)
-
-        handle.offered = self._dispatcher.offered if self._dispatcher else ()
-        try:
-            write_mcp_config(handle.mcp_config_path, self._socket_path or "")
+            self._write_tool_files(harness_dir, token)
+        except _StartFailed as exc:
+            return self._start_failed(str(exc))
         except OSError as exc:
-            return self._start_failed(f"could not write the MCP config: {exc}")
+            return self._start_failed(f"could not write the tool server's files: {exc}")
+        except Exception as exc:  # noqa: BLE001 — every start failure is reported, not raised
+            return self._start_failed(f"{type(exc).__name__}: {exc}")
         return handle
+
+    def _write_tool_files(self, harness_dir: Path, token: str) -> None:
+        from istota.session.tools.remote import server_command
+
+        req = self._req
+        spec = req.harness
+        handle = self.handle
+        control_dir = Path(spec.control_dir) if spec.control_dir is not None else harness_dir
+        hello_path = control_dir / f"tool-hello-{token}.json"
+        gate_path = control_dir / f"gate-{token}.fifo"
+        # What `start_request_tool_server` gives the server process: `or {}`,
+        # never `or None`, which would hand the launcher nothing to exec with.
+        server_env = without_claude_runtime_env(req.env) if req.env else {}
+
+        raw = server_command() + ["--mcp", "--hello", str(hello_path)]
+        wrap = req.tool_server_wrap
+        command = list(wrap(list(raw))) if wrap is not None else list(raw)
+        if spec.control_dir is None and command != raw:
+            raise _StartFailed(
+                "the request names no control directory, and the sandboxed "
+                "tool server can read its hello only from one"
+            )
+        if not os.path.isabs(command[0]):
+            # `build_bwrap_cmd` returns a bare `bwrap`, and `execve` searches
+            # nothing (Stage 1).
+            found = shutil.which(command[0], path=server_env.get("PATH") or os.defpath)
+            if found is None:
+                raise _StartFailed(f"{command[0]!r} is not on the tool server's PATH")
+            command[0] = os.path.abspath(found)
+
+        hello = request_hello(req, bash_spill_full_output=spec.bash_spill_full_output)
+        hello["text_cap"] = HARNESS_TEXT_CAP_CHARS
+        hello["gate"] = str(gate_path)
+        handle.offered = tuple(hello.get("tools") or ())
+
+        os.mkfifo(gate_path, 0o600)
+        self._files.append(gate_path)
+        self._gate_path = gate_path
+        _write_new_file(hello_path, json.dumps(hello))
+        self._files.append(hello_path)
+
+        env_file = harness_dir / "tool-env.json"
+        self._env_text = json.dumps(server_env)
+        _write_new_file(env_file, self._env_text)
+        self._files.append(env_file)
+        self._env_file = env_file
+
+        pid_fifo = harness_dir / "pid.fifo"
+        os.mkfifo(pid_fifo, 0o600)
+        self._files.append(pid_fifo)
+        # The read end before the CLI spawns, so the launcher's non-blocking
+        # open finds a reader. The write end this process keeps is only there
+        # so the read end never sees end-of-file between launchers.
+        self._read_fd = os.open(pid_fifo, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        self._keep_fd = os.open(pid_fifo, os.O_WRONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+
+        write_mcp_config(
+            handle.mcp_config_path,
+            report_fifo=pid_fifo, env_file=env_file, command=command,
+        )
+        self._files.append(handle.mcp_config_path)
+
+        self._reader = threading.Thread(
+            target=self._read_reports, daemon=True, name="tool-harness-pids",
+        )
+        self._reader.start()
 
     def _failed_handle(self, cwd: Path, harness_dir: Path, reason: str) -> HarnessHandle:
         self.handle = HarnessHandle(
@@ -422,7 +482,7 @@ class _Bridge:
             cwd=cwd,
             offered=(),
             failure=f"could not start the tool harness: {reason}",
-            _bridge=self,
+            _harness=self,
         )
         return self.handle
 
@@ -433,256 +493,252 @@ class _Bridge:
         logger.warning("tool harness start failed (%s): %s", self._label, reason)
         return self.handle
 
-    async def _astart(self, bash_spill_full_output: bool) -> None:
-        from istota.session.tools import build_remote_tools
+    # -- pid reports ---------------------------------------------------------
 
-        self._released = asyncio.Event()
-        self._failed = asyncio.Event()
-        server_abort = asyncio.Event()
-        try:
-            server = await start_request_tool_server(
-                self._req, server_abort, bash_spill_full_output=bash_spill_full_output,
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"the tool server did not start: {exc}") from exc
+    def _read_reports(self) -> None:
+        tail = b""
+        while not self._closing.is_set():
+            try:
+                ready, _, _ = select.select([self._read_fd], [], [], _POLL_SECONDS)
+            except (OSError, ValueError):
+                return
+            if not ready:
+                continue
+            try:
+                chunk = os.read(self._read_fd, 4096)
+            except BlockingIOError:
+                continue
+            except OSError:
+                return
+            if not chunk:
+                # No writer at this instant; a later launcher can still open it.
+                time.sleep(_POLL_SECONDS)
+                continue
+            pids, tail = split_pid_lines(tail + chunk)
+            if len(tail) > 32:
+                tail = b""
+            for pid in pids:
+                try:
+                    self._on_report(pid)
+                except Exception:  # noqa: BLE001 — never raise out of the reader
+                    logger.exception("tool harness: handling a pid report raised")
+
+    def _on_report(self, pid: int) -> None:
+        seen_start = start_time(pid)
+        with self._lock:
+            deadline = time.monotonic() + _ROOT_GRACE_SECONDS
+            while self._root is None and not self._closing.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._root_changed.wait(remaining)
+            root = self._root
+            server = None
+            if self._closing.is_set():
+                verdict = "a tool server reported after the harness began closing"
+            elif root is None:
+                verdict = "a tool server reported before the CLI was registered"
+            elif self._server is not None:
+                verdict = "a second tool server reported under one CLI"
+            elif seen_start is None:
+                verdict = "a tool server exited before its report was checked"
+            elif not descends_from(pid, {root[0]: root[1]}):
+                verdict = "a tool server reported from outside the CLI"
+            else:
+                verdict = None
+                server = _Server(pid=pid, started=seen_start)
+                self._server = server
         if server is None:
-            raise RuntimeError("the request grants no tools")
-        self._server = server
+            self._refuse(pid, seen_start, verdict, fail=not self._closing.is_set())
+            return
+        on_pid = self._req.on_pid
+        if on_pid is not None:
+            try:
+                on_pid(pid)
+            except Exception:  # noqa: BLE001
+                logger.warning("tool harness: on_pid raised", exc_info=True)
+        threading.Thread(
+            target=self._watch, args=(server,), daemon=True, name="tool-harness-watch",
+        ).start()
 
-        tools = {tool.schema.name: tool for tool in build_remote_tools(server)}
-        web_fetch = request_web_fetch_tool(self._req, self._req.harness.web_fetch)
-        if web_fetch is not None:
-            tools[web_fetch.schema.name] = web_fetch
-        self._dispatcher = ToolDispatcher(
-            tools, offered=self._req.allowed_tools, text_cap=HARNESS_TEXT_CAP_CHARS,
-        )
-        self._watcher = asyncio.ensure_future(self._watch_server(server_abort))
-        await self._open_listener()
+    def _refuse(self, pid: int, seen_start: int | None, reason: str, *, fail: bool) -> None:
+        logger.warning("tool harness (%s) refused pid %d: %s", self._label, pid, reason)
+        if seen_start is not None and start_time(pid) == seen_start:
+            with suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+        if fail:
+            self._fail(reason)
 
-    async def _open_listener(self) -> None:
-        path = _socket_path(self._req.task_id)
-        if len(os.fsencode(path)) >= _SUN_PATH_MAX:
-            raise RuntimeError(
-                f"the bridge socket path is {len(os.fsencode(path))} bytes, over the "
-                f"{_SUN_PATH_MAX - 1}-byte limit; set a shorter TMPDIR for the daemon"
-            )
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    # -- the watcher ---------------------------------------------------------
+
+    def _watch(self, server: _Server) -> None:
+        self._wait_for_exit(server)
+        server.exited.set()
+        self._report_reaped(server)
+        # The normal end: the CLI SIGINTs its server and exits a moment later,
+        # and the brain leaves the harness. Either one ends this.
+        if self._closing.wait(_EXIT_GRACE_SECONDS):
+            return
+        with self._lock:
+            current = self._server is server
+        if current and self._cli_alive():
+            self._fail("the tool server exited")
+
+    def _wait_for_exit(self, server: _Server) -> None:
+        pidfd = None
+        if hasattr(os, "pidfd_open"):
+            try:
+                pidfd = os.pidfd_open(server.pid)
+            except ProcessLookupError:
+                return
+            except OSError:
+                pidfd = None
+            if pidfd is not None and start_time(server.pid) != server.started:
+                os.close(pidfd)
+                return
         try:
-            # Fails on an existing path; nothing here unlinks a path it did not
-            # create.
-            sock.bind(path)
-            self._socket_path = path
-            self._socket_created = True
-            os.chmod(path, 0o600)
-            self._listener = await asyncio.start_unix_server(self._accept, sock=sock)
-        except Exception as exc:
-            with contextlib.suppress(Exception):
-                sock.close()
-            raise RuntimeError(f"could not open the bridge socket: {exc}") from exc
+            while not self._done.is_set():
+                if pidfd is not None:
+                    try:
+                        ready, _, _ = select.select([pidfd], [], [], _POLL_SECONDS)
+                    except (OSError, ValueError):
+                        return
+                    if ready:
+                        return
+                else:
+                    if start_time(server.pid) != server.started:
+                        return
+                    time.sleep(_POLL_SECONDS)
+        finally:
+            if pidfd is not None:
+                os.close(pidfd)
 
-    # -- failure -------------------------------------------------------------
+    def _report_reaped(self, server: _Server) -> None:
+        with self._lock:
+            if server.reap_reported:
+                return
+            server.reap_reported = True
+        report_child_reaped(self._req.on_pid)
 
-    async def _watch_server(self, server_abort: asyncio.Event) -> None:
-        # `RemoteToolServer._fail` is the only thing that sets this event.
-        await server_abort.wait()
-        server = self._server
-        if server is not None and server.failure is not None:
-            self._fail(server.failure)
+    def _cli_alive(self) -> bool:
+        with self._lock:
+            root = self._root
+        if root is None:
+            return False
+        pid, started = root
+        if start_time(pid) != started:
+            return False
+        # The CLI is the brain's child: an exited one not yet reaped still has
+        # its start time, and `WNOWAIT` asks without reaping it.
+        try:
+            exited = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return True
+        except (OSError, AttributeError):
+            return True
+        return exited is None
 
     def _fail(self, reason: str) -> None:
         handle = self.handle
-        if handle is None or handle.failure is not None:
-            return
-        handle.failure = reason
-        if self._failed is not None:
-            self._failed.set()
-        logger.warning("tool harness failed (%s): the tool server is gone", self._label)
+        with self._lock:
+            if handle is None or handle.failure is not None or self._closing.is_set():
+                return
+            handle.failure = reason
+        logger.warning("tool harness failed (%s): %s", self._label, reason)
         try:
             self._on_failure()
-        except Exception:  # noqa: BLE001 — never raise into the loop
+        except Exception:  # noqa: BLE001 — never raise into a harness thread
             logger.exception("tool harness on_failure raised")
 
-    # -- peers ---------------------------------------------------------------
+    # -- the seam ------------------------------------------------------------
 
     def set_root(self, pid: int) -> None:
-        for old in self._roots.pids:
-            self._roots.revoke(old)
-        if not self._roots.authorize(pid):
-            logger.warning("tool harness: the CLI (pid %d) was gone before it was registered", pid)
-        # The previous CLI's adapter belongs to a process that is gone, and a
-        # respawned CLI has its own init check to pass before calls run again.
-        if self._runtime.is_running:
-            with contextlib.suppress(Exception):
-                self._runtime.loop.call_soon_threadsafe(self._new_root)
+        started = start_time(pid)
+        with self._lock:
+            old = self._server
+            self._server = None
+            self._root = None
+            report_old = old is not None and not old.reap_reported
+            if report_old:
+                old.reap_reported = True
+        # A respawned CLI: the previous one's server belongs to a process that
+        # is gone, and the new CLI's launcher reports a server of its own.
+        if old is not None and start_time(old.pid) == old.started:
+            kill_process_group(old.pid, signal.SIGKILL)
+        if report_old:
+            report_child_reaped(self._req.on_pid)
+        self._restore_env_file()
+        with self._lock:
+            if started is None:
+                logger.warning(
+                    "tool harness: the CLI (pid %d) was gone before it was registered", pid,
+                )
+            else:
+                self._root = (pid, started)
+            self._root_changed.notify_all()
 
-    def _new_root(self) -> None:
-        if self._released is not None:
-            self._released.clear()
-        self._drop_connections()
-
-    def _drop_connections(self) -> None:
-        for conn in list(self._connections):
-            conn.close()
-        self._connections.clear()
+    def _restore_env_file(self) -> None:
+        """The launcher unlinks the env file once read; a respawned CLI's
+        launcher needs it again."""
+        if self._env_file is None:
+            return
+        try:
+            _write_new_file(self._env_file, self._env_text)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            logger.warning("tool harness: could not rewrite the env file: %s", exc)
 
     def release(self) -> None:
-        if self._released is not None and self._runtime.is_running:
-            with contextlib.suppress(Exception):
-                self._runtime.loop.call_soon_threadsafe(self._released.set)
-
-    async def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        task = asyncio.current_task()
-        if task is not None:
-            self._handler_tasks.add(task)
-        try:
-            await self._serve_connection(reader, writer)
-        finally:
-            if task is not None:
-                self._handler_tasks.discard(task)
-
-    async def _serve_connection(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-    ) -> None:
-        pid = peer_pid(writer.get_extra_info("socket"))
-        loop = asyncio.get_running_loop()
-        admitted = await loop.run_in_executor(
-            None, functools.partial(self._roots.contains, pid, grace_seconds=_PEER_GRACE_SECONDS),
-        )
-        if not admitted:
-            logger.warning("tool harness refused a connection from pid %s", pid)
-            with contextlib.suppress(Exception):
-                writer.close()
+        if self._gate_path is None:
             return
-
-        conn = _Connection(writer)
-        self._connections.add(conn)
-        decoder = proto.FrameDecoder()
-        greeted = False
         try:
-            while True:
-                data = await reader.read(65536)
-                if not data:
-                    return
-                for msg in decoder.feed(data):
-                    kind = msg.get("type")
-                    if kind == proto.MSG_HELLO and not greeted:
-                        greeted = True
-                        await conn.send({
-                            "type": proto.MSG_READY,
-                            "protocol": proto.PROTOCOL_VERSION,
-                            "tools": self._dispatcher.mcp_tool_list() if self._dispatcher else [],
-                        })
-                    elif kind == proto.MSG_CALL and greeted:
-                        self._start_call(conn, msg)
-                    elif kind == proto.MSG_ABORT and greeted:
-                        entry = conn.calls.get(str(msg.get("id")))
-                        if entry is not None:
-                            entry[1].set()
-                    elif kind == proto.MSG_SHUTDOWN:
-                        return
-                    else:
-                        logger.warning("tool harness: unexpected %r frame from the adapter", kind)
-                        await conn.send({"type": proto.MSG_FATAL, "message": f"unexpected {kind!r} frame"})
-                        return
-        except asyncio.CancelledError:
-            raise
-        except proto.ProtocolError as exc:
-            logger.warning("tool harness: bad frame from the adapter: %s", type(exc).__name__)
-            with contextlib.suppress(Exception):
-                await conn.send({"type": proto.MSG_FATAL, "message": "bad frame"})
-        except Exception:  # noqa: BLE001 — a connection failure ends that connection
-            logger.debug("tool harness connection failed", exc_info=True)
+            fd = os.open(self._gate_path, os.O_WRONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        except OSError as exc:
+            logger.warning("tool harness: could not open the call gate: %s", exc.strerror)
+            return
+        try:
+            if not stat.S_ISFIFO(os.fstat(fd).st_mode):
+                logger.warning("tool harness: the call gate is not a FIFO")
+                return
+            os.write(fd, b"\x01")
+        except OSError as exc:
+            logger.warning("tool harness: could not write the call gate: %s", exc.strerror)
         finally:
-            conn.close()
-            self._connections.discard(conn)
-
-    def _start_call(self, conn: _Connection, msg: dict) -> None:
-        call_id = str(msg.get("id"))
-        name = str(msg.get("tool") or "")
-        args = msg.get("args")
-        abort = asyncio.Event()
-        task = asyncio.ensure_future(
-            self._run_call(conn, call_id, name, args if isinstance(args, dict) else {}, abort)
-        )
-        conn.calls[call_id] = (task, abort)
-        task.add_done_callback(lambda _t, key=call_id: conn.calls.pop(key, None))
-
-    async def _run_call(
-        self, conn: _Connection, call_id: str, name: str, args: dict, abort: asyncio.Event,
-    ) -> None:
-        outcome = await self._outcome(call_id, name, args, abort)
-        with contextlib.suppress(Exception):
-            await conn.send({
-                "type": proto.MSG_RESULT,
-                "id": call_id,
-                "content": outcome["content"],
-                "is_error": outcome["is_error"],
-            })
-
-    async def _outcome(self, call_id: str, name: str, args: dict, abort: asyncio.Event) -> dict:
-        from istota.session.tools.remote import content_to_wire
-
-        if not await self._wait_for_release():
-            return _error_wire(f"Tool server failed: {self.handle.failure}")
-        if abort.is_set():
-            return _error_wire("Tool call aborted")
-        try:
-            result = await self._dispatcher.call(call_id, name, args, None, abort)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 — a call failure is a result
-            return _error_wire(f"Tool error: {exc}")
-        return {"content": content_to_wire(result.content), "is_error": bool(result.is_error)}
-
-    async def _wait_for_release(self) -> bool:
-        """True once calls may run, False once the harness failed."""
-        if self._failed.is_set():
-            return False
-        if self._released.is_set():
-            return True
-        released = asyncio.ensure_future(self._released.wait())
-        failed = asyncio.ensure_future(self._failed.wait())
-        try:
-            await asyncio.wait({released, failed}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            released.cancel()
-            failed.cancel()
-        return not self._failed.is_set()
+            os.close(fd)
 
     # -- close ---------------------------------------------------------------
 
     def close(self) -> None:
-        """Listener closed and the socket unlinked, the server shut down and
-        reaped, the loop stopped. Never raises."""
+        """The server gone (killed after a wait), its reap reported once, the
+        reader stopped and every file this harness wrote removed. Never raises."""
         try:
-            if self._runtime.is_running:
-                self._runtime.submit(self._aclose(), timeout=_CLOSE_TIMEOUT_SECONDS)
+            self._close()
         except Exception:  # noqa: BLE001
             logger.warning("tool harness close did not finish cleanly", exc_info=True)
-        finally:
-            self._unlink_socket()
-            with contextlib.suppress(Exception):
-                self._runtime.stop(timeout=_RUNTIME_STOP_TIMEOUT_SECONDS)
 
-    async def _aclose(self) -> None:
-        if self._watcher is not None:
-            self._watcher.cancel()
-        if self._listener is not None:
-            with contextlib.suppress(Exception):
-                self._listener.close()
-        self._unlink_socket()
-        self._drop_connections()
-        for task in list(self._handler_tasks):
-            task.cancel()
-        if self._server is not None:
-            with contextlib.suppress(BaseException):
-                await self._server.aclose()
-
-    def _unlink_socket(self) -> None:
-        if self._socket_created and self._socket_path:
-            self._socket_created = False
-            with contextlib.suppress(FileNotFoundError, OSError):
-                os.unlink(self._socket_path)
+    def _close(self) -> None:
+        self._closing.set()
+        with self._lock:
+            self._root_changed.notify_all()
+            server = self._server
+        if server is not None:
+            if not server.exited.wait(_CLOSE_WAIT_SECONDS):
+                if start_time(server.pid) == server.started:
+                    kill_process_group(server.pid, signal.SIGKILL)
+                server.exited.wait(_EXIT_GRACE_SECONDS)
+            self._report_reaped(server)
+        self._done.set()
+        if self._reader is not None:
+            self._reader.join(timeout=5)
+        for fd in (self._read_fd, self._keep_fd):
+            if fd is not None:
+                with suppress(OSError):
+                    os.close(fd)
+        self._read_fd = self._keep_fd = None
+        for path in self._files:
+            with suppress(OSError):
+                os.unlink(path)
 
 
 @contextmanager
@@ -692,33 +748,34 @@ def tool_harness(
     brain_label: str,
     on_failure: Callable[[], None],
 ) -> Iterator[HarnessHandle]:
-    """One harness: a directory, a tool server, a listener and the MCP config.
+    """One harness: a directory, the files the CLI's launcher and the tool
+    server read, the pid reader and the MCP config.
 
     The handle comes back with ``failure`` set when any of that could not be
     made; the caller fails the attempt with ``stop_reason="error"`` rather than
-    starting the CLI. ``on_failure`` is called on the harness's own thread when
-    the tool server dies.
+    starting the CLI. ``on_failure`` is called on a harness thread when a pid
+    report is refused or the tool server dies mid-attempt.
     """
-    bridge = _Bridge(req, brain_label=brain_label, on_failure=on_failure)
+    harness = _DirectHarness(req, brain_label=brain_label, on_failure=on_failure)
     try:
-        handle = bridge.start()
+        handle = harness.start()
     except BaseException:
-        bridge.close()
+        harness.close()
         raise
     try:
         yield handle
     finally:
-        bridge.close()
+        harness.close()
 
 
 def set_cli_root(handle: HarnessHandle, pid: int) -> None:
-    """The CLI was (re)spawned with ``pid``: admit its descendants, and only
-    theirs, from now on, and hold calls until ``release_calls`` again."""
-    if handle._bridge is not None:
-        handle._bridge.set_root(pid)
+    """The CLI was (re)spawned with ``pid``: accept one tool server descending
+    from it, and drop the previous CLI's."""
+    if handle._harness is not None:
+        handle._harness.set_root(pid)
 
 
 def release_calls(handle: HarnessHandle) -> None:
-    """The CLI's init check passed; held and later calls may run."""
-    if handle._bridge is not None:
-        handle._bridge.release()
+    """The CLI's init check passed; the tool server may run calls."""
+    if handle._harness is not None:
+        handle._harness.release()

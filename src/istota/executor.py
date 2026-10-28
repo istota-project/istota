@@ -2924,10 +2924,11 @@ def _native_web_fetch_enabled(
 ) -> bool:
     """True when this task will actually have the daemon-side WebFetch tool.
 
-    A native task builds it in `NativeBrain`; a `claude_code` task gets it
-    from the tool harness's bridge (`HarnessSpec.web_fetch`), since the
-    harness denies the CLI's own. Asked at prompt time, so it reads the routed
-    kind only, as `harness_denies_web_fetch` does.
+    A native task builds it in `NativeBrain`; a `claude_code` task is to get
+    it from a second MCP server on the tool harness (`HarnessSpec.web_fetch`,
+    #862 Stage 6; between Stages 5 and 6 nothing serves it), since the harness
+    denies the CLI's own. Asked at prompt time, so it reads the routed kind
+    only, as `harness_denies_web_fetch` does.
 
     Used to fold `untrusted_input` into the eager skill set — the native
     WebFetch tool ingests untrusted web content but, as a core tool, doesn't
@@ -7732,7 +7733,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     # **The withheld predicate asks the routing question and the tool list does
     # not**, which is a disagreement on purpose rather than drift. `admin_only`
     # only ever removes the *daemon-side* tool, which native builds and the
-    # tool harness's bridge offers; a `claude_code` task off the harness keeps
+    # tool harness offers (#862 Stage 6); a `claude_code` task off the harness keeps
     # the CLI's own `WebFetch` whatever this list says, because that list
     # never reaches the CLI as an allowlist. So a prompt that told a non-admin
     # there "you have no fetch tool" would be stating an absence that is not
@@ -9547,6 +9548,9 @@ def execute_task(
                 harness_root=ensure_task_harness_dir(config, task.user_id, task.id),
                 bash_spill_full_output=config.brain.native.bash_spill_full_output,
                 web_fetch=harness_web_fetch_policy(config, allowed),
+                # Bound read-only by `_tool_server_wrap` above: where the
+                # harness hands the CLI-spawned tool server its hello and gate.
+                control_dir=control_dir,
             )
         if req.advisor:
             logger.info(

@@ -68,9 +68,16 @@ class HarnessSpec:
     # harness makes its own directory under it.
     harness_root: Path
     bash_spill_full_output: bool = True
-    # The daemon-side WebFetch the bridge offers, from `[brain.native.web_fetch]`;
-    # `None` when the grant leaves it out or the tool is disabled.
+    # The daemon-side WebFetch policy, from `[brain.native.web_fetch]`; `None`
+    # when the grant leaves it out or the tool is disabled. Not served to the
+    # CLI between #862's Stage 5 and Stage 6, which serves it from a second
+    # MCP server.
     web_fetch: "WebFetchPolicy | None" = None
+    # The task's control directory, which the tool server's wrap binds
+    # read-only: the harness puts the tool server's hello and call gate there.
+    # `None` for a direct caller; on a sandboxed shape the harness then refuses
+    # to start, since nothing it could write is visible in the namespace.
+    control_dir: Path | None = None
 
 
 @dataclass

@@ -69,7 +69,7 @@ Boundaries and operations:
 src/istota/
 ├── brain/                # Pluggable model invocation (Brain protocol)
 │   ├── _cli_config_dir.py  # A fresh per-run `CLAUDE_CONFIG_DIR`: the O_EXCL writer, the onboarding seed, the credentials link, `make_cli_config_dir` → brain.md
-│   └── _tool_harness.py  # The shared tool-server start (native and CLI) and the CLI tool harness: `tool_harness`, `HarnessHandle`, `set_cli_root`, `release_calls` → brain.md
+│   └── _tool_harness.py  # The shared tool-server start (native and CLI) and the CLI tool harness: the launcher config, hello and gate files, the pid reader with its descent check, the watcher; `tool_harness`, `HarnessHandle`, `set_cli_root`, `release_calls` → brain.md
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
 ├── assignments/          # Goals Istota carries across days: store.py (row access), charter.py, validators.py, lifecycle.py (the one state writer), caller.py (user turn, wake or neither), budget.py (the ledger and ceilings), wakes.py (due wakes, the wake task, pickup, orphan reaping), scratchpad.py (snapshots, user edits, repair), prompt.py (the wake prompt) → assignments.md
 ├── skills/               # Self-contained skills (skill.md + optional CLI)
@@ -131,11 +131,10 @@ src/istota/
 │   ├── plan.py           # The sandbox mount plan, as data: what `build_bwrap_cmd` binds, masks and unshares
 │   ├── confined.py       # Opening a file in a task-writable tree by fd from a daemon-composed root, never by name; the guard in `tests/test_confined_file_access.py` → sandbox.md
 │   ├── claude_runtime_env.py  # What a task env carries only because the outer process is the `claude` CLI → sandbox.md
-│   ├── tool_server.py    # The native brain's tool server, one process per task attempt, inside the sandbox → sandbox.md
+│   ├── tool_server.py    # Every brain's tool server, one process per task attempt, inside the sandbox: `--fd` for native, `--mcp --hello` for the CLI → sandbox.md
 │   ├── tool_server_protocol.py  # The wire format between the two, stdlib-only → sandbox.md
 │   ├── tool_launcher.py  # What the CLI runs as its MCP server: clears env, reports its pid down a FIFO, execs the bwrapped tool server; stdlib-only → sandbox.md
 │   ├── mcp_stdio.py      # MCP over stdio for the `claude` CLI: `serve_stdio`, the method table, version negotiation, content mapping; stdlib-only → brain.md
-│   ├── mcp_adapter.py    # The MCP server the CLI spawns in tool-harness mode: drops its env, relays calls to the daemon's bridge socket; interim, deleted by #862 → brain.md
 │   ├── skill_proxy.py    # Unix-socket proxy for credential isolation
 │   ├── network_proxy.py  # CONNECT proxy for network isolation
 │   ├── kv_namespaces.py  # Which `istota_kv` namespaces the model may not touch → sandbox.md

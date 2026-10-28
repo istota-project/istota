@@ -7,8 +7,7 @@ own steps, ``agent.coercion.prepare_tool_arguments``), a readers-writer lock by
 ``execution_mode``, ``execute``, then the text cap.
 
 The tool server builds one over its real tools for every call it runs, from
-either brain (#862); part 1's harness bridge still builds one over
-``build_remote_tools`` until the bridge goes. So this module imports only from
+either brain (#862). This module imports only from
 ``istota.agent`` and ``istota.llm``'s leaves, never the brain or the daemon:
 ``tests/test_tool_dispatch.py`` holds that.
 

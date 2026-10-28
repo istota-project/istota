@@ -1,12 +1,11 @@
 """MCP over stdio: the codec a tool host speaks to the ``claude`` CLI.
 
 Newline-delimited JSON-RPC 2.0, one message per line, the five methods the
-CLI uses and nothing else. The codec knows nothing about sockets, the bridge
-or the tool server: its host hands ``serve_stdio`` the tool list and two
-callables, ``call(call_id, name, args)`` returning ``{content, is_error}`` in
-the tool server's wire shape, and ``abort(call_id)``. Two hosts: the tool
-server's ``--mcp`` front end (#862) and, until the relay goes,
-``sandbox/mcp_adapter.py``. Stdlib only, held by ``tests/test_mcp_stdio.py``.
+CLI uses and nothing else. The codec knows nothing about sockets or the
+tool server: its host hands ``serve_stdio`` the tool list and two callables,
+``call(call_id, name, args)`` returning ``{content, is_error}`` in the tool
+server's wire shape, and ``abort(call_id)``. Its host is the tool server's
+``--mcp`` front end (#862). Stdlib only, held by ``tests/test_mcp_stdio.py``.
 
 The method table:
 

@@ -26,9 +26,8 @@ built from an allowlist and carries no variable of ours):
   left on would. The smoke witness's negative control
   (`scripts/test-image-negative-control.sh cli-witness`).
 
-`{socket}` and `{harness_dir}` in a call's arguments or the host probe are
-replaced with the bridge socket and the harness directory, read from the MCP
-config.
+`{harness_dir}` in a call's arguments or the host probe is replaced with the
+harness directory, read from the MCP config.
 - `sleep_before_calls`, `sleep_before_result`: seconds.
 - `exit`: the exit status, 0 by default.
 
@@ -60,8 +59,6 @@ class _Mcp:
         with open(config_path) as fh:
             servers = json.load(fh)["mcpServers"]
         (self.name, server), = servers.items()
-        args = server["args"]
-        self.socket = args[args.index("--socket") + 1] if "--socket" in args else ""
         # The real CLI passes its whole environment, whatever `env` says.
         self.proc = subprocess.Popen(
             [server["command"], *server["args"]],
@@ -133,7 +130,7 @@ def main(argv: list[str]) -> int:
     if config_path is None:
         return _without_mcp(argv, plan)
     mcp = _Mcp(config_path)
-    places = {"{socket}": mcp.socket, "{harness_dir}": os.path.dirname(config_path)}
+    places = {"{harness_dir}": os.path.dirname(config_path)}
 
     def subst(value):
         if isinstance(value, str):
