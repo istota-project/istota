@@ -9,17 +9,15 @@ module + ``istota.session``).
 What the executor still owns and ``NativeBrain`` consumes: the fully-composed
 prompt (``req.prompt`` → the user message), the optional system-prompt file, the
 per-task env, the cwd, the cancel check, ``task_cgroup``, ``on_pid``, and
-``native_sandbox_wrap`` — the sandbox under the *native* profile. The last three
+``tool_server_wrap`` — the tool server's sandbox. The last three
 go to one place: the tool server this brain spawns once per attempt
-(``session/tools/remote.py``), wrapped by that profile, placed in the cgroup
+(``session/tools/remote.py``), wrapped by it, placed in the cgroup
 from ``preexec_fn``, and reported through ``on_pid`` as the pid ``!stop``, the
 web cancel endpoint and ``host_pressure.read_sandbox_shm`` reach for. Before
 that server existed this brain called ``on_pid`` never, so every native task
 carried ``worker_pid`` 0.
 
-What it still ignores: ``sandbox_wrap`` (the *Claude* profile — that namespace
-carries the `claude` CLI's runtime state and its credential, which this brain's
-tools have no use for and must not be handed, ISSUE-389) and ``result_file``.
+What it still ignores: ``harness`` and ``result_file``.
 
 Wired here: compaction via the loop's ``prepare_next_turn`` hook, output-aware
 loop detection + a max-turns cap as composable stop conditions, transient-error
@@ -113,7 +111,13 @@ from istota.session.usage import TaskUsage, cache_write_multiplier_for_ttl
 from ._aliases import CANONICAL_ROLES, split_effort
 from ._resolve import Resolution, alias_keys, clamp_effort_level, effort_wire_value, resolve_selection
 from ._roles import current_alias_table
-from ._tool_harness import request_hello, request_tool_workspace, start_request_tool_server
+from ._tool_harness import (
+    extract_urls as _extract_urls,  # noqa: F401 — the provenance corpus, read by tests here
+    request_hello,
+    request_tool_workspace,
+    request_web_fetch_tool,
+    start_request_tool_server,
+)
 from ._types import BrainRequest, BrainResult, ImageInput
 from .claude_code import is_usage_limit_error
 
@@ -255,15 +259,6 @@ _API_RETRY_MAX_DELAY = 120.0
 # portable role survives a cross-provider fallback.
 _BUILTIN_ROLE_NAMES = CANONICAL_ROLES
 
-# URL harvester for require_url_provenance (Stage 3b). Matches http(s) URLs in
-# free text; trailing punctuation the wrapping prose contributes is trimmed.
-_URL_RE = re.compile(r"https?://[^\s<>\"'`\])}]+", re.IGNORECASE)
-
-
-def _extract_urls(text: str) -> frozenset[str]:
-    if not text:
-        return frozenset()
-    return frozenset(m.rstrip(".,;:!?") for m in _URL_RE.findall(text))
 
 # The BrainResult.stop_reason vocabulary the executor documents. The loop's raw
 # agent_end reasons are normalized into this set so a future stop_reason-keyed
@@ -2914,26 +2909,12 @@ class NativeBrain:
         """
         if not req.allowed_tools:
             return []
-        from istota.session.tools import ToolEnv, build_remote_tools, make_web_fetch_tool
+        from istota.session.tools import build_remote_tools
 
         tools = list(build_remote_tools(server)) if server is not None else []
-
-        policy = self._web_fetch_policy()
-        if policy is not None and policy.enabled:
-            # Provenance corpus (Stage 3b): only assembled when the knob is on,
-            # so the default path threads nothing new. v1 corpus = URLs present
-            # in the task prompt (task text + prior conversation context already
-            # folded into req.prompt by the executor).
-            corpus = _extract_urls(req.prompt) if policy.require_url_provenance else None
-            cwd, read_roots, write_roots, write_denied_roots = self._tool_workspace(req)
-            tools.append(make_web_fetch_tool(ToolEnv(
-                cwd=cwd,
-                read_roots=read_roots,
-                write_roots=write_roots,
-                write_denied_roots=write_denied_roots,
-                web_fetch=policy,
-                web_fetch_url_corpus=corpus,
-            )))
+        web_fetch = request_web_fetch_tool(req, self._web_fetch_policy())
+        if web_fetch is not None:
+            tools.append(web_fetch)
 
         allowed = set(req.allowed_tools)
         return [t for t in tools if t.schema.name in allowed]
@@ -2945,25 +2926,9 @@ class NativeBrain:
         The native harness has no other web-reaching tool once Bash is confined
         behind the CONNECT allowlist, so this is the daemon-side fetch path.
         """
-        from istota.session.tools import WebFetchPolicy
+        from istota.session.tools import web_fetch_policy_from_config
 
-        cfg = getattr(self._config, "web_fetch", None)
-        if cfg is None or not cfg.enabled:
-            return None
-        return WebFetchPolicy(
-            enabled=True,
-            timeout_seconds=cfg.timeout_seconds,
-            max_bytes=cfg.max_bytes,
-            max_content_chars=cfg.max_content_chars,
-            max_redirects=cfg.max_redirects,
-            allow_http=cfg.allow_http,
-            allowed_ports=tuple(cfg.allowed_ports),
-            user_agent=cfg.user_agent,
-            allow_hosts=tuple(cfg.allow_hosts),
-            block_hosts=tuple(cfg.block_hosts),
-            extra_blocked_cidrs=tuple(cfg.extra_blocked_cidrs),
-            require_url_provenance=cfg.require_url_provenance,
-        )
+        return web_fetch_policy_from_config(getattr(self._config, "web_fetch", None))
 
     def _convert_to_llm(self, messages: list[AgentMessage]) -> list[Message]:
         """Render AgentMessages to provider wire format, then repair tool pairs.

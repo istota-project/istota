@@ -39,6 +39,8 @@ from istota.sandbox.shell_exec import PIPEFAIL_SHELLOPTS, SHELLOPTS_VAR
 from istota.skills._env import EnvContext, build_identity_env, build_skill_env
 from istota.skills._types import EnvSpec, SkillMeta
 
+pytestmark = pytest.mark.usefixtures("cli_without_tool_server")
+
 
 class TestBuildCleanEnv:
     def test_returns_minimal_env(self):
@@ -119,8 +121,10 @@ class TestBuildCleanEnv:
         assert "USER" not in env
         assert "LOGNAME" not in env
 
-    def test_includes_oauth_token(self):
-        """CLAUDE_CODE_OAUTH_TOKEN is passed through for auth."""
+    def test_the_oauth_token_stays_out_and_the_mode_comes_through(self):
+        """The CLI's credential is not a task's (cli-brain-tools part 2,
+        Stage 5): `build_clean_env` names the mode, which host-side skill CLIs
+        read, and the CLI env builders add the credential themselves."""
         config = Config()
         with patch.dict(os.environ, {
             "PATH": "/usr/bin",
@@ -128,7 +132,11 @@ class TestBuildCleanEnv:
             "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-secret",
         }, clear=True):
             env = build_clean_env(config)
-        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-secret"
+            cli_env = build_model_cli_env(config)
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+        assert "sk-ant-oat-secret" not in env.values()
+        assert env["ISTOTA_CLI_AUTH"] == "subscription"
+        assert cli_env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-secret"
 
     @pytest.mark.parametrize("mode", ["subscription", "api_key"])
     def test_every_credential_shaped_var_it_injects_is_named_in_the_strip_set(self, mode):
@@ -174,22 +182,29 @@ class TestBuildCleanEnv:
 
             __iter__ = keys
 
-        # An explicit mode, both of them: what `build_clean_env` adds is the
-        # mode's credential (`cli_auth_env`), and each mode adds different names.
+        # An explicit mode, both of them: what the CLI env adds is the mode's
+        # credential (`cli_credential_env`), and each mode adds different names.
+        # `build_clean_env`, which every task env starts from, adds none of
+        # them since the CLI left the sandbox (cli-brain-tools part 2, Stage 5);
+        # `build_model_cli_env` is the positive control.
         config = Config()
         config.brain.claude_code.auth = mode
         config.providers["anthropic"].api_key = "sentinel-provider-key"
         with patch.object(os, "environ", _AnswersEverything()):
-            env = build_clean_env(config)
+            clean = build_clean_env(config)
+            cli = build_model_cli_env(config)
 
-        suspicious = {
-            k for k in env
-            if k.upper().startswith("CLAUDE")
-            or any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
-        }
+        def suspicious(env):
+            return {
+                k for k in env
+                if k.upper().startswith("CLAUDE")
+                or any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
+            }
+
+        assert suspicious(clean) == set()
         # Positive control: a guard that finds nothing to check is not a guard.
-        assert suspicious, "build_clean_env injected no credential-shaped var"
-        assert suspicious <= CLAUDE_RUNTIME_ENV_VARS
+        assert suspicious(cli), "build_model_cli_env injected no credential-shaped var"
+        assert suspicious(cli) <= CLAUDE_RUNTIME_ENV_VARS
 
     def test_propagates_admins_file_path(self):
         """ISTOTA_ADMINS_FILE (a path, not a secret) reaches subprocesses so a

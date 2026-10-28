@@ -265,7 +265,6 @@ def _run_section_brain(config, prompt: str, label: str, *, task_id=None, usage_o
         on_progress=None,
         cancel_check=cancel_check,
         on_pid=None,
-        sandbox_wrap=None,
         result_file=None,
     )
     try:

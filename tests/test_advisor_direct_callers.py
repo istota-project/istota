@@ -59,6 +59,11 @@ _KNOWN_SITES = {
     # for on every turn. Before ISSUE-272 this site spawned `claude` directly
     # and never set the disable var at all — the channel really was open.
     "context.py",
+    # The doctor's model probe, moved off its own `claude -p` spawn onto the
+    # tool harness (cli-brain-tools-only-path, Stage 1). It grants Bash and
+    # leaves `advisor=""`, so `ClaudeCodeBrain` sets
+    # `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` as for every other direct caller.
+    "doctor.py",
 }
 
 
@@ -125,7 +130,14 @@ class TestDirectCallerShapesStayAdvisorFree:
         assert env.get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") == "1"
 
     def test_read_only_shape(self, tmp_path):
-        # ocr / encounter_ocr / immunization_ocr (read_path=<document>)
-        cmd, env = self._execute_capturing(tmp_path, allowed_tools=["Read"])
+        # ocr / encounter_ocr / immunization_ocr (read_path=<document>), and the
+        # code reviewer's tooled request. A tool grant runs on the harness, so
+        # the argv carries its MCP config and the CLI's env is the harness's.
+        from istota.brain import claude_code
+        from tests.test_brain import _handle, _harness_req
+
+        req = _harness_req(tmp_path, allowed_tools=["Read"])
+        cmd = ClaudeCodeBrain._build_command(req, mcp_config_path=tmp_path / "mcp.json")
+        env = claude_code._harness_cli_env(req, _handle(tmp_path))
         assert "--advisor" not in cmd
         assert env.get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") == "1"

@@ -579,7 +579,7 @@ class TestTheClaudeRuntimeBlockIsStillAbsentHere:
 
     `tests/linux/test_sandbox_profiles_real.py` proves the NATIVE argv builds a
     namespace without the credential. This proves the tool server is built with
-    that argv — a regression that spawned it under the CLAUDE profile would
+    that argv — a regression that spawned it under some other namespace would
     leave that file green and hand the model the token again.
     """
 

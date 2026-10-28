@@ -567,15 +567,16 @@ def model_caller_env(
     return out
 
 
-def strip_unselected_cli_credentials(
-    env: Mapping[str, str], mode: str | None, carried: Mapping[str, str],
+def cli_credential_env(
+    config, mode: str | None, user_id: str | None = None,  # noqa: ANN001
 ) -> dict[str, str]:
-    """``env`` without any model credential the mode does not carry, with the
-    mode's own values (``carried``, `cli_auth_env`'s answer for ``mode``) put
-    back over whatever a merge left there. The last step of a task's env."""
-    out = {k: v for k, v in env.items() if not is_model_credential_name(k)}
-    out.update(carried)
-    return out
+    """The credential names a `claude` CLI process gets for ``mode``.
+
+    The one place that decides it: `executor.build_model_cli_env` and
+    `executor.build_harness_cli_env` both call this. No task env carries the result, so the model's tools
+    never see it. ``user_id``'s own `anthropic` key under "api_key".
+    """
+    return cli_auth_env(config, mode, user_id)
 
 
 def strip_model_credentials(env: Mapping[str, str]) -> dict[str, str]:

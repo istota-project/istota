@@ -36,7 +36,7 @@ the server is exactly six; the daemon builds the seventh itself.
 """
 
 from .bash import make_bash_tool
-from .env import ToolEnv, ToolPathError, WebFetchPolicy
+from .env import ToolEnv, ToolPathError, WebFetchPolicy, web_fetch_policy_from_config
 from .files import (
     make_edit_tool,
     make_glob_tool,
@@ -96,4 +96,5 @@ __all__ = [
     "make_glob_tool",
     "make_bash_tool",
     "make_web_fetch_tool",
+    "web_fetch_policy_from_config",
 ]

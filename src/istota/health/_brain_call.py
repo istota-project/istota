@@ -35,9 +35,9 @@ explainer had no ``read_path`` parameter at all, so "grant ``Read`` and do not
 wrap" was not a thing anyone could write. One function with two keywords makes
 it writable — and the tree-wide AST guard that would have caught it
 (``tests/test_brain_request_confinement.py::test_a_file_tool_grant_carries_a_
-sandbox_wrap``) cannot: it requires the ``sandbox_wrap=`` keyword to be present
-and not a literal ``None``, and what it now sees is a bare name that is ``None``
-on a live branch. So the two are re-paired at run time instead, at the top of
+sandbox_wrap``) cannot: it requires the ``tool_server_wrap=`` keyword to be
+present and not a literal ``None``, and what it now sees is a bare name that is
+``None`` on a live branch. So the two are re-paired at run time instead, at the top of
 the function, before anything else happens.
 
 ``logger`` is the fourth per-caller value and is passed for the same reason
@@ -89,16 +89,13 @@ def call_health_brain(
     empty list here would leave the tools unconfined. That is why the caller
     names a file rather than passing a possibly-empty list.
 
-    Confinement covers ``NativeBrain``, whose file tools read these roots.
-
-    **The Claude Code brains ignore those roots entirely and take their
-    boundary from bubblewrap**, which is what ``sandbox_wrap`` supplies
-    (ISSUE-397). Without it the grant was far wider than it reads:
-    ``build_claude_cli_flags`` treats a non-empty ``allowed_tools`` as the
-    signal to add ``--dangerously-skip-permissions`` and no ``--allowedTools``
-    allowlist at all, so the CLI ran its full default toolset — ``Bash`` and
-    ``Write`` included — host-side as the daemon user, on the default
-    deployment, driven by a prompt whose input is an uploaded document.
+    The roots and the wrap bound every brain's tools, because every brain now
+    runs them in the tool server: ``NativeBrain`` directly, and the Claude Code
+    brain on the tool harness (``harness``), its CLI outside the namespace and
+    its ``Read`` relayed into the tool server. Before the harness the CLI was
+    wrapped itself and ignored these roots, and before ISSUE-397 it was not
+    wrapped at all, so a ``Read`` grant ran its full default toolset host-side
+    as the daemon user.
 
     The wrap is passed on both branches rather than only on the vision one, so
     "an OCR call runs in a namespace" is a property of the call rather than of
@@ -138,6 +135,8 @@ def call_health_brain(
     # `briefings.generate`, and a top-level import from any of these callers
     # risks closing a cycle back through it.
     from istota.executor import (  # noqa: PLC0415
+        SandboxProfile,
+        build_daemon_harness,
         build_daemon_sandbox,
         build_model_cli_env,
         persist_brain_usage,
@@ -145,13 +144,14 @@ def call_health_brain(
 
     if sandboxed:
         sandbox = build_daemon_sandbox(
-            config, user_id, extra_ro_binds=[read_path] if read_path else None
+            config, user_id,
+            extra_ro_binds=[read_path] if read_path else None,
+            profile=SandboxProfile.NATIVE,
         )
         if sandbox.refused and read_path:
             # Fail closed. A namespace was wanted and could not be built, and
-            # the tool grant below is only safe inside one — on the Claude
-            # brains it is the CLI's whole default toolset, confined by nothing
-            # else. Better no extraction than an unconfined one: the caller
+            # the tool grant below is only safe inside one. Better no
+            # extraction than an unconfined one: the caller
             # renders "extraction unavailable, add the rows by hand", which is
             # a recoverable answer.
             log.warning(
@@ -160,13 +160,25 @@ def call_health_brain(
             )
             return None
         cwd = sandbox.work_dir
-        sandbox_wrap = sandbox.wrap
+        tool_server_wrap = sandbox.tool_server_wrap
     else:
         # The explainer: no tool grant, so no namespace and no per-user work
         # dir. `config.temp_dir` is the shared root and is what that call has
         # always used as its cwd.
         cwd = Path(getattr(config, "temp_dir", None) or "/tmp")
-        sandbox_wrap = None
+        tool_server_wrap = None
+
+    harness = None
+    if read_path is not None:
+        try:
+            harness = build_daemon_harness(
+                config, user_id,
+                brain_kind=getattr(brain, "kind", ""),
+                timeout_seconds=timeout_seconds,
+            )
+        except RuntimeError as e:
+            log.warning("%s_harness_failed user_id=%r error=%s", prefix, user_id, e)
+            return None
 
     req = BrainRequest(
         prompt=prompt,
@@ -179,10 +191,10 @@ def call_health_brain(
         # daemon-side model spawn that is not a task (ISSUE-232).
         env=build_model_cli_env(config),
         fs_read_roots=[read_path] if read_path else None,
-        # The Claude brains' filesystem boundary (ISSUE-397). `NativeBrain`
-        # reads `native_sandbox_wrap` and not this one, and is confined by the
-        # roots above instead.
-        sandbox_wrap=sandbox_wrap,
+        # The tool server's namespace (ISSUE-397), for every brain: on
+        # `claude_code` the CLI runs outside it on the harness.
+        tool_server_wrap=tool_server_wrap,
+        harness=harness,
         timeout_seconds=timeout_seconds,
         model=model,
         streaming=False,

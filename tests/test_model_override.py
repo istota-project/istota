@@ -31,6 +31,8 @@ from istota.scheduler import check_scheduled_jobs
 from istota.storage import get_user_cron_path
 from istota.brain.claude_code import OPUS
 
+pytestmark = pytest.mark.usefixtures("cli_without_tool_server")
+
 
 def _write_cron_md(mount_path, user_id, content):
     cron_path = mount_path / get_user_cron_path(user_id, "istota").lstrip("/")

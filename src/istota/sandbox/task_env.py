@@ -227,19 +227,14 @@ def build_task_runtime(
         skill_model_reachability,
     )
     from istota.llm.providers import (
-        cli_auth_env,
         model_caller_env,
         model_caller_provider,
         process_cli_auth,
-        strip_unselected_cli_credentials,
+        strip_model_credentials,
     )
 
     cli_mode = process_cli_auth(config)
-    # The CLI credential this task carries, the user's own `anthropic` key
-    # under "api_key". Computed once: `build_clean_env` sets it and the strip
-    # below puts it back over anything a merge replaced.
-    cli_credentials = cli_auth_env(config, cli_mode, task.user_id)
-    env = build_clean_env(config, user_id=task.user_id)
+    env = build_clean_env(config)
     env.update({
         "ISTOTA_TASK_ID": str(task.id),
         # `tasks transcript` reads this to decide which log is the one being
@@ -368,10 +363,11 @@ def build_task_runtime(
         if k not in env:
             env[k] = v
     # After the last merge, before the proxy split: whatever a manifest or a
-    # hook put under a model credential name goes, and the mode's own value is
-    # restored. The hook and manifest filters are the first line; this is the
-    # guarantee.
-    env = strip_unselected_cli_credentials(env, cli_mode, cli_credentials)
+    # hook put under a model credential name goes, and nothing comes back. No
+    # task env carries the CLI's credential (cli-brain-tools part 2, Stage 5):
+    # the CLI gets it from its own env builder. The hook and manifest filters
+    # are the first line; this is the guarantee.
+    env = strip_model_credentials(env)
 
     # Credential isolation via skill proxy: strip secrets from Claude's env
     # and run skill CLIs through a Unix socket proxy that injects them.

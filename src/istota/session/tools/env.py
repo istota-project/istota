@@ -54,6 +54,32 @@ class WebFetchPolicy:
     require_url_provenance: bool = False
 
 
+def web_fetch_policy_from_config(cfg) -> WebFetchPolicy | None:
+    """``[brain.native.web_fetch]`` as the tool's policy, or ``None`` when the
+    block is absent or disabled.
+
+    The one mapping: NativeBrain builds its tool from it, and the executor puts
+    it on ``HarnessSpec.web_fetch`` for the CLI harness. ``admin_only`` has no
+    counterpart here; ``build_allowed_tools`` reads it.
+    """
+    if cfg is None or not cfg.enabled:
+        return None
+    return WebFetchPolicy(
+        enabled=True,
+        timeout_seconds=cfg.timeout_seconds,
+        max_bytes=cfg.max_bytes,
+        max_content_chars=cfg.max_content_chars,
+        max_redirects=cfg.max_redirects,
+        allow_http=cfg.allow_http,
+        allowed_ports=tuple(cfg.allowed_ports),
+        user_agent=cfg.user_agent,
+        allow_hosts=tuple(cfg.allow_hosts),
+        block_hosts=tuple(cfg.block_hosts),
+        extra_blocked_cidrs=tuple(cfg.extra_blocked_cidrs),
+        require_url_provenance=cfg.require_url_provenance,
+    )
+
+
 def _realpath(p: Path) -> Path:
     """Resolve symlinks and normalize. Works for non-existent paths too — the
     existing prefix's symlinks are resolved, the rest is normalized — so a file

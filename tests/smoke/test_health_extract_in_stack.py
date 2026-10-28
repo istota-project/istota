@@ -140,9 +140,9 @@ WRAP_PROBE = f"""
     import json, subprocess
     from pathlib import Path
     from istota.config import load_config
-    from istota.executor import build_daemon_sandbox
+    from istota.executor import SandboxProfile, build_daemon_sandbox
     config = load_config(Path({CONTAINER_CONFIG!r}))
-    sandbox = build_daemon_sandbox(config, {USER!r})
+    sandbox = build_daemon_sandbox(config, {USER!r}, profile=SandboxProfile.NATIVE)
     probe = ["stat", "-f", "-c", "%T", "/data/db"]
     argv = sandbox.wrap(probe) if sandbox.wrap else probe
     run = subprocess.run(argv, capture_output=True, text=True)

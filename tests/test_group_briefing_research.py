@@ -107,7 +107,7 @@ def test_research_scratch_cannot_request_deferred_writes(env, tmp_path, make_tas
 
 
 @pytest.mark.parametrize("brain_kind", ["native", "claude_code"])
-def test_ordinary_brains_follow_article_through_skill_and_proxy(env, api, tmp_path, monkeypatch, brain_kind):
+def test_ordinary_brains_follow_article_through_skill_and_proxy(env, api, tmp_path, monkeypatch, request, brain_kind):
     """Real executor, brains, shell, proxy, CLI and HTTP API; scripted model and Chrome."""
     from werkzeug.serving import make_server
     from istota import executor
@@ -192,7 +192,10 @@ def test_ordinary_brains_follow_article_through_skill_and_proxy(env, api, tmp_pa
                          "    assert result.returncode == 0, result.stdout + result.stderr\n"
                          "    assert 'Article' in result.stdout or 'article' in result.stdout, result.stdout\n"
                          f"print(json.dumps({{'type': 'result', 'subtype': 'success', 'result': {answer!r}}}))\n")
-        monkeypatch.setattr(ClaudeCodeBrain, "_build_command", staticmethod(lambda req: [sys.executable, str(model)]))
+        monkeypatch.setattr(ClaudeCodeBrain, "_build_command", staticmethod(lambda req, **_kw: [sys.executable, str(model)]))
+        # The scripted model runs its commands in its own process, so no tool
+        # server: the CLI's path without the harness.
+        request.getfixturevalue("cli_without_tool_server")
     try:
         with db.get_db(env.db_path) as conn:
             definition = define(conn, env, generation={"version": 1, "prompt": "PRIVATE-FINAL-CANARY", "research": {

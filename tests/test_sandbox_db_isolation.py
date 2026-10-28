@@ -73,7 +73,7 @@ def _bwrap(config, task, is_admin):
     with patch("istota.executor._bwrap_available", return_value=True):
         return build_bwrap_cmd(
             ["claude", "-p", "test"], config, task, is_admin, [], user_temp,
-            profile=SandboxProfile.CLAUDE,
+            profile=SandboxProfile.NATIVE,
         )
 
 

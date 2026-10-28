@@ -281,17 +281,20 @@ class TestTheClaudeRuntimeCredential:
 
         assert runtime.proxy_ctx is not None
         assert "CLAUDE_CODE_OAUTH_TOKEN" not in runtime.proxy_ctx.base_env
-        # It *is* in the model's env — every brain that authenticates with it
-        # needs it there; `NativeBrain` strips it on its own paths.
-        assert runtime.env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-test"
+        # Nor in the model's env: the CLI gets it from its own env builder
+        # (cli-brain-tools part 2, Stage 5). The mode's name stays.
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in runtime.env
+        assert "sk-ant-oat-test" not in runtime.env.values()
+        assert runtime.env["ISTOTA_CLI_AUTH"] == "subscription"
 
     def test_the_one_skill_that_calls_a_model_gets_it_back(
         self, tmp_path, runtime_inputs, monkeypatch,
     ):
         # `code_review` spawns the `claude` CLI of its own, so the strip above
         # left it unauthenticated (every review came back `review_failed`).
-        # It comes back scoped to that skill, by copy rather than by split:
-        # the model's env keeps it, because two brains authenticate with it.
+        # It comes back scoped to that skill, from config, not from the
+        # model's env, which has not carried it since Stage 5 of
+        # cli-brain-tools part 2.
         monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
         config = _config(tmp_path)
@@ -310,9 +313,9 @@ class TestTheClaudeRuntimeCredential:
         assert proxy is not None
         assert proxy.credential_env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-test"
         assert "CLAUDE_CODE_OAUTH_TOKEN" in proxy.skill_credential_map["code_review"]
-        # Still out of the shared base env and still in the model's own.
+        # Out of the shared base env and out of the model's own.
         assert "CLAUDE_CODE_OAUTH_TOKEN" not in proxy.base_env
-        assert runtime.env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-test"
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in runtime.env
 
     def test_no_other_skill_gets_it(
         self, tmp_path, runtime_inputs, monkeypatch,
@@ -377,8 +380,8 @@ class TestTheClaudeRuntimeCredential:
     ):
         # `build_model_cli_env` runs *inside* the skill subprocess and builds
         # the CLI env from that process's own config: the copy carries the
-        # mode and the `anthropic` provider's key under its provider variable,
-        # and the model's own env carries the key the CLI reads.
+        # mode and the `anthropic` provider's key under its provider variable.
+        # The model's own env carries no key at all.
         monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-from-the-daemon-env")
@@ -401,9 +404,11 @@ class TestTheClaudeRuntimeCredential:
         # Never in the shared snapshot: it reaches one skill, not all of them.
         assert "ISTOTA_PROVIDER_ANTHROPIC_API_KEY" not in proxy.base_env
         assert "ANTHROPIC_API_KEY" not in proxy.base_env
-        # The model's env carries the config key, never the daemon's variable.
-        assert runtime.env["ANTHROPIC_API_KEY"] == "sk-ant-api-test"
+        assert "ANTHROPIC_API_KEY" not in runtime.env
+        assert "ANTHROPIC_BASE_URL" not in runtime.env
+        assert "sk-ant-api-test" not in runtime.env.values()
         assert "CLAUDE_CODE_OAUTH_TOKEN" not in runtime.env
+        assert runtime.env["ISTOTA_CLI_AUTH"] == "api_key"
 
     def test_nothing_is_injected_when_the_daemon_has_no_token(
         self, tmp_path, runtime_inputs, monkeypatch,
@@ -1104,7 +1109,7 @@ class TestBrokerTrustSplit:
         for path in runtime.sandbox_env.values():
             assert Path(path).is_relative_to(runtime_inputs["control_dir"])
             assert "PRIVATE KEY" not in Path(path).read_text()
-        for profile in (SandboxProfile.CLAUDE, SandboxProfile.NATIVE):
+        for profile in (SandboxProfile.NATIVE,):
             argv = executor.build_bwrap_cmd(
                 ["echo", "ok"], config, runtime_inputs["task"], True, [],
                 runtime_inputs["user_temp_dir"], net_proxy_sock=runtime.net_proxy_sock,

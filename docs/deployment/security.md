@@ -1,6 +1,6 @@
 # Security
 
-Istota isolates Claude Code invocations through layered security: clean environment, filesystem sandbox, credential proxy, network isolation, and the credential broker.
+Istota isolates the model's tools through layered security: clean environment, filesystem sandbox, credential proxy, network isolation, and the credential broker.
 
 ## Supported deployment
 
@@ -36,13 +36,13 @@ awk '{print $3, $4}' /srv/app/istota/allowed_signers | ssh-keygen -lf -
 
 ## Clean environment
 
-Every Claude Code subprocess gets a minimal environment built by `build_clean_env()`: only PATH, HOME, PYTHONUNBUFFERED, and configured passthrough vars (`LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`). Task-specific variables (Nextcloud credentials, CalDAV, email, etc.) are added per-task.
+Every task starts from a minimal environment built by `build_clean_env()`: only PATH, HOME, PYTHONUNBUFFERED, and configured passthrough vars (`LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`). Task-specific variables (Nextcloud credentials, CalDAV, email, etc.) are added per-task. No task env carries the `claude` CLI's credential; see [The model's tools and the CLI's credential](#the-models-tools-and-the-clis-credential).
 
 For heartbeat/cron shell commands, `build_stripped_env()` removes all credential-pattern vars (PASSWORD, TOKEN, SECRET, API_KEY, etc.) from the environment.
 
 ## Filesystem sandbox (bubblewrap)
 
-When `sandbox_enabled = true` (default), each Claude Code invocation runs inside a `bwrap` mount namespace with PID isolation.
+When `sandbox_enabled = true` (default), each task's tools run inside a `bwrap` mount namespace with PID isolation: one tool server per task attempt, which runs every Read, Write, Edit, Grep, Glob and Bash call on either brain.
 
 **Every task sees**:
 
@@ -61,7 +61,7 @@ A mask hides rather than revokes: `kernel.unprivileged_userns_clone` is on (bwra
 
 **Also hidden from everyone**: other users' directories and the config directory.
 
-The config directory is not bound — it holds `config.toml`. `emissaries.md`, `persona.md`, `guidelines/*.md` and the skill bodies reach the model as content the daemon read and put in the prompt, so they never needed to be there. `system-prompt.md` is the exception, since `custom_system_prompt = true` makes the CLI open the path itself; that one file is bound read-only, which leaves `config.toml` outside. Until now the file arrived only via the `sandbox_ro_paths = ["/srv/app"]` default, which is why narrowing that default broke every task on such an install.
+The config directory is not bound — it holds `config.toml`. `emissaries.md`, `persona.md`, `guidelines/*.md` and the skill bodies reach the model as content the daemon read and put in the prompt, so they never needed to be there. `system-prompt.md` is no exception: under `custom_system_prompt = true` the native brain reads it in the daemon, and the `claude` CLI, which opens the path itself, runs outside the sandbox.
 
 **Admin users additionally see**: their own developer repositories, when the developer skill is enabled. The workspace bind is the same for an admin as for anyone else: only their own `Users/<id>/` subtree, never the whole workspace or another admin's repositories.
 
@@ -111,7 +111,7 @@ Two limits are worth stating plainly. `security.sandbox_ro_paths` is bound verba
 
 ### Shared rooms
 
-A member's turn in a room more than one person reads runs with that member's full reach, as it does in their private room, apart from their personal memory, which is not loaded into the prompt (see [shared rooms](../features/shared-rooms.md#what-a-task-can-reach)). Two kinds of task there run with nothing of the user's: a guest's turn, which runs as the room's host, and a task nobody asked in the room, such as a scheduled job whose conversation is a shared room. On a sandboxed deployment that is a property of the namespace rather than of the prompt: the user's workspace is not bound at all, and neither are per-resource mounts or the developer repos. Such a task gets a temp directory of its own (`emissary-task-<id>` for a guest's turn, `room-task-<id>` otherwise) instead of the per-user one that persists across the user's tasks in every room, and no bind of the shared Talk attachments directory; its own attachments are copied into the read-only control directory. The CLI brain's session history (`~/.claude/projects`) is not bound into it. Host-side skill CLIs apply the same rule to every path argument, and the Nextcloud skill applies it to its WebDAV verbs and refuses to post into a Talk conversation other people read.
+A member's turn in a room more than one person reads runs with that member's full reach, as it does in their private room, apart from their personal memory, which is not loaded into the prompt (see [shared rooms](../features/shared-rooms.md#what-a-task-can-reach)). Two kinds of task there run with nothing of the user's: a guest's turn, which runs as the room's host, and a task nobody asked in the room, such as a scheduled job whose conversation is a shared room. On a sandboxed deployment that is a property of the namespace rather than of the prompt: the user's workspace is not bound at all, and neither are per-resource mounts or the developer repos. Such a task gets a temp directory of its own (`emissary-task-<id>` for a guest's turn, `room-task-<id>` otherwise) instead of the per-user one that persists across the user's tasks in every room, and no bind of the shared Talk attachments directory; its own attachments are copied into the read-only control directory. Host-side skill CLIs apply the same rule to every path argument, and the Nextcloud skill applies it to its WebDAV verbs and refuses to post into a Talk conversation other people read.
 
 Other participants' messages in a shared room's history reach the model inside an untrusted-content fence, since a co-member's message could otherwise try to steer a turn that runs at full reach. Confirmations still gate side effects.
 
@@ -204,15 +204,23 @@ A deployment may run project code — `npm`, `uv`, `cargo`, a test suite — ins
 
 **A task's cgroup no longer bounds a build.** Container processes are in the container's cgroup, not the task's, so `memory.max`, `pids.max` and `cpu.max` stop applying to anything that moved. The container's own `mem_limit`, `pids_limit` and `cpus` replace them at a coarser granularity — per user rather than per task — so one user's runaway build can take another of their own tasks down with it. Cross-user isolation is intact. An OOM-killed build comes back as exit 137 and is reported by nothing else.
 
+### The model's tools and the CLI's credential
+
+On the `claude_code` brain the `claude` CLI runs outside the sandbox, and none of its own tools that act on the machine are available to it. Its tools come from the same tool server the native brain uses, inside the task's namespace, through one MCP server. The CLI's credential is in the CLI's own environment and, under `auth = "subscription"`, a per-run config directory linking to the daemon's credentials file. Nothing inside the namespace holds it: not the task env, not a file the namespace binds, not a process environment a tool can read under `/proc`. The smoke tier's `tests/smoke/test_cli_credential_unreachable.py` runs those probes, and `scripts/test-image-negative-control.sh cli-witness` turns them red by running the tool calls in the CLI's process instead.
+
+Each run of the CLI gets a fresh `CLAUDE_CONFIG_DIR` with an empty `settings.json`, so the operator's own `~/.claude/settings.json` no longer applies to tasks, and the CLI's own transcripts land in that directory, removed with the rest of the harness directory by the temp-file sweep. `istota-skill tasks transcript` reads the native brain's session logs only.
+
+This holds on the sandboxed shape. Where nothing is sandboxed, the tool server runs as the daemon user without a namespace, and a Bash call can read any process of that user, the CLI included.
+
 ## Network isolation
 
 When `[security.network] enabled = true` (default, requires sandbox), each task's sandbox gets `--unshare-net` (own network namespace, no external connectivity). Outbound traffic goes through a CONNECT proxy on a Unix socket.
 
 Default allowlist:
 
-- `api.anthropic.com:443` -- Claude API
-- `mcp-proxy.anthropic.com:443` -- Claude API
 - `pypi.org:443`, `files.pythonhosted.org:443` -- package installs (when `allow_pypi = true`)
+
+Nothing in the sandbox talks to Anthropic: the `claude` CLI runs outside it, and the code reviewer calls its model host-side. `api.anthropic.com:443` and `mcp-proxy.anthropic.com:443` are no longer on the list, and under `auth = "api_key"` the `anthropic` provider's base-URL host is not added either. A task that calls Anthropic's API from Bash needs the host in `extra_hosts`.
 
 Additional hosts added automatically:
 

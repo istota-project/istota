@@ -537,7 +537,7 @@ class TestProcessUserSleepCycle:
                 req = mock_make_brain.return_value.execute.call_args[0][0]
                 assert req.allowed_tools == []
                 assert req.streaming is False
-                assert req.sandbox_wrap is None
+                assert req.tool_server_wrap is None
                 assert req.on_progress is None
                 assert req.cancel_check is None
 

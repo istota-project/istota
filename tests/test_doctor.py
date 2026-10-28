@@ -132,7 +132,7 @@ class TestRegistry:
             live = name in LIVE_CHECKS
             with pytest.MonkeyPatch.context() as mp:
                 if live:
-                    mp.setattr(subprocess, "run", _NoModel())
+                    _NoModel().install(mp)
                 results = run_checks(config, only=(name,), deep=True, live=live)
             assert results, f"{name} produced no result"
             for r in results:
@@ -146,11 +146,10 @@ class TestRegistry:
         It does not bill the account because `_dev_config` configures no users
         and `runtime.model_execution` therefore SKIPs — which is luck until
         something asserts it. This is that assertion, with `subprocess.run`
-        replaced by a sentinel so a future change that makes the sweep reach a
+        and `make_brain` replaced by a sentinel so a future change that makes the sweep reach a
         model fails here rather than on an invoice.
         """
-        sentinel = _NoModel()
-        monkeypatch.setattr(subprocess, "run", sentinel)
+        sentinel = _NoModel().install(monkeypatch)
         config = _dev_config(make_config, tmp_path)
         results = run_checks(config, only=("runtime.model_execution",), deep=True, live=True)
         assert [r.status for r in results] == [SKIP]
@@ -1480,15 +1479,28 @@ _REAL_SUBPROCESS_RUN = subprocess.run
 
 
 class _NoModel:
-    """A `subprocess.run` stand-in that fails the test if the *model probe* runs.
+    """A stand-in that fails the test if the *model probe* runs.
 
-    It discriminates on the probe's own marker rather than refusing everything,
-    because `runtime.model_cli` and the forge checks all spawn a
-    real `--version` in a whole-registry run. Everything else is delegated.
+    The probe goes through ``istota.brain.make_brain`` and the brain, so
+    :meth:`install` replaces that factory, which raises on any call. It also
+    replaces ``subprocess.run``, discriminating on the probe's own marker
+    rather than refusing everything, because `runtime.model_cli` and the forge
+    checks all spawn a real `--version` in a whole-registry run.
     """
 
     def __init__(self):
         self.calls = []
+
+    def install(self, mp):
+        import istota.brain as brain_mod
+
+        mp.setattr(subprocess, "run", self)
+        mp.setattr(brain_mod, "make_brain", self.make_brain)
+        return self
+
+    def make_brain(self, *args, **kwargs):
+        self.calls.append(("make_brain", args))
+        raise _ModelReached("a test built a brain for the model probe")
 
     def __call__(self, cmd, *args, **kwargs):
         if any(_MODEL_MARKER in str(part) for part in (cmd or ())):
@@ -1497,11 +1509,39 @@ class _NoModel:
         return _REAL_SUBPROCESS_RUN(cmd, *args, **kwargs)
 
 
-class TestModelExecution:
-    """The live `claude -p` probe.
+class _ProbeBrain:
+    """The brain the probe builds, answering from a canned result and keeping
+    the request. ``kind`` is ``claude_code``, so the probe builds a harness."""
 
-    Every case patches `subprocess.run` and asserts the patched callable was
-    the one invoked, so no case can bill the account by accident.
+    kind = "claude_code"
+
+    def __init__(self, result=None, raises=None):
+        self.result = result
+        self.raises = raises
+        self.requests = []
+
+    def execute(self, req):
+        from istota.brain import BrainResult
+
+        self.requests.append(req)
+        if self.raises is not None:
+            raise self.raises
+        if self.result is not None:
+            return self.result
+        trace = json.dumps([
+            {"type": "tool", "text": "Bash", "raw": f"echo {_MODEL_MARKER}"},
+            {"type": "text", "text": _MODEL_MARKER},
+        ])
+        return BrainResult(
+            success=True, result_text=f"{_MODEL_MARKER}\n", execution_trace=trace,
+        )
+
+
+class TestModelExecution:
+    """The live `claude -p` probe, on the tool harness.
+
+    Every case replaces `make_brain` and asserts the stand-in was the one
+    invoked, so no case can bill the account by accident.
     """
 
     def _config(self, make_config, make_user_config, **overrides):
@@ -1509,17 +1549,12 @@ class TestModelExecution:
         fields.update(overrides)
         return make_config(**fields)
 
-    def _stub(self, monkeypatch, *, stdout="healthcheck-ok\n", stderr="", raises=None, returncode=0):
-        calls = []
+    def _stub(self, monkeypatch, brain=None):
+        import istota.brain as brain_mod
 
-        def _run_stub(cmd, **kwargs):
-            calls.append((cmd, kwargs))
-            if raises is not None:
-                raise raises
-            return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
-
-        monkeypatch.setattr(subprocess, "run", _run_stub)
-        return calls
+        brain = brain or _ProbeBrain()
+        monkeypatch.setattr(brain_mod, "make_brain", lambda cfg: brain)
+        return brain
 
     def _unsandboxed(self, monkeypatch):
         """Pin the wrap off, so a Linux host and a macOS host answer alike."""
@@ -1542,21 +1577,22 @@ class TestModelExecution:
     ):
         """The no-spawn constraint at the top of doctor.py is unconditional,
         and this is the most expensive possible way to violate it."""
-        monkeypatch.setattr(subprocess, "run", _NoModel())
+        sentinel = _NoModel().install(monkeypatch)
         r = self._run(self._config(make_config, make_user_config), probe=False)
         assert r.status == SKIP
+        assert sentinel.calls == []
 
     def test_skips_on_a_native_brain(self, make_config, make_user_config, monkeypatch):
         from istota.config import BrainConfig
 
-        monkeypatch.setattr(subprocess, "run", _NoModel())
+        sentinel = _NoModel().install(monkeypatch)
         r = self._run(self._config(make_config, make_user_config, brain=BrainConfig(kind="native")))
         assert r.status == SKIP
         assert "native" in r.detail
+        assert sentinel.calls == []
 
     def test_skips_with_no_user_to_run_as(self, make_config, monkeypatch):
-        sentinel = _NoModel()
-        monkeypatch.setattr(subprocess, "run", sentinel)
+        sentinel = _NoModel().install(monkeypatch)
         r = self._run(make_config())
         assert r.status == SKIP
         assert "user" in r.detail
@@ -1565,43 +1601,100 @@ class TestModelExecution:
         # produce as well, so it cannot stand alone on this check.
         assert sentinel.calls == []
 
-    def test_ok_when_the_echo_comes_back(self, make_config, make_user_config, monkeypatch):
+    def test_ok_when_bash_echoed_the_marker(self, make_config, make_user_config, monkeypatch):
         self._unsandboxed(monkeypatch)
-        calls = self._stub(monkeypatch)
+        brain = self._stub(monkeypatch)
         r = self._run(self._config(make_config, make_user_config))
-        assert r.status == OK
-        assert len(calls) == 1
-        cmd, kwargs = calls[0]
-        assert cmd[0] == "claude" and "healthcheck-ok" in " ".join(cmd)
-        assert kwargs["timeout"] == doctor.MODEL_PROBE_TIMEOUT
+        assert r.status == OK, r.detail
+        assert "through Bash" in r.detail
+        assert len(brain.requests) == 1
+
+    def test_the_request_is_a_harness_run_granting_bash_only(
+        self, make_config, make_user_config, monkeypatch
+    ):
+        """The CLI runs on the tool harness, so its one tool is the tool
+        server's Bash. The harness root is a private temporary directory, never
+        `{temp_dir}/.harness`, which a `sudo istota doctor` would leave
+        root-owned."""
+        self._unsandboxed(monkeypatch)
+        brain = self._stub(monkeypatch)
+        config = self._config(make_config, make_user_config)
+        self._run(config)
+
+        req = brain.requests[0]
+        assert req.allowed_tools == ["Bash"]
+        assert _MODEL_MARKER in req.prompt
+        assert req.timeout_seconds == doctor.MODEL_PROBE_TIMEOUT
+        assert req.harness is not None
+        assert req.harness.cli_env["MCP_TOOL_TIMEOUT"] == str(
+            (doctor.MODEL_PROBE_TIMEOUT + 30) * 1000
+        )
+        assert not str(req.harness.harness_root).startswith(str(config.temp_dir))
+        assert not (Path(config.temp_dir) / ".harness").exists()
+        assert not req.harness.harness_root.exists(), "the scratch root outlived the probe"
+        # Unwrapped, so no roots: the harness reads roots with no wrap as a
+        # sandboxed shape missing its wrap, and refuses.
+        assert req.fs_read_roots is None and req.fs_write_roots is None
+        assert req.tool_server_wrap is None
+
+    def test_an_answer_without_a_bash_call_fails(
+        self, make_config, make_user_config, monkeypatch
+    ):
+        """"Through Bash" is the claim, so the marker in the text alone is not
+        enough: a model that writes it without running anything has not shown
+        that the tool server works."""
+        from istota.brain import BrainResult
+
+        self._unsandboxed(monkeypatch)
+        self._stub(monkeypatch, _ProbeBrain(BrainResult(
+            success=True, result_text=_MODEL_MARKER, execution_trace="[]",
+        )))
+        r = self._run(self._config(make_config, make_user_config))
+        assert r.status == FAIL
+        assert "without running it through Bash" in r.detail
+        assert r.remedy.strip()
 
     @pytest.mark.parametrize(
-        "stub,named",
+        "result_kw,named",
         [
             # The excerpt is what makes the finding actionable; without
             # asserting it the `observed` chain could return "" and pass.
-            ({"stdout": "something else", "stderr": "boom"}, ("boom",)),
-            ({"stdout": "only on stdout", "returncode": 7}, ("only on stdout", "7")),
-            ({"stdout": "", "stderr": ""}, ("no output",)),
-            ({"raises": subprocess.TimeoutExpired(cmd=["claude"], timeout=30)}, ("timed out",)),
-            ({"raises": FileNotFoundError("no claude")}, ()),
+            ({"success": False, "result_text": "boom", "stop_reason": "error"}, ("boom", "error")),
+            ({"success": True, "result_text": "something else"}, ("something else", "completed")),
+            ({"success": False, "result_text": ""}, ("no output",)),
+            ({"success": False, "result_text": "", "stop_reason": "timeout"}, ("timed out",)),
         ],
-        ids=["wrong-output", "stdout-fallback-and-exit-status", "no-output", "timeout", "missing-binary"],
+        ids=["error", "wrong-output", "no-output", "timeout"],
     )
-    def test_fails_and_says_why(self, make_config, make_user_config, monkeypatch, stub, named):
+    def test_fails_and_says_why(
+        self, make_config, make_user_config, monkeypatch, result_kw, named
+    ):
+        from istota.brain import BrainResult
+
         self._unsandboxed(monkeypatch)
-        calls = self._stub(monkeypatch, **stub)
+        brain = self._stub(monkeypatch, _ProbeBrain(BrainResult(**result_kw)))
         r = self._run(self._config(make_config, make_user_config))
         assert r.status == FAIL
         assert r.remedy.strip()
-        assert calls
+        assert brain.requests
         for text in named:
             assert text in r.detail
 
-    def test_the_detail_bounds_a_long_stream(self, make_config, make_user_config, monkeypatch):
-        """A subprocess stream is unbounded; a rendered check line is not."""
+    def test_a_brain_that_raises_fails(self, make_config, make_user_config, monkeypatch):
         self._unsandboxed(monkeypatch)
-        self._stub(monkeypatch, stdout="nope", stderr="x " * 5000)
+        self._stub(monkeypatch, _ProbeBrain(raises=FileNotFoundError("no claude")))
+        r = self._run(self._config(make_config, make_user_config))
+        assert r.status == FAIL
+        assert "FileNotFoundError" in r.detail
+
+    def test_the_detail_bounds_a_long_answer(self, make_config, make_user_config, monkeypatch):
+        """A brain's answer is unbounded; a rendered check line is not."""
+        from istota.brain import BrainResult
+
+        self._unsandboxed(monkeypatch)
+        self._stub(monkeypatch, _ProbeBrain(BrainResult(
+            success=False, result_text="x " * 5000, stop_reason="error",
+        )))
         r = self._run(self._config(make_config, make_user_config))
         assert len(r.detail) < 400, len(r.detail)
 
@@ -1643,7 +1736,7 @@ class TestModelExecution:
         from istota import executor
 
         monkeypatch.setattr(executor, "effective_sandboxing", lambda config: True)
-        monkeypatch.setattr(subprocess, "run", _NoModel())
+        sentinel = _NoModel().install(monkeypatch)
         config = self._config(make_config, make_user_config)
         user_temp = Path(config.temp_dir) / "alice"
         assert not user_temp.exists()
@@ -1652,6 +1745,7 @@ class TestModelExecution:
 
         assert r.status == SKIP
         assert not user_temp.exists(), "the check created the directory it was asked about"
+        assert sentinel.calls == []
 
     def test_reads_user_resources_without_writing(
         self, make_config, make_user_config, monkeypatch
@@ -1700,8 +1794,8 @@ class TestModelExecution:
     def test_wraps_under_effective_sandboxing_not_the_flag(
         self, make_config, make_user_config, monkeypatch
     ):
-        """On the shipped Docker stack `sandbox_enabled` is true and the
-        namespace cannot be created, so a wrap there dies for the wrong reason."""
+        """On a shape where `sandbox_enabled` is true and no namespace can be
+        created, a wrap dies for a reason that is not the model's."""
         from istota import executor
 
         def _must_not_wrap(*args, **kwargs):
@@ -1709,13 +1803,15 @@ class TestModelExecution:
 
         monkeypatch.setattr(executor, "effective_sandboxing", lambda config: False)
         monkeypatch.setattr(executor, "build_bwrap_cmd", _must_not_wrap)
-        calls = self._stub(monkeypatch)
+        brain = self._stub(monkeypatch)
         assert self._run(self._config(make_config, make_user_config)).status == OK
-        assert calls[0][0][0] == "claude"
+        assert brain.requests[0].tool_server_wrap is None
 
-    def test_wraps_when_the_sandbox_is_effective(
+    def test_wraps_the_tool_server_natively_when_the_sandbox_is_effective(
         self, make_config, make_user_config, monkeypatch
     ):
+        """The NATIVE wrap goes round the tool server, never CLAUDE round the
+        CLI, and the roots and cwd are the per-user temp dir it binds."""
         from istota.executor import SandboxProfile
 
         seen = {}
@@ -1723,30 +1819,75 @@ class TestModelExecution:
         def _wrap(cmd, config, task, is_admin, user_resources, user_temp_dir, *a, **kw):
             seen["profile"] = kw.get("profile")
             seen["task"] = task
+            seen["user_temp_dir"] = user_temp_dir
             return ["bwrap", "--", *cmd]
 
         self._sandboxed(monkeypatch, _wrap)
-        calls = self._stub(monkeypatch)
+        brain = self._stub(monkeypatch)
         config = self._config(make_config, make_user_config)
         # The check refuses to create this itself; the daemon owns that.
-        (Path(config.temp_dir) / "alice").mkdir(parents=True)
+        user_temp = Path(config.temp_dir) / "alice"
+        user_temp.mkdir(parents=True)
         assert self._run(config).status == OK
-        assert calls[0][0][0] == "bwrap"
-        assert seen["profile"] == SandboxProfile.CLAUDE
+
+        req = brain.requests[0]
+        assert req.tool_server_wrap(["tool-server"]) == ["bwrap", "--", "tool-server"]
+        assert seen["profile"] == SandboxProfile.NATIVE
         assert seen["task"].user_id == "alice"
+        assert seen["user_temp_dir"] == user_temp
+        assert req.cwd == user_temp
+        assert req.fs_read_roots == req.fs_write_roots == [user_temp]
 
     def test_env_comes_from_build_model_cli_env(
         self, make_config, make_user_config, monkeypatch
     ):
         """A daemon-side model call with no task behind it: its env is that
-        function's business, not `os.environ`'s."""
+        function's business, not `os.environ`'s. Both the tool server's env and
+        the CLI's harness env are built on it."""
         from istota import executor
 
         self._unsandboxed(monkeypatch)
         monkeypatch.setattr(executor, "build_model_cli_env", lambda config: {"MARKER": "1"})
-        calls = self._stub(monkeypatch)
+        brain = self._stub(monkeypatch)
         self._run(self._config(make_config, make_user_config))
-        assert calls[0][1]["env"] == {"MARKER": "1"}
+        req = brain.requests[0]
+        assert req.env == {"MARKER": "1"}
+        assert req.harness.cli_env["MARKER"] == "1"
+
+    def test_the_probe_runs_through_the_real_harness(
+        self, make_config, make_user_config, monkeypatch, tmp_path
+    ):
+        """Through the real seam: the real `ClaudeCodeBrain`, with
+        `tests/support/fake_claude_cli.py` on PATH as `claude`, which starts the
+        real adapter, so the Bash call goes adapter, bridge, dispatcher, tool
+        server. The control is the same run with the call left out of the
+        plan, which the probe must not read as a pass."""
+        fake_cli = Path(__file__).parent / "support" / "fake_claude_cli.py"
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        shim = bin_dir / "claude"
+        shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{fake_cli}" "$@"\n')
+        shim.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}")
+        self._unsandboxed(monkeypatch)
+        config = self._config(make_config, make_user_config)
+        config.security.passthrough_env_vars = [
+            *config.security.passthrough_env_vars, "FAKE_CLAUDE_PLAN",
+        ]
+
+        def _probe(calls):
+            plan = tmp_path / f"plan-{len(calls)}.json"
+            plan.write_text(json.dumps({"calls": calls}))
+            monkeypatch.setenv("FAKE_CLAUDE_PLAN", str(plan))
+            return self._run(config)
+
+        ran = _probe([{"name": "Bash", "args": {
+            "command": f"echo {_MODEL_MARKER}", "description": "probe",
+        }}])
+        assert ran.status == OK, ran.detail
+        idle = _probe([])
+        assert idle.status == FAIL, idle.detail
+        assert not (Path(config.temp_dir) / ".harness").exists()
 
 
 class TestLiveChecks:
@@ -1775,7 +1916,7 @@ class TestLiveChecks:
         ids=["deep-selects-no-live-check", "live-selects-it-and-not-deep"],
     )
     def test_each_flag_selects_only_its_own_axis(self, make_config, monkeypatch, flags, present, absent):
-        monkeypatch.setattr(subprocess, "run", _NoModel())
+        _NoModel().install(monkeypatch)
         names = {r.name for r in run_checks(make_config(), **flags)}
         assert absent not in names
         if present:
@@ -6180,58 +6321,6 @@ class TestSandboxMasksUsesTheNativeProfile:
         # `_mask_dir` skips a candidate an earlier mask already covers, so the
         # module root is asserted covered rather than masked on its own.
         assert config.module_db_root().resolve().is_relative_to(db_dir)
-
-    def test_everything_the_probe_reads_is_identical_under_both_profiles(
-        self, make_config, monkeypatch, claude_home, tmp_path,
-    ):
-        """Rebuilds the same argv under CLAUDE and compares the masks and the
-        system binds, so a profile-dependent change shows here before the
-        Linux tier."""
-        import tempfile
-
-        from istota import db
-        from istota.executor import SandboxProfile, build_bwrap_cmd
-
-        _, native_cmd, config = self._run_and_capture(
-            make_config, monkeypatch, tmp_path,
-        )
-        task = db.Task(
-            id=0, status="running", source_type="doctor", user_id="doctor", prompt="",
-        )
-        script = native_cmd[native_cmd.index("--") + 3]
-        with tempfile.TemporaryDirectory(prefix="istota-doctor-probe-") as user_temp:
-            claude_cmd = build_bwrap_cmd(
-                ["/bin/sh", "-c", script], config, task, is_admin=False,
-                user_resources=[], user_temp_dir=Path(user_temp),
-                profile=SandboxProfile.CLAUDE,
-            )
-
-        def _masks(argv):
-            """Every tmpfs/remount-ro after the last bind. Not every `--tmpfs`:
-            `/tmp` is mounted early, and under CLAUDE so is the `~/.claude`
-            base this profile deliberately drops."""
-            last_bind = max(
-                (i for i, a in enumerate(argv) if a in ("--bind", "--ro-bind")),
-                default=-1,
-            )
-            return [
-                (argv[i], argv[i + 1]) for i in range(last_bind + 1, len(argv) - 1)
-                if argv[i] in ("--tmpfs", "--remount-ro")
-            ]
-
-        def _system_binds(argv):
-            return [
-                (argv[i], argv[i + 1], argv[i + 2])
-                for i, a in enumerate(argv)
-                if a in ("--ro-bind", "--symlink")
-                and argv[i + 1].startswith(("/usr", "/bin", "/lib", "/sbin", "/etc"))
-            ]
-
-        # The user temp dir differs between the two calls, so compare the two
-        # families the verdict actually reads.
-        assert _masks(native_cmd) == _masks(claude_cmd)
-        assert _system_binds(native_cmd) == _system_binds(claude_cmd)
-        assert native_cmd[native_cmd.index("--"):][:3] == ["--", "/bin/sh", "-c"]
 
 
 class TestVerdict:

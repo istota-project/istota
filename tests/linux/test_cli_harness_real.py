@@ -149,8 +149,7 @@ def test_a_tool_call_reaches_neither_the_bridge_socket_nor_the_harness_dir(tmp_p
         attempt=1,
         model="claude-sonnet-4-5",
         on_pid=on_pid,
-        native_sandbox_wrap=native_wrap,
-        sandbox_wrap=lambda cmd: pytest.fail("the CLI was wrapped"),
+        tool_server_wrap=native_wrap,
         harness=HarnessSpec(
             cli_env={"PATH": f"{bin_dir}:{path}", "FAKE_CLAUDE_PLAN": str(plan),
                      "ISTOTA_CLI_AUTH": "api_key"},

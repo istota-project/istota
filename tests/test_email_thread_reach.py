@@ -85,7 +85,7 @@ def _run(config, make_turn) -> dict:
             outcome = execute_task(task, config, [], conn=conn)
         assert captured, f"the brain was never called: {outcome!r}"
         req = captured[0]
-        argv = req.sandbox_wrap(["claude", "-p"])
+        argv = req.tool_server_wrap(["claude", "-p"])
     args, kwargs = mock_proxy.call_args
     return {
         "disabled": disabled_seen[0],
