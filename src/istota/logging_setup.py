@@ -15,6 +15,7 @@ def setup_logging(
     config: Config,
     verbose: bool = False,
     daemon_mode: bool = False,
+    console_only: bool = False,
 ) -> None:
     """
     Configure logging for the istota application.
@@ -23,6 +24,9 @@ def setup_logging(
         config: Application configuration with logging settings
         verbose: If True, override config level to DEBUG
         daemon_mode: If True, include timestamps in console output
+        console_only: If True, log to stderr whatever `output` says. For the
+            stack's web process: the configured file is the daemon's, and two
+            processes rotating one file corrupt it.
     """
     global _initialized
     if _initialized:
@@ -49,14 +53,14 @@ def setup_logging(
         date_format = None
 
     # Add console handler if output includes console
-    if log_config.output in ("console", "both"):
+    if console_only or log_config.output in ("console", "both"):
         console_handler = logging.StreamHandler(sys.stderr)
         console_handler.setLevel(level)
         console_handler.setFormatter(logging.Formatter(console_format, datefmt=date_format))
         logger.addHandler(console_handler)
 
     # Add file handler if output includes file
-    if log_config.output in ("file", "both") and log_config.file:
+    if not console_only and log_config.output in ("file", "both") and log_config.file:
         file_path = Path(log_config.file)
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
