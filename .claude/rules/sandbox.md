@@ -94,13 +94,14 @@ A name list, not a `CLAUDE_*` prefix (would eat `passthrough_env_vars`), guarded
 
 - **Wraps nothing**: nested bwrap under `--unshare-user --disable-userns` fails, so `ToolEnv` lost the field.
 - **Places nothing**: membership is inherited at fork; `cgroup.procs` is unbound.
+- **Every call goes through one `ToolDispatcher`** (`build_dispatcher`, #862): the hello's `tools` subset (absent = all six, `[]` = none), argument preparation, the readers-writer lock (Bash, Write, Edit alone; Read, Grep, Glob together) and the hello's `text_cap`. Native's `request_hello` sends `tools` as its grant narrowed to the six and no cap; the loop prepares arguments too, which is safe because preparation is idempotent on its own output (`tests/test_tool_server.py`).
 - **Merges `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` from its own env** into `subprocess_env`, since the wrapper `exec env`s them onto this process and the frame env came from the bridge-less daemon. `NO_PROXY` is deliberately empty, so the merge tests presence; the wrapper wins collisions (the loopback bridge is the only reachable proxy).
 
 Nothing raises past `main` (sends `fatal`); frame contents are never logged.
 
 ## sandbox/tool_server_protocol.py
 
-stdlib-only, one `ProtocolError`. 4-byte big-endian length plus UTF-8 JSON; `MAX_FRAME_BYTES` (32 MiB) enforced on both ends. Messages: `hello` / `call` / `abort` / `shutdown` down, `ready` / `update` / `result` / `fatal` up. `ToolResult.details` does not cross (only `agent/loop.py` reads it); content blocks are plain dicts. `FrameDecoder.close()` raises on leftover bytes: a missing result is a broken server, not an unmade call.
+stdlib-only, one `ProtocolError`. 4-byte big-endian length plus UTF-8 JSON; `MAX_FRAME_BYTES` (32 MiB) enforced on both ends. `hello` carries two optional fields, `tools` and `text_cap`, with no version change. Messages: `hello` / `call` / `abort` / `shutdown` down, `ready` / `update` / `result` / `fatal` up. `ToolResult.details` does not cross (only `agent/loop.py` reads it); content blocks are plain dicts. `FrameDecoder.close()` raises on leftover bytes: a missing result is a broken server, not an unmade call.
 
 ## sandbox/cgroup.py
 

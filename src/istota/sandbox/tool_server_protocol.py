@@ -38,6 +38,11 @@ type         direction  carries
 ``fatal``    s -> d     ``{message}``, sent before the socket closes
 ===========  =========  ==================================================
 
+``hello`` has two optional fields, so ``PROTOCOL_VERSION`` did not move when
+they were added: ``tools``, the names this attempt may call (absent is all six,
+``[]`` is none), and ``text_cap``, a positive int (absent is no cap). The server
+builds its ``ToolDispatcher`` from them. ``ready`` still lists every tool bound.
+
 ``ToolResult.details`` does not cross. ``agent/loop.py`` is its only reader and
 only carries it through the after-hook override, so a proxy tool returns
 ``details=None`` and there is nothing to serialize.

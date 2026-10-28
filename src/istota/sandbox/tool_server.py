@@ -8,6 +8,11 @@ it, and answers ``call`` frames until it is told to stop. See
 ``session/tools/remote.py`` for the daemon's half and for why the transport is
 an inherited descriptor.
 
+Every call runs through one ``ToolDispatcher`` (``session/tools/dispatch.py``),
+built from the hello by ``build_dispatcher``: the subset the hello's ``tools``
+names, argument preparation, the readers-writer lock and the hello's
+``text_cap``. That policy has this one call site, whichever brain is calling.
+
 Three things about the environment it runs in are worth stating here, because
 each is a decision rather than a consequence.
 
@@ -149,15 +154,45 @@ def build_env(hello: dict[str, Any], process_env: dict[str, str] | None = None):
     )
 
 
+def build_dispatcher(hello: dict[str, Any], process_env: dict[str, str] | None = None):
+    """The ``hello`` frame → the ``ToolDispatcher`` every call runs through.
+
+    ``tools`` absent offers all six; a list offers those it names, so ``[]``
+    offers none rather than widening to all. ``text_cap`` absent is no cap.
+    A field of the wrong shape is a ``ProtocolError``: the hello is the
+    daemon's, and guessing at what it meant could offer a tool it withheld.
+    """
+    from istota.session.tools import build_default_tools
+    from istota.session.tools.dispatch import ToolDispatcher
+
+    offered = hello.get("tools")
+    if offered is not None and (
+        not isinstance(offered, list) or not all(isinstance(n, str) for n in offered)
+    ):
+        raise proto.ProtocolError("hello field 'tools' must be a list of tool names")
+    text_cap = hello.get("text_cap")
+    if text_cap is not None and (
+        isinstance(text_cap, bool) or not isinstance(text_cap, int) or text_cap <= 0
+    ):
+        raise proto.ProtocolError("hello field 'text_cap' must be a positive integer")
+
+    tools = {t.schema.name: t for t in build_default_tools(build_env(hello, process_env))}
+    return ToolDispatcher(
+        tools,
+        offered=tools.keys() if offered is None else offered,
+        text_cap=text_cap,
+    )
+
+
 class _Server:
-    """One connection, its tools, and the calls running on it."""
+    """One connection, its dispatcher, and the calls running on it."""
 
     def __init__(self, sock: socket.socket) -> None:
         self._sock = sock
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._write_lock = asyncio.Lock()
-        self._tools: dict[str, Any] = {}
+        self._dispatcher: Any = None
         self._aborts: dict[str, asyncio.Event] = {}
         self._running: dict[str, asyncio.Task] = {}
         self._stop = asyncio.Event()
@@ -216,7 +251,7 @@ class _Server:
             await self._on_hello(message)
             return
         if kind == proto.MSG_CALL:
-            if not self._tools:
+            if self._dispatcher is None:
                 # The `hello`-first rule, which was enforced nowhere: with no
                 # tools bound every name resolves to None and the caller was
                 # told "Unknown tool: Read", which sends the reader looking at
@@ -235,7 +270,7 @@ class _Server:
         raise proto.ProtocolError(f"the daemon sent {kind!r}, which a server does not take")
 
     async def _on_hello(self, message: dict) -> None:
-        if self._tools:
+        if self._dispatcher is not None:
             raise proto.ProtocolError("a second hello frame")
         got = message.get("protocol")
         if got not in proto.SUPPORTED_PROTOCOLS:
@@ -243,14 +278,11 @@ class _Server:
                 f"the daemon speaks protocol {got!r}, this server speaks "
                 f"{sorted(proto.SUPPORTED_PROTOCOLS)}"
             )
-        from istota.session.tools import build_default_tools
-
-        env = build_env(message)
-        self._tools = {t.schema.name: t for t in build_default_tools(env)}
+        self._dispatcher = build_dispatcher(message)
         await self._send({
             "type": proto.MSG_READY,
             "protocol": proto.PROTOCOL_VERSION,
-            "tools": sorted(self._tools),
+            "tools": sorted(self._dispatcher.tool_names),
         })
 
     def _on_call(self, message: dict) -> None:
@@ -277,25 +309,13 @@ class _Server:
         name = str(message.get("tool"))
         args = message.get("args")
         try:
-            tool = self._tools.get(name)
-            if tool is None:
-                await self._result(call_id, _error(f"Unknown tool: {name}"))
-                return
-            if not isinstance(args, dict):
-                await self._result(call_id, _error(f"{name}: arguments must be an object"))
-                return
-
             async def _on_update(text: str) -> None:
                 await self._send({"type": proto.MSG_UPDATE, "id": call_id, "text": text})
 
-            try:
-                result = await tool.execute(call_id, args, _on_update, abort)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                # The same contract every tool already satisfies: a failure is
-                # an error result, never something that reaches the loop.
-                result = _error(f"{name} failed: {type(exc).__name__}: {exc}")
+            # The dispatcher answers an unknown or withheld tool, arguments
+            # that are not an object, and a tool that raises, each as an error
+            # result rather than something that reaches the loop.
+            result = await self._dispatcher.call(call_id, name, args, _on_update, abort)
             await self._result(call_id, result)
         except asyncio.CancelledError:
             raise

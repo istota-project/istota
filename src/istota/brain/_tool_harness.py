@@ -181,8 +181,12 @@ def request_hello(req: BrainRequest, *, bash_spill_full_output: bool) -> dict:
 
     The three caps come from ``ToolEnv``'s own defaults: they were never
     request-derived, and restating them would be a second default.
+
+    ``tools`` is the grant narrowed to what the server runs, so a turn whose
+    grant leaves out Write is refused Write by the server's dispatcher as well
+    as by the loop. No ``text_cap``: native's results are not capped.
     """
-    from istota.session.tools import ToolEnv, hello_payload
+    from istota.session.tools import SANDBOXED_TOOL_NAMES, ToolEnv, hello_payload
 
     defaults = ToolEnv(cwd=Path(req.cwd))
     cwd, read_roots, write_roots, write_denied_roots = request_tool_workspace(req)
@@ -199,6 +203,7 @@ def request_hello(req: BrainRequest, *, bash_spill_full_output: bool) -> dict:
         max_read_lines=defaults.max_read_lines,
         max_read_bytes=defaults.max_read_bytes,
         bash_spill_full_output=bash_spill_full_output,
+        tools=[name for name in req.allowed_tools if name in SANDBOXED_TOOL_NAMES],
     )
 
 
