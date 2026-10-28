@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Icon, CategoryGroup, ListRow } from '@minot/ui';
-  import { Folder, Cloud, Paperclip } from '@lucide/svelte';
+  import { Folder, Cloud } from '@lucide/svelte';
   import type { WorkspacePlace } from '$lib/api';
   import TaskReachIcon from './TaskReachIcon.svelte';
   import { reachesTasks } from './reach';
@@ -20,7 +20,7 @@
   // My files, rooms, groups and shares from other servers live in the bot section and its index views.
   const groups = [
     { label: 'Linked folders', kinds: ['linked'], icon: Folder },
-    { label: 'Connections', kinds: ['drive', 'nextcloud', 'talk'], icon: Cloud },
+    { label: 'Connections', kinds: ['drive', 'nextcloud'], icon: Cloud },
   ];
 </script>
 
@@ -44,12 +44,7 @@
           onclick={(event) => onNavigate(event, place.id)}
         >
           {#snippet icon()}
-            <span class="place-icon"
-              >{#if place.kind === 'talk'}<Icon icon={Paperclip} size="sm" />{:else}<Icon
-                  icon={group.icon}
-                  size="sm"
-                />{/if}</span
-            >
+            <span class="place-icon"><Icon icon={group.icon} size="sm" /></span>
           {/snippet}
           {place.label}
           {#snippet badge()}

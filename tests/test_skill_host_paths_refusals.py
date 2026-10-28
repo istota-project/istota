@@ -39,6 +39,7 @@ from typing import Callable
 
 import pytest
 
+from istota.sandbox.host_paths import ATTACHMENTS_DIR_VAR
 from istota.skills._hostpath import EGRESS, READ, RESOLVING, WRITE, stamped
 from tests.support.skill_cli import run_skill_main
 
@@ -63,6 +64,7 @@ class Mount:
     link: Path
     real: Path
     deferred: Path
+    attachments: Path
 
     def own(self, *parts: str) -> Path:
         return self.link.joinpath("Users", "alice", *parts)
@@ -70,8 +72,9 @@ class Mount:
     def channel(self, *parts: str) -> Path:
         return self.link.joinpath("Channels", "tok1", *parts)
 
-    def talk(self, *parts: str) -> Path:
-        return self.link.joinpath("Talk", *parts)
+    def attachment(self, *parts: str) -> Path:
+        # A Talk attachment is a read-only copy in the control dir (ISSUE-880).
+        return self.attachments.joinpath(*parts)
 
 
 @pytest.fixture
@@ -83,13 +86,16 @@ def mount(tmp_path, monkeypatch) -> Mount:
     link.symlink_to(real, target_is_directory=True)
     deferred = tmp_path / "deferred"
     deferred.mkdir()
+    attachments = tmp_path / "control" / "room-attachments"
+    attachments.mkdir(parents=True)
 
+    monkeypatch.setenv(ATTACHMENTS_DIR_VAR, str(attachments))
     monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(link))
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
     monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(deferred))
     monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "tok1")
     monkeypatch.setenv("ISTOTA_BOT_DIR_NAME", "istota")
-    return Mount(link=link, real=real, deferred=deferred)
+    return Mount(link=link, real=real, deferred=deferred, attachments=attachments)
 
 
 # --------------------------------------------------------------------------- #
@@ -700,7 +706,7 @@ class TestTheModeDecidesTheRoots:
 
     @pytest.mark.parametrize("key", _params(_keys_for(READ)))
     def test_a_read_may_name_a_talk_attachment(self, key, mount, drive):
-        source = mount.talk("shared.pdf")
+        source = mount.attachment("shared.pdf")
         source.write_bytes(b"payload")
         run, recorder = drive(key, source)
         assert recorder.called, run.envelope or run.stdout
@@ -715,7 +721,7 @@ class TestTheModeDecidesTheRoots:
         against the workspace alone hours later — it is the direct-send path
         getting the same answer as the held one.
         """
-        source = mount.talk("shared.pdf")
+        source = mount.attachment("shared.pdf")
         source.write_bytes(b"payload")
         run, recorder = drive(key, source)
         assert not recorder.called, f"{key} mailed a Talk attachment"
@@ -902,7 +908,7 @@ class TestTheVerbsTheDaemonReplays:
             "own workspace": mount.own("labs.csv"),
             "deferred dir": mount.deferred / "labs.csv",
             "channel dir": mount.channel("labs.csv"),
-            "talk": mount.talk("labs.csv"),
+            "talk": mount.attachment("labs.csv"),
             "another user": mount.link / "Users" / "bob" / "labs.csv",
         }
         for path in candidates.values():
@@ -930,11 +936,11 @@ class TestTheVerbsTheDaemonReplays:
     ):
         """The observable half of the same property, at the CLI.
 
-        `{mount}/Talk` is the root the two sets disagreed about, so it is the
+        The attachments dir is the root the two sets disagree about, so it is the
         one worth driving end to end: the refusal has to arrive in the turn
         that asked, not as a warning in a log the model cannot read.
         """
-        source = mount.talk("labs.pdf")
+        source = mount.attachment("labs.pdf")
         source.write_bytes(b"payload")
 
         run, recorder = drive(key, source)

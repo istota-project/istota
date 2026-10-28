@@ -98,9 +98,8 @@ describe('placeForRef', () => {
   const home = place('home', '/Users/u', { kind: 'home' });
   const linked = place('linked:cfg:abc', '/Users/u/Projects/site');
   const short = place('linked:cfg:f', '/Users/u/f');
-  const talk = place('talk', '/Talk', { kind: 'talk', browsable: false });
   const nextcloud = place('nextcloud', null, { kind: 'nextcloud' });
-  const places = [home, linked, short, talk, nextcloud];
+  const places = [home, linked, short, nextcloud];
 
   it('matches a place by its exact view root', () => {
     expect(placeForRef(places, '/Users/u')).toBe(home);

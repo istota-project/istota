@@ -32,16 +32,17 @@ of the six expresses is a missing mode, not a special case.
 
 **Two root sets, and the mode picks which.** What varies is not who is asking
 but where the bytes end up. `READ` gets the task's whole working context — its
-own workspace, its deferred dir, its channel directory and `{mount}/Talk`,
-mirroring what the sandbox binds. `WRITE` gets the same set with the read-only
+own workspace, its deferred dir, its channel directory and its own attachment
+copies (`ISTOTA_ATTACHMENTS_DIR`), mirroring what the sandbox binds. `WRITE` gets the same set with the read-only
 roots dropped, because a destination's content does not leave that context: it
 lands in storage the task reads back and `/chat/files` serves. `EGRESS` gets
 the same set with both *shared* roots dropped — the user's own workspace and
 the task's own deferred dir — because its content *does* leave: mailed to an
 address the model chose, indexed into something later searchable, uploaded, or
-persisted for the daemon to read after the task is over. Talk is in the first
-set and not the last for the same reason read the other way — a task may
-legitimately read a Talk attachment into its own reasoning, which is a
+persisted for the daemon to read after the task is over. The task's
+attachment copies are in the first set and not the last for the same reason
+read the other way — a task may legitimately read an attachment into its own
+reasoning, which is a
 different question from whether those bytes may be mailed out.
 
 **A dest is not unique across a parser, so nothing here keys on one.**
@@ -461,8 +462,8 @@ def _own_roots(*, writable: bool) -> list[Path]:
     """`{mount}/Users/{ISTOTA_USER_ID}` and the caller's own deferred dir.
 
     The `TASK` set with both *shared* roots dropped, which is what `OWN`
-    means: `{mount}/Channels/{token}` and `{mount}/Talk` hold material other
-    people put there, and a verb sending bytes out of the task must not be
+    means: `{mount}/Channels/{token}` and the task's attachment copies hold
+    material other people put there, and a verb sending bytes out of the task must not be
     able to name it directly. The deferred directory is not that. It is per
     *user* rather than per task — `task_env` sets `ISTOTA_DEFERRED_DIR` to
     `user_temp_dir`, so this user's concurrent tasks share one — but each of
@@ -483,7 +484,7 @@ def _own_roots(*, writable: bool) -> list[Path]:
 
     It gives up nothing. `EGRESS` is a guard against naming shared material
     directly — a speed bump on accident rather than a barrier against intent,
-    since a task may already copy a Talk attachment into its workspace and
+    since a task may already copy an attachment into its workspace and
     mail that — and it is not weakened by admitting the most private root
     there is. `outbound_drafts._confined_attachment` is the one caller that
     genuinely needs the workspace alone, and it keeps its own check for a
@@ -495,7 +496,7 @@ def _own_roots(*, writable: bool) -> list[Path]:
     the same either way, and taking it keeps the two branches of `_roots_for`
     reading alike.
     """
-    return env_host_roots(writable=writable, talk=False, channel=False)
+    return env_host_roots(writable=writable, attachments=False, channel=False)
 
 
 def _roots_for(mode: str, *, writable: bool) -> list[Path]:
@@ -519,9 +520,9 @@ def _roots_for(mode: str, *, writable: bool) -> list[Path]:
 
     `EGRESS` is the one narrowing the spec does carry, and it is stated as
     such: the workspace and the deferred dir, so a verb whose content leaves
-    the task can name neither `{mount}/Channels/{token}` nor `{mount}/Talk`.
-    Talk is in the first set and not the second for the same rule read the
-    other way — a task may legitimately read a Talk attachment into its own
+    the task can name neither `{mount}/Channels/{token}` nor its attachment
+    copies. Those are in the first set and not the second for the same rule
+    read the other way — a task may legitimately read an attachment into its own
     reasoning, which is a different question from whether those bytes may be
     mailed out. Why the deferred dir stays: see `_own_roots`.
     """
@@ -551,7 +552,7 @@ def egress_roots() -> list[Path]:
     `EGRESS`'s set, for the same reason `write_roots` exists: a path that
     arrives inside a file the model wrote (the ``$upload`` markers in a
     `wordpress --acf-file`) never passes the argv stamp, so the handler
-    resolves it itself, and spelling `env_host_roots(talk=False,
+    resolves it itself, and spelling `env_host_roots(attachments=False,
     channel=False)` there would be a second copy of the mapping. The caller
     still applies `memory_refusal` to what resolves, as `_resolve_one` does.
     """

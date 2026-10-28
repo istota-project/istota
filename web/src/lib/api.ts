@@ -6784,7 +6784,7 @@ export function finishSetup(): Promise<SetupFinished> {
 export type WorkspaceAccess = 'rw' | 'ro' | 'skill' | 'none' | 'conditional';
 export interface WorkspacePlace {
   id: string;
-  kind: 'home' | 'linked' | 'room' | 'group' | 'talk' | 'drive' | 'nextcloud' | 'share';
+  kind: 'home' | 'linked' | 'room' | 'group' | 'drive' | 'nextcloud' | 'share';
   label: string;
   browsable: boolean;
   view_root: string | null;

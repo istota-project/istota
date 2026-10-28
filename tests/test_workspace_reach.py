@@ -37,7 +37,7 @@ def resources():
 
 
 @pytest.mark.parametrize("withheld, reasons", [
-    (frozenset(), ["nextcloud_user_dir", "nextcloud_talk_dir", "nextcloud_channel_dir",
+    (frozenset(), ["nextcloud_user_dir", "nextcloud_channel_dir",
                    "nextcloud_group_dir", "user_resource", "user_resource"]),
     ({"memory"}, ["nextcloud_user_dir", "nextcloud_channel_dir", "nextcloud_group_dir",
                   "user_resource", "user_resource"]),
@@ -52,7 +52,7 @@ def test_mount_gates_and_order(config, withheld, reasons):
     assert [m.reason for m in mounts] == reasons
     assert all(m.user_data for m in mounts)
     if not withheld:
-        assert [m.mode for m in mounts] == ["rw", "ro", "rw", "rw", "rw", "ro"]
+        assert [m.mode for m in mounts] == ["rw", "rw", "rw", "rw", "ro"]
 
 
 def test_local_workspace_binds_no_talk_dir(config):
@@ -95,17 +95,17 @@ def test_places_and_reach_through_live_membership(config, conn):
     rw_id = db.add_user_resource(conn, "alice", "folder", "linked/rw", permissions="readwrite")
     config.users["alice"] = UserConfig(resources=[ResourceConfig(type="folder", path="linked/ro")])
     cfg_id = "linked:cfg:" + hashlib.sha256(b"linked/ro").hexdigest()[:12]
-    # The Talk attachments place exists only on the Nextcloud mount (ISSUE-725).
+    # No Talk attachments place even on the Nextcloud mount: no task reaches
+    # the bot's flat `Talk/` folder (ISSUE-880).
     config.nextcloud.url = "https://cloud.example.com"
     config.workspace_mount_path = config.workspace_path
     places = list_places(config, conn, "alice")
     by_id = {p.id: p for p in places}
-    assert set(by_id) == {"home", "talk", f"linked:{rw_id}", cfg_id, f"room:{room.token}", "group:team", "nextcloud"}
+    assert set(by_id) == {"home", f"linked:{rw_id}", cfg_id, f"room:{room.token}", "group:team", "nextcloud"}
     assert by_id["home"].view_root == "/Users/alice"
-    assert not by_id["talk"].browsable and by_id["talk"].view_root is None
     assert len(by_id[f"room:{room.token}"].label) == 120
     reach = place_reach(config, conn, "alice", places)
-    for place_id, mode in (("home", "rw"), (f"linked:{rw_id}", "rw"), (cfg_id, "ro"), ("talk", "ro")):
+    for place_id, mode in (("home", "rw"), (f"linked:{rw_id}", "rw"), (cfg_id, "ro")):
         assert (reach[place_id].private, reach[place_id].shared_member, reach[place_id].restricted) == (mode, mode, "none")
     r = reach[f"room:{room.token}"]
     assert (r.private, r.shared_member, r.restricted) == ("rw", "rw", "rw")

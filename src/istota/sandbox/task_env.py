@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .claude_runtime_env import without_claude_runtime_env
+from .host_paths import ATTACHMENTS_DIR_VAR
 
 if TYPE_CHECKING:
     from istota import db
@@ -213,6 +214,7 @@ def build_task_runtime(
         SKILL_MODEL_CALLERS,
         _build_network_allowlist,
         _split_credential_env,
+        attachments_dir,
         build_clean_env,
         derive_authorized_skills,
         derive_credential_set,
@@ -248,6 +250,7 @@ def build_task_runtime(
         "ISTOTA_BOT_DIR_NAME": config.bot_dir_name,
         "ISTOTA_CONVERSATION_TOKEN": task.conversation_token or "",
         "ISTOTA_DEFERRED_DIR": str(user_temp_dir),
+        ATTACHMENTS_DIR_VAR: str(attachments_dir(control_dir)),
         "ISTOTA_EXPERIMENTAL_FEATURES": ",".join(config.experimental.features),
     })
 

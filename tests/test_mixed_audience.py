@@ -331,7 +331,7 @@ class TestAGuestsTurnHasItsOwnDirectories:
         assert task_temp_dir(config, task, restricted=False) == legacy
         assert task_deferred_dir(config, task) == legacy
 
-    def test_a_skill_cli_host_path_refuses_the_talk_dir_when_restricted(
+    def test_a_skill_cli_host_path_refuses_the_talk_dir_restricted_or_not(
         self, tmp_path, monkeypatch,
     ):
         from istota.sandbox.host_paths import WITHHELD_SCOPES_VAR, resolve_host_path
@@ -347,14 +347,26 @@ class TestAGuestsTurnHasItsOwnDirectories:
         refused, _ = resolve_host_path(other, writable=False, operation="read")
         assert refused is None
         monkeypatch.delenv(WITHHELD_SCOPES_VAR)
-        ok, err = resolve_host_path(other, writable=False, operation="read")
-        assert ok is not None, err
+        refused, _ = resolve_host_path(other, writable=False, operation="read")
+        assert refused is None  # ISSUE-880
 
-    def test_control_a_private_task_binds_the_talk_dir(self, config):
+    def test_a_private_task_gets_its_own_attachment_and_no_talk_dir(self, config):
+        # ISSUE-880: the flat folder holds every conversation's files, so no
+        # task binds it; every task gets a copy of what it was sent.
         config.workspace_mount_path = config.workspace_path
-        (config.workspace_path / "Talk").mkdir()
-        seen = _run(config, _room(config, shared=False))
-        assert str((config.workspace_path / "Talk").resolve()) in _binds(seen["argv"])
+        talk = config.workspace_path / "Talk"
+        talk.mkdir()
+        (talk / "other-room.pdf").write_bytes(b"not yours")
+        own = talk / "ticket.pdf"
+        own.write_bytes(b"%PDF-1.4 ticket")
+        seen = _run(config, _room(config, shared=False), attachments=[str(own)])
+        assert str(talk.resolve()) not in _binds(seen["argv"])
+        staged = (config.temp_dir / ".control" / "alice" / "task_1"
+                  / "room-attachments" / "ticket.pdf")
+        assert staged.read_bytes() == b"%PDF-1.4 ticket"
+        assert str(staged.resolve()) in seen["prompt"]
+        assert str(own) not in seen["prompt"]
+        assert seen["model_env"]["ISTOTA_ATTACHMENTS_DIR"] == str(staged.parent.resolve())
 
 
 # ---------------------------------------------------------------------------

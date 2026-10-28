@@ -39,13 +39,16 @@ self-scoping by `ISTOTA_USER_ID`. A host-side path argument does neither, so
 taking the mount root as a root would hand back any other user's workspace
 through `kv get`. The roots here are therefore the same three the sandbox
 binds: the task's deferred dir, `{mount}/Users/{ISTOTA_USER_ID}`, and the
-task's own `{mount}/Channels/{ISTOTA_CONVERSATION_TOKEN}` — plus `{mount}/Talk`
-for reads only, matching its read-only bind. With no `ISTOTA_USER_ID` in the
-environment the mount contributes nothing; the deferred dir stands alone. An
-`ISTOTA_USER_ID` that is set but does not name a child of `{mount}/Users` costs
-that one root and no other — the channel and Talk roots are scoped by the
-conversation token and by nothing, not by the user id — because the collapsed
-join is `{mount}/Users`, every user's directory at once (ISSUE-402).
+task's own `{mount}/Channels/{ISTOTA_CONVERSATION_TOKEN}` — plus, for reads
+only, the copies of the task's own attachments in its control directory
+(`ISTOTA_ATTACHMENTS_DIR`), which the sandbox binds read-only. Never the flat
+`{mount}/Talk`, which holds every conversation's files (ISSUE-880). With no
+`ISTOTA_USER_ID` in the environment the mount contributes nothing; the
+deferred dir stands alone. An `ISTOTA_USER_ID` that is set but does not name a
+child of `{mount}/Users` costs that one root and no other — the channel root
+is scoped by the conversation token, not by the user id — because the
+collapsed join is `{mount}/Users`, every user's directory at once
+(ISSUE-402).
 
 `DEVELOPER_REPOS_DIR` is scoped the same way, and it did not used to be. It
 named the whole of `developer.repos_dir`, one tree shared by every admin, so
@@ -83,9 +86,10 @@ their roots, in their symlink handling and in whether the conversation token
 was guarded.
 
 Unifying the *implementation* is not unifying the *roots*, and the difference
-is deliberate. The deferred replay has no conversation token and no Talk
-access; a draft is confined to its owner's workspace alone. Each caller states
-its own root set at its own call site, which is why ``talk`` is opt-in rather
+is deliberate. The deferred replay has no conversation token and no
+attachments root; a draft is confined to its owner's workspace alone. Each
+caller states its own root set at its own call site, which is why the
+attachments directory is opt-in rather
 than implied by ``writable``: a read whose bytes leave the task is not the same
 question as a read whose bytes stay in it.
 """
@@ -106,7 +110,7 @@ def workspace_roots(
     deferred_dir: Path | str | None = None,
     conversation_token: str | None = None,
     writable: bool = False,
-    talk: bool = False,
+    attachments_dir: Path | str | None = None,
     own_workspace: bool = True,
 ) -> list[Path]:
     """The roots one caller may operate inside, derived from explicit values.
@@ -132,12 +136,13 @@ def workspace_roots(
     channel root would then be the only thing standing between the caller and
     a directory it has no claim to.
 
-    **`talk` is opt-in rather than implied by `writable`.** `{mount}/Talk` is
-    shared, and the sandbox binds it read-only because a task may legitimately
-    read a Talk attachment into its own reasoning. Whether those bytes may
-    then *leave* the task — be mailed out, or indexed into something later
-    searchable — is a different question, and the caller is the only one that
-    knows the answer. A writable call never gets it whatever `talk` says.
+    **`attachments_dir` is opt-in rather than implied by `writable`.** It is
+    the task's own attachment copies, bound read-only, and a task may read one
+    into its own reasoning. Whether those bytes may then *leave* the task — be
+    mailed out, or indexed into something later searchable — is a different
+    question, and the caller is the only one that knows the answer. A writable
+    call never gets it. It replaced `{mount}/Talk`, which held every
+    conversation's attachments (ISSUE-880).
 
     **The user id is passed to `scoped_user_dir` exactly as given, and in
     particular is not stripped.** `is_scopable_user_id` refuses surrounding
@@ -176,8 +181,11 @@ def workspace_roots(
     if token and "/" not in token and token not in (".", ".."):
         roots.append(mount_path / "Channels" / token)
 
-    if talk and not writable:
-        roots.append(mount_path / "Talk")
+    if attachments_dir and not writable:
+        try:
+            roots.append(Path(attachments_dir).resolve())
+        except (OSError, TypeError, ValueError):
+            pass
     return roots
 
 
@@ -217,6 +225,10 @@ def user_workspace_root() -> Path | None:
 #: what the room withholds. Never in the model's env; the proxy is its only
 #: route to a skill CLI.
 WITHHELD_SCOPES_VAR = "ISTOTA_WITHHELD_SCOPES"
+
+#: Set by `task_env`: the task's own attachment copies, under its control
+#: directory (`executor.stage_attachments`), a read-only root (ISSUE-880).
+ATTACHMENTS_DIR_VAR = "ISTOTA_ATTACHMENTS_DIR"
 
 #: Set by `task_env` in the proxy's base env, naming the task's resolved group
 #: set (`room_scopes.task_group_ids`), comma-separated. `kv --group` refuses a
@@ -281,7 +293,7 @@ def memory_refusal(resolved: Path) -> str | None:
 
 
 def env_host_roots(
-    *, writable: bool = False, talk: bool = True, channel: bool = True,
+    *, writable: bool = False, attachments: bool = True, channel: bool = True,
 ) -> list[Path]:
     """`workspace_roots` for a skill CLI, from the environment the proxy set.
 
@@ -290,7 +302,7 @@ def env_host_roots(
     the daemon has none of them set, so a daemon-side caller reading them would
     silently get an empty allowlist (or, worse, another task's).
 
-    `talk=False` and `channel=False` together are for a read whose bytes leave
+    `attachments=False` and `channel=False` together are for a read whose bytes leave
     the task — see `workspace_roots` for why that is the caller's question and
     not this module's. They are two switches rather than one because the two
     roots are shared in different ways and a future caller may well want one
@@ -307,9 +319,9 @@ def env_host_roots(
             os.environ.get("ISTOTA_CONVERSATION_TOKEN", "").strip() if channel else ""
         ),
         writable=writable,
-        # A task its room restricts has no `{mount}/Talk` in its sandbox; its
-        # own attachments were staged where the sandbox binds them.
-        talk=talk and not _withheld_from_env(),
+        attachments_dir=(
+            os.environ.get(ATTACHMENTS_DIR_VAR, "").strip() or None
+        ) if attachments else None,
         own_workspace=not _files_withheld(),
     )
 
@@ -739,7 +751,7 @@ def path_under_roots(resolved: Path, roots: Sequence[Path]) -> bool:
 
     The per-root test is `user_scope.is_within` and the *root set* stays a
     parameter, which is the whole shape of ISSUE-447: the deferred replay's
-    roots carry no conversation token and no Talk root while a skill CLI's do,
+    roots carry no conversation token and no attachments root while a skill CLI's do,
     and one predicate over two root sets is not the same thing as one root set.
     """
     return any(is_within(resolved, root) for root in roots)

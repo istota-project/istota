@@ -40,9 +40,10 @@ def _save_destination(audio_path: str, output_format: str) -> tuple[Path | None,
     cannot leave its parent. Layer 3 of ISSUE-447 reads that as needing no
     second resolution, and **that is right about containment and silent about
     writability** (ISSUE-453). A `READ` argument is scoped against the task's
-    whole working context, which includes `{mount}/Talk` — where a Talk voice
-    message lands, and reading one is the point of this verb. The derived
-    destination was then inside `{mount}/Talk` too: a directory the sandbox
+    whole working context, which includes the task's attachment copies
+    (`ISTOTA_ATTACHMENTS_DIR`) — where a Talk voice message is, and reading one
+    is the point of this verb. The derived destination was then inside that
+    directory too: a directory the sandbox
     binds read-only, written host-side by the daemon user, where the task's
     own file tools could not have written at all.
 
@@ -51,7 +52,7 @@ def _save_destination(audio_path: str, output_format: str) -> tuple[Path | None,
     True)` spelled here: the mode-to-roots mapping lives in `_hostpath`, and a
     derived destination has no stamp to carry the mode, so asking that module
     is what keeps this from drifting the next time `WRITE` narrows. The only
-    root it drops is `{mount}/Talk`; the channel directory and the task's
+    root it drops is the attachments directory; the channel directory and the task's
     deferred directory both stay, the first because the sandbox binds it
     read-write and a save there is one the task could have made itself.
 
@@ -82,8 +83,8 @@ def _save_destination(audio_path: str, output_format: str) -> tuple[Path | None,
     if roots and not path_under_roots(out_path.parent, roots):
         return None, (
             f"{error}. --save writes beside the audio file, and this one is in "
-            "a directory this task may read but not write — Talk is shared and "
-            "bound read-only. Copy the audio into your workspace and transcribe "
+            "a directory this task may read but not write — attachments are a "
+            "read-only copy. Copy the audio into your workspace and transcribe "
             "that, or take the transcript from this command's output and write "
             "it where you want it."
         )
@@ -208,8 +209,8 @@ def build_parser() -> argparse.ArgumentParser:
     # transcribe command
     tr = sub.add_parser("transcribe", help="Transcribe an audio file")
     # The transcript comes back to whoever called, inside the task, so this is
-    # the task's whole working context — including `{mount}/Talk`, which is
-    # where a Talk voice message lands. `out_of_process.py` is the daemon-side
+    # the task's whole working context — including its attachment copies,
+    # where a Talk voice message is. `out_of_process.py` is the daemon-side
     # caller and has to pass the task identity for any of it to resolve.
     host_path(tr, "audio_path", mode=READ, help="Path to audio file")
     tr.add_argument(

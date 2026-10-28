@@ -381,8 +381,15 @@ class TestResolveParsed:
         args = parser.parse_args(["go", "--file", str(mount / "Talk" / "out.csv")])
         assert resolve_parsed(parser, args) is not None
 
-    def test_read_admits_talk_and_egress_does_not(self, mount):
-        shared = mount / "Talk" / "attachment.pdf"
+    def test_read_admits_an_attachment_and_egress_does_not(
+        self, mount, tmp_path, monkeypatch,
+    ):
+        from istota.sandbox.host_paths import ATTACHMENTS_DIR_VAR
+
+        attachments = tmp_path / "room-attachments"
+        attachments.mkdir()
+        monkeypatch.setenv(ATTACHMENTS_DIR_VAR, str(attachments))
+        shared = attachments / "attachment.pdf"
         shared.write_text("x")
         read_parser = _one_verb_parser(READ)
         args = read_parser.parse_args(["go", "--file", str(shared)])

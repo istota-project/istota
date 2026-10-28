@@ -23,7 +23,7 @@ The costs are stated rather than hidden.
   construction rather than beside the daemon's working directory.
 - **One rule for reads and uploads alike.** A token is resolved with
   `writable=False`, so it must exist and it is admitted from the task's whole
-  working context — `{mount}/Talk` included. An upload is egress and the
+  working context — the task's attachment copies included. An upload is egress and the
   narrower `OWN` set would fit it better, but telling an upload from a read
   means knowing gws's verbs, which is the table above. The scan applies the
   read rule and says so here.

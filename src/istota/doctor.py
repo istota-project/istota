@@ -2398,9 +2398,9 @@ def _control_overlap_findings(
       doctor is the surface an operator reads.
     - ``{repos_dir}/{user_id}`` and the package cache under it, read-write for
       an admin developer task.
-    - ``{mount}/Users/{user_id}`` read-write, ``{mount}/Talk`` read-only, and
-      ``{mount}/Channels`` — the last as the whole directory, since the bind is
-      per conversation token and doctor has no task to take one from.
+    - ``{mount}/Users/{user_id}`` read-write and ``{mount}/Channels`` — the
+      last as the whole directory, since the bind is per conversation token
+      and doctor has no task to take one from.
     - the **per-resource mounts**, which are the reason this axis reports more
       than the guards themselves cover. A ``user_resources`` row resolves to
       ``mount / resource_path``, bounded by the workspace root and
@@ -2485,7 +2485,6 @@ def _control_overlap_findings(
     except _PATH_ERRORS:
         return out
 
-    _check("the Talk directory on the mount", mount / "Talk")
     # The whole directory rather than one token's: the bind is per
     # conversation and doctor has no task to take a token from, so the
     # question it can answer is whether the tree is reachable from any of them.

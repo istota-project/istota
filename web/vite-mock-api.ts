@@ -6872,14 +6872,6 @@ const workspacePlaces: WorkspacePlace[] = [
     },
   },
   {
-    id: 'talk',
-    kind: 'talk',
-    label: 'Talk attachments',
-    browsable: false,
-    view_root: null,
-    reach: workspaceReach,
-  },
-  {
     id: 'share:7',
     kind: 'share',
     label: 'Taxes 2026',

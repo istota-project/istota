@@ -125,8 +125,8 @@ def cmd_index_file(args) -> dict:
     stay in this task: `search` hands them back afterwards, to this user and
     to whatever later task asks. So the roots are the ones nobody else writes
     into — the user's own workspace and this task's own deferred dir. What
-    goes is the *shared* pair: `{mount}/Talk`, which the sandbox binds
-    read-only because a task may read an attachment into its own reasoning (a
+    goes is the *shared* pair: the task's attachment copies, which the
+    sandbox binds read-only because a task may read an attachment into its own reasoning (a
     different question from whether it may be indexed into a store), and
     `{mount}/Channels/{token}`. This verb used to
     resolve here against `_indexable_roots`, a second copy of the derivation
