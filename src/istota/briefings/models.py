@@ -65,6 +65,11 @@ ALLOWED_SHARED_SOURCE_KINDS = frozenset({"browse", "markets", "email"})
 # free-text synthesized. Used to pick a block's default render_mode.
 STRUCTURED_KINDS = ("markets", "calendar")
 
+#: The cap on a directive, prompt or definition file a briefing verb reads from
+#: chat (`briefings` and `briefings_config`). Far above any real prompt; it
+#: bounds what one call reads into memory.
+TEXT_FILE_MAX_BYTES = 256 * 1024
+
 
 # Draft definitions only; runtime pickers supply feed, site, file and shared names.
 # A starting directive for templates that need one. Source config stays empty:

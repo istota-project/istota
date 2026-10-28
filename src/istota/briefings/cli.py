@@ -45,6 +45,7 @@ from istota.briefings.models import (
     RENDER_MODES,
     SOURCE_KINDS,
     STRUCTURED_KINDS,
+    TEXT_FILE_MAX_BYTES,
     BriefingsContext,
     normalize_block_payload,
 )
@@ -52,9 +53,6 @@ from istota.briefings.source_checks import SourceRefused, check_source
 from istota.skills._hostpath import READ, ReadRefused, click_host_path, read_resolved_text
 
 logger = logging.getLogger(__name__)
-
-#: The cap `briefings_config shared-block set-prompt --prompt-file` reads under.
-MAX_FILE_BYTES = 256 * 1024
 
 
 def _emit(payload) -> None:
@@ -110,7 +108,7 @@ def _json_list(flag: str, raw: str) -> list:
 def _read_file(flag: str, path: str) -> str:
     """A file the `READ` stamp already resolved, read with the leaf unfollowed."""
     try:
-        return read_resolved_text(path, flag=flag, max_bytes=MAX_FILE_BYTES)
+        return read_resolved_text(path, flag=flag, max_bytes=TEXT_FILE_MAX_BYTES)
     except ReadRefused as e:
         _fail("invalid_argument", str(e))
 
@@ -143,8 +141,16 @@ def _check_block_sources(bctx: BriefingsContext, sources: list[dict], existing) 
         _check_source(bctx, source["kind"], source["config"], stored=stored.config if stored else None)
 
 
-def _save_block(bctx: BriefingsContext, action: str, payload: dict) -> None:
+def _save_block(bctx: BriefingsContext, action: str, payload: dict, *, prepare=None) -> None:
+    """Validate and save ``payload``; ``prepare(conn, payload)`` first reads what it merges.
+
+    One write transaction from that read to the save, so an edit landing in
+    between is not overwritten with values read before it.
+    """
     with bdb.connect(bctx.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if prepare is not None:
+            prepare(conn, payload)
         try:
             values = normalize_block_payload(payload)
         except ValueError as e:
@@ -378,14 +384,17 @@ def blocks_set(ctx, block_id, title, directive, directive_file, render_mode, opt
         payload["render_mode"] = render_mode
     if options is not None:
         payload["options"] = _json_object("--options", options)
+    prepare = None
     if merge_options is not None:
         patch = _json_object("--merge-options", merge_options)
-        with bdb.connect(bctx.db_path) as conn:
+
+        def prepare(conn, payload):
             stored = bdb.get_block(conn, block_id, with_sources=False)
-        if stored is None:
-            _fail("not_found", "block not found")
-        payload["options"] = _merge_options(stored.options or {}, patch)
-    _save_block(bctx, "blocks.set", payload)
+            if stored is None:
+                _fail("not_found", "block not found")
+            payload["options"] = _merge_options(stored.options or {}, patch)
+
+    _save_block(bctx, "blocks.set", payload, prepare=prepare)
 
 
 @blocks.command("remove")
@@ -493,6 +502,8 @@ def sources_set(ctx, source_id, config_json, merge_config, enabled):
     replacement = _json_object("--config", config_json) if config_json is not None else None
     patch = _json_object("--merge-config", merge_config) if merge_config is not None else None
     with bdb.connect(bctx.db_path) as conn:
+        # The merge reads and writes in one write transaction, as `blocks set` does.
+        conn.execute("BEGIN IMMEDIATE")
         stored = bdb.get_source(conn, source_id)
         if stored is None:
             _fail("not_found", "source not found")
