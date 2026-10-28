@@ -478,8 +478,8 @@ class TestRenderBriefingHtml:
         assert out.endswith("</body></html>")
         assert "<p>Hello</p>" in out
 
-    def test_no_styling_anywhere(self):
-        """Guards the 'email client default typography' decision."""
+    def test_only_the_list_is_styled(self):
+        """Client default typography, except the list's left indent."""
         from istota.skills.briefing import render_briefing_html
         md = (
             "\U0001f30d World\n"
@@ -491,7 +491,8 @@ class TestRenderBriefingHtml:
             "- *soft* item\n"
         )
         out = render_briefing_html(md)
-        assert "style=" not in out
+        assert out.count("style=") == out.count("<ul") == 1
+        assert briefing_mod.HTML_LIST_OPEN in out
         assert "<head" not in out.lower()
         assert "<style" not in out.lower()
         assert "class=" not in out
@@ -541,7 +542,7 @@ class TestRenderBriefingHtml:
     def test_bullets_become_unordered_list(self):
         from istota.skills.briefing import render_briefing_html
         out = render_briefing_html("- one\n- two")
-        assert "<ul>" in out and "</ul>" in out
+        assert briefing_mod.HTML_LIST_OPEN in out and "</ul>" in out
         assert "<li>one</li>" in out
         assert "<li>two</li>" in out
 
@@ -626,7 +627,7 @@ class TestRenderBriefingHtml:
         assert "<strong>S&amp;P 500 E-mini</strong>" in out
         assert "<hr>" in out
         assert "<em>Remember to breathe.</em>" in out
-        assert "style=" not in out
+        assert out.count("style=") == out.count(briefing_mod.HTML_LIST_OPEN)
 
     def test_render_failure_falls_back_to_empty(self, monkeypatch):
         """A renderer exception must never bubble into delivery."""
@@ -662,7 +663,8 @@ class TestDocumentEmailRendering:
         assert "<p><strong>Full</strong> fallback</p>" in rich
         assert "Some sources unavailable." not in rich
         assert plain == '<img src="x"> & **literal**\n\nFull fallback'
-        assert "style=" not in rich and "<style" not in rich and "<head" not in rich
+        assert rich.count("style=") == rich.count(briefing_mod.HTML_LIST_OPEN)
+        assert "<style" not in rich and "<head" not in rich
 
     def test_document_html_failure_returns_empty(self, monkeypatch):
         def fail(lines):

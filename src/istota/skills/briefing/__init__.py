@@ -136,8 +136,9 @@ def strip_markdown(text: str, *, preserve_links: bool = False) -> str:
 # input is escaped *first*, so newsletter-derived `<script>` or a quote inside a
 # URL can never become markup. Only http/https/mailto reach an `href`.
 #
-# There is no styling of any kind — no `style` attributes, no `<head>`/`<style>`
-# block — so each mail client's own default typography renders the message.
+# Styling is limited to one inline `style` on `<ul>`, which takes away the
+# client's default left indent so bullets line up with the paragraphs. There is
+# no `<head>`/`<style>` block; each mail client's own typography does the rest.
 
 _HTML_LINK_RE = re.compile(r"\[([^\[\]]+)\]\(([^)\s]*)\)")
 _HTML_SAFE_SCHEME_RE = re.compile(r"(?:https?|mailto):", re.IGNORECASE)
@@ -152,6 +153,11 @@ _HTML_BULLET_RE = re.compile(r"^[-*+]\s+(.*)$")
 # (the same leak `strip_markdown` guards against). Drop the marker and render the
 # line as an ordinary paragraph rather than leaking `## ` into the mail.
 _HTML_ATX_RE = re.compile(r"^#{1,6}[ \t]+")
+# Inside markers keep the bullet visible once the padding that holds an outside
+# marker is gone.
+HTML_LIST_OPEN = (
+    '<ul style="margin-left:0;padding-left:0;list-style-position:inside">'
+)
 
 
 def _render_emphasis(escaped: str) -> str:
@@ -204,7 +210,7 @@ def _render_blocks(lines: list[str]) -> list[str]:
             para.clear()
         if items:
             out.append(
-                "<ul>\n" + "\n".join(f"<li>{i}</li>" for i in items) + "\n</ul>"
+                HTML_LIST_OPEN + "\n" + "\n".join(f"<li>{i}</li>" for i in items) + "\n</ul>"
             )
             items.clear()
 
