@@ -146,6 +146,45 @@ class TestBlocksSources:
         with bdb.connect(ctx.db_path) as conn:
             assert [b.title for b in bdb.list_blocks(conn, "M")] == ["C", "A", "B"]
 
+    def test_sources_set_and_reorder_are_forwarded(self, config, capsys):
+        cli_briefings.dispatch(
+            ["blocks", "add", "-u", "alice", "--briefing", "M", "--title", "News"],
+            config,
+        )
+        bid = json.loads(capsys.readouterr().out)["block"]["id"]
+        ids = []
+        for kind in ("markets", "calendar"):
+            assert cli_briefings.dispatch(
+                ["sources", "add", "-u", "alice", "--block", str(bid), "--kind", kind,
+                 "--disabled"],
+                config,
+            ) == 0
+            ids.append(json.loads(capsys.readouterr().out)["id"])
+
+        assert cli_briefings.dispatch(
+            ["sources", "set", "-u", "alice", "--id", str(ids[0]), "--enabled",
+             "--merge-config", '{"indices": ["DAX"]}'],
+            config,
+        ) == 0
+        capsys.readouterr()
+        assert cli_briefings.dispatch(
+            ["sources", "reorder", "-u", "alice", "--block", str(bid),
+             "--ids", f"{ids[1]},{ids[0]}"],
+            config,
+        ) == 0
+        capsys.readouterr()
+
+        ctx = resolve_for_user("alice", config)
+        with bdb.connect(ctx.db_path) as conn:
+            stored = [(s.id, s.enabled, s.config) for s in bdb.list_sources(conn, bid)]
+        assert stored == [(ids[1], False, {}), (ids[0], True, {"indices": ["DAX"]})]
+
+        rc = cli_briefings.dispatch(
+            ["sources", "set", "-u", "alice", "--id", str(ids[0])], config,
+        )
+        assert rc == 1
+        assert json.loads(capsys.readouterr().out)["reason"] == "invalid_argument"
+
     def test_invalid_kind_errors(self, config, capsys):
         cli_briefings.dispatch(
             ["blocks", "add", "-u", "alice", "--briefing", "M", "--title", "X"],
@@ -157,6 +196,67 @@ class TestBlocksSources:
             config,
         )
         assert rc == 1
+
+    def test_refusal_prints_the_envelope_and_exits_one(self, config, capsys):
+        cli_briefings.dispatch(
+            ["blocks", "add", "-u", "alice", "--briefing", "M", "--title", "X"],
+            config,
+        )
+        bid = json.loads(capsys.readouterr().out)["block"]["id"]
+
+        rc = cli_briefings.dispatch(
+            ["blocks", "set", "-u", "alice", "--id", str(bid), "--render-mode", "agent"],
+            config,
+        )
+
+        assert rc == 1
+        assert json.loads(capsys.readouterr().out)["reason"] == "invalid_definition"
+
+    def test_add_options_and_merge_options_are_forwarded(self, config, capsys):
+        rc = cli_briefings.dispatch(
+            ["blocks", "add", "-u", "alice", "--briefing", "M", "--title", "X",
+             "--options", '{"tone": "neutral"}'],
+            config,
+        )
+        assert rc == 0
+        bid = json.loads(capsys.readouterr().out)["block"]["id"]
+
+        rc = cli_briefings.dispatch(
+            ["blocks", "set", "-u", "alice", "--id", str(bid),
+             "--merge-options", '{"story_count": 4}'],
+            config,
+        )
+
+        assert rc == 0
+        options = json.loads(capsys.readouterr().out)["block"]["options"]
+        assert options == {"tone": "neutral", "story_count": 4}
+
+    def test_add_sources_is_forwarded(self, config, capsys):
+        rc = cli_briefings.dispatch(
+            ["blocks", "add", "-u", "alice", "--briefing", "M", "--title", "X",
+             "--sources", '[{"kind": "calendar"}]'],
+            config,
+        )
+
+        assert rc == 0
+        sources = json.loads(capsys.readouterr().out)["block"]["sources"]
+        assert [s["kind"] for s in sources] == ["calendar"]
+
+    def test_operator_context_carries_the_app_config(self, config, capsys, monkeypatch):
+        from istota.briefings import cli as bcli
+
+        seen = {}
+        real_ctx = bcli._ctx
+
+        def capture(click_ctx):
+            bctx = real_ctx(click_ctx)
+            seen["app_config"] = bctx.app_config
+            return bctx
+
+        monkeypatch.setattr(bcli, "_ctx", capture)
+        cli_briefings.dispatch(["blocks", "list", "-u", "alice", "--briefing", "M"], config)
+
+        assert seen["app_config"] is config
 
     def test_disabled_module_errors(self, tmp_path, capsys):
         cfg = Config(
@@ -247,6 +347,46 @@ class TestArchive:
         )
         shown = json.loads(capsys.readouterr().out)["briefing"]
         assert shown["body_md"] == "📰 news"
+
+    def test_archive_read_mark_read_and_delete_mirrors(self, config, capsys):
+        ctx = resolve_for_user("alice", config)
+        bdb.init_db(ctx.db_path)
+        with bdb.connect(ctx.db_path) as conn:
+            first = bdb.insert_archive(conn, briefing_name="M", subject="One", body_md="a")
+            second = bdb.insert_archive(conn, briefing_name="N", subject="Two", body_md="b")
+            conn.commit()
+
+        assert cli_briefings.dispatch(["archive", "read", "-u", "alice", "--id", str(first)], config) == 0
+        assert json.loads(capsys.readouterr().out)["read_at"]
+
+        assert cli_briefings.dispatch(["archive", "mark-read", "-u", "alice", "--all"], config) == 0
+        assert json.loads(capsys.readouterr().out) == {"status": "ok", "updated": 1}
+
+        assert cli_briefings.dispatch(
+            ["archive", "show", "-u", "alice", "--id", str(second), "--blocks"], config,
+        ) == 0
+        assert json.loads(capsys.readouterr().out)["briefing"]["document"] is None
+
+        assert cli_briefings.dispatch(["archive", "delete", "-u", "alice", "--id", str(second)], config) == 1
+        assert json.loads(capsys.readouterr().out)["reason"] == "confirmation_required"
+        assert cli_briefings.dispatch(
+            ["archive", "delete", "-u", "alice", "--id", str(second), "--confirmed"], config,
+        ) == 0
+        capsys.readouterr()
+        with bdb.connect(ctx.db_path) as conn:
+            assert bdb.get_archived(conn, second) is None
+
+    def test_archive_mark_read_by_briefing_mirror(self, config, capsys):
+        ctx = resolve_for_user("alice", config)
+        bdb.init_db(ctx.db_path)
+        with bdb.connect(ctx.db_path) as conn:
+            bdb.insert_archive(conn, briefing_name="M", subject="One", body_md="a")
+            bdb.insert_archive(conn, briefing_name="N", subject="Two", body_md="b")
+            conn.commit()
+
+        rc = cli_briefings.dispatch(["archive", "mark-read", "-u", "alice", "--briefing", "N"], config)
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out) == {"status": "ok", "updated": 1}
 
 
 class TestSkillFacade:

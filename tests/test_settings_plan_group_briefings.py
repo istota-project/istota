@@ -112,6 +112,27 @@ def test_all_users_admin_exception(install):
         preview(install, [definition(group_id=group["group_id"], title="No")])
 
 
+def test_prepare_definition_takes_the_callers_admin_answer(install):
+    """A skill passes the web's admin rule; the operator path keeps its own."""
+    from istota.groups.policy import GroupError
+    from istota.groups.system import reconcile_all_users
+    from istota.settings_plan.group_briefings import operator_is_admin, prepare_definition
+    with db.get_db(install[1].db_path) as conn:
+        group = reconcile_all_users(conn, install[1])
+        declaration = definition(group_id=group["group_id"])
+        assert operator_is_admin(conn, install[1], "admin")
+        value, old = prepare_definition(conn, install[1], declaration, actor="admin")
+        assert old is None and value["name"] == "daily"
+        with pytest.raises(GroupError) as exc:
+            prepare_definition(conn, install[1], declaration, actor="admin", is_admin=False)
+        assert exc.value.code == "briefing_forbidden"
+        with pytest.raises(GroupError) as exc:
+            prepare_definition(conn, install[1], declaration, actor="alice")
+        assert exc.value.code == "briefing_forbidden"
+        value, _ = prepare_definition(conn, install[1], declaration, actor="alice", is_admin=True)
+        assert value["name"] == "daily"
+
+
 def test_cli_revision_owner_and_draft_contract(install, tmp_path, capsys):
     path = tmp_path / "definition.json"
     raw = definition()

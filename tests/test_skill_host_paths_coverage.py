@@ -71,6 +71,7 @@ from pathlib import Path
 import pytest
 
 from istota.skills._hostpath import (
+    READ,
     REPO as HOSTPATH_REPO,
     click_commands,
     click_stamped,
@@ -116,6 +117,13 @@ REGISTRY: dict[tuple[str, str, str], Entry] = {
         SCOPED, guard="istota.skills.wordpress.fields.parse_ops", helper="egress_path",
         note="one dest for every op flag, so their order survives; only --set-file and "
              "--insert-file name a host file, inside the value, resolved by parse_ops",
+    ),
+    ("briefings", "options", "query"): Entry(
+        SCOPED, guard="istota.briefings.pickers.path_check", helper="_resolve_user_path",
+        note="a path relative to the user's own folder, resolved as the todos/notes "
+             "resolver does and read with read_owner_text; a READ stamp would rewrite "
+             "it to an absolute path the source config cannot store. The same value "
+             "filters path_suggestions, which walks only workspace_root(user)",
     ),
 
     # -- Remote: the path names somewhere else -------------------------------
@@ -164,6 +172,10 @@ REGISTRY: dict[tuple[str, str, str], Entry] = {
 
     ("wordpress", "fields.get", "path"): Entry(
         NOT_A_PATH, note="a path inside an ACF value, such as blocks/0/items",
+    ),
+
+    ("briefings_config", "schedule.set", "output"): Entry(
+        NOT_A_PATH, note="a delivery descriptor such as talk,email",
     ),
 
     ("servarr", "add", "profile"): Entry(
@@ -508,21 +520,41 @@ def test_no_skill_exposes_both_kinds_of_parser():
 def test_the_click_walk_reaches_the_briefings_group():
     """The other half of the walk, which no argparse assertion can establish.
 
-    `briefings` holds no path-shaped parameter today, so every count-based
-    assertion in this file is satisfied whether the Click walk works or not —
-    and an import that starts failing, a renamed `build_cli` or a group whose
+    Every count-based assertion in this file is satisfied whether the Click
+    walk works or not, since the argparse skills alone clear the floor — and
+    an import that starts failing, a renamed `build_cli` or a group whose
     subcommands stop being descended would all leave it that way. What is
     asserted is therefore that the walk *arrives*: the group is reached and
     its nested commands are enumerated, so a `click.Path` parameter added to
-    one of them lands in `discovered()` rather than in nobody's list. That is
-    the deliverable — the walk being able to reach it, not the count.
+    one of them lands in `discovered()` rather than in nobody's list.
     """
     module_name = _click_module_for(SKILLS_DIR / "briefings")
     assert module_name is not None, "briefings exposes no build_cli"
     group = importlib.import_module(module_name).build_cli()
     walked = {dotted for dotted, _ in click_commands(group)}
-    for command in ("list", "blocks", "blocks.add", "sources.add", "archive.show"):
+    for command in ("list", "blocks", "blocks.add", "blocks.save", "sources.add", "archive.show"):
         assert command in walked, f"{command} not walked; walked {sorted(walked)}"
+
+
+BRIEFINGS_FILE_ARGUMENTS = {
+    ("briefings", "blocks.add", "directive_file"),
+    ("briefings", "blocks.set", "directive_file"),
+    ("briefings", "blocks.save", "payload_file"),
+}
+
+
+def test_the_briefings_file_arguments_are_found_and_stamped_read():
+    """The three files the skill reads into a block, each by name.
+
+    Found by the heuristic, so the walk would have flagged them unstamped, and
+    stamped `READ`: the bytes become a directive or a block row in the user's
+    own module DB, so the task's whole working context is the right set.
+    """
+    found = discovered()
+    stamped_modes = stamps()
+    for key in sorted(BRIEFINGS_FILE_ARGUMENTS):
+        assert key in found, f"{key} not discovered"
+        assert stamped_modes.get(key) == READ, (key, stamped_modes.get(key))
 
 
 def test_the_walk_finds_the_arguments_it_is_meant_to_guard():

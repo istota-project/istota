@@ -48,8 +48,13 @@ def _as_saved_today(old):
         return old
 
 
-def prepare_definition(conn, config, declaration, *, actor, expected_revision=None, allow_unchanged=False):
-    """Merge supplied fields only, then run the store's read-only save checks."""
+def prepare_definition(conn, config, declaration, *, actor, expected_revision=None, allow_unchanged=False,
+                       is_admin=None):
+    """Merge supplied fields only, then run the store's read-only save checks.
+
+    `is_admin` is the caller's own admin answer (a skill passes the web's rule);
+    left out, the operator's `operator_is_admin` decides.
+    """
     group_id, name = declaration["group_id"], declaration["name"]
     row = conn.execute("SELECT id FROM group_briefing_configs WHERE group_id=? AND name=?", (group_id, name)).fetchone()
     old = store.get_definition(conn, row["id"]) if row else None
@@ -65,7 +70,8 @@ def prepare_definition(conn, config, declaration, *, actor, expected_revision=No
             return payload, old
     if not actor:
         raise ExecutionError("group_briefing_actor_required", ["group_briefings", "--actor"])
-    is_admin = operator_is_admin(conn, config, actor)
+    if is_admin is None:
+        is_admin = operator_is_admin(conn, config, actor)
     store._require_author(conn, config, group_id, actor, is_admin)
     if old is None and payload.get("enabled", False):
         raise GroupError(422, "draft_required", "Create a disabled draft before enabling")

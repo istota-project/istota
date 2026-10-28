@@ -12,8 +12,10 @@ Endpoints:
 * Content:  ``GET /config`` (blocks + schedule names),
             ``PUT /blocks`` (create/update/reorder), ``DELETE /blocks/{id}``,
             ``PUT /sources`` (create/update), ``DELETE /sources/{id}``.
-* Pickers:  ``GET /feed-options`` (the user's Feeds subs/categories),
-            ``GET /browse-presets``.
+* Pickers:  ``GET /feed-options``, ``GET /browse-presets``,
+            ``GET /email-accounts``, ``GET /shared-block-options``,
+            ``GET /path-check``, ``GET /path-suggest``; each delegates to
+            :mod:`istota.briefings.pickers`.
 """
 
 from __future__ import annotations
@@ -21,15 +23,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-from datetime import datetime, timezone
-from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from istota.briefings import db as bdb
+from istota.briefings import pickers
 from istota.briefings.document import edition_preview
+from istota.briefings.shared_block_view import _map_shared_block, _shared_block_status
 from istota.briefings._loader import UserNotFoundError, resolve_for_user
 from istota.briefings._migrate import ensure_initialised
 from istota.briefings.models import (
@@ -44,7 +44,6 @@ from istota.briefings.models import (
     validate_shared_block_payload,
     validate_briefing_document,
 )
-from istota.briefings.sources.browse import BROWSE_PRESETS
 from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
 from istota.webui.request_guards import BodyError, read_bounded_body
 from istota.webui.router_stubs import make_get_user_context, require_auth, verify_origin
@@ -489,12 +488,7 @@ def delete_source(
 
 @router.get("/browse-presets")
 def get_browse_presets() -> dict:
-    return {
-        "presets": [
-            {"key": k, "name": v["name"], "url": v["url"]}
-            for k, v in BROWSE_PRESETS.items()
-        ]
-    }
+    return {"presets": pickers.browse_presets()}
 
 
 @router.get("/feed-options")
@@ -502,112 +496,17 @@ def get_feed_options(
     request: Request,
     user: dict = Depends(require_auth),
 ) -> dict:
-    """The user's Feeds subscriptions + categories for the RSS source picker.
+    """The user's Feeds subscriptions + categories for the RSS source picker."""
+    return pickers.feed_options(_app_config(request), user["username"])
 
-    Soft-degrades to empty lists when the Feeds module is off / unavailable.
-    """
-    cfg = _app_config(request)
-    subscriptions: list[dict] = []
-    categories: list[dict] = []
-    try:
-        from istota import feeds
-        from istota.feeds import db as feeds_db
 
-        fctx = feeds.resolve_for_user(user["username"], cfg)
-        with feeds_db.connect(fctx.db_path) as conn:
-            for f in feeds_db.list_feeds(conn):
-                subscriptions.append({
-                    "kind": "subscription", "value": f.id,
-                    "label": f.title or f.url,
-                })
-            for c in feeds_db.list_categories(conn):
-                categories.append({
-                    "kind": "category", "value": c.id, "label": c.title,
-                })
-    except Exception:  # noqa: BLE001
-        pass
-    return {
-        "available": bool(subscriptions or categories),
-        "subscriptions": subscriptions,
-        "categories": categories,
-    }
 
 
 # ---------------------------------------------------------------------------
 # Shared briefing blocks (admin-editable; admin-shared-briefing-blocks spec)
 # ---------------------------------------------------------------------------
-
-def _shared_last_run_utc(value: str | None, tz_name: str) -> str | None:
-    """The scheduler's naive last-run stamp, which is wall-clock time in the
-    shared-block timezone, as ISO UTC: the clock ``run_answered.at`` is on."""
-    if not value:
-        return None
-    try:
-        tz = ZoneInfo(tz_name)
-    except Exception:  # noqa: BLE001 - the scheduler falls back the same way
-        tz = ZoneInfo("UTC")
-    try:
-        stamped = datetime.fromisoformat(value)
-    except ValueError:
-        return value
-    if stamped.tzinfo is None:
-        stamped = stamped.replace(tzinfo=tz)
-    return stamped.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _shared_block_status(conn, name: str, tz_name: str) -> dict:
-    """Per-block runtime status: last generation, current shared_kv preview,
-    and any Run now request with the daemon's last answer to one."""
-    from istota import db as fdb
-    from istota.briefings import shared_block_runs
-
-    last_run_at = _shared_last_run_utc(
-        fdb.get_briefing_shared_block_last_run(conn, name), tz_name,
-    )
-    val = fdb.shared_kv_get(conn, SHARED_BLOCK_NAMESPACE, name)
-    preview = None
-    updated_at = None
-    stored_trusted = None
-    if val:
-        updated_at = val.get("updated_at")
-        try:
-            import json as _json
-            parsed = _json.loads(val["value"])
-            if isinstance(parsed, dict):
-                stored_trusted = bool(parsed.get("trusted", False))
-                text = parsed.get("text")
-                if isinstance(text, str):
-                    preview = text[:400]
-        except (ValueError, TypeError):
-            preview = (val.get("value") or "")[:400]
-    runs = shared_block_runs.run_state(conn, name)
-    return {
-        "run_pending": runs["pending"],
-        "run_answered": runs["answered"],
-        "agent": runs["agent"],
-        "last_run_at": last_run_at,
-        "value_updated_at": updated_at,
-        "value_preview": preview,
-        "stored_trusted": stored_trusted,
-        "has_content": val is not None,
-    }
-
-
-def _map_shared_block(row, status: dict) -> dict:
-    return {
-        "name": row.name,
-        "cron": row.cron,
-        "title": row.title,
-        "directive": row.directive or "",
-        "render_mode": row.render_mode,
-        "enabled": row.enabled,
-        "trusted": row.trusted,
-        "sources": row.sources,
-        "created_at": row.created_at,
-        "updated_at": row.updated_at,
-        "status": status,
-    }
-
+# The listing's view (`_map_shared_block`, `_shared_block_status`) is in
+# `briefings.shared_block_view`, shared with the `briefings_config` skill.
 
 @router.get("/shared-blocks")
 def list_shared_blocks(
@@ -719,18 +618,8 @@ def get_email_accounts(
     request: Request,
     user: dict = Depends(require_auth),
 ) -> dict:
-    """The signed-in user's mail accounts a ``my_email`` source can read.
-
-    Always the bot plus-address; Gmail too when Google Workspace is on, marked
-    unavailable until the user grants Gmail access; then each of the user's
-    enabled connected mail accounts as ``imap:<id>``.
-    """
-    from istota import db as fdb
-    from istota.briefings.sources.my_email import list_accounts
-
-    cfg = _app_config(request)
-    with fdb.get_db(cfg.db_path) as conn:
-        return {"accounts": list_accounts(cfg, conn, user["username"])}
+    """The signed-in user's mail accounts a ``my_email`` source can read."""
+    return {"accounts": pickers.email_accounts(_app_config(request), user["username"])}
 
 
 @router.get("/shared-block-options")
@@ -740,81 +629,9 @@ def get_shared_block_options(
 ) -> dict:
     """Live pickable shared blocks for the per-user Shared source dropdown.
 
-    Available to any authenticated user (read-only discovery). Lists every live
-    ``shared_kv`` key in the shared-block namespace, tagged ``config`` (has a
-    definition row) or ``custom`` (published by a job, no definition). A defined
-    block with no content yet is also surfaced so a user can reference it ahead
-    of first generation.
+    Available to any authenticated user (read-only discovery).
     """
-    from istota import db as fdb
-
-    cfg = _app_config(request)
-    options: dict[str, dict] = {}
-    with fdb.get_db(cfg.db_path) as conn:
-        defined = {r.name for r in fdb.list_shared_block_configs(conn)}
-        for r in fdb.list_shared_block_configs(conn):
-            options[r.name] = {
-                "name": r.name, "updated_at": None, "has_content": False,
-                "source": "config",
-            }
-        for row in fdb.shared_kv_list(conn, SHARED_BLOCK_NAMESPACE):
-            key = row["key"]
-            options[key] = {
-                "name": key,
-                "updated_at": row.get("updated_at"),
-                "has_content": True,
-                "source": "config" if key in defined else "custom",
-            }
-    return {"options": sorted(options.values(), key=lambda o: o["name"])}
-
-
-# File-path picker for todos / reminders / notes sources. The path a user
-# types is resolved relative to their own /Users/<uid>/ folder (see
-# sources.builtins._resolve_user_path); these endpoints let the editor verify a
-# path exists and offer a datalist of candidate text files.
-_PATH_SUGGEST_EXTS = (".md", ".txt")
-_PATH_SUGGEST_MAX = 50
-_PATH_SUGGEST_DEPTH = 6
-# Hard cap on candidate files inspected per request, so the query walk stays
-# bounded even on a huge workspace where few paths match.
-_PATH_SUGGEST_SCAN_MAX = 8000
-
-
-def _walk_text_files(root: Path, query: str = "") -> list[str]:
-    """Bounded walk of ``root`` for ``.md`` / ``.txt`` files matching ``query``.
-
-    Returns paths relative to ``root`` (forward-slashed) — the same form the
-    user types into the source path field. When ``query`` is given, only paths
-    whose relative form contains it (case-insensitive substring) are returned,
-    so a deep or late file still surfaces as the user types; matches whose
-    basename hits the query rank ahead of directory-only hits. Bounded by
-    depth, a total-scan cap, and the returned-count cap; hidden directories are
-    skipped.
-    """
-    needle = query.strip().lower()
-    root_str = str(root)
-    scanned = 0
-    name_hits: list[str] = []  # query matched the filename
-    path_hits: list[str] = []  # query matched only a parent directory
-    for dirpath, dirnames, filenames in os.walk(root_str):
-        rel_dir = os.path.relpath(dirpath, root_str)
-        depth = 0 if rel_dir == "." else rel_dir.count(os.sep) + 1
-        kept = sorted(d for d in dirnames if not d.startswith("."))
-        dirnames[:] = [] if depth >= _PATH_SUGGEST_DEPTH else kept
-        for fn in sorted(filenames):
-            if not fn.lower().endswith(_PATH_SUGGEST_EXTS):
-                continue
-            scanned += 1
-            rel = os.path.relpath(os.path.join(dirpath, fn), root_str).replace(os.sep, "/")
-            if not needle:
-                name_hits.append(rel)
-            elif needle in fn.lower():
-                name_hits.append(rel)
-            elif needle in rel.lower():
-                path_hits.append(rel)
-            if len(name_hits) >= _PATH_SUGGEST_MAX or scanned >= _PATH_SUGGEST_SCAN_MAX:
-                return (name_hits + path_hits)[:_PATH_SUGGEST_MAX]
-    return (name_hits + path_hits)[:_PATH_SUGGEST_MAX]
+    return {"options": pickers.shared_block_options(_app_config(request))}
 
 
 @router.get("/path-check")
@@ -823,38 +640,8 @@ def check_path(
     path: str = Query("", description="Candidate source file path"),
     user: dict = Depends(require_auth),
 ) -> dict:
-    """Verify a todos/reminders/notes source path resolves to an existing file.
-
-    Resolves the candidate exactly as the resolver does (relative to the user's
-    own folder) and checks existence. ``{ok: true, resolved}`` or
-    ``{ok: false, error}``.
-    """
-    from istota.briefings.sources.builtins import _resolve_user_path
-    from istota.skills.files import path_exists
-
-    resolved = _resolve_user_path(user["username"], path)
-    if not resolved:
-        return {"ok": False, "error": "Enter a file path."}
-    cfg = _app_config(request)
-    exists = False
-    try:
-        if cfg is not None and cfg.has_workspace:
-            # The resolver's own read (ISSUE-596), so this says yes exactly
-            # when the briefing will read the file, and a symlink planted in
-            # the user's tree cannot answer whether its target exists.
-            from istota.storage import read_owner_text
-
-            text, _reason, _definitive = read_owner_text(
-                cfg, user["username"], resolved,
-            )
-            exists = text is not None
-        elif cfg is not None:
-            exists = path_exists(cfg, resolved)
-    except Exception:  # noqa: BLE001
-        exists = False
-    if not exists:
-        return {"ok": False, "error": "No file found at that path."}
-    return {"ok": True, "resolved": resolved}
+    """Verify a todos/reminders/notes source path resolves to an existing file."""
+    return pickers.path_check(_app_config(request), user["username"], path)
 
 
 @router.get("/path-suggest")
@@ -863,15 +650,5 @@ def suggest_paths(
     q: str = Query("", description="Filter suggestions by substring"),
     user: dict = Depends(require_auth),
 ) -> dict:
-    """Candidate text-file paths under the user's folder, for the autocomplete.
-
-    Bounded, ``.md`` / ``.txt`` only, returned relative to the user's own
-    folder (the form the user types). ``q`` filters server-side (a substring of
-    the relative path), so a deep or late-in-walk file still surfaces as the
-    user types rather than being clipped by the bound. Empty without a
-    workspace.
-    """
-    cfg = _app_config(request)
-    root = cfg.workspace_root(user["username"]) if cfg is not None else None
-    paths = _walk_text_files(root, q) if root is not None and root.is_dir() else []
-    return {"paths": paths}
+    """Candidate text-file paths under the user's folder, for the autocomplete."""
+    return {"paths": pickers.path_suggestions(_app_config(request), user["username"], q)}
