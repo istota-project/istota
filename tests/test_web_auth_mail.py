@@ -31,6 +31,27 @@ def test_sign_in_code_mail_carries_a_code_and_no_link():
     assert "<Alice>" in plain and "&lt;Alice&gt;" in rich and "Example &lt;bot&gt;" in rich
 
 
+def test_every_auth_mail_uses_the_shared_template():
+    from istota.mail.html_template import STYLES
+    from istota.webui import auth_mail as web_auth_mail
+    from tests.support.html_mail import TEMPLATE_STYLES, style_values
+    link = "https://bot.example.com/istota/auth/set-password?token=example"
+    bodies = {
+        "enrol": web_auth_mail.build_enrol_email("Bot", "Alice", link, 168)[2],
+        "reset": web_auth_mail.build_reset_email("Bot", "Alice", link, 1)[2],
+        "code": web_auth_mail.build_sign_in_code_email("Bot", "Alice", "042917", 10)[2],
+        "step_up": web_auth_mail.build_step_up_email("Bot", "Alice", "042917", "export", 10, None)[2],
+        "export": web_auth_mail.build_export_notice_email("Bot", "Alice", "now", None, "")[2],
+    }
+    code_style = f"{STYLES['p']};{web_auth_mail._CODE_STYLE}"
+    for name, rich in bodies.items():
+        assert rich.startswith("<!DOCTYPE html>"), name
+        assert set(style_values(rich)) <= TEMPLATE_STYLES | {code_style}, name
+    # Both code mails set the code apart the same way.
+    for name in ("code", "step_up"):
+        assert f'<p style="{code_style}"><strong>042917</strong></p>' in bodies[name]
+
+
 def test_disabled_mail_returns_false_and_logs(caplog):
     from istota.webui.auth_mail import send_auth_email
     config = Config()

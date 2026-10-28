@@ -15,6 +15,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from ...config import BriefingConfig, Config
+from ...mail.html_template import open_tag, wrap_document
 
 logger = logging.getLogger("istota.briefing")
 
@@ -136,9 +137,8 @@ def strip_markdown(text: str, *, preserve_links: bool = False) -> str:
 # input is escaped *first*, so newsletter-derived `<script>` or a quote inside a
 # URL can never become markup. Only http/https/mailto reach an `href`.
 #
-# Styling is limited to one inline `style` on `<ul>`, which takes away the
-# client's default left indent so bullets line up with the paragraphs. There is
-# no `<head>`/`<style>` block; each mail client's own typography does the rest.
+# The document and each block tag's style come from `mail.html_template`, the
+# one HTML mail template; this module only decides which tags a line becomes.
 
 _HTML_LINK_RE = re.compile(r"\[([^\[\]]+)\]\(([^)\s]*)\)")
 _HTML_SAFE_SCHEME_RE = re.compile(r"(?:https?|mailto):", re.IGNORECASE)
@@ -153,11 +153,6 @@ _HTML_BULLET_RE = re.compile(r"^[-*+]\s+(.*)$")
 # (the same leak `strip_markdown` guards against). Drop the marker and render the
 # line as an ordinary paragraph rather than leaking `## ` into the mail.
 _HTML_ATX_RE = re.compile(r"^#{1,6}[ \t]+")
-# Inside markers keep the bullet visible once the padding that holds an outside
-# marker is gone.
-HTML_LIST_OPEN = (
-    '<ul style="margin-left:0;padding-left:0;list-style-position:inside">'
-)
 
 
 def _render_emphasis(escaped: str) -> str:
@@ -206,11 +201,12 @@ def _render_blocks(lines: list[str]) -> list[str]:
 
     def flush() -> None:
         if para:
-            out.append("<p>" + "<br>\n".join(para) + "</p>")
+            out.append(open_tag("p") + "<br>\n".join(para) + "</p>")
             para.clear()
         if items:
+            li = open_tag("li")
             out.append(
-                HTML_LIST_OPEN + "\n" + "\n".join(f"<li>{i}</li>" for i in items) + "\n</ul>"
+                open_tag("ul") + "\n" + "\n".join(f"{li}{i}</li>" for i in items) + "\n</ul>"
             )
             items.clear()
 
@@ -221,7 +217,7 @@ def _render_blocks(lines: list[str]) -> list[str]:
             continue
         if _HTML_RULE_RE.match(line):
             flush()
-            out.append("<hr>")
+            out.append(open_tag("hr"))
             continue
         bullet = _HTML_BULLET_RE.match(line)
         if bullet:
@@ -238,7 +234,7 @@ def _render_blocks(lines: list[str]) -> list[str]:
 
 
 def render_briefing_html(md: str) -> str:
-    """Render a briefing markdown body as bare HTML for multipart email.
+    """Render a briefing markdown body as HTML for multipart email.
 
     Returns ``""`` for empty input or on any rendering failure — the caller
     then sends plain-text only, which is exactly the pre-feature behaviour. A
@@ -253,19 +249,19 @@ def render_briefing_html(md: str) -> str:
         return ""
     if not blocks:
         return ""
-    return "<html><body>\n" + "\n".join(blocks) + "\n</body></html>"
+    return wrap_document("\n".join(blocks))
 
 
 def render_briefing_document_html(document: dict) -> str:
-    """Render complete ordered sections with the existing bare email markup."""
+    """Render complete ordered sections in the shared HTML mail template."""
     try:
         sections: list[str] = []
         for block in document["blocks"]:
-            sections.append(f'<h2>{html.escape(block["title"], quote=True)}</h2>')
+            sections.append(open_tag("h2") + html.escape(block["title"], quote=True) + "</h2>")
             sections.extend(_render_blocks(block["body_md"].split("\n")))
         if not sections:
             return ""
-        return "<html><body>\n" + "\n".join(sections) + "\n</body></html>"
+        return wrap_document("\n".join(sections))
     except Exception:  # noqa: BLE001 - never break delivery over markup
         logger.warning("render_briefing_document_html failed, falling back to plain")
         return ""
