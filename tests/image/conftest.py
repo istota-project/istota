@@ -272,13 +272,15 @@ def run_in(
     entrypoint: str = "/bin/sh",
     timeout: int | None = None,
     volumes: list[tuple[Path, str, str]] | None = None,
+    docker_args: list[str] | None = None,
 ) -> subprocess.CompletedProcess:
     """`docker run --rm --entrypoint …`, with credential-scrubbed output.
 
     The entrypoint override is the default and not a convenience: the image's
     own ENTRYPOINT waits ten minutes for a provisioning flag that a volume-less
     container will never have. `volumes` are `(host path, container path,
-    "ro" | "rw")` binds.
+    "ro" | "rw")` binds. `docker_args` go before the image, for a case that
+    needs part of the run contract (bwrap needs the seccomp grant).
     """
     require_docker()
     if timeout is None:
@@ -289,6 +291,7 @@ def run_in(
         cmd += ["--platform", image.platform]
     for source, target, mode in volumes or ():
         cmd += ["-v", f"{source}:{target}:{mode}"]
+    cmd += list(docker_args or ())
 
     # A credential-shaped value is passed as a bare `-e NAME` and handed to
     # docker through *our* environment, never as `-e NAME=value` in argv, which

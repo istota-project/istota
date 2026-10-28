@@ -485,6 +485,8 @@ def cmd_run(args):
                     config, user_id,
                     brain_kind=getattr(brain, "kind", ""),
                     timeout_seconds=timeout,
+                    # Bound read-only into the namespace; released with it.
+                    control_dir=sandbox.control_dir,
                 )
             except RuntimeError as exc:
                 logger.error("code_review %s could not start: %s", agent, exc)

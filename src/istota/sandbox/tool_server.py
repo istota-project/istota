@@ -1,12 +1,29 @@
-"""The native brain's tool server: one per task attempt, inside the sandbox.
+"""The tool server: one per task attempt, inside the sandbox, for either brain.
 
-``python -m istota.sandbox.tool_server --fd N``. The daemon spawns it once through
-``build_bwrap_cmd(..., profile=NATIVE)``, places it in the task cgroup from
-``preexec_fn``, and talks to it over the inherited socketpair end on fd ``N``.
-It builds one ``ToolEnv`` from the ``hello`` frame, binds the six core tools to
-it, and answers ``call`` frames until it is told to stop. See
-``session/tools/remote.py`` for the daemon's half and for why the transport is
-an inherited descriptor.
+Two front ends over the same tools, one per process:
+
+- ``--fd N``: the daemon spawns it through ``build_bwrap_cmd(...,
+  profile=NATIVE)``, places it in the task cgroup from ``preexec_fn``, sends a
+  ``hello`` frame and ``call`` frames over the inherited socketpair end on fd
+  ``N``, and reads ``update`` and ``result`` frames back. The native brain's
+  path; see ``session/tools/remote.py`` for the daemon's half and for why the
+  transport is an inherited descriptor.
+- ``--mcp --hello PATH``: MCP over stdio (``sandbox/mcp_stdio.py``), for the
+  ``claude`` CLI to spawn as its MCP server. The hello comes from a file the
+  daemon wrote in the task's control dir, since stdin carries MCP, and may name
+  a ``gate`` FIFO that holds the first ``tools/call`` until the daemon writes a
+  byte. Nothing but JSON-RPC reaches the MCP stream: it is moved off fds 0 and
+  1 at start, which become /dev/null and stderr for every child. stdin EOF
+  ends the process; in practice the CLI SIGINTs bwrap and
+  ``--die-with-parent`` takes the server with it.
+
+Either way it builds one ``ToolEnv`` from the hello and binds the six core
+tools to it.
+
+Every call runs through one ``ToolDispatcher`` (``session/tools/dispatch.py``),
+built from the hello by ``build_dispatcher``: the subset the hello's ``tools``
+names, argument preparation, the readers-writer lock and the hello's
+``text_cap``. That policy has this one call site, whichever brain is calling.
 
 Three things about the environment it runs in are worth stating here, because
 each is a decision rather than a consequence.
@@ -45,8 +62,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import socket
+import stat
 import sys
 import traceback
 from pathlib import Path
@@ -149,15 +168,45 @@ def build_env(hello: dict[str, Any], process_env: dict[str, str] | None = None):
     )
 
 
+def build_dispatcher(hello: dict[str, Any], process_env: dict[str, str] | None = None):
+    """The ``hello`` frame → the ``ToolDispatcher`` every call runs through.
+
+    ``tools`` absent offers all six; a list offers those it names, so ``[]``
+    offers none rather than widening to all. ``text_cap`` absent is no cap.
+    A field of the wrong shape is a ``ProtocolError``: the hello is the
+    daemon's, and guessing at what it meant could offer a tool it withheld.
+    """
+    from istota.session.tools import build_default_tools
+    from istota.session.tools.dispatch import ToolDispatcher
+
+    offered = hello.get("tools")
+    if offered is not None and (
+        not isinstance(offered, list) or not all(isinstance(n, str) for n in offered)
+    ):
+        raise proto.ProtocolError("hello field 'tools' must be a list of tool names")
+    text_cap = hello.get("text_cap")
+    if text_cap is not None and (
+        isinstance(text_cap, bool) or not isinstance(text_cap, int) or text_cap <= 0
+    ):
+        raise proto.ProtocolError("hello field 'text_cap' must be a positive integer")
+
+    tools = {t.schema.name: t for t in build_default_tools(build_env(hello, process_env))}
+    return ToolDispatcher(
+        tools,
+        offered=tools.keys() if offered is None else offered,
+        text_cap=text_cap,
+    )
+
+
 class _Server:
-    """One connection, its tools, and the calls running on it."""
+    """One connection, its dispatcher, and the calls running on it."""
 
     def __init__(self, sock: socket.socket) -> None:
         self._sock = sock
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._write_lock = asyncio.Lock()
-        self._tools: dict[str, Any] = {}
+        self._dispatcher: Any = None
         self._aborts: dict[str, asyncio.Event] = {}
         self._running: dict[str, asyncio.Task] = {}
         self._stop = asyncio.Event()
@@ -216,7 +265,7 @@ class _Server:
             await self._on_hello(message)
             return
         if kind == proto.MSG_CALL:
-            if not self._tools:
+            if self._dispatcher is None:
                 # The `hello`-first rule, which was enforced nowhere: with no
                 # tools bound every name resolves to None and the caller was
                 # told "Unknown tool: Read", which sends the reader looking at
@@ -235,7 +284,7 @@ class _Server:
         raise proto.ProtocolError(f"the daemon sent {kind!r}, which a server does not take")
 
     async def _on_hello(self, message: dict) -> None:
-        if self._tools:
+        if self._dispatcher is not None:
             raise proto.ProtocolError("a second hello frame")
         got = message.get("protocol")
         if got not in proto.SUPPORTED_PROTOCOLS:
@@ -243,14 +292,11 @@ class _Server:
                 f"the daemon speaks protocol {got!r}, this server speaks "
                 f"{sorted(proto.SUPPORTED_PROTOCOLS)}"
             )
-        from istota.session.tools import build_default_tools
-
-        env = build_env(message)
-        self._tools = {t.schema.name: t for t in build_default_tools(env)}
+        self._dispatcher = build_dispatcher(message)
         await self._send({
             "type": proto.MSG_READY,
             "protocol": proto.PROTOCOL_VERSION,
-            "tools": sorted(self._tools),
+            "tools": sorted(self._dispatcher.tool_names),
         })
 
     def _on_call(self, message: dict) -> None:
@@ -277,25 +323,13 @@ class _Server:
         name = str(message.get("tool"))
         args = message.get("args")
         try:
-            tool = self._tools.get(name)
-            if tool is None:
-                await self._result(call_id, _error(f"Unknown tool: {name}"))
-                return
-            if not isinstance(args, dict):
-                await self._result(call_id, _error(f"{name}: arguments must be an object"))
-                return
-
             async def _on_update(text: str) -> None:
                 await self._send({"type": proto.MSG_UPDATE, "id": call_id, "text": text})
 
-            try:
-                result = await tool.execute(call_id, args, _on_update, abort)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                # The same contract every tool already satisfies: a failure is
-                # an error result, never something that reaches the loop.
-                result = _error(f"{name} failed: {type(exc).__name__}: {exc}")
+            # The dispatcher answers an unknown or withheld tool, arguments
+            # that are not an object, and a tool that raises, each as an error
+            # result rather than something that reaches the loop.
+            result = await self._dispatcher.call(call_id, name, args, _on_update, abort)
             await self._result(call_id, result)
         except asyncio.CancelledError:
             raise
@@ -345,19 +379,262 @@ def _error(text: str):
     return ToolResult(content=[TextContent(text=text)], is_error=True)
 
 
+class _StartError(Exception):
+    """Something the MCP front end could not set up before serving."""
+
+
+def read_hello_file(path: str) -> dict[str, Any]:
+    """The hello the daemon wrote for ``--mcp``, read once.
+
+    ``O_NOFOLLOW`` and a regular-file check on the descriptor: the file is in
+    the task's control dir, which the daemon writes and the sandbox binds
+    read-only, so anything else there is not the daemon's hello.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except OSError as exc:
+        raise _StartError(f"cannot open the hello file: {exc.strerror or exc}") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise _StartError("the hello file is not a regular file")
+        chunks = []
+        size = 0
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > proto.MAX_FRAME_BYTES:
+                raise _StartError("the hello file is larger than a frame")
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    try:
+        hello = json.loads(b"".join(chunks))
+    except (ValueError, UnicodeDecodeError):
+        raise _StartError("the hello file is not JSON") from None
+    if not isinstance(hello, dict):
+        raise _StartError("the hello file is not a JSON object")
+    got = hello.get("protocol")
+    if got not in proto.SUPPORTED_PROTOCOLS:
+        raise _StartError(
+            f"the hello speaks protocol {got!r}, this server speaks "
+            f"{sorted(proto.SUPPORTED_PROTOCOLS)}"
+        )
+    return hello
+
+
+def _open_gate(path: Any) -> int:
+    """The gate FIFO's read end, opened before the first ``tools/list`` is
+    answered, so the daemon's non-blocking write finds a reader.
+
+    ``O_RDWR`` rather than ``O_RDONLY``: this process then counts as a writer
+    too, so the FIFO never reads as end-of-file while the daemon has not
+    opened it yet, and the read waits for a byte rather than spinning on EOF.
+    """
+    if not isinstance(path, str) or not path:
+        raise _StartError("hello field 'gate' must be a path")
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        raise _StartError(f"cannot open the gate: {exc.strerror or exc}") from None
+    if not stat.S_ISFIFO(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise _StartError("the gate is not a FIFO")
+    return fd
+
+
+def _take_stdio() -> tuple[int, int]:
+    """Move the MCP stream off fds 0 and 1, and put /dev/null and stderr there.
+
+    Bash children inherit this process's fd 0. Under ``--fd`` that is
+    /dev/null; under ``--mcp`` it is the CLI's stream, and on the pinned CLI a
+    bidirectional socket, so a ``cat`` would swallow requests and a child could
+    write replies of its own. Pointing fd 1 at stderr also keeps any stray
+    write off the MCP stream.
+    """
+    mcp_in = os.dup(0)
+    mcp_out = os.dup(1)
+    devnull = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(devnull, 0)
+    os.close(devnull)
+    os.dup2(2, 1)
+    return mcp_in, mcp_out
+
+
+class _McpServer:
+    """The ``--mcp`` front end: one dispatcher behind ``serve_stdio``.
+
+    The gate holds every ``tools/call`` until one byte arrives on the hello's
+    ``gate`` FIFO, which the daemon writes once the brain's init check has
+    passed. It is read once; later calls do not wait. ``initialize``,
+    ``tools/list`` and ``ping`` are never held, because the CLI needs them to
+    build ``system/init``. A hello naming no gate holds nothing.
+    """
+
+    def __init__(self, dispatcher: Any, gate_fd: int | None) -> None:
+        self._dispatcher = dispatcher
+        self._gate_fd = gate_fd
+        self._released = asyncio.Event()
+        self._aborts: dict[str, asyncio.Event] = {}
+        if gate_fd is None:
+            self._released.set()
+
+    def _watch_gate(self) -> None:
+        if self._gate_fd is None:
+            return
+        asyncio.get_running_loop().add_reader(self._gate_fd, self._on_gate_readable)
+
+    def _close_gate(self) -> None:
+        if self._gate_fd is None:
+            return
+        fd, self._gate_fd = self._gate_fd, None
+        asyncio.get_running_loop().remove_reader(fd)
+        os.close(fd)
+
+    def _on_gate_readable(self) -> None:
+        try:
+            data = os.read(self._gate_fd, 1)
+        except (BlockingIOError, InterruptedError):
+            return
+        except OSError:
+            # Fail closed: a gate that cannot be read never opens.
+            self._close_gate()
+            return
+        if not data:
+            self._close_gate()
+            return
+        self._close_gate()
+        self._released.set()
+
+    async def _wait_for_gate(self, abort: asyncio.Event) -> bool:
+        if self._released.is_set():
+            return True
+        released = asyncio.ensure_future(self._released.wait())
+        aborted = asyncio.ensure_future(abort.wait())
+        try:
+            await asyncio.wait({released, aborted}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            released.cancel()
+            aborted.cancel()
+        return self._released.is_set()
+
+    async def call(self, call_id: str, name: str, args: dict) -> dict:
+        from istota.session.tools.remote import content_to_wire
+
+        abort = asyncio.Event()
+        self._aborts[call_id] = abort
+        try:
+            if not await self._wait_for_gate(abort):
+                result = _error("The call was cancelled before tools were released.")
+            else:
+                # No update sink: part 1 decided not to forward Bash's
+                # partial output to the CLI.
+                result = await self._dispatcher.call(call_id, name, args, None, abort)
+        finally:
+            self._aborts.pop(call_id, None)
+        return {"content": content_to_wire(result.content), "is_error": bool(result.is_error)}
+
+    def abort(self, call_id: str) -> None:
+        event = self._aborts.get(call_id)
+        if event is not None:
+            event.set()
+
+    async def run(self, mcp_in: int, mcp_out: int) -> int:
+        from istota.sandbox.mcp_stdio import serve_stdio, stdio_streams
+
+        reader, writer = await stdio_streams(
+            os.fdopen(mcp_in, "rb", buffering=0), os.fdopen(mcp_out, "wb", buffering=0),
+        )
+        self._watch_gate()
+        try:
+            return await serve_stdio(
+                reader, writer,
+                tools=self._dispatcher.mcp_tool_list(),
+                call=self.call,
+                abort=self.abort,
+                server_version=_server_version(),
+            )
+        finally:
+            self._close_gate()
+
+
+def _server_version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return version("istota")
+    except Exception:  # noqa: BLE001 — a missing dist-info is not a failure
+        return "0"
+
+
+def serve_mcp(dispatcher: Any, gate: Any = None, *, label: str = "tool server") -> int:
+    """Serve ``dispatcher`` as an MCP server on this process's stdio until
+    stdin ends, holding every ``tools/call`` behind ``gate`` (a FIFO path) when
+    one is named. Returns the exit status.
+
+    The ``--mcp`` front end, and the CLI harness's WebFetch server
+    (``brain/_web_fetch_mcp.py``), which serves its one tool the same way.
+    """
+    mcp_in, mcp_out = _take_stdio()
+    gate_fd = None
+    try:
+        if gate is not None:
+            gate_fd = _open_gate(gate)
+    except _StartError as exc:
+        print(f"{label}: {exc}", file=sys.stderr)
+        return 2
+    try:
+        return asyncio.run(_McpServer(dispatcher, gate_fd).run(mcp_in, mcp_out))
+    except KeyboardInterrupt:
+        return 130
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+        return 2
+
+
+def _main_mcp(hello_path: str) -> int:
+    try:
+        hello = read_hello_file(hello_path)
+        dispatcher = build_dispatcher(hello)
+    except (_StartError, proto.ProtocolError) as exc:
+        print(f"tool server: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"tool server: cannot start: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    return serve_mcp(dispatcher, hello.get("gate"))
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="istota.sandbox.tool_server", add_help=True)
-    parser.add_argument(
+    front = parser.add_mutually_exclusive_group(required=True)
+    front.add_argument(
         "--fd",
         type=int,
-        required=True,
         help="inherited socketpair descriptor to serve on",
     )
-    return parser.parse_args(argv)
+    front.add_argument(
+        "--mcp",
+        action="store_true",
+        help="serve MCP over stdio; needs --hello",
+    )
+    parser.add_argument(
+        "--hello",
+        help="the hello, as a JSON file the daemon wrote (with --mcp only)",
+    )
+    args = parser.parse_args(argv)
+    if args.mcp and not args.hello:
+        parser.error("--mcp needs --hello")
+    if args.hello and not args.mcp:
+        parser.error("--hello is for --mcp only")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
+    if args.mcp:
+        return _main_mcp(args.hello)
     try:
         sock = socket.socket(fileno=args.fd)
     except OSError as exc:

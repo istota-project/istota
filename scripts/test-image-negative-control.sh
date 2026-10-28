@@ -71,7 +71,9 @@
 # (needs `web/build-render`). The eighth runs the group-owned-rooms upgrade
 # witness against two broken migrations, one that converts linked rooms and
 # one whose column differs from schema.sql's. The ninth runs the CLI harness's
-# `system/init` witnesses with `--tools` dropped from the argv. The tenth runs
+# `system/init` witnesses with `--tools` dropped from the argv, and with a
+# launcher that skips its pid report, the stub `git` off PATH and `TMPDIR`
+# unset. The tenth runs
 # the smoke tier's CLI credential witness with the probe run in the CLI's own
 # process, where the credential is, as a CLI whose own Bash were left on would.
 # The eleventh runs the browser image's console socket witness against an image
@@ -409,7 +411,8 @@ secrets_half() {
 # --------------------------------------------------------------------------
 # The CLI harness's `system/init`: the same argv without `--tools`. The deny
 # list alone leaves SendMessage, ListAgents, EnterWorktree and others in the frame
-# on the pinned CLI, so both witnesses must go red on the tool set.
+# on the pinned CLI, so the init witnesses must go red on the tool set. Then a
+# launcher that skips its pid report, which the harness must fail (#862).
 
 CLI_HARNESS_TESTS="tests/image/test_cli_harness_init.py"
 
@@ -444,7 +447,16 @@ cli_harness_half() {
     # The harness argv without --tools: the extra built-ins reach the frame.
     cli_harness_control drop-tools SendMessage \
         TestTheInitFrameListsOnlyWhatTheHarnessAskedFor::test_websearch_granted \
-        TestTheInitFrameListsOnlyWhatTheHarnessAskedFor::test_no_builtins_granted
+        TestTheInitFrameListsOnlyWhatTheHarnessAskedFor::test_no_builtins_granted \
+        TestTheInitFrameListsOnlyWhatTheHarnessAskedFor::test_webfetch_granted_is_a_second_server \
+        TestTheToolServerUnderBwrap::test_the_wrapped_server_connects_and_bwrap_is_what_reports
+    # A launcher that execs the tool server without reporting its pid: the
+    # harness keeps the call gate shut and fails the attempt.
+    cli_harness_control skip-report "never reported its pid" \
+        TestTheInitFrameListsOnlyWhatTheHarnessAskedFor::test_websearch_granted \
+        TestTheInitFrameListsOnlyWhatTheHarnessAskedFor::test_no_builtins_granted \
+        TestTheInitFrameListsOnlyWhatTheHarnessAskedFor::test_webfetch_granted_is_a_second_server \
+        TestTheToolServerUnderBwrap::test_the_wrapped_server_connects_and_bwrap_is_what_reports
     # The stub git off the CLI's PATH: the image's real git runs in the cwd.
     cli_harness_control stub-off "a git other than the harness stub" \
         TestWhatTheUnwrappedCliTouches::test_it_runs_no_real_git_and_only_looks_at_its_cwd

@@ -67,7 +67,7 @@ import os
 import signal
 import socket
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -102,6 +102,9 @@ _PROXIED: tuple[tuple[ToolSchema, str], ...] = (
     (GLOB_SCHEMA, "parallel"),
     (BASH_SCHEMA, "sequential"),
 )
+
+#: The names the tool server can run, which a ``hello`` may narrow with ``tools``.
+SANDBOXED_TOOL_NAMES: tuple[str, ...] = tuple(schema.name for schema, _ in _PROXIED)
 
 # Only Edit has one, and it is the *same object* the real tool passes, not a
 # second coercion shim. See `files.prepare_edit_arguments`.
@@ -208,14 +211,20 @@ def hello_payload(
     max_read_lines: int,
     max_read_bytes: int,
     bash_spill_full_output: bool,
+    tools: Iterable[str] | None = None,
+    text_cap: int | None = None,
 ) -> dict[str, Any]:
-    """The ``hello`` frame: everything the server needs to build its ``ToolEnv``.
+    """The ``hello`` frame: everything the server needs to build its ``ToolEnv``
+    and its ``ToolDispatcher``.
 
     A function rather than an inline literal because two things read it — the
     spawn, and the tests that assert a request's confinement roots reach the
     tools without standing up a subprocess.
+
+    ``tools`` and ``text_cap`` are left out of the frame when ``None``: absent
+    means all six and no cap. An empty ``tools`` is sent, and offers nothing.
     """
-    return {
+    hello: dict[str, Any] = {
         "type": proto.MSG_HELLO,
         "protocol": proto.PROTOCOL_VERSION,
         "cwd": str(cwd),
@@ -230,6 +239,11 @@ def hello_payload(
         "max_read_bytes": int(max_read_bytes),
         "bash_spill_full_output": bool(bash_spill_full_output),
     }
+    if tools is not None:
+        hello["tools"] = [str(name) for name in tools]
+    if text_cap is not None:
+        hello["text_cap"] = int(text_cap)
+    return hello
 
 
 class RemoteToolServer:

@@ -68,9 +68,16 @@ class HarnessSpec:
     # harness makes its own directory under it.
     harness_root: Path
     bash_spill_full_output: bool = True
-    # The daemon-side WebFetch the bridge offers, from `[brain.native.web_fetch]`;
-    # `None` when the grant leaves it out or the tool is disabled.
+    # The daemon-side WebFetch policy, from `[brain.native.web_fetch]`; `None`
+    # when the grant leaves it out or the tool is disabled. The harness serves
+    # it to the CLI from a second MCP server, `istota_web`.
     web_fetch: "WebFetchPolicy | None" = None
+    # The control directory the tool server's wrap binds read-only: the task's,
+    # or a direct caller's `DaemonSandbox.control_dir`. The harness puts the
+    # tool server's hello and call gate there. `None` only where nothing is
+    # wrapped; under a real wrap the harness then refuses to start, since
+    # nothing it could write would be visible in the namespace.
+    control_dir: Path | None = None
 
 
 @dataclass

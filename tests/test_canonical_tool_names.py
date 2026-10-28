@@ -18,6 +18,7 @@ from istota.agent import events as agent_events
 from istota.agent.events import (
     HARNESS_MCP_SERVER,
     PRIVATE_RELAY_TOOL_DESCRIPTION,
+    WEB_FETCH_MCP_SERVER,
     READ_DESCRIPTION_PREFIX,
     canonical_tool_name,
 )
@@ -25,6 +26,8 @@ from istota.brain import _events as stream_events
 from istota.brain._events import parse_stream_line
 
 PREFIX = f"mcp__{HARNESS_MCP_SERVER}__"
+WEB_PREFIX = f"mcp__{WEB_FETCH_MCP_SERVER}__"
+WEB_CALL = ("WebFetch", {"url": "https://example.org/page"})
 
 RELAY = {"command": "istota-skill relay ask bob --request-key q 'What time?'"}
 WALLET = {"command": "istota-skill wallet request --amount 20 --merchant shop"}
@@ -44,6 +47,10 @@ CALLS = [
 class TestCanonicalToolName:
     def test_the_server_name_is_the_harness_constant(self):
         assert HARNESS_MCP_SERVER == "istota"
+        assert WEB_FETCH_MCP_SERVER == "istota_web"
+
+    def test_the_webfetch_servers_prefix_is_stripped(self):
+        assert canonical_tool_name("mcp__istota_web__WebFetch") == "WebFetch"
 
     @pytest.mark.parametrize("name", ["Bash", "Read", "Write", "Edit", "Grep", "Glob"])
     def test_our_server_prefix_is_stripped(self, name):
@@ -56,6 +63,8 @@ class TestCanonicalToolName:
         "mcp__istota_x__Bash",
         "MCP__istota__Bash",
         "mcp__istota__",  # no tool name at all
+        "mcp__istota_web__",
+        "mcp__istota_webx__WebFetch",
         "",
     ])
     def test_any_other_name_is_unchanged(self, name):
@@ -92,6 +101,13 @@ class TestTheParseSites:
         plain = parse(name, args, tmp_path)
         assert mcp.tool_name == name
         assert mcp == plain
+
+    @pytest.mark.parametrize("site", sorted(SITES))
+    def test_the_webfetch_server_name_reads_as_the_builtin(self, site, tmp_path):
+        name, args = WEB_CALL
+        mcp = SITES[site](WEB_PREFIX + name, args, tmp_path)
+        assert mcp.tool_name == name
+        assert mcp == SITES[site](name, args, tmp_path)
 
     @pytest.mark.parametrize("site", sorted(SITES))
     @pytest.mark.parametrize("args", [RELAY, WALLET], ids=["relay", "wallet"])
@@ -141,8 +157,10 @@ class TestTheGuard:
         for site in SITES.values():
             for name, args in CALLS:
                 site(PREFIX + name, args, tmp_path)
+            site(WEB_PREFIX + WEB_CALL[0], WEB_CALL[1], tmp_path)
 
         helpers = {helper for helper, _ in received}
         # The guard is vacuous unless every helper was reached through the sites.
         assert helpers == {"_describe_tool_use", "_tool_invocation", "_lone_relay_ask", "_private_relay_tool"}
-        assert [name for _, name in received if name.startswith(PREFIX)] == []
+        assert [name for _, name in received if name.startswith("mcp__")] == []
+        assert ("_describe_tool_use", "WebFetch") in received

@@ -8,15 +8,16 @@ harness root and its sweep, the per-harness `CLAUDE_CONFIG_DIR`).
 The brain's half, from "ClaudeCodeBrain on the harness" down: the argv, the
 `system/init` check, the failure order, the pid rules and the seam. Those run
 `ClaudeCodeBrain.execute` for real against `tests/support/fake_claude_cli.py`
-on PATH as `claude`, which starts the real adapter from the harness's MCP
-config, so every call goes adapter, bridge, dispatcher, tool server. The tool
-server runs unwrapped here; `tests/linux/test_cli_harness_real.py` runs it
-under bwrap.
+on PATH as `claude`, which starts the real launcher from the harness's MCP
+config, so every call goes CLI, launcher-exec'd tool server, dispatcher. The
+tool server runs unwrapped here; `tests/linux/test_cli_harness_direct.py` runs
+it under bwrap.
 """
 
 from __future__ import annotations
 
 import ast
+import dataclasses
 import json
 import os
 import signal
@@ -50,6 +51,7 @@ from istota.executor import (
 )
 from istota.llm import providers
 from istota.llm.providers import resolve_process_auth
+from istota.session.tools import WebFetchPolicy
 from tests.support.drift import source_of
 
 OAUTH = "OAUTH-SENTINEL"
@@ -173,6 +175,9 @@ class TestTheRequestBuilder:
             (req.timeout_seconds + 30) * 1000
         )
         assert req.harness.bash_spill_full_output == config.brain.native.bash_spill_full_output
+        # The directory the tool server's wrap binds read-only, where the
+        # harness hands the CLI-spawned server its hello and gate (#862).
+        assert req.harness.control_dir == Path(req.composed_system_prompt_path).parent
 
     def test_the_request_env_holds_no_credential(self, tmp_path, monkeypatch):
         """The tool server's env is `req.env`; the CLI's credential is only in
@@ -760,6 +765,53 @@ class TestTheHarnessRun:
         assert result.success, result.result_text
         assert _flag_values(h.recorded()["argv"], "--tools") == ["WebSearch"]
 
+    def _web(self, tmp_path, plan=None):
+        h = _Harnessed(tmp_path, tools=[*_SIX, "WebFetch"], plan=plan)
+        h.req.harness = dataclasses.replace(
+            h.req.harness, web_fetch=WebFetchPolicy(block_hosts=("blocked.example",)),
+        )
+        return h
+
+    def test_webfetch_runs_in_its_own_server(self, tmp_path):
+        h = self._web(tmp_path, plan={"calls": [
+            {"server": "istota_web", "name": "WebFetch", "args": {"url": "https://blocked.example/x"}},
+        ]})
+
+        result = h.run()
+
+        assert result.success, result.result_text
+        assert "host blocked.example is blocked" in result.result_text
+        tools = [e for e in json.loads(result.execution_trace) if e["type"] == "tool"]
+        assert tools and "mcp__" not in result.execution_trace
+        # The CLI's own WebFetch stays off; ours is the MCP tool.
+        assert _flag_values(h.recorded()["argv"], "--tools") == [""]
+        # Only the tool server was reported, then reaped.
+        assert len(h.pids) == 2 and h.pids[1] == 0
+
+    def test_a_missing_web_server_fails_the_init_check(self, tmp_path):
+        h = self._web(tmp_path, plan={"init_drop_servers": ["istota_web"]})
+
+        result = h.run()
+
+        assert result.stop_reason == "error"
+        assert "expected istota (connected), istota_web (connected)" in result.result_text
+
+    def test_a_web_server_that_is_not_connected_fails_the_init_check(self, tmp_path):
+        h = self._web(tmp_path, plan={"init_server_status": "failed"})
+
+        result = h.run()
+
+        assert result.stop_reason == "error"
+        assert "istota_web (failed)" in result.result_text
+
+    def test_an_extra_server_fails_the_init_check(self, tmp_path):
+        h = _Harnessed(tmp_path, plan={"init_extra_servers": ["istota_web"]})
+
+        result = h.run()
+
+        assert result.stop_reason == "error"
+        assert "MCP servers" in result.result_text
+
     def test_a_sandboxed_request_without_a_wrap_is_refused(self, tmp_path):
         h = _Harnessed(tmp_path, fs_read_roots=[tmp_path], tool_server_wrap=None)
 
@@ -802,12 +854,18 @@ class TestTheFailureOrder:
             time.sleep(1.0)
             if first is not None:
                 first()
-            os.killpg(pid, signal.SIGKILL)
+            # The CLI spawns it, so it leads no process group of its own.
+            os.kill(pid, signal.SIGKILL)
 
         threading.Thread(target=go, daemon=True).start()
 
     def test_a_dead_tool_server_reads_as_its_failure_not_oom(self, tmp_path):
-        h = _Harnessed(tmp_path, plan={"calls": [{"name": "Bash", "args": {"command": "sleep 30"}}]})
+        # The CLI outlives its server, as the real one does while the model
+        # takes its next turn after a "Connection closed" result.
+        h = _Harnessed(tmp_path, plan={
+            "calls": [{"name": "Bash", "args": {"command": "sleep 30"}}],
+            "sleep_before_result": 30,
+        })
         self._kill_server_when_running(h)
 
         started = time.monotonic()
@@ -815,11 +873,25 @@ class TestTheFailureOrder:
 
         assert time.monotonic() - started < 25
         # `error`, where the CLI's own SIGKILL from `on_failure` would read as
-        # `oom`. The text is the server's signal death, verbatim, so a deploy
-        # restart is still recognised as one (`attempt_failure_text`).
+        # `oom`. The daemon is not the server's parent since #862, so it sees
+        # the exit and not the signal; a deploy restart, which kills the CLI
+        # too, still reads as the CLI's own signal death.
         assert result.stop_reason == "error", result.result_text
-        assert result.result_text.startswith("Claude Code was terminated by SIGKILL")
+        assert result.result_text == (
+            "The Claude Code brain's tool server failed: the tool server exited"
+        )
         assert h.pids[-1] == 0
+
+    def test_a_slow_exit_after_the_result_keeps_the_answer(self, tmp_path):
+        # The servers are gone once the result is out; a CLI slower to exit
+        # than the watcher's 2 s grace must not turn the answer into a failure.
+        h = _Harnessed(tmp_path, plan={"result": "the answer", "sleep_after_result": 3.5})
+
+        result = h.run()
+
+        assert result.success, result.result_text
+        assert result.stop_reason == "completed"
+        assert result.result_text == "the answer"
 
     def test_a_cancel_outranks_the_dead_tool_server(self, tmp_path):
         h = _Harnessed(tmp_path, plan={"calls": [{"name": "Bash", "args": {"command": "sleep 30"}}]})

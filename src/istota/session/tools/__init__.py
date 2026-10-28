@@ -47,6 +47,7 @@ from .files import (
 from .web_fetch import make_web_fetch_tool
 # Last, and after `.bash` / `.files`: it imports schema constants from both.
 from .remote import (
+    SANDBOXED_TOOL_NAMES,
     RemoteToolServer,
     ToolServerError,
     build_remote_tools,
@@ -80,6 +81,7 @@ def build_default_tools(env: ToolEnv) -> list[AgentTool]:
 
 
 __all__ = [
+    "SANDBOXED_TOOL_NAMES",
     "RemoteToolServer",
     "ToolEnv",
     "ToolPathError",

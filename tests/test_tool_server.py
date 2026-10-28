@@ -76,8 +76,23 @@ async def _call(server, tool, args, on_update=None, abort=None):
     return await server.call(tool, "c1", args, on_update, abort)
 
 
+async def _call_id(server, tool, call_id, args):
+    return await server.call(tool, call_id, args, None, None)
+
+
 def _text(result):
     return "".join(getattr(b, "text", "") for b in result.content)
+
+
+async def _open_fifo_writer(path, *, timeout):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        try:
+            return os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError:
+            if asyncio.get_running_loop().time() > deadline:
+                raise AssertionError(f"nothing opened {path.name} for reading")
+            await asyncio.sleep(0.02)
 
 
 class TestHandshake:
@@ -244,11 +259,38 @@ class TestStreamingAndAbort:
             result = await asyncio.wait_for(call, timeout=15)
         assert "aborted" in _text(result)
 
-    async def test_two_parallel_calls_overlap(self, tmp_path):
-        """`execution_mode="parallel"` is decided daemon-side, so the server
-        must run concurrent `call` frames concurrently — awaiting them one at a
-        time would silently serialize every read-only batch the loop dispatches
-        while every schema assertion stayed green."""
+    async def test_a_parallel_read_batch_overlaps(self, tmp_path):
+        """The server must run concurrent `call` frames concurrently, and its
+        dispatcher's lock must grant parallel tools together: either one
+        serializing would silently undo every read-only batch the loop sends
+        while every schema assertion stayed green.
+
+        Witnessed with two FIFOs rather than a clock. Each Read blocks in its
+        open until a writer arrives, so the second Read's open can only be
+        seen while the first is still blocked if the two run together."""
+        first, second = tmp_path / "first.txt", tmp_path / "second.txt"
+        os.mkfifo(first)
+        os.mkfifo(second)
+        async with server_for(tmp_path) as server:
+            a = asyncio.ensure_future(_call_id(server, "Read", "a", {"file_path": str(first)}))
+            b = asyncio.ensure_future(_call_id(server, "Read", "b", {"file_path": str(second)}))
+            try:
+                # Fails ENXIO until the second Read has the FIFO open for reading.
+                fd = await _open_fifo_writer(second, timeout=10)
+                assert not a.done(), "the first Read finished without its writer"
+                os.write(fd, b"second\n")
+                os.close(fd)
+                fd = await _open_fifo_writer(first, timeout=10)
+                os.write(fd, b"first\n")
+                os.close(fd)
+                ra, rb = await asyncio.wait_for(asyncio.gather(a, b), timeout=10)
+            finally:
+                for fut in (a, b):
+                    fut.cancel()
+        assert "first" in _text(ra) and "second" in _text(rb)
+
+    async def test_two_bash_calls_do_not_overlap(self, tmp_path):
+        """The other side of the lock: a mutating tool runs alone."""
         async with server_for(tmp_path) as server:
             started = asyncio.get_running_loop().time()
             await asyncio.gather(
@@ -256,7 +298,7 @@ class TestStreamingAndAbort:
                 server.call("Bash", "b", {"command": "sleep 1"}, None, None),
             )
             elapsed = asyncio.get_running_loop().time() - started
-        assert elapsed < 1.8, f"the two calls ran back to back ({elapsed:.2f}s)"
+        assert elapsed >= 1.9, f"the two Bash calls overlapped ({elapsed:.2f}s)"
 
 
 class TestFailure:
@@ -752,3 +794,122 @@ class TestTheRecordedPidIsClearedOnReap:
 
         assert seen == [server.pid, 0]
         assert holder["returncode"] is not None
+
+
+_LONG_OUTPUT = "head -c 3000 /dev/zero | tr '\\0' x"
+
+
+class TestTheDispatcherIsInTheServer:
+    """#862, Stage 2: every call through the server passes `ToolDispatcher`,
+    built from the hello's `tools` and `text_cap`."""
+
+    async def test_a_hello_naming_a_subset_refuses_the_others(self, tmp_path):
+        marker = tmp_path / "ran"
+        (tmp_path / "a.txt").write_text("readable\n")
+        async with server_for(tmp_path, tools=["Read"]) as server:
+            refused = await _call(server, "Bash", {"command": f"touch {marker}"})
+            assert refused.is_error and "Unknown tool: Bash" in _text(refused)
+            read = await _call(server, "Read", {"file_path": str(tmp_path / "a.txt")})
+            assert "readable" in _text(read)
+        assert not marker.exists(), "a tool outside the hello's subset ran"
+
+    async def test_a_hello_without_tools_offers_all_six(self, tmp_path):
+        hello = _hello(tmp_path)
+        assert "tools" not in hello and "text_cap" not in hello
+        async with server_for(tmp_path) as server:
+            ran = await _call(server, "Bash", {"command": "echo all-six"})
+        assert "all-six" in _text(ran)
+
+    async def test_an_empty_subset_offers_nothing(self, tmp_path):
+        """`[]` is a subset, not an absent field: it must never widen to all six."""
+        (tmp_path / "a.txt").write_text("readable\n")
+        async with server_for(tmp_path, tools=[]) as server:
+            refused = await _call(server, "Read", {"file_path": str(tmp_path / "a.txt")})
+        assert refused.is_error and "Unknown tool: Read" in _text(refused)
+
+    async def test_text_cap_cuts_text(self, tmp_path):
+        async with server_for(tmp_path, text_cap=200) as server:
+            capped = await _call(server, "Bash", {"command": _LONG_OUTPUT})
+        text = _text(capped)
+        assert "[Output cut at 200 of" in text, text
+        assert text.index("[Output cut") == 200, text
+
+    async def test_no_text_cap_leaves_text_whole(self, tmp_path):
+        async with server_for(tmp_path) as server:
+            whole = await _call(server, "Bash", {"command": _LONG_OUTPUT})
+        assert "Output cut" not in _text(whole)
+        assert "x" * 3000 in _text(whole)
+
+    async def test_arguments_that_are_not_an_object_are_an_error_result(self, tmp_path):
+        async with server_for(tmp_path) as server:
+            result = await server.call("Read", "c", ["not", "an", "object"], None, None)
+            assert result.is_error and "arguments must be an object" in _text(result)
+            assert server.failure is None
+
+    async def test_a_tools_field_that_is_not_a_list_of_names_fails_the_start(self, tmp_path):
+        hello = _hello(tmp_path)
+        hello["tools"] = "Read"
+        with pytest.raises(remote_mod.ToolServerError):
+            await start_tool_server(hello, startup_timeout=10.0)
+
+    async def test_a_text_cap_that_is_not_an_int_fails_the_start(self, tmp_path):
+        hello = _hello(tmp_path)
+        hello["text_cap"] = "200"
+        with pytest.raises(remote_mod.ToolServerError):
+            await start_tool_server(hello, startup_timeout=10.0)
+
+
+class TestArgumentPreparationTwice:
+    """Native prepares arguments in the loop and the server's dispatcher
+    prepares them again. That is safe only if preparation is idempotent on its
+    own output, for each of the six real tools."""
+
+    @pytest.mark.parametrize("name,raw", [
+        ("Read", {"file_path": "/a", "offset": "5", "limit": None}),
+        ("Write", {"file_path": "/a", "content": "x"}),
+        ("Edit", {"file_path": "/a", "old_string": "a", "new_string": "b", "replace_all": "true"}),
+        ("Edit", {"file_path": "/a", "edits": '[{"old_string": "a", "new_string": "b"}]'}),
+        ("Grep", {"pattern": "x", "path": None, "-i": "true", "head_limit": "3"}),
+        ("Glob", {"pattern": "*.py", "path": None}),
+        ("Bash", {"command": "ls", "timeout": "10", "description": None}),
+    ])
+    async def test_prepare_tool_arguments_is_idempotent(self, tmp_path, name, raw):
+        from istota.agent.coercion import prepare_tool_arguments
+        from istota.session.tools import build_default_tools
+
+        tools = {t.schema.name: t for t in build_default_tools(ToolEnv(cwd=tmp_path))}
+        once, error = prepare_tool_arguments(tools[name], raw)
+        assert error is None, error
+        twice, error = prepare_tool_arguments(tools[name], once)
+        assert error is None, error
+        assert twice == once
+
+
+class TestNativeHelloNamesItsSubset:
+    def _req(self, tmp_path, tools):
+        from istota.brain import BrainRequest
+
+        return BrainRequest(
+            prompt="", allowed_tools=tools, cwd=tmp_path, env={}, timeout_seconds=60,
+        )
+
+    async def test_the_hello_sends_the_granted_sandboxed_tools(self, tmp_path):
+        from istota.brain._tool_harness import request_hello
+
+        req = self._req(tmp_path, ["Read", "Glob", "WebFetch", "Bash"])
+        hello = request_hello(req, bash_spill_full_output=True)
+        assert hello["tools"] == ["Read", "Glob", "Bash"]
+        assert "text_cap" not in hello
+
+    async def test_a_guest_turn_without_write_is_refused_write_by_the_server(self, tmp_path):
+        from istota.brain._tool_harness import request_hello
+        from istota.sandbox.tool_server import build_dispatcher
+
+        req = self._req(tmp_path, ["Read", "Grep", "Glob"])
+        dispatcher = build_dispatcher(request_hello(req, bash_spill_full_output=True))
+        assert dispatcher.offered == ("Read", "Grep", "Glob")
+        refused = await dispatcher.call(
+            "c", "Write", {"file_path": str(tmp_path / "w"), "content": "x"}, None, None
+        )
+        assert refused.is_error and "Unknown tool: Write" in _text(refused)
+        assert not (tmp_path / "w").exists()

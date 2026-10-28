@@ -6,11 +6,10 @@ offered never reaches ``execute``), argument preparation (the native loop's
 own steps, ``agent.coercion.prepare_tool_arguments``), a readers-writer lock by
 ``execution_mode``, ``execute``, then the text cap.
 
-In part 1 of the CLI-brain harness the bridge builds it over
-``build_remote_tools``; the unified tool server (#862) builds it over its real
-tools. So this module imports only from ``istota.agent`` and ``istota.llm``'s
-leaves, never the brain or the daemon: ``tests/test_tool_dispatch.py`` holds
-that.
+The tool server builds one over its real tools for every call it runs, from
+either brain (#862). This module imports only from
+``istota.agent`` and ``istota.llm``'s leaves, never the brain or the daemon:
+``tests/test_tool_dispatch.py`` holds that.
 
 **Why a lock and not native's batch rule.** The native loop sees a whole batch
 and serialises it when any call mutates. The CLI sends calls one at a time as
@@ -193,6 +192,11 @@ class ToolDispatcher:
         self._text_cap = text_cap
         self._lock = _ToolLock()
 
+    @property
+    def tool_names(self) -> tuple[str, ...]:
+        """Every tool bound, offered or not."""
+        return tuple(self._tools)
+
     def mcp_tool_list(self) -> list[dict]:
         """The offered tools as ``{name, description, input_schema, read_only}``,
         in offered order: what ``sandbox.mcp_stdio`` lists as ``tools/list``.
@@ -226,9 +230,11 @@ class ToolDispatcher:
         """Run ``name``; never raises except for cancellation."""
         if name not in self.offered:
             return _error(f"Unknown tool: {name}")
+        if not isinstance(raw_args, dict):
+            return _error(f"{name}: arguments must be an object")
         tool = self._tools[name]
 
-        args, error = prepare_tool_arguments(tool, raw_args if isinstance(raw_args, dict) else {})
+        args, error = prepare_tool_arguments(tool, raw_args)
         if error is not None:
             return _error(error)
 

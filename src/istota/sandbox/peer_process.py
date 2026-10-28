@@ -50,6 +50,7 @@ __all__ = [
     "peer_pid",
     "report_child_reaped",
     "reporting_pid",
+    "split_pid_lines",
     "start_time",
     "supported",
 ]
@@ -222,6 +223,25 @@ def report_child_reaped(on_pid: Callable[[int], None] | None) -> None:
         pass
 
 
+def split_pid_lines(buffered: bytes) -> tuple[list[int], bytes]:
+    """The pids in the complete ``pid\\n`` lines of ``buffered``, and the tail.
+
+    The one parser for a pid report: ``reporting_pid``'s pipe and the tool
+    harness's FIFO (#862). The tail is an unfinished line; prepend it to the
+    next chunk. A line that is not a positive ASCII decimal is dropped, so a
+    report can never read as 0, which a brain's ``on_pid`` takes as a reap.
+    """
+    pids: list[int] = []
+    while b"\n" in buffered:
+        line, buffered = buffered.split(b"\n", 1)
+        if not line.isdigit():
+            continue
+        pid = int(line)
+        if pid > 0:
+            pids.append(pid)
+    return pids, buffered
+
+
 @contextlib.contextmanager
 def reporting_pid(
     on_pid: Callable[[int], None] | None,
@@ -271,12 +291,11 @@ def reporting_pid(
                 chunk = os.read(read_fd, 64)
                 if not chunk:
                     break
-                buffered += chunk
-                while b"\n" in buffered:
-                    line, buffered = buffered.split(b"\n", 1)
+                pids, buffered = split_pid_lines(buffered + chunk)
+                for pid in pids:
                     delivered = True
                     try:
-                        on_pid(int(line))
+                        on_pid(pid)
                     except Exception:
                         pass
             if report_reap and delivered:

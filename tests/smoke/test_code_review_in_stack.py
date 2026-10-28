@@ -24,9 +24,9 @@ on `NativeBrain`. The second (ISSUE-614, moved onto the tool harness by the
 cli-brain-tools-only-path spec, Stage 1) runs the same CLI on the `claude_code`
 brain, with the image's own `claude` running outside the namespace and talking
 to the scripted endpoint's Anthropic half: its calls are the harness's
-`mcp__istota__*` tools, relayed into the tool server. The bubblewrap layer
+`mcp__istota__*` tools, served by the tool server the CLI spawned. The bubblewrap layer
 under the roots is the linux tier's to witness
-(`tests/linux/test_daemon_sandbox_real.py`, `tests/linux/test_cli_harness_real.py`).
+(`tests/linux/test_daemon_sandbox_real.py`, `tests/linux/test_cli_harness_direct.py`).
 
 **The native class's reads are relative to `tree/`**, not absolute as `reviewer.md` asks,
 because the run directory's name is random and a script is fixed before the
