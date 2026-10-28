@@ -2,9 +2,9 @@
 
 import re
 
-from istota.mail.html_template import CONTAINER_STYLE, STYLES
+from istota.mail.html_template import STYLES
 
-TEMPLATE_STYLES = frozenset(STYLES.values()) | {CONTAINER_STYLE}
+TEMPLATE_STYLES = frozenset(STYLES.values())
 
 
 def bare(html: str) -> str:
