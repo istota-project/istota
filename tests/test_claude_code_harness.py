@@ -10,7 +10,7 @@ The brain's half, from "ClaudeCodeBrain on the harness" down: the argv, the
 `ClaudeCodeBrain.execute` for real against `tests/support/fake_claude_cli.py`
 on PATH as `claude`, which starts the real launcher from the harness's MCP
 config, so every call goes CLI, launcher-exec'd tool server, dispatcher. The
-tool server runs unwrapped here; `tests/linux/test_cli_harness_real.py` runs
+tool server runs unwrapped here; `tests/linux/test_cli_harness_direct.py` runs
 it under bwrap.
 """
 
