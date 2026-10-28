@@ -11,7 +11,8 @@ from istota import db, storage
 from istota.config import refresh_user_profiles_if_changed
 from istota.groups import memory, service
 from istota.groups import rooms as group_rooms
-from istota.groups.policy import GroupError, group_capabilities, require_group_member
+from istota.groups.policy import GroupError, group_capabilities, is_group_admin, require_group_member
+from istota.groups.policy import user_label as _user
 from istota.webui.request_guards import BodyError, read_bounded_body
 from istota.webui.router_stubs import require_auth, verify_origin
 
@@ -77,15 +78,8 @@ async def _run(request, user, operation, *args, read=False, **kwargs):
     return result
 
 
-def _user(config, user_id):
-    profile = config.users.get(user_id)
-    return {"user_id": user_id, "display_name": (profile.display_name if profile else "") or user_id}
-
-
 def _summary(conn, group, actor, *, admin=False, config=None):
-    is_admin = admin or bool(config and (
-        config.is_named_admin(actor) or (config.web.has_method("none") and actor == config.local_user_id)
-    ))
+    is_admin = admin or bool(config and is_group_admin(config, actor))
     capabilities = group_capabilities(conn, group["group_id"], actor, is_admin=is_admin)
     role = "owner" if capabilities["owner"] else "member" if capabilities["member"] else None
     metadata = group if admin else {field: group[field] for field in ("group_id", "display_name", "kind", "revision", "system_key")}

@@ -44,3 +44,31 @@ def test_archived_and_removed_members_lose_content(conn):
     db.archive_group(conn, "family")
     with pytest.raises(GroupError):
         require_group_member(conn, "family", "alice")
+
+
+@pytest.mark.parametrize("auth,users,actor,expected", [
+    (["nextcloud"], (), "admin", True),
+    (["nextcloud"], (), "alice", False),
+    (["none"], ("alice",), "alice", True),
+    (["none"], ("alice",), "bob", False),
+    (["nextcloud"], ("alice",), "alice", False),
+])
+def test_is_group_admin_is_the_summary_rule(conn, auth, users, actor, expected):
+    """The Groups summary and every door that cannot import it read one rule."""
+    from istota.config import Config, UserConfig, WebConfig
+    from istota.groups.policy import is_group_admin
+    from istota.groups.routes import _summary
+    config = Config(web=WebConfig(auth=auth), admin_users={"admin"},
+                    users={user: UserConfig() for user in users})
+    assert is_group_admin(config, actor) is expected
+    # `archive` is the one capability the admin flag alone decides on an ordinary group.
+    summary = _summary(conn, db.get_group(conn, "family"), actor, config=config)
+    assert summary["capabilities"]["archive"] is expected
+
+
+def test_user_label_falls_back_to_the_id():
+    from istota.config import Config, UserConfig
+    from istota.groups.policy import user_label
+    config = Config(users={"alice": UserConfig(display_name="Alice A")})
+    assert user_label(config, "alice") == {"user_id": "alice", "display_name": "Alice A"}
+    assert user_label(config, "ghost") == {"user_id": "ghost", "display_name": "ghost"}
