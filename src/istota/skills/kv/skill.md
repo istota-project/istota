@@ -122,6 +122,10 @@ istota-skill kv shared-status   # can I write shared KV on this deployment?
   write returns `{"status":"error","error":"shared KV writes require admin"}`
   and exits non-zero. On a deployment with a *blank* admins file no one can
   write (fail-closed).
+- **Writes run only on a turn the user wrote.** Answering mail somebody else
+  wrote (a correspondent on an email thread, for example), `set --shared` and
+  `delete --shared` answer `reason: not_owner_turn` and change nothing. Do not
+  retry; tell the user to ask for the change themselves.
 - **Check before you wire.** Whether *you* may write shared content is
   deployment-specific (it depends on the admins allowlist, which differs per
   install). Run `istota-skill kv shared-status` to find out — don't infer it

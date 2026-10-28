@@ -119,3 +119,74 @@ class TestSharedDeferredWrites:
         _process_deferred_kv_ops(config, task, user_temp)
         with db.get_db(db_path) as conn:
             assert db.shared_kv_get(conn, "ns", "k") is None
+
+
+def _seed_correspondents_task(db_path, user_id):
+    """A task answering mail somebody else wrote, as an email thread room runs it."""
+    with db.get_db(db_path) as conn:
+        task_id = db.create_task(conn, prompt="hi", user_id=user_id, source_type="web")
+        token = db.create_web_chat_room(conn, user_id, "general").token
+        db.add_message(conn, token, role="user", body="hi", origin_surface="web",
+                       task_id=task_id, author_label="someone@elsewhere.example")
+        return db.get_task(conn, task_id)
+
+
+class TestSharedDeferredWritesNeedTheUsersOwnTurn:
+    def test_a_correspondents_turn_is_refused(self, db_path, tmp_path):
+        config = _make_config(db_path, tmp_path, {"alice"})
+        with db.get_db(db_path) as conn:
+            db.shared_kv_set(conn, "ns", "gone", '"orig"', "alice")
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+        task = _seed_correspondents_task(db_path, "alice")
+
+        ops = [
+            {"op": "set", "namespace": "ns", "key": "k", "value": '"evil"', "scope": "shared"},
+            {"op": "delete", "namespace": "ns", "key": "gone", "scope": "shared"},
+            {"op": "set", "namespace": "ns", "key": "own", "value": '"y"'},
+        ]
+        (user_temp / f"task_{task.id}_kv_ops.json").write_text(json.dumps(ops))
+
+        count = _process_deferred_kv_ops(config, task, user_temp)
+
+        assert count == 1
+        with db.get_db(db_path) as conn:
+            assert db.shared_kv_get(conn, "ns", "k") is None
+            assert db.shared_kv_get(conn, "ns", "gone")["value"] == '"orig"'
+            assert db.kv_get(conn, "alice", "ns", "own")["value"] == '"y"'
+
+    def test_a_subtask_of_a_correspondents_turn_is_refused(self, db_path, tmp_path):
+        config = _make_config(db_path, tmp_path, {"alice"})
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+        parent = _seed_correspondents_task(db_path, "alice")
+        with db.get_db(db_path) as conn:
+            child = db.get_task(conn, db.create_task(
+                conn, prompt="t", user_id="alice", parent_task_id=parent.id))
+
+        ops = [{"op": "set", "namespace": "ns", "key": "k", "value": '"evil"', "scope": "shared"}]
+        (user_temp / f"task_{child.id}_kv_ops.json").write_text(json.dumps(ops))
+
+        assert _process_deferred_kv_ops(config, child, user_temp) == 0
+        with db.get_db(db_path) as conn:
+            assert db.shared_kv_get(conn, "ns", "k") is None
+
+    def test_the_admins_own_turn_in_a_shared_room_applies(self, db_path, tmp_path):
+        config = _make_config(db_path, tmp_path, {"alice"})
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+        with db.get_db(db_path) as conn:
+            room = db.create_web_chat_room(conn, "alice", "Family")
+            db.add_web_room_member(conn, room.token, "bob")
+            task_id = db.create_task(conn, prompt="hi", user_id="alice", source_type="web",
+                                     conversation_token=room.token)
+            db.add_message(conn, room.token, role="user", body="hi", origin_surface="web",
+                           task_id=task_id, author_user_id="alice")
+            task = db.get_task(conn, task_id)
+
+        ops = [{"op": "set", "namespace": "ns", "key": "k", "value": '"x"', "scope": "shared"}]
+        (user_temp / f"task_{task.id}_kv_ops.json").write_text(json.dumps(ops))
+
+        assert _process_deferred_kv_ops(config, task, user_temp) == 1
+        with db.get_db(db_path) as conn:
+            assert db.shared_kv_get(conn, "ns", "k")["value"] == '"x"'
