@@ -829,8 +829,8 @@ class TestWhatTheBrainIsHanded:
 
         with patch("istota.executor.build_bwrap_cmd", side_effect=fake_bwrap):
             config, task, req = self._run(tmp_path, sandbox=True)
-            req.sandbox_wrap(["true"])
-            req.native_sandbox_wrap(["true"])
+            req.tool_server_wrap(["true"])
+            req.tool_server_wrap(["true"])
 
         control = executor.get_task_control_dir(config, task.user_id, task.id)
         assert captured["extra_ro_binds"] == [control], (

@@ -50,6 +50,8 @@ from pathlib import Path
 from istota.config import Config, CredentialBrokerConfig, DeveloperConfig, EmailConfig as AppEmailConfig, NextcloudConfig, SecurityConfig, SiteConfig, UserConfig
 from istota import db
 
+pytestmark = pytest.mark.usefixtures("cli_without_tool_server")
+
 
 def _system_half(config, user_id="alice", task_id=1) -> str:
     """The standing instructions `execute_task` wrote for this task.
@@ -3580,7 +3582,7 @@ class TestWorkspaceDirBwrap:
         user_temp.mkdir(parents=True)
         return executor.build_bwrap_cmd(
             ["claude"], cfg, task, True, [], user_temp, workspace_dir=workspace_dir,
-            profile=executor.SandboxProfile.CLAUDE,
+            profile=executor.SandboxProfile.NATIVE,
         )
 
     def test_workspace_bind_and_chdir(self, tmp_path, monkeypatch):

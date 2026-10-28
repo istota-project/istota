@@ -144,7 +144,7 @@ def _turn(config, token, user, text) -> dict:
                            origin_surface="web", task_id=task.id)
         assert captured, "the brain was never called"
         req = captured[0]
-        argv = req.sandbox_wrap(["claude", "-p"])
+        argv = req.tool_server_wrap(["claude", "-p"])
     return {
         "task": task, "ambient_off": ambient_off, "prompt": req.prompt,
         "argv": argv, "allowed_skills": set(proxy.call_args.kwargs["allowed_skills"]),

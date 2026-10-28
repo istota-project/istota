@@ -72,10 +72,10 @@ def _link_credentials(config_dir: Path, home: str) -> None:
 
     The CLI reads `$CLAUDE_CONFIG_DIR/.credentials.json`, not
     `~/.claude/.credentials.json`, once `CLAUDE_CONFIG_DIR` is set, so with
-    the token off the environment the session needs a way to the file. A link
-    at that name to the home copy, which the CLAUDE wrap binds read-only at
-    the same path under "subscription". Nothing when there is no file (a Mac
-    checkout, where the CLI keeps its login in the keychain).
+    a file login the session needs a way to it. A link at that name to the
+    daemon's home copy, which the unwrapped CLI reads directly. Nothing when
+    there is no file (a Mac checkout, where the CLI keeps its login in the
+    keychain).
     """
     if not home:
         return

@@ -8,7 +8,12 @@ server offered, then makes the planned tool calls through the server, printing
 each as an assistant `tool_use` frame, and ends with a `result` frame holding
 the call results.
 
-What it does is read from a JSON plan named by `FAKE_CLAUDE_PLAN`:
+Without `--mcp-config` it is a text-only run and answers with one `result`
+frame. The old wrapped path, where the CLI ran tools itself, is gone.
+
+What it does is read from a JSON plan named by `FAKE_CLAUDE_PLAN`, or else
+`plan.json` beside this file (the smoke tier's case: the CLI's environment is
+built from an allowlist and carries no variable of ours):
 
 - `record`: a file to write the argv, cwd, pid and environment to.
 - `init_extra_tools`, `init_drop_tools`, `init_server_status`: what to
@@ -16,6 +21,10 @@ What it does is read from a JSON plan named by `FAKE_CLAUDE_PLAN`:
 - `calls`: `[{"name": "Bash", "args": {...}}]`.
 - `host_probe`: a shell command the fake runs itself first, from the CLI's
   unwrapped view, its output put ahead of the call results.
+- `run_in_cli`: on a harness run, make the planned `Bash` calls in the fake's
+  own process rather than through the MCP server, as a CLI whose own Bash were
+  left on would. The smoke witness's negative control
+  (`scripts/test-image-negative-control.sh cli-witness`).
 
 `{socket}` and `{harness_dir}` in a call's arguments or the host probe are
 replaced with the bridge socket and the harness directory, read from the MCP
@@ -85,8 +94,31 @@ class _Mcp:
             self.proc.kill()
 
 
+def _plan_path() -> str:
+    named = os.environ.get("FAKE_CLAUDE_PLAN")
+    if named:
+        return named
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "plan.json")
+
+
+def _without_mcp(argv: list[str], plan: dict) -> int:
+    """A run with no `--mcp-config`: text-only.
+
+    `--output-format json` (the non-streaming path) prints the frames as one
+    array at the end, as the pinned CLI does with `--verbose`; otherwise one
+    frame per line."""
+    frames = [{"type": "result", "subtype": "success", "result": "done"}]
+    if _flag(argv, "--output-format") == "json":
+        sys.stdout.write(json.dumps(frames) + "\n")
+        sys.stdout.flush()
+    else:
+        for frame in frames:
+            _emit(frame)
+    return 0
+
+
 def main(argv: list[str]) -> int:
-    with open(os.environ["FAKE_CLAUDE_PLAN"]) as fh:
+    with open(_plan_path()) as fh:
         plan = json.load(fh)
     sys.stdin.read()
 
@@ -98,6 +130,8 @@ def main(argv: list[str]) -> int:
     tools_flag = _flag(argv, "--tools")
     builtins = [t for t in (tools_flag or "").split(",") if t]
     config_path = _flag(argv, "--mcp-config")
+    if config_path is None:
+        return _without_mcp(argv, plan)
     mcp = _Mcp(config_path)
     places = {"{socket}": mcp.socket, "{harness_dir}": os.path.dirname(config_path)}
 
@@ -145,6 +179,11 @@ def main(argv: list[str]) -> int:
             "type": "tool_use", "id": call_id, "name": f"mcp__{mcp.name}__{call['name']}",
             "input": args,
         }]}})
+        if plan.get("run_in_cli") and call["name"] == "Bash":
+            ran = subprocess.run(["/bin/sh", "-c", args.get("command", "")],
+                                 capture_output=True, text=True)
+            texts.append(ran.stdout + ran.stderr)
+            continue
         reply = mcp.request("tools/call", {"name": call["name"], "arguments": args})
         result = reply.get("result") or {}
         text = "".join(b.get("text", "") for b in result.get("content", []) if b.get("type") == "text")

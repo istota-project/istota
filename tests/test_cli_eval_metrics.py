@@ -145,7 +145,7 @@ def _request(arm, tmp_path):
 def test_the_builtin_arm_has_no_harness_and_gives_the_cli_its_env(tmp_path):
     req = _request("builtin", tmp_path)
     assert req.harness is None
-    assert req.sandbox_wrap is None and req.native_sandbox_wrap is None
+    assert req.tool_server_wrap is None
     assert req.env["CLAUDE_CODE_OAUTH_TOKEN"] == "t"
     assert req.env["CLAUDE_CODE_DISABLE_CRON"] == "1"
     assert req.env["SHELLOPTS"] == "pipefail"
@@ -161,7 +161,7 @@ def test_the_harness_arm_keeps_the_credential_off_the_tool_server_env(tmp_path):
     assert cli["MCP_TOOL_TIMEOUT"] == str((60 + 30) * 1000)
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in req.env
     assert req.harness.harness_root.is_dir()
-    assert req.fs_read_roots is None and req.native_sandbox_wrap is None
+    assert req.fs_read_roots is None and req.tool_server_wrap is None
     assert req.attempt == 2
 
 

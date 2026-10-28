@@ -172,7 +172,7 @@ def _q(path):
 
 
 def run_probe(script, config, task, user_temp, *, is_admin=False,
-              profile=SandboxProfile.CLAUDE, **kwargs):
+              profile=SandboxProfile.NATIVE, **kwargs):
     """Run `sh -c script` inside the real sandbox and return the result.
 
     Fails the test rather than returning if bwrap declined to build a command:
@@ -180,11 +180,8 @@ def run_probe(script, config, task, user_temp, *, is_admin=False,
     so a probe that silently ran on the host would pass every assertion below
     that expects something to be missing.
 
-    ``profile`` defaults to CLAUDE, which is what the assertions in this file
-    were written against — every one of them is about the generic half of the
-    plan (the masks, the per-user binds), which both profiles emit identically.
-    `test_sandbox_profiles_real.py` is where the difference is probed, and it
-    reuses this helper with ``profile=SandboxProfile.NATIVE``.
+    ``profile`` defaults to NATIVE, the one profile left; every assertion in
+    this file is about the generic plan (the masks, the per-user binds).
     """
     cmd = build_bwrap_cmd(
         ["/bin/sh", "-c", script], config, task, is_admin, [], user_temp,
@@ -305,7 +302,7 @@ class TestMountScoping:
              f'cat {_q(f"{mount}/Users/bob/secret.txt")} 2>/dev/null || echo BOB_UNREADABLE; '
              f'cat {_q(f"{mount}/Users/alice/shared/Doc/secret.txt")} 2>/dev/null '
              f'|| echo LINK_UNREADABLE'],
-            layout, task, False, resources, user_temp, profile=SandboxProfile.CLAUDE,
+            layout, task, False, resources, user_temp, profile=SandboxProfile.NATIVE,
         )
         assert cmd[0] == "bwrap", "sandbox unavailable — probe would have run unsandboxed"
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -317,19 +314,21 @@ class TestMountScoping:
 
 
 class TestCustomSystemPrompt:
-    def test_bound_read_only_when_configured(self, layout, tmp_path, task, user_temp):
+    """The operator's system prompt is in no namespace, configured or not: the
+    `claude` CLI that opens it runs outside the sandbox on the tool harness,
+    and NativeBrain reads it in the daemon (cli-brain-tools part 2, Stage 6).
+    The CLAUDE profile used to bind it read-only for the in-sandbox CLI."""
+
+    def test_absent_when_configured(self, layout, tmp_path, task, user_temp):
         prompt = tmp_path / "system-prompt.md"
         prompt.write_text("operator system prompt")
         layout.brain.custom_system_prompt = True
 
         result = run_probe(
-            f'cat {_q(prompt)}; '
-            f'echo tampered > {_q(prompt)} 2>/dev/null && echo WRITE_OK || echo WRITE_FAIL',
-            layout, task, user_temp,
+            f'cat {_q(prompt)} 2>/dev/null || echo PROMPT_ABSENT', layout, task, user_temp,
         )
-        out = result.stdout
-        assert "operator system prompt" in out, result.stderr
-        assert "WRITE_FAIL" in out, out
+        assert "PROMPT_ABSENT" in result.stdout, (result.stdout, result.stderr)
+        assert "operator system prompt" not in result.stdout
 
     def test_absent_when_not_configured(self, layout, tmp_path, task, user_temp):
         prompt = tmp_path / "system-prompt.md"

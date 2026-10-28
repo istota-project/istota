@@ -31,6 +31,8 @@ from .test_executor_streaming import (
     contextmanager_chain,
 )
 
+pytestmark = pytest.mark.usefixtures("cli_without_tool_server")
+
 
 @pytest.fixture(autouse=True)
 def _fresh_log_state():

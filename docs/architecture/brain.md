@@ -23,7 +23,9 @@ brain/
 ├── claude_code.py  # ClaudeCodeBrain — wraps the `claude` CLI subprocess;
 │                   # its resolver methods delegate to _resolve for `anthropic`
 ├── native.py       # NativeBrain — drives Istota's in-process agent loop
-└── _cli_config_dir.py  # Helpers for building a per-task CLAUDE_CONFIG_DIR
+├── _tool_harness.py    # The tool-server start both brains share, and the CLI's
+│                       # tool harness
+└── _cli_config_dir.py  # A fresh CLAUDE_CONFIG_DIR per harness run
 ```
 
 The native loop's machinery lives in sibling packages: `llm/` (providers, the model catalogue and its discovery, and the OpenAI-compatible client every provider is reached through), `agent/` (the loop and tool dispatch), and `session/` (turn state, compaction, retry). How providers, the catalogue and selection fit together for an operator is in [Models and providers](../configuration/models.md).
@@ -73,9 +75,9 @@ The dataclass the executor populates per task. The brain treats it as immutable 
 | Field | Notes |
 |---|---|
 | `prompt` | The user half — task material only (memory + knowledge facts + playbooks + conversation and confirmation context + request + attachments). Native compaction may summarize it. |
-| `allowed_tools` | From `executor.build_allowed_tools()` — `["Read","Write","Edit","Grep","Glob","Bash","WebSearch","WebFetch"]`. For ClaudeCodeBrain the list contents no longer reach the CLI (it runs with `--dangerously-skip-permissions`, not an `--allowedTools` allowlist); the names only matter to NativeBrain, which filters its in-process tool set by them. A non-empty list is also the signal that distinguishes a tool-bearing task from a text-only one (empty = no tools, no skip-permissions, e.g. the sleep cycle). |
+| `allowed_tools` | From `executor.build_allowed_tools()` — `["Read","Write","Edit","Grep","Glob","Bash","WebSearch","WebFetch"]`. Both brains offer only the granted tools: NativeBrain filters its tool set by them, and ClaudeCodeBrain's tool harness offers the granted ones from the tool server (WebSearch, which runs on Anthropic's side, stays a CLI built-in). A non-empty list is also the signal that distinguishes a tool-bearing task from a text-only one (empty = no tools, no harness, no skip-permissions, e.g. the sleep cycle). |
 | `cwd` | Subprocess working directory (`config.temp_dir`) |
-| `env` | Per-task env (already credential-stripped if the skill proxy is enabled) |
+| `env` | Per-task env (already credential-stripped if the skill proxy is enabled). It never carries the `claude` CLI's credential: on the harness the CLI gets its own env from `HarnessSpec.cli_env`, and this one goes to the tool server |
 | `timeout_seconds` | `config.scheduler.task_timeout_minutes * 60` |
 | `model` | The task's pin (`tasks.model`, a resolved ref or the selection as written), or empty; the brain fills its own default |
 | `effort` | The task's requested effort, or empty; the brain fills its default and clamps it to the model |
@@ -86,13 +88,13 @@ The dataclass the executor populates per task. The brain treats it as immutable 
 | `cancel_check` | Polled between events; True → kill subprocess, return `cancelled` |
 | `poll_steers` | Drained at loop boundaries for pending `!steer` notes, each injected as a user turn. Supplied only to brains whose `supports_steering` is True |
 | `on_pid` | Called once with subprocess PID immediately after spawn |
-| `sandbox_wrap` | Closure that wraps the brain's raw cmd (e.g. with bubblewrap); brain stays sandbox-agnostic |
+| `tool_server_wrap` | Closure that wraps the tool server's command with bubblewrap (the NATIVE profile); the brain stays sandbox-agnostic. One wrap for both brains, since both run their tools in the same tool server |
+| `harness` | `HarnessSpec` for a `claude_code` request with tools: the CLI's whole env, the harness root, and the WebFetch policy the harness offers. `None` on a text-only request; ClaudeCodeBrain refuses a tool grant without one |
 | `result_file` | claude_code-specific fallback file path |
 | `advisor` | Advisor-model config: a stronger model the cheap default can consult at moments the advisor tool picks. Anthropic-namespace brains only; skipped when the task pins its own model |
-| `fs_read_roots` / `fs_write_roots` | Filesystem roots the in-process tools may read from and write to (NativeBrain — it has no bwrap wrapper of its own) |
+| `fs_read_roots` / `fs_write_roots` | Filesystem roots the tool server's file tools may read from and write to, on either brain. Under bwrap they are the error-message layer above the namespace; without it they are the only confinement |
 | `fs_write_denied_roots` | Read-only carve-outs the write roots cannot express. Up to two entries: the task's control directory, which holds the composed standing instructions the row above names and every other per-task file the daemon writes, on every shape; plus its `.developer` directory, which holds the scripts that fetch its own credentials, on a confined one. See [the `.developer` carve-out](../deployment/security.md#the-developer-carve-out) |
 | `db_path` | Handed to the brain rather than to the model: `env` no longer carries `ISTOTA_DB_PATH` |
-| `session_label` | Label for the session transcript, so a run is identifiable in the logs |
 
 ## BrainResult
 
@@ -108,9 +110,9 @@ The dataclass the executor populates per task. The brain treats it as immutable 
 
 Wraps the `claude` CLI subprocess. Owns:
 
-1. **Command construction** — `claude -p - --dangerously-skip-permissions --disallowedTools Agent Workflow`, plus optional `--model`, `--effort`, `--system-prompt-file`, `--append-system-prompt-file`, and (in streaming mode) `--output-format stream-json --verbose --include-partial-messages`. Tool-bearing tasks no longer pass an `--allowedTools` allowlist — the model gets its full default toolset and the security boundary is the bwrap sandbox + network proxy + clean env, not an interactive permission prompt. `Agent` + `Workflow` (the harness's multi-agent fan-out) stay denied so Istota orchestrates through its own skills. Text-only invocations (empty `allowed_tools`, e.g. the sleep cycle) emit no tool flags and no skip-permissions. A grant made only of `Read`, `Grep` and `Glob` (health OCR, the code reviewer) also gets `--tools` naming those tools and `--strict-mcp-config`, so no other built-in tool and no MCP server exists for that call, plus a deny list behind them as a backstop. The `--include-partial-messages` flag makes the CLI emit answer / reasoning text token-by-token as `stream_event` frames *before* the whole `assistant` block lands — without it the final response would arrive as one block and dump all at once on stream surfaces (web / REPL).
-2. **Sandbox wrap** — calls `req.sandbox_wrap(cmd)` if provided so the executor's bwrap configuration applies.
-3. **Subprocess** — `Popen` (streaming) or `subprocess.run` (simple), prompt via stdin to avoid `E2BIG` on large prompts; stderr drained on a background thread to prevent deadlock. Every `task`-origin call streams, and so does code review, so a timed-out review still records its usage; the daemon's other model calls (sleep cycle, shared briefing blocks, health OCR and explainer) take the simple path.
+1. **Command construction** — `claude -p - --dangerously-skip-permissions --disallowedTools Agent Workflow`, plus optional `--model`, `--effort`, `--system-prompt-file`, `--append-system-prompt-file`, and (in streaming mode) `--output-format stream-json --verbose --include-partial-messages`. A request with tools runs on the tool harness (below): the CLI also gets every built-in that acts on the machine denied, `--tools` naming only the granted built-ins that do not (WebSearch), `--mcp-config` naming the harness's one MCP server, and `--strict-mcp-config`, so the account's claude.ai connectors and every other MCP server are absent. `Agent` + `Workflow` (the CLI's multi-agent fan-out) stay denied so Istota orchestrates through its own skills. Text-only invocations (empty `allowed_tools`, e.g. the sleep cycle) emit no tool flags and no skip-permissions. The `--include-partial-messages` flag makes the CLI emit answer / reasoning text token-by-token as `stream_event` frames *before* the whole `assistant` block lands — without it the final response would arrive as one block and dump all at once on stream surfaces (web / REPL).
+2. **Tool harness** — with tools granted, the CLI runs outside the sandbox and its tools run in the tool server under `req.tool_server_wrap`, the same process NativeBrain uses. The CLI reaches them through an MCP adapter and a daemon-side relay; each harness has its own `CLAUDE_CONFIG_DIR` (an empty `settings.json`, an onboarding seed and, under "subscription", a link to the daemon's credentials file), so nothing of the daemon's own `~/.claude` applies. The brain checks the CLI's `system/init` frame lists exactly the expected tools before any call is released. The CLI's credential is in the CLI's env only; nothing the model drives can read it on a sandboxed shape. A tool grant with no `harness` is refused. Rules: `.claude/rules/brain.md`, "The tool server".
+3. **Subprocess** — `Popen` (streaming) or `subprocess.run` (simple), prompt via stdin to avoid `E2BIG` on large prompts; stderr drained on a background thread to prevent deadlock. Every harness run streams, as does every `task`-origin call and code review, so a timed-out review still records its usage; the daemon's other model calls (sleep cycle, shared briefing blocks, health OCR and explainer) take the simple path.
 4. **Stream parsing** — line-by-line via `make_stream_parser()` from `_events.py`, dispatching `ResultEvent` → final result, `ToolUseEvent` / `TextEvent` → trace + on_progress, `ContextManagementEvent` → `cm_boundary` marker in trace. The `stream_event` partial frames parse into `TextDeltaEvent` / `ThinkingDeltaEvent` and go to `on_progress` only (never the trace); the trailing whole-block `TextEvent` / `ThinkingEvent` still records the trace and is deduped against the deltas executor-side (text via `_delta_seen`, thinking via `_thinking_seen`). On push surfaces (Talk) the deltas are dropped and `TextEvent` → `progress_text` stands.
 5. **Cancellation** — polls `req.cancel_check()` between events; final re-check after the subprocess exits catches SIGTERM-style external kills.
 6. **Timeout** — `threading.Timer` kills the process after `req.timeout_seconds`; result tagged `stop_reason="timeout"`.

@@ -28,7 +28,9 @@ import pytest
 
 from istota import db
 from istota.config import SecurityConfig
-from istota.executor import _bwrap_available, build_daemon_sandbox
+from istota.executor import SandboxProfile, _bwrap_available, build_daemon_sandbox
+
+NATIVE = SandboxProfile.NATIVE
 
 from .test_sandbox_real import _unavailable
 
@@ -120,7 +122,7 @@ class TestTheOcrNamespace:
         which is the outage ISSUE-395 held this change back over.
         """
         sandbox = build_daemon_sandbox(
-            layout, "alice", extra_ro_binds=[panel_upload]
+            layout, "alice", extra_ro_binds=[panel_upload], profile=NATIVE,
         )
         result = run_in_wrap(
             f'cat {_q(panel_upload)} 2>/dev/null || echo DOC_UNREADABLE; '
@@ -144,7 +146,7 @@ class TestTheOcrNamespace:
         document" would pass on a namespace where nothing is writable.
         """
         sandbox = build_daemon_sandbox(
-            layout, "alice", extra_ro_binds=[panel_upload]
+            layout, "alice", extra_ro_binds=[panel_upload], profile=NATIVE,
         )
         sibling = panel_upload.parent / "scratch.txt"
         result = run_in_wrap(
@@ -168,7 +170,7 @@ class TestTheOcrNamespace:
         so a wrong `user_id` there would widen the namespace silently.
         """
         sandbox = build_daemon_sandbox(
-            layout, "alice", extra_ro_binds=[panel_upload]
+            layout, "alice", extra_ro_binds=[panel_upload], profile=NATIVE,
         )
         other = Path(layout.workspace_path) / "Users" / "bob" / "secret.txt"
         result = run_in_wrap(
@@ -187,7 +189,7 @@ class TestTheOcrNamespace:
         is not there.
         """
         sandbox = build_daemon_sandbox(
-            layout, "alice", extra_ro_binds=[panel_upload]
+            layout, "alice", extra_ro_binds=[panel_upload], profile=NATIVE,
         )
         result = run_in_wrap("pwd; touch ./probe && echo CWD_WRITE_OK", sandbox)
 
@@ -210,7 +212,7 @@ class TestTheOcrNamespace:
         elsewhere.write_text(DOCUMENT_SENTINEL)
         elsewhere = elsewhere.resolve()
 
-        sandbox = build_daemon_sandbox(layout, "alice", extra_ro_binds=[elsewhere])
+        sandbox = build_daemon_sandbox(layout, "alice", extra_ro_binds=[elsewhere], profile=NATIVE)
         result = run_in_wrap(
             f'cat {_q(elsewhere)} 2>/dev/null || echo DOC_UNREADABLE', sandbox
         )
@@ -230,7 +232,7 @@ class TestTheOcrNamespace:
         elsewhere.write_text(DOCUMENT_SENTINEL)
         elsewhere = elsewhere.resolve()
 
-        sandbox = build_daemon_sandbox(layout, "alice")
+        sandbox = build_daemon_sandbox(layout, "alice", profile=NATIVE)
         result = run_in_wrap(
             f'cat {_q(elsewhere)} 2>/dev/null || echo DOC_UNREADABLE', sandbox
         )
@@ -242,7 +244,7 @@ class TestTheOcrNamespace:
 class TestTheRefusal:
     def test_an_unscoped_user_builds_no_wrap(self, layout):
         """And says it refused, rather than handing back a usable-looking one."""
-        sandbox = build_daemon_sandbox(layout, "")
+        sandbox = build_daemon_sandbox(layout, "", profile=NATIVE)
 
         assert sandbox.wrap is None
         assert sandbox.refused
@@ -256,7 +258,7 @@ class TestTheRefusal:
         Path(layout.db_path).unlink()
         db.init_db(layout.db_path)
 
-        build_daemon_sandbox(layout, "alice")
+        build_daemon_sandbox(layout, "alice", profile=NATIVE)
 
         with db.get_db(layout.db_path) as conn:
             count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]

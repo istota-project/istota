@@ -77,7 +77,7 @@ def _argv(config, task, authorized, *, is_admin=True):
         return build_bwrap_cmd(
             ["echo", "hi"], config, task, is_admin, [], user_temp,
             authorized_skills=frozenset(authorized),
-            profile=SandboxProfile.CLAUDE,
+            profile=SandboxProfile.NATIVE,
         )
 
 

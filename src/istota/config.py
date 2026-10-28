@@ -2159,7 +2159,8 @@ class NativeBrainConfig:
     # since the round's stage 8 evals: fewer failed edits on the weaker model.
     strict_tool_schemas: str = "auto"
     # Daemon-side WebFetch tool ([brain.native.web_fetch]). Enabled by default
-    # with safe caps; the tool is native-only (added to build_default_tools).
+    # with safe caps; native adds it to its tools and the CLI tool harness
+    # offers it to a claude_code task.
     web_fetch: WebFetchConfig = field(default_factory=WebFetchConfig)
     # When Bash output exceeds the per-tool cap, spill the full captured output
     # to a temp file under ISTOTA_DEFERRED_DIR and name it in the result so the
@@ -2345,10 +2346,6 @@ class BrainConfig:
     # brains take it in place of Claude Code's default, the native brain appends
     # it to its own. Read at the root until it moved here.
     custom_system_prompt: bool = False
-    # Temporary switch for the CLI tool harness (cli-brain-tools spec, part 1):
-    # a `claude_code` task with tools runs the CLI outside the sandbox and its
-    # tools in the tool server. Read by the executor; part 2 removes it.
-    tool_harness: bool = False
     # Availability failover (brain-fallback spec). When the primary brain is
     # unavailable (usage limit / not_found), the task runs
     # on ``fallback`` with that brain's own configured settings. "" = no
@@ -4117,6 +4114,8 @@ _RETIRED = frozenset({
     "security.sandbox_admin_db_write",
     "rooms",
     "devbox.docker_cli",
+    # The tool harness is the only path for a `claude_code` request with tools.
+    "brain.tool_harness",
     "scheduler.vault_sync_interval",
     # The tmux brain's block; `_retire_tmux_brain` warns about it.
     "brain.tmux",
@@ -6079,6 +6078,14 @@ def load_config(
             "ignored. A member's turn in a shared room runs with that member's "
             "full reach, and their personal memory is never loaded there "
             "(ISSUE-576). Remove the key."
+        )
+
+    if "tool_harness" in (data.get("brain") or {}):
+        report_problem(
+            "retired", ("brain", "tool_harness"),
+            "[brain] tool_harness is no longer supported and is being ignored. "
+            "A claude_code task's tools always run in the tool server under the "
+            "sandbox, with the claude CLI outside it. Remove the key."
         )
 
     if "docker_cli" in (data.get("devbox") or {}):

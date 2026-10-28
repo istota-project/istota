@@ -1,7 +1,7 @@
-"""What each `SandboxProfile` actually puts in the namespace, on a real kernel.
+"""What the sandbox puts in the namespace of the Claude CLI's state: nothing.
 
 `tests/test_sandbox.py::TestSandboxProfiles` asserts that the Claude runtime
-paths are absent from the NATIVE *argv*. That is the strongest thing darwin can
+paths are absent from the *argv*. That is the strongest thing darwin can
 say, and it is an assertion about a command line rather than about a boundary:
 a mount plan can be right and the namespace still wrong, which is why every
 containment claim in this repo is made here instead.
@@ -11,13 +11,16 @@ The claim under test is ISSUE-389's: a sandboxed `NativeBrain` Bash call could
 a tool result, because `build_bwrap_cmd` bound the Claude CLI's runtime block
 unconditionally. Read-only stopped the token being rewritten, never read.
 
-**The positive control is the point of the file.** "The credential cannot be
-read under NATIVE" passes perfectly on a sandbox that mounted nothing at all,
-on a `$HOME` with no Claude install, and on a probe that never ran. So every
-absence below is paired with the same probe under CLAUDE, where the sentinel
-must come back — and `run_probe` (reused from `test_sandbox_real.py`, including
+The CLAUDE profile, which bound that block on purpose for the in-sandbox CLI,
+was removed with it (cli-brain-tools part 2, Stage 6); NATIVE is the one
+profile left. "The credential cannot be read" passes perfectly on a sandbox
+that mounted nothing at all, on a `$HOME` with no Claude install, and on a
+probe that never ran. So the fixture's files are checked to exist on the host,
+every absence is paired with something the namespace does contain coming back
+on the same run, and `run_probe` (reused from `test_sandbox_real.py`, including
 its `assert cmd[0] == "bwrap"` guard) fails rather than returning if bwrap
-declined to build a command.
+declined to build a command. The CLAUDE profile's own read used to be the
+positive control; there is no profile left that binds the files.
 
 Run with `scripts/test-linux.sh`. Carries the `linux` marker.
 """
@@ -40,12 +43,6 @@ pytestmark = pytest.mark.linux
 #: What the credential sentinel contains. Distinctive enough that finding it in
 #: a probe's stdout cannot be a coincidence, and it is not a credential shape.
 CREDENTIAL_SENTINEL = "sentinel-not-a-real-token"
-
-#: `.credentials.json` is bound only under the "subscription" auth mode, so
-#: every probe here names it: the absences under NATIVE must hold in the one
-#: mode where CLAUDE does bind it.
-CLI_AUTH = "subscription"
-
 
 @pytest.fixture(autouse=True)
 def _requires_real_bwrap():
@@ -124,9 +121,9 @@ def task():
 def _sentinel_probe(claude_home):
     """`stat`, `cat` and `touch` against every Claude runtime path.
 
-    Three verbs rather than one: read-only is what the CLAUDE profile grants
-    the credential, so a test that only tried to write would report a boundary
-    where there is none — that difference is the whole bug.
+    Three verbs rather than one: read-only is what the old CLAUDE profile
+    granted the credential, so a test that only tried to write would report a
+    boundary where there is none — that difference was the whole bug.
     """
     targets = {
         "BIN": claude_home / ".local" / "bin" / "claude",
@@ -151,8 +148,7 @@ def _sentinel_probe(claude_home):
         parts.append(
             f'echo "{label}_BODY=$(cat {_q(path)} 2>/dev/null | tr -d "\\n");"'
         )
-    # A write into the tmpfs base, which under CLAUDE is a writable mount and
-    # under NATIVE is not in the namespace at all.
+    # A write into the old tmpfs base, which is not in the namespace at all.
     claude_dir = claude_home / ".claude"
     parts.append(
         f'touch {_q(claude_dir / "planted")} 2>/dev/null && echo DIR_WRITE_OK '
@@ -161,46 +157,13 @@ def _sentinel_probe(claude_home):
     return "; ".join(parts)
 
 
-class TestTheClaudeProfileIsThePositiveControl:
-    """Without this class the file passes on a sandbox that mounted nothing."""
-
-    def test_the_credential_sentinel_comes_back_under_claude(
-        self, layout, task, user_temp, claude_home,
-    ):
-        result = run_probe(
-            _sentinel_probe(claude_home), layout, task, user_temp,
-            profile=SandboxProfile.CLAUDE, cli_auth_mode=CLI_AUTH,
-        )
-        out = result.stdout
-
-        assert "CREDS_STAT_OK" in out, (out, result.stderr)
-        assert CREDENTIAL_SENTINEL in out, (out, result.stderr)
-        # And the rest of the block, so "the CLAUDE profile works" is not one
-        # bind standing in for six.
-        for label in ("BIN", "SHARE", "STATE", "SETTINGS", "PROJECTS"):
-            assert f"{label}_STAT_OK" in out, (label, out)
-
-    def test_the_credential_is_read_only_under_claude(
-        self, layout, task, user_temp, claude_home,
-    ):
-        """Which is the shape of the bug: read-only never stopped a read."""
-        creds = claude_home / ".claude" / ".credentials.json"
-        result = run_probe(
-            f'echo tampered > {_q(creds)} 2>/dev/null && echo WRITE_OK '
-            f"|| echo WRITE_FAIL",
-            layout, task, user_temp, profile=SandboxProfile.CLAUDE, cli_auth_mode=CLI_AUTH,
-        )
-        assert "WRITE_FAIL" in result.stdout, result.stdout
-        assert creds.read_text().strip().endswith('"}'), "the host file was rewritten"
-
-
 class TestTheNativeProfileHasNoneOfIt:
     def test_no_claude_runtime_path_can_be_stat_read_or_written(
         self, layout, task, user_temp, claude_home,
     ):
         result = run_probe(
             _sentinel_probe(claude_home), layout, task, user_temp,
-            profile=SandboxProfile.NATIVE, cli_auth_mode=CLI_AUTH,
+            profile=SandboxProfile.NATIVE,
         )
         out = result.stdout
 
@@ -224,7 +187,7 @@ class TestTheNativeProfileHasNoneOfIt:
         (alice / "mine.txt").write_text("alice-can-read-this\n")
         result = run_probe(
             f"{_sentinel_probe(claude_home)}; cat {_q(alice / 'mine.txt')}",
-            layout, task, user_temp, profile=SandboxProfile.NATIVE, cli_auth_mode=CLI_AUTH,
+            layout, task, user_temp, profile=SandboxProfile.NATIVE,
         )
 
         assert result.returncode == 0, (result.stdout, result.stderr)
@@ -241,7 +204,7 @@ class TestTheNativeProfileHasNoneOfIt:
         local_entries = f'ls -A {_q(claude_home / ".local")} 2>/dev/null | tr "\\n" " "'
         result = run_probe(
             f'echo "home=[$({home_entries})]"; echo "local=[$({local_entries})]"',
-            layout, task, user_temp, profile=SandboxProfile.NATIVE, cli_auth_mode=CLI_AUTH,
+            layout, task, user_temp, profile=SandboxProfile.NATIVE,
         )
         out = result.stdout
 
@@ -249,13 +212,8 @@ class TestTheNativeProfileHasNoneOfIt:
         assert "local=[]" in out, (out, result.stderr)
 
 
-class TestTheGenericPlanIsIdenticalUnderBothProfiles:
-    """The masks, the per-user binds and `/bin/sh` itself — the half of the plan
-    the split must not have touched.
-
-    `doctor`'s `sandbox.masks` check moved to the NATIVE profile with this
-    change, and its verdict is only unchanged if this holds.
-    """
+class TestTheGenericPlan:
+    """The masks and the per-user binds, under the one profile left."""
 
     def _mask_probe(self, layout):
         db_dir = Path(layout.db_path).parent
@@ -267,26 +225,20 @@ class TestTheGenericPlanIsIdenticalUnderBothProfiles:
             f"|| echo WRITE_FAIL"
         )
 
-    def test_the_database_masks_hold_under_both(
+    def test_the_database_masks_hold(
         self, layout, task, user_temp, claude_home,
     ):
-        outputs = {}
         for profile in SandboxProfile:
             result = run_probe(
                 self._mask_probe(layout), layout, task, user_temp, profile=profile,
             )
-            outputs[profile] = result.stdout
             assert "PRESENT" in result.stdout, (profile, result.stderr)
             assert "entries=[]" in result.stdout, (profile, result.stdout)
             assert "READ_FAIL" in result.stdout, (profile, result.stdout)
             assert "WRITE_FAIL" in result.stdout, (profile, result.stdout)
             assert "framework-db-contents" not in result.stdout, profile
 
-        # Byte for byte: this is the `doctor` verdict-unchanged claim, made
-        # against the namespace rather than against the argv.
-        assert outputs[SandboxProfile.CLAUDE] == outputs[SandboxProfile.NATIVE]
-
-    def test_the_users_own_directory_is_writable_under_both(
+    def test_the_users_own_directory_is_writable(
         self, layout, task, user_temp, claude_home,
     ):
         alice = Path(layout.workspace_path) / "Users" / "alice"
@@ -298,7 +250,7 @@ class TestTheGenericPlanIsIdenticalUnderBothProfiles:
             )
             assert "WRITE_OK" in result.stdout, (profile, result.stderr)
 
-    def test_another_users_directory_is_absent_under_both(
+    def test_another_users_directory_is_absent(
         self, layout, task, user_temp, claude_home,
     ):
         bob = Path(layout.workspace_path) / "Users" / "bob"
@@ -362,7 +314,7 @@ def test_the_probe_helper_refuses_an_unsandboxed_run(layout, task, user_temp):
 
 
 @pytest.mark.parametrize("source_type", ["group_briefing_research", "shared_block_research"])
-@pytest.mark.parametrize("profile", [SandboxProfile.CLAUDE, SandboxProfile.NATIVE])
+@pytest.mark.parametrize("profile", list(SandboxProfile))
 def test_briefing_research_has_scratch_without_personal_or_group_files(
     layout, claude_home, make_task, profile, source_type,
 ):

@@ -3198,26 +3198,35 @@ def check_model_execution(config: "Config", probe: bool) -> CheckResult:
     the no-spawn rule at the top of this module is unconditional and this is the
     most expensive possible way to break it.
 
-    Lifted off ``heartbeat._check_self`` and the old ``!check`` command, with two
-    corrections. It gates the sandbox wrap on
-    :func:`executor.effective_sandboxing` rather than on
-    ``security.sandbox_enabled``: on the shipped Docker stack the flag is true
-    and no namespace can be created, so the copies' spelling built a wrap that
-    failed for a reason having nothing to do with the model. And it ``SKIP``s on
-    a brain that runs no CLI, on :func:`check_model_cli`'s own predicate — both
-    copies exec ``claude`` unconditionally, so on a ``native`` deployment (which
-    is what ``docker/.env`` ships) they tested a binary nothing uses.
+    It runs the way a task's CLI runs (cli-brain-tools-only-path, Stage 1):
+    through ``ClaudeCodeBrain`` on the tool harness, granting ``Bash`` alone.
+    The CLI runs unwrapped with ``build_harness_cli_env``'s env, which is
+    ``build_model_cli_env``'s; the ``Bash`` call runs in a tool server, under a
+    NATIVE wrap of ``{temp_dir}/{user_id}`` where the sandbox is effective, so
+    the probe passes only when the model, the CLI, the harness and the tool
+    server all work. OK needs the marker in the answer *and* a Bash call that
+    echoed it in the trace, which is what keeps "through Bash" true.
 
-    One property of the FAIL detail is worth stating rather than assuming. It
-    quotes a bounded excerpt of the CLI's own stderr, which is what makes the
-    finding actionable and is what the old ``!check`` command already printed. The
-    redaction pass behind :func:`config_secrets` scrubs values it can find in
-    the loaded ``Config``, and the credentials this particular call carries are
-    not among them — ``CLAUDE_CODE_OAUTH_TOKEN`` comes from the daemon's own
-    environment, as do the proxy and TLS names :func:`build_model_cli_env`
-    passes through. So the excerpt is safe because the CLI does not print its
-    own credential, not because anything here checks. If that stops being true,
-    classify the failure instead of quoting it.
+    The wrap is gated on :func:`executor.effective_sandboxing` rather than on
+    ``security.sandbox_enabled``: on a shape where the flag is true and no
+    namespace can be created, a wrap fails for a reason having nothing to do
+    with the model. It ``SKIP``s on a brain that runs no CLI, on
+    :func:`check_model_cli`'s own predicate.
+
+    **It creates nothing under ``temp_dir``.** Doctor is a diagnostic and its
+    entry points include an operator shell, so a ``sudo istota doctor`` would
+    leave root-owned directories that every later task for the user then
+    cannot use. The per-user temp dir must already exist, and the harness root
+    is a private temporary directory removed on the way out, not
+    ``{temp_dir}/.harness``.
+
+    The FAIL detail quotes a bounded excerpt of the brain's answer, which on a
+    failed run is the CLI's own error text. The redaction pass behind
+    :func:`config_secrets` scrubs values it can find in the loaded ``Config``,
+    and the credential the CLI carries comes from config too; the excerpt is
+    safe because the CLI does not print its own credential, not because
+    anything here checks. If that stops being true, classify the failure
+    instead of quoting it.
     """
     name = "runtime.model_execution"
     if not probe:
@@ -3237,36 +3246,23 @@ def check_model_execution(config: "Config", probe: bool) -> CheckResult:
             name, SKIP, "no user to run a probe as (no single admin, no configured user)"
         )
 
+    import tempfile
+
     from . import db
+    from .brain import BrainRequest, make_brain
     from .executor import (
         SandboxProfile,
         build_bwrap_cmd,
+        build_daemon_harness,
         build_model_cli_env,
         effective_sandboxing,
     )
 
-    cmd = [
-        "claude",
-        "-p",
-        f"Run: echo {_MODEL_PROBE_MARKER}",
-        "--allowedTools",
-        "Bash",
-        "--output-format",
-        "text",
-    ]
+    remedy = "Check the model credential and network egress, then retry."
+    wrap = None
+    work_dir: Path | None = None
     try:
-        env = build_model_cli_env(config)
         if effective_sandboxing(config):
-            # Both probes this replaces created this directory. This one does
-            # not: doctor is a diagnostic and its entry points include an
-            # operator shell, so a `sudo istota doctor` would leave a
-            # root-owned `{temp_dir}/{user_id}` that every later task for that
-            # user then binds read-write and cannot write to — the same
-            # ownership hazard `sqlite_util.connect_read_only` avoids by
-            # leaving no sidecar behind, and worse, because a directory nothing
-            # cleans up persists. A directory the daemon has not
-            # made yet means no task has run as this user, which is a fact
-            # worth reporting rather than papering over.
             user_temp = Path(config.temp_dir) / user_id
             if not user_temp.is_dir():
                 return CheckResult(
@@ -3283,49 +3279,94 @@ def check_model_execution(config: "Config", probe: bool) -> CheckResult:
                 conversation_token="",
             )
             user_resources = _read_user_resources(config, user_id)
-            # CLAUDE: the command being wrapped *is* the `claude` CLI, so it
-            # needs its own binary, its credential and its state directory.
-            cmd = build_bwrap_cmd(
-                cmd,
-                config,
-                fake_task,
-                config.is_admin(user_id),
-                user_resources,
-                user_temp,
-                profile=SandboxProfile.CLAUDE,
+            is_admin = config.is_admin(user_id)
+
+            def wrap(cmd: list[str]) -> list[str]:
+                return build_bwrap_cmd(
+                    cmd, config, fake_task, is_admin, user_resources, user_temp,
+                    profile=SandboxProfile.NATIVE,
+                )
+
+            work_dir = user_temp
+        with tempfile.TemporaryDirectory(prefix="istota-doctor-") as scratch:
+            scratch_dir = Path(scratch)
+            if work_dir is None:
+                work_dir = scratch_dir / "work"
+                work_dir.mkdir()
+            harness_root = scratch_dir / "harness"
+            harness_root.mkdir()
+            brain = make_brain(config.brain)
+            req = BrainRequest(
+                prompt=f"Run: echo {_MODEL_PROBE_MARKER}",
+                allowed_tools=["Bash"],
+                cwd=work_dir,
+                env=build_model_cli_env(config),
+                timeout_seconds=MODEL_PROBE_TIMEOUT,
+                tool_server_wrap=wrap,
+                harness=build_daemon_harness(
+                    config, user_id, brain_kind=getattr(brain, "kind", kind),
+                    timeout_seconds=MODEL_PROBE_TIMEOUT, harness_root=harness_root,
+                ),
+                # The bind's projection where there is one. Unwrapped, roots
+                # alone would read to the harness as a sandboxed shape with
+                # its wrap missing, and it refuses that.
+                fs_read_roots=[work_dir] if wrap is not None else None,
+                fs_write_roots=[work_dir] if wrap is not None else None,
+                streaming=False,
             )
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=MODEL_PROBE_TIMEOUT, env=env
-        )
-    except subprocess.TimeoutExpired:
-        return CheckResult(
-            name,
-            FAIL,
-            f"`claude -p` timed out after {MODEL_PROBE_TIMEOUT}s (as {user_id})",
-            remedy="Check the model credential and network egress, then retry.",
-        )
+            result = brain.execute(req)
     except Exception as exc:  # noqa: BLE001 - deliberate: doctor never raises
         return CheckResult(
             name,
             FAIL,
             f"`claude -p` could not be run (as {user_id}): {type(exc).__name__}: {exc}",
-            remedy="Check the model credential and network egress, then retry.",
+            remedy=remedy,
         )
 
-    if _MODEL_PROBE_MARKER in (result.stdout or ""):
+    answered = _MODEL_PROBE_MARKER in (result.result_text or "")
+    if answered and _bash_echoed_marker(result.execution_trace):
         return CheckResult(
             name, OK, f"`claude -p` echoed {_MODEL_PROBE_MARKER!r} through Bash (as {user_id})"
         )
-    observed = (
-        _probe_output_line(result.stderr) or _probe_output_line(result.stdout) or "(no output)"
-    )
+    if result.stop_reason == "timeout":
+        return CheckResult(
+            name,
+            FAIL,
+            f"`claude -p` timed out after {MODEL_PROBE_TIMEOUT}s (as {user_id})",
+            remedy=remedy,
+        )
+    observed = _probe_output_line(result.result_text) or "(no output)"
+    if answered:
+        return CheckResult(
+            name,
+            FAIL,
+            f"`claude -p` answered {_MODEL_PROBE_MARKER!r} without running it "
+            f"through Bash (as {user_id}): {observed}",
+            remedy="Check that the tool harness starts its tool server, then retry.",
+        )
     return CheckResult(
         name,
         FAIL,
-        f"`claude -p` exited {result.returncode} without {_MODEL_PROBE_MARKER!r} "
+        f"`claude -p` stopped ({result.stop_reason}) without {_MODEL_PROBE_MARKER!r} "
         f"(as {user_id}): {observed}",
-        remedy="Check the model credential and network egress, then retry.",
+        remedy=remedy,
     )
+
+
+def _bash_echoed_marker(trace_json: str | None) -> bool:
+    """Whether the trace holds a Bash call whose command names the marker."""
+    try:
+        entries = json.loads(trace_json or "[]")
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(entries, list):
+        return False
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("type") != "tool":
+            continue
+        if _MODEL_PROBE_MARKER in str(entry.get("raw") or ""):
+            return True
+    return False
 
 
 def _probe_output_line(text: str | None, limit: int = 160) -> str:
@@ -3410,9 +3451,11 @@ def check_skill_model_credential(
     something other than the daemon, and the answer there is a skip.
 
     Presence stays OK wherever it is read, which is the asymmetry that makes
-    the skip narrow rather than a hole. `build_clean_env` copies the token out
-    of the daemon's own environment into every task's, so seeing it inside a
-    task does answer the question; only absence is the unanswerable direction.
+    the skip narrow rather than a hole: a credential seen answers the question
+    whoever's environment it was seen in, and only absence is the unanswerable
+    direction. No task env carries the CLI's credential any more
+    (cli-brain-tools part 2, Stage 5), so inside a task this check now reaches
+    the skip, never the OK arm; the logic does not depend on either.
 
     Spawns nothing, so it is safe under ``probe=False``, and never raises.
     """
@@ -6074,24 +6117,11 @@ def check_sandbox_masks(config: "Config", probe: bool) -> CheckResult:
     structurally cannot: that the database directories are empty and unwritable
     *inside* the namespace, rather than that the right flags were passed.
 
-    **It probes under the NATIVE profile, and that narrows what it covers.**
-    The masks and the system binds it reads are part of the generic plan and
-    identical under both profiles, so its verdict is unchanged — that much is
-    pinned by ``tests/test_doctor.py::TestSandboxMasksUsesTheNativeProfile``.
-    What it stops doing is exercising whether the *CLAUDE* argv can be built at
-    all on this host. bwrap exits before running anything on a bad mount
-    operation, and the CLAUDE-only binds have a recorded failure of exactly
-    that kind: a config directory under ``db_path.parent`` shadows the
-    system-prompt bind, which is how narrowing ``sandbox_ro_paths`` to ``[]``
-    made every task on a ``custom_system_prompt`` install exit with "System
-    prompt file not found". A host in that state now passes this check while
-    every claude_code task fails.
-
-    What still covers it live is the heartbeat's ``self-check``, which builds
-    a CLAUDE sandbox and runs the CLI through it — but it is opt-in, where this
-    ran on every ``--deep``. The tier that covers it unconditionally is ``tests/linux/test_sandbox_profiles_real.py``. Probing
-    both profiles here would restore it for two subprocesses; that is a
-    deliberate omission rather than an oversight.
+    **It probes under the NATIVE profile**, the only one: every brain's tools
+    run in a NATIVE namespace, so this argv is the one a task builds
+    (``tests/test_doctor.py::TestSandboxMasksUsesTheNativeProfile``). The
+    CLAUDE profile, whose system-prompt bind could be shadowed by a config
+    directory under ``db_path.parent``, went with the in-sandbox CLI.
     """
     if not probe:
         # The contract is unconditional: probe=False forbids spawning. Checked

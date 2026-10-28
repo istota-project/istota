@@ -24,6 +24,8 @@ from istota.config import (
     SecurityConfig,
 )
 
+pytestmark = pytest.mark.usefixtures("cli_without_tool_server")
+
 
 def _write_skill_md(base_dir: Path, name: str, frontmatter: dict, body: str = "") -> Path:
     skill_dir = base_dir / name
@@ -149,10 +151,15 @@ class TestClaudeRuntimeEnvIsNotInTheProxyBaseEnv:
             os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-fake-for-tests"},
         ):
             claude_env, proxy_call = _run_task(env_config)
+            from istota.executor import build_harness_cli_env
+
+            cli_env = build_harness_cli_env(env_config, "alice", timeout_seconds=60)
         assert "CLAUDE_CODE_OAUTH_TOKEN" not in _proxy_base_env(proxy_call)
-        # Control: the variable really was set for this task, so the assertion
-        # above is not passing merely because the daemon had no token.
-        assert claude_env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-fake-for-tests"
+        # Nor in the task env, which is the tool server's on the harness.
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in claude_env
+        # Control: the CLI itself does get it, so the assertions above are not
+        # passing merely because the daemon had no token.
+        assert cli_env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-fake-for-tests"
 
 
 class TestFrameworkDbPathRouting:

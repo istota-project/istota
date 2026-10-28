@@ -1,6 +1,12 @@
 """What a task environment carries only because the outer process is `claude`.
 
-`executor.build_clean_env` copies `CLAUDE_CODE_OAUTH_TOKEN` out of the daemon's
+Since cli-brain-tools part 2, Stage 5, no task env carries the CLI's
+credential: `executor.build_clean_env` names the mode only, and the CLI's own
+env builders add the credential through `llm.providers.cli_credential_env`.
+The CLI runs outside the sandbox on the tool harness, and the strips below
+stay as defence in depth. The history they answer follows.
+
+`executor.build_clean_env` copied `CLAUDE_CODE_OAUTH_TOKEN` out of the daemon's
 environment into **every** task's env, for every brain, because
 `ClaudeCodeBrain` authenticates with it: its outer process is the `claude`
 CLI. `NativeBrain` is not —
@@ -11,26 +17,26 @@ route out: `echo "$CLAUDE_CODE_OAUTH_TOKEN"` in a Bash call comes back as a
 is a provider boundary wherever that is not the credential's own issuer
 (ISSUE-390).
 
-This is the environment counterpart of the Claude-only *mount* block. ISSUE-389
-split those, putting `~/.claude/.credentials.json` and its neighbours behind
-`SandboxProfile.CLAUDE`; mounts and environment are separate mechanisms and the
-mount split never addressed the second one.
+This is the environment counterpart of the Claude-only *mount* block that
+ISSUE-389 split out and the CLI harness removed; mounts and environment are
+separate mechanisms and the mount split never addressed the second one.
 
 **A name list rather than a `CLAUDE_*` prefix rule.** A prefix would also
 swallow an operator's own `security.passthrough_env_vars` entry, and what an
 operator put in that list on purpose is their decision, not this module's. The
 drift a name list buys is covered mechanically instead:
-`tests/test_security.py::TestBuildCleanEnv` requires every Claude-family or
-credential-shaped key `build_clean_env` puts in a task env to be named here.
+`tests/test_security.py::TestBuildCleanEnv` requires `build_clean_env` to put
+no Claude-family or credential-shaped key in a task env, and every such key
+`build_model_cli_env` adds to be named here.
 
 **What this is not.** It is not a general credential filter. The skill
 credentials — `NC_PASS`, the mail passwords, the forge tokens — are taken out of
 the model's environment by `_split_credential_env`, gated on
 `security.skill_proxy_enabled`, which defaults on. This set exists because the
-Claude token is the one name that gating never reaches: `build_clean_env` sets
+Claude token was the one name that gating never reached: `build_clean_env` set
 it unconditionally and no skill manifest declares it, so `derive_credential_set`
-cannot see it and it survived on the *sandboxed* production shape where every
-other credential was already gone. That is the whole of the gap, and it is why
+could not see it and it survived on the *sandboxed* production shape where every
+other credential was already gone. That was the whole of the gap, and it is why
 ISSUE-390 was live where it was.
 
 Two neighbouring shapes are deliberately not this module's problem. Where the

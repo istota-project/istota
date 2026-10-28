@@ -1,22 +1,16 @@
-"""Two sandbox wraps on `BrainRequest`, and each brain reading only its own.
+"""One sandbox wrap on `BrainRequest`, `tool_server_wrap`, read by both brains.
 
-`build_bwrap_cmd` has two profiles now (`executor.SandboxProfile`). The request
-carries one closure per profile rather than one closure plus a profile
-argument, and that is a structural decision rather than a stylistic one:
-`executor._run_fallback` reroutes an attempt to the other brain by copying the
-request with
+There used to be two, `sandbox_wrap` (the CLAUDE profile, around the `claude`
+CLI itself) and `native_sandbox_wrap`, because `executor._run_fallback` copies
+the request with
 
     dataclasses.replace(req, model=…, effort=…, advisor=…, is_fallback=True)
 
-which names neither wrap field. With a single field, the shipped
-`claude_code -> native` reroute would hand NativeBrain the *Claude* namespace —
-`~/.claude/.credentials.json` and all — which is exactly the bug the split
-exists to close (ISSUE-389). With two, each carries across harmlessly, because
-each brain reads only the one addressed to it.
-
-These are the tests for that. The `replace` guard is the regression the design
-note predicts; the three reader tests are what make the guard mean anything,
-since carrying a field nothing reads proves nothing.
+and a single field would have carried the Claude namespace into NativeBrain on
+a `claude_code -> native` reroute (ISSUE-389). That invariant is retired: the
+CLI runs outside the sandbox on the tool harness (cli-brain-tools part 2), so
+there is one namespace, the tool server's, for every brain, and nothing that
+could cross a reroute with the wrong profile.
 """
 
 import asyncio
@@ -30,12 +24,8 @@ from istota.brain.native import NativeBrain
 from istota.config import NativeBrainConfig
 
 
-def _claude_wrap(cmd):
-    return ["bwrap", "CLAUDE-PROFILE", "--", *cmd]
-
-
-def _native_wrap(cmd):
-    return ["bwrap", "NATIVE-PROFILE", "--", *cmd]
+def _wrap(cmd):
+    return ["bwrap", "TOOL-SERVER", "--", *cmd]
 
 
 def _req(tmp_path, **kw):
@@ -47,40 +37,31 @@ def _req(tmp_path, **kw):
         timeout_seconds=60,
         # Non-streaming, so the assertions below can watch one exit path.
         streaming=False,
-        sandbox_wrap=_claude_wrap,
-        native_sandbox_wrap=_native_wrap,
+        tool_server_wrap=_wrap,
     )
     base.update(kw)
     return BrainRequest(**base)
 
 
-class TestTheFallbackCopyCarriesBothWraps:
-    def test_replace_as_run_fallback_spells_it_keeps_both(self, tmp_path):
+class TestOneWrap:
+    def test_there_is_no_cli_wrap_field(self):
+        names = {f.name for f in dataclasses.fields(BrainRequest)}
+        assert "tool_server_wrap" in names
+        assert "sandbox_wrap" not in names
+        assert "native_sandbox_wrap" not in names
+
+    def test_the_fallback_copy_carries_it(self, tmp_path):
         """The exact call `_run_fallback` makes, field for field."""
-        req = _req(tmp_path)
-
         fb = dataclasses.replace(
-            req, model="m", effort="high", advisor="", is_fallback=True,
+            _req(tmp_path), model="m", effort="high", advisor="", is_fallback=True,
         )
+        assert fb.tool_server_wrap is _wrap
 
-        assert fb.sandbox_wrap is _claude_wrap
-        assert fb.native_sandbox_wrap is _native_wrap
-
-    def test_the_two_fields_are_independent(self, tmp_path):
-        """Neither defaults from the other, and either may be absent alone.
-
-        A direct brain caller (the sleep cycle, a health OCR pass) builds a
-        request with no sandbox at all; the executor supplies both.
-        """
+    def test_a_direct_caller_may_leave_it_unset(self, tmp_path):
         bare = BrainRequest(
             prompt="x", allowed_tools=[], cwd=tmp_path, env={}, timeout_seconds=1,
         )
-        assert bare.sandbox_wrap is None
-        assert bare.native_sandbox_wrap is None
-
-        only_native = _req(tmp_path, sandbox_wrap=None)
-        assert only_native.sandbox_wrap is None
-        assert only_native.native_sandbox_wrap is _native_wrap
+        assert bare.tool_server_wrap is None
 
 
 class TestTheFallbackCopyCarriesTheComposedSplit:
@@ -150,23 +131,12 @@ class TestTheFallbackCopyCarriesTheComposedSplit:
         assert fb.prompt == "USER-HALF"
 
 
-class TestNativeBrainReadsTheNativeWrap:
-    """`_start_tool_server` is where the wrap reaches bubblewrap now.
-
-    It used to be `_build_tools`, which put the closure on `ToolEnv` for the
-    Bash tool to apply per call. The tools moved into one sandboxed server per
-    attempt, so the wrap is applied once, to that server's argv — but *which*
-    of the request's two closures gets applied is unchanged and is what this
-    class holds.
-    """
+class TestNativeBrainReadsTheWrap:
+    """`_start_tool_server` is where the wrap reaches bubblewrap: once, round
+    the attempt's tool server."""
 
     def _captured_wrap(self, monkeypatch, req):
-        """Spy on the spawn without performing one.
-
-        `start_tool_server` is patched at the name `native.py` imports it
-        under, so the assertion is about the argument NativeBrain passes rather
-        than about anything the spawn does with it.
-        """
+        """Spy on the spawn without performing one."""
         seen = {}
 
         async def _spy(hello, **kwargs):
@@ -182,41 +152,27 @@ class TestNativeBrainReadsTheNativeWrap:
         assert "kwargs" in seen, "_start_tool_server spawned nothing"
         return seen["kwargs"]["sandbox_wrap"]
 
-    def test_the_tool_server_is_spawned_through_the_native_wrap(self, monkeypatch, tmp_path):
+    def test_the_tool_server_is_spawned_through_the_wrap(self, monkeypatch, tmp_path):
         req = _req(tmp_path, allowed_tools=["Bash"])
-        wrap = self._captured_wrap(monkeypatch, req)
-
-        assert wrap is _native_wrap
-        assert wrap is not _claude_wrap
+        assert self._captured_wrap(monkeypatch, req) is _wrap
 
     def test_it_survives_the_fallback_copy(self, monkeypatch, tmp_path):
-        """The reroute this design exists for: a request assembled for
-        ClaudeCodeBrain, copied by `_run_fallback`, executed by NativeBrain."""
         req = dataclasses.replace(
             _req(tmp_path, allowed_tools=["Bash"]),
             model="m", effort="high", advisor="", is_fallback=True,
         )
+        assert self._captured_wrap(monkeypatch, req) is _wrap
 
-        assert self._captured_wrap(monkeypatch, req) is _native_wrap
-
-    def test_a_request_with_no_native_wrap_leaves_the_server_unwrapped(
+    def test_a_request_with_no_wrap_leaves_the_server_unwrapped(
         self, monkeypatch, tmp_path,
     ):
-        """The control. Without it the assertions above would pass on a
-        `_start_tool_server` that had hardcoded the wrap from somewhere else.
-
-        `sandbox_wrap` is still set here, so a build that fell back to it would
-        be visible rather than reading as "unsandboxed".
-        """
-        req = _req(tmp_path, allowed_tools=["Bash"], native_sandbox_wrap=None)
-
+        """The control: the assertions above are not a hardcoded wrap."""
+        req = _req(tmp_path, allowed_tools=["Bash"], tool_server_wrap=None)
         assert self._captured_wrap(monkeypatch, req) is None
 
     def test_a_text_only_request_spawns_no_server_at_all(self, monkeypatch, tmp_path):
-        """Empty `allowed_tools` is the sleep cycle, health OCR, briefing
-        synthesis and conversation triage. They get no tools, so they must also
-        get no subprocess — an unconditional spawn would put a bwrap namespace
-        behind every one of those."""
+        """Empty `allowed_tools` is the sleep cycle, the explainer, briefing
+        synthesis and conversation triage: no tools, no subprocess."""
         spawned = []
 
         async def _spy(hello, **kwargs):
@@ -231,8 +187,9 @@ class TestNativeBrainReadsTheNativeWrap:
         assert server is None and spawned == []
 
 
-class TestTheClaudeBrainReadsTheClaudeWrap:
-    def test_claude_code_wraps_with_the_claude_profile(self, monkeypatch, tmp_path):
+class TestTheClaudeBrainNeverWrapsTheCli:
+    def test_a_text_only_cli_call_runs_unwrapped(self, monkeypatch, tmp_path):
+        """The wrap is the tool server's; the CLI is never inside it."""
         brain = ClaudeCodeBrain()
         captured = {}
 
@@ -242,18 +199,5 @@ class TestTheClaudeBrainReadsTheClaudeWrap:
 
         monkeypatch.setattr(brain, "_execute_simple", _fake_simple)
         assert brain.execute(_req(tmp_path)).result_text == "sentinel"
-        assert captured["cmd"][:2] == ["bwrap", "CLAUDE-PROFILE"]
-
-    def test_claude_code_ignores_the_native_wrap(self, monkeypatch, tmp_path):
-        """The control: with only the native wrap set, the CLI argv is bare."""
-        brain = ClaudeCodeBrain()
-        captured = {}
-        def _fake_simple(cmd, req):
-            captured["cmd"] = cmd
-            return BrainResult(success=True, result_text="sentinel")
-
-        monkeypatch.setattr(brain, "_execute_simple", _fake_simple)
-        brain.execute(_req(tmp_path, sandbox_wrap=None))
-
-        assert "NATIVE-PROFILE" not in captured["cmd"]
-        assert captured["cmd"][0] != "bwrap"
+        assert captured["cmd"][0] == "claude"
+        assert "TOOL-SERVER" not in captured["cmd"]
