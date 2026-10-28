@@ -27,7 +27,10 @@
 
   /**
    * One user's live browser, driven over the admin console relay. Each open
-   * asks for a step-up, trades the proof for a single-use ticket, sends the
+   * first asks for a ticket with no proof, so a refusal the server checks
+   * ahead of the step-up (the relay cap, a disabled browser, no identity)
+   * costs no mailed code. On the step-up refusal it asks for the step-up,
+   * trades the proof for a single-use ticket, sends the
    * ticket as the websocket's first frame and hands the socket to noVNC once
    * the relay answers `ok`. The closed state comes from the socket's close
    * code, which noVNC's own `disconnect` event does not carry.
@@ -40,12 +43,12 @@
     user: string;
     /** The list this console was opened from. */
     backHref: string;
-    /** Leave the console: a cancelled step-up, or Disconnect. */
+    /** Leave the console: a cancelled step-up, Disconnect, or the back link. */
     onExit: () => void;
   } = $props();
 
-  type Phase = 'step-up' | 'connecting' | 'connected' | 'closed' | 'refused';
-  let phase = $state<Phase>('step-up');
+  type Phase = 'checking' | 'step-up' | 'connecting' | 'connected' | 'closed' | 'refused';
+  let phase = $state<Phase>('checking');
   let closed = $state<(ConsoleClose & { code: number }) | null>(null);
   let refusal = $state('');
   let screen = $state<HTMLDivElement | undefined>();
@@ -62,11 +65,23 @@
   let status = $derived(
     phase === 'connected'
       ? { tone: 'success' as const, label: 'Connected' }
-      : phase === 'step-up' || phase === 'connecting'
+      : phase === 'checking' || phase === 'step-up' || phase === 'connecting'
         ? { tone: 'info' as const, label: 'Connecting' }
         : { tone: 'neutral' as const, label: 'Closed' },
   );
   let live = $derived(phase === 'connecting' || phase === 'connected');
+
+  async function begin() {
+    phase = 'checking';
+    try {
+      const { ticket } = await getAdminBrowserConsoleTicket(user);
+      if (active) connect(ticket);
+    } catch (e) {
+      if (!active) return;
+      if (isStepUpRefusal(e)) phase = 'step-up';
+      else refuse(e);
+    }
+  }
 
   // The step-up dialog is still mounted while this runs; what it decides is
   // applied once the dialog completes.
@@ -194,8 +209,20 @@
     refusal = '';
     credentialError = '';
     credentialsOpen = false;
-    phase = 'step-up';
+    void begin();
   }
+
+  // A plain click on the back link leaves the way Disconnect does; a modified
+  // click keeps the link's own behaviour.
+  function backClick(event: MouseEvent) {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      return;
+    }
+    event.preventDefault();
+    disconnect();
+  }
+
+  void begin();
 
   onDestroy(() => {
     active = false;
@@ -205,7 +232,11 @@
 
 <section class="browser-console">
   <div class="toolbar toolbar--bar console-bar">
-    <BackLink href={backHref} label="Browsers" />
+    <!-- The link inside is the control; Enter on it arrives here as a click. -->
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <span onclickcapture={backClick}>
+      <BackLink href={backHref} label="Browsers" />
+    </span>
     <h2 class="title-card truncate console-user">{user}</h2>
     <StatusDot tone={status.tone} label={status.label} showLabel />
     {#if live}

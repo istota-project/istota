@@ -4,6 +4,7 @@ import { tick } from 'svelte';
 import { __history } from '../../../../vitest-stubs/app-navigation';
 import { page } from '../../../../vitest-stubs/app-state.svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
+import { GroupApiError } from '$lib/api';
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 vi.mock('@novnc/novnc', () => ({ default: class {} }));
@@ -25,6 +26,12 @@ function resetTo(url: string) {
 
 beforeEach(() => {
   resetTo(LIST);
+  // Browser Back in the history double, as SvelteKit's popstate would see it.
+  vi.spyOn(window.history, 'back').mockImplementation(() => __history.back());
+  // A ticket asked for with no proof is the step-up refusal.
+  api.getAdminBrowserConsoleTicket.mockRejectedValue(
+    new GroupApiError(403, '', 'This confirmation has expired.', 'dead'),
+  );
   // The step-up dialog asks for its request on mount; leave it waiting.
   api.startStepUp.mockReturnValue(new Promise(() => {}));
 });
@@ -32,6 +39,7 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.clearAllMocks();
+  vi.restoreAllMocks();
 });
 
 it('lists live browsers with a View button and no external viewer', async () => {
@@ -144,6 +152,42 @@ it('returns to the list when the step-up is cancelled', async () => {
   await waitFor(() => expect(screen.queryByRole('heading', { name: 'alice' })).toBeNull());
   expect(new URL(currentUrl(), 'http://localhost').searchParams.get('user')).toBeNull();
   expect(await screen.findByRole('button', { name: "View alice's browser" })).toBeTruthy();
+  // A deep link has no list behind it: the console's entry is replaced, not stacked.
+  expect(__history.entries).toHaveLength(1);
+  expect(window.history.back).not.toHaveBeenCalled();
+});
+
+it('goes back in history when a console opened from the list is left', async () => {
+  api.startStepUp.mockResolvedValue({
+    request_id: 'req-1',
+    method: 'password',
+    methods: ['password'],
+  });
+  api.getAdminBrowsers.mockResolvedValue(live('alice'));
+  render(Page);
+  await fireEvent.click(await screen.findByRole('button', { name: "View alice's browser" }));
+  const dialog = await screen.findByRole('dialog', { name: 'Confirm sensitive action' });
+  await fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+  await waitFor(() => expect(screen.queryByRole('heading', { name: 'alice' })).toBeNull());
+  expect(window.history.back).toHaveBeenCalledOnce();
+  expect(__history.index).toBe(0);
+  expect(new URL(currentUrl(), 'http://localhost').searchParams.get('user')).toBeNull();
+  // Back from here leaves the page rather than reopening the console.
+  __history.back();
+  await tick();
+  expect(screen.queryByRole('heading', { name: 'alice' })).toBeNull();
+  expect(api.startStepUp).toHaveBeenCalledOnce();
+});
+
+it('goes back in history from the back link of a console opened from the list', async () => {
+  api.getAdminBrowsers.mockResolvedValue(live('alice'));
+  render(Page);
+  await fireEvent.click(await screen.findByRole('button', { name: "View alice's browser" }));
+  await screen.findByRole('heading', { name: 'alice' });
+  await fireEvent.click(screen.getByRole('link', { name: /Browsers/ }));
+  await waitFor(() => expect(screen.queryByRole('heading', { name: 'alice' })).toBeNull());
+  expect(window.history.back).toHaveBeenCalledOnce();
+  expect(__history.index).toBe(0);
 });
 
 it('refreshes discovery and stops polling when closed', async () => {

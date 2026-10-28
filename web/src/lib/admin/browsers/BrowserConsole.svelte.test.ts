@@ -68,6 +68,14 @@ import BrowserConsole from './BrowserConsole.svelte';
 import { GroupApiError } from '$lib/api';
 
 const PROOF = { request_id: 'req-1', password: 'hunter2' };
+// What the ticket route answers when no proof is sent and nothing else refuses.
+const STEP_UP_REQUIRED = new GroupApiError(403, '', 'This confirmation has expired.', 'dead');
+
+function ticketAfterStepUp(withProof: () => Promise<{ ticket: string; expires_in: number }>) {
+  api.getAdminBrowserConsoleTicket.mockImplementation((_user: string, proof?: unknown) =>
+    proof ? withProof() : Promise.reject(STEP_UP_REQUIRED),
+  );
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -79,7 +87,7 @@ beforeEach(() => {
     method: 'password',
     methods: ['password'],
   });
-  api.getAdminBrowserConsoleTicket.mockResolvedValue({ ticket: 'tkt-1', expires_in: 60 });
+  ticketAfterStepUp(async () => ({ ticket: 'tkt-1', expires_in: 60 }));
   api.adminBrowserConsoleUrl.mockReturnValue('ws://test/istota/api/admin/browsers/console');
 });
 afterEach(() => {
@@ -111,12 +119,13 @@ async function relayOpen() {
   return socket;
 }
 
-it('asks for the step-up before the ticket, and sends the ticket as the first frame', async () => {
+it('asks without a proof, then for the step-up, and sends the ticket as the first frame', async () => {
   open();
   expect(screen.getByText('Connecting')).toBeTruthy();
-  expect(api.getAdminBrowserConsoleTicket).not.toHaveBeenCalled();
+  expect(api.getAdminBrowserConsoleTicket).toHaveBeenCalledExactlyOnceWith('alice');
   const socket = await relayOpen();
-  expect(api.getAdminBrowserConsoleTicket).toHaveBeenCalledWith('alice', PROOF);
+  expect(api.getAdminBrowserConsoleTicket).toHaveBeenCalledTimes(2);
+  expect(api.getAdminBrowserConsoleTicket).toHaveBeenLastCalledWith('alice', PROOF);
   expect(socket.url).toBe('ws://test/istota/api/admin/browsers/console');
   expect(socket.sent).toEqual(['tkt-1']);
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
@@ -208,27 +217,56 @@ it('returns to the list when the step-up is cancelled', async () => {
   const dialog = await screen.findByRole('dialog', { name: 'Confirm sensitive action' });
   await fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
   expect(onExit).toHaveBeenCalled();
-  expect(api.getAdminBrowserConsoleTicket).not.toHaveBeenCalled();
+  expect(api.getAdminBrowserConsoleTicket).toHaveBeenCalledExactlyOnceWith('alice');
 });
 
-it('shows a missing identity as an alert, opening no socket', async () => {
-  api.getAdminBrowserConsoleTicket.mockRejectedValue(
-    new GroupApiError(
-      403,
-      'admin_identity_required',
-      'Opening a browser console needs an admin with a live email sign-in identity.',
-    ),
-  );
+it.each([
+  [
+    'admin_identity_required',
+    'Opening a browser console needs an admin with a live email sign-in identity.',
+  ],
+  ['browser_disabled', 'The browser is not enabled on this instance.'],
+])('shows %s as an alert without asking for a step-up', async (code, message) => {
+  api.getAdminBrowserConsoleTicket.mockRejectedValue(new GroupApiError(403, code, message));
   open();
-  await confirmStepUp();
-  expect(await screen.findByText(/needs an admin with a live email sign-in/)).toBeTruthy();
+  expect(await screen.findByText(message)).toBeTruthy();
+  expect(screen.getByText('The console cannot open')).toBeTruthy();
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(api.startStepUp).not.toHaveBeenCalled();
   expect(FakeSocket.instances).toHaveLength(0);
   expect(notices.notifyError).not.toHaveBeenCalled();
 });
 
-it('keeps a refused password in the step-up dialog', async () => {
+it('shows the relay cap as the 4429 message without asking for a step-up', async () => {
   api.getAdminBrowserConsoleTicket.mockRejectedValue(
-    new GroupApiError(403, '', 'That password is not right.', 'bad'),
+    new GroupApiError(429, 'console_limit', 'Too many consoles are open. Close one and try again.'),
+  );
+  open();
+  expect(
+    await screen.findByText('Too many consoles are open. Close one and try again.'),
+  ).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Reconnect' })).toBeTruthy();
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(api.startStepUp).not.toHaveBeenCalled();
+  expect(FakeSocket.instances).toHaveLength(0);
+});
+
+it('leaves through onExit on a plain click of the back link', async () => {
+  const onExit = open();
+  const socket = await relayOpen();
+  socket.deliver('ok');
+  const view = rfb.FakeRFB.instances[0];
+  const back = screen.getByRole('link', { name: /Browsers/ });
+  const event = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+  back.dispatchEvent(event);
+  expect(event.defaultPrevented).toBe(true);
+  expect(view.disconnect).toHaveBeenCalled();
+  expect(onExit).toHaveBeenCalled();
+});
+
+it('keeps a refused password in the step-up dialog', async () => {
+  ticketAfterStepUp(() =>
+    Promise.reject(new GroupApiError(403, '', 'That password is not right.', 'bad')),
   );
   open();
   await confirmStepUp();

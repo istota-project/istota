@@ -9,6 +9,9 @@
   let loading = $state(true);
   let failed = $state(false);
   let consoleUser = $state<string | null>(null);
+  // Whether the entry behind the console is this page's list, so leaving can
+  // go back to it rather than push a list entry over the console's.
+  let listBehind = false;
 
   const listHref = `${base}/admin/browsers`;
 
@@ -19,9 +22,21 @@
     decode: (params) => ({ user: params.user || null }),
     read: () => ({ user: consoleUser }),
     apply: ({ user }) => {
+      listBehind = user !== null && consoleUser === null;
       consoleUser = user;
     },
   });
+
+  // A pushed list entry would leave the console's entry behind it, and Back
+  // would reopen the console and ask for another step-up.
+  function leaveConsole() {
+    if (listBehind) {
+      listBehind = false;
+      history.back();
+    } else {
+      selection.replace({ user: null });
+    }
+  }
   selection.start();
   // A deep link opens the console whatever the list says: the relay, not the
   // daemon's record, decides whether the browser is running.
@@ -71,11 +86,7 @@
 
 {#if consoleUser !== null}
   {#key consoleUser}
-    <BrowserConsole
-      user={consoleUser}
-      backHref={listHref}
-      onExit={() => selection.push({ user: null })}
-    />
+    <BrowserConsole user={consoleUser} backHref={listHref} onExit={leaveConsole} />
   {/key}
 {:else}
   <div class="settings admin-page card-pane">
