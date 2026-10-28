@@ -1,6 +1,7 @@
 # Skills Changelog
 
 ## 2026-10-27
+- `briefings_config schedule list|set|remove`: read and change the user's own briefing schedule from chat. `set` changes only the flags given; a room or surface the user may not deliver to is `reason: route_refused`. `remove` needs `--confirmed`: show the user the `would` object and ask first. The old instruction to send the user to Briefings → Settings for a schedule change no longer applies
 - `briefings_config shared-block show <name>`, for administrators: a shared briefing block's definition with its whole directive, and its last run. For an `agent` block that is the latest task and how its result was taken. Read it before suggesting a change to the block's prompt
 - `briefings_config shared-block set-prompt <name> --prompt-file <path>`, for administrators: replaces a shared block's directive with the whole contents of a file in your temp directory or the user's workspace, and changes nothing else. Show the user the change first. An empty file is refused
 

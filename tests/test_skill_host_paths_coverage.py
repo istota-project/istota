@@ -174,6 +174,10 @@ REGISTRY: dict[tuple[str, str, str], Entry] = {
         NOT_A_PATH, note="a path inside an ACF value, such as blocks/0/items",
     ),
 
+    ("briefings_config", "schedule.set", "output"): Entry(
+        NOT_A_PATH, note="a delivery descriptor such as talk,email",
+    ),
+
     ("servarr", "add", "profile"): Entry(
         NOT_A_PATH, note="an arr quality profile name; 'profile' holds 'file'",
     ),
