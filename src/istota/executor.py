@@ -3901,6 +3901,7 @@ def build_model_cli_env(config: Config) -> dict[str, str]:
 
     An operator's own `security.passthrough_env_vars` entry wins: those are
     applied by `build_clean_env` and are only filled in here when absent.
+    `MODEL_CLI_SWITCHES` is the exception, set last so nothing overrides it.
     """
     env = build_clean_env(config)
     for name in (*_MODEL_CLI_PROXY_VARS, *_MODEL_CLI_TLS_VARS):
@@ -3908,16 +3909,26 @@ def build_model_cli_env(config: Config) -> dict[str, str]:
         if name not in env and name in os.environ:
             env[name] = os.environ[name]
     env.update(cli_credential_env(config, process_cli_auth(config)))
+    env.update(MODEL_CLI_SWITCHES)
     return env
 
+
+#: Set on every daemon-side `claude` env, after the passthrough, so neither
+#: the daemon's environment nor an operator entry can turn one back off.
+MODEL_CLI_SWITCHES = {
+    # `@path` in a `-p` prompt attaches that file otherwise, read with the
+    # daemon's filesystem view, and these prompts carry other people's text
+    # (#861).
+    "CLAUDE_CODE_DISABLE_ATTACHMENTS": "1",
+}
 
 #: What the CLI tool harness adds to the `claude` CLI's env, beyond
 #: `build_model_cli_env`. `CLAUDE_CONFIG_DIR`, `HOME` and `TMPDIR` are the
 #: brain's, per harness; `IS_SANDBOX` and the advisor switch stay the brain's
-#: per-attempt decision, as on the old path.
+#: per-attempt decision, as on the old path. It repeats `MODEL_CLI_SWITCHES`
+#: for the live eval runner, which builds its CLI env from this alone.
 HARNESS_CLI_SWITCHES = {
-    # `@path` in a `-p` prompt attaches that file otherwise (#861).
-    "CLAUDE_CODE_DISABLE_ATTACHMENTS": "1",
+    **MODEL_CLI_SWITCHES,
     # Behind `--setting-sources user` and `--strict-mcp-config`.
     "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
     # The image sets it; `build_clean_env` starts from nothing and drops it.
