@@ -66,7 +66,7 @@ describe('briefing delivery previews', () => {
     const html = new DOMParser().parseFromString(frame.getAttribute('srcdoc')!, 'text/html');
     expect(
       html.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute('content'),
-    ).toBe("default-src 'none'; base-uri 'none'; form-action 'none'");
+    ).toBe("default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'");
     expect(html.querySelector('a, script, img, form')).toBeNull();
     expect(html.querySelector('span')?.textContent).toBe('A story');
     expect(html.body.textContent).toContain('Headlines');

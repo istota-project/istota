@@ -39,6 +39,7 @@ from typing import Any
 
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import NOT_A_PATH, host_path
+from istota.skills._turn_access import calling_task_id as _task_id
 
 STATES = ("draft", "active", "sleeping", "waiting", "paused", "completed", "abandoned")
 DEFAULT_SHOW_WAKES = 3
@@ -136,12 +137,6 @@ def _require_user_turn(ctx: _Ctx) -> None:
             "only the user's own turn in their private web or Talk chat can do this; "
             "ask them to say it there",
         )
-
-
-def _task_id() -> int | None:
-    """The calling task, which `_require_user_turn` has already checked."""
-    value = os.environ.get("ISTOTA_TASK_ID")
-    return int(value) if value and value.isdigit() else None
 
 
 def _user_tz(ctx: _Ctx) -> tzinfo:

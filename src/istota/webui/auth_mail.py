@@ -6,19 +6,31 @@ from html import escape
 import logging
 from typing import TYPE_CHECKING
 
+from istota.mail.html_template import open_tag, wrap_document
+
 if TYPE_CHECKING:
     from istota.config import Config
 
 logger = logging.getLogger(__name__)
+
+_CODE_STYLE = "font-size:1.5em;letter-spacing:0.2em"
+
+
+def _p(inner: str, extra_style: str = "") -> str:
+    """One paragraph; ``inner`` must already be escaped."""
+    return open_tag("p", extra_style) + inner + "</p>"
 
 
 def _message(bot_name: str, display_name: str, link: str, action: str, detail: str) -> tuple[str, str, str]:
     subject = f"{bot_name}: {action}"
     greeting = f"Hello {display_name}," if display_name else "Hello,"
     plain = f"{greeting}\n\n{action} for {bot_name}:\n\n{link}\n\n{detail}\n"
-    html = (f"<p>{escape(greeting)}</p><p>{escape(action)} for {escape(bot_name)}:</p>"
-            f'<p><a href="{escape(link, quote=True)}">{escape(action)}</a></p>'
-            f"<p>{escape(detail)}</p>")
+    html = wrap_document("\n".join([
+        _p(escape(greeting)),
+        _p(f"{escape(action)} for {escape(bot_name)}:"),
+        _p(f'<a href="{escape(link, quote=True)}">{escape(action)}</a>'),
+        _p(escape(detail)),
+    ]))
     return subject, plain, html
 
 
@@ -45,9 +57,12 @@ def build_sign_in_code_email(bot_name: str, display_name: str, code: str, ttl_mi
               f"{ttl_minutes} minutes and works only there. Never type it into a page you did not "
               "open yourself. If you did not request it, you can ignore this email.")
     plain = f"{greeting}\n\nYour {bot_name} sign-in code is:\n\n{code}\n\n{detail}\n"
-    html = (f"<p>{escape(greeting)}</p><p>Your {escape(bot_name)} sign-in code is:</p>"
-            f'<p style="font-size:1.5em;letter-spacing:0.2em"><strong>{escape(code)}</strong></p>'
-            f"<p>{escape(detail)}</p>")
+    html = wrap_document("\n".join([
+        _p(escape(greeting)),
+        _p(f"Your {escape(bot_name)} sign-in code is:"),
+        _p(f"<strong>{escape(code)}</strong>", _CODE_STYLE),
+        _p(escape(detail)),
+    ]))
     return subject, plain, html
 
 
@@ -82,7 +97,11 @@ def build_step_up_email(bot_name: str, display_name: str, code: str, action_labe
               "If you did not ask for this, someone is signed in as you: sign out everywhere in Settings → Account.")
     return (f"{code} is your {bot_name} confirmation code",
             f"{greeting}\n\n{code}\n\n{detail}\n",
-            f"<p>{escape(greeting)}</p><p><strong>{escape(code)}</strong></p><p>{escape(detail)}</p>")
+            wrap_document("\n".join([
+                _p(escape(greeting)),
+                _p(f"<strong>{escape(code)}</strong>", _CODE_STYLE),
+                _p(escape(detail)),
+            ])))
 
 
 def build_export_notice_email(bot_name: str, display_name: str, when: str,
@@ -92,4 +111,4 @@ def build_export_notice_email(bot_name: str, display_name: str, when: str,
               f"Browser: {user_agent or 'unknown'}. "
               "If this was not you, sign out everywhere in Settings → Account and change the passwords in the export.")
     return (f"{bot_name}: Your credentials were exported", f"{greeting}\n\n{detail}\n",
-            f"<p>{escape(greeting)}</p><p>{escape(detail)}</p>")
+            wrap_document(_p(escape(greeting)) + "\n" + _p(escape(detail))))

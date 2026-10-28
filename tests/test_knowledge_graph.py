@@ -220,7 +220,7 @@ class TestAddFact:
     def test_duplicate_only_checks_current(self, conn):
         """A fact that has been invalidated can be re-added."""
         id1 = add_fact(conn, "user1", "bob", "knows", "python")
-        invalidate_fact(conn, id1, ended="2026-01-01")
+        invalidate_fact(conn, "user1", id1, ended="2026-01-01")
         id2 = add_fact(conn, "user1", "bob", "knows", "python")
         assert id2 is not None
         assert id2 != id1
@@ -421,7 +421,7 @@ class TestEphemeralAutoExpiry:
 class TestInvalidateFact:
     def test_invalidate(self, conn):
         fact_id = add_fact(conn, "user1", "bob", "knows", "python")
-        result = invalidate_fact(conn, fact_id, ended="2026-04-08")
+        result = invalidate_fact(conn, "user1", fact_id, ended="2026-04-08")
         assert result is True
         fact = get_fact(conn, fact_id)
         assert fact.valid_until == "2026-04-08"
@@ -429,31 +429,58 @@ class TestInvalidateFact:
     def test_invalidate_defaults_to_today(self, conn):
         from datetime import date as date_cls
         fact_id = add_fact(conn, "user1", "bob", "knows", "python")
-        invalidate_fact(conn, fact_id)
+        invalidate_fact(conn, "user1", fact_id)
         fact = get_fact(conn, fact_id)
         assert fact.valid_until == date_cls.today().isoformat()
 
     def test_invalidate_already_invalidated(self, conn):
         fact_id = add_fact(conn, "user1", "bob", "knows", "python")
-        invalidate_fact(conn, fact_id, ended="2026-01-01")
-        result = invalidate_fact(conn, fact_id, ended="2026-04-08")
+        invalidate_fact(conn, "user1", fact_id, ended="2026-01-01")
+        result = invalidate_fact(conn, "user1", fact_id, ended="2026-04-08")
         assert result is False  # Already had valid_until
 
     def test_invalidate_nonexistent(self, conn):
-        result = invalidate_fact(conn, 9999)
+        result = invalidate_fact(conn, "user1", 9999)
         assert result is False
 
 
 class TestDeleteFact:
     def test_delete(self, conn):
         fact_id = add_fact(conn, "user1", "bob", "knows", "python")
-        result = delete_fact(conn, fact_id)
+        result = delete_fact(conn, "user1", fact_id)
         assert result is True
         assert get_fact(conn, fact_id) is None
 
     def test_delete_nonexistent(self, conn):
-        result = delete_fact(conn, 9999)
+        result = delete_fact(conn, "user1", 9999)
         assert result is False
+
+
+class TestFactMutationsAreScopedToTheCaller:
+    """ISSUE-875: ending or deleting a fact matches the caller's user too."""
+
+    def test_invalidate_another_users_fact_is_refused(self, conn):
+        fact_id = add_fact(conn, "alice", "alice", "lives_in", "lisbon")
+        assert invalidate_fact(conn, "bob", fact_id, ended="2026-04-08") is False
+        assert get_fact(conn, fact_id).valid_until is None
+        assert [r.op for r in get_fact_history(conn, "alice")] == ["insert"]
+
+    def test_delete_another_users_fact_is_refused(self, conn):
+        fact_id = add_fact(conn, "alice", "alice", "lives_in", "lisbon")
+        assert delete_fact(conn, "bob", fact_id) is False
+        assert get_fact(conn, fact_id) is not None
+        assert [r.op for r in get_fact_history(conn, "alice")] == ["insert"]
+
+    def test_own_fact_audit_rows_carry_the_task(self, conn):
+        ended_id = add_fact(conn, "bob", "bob", "lives_in", "lisbon")
+        deleted_id = add_fact(conn, "bob", "bob", "knows", "python")
+        assert invalidate_fact(
+            conn, "bob", ended_id, ended="2026-04-08", source_task_id=77,
+        ) is True
+        assert delete_fact(conn, "bob", deleted_id, source_task_id=78) is True
+        rows = {r.op: r for r in get_fact_history(conn, "bob")}
+        assert (rows["invalidate"].fact_id, rows["invalidate"].source_task_id) == (ended_id, 77)
+        assert (rows["delete"].fact_id, rows["delete"].source_task_id) == (deleted_id, 78)
 
 
 class TestGetCurrentFacts:
@@ -559,7 +586,7 @@ class TestGetEntityTimeline:
     def test_includes_historical_facts(self, conn):
         id1 = add_fact(conn, "user1", "bob", "works_at", "acme",
                        valid_from="2025-01-01")
-        invalidate_fact(conn, id1, ended="2026-01-01")
+        invalidate_fact(conn, "user1", id1, ended="2026-01-01")
         add_fact(conn, "user1", "bob", "works_at", "globex",
                  valid_from="2026-01-01")
 
@@ -697,7 +724,7 @@ class TestGetFactCount:
         deliberately does not read. Health metric, not an audit.
         """
         fact_id = add_fact(conn, "user1", "bob", "works_at", "acme")
-        invalidate_fact(conn, fact_id,
+        invalidate_fact(conn, "user1", fact_id,
                         ended=(date.today() - timedelta(days=1)).isoformat())
         add_fact(conn, "user1", "bob", "works_at", "globex")
 
@@ -709,7 +736,7 @@ class TestGetFactCount:
         """The other direction of the same residual."""
         add_fact(conn, "user1", "bob", "works_at", "acme")
         replacement = add_fact(conn, "user1", "bob", "works_at", "globex")
-        invalidate_fact(conn, replacement,
+        invalidate_fact(conn, "user1", replacement,
                         ended=(date.today() - timedelta(days=1)).isoformat())
 
         counts = get_fact_count(conn, "user1")
@@ -1226,13 +1253,13 @@ class TestKnowledgeFactsAudit:
 
     def test_invalidate_writes_audit_row(self, conn):
         fact_id = add_fact(conn, "alice", "bob", "uses_tech", "python")
-        invalidate_fact(conn, fact_id, ended="2026-04-01")
+        invalidate_fact(conn, "alice", fact_id, ended="2026-04-01")
         ops = [r.op for r in get_fact_history(conn, "alice")]
         assert "invalidate" in ops
 
     def test_delete_writes_audit_row(self, conn):
         fact_id = add_fact(conn, "alice", "bob", "uses_tech", "python")
-        delete_fact(conn, fact_id)
+        delete_fact(conn, "alice", fact_id)
         ops = [r.op for r in get_fact_history(conn, "alice")]
         assert "delete" in ops
 
