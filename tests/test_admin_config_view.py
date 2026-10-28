@@ -44,6 +44,45 @@ class TestSections:
         assert "brain.native" in keys
         assert "security.network" in keys
 
+    def test_retired_root_model_and_effort_are_not_fields(self):
+        # ISSUE-418: they are claude_code's, moved onto [brain.claude_code] at
+        # load, so a General field would read as a deployment-wide default.
+        payload = view.build_config_view(Config())
+        general = _fields(payload, "general")
+        assert "model" not in general
+        assert "effort" not in general
+        claude = _fields(payload, "brain.claude_code")
+        assert {"model", "effort"} <= set(claude)
+
+    async def test_a_file_still_setting_root_model_gets_a_removable_problem(self):
+        from istota.config_editor.check import run_check
+        from istota.lib import toml_write
+
+        document = {"model": "opus", "effort": "high"}
+        check = await run_check(document)
+        payload = view.build_config_view(
+            Config(), document=toml_write.dumps(document), check=check,
+        )
+        retired = {
+            tuple(p["path"]): p.get("action")
+            for p in payload["problems"] if p["kind"] == "retired"
+        }
+        assert retired[("model",)] == "unset"
+        assert retired[("effort",)] == "unset"
+
+    def test_providers_is_its_own_section_after_the_brain(self):
+        payload = view.build_config_view(Config())
+        assert "providers" not in _fields(payload, "general")
+        keys = [s["key"] for s in payload["sections"]]
+        section = next(s for s in payload["sections"] if s["key"] == "providers")
+        assert section["label"] == "[providers]"
+        [field] = section["fields"]
+        assert field["key"] == "providers"
+        assert field["editor"] == "table"
+        assert "built in" in field["doc"]
+        last_brain = max(i for i, k in enumerate(keys) if k.startswith("brain"))
+        assert keys.index("providers") == last_brain + 1
+
     def test_sections_are_ordered_general_first(self):
         payload = view.build_config_view(Config())
         assert payload["sections"][0]["key"] == "general"
