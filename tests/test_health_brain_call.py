@@ -247,6 +247,46 @@ class TestEachCallerKeepsItsRequestShape:
         assert persisted[0]["origin"] == "health_explainer"
 
 
+class TestTheHarnessGetsTheSandboxsControlDir:
+    """On ``claude_code`` the CLI spawns the tool server, which reads its hello
+    and gate from a control dir the namespace binds read-only (#862). A direct
+    caller has no task control dir, so the sandbox makes one for the call."""
+
+    def test_the_extractor_hands_the_harness_a_bound_control_dir_and_removes_it(
+        self, monkeypatch, make_config, tmp_path,
+    ):
+        import istota.brain as brain_mod
+        import istota.executor as executor_mod
+        from istota.health import ocr
+
+        seen: list[tuple[BrainRequest, Path, bool, list[str]]] = []
+
+        class _CliBrain(_CapturingBrain):
+            kind = "claude_code"
+
+            def execute(self, req):
+                control = req.harness.control_dir
+                argv = req.tool_server_wrap(["tool-server"])
+                seen.append((req, control, control.is_dir(), argv))
+                return BrainResult(success=True, result_text="[]")
+
+        monkeypatch.setattr(brain_mod, "make_brain", lambda _cfg: _CliBrain([]))
+        monkeypatch.setattr(executor_mod, "persist_brain_usage", lambda *a, **k: None)
+        monkeypatch.setattr(executor_mod, "_bwrap_available", lambda: True)
+        config = make_config()
+        config.security.sandbox_enabled = True
+
+        ocr._call_brain("extract this", config, read_path=_document(tmp_path), user_id="alice")
+
+        req, control, existed, argv = seen[0]
+        assert existed
+        assert control.parent == config.temp_dir.resolve() / ".control" / "alice"
+        assert control.name.startswith("daemon-")
+        i = argv.index(str(control))
+        assert argv[i - 1] == "--ro-bind" and argv[i + 1] == str(control)
+        assert not control.exists(), "the control dir outlived the call"
+
+
 class TestTheFailClosedRefusalIsStatedOnce:
     """Both directions, because only the pair distinguishes the boundary.
 

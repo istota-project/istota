@@ -1052,11 +1052,17 @@ def ensure_task_control_dir(config: Config, user_id: str, task_id: int) -> Path:
 
 def _ensure_task_dir(
     control_dir: Path | None, config: Config, root_name: str,
-    user_id: str, task_id: int, *, noun: str,
+    user_id: str, task_id: int, *, noun: str, unique_prefix: str | None = None,
 ) -> Path:
     """The body of :func:`ensure_task_control_dir`, shared with
-    :func:`ensure_task_harness_dir`; the reasoning is in the former's
-    docstring. ``control_dir`` is the resolver's answer for ``root_name``."""
+    :func:`ensure_task_harness_dir` and :func:`make_daemon_control_dir`; the
+    reasoning is in the first one's docstring. ``control_dir`` is the
+    resolver's answer for ``root_name``.
+
+    With ``unique_prefix`` the leaf is not ``control_dir`` but a fresh
+    ``mkdtemp`` directory beside it, ``{prefix}<random>``, 0700 and created
+    exclusively, for a caller that needs one directory per call.
+    """
     if control_dir is None:
         raise RuntimeError(
             f"cannot name a {noun} for user {user_id!r}, "
@@ -1072,10 +1078,15 @@ def _ensure_task_dir(
     # only, so this creates `temp_dir` with the ambient umask and `.control`
     # itself at 0700.
     levels = ((root, True), (user_level, False), (control_dir, False))
+    if unique_prefix is not None:
+        levels = levels[:2]
     for attempt in (1, 2):
         try:
             for level, parents in levels:
                 _ensure_control_level(level, parents=parents)
+            if unique_prefix is not None:
+                level = user_level
+                return Path(tempfile.mkdtemp(prefix=unique_prefix, dir=user_level))
         except FileNotFoundError as exc:
             # A level was collected under us between two iterations. Start
             # again once; a second occurrence is not a sweep race.
@@ -1092,6 +1103,45 @@ def _ensure_task_dir(
             ) from exc
         return control_dir
     return control_dir
+
+
+#: The leaf prefix of a direct caller's control dir under ``.control/{user_id}``.
+DAEMON_CONTROL_DIR_PREFIX = "daemon-"
+
+
+def make_daemon_control_dir(config: Config, user_id: str) -> Path:
+    """A fresh ``{temp_dir}/.control/{user_id}/daemon-<random>/`` for one
+    task-less model call, 0700 at every level, and return it resolved.
+
+    The control dir a task gets, for a caller that has no task: the CLI tool
+    harness writes the tool server's hello and call gate there, and the
+    caller's namespace binds it read-only (#862). Same resolver, same levels
+    and same refusals as :func:`ensure_task_control_dir`; only the leaf is
+    one per call, since concurrent direct calls of one user share no task id.
+    Removed by :func:`remove_daemon_control_dir`; one left by a killed daemon
+    goes with ``cleanup_old_temp_files``. Raises ``RuntimeError``.
+    """
+    return _ensure_task_dir(
+        get_task_control_dir(config, user_id, 0),
+        config, CONTROL_DIR_NAME, user_id, 0,
+        noun="daemon control directory", unique_prefix=DAEMON_CONTROL_DIR_PREFIX,
+    )
+
+
+def remove_daemon_control_dir(control_dir: Path | None) -> None:
+    """Remove what :func:`make_daemon_control_dir` made. Never raises."""
+    if control_dir is None:
+        return
+    import shutil
+
+    try:
+        shutil.rmtree(control_dir)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logger.warning(
+            "daemon_control_dir_release_failed path=%s error=%s", control_dir, e,
+        )
 
 
 def get_task_harness_dir(
@@ -1178,6 +1228,11 @@ class DaemonSandbox(NamedTuple):
     #: scopes withheld), and the caller removes it with
     #: :func:`release_daemon_sandbox` once the model call is over.
     scratch: bool = False
+    #: A daemon-only directory bound read-only into the namespace, made for
+    #: this call (:func:`make_daemon_control_dir`): where the CLI tool harness
+    #: hands the tool server its hello and gate (#862). ``None`` when there is
+    #: no namespace. :func:`release_daemon_sandbox` removes it.
+    control_dir: Path | None = None
 
     @property
     def tool_server_wrap(self) -> Callable[[list[str]], list[str]] | None:
@@ -1413,6 +1468,16 @@ def build_daemon_sandbox(
             )
             return DaemonSandbox(None, work_dir, refused=True)
         scratch = True
+    try:
+        control_dir = make_daemon_control_dir(config, user_id)
+    except RuntimeError as e:
+        logger.warning(
+            "daemon_sandbox_refused user_id=%r — no control directory for the "
+            "namespace: %s", user_id, e,
+        )
+        if scratch:
+            release_daemon_sandbox(DaemonSandbox(None, work_dir, scratch=True))
+        return DaemonSandbox(None, work_dir, refused=True)
 
     task = db.Task(
         id=0,
@@ -1439,6 +1504,8 @@ def build_daemon_sandbox(
             binds.append(Path(path).resolve())
         except OSError:
             continue
+    # Resolved already, and last: no earlier read-write bind can cover it.
+    binds.append(control_dir)
 
     def _wrap(raw_cmd: list[str]) -> list[str]:
         return build_bwrap_cmd(
@@ -1447,7 +1514,7 @@ def build_daemon_sandbox(
             withheld_scopes=withheld,
         )
 
-    return DaemonSandbox(_wrap, work_dir, scratch=scratch)
+    return DaemonSandbox(_wrap, work_dir, scratch=scratch, control_dir=control_dir)
 
 
 #: The root of the private work dirs :func:`build_daemon_sandbox` makes for a
@@ -1479,11 +1546,13 @@ def _make_daemon_scratch_dir(root: Path, user_id: str) -> Path:
 
 
 def release_daemon_sandbox(sandbox: DaemonSandbox) -> None:
-    """Remove the private work dir of a ``scratch`` sandbox. Never raises.
+    """Remove the sandbox's control dir and, for a ``scratch`` sandbox, its
+    private work dir. Never raises.
 
-    A no-op for any other sandbox: their ``work_dir`` is the shared per-user
-    directory and is not this call's to remove.
+    The work dir of any other sandbox is the shared per-user directory and is
+    not this call's to remove.
     """
+    remove_daemon_control_dir(sandbox.control_dir)
     if not sandbox.scratch:
         return
     import shutil
@@ -3996,6 +4065,7 @@ def build_daemon_harness(
     brain_kind: str,
     timeout_seconds: int,
     harness_root: Path | None = None,
+    control_dir: Path | None = None,
 ) -> "HarnessSpec | None":
     """The `HarnessSpec` for a direct caller's tool-granting request, or None.
 
@@ -4007,6 +4077,10 @@ def build_daemon_harness(
     ``{temp_dir}/.harness/{user_id}/task_0`` unless the caller names one; each
     harness makes its own directory under it, so concurrent calls do not
     collide. Raises ``RuntimeError`` when that root cannot be made.
+
+    ``control_dir`` is the directory the caller's namespace binds read-only
+    (``DaemonSandbox.control_dir``): the harness hands the tool server its
+    hello and gate there, and refuses to start under a real wrap without one.
     """
     if brain_kind != "claude_code":
         return None
@@ -4018,6 +4092,7 @@ def build_daemon_harness(
         cli_env=build_harness_cli_env(config, user_id, timeout_seconds=timeout_seconds),
         harness_root=harness_root,
         bash_spill_full_output=config.brain.native.bash_spill_full_output,
+        control_dir=control_dir,
     )
 
 

@@ -240,3 +240,73 @@ def test_a_refused_sandbox_has_no_tool_server_wrap(dev_config):
     sandbox = build_daemon_sandbox(dev_config, "", profile=NATIVE)
     assert sandbox.refused
     assert sandbox.tool_server_wrap is None
+
+
+# ---- The control dir a direct caller's tool server reads its hello from (#862)
+
+
+def _control_root(config) -> Path:
+    return config.temp_dir.resolve() / ".control" / "alice"
+
+
+@pytest.mark.parametrize("withheld", [frozenset(), WITHHELD], ids=["plain", "withheld"])
+def test_a_wrapped_direct_call_gets_a_private_control_dir_bound_read_only(
+    dev_config, _bwrap_flag_cache, withheld,
+):
+    """The CLI-spawned tool server reads its hello and gate from a directory
+    the namespace binds read-only and no task can write: a fresh one per call,
+    beside the task control dirs, removed on release."""
+    sandbox = build_daemon_sandbox(
+        dev_config, "alice", withheld_scopes=withheld, profile=NATIVE,
+    )
+    control = sandbox.control_dir
+    try:
+        assert control is not None
+        assert control.parent == _control_root(dev_config)
+        assert control.name.startswith("daemon-")
+        for level in (control, control.parent, control.parent.parent):
+            assert stat.S_IMODE(level.lstat().st_mode) == 0o700
+        binds = _binds(_argv(sandbox))
+        flags = [flag for _i, flag, dest in binds if dest == str(control)]
+        assert flags == ["--ro-bind"]
+        # Bound after the work dir, so nothing writable covers it.
+        control_idx = [i for i, _f, d in binds if d == str(control)][-1]
+        work_idx = [i for i, _f, d in binds if d == str(sandbox.work_dir)][-1]
+        assert control_idx > work_idx
+    finally:
+        release_daemon_sandbox(sandbox)
+    assert not control.exists()
+    assert _control_root(dev_config).is_dir(), "release removes only its own dir"
+
+
+def test_two_direct_calls_get_two_control_dirs(dev_config):
+    first = build_daemon_sandbox(dev_config, "alice", profile=NATIVE)
+    second = build_daemon_sandbox(dev_config, "alice", profile=NATIVE)
+    try:
+        assert first.control_dir != second.control_dir
+    finally:
+        release_daemon_sandbox(first)
+        release_daemon_sandbox(second)
+
+
+def test_no_control_dir_with_the_sandbox_off(dev_config):
+    """Nothing is wrapped, so the harness keeps its files in its own dir."""
+    dev_config.security.sandbox_enabled = False
+    sandbox = build_daemon_sandbox(dev_config, "alice", profile=NATIVE)
+    assert sandbox.control_dir is None
+    assert not (dev_config.temp_dir / ".control").exists()
+
+
+def test_a_control_root_that_is_not_the_daemons_refuses_the_namespace(
+    dev_config, tmp_path,
+):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    dev_config.temp_dir.mkdir(parents=True, exist_ok=True)
+    (dev_config.temp_dir / ".control").symlink_to(elsewhere)
+
+    sandbox = build_daemon_sandbox(dev_config, "alice", profile=NATIVE)
+
+    assert sandbox.refused and sandbox.wrap is None
+    assert sandbox.control_dir is None
+    assert list(elsewhere.iterdir()) == []

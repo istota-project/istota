@@ -140,8 +140,10 @@ def call_health_brain(
         build_daemon_sandbox,
         build_model_cli_env,
         persist_brain_usage,
+        release_daemon_sandbox,
     )
 
+    sandbox = None
     if sandboxed:
         sandbox = build_daemon_sandbox(
             config, user_id,
@@ -158,6 +160,7 @@ def call_health_brain(
                 "%s_sandbox_refused user_id=%r — not granting Read "
                 "outside a namespace", prefix, user_id,
             )
+            release_daemon_sandbox(sandbox)
             return None
         cwd = sandbox.work_dir
         tool_server_wrap = sandbox.tool_server_wrap
@@ -168,59 +171,66 @@ def call_health_brain(
         cwd = Path(getattr(config, "temp_dir", None) or "/tmp")
         tool_server_wrap = None
 
-    harness = None
-    if read_path is not None:
+    # The sandbox's control dir is made for this call alone, so every exit
+    # below releases it.
+    try:
+        harness = None
+        if read_path is not None:
+            try:
+                harness = build_daemon_harness(
+                    config, user_id,
+                    brain_kind=getattr(brain, "kind", ""),
+                    timeout_seconds=timeout_seconds,
+                    control_dir=sandbox.control_dir if sandbox is not None else None,
+                )
+            except RuntimeError as e:
+                log.warning("%s_harness_failed user_id=%r error=%s", prefix, user_id, e)
+                return None
+
+        req = BrainRequest(
+            prompt=prompt,
+            allowed_tools=["Read"] if read_path else [],
+            cwd=cwd,
+            # Not `dict(os.environ)`: this is a daemon-side call with no task
+            # behind it, so nothing has stripped the master Fernet key, the
+            # Nextcloud app password, the mail passwords or the forge tokens
+            # (ISSUE-395). `build_model_cli_env` is the existing answer for a
+            # daemon-side model spawn that is not a task (ISSUE-232).
+            env=build_model_cli_env(config),
+            fs_read_roots=[read_path] if read_path else None,
+            # The tool server's namespace (ISSUE-397), for every brain: on
+            # `claude_code` the CLI runs outside it on the harness.
+            tool_server_wrap=tool_server_wrap,
+            harness=harness,
+            timeout_seconds=timeout_seconds,
+            model=model,
+            streaming=False,
+        )
         try:
-            harness = build_daemon_harness(
-                config, user_id,
-                brain_kind=getattr(brain, "kind", ""),
-                timeout_seconds=timeout_seconds,
-            )
-        except RuntimeError as e:
-            log.warning("%s_harness_failed user_id=%r error=%s", prefix, user_id, e)
+            result = brain.execute(req)
+        except Exception as e:  # noqa: BLE001
+            log.warning("%s_brain_failed error=%s", prefix, e)
             return None
 
-    req = BrainRequest(
-        prompt=prompt,
-        allowed_tools=["Read"] if read_path else [],
-        cwd=cwd,
-        # Not `dict(os.environ)`: this is a daemon-side call with no task
-        # behind it, so nothing has stripped the master Fernet key, the
-        # Nextcloud app password, the mail passwords or the forge tokens
-        # (ISSUE-395). `build_model_cli_env` is the existing answer for a
-        # daemon-side model spawn that is not a task (ISSUE-232).
-        env=build_model_cli_env(config),
-        fs_read_roots=[read_path] if read_path else None,
-        # The tool server's namespace (ISSUE-397), for every brain: on
-        # `claude_code` the CLI runs outside it on the harness.
-        tool_server_wrap=tool_server_wrap,
-        harness=harness,
-        timeout_seconds=timeout_seconds,
-        model=model,
-        streaming=False,
-    )
-    try:
-        result = brain.execute(req)
-    except Exception as e:  # noqa: BLE001
-        log.warning("%s_brain_failed error=%s", prefix, e)
-        return None
-
-    # One call per uploaded document or explain request, with no task row
-    # behind it.
-    persist_brain_usage(
-        config, None, usage=result.usage, origin=origin,
-        user_id=user_id, brain_kind=result.brain_kind,
-        model=result.model_used or req.model,
-        stop_reason=result.stop_reason, success=result.success,
-    )
-
-    if not result.success:
-        log.warning(
-            "%s_brain_unsuccessful stop_reason=%s",
-            prefix, getattr(result, "stop_reason", "?"),
+        # One call per uploaded document or explain request, with no task row
+        # behind it.
+        persist_brain_usage(
+            config, None, usage=result.usage, origin=origin,
+            user_id=user_id, brain_kind=result.brain_kind,
+            model=result.model_used or req.model,
+            stop_reason=result.stop_reason, success=result.success,
         )
-        return None
-    return result.result_text or ""
+
+        if not result.success:
+            log.warning(
+                "%s_brain_unsuccessful stop_reason=%s",
+                prefix, getattr(result, "stop_reason", "?"),
+            )
+            return None
+        return result.result_text or ""
+    finally:
+        if sandbox is not None:
+            release_daemon_sandbox(sandbox)
 
 
 __all__ = ["DEFAULT_TIMEOUT_SECONDS", "call_health_brain"]

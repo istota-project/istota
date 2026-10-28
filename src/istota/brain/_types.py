@@ -73,10 +73,11 @@ class HarnessSpec:
     # CLI between #862's Stage 5 and Stage 6, which serves it from a second
     # MCP server.
     web_fetch: "WebFetchPolicy | None" = None
-    # The task's control directory, which the tool server's wrap binds
-    # read-only: the harness puts the tool server's hello and call gate there.
-    # `None` for a direct caller; on a sandboxed shape the harness then refuses
-    # to start, since nothing it could write is visible in the namespace.
+    # The control directory the tool server's wrap binds read-only: the task's,
+    # or a direct caller's `DaemonSandbox.control_dir`. The harness puts the
+    # tool server's hello and call gate there. `None` only where nothing is
+    # wrapped; under a real wrap the harness then refuses to start, since
+    # nothing it could write would be visible in the namespace.
     control_dir: Path | None = None
 
 

@@ -1791,6 +1791,43 @@ class TestModelExecution:
         assert doctor._read_user_resources(config, "alice") == []
         assert not db_path.exists(), "the check created the database it was reading"
 
+    def test_a_wrapped_probe_binds_a_private_control_dir_and_removes_it(
+        self, make_config, make_user_config, monkeypatch
+    ):
+        """The CLI-spawned tool server reads its hello and gate from a control
+        dir the namespace binds read-only (#862). The probe's is inside its
+        private scratch directory rather than under `{temp_dir}/.control`,
+        which a `sudo istota doctor` would leave root-owned."""
+        import stat as stat_mod
+
+        seen = []
+
+        def _wrap(cmd, *args, extra_ro_binds=None, **kwargs):
+            seen.append(list(extra_ro_binds or ()))
+            return list(cmd)
+
+        class _Looking(_ProbeBrain):
+            def execute(self, req):
+                control = req.harness.control_dir
+                req.tool_server_wrap(["tool-server"])
+                self.control = (control, control.is_dir(),
+                                stat_mod.S_IMODE(control.stat().st_mode))
+                return super().execute(req)
+
+        config = self._config(make_config, make_user_config)
+        (Path(config.temp_dir) / "alice").mkdir(parents=True)
+        self._sandboxed(monkeypatch, wrap=_wrap)
+        brain = self._stub(monkeypatch, _Looking())
+
+        assert self._run(config).status == OK
+
+        control, existed, mode = brain.control
+        assert existed and mode == 0o700
+        assert seen and all(binds == [control] for binds in seen)
+        assert not str(control).startswith(str(config.temp_dir))
+        assert not (Path(config.temp_dir) / ".control").exists()
+        assert not control.exists(), "the control dir outlived the probe"
+
     def test_wraps_under_effective_sandboxing_not_the_flag(
         self, make_config, make_user_config, monkeypatch
     ):

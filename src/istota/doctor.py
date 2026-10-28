@@ -3261,6 +3261,11 @@ def check_model_execution(config: "Config", probe: bool) -> CheckResult:
     remedy = "Check the model credential and network egress, then retry."
     wrap = None
     work_dir: Path | None = None
+    # Where the CLI-spawned tool server reads its hello and gate, bound
+    # read-only (#862). Inside the private scratch directory below rather than
+    # `make_daemon_control_dir`'s `{temp_dir}/.control`, which a `sudo istota
+    # doctor` would leave root-owned. Set before `wrap` is first called.
+    control_dir: Path | None = None
     try:
         if effective_sandboxing(config):
             user_temp = Path(config.temp_dir) / user_id
@@ -3284,6 +3289,7 @@ def check_model_execution(config: "Config", probe: bool) -> CheckResult:
             def wrap(cmd: list[str]) -> list[str]:
                 return build_bwrap_cmd(
                     cmd, config, fake_task, is_admin, user_resources, user_temp,
+                    extra_ro_binds=[control_dir] if control_dir is not None else [],
                     profile=SandboxProfile.NATIVE,
                 )
 
@@ -3295,6 +3301,9 @@ def check_model_execution(config: "Config", probe: bool) -> CheckResult:
                 work_dir.mkdir()
             harness_root = scratch_dir / "harness"
             harness_root.mkdir()
+            if wrap is not None:
+                control_dir = (scratch_dir / "control").resolve()
+                control_dir.mkdir(mode=0o700)
             brain = make_brain(config.brain)
             req = BrainRequest(
                 prompt=f"Run: echo {_MODEL_PROBE_MARKER}",
@@ -3306,6 +3315,7 @@ def check_model_execution(config: "Config", probe: bool) -> CheckResult:
                 harness=build_daemon_harness(
                     config, user_id, brain_kind=getattr(brain, "kind", kind),
                     timeout_seconds=MODEL_PROBE_TIMEOUT, harness_root=harness_root,
+                    control_dir=control_dir,
                 ),
                 # The bind's projection where there is one. Unwrapped, roots
                 # alone would read to the harness as a sandboxed shape with
