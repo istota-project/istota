@@ -123,7 +123,7 @@ def test_control_without_withheld_scopes_binds_them_all(
     dests = _dests(argv)
     assert str(repos) in dests
     assert str(user_dir) in dests
-    assert str(talk) in dests
+    assert str(talk) not in dests  # ISSUE-880: never bound
     assert str(run_dir.resolve()) in dests
     assert _shared_user_temp(dev_config) in dests
     assert sandbox.work_dir == Path(_shared_user_temp(dev_config))

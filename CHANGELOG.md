@@ -85,6 +85,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On a Nextcloud-mounted workspace, a task can no longer read other rooms' Talk attachments. The bot's shared `Talk/` folder is no longer in any task's sandbox; each task gets a read-only copy of the files it was sent, up to `[talk] attachment_max_mb`. A file named only in older conversation history is no longer readable, and the Files page no longer lists Talk attachments.
+
 - A task can no longer redirect deferred output or cleanup to private host files through a symlink. Deferred reads also reject special files and oversized input, so a planted pipe cannot block the scheduler.
 
 - The stack's web service now writes its own log lines, such as admin browser console opens and closes, step-up and config editor actions, to its container output in the daemon's format. Before, only uvicorn's lines reached `docker compose logs web`. The web service still never writes to the daemon's log file.

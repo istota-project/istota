@@ -135,7 +135,7 @@ The audience does not change what a member's own turn may reach. It decides what
 | A task nobody asked in a shared room (a subtask, a CLI or heartbeat task, someone else's scheduled job) | every scope |
 | Any task in an email thread room, a correspondent's turn included (`rooms.scopes.is_email_thread_room`) | nothing, with ambient memory loaded |
 
-The withheld set is applied at every seam that grants reach: the skill index and selection, the skill proxy's allowed CLIs, setup-env hooks, identity environment, the vault, and the sandbox mount plan. A restricted task gets no workspace bind without `files`, its own temp and deferred-op directory, no Talk bind (attachments are copied in read-only), and Talk writes that check the live roster. The details are in [security](../deployment/security.md) and `.claude/rules/sandbox.md`.
+The withheld set is applied at every seam that grants reach: the skill index and selection, the skill proxy's allowed CLIs, setup-env hooks, identity environment, the vault, and the sandbox mount plan. A restricted task gets no workspace bind without `files`, its own temp and deferred-op directory, and Talk writes that check the live roster. No task, restricted or not, binds the bot's shared Talk folder; a task's own attachments are copied in read-only. The details are in [security](../deployment/security.md) and `.claude/rules/sandbox.md`.
 
 Without bubblewrap (`istota serve` on macOS), withholding removes the scope from the prompt, the skill list and the environment, but the task's own file tools can still reach the host's workspace. `istota doctor` reports this as `security.room_scope_confinement`.
 

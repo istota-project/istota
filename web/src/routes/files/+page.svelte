@@ -339,7 +339,7 @@
     return entry ? taskReachNote(entry.access, botName, entry.scope) : null;
   }
   let parentView = $derived(indexViewForKind(place?.kind));
-  const sidebarKinds: string[] = ['linked', 'drive', 'nextcloud', 'talk'];
+  const sidebarKinds: string[] = ['linked', 'drive', 'nextcloud'];
   let botCurrent = $derived<IndexView | 'home' | null>(
     view ?? (place?.kind === 'home' ? 'home' : indexViewForKind(place?.kind)),
   );
@@ -952,11 +952,7 @@
         onFiles={enqueue}
       >
         {#if !place.browsable}
-          <div class="center-msg">
-            {place.kind === 'talk'
-              ? 'Talk attachments are available to tasks, but cannot be browsed here.'
-              : 'This connection is reached through a skill during a task.'}
-          </div>
+          <div class="center-msg">This connection is reached through a skill during a task.</div>
         {:else if listingLoading}
           <PageLoading label="Loading folder…" />
         {:else if listingError}

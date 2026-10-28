@@ -1993,9 +1993,28 @@ class TestTheAudioTheChildIsActuallyHandedIsInReach:
         monkeypatch.setattr(_POPEN, fake_popen)
         return seen
 
-    def test_a_talk_attachment_on_the_mount_is_passed_through(
+    def test_a_staged_talk_attachment_is_copied_into_reach(
         self, tmp_path, monkeypatch,
     ):
+        # ISSUE-880: `stage_attachments` has already copied a Talk attachment
+        # into the control dir, which the child's roots do not name.
+        identity = self._identity(tmp_path)
+        seen = self._spawn(monkeypatch)
+        control = tmp_path / "temp" / ".control" / "alice" / "task_1"
+        audio = control / "room-attachments" / "memo.m4a"
+        audio.parent.mkdir(parents=True)
+        audio.write_bytes(b"not really audio")
+
+        out = executor._pre_transcribe_attachments(
+            [str(audio)], "", control_dir=control, **identity,
+        )
+
+        assert "buy milk" in out
+        handed = Path(seen["argv"][-1])
+        assert handed != audio
+        assert handed.read_bytes() == b"not really audio"
+
+    def test_a_raw_talk_path_on_the_mount_is_refused(self, tmp_path, monkeypatch):
         identity = self._identity(tmp_path)
         seen = self._spawn(monkeypatch)
         audio = identity["mount_path"] / "Talk" / "memo.m4a"
@@ -2003,10 +2022,8 @@ class TestTheAudioTheChildIsActuallyHandedIsInReach:
 
         out = executor._pre_transcribe_attachments([str(audio)], "", **identity)
 
-        assert "buy milk" in out
-        # Handed through unchanged: it was already in reach, so nothing is
-        # copied and the prompt still names the file the user shared.
-        assert seen["argv"][-1] == str(audio)
+        assert "buy milk" not in (out or "")
+        assert "argv" not in seen
 
     def test_an_attachment_outside_the_roots_is_staged_into_them(
         self, tmp_path, monkeypatch,
@@ -2040,7 +2057,6 @@ class TestTheAudioTheChildIsActuallyHandedIsInReach:
             mount=seen["env"].get("NEXTCLOUD_MOUNT_PATH"),
             user_id=seen["env"].get("ISTOTA_USER_ID", ""),
             deferred_dir=seen["env"].get("ISTOTA_DEFERRED_DIR"),
-            talk=True,
         )
         assert path_under_roots(handed.resolve(), roots), (handed, roots)
 
@@ -4003,7 +4019,7 @@ class TestAnOptionalReadNeverCreatesTheDatabase:
 
 
 class TestRestrictedStagingNeverFollowsALink:
-    """`stage_restricted_attachments` copies into a guest-facing sandbox, so
+    """`stage_attachments` copies into a task's sandbox, so
     it takes the same rule as audio and images (ISSUE-610)."""
 
     def test_a_symlinked_directory_in_the_inbox_is_not_copied(self, tmp_path):
@@ -4020,7 +4036,7 @@ class TestRestrictedStagingNeverFollowsALink:
         config = Config(workspace_path=mount, temp_dir=tmp_path / "temp")
         named = str(inbox / "web-chat" / "x.pdf")
 
-        out = executor.stage_restricted_attachments(
+        out = executor.stage_attachments(
             config, [named], dest, user_id="alice", files_withheld=True,
         )
 
@@ -4036,7 +4052,7 @@ class TestRestrictedStagingNeverFollowsALink:
         dest.parent.mkdir()
         config = Config(workspace_path=mount, temp_dir=tmp_path / "temp")
 
-        out = executor.stage_restricted_attachments(
+        out = executor.stage_attachments(
             config, [str(inbox / "x.pdf")], dest, user_id="alice", files_withheld=True,
         )
 

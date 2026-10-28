@@ -470,7 +470,7 @@ def cmd_upload(args: argparse.Namespace) -> None:
     1's rule is where the bytes end up, and it names this case in as many
     words: a path persisted for the daemon to read after the task has ended.
     Under `READ` the stamp gave this verb `env_host_roots()` — the workspace,
-    the deferred dir, this task's channel directory and `{mount}/Talk` —
+    the deferred dir, this task's channel directory and the Talk folder —
     while `scheduler_deferred._source_path_allowed` derives the workspace and
     the deferred dir only, deliberately and with a docstring saying why: there
     is no conversation token on the replay path. So `health upload

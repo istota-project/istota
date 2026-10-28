@@ -1,5 +1,8 @@
 # Skills Changelog
 
+## 2026-10-28
+- `Talk` is no longer a folder you can read, in your file tools or as a skill CLI path argument. The attachments you were sent are read-only copies at the paths the request lists; use those. A file named only in earlier conversation history is not available; ask the user to send it again
+
 ## 2026-10-27
 - `briefings_config group …`: list, read, create, change, preview, publish and delete group briefings, read editions, set the user's own delivery mutes and revoke their own source approvals. They work only in the user's private chat; anywhere else they answer `reason: private_chat_only`, so ask the user to continue there. Every change takes the `--revision` you last read. Preview before publishing, since publish delivers to every member. Edition text arrives fenced as untrusted. Approving a source and retrying deliveries stay on the web
 - `briefings_config shared-block list|set|run|remove`, for administrators: list every shared block with its status, change one with `set` (flags not given keep their value; `--create` makes a new one), ask the daemon to regenerate one with `run`, and delete one with `remove --confirmed`. To switch a block to `agent`, pass `--sources '[]'` in the same `set`. After `run`, check `show` once later for `run.run_now_answered.id` matching the id you got; do not poll. The list's content preview arrives fenced as untrusted unless the block is trusted

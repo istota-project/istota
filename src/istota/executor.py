@@ -313,7 +313,7 @@ def _audio_in_reach(
     `/mnt/nc-data/<user>/files/Talk/<name>` when the bot's own `Talk/` view
     does not hold the file (Nextcloud keeps a shared file in the *sender's*
     data dir). That fallback, the WhatsApp and email copies kept in `temp_dir`
-    when an inbox upload fails, and a restricted task's own
+    when an inbox upload fails, and the task's own
     `{control_dir}/room-attachments` copy are copied into the task's own temp
     dir, which is a root because the caller passes it as
     `ISTOTA_DEFERRED_DIR`. `cleanup_old_temp_files` owns the copy afterwards.
@@ -341,7 +341,6 @@ def _audio_in_reach(
         mount=mount_path,
         user_id=user_id or "",
         deferred_dir=deferred_dir,
-        talk=True,
     )
     if not roots:
         return audio_path
@@ -594,13 +593,14 @@ def _make_cancel_check(config: Config, task_id: int) -> "Callable[[], bool]":
 
 def image_bind_roots(
     config: Config, task: db.Task, user_temp_dir: Path,
-    control_dir: Path | None = None, *, restricted: bool = False,
+    control_dir: Path | None = None,
 ) -> list[Path]:
     """The roots an image attachment can live under and still be openable.
 
-    `build_bwrap_cmd` binds the user temp dir plus `{mount}/Users/{user}`,
-    `{mount}/Talk` and `{mount}/Channels/{token}`, and re-binds the task
-    control directory read-only after all of them — and nothing else. The
+    `build_bwrap_cmd` binds the user temp dir plus `{mount}/Users/{user}` and
+    `{mount}/Channels/{token}`, and re-binds the task control directory
+    read-only after all of them — and nothing else. A Talk attachment is in
+    the control directory by now (`stage_attachments`, ISSUE-880). The
     scheduler's nc-data fallback hands out `/mnt/nc-data/<user>/files/Talk/...`,
     which is under none of them, so a small in-limits screenshot arriving that
     way would be named in the Claude Code directive and be unreadable. Naming
@@ -648,11 +648,6 @@ def image_bind_roots(
         own = scoped_user_dir(mount / "Users", task.user_id)
         if own is not None:
             roots.append(own)
-        # A task its room restricts has no `{mount}/Talk` bind; its own
-        # attachments were copied into its temp dir instead. A local workspace
-        # has no `Talk/` folder: attachments land under `Channels/<token>/`.
-        if not restricted and config.storage_is_nextcloud:
-            roots.append(mount / "Talk")
         if task.conversation_token:
             roots.append(mount / "Channels" / task.conversation_token)
     resolved = []
@@ -727,16 +722,18 @@ def task_deferred_dir(config: Config, task: "db.Task") -> Path:
     return base
 
 
-def stage_restricted_attachments(
+def stage_attachments(
     config: Config, attachments: "list[str] | None", dest_dir: Path,
     *, user_id: str | None = None, files_withheld: bool = False,
 ) -> "list[str] | None":
-    """Copy a restricted task's own Talk attachments into ``dest_dir``.
+    """Copy a task's own Talk attachments into ``dest_dir``.
 
-    The sandbox of a task its room restricts binds no ``{mount}/Talk``, since
-    that directory is flat and holds the attachments of every conversation the
-    bot is in. The files this task was sent are copied into ``dest_dir`` and
-    the list names the copies. With ``files_withheld`` the same goes for files
+    No sandbox binds ``{mount}/Talk``, since that directory is flat and holds
+    the attachments of every conversation the bot is in (ISSUE-880). The files
+    this task was sent are copied into ``dest_dir`` and the list names the
+    copies; a skill CLI reaches them through ``ISTOTA_ATTACHMENTS_DIR``. So is
+    the nc-data fallback `download_talk_attachments` hands out. With
+    ``files_withheld`` the same goes for files
     under ``{mount}/Users/{user_id}``: the scheduler maps an email or WhatsApp
     inbox attachment there, and that tree is not bound once ``files`` is
     withheld, so without the copy the prompt would name a path the sandbox
@@ -752,10 +749,14 @@ def stage_restricted_attachments(
     if not attachments or not mount:
         return attachments
     roots = [Path(mount) / "Talk"]
+    own = None
     if files_withheld:
         own = scoped_user_dir(Path(mount) / "Users", user_id)
         if own is not None:
             roots.append(own)
+    # Every task copies its Talk files now, into `temp_dir` (tmpfs on the
+    # stack), so they take the cap the local workspace's fetch applies.
+    talk_cap = max(0, int(config.talk.attachment_max_mb)) * 1024 * 1024
     staged: list[str] = []
     used: set[str] = set()
     for raw in attachments:
@@ -768,6 +769,14 @@ def stage_restricted_attachments(
             continue
         src_fd, source = opened
         leaf = Path(source.parts[-1])
+        limit = None if own is not None and source.anchor == own else talk_cap
+        if limit is not None and os.fstat(src_fd).st_size > limit:
+            os.close(src_fd)
+            logger.warning(
+                "attachment %s not staged: over [talk] attachment_max_mb", leaf.name,
+            )
+            staged.append(raw)
+            continue
         name = leaf.name
         stem, suffix, n = leaf.stem, leaf.suffix, 1
         while name in used:
@@ -780,12 +789,11 @@ def stage_restricted_attachments(
             dest.unlink(missing_ok=True)  # a retry's own earlier copy
             fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             try:
-                copy_fd(src_fd, fd)
+                copy_fd(src_fd, fd, limit=limit)
             finally:
                 os.close(fd)
         except OSError as exc:
-            logger.warning("could not stage attachment %s for a restricted task: %s",
-                           leaf.name, exc)
+            logger.warning("could not stage attachment %s: %s", leaf.name, exc)
             staged.append(raw)
             continue
         finally:
@@ -795,6 +803,13 @@ def stage_restricted_attachments(
 
 
 CONTROL_DIR_NAME = ".control"
+#: Where `stage_attachments` puts a task's attachment copies, in its control dir.
+ATTACHMENTS_DIR_NAME = "room-attachments"
+
+
+def attachments_dir(control_dir: Path) -> Path:
+    return control_dir / ATTACHMENTS_DIR_NAME
+
 #: The CLI tool harness's per-task directories, beside `.control`; never bound.
 HARNESS_DIR_NAME = ".harness"
 _DAEMON_TEMP_ROOTS = (CONTROL_DIR_NAME, HARNESS_DIR_NAME)
@@ -8585,15 +8600,14 @@ def execute_task(
     # normalization plus the OCR deadline, in sequence on one worker.
     _cancel_check = _make_cancel_check(config, task.id)
 
-    # A task its room restricts is not given the flat Talk attachments
-    # directory, which holds every conversation's files; the ones this task
-    # was sent are copied into its control directory instead, which the
-    # sandbox binds read-only. In memory only, as the image renditions are.
-    if _withheld:
-        task.attachments = stage_restricted_attachments(
-            config, task.attachments, control_dir / "room-attachments",
-            user_id=task.user_id, files_withheld="files" in _withheld,
-        )
+    # No task is given the flat Talk attachments directory, which holds every
+    # conversation's files (ISSUE-880); the ones this task was sent are copied
+    # into its control directory instead, which the sandbox binds read-only.
+    # In memory only, as the image renditions are.
+    task.attachments = stage_attachments(
+        config, task.attachments, attachments_dir(control_dir),
+        user_id=task.user_id, files_withheld="files" in _withheld,
+    )
 
     # Pre-transcribe audio attachments so skill selection sees real text.
     #
@@ -8642,7 +8656,7 @@ def execute_task(
         # on the standalone single-user shape, for every image.
         bind_roots=(
             image_bind_roots(
-                config, task, user_temp_dir, control_dir, restricted=bool(_withheld),
+                config, task, user_temp_dir, control_dir,
             )
             if effective_sandboxing(config)
             else None

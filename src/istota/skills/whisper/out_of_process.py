@@ -77,7 +77,7 @@ def _identity_env(
     Four of the five workspace identity variables `build_task_runtime` exports;
     `ISTOTA_CONVERSATION_TOKEN` is deliberately not among them, so the child
     gets no `{mount}/Channels/{token}` root. Nothing writes an audio
-    attachment there — Talk shares land in `{mount}/Talk`, web-chat uploads
+    attachment there — a Talk share is copied into the task's control dir, web-chat uploads
     in the workspace inbox or the per-user temp dir — and the caller stages
     anything out of reach into the temp dir anyway
     (`executor._audio_in_reach`), so the root would widen what the child may

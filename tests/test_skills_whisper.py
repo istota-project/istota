@@ -760,12 +760,13 @@ class TestTheDerivedSaveDestinations:
         assert run.exit_code == 1, run.stdout
         assert run.envelope.get("status") == "error", run.stdout
 
-    def test_a_talk_sourced_save_is_refused(self, mount):
+    def test_a_talk_sourced_save_is_refused(self, mount, monkeypatch):
         """The derived write is resolved against the *writable* roots.
 
-        `audio_path` is `READ`, which admits `{mount}/Talk` — that is where a
-        Talk voice message lands, and reading it is the point of the verb. The
-        derived `--save` destination is then inside `{mount}/Talk` too, a
+        `audio_path` is `READ`, which admits the task's attachment copies —
+        that is where a Talk voice message is, and reading it is the point of
+        the verb. The derived `--save` destination is then inside that
+        directory too, a
         directory the sandbox binds read-only, so the save wrote host-side
         where the task's own tools could not (ISSUE-453). A derivation is
         contained by construction only with respect to the root its source
@@ -773,7 +774,13 @@ class TestTheDerivedSaveDestinations:
         """
         from istota.skills.whisper.cli import main
 
-        source = mount / "Talk" / "voicemail.wav"
+        from istota.sandbox.host_paths import ATTACHMENTS_DIR_VAR
+
+        # A Talk voice message is a read-only copy in the control dir (ISSUE-880).
+        attachments = mount.parent / "control" / "room-attachments"
+        attachments.mkdir(parents=True)
+        monkeypatch.setenv(ATTACHMENTS_DIR_VAR, str(attachments))
+        source = attachments / "voicemail.wav"
         source.write_bytes(b"RIFF")
 
         run = run_skill_main(
@@ -805,7 +812,13 @@ class TestTheDerivedSaveDestinations:
         monkeypatch.setattr(
             cli, "transcribe_audio", lambda *a, **k: calls.append(a) or {},
         )
-        source = mount / "Talk" / "voicemail.wav"
+        from istota.sandbox.host_paths import ATTACHMENTS_DIR_VAR
+
+        # A Talk voice message is a read-only copy in the control dir (ISSUE-880).
+        attachments = mount.parent / "control" / "room-attachments"
+        attachments.mkdir(parents=True)
+        monkeypatch.setenv(ATTACHMENTS_DIR_VAR, str(attachments))
+        source = attachments / "voicemail.wav"
         source.write_bytes(b"RIFF")
 
         run = run_skill_main(

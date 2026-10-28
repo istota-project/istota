@@ -110,8 +110,9 @@ class TestAllowedHostRoots:
         assert mount / "Channels" / "tok1" in roots
         assert mount / "Channels" / "tok2" not in roots
 
-    def test_talk_is_readable_but_not_writable(self, mount):
-        assert mount / "Talk" in allowed_host_roots(writable=False)
+    def test_talk_is_never_a_root(self, mount):
+        # ISSUE-880: the flat folder holds every conversation's files.
+        assert mount / "Talk" not in allowed_host_roots(writable=False)
         assert mount / "Talk" not in allowed_host_roots(writable=True)
 
     def test_traversal_token_is_not_turned_into_a_path(self, mount, monkeypatch):
@@ -1265,8 +1266,8 @@ class TestWorkspaceRoots:
     ):
         """ISSUE-402: the collapsed join is `{mount}/Users`, every user at once.
 
-        The channel and Talk roots are scoped by the token and by nothing, so
-        they survive — the documented behaviour of the environment-reading
+        The channel root is scoped by the token and by nothing, so
+        it survives — the documented behaviour of the environment-reading
         version, restated here because this is now where it is decided.
 
         """
@@ -1275,7 +1276,7 @@ class TestWorkspaceRoots:
         mount = tmp_path / "mount"
         (mount / "Users" / "bob").mkdir(parents=True)
         roots = workspace_roots(
-            mount=mount, user_id=user_id, conversation_token="tok", talk=True,
+            mount=mount, user_id=user_id, conversation_token="tok",
         )
         assert (mount / "Users").resolve() not in roots
         assert not any(
@@ -1320,7 +1321,7 @@ class TestWorkspaceRoots:
         deferred.mkdir()
         roots = workspace_roots(
             mount=mount, user_id="", deferred_dir=deferred,
-            conversation_token="tok", talk=True,
+            conversation_token="tok", attachments_dir=tmp_path / "att",
         )
         assert roots == [deferred.resolve()]
 
@@ -1335,22 +1336,25 @@ class TestWorkspaceRoots:
         )
         assert all("Channels" not in str(r) for r in roots)
 
-    def test_talk_is_opt_in_and_never_writable(self, tmp_path):
-        """The shared read-only root, so a caller has to ask for it.
+    def test_the_attachments_dir_is_opt_in_and_never_writable(self, tmp_path):
+        """The task's read-only attachment copies, so a caller has to ask.
 
         `env_host_roots` asks on behalf of a skill CLI read; the daemon-side
         callers do not, which is the whole of what keeps their root sets
-        different from each other.
+        different from each other. `{mount}/Talk` is never a root (ISSUE-880).
         """
         from istota.sandbox.host_paths import workspace_roots
 
         mount = tmp_path / "mount"
         (mount / "Users" / "alice").mkdir(parents=True)
-        talk = (mount / "Talk").resolve()
-        assert talk not in workspace_roots(mount=mount, user_id="alice")
-        assert talk in workspace_roots(mount=mount, user_id="alice", talk=True)
-        assert talk not in workspace_roots(
-            mount=mount, user_id="alice", talk=True, writable=True,
+        attachments = tmp_path / "room-attachments"
+        attachments.mkdir()
+        assert attachments.resolve() not in workspace_roots(mount=mount, user_id="alice")
+        roots = workspace_roots(mount=mount, user_id="alice", attachments_dir=attachments)
+        assert attachments.resolve() in roots
+        assert (mount / "Talk").resolve() not in roots
+        assert attachments.resolve() not in workspace_roots(
+            mount=mount, user_id="alice", attachments_dir=attachments, writable=True,
         )
 
     def test_no_mount_leaves_the_deferred_dir_standing_alone(self, tmp_path):
@@ -1383,24 +1387,30 @@ class TestEnvHostRoots:
     def test_it_derives_the_four_roots_the_sandbox_binds(
         self, mount, monkeypatch, tmp_path,
     ):
-        from istota.sandbox.host_paths import env_host_roots
+        from istota.sandbox.host_paths import ATTACHMENTS_DIR_VAR, env_host_roots
 
+        attachments = tmp_path / "room-attachments"
+        attachments.mkdir()
+        monkeypatch.setenv(ATTACHMENTS_DIR_VAR, str(attachments))
         monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "tok1")
         assert set(env_host_roots()) == {
             (tmp_path / "deferred").resolve(),
             (mount / "Users" / "alice").resolve(),
             (mount / "Channels" / "tok1").resolve(),
-            (mount / "Talk").resolve(),
+            attachments.resolve(),
         }
 
-    def test_talk_can_be_dropped_for_a_read_whose_bytes_leave_the_task(
-        self, mount, monkeypatch,
+    def test_attachments_can_be_dropped_for_a_read_whose_bytes_leave_the_task(
+        self, mount, monkeypatch, tmp_path,
     ):
-        from istota.sandbox.host_paths import env_host_roots
+        from istota.sandbox.host_paths import ATTACHMENTS_DIR_VAR, env_host_roots
 
+        attachments = tmp_path / "room-attachments"
+        attachments.mkdir()
+        monkeypatch.setenv(ATTACHMENTS_DIR_VAR, str(attachments))
         monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "tok1")
-        assert (mount / "Talk").resolve() not in env_host_roots(talk=False)
-        assert (mount / "Users" / "alice").resolve() in env_host_roots(talk=False)
+        assert attachments.resolve() not in env_host_roots(attachments=False)
+        assert (mount / "Users" / "alice").resolve() in env_host_roots(attachments=False)
 
 
 class TestPathUnderRoots:
@@ -1429,12 +1439,17 @@ class TestTheFourCallersRootSets:
     """
 
     def test_the_skill_cli_read_gets_all_four(self, mount, monkeypatch, tmp_path):
+        from istota.sandbox.host_paths import ATTACHMENTS_DIR_VAR
+
+        attachments = tmp_path / "room-attachments"
+        attachments.mkdir()
+        monkeypatch.setenv(ATTACHMENTS_DIR_VAR, str(attachments))
         monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "tok1")
         assert set(allowed_host_roots(writable=False)) == {
             (tmp_path / "deferred").resolve(),
             (mount / "Users" / "alice").resolve(),
             (mount / "Channels" / "tok1").resolve(),
-            (mount / "Talk").resolve(),
+            attachments.resolve(),
         }
 
     def test_memory_search_index_file_drops_both_shared_roots(
@@ -1596,7 +1611,8 @@ class TestTheFourCallersRootSets:
 _EQUIVALENCE_CASES = [
     ("own workspace", "Users/alice/labs.csv", "alice", "tok1", True),
     ("own channel", "Channels/tok1/labs.csv", "alice", "tok1", True),
-    ("talk", "Talk/labs.csv", "alice", "tok1", True),
+    # The old ceiling admitted it; ISSUE-880 removed the root.
+    ("talk", "Talk/labs.csv", "alice", "tok1", False),
     ("another user", "Users/bob/labs.csv", "alice", "tok1", False),
     ("another channel", "Channels/tok2/labs.csv", "alice", "tok1", False),
     ("the users root itself", "Users/labs.csv", "alice", "tok1", False),
@@ -1653,7 +1669,7 @@ class TestTheConsolidationNeverWidens:
         target = self._target(bed, tmp_path, relative)
         roots = workspace_roots(
             mount=mount, user_id=user_id, deferred_dir=deferred,
-            conversation_token=token, talk=True,
+            conversation_token=token,
         )
         got = path_under_roots(target.resolve(), roots)
         assert got is expected, f"{name}: {target} against {roots}"
@@ -1706,11 +1722,11 @@ class TestTheConsolidationNeverWidens:
 
         deferred = tmp_path / "deferred"
         monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "tok1")
-        assert set(env_host_roots(talk=False)) == set(
+        assert set(env_host_roots(attachments=False)) == set(
             _legacy_indexable_roots(mount, deferred, "alice", "tok1"),
         )
         monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "../..")
-        assert set(env_host_roots(talk=False)) < set(
+        assert set(env_host_roots(attachments=False)) < set(
             _legacy_indexable_roots(mount, deferred, "alice", "../.."),
         )
 
@@ -1725,7 +1741,7 @@ class TestTheConsolidationNeverWidens:
         link = mount / "Users" / "alice" / "link.csv"
         link.symlink_to(secret)
         roots = workspace_roots(
-            mount=mount, user_id="alice", deferred_dir=deferred, talk=True,
+            mount=mount, user_id="alice", deferred_dir=deferred,
         )
         assert path_under_roots(link, roots)
         assert not path_under_roots(link.resolve(), roots)

@@ -1415,14 +1415,15 @@ class TestNativeFsRoots:
         assert (mount / "Users" / "alice").resolve() in write
         assert (mount / "Channels" / "room123").resolve() in write
 
-    def test_talk_is_read_only(self, sandbox_config, make_sandbox_task):
+    def test_talk_is_not_a_root_on_the_mount(self, sandbox_config, make_sandbox_task):
+        # ISSUE-880: the flat folder holds every conversation's files.
         sandbox_config.nextcloud.url = "https://cloud.example.com"
         sandbox_config.workspace_mount_path = sandbox_config.workspace_path
         (sandbox_config.workspace_path / "Talk").mkdir()
         task = make_sandbox_task()
         read, write, _ = self._roots(sandbox_config, task, False)
         talk = (sandbox_config.workspace_path / "Talk").resolve()
-        assert talk in read
+        assert talk not in read
         assert talk not in write
 
     def test_talk_not_bound_on_local_workspace(self, sandbox_config, make_sandbox_task):

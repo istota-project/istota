@@ -20,7 +20,7 @@ Two rules decide where a source may be:
   ``{temp_dir}/whatsapp-media/<name>`` and
   ``{temp_dir}/attachments_<id>/<name>`` (the WhatsApp and email copies kept
   when the inbox upload fails), and any directory the caller names in
-  ``extra`` (a restricted task's own ``room-attachments`` copy). None of these
+  ``extra`` (a task's own ``room-attachments`` copy). None of these
   is bound into any sandbox, they are matched by spelling only, and the same
   walk applies below them. The bare relative ``Talk/<name>`` is refused:
   ``download_talk_attachments`` returns it only when it found the file
