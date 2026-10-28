@@ -241,7 +241,7 @@ src/istota/
 │   ├── fixed_get.py      # One credentialed GET to a fixed URL, no redirect, no proxy: the usage poll and Anthropic's model list → leaf-modules.md
 │   ├── rate_limit.py     # A sliding-window hit counter per key, in bounded memory, for public routes with no table behind them → leaf-modules.md
 │   └── unix_connect.py   # Connecting to a Unix socket without following a symlink at its leaf → leaf-modules.md
-├── briefings/            # Personal/group briefings — source grants, generation, edition/delivery ledger, reader/settings routes and migration → briefings.md
+├── briefings/            # Personal/group briefings — source grants, generation, edition/delivery ledger, reader/settings routes (group operations in `group_service.py`, HTTP-free, so a skill CLI can call them) and migration → briefings.md
 ├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML, image_dedupe
 ├── health/               # Body stats, bloodwork, biomarker trends, encounters, immunizations, Garmin, OCR
 └── location/             # Per-user location.db module (pings, places, visits, state, migration)
