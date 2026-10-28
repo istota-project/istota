@@ -1,23 +1,35 @@
 """The pinned CLI on the tool harness, in the built image.
 
-The CLI-brain spec runs `claude` outside the sandbox with every built-in that
-acts on the machine switched off and its tools served by one MCP server. Each
-case here runs one real `ClaudeCodeBrain` attempt in the image
+The CLI-brain specs run `claude` outside the sandbox with every built-in that
+acts on the machine switched off and its tools served by MCP. Since #862 the
+CLI spawns its own tool server: `python -I -m istota.sandbox.tool_launcher`
+from the harness's `mcp_config.json`, which clears the CLI's environment,
+reports its pid down a FIFO and execs the tool server with `--mcp --hello`;
+with WebFetch granted a second server, `istota_web`, runs beside it. Each case
+here runs one real `ClaudeCodeBrain` attempt in the image
 (`cli_harness_run.py`): the real argv from `build_claude_cli_flags`, the real
-adapter, bridge and tool server, the pinned CLI, and a bogus credential. The
+harness, launcher and servers, the pinned CLI, and a bogus credential. The
 CLI emits `system/init` before its first API request, then ends on "Invalid
-API key", so no tool call runs and three things are read:
+API key", so no tool call runs and these are read:
 
 - the init frame lists exactly the harness built-ins plus
-  `mcp__istota__<name>` for the six offered tools, and one MCP server,
-  `istota`, connected, and the brain's own init check passed;
+  `mcp__istota__<name>` for the six offered tools (and
+  `mcp__istota_web__WebFetch` with WebFetch), and the servers the harness
+  wrote, each connected; the brain's own init check passed; the launcher's
+  pid was reported and its reap after it;
 - under `strace`, the unwrapped CLI runs no real `git`: every exec is the
-  CLI, its MCP adapter, the harness's stub `git` or the bundled rg; and in its
-  cwd, which is the tool server's cwd and so the user's workspace, it and its
-  children only stat, list (rg), and watch (inotify), with nothing opened
-  under `.claude/`;
+  CLI, the launcher and the tool server it execs, the WebFetch server, the
+  harness's stub `git` or the bundled rg; and in its cwd, which is the tool
+  server's cwd and so the user's workspace, the CLI and every child but the
+  tool server only stat, list (rg), and watch (inotify), with nothing opened
+  under `.claude/`. The tool server is the sandboxed side, whose cwd that is
+  by design;
 - nothing appears under `/tmp`: the CLI's `claude-<uid>/` and `cc-socks/`
-  follow the per-harness `TMPDIR`.
+  follow the per-harness `TMPDIR`;
+- under the run contract's seccomp grant, a direct caller's shape: the tool
+  server is wrapped by `build_daemon_sandbox`'s real bwrap, reads its hello
+  from the daemon control dir bound read-only, and the reported pid is
+  bwrap's.
 
 strace is not in the shipped image; `strace.Dockerfile` adds it on top, for
 this file only.
@@ -27,8 +39,11 @@ through `ISTOTA_TEST_CLI_HARNESS_CONTROL` (an `ISTOTA_TEST_*` name, which the
 suite's env scrub keeps):
 
 - `drop-tools`: `--tools` out of the argv. The deny list alone leaves
-  SendMessage, ListAgents, EnterWorktree and others in the frame; both init cases
-  go red.
+  SendMessage, ListAgents, EnterWorktree and others in the frame; the init
+  cases go red.
+- `skip-report`: a launcher that execs the tool server without reporting its
+  pid. The harness keeps the gate shut and fails the attempt ("the tool
+  server never reported its pid"); the init cases go red.
 - `stub-off`: the stub `git` left off the CLI's PATH; the image's real git
   runs in the cwd and the cwd case goes red.
 - `open-cwd`: a `CLAUDE.md` in the cwd, `--setting-sources user` and
@@ -46,7 +61,7 @@ from pathlib import Path
 
 import pytest
 
-from .conftest import BuiltImage, assert_ok, build_image, run_in
+from .conftest import REPO, BuiltImage, assert_ok, build_image, run_in
 
 pytestmark = pytest.mark.image
 
@@ -58,6 +73,7 @@ MOUNT = "/stub"
 DRIVER = "cli_harness_run.py"
 
 MCP_SERVER = "istota"
+WEB_SERVER = "istota_web"
 OFFERED = ("Bash", "Edit", "Glob", "Grep", "Read", "Write")
 
 # Calls that look at a path without opening what is there.
@@ -84,12 +100,26 @@ def strace_image(istota_image) -> BuiltImage:
     )
 
 
-_RUNS: dict[tuple[str, str], dict] = {}
+#: What bwrap needs from the run contract (`tests/image/test_upgrade.py`'s
+#: `_RUN_CONTRACT`), and the capabilities `setpriv` needs to drop to 10001.
+_BWRAP_GRANT = [
+    "--security-opt", f"seccomp={REPO / 'docker' / 'istota' / 'seccomp-istota.json'}",
+    "--security-opt", "apparmor=istota",
+    "--security-opt", "systempaths=unconfined",
+    "--security-opt", "no-new-privileges:true",
+    "--cap-drop", "ALL",
+    "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "SETPCAP",
+]
+
+_RUNS: dict[tuple, dict] = {}
 
 
-def _run(image: BuiltImage, builtins: tuple[str, ...]) -> dict:
+def _run(
+    image: BuiltImage, builtins: tuple[str, ...], *,
+    web_fetch: bool = False, wrap: str = "", strace: bool = True,
+) -> dict:
     control = os.environ.get(CONTROL_ENV, "")
-    key = (",".join(builtins), control)
+    key = (",".join(builtins), web_fetch, wrap, strace, control)
     if key in _RUNS:
         return _RUNS[key]
     script = (
@@ -100,8 +130,15 @@ def _run(image: BuiltImage, builtins: tuple[str, ...]) -> dict:
     result = run_in(
         image,
         ["-c", script],
-        env={"HARNESS_BUILTINS": key[0], "HARNESS_CONTROL": control},
+        env={
+            "HARNESS_BUILTINS": key[0],
+            "HARNESS_WEB_FETCH": "1" if web_fetch else "",
+            "HARNESS_WRAP": wrap,
+            "HARNESS_STRACE": "1" if strace else "0",
+            "HARNESS_CONTROL": control,
+        },
         volumes=[(HERE, MOUNT, "ro")],
+        docker_args=_BWRAP_GRANT if wrap == "bwrap" else None,
     )
     out = assert_ok(result, "the harness driver")
     report = json.loads(out.strip().splitlines()[-1])
@@ -109,8 +146,11 @@ def _run(image: BuiltImage, builtins: tuple[str, ...]) -> dict:
     return report
 
 
-def _expected_tools(builtins: tuple[str, ...]) -> list[str]:
-    return sorted([*builtins, *(f"mcp__{MCP_SERVER}__{name}" for name in OFFERED)])
+def _expected_tools(builtins: tuple[str, ...], *, web_fetch: bool = False) -> list[str]:
+    tools = [*builtins, *(f"mcp__{MCP_SERVER}__{name}" for name in OFFERED)]
+    if web_fetch:
+        tools.append(f"mcp__{WEB_SERVER}__WebFetch")
+    return sorted(tools)
 
 
 def _calls(report: dict):
@@ -178,15 +218,57 @@ def _rg_family(report: dict) -> set[int]:
     return family
 
 
-def _assert_init(report: dict, builtins: tuple[str, ...]) -> None:
+def _succeeded(line: str) -> bool:
+    return re.search(r"\)\s+=\s+-1\s", line) is None
+
+
+def _server_family(report: dict) -> set[int]:
+    """The tool server: the reported pid from the moment the launcher exec'd
+    `istota.sandbox.tool_server`, and every thread or child it cloned after.
+    The launcher's own life before that exec (same pid) is not included: it
+    runs as the CLI's child, before any sandbox, and is held to the CLI's rule.
+    """
+    reported = [pid for pid in report["pids"] if pid]
+    if not reported:
+        return set()
+    server = reported[0]
+    family: set[int] = set()
+    for line in report["strace"]:
+        pid = _pid(line)
+        if pid is None:
+            continue
+        call = _CALL.match(line)
+        if (
+            pid == server and call and call.group(1) == "execve"
+            and "istota.sandbox.tool_server" in line and _succeeded(line)
+        ):
+            family.add(pid)
+            continue
+        cloned = _CLONED.match(line)
+        if cloned and pid in family:
+            family.add(int(cloned.group(2)))
+    return family
+
+
+def _assert_init(report: dict, builtins: tuple[str, ...], *, web_fetch: bool = False) -> None:
+    # The brain's own checks passed and the attempt ended on the bogus key:
+    # the init check, and the harness's (a reported, authorized tool server).
+    assert "did not load the tool set" not in report["result_text"], report["result_text"]
+    assert "never reported its pid" not in report["result_text"], report["result_text"]
     frame = report["init"]
     assert frame is not None, report
-    assert sorted(frame.get("tools") or []) == _expected_tools(builtins), frame.get("tools")
-    servers = [(s.get("name"), s.get("status")) for s in frame.get("mcp_servers") or []]
-    assert servers == [(MCP_SERVER, "connected")]
-    # The brain's own check passed and the attempt ended on the bogus key.
-    assert "did not load the tool set" not in report["result_text"], report["result_text"]
-    assert report["pids"] and report["pids"][-1] == 0
+    assert sorted(frame.get("tools") or []) == _expected_tools(builtins, web_fetch=web_fetch), (
+        frame.get("tools")
+    )
+    servers = sorted((s.get("name"), s.get("status")) for s in frame.get("mcp_servers") or [])
+    expected = [(MCP_SERVER, "connected")] + ([(WEB_SERVER, "connected")] if web_fetch else [])
+    assert servers == sorted(expected)
+    # One tool server reported, then its reap; never the CLI, never istota_web.
+    assert len(report["pids"]) == 2 and report["pids"][0] > 0 and report["pids"][1] == 0, (
+        report["pids"]
+    )
+    # Close removed every file the harness wrote.
+    assert report["harness_files"] == [], report["harness_files"]
 
 
 class TestTheInitFrameListsOnlyWhatTheHarnessAskedFor:
@@ -197,6 +279,12 @@ class TestTheInitFrameListsOnlyWhatTheHarnessAskedFor:
         """A guest turn has no WebSearch; `--tools ""` is the CLI's "no built-ins"."""
         _assert_init(_run(strace_image, ()), ())
 
+    def test_webfetch_granted_is_a_second_server(self, strace_image):
+        """The pinned CLI accepts two servers and names the second one's tool
+        `mcp__istota_web__WebFetch`, which the init check expects."""
+        report = _run(strace_image, ("WebSearch",), web_fetch=True)
+        _assert_init(report, ("WebSearch",), web_fetch=True)
+
 
 class TestWhatTheUnwrappedCliTouches:
     # On 2.1.296 the unwrapped CLI runs `git` three times in its cwd at
@@ -205,14 +293,17 @@ class TestWhatTheUnwrappedCliTouches:
     # The cwd is the tool server's, a tree the model can write, so the harness
     # puts a stub `git` (exit 128) first on the CLI's PATH and sets
     # CLAUDE_CODE_DISABLE_CRON=1. This case holds the CLI to that: every exec
-    # is the CLI, its MCP adapter, the stub or the bundled rg, and in the cwd
-    # it only stats, lists (rg) and watches.
+    # is the CLI, the launcher, the tool server it execs, the WebFetch server,
+    # the stub or the bundled rg, and in the cwd everything but the tool server
+    # only stats, lists (rg) and watches. The run grants WebFetch, so the
+    # unwrapped WebFetch server is held to the CLI's rule too.
     def test_it_runs_no_real_git_and_only_looks_at_its_cwd(self, strace_image):
-        report = _run(strace_image, ("WebSearch",))
+        report = _run(strace_image, ("WebSearch",), web_fetch=True)
         assert report["strace_lines"] > 0, "strace recorded nothing; the check would pass on no data"
         cwd = report["cwd"]
         assert len(report["harness_dirs"]) == 1, report["harness_dirs"]
         stub = f"{report['harness_dirs'][0]}/bin/git"
+        pythons = {report["python"], report["server_python"]}
 
         execs = _execs(report)
         shown = "\n".join(line for _, _, _, line in execs)
@@ -223,21 +314,34 @@ class TestWhatTheUnwrappedCliTouches:
         assert any(path == stub for _, path, _, _ in ran), "the stub was never run:\n" + shown
         rg_pids = _rg_family(report)
         assert rg_pids, "the bundled rg was never run; the allowlist below would be vacuous:\n" + shown
+        server_pids = _server_family(report)
+        assert server_pids, "the tool server's exec was not seen:\n" + shown
+        for module in ("istota.sandbox.tool_launcher", "istota.brain._web_fetch_mcp"):
+            assert any(path in pythons and module in line for _, path, _, line in ran), (
+                f"{module} was never run:\n" + shown
+            )
         unexpected = [
             line for pid, path, _, line in ran
             if not (
                 path == stub
                 or _is_bundled_rg(path, line)
                 or path == report["real_claude"]
-                or (path == report["python"] and "istota.sandbox.mcp_adapter" in line)
+                or (path in pythons and (
+                    "istota.sandbox.tool_launcher" in line
+                    or "istota.sandbox.tool_server" in line
+                    or "istota.brain._web_fetch_mcp" in line
+                ))
             )
+            # What the tool server itself runs is the model's Bash, in the
+            # sandbox on a real deployment; no call runs here anyway.
+            and pid not in server_pids
         ]
         assert unexpected == [], "\n".join(unexpected)
 
         opened = []
         stats = 0
         for syscall, path, line in _calls(report):
-            if syscall == "execve":
+            if syscall == "execve" or _pid(line) in server_pids:
                 continue
             under = path == cwd or path.startswith(cwd + "/") or (
                 not path.startswith("/") and ("AT_FDCWD" in line or not syscall.endswith("at"))
@@ -274,3 +378,27 @@ class TestWhatTheUnwrappedCliTouches:
         ]
         assert created == [], "\n".join(created)
         assert report["harness_dirs"], "no harness directory was made"
+
+
+class TestTheToolServerUnderBwrap:
+    """A direct caller's shape (health OCR, the code reviewer) under the run
+    contract's seccomp grant: `build_daemon_sandbox`'s NATIVE wrap around the
+    tool server, the CLI spawning the launcher, the launcher exec'ing a real
+    bwrap, the server reading its hello and gate from the daemon control dir
+    bound read-only. No strace here: the question is whether the wrapped
+    server comes up for the pinned CLI, not what the CLI touches."""
+
+    def test_the_wrapped_server_connects_and_bwrap_is_what_reports(self, istota_image):
+        report = _run(istota_image, ("WebSearch",), web_fetch=True, wrap="bwrap", strace=False)
+        _assert_init(report, ("WebSearch",), web_fetch=True)
+        assert report["comms"] == ["bwrap"], report["comms"]
+        assert len(report["wrapped"]) == 1, report["wrapped"]
+        argv = report["wrapped"][0]
+        control = report["control_dir"]
+        assert control and "--ro-bind" in argv
+        binds = [argv[i + 1:i + 3] for i, arg in enumerate(argv) if arg == "--ro-bind"]
+        assert [control, control] in binds, argv
+        assert "--die-with-parent" in argv
+        assert any("istota.sandbox.tool_server" in arg for arg in argv)
+        # release_daemon_sandbox removed the control dir with the hello in it.
+        assert report["control_dir_left"] is False
