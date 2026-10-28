@@ -81,6 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A message containing `@` followed by a file path can no longer pull that file into a model call. The `claude` CLI attaches any file a prompt names that way, and the daemon's own text-only model calls, such as conversation triage, the sleep cycle and shared briefing blocks, put other people's text in the prompt and run with the daemon's file access. Every `claude` call the daemon makes now runs with attachments turned off.
+
 - A scheduled job with `target = "whatsapp"` or `target = "sms"` no longer logs on every cron sync that its target will be dropped; both deliver to the user's own phone room. It now warns only when the job really is dropped: that transport is off on the deployment, or the target names a WhatsApp group, which a scheduled job cannot post into.
 
 - A shared briefing block created or edited on the briefings settings page now runs on its schedule without a restart. Before, a new block ran only through Run now, and an edited one kept its old definition on its schedule until the daemon restarted.

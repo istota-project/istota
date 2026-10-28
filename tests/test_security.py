@@ -22,6 +22,7 @@ from istota.executor import (
     _PROXY_LOOKUP_BLOCKED,
     _SHELL_STARTUP_ENV_VARS,
     CLAUDE_RUNTIME_ENV_VARS,
+    MODEL_CLI_SWITCHES,
     _split_credential_env,
     build_allowed_tools,
     build_clean_env,
@@ -194,11 +195,15 @@ class TestBuildCleanEnv:
             clean = build_clean_env(config)
             cli = build_model_cli_env(config)
 
+        # The CLI's own off-switches are `CLAUDE_`-prefixed and carry a "1".
         def suspicious(env):
             return {
                 k for k in env
-                if k.upper().startswith("CLAUDE")
-                or any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
+                if k not in MODEL_CLI_SWITCHES
+                and (
+                    k.upper().startswith("CLAUDE")
+                    or any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
+                )
             }
 
         assert suspicious(clean) == set()
@@ -1124,6 +1129,25 @@ class TestBuildModelCliEnv:
             env = build_model_cli_env(config)
         assert "ANTHROPIC_API_KEY" not in env
 
+    def test_prompt_attachments_are_off(self):
+        """#861: `claude -p` reads an `@path` in the prompt text and attaches
+        the file. These callers put other people's text in the prompt and run
+        the CLI with the daemon's filesystem view."""
+        with patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=True):
+            env = build_model_cli_env(Config())
+        assert env["CLAUDE_CODE_DISABLE_ATTACHMENTS"] == "1"
+
+    def test_neither_the_daemon_env_nor_a_passthrough_turns_them_back_on(self):
+        config = Config(security=SecurityConfig(
+            passthrough_env_vars=["CLAUDE_CODE_DISABLE_ATTACHMENTS"],
+        ))
+        with patch.dict(os.environ, {
+            "PATH": "/usr/bin",
+            "CLAUDE_CODE_DISABLE_ATTACHMENTS": "0",
+        }, clear=True):
+            env = build_model_cli_env(config)
+        assert env["CLAUDE_CODE_DISABLE_ATTACHMENTS"] == "1"
+
 
 class TestClaudeCliTriageEnv:
     """ISSUE-232 — the context-triage `claude -p` spawn was the one `claude`
@@ -1176,6 +1200,12 @@ class TestClaudeCliTriageEnv:
         })
         assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-parent"
         assert "ANTHROPIC_API_KEY" not in env
+
+    def test_child_runs_with_prompt_attachments_off(self):
+        """Triage's prompt is conversation history, so an `@path` a room
+        member wrote would otherwise attach a daemon-readable file (#861)."""
+        env = self._triage_env({"PATH": "/usr/bin"})
+        assert env["CLAUDE_CODE_DISABLE_ATTACHMENTS"] == "1"
 
     def test_child_keeps_what_it_needs_to_run(self):
         env = self._triage_env({"PATH": "/usr/bin", "HOME": "/home/test"})
