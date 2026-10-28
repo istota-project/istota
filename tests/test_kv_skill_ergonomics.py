@@ -15,6 +15,7 @@ import os
 import pytest
 
 from istota import db
+from istota.skills import kv as kv_skill
 from istota.skills.kv import main as kv_main
 
 
@@ -381,6 +382,7 @@ class TestSetValueFile:
         payload.write_text('"x"')
         _env(monkeypatch, db_path, deferred=tmp_path)
         monkeypatch.delenv("ISTOTA_CONFIG_PATH", raising=False)
+        monkeypatch.setattr(kv_skill, "calling_turn_passes", lambda user_id: True)
         with pytest.raises(SystemExit):
             kv_main(["set", "ns", "k", "--value-file", str(payload), "--shared"])
         out = json.loads(capsys.readouterr().out)

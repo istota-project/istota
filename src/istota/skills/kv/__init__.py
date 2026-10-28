@@ -26,6 +26,7 @@ import sys
 from istota.sandbox.kv_namespaces import is_reserved_namespace
 from istota.skills._cli import fail as _fail, parse_and_resolve, run_skill_cli
 from istota.skills._group_access import group_access_denied, group_refusal
+from istota.skills._turn_access import calling_turn_passes
 from istota.skills._hostpath import READ, ReadRefused, host_path, read_resolved_text
 from istota.lib.untrusted import frame_untrusted
 
@@ -758,6 +759,23 @@ def main(argv=None):
             _fail("--group and --shared cannot be combined")
         if group_access_denied(group):
             _fail(group_refusal(group))
+    # Shared KV reaches every user, a trusted shared block unfenced, so a turn
+    # somebody else wrote (a correspondent's mail on an email thread room runs
+    # as the host) may not write it. `--group` needs no such check: a room with
+    # a non-member reader resolves no groups. The deferred replay re-checks.
+    if (args.command in ("set", "delete") and getattr(args, "shared", False)
+            and not calling_turn_passes(_user_id())):
+        if not os.environ.get("ISTOTA_TASK_ID", ""):
+            _fail(
+                "shared KV can only be changed from a task; outside one, use "
+                "the operator CLI `istota kv`",
+                reason="not_owner_turn",
+            )
+        _fail(
+            "shared KV can only be changed on the user's own turn; the message "
+            "being answered was not written by them",
+            reason="not_owner_turn",
+        )
     commands = {
         "get": cmd_get,
         "set": cmd_set,
