@@ -15,6 +15,9 @@ def _shared_env(db_path, monkeypatch):
     monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
     monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
+    with db.get_db(db_path) as conn:
+        task_id = db.create_task(conn, prompt="t", user_id="alice")
+    monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
     return db_path
 
 
@@ -102,11 +105,13 @@ class TestSharedDeferredWrite:
         monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
         monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(tmp_path))
-        monkeypatch.setenv("ISTOTA_TASK_ID", "77")
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="t", user_id="alice")
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
         kv_main(["set", "ns", "k", '"v"', "--shared"])
         out = json.loads(capsys.readouterr().out)
         assert out["deferred"] is True
-        ops = json.loads((tmp_path / "task_77_kv_ops.json").read_text())
+        ops = json.loads((tmp_path / f"task_{task_id}_kv_ops.json").read_text())
         assert ops[0]["scope"] == "shared"
 
     def test_set_user_omits_scope(self, db_path, tmp_path, capsys, monkeypatch):
@@ -181,3 +186,82 @@ class TestSharedStatus:
         out = json.loads(capsys.readouterr().out)
         assert out["status"] == "ok"
         assert out["can_write_shared"] is False
+
+
+def _correspondents_turn(monkeypatch, db_path, user_id="alice"):
+    """A task answering mail somebody else wrote, as an email thread room runs it."""
+    with db.get_db(db_path) as conn:
+        task_id = db.create_task(conn, prompt="hi", user_id=user_id, source_type="web")
+        token = db.create_web_chat_room(conn, user_id, "general").token
+        db.add_message(conn, token, role="user", body="hi", origin_surface="web",
+                       task_id=task_id, author_label="someone@elsewhere.example")
+    monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+    return task_id
+
+
+class TestSharedWritesNeedTheUsersOwnTurn:
+    @pytest.mark.parametrize("argv", [
+        ["set", "ns", "k", '"evil"', "--shared"],
+        ["delete", "ns", "k", "--shared"],
+    ], ids=["set", "delete"])
+    def test_a_correspondents_turn_is_refused(self, argv, _shared_env, db_path, capsys, monkeypatch):
+        with db.get_db(db_path) as conn:
+            db.shared_kv_set(conn, "ns", "k", '"orig"', "alice")
+        _patch_config(monkeypatch, db_path, {"alice"})
+        _correspondents_turn(monkeypatch, db_path)
+
+        with pytest.raises(SystemExit) as exc:
+            kv_main(argv)
+
+        assert exc.value.code == 1
+        out = json.loads(capsys.readouterr().out)
+        assert out["reason"] == "not_owner_turn"
+        with db.get_db(db_path) as conn:
+            assert db.shared_kv_get(conn, "ns", "k")["value"] == '"orig"'
+
+    def test_a_correspondents_turn_queues_no_deferred_op(self, db_path, tmp_path, capsys, monkeypatch):
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(tmp_path))
+        task_id = _correspondents_turn(monkeypatch, db_path)
+
+        with pytest.raises(SystemExit):
+            kv_main(["set", "ns", "k", '"evil"', "--shared"])
+
+        assert json.loads(capsys.readouterr().out)["reason"] == "not_owner_turn"
+        assert not (tmp_path / f"task_{task_id}_kv_ops.json").exists()
+
+    def test_no_task_is_refused(self, _shared_env, db_path, capsys, monkeypatch):
+        _patch_config(monkeypatch, db_path, {"alice"})
+        monkeypatch.delenv("ISTOTA_TASK_ID", raising=False)
+
+        with pytest.raises(SystemExit):
+            kv_main(["set", "ns", "k", '"x"', "--shared"])
+
+        assert json.loads(capsys.readouterr().out)["reason"] == "not_owner_turn"
+
+    def test_the_admins_own_turn_in_a_shared_room_writes(self, _shared_env, db_path, capsys, monkeypatch):
+        _patch_config(monkeypatch, db_path, {"alice"})
+        with db.get_db(db_path) as conn:
+            room = db.create_web_chat_room(conn, "alice", "Family")
+            db.add_web_room_member(conn, room.token, "bob")
+            task_id = db.create_task(conn, prompt="hi", user_id="alice", source_type="web",
+                                     conversation_token=room.token)
+            db.add_message(conn, room.token, role="user", body="hi", origin_surface="web",
+                           task_id=task_id, author_user_id="alice")
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+
+        kv_main(["set", "ns", "k", '"x"', "--shared"])
+
+        assert json.loads(capsys.readouterr().out)["status"] == "ok"
+        with db.get_db(db_path) as conn:
+            assert db.shared_kv_get(conn, "ns", "k")["value"] == '"x"'
+
+    def test_a_correspondents_turn_still_writes_the_users_own_kv(self, _shared_env, db_path, capsys, monkeypatch):
+        _correspondents_turn(monkeypatch, db_path)
+
+        kv_main(["set", "ns", "k", '"mine"'])
+
+        assert json.loads(capsys.readouterr().out)["status"] == "ok"
+        with db.get_db(db_path) as conn:
+            assert db.kv_get(conn, "alice", "ns", "k")["value"] == '"mine"'

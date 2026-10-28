@@ -44,6 +44,7 @@ import uuid
 from istota.briefings.models import TEXT_FILE_MAX_BYTES
 from istota.skills._cli import error_envelope, fail, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import READ, ReadRefused, host_path, read_resolved_text
+from istota.skills._turn_access import calling_turn_passes
 
 logger = logging.getLogger(__name__)
 
@@ -88,31 +89,6 @@ def _writer_refusal(config, user_id: str) -> dict | None:
     )
 
 
-def _calling_turn_passes(user_id: str, check=None) -> bool:
-    """Whether the calling task answers ``user_id``'s own turn, ancestors included.
-
-    ``check(conn, task)``, when given, must also hold. Anything unanswerable
-    (no task, no database, a read error) is False.
-    """
-    from pathlib import Path
-
-    from istota import db
-    from istota.sandbox.skill_proxy import _owners_own_turn
-
-    task_id = os.environ.get("ISTOTA_TASK_ID", "")
-    db_path = _db_path()
-    if not task_id.isdigit() or not Path(db_path).is_file():
-        return False
-    try:
-        with db.get_db(Path(db_path)) as conn:
-            if not _owners_own_turn(conn, int(task_id), user_id):
-                return False
-            return check is None or bool(check(conn, db.get_task(conn, int(task_id))))
-    except Exception as exc:  # noqa: BLE001 — an unreadable task refuses
-        logger.warning("briefings_config: could not read the calling task: %s", exc)
-        return False
-
-
 def _own_turn_refusal(user_id: str) -> dict | None:
     """Refuse a write on a turn somebody else wrote.
 
@@ -120,7 +96,7 @@ def _own_turn_refusal(user_id: str) -> dict | None:
     full reach; it must not change a schedule or a shared block, which reaches
     every user unfenced. An admin's own turn in a shared room passes.
     """
-    if _calling_turn_passes(user_id):
+    if calling_turn_passes(user_id):
         return None
     return error_envelope(
         "this change can only be made on the user's own turn; the message being "
@@ -627,7 +603,7 @@ def _private_chat_refusal(user_id: str) -> dict | None:
             is_group_chat=bool(task.is_group_chat),
         )
 
-    if _calling_turn_passes(user_id, reads_privately):
+    if calling_turn_passes(user_id, reads_privately):
         return None
     return error_envelope(
         "group briefings are read and changed from the user's private chat only; "
