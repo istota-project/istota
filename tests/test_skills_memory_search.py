@@ -1012,6 +1012,101 @@ class TestKgSkillDeferred:
         assert fact.valid_until == "2026-04-08"
 
 
+class TestKgMutationsAreScopedToTheCaller:
+    """ISSUE-875: a task can end or delete only its own user's facts.
+
+    Fact ids are sequential, so an unscoped `WHERE id = ?` let any task
+    reach another user's facts by counting. Both paths are covered: the
+    direct CLI (identity from `ISTOTA_USER_ID`) and the deferred replay
+    (identity from the task row, never the model-written file).
+    """
+
+    def _seed(self, db_path):
+        from istota import db
+        from istota.memory.knowledge_graph import add_fact, ensure_table
+
+        _init_db(db_path).close()
+        with db.get_db(db_path) as conn:
+            ensure_table(conn)
+            alice_a = add_fact(conn, "alice", "alice", "lives_in", "lisbon")
+            alice_b = add_fact(conn, "alice", "alice", "knows", "python")
+            bob_a = add_fact(conn, "bob", "bob", "lives_in", "porto")
+            bob_b = add_fact(conn, "bob", "bob", "knows", "rust")
+        return alice_a, alice_b, bob_a, bob_b
+
+    def _assert_alice_intact(self, db_path, alice_a, alice_b):
+        from istota import db
+        from istota.memory.knowledge_graph import get_fact, get_fact_history
+
+        with db.get_db(db_path) as conn:
+            assert get_fact(conn, alice_a).valid_until is None
+            assert get_fact(conn, alice_b) is not None
+            assert {r.op for r in get_fact_history(conn, "alice")} == {"insert"}
+
+    def test_direct_path_refuses_another_users_fact(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "test.db"
+        alice_a, alice_b, bob_a, bob_b = self._seed(db_path)
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "bob")
+        monkeypatch.setenv("ISTOTA_TASK_ID", "55")
+        monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
+
+        inv = MagicMock()
+        inv.fact_id = alice_a
+        inv.ended = "2026-04-08"
+        assert cmd_invalidate_fact(inv)["status"] == "error"
+        dele = MagicMock()
+        dele.fact_id = alice_b
+        assert cmd_delete_fact(dele)["status"] == "error"
+        self._assert_alice_intact(db_path, alice_a, alice_b)
+
+        inv.fact_id = bob_a
+        assert cmd_invalidate_fact(inv) == {"status": "ok", "fact_id": bob_a}
+        dele.fact_id = bob_b
+        assert cmd_delete_fact(dele) == {"status": "ok", "fact_id": bob_b}
+
+        from istota import db
+        from istota.memory.knowledge_graph import get_fact, get_fact_history
+        with db.get_db(db_path) as conn:
+            assert get_fact(conn, bob_a).valid_until == "2026-04-08"
+            assert get_fact(conn, bob_b) is None
+            rows = {r.op: r for r in get_fact_history(conn, "bob")}
+        assert rows["invalidate"].source_task_id == 55
+        assert rows["delete"].source_task_id == 55
+
+    def test_deferred_replay_refuses_another_users_fact(self, tmp_path):
+        from istota import db
+        from istota.config import Config
+        from istota.memory.knowledge_graph import get_fact, get_fact_history
+        from istota.scheduler_deferred import _process_deferred_kg_ops
+
+        db_path = tmp_path / "test.db"
+        alice_a, alice_b, bob_a, bob_b = self._seed(db_path)
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="test", user_id="bob")
+            task = db.get_task(conn, task_id)
+
+        user_temp = tmp_path / "temp" / "bob"
+        user_temp.mkdir(parents=True)
+        (user_temp / f"task_{task_id}_kg_ops.json").write_text(json.dumps([
+            {"op": "invalidate", "fact_id": alice_a, "ended": "2026-04-08"},
+            {"op": "delete", "fact_id": alice_b},
+            {"op": "invalidate", "fact_id": bob_a, "ended": "2026-04-08"},
+            {"op": "delete", "fact_id": bob_b},
+        ]))
+
+        assert _process_deferred_kg_ops(Config(db_path=db_path), task, user_temp) == 2
+        self._assert_alice_intact(db_path, alice_a, alice_b)
+
+        with db.get_db(db_path) as conn:
+            assert get_fact(conn, bob_a).valid_until == "2026-04-08"
+            assert get_fact(conn, bob_b) is None
+            rows = {r.op: r for r in get_fact_history(conn, "bob")}
+        assert rows["invalidate"].source_task_id == task_id
+        assert rows["delete"].source_task_id == task_id
+
+
 class TestStatsIncludesKG:
     def test_stats_includes_knowledge_facts(self, tmp_path, monkeypatch):
         db_path = tmp_path / "test.db"

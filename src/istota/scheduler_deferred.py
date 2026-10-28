@@ -1084,6 +1084,14 @@ def _deferred_alert_title(alert_type: str, task_id: int) -> str:
     return f"Note — task #{task_id}"
 
 
+def _log_unmatched_kg_op(op: str, task: db.Task) -> None:
+    # Missing, already ended, or another user's fact: one answer for all three.
+    logger.info(
+        "Deferred KG %s for task %d matched no current fact of user %s",
+        op, task.id, task.user_id,
+    )
+
+
 def _process_deferred_kg_ops(
     config: Config, task: db.Task, user_temp_dir: Path,
 ) -> int:
@@ -1133,13 +1141,22 @@ def _process_deferred_kg_ops(
                     fact_id = entry.get("fact_id")
                     if fact_id is None:
                         continue
-                    kg_invalidate_fact(conn, int(fact_id), ended=entry.get("ended"))
+                    if not kg_invalidate_fact(
+                        conn, task.user_id, int(fact_id),
+                        ended=entry.get("ended"), source_task_id=task.id,
+                    ):
+                        _log_unmatched_kg_op(op, task)
+                        continue
                     count += 1
                 elif op == "delete":
                     fact_id = entry.get("fact_id")
                     if fact_id is None:
                         continue
-                    kg_delete_fact(conn, int(fact_id))
+                    if not kg_delete_fact(
+                        conn, task.user_id, int(fact_id), source_task_id=task.id,
+                    ):
+                        _log_unmatched_kg_op(op, task)
+                        continue
                     count += 1
                 else:
                     logger.warning(

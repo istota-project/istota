@@ -19,6 +19,7 @@ from pathlib import Path
 
 from istota.skills._cli import parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import EGRESS, host_path
+from istota.skills._turn_access import calling_task_id
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -390,9 +391,13 @@ def cmd_invalidate_fact(args) -> dict:
     from istota.memory.knowledge_graph import ensure_table, invalidate_fact
 
     conn = _get_conn()
+    user_id = _get_user_id()
     ensure_table(conn)
 
-    result = invalidate_fact(conn, args.fact_id, ended=args.ended)
+    result = invalidate_fact(
+        conn, user_id, args.fact_id, ended=args.ended,
+        source_task_id=calling_task_id(),
+    )
     conn.commit()
     conn.close()
 
@@ -411,9 +416,10 @@ def cmd_delete_fact(args) -> dict:
     from istota.memory.knowledge_graph import ensure_table, delete_fact
 
     conn = _get_conn()
+    user_id = _get_user_id()
     ensure_table(conn)
 
-    result = delete_fact(conn, args.fact_id)
+    result = delete_fact(conn, user_id, args.fact_id, source_task_id=calling_task_id())
     conn.commit()
     conn.close()
 

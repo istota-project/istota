@@ -51,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The claude CLI's credential is out of the model's reach.** On the `claude_code` brain the CLI now runs outside the sandbox, and every tool it uses runs in the same sandboxed tool server as the native brain's, so on the sandboxed stack no task environment, file or process the model can reach holds the token or API key. Nothing in the sandbox talks to Anthropic any more, so `api.anthropic.com` and `mcp-proxy.anthropic.com` are off the network allowlist. **Upgrade note:** a task that called Anthropic's API from Bash needs `api.anthropic.com:443` in `[security.network] extra_hosts`; `[brain] tool_harness` is gone and is ignored with a warning.
 - An RSS or Atom feed can no longer point the feed poller at a private address. A feed on a local, loopback or internal address, or one that redirects to such an address, is now refused with an error on the feed, and nothing is requested from it. **Upgrade note:** a feed you poll on your own network stops updating until its host is listed in `[feeds] private_hosts`.
+- A task can end or delete only its own user's knowledge-graph facts. Before, a fact id belonging to another user was accepted, so any task could remove facts from someone else's memory. The fact's history now also records which task ended or deleted it.
 
 ### Changed
 
