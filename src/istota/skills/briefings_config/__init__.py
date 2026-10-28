@@ -32,19 +32,20 @@ forwards argv only; a proxied CLI never sees the task's stdin.
 
 Runs host-side through the skill proxy, where the framework database is. The
 identity is ``ISTOTA_USER_ID`` and the gate is ``Config.is_shared_kv_writer``,
-the one the admin routes use, so a blank admins file lets nobody in.
+the one the admin routes use, so a blank admins file lets nobody in. The
+schedule and shared-block writes also need the caller's own turn
+(``_own_turn_refusal``, ``reason: not_owner_turn``).
 """
 
 import logging
 import os
+import uuid
 
+from istota.briefings.models import TEXT_FILE_MAX_BYTES
 from istota.skills._cli import error_envelope, fail, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import READ, ReadRefused, host_path, read_resolved_text
 
 logger = logging.getLogger(__name__)
-
-# Far above any real task prompt; bounds what one call reads into memory.
-MAX_PROMPT_FILE_BYTES = 256 * 1024
 
 
 def _user_id() -> str:
@@ -84,6 +85,47 @@ def _writer_refusal(config, user_id: str) -> dict | None:
     return error_envelope(
         "shared briefing blocks can only be read or changed by an administrator",
         reason="not_a_shared_content_writer",
+    )
+
+
+def _calling_turn_passes(user_id: str, check=None) -> bool:
+    """Whether the calling task answers ``user_id``'s own turn, ancestors included.
+
+    ``check(conn, task)``, when given, must also hold. Anything unanswerable
+    (no task, no database, a read error) is False.
+    """
+    from pathlib import Path
+
+    from istota import db
+    from istota.sandbox.skill_proxy import _owners_own_turn
+
+    task_id = os.environ.get("ISTOTA_TASK_ID", "")
+    db_path = _db_path()
+    if not task_id.isdigit() or not Path(db_path).is_file():
+        return False
+    try:
+        with db.get_db(Path(db_path)) as conn:
+            if not _owners_own_turn(conn, int(task_id), user_id):
+                return False
+            return check is None or bool(check(conn, db.get_task(conn, int(task_id))))
+    except Exception as exc:  # noqa: BLE001 — an unreadable task refuses
+        logger.warning("briefings_config: could not read the calling task: %s", exc)
+        return False
+
+
+def _own_turn_refusal(user_id: str) -> dict | None:
+    """Refuse a write on a turn somebody else wrote.
+
+    A correspondent's admitted mail on an email thread room runs as the host at
+    full reach; it must not change a schedule or a shared block, which reaches
+    every user unfenced. An admin's own turn in a shared room passes.
+    """
+    if _calling_turn_passes(user_id):
+        return None
+    return error_envelope(
+        "this change can only be made on the user's own turn; the message being "
+        "answered was not written by them",
+        reason="not_owner_turn",
     )
 
 
@@ -157,6 +199,9 @@ def cmd_schedule_set(args):
     from istota import user_briefings
     from istota.transport.route_checks import RouteRefused, validate_briefing_schedule
 
+    refusal = _own_turn_refusal(_user_id())
+    if refusal is not None:
+        return refusal
     config = _load_config()
     if config is None:
         return _unavailable()
@@ -216,6 +261,9 @@ def cmd_schedule_set(args):
 def cmd_schedule_remove(args):
     from istota import user_briefings
 
+    refusal = _own_turn_refusal(_user_id())
+    if refusal is not None:
+        return refusal
     config = _load_config()
     if config is None:
         return _unavailable()
@@ -335,7 +383,7 @@ def _read_prompt(path) -> tuple[str | None, dict | None]:
     """The directive in ``--prompt-file``, or the refusal to answer instead."""
     try:
         directive = read_resolved_text(
-            path, flag="--prompt-file", max_bytes=MAX_PROMPT_FILE_BYTES,
+            path, flag="--prompt-file", max_bytes=TEXT_FILE_MAX_BYTES,
         )
     except ReadRefused as exc:
         return None, error_envelope(str(exc), reason="prompt_file_unreadable")
@@ -351,7 +399,8 @@ def cmd_set_prompt(args):
     from istota import db
     from istota.briefings.models import validate_shared_block_payload
 
-    refusal = _writer_refusal(_load_config(), _user_id())
+    user_id = _user_id()
+    refusal = _own_turn_refusal(user_id) or _writer_refusal(_load_config(), user_id)
     if refusal is not None:
         return refusal
 
@@ -408,7 +457,7 @@ def cmd_set(args):
 
     config = _load_config()
     user_id = _user_id()
-    refusal = _writer_refusal(config, user_id)
+    refusal = _own_turn_refusal(user_id) or _writer_refusal(config, user_id)
     if refusal is not None:
         return refusal
 
@@ -488,7 +537,7 @@ def cmd_run(args):
 
     config = _load_config()
     user_id = _user_id()
-    refusal = _writer_refusal(config, user_id)
+    refusal = _own_turn_refusal(user_id) or _writer_refusal(config, user_id)
     if refusal is not None:
         return refusal
 
@@ -513,7 +562,7 @@ def cmd_remove(args):
 
     config = _load_config()
     user_id = _user_id()
-    refusal = _writer_refusal(config, user_id)
+    refusal = _own_turn_refusal(user_id) or _writer_refusal(config, user_id)
     if refusal is not None:
         return refusal
 
@@ -543,17 +592,23 @@ def cmd_remove(args):
         removed = db.delete_shared_block_config(conn, args.name)
         if removed:
             shared_block_runs.forget(conn, args.name)
+        deleted_value = False
         if args.delete_value:
-            db.shared_kv_delete(conn, SHARED_BLOCK_NAMESPACE, args.name)
-    if not removed:
+            deleted_value = db.shared_kv_delete(conn, SHARED_BLOCK_NAMESPACE, args.name)
+    if not removed and not deleted_value:
         return _not_found(args.name)
     _log_write("shared_block.remove", user_id, args.name)
-    return {"status": "ok", "removed": args.name, "deleted_value": bool(args.delete_value)}
+    if not removed:
+        # Content left behind by a definition removed earlier without --delete-value.
+        return {"status": "ok", "removed": False, "deleted_value": True}
+    return {"status": "ok", "removed": args.name, "deleted_value": deleted_value}
 
 
 # -- group briefings ---------------------------------------------------------
 
 EDITION_LABEL = "group briefing edition"
+# Fixed so a publish's request id is the same on every call; never change it.
+_PUBLISH_REQUEST_NAMESPACE = uuid.UUID("6f0c2b8e-4d1a-5e7b-9c3f-1a2b3c4d5e6f")
 _PERSONAL_SOURCE_KINDS = ("personal_file", "personal_calendar")
 
 
@@ -561,38 +616,24 @@ def _private_chat_refusal(user_id: str) -> dict | None:
     """The first two group checks: the caller's own turn, in a private read.
 
     Both run before any group id is read, so the refusal says nothing about
-    which groups exist. Anything unanswerable (no task, a read error) refuses.
+    which groups exist.
     """
-    from pathlib import Path
-
-    from istota import db
     from istota.rooms.scopes import channel_notes_shared
-    from istota.sandbox.skill_proxy import _owners_own_turn
 
-    refusal = error_envelope(
+    def reads_privately(conn, task) -> bool:
+        return not channel_notes_shared(
+            conn, task.conversation_token,
+            guest_turn=task.guest_participant_id is not None,
+            is_group_chat=bool(task.is_group_chat),
+        )
+
+    if _calling_turn_passes(user_id, reads_privately):
+        return None
+    return error_envelope(
         "group briefings are read and changed from the user's private chat only; "
         "ask the user to continue there",
         reason="private_chat_only",
     )
-    task_id = os.environ.get("ISTOTA_TASK_ID", "")
-    db_path = _db_path()
-    if not task_id.isdigit() or not Path(db_path).is_file():
-        return refusal
-    try:
-        with db.get_db(Path(db_path)) as conn:
-            if not _owners_own_turn(conn, int(task_id), user_id):
-                return refusal
-            task = db.get_task(conn, int(task_id))
-            if channel_notes_shared(
-                conn, task.conversation_token,
-                guest_turn=task.guest_participant_id is not None,
-                is_group_chat=bool(task.is_group_chat),
-            ):
-                return refusal
-    except Exception as exc:  # noqa: BLE001 — an unreadable task refuses
-        logger.warning("briefings_config: could not read the calling task: %s", exc)
-        return refusal
-    return None
 
 
 def _group(args, operation: str, body, *, read: bool) -> dict:
@@ -650,7 +691,7 @@ def _fenced(view: dict) -> dict:
 
 def _read_file_text(path, flag: str, reason: str) -> tuple[str | None, dict | None]:
     try:
-        return read_resolved_text(path, flag=flag, max_bytes=MAX_PROMPT_FILE_BYTES), None
+        return read_resolved_text(path, flag=flag, max_bytes=TEXT_FILE_MAX_BYTES), None
     except ReadRefused as exc:
         return None, error_envelope(str(exc), reason=reason)
 
@@ -786,13 +827,28 @@ def cmd_group_set(args):
     return _group(args, "set", body, read=False)
 
 
-def cmd_group_run(args):
-    import uuid
+def _publish_request_id(conn, group_id: str, name: str) -> str:
+    """One publish per task and definition revision, so a model retry joins the run.
 
+    The private-chat gate has already required a numeric ``ISTOTA_TASK_ID``.
+    """
+    row = conn.execute("SELECT revision FROM group_briefing_configs WHERE group_id=? AND name=?",
+                       (group_id, name)).fetchone()
+    revision = row["revision"] if row else 0
+    task_id = os.environ["ISTOTA_TASK_ID"]
+    return str(uuid.uuid5(_PUBLISH_REQUEST_NAMESPACE,
+                          f"{task_id}:{group_id}:{name}:publish:{revision}"))
+
+
+def cmd_group_run(args):
     from istota.briefings import group_service
 
     def body(conn, config, actor):
-        request_id = str(uuid.uuid4())
+        if args.mode == "publish":
+            request_id = _publish_request_id(conn, args.group_id, args.name)
+        else:
+            # A repeated preview delivers nothing, so each call is its own run.
+            request_id = str(uuid.uuid4())
         view = group_service.runs(conn, config, actor, args.group_id, args.name,
                                   payload={"request_id": request_id, "mode": args.mode})
         return {

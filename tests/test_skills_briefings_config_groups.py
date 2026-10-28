@@ -412,6 +412,40 @@ class TestRun:
         with db.get_db(config.db_path) as conn:
             assert conn.execute("SELECT COUNT(*) FROM group_briefing_runs").fetchone()[0] == 2
 
+    def test_a_repeated_publish_in_one_task_joins_the_first_run(self, config, capsys):
+        definition = define(config)
+        with db.get_db(config.db_path) as conn:
+            store.save_definition(conn, config, "team", payload(enabled=True), actor_id="alice",
+                                  definition_id=definition["id"],
+                                  expected_revision=definition["revision"])
+        argv = ["group", "run", "--group-id", "team", "--name", "weekly", "--mode", "publish"]
+
+        first, code = run(capsys, argv)
+        second, again = run(capsys, argv)
+
+        assert code == 0 and again == 0, (first, second)
+        assert first["request_id"] == second["request_id"]
+        assert first["edition"]["id"] == second["edition"]["id"]
+        with db.get_db(config.db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM group_briefing_runs").fetchone()[0] == 1
+
+    def test_a_publish_from_another_task_is_a_new_run(self, monkeypatch, config, capsys):
+        definition = define(config)
+        with db.get_db(config.db_path) as conn:
+            store.save_definition(conn, config, "team", payload(enabled=True), actor_id="alice",
+                                  definition_id=definition["id"],
+                                  expected_revision=definition["revision"])
+        argv = ["group", "run", "--group-id", "team", "--name", "weekly", "--mode", "publish"]
+
+        first, _ = run(capsys, argv)
+        as_user(monkeypatch, config, "alice")
+        second, code = run(capsys, argv)
+
+        assert code == 0, second
+        assert first["request_id"] != second["request_id"]
+        with db.get_db(config.db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM group_briefing_runs").fetchone()[0] == 2
+
     def test_publishing_a_disabled_definition_is_refused(self, config, capsys):
         define(config)
 

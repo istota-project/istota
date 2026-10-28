@@ -36,6 +36,10 @@ def _env(monkeypatch, db_path, deferred):
     monkeypatch.delenv("ISTOTA_WORKSPACE_PATH", raising=False)
     monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
     monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)
+    # Alice's own turn: the write verbs refuse a turn somebody else wrote.
+    with db.get_db(db_path) as conn:
+        task_id = db.create_task(conn, prompt="hi", user_id="alice")
+    monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
 
 
 def _writers(monkeypatch, db_path, admins):
@@ -945,3 +949,99 @@ class TestSharedBlockRemove:
 
         assert code == 1
         assert out["reason"] == "not_found"
+
+    def test_delete_value_on_content_left_behind_deletes_it(
+        self, db_path, monkeypatch, capsys, caplog,
+    ):
+        import logging
+
+        _writers(monkeypatch, db_path, {"alice"})
+        _publish(db_path, "world", "Headline", trusted=False)
+        caplog.set_level(logging.INFO, logger="istota.skills.briefings_config")
+
+        out, code = _run(
+            capsys, ["shared-block", "remove", "world", "--delete-value", "--confirmed"],
+        )
+
+        assert code == 0, out
+        assert (out["removed"], out["deleted_value"]) == (False, True)
+        assert _kv(db_path, "world") is None
+        assert _log_lines(caplog) == [
+            "briefing_skill action=shared_block.remove user=alice target=world",
+        ]
+
+
+def _correspondents_turn(monkeypatch, db_path):
+    """Alice's task answering mail somebody else wrote, as an email thread room runs it."""
+    with db.get_db(db_path) as conn:
+        task_id = db.create_task(conn, prompt="hi", user_id="alice", source_type="web")
+        token = db.create_web_chat_room(conn, "alice", "general").token
+        db.add_message(conn, token, role="user", body="hi", origin_surface="web",
+                       task_id=task_id, author_label="someone@elsewhere.example")
+    monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+
+
+class TestTheWriteVerbsRefuseSomeoneElsesTurn:
+    @pytest.fixture
+    def stage(self, db_path, deferred, monkeypatch):
+        config = _schedule_config(monkeypatch, db_path)
+        config.admin_users = {"alice"}
+        _briefing(db_path)
+        _synthesis_block(db_path)
+        prompt = deferred / "prompt.md"
+        prompt.write_text(NEW_PROMPT)
+        return prompt
+
+    WRITES = [
+        ["shared-block", "set", "world", "--cron", "0 7 * * *"],
+        ["shared-block", "set-prompt", "world", "--prompt-file", "{prompt}"],
+        ["shared-block", "run", "world"],
+        ["shared-block", "remove", "world", "--confirmed", "--delete-value"],
+        ["schedule", "set", "--name", "morning", "--cron", "30 6 * * 1-5"],
+        ["schedule", "remove", "--name", "morning", "--confirmed"],
+    ]
+
+    @pytest.mark.parametrize("argv", WRITES, ids=lambda a: " ".join(a[:2]))
+    def test_a_correspondents_turn_is_refused(self, argv, stage, db_path, monkeypatch, capsys):
+        block, briefing = _row(db_path, "world"), _stored(db_path)
+        _correspondents_turn(monkeypatch, db_path)
+
+        out, code = _run(capsys, [part.format(prompt=stage) for part in argv])
+
+        assert code == 1
+        assert out["reason"] == "not_owner_turn"
+        assert _row(db_path, "world") == block
+        assert _stored(db_path) == briefing
+        with db.get_db(db_path) as conn:
+            assert shared_block_runs.run_state(conn, "world")["pending"] is None
+
+    @pytest.mark.parametrize("argv", WRITES, ids=lambda a: " ".join(a[:2]))
+    def test_no_task_is_refused(self, argv, stage, monkeypatch, capsys):
+        monkeypatch.delenv("ISTOTA_TASK_ID")
+
+        out, code = _run(capsys, [part.format(prompt=stage) for part in argv])
+
+        assert out["reason"] == "not_owner_turn"
+
+    def test_the_admins_own_turn_in_a_shared_room_passes(self, stage, db_path, monkeypatch, capsys):
+        with db.get_db(db_path) as conn:
+            room = db.create_web_chat_room(conn, "alice", "Family")
+            db.add_web_room_member(conn, room.token, "bob")
+            task_id = db.create_task(conn, prompt="hi", user_id="alice", source_type="web",
+                                     conversation_token=room.token)
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+
+        out, code = _run(capsys, ["shared-block", "set", "world", "--cron", "0 7 * * *"])
+
+        assert code == 0, out
+        assert _row(db_path, "world").cron == "0 7 * * *"
+
+    @pytest.mark.parametrize("argv", [
+        ["shared-block", "list"], ["shared-block", "show", "world"], ["schedule", "list"],
+    ])
+    def test_the_reads_are_not_gated_on_the_turn(self, argv, stage, db_path, monkeypatch, capsys):
+        _correspondents_turn(monkeypatch, db_path)
+
+        out, code = _run(capsys, argv)
+
+        assert code == 0, out
