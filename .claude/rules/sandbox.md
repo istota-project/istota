@@ -100,6 +100,10 @@ A name list, not a `CLAUDE_*` prefix (would eat `passthrough_env_vars`), guarded
 
 Nothing raises past `main` (sends `fatal`); frame contents are never logged.
 
+## sandbox/tool_launcher.py
+
+`python -I -m istota.sandbox.tool_launcher --report FIFO --env-file PATH -- ARGV...`, the command the `claude` CLI runs as its MCP server (#862). In order: `os.environ.clear()`; report its pid down the FIFO (`O_WRONLY | O_NONBLOCK | O_NOFOLLOW`, `S_ISFIFO` by `fstat`); read the env file (`O_NOFOLLOW`, regular, a JSON object of strings) and unlink it; `execve` with that env. The pid survives the exec, so the daemon authorizes the tool server and never the CLI. The report comes before the env file so a respawned launcher still reports and is refused. `ARGV[0]` must be absolute; nothing searches `PATH`. Every refusal, an exec failure included, exits 2 before running anything, with one line on stderr and no values. The child's env is the file's because `execve` is passed it explicitly; the clear covers only the launcher's own life before the exec. stdlib-only, imports nothing from the package. `tests/test_tool_launcher.py`.
+
 ## sandbox/tool_server_protocol.py
 
 stdlib-only, one `ProtocolError`. 4-byte big-endian length plus UTF-8 JSON; `MAX_FRAME_BYTES` (32 MiB) enforced on both ends. `hello` carries two optional fields, `tools` and `text_cap`, with no version change. Messages: `hello` / `call` / `abort` / `shutdown` down, `ready` / `update` / `result` / `fatal` up. `ToolResult.details` does not cross (only `agent/loop.py` reads it); content blocks are plain dicts. `FrameDecoder.close()` raises on leftover bytes: a missing result is a broken server, not an unmade call.
@@ -160,7 +164,7 @@ The HTTP half beside `net_guard`'s address rule, for daemon-side fetches to a ho
 
 ## sandbox/peer_process.py
 
-Peer identity on a Unix socket and descent from roots (ISSUE-550). `peer_pid`: `SO_PEERCRED` (translates `--unshare-pid` pids) or `LOCAL_PEERPID`. `parent_pid`: `/proc/<pid>/stat` after the last `)`, or `proc_pidinfo(PROC_PIDTBSDINFO)`. `start_time`: field 22, or `pbi_start_tvsec`/`pbi_start_tvusec`. `descends_from` takes `{pid: start}`, needs both to match, refuses on unreadable links and at pid 1. `reporting_pid` is a `preexec_fn` sending the child pid down a close-on-exec pipe, reader joined on exit; runs after `sandbox.cgroup.placement`. Other platforms answer `None`, so all are refused (`security.proxy_peer_check` FAIL). `PeerRoots` serves both proxies; the network proxy checks before reading CONNECT, and brain children are registered with both even with the skill proxy off. No roots, no access; per connection, so an admitted tunnel lasts until closed. stdlib-only, never raises.
+Peer identity on a Unix socket and descent from roots (ISSUE-550). `peer_pid`: `SO_PEERCRED` (translates `--unshare-pid` pids) or `LOCAL_PEERPID`. `parent_pid`: `/proc/<pid>/stat` after the last `)`, or `proc_pidinfo(PROC_PIDTBSDINFO)`. `start_time`: field 22, or `pbi_start_tvsec`/`pbi_start_tvusec`. `descends_from` takes `{pid: start}`, needs both to match, refuses on unreadable links and at pid 1. `reporting_pid` is a `preexec_fn` sending the child pid down a close-on-exec pipe, reader joined on exit; runs after `sandbox.cgroup.placement`. `split_pid_lines` is the one `pid\n` parser, shared with the tool harness's FIFO reader; it drops anything but a positive decimal, so a report never reads as the reap report 0. Other platforms answer `None`, so all are refused (`security.proxy_peer_check` FAIL). `PeerRoots` serves both proxies; the network proxy checks before reading CONNECT, and brain children are registered with both even with the skill proxy off. No roots, no access; per connection, so an admitted tunnel lasts until closed. stdlib-only, never raises.
 
 ## sandbox/process_group.py
 

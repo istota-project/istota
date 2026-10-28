@@ -308,6 +308,23 @@ class TestReportingPid:
             assert preexec is mine
 
 
+class TestSplitPidLines:
+    """The `pid\\n` parser `reporting_pid` and the tool harness's FIFO share."""
+
+    def test_whole_lines_and_a_partial_tail(self):
+        assert peer_process.split_pid_lines(b"12\n345\n67") == ([12, 345], b"67")
+
+    def test_a_tail_completed_by_the_next_chunk(self):
+        pids, rest = peer_process.split_pid_lines(b"6")
+        assert (pids, rest) == ([], b"6")
+        assert peer_process.split_pid_lines(rest + b"7\n") == ([67], b"")
+
+    @pytest.mark.parametrize("line", [b"0", b"-5", b"+5", b" 5", b"5 ", b"x", b"", b"\xff", b"\xd9\xa5"])
+    def test_anything_but_a_positive_decimal_is_dropped(self, line):
+        # 0 is the reap report to a brain's on_pid, so it may never parse as one.
+        assert peer_process.split_pid_lines(line + b"\n9\n") == ([9], b"")
+
+
 class TestTheRootIsRegistered:
     """The proxy is only as good as the roots it hears about.
 

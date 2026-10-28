@@ -133,6 +133,7 @@ src/istota/
 │   ├── claude_runtime_env.py  # What a task env carries only because the outer process is the `claude` CLI → sandbox.md
 │   ├── tool_server.py    # The native brain's tool server, one process per task attempt, inside the sandbox → sandbox.md
 │   ├── tool_server_protocol.py  # The wire format between the two, stdlib-only → sandbox.md
+│   ├── tool_launcher.py  # What the CLI runs as its MCP server: clears env, reports its pid down a FIFO, execs the bwrapped tool server; stdlib-only → sandbox.md
 │   ├── mcp_stdio.py      # MCP over stdio for the `claude` CLI: `serve_stdio`, the method table, version negotiation, content mapping; stdlib-only → brain.md
 │   ├── mcp_adapter.py    # The MCP server the CLI spawns in tool-harness mode: drops its env, relays calls to the daemon's bridge socket; interim, deleted by #862 → brain.md
 │   ├── skill_proxy.py    # Unix-socket proxy for credential isolation
