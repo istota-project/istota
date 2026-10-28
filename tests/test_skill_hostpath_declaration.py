@@ -40,6 +40,7 @@ import argparse
 import importlib
 import json
 import os
+import types
 from pathlib import Path
 
 import pytest
@@ -844,7 +845,8 @@ class TestTheBriefingsFacade:
         monkeypatch.setattr(briefings_cli_module, "cli", cli)
         monkeypatch.setattr(config_module, "load_config", lambda *a, **k: object())
         monkeypatch.setattr(
-            briefings_pkg, "resolve_for_user", lambda user_id, cfg: object(),
+            briefings_pkg, "resolve_for_user",
+            lambda user_id, cfg: types.SimpleNamespace(),
         )
         monkeypatch.setattr(
             briefings_pkg, "ensure_initialised", lambda ctx, app_config=None: None,

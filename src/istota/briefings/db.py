@@ -504,6 +504,39 @@ def update_source(
     )
 
 
+def reorder_sources(
+    conn: sqlite3.Connection, block_id: int, ordered_ids: list[int],
+) -> None:
+    """Rewrite the ``position`` of a block's sources to match ``ordered_ids``.
+
+    The same contract and two-phase write as :func:`reorder_blocks`, so the two
+    read alike; ``briefing_block_sources`` has no unique position constraint.
+    ``ordered_ids`` must be an exact permutation of this block's source ids.
+    """
+    valid = {
+        r["id"]
+        for r in conn.execute(
+            "SELECT id FROM briefing_block_sources WHERE block_id = ?", (block_id,),
+        ).fetchall()
+    }
+    if (not isinstance(ordered_ids, list)
+            or any(type(sid) is not int for sid in ordered_ids)
+            or len(ordered_ids) != len(valid) or set(ordered_ids) != valid):
+        raise ValueError("ordered_ids must be an exact permutation of the block source ids")
+    offset = conn.execute(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM briefing_block_sources WHERE block_id = ?",
+        (block_id,),
+    ).fetchone()[0]
+    for i, sid in enumerate(ordered_ids):
+        conn.execute(
+            "UPDATE briefing_block_sources SET position = ? WHERE id = ?", (offset + i, sid),
+        )
+    for i, sid in enumerate(ordered_ids):
+        conn.execute(
+            "UPDATE briefing_block_sources SET position = ? WHERE id = ?", (i, sid),
+        )
+
+
 def delete_source(conn: sqlite3.Connection, source_id: int) -> None:
     conn.execute("DELETE FROM briefing_block_sources WHERE id = ?", (source_id,))
 

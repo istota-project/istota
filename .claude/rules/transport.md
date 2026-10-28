@@ -14,12 +14,12 @@ A uniform seam over messaging surfaces. Inbound, a `Transport` normalizes messag
 
 ## Layout
 
-`_types.py`, `registry.py`, `routing.py`, `ingest.py`, `participants.py`; subpackages `talk/`, `email/` (`inbound.py`, `outbound.py`, `threads.py`), `sms/` (`.claude/rules/sms.md`), `whatsapp/` (Cloud and Baileys, `.claude/rules/whatsapp.md`), `ntfy/` (`send_ntfy_async`, the single ntfy POST), `istota_file/`, `repl/`, `web/`. Low-level clients stay outside (`istota.nextcloud.talk.TalkClient`, `istota.skills.email`); shared non-transport email helpers are `istota.mail.support`.
+`_types.py`, `registry.py`, `routing.py`, `ingest.py`, `participants.py`, `route_checks.py` (save-time route authorization: the room and surface checks behind the web profile PUT, the briefing POST and the briefings_config skill; `validate_briefing_schedule` raises `RouteRefused`, a `ValueError`, for a room or surface refusal so a caller can tell it from a malformed schedule; `webui.app` keeps thin `_`-prefixed wrappers); subpackages `talk/`, `email/` (`inbound.py`, `outbound.py`, `threads.py`), `sms/` (`.claude/rules/sms.md`), `whatsapp/` (Cloud and Baileys, `.claude/rules/whatsapp.md`), `ntfy/` (`send_ntfy_async`, the single ntfy POST), `istota_file/`, `repl/`, `web/`. Low-level clients stay outside (`istota.nextcloud.talk.TalkClient`, `istota.skills.email`); shared non-transport email helpers are `istota.mail.support`.
 
 ## Core types (`_types.py`)
 
 - **`IncomingMessage`**: `channel_token` → `conversation_token`, `delivery_token` → `talk_delivery_token`, `platform_message_id` → `talk_message_id`, `reply_to_message_id` → `reply_to_talk_id`; multiplayer `author`, `addressed_to_bot`, `classified`, `is_command`, `room_container`. `sender_address` is untrusted, sanitized by `db.external_email_sender`. `queue` defaults `foreground`; email passes `[scheduler] email_task_queue` (default `background`) so a flood at `bot+user@` cannot take chat slots (ISSUE-250).
-- **`TransportCapabilities`** (frozen): edit, threading, progress-ack, typing, `max_message_length`, `surface_class`, `user_routable` (False for `istota_file`, `repl`; `registry.routable_names()` is what the UI offers, `_validate_descriptor_surfaces` still accepts the rest), and the three room fields.
+- **`TransportCapabilities`** (frozen): edit, threading, progress-ack, typing, `max_message_length`, `surface_class`, `user_routable` (False for `istota_file`, `repl`; `registry.routable_names()` is what the UI offers, `route_checks.validate_descriptor_surfaces` still accepts the rest), and the three room fields.
 - **`DeliveryOptions`**: `title`, `priority`, `tags`, `markdown` (opt-in; ntfy's `Markdown: yes` bypasses `encode_header_value` so the ASCII retry cannot drop it).
 - **`Transport`** protocol: `poll`, `deliver(target, text, *, task, reply_to, reference_id, threaded) -> int | None` (task-aware), `edit`, `download_attachment`, `resolve_target`.
 

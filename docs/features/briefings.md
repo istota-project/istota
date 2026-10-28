@@ -87,6 +87,14 @@ Delete asks for the briefing's name typed back and then a confirmation code or p
 
 The owner of a personal briefing, or the current owners of a group, get a notification when an administrator pauses, resumes or deletes it. The acting administrator is not notified, and nobody is notified about an All users briefing.
 
+## Changing briefings from chat
+
+The bot can make the same changes the settings page makes, through two skills. `briefings` edits a personal briefing's blocks and sources, and its archive. `briefings_config` reads and changes the schedule, lets an admin list, create, change, run and remove shared blocks, and works on group briefings. Each change goes through the same checks as the web page, and a refusal names a reason the bot passes on to you. Removing a schedule, a shared block, an archived edition or a group draft, and revoking a source approval, are shown to you first and need your yes.
+
+Group briefings are reachable from your private chat only. In a group room, a shared web room, a WhatsApp group, an email thread or any room someone else has been in, the bot cannot read or change them, because a definition holds the owners' instructions that members do not see. From your private chat it applies the authority the web applies: owners write definitions, preview and publish, members read published editions and set their own mutes, and admins write All users briefings. Edition text reaches the bot marked as untrusted content.
+
+Two things stay on the web. Approving a personal file or calendar for a group shares it with every current and future member, and retrying failed deliveries can send someone the same edition twice. In both cases the web asks you to acknowledge that yourself, so the bot points you at Briefings → Settings.
+
 ## Memory isolation
 
 Briefing prompts intentionally exclude USER.md and dated memories. This prevents private context from leaking into what may be shared or newsletter-style output.

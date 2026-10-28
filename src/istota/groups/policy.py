@@ -10,6 +10,19 @@ class GroupError(ValueError):
         self.details = details
 
 
+def payload_problem(data, fields: dict, required: set) -> str | None:
+    """Why a request body does not fit `fields` (name to allowed types), or None.
+
+    The group routes and the `briefings_config` skill check bodies with this.
+    """
+    if not isinstance(data, dict) or data.keys() - fields.keys() or required - data.keys():
+        return "Missing or unknown fields"
+    for field, value in data.items():
+        if type(value) not in fields[field]:
+            return f"Invalid {field}"
+    return None
+
+
 def group_capabilities(conn, group_id: str, actor_id: str, *, is_admin: bool) -> dict:
     group = db.get_group(conn, group_id)
     member = bool(group) and db.is_group_member(conn, group_id, actor_id)
@@ -25,6 +38,17 @@ def group_capabilities(conn, group_id: str, actor_id: str, *, is_admin: bool) ->
         "author_briefings": member and (owner or (system and is_admin)),
         "receive_briefings": member,
     }
+
+
+def is_group_admin(config, actor_id: str) -> bool:
+    """The admin answer group capabilities take: a named admin, or the local user under `auth = "none"`."""
+    return bool(config.is_named_admin(actor_id)
+                or (config.web.has_method("none") and actor_id == config.local_user_id))
+
+
+def user_label(config, user_id: str) -> dict:
+    profile = config.users.get(user_id)
+    return {"user_id": user_id, "display_name": (profile.display_name if profile else "") or user_id}
 
 
 def require_group_member(conn, group_id: str, actor_id: str) -> None:

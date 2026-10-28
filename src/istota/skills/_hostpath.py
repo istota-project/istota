@@ -194,7 +194,10 @@ def click_host_path(mode: str, *, note: str = ""):
     exactly as `whisper`'s did when its daemon-side caller passed no identity.
     That is the same rule stated for that case (a caller passes the task
     identity, or the CLI refuses every path) reaching an in-process caller,
-    and it is why nothing in `briefings.cli` is stamped today.
+    and it is why the stamped parameters in `briefings.cli` (`--directive-file`,
+    `blocks save --file`) are not offered by the operator's argparse tree: a
+    stamp skips a value that was never passed, so the operator path is
+    untouched.
     """
     _check_declaration(mode, note)
 

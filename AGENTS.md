@@ -108,6 +108,7 @@ src/istota/
 ├── logging_setup.py
 ├── transport/            # Transport seam: IncomingMessage, registry, ingest, routing, talk/ email/ sms/ whatsapp/ ntfy/ istota_file/ repl/ web/
 │   ├── participants.py   # Who wrote a turn: principal / guest / agent, and the one multi-human predicate → transport.md
+│   ├── route_checks.py   # Save-time checks on a route a user picked: which rooms and surfaces a descriptor or a briefing's token may name; `RouteRefused` → transport.md
 │   ├── whatsapp/groups.py  # A Baileys group as a room: roster, registration, addressing, D14 leave → whatsapp.md
 │   ├── email/threads.py  # A multi-party email thread as a room: minting, participants, reply-all → transport.md
 │   └── email/private_room.py  # The user's private email room's ref: mail between the user and the bot alone → transport.md
@@ -241,7 +242,7 @@ src/istota/
 │   ├── rate_limit.py     # A sliding-window hit counter per key, in bounded memory, for public routes with no table behind them → leaf-modules.md
 │   ├── browser_console.py  # A user's browser console socket name, shared by the browser pool and the web relay; vendored into the browser image → leaf-modules.md
 │   └── unix_connect.py   # Connecting to a Unix socket without following a symlink at its leaf → leaf-modules.md
-├── briefings/            # Personal/group briefings — source grants, generation, edition/delivery ledger, reader/settings routes and migration → briefings.md
+├── briefings/            # Personal/group briefings — source grants, generation, edition/delivery ledger, reader/settings routes (group operations in `group_service.py`, HTTP-free, so a skill CLI can call them) and migration → briefings.md
 ├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML, image_dedupe
 ├── health/               # Body stats, bloodwork, biomarker trends, encounters, immunizations, Garmin, OCR
 └── location/             # Per-user location.db module (pings, places, visits, state, migration)
