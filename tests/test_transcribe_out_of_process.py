@@ -12,6 +12,7 @@ in-process. So nothing here asserts an import floor.
 import json
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -417,7 +418,7 @@ class TestTheChildImportSurface:
             "0.12s figure in the leaf's own docstring are now stale"
         )
 
-    def test_the_skill_cli_and_the_child_run_the_same_ocr(self):
+    def test_the_skill_cli_and_the_child_run_the_same_ocr(self, tmp_path):
         """One implementation, two entry points.
 
         The seam is `cmd_ocr` -> `ocr_leaf.ocr_image`, so that is what this
@@ -429,17 +430,24 @@ class TestTheChildImportSurface:
         from istota.lib import ocr_leaf
         from istota.skills import transcribe
 
+        image = tmp_path.resolve() / "shot.png"
+        image.write_bytes(b"png bytes")
         seen = {}
 
         def fake(image_path, preprocess=False):
             seen["args"] = (image_path, preprocess)
+            seen["bytes"] = Path(image_path).read_bytes()
             return {"status": "ok", "text": "t", "confidence": 0.5, "word_count": 1}
 
         with patch.object(ocr_leaf, "ocr_image", fake), \
                 patch.object(transcribe, "ocr_image", fake):
             result = transcribe.cmd_ocr(
-                SimpleNamespace(image_path="/tmp/shot.png", preprocess=True)
+                SimpleNamespace(image_path=str(image), preprocess=True)
             )
 
-        assert seen["args"] == ("/tmp/shot.png", True)
+        # The leaf reads a private copy, never the task-writable original.
+        staged, preprocess = seen["args"]
+        assert preprocess is True
+        assert staged != str(image) and Path(staged).name == "shot.png"
+        assert seen["bytes"] == b"png bytes"
         assert result == {"status": "ok", "text": "t", "confidence": 0.5, "word_count": 1}
