@@ -84,6 +84,8 @@ does not pay for it.
 
 from __future__ import annotations
 
+from istota.sandbox.host_paths import open_resolved
+
 import argparse
 import logging
 from collections.abc import Iterator, Sequence
@@ -564,15 +566,7 @@ class ReadRefused(ValueError):
 
 
 def read_resolved_text(path: str | Path, *, flag: str, max_bytes: int) -> str:
-    """Read a UTF-8 file a `READ` stamp resolved, refusing a link at the leaf.
-
-    The read half of a stamped file argument (`kv set --value-file`,
-    `briefings_config shared-block set-prompt --prompt-file`). The stamp
-    resolved the path at parse, but the leaf can still be swapped for a symlink
-    before the open, so the open is `O_NOFOLLOW` and the size comes from the
-    same descriptor, which describes the file actually read. `flag` names the
-    argument in each refusal.
-    """
+    """Read an authorized UTF-8 file through a confined descriptor, with a cap."""
     import os
     import stat
 
@@ -580,7 +574,7 @@ def read_resolved_text(path: str | Path, *, flag: str, max_bytes: int) -> str:
     if not resolved.is_file():
         raise ReadRefused(f"{flag} is not a regular file: {resolved}")
     try:
-        fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = open_resolved(resolved)
     except OSError as e:
         raise ReadRefused(f"could not open {flag}: {e}") from None
     try:
@@ -593,7 +587,10 @@ def read_resolved_text(path: str | Path, *, flag: str, max_bytes: int) -> str:
             raise ReadRefused(f"{flag} is {size} bytes, over the {max_bytes}-byte cap")
         with os.fdopen(fd, encoding="utf-8") as fh:
             fd = -1  # fdopen owns it now
-            return fh.read()
+            text = fh.read(max_bytes + 1)
+            if len(text.encode("utf-8")) > max_bytes:
+                raise ReadRefused(f"{flag} is over the {max_bytes}-byte cap")
+            return text
     except (OSError, UnicodeDecodeError) as e:
         raise ReadRefused(f"could not read {flag}: {e}") from None
     finally:

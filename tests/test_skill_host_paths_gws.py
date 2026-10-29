@@ -343,14 +343,26 @@ class TestNoRootsResolvable:
 
 
 class TestMain:
-    """The exec itself: what argv reaches it, and where it is standing."""
+    """gws runs with private inputs and a non-writable working directory."""
+
+    @pytest.fixture(autouse=True)
+    def host_files(self, tmp_path, monkeypatch):
+        root = tmp_path / "host-files"
+        root.mkdir()
+        monkeypatch.setenv("ISTOTA_HOST_FILES_DIR", str(root))
 
     @pytest.fixture
     def execs(self, monkeypatch):
         calls: list[tuple[str, list[str]]] = []
-        monkeypatch.setattr(
-            os, "execvp", lambda file, args: calls.append((file, list(args))),
-        )
+        def run(file, args):
+            assert Path.cwd().stat().st_mode & 0o222 == 0
+            if args[1:3] == ["drive", "+upload"]:
+                path = Path(args[3])
+                assert path.is_file()
+                assert path.stat().st_mode & 0o222 == 0
+            calls.append((file, list(args)))
+
+        monkeypatch.setattr(os, "execvp", run)
         return calls
 
     def test_a_missing_binary_is_a_structured_error(self, mount, monkeypatch):
@@ -396,7 +408,12 @@ class TestMain:
 
         run_skill_main(main, ["drive", "+upload", str(report)])
 
-        assert execs == [("gws", ["gws", "drive", "+upload", str(report.resolve())])]
+        assert execs[0][0] == "gws"
+        assert execs[0][1][:3] == ["gws", "drive", "+upload"]
+        staged = Path(execs[0][1][3])
+        assert staged.name == report.name
+        assert staged != report.resolve()
+        assert not staged.exists()
 
     def test_the_cwd_is_the_users_workspace(self, mount, execs, monkeypatch):
         """What carries the residual the scan cannot classify.

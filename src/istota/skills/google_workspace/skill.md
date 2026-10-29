@@ -58,7 +58,7 @@ Any argument naming a file **on this machine** — `drive +upload /path/to/file.
 
 Google's own identifiers are untouched: `--fileId`, `--parents FOLDER_ID`, spreadsheet ids and a `--query` containing a slash are not host paths and are passed through as written.
 
-Relative paths resolve against the user's workspace, so `+upload notes.pdf` means the file of that name in it.
+Relative input paths resolve against the user's workspace, so `+upload notes.pdf` means the file of that name in it. Files are copied into private read-only storage before `gws` opens them. Directory arguments and local output files are unsupported; use stdout for output. Run through `istota-skill`, which cleans up the copies after the command ends.
 
 `+upload` sends the file to Google, and the check it goes through is the read rule rather than the narrower rule `email --attach` uses — so an attachment you were sent or a channel file can be uploaded to Drive where it could not be mailed. Telling an upload from a read means knowing every gws verb, which is a list that would go stale against a program shipped elsewhere.
 

@@ -27,6 +27,8 @@ fails does not undo the upload; it is reported as ``metadata_error``.
 
 from __future__ import annotations
 
+from istota.sandbox.host_paths import open_resolved
+
 import os
 import stat
 import sys
@@ -178,16 +180,9 @@ def _fd_path(fd: int) -> str | None:
 
 
 def open_upload(path: str, label: str, cap: int, meta: dict | None = None) -> UploadSource:
-    """Open one already-resolved path for upload, or refuse it, sending nothing.
-
-    ``O_NOFOLLOW`` guards only the last component, so a directory above it
-    swapped for a symlink between the resolve and this open would carry the
-    open elsewhere. The descriptor's own path is checked against the same
-    rule after the open, which closes that window where the kernel reports
-    the path (Linux, macOS).
-    """
+    """Open an authorized upload through a no-follow descriptor walk."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        fd = open_resolved(path)
     except OSError as exc:
         raise WordPressError(f"Could not open {label}: {exc.strerror}.",
                              "validation_error") from None

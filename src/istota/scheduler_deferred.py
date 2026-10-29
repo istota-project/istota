@@ -21,6 +21,8 @@ here — it returns parsed dict content for the email-delivery path, not
 an op count, and its lifecycle is owned by the result-delivery code.
 """
 
+from istota.sandbox.host_paths import open_resolved, read_resolved, read_resolved_text
+
 import json
 import logging
 import os
@@ -1408,7 +1410,7 @@ def _process_deferred_health_ops(
                     root, walk = uploads_walk(ctx, str(pid))
                     try:
                         os.close(open_or_create_dirs(root, walk))
-                        with open(src, "rb") as fh:
+                        with os.fdopen(open_resolved(src), "rb") as fh:
                             name = write_new_file(
                                 root, walk, f"original{src.suffix}",
                                 iter(lambda: fh.read(1024 * 1024), b""),
@@ -1487,7 +1489,7 @@ def _process_deferred_health_ops(
                         continue
                     _health_documents.attach_document(
                         conn, ctx,
-                        raw=src.read_bytes(),
+                        raw=read_resolved(src),
                         filename=entry.get("filename") or src.name,
                         mime=None,
                         entity_type=entity_type,
@@ -1524,7 +1526,7 @@ def _process_deferred_health_ops(
                             task.id, entry.get("source_path"),
                         )
                         continue
-                    csv_text = src.read_text(encoding="utf-8-sig", errors="replace")
+                    csv_text = read_resolved_text(src, encoding="utf-8-sig", errors="replace")
                     summary = _csv_io.import_csv(conn, csv_text)
                     logger.info(
                         "Imported CSV for task %d: created=%d skipped_identical=%d "

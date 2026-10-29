@@ -7,6 +7,8 @@ CLI:
     python -m istota.skills.whisper download <model-name>
 """
 
+from istota.sandbox.host_paths import stage_resolved
+
 import argparse
 import json
 from pathlib import Path
@@ -132,11 +134,15 @@ def cmd_transcribe(args) -> dict:
         if refusal is not None:
             return error_envelope(refusal, reason="host_path_refused")
 
-    result = transcribe_audio(
-        args.audio_path,
-        model=args.model,
-        language=args.language,
-    )
+    try:
+        with stage_resolved(args.audio_path) as source:
+            result = transcribe_audio(
+                str(source),
+                model=args.model,
+                language=args.language,
+            )
+    except OSError:
+        return error_envelope("Audio file not found or unsafe", reason="host_path_refused")
 
     if result.get("status") == "error":
         return result

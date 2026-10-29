@@ -11,6 +11,9 @@ outside the mount.
 
 from __future__ import annotations
 
+from istota.sandbox.host_paths import open_resolved
+
+import os
 import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -411,29 +414,30 @@ def upload(
     if not local.is_file():
         raise OcsError(f"No such local file: {local}", None, None, str(local))
 
-    size = local.stat().st_size
-    want_chunks = chunked if chunked is not None else size >= CHUNKED_UPLOAD_THRESHOLD
-    use_chunks = want_chunks and supports_chunking
+    with os.fdopen(open_resolved(local), "rb") as source:
+        size = os.fstat(source.fileno()).st_size
+        want_chunks = chunked if chunked is not None else size >= CHUNKED_UPLOAD_THRESHOLD
+        use_chunks = want_chunks and supports_chunking
 
-    if use_chunks:
-        _upload_chunked(
-            config, local, remote_path, timeout=timeout,
-            prefixed=prefixed, overwrite=overwrite,
-        )
-        method = "chunked"
-    else:
-        headers = {"Content-Type": "application/octet-stream"}
-        if not overwrite:
-            headers["If-None-Match"] = "*"
-        dav_request(
-            config,
-            "PUT",
-            dav_files_url(config, remote_path, prefixed=prefixed),
-            content=local.read_bytes(),
-            headers=headers,
-            timeout=timeout,
-        )
-        method = "plain"
+        if use_chunks:
+            _upload_chunked(
+                config, source, remote_path, timeout=timeout,
+                prefixed=prefixed, overwrite=overwrite,
+            )
+            method = "chunked"
+        else:
+            headers = {"Content-Type": "application/octet-stream"}
+            if not overwrite:
+                headers["If-None-Match"] = "*"
+            dav_request(
+                config,
+                "PUT",
+                dav_files_url(config, remote_path, prefixed=prefixed),
+                content=source.read(),
+                headers=headers,
+                timeout=timeout,
+            )
+            method = "plain"
 
     return {
         "status": "ok",
@@ -446,7 +450,7 @@ def upload(
 
 
 def _upload_chunked(
-    config: Config, local: Path, remote_path: str, *, timeout: float,
+    config: Config, source, remote_path: str, *, timeout: float,
     prefixed: bool = True, overwrite: bool = True,
 ) -> None:
     """Chunked upload v2: a temp collection, per-chunk PUTs, a final MOVE."""
@@ -462,20 +466,19 @@ def _upload_chunked(
     )
     try:
         index = 1
-        with local.open("rb") as fh:
-            while True:
-                chunk = fh.read(CHUNK_SIZE)
-                if not chunk:
-                    break
-                dav_request(
-                    config,
-                    "PUT",
-                    uploads_url(config, upload_id, str(index)),
-                    content=chunk,
-                    headers={"Content-Type": "application/octet-stream"},
-                    timeout=timeout,
-                )
-                index += 1
+        while True:
+            chunk = source.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            dav_request(
+                config,
+                "PUT",
+                uploads_url(config, upload_id, str(index)),
+                content=chunk,
+                headers={"Content-Type": "application/octet-stream"},
+                timeout=timeout,
+            )
+            index += 1
 
         dav_request(
             config,

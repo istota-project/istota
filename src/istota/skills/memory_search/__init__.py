@@ -10,6 +10,8 @@ CLI:
 Env vars: ISTOTA_DB_PATH, ISTOTA_USER_ID, NEXTCLOUD_MOUNT_PATH
 """
 
+from istota.sandbox.host_paths import read_resolved_text
+
 import argparse
 import json
 import os
@@ -151,7 +153,7 @@ def cmd_index_file(args) -> dict:
     if not resolved.is_file():
         return {"status": "error", "error": f"Not a regular file: {resolved}"}
 
-    content = resolved.read_text()
+    content = read_resolved_text(resolved)
     source_type = args.source_type or "memory_file"
     conn = _get_conn()
     n = index_file(conn, user_id, str(resolved), content, source_type)

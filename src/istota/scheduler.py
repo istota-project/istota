@@ -2792,13 +2792,16 @@ def _execute_skill_task(
     env.update(servarr_daemon_keyed_env(os.environ))
 
     cmd = [sys.executable, "-m", f"istota.skills.{skill_name}"] + skill_args
+    from istota.sandbox.host_paths import skill_file_env
+
     try:
-        proc = _run_capture(
-            cmd,
-            timeout=timeout,
-            cwd=str(config.temp_dir),
-            env=env,
-        )
+        with skill_file_env(env) as env:
+            proc = _run_capture(
+                cmd,
+                timeout=timeout,
+                cwd=str(config.temp_dir),
+                env=env,
+            )
     except subprocess.TimeoutExpired:
         return (
             False,

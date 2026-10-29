@@ -30,6 +30,8 @@ shell when those env vars aren't set.
 
 from __future__ import annotations
 
+from istota.sandbox.host_paths import read_resolved, read_resolved_text
+
 import argparse
 import json
 import os
@@ -663,7 +665,7 @@ def cmd_attach_document(args: argparse.Namespace) -> None:
     from istota.health import documents as health_documents
 
     ctx = _direct_context()
-    raw = path.read_bytes()
+    raw = read_resolved(path)
     conn = _connect()
     try:
         # attach_document validates the target exists before writing bytes;
@@ -796,7 +798,7 @@ def cmd_import_csv(args: argparse.Namespace) -> None:
 
     from istota.health import csv_io
 
-    csv_text = path.read_text(encoding="utf-8-sig", errors="replace")
+    csv_text = read_resolved_text(path, encoding="utf-8-sig", errors="replace")
     conn = _connect()
     try:
         summary = csv_io.import_csv(conn, csv_text)
@@ -1950,7 +1952,7 @@ def cmd_import_immunizations(args: argparse.Namespace) -> None:
         # reason; the `@PATH` read this replaced had it too.
         if not src.is_file():
             _fail(f"not a regular file: {src}")
-        raw = src.read_text(encoding="utf-8")
+        raw = read_resolved_text(src)
     else:
         raw = args.paste
         if not raw:

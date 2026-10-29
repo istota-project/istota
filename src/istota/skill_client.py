@@ -156,8 +156,11 @@ def _run_direct(skill: str, args: list[str]) -> None:
         )
         sys.exit(1)
     cmd = [sys.executable, "-m", f"istota.skills.{skill}"] + args
+    from istota.sandbox.host_paths import skill_file_env
+
     try:
-        result = subprocess.run(cmd)
+        with skill_file_env(dict(os.environ)) as env:
+            result = subprocess.run(cmd, env=env)
         sys.exit(result.returncode)
     except FileNotFoundError:
         print(f"Python not found or skill module missing: istota.skills.{skill}", file=sys.stderr)

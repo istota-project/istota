@@ -6,6 +6,8 @@ Also provides a CLI for sending email directly from Claude Code:
 
 from __future__ import annotations
 
+from istota.sandbox.host_paths import mkdir_resolved, read_resolved, read_resolved_text
+
 import argparse
 import logging
 import mimetypes
@@ -650,8 +652,8 @@ def download_attachments(
     if config is None:
         raise ValueError("config is required")
 
-    target_dir.mkdir(parents=True, exist_ok=True)
-    dest_root = target_dir.resolve()
+    mkdir_resolved(target_dir)
+    dest_root = target_dir
 
     downloaded = []
     written = 0
@@ -820,7 +822,7 @@ def _attach_files(msg: EmailMessage, attachments: list[str]) -> None:
     """Attach each file path to the message, guessing its MIME type."""
     for path_str in attachments:
         path = Path(path_str)
-        data = path.read_bytes()
+        data = read_resolved(path)
         ctype, _ = mimetypes.guess_type(path.name)
         maintype, subtype = (ctype.split("/", 1) if ctype else ("application", "octet-stream"))
         msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=path.name)
@@ -2717,7 +2719,7 @@ def cmd_output(args):
 
     # Read body from file if specified
     if args.body_file:
-        body = Path(args.body_file).read_text()
+        body = read_resolved_text(args.body_file)
     else:
         body = args.body
     if not body:
@@ -2876,7 +2878,7 @@ def _read_body(args) -> str:
     outgoing message, which is the one thing `EGRESS` names.
     """
     if getattr(args, "body_file", None):
-        body = Path(args.body_file).read_text()
+        body = read_resolved_text(args.body_file)
     else:
         body = getattr(args, "body", None)
     if not body:

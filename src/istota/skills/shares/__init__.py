@@ -42,6 +42,8 @@ reference to pass back to this CLI and is not fenced.
 
 from __future__ import annotations
 
+from istota.sandbox.host_paths import open_resolved
+
 import argparse
 import logging
 import os
@@ -491,7 +493,7 @@ def cmd_get(args) -> dict:
 def _open_source(path: str) -> int:
     """A local source opened without following a link, checked as a regular file under the cap."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = open_resolved(path)
     except OSError:
         raise Refusal("not_a_file", path=path) from None
     info = os.fstat(fd)

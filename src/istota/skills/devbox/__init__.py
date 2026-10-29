@@ -56,6 +56,8 @@ Usage:
 
 from __future__ import annotations
 
+from istota.sandbox.host_paths import read_resolved
+
 import argparse
 import functools
 import os
@@ -636,7 +638,7 @@ def cmd_exec_file(args) -> dict:
         return _err(f"Refusing unusual script basename: {base!r}")
 
     try:
-        body = local.read_bytes()
+        body = read_resolved(local)
     except OSError as e:
         return _err(f"could not read {local}: {e}")
 
@@ -729,7 +731,7 @@ def cmd_cp_in(args) -> dict:
             "command in the devbox."
         )
     try:
-        body = src.read_bytes()
+        body = read_resolved(src)
     except OSError as e:
         return _err(f"could not read {src}: {e}")
     if len(body) > proto.MAX_WRITE_FILE_BYTES:
