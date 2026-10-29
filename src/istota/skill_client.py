@@ -18,6 +18,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 
 #: How long this client waits on the proxy socket before giving up, when the
 #: deployment says nothing else.
@@ -43,6 +44,14 @@ SKILL_CLIENT_WAIT_SECONDS = 600
 #: clamps its configured wait to the same number so the two ends stay in
 #: agreement.
 MAX_CLIENT_WAIT_SECONDS = 86400
+
+#: Backoff between connect attempts while the proxy's listen backlog is full.
+CONNECT_RETRY_FIRST_SECONDS = 0.01
+CONNECT_RETRY_MAX_SECONDS = 0.2
+
+
+class _ProxyBusy(Exception):
+    """The listen backlog stayed full for the whole wait."""
 
 
 def client_wait_seconds(env=None) -> int:
@@ -83,14 +92,42 @@ def main() -> None:
         _run_direct(skill, args)
 
 
+def _connect(sock_path: str, wait: int) -> socket.socket:
+    """A socket connected to the proxy, waiting out a full listen backlog.
+
+    The timeout puts the fd in non-blocking mode, and on Linux a non-blocking
+    `AF_UNIX` connect to a full backlog fails at once with `EAGAIN` rather than
+    `EINPROGRESS`, so CPython raises `BlockingIOError` without polling (#876).
+    Only that error is retried: `ECONNREFUSED` means nothing is listening, and
+    retrying it would turn a dead proxy into a hang for the whole wait.
+    """
+    deadline = time.monotonic() + wait
+    delay = CONNECT_RETRY_FIRST_SECONDS
+    while True:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(wait)
+        try:
+            sock.connect(sock_path)
+            return sock
+        except BlockingIOError:
+            sock.close()
+        except BaseException:
+            sock.close()
+            raise
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _ProxyBusy()
+        time.sleep(min(delay, remaining))
+        delay = min(delay * 2, CONNECT_RETRY_MAX_SECONDS)
+
+
 def _run_via_proxy(sock_path: str, skill: str, args: list[str]) -> None:
     """Send request to proxy socket, print result, exit with returncode."""
     request = json.dumps({"skill": skill, "args": args}) + "\n"
+    wait = client_wait_seconds()
 
     try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(client_wait_seconds())
-        sock.connect(sock_path)
+        sock = _connect(sock_path, wait)
         sock.sendall(request.encode("utf-8"))
 
         # Read response until newline
@@ -123,6 +160,12 @@ def _run_via_proxy(sock_path: str, skill: str, args: list[str]) -> None:
                 print("", file=sys.stderr)
         sys.exit(response.get("returncode", 1))
 
+    except _ProxyBusy:
+        print(f"Skill proxy busy: could not connect within {wait}s", file=sys.stderr)
+        sys.exit(1)
+    except TimeoutError:
+        print(f"Skill proxy did not answer within {wait}s", file=sys.stderr)
+        sys.exit(1)
     except FileNotFoundError:
         print(f"Skill proxy socket not found: {sock_path}", file=sys.stderr)
         sys.exit(1)

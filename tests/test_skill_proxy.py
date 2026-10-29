@@ -1327,6 +1327,9 @@ class TestTheClientSideWait:
             def connect(self, path):
                 raise ConnectionRefusedError("stop here")
 
+            def close(self):
+                pass
+
         monkeypatch.setattr(
             skill_client.socket, "socket", lambda *a, **k: FakeSock()
         )
@@ -1334,3 +1337,139 @@ class TestTheClientSideWait:
         with pytest.raises(SystemExit):
             skill_client._run_via_proxy("/nowhere.sock", "email", ["list"])
         assert armed == [1234]
+
+
+class TestTheConnectBurst:
+    """#876: a burst of skill calls from one task lost some of them.
+
+    On Linux a connect to a full `AF_UNIX` backlog on a socket with a timeout
+    armed fails at once with `EAGAIN`, and CPython raises `BlockingIOError`
+    without polling, so the client must retry within its own wait. macOS
+    reports the same state as `ECONNREFUSED`, which is also what a socket with
+    no listener says, so the backlog itself has to be deep enough for a burst.
+    """
+
+    def _serve_one(self, sock_path, response):
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(sock_path))
+        server.listen(1)
+
+        server.settimeout(5)
+
+        def serve():
+            try:
+                conn, _ = server.accept()
+                conn.recv(65536)
+                conn.sendall((json.dumps(response) + "\n").encode())
+                conn.close()
+            except OSError:
+                pass
+            finally:
+                server.close()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        return thread
+
+    def test_a_full_backlog_is_waited_out(self, sock_path, monkeypatch, capsys):
+        """The kernel's `EAGAIN` is simulated, since macOS cannot produce it;
+        everything after the connect is the real socket and the real server."""
+        from istota import skill_client
+
+        real_connect = socket.socket.connect
+        refusals = {"n": 0}
+
+        def busy_then_real(self, address):
+            if refusals["n"] < 3:
+                refusals["n"] += 1
+                raise BlockingIOError(11, "Resource temporarily unavailable")
+            return real_connect(self, address)
+
+        thread = self._serve_one(
+            sock_path, {"stdout": "served\n", "stderr": "", "returncode": 0},
+        )
+        monkeypatch.setattr(socket.socket, "connect", busy_then_real)
+        with pytest.raises(SystemExit) as exc_info:
+            skill_client._run_via_proxy(str(sock_path), "kv", ["namespaces"])
+        thread.join(timeout=5)
+
+        assert exc_info.value.code == 0
+        assert refusals["n"] == 3
+        assert capsys.readouterr().out == "served\n"
+
+    def test_a_backlog_that_never_drains_is_one_clean_line(
+        self, monkeypatch, capsys,
+    ):
+        from istota import skill_client
+
+        def always_busy(self, address):
+            raise BlockingIOError(11, "Resource temporarily unavailable")
+
+        monkeypatch.setattr(socket.socket, "connect", always_busy)
+        monkeypatch.setenv("ISTOTA_SKILL_CLIENT_WAIT", "1")
+        started = time.monotonic()
+        with pytest.raises(SystemExit) as exc_info:
+            skill_client._run_via_proxy("/nowhere.sock", "kv", ["namespaces"])
+        elapsed = time.monotonic() - started
+
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert err == "Skill proxy busy: could not connect within 1s\n"
+        assert 0.9 <= elapsed < 3
+
+    def test_a_refusal_is_not_retried(self, monkeypatch):
+        """`ECONNREFUSED` means nothing is listening; retrying it for the whole
+        wait would turn a dead proxy into a ten-minute hang."""
+        from istota import skill_client
+
+        calls = {"n": 0}
+
+        def refused(self, address):
+            calls["n"] += 1
+            raise ConnectionRefusedError(61, "Connection refused")
+
+        monkeypatch.setattr(socket.socket, "connect", refused)
+        with pytest.raises(SystemExit) as exc_info:
+            skill_client._run_via_proxy("/nowhere.sock", "kv", ["namespaces"])
+        assert exc_info.value.code == 1
+        assert calls["n"] == 1
+
+    def test_a_proxy_that_never_answers_is_one_clean_line(
+        self, sock_path, monkeypatch, capsys,
+    ):
+        """Accepted and silent until the wait runs out: a timeout on `recv`
+        used to escape as a traceback too."""
+        from istota import skill_client
+
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(sock_path))
+        server.listen(1)
+        monkeypatch.setenv("ISTOTA_SKILL_CLIENT_WAIT", "1")
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                skill_client._run_via_proxy(str(sock_path), "kv", ["namespaces"])
+        finally:
+            server.close()
+        assert exc_info.value.code == 1
+        assert capsys.readouterr().err == "Skill proxy did not answer within 1s\n"
+
+    def test_forty_concurrent_clients_each_get_their_own_answer(self, sock_path):
+        """Real client processes against a real proxy: every call is answered
+        and none crosses another's response. It is not the regression test:
+        it does not fill the backlog on macOS. The kernel's `EAGAIN` path is
+        `tests/linux/test_skill_client_backlog.py`."""
+        env = {"PATH": "/usr/bin:/bin", "ISTOTA_SKILL_PROXY_SOCK": str(sock_path)}
+        with SkillProxy(sock_path, {}, {}, allowed_skills=frozenset()):
+            procs = [
+                subprocess.Popen(
+                    [sys.executable, "-m", "istota.skill_client", f"burst{i}", "x"],
+                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True,
+                )
+                for i in range(40)
+            ]
+            results = [p.communicate(timeout=60) for p in procs]
+
+        for i, (_out, err) in enumerate(results):
+            assert f"Unknown skill: 'burst{i}'" in err, err
+            assert "Traceback" not in err
