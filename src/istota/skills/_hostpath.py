@@ -84,14 +84,17 @@ does not pay for it.
 
 from __future__ import annotations
 
-from istota.sandbox.host_paths import open_resolved
-
 import argparse
 import logging
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
-from istota.sandbox.host_paths import env_host_roots, memory_refusal, resolve_in_roots
+from istota.sandbox.host_paths import (
+    env_host_roots,
+    memory_refusal,
+    open_resolved,
+    resolve_in_roots,
+)
 
 log = logging.getLogger(__name__)
 

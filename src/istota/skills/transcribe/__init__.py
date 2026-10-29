@@ -12,12 +12,11 @@ implementation in one place is what stops the hand-typed CLI and the spawned
 child drifting apart; see the leaf's own docstring for the rule it keeps.
 """
 
-from istota.sandbox.host_paths import stage_resolved
-
 import argparse
 
 from istota.lib.ocr_leaf import ocr_image, preprocess_image, text_from_data
 
+from istota.sandbox.host_paths import stage_resolved
 from istota.skills._cli import parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import READ, host_path
 

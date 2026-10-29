@@ -6,14 +6,13 @@ Resolves the user's :class:`FeedsContext` via
 no HTTP. Mirrors :mod:`istota.skills.money`.
 """
 
-from istota.sandbox.host_paths import stage_resolved, write_resolved
-
 import argparse
 import json
 import os
 import sys
 from pathlib import Path
 
+from istota.sandbox.host_paths import stage_resolved, write_resolved
 from istota.skills._cli import emit, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import READ, WRITE, host_path
 

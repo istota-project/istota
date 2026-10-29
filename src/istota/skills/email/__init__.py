@@ -6,8 +6,6 @@ Also provides a CLI for sending email directly from Claude Code:
 
 from __future__ import annotations
 
-from istota.sandbox.host_paths import mkdir_resolved, read_resolved, read_resolved_text
-
 import argparse
 import logging
 import mimetypes
@@ -29,7 +27,10 @@ from istota.lib.filenames import (
     filename_parts, numbered_name, safe_filename,
 )
 from istota.sandbox.host_paths import (
+    mkdir_resolved,
     path_under_roots,
+    read_resolved,
+    read_resolved_text,
     resolve_in_roots,
     user_workspace_root,
     write_resolved,

@@ -13,13 +13,12 @@ way ``istota/cli_money.py`` does, because the Click tree exposes no config
 commands. Both resolve the user through :func:`_resolve_context`.
 """
 
-from istota.sandbox.host_paths import stage_resolved
-
 import argparse
 import json
 import os
 import sys
 
+from istota.sandbox.host_paths import stage_resolved
 from istota.skills._cli import emit as _output, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import READ, WRITE, host_path
 

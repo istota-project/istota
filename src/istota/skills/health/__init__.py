@@ -30,8 +30,6 @@ shell when those env vars aren't set.
 
 from __future__ import annotations
 
-from istota.sandbox.host_paths import read_resolved, read_resolved_text
-
 import argparse
 import json
 import os
@@ -42,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from istota.sandbox import deferred
+from istota.sandbox.host_paths import read_resolved, read_resolved_text
 from istota.skills._cli import emit, error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import EGRESS, READ, WRITE, host_path
 

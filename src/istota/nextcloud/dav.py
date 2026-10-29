@@ -11,8 +11,6 @@ outside the mount.
 
 from __future__ import annotations
 
-from istota.sandbox.host_paths import open_resolved
-
 import os
 import uuid
 import xml.etree.ElementTree as ET
@@ -21,7 +19,7 @@ from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
 from ..config import Config
-from istota.sandbox.host_paths import write_resolved
+from istota.sandbox.host_paths import open_resolved, write_resolved
 from ._http import (
     DAV_TIMEOUT,
     OcsError,

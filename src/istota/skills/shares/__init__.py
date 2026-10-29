@@ -42,8 +42,6 @@ reference to pass back to this CLI and is not fenced.
 
 from __future__ import annotations
 
-from istota.sandbox.host_paths import open_resolved
-
 import argparse
 import logging
 import os
@@ -52,6 +50,7 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from istota.sandbox.host_paths import open_resolved
 from istota.sharing.ocm_files import (  # noqa: F401 -- re-exported, the skill's path rules
     LISTING_BODY,
     LISTING_MAX_BYTES,

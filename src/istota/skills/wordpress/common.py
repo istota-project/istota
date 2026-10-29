@@ -7,12 +7,12 @@ and `admin` and `generic` do not have to import `content`.
 
 from __future__ import annotations
 
-from istota.sandbox.host_paths import open_resolved
-
 import json
 import os
 import shlex
 import stat
+
+from istota.sandbox.host_paths import open_resolved
 
 from .client import WordPressError
 

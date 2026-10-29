@@ -27,8 +27,6 @@ fails does not undo the upload; it is reported as ``metadata_error``.
 
 from __future__ import annotations
 
-from istota.sandbox.host_paths import open_resolved
-
 import os
 import stat
 import sys
@@ -38,7 +36,7 @@ from pathlib import Path
 
 from istota.lib.filenames import safe_filename as _safe_name
 from istota.lib.image_sniff import sniff_decodable
-from istota.sandbox.host_paths import memory_refusal, resolve_in_roots
+from istota.sandbox.host_paths import memory_refusal, open_resolved, resolve_in_roots
 from istota.skills._hostpath import egress_roots
 
 from .client import UPLOAD_TIMEOUT, WordPressError, fence, raw_text, selector

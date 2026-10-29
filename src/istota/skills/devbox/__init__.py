@@ -56,8 +56,6 @@ Usage:
 
 from __future__ import annotations
 
-from istota.sandbox.host_paths import read_resolved
-
 import argparse
 import functools
 import os
@@ -69,7 +67,7 @@ from pathlib import Path
 from istota.devbox import exec_client as _client
 from istota.devbox import exec_protocol as proto
 from istota.lib.unix_connect import connect_no_follow
-from istota.sandbox.host_paths import write_resolved
+from istota.sandbox.host_paths import read_resolved, write_resolved
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import READ, REMOTE, WRITE, host_path
 

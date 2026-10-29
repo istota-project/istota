@@ -10,8 +10,6 @@ CLI:
 Env vars: ISTOTA_DB_PATH, ISTOTA_USER_ID, NEXTCLOUD_MOUNT_PATH
 """
 
-from istota.sandbox.host_paths import read_resolved_text
-
 import argparse
 import json
 import os
@@ -20,6 +18,7 @@ import sys
 from pathlib import Path
 
 from istota.sandbox import deferred
+from istota.sandbox.host_paths import read_resolved_text
 from istota.skills._cli import parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import EGRESS, host_path
 from istota.skills._turn_access import calling_task_id

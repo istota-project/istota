@@ -21,8 +21,6 @@ here — it returns parsed dict content for the email-delivery path, not
 an op count, and its lifecycle is owned by the result-delivery code.
 """
 
-from istota.sandbox.host_paths import open_resolved, read_resolved, read_resolved_text
-
 import json
 import logging
 import os
@@ -37,7 +35,13 @@ from .brain import model_namespace_for_kind, resolve_brain_kind
 from istota.sandbox.kv_namespaces import is_reserved_namespace
 from istota.sandbox.skill_proxy import _owners_own_turn
 from istota.notifications.store import deliver_pending
-from istota.sandbox.host_paths import path_under_roots, workspace_roots
+from istota.sandbox.host_paths import (
+    open_resolved,
+    path_under_roots,
+    read_resolved,
+    read_resolved_text,
+    workspace_roots,
+)
 from istota.sandbox.user_scope import is_scopable_user_id
 
 # Use the parent scheduler's logger name so log lines remain identical to
