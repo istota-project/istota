@@ -5,15 +5,24 @@ Inside the bwrap sandbox (--unshare-net), a TCP-to-Unix bridge
 forwards connections from 127.0.0.1:PORT to this socket.
 HTTPS CONNECT requests to allowlisted host:port pairs are tunneled. With the
 credential broker enabled, bound HTTP destinations use its grant-checked parser.
+
+The allowlist names a host, so the proxy checks what the name reaches
+(ISSUE-883): every upstream connect, raw or brokered, goes to an address
+`net_guard` passed, resolved once and pinned, and a non-public address only
+for a name on ``private_hosts``. A raw tunnel then carries only TLS whose
+ClientHello names the CONNECT host. The HTTP ``Host`` inside that TLS is not
+visible here, so a shared front that routes on it (domain fronting) is still
+reachable through an allowed name; only the broker's interception sees it.
 """
 
+import ipaddress
 import logging
 import socket
 import threading
 from collections.abc import Iterable
 from pathlib import Path
 
-from istota.sandbox import peer_process
+from istota.sandbox import net_guard, peer_process
 from istota.sandbox.unix_server import UnixSocketServer
 
 logger = logging.getLogger("istota.sandbox.network_proxy")
@@ -81,6 +90,169 @@ def _enable_tcp_keepalive(sock: socket.socket) -> None:
             sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), val)
 
 
+class UpstreamRefused(Exception):
+    """The destination resolved to a non-public address no grant covers."""
+
+
+# A ClientHello is a few KiB; one larger than this is refused, not buffered.
+MAX_CLIENT_HELLO_BYTES = 65536
+# RFC 8446 5.1: a plaintext record carries at most 2^14 bytes.
+_MAX_RECORD_BYTES = 16384
+
+
+def _unbracket(host: str) -> str:
+    """CONNECT brackets an IPv6 literal; sockets and the address rule do not."""
+    if host.startswith("[") and host.endswith("]"):
+        return host[1:-1]
+    return host
+
+
+def checked_addresses(host: str, port: int, *, private_hosts) -> list[str]:
+    """The addresses an upstream connect to ``host`` may use, resolved once.
+
+    Raises `UpstreamRefused` when one is non-public and the name is not on
+    ``private_hosts``; empty when nothing resolved.
+    """
+    addresses, refused = net_guard.checked_addresses(
+        _unbracket(host), port, private_hosts=private_hosts,
+    )
+    if refused is not None:
+        raise UpstreamRefused()
+    return addresses
+
+
+def connect_addresses(addresses: list[str], port: int, *, timeout: float = 10) -> socket.socket:
+    """A connection to the first of ``addresses`` that accepts; OSError if none."""
+    error: OSError = OSError("no address resolved")
+    for address in addresses:
+        try:
+            return socket.create_connection((address, port), timeout=timeout)
+        except OSError as exc:
+            error = exc
+    raise error
+
+
+def checked_connection(host: str, port: int, *, private_hosts, timeout: float = 10) -> socket.socket:
+    """`checked_addresses` then `connect_addresses`: the one upstream connect."""
+    return connect_addresses(
+        checked_addresses(host, port, private_hosts=private_hosts), port, timeout=timeout,
+    )
+
+
+def _recv_exact(sock: socket.socket, size: int) -> bytes | None:
+    data = b""
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            return None
+        data += chunk
+    return data
+
+
+def _u16(data: bytes, pos: int) -> int:
+    if pos + 2 > len(data):
+        raise ValueError("truncated")
+    return int.from_bytes(data[pos:pos + 2], "big")
+
+
+def _server_name(hello: bytes) -> str | None:
+    """The one host_name in a ClientHello body's server_name extension, or None.
+
+    More than one server_name extension, or more than one host name, is
+    malformed: a server and this check could otherwise read different ones.
+    """
+    pos = 2 + 32  # legacy_version, random
+    if pos >= len(hello):
+        raise ValueError("truncated")
+    pos += 1 + hello[pos]  # session id
+    pos += 2 + _u16(hello, pos)  # cipher suites
+    if pos >= len(hello):
+        raise ValueError("truncated")
+    pos += 1 + hello[pos]  # compression methods
+    if pos == len(hello):
+        return None
+    end = pos + 2 + _u16(hello, pos)
+    pos += 2
+    if end != len(hello):
+        raise ValueError("extensions length")
+    names = []
+    while pos < end:
+        kind, length = _u16(hello, pos), _u16(hello, pos + 2)
+        pos += 4
+        if pos + length > end:
+            raise ValueError("extension length")
+        if kind == 0:
+            data = hello[pos:pos + length]
+            if 2 + _u16(data, 0) != len(data):
+                raise ValueError("server_name length")
+            inner = 2
+            while inner < len(data):
+                if inner + 3 > len(data):
+                    raise ValueError("truncated")
+                name_type, name_length = data[inner], _u16(data, inner + 1)
+                inner += 3
+                if inner + name_length > len(data):
+                    raise ValueError("truncated")
+                if name_type == 0:
+                    names.append(data[inner:inner + name_length].decode("ascii"))
+                inner += name_length
+        pos += length
+    if len(names) > 1:
+        raise ValueError("several server names")
+    return names[0] if names else None
+
+
+def read_client_hello(sock: socket.socket) -> tuple[bytes, str | None] | None:
+    """The records carrying a client's first ClientHello, and the name it asks for.
+
+    None when the first bytes are not a TLS handshake, the hello is malformed
+    or over `MAX_CLIENT_HELLO_BYTES`, or the client closed first. The records
+    are returned whole, to be forwarded upstream unchanged.
+    """
+    raw = b""
+    handshake = b""
+    try:
+        while True:
+            header = _recv_exact(sock, 5)
+            if header is None or header[0] != 0x16 or header[1] != 0x03:
+                return None
+            length = _u16(header, 3)
+            if not 0 < length <= _MAX_RECORD_BYTES:
+                return None
+            body = _recv_exact(sock, length)
+            if body is None:
+                return None
+            raw += header + body
+            handshake += body
+            if len(raw) > MAX_CLIENT_HELLO_BYTES or handshake[0] != 0x01:
+                return None
+            if len(handshake) < 4:
+                continue
+            needed = 4 + int.from_bytes(handshake[1:4], "big")
+            if needed > MAX_CLIENT_HELLO_BYTES:
+                return None
+            if len(handshake) >= needed:
+                return raw, _server_name(handshake[4:needed])
+    except (ValueError, OSError):
+        return None
+
+
+def _sni_matches(server_name: str | None, host: str) -> bool:
+    """Whether a ClientHello's name is the CONNECT host's.
+
+    RFC 6066 leaves IP literals out of SNI, so a tunnel opened to an address
+    may carry none; the broker's `check_sni` makes the same exception.
+    """
+    host = _unbracket(host)
+    if server_name is None:
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            return False
+        return True
+    return net_guard.normal_host(server_name) == net_guard.normal_host(host)
+
+
 def write_bridge_script(path: Path) -> None:
     """Write the TCP-to-Unix bridge script to the given path."""
     path.write_text(BRIDGE_SCRIPT)
@@ -109,9 +281,12 @@ class NetworkProxy:
         *,
         trusted_roots: Iterable[int] = (),
         broker=None,
+        private_hosts: Iterable[str] = (),
     ):
         self.allowed_hosts = allowed_hosts
         self.broker = broker
+        # Exact names whose addresses may be non-public; nothing is implied.
+        self.private_hosts = net_guard.host_set(private_hosts)
         self._peer_roots = peer_process.PeerRoots()
         for pid in trusted_roots:
             self.authorize_pid(pid)
@@ -244,7 +419,8 @@ class NetworkProxy:
         except ValueError:
             client.sendall(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
             return
-        _requests(self.broker, client, host, port, target, plain_http=True, initial_data=data)
+        _requests(self.broker, client, host, port, target, plain_http=True, initial_data=data,
+                  private_hosts=self.private_hosts)
 
     def _handle_connect(
         self, client: socket.socket, host: str, port: int,
@@ -255,15 +431,23 @@ class NetworkProxy:
             client.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
             return
 
+        try:
+            addresses = checked_addresses(host, port, private_hosts=self.private_hosts)
+        except UpstreamRefused:
+            logger.warning("network_proxy_rejected target=%s reason=address", target)
+            client.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+            return
+
         if self.broker is not None:
             from istota.credentials.broker.bindings import https_host
             from istota.credentials.broker.intercept import intercept
             if self.broker.covers(https_host(f"https://{host}:{port}")):
-                intercept(self.broker, client, host, port)
+                # Each upstream connect it makes is checked again, by name.
+                intercept(self.broker, client, host, port, private_hosts=self.private_hosts)
                 return
 
         try:
-            upstream = socket.create_connection((host, port), timeout=10)
+            upstream = connect_addresses(addresses, port)
         except OSError as e:
             logger.debug(
                 "Network proxy upstream connect failed: %s: %s", target, e,
@@ -271,20 +455,25 @@ class NetworkProxy:
             client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
             return
 
-        client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-
-        # Clear the 30s request-parsing timeout — the tunnel may be
-        # idle for long stretches during streaming API responses.
-        client.settimeout(None)
-        upstream.settimeout(None)
-
-        # Enable TCP keepalive on upstream to detect dead connections
-        # (NAT timeouts, load balancer drops, etc.)
-        _enable_tcp_keepalive(upstream)
-
-        logger.debug("Network proxy tunnel established: %s", target)
-
         try:
+            client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            hello = read_client_hello(client)
+            if hello is None or not _sni_matches(hello[1], host):
+                logger.warning("network_proxy_rejected target=%s reason=sni", target)
+                return
+            upstream.sendall(hello[0])
+
+            # Clear the 30s request-parsing timeout — the tunnel may be
+            # idle for long stretches during streaming API responses.
+            client.settimeout(None)
+            upstream.settimeout(None)
+
+            # Enable TCP keepalive on upstream to detect dead connections
+            # (NAT timeouts, load balancer drops, etc.)
+            _enable_tcp_keepalive(upstream)
+
+            logger.debug("Network proxy tunnel established: %s", target)
+
             self._bridge(client, upstream, target)
         finally:
             try:

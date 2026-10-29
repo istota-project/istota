@@ -361,7 +361,7 @@ ICS_POLL_INTERVAL_MIN = 300
 
 
 # What a `private_hosts` entry (`[wordpress]`, `[servarr]`,
-# `[mail_accounts]`, `[sharing]`, `[feeds]`) may look like: a
+# `[mail_accounts]`, `[sharing]`, `[feeds]`, `[security.network]`) may look like: a
 # host name (with an optional trailing dot) or an IP literal. The skills match
 # entries by exact name, so a URL, a port or a wildcard matches nothing. The
 # Ansible role asserts with this same string.
@@ -1824,6 +1824,9 @@ class NetworkConfig:
     enabled: bool = True  # --unshare-net + proxy; false keeps current open-network behavior
     allow_pypi: bool = True  # add pypi.org + files.pythonhosted.org to allowlist
     extra_hosts: list[str] = field(default_factory=list)  # operator-specific additions
+    # Exact names an allowlisted connection may reach at a private, loopback or
+    # link-local address. Nothing else may, whatever its DNS says (ISSUE-883).
+    private_hosts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -6301,6 +6304,9 @@ def load_config(
     _warn_malformed_private_hosts("mail_accounts", config.mail_accounts.private_hosts, "account")
     _warn_malformed_private_hosts("sharing", config.sharing.private_hosts, "shared source")
     _warn_malformed_private_hosts("feeds", config.feeds.private_hosts, "feed")
+    _warn_malformed_private_hosts(
+        "security.network", config.security.network.private_hosts, "allowed host",
+    )
     _validate_servarr(config)
     _validate_claude_code_brain(config)
     _validate_configured_model_references(config)
@@ -7216,7 +7222,7 @@ def _warn_malformed_private_hosts(section: str, entries, target: str) -> None:
     ]
     if malformed:
         report_problem(
-            "warning", (section, "private_hosts"),
+            "warning", (*section.split("."), "private_hosts"),
             "[%s] private_hosts entry %s is not a bare host name or IP "
             "address; entries are matched by exact name, so it lifts the "
             "private-address refusal for no %s (write the host alone, with "

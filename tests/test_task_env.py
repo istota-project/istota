@@ -840,6 +840,37 @@ class TestTheNetworkProxyGate:
         assert runtime.net_proxy_ctx is not None
         assert runtime.net_proxy_sock is not None
 
+    def test_private_hosts_reach_the_proxy_from_config_toml(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        """ISSUE-883: the grant is read from the file and handed to the proxy."""
+        from istota.config import load_config
+
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        path = tmp_path / "config.toml"
+        path.write_text('[security.network]\nprivate_hosts = ["Git.LAN"]\n')
+        config = _config(tmp_path)
+        config.security.network = load_config(path).security.network
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        assert runtime.net_proxy_ctx.private_hosts == frozenset({"git.lan"})
+
+    def test_a_private_host_with_a_port_is_warned_about(self, tmp_path, caplog):
+        """`extra_hosts` beside it takes `host:port`; this key never matches one."""
+        import logging
+
+        from istota.config import load_config
+        from istota.config_editor import schema
+
+        caplog.set_level(logging.WARNING, logger="istota.config")
+        path = tmp_path / "config.toml"
+        path.write_text('[security.network]\nprivate_hosts = ["git.lan:443"]\n')
+        load_config(path)
+        messages = [r.getMessage() for r in caplog.records if "private_hosts" in r.getMessage()]
+        assert len(messages) == 1 and "[security.network]" in messages[0]
+        assert ("security", "network", "private_hosts") in schema.RISKY_KEYS
+
     def test_the_network_gate_ignores_the_bwrap_probe(
         self, tmp_path, runtime_inputs, monkeypatch,
     ):
