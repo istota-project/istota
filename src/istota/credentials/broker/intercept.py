@@ -13,13 +13,13 @@ import ipaddress
 from dataclasses import dataclass
 import logging
 import re
-import socket
 import ssl
 
 import h11
 
 from istota import db
 from istota.credentials import store as secrets_store
+from istota.sandbox.network_proxy import UpstreamRefused, checked_connection
 from . import ca
 from .bindings import get_entry_binding, https_host, credential_host, daemon_only_refusal
 from .grants import check_credential_grant
@@ -190,7 +190,7 @@ def _refusal(broker, sock, reason, status=403):
         pass
 
 
-def intercept(broker, client, host, port):
+def intercept(broker, client, host, port, *, private_hosts=()):
     """Serve one CONNECT. The caller has already checked peer and allowlist."""
     target = https_host(f"https://{host}:{port}")
     # CONNECT uses brackets for IPv6; TLS and socket APIs take the address.
@@ -216,7 +216,7 @@ def intercept(broker, client, host, port):
     try:
         with context.wrap_socket(client, server_side=True) as tls:
             tls.settimeout(30)
-            _requests(broker, tls, host, port, target)
+            _requests(broker, tls, host, port, target, private_hosts=private_hosts)
     except (OSError, ValueError):
         # In particular, do not log SSL/parser exceptions containing wire data.
         logger.warning("credential_tls_failed task=%s user=%s", broker.task_id, broker.user_id)
@@ -229,7 +229,7 @@ def _audit(broker, names, target, method, status, request_limited, response_limi
                     status, request_limited, response_limited)
 
 
-def _requests(broker, tls, host, port, target, *, plain_http=False, initial_data=b""):
+def _requests(broker, tls, host, port, target, *, plain_http=False, initial_data=b"", private_hosts=()):
     downstream = h11.Connection(h11.SERVER, max_incomplete_event_size=65536)
     if initial_data:
         downstream.receive_data(initial_data)
@@ -273,7 +273,11 @@ def _requests(broker, tls, host, port, target, *, plain_http=False, initial_data
                 raise Refused("credential_in_body")
             # Recheck after a potentially slow upload prefix, before using values.
             headers, replacements, names = _headers(broker, request, target)
-            with socket.create_connection((host, port), timeout=10) as raw:
+            try:
+                raw = checked_connection(host, port, private_hosts=private_hosts)
+            except UpstreamRefused:
+                raise Refused("host_refused") from None
+            with raw:
                 with (nullcontext(raw) if plain_http else
                       ca.upstream_context().wrap_socket(raw, server_hostname=host)) as upstream:
                     upstream.settimeout(30)

@@ -121,6 +121,8 @@ RISKY_KEYS: frozenset[tuple[str, ...]] = frozenset({
     ("sharing", "ocm", "enabled"),
     # Lifts the private-address refusal for daemon-side fetches.
     ("sharing", "private_hosts"),
+    # Lifts it for the sandbox's own connections, which the model drives.
+    ("security", "network", "private_hosts"),
 })
 
 

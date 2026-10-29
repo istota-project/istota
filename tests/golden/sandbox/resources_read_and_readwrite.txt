@@ -8,7 +8,6 @@ bwrap	<HOST-SYSTEM-BINDS>
 --bind	<TMP>/temp/alice	<TMP>/temp/alice
 --ro-bind	<TMP>/temp/alice/.developer	<TMP>/temp/alice/.developer
 --bind	<TMP>/mount/Users/alice	<TMP>/mount/Users/alice
---ro-bind	<TMP>/mount/Talk	<TMP>/mount/Talk
 --bind	<TMP>/mount/Channels/room123	<TMP>/mount/Channels/room123
 --ro-bind	<HOME>/.cache/huggingface	<HOME>/.cache/huggingface
 --bind	<TMP>/mount/Docs	<TMP>/mount/Docs

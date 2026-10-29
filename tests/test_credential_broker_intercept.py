@@ -123,8 +123,10 @@ def broker(tmp_path, monkeypatch, request, broker_responder, broker_scheme):
     thread.start()
     from istota.credentials.broker.intercept import Broker
     socket_dir = tempfile.TemporaryDirectory(prefix="broker-", dir="/tmp")
+    # The upstream is a loopback listener, which only a private_hosts grant reaches.
     proxy = NetworkProxy(Path(socket_dir.name) / "p.sock", {host}, trusted_roots=[os.getpid()],
-                         broker=Broker(config, task_id, "alice", authority))
+                         broker=Broker(config, task_id, "alice", authority),
+                         private_hosts=[upstream_host])
     with proxy:
         yield config, task_id, authority, upstream_ca, proxy, host, received
     stopped.set()
@@ -399,6 +401,42 @@ def test_http_requires_override_and_scrubs_response(broker):
     assert PLACEHOLDER in response
     assert b"403" in request(b"http://other.example/").split(b"\r\n")[0]
     assert len(received) == 1
+
+
+def test_bound_host_at_a_private_address_is_refused_without_a_grant(broker):
+    """ISSUE-883: interception reaches only an address the raw path could."""
+    _, _, _, _, proxy, host, received = broker
+    proxy.private_hosts = frozenset()
+    with socket.socket(socket.AF_UNIX) as conn:
+        conn.settimeout(3)
+        conn.connect(str(proxy.socket_path))
+        conn.sendall(f"CONNECT {host} HTTP/1.1\r\nHost: {host}\r\n\r\n".encode())
+        assert conn.recv(4096).startswith(b"HTTP/1.1 403")
+    assert received == []
+
+
+@pytest.mark.parametrize("broker_scheme", ["http"], indirect=True)
+def test_each_brokered_upstream_connect_checks_the_address(broker):
+    """Absolute-form HTTP has no CONNECT to check; the request's own connect does."""
+    config, _, _, _, proxy, host, received = broker
+    with db.get_db(config.db_path) as conn:
+        grants.put_grant(conn, "alice", "portal", allow_http=True)
+        task_id = db.create_task(conn, user_id="alice", prompt="test", source_type="talk",
+                                 conversation_token="room-a")
+        grants.ensure_credential_grants(conn, task_id, "alice")
+    proxy.broker.task_id = task_id
+    proxy.private_hosts = frozenset()
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(3)
+        client.connect(str(proxy.socket_path))
+        client.sendall(f"GET http://{host}/ HTTP/1.1\r\nHost: {host}\r\n".encode()
+                       + b"Authorization: Bearer " + PLACEHOLDER + b"\r\nConnection: close\r\n\r\n")
+        response = b""
+        while chunk := client.recv(65536):
+            response += chunk
+    assert response.startswith(b"HTTP/1.1 403")
+    assert b"host_refused" in response
+    assert received == []
 
 
 @pytest.mark.parametrize("broker_scheme", ["http"], indirect=True)

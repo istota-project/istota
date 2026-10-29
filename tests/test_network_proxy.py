@@ -156,7 +156,10 @@ class TestNetworkProxyAllowed:
         upstream_ready.wait()
 
         allowed = {f"127.0.0.1:{port}"}
-        with NetworkProxy(proxy_sock, allowed, trusted_roots={os.getpid()}):
+        hello = _client_hello(None)
+        with NetworkProxy(
+            proxy_sock, allowed, trusted_roots={os.getpid()}, private_hosts=["127.0.0.1"],
+        ):
             client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             client.connect(str(proxy_sock))
             client.sendall(f"CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n".encode())
@@ -167,22 +170,24 @@ class TestNetworkProxyAllowed:
                 response += client.recv(4096)
             assert b"200 Connection Established" in response
 
-            # Send data through the tunnel
-            client.sendall(b"HELLO-FROM-CLIENT")
+            # An IP literal carries no SNI (RFC 6066), so none is required.
+            client.sendall(hello)
             reply = client.recv(4096)
             client.close()
 
         srv.close()
         t.join(timeout=2)
 
-        assert upstream_received[0] == b"HELLO-FROM-CLIENT"
+        assert upstream_received[0] == hello
         assert reply == b"UPSTREAM-REPLY"
 
     def test_upstream_unreachable_returns_502(self, proxy_sock):
         """Verify that a failed upstream connect returns 502."""
         # Use a port that's definitely not listening
         allowed = {"127.0.0.1:1"}
-        with NetworkProxy(proxy_sock, allowed, trusted_roots={os.getpid()}):
+        with NetworkProxy(
+            proxy_sock, allowed, trusted_roots={os.getpid()}, private_hosts=["127.0.0.1"],
+        ):
             client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             client.connect(str(proxy_sock))
             client.sendall(b"CONNECT 127.0.0.1:1 HTTP/1.1\r\n\r\n")
@@ -256,7 +261,9 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
     client.sendall(b"CONNECT 127.0.0.1:1 HTTP/1.1\r\n\r\n")
     print(client.recv(4096).decode())
 """
-        with NetworkProxy(proxy_sock, {"127.0.0.1:1"}, trusted_roots=()) as proxy:
+        with NetworkProxy(
+            proxy_sock, {"127.0.0.1:1"}, trusted_roots=(), private_hosts=["127.0.0.1"],
+        ) as proxy:
             with subprocess.Popen(
                 [sys.executable, "-c", script, str(proxy_sock)],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
@@ -291,7 +298,7 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             return pid
 
         monkeypatch.setattr(peer_process, "peer_pid", observe_peer)
-        with NetworkProxy(proxy_sock, {"127.0.0.1:1"}) as proxy:
+        with NetworkProxy(proxy_sock, {"127.0.0.1:1"}, private_hosts=["127.0.0.1"]) as proxy:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 client.settimeout(5)
                 client.connect(str(proxy_sock))
@@ -299,3 +306,220 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 assert connected.wait(2)
                 proxy.authorize_pid(os.getpid())
                 assert b"502 Bad Gateway" in client.recv(4096)
+
+
+def _client_hello(server_name=None):
+    """A real TLS ClientHello, as the first bytes a client sends down a tunnel."""
+    import ssl
+
+    context = ssl.create_default_context()
+    if server_name is None:
+        context.check_hostname = False
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    tls = context.wrap_bio(incoming, outgoing, server_hostname=server_name)
+    with pytest.raises(ssl.SSLWantReadError):
+        tls.do_handshake()
+    return outgoing.read()
+
+
+class _Upstream:
+    """One loopback listener that records what the tunnel forwarded to it."""
+
+    def __init__(self):
+        self.received = []
+        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.srv.bind(("127.0.0.1", 0))
+        self.srv.listen(4)
+        self.srv.settimeout(5)
+        self.port = self.srv.getsockname()[1]
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self):
+        try:
+            conn, _ = self.srv.accept()
+        except OSError:
+            return
+        with conn:
+            conn.settimeout(2)
+            data = b""
+            try:
+                while True:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                    conn.sendall(b"UPSTREAM-REPLY")
+            except OSError:
+                pass
+            self.received.append(data)
+
+    def close(self):
+        self.srv.close()
+        self.thread.join(timeout=5)
+
+
+def _resolve_to_loopback(monkeypatch, name):
+    original = socket.getaddrinfo
+
+    def resolve(host, port, *args, **kwargs):
+        return original("127.0.0.1" if host == name else host, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+
+
+def _connect(proxy_sock, target):
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(5)
+    client.connect(str(proxy_sock))
+    client.sendall(f"CONNECT {target} HTTP/1.1\r\n\r\n".encode())
+    response = b""
+    while b"\r\n\r\n" not in response:
+        chunk = client.recv(4096)
+        if not chunk:
+            break
+        response += chunk
+    return client, response
+
+
+def _closed(client):
+    try:
+        return client.recv(4096) == b""
+    except OSError:
+        return True
+
+
+class TestNetworkProxyAddressPolicy:
+    """ISSUE-883: the allowlist names a host; the proxy must check what it reaches."""
+
+    def test_allowed_name_resolving_to_loopback_is_refused(self, proxy_sock, monkeypatch):
+        upstream = _Upstream()
+        _resolve_to_loopback(monkeypatch, "allowed.example")
+        target = f"allowed.example:{upstream.port}"
+        try:
+            with NetworkProxy(proxy_sock, {target}, trusted_roots={os.getpid()}):
+                client, response = _connect(proxy_sock, target)
+                client.close()
+        finally:
+            upstream.close()
+        assert b"403 Forbidden" in response
+        assert upstream.received == []
+
+    def test_literal_private_address_is_refused(self, proxy_sock):
+        with patch("istota.sandbox.network_proxy.socket.create_connection") as connect:
+            with NetworkProxy(proxy_sock, {"169.254.169.254:80"}, trusted_roots={os.getpid()}):
+                client, response = _connect(proxy_sock, "169.254.169.254:80")
+                client.close()
+        assert b"403 Forbidden" in response
+        connect.assert_not_called()
+
+    def test_private_hosts_grant_reaches_private_address(self, proxy_sock, monkeypatch):
+        upstream = _Upstream()
+        _resolve_to_loopback(monkeypatch, "git.lan")
+        target = f"git.lan:{upstream.port}"
+        hello = _client_hello("git.lan")
+        try:
+            with NetworkProxy(
+                proxy_sock, {target}, trusted_roots={os.getpid()}, private_hosts=["Git.LAN."],
+            ):
+                client, response = _connect(proxy_sock, target)
+                assert b"200 Connection Established" in response
+                client.sendall(hello)
+                assert client.recv(4096) == b"UPSTREAM-REPLY"
+                client.close()
+        finally:
+            upstream.close()
+        assert upstream.received == [hello]
+
+    def test_connects_to_the_checked_address_not_the_name(self, proxy_sock, monkeypatch):
+        """Pinned: one resolution decides, and the connect uses its answer."""
+        calls = []
+
+        def resolve(host, port, *args, **kwargs):
+            calls.append(host)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port))]
+
+        monkeypatch.setattr(socket, "getaddrinfo", resolve)
+        with patch(
+            "istota.sandbox.network_proxy.socket.create_connection", side_effect=OSError("down"),
+        ) as connect:
+            with NetworkProxy(proxy_sock, {"public.example:443"}, trusted_roots={os.getpid()}):
+                client, response = _connect(proxy_sock, "public.example:443")
+                client.close()
+        assert b"502 Bad Gateway" in response
+        assert calls == ["public.example"]
+        assert connect.call_args.args[0] == ("8.8.8.8", 443)
+
+
+class TestReadClientHello:
+    def _read(self, data):
+        from istota.sandbox.network_proxy import read_client_hello
+
+        a, b = socket.socketpair()
+        with a, b:
+            b.settimeout(2)
+            a.sendall(data)
+            a.shutdown(socket.SHUT_WR)
+            return read_client_hello(b)
+
+    def test_a_hello_split_across_records_is_reassembled(self):
+        record = _client_hello("split.example")
+        body = record[5:]
+        head, tail = body[:40], body[40:]
+        split = (
+            record[:3] + len(head).to_bytes(2, "big") + head
+            + record[:3] + len(tail).to_bytes(2, "big") + tail
+        )
+        assert self._read(split) == (split, "split.example")
+
+    def test_a_truncated_hello_is_refused(self):
+        assert self._read(_client_hello("cut.example")[:60]) is None
+
+
+class TestNetworkProxyInnerAuthority:
+    """ISSUE-883: a raw tunnel carries TLS for the name it was opened for."""
+
+    @pytest.fixture
+    def tunnel(self, proxy_sock, monkeypatch):
+        upstream = _Upstream()
+        _resolve_to_loopback(monkeypatch, "allowed.example")
+        target = f"allowed.example:{upstream.port}"
+        with NetworkProxy(
+            proxy_sock, {target}, trusted_roots={os.getpid()}, private_hosts=["allowed.example"],
+        ):
+            client, response = _connect(proxy_sock, target)
+            assert b"200 Connection Established" in response
+            yield client, upstream
+            client.close()
+        upstream.close()
+
+    def test_matching_sni_is_forwarded(self, tunnel):
+        client, upstream = tunnel
+        hello = _client_hello("allowed.example")
+        client.sendall(hello)
+        assert client.recv(4096) == b"UPSTREAM-REPLY"
+        client.close()
+        upstream.close()
+        assert upstream.received == [hello]
+
+    def test_mismatched_sni_closes_the_tunnel(self, tunnel):
+        client, upstream = tunnel
+        client.sendall(_client_hello("other.example"))
+        assert _closed(client)
+        upstream.close()
+        assert upstream.received in ([], [b""])
+
+    def test_missing_sni_closes_the_tunnel(self, tunnel):
+        client, upstream = tunnel
+        client.sendall(_client_hello(None))
+        assert _closed(client)
+        upstream.close()
+        assert upstream.received in ([], [b""])
+
+    def test_plain_http_naming_another_host_closes_the_tunnel(self, tunnel):
+        """The audit's witness: a raw request with a different Host."""
+        client, upstream = tunnel
+        client.sendall(b"GET /collect?data=canary HTTP/1.1\r\nHost: other.example\r\n\r\n")
+        assert _closed(client)
+        upstream.close()
+        assert upstream.received in ([], [b""])

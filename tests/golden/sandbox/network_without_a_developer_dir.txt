@@ -9,7 +9,6 @@ bwrap	<HOST-SYSTEM-BINDS>
 --unshare-net
 --ro-bind	<TMP>/sockets/net.sock	<TMP>/sockets/net.sock
 --bind	<TMP>/mount/Users/alice	<TMP>/mount/Users/alice
---ro-bind	<TMP>/mount/Talk	<TMP>/mount/Talk
 --bind	<TMP>/mount/Channels/room123	<TMP>/mount/Channels/room123
 --ro-bind	<HOME>/.cache/huggingface	<HOME>/.cache/huggingface
 --tmpfs	<TMP>/data

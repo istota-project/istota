@@ -366,6 +366,12 @@ features = []
 # enabled = true                   # --unshare-net + CONNECT proxy (requires sandbox)
 # allow_pypi = true                # add pypi.org + files.pythonhosted.org to allowlist
 # extra_hosts = []                 # operator-specific additions (e.g. ["registry.example.com:443"])
+# private_hosts = []               # exact names an allowed host may reach at a private address
+#
+# An allowed host is refused when it resolves to a private, loopback or
+# link-local address, unless its exact name is in `private_hosts`: a
+# self-hosted GitLab on the LAN, say. The proxy connects to the address it
+# checked, and a tunnel must carry TLS whose server name is the allowed host.
 #
 # The public npm and crates.io registries are already added for a task that is
 # authorized for the `developer` skill, so an install inside a worktree needs

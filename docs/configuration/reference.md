@@ -403,6 +403,7 @@ Substitutes credential placeholders in authentication headers, for hosts a crede
 | `enabled` | `true` | Network isolation via CONNECT proxy |
 | `allow_pypi` | `true` | Allow PyPI access |
 | `extra_hosts` | `[]` | Additional allowed hosts. No Anthropic host is on the default list; a task that calls Anthropic's API from Bash needs `api.anthropic.com:443` here |
+| `private_hosts` | `[]` | Exact host names an allowed connection may reach at a private, loopback or link-local address. Any other allowed host that resolves to one is refused. Names only, no port |
 
 ## `[skills]`
 
