@@ -225,6 +225,22 @@ class TestSweepSkips:
         assert "developer.container" in skipped
         assert "security.devbox_netfilter" in skipped
 
+    def test_the_boot_run_leaves_the_public_ocm_fetch_to_the_first_sweep(
+        self, make_config, monkeypatch, sent
+    ):
+        """`web` starts once the daemon is healthy and nginx after it, so the
+        boot run's fetch of the public `/ocm-provider/` reached a proxy with
+        nothing behind it and failed with a 502 on every restart."""
+        seen = {}
+
+        def _capture(config, **kw):
+            seen.update(kw)
+            return [_ok()]
+
+        monkeypatch.setattr("istota.doctor.run_checks", _capture)
+        scheduler.run_startup_checks(make_config())
+        assert "sharing.ocm" in seen.get("skip", ())
+
     def test_the_boot_skips_name_real_checks(self):
         from istota.doctor import CHECKS
 

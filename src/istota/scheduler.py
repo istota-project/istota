@@ -6779,8 +6779,12 @@ SWEEP_SKIPPED_CHECKS = ("runtime.framework_db",)
 
 # The devbox services start once the daemon reports healthy, so at the boot run
 # their exec sockets do not exist yet: these failed, and alerted, on every
-# restart. The first sweep, DOCTOR_FIRST_SWEEP_DELAY after boot, answers them.
-STARTUP_SKIPPED_CHECKS = ("developer.container", "security.devbox_netfilter")
+# restart. `web` waits for the same signal and nginx for `web`, so the public
+# OCM fetch got a proxy's 502. The first sweep, DOCTOR_FIRST_SWEEP_DELAY after
+# boot, answers them.
+STARTUP_SKIPPED_CHECKS = (
+    "developer.container", "security.devbox_netfilter", "sharing.ocm",
+)
 DOCTOR_FIRST_SWEEP_DELAY = 300
 
 
