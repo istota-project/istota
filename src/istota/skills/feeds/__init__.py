@@ -6,13 +6,15 @@ Resolves the user's :class:`FeedsContext` via
 no HTTP. Mirrors :mod:`istota.skills.money`.
 """
 
+from istota.sandbox.host_paths import stage_resolved, write_resolved
+
 import argparse
 import json
 import os
 import sys
 from pathlib import Path
 
-from istota.skills._cli import emit, error_envelope, parse_and_resolve, run_skill_cli
+from istota.skills._cli import emit, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import READ, WRITE, host_path
 
 
@@ -153,44 +155,18 @@ def cmd_prune(args):
     _output(_run(cli_args))
 
 
-def _ensure_parent(resolved: str) -> str:
-    """Make the destination's parent, and hand the path straight back.
-
-    **This is the one host-path consumer that does not write through
-    `write_resolved`**, because the Click CLI opens the destination itself —
-    so the parent has to exist at the moment the path is handed over rather
-    than at a write this module performs. `resolve_in_roots` deliberately
-    creates nothing: resolution answers "may this path be used" and must not
-    mutate the filesystem answering it, which since ISSUE-447 matters more
-    than it did, since resolution now runs at parse time on every invocation
-    and would otherwise leave a tree behind on a verb that then refused for an
-    unrelated reason.
-
-    Safe to run on the value off the namespace, and only there: the `WRITE`
-    stamp on the declaration has already resolved it and established that it
-    is inside the roots, so nothing is created outside them.
-    """
-    parent = Path(resolved).parent
-    try:
-        parent.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        # `emit` exits 1 on an error envelope, so this does not return.
-        _output(error_envelope(f"could not create {parent}: {e}"))
-    return resolved
-
-
 def cmd_import_opml(args):
-    # `args.path` is the resolved path — the `READ` stamp on the declaration
-    # settled it. Handing the Click CLI the original would re-walk every
-    # symlink the resolution just settled, in a process that opens it itself.
-    _output(_run(["import-opml", args.path]))
+    with stage_resolved(args.path) as source:
+        _output(_run(["import-opml", str(source)]))
 
 
 def cmd_export_opml(args):
-    cli_args = ["export-opml"]
-    if args.output:
-        cli_args += ["--output", _ensure_parent(args.output)]
-    _output(_run(cli_args))
+    result = _run(["export-opml"])
+    if args.output and result.get("status") == "ok":
+        text = result["raw"]
+        write_resolved(Path(args.output), text.encode("utf-8"))
+        result = {"status": "ok", "path": args.output, "bytes": len(text)}
+    _output(result)
 
 
 # ---------------------------------------------------------------------------

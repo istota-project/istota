@@ -57,20 +57,7 @@ back as reviewer-prompt text. The variable is now the caller's own subtree and
 `developer_repos_root` re-derives that scope from `ISTOTA_USER_ID` rather than
 trusting it.
 
-**Callers must use the returned resolved path.** Validating one path and then
-opening the original re-walks every symlink in it, so a link swapped in between
-lands outside the allowlist with the check already passed. The resolved path
-has no symlink components *as of the check*, which removes that re-walk. For a
-stamped argument this stopped being a rule each handler has to remember:
-``resolve_parsed`` writes the resolved value back onto the namespace, so
-``args.file_path`` already is it. A caller resolving by hand still owes it.
-
-It does not make the caller's later open atomic. Both allowlists validate a
-path, and the trees they validate are bound read-write into the sandbox, so a
-component can in principle be replaced between the return and the use. Path
-validation cannot close that on its own. What it does close is the much larger
-window of re-resolving an attacker-supplied string, which is why the rule is to
-operate on what comes back and never to re-walk the argument.
+**Validation is not an open.** The returned name carries the scope decision, but every component can change afterwards. Consumers use `open_resolved`, `read_resolved`, `read_resolved_text` or `write_resolved`: they walk the absolute name from the filesystem root with no links followed, and use the opened descriptor. A consumer that requires a pathname gets a private copy through `stage_resolved`. These operations do not grant access; the caller must still validate the name against its own roots.
 
 **One rule, two derivations.** The containment rule itself is
 ``path_under_roots`` plus ``resolve_in_roots``, and the roots it works against
@@ -96,10 +83,13 @@ question as a read whose bytes stay in it.
 
 import os
 import stat
+import shutil
+import tempfile
 from collections.abc import Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
-from .confined import open_dir, valid_parts
+from .confined import open_dir, open_or_create_dirs, open_regular, valid_parts
 from .user_scope import is_within, scoped_user_dir
 
 
@@ -427,55 +417,90 @@ def resolve_in_roots(
     return resolved, None
 
 
-def write_resolved(path: Path, data: bytes, *, exclusive: bool = False) -> None:
-    """Write `data` to a path `resolve_host_path` just returned, refusing a link.
+def _absolute_parts(path: str | Path) -> tuple[Path, tuple[str, ...]]:
+    # Do not resolve again: the no-follow walk must see every component.
+    path = Path(path)
+    if not path.is_absolute() or not valid_parts(path.parts[1:]):
+        raise OSError("Expected an absolute resolved file path")
+    return Path(path.anchor), path.parts[1:]
 
-    The counterpart to "use the returned resolved path": the caller still has
-    to *open* it, and a plain `open(path, "wb")` follows a symlink standing at
-    the final component. `resolve_host_path` refuses one as of its own check,
-    which leaves the window between the check and this open — narrow, and
-    model-plantable, since the workspace is bound read-write into the sandbox.
-    `O_NOFOLLOW` closes it: the open fails rather than landing wherever the
-    link points, as the daemon user.
 
-    **`exclusive` decides which of two different questions the open answers,
-    and the default is the wrong answer for a derived name.** `O_TRUNC` is
-    right for a destination the caller named: overwriting it is what every
-    consumer here already did, and refusing would break a re-run. A name the
-    *caller derived* to be unique is the other case — two tasks of one user
-    can derive the same one, the scheduler runs a worker pool, and under
-    `O_TRUNC` the loser's bytes replace the winner's while both report ok with
-    a `size` that no longer describes what is on disk. `O_EXCL` makes the
-    check and the create one step and raises `FileExistsError` instead, which
-    is what a caller looping over candidate names needs.
+def open_resolved(path: str | Path) -> int:
+    """Open an authorized absolute path without following any component links.
 
-    The mode requested is `0o666` and the umask narrows it, which is exactly
-    what a plain `open(path, "wb")` does — so a file written this way is
-    neither wider nor narrower than the workspace's other files. A fixed
-    `0o644` would be narrower under a `umask 002` deployment, which is a
-    shipped shape for a group-shared mount.
-
-    **It also ensures the parent**, which `resolve_in_roots` used to do and
-    deliberately no longer does. That moves the directory creation from check
-    time to write time, and the residual is worth naming: an ancestor of the
-    resolved path can be swapped between the resolution and this call, and
-    `mkdir(parents=True)` follows a symlink standing at an existing ancestor
-    while `O_NOFOLLOW` covers only the final component. That window was
-    already open — the old ordering did not make the check and the write
-    atomic either — and it is the same one the module docstring means by what
-    path validation cannot close on its own.
-
-    Raises `OSError`, which every consumer already handles: a refusal is an
-    envelope, not a traceback.
+    Scope checks remain the caller's responsibility. The filesystem root
+    anchors the walk because validation already returned a resolved name.
+    The caller owns the returned regular-file descriptor.
     """
-    # The parent, here rather than in the resolver: `resolve_in_roots` answers
-    # a question and must not mutate anything answering it, and this is the one
-    # place that knows a write is actually about to happen. `path` is what the
-    # resolver returned, so its parent is inside a root by construction.
-    path.parent.mkdir(parents=True, exist_ok=True)
-    mode = os.O_EXCL if exclusive else os.O_TRUNC
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | mode | os.O_NOFOLLOW, 0o666)
+    anchor, parts = _absolute_parts(path)
+    fd = open_regular(anchor, parts)
+    if fd is None:
+        raise OSError("Could not open resolved regular file")
+    return fd
+
+
+def read_resolved(path: str | Path) -> bytes:
+    with os.fdopen(open_resolved(path), "rb") as handle:
+        return handle.read()
+
+
+def read_resolved_text(
+    path: str | Path, *, encoding: str = "utf-8", errors: str = "strict",
+) -> str:
+    with os.fdopen(open_resolved(path), encoding=encoding, errors=errors) as handle:
+        return handle.read()
+
+
+def mkdir_resolved(path: str | Path) -> None:
+    """Create an authorized directory without following component links."""
+    anchor, parts = _absolute_parts(path)
+    os.close(open_or_create_dirs(anchor, parts))
+
+
+@contextmanager
+def skill_file_env(env: dict[str, str]):
+    """Give one host skill invocation private staging, reaped by its parent."""
+    with tempfile.TemporaryDirectory(prefix="istota-skill-files-") as directory:
+        yield {**env, "ISTOTA_HOST_FILES_DIR": directory}
+
+
+@contextmanager
+def stage_resolved(path: str | Path, *, readonly: bool = False):
+    """A private copy for a consumer that only accepts a pathname."""
+    with os.fdopen(open_resolved(path), "rb") as source:
+        with tempfile.TemporaryDirectory(
+            prefix="istota-host-file-", dir=os.environ.get("ISTOTA_HOST_FILES_DIR"),
+        ) as directory:
+            staged = Path(directory) / Path(path).name
+            with staged.open("xb") as target:
+                shutil.copyfileobj(source, target)
+            if readonly:
+                staged.chmod(0o400)
+                Path(directory).chmod(0o500)
+            try:
+                yield staged
+            finally:
+                if readonly:
+                    Path(directory).chmod(0o700)
+
+
+def write_resolved(path: Path, data: bytes, *, exclusive: bool = False) -> None:
+    """Write an authorized destination through a no-follow parent descriptor."""
+    anchor, parts = _absolute_parts(path)
+    if not parts:
+        raise OSError("Expected a file name")
+    parent_fd = open_or_create_dirs(anchor, parts[:-1])
     try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+        if exclusive:
+            flags |= os.O_EXCL
+        fd = os.open(parts[-1], flags, 0o666, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("Destination is not a regular file")
+        os.ftruncate(fd, 0)
         handle = os.fdopen(fd, "wb")
     except BaseException:
         # Only this call. Past it the descriptor belongs to `handle`, and

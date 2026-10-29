@@ -137,7 +137,9 @@ def _scratch_dir(config: "Config") -> Path:
     directory = Path(config.temp_dir) / _SCRATCH_DIR
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(directory, 0o700)
-    return directory
+    # `dav.upload` opens through a no-follow walk from `/`, so a symlinked
+    # `temp_dir` would refuse every upload. No task can write here.
+    return directory.resolve()
 
 
 def _share_failure_state(exc: BaseException) -> str:

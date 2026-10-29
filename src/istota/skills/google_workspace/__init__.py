@@ -1,44 +1,16 @@
-"""Google Workspace skill — setup_env hook and CLI passthrough.
+"""Google Workspace operations with scoped, private copies of host input files.
 
-**The passthrough is the one skill CLI whose arguments nothing can enumerate,
-so its boundary is on argv.** `main` execs `gws`, a program that is not in
-this tree and is not installed on the development machine, and its own
-`skill.md` documents `drive +upload /path/to/file.pdf` — a host read that
-lands in Google Drive. Every other skill declares its path arguments and
-`tests/test_skill_host_paths_coverage.py` walks them; here there is no parser
-to walk, so `scan_argv` classifies each token instead and a path-shaped one is
-resolved through the shared allowlist before the exec (ISSUE-447 Layer 4).
+The external CLI's argument grammar is not available here. The scanner keeps
+its existing classification: absolute paths, traversal, existing relative
+names and attached flag values are scoped as reads. Opaque Google identifiers
+pass through. Each admitted regular file is copied through a confined fd,
+then made read-only. Directory arguments are refused.
 
-Coarser than a declaration, and chosen over the alternative deliberately: a
-per-verb policy table for gws would be a hand-maintained description of a
-program we do not ship, which is the staleness the rest of that work removes.
-The costs are stated rather than hidden.
-
-- **A path this scan cannot see passes through unscoped.** A token that is
-  neither absolute, nor `~`-prefixed, nor holding a `..` component, nor naming
-  something that exists relative to the cwd is not path-shaped — which is
-  exactly a *relative destination that does not exist yet*. That residual is
-  carried by the cwd rather than by another layer: `main` stands in the user's
-  own workspace before the exec, so such a path lands in-roots by
-  construction rather than beside the daemon's working directory.
-- **One rule for reads and uploads alike.** A token is resolved with
-  `writable=False`, so it must exist and it is admitted from the task's whole
-  working context — the task's attachment copies included. An upload is egress and the
-  narrower `OWN` set would fit it better, but telling an upload from a read
-  means knowing gws's verbs, which is the table above. The scan applies the
-  read rule and says so here.
-- **False positives are refusals, not silent passes.** A `~`-prefixed token
-  and a destination that does not exist yet are both refused where they are
-  path-shaped, which is the direction to be wrong in.
-- **A workspace file named like a gws verb rewrites the verb.** The cwd is the
-  workspace, so `drive` is path-shaped when a file of that name sits there and
-  the token becomes an absolute path where gws wants a service name. `docs`,
-  `calendar`, `chat` and `list` are all plausible filenames in a directory the
-  model writes to. The command then fails in gws rather than doing something
-  unintended, which is why the existence signal stays: dropping it for
-  separator-less tokens would let a bare `secret.pdf` beside a cwd that is
-  *not* the workspace through unscanned, trading a loud failure for a quiet
-  read.
+Relative input names are interpreted in the user's workspace. Execution uses
+an empty, non-writable private cwd, so an unrecognized relative output cannot
+write into that workspace. Local output files are unsupported; use stdout.
+The parent skill launcher owns the staging directory and removes it after
+exit or timeout. Keeping exec lets that parent terminate gws itself.
 """
 
 from __future__ import annotations
@@ -46,9 +18,11 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 
-from istota.sandbox.host_paths import resolve_host_path, user_workspace_root
+from istota.sandbox.host_paths import resolve_host_path, stage_resolved, user_workspace_root
 from istota.skills._cli import fail
 
 logger = logging.getLogger("istota.skills.google_workspace")
@@ -100,13 +74,18 @@ def _is_path_shaped(token: str) -> bool:
         return False
 
 
-def _scoped(token: str, operation: str) -> tuple[str | None, str | None]:
+def _scoped(token: str, operation: str, stage=None) -> tuple[str | None, str | None]:
     """The token's resolution, or the refusal. Never the token unchanged."""
     resolved, error = resolve_host_path(
         Path(token), writable=False, operation=f"gws {operation}",
     )
     if error is not None:
         return None, error
+    if stage is not None:
+        try:
+            resolved = stage(resolved)
+        except OSError:
+            return None, "Host file is not a safely readable regular file"
     return str(resolved), None
 
 
@@ -144,21 +123,21 @@ def _attached_values(token: str) -> list[tuple[str, str, str]]:
     return out
 
 
-def _scan_token(token: str) -> tuple[str | None, str | None]:
+def _scan_token(token: str, stage=None) -> tuple[str | None, str | None]:
     """One token, rewritten to its resolution where it names a host path."""
     if _is_path_shaped(token):
-        return _scoped(token, "argument")
+        return _scoped(token, "argument", stage)
     for prefix, value, operation in _attached_values(token):
         if not _is_path_shaped(value):
             continue
-        resolved, error = _scoped(value, operation)
+        resolved, error = _scoped(value, operation, stage)
         if error is not None:
             return None, error
         return f"{prefix}{resolved}", None
     return token, None
 
 
-def scan_argv(argv: list[str]) -> tuple[list[str], str | None]:
+def scan_argv(argv: list[str], *, stage=None) -> tuple[list[str], str | None]:
     """The argv to exec, or `([], refusal)`.
 
     Each token is passed through untouched or replaced by its resolution.
@@ -179,7 +158,7 @@ def scan_argv(argv: list[str]) -> tuple[list[str], str | None]:
     """
     out: list[str] = []
     for token in argv:
-        rewritten, error = _scan_token(token)
+        rewritten, error = _scan_token(token, stage)
         if error is not None:
             return [], error
         out.append(rewritten)
@@ -187,28 +166,7 @@ def scan_argv(argv: list[str]) -> tuple[list[str], str | None]:
 
 
 def _enter_workspace() -> str | None:
-    """Stand in the user's own workspace. The refusal, or None.
-
-    This is what carries the residual `scan_argv` cannot classify: a relative
-    token naming something that does not exist yet is not path-shaped, passes
-    through, and is resolved by gws against *this* process's cwd — which for a
-    proxied skill is the daemon's working directory. Standing in the workspace
-    puts it in-roots by construction.
-
-    **A workspace that resolves and cannot be entered is a refusal, not a
-    warning.** `user_workspace_root` does not check that the directory exists,
-    so a deployment whose workspace has not been created yet gets a path and an
-    `ENOENT` from `chdir` — and carrying on there would leave the residual
-    resolving against the daemon's working directory, which is the one thing
-    this function exists to prevent, with only a log line saying so.
-
-    A deployment where no workspace *resolves at all* is a different state and
-    is left where it is: the allowlist is empty or nearly so, every path-shaped
-    token is refused by it, and refusing the invocation outright would break
-    the opaque-id verbs that have nothing to do with host paths. The residual
-    is uncarried there and is the narrower one — a relative path naming
-    something that does not exist.
-    """
+    """Use the workspace to interpret relative inputs before staging them."""
     root = user_workspace_root()
     if root is None:
         return None
@@ -225,26 +183,35 @@ def _enter_workspace() -> str | None:
 
 
 def main() -> None:
-    """Scan the argv for host paths, then pass through to the gws binary."""
+    """Run gws with read-only input copies owned and reaped by the skill proxy."""
+    host_files = os.environ.get("ISTOTA_HOST_FILES_DIR")
+    if not host_files:
+        fail("Google Workspace must run through istota-skill or a scheduled skill launcher", reason="host_path_refused")
     refusal = _enter_workspace()
-    if refusal is None:
-        argv, refusal = scan_argv(sys.argv[1:])
     if refusal is not None:
         fail(refusal, reason="host_path_refused")
-    try:
-        os.execvp("gws", ["gws"] + argv)
-    except OSError as e:
-        # execvp raises the first error other than ENOENT it met on PATH, so a
-        # missing binary can also arrive as EACCES from an unrelated entry.
-        if isinstance(e, FileNotFoundError):
+    scan_cwd = Path.cwd()
+    with ExitStack() as stack:
+        def stage(path):
+            return stack.enter_context(stage_resolved(path, readonly=True))
+
+        argv, refusal = scan_argv(sys.argv[1:], stage=stage)
+        if refusal is not None:
+            fail(refusal, reason="host_path_refused")
+        directory = stack.enter_context(tempfile.TemporaryDirectory(dir=host_files, prefix="cwd-"))
+        Path(directory).chmod(0o500)
+        try:
+            os.chdir(directory)
+            # Keep exec: the proxy must kill and reap gws itself on timeout.
+            # The proxy owns the copies' lifetime even after Python is gone.
+            os.execvp("gws", ["gws"] + argv)
+        except OSError as e:
+            if isinstance(e, FileNotFoundError):
+                fail("The gws binary is not installed on this deployment.", reason="gws_missing")
             fail(
-                "The gws binary is not installed on this deployment, so no Google "
-                "Workspace command can run. This is a deployment problem; report it "
-                "to the operator.",
-                reason="gws_missing",
+                f"The gws binary could not be run ({e.strerror or e}).",
+                reason="gws_exec_failed",
             )
-        fail(
-            f"The gws binary could not be run ({e.strerror or e}). This is a "
-            "deployment problem; report it to the operator.",
-            reason="gws_exec_failed",
-        )
+        finally:
+            os.chdir(scan_cwd)
+            Path(directory).chmod(0o700)

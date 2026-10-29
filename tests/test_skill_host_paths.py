@@ -1076,21 +1076,14 @@ class TestHealthExportCsvIsScoped:
 
 
 class TestFeedsOpmlIsScoped:
-    """One read and one write, and both go to a CLI that opens the path itself.
-
-    So the *resolved* path is what has to travel: handing the Click CLI the
-    original argument re-walks every symlink the check just settled. Since the
-    resolution is `parse_and_resolve`'s, that is now a property of the value on
-    the namespace rather than of anything these two handlers do — which is what
-    the two "the resolved path is what reaches the CLI" cases pin.
-    """
+    """Reads use private copies; writes stay in the confined facade."""
 
     @pytest.fixture
     def ran(self):
         from unittest.mock import patch
 
         with patch(
-            "istota.skills.feeds._run", return_value={"status": "ok"},
+            "istota.skills.feeds._run", return_value={"status": "ok", "raw": "<opml/>"},
         ) as m:
             yield m
 
@@ -1121,14 +1114,7 @@ class TestFeedsOpmlIsScoped:
         assert not (tmp_path / "attacker").exists()
         ran.assert_not_called()
 
-    def test_the_resolved_path_is_what_reaches_the_cli(self, mount, ran):
-        """The path handed down must be the resolved one, not the argument.
-
-        Reached through a symlinked intermediate directory so the two strings
-        genuinely differ: a test where they happen to be equal cannot tell a
-        resolving implementation from a passthrough, and on a host whose temp
-        directory is already a realpath they are equal for every plain path.
-        """
+    def test_export_writes_the_resolved_destination(self, mount, ran):
         real = mount / "Users" / "alice" / "real" / "exports"
         real.mkdir(parents=True)
         (mount / "Users" / "alice" / "via").symlink_to(
@@ -1139,9 +1125,8 @@ class TestFeedsOpmlIsScoped:
 
         self._feeds("export-opml", "--output", str(dest))
         ran.assert_called_once()
-        assert ran.call_args[0][0] == [
-            "export-opml", "--output", str(real.resolve() / "subs.opml"),
-        ]
+        assert ran.call_args[0][0] == ["export-opml"]
+        assert dest.read_text() == "<opml/>"
 
     def test_export_inside_the_workspace_is_allowed(self, mount, ran):
         dest = mount / "Users" / "alice" / "exports" / "subs.opml"
@@ -1159,12 +1144,19 @@ class TestFeedsOpmlIsScoped:
         source = mount / "Users" / "alice" / "via" / "subs.opml"
         assert str(source) != str(source.resolve())
 
-        self._feeds("import-opml", str(source))
+        staged = []
+
+        def consume(argv):
+            staged.append(Path(argv[1]))
+            assert staged[-1].read_text() == "<opml/>"
+            assert staged[-1] != source.resolve()
+            return {"status": "ok"}
+
+        ran.side_effect = consume
+        run = self._feeds("import-opml", str(source))
+        assert run.exit_code == 0
         ran.assert_called_once()
-        # Resolved, again: reopening the argument re-walks `via`.
-        assert ran.call_args[0][0] == [
-            "import-opml", str((real / "subs.opml").resolve()),
-        ]
+        assert not staged[0].exists()
 
 
 # ---------------------------------------------------------------------------

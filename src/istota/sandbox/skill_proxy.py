@@ -19,6 +19,7 @@ from time import sleep, time
 
 from istota import skill_client
 from istota.sandbox import peer_process
+from istota.sandbox.host_paths import skill_file_env
 from istota.credentials.names import label_for_display
 from istota.sandbox.unix_server import UnixSocketServer
 
@@ -790,7 +791,8 @@ class SkillProxy:
 
                 try:
                     with self._credential_channel(skill_timeout, skill) as credential_fd, \
-                            peer_process.reporting_pid(_register) as preexec:
+                            peer_process.reporting_pid(_register) as preexec, \
+                            skill_file_env(merged_env) as merged_env:
                         merged_env["ISTOTA_CRED_FD"] = str(credential_fd)
                         result = subprocess.run(
                             cmd,

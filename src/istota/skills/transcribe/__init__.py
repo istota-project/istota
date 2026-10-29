@@ -12,6 +12,8 @@ implementation in one place is what stops the hand-typed CLI and the spawned
 child drifting apart; see the leaf's own docstring for the rule it keeps.
 """
 
+from istota.sandbox.host_paths import stage_resolved
+
 import argparse
 
 from istota.lib.ocr_leaf import ocr_image, preprocess_image, text_from_data
@@ -34,7 +36,11 @@ def cmd_ocr(args) -> dict:
     A thin adapter over `istota.lib.ocr_leaf.ocr_image`: this half owns the argparse
     namespace the skill CLI produces, the leaf owns the OCR.
     """
-    return ocr_image(args.image_path, preprocess=args.preprocess)
+    try:
+        with stage_resolved(args.image_path) as source:
+            return ocr_image(str(source), preprocess=args.preprocess)
+    except OSError:
+        return {"status": "error", "error": "Image file not found or unsafe"}
 
 
 def build_parser() -> argparse.ArgumentParser:

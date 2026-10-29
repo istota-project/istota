@@ -13,6 +13,8 @@ way ``istota/cli_money.py`` does, because the Click tree exposes no config
 commands. Both resolve the user through :func:`_resolve_context`.
 """
 
+from istota.sandbox.host_paths import stage_resolved
+
 import argparse
 import json
 import os
@@ -521,7 +523,9 @@ def cmd_import_csv(args):
             cli_args += ["--exclude-tag", t]
     if args.ledger:
         cli_args += ["--ledger", args.ledger]
-    _output(_run(cli_args))
+    with stage_resolved(args.file) as source:
+        cli_args[1] = str(source)
+        _output(_run(cli_args))
 
 
 def cmd_run_scheduled(args):
@@ -776,7 +780,9 @@ def cmd_portfolio_import(args):
         cli_args.append("--dry-run")
     if args.replace is not None:
         cli_args += ["--replace", str(args.replace)]
-    _output(_run(cli_args))
+    with stage_resolved(args.file) as source:
+        cli_args[2] = str(source)
+        _output(_run(cli_args))
 
 
 def cmd_portfolio_snapshots(args):  # noqa: ARG001

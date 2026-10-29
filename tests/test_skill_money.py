@@ -1,6 +1,7 @@
 """Tests for the money skill (in-process facade over the vendored money package)."""
 
 import os
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -253,6 +254,8 @@ class TestCommandDispatch:
         captured = []
 
         def fake_run(args):
+            if args[:2] == ["portfolio", "import"]:
+                assert Path(args[2]).read_text() == "symbol,quantity\nVTI,10\n"
             captured.append(args)
             return {"status": "ok"}
 
@@ -404,9 +407,10 @@ class TestCommandDispatch:
         main(["portfolio", "import", str(positions_csv), "--source",
               "fidelity-positions-csv", "--dry-run"])
         args = captured[-1]
-        assert args[:3] == [
-            "portfolio", "import", str(positions_csv.resolve()),
-        ]
+        assert args[:2] == ["portfolio", "import"]
+        assert Path(args[2]).name == positions_csv.name
+        assert Path(args[2]) != positions_csv.resolve()
+        assert not Path(args[2]).exists()
         # A string, not a `Path`: `_run` splices it into a `CliRunner` argv,
         # which takes a sequence of strings.
         assert isinstance(args[2], str)

@@ -86,6 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Tasks can no longer redirect host file reads or writes outside their allowed folders by swapping a path for a symlink while a skill runs. Commands that need a filename receive private copies; Google Workspace now accepts only file inputs and stdout output, with no local output paths or directory arguments.
+
 - On a Nextcloud-mounted workspace, a task can no longer read other rooms' Talk attachments. The bot's shared `Talk/` folder is no longer in any task's sandbox; each task gets a read-only copy of the files it was sent, up to `[talk] attachment_max_mb`. A file named only in older conversation history is no longer readable, and the Files page no longer lists Talk attachments.
 
 - A task can no longer redirect deferred output or cleanup to private host files through a symlink. Deferred reads also reject special files and oversized input, so a planted pipe cannot block the scheduler.

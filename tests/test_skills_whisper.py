@@ -413,6 +413,7 @@ class TestNoSegments:
     def _args(self, tmp_path, output, no_segments):
         args = MagicMock()
         args.audio_path = str(tmp_path / "test.wav")
+        (tmp_path / "test.wav").write_bytes(b"synthetic audio")
         args.model = "auto"
         args.language = None
         args.output = output
@@ -465,6 +466,7 @@ class TestCmdTranscribe:
         }
         args = MagicMock()
         args.audio_path = str(tmp_path / "test.wav")
+        (tmp_path / "test.wav").write_bytes(b"synthetic audio")
         args.model = "auto"
         args.language = None
         args.output = "json"
@@ -475,14 +477,15 @@ class TestCmdTranscribe:
         assert "segments" in result
 
     @patch("istota.skills.whisper.cli.transcribe_audio")
-    def test_text_output(self, mock_transcribe):
+    def test_text_output(self, mock_transcribe, tmp_path):
         mock_transcribe.return_value = {
             "status": "ok",
             "text": "Hello world",
             "segments": [],
         }
         args = MagicMock()
-        args.audio_path = "/test.wav"
+        args.audio_path = str(tmp_path / "test.wav")
+        (tmp_path / "test.wav").write_bytes(b"synthetic audio")
         args.model = "auto"
         args.language = None
         args.output = "text"
@@ -493,14 +496,15 @@ class TestCmdTranscribe:
 
     @patch("istota.skills.whisper.cli.format_srt", return_value="1\n00:00:00,000 --> 00:00:02,000\nHello\n")
     @patch("istota.skills.whisper.cli.transcribe_audio")
-    def test_srt_output(self, mock_transcribe, mock_srt):
+    def test_srt_output(self, mock_transcribe, mock_srt, tmp_path):
         mock_transcribe.return_value = {
             "status": "ok",
             "text": "Hello",
             "segments": [{"start": 0.0, "end": 2.0, "text": "Hello"}],
         }
         args = MagicMock()
-        args.audio_path = "/test.wav"
+        args.audio_path = str(tmp_path / "test.wav")
+        (tmp_path / "test.wav").write_bytes(b"synthetic audio")
         args.model = "auto"
         args.language = None
         args.output = "srt"

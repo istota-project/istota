@@ -7,6 +7,8 @@ and `admin` and `generic` do not have to import `content`.
 
 from __future__ import annotations
 
+from istota.sandbox.host_paths import open_resolved
+
 import json
 import os
 import shlex
@@ -89,7 +91,7 @@ def read_text_file(path: str, label: str, cap: int) -> str:
     """A UTF-8 file the `EGRESS` stamp already resolved, read without following
     a symlink swapped in since, and bounded by its own descriptor's size."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = open_resolved(path)
     except OSError as exc:
         raise WordPressError(f"Could not open {label}: {exc.strerror}.",
                              "validation_error") from None
