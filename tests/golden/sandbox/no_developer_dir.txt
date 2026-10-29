@@ -7,7 +7,6 @@ bwrap	<HOST-SYSTEM-BINDS>
 --ro-bind	<SRC>	<SRC>
 --bind	<TMP>/temp/alice	<TMP>/temp/alice
 --bind	<TMP>/mount/Users/alice	<TMP>/mount/Users/alice
---ro-bind	<TMP>/mount/Talk	<TMP>/mount/Talk
 --bind	<TMP>/mount/Channels/room123	<TMP>/mount/Channels/room123
 --ro-bind	<HOME>/.cache/huggingface	<HOME>/.cache/huggingface
 --tmpfs	<TMP>/data
