@@ -55,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Compare a VM's host.env with the Ansible inventory.** `istota migrate role-vars` without `--old-vars` prints the VM's `host.env` and `.env` as the management role's deployment variables, `istota_site_dir` and `istota_apt_mirror` included. See ansible/README.md.
 - **Claude Code tasks reach their tools with fewer moving parts.** The claude CLI now starts the sandboxed tool server itself, so the daemon no longer relays tool calls, and both brains' calls pass the same checks inside it. WebFetch reaches Claude Code tasks as its own fetch server outside the sandbox, under the native brain's rules.
 - Briefing and sign-in emails share one HTML template. It keeps your mail app's own fonts and colours, and tidies the rest: lists line up with the text around them, headings are only a little larger than body text, and spacing between blocks is even.
 - Admin > Configuration no longer shows the retired top-level model and effort under General; each brain's own section holds them, and a config file that still sets one shows a problem you can remove. Providers have a section of their own, next to the brain settings, explaining that the two built-in providers need no table.

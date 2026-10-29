@@ -534,9 +534,10 @@ The other two you run yourself:
 ```bash
 istota migrate workspace-paths [--map OLD=NEW] [--old-home DIR] [--dry-run]   # rewrite old host paths in users' bot directories
 istota migrate role-vars --old-vars FILE -o FILE [--config FILE] [--host-env FILE] [--stack-env FILE] [--rclone-conf FILE]
+istota migrate role-vars --host-env FILE [--stack-env FILE] -o FILE|-   # the deployment variables alone
 ```
 
-`workspace-paths` runs on the stack through the `istota` wrapper. `role-vars` is only for an estate moving from the old bare-metal Ansible role to the optional management role: it runs from a checkout and writes the new role's variables (credentials included, 0600) from the old role's decrypted variables and the migrated VM's files.
+`workspace-paths` runs on the stack through the `istota` wrapper. `role-vars` is for an estate using the optional management role. With `--old-vars` it is the move from the old bare-metal role: it runs from a checkout and writes the new role's variables (credentials included, 0600) from the old role's decrypted variables and the migrated VM's files. Without `--old-vars` it prints only the deployment variables a VM's `host.env` and `.env` hold, which have no credentials, so `-o -` writes them to stdout; `ansible/README.md` uses it to compare a VM with its inventory.
 
 `restore-workspace` puts back the master key, `config.toml`, the admins file, the `.env` and `host.env` copies and the databases from the workspace's `Backups/`, refusing before it writes anything when a check fails. `import-standalone` writes a stack config from the standalone one, moves every `istota.env` credential into the secrets files, restores the databases and rebases their stored paths. Both exit 0 when done, 1 when refused with nothing written, 2 when partial. See [Local install](../getting-started/local-install.md#backups-and-recovery).
 

@@ -272,6 +272,25 @@ def test_host_env_round_trips_through_the_roles_own_derivation():
     assert result.vars["istota_release"] == "v0.45.0"
 
 
+def test_every_role_variable_in_host_env_is_mapped():
+    """A host.env key the role writes from its own variable converts to that variable, not to extra."""
+    for key, template in _defaults()["istota_host_env"].items():
+        match = re.fullmatch(r"\{\{\s*(istota_[a-z_]+)\s*\}\}", str(template))
+        if match:
+            assert role_vars.HOST_ENV_VARS.get(key) == match.group(1), key
+
+
+def test_a_site_dir_converts_to_its_own_variable():
+    host = HOST_ENV.replace("SITE_DIR=", "SITE_DIR=/srv/www/html").replace(
+        "APT_MIRROR=", "APT_MIRROR=http://mirror.example.com/debian")
+    result = _convert(host_env=role_vars.parse_env(host, "host.env"))
+    assert result.vars["istota_site_dir"] == "/srv/www/html"
+    assert result.vars["istota_apt_mirror"] == "http://mirror.example.com/debian"
+    assert {"SITE_DIR", "APT_MIRROR"}.isdisjoint(result.vars["istota_host_env_extra"])
+    rendered = _render(_defaults() | result.vars)
+    assert rendered["istota_host_env"]["SITE_DIR"] == "/srv/www/html"
+
+
 def test_an_unsigned_running_tag_is_reported():
     stack = STACK_ENV + "ISTOTA_TAG_UNSIGNED=1\n"
     result = _convert(stack_env=role_vars.parse_env(stack, ".env"))
@@ -353,6 +372,34 @@ def test_later_old_vars_files_win(tmp_path, capsys):
     assert role_vars.main(args + ["--old-vars", str(tmp_path / "host.yml"), "--output", str(out)]) == 0
     written = yaml.safe_load(out.read_text())
     assert written["istota_secrets"]["istota_nextcloud_app_password"] == "host-0014"
+
+
+def test_without_old_vars_only_the_deployment_variables_go_to_stdout(tmp_path, capsys):
+    (tmp_path / "host.env").write_text(HOST_ENV.replace("SITE_DIR=", "SITE_DIR=/srv/www/html"))
+    (tmp_path / ".env").write_text(STACK_ENV)
+    code = role_vars.main(["--host-env", str(tmp_path / "host.env"), "--stack-env", str(tmp_path / ".env"),
+                           "--output", "-"])
+    captured = capsys.readouterr()
+    assert code == 0, captured.err
+    written = yaml.safe_load(captured.out)
+    assert written["istota_site_dir"] == "/srv/www/html"
+    assert written["istota_release"] == "v0.45.0"
+    assert not {"istota_secrets", "istota_rclone_conf", "istota_admins"} & set(written)
+    rendered = _render(_defaults() | written)
+    live = role_vars.parse_env((tmp_path / "host.env").read_text(), "host.env")
+    assert {k: str(v) for k, v in (rendered["istota_host_env"] | rendered["istota_host_env_extra"]).items()} == live
+
+
+def test_stdout_is_refused_when_the_result_holds_credentials(tmp_path, capsys):
+    assert role_vars.main(_write_inputs(tmp_path, _old()) + ["--output", "-"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "credentials" in captured.err
+
+
+def test_without_old_vars_a_host_env_is_required(tmp_path, capsys):
+    assert role_vars.main(["--output", "-"]) == 1
+    assert "--host-env" in capsys.readouterr().err
 
 
 def test_the_cli_is_reached_through_istota_migrate(tmp_path, monkeypatch):

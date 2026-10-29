@@ -74,6 +74,23 @@ istota_plan_secrets:
 
 An image older than this role's `istota-stack` cannot read the role's input and returns no result document. The play then fails with nothing written. Update the release first (`--tags istota_update`), then run the whole play.
 
+### Deployment settings: host.env and .env
+
+The snapshot covers the application settings only. `host.env` (storage, ingress, domain, `SITE_DIR` and the rest) and the role's keys in the stack's `.env` (the release, the compose profiles) come from the deployment variables in the inventory, such as `istota_ingress`, `istota_site_dir` and `istota_update_mode`. The play writes every key it names, so a change made on the VM (`istota-stack host-env KEY=VALUE`, a `setup --force` re-run) is put back by the next play, as a web UI change is.
+
+To see the VM's current values in the role's names, run the converter from the istota checkout the role comes from, without `--old-vars`:
+
+```sh
+uv run --project /path/to/istota istota migrate role-vars \
+  --host-env <(ssh vm sudo cat /srv/app/istota/host.env) \
+  --stack-env <(ssh vm sudo cat /srv/app/istota/.env) \
+  --output -
+```
+
+It prints `istota_storage`, `istota_ingress`, `istota_site_dir`, `istota_update_mode` and the rest as YAML on stdout. Neither file holds a credential (the release signing key is public), so nothing needs the vault. A key the role has no variable for lands in `istota_host_env_extra`. Copy the values that differ into the inventory's deployment variables by hand: the converter does not write the inventory, because that file also holds `istota_secrets`, `istota_admins` and `rclone.conf`, which the VM's files cannot give back.
+
+To check without changing anything, run the play with `--check --tags istota`. The `host.env` and `.env` tasks report each key that would change by name (the loop label), not by value; leave off `--diff`, which would print the files. The role sets the keys it names and removes none, so a key on the VM that no variable names stays as it is.
+
 ### Release or latest
 
 `istota_update_mode` picks how the VM is updated. `release` (the default) runs the signed tag in `istota_release`, verified against `istota_release_signing_key` (the project's key unless a fork sets its own), and updates only when that variable changes. `latest` follows main: each play asks `istota-stack latest-tag` for the name main's tip would install (`main-<12 hex>`, read from origin without fetching) and runs `istota-stack update --unsigned latest` only when it differs from the deployed one. Nothing is verified in `latest` mode, so no key is required and `istota_release` is ignored. Either way the rebuild after a config change uses the way the deployed tag was installed, so an unsigned tag is rebuilt unsigned.

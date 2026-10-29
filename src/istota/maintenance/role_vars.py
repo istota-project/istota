@@ -4,6 +4,7 @@
                              [--config config.toml] [--host-env host.env]
                              [--stack-env .env] [--rclone-conf rclone.conf]
                              --output FILE
+    istota migrate role-vars --host-env host.env [--stack-env .env] [--output -]
 
 The old role (`deploy/ansible/`) took every setting as a flat `istota_*`
 variable and rendered config.toml from them. The management role (`ansible/`)
@@ -29,6 +30,11 @@ rule: a credential is never dropped silently. The master key and the web token
 key have no role variable (they live in the state volume) and are kept as
 `vault_istota_secret_key` and `vault_istota_web_token_key`, because the vault
 is their only copy off the VM.
+
+Without `--old-vars` it writes only the deployment variables, from host.env
+and the stack's .env: what `istota snapshot` is for the plan, the VM's current
+deployment settings in the role's names. Neither file holds a credential, so
+`--output -` (stdout) is accepted in that mode alone.
 """
 
 from __future__ import annotations
@@ -105,6 +111,7 @@ HOST_ENV_VARS = {
     "LISTEN_PORT": "istota_listen_port",
     "RELEASE_SIGNING_KEY": "istota_release_signing_key",
     "CLAUDE_CODE_VERSION": "istota_claude_code_version",
+    "APT_MIRROR": "istota_apt_mirror",
     "ACME_EMAIL": "istota_acme_email",
     "ACME_SERVER": "istota_acme_server",
     "RCLONE_REMOTE": "istota_rclone_remote",
@@ -112,6 +119,7 @@ HOST_ENV_VARS = {
     "HOST_LOOPBACK_BLOCK": "istota_host_loopback_block",
     "HOST_GATEWAY_ADDR": "istota_host_gateway_addr",
     "HOST_LOOPBACK_ALLOW": "istota_host_loopback_allow",
+    "SITE_DIR": "istota_site_dir",
 }
 
 #: Old variables the conversion reads besides the secrets and keys.
@@ -295,6 +303,12 @@ def convert(
     return Conversion(vars=out, notes=notes)
 
 
+def deployment_vars(host_env: dict[str, str], stack_env: dict[str, str] | None = None) -> Conversion:
+    """The role's deployment variables from a VM's host.env and .env, and nothing else."""
+    notes: list[str] = []
+    return Conversion(vars=_host_vars(host_env, stack_env or {}, notes), notes=notes)
+
+
 class _Dumper(yaml.SafeDumper):
     pass
 
@@ -307,12 +321,18 @@ def _str(dumper: yaml.SafeDumper, value: str):
 _Dumper.add_representer(str, _str)
 
 
-def render(variables: dict) -> str:
-    return (
-        "# The istota management role's variables, written by `istota migrate role-vars`.\n"
-        "# Holds credentials: encrypt with `ansible-vault encrypt` before committing.\n"
-        + yaml.dump(variables, Dumper=_Dumper, sort_keys=False, allow_unicode=True, width=1000)
-    )
+def render(variables: dict, *, deployment_only: bool = False) -> str:
+    if deployment_only:
+        header = (
+            "# The istota management role's deployment variables, from the VM's host.env and .env,\n"
+            "# written by `istota migrate role-vars`. No credentials.\n"
+        )
+    else:
+        header = (
+            "# The istota management role's variables, written by `istota migrate role-vars`.\n"
+            "# Holds credentials: encrypt with `ansible-vault encrypt` before committing.\n"
+        )
+    return header + yaml.dump(variables, Dumper=_Dumper, sort_keys=False, allow_unicode=True, width=1000)
 
 
 def _read(path: str) -> str:
@@ -322,23 +342,31 @@ def _read(path: str) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="istota migrate role-vars",
-        description="Write the management role's variables from the old bare-metal role's.",
+        description=(
+            "Write the management role's variables from the old bare-metal role's, or, "
+            "without --old-vars, only the deployment variables from a VM's host.env and .env."
+        ),
     )
     parser.add_argument(
-        "--old-vars", action="append", required=True, metavar="FILE",
+        "--old-vars", action="append", metavar="FILE",
         help="The old role's variables, decrypted YAML; '-' for stdin. Repeat: later files win",
     )
     parser.add_argument("--config", metavar="FILE", help="The VM's live config.toml, for the Nextcloud account rclone.conf is rendered with")
     parser.add_argument("--host-env", metavar="FILE", help="The VM's host.env")
     parser.add_argument("--stack-env", metavar="FILE", help="The stack's .env")
     parser.add_argument("--rclone-conf", metavar="FILE", help="The VM's rclone.conf; otherwise rendered from the old variables")
-    parser.add_argument("-o", "--output", required=True, metavar="FILE", help="Where to write the variables (0600)")
+    parser.add_argument("-o", "--output", required=True, metavar="FILE", help="Where to write the variables (0600); '-' for stdout without --old-vars")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     err = sys.stderr
+    if not args.old_vars:
+        return _deployment_main(args)
+    if args.output == "-":
+        print("refused: --output - only without --old-vars; the result holds credentials", file=err)
+        return EXIT_REFUSED
     try:
         old: dict = {}
         for path in args.old_vars:
@@ -365,6 +393,33 @@ def main(argv: list[str] | None = None) -> int:
     print(f"wrote {args.output}: " + ", ".join(result.vars), file=err)
     secrets = result.vars.get("istota_secrets", {})
     print(f"istota_secrets: {', '.join(secrets) or 'none'}", file=err)
+    for note in result.notes:
+        print(f"note: {note}", file=err)
+    return EXIT_OK
+
+
+def _deployment_main(args: argparse.Namespace) -> int:
+    err = sys.stderr
+    if not args.host_env:
+        print("refused: --host-env is required without --old-vars", file=err)
+        return EXIT_REFUSED
+    unused = [flag for flag, value in (("--config", args.config), ("--rclone-conf", args.rclone_conf)) if value]
+    if unused:
+        print(f"refused: {', '.join(unused)} only with --old-vars", file=err)
+        return EXIT_REFUSED
+    try:
+        host_env = parse_env(_read(args.host_env), "host.env")
+        stack_env = parse_env(_read(args.stack_env), ".env") if args.stack_env else None
+    except (Refusal, OSError) as exc:
+        print(f"refused: {exc}", file=err)
+        return EXIT_REFUSED
+    result = deployment_vars(host_env, stack_env)
+    text = render(result.vars, deployment_only=True)
+    if args.output == "-":
+        sys.stdout.write(text)
+    else:
+        apply_module.write_private(Path(args.output), text)
+        print(f"wrote {args.output}: " + ", ".join(result.vars), file=err)
     for note in result.notes:
         print(f"note: {note}", file=err)
     return EXIT_OK
