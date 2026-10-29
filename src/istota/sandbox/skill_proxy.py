@@ -106,8 +106,9 @@ SOCKET_MODE = 0o600
 # connection, which is the cost to it of trying.
 PEER_REGISTRATION_GRACE_SECONDS = 2.0
 
-# Listen backlog. Connections are skill calls from one sandboxed task.
-LISTEN_BACKLOG = 8
+# Listen backlog. Connections are skill calls from one sandboxed task, and a
+# model fanning out tool calls starts dozens at once; 8 overflowed (#876).
+LISTEN_BACKLOG = 32
 
 # How much longer than the subprocess budget a connection stays armed, so the
 # handler outlives the command it is waiting on and can report the timeout
