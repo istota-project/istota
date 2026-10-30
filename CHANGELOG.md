@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Taxes page shows income it has not projected yet.** Self-employment income already posted in the current month appears on its own line, marked as not yet in the projection, so it no longer looks missing from the estimate.
+- **See what the SE account patterns match.** Settings > Taxes lists the accounts each pattern list matches and their totals for the tax year, and follows your edits before you save. A list that matches nothing says so.
+- **Change SE account patterns from chat.** The bot can list, add and remove the accounts counted as self-employment, with the same checks as the settings page.
+
 - **Change briefings from chat.** The bot can make the edits the Briefings settings page makes: change one setting of a source in place, build a block with its sources in one step, reorder sources, manage archived editions and change your schedule, with the same checks as the page.
 - **Shared blocks and group briefings from chat.** Admins can create, change, run and remove shared blocks. From your private chat, group owners can edit, preview, publish and delete group briefings, and members can read editions and mute delivery. Approving personal sources and retrying deliveries stay on the web.
 - **Admin browser console in the web app.** View on Admin > Browsers opens a user's live browser in the page after a password or code confirmation, so an operator can finish a login without an SSH tunnel. A reverse proxy in front must forward websocket upgrades; see docs/deployment/running-the-stack.md.

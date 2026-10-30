@@ -15395,6 +15395,7 @@ const handlers: MockHandler[] = [
         annualization_months: months,
         annualization_period_months: ANNUALIZATION_PERIOD_END_MONTH[opts.quarter] ?? 12,
         se_income_through: `${config.tax_year}-${String(months).padStart(2, '0')}-${new Date(config.tax_year, months, 0).getDate()}`,
+        se_income_in_progress: null,
         se_income_ytd: opts.seIncomeYtd,
         se_income_annualized: seAnnualized,
         w2_income: opts.w2Income,

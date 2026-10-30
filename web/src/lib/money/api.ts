@@ -810,6 +810,7 @@ export interface TaxEstimateResponse {
   annualization_months: number;
   annualization_period_months: number;
   se_income_through: string;
+  se_income_in_progress: { through: string; amount: number } | null;
   se_income_ytd: number;
   se_income_annualized: number;
   w2_income: number;
