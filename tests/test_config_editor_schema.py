@@ -56,6 +56,9 @@ class TestRiskyAndTables:
         for path in schema.RISKY_KEYS:
             _resolve(path)
 
+    def test_granting_a_devbox_the_forge_tokens_is_risky(self):
+        assert ("devbox", "forge_users") in schema.RISKY_KEYS
+
     def test_the_oauth_client_secret_is_risky_by_its_path(self):
         assert ("web", "oauth2_client_secret") in schema.RISKY_KEYS
 

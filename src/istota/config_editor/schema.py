@@ -103,6 +103,8 @@ def read_only_reason(path: tuple[str, ...] | list[str]) -> str | None:
     return None
 
 RISKY_KEYS: frozenset[tuple[str, ...]] = frozenset({
+    # Hands the raw forge tokens to everything running in those users' devboxes.
+    ("devbox", "forge_users"),
     ("web", "auth"),
     ("web", "oauth2_provider"),
     ("web", "oauth2_client_id"),

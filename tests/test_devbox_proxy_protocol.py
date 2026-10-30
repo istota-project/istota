@@ -23,6 +23,7 @@ from istota.devbox.proxy_protocol import (
     ACTION_PING,
     ALL_ACTIONS,
     ERR_BAD_REQUEST,
+    ERR_FORGE_NOT_GRANTED,
     ERR_INTERNAL,
     ERR_NO_TOKEN,
     ERR_UNKNOWN_ACTION,
@@ -70,6 +71,7 @@ class TestErrorCodes:
     def test_error_code_strings_are_stable(self):
         # Stable string identifiers — audit log keys on these.
         assert ERR_NO_TOKEN == "no_token"
+        assert ERR_FORGE_NOT_GRANTED == "forge_not_granted"
         assert ERR_UNKNOWN_ACTION == "unknown_action"
         assert ERR_BAD_REQUEST == "bad_request"
         assert ERR_UNKNOWN_PROVIDER == "unknown_provider"

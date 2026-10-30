@@ -1212,8 +1212,8 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # enabled, [developer] enabled and repos_dir are all set, and otherwise on the
 # host inside the task's sandbox. docs/configuration/reference.md has the rest.
 
-# The devbox credential proxy: one socket per user under this directory, which
-# lets the forge CLIs and pushes in a devbox authenticate without holding a token.
+# The devbox credential proxy: one socket per user under this directory. It
+# hands the forge tokens only to the users in [devbox] forge_users.
 # devbox_proxy_enabled = true
 # devbox_proxy_socket_dir = "/var/run/istota"
 # devbox_proxy_audit_log = ""                       # empty = journal only; a path adds a file
@@ -1258,6 +1258,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # The rest sizes the per-user devbox services `istota devbox compose-file`
 # renders for the stack.
 # users = []                           # e.g. ["sam"]; one devbox each
+# forge_users = []                     # whose devbox may fetch the [developer] forge tokens; code in it can read them
 # mem_limit = "4g"
 # cpus = 2.0
 # pids_limit = 512

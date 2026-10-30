@@ -282,7 +282,7 @@ Audit records name the task, the credential and the outcome. They never hold a v
 - Compressed request bodies, compressed responses to authenticated requests, trailers and protocol upgrades are refused on intercepted hosts.
 - Body bytes past `scan_max_bytes` (1 MiB by default) stream unscanned: a placeholder there is not substituted, and a value echoed there is not scrubbed.
 - The scrub matches the exact substituted bytes. A service that encodes or transforms the credential in its response is not caught.
-- The devbox has its own credential proxy and is outside the broker. Forge tokens reach a build in the devbox as they did before.
+- The devbox has its own credential proxy and is outside the broker. Forge tokens reach a build in the devbox only when `[devbox] forge_users` names the user, and then as raw values.
 
 ### Upgrading an install that ran without it
 
