@@ -5094,7 +5094,7 @@ def add_user_ensure_arguments(user_ensure_parser):
         help=(
             "Skill, or `web` for the native web tools, that mail somebody else "
             "wrote may reach beyond the default (repeatable; replaces the list). "
-            "Refuses files, memory and recall."
+            "Refuses files, memory, recall and memory_search."
         ),
     )
     correspondent_assignment.add_argument(

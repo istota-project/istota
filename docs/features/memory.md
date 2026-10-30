@@ -75,7 +75,7 @@ When `sqlite-vec` or `sentence-transformers` is missing, the search degrades to 
 
 **Auto-recall.** When `[memory_search] auto_recall = true`, the executor runs the same hybrid search described above using the task prompt as the query, before each interactive task (briefings excluded), and injects the top `auto_recall_limit` (default 5) results into the prompt as a "Recalled memories" section. Recency decay applies here too. There is no LLM call in the recall path. When a `conversation_token` is set, the channel namespace `channel:{token}` is included in the search.
 
-**Auto-indexing.** After every successful task the conversation is indexed under the user's namespace (and the channel namespace if applicable). Silent scheduled jobs (`heartbeat_silent = True`) skip indexing — high-volume retrieve-and-render crons have no recall value and would otherwise inflate `memory_chunks`.
+**Auto-indexing.** After every successful task the conversation is indexed under the user's namespace (and the channel namespace if applicable). A guest's turn is indexed nowhere, and mail somebody else wrote is indexed under its room's channel namespace alone. Text a correspondent's mail put under a user's namespace before that rule stays there; nothing purges it. Silent scheduled jobs (`heartbeat_silent = True`) skip indexing — high-volume retrieve-and-render crons have no recall value and would otherwise inflate `memory_chunks`.
 
 **Metadata filtering.** Each chunk has optional `topic` (one of `work`, `tech`, `personal`, `finance`, `admin`, `learning`, `meta`) and `entities` (JSON array of lowercase names) populated during sleep-cycle extraction. The `search` CLI exposes:
 
