@@ -16,6 +16,7 @@ const PROBLEM = 'Add at least one pattern, with no blank rows.';
 let patterns = { se_income: ['Income:Consulting'], se_expense: ['Expenses:Business'] };
 let failSave = false;
 let failReload = false;
+let failTotals = false;
 const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
   const path = url.split('?')[0];
   if (path.endsWith('/config/tax/patterns')) {
@@ -32,6 +33,17 @@ const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
     return Response.json({ tax: { tax_year: 2026, filing_status: 'single', state: '' } });
   if (path.endsWith('/config/tax/jurisdictions')) return Response.json({ jurisdictions: [] });
   if (path.endsWith('/config/tax/resolved')) return Response.json(null);
+  if (path.endsWith('/accounts') && url.includes('year=')) {
+    if (failTotals) return new Response(JSON.stringify({ error: 'No ledger' }), { status: 404 });
+    return Response.json({
+      accounts: [
+        { account: 'Income:Consulting', 'sum(position)': '-900.00 USD' },
+        { account: 'Income:Interest', 'sum(position)': '-100.00 USD' },
+        { account: 'Expenses:Business', 'sum(position)': '50.00 USD' },
+        { account: 'Assets:Bank', 'sum(position)': '850.00 USD' },
+      ],
+    });
+  }
   if (path.endsWith('/accounts'))
     return Response.json({
       accounts: [
@@ -48,6 +60,7 @@ beforeEach(() => {
   patterns = { se_income: ['Income:Consulting'], se_expense: ['Expenses:Business'] };
   failSave = false;
   failReload = false;
+  failTotals = false;
   fetcher.mockClear();
   vi.stubGlobal('fetch', fetcher);
 });
@@ -125,6 +138,49 @@ it('marks a pattern that matches every account', async () => {
   await fireEvent.input(input, { target: { value: 'Income:Consulting|' } });
   await waitFor(() => expect(get(settingsSave)?.disabled).toBe(true));
   expect(screen.getByText('This matches every account.')).toBeTruthy();
+});
+
+it('previews the accounts each list matches, following unsaved edits', async () => {
+  render(Page);
+  const input = await screen.findByDisplayValue('Income:Consulting');
+  const income = await screen.findByRole('list', { name: 'SE income matches' });
+  expect(income.textContent).toContain('Income:Consulting');
+  expect(income.textContent).toContain('900.00 USD');
+  expect(income.textContent).not.toContain('-900.00');
+  expect(income.textContent).not.toContain('Income:Interest');
+  expect(screen.getByRole('list', { name: 'SE expense matches' }).textContent).toContain(
+    '50.00 USD',
+  );
+
+  await fireEvent.input(input, { target: { value: 'income' } });
+  await waitFor(() =>
+    expect(screen.getByRole('list', { name: 'SE income matches' }).textContent).toContain(
+      'Income:Interest',
+    ),
+  );
+
+  await fireEvent.input(input, { target: { value: 'Income:Nothing' } });
+  expect(await screen.findByText('Matches no account with postings in 2026.')).toBeTruthy();
+
+  await fireEvent.input(input, { target: { value: 'Income:[' } });
+  await waitFor(() => expect(screen.queryByRole('list', { name: 'SE income matches' })).toBeNull());
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(0);
+});
+
+it('anchors the preview at the start of the account name', async () => {
+  render(Page);
+  const input = await screen.findByDisplayValue('Income:Consulting');
+  await fireEvent.input(input, { target: { value: 'Consulting' } });
+  expect(await screen.findByText('Matches no account with postings in 2026.')).toBeTruthy();
+});
+
+it('leaves the preview out when the totals cannot be read', async () => {
+  failTotals = true;
+  render(Page);
+  await screen.findByDisplayValue('Income:Consulting');
+  await waitFor(() => expect(fetcher.mock.calls.some(([url]) => url.includes('year='))).toBe(true));
+  expect(screen.queryByRole('list', { name: 'SE income matches' })).toBeNull();
+  expect(screen.queryByText(/Matches no account/)).toBeNull();
 });
 
 it('can still save after a reload fails', async () => {

@@ -34,7 +34,9 @@
     type ResolvedRates,
     type TaxJurisdiction,
     type TaxSettings,
+    type AccountRow,
   } from '$lib/money/api';
+  import { displayBalance } from '$lib/money/utils/accounts';
 
   let settings = $state<TaxSettings | null>(null);
   let resolved = $state<ResolvedRates | null>(null);
@@ -44,6 +46,8 @@
   let saving = $state(false);
   const patterns = createDraft<TaxPatterns>({ se_income: [], se_expense: [] });
   let accounts = $state<string[]>([]);
+  let yearTotals = $state<AccountRow[] | null>(null);
+  let yearTotalsRequest = 0;
   const PATTERN_KINDS = [
     { kind: 'se_income', label: 'SE income', root: 'Income:' },
     { kind: 'se_expense', label: 'SE expense', root: 'Expenses:' },
@@ -62,6 +66,27 @@
     }
     return '';
   }
+  // BQL's `~` ignores case, so the preview has to as well. Call this only on
+  // values patternProblem passed.
+  function matchedAccounts(values: string[]) {
+    const matchers = values.map((value) => new RegExp(`^(?:${value.trim()})`, 'i'));
+    return (yearTotals ?? []).filter((row) => matchers.some((m) => m.test(row.account)));
+  }
+
+  /** The preview is optional; a ledger read must not block editing settings. */
+  async function loadYearTotals() {
+    const request = ++yearTotalsRequest;
+    let rows: AccountRow[] | null = null;
+    try {
+      const response = await getAccounts({ ledger: $selectedLedger || undefined, year: taxYear });
+      rows = response.accounts;
+    } catch {
+      rows = null;
+    }
+    // The year field fires on each keystroke, so an older reply can land last.
+    if (request === yearTotalsRequest) yearTotals = rows;
+  }
+
   // Only an edited list blocks Save: a ledger with no patterns stored must
   // still be able to save its other tax settings.
   // Only a first load that failed: its empty lists must not be saved. A reload
@@ -143,6 +168,7 @@
       resolved = rates;
       patterns.reset(p);
       loadError = '';
+      void loadYearTotals();
     } catch (e) {
       loadError = e instanceof Error ? e.message : 'Failed to load tax settings';
     } finally {
@@ -302,6 +328,7 @@
           if (Number.isFinite(v) && v > 1900) {
             editSettings({ tax_year: v });
             reloadResolved();
+            void loadYearTotals();
           }
         }}
       />
@@ -363,6 +390,22 @@
                 }}>Add {label} pattern</Button
               >
             </div>
+            {#if yearTotals && patterns.value[kind].length && !patternProblem(patterns.value[kind])}
+              {@const matched = matchedAccounts(patterns.value[kind])}
+              {#if matched.length}
+                <p class="caption">Matches these accounts, with their {taxYear} totals:</p>
+                <ul class="list-reset pattern-matches" aria-label={`${label} matches`}>
+                  {#each matched as row (row.account)}
+                    <li class="caption">
+                      <span class="pattern-match-account">{row.account}</span>
+                      <span>{displayBalance(row['sum(position)'], row.account)}</span>
+                    </li>
+                  {/each}
+                </ul>
+              {:else}
+                <p class="caption">Matches no account with postings in {taxYear}.</p>
+              {/if}
+            {/if}
           </div>
         </Field>
       {/each}
@@ -440,6 +483,17 @@
     grid-template-columns: minmax(0, 1fr) auto;
     gap: var(--space-2);
     align-items: center;
+  }
+
+  .pattern-matches li {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+
+  .pattern-match-account {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .overridden {
