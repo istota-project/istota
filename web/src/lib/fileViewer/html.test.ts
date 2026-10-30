@@ -59,6 +59,27 @@ describe('framePage', () => {
     expect(referrers.map((meta) => meta.getAttribute('content'))).toEqual(['no-referrer']);
   });
 
+  it('keeps fragment links in the page and resolves the rest against the frame', () => {
+    const doc = parse(
+      framePage(
+        '<a href="#intro" target="_blank">in</a><a href=" #x">sp</a><area href="#map">' +
+          '<a href="//example.com/a">proto</a><a href="https://example.com/b">abs</a>' +
+          '<h2 id="intro">Intro</h2>',
+      ),
+    );
+    expect(doc.querySelector('base')!.getAttribute('href')).toBe('about:srcdoc');
+    const links = [...doc.querySelectorAll('a, area')];
+    expect(links.map((link) => link.getAttribute('target'))).toEqual([
+      '_self',
+      '_self',
+      '_self',
+      null,
+      null,
+    ]);
+    expect(links[3].getAttribute('href')).toBe('https://example.com/a');
+    expect(links[4].getAttribute('href')).toBe('https://example.com/b');
+  });
+
   it('drops resource hints, which CSP does not govern', () => {
     const hints = [
       'dns-prefetch',

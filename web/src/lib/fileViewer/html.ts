@@ -49,10 +49,18 @@ function serializeFramed(doc: Document): string {
   for (const element of doc.querySelectorAll('[referrerpolicy]'))
     element.removeAttribute('referrerpolicy');
   // An escaped popup with an opener could navigate the app's tab, as Markdown links prevent too.
-  for (const link of doc.querySelectorAll('a, area'))
+  for (const link of doc.querySelectorAll('a, area')) {
     link.setAttribute('rel', 'noopener noreferrer');
-  // Links open in a new tab rather than navigating the frame away from the file.
+    const href = link.getAttribute('href') ?? '';
+    // A fragment scrolls the page in place; every other link takes the base's new tab.
+    if (/^[\t\n\f\r ]*#/.test(href)) link.setAttribute('target', '_self');
+    // `about:srcdoc` is no base for a scheme-relative link, so name the scheme.
+    else if (/^[\t\n\f\r ]*\/\//.test(href)) link.setAttribute('href', `https:${href.trimStart()}`);
+  }
+  // A srcdoc page resolves against the app's URL by default, which sent `#section`
+  // to the app; against its own document a fragment link is a scroll.
   const base = doc.createElement('base');
+  base.setAttribute('href', 'about:srcdoc');
   base.setAttribute('target', '_blank');
   doc.head.prepend(
     meta(doc, { 'http-equiv': 'Content-Security-Policy', content: HTML_FRAME_CSP }),
