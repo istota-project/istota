@@ -158,6 +158,10 @@ State tax is a real dimension rather than a California special case: `state = ""
 
 Rates are deliberately not fetched from anywhere. The IRS publishes nothing machine-readable, and fetching would not have prevented the class of bug this design targets — a tax year whose *structure* changed returns current-looking thresholds from a bracket API and still produces a wrong answer. What is wanted is knowing when the numbers are stale, which needs no dependency.
 
+The estimate projects from completed months, so income posted in the current month is left out of it. That income appears on its own line, marked as not yet in the projection.
+
+The accounts counted as self-employment are regular expressions anchored at the start of the account name. Edit them on the settings page, which lists what each list matches and the totals for the tax year before you save, or ask the assistant, which uses `istota-skill money tax pattern list|add|remove`.
+
 A disclaimer naming what is not modelled — local taxes, credits, AMT, itemizing — renders persistently on both the estimate and its settings page.
 
 ## Portfolio

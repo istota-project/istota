@@ -1996,11 +1996,41 @@ def _upsert_year_rates(
     )
 
 
-def add_tax_pattern(db_path: Path | str, kind: str, pattern: str) -> str:
-    """Add an SE account pattern. Returns 'created' or 'noop'."""
-    init_db(db_path)
+def _check_tax_pattern_kind(kind: str) -> None:
     if kind not in ("se_income", "se_expense"):
         raise ValueError(f"unknown pattern kind: {kind}")
+
+
+def validate_tax_patterns(kind: str, patterns: list[str]) -> None:
+    """Refuse a pattern that would match nothing or misstate SE income.
+
+    A failed ledger query reads as zero income on the estimate rather than as
+    an error, so a bad pattern has to stop here. A pattern is compiled alone as
+    well as wrapped, since ``a)|(b`` only compiles wrapped, where it would close
+    the group the query anchors it with.
+    """
+    _check_tax_pattern_kind(kind)
+    if not isinstance(patterns, list) or not patterns:
+        raise ValueError(f"{kind} must contain at least one non-empty pattern")
+    for pattern in patterns:
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise ValueError(f"{kind} must contain only non-empty strings")
+        if pattern != pattern.strip() or "\x00" in pattern:
+            raise ValueError(f"{kind} patterns must not have surrounding whitespace or a null byte")
+        try:
+            re.compile(pattern)
+            anchored = re.compile(f"^(?:{pattern})")
+        except re.error as exc:
+            raise ValueError(f"{kind} contains an invalid regular expression") from exc
+        # One that matches nothing at all matches every account too.
+        if anchored.match(""):
+            raise ValueError(f"{kind} contains a pattern that matches every account")
+
+
+def add_tax_pattern(db_path: Path | str, kind: str, pattern: str) -> str:
+    """Add an SE account pattern. Returns 'created' or 'noop'."""
+    validate_tax_patterns(kind, [pattern])
+    init_db(db_path)
     with _connect(db_path) as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO tax_account_patterns(kind, pattern) "
@@ -2011,28 +2041,39 @@ def add_tax_pattern(db_path: Path | str, kind: str, pattern: str) -> str:
 
 
 def remove_tax_pattern(db_path: Path | str, kind: str, pattern: str) -> bool:
+    # Only the kind: a bad pattern already stored has to stay removable.
+    _check_tax_pattern_kind(kind)
     init_db(db_path)
     with _connect(db_path) as conn:
-        cur = conn.execute(
+        # Hold the writer lock across the count and deletion.
+        conn.execute("BEGIN IMMEDIATE")
+        patterns = [row["pattern"] for row in conn.execute(
+            "SELECT pattern FROM tax_account_patterns WHERE kind = ?", (kind,),
+        ).fetchall()]
+        if pattern not in patterns:
+            return False
+        if len(patterns) == 1:
+            raise ValueError(f"cannot remove the last {kind} pattern; add its replacement first")
+        conn.execute(
             "DELETE FROM tax_account_patterns WHERE kind = ? AND pattern = ?",
             (kind, pattern),
         )
-        return cur.rowcount > 0
+        return True
 
 
 def replace_tax_patterns(
     db_path: Path | str, kind_to_patterns: dict[str, list[str]],
 ) -> None:
     """Replace-all per kind. Keys not present are left untouched."""
+    for kind, patterns in kind_to_patterns.items():
+        validate_tax_patterns(kind, patterns)
     init_db(db_path)
     with _connect(db_path) as conn:
         for kind, patterns in kind_to_patterns.items():
-            if kind not in ("se_income", "se_expense"):
-                raise ValueError(f"unknown pattern kind: {kind}")
             conn.execute(
                 "DELETE FROM tax_account_patterns WHERE kind = ?", (kind,),
             )
-            for p in patterns or []:
+            for p in patterns:
                 conn.execute(
                     "INSERT OR IGNORE INTO tax_account_patterns(kind, pattern) "
                     "VALUES (?, ?)", (kind, p),

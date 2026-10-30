@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Taxes page shows income it has not projected yet.** Self-employment income already posted in the current month appears on its own line, marked as not yet in the projection, so it no longer looks missing from the estimate.
+- **See what the SE account patterns match.** Settings > Taxes lists the accounts each pattern list matches and their totals for the tax year, and follows your edits before you save. A list that matches nothing says so.
+- **Change SE account patterns from chat.** The bot can list, add and remove the accounts counted as self-employment, with the same checks as the settings page.
+
 - **Change briefings from chat.** The bot can make the edits the Briefings settings page makes: change one setting of a source in place, build a block with its sources in one step, reorder sources, manage archived editions and change your schedule, with the same checks as the page.
 - **Shared blocks and group briefings from chat.** Admins can create, change, run and remove shared blocks. From your private chat, group owners can edit, preview, publish and delete group briefings, and members can read editions and mute delivery. Approving personal sources and retrying deliveries stay on the web.
 - **Admin browser console in the web app.** View on Admin > Browsers opens a user's live browser in the page after a password or code confirmation, so an operator can finish a login without an SSH tunnel. A reverse proxy in front must forward websocket upgrades; see docs/deployment/running-the-stack.md.
@@ -89,6 +93,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The tmux brain.** `tmux_claude`, which drove the interactive `claude` interface inside tmux, is gone; the native brain covers what it was kept for. A config that still names it loads as `claude_code` with a warning, and a `[brain.tmux]` block is ignored except that its model fills an unset `[brain.claude_code]` model on a deployment that ran on tmux. A room or scheduled job pinned to it runs on the deployment's brain.
 
 ### Fixed
+
+- The tax estimate now labels self-employment income as net income through a specific date and explains the span used for its annual projection. It no longer reads zero when income patterns are set and no expense pattern is.
+
+- Money → Settings → Taxes now lets you edit the income and expense account patterns, with account suggestions. Patterns that are empty, malformed or would match every account are refused, including on `istota money config import`, and the CLI keeps the last pattern of each kind.
 
 - A task that starts many skill commands at once no longer sees some of them fail at random with `BlockingIOError`. The skill proxy queues more waiting connections, and `istota-skill` waits for room instead of failing. If the proxy stays busy or does not answer, the command prints one line saying so, with no traceback.
 

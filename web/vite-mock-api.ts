@@ -15393,6 +15393,9 @@ const handlers: MockHandler[] = [
         filing_status: filingStatus,
         w2_months: opts.w2Months,
         annualization_months: months,
+        annualization_period_months: ANNUALIZATION_PERIOD_END_MONTH[opts.quarter] ?? 12,
+        se_income_through: `${config.tax_year}-${String(months).padStart(2, '0')}-${new Date(config.tax_year, months, 0).getDate()}`,
+        se_income_in_progress: null,
         se_income_ytd: opts.seIncomeYtd,
         se_income_annualized: seAnnualized,
         w2_income: opts.w2Income,
@@ -15554,9 +15557,51 @@ const handlers: MockHandler[] = [
       return null;
     }
 
+    const patterns: Record<string, string[]> = {
+      se_income: ['Income:Consulting'],
+      se_expense: ['Expenses:Business'],
+    };
+
     function handleConfig(url: string, method: string, body: any): unknown | undefined {
       const path = url.split('?')[0];
       const params = new URLSearchParams(url.split('?')[1] ?? '');
+
+      if (path === `${CONFIG_PATH}/patterns`) {
+        if (method === 'GET') return { status: 'ok', patterns };
+        if (method === 'PUT') {
+          if (!body || typeof body !== 'object' || Array.isArray(body)) {
+            return { __status: 400, status: 'error', error: 'body must be an object' };
+          }
+          for (const kind of ['se_income', 'se_expense']) {
+            if (!(kind in body)) continue;
+            const values = body[kind];
+            if (
+              !Array.isArray(values) ||
+              !values.length ||
+              values.some((v: unknown) => typeof v !== 'string' || !v.trim())
+            ) {
+              return {
+                __status: 400,
+                status: 'error',
+                error: `${kind} must contain at least one non-empty pattern`,
+              };
+            }
+            try {
+              for (const value of values) new RegExp(`^(?:${value})`);
+            } catch {
+              return {
+                __status: 400,
+                status: 'error',
+                error: `${kind} contains an invalid regular expression`,
+              };
+            }
+          }
+          for (const kind of ['se_income', 'se_expense']) {
+            if (kind in body) patterns[kind] = [...new Set<string>(body[kind])].sort();
+          }
+          return { status: 'ok' };
+        }
+      }
 
       if (path === `${CONFIG_PATH}/jurisdictions` && method === 'GET') {
         const bundled = new Set(Object.keys(TAX_RATES.states ?? {}));

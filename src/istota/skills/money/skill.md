@@ -73,7 +73,7 @@ istota-skill money run-scheduled [--dry-run] [--skip-monarch] [--no-match-invoic
 
 All output is JSON with `status: ok|error`.
 
-**Concurrency rule:** mutation commands (`add-transaction`, `edit-transaction`, `backfill-ids`, `sync-monarch`, `import-csv`, `run-scheduled`, `work add/update/remove`, `invoice generate/paid/unpaid/void/record-void/create`, `monarch-category-map set`, `transaction-rules set`, `portfolio import/delete-snapshot/classify/unclassify`, and `portfolio accounts` when it carries a `--set-*`/`--exclude`/`--include` flag) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `work export`, `invoice list`, `monarch-category-map list`, `transaction-rules list/test`, `portfolio snapshots/summary/history/diff/symbol/classifications`, and bare `portfolio accounts`) are safe to parallelize.
+**Concurrency rule:** mutation commands (`add-transaction`, `edit-transaction`, `backfill-ids`, `sync-monarch`, `import-csv`, `run-scheduled`, `work add/update/remove`, `invoice generate/paid/unpaid/void/record-void/create`, `monarch-category-map set`, `transaction-rules set`, `tax pattern add/remove`, `portfolio import/delete-snapshot/classify/unclassify`, and `portfolio accounts` when it carries a `--set-*`/`--exclude`/`--include` flag) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `work export`, `invoice list`, `monarch-category-map list`, `tax pattern list`, `transaction-rules list/test`, `portfolio snapshots/summary/history/diff/symbol/classifications`, and bare `portfolio accounts`) are safe to parallelize.
 
 ## Adding transactions
 
@@ -380,7 +380,20 @@ irreversible: confirm with the user first.
 ## Estimated taxes
 
 The quarterly estimate lives on the web page at `/money/taxes`, and its rates
-are managed at `/money/settings/taxes`. There is no skill subcommand for it.
+are managed at `/money/settings/taxes`. The only skill subcommand is for the
+accounts it counts as self-employment:
+
+```bash
+istota-skill money tax pattern list
+istota-skill money tax pattern add --kind se_income --pattern Income:Consulting
+istota-skill money tax pattern remove --kind se_income --pattern Income
+```
+
+`--kind` is `se_income` or `se_expense`. A pattern is a regular expression
+anchored at the start of the account name, so `Income:Consulting` includes its
+subaccounts and `Income` includes interest. Change patterns only when the user
+asks, and show them the list first. The last pattern of a kind cannot be
+removed, so add the replacement before removing the old one.
 
 If the user asks about it, three things are worth knowing:
 

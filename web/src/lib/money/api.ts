@@ -808,6 +808,9 @@ export interface TaxEstimateResponse {
   filing_status: string;
   w2_months: number;
   annualization_months: number;
+  annualization_period_months: number;
+  se_income_through: string;
+  se_income_in_progress: { through: string; amount: number } | null;
   se_income_ytd: number;
   se_income_annualized: number;
   w2_income: number;
@@ -1269,6 +1272,24 @@ export interface TaxSchedule {
   filing_status: string;
   brackets: number[][] | null;
   standard_deduction: number | null;
+}
+
+export interface TaxPatterns {
+  se_income: string[];
+  se_expense: string[];
+}
+
+export async function getTaxPatterns(): Promise<TaxPatterns> {
+  const resp = await apiFetch<{ patterns: TaxPatterns }>('/config/tax/patterns');
+  return resp.patterns;
+}
+
+export async function putTaxPatterns(patterns: TaxPatterns): Promise<void> {
+  await apiFetch('/config/tax/patterns', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patterns),
+  });
 }
 
 export async function getTaxSettings(): Promise<TaxSettings> {
