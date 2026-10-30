@@ -7,7 +7,7 @@ marshaling, no subprocess, no HTTP.
 
 Two shapes, and which one a verb takes follows the split the two CLIs already
 keep. An accounting operation goes through the Click tree via :func:`_run`,
-which is every verb here bar two. A verb reading or writing the money *config*
+which is most verbs here. A verb reading or writing the money *config*
 calls :mod:`istota.money.config_store` directly against ``ctx.db_path``, the
 way ``istota/cli_money.py`` does, because the Click tree exposes no config
 commands. Both resolve the user through :func:`_resolve_context`.
@@ -288,6 +288,51 @@ def cmd_monarch_category_map_set(args):
         "profile": profile or "__global__",
         "category": args.category,
         "account": args.account,
+    })
+
+
+def cmd_tax_pattern_list(args):  # noqa: ARG001
+    _, _, ctx, err = _resolve_context()
+    if err:
+        _output(err)
+        return
+    from istota.money import config_store
+
+    _output({"status": "ok", "patterns": config_store.list_tax_patterns(ctx.db_path)})
+
+
+def cmd_tax_pattern_add(args):
+    _, _, ctx, err = _resolve_context()
+    if err:
+        _output(err)
+        return
+    from istota.money import config_store
+
+    try:
+        state = config_store.add_tax_pattern(ctx.db_path, args.kind, args.pattern)
+    except ValueError as exc:
+        _output({"status": "error", "error": str(exc)})
+        return
+    _output({"status": "ok", "state": state, "kind": args.kind, "pattern": args.pattern})
+
+
+def cmd_tax_pattern_remove(args):
+    _, _, ctx, err = _resolve_context()
+    if err:
+        _output(err)
+        return
+    from istota.money import config_store
+
+    try:
+        removed = config_store.remove_tax_pattern(ctx.db_path, args.kind, args.pattern)
+    except ValueError as exc:
+        _output({"status": "error", "error": str(exc)})
+        return
+    _output({
+        "status": "ok",
+        "state": "removed" if removed else "noop",
+        "kind": args.kind,
+        "pattern": args.pattern,
     })
 
 
@@ -952,6 +997,21 @@ def build_parser():
         help="Dollar slack allowed between a credit and an invoice total (default exact)",
     )
 
+    p_tax = sub.add_parser("tax", help="Estimated tax settings")
+    tax_sub = p_tax.add_subparsers(dest="tax_command")
+    p_tax_pattern = tax_sub.add_parser(
+        "pattern", help="Read or change the accounts counted as self-employment",
+    )
+    tax_pattern_sub = p_tax_pattern.add_subparsers(dest="tax_pattern_action")
+    tax_pattern_sub.add_parser("list", help="Show both pattern lists")
+    for action, action_help in (("add", "Add a pattern"), ("remove", "Remove a pattern")):
+        p_tax_action = tax_pattern_sub.add_parser(action, help=action_help)
+        p_tax_action.add_argument("--kind", choices=("se_income", "se_expense"), required=True)
+        p_tax_action.add_argument(
+            "--pattern", required=True,
+            help="Regular expression anchored at the start of the account name",
+        )
+
     p_mcm = sub.add_parser(
         "monarch-category-map",
         help="Read or set the Monarch category to beancount account mapping",
@@ -1297,6 +1357,9 @@ def commands() -> dict:
         "portfolio classify": cmd_portfolio_classify,
         "portfolio unclassify": cmd_portfolio_unclassify,
         "portfolio autoclass": cmd_portfolio_autoclass,
+        "tax pattern list": cmd_tax_pattern_list,
+        "tax pattern add": cmd_tax_pattern_add,
+        "tax pattern remove": cmd_tax_pattern_remove,
     }
 
 #: Each group, and the argparse dest its own subparser stores the action in.
@@ -1307,6 +1370,8 @@ GROUP_ACTION_DEST = {
     "invoice review": "invoice_review_command",
     "work": "work_command",
     "portfolio": "portfolio_command",
+    "tax": "tax_command",
+    "tax pattern": "tax_pattern_action",
 }
 
 

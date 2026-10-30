@@ -616,6 +616,92 @@ class TestMoneyLoaderEnvFirst:
         }}
 
 
+class TestTaxPatterns:
+    """The assistant's route to the SE account patterns, through `config_store`.
+
+    The refusals are the store's, so a bad pattern fails here the way it does on
+    the web page and the operator CLI.
+    """
+
+    @pytest.fixture
+    def ctx(self, tmp_path):
+        from istota.money import config_store
+        from istota.money.cli import UserContext
+
+        db_path = tmp_path / "money" / "data" / "money.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        config_store.init_db(db_path)
+        config_store.replace_tax_patterns(db_path, {
+            "se_income": ["Income"], "se_expense": ["Expenses:Business"],
+        })
+        return UserContext(data_dir=tmp_path / "money", ledgers=[], db_path=db_path)
+
+    @pytest.fixture
+    def run(self, ctx, capsys):
+        import json as _json
+
+        from istota.skills.money import main
+
+        def _run(*argv):
+            code = 0
+            with patch.dict(os.environ, {"MONEY_USER": "alice"}, clear=True), \
+                 patch("istota.config.load_config", return_value=MagicMock()), \
+                 patch("istota.money.resolve_for_user", return_value=ctx):
+                try:
+                    main(["tax", "pattern", *argv])
+                except SystemExit as exc:
+                    code = exc.code
+            return _json.loads(capsys.readouterr().out), code
+
+        return _run
+
+    def test_list(self, run):
+        body, code = run("list")
+        assert code == 0
+        assert body == {
+            "status": "ok",
+            "patterns": {"se_income": ["Income"], "se_expense": ["Expenses:Business"]},
+        }
+
+    def test_narrowing_a_pattern_is_add_then_remove(self, run, ctx):
+        from istota.money import config_store
+
+        body, code = run("add", "--kind", "se_income", "--pattern", "Income:Consulting")
+        assert code == 0
+        assert body["state"] == "created"
+        body, code = run("remove", "--kind", "se_income", "--pattern", "Income")
+        assert code == 0
+        assert body["state"] == "removed"
+        assert config_store.list_tax_patterns(ctx.db_path)["se_income"] == ["Income:Consulting"]
+
+    def test_repeating_either_write_is_a_noop(self, run):
+        body, _ = run("add", "--kind", "se_income", "--pattern", "Income")
+        assert body["state"] == "noop"
+        body, _ = run("remove", "--kind", "se_income", "--pattern", "Income:Nope")
+        assert body["state"] == "noop"
+
+    def test_removing_the_last_pattern_is_refused(self, run, ctx):
+        from istota.money import config_store
+
+        body, code = run("remove", "--kind", "se_income", "--pattern", "Income")
+        assert code == 1
+        assert "last se_income pattern" in body["error"]
+        assert config_store.list_tax_patterns(ctx.db_path)["se_income"] == ["Income"]
+
+    @pytest.mark.parametrize("pattern", ["Income:[", ".*"])
+    def test_a_bad_pattern_is_refused(self, run, ctx, pattern):
+        from istota.money import config_store
+
+        body, code = run("add", "--kind", "se_income", "--pattern", pattern)
+        assert code == 1
+        assert body["status"] == "error"
+        assert config_store.list_tax_patterns(ctx.db_path)["se_income"] == ["Income"]
+
+    def test_no_flag_names_another_user(self):
+        err = _argparse_refusal(["tax", "pattern", "list", "--user", "bob"])
+        assert "unrecognized arguments: --user" in err
+
+
 class TestMonarchCategoryMap:
     """The host-side route for reading and setting a Monarch category mapping.
 
