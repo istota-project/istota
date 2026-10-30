@@ -13,6 +13,7 @@ import pytest
 from istota import cli_money
 from istota.money import config_store
 from istota.money.cli import UserContext
+from istota.money.core.models import TaxConfig
 
 
 @pytest.fixture
@@ -228,6 +229,7 @@ class TestTax:
         assert config_store.load_tax(patched_loader.db_path).state == "NY"
 
     def test_tax_pattern_add_remove(self, patched_loader):
+        config_store.add_tax_pattern(patched_loader.db_path, "se_income", "Income:Consulting")
         rc, out, _ = _run([
             "money", "tax", "pattern", "add", "--user", "u1",
             "--kind", "se_income", "--pattern", "Income:Side",
@@ -1133,3 +1135,44 @@ def test_merge_import_preserves_omitted_enabled_detection(detection_ctx, tmp_pat
     assert saved.payment_detection_ledger == "Business"
     assert saved.payment_detection_income_account == "Income:Consulting"
     assert saved.name == "Renamed"
+
+
+@pytest.mark.parametrize("kind,pattern", [
+    ("se_income", "Income:Consulting"), ("se_expense", "Expenses:Business"),
+])
+def test_tax_pattern_remove_last_is_refused(patched_loader, kind, pattern):
+    config_store.add_tax_pattern(patched_loader.db_path, kind, pattern)
+    rc, _, err = _run([
+        "money", "tax", "pattern", "remove", "--user", "u1",
+        "--kind", kind, "--pattern", pattern,
+    ])
+    assert rc == 2
+    assert "last" in err
+    assert config_store.list_tax_patterns(patched_loader.db_path)[kind] == [pattern]
+
+
+def test_tax_pattern_remove_takes_out_a_stored_bad_pattern(patched_loader):
+    db_path = patched_loader.db_path
+    config_store.save_tax(db_path, TaxConfig(tax_year=2026, se_income_accounts=["Income:X", "["]))
+    rc, _, _ = _run([
+        "money", "tax", "pattern", "remove", "--user", "u1",
+        "--kind", "se_income", "--pattern", "[",
+    ])
+    assert rc == 0
+    assert config_store.list_tax_patterns(db_path)["se_income"] == ["Income:X"]
+
+
+@pytest.mark.parametrize("extra", [[], ["--replace"]])
+@pytest.mark.parametrize("bad", ["[", " Income:X", ""])
+def test_tax_import_refuses_a_bad_pattern(patched_loader, tmp_path, extra, bad):
+    toml_path = tmp_path / "in.toml"
+    toml_path.write_text(
+        f'''[tax.accounts]\nse_income = ["Income:X", "{bad}"]\nse_expenses = ["Expenses:Y"]\n'''
+    )
+    rc, _, err = _run([
+        "money", "config", "import", "--user", "u1",
+        "--file", str(toml_path), "--section", "tax", *extra,
+    ])
+    assert rc != 0
+    assert "se_income" in err
+    assert config_store.list_tax_patterns(patched_loader.db_path)["se_income"] == []

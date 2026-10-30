@@ -468,6 +468,7 @@ class TestTaxRoundTrip:
 
     def test_patterns_add_remove(self, tmp_path):
         db_path = tmp_path / "money.db"
+        cs.add_tax_pattern(db_path, "se_income", "Income:Consulting")
         assert cs.add_tax_pattern(db_path, "se_income", "Income:Side") == "created"
         assert cs.add_tax_pattern(db_path, "se_income", "Income:Side") == "noop"
         patterns = cs.list_tax_patterns(db_path)

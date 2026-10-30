@@ -89,6 +89,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The tax estimate now labels self-employment income as net income through a specific date and explains the span used for its annual projection. It no longer reads zero when income patterns are set and no expense pattern is.
+
+- Money → Settings → Taxes now lets you edit the income and expense account patterns, with account suggestions. Patterns that are empty, malformed or would match every account are refused, including on `istota money config import`, and the CLI keeps the last pattern of each kind.
+
 - A task that starts many skill commands at once no longer sees some of them fail at random with `BlockingIOError`. The skill proxy queues more waiting connections, and `istota-skill` waits for room instead of failing. If the proxy stays busy or does not answer, the command prints one line saying so, with no traceback.
 
 - A restart no longer sends a `sharing.ocm` start-up alert with an HTTP 502. The check ran before the web container was serving, and now waits for the first sweep five minutes later.

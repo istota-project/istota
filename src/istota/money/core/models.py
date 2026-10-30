@@ -290,6 +290,8 @@ class QuarterlyTaxEstimate:
     filing_status: str
     w2_months: int
     annualization_months: int
+    annualization_period_months: int
+    se_income_through: str
     # Income
     se_income_ytd: float
     se_income_annualized: float

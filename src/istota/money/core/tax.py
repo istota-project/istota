@@ -14,6 +14,7 @@ indexed* (they do not change each January) or are pure calculation policy.
 
 from __future__ import annotations
 
+from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -578,6 +579,8 @@ def estimate_quarterly_tax(
         filing_status=filing_status,
         w2_months=w2_months,
         annualization_months=months,
+        annualization_period_months=annualization_months(current_quarter, tax_year),
+        se_income_through=date(tax_year, months, monthrange(tax_year, months)[1]).isoformat(),
         se_income_ytd=se_income_ytd,
         se_income_annualized=se_annualized,
         w2_income=w2_income,
@@ -777,36 +780,31 @@ def query_se_income(
     period the estimate annualizes from. Returns net SE income as a positive
     number.
     """
-    from istota.money.core.ledger import run_bean_query
+    from istota.money.core.ledger import _sanitize_bql_string, run_bean_query
 
     year = config.tax_year
     end_month = max(1, min(12, through_month))
 
-    # Query SE revenue (Income accounts are negative in beancount)
-    # Anchor with ^ to avoid matching e.g. Assets:SK-Income-Fidelity
-    income_patterns = " OR ".join(
-        f"account ~ '^{acct}'" for acct in config.se_income_accounts
-    )
-    income_query = (
-        f"SELECT sum(position) WHERE ({income_patterns}) "
-        f"AND year = {year} AND month <= {end_month}"
-    )
-    income_rows = run_bean_query(ledger_path, income_query)
-    revenue = 0.0
-    if income_rows:
-        revenue = abs(_parse_amount(income_rows[0].get("sum(position)", "0")))
+    def total(patterns: list[str]) -> float:
+        # A ledger with no patterns stored matches nothing; an empty
+        # disjunction would be a BQL syntax error.
+        if not patterns:
+            return 0.0
+        # Anchor with ^ to avoid matching e.g. Assets:SK-Income-Fidelity. The
+        # group holds the anchor over an alternation in a pattern.
+        matches = " OR ".join(
+            f"account ~ '^(?:{_sanitize_bql_string(acct)})'" for acct in patterns
+        )
+        rows = run_bean_query(
+            ledger_path,
+            f"SELECT sum(position) WHERE ({matches}) "
+            f"AND year = {year} AND month <= {end_month}",
+        )
+        if not rows:
+            return 0.0
+        return abs(_parse_amount(rows[0].get("sum(position)", "0")))
 
-    # Query business expenses
-    expense_patterns = " OR ".join(
-        f"account ~ '^{acct}'" for acct in config.se_expense_accounts
-    )
-    expense_query = (
-        f"SELECT sum(position) WHERE ({expense_patterns}) "
-        f"AND year = {year} AND month <= {end_month}"
-    )
-    expense_rows = run_bean_query(ledger_path, expense_query)
-    expenses = 0.0
-    if expense_rows:
-        expenses = abs(_parse_amount(expense_rows[0].get("sum(position)", "0")))
-
+    # Income accounts are negative in beancount; total() takes the magnitude.
+    revenue = total(config.se_income_accounts)
+    expenses = total(config.se_expense_accounts)
     return max(0, revenue - expenses)
