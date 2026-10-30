@@ -276,7 +276,7 @@ Besides the bot's mailbox, each user can connect mail accounts of their own, suc
 
 Use "Test" on an account to check that it signs in. The test runs in the daemon, and the page shows each step's result.
 
-The bot reaches an account with the email skill's `--account <slug>` (`email accounts` lists them). There is no default account: a request that does not say which mailbox reads the bot's, and if this instance has no bot mailbox the bot asks which account you mean. Scheduled prompt jobs can read an account too, and a personal briefing's "My email" source can read any of your accounts. A `command:` or `skill:` job cannot, since only a task's own skill call is given the password.
+The bot reaches an account with the email skill's `--account <slug>` (`email accounts` lists them). There is no default account: a request that does not say which mailbox reads the bot's, and if this instance has no bot mailbox the bot asks which account you mean. Scheduled prompt jobs can read an account too, and a personal briefing's "My email" source can read any of your accounts. A `command:` job can too, through `istota-skill`. A `skill:` job cannot, since it runs the CLI with no proxy and so is not given the password.
 
 What stays the same and what does not:
 

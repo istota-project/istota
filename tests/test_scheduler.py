@@ -5192,12 +5192,12 @@ class TestExecuteCommandTask:
         assert success is True
         assert "42:bob:room99" in result
 
-    def test_db_path_in_env(self, db_path, tmp_path):
+    def test_db_path_stays_out_of_the_shell(self, db_path, tmp_path):
         config = self._make_config(db_path, tmp_path)
         task = self._make_task(command="echo $ISTOTA_DB_PATH")
         success, result = _execute_command_task(task, config)
         assert success is True
-        assert str(db_path) in result
+        assert str(db_path) not in result
 
     def test_config_path_propagated_when_set(self, db_path, tmp_path):
         """Subprocesses (e.g. _module.feeds.run_scheduled) need ISTOTA_CONFIG_PATH
@@ -5450,53 +5450,6 @@ class TestExecuteCommandTask:
         assert "caldav=[]" in result
         assert "nc=[https://nc.example.com]" in result
 
-    def test_setup_env_hooks_dispatched(self, db_path, tmp_path):
-        """ISSUE-097 regression: ``_execute_command_task`` must run
-        ``dispatch_setup_env_hooks`` so vars declared ``from: "setup_env"``
-        (``LOCATION_DB_PATH``, ``HEALTH_DB_PATH``) reach the subprocess.
-        Before the fix, the hook only ran on the skill-task path, so
-        command-type cron jobs (``gym-check-sync``) failed silently when
-        the daemon env didn't happen to carry the var."""
-        config = self._make_config(db_path, tmp_path)
-        config.admin_users = {"alice"}
-        task = self._make_task(
-            user_id="alice",
-            command="echo loc=[$LOCATION_DB_PATH]:health=[$HEALTH_DB_PATH]",
-        )
-        with patch(
-            "istota.skills._env.dispatch_setup_env_hooks",
-            return_value={
-                "LOCATION_DB_PATH": "/srv/data/alice/location.db",
-                "HEALTH_DB_PATH": "/srv/data/alice/health.db",
-            },
-        ):
-            success, result = _execute_command_task(task, config)
-        assert success is True
-        assert "loc=[/srv/data/alice/location.db]" in result
-        assert "health=[/srv/data/alice/health.db]" in result
-
-    def test_setup_env_hook_value_wins_over_daemon_ambient(
-        self, db_path, tmp_path, monkeypatch,
-    ):
-        """ISSUE-097: per-user hook value is authoritative. If a stale
-        ``LOCATION_DB_PATH`` is inherited from systemd EnvironmentFile,
-        the hook's per-user computation must overwrite it — otherwise
-        every user's command-task would read user-X's location DB."""
-        monkeypatch.setenv("LOCATION_DB_PATH", "/wrong/from/systemd.db")
-        config = self._make_config(db_path, tmp_path)
-        config.admin_users = {"alice"}
-        task = self._make_task(
-            user_id="alice",
-            command="echo loc=[$LOCATION_DB_PATH]",
-        )
-        with patch(
-            "istota.skills._env.dispatch_setup_env_hooks",
-            return_value={"LOCATION_DB_PATH": "/srv/data/alice/location.db"},
-        ):
-            success, result = _execute_command_task(task, config)
-        assert success is True
-        assert "loc=[/srv/data/alice/location.db]" in result
-
     def test_master_key_never_in_command_env(self, db_path, tmp_path, monkeypatch):
         """Phase 4 acceptance — the operator command-task path must not
         propagate ``ISTOTA_SECRET_KEY`` to the subprocess. Phase 1.4
@@ -5654,7 +5607,23 @@ class _TaskPathEnvHarness:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr("istota.scheduler._run_capture", fake_run)
+        monkeypatch.setattr("istota.sandbox.confined_command.run_capture", fake_run)
         target()
+        return captured
+
+    def _captured_proxy_env(self, monkeypatch, target):
+        """The same for a command job's skill CLIs, whose env is the proxy's."""
+        from istota.sandbox.skill_proxy import SkillProxy
+
+        captured = {}
+        real_init = SkillProxy.__init__
+
+        def spy(proxy, sock, credential_env, base_env, **kwargs):
+            captured.update(base_env)
+            real_init(proxy, sock, credential_env, base_env, **kwargs)
+
+        monkeypatch.setattr(SkillProxy, "__init__", spy)
+        self._captured_env(monkeypatch, target)
         return captured
 
 
@@ -5744,7 +5713,7 @@ class TestTaskAttemptContract(_TaskPathEnvHarness):
     ):
         config = self._config(db_path, tmp_path)
 
-        cmd_env = self._captured_env(
+        cmd_env = self._captured_proxy_env(
             monkeypatch,
             lambda: _execute_command_task(
                 self._task(command="true", attempt_count=2), config,
@@ -5889,13 +5858,19 @@ class TestTaskAttemptContract(_TaskPathEnvHarness):
         """
         config = self._config(db_path, tmp_path)
 
-        for build in (
-            lambda: _execute_command_task(self._task(command="true"), config),
-            lambda: _execute_skill_task(
-                self._task(skill="kv", skill_args='["namespaces"]'), config,
+        for capture, build in (
+            (
+                self._captured_proxy_env,
+                lambda: _execute_command_task(self._task(command="true"), config),
+            ),
+            (
+                self._captured_env,
+                lambda: _execute_skill_task(
+                    self._task(skill="kv", skill_args='["namespaces"]'), config,
+                ),
             ),
         ):
-            env = self._captured_env(monkeypatch, build)
+            env = capture(monkeypatch, build)
             assert "ISTOTA_TASK_ID" in env
             assert "ISTOTA_TASK_ATTEMPT" in env
 

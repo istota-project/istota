@@ -150,7 +150,7 @@ REGISTRY: tuple[TaskPosture, ...] = (
         posture=POSTURE_FAIL_CLEAN,
         call_site="istota.scheduler._execute_command_task",
         notes=(
-            "CRON.md ``command`` jobs run a shell subprocess — no brain call, so "
+            "CRON.md ``command`` jobs run a shell in the task sandbox — no brain call, so "
             "brain unavailability is N/A. A publish_shared_kv job's *result* may "
             "come from a prompt job (covered above). Listed for completeness."
         ),

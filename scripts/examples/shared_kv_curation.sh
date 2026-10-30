@@ -11,13 +11,15 @@
 # the fetch and the synthesis happen ONCE, not once per user.
 #
 # Run this from an admin CRON `command:` job (the task's identity must be an
-# admin — shared writes are admin-only, fail-closed on a blank admins file):
+# admin — shared writes are admin-only, fail-closed on a blank admins file). The
+# job runs in the task sandbox, so copy this script into your own workspace first:
+# the checkout on the host is not in there.
 #
 #   # CRON.md
 #   [[jobs]]
 #   name = "curate-tech-digest"
 #   type = "command"
-#   command = "bash /srv/app/istota/scripts/examples/shared_kv_curation.sh"
+#   command = "bash $NEXTCLOUD_MOUNT_PATH/Users/<you>/istota/scripts/shared_kv_curation.sh"
 #   cron = "0 6 * * *"          # before the briefing window that reads it
 #   silent_unless_action = true
 #

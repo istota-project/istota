@@ -119,7 +119,7 @@ def _skill_index():
 
 def _every_env(config, make_task, monkeypatch, tmp_path) -> dict[str, dict]:
     """Every environment istota builds, by name."""
-    from istota import heartbeat, scheduler
+    from istota import scheduler
     from istota.sandbox import task_env
     from istota.skills import _env as skills_env
 
@@ -169,7 +169,6 @@ def _every_env(config, make_task, monkeypatch, tmp_path) -> dict[str, dict]:
             config,
         )
         envs[f"scheduler_skill_task:{skill}"] = captured.pop("env")
-    envs["heartbeat"] = heartbeat._build_heartbeat_skill_env(config, "alice")
 
     box = executor.build_daemon_sandbox(
         config, "alice", profile=executor.SandboxProfile.NATIVE,
@@ -222,7 +221,7 @@ def test_each_sentinel_appears_only_where_its_mode_carries_it(world, mode, monke
             assert not _carries(env, OAUTH), name
 
     # No model credential name survives into an env that carries none.
-    for name in ("build_clean_env", "task_env", "build_stripped_env", "heartbeat",
+    for name in ("build_clean_env", "task_env", "build_stripped_env",
                  "skill_proxy_base_env", "scheduler_skill_task:kv"):
         assert not [k for k in envs[name] if is_model_credential_name(k)], name
 

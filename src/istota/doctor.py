@@ -3400,10 +3400,10 @@ def _probe_output_line(text: str | None, limit: int = 160) -> str:
 #: * ``ISTOTA_SANDBOXED`` — narrower (it needs the sandbox in effect and the
 #:   proxy on), and kept because its meaning is exactly "this environment was
 #:   built for the model".
-#: * ``PRECOMMIT_SCANS_REQUIRED`` — `executor.build_stripped_env` sets it, which
-#:   is what a cron ``command`` job and a heartbeat ``shell-command`` run with;
-#:   that builder filters every name matching the credential patterns, so all
-#:   three names below are gone from it by construction. Unlike the other two an
+#: * ``PRECOMMIT_SCANS_REQUIRED`` — `sandbox.confined_command` sets it for a cron
+#:   ``command`` job and a heartbeat ``shell-command``; the runtime's env holds
+#:   no credential, so all three names below are gone from it by construction.
+#:   Unlike the other two an
 #:   operator can also set this one by hand (ISSUE-291 made it an override), so
 #:   it is evidence rather than proof. It errs toward a skip, which is the safe
 #:   direction for a check whose observed failure mode is crying wolf.
