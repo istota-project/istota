@@ -620,7 +620,7 @@ def _compute_section_diff(
             else:
                 out.append(("updated", f"service key={key}"))
     elif section == "tax":
-        cfg_new = config_store.tax_config_from_toml_dict(data)
+        cfg_new = _tax_config_for_import(data)
         out.append(("updated", f"tax_year={cfg_new.tax_year} filing_status={cfg_new.filing_status}"))
         if any(v is not None for v in (
             cfg_new.federal_brackets, cfg_new.state_brackets,
@@ -710,7 +710,7 @@ def _apply_section_import(ctx, section: str, data: dict, replace: bool) -> None:
         config_store.save_invoicing(ctx.db_path, cfg, replace_collections=replace)
     elif section == "tax":
         if replace:
-            cfg = config_store.tax_config_from_toml_dict(data)
+            cfg = _tax_config_for_import(data)
             config_store.save_tax(ctx.db_path, cfg, replace_collections=True,
                                   write_schedules=True)
         else:
@@ -769,11 +769,21 @@ def _merge_invoicing(db_path, data: dict):
     return merged
 
 
+def _tax_config_for_import(data: dict):
+    cfg = config_store.tax_config_from_toml_dict(data)
+    for kind, patterns in (
+        ("se_income", cfg.se_income_accounts), ("se_expense", cfg.se_expense_accounts),
+    ):
+        if patterns:
+            config_store.validate_tax_patterns(kind, patterns)
+    return cfg
+
+
 def _merge_tax(db_path, data: dict):
     """Merge imported tax TOML into existing DB config."""
     existing = config_store.load_tax(db_path)
     tax_data = data.get("tax", data) or {}
-    incoming = config_store.tax_config_from_toml_dict(data)
+    incoming = _tax_config_for_import(data)
 
     # Captured before any overlay: these are the coordinates the schedule
     # overrides now sitting on `existing` were actually read under.
