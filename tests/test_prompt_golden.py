@@ -462,10 +462,17 @@ class Case:
     #: render (groups spec D6, multiplayer D21).
     group: bool = False
     #: Binds that room to an email thread (email on rooms, stage 2) with one
-    #: correspondent on it, and makes the task that correspondent's turn with
-    #: the host not on the message: it runs as the host at full reach, so the
-    #: card is the email one and the host's memory loads.
+    #: correspondent on it, and makes the task the host's own turn there: full
+    #: reach, the email card and the host's memory.
     email_thread: bool = False
+    #: Makes an `email` task somebody else's mail. On a thread (`email_thread`)
+    #: their stored turn, with the host not on the message; off one, a stranger's
+    #: `processed_emails` row and no stored turn, as an approved held mail no
+    #: room admitted leaves. Either way it withholds all but the allowlist, with
+    #: `USER.md` and overlays loaded and the rest of the memory not. An `email`
+    #: task without this has an own-address row, which is what makes it the
+    #: user's own.
+    correspondent: bool = False
     pins: bool = False
     #: Seeds one ICS feed for the user (open-protocol sharing) and puts a
     #: `calendar` skill in the catalogue, which the feeds line is gated on.
@@ -639,10 +646,10 @@ CASES: tuple[Case, ...] = (
         shared=True,
         memory=True,
     ),
-    # A correspondent's mail on an email thread room the host is not on (email
-    # on rooms, stage 2): the email room card, nothing withheld, and the host's
-    # memory loaded, against `shared_room_notes`, where a shared room leaves it
-    # out. The room notes stay fenced, since a thread is read by others.
+    # The host's own mail on an email thread room (email on rooms, stage 2): the
+    # email room card, nothing withheld, and their memory loaded, against
+    # `shared_room_notes`, where a shared room leaves it out. The room notes stay
+    # fenced, since a thread is read by others.
     Case(
         "email_thread",
         source_type="email",
@@ -650,6 +657,28 @@ CASES: tuple[Case, ...] = (
         room=("Dinner plans", "email"),
         memory=True,
         email_thread=True,
+    ),
+    # A correspondent's mail on that thread with the host not on it: the card
+    # adds what this turn withholds, `USER.md` stays and only allowlisted skills
+    # are offered, against `email_thread`.
+    Case(
+        "email_thread_correspondent",
+        source_type="email",
+        conversation_token="rm_email_thread_fixture",
+        room=("Dinner plans", "email"),
+        memory=True,
+        email_thread=True,
+        correspondent=True,
+    ),
+    # A stranger's held mail approved into no room (ISSUE-874): no card, so the
+    # line is in the requester section, and no group notebook, though off a room
+    # the user's own mail would load every group, against `source_email`.
+    Case(
+        "email_roomless_correspondent",
+        source_type="email",
+        memory=True,
+        group=True,
+        correspondent=True,
     ),
     # A feed the user shared with Istota, against `base_nextcloud` plus the
     # `calendar` skill: the `Other calendars` line in the system half, with the
@@ -785,7 +814,7 @@ def _build_task(case: Case) -> db.Task:
         conversation_token=case.conversation_token,
         brain=case.brain,
         is_group_chat=case.shared or case.email_thread,
-        host_absent=case.email_thread,
+        host_absent=case.email_thread and case.correspondent,
     )
     if case.confirmed:
         fields["confirmed_at"] = "2026-01-01T00:00:00Z"
@@ -934,6 +963,21 @@ def _seed_shared_credentials(config: Config, case: Case, monkeypatch) -> None:
         conn.commit()
 
 
+def _seed_email_ledger(config: Config, case: Case) -> None:
+    """The `processed_emails` row that says who wrote an `email` task with no
+    stored turn (`rooms.scopes.turn_author`)."""
+    if case.source_type != "email" or case.email_thread:
+        return
+    sender, method = (
+        ("ana@ext.example", "plus_address") if case.correspondent
+        else (f"{USER}@example.test", "sender_match")
+    )
+    with db.get_db(config.db_path) as conn:
+        db.mark_email_processed(conn, "uid-golden", sender, user_id=USER, task_id=1,
+                                routing_method=method)
+        conn.commit()
+
+
 def _seed_room(config: Config, case: Case) -> None:
     """One registry room for `conversation_token`, and optionally its `talk`
     binding.
@@ -983,10 +1027,13 @@ def _seed_room(config: Config, case: Case) -> None:
                 surface_ref="ana@ext.example", kind="guest",
                 display_name="Ana GUEST_DISPLAY_NAME",
             )
+            author = (
+                {"author_label": "ana@ext.example", "author_participant_id": participant}
+                if case.correspondent else {"author_user_id": USER}
+            )
             db.add_message(conn, case.conversation_token, role="user",
                            body="Can we move dinner to Friday?", origin_surface="email",
-                           task_id=1, author_label="ana@ext.example",
-                           author_participant_id=participant)
+                           task_id=1, **author)
         conn.commit()
 
 
@@ -1160,6 +1207,7 @@ def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
     _seed_history(config, case)
     _seed_shared_credentials(config, case, monkeypatch)
     _seed_room(config, case)
+    _seed_email_ledger(config, case)
     _seed_groups(config, case)
     _seed_shared_feed(config, case)
     _seed_shared_folder(config, case)
@@ -2090,7 +2138,7 @@ class TestSharedRoomNotesAreFenced:
         assert "untrusted room notes" not in user.lower()
 
 
-@pytest.mark.parametrize("name,expected", [("pins", True), ("shared_room_notes", False), ("email_thread", True), ("source_briefing", False)])
+@pytest.mark.parametrize("name,expected", [("pins", True), ("shared_room_notes", False), ("email_thread", True), ("email_thread_correspondent", False), ("email_roomless_correspondent", False), ("source_briefing", False)])
 def test_pins_follow_ambient_memory(name, expected, tmp_path, monkeypatch):
     case = replace(CASES_BY_NAME[name], pins=True)
     system, user = split_halves(assemble(case, tmp_path, monkeypatch))

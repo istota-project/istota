@@ -630,12 +630,15 @@ def _is_member(conn, group_id: str, user_id: str) -> bool:
         return False
 
 
-def _task_groups(conn, task) -> list[str]:
+def _task_groups(config, conn, task) -> list[str]:
     """``room_scopes.task_group_ids``, with a database error read as none."""
+    from istota.mail.support import own_addresses
     from istota.rooms.scopes import task_group_ids
 
     try:
-        return task_group_ids(conn, task)
+        return task_group_ids(
+            conn, task, own_addresses=own_addresses(config, task.user_id),
+        )
     except Exception as e:  # noqa: BLE001
         logger.warning("group resolution failed for task %d: %s", task.id, e)
         return []
@@ -818,7 +821,7 @@ def _process_deferred_kv_ops(
             if scope is not None:
                 group_id = _group_of_scope(scope)
                 if task_groups is None:
-                    task_groups = _task_groups(conn, task)
+                    task_groups = _task_groups(config, conn, task)
                 if (
                     group_id is None
                     or group_id not in task_groups

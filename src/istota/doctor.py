@@ -4381,15 +4381,15 @@ def check_room_scope_confinement(config: "Config", probe: bool) -> CheckResult:
     Elsewhere (the shipped Docker stack, macOS, a checkout running ``istota
     serve``) a guest's turn can still read the host's workspace from disk.
 
-    Every arm says the same of email thread rooms, which have no guest turn:
-    a correspondent's admitted mail runs as the host at full reach, bounded by
-    the admit gate and the outbound gate rather than by withheld scopes.
+    Every arm says the same of a correspondent's mail, which is not a guest
+    turn: it runs as the host and withholds all but a short allowlist, which
+    holds on the filesystem only where a guest's turn does.
     """
     name = "security.room_scope_confinement"
     email = (
-        " Email thread rooms withhold nothing: a correspondent's admitted mail "
-        "runs as the host, bounded by the untrusted-sender gate and the "
-        "outbound approval gate instead."
+        " A correspondent's mail on email runs as the host and withholds "
+        "everything but a short allowlist; with no sandbox that is the prompt, "
+        "the skills and the environment only, as for a guest."
     )
     effective, why = _deployment_sandboxing(config, probe)
     if effective:

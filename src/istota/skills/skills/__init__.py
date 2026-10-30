@@ -41,11 +41,15 @@ def _load_context():
 
     config = load_config()
     skill_index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
-    withheld = _room_withheld(config, user_id, skill_index)
-    return skill_context(config, user_id, skill_index, withheld)
+    reach = _room_reach(config, user_id, skill_index)
+    return skill_context(config, user_id, skill_index, reach.withheld,
+                         overlays_load=reach.standing_memory_loads)
 
 
-def skill_context(config, user_id: str, skill_index, withheld: frozenset[str]) -> dict:
+def skill_context(
+    config, user_id: str, skill_index, withheld: frozenset[str],
+    *, overlays_load: bool | None = None,
+) -> dict:
     """The context `_guard_skill` reads, for a caller whose withheld set is known.
 
     `_load_context` reaches it from a CLI's environment; a `!command`, which a
@@ -76,13 +80,15 @@ def skill_context(config, user_id: str, skill_index, withheld: frozenset[str]) -
         "skill_index": skill_index,
         "disabled": disabled,
         "withheld": withheld,
+        "overlays_load": "memory" not in withheld if overlays_load is None else overlays_load,
         "is_admin": is_admin,
         "enabled_features": enabled_features,
     }
 
 
-def _room_withheld(config, user_id: str, skill_index) -> frozenset[str]:
-    """What the calling task withholds from it (seam 6, multiplayer).
+def _room_reach(config, user_id: str, skill_index):
+    """What the calling task withholds from it (seam 6, multiplayer), and
+    whether overlays load regardless (`Reach.standing_memory_loads`).
 
     The executor's seams are what enforce a guest turn's restriction; this is
     the subprocess backstop, so a skill body or an overlay a guest's turn may
@@ -90,8 +96,10 @@ def _room_withheld(config, user_id: str, skill_index) -> frozenset[str]:
     unioned: the set the executor computed for the task
     (`ISTOTA_WITHHELD_SCOPES`, put in the proxy's environment and never the
     model's), and a fresh derivation from the task's own row through the same
-    `room_scopes.withheld_for_task` the executor calls, since only the row says
-    the turn is a guest's or nobody asked it in the room.
+    `room_scopes.reach_for_task` the executor calls, since only the row says
+    the turn is a guest's, a correspondent's or nobody asked it in the room.
+    The posture comes from the row alone, so the environment's set can never
+    open an overlay by itself.
 
     No task (an operator's shell, the heartbeat's id 0) reads the environment
     alone. A database that cannot be read withholds every scope.
@@ -99,29 +107,34 @@ def _room_withheld(config, user_id: str, skill_index) -> frozenset[str]:
     from pathlib import Path
 
     from istota import db
+    from istota.mail.support import own_addresses
     from istota.rooms import scopes as room_scopes
     from istota.sandbox.host_paths import WITHHELD_SCOPES_VAR
 
     raw = os.environ.get(WITHHELD_SCOPES_VAR, "")
     withheld = {part.strip() for part in raw.split(",") if part.strip()}
+    author = "own"
     try:
         task_id = int(os.environ.get("ISTOTA_TASK_ID", "") or 0)
     except ValueError:
         task_id = 0
     if task_id <= 0:
-        return frozenset(withheld)
+        return room_scopes.Reach(frozenset(withheld), author)
     try:
         if not Path(config.db_path).exists():
-            return frozenset(withheld)
+            return room_scopes.Reach(frozenset(withheld), author)
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, task_id)
             if task is not None and task.user_id == user_id:
-                withheld |= room_scopes.withheld_for_task(
+                reach = room_scopes.reach_for_task(
                     conn, task, skill_index=skill_index,
+                    own_addresses=own_addresses(config, user_id),
                 )
+                withheld |= reach.withheld
+                author = reach.author
     except Exception:
         withheld |= room_scopes.all_scopes(skill_index)
-    return frozenset(withheld)
+    return room_scopes.Reach(frozenset(withheld), author)
 
 
 def _guard_skill(name: str, ctx: dict) -> str | None:
@@ -219,8 +232,9 @@ def cmd_show(args) -> None:
     config = ctx["config"]
     skill_index = ctx["skill_index"]
     # An overlay is the user's memory; a room that withholds memory gets the
-    # bare body, as the executor's eager path does.
-    if "memory" in ctx["withheld"]:
+    # bare body, as the executor's eager path does. A correspondent's turn keeps
+    # it, as it keeps `USER.md`.
+    if not ctx["overlays_load"]:
         overlay_dir, overlay_fd = None, None
     else:
         overlay_dir, overlay_fd = _overlay_dir(config, ctx["user_id"])
@@ -357,7 +371,7 @@ def _resolve_overlay_dir(ctx):
     go through the descriptor.
     """
     config = ctx["config"]
-    if "memory" in ctx["withheld"]:
+    if not ctx["overlays_load"]:
         # Overlays are memory; the room this task runs in withholds it.
         _output_error("memory_withheld")
     if not config.has_workspace:

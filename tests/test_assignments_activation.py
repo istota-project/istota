@@ -151,6 +151,9 @@ class TestHold:
         with db.get_db(config.db_path) as conn:
             task_id = db.create_task(conn, prompt="x", user_id="alice", source_type="email")
             conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (task_id,))
+            # The user's own mail: a correspondent's has no such skill at all.
+            db.mark_email_processed(conn, "uid-own", "alice@example.com", user_id="alice",
+                                    task_id=task_id, routing_method="sender_match")
         monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
         code, out = _run("activate", str(assignment_id))
         assert code == 1 and out["error"] == "not_a_user_turn"

@@ -1,5 +1,5 @@
-"""Email on rooms, section 2a: a correspondent's turn on an email thread room
-runs as the host at full reach, with the host's ambient memory loaded.
+"""A correspondent's turn runs as the host and withholds all but the allowlist,
+with the host's USER.md and overlays loaded and the rest of their memory not.
 
 Driven through `execute_task`, the seams' one caller, with the harness
 `test_shared_room_restriction.py` uses, so every seam is read off what the
@@ -9,9 +9,14 @@ harness is the control: it still withholds everything.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import patch
 
+import pytest
+
 from istota import db
+from istota.config import UserConfig
+from istota.memory.knowledge_graph import add_fact, ensure_table
 
 from .test_shared_room_restriction import HEALTH_DB, _binds, _capturing_brain, _user_dir
 from . import test_shared_room_restriction as _base
@@ -20,6 +25,10 @@ config = _base.config
 _bwrap_flag_cache = _base._bwrap_flag_cache
 
 SENTINEL = "alice-private-memory-sentinel"
+OVERLAY_SENTINEL = "alice-overlay-sentinel"
+DATED_SENTINEL = "alice-dated-memory-sentinel"
+FACT_SENTINEL = "alice-knowledge-fact-sentinel"
+PIN_SENTINEL = "alice-pinned-file-sentinel"
 CORRESPONDENT = "carol@example.com"
 
 
@@ -30,7 +39,7 @@ def _user_md(config) -> None:
     path.write_text(f"# Memory\n\n{SENTINEL}\n", encoding="utf-8")
 
 
-def _thread_turn(conn) -> int:
+def _thread_turn(conn, attachments=None) -> int:
     """A thread room as the poller leaves it, and a correspondent's turn on it:
     stored under their label, run as the host, marked a group chat."""
     room = db.register_bound_room(conn, "alice", origin="email", name="Dinner",
@@ -43,6 +52,7 @@ def _thread_turn(conn) -> int:
         conn, prompt="<email_content>\nwhat is on Thursday?\n</email_content>",
         user_id="alice", source_type="email", conversation_token=room.token,
         is_group_chat=True, audience="mixed", host_absent=True,
+        attachments=attachments,
     )
     db.add_message(conn, room.token, role="user", body="what is on Thursday?",
                    origin_surface="email", task_id=task_id, author_label=CORRESPONDENT,
@@ -98,25 +108,207 @@ def _run(config, make_turn) -> dict:
     }
 
 
-class TestACorrespondentsTurn:
-    def test_it_reaches_everything_the_host_can(self, config):
-        seen = _run(config, _thread_turn)
-        assert "calendar" not in seen["disabled"]
-        assert "calendar" in seen["allowed_skills"]
-        assert seen["proxy_base_env"].get("HEALTH_DB_PATH") == HEALTH_DB
-        assert _user_dir(config) in _binds(seen["argv"])
-        assert seen["vault"] == {"bank": "s3cret"}
+def _roomless_turn(conn) -> int:
+    """An approved held mail no room admitted: no token and no stored row."""
+    task_id = db.create_task(conn, prompt="<email_content>\nhello\n</email_content>",
+                             user_id="alice", source_type="email")
+    db.mark_email_processed(conn, f"uid-{task_id}", CORRESPONDENT, user_id="alice",
+                            task_id=task_id, routing_method="plus_address")
+    return task_id
 
-    def test_the_hosts_user_md_is_in_the_prompt(self, config):
+
+def _own_thread_turn(conn) -> int:
+    room = db.register_bound_room(conn, "alice", origin="email", name="Dinner",
+                                  surface="email", surface_ref="<own@example.com>")
+    task_id = db.create_task(conn, prompt="what is on Thursday?", user_id="alice",
+                             source_type="email", conversation_token=room.token,
+                             is_group_chat=True)
+    db.add_message(conn, room.token, role="user", body="b", origin_surface="email",
+                   task_id=task_id, author_user_id="alice")
+    return task_id
+
+
+def _overlay(config) -> None:
+    path = (config.workspace_path / "Users" / "alice" / config.bot_dir_name
+            / "config" / "skills" / "email.md")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"- {OVERLAY_SENTINEL}\n", encoding="utf-8")
+
+
+def _ambient(config) -> None:
+    """Everything a correspondent's turn must not load, each its own sentinel."""
+    config.sleep_cycle.enabled = True
+    config.sleep_cycle.auto_load_dated_days = 3
+    config.memory_search.enabled = True
+    config.memory_search.auto_recall = True
+    config.playbooks.enabled = True
+    memories = config.workspace_path / "Users" / "alice" / "memories"
+    memories.mkdir(parents=True, exist_ok=True)
+    today = datetime.now(UTC).date().isoformat()
+    (memories / f"{today}.md").write_text(f"{DATED_SENTINEL}\n", encoding="utf-8")
+    with db.get_db(config.db_path) as conn:
+        ensure_table(conn)
+        add_fact(conn, "alice", "alice", "knows", FACT_SENTINEL)
+        db.add_pin(conn, "alice", "workspace", f"/Users/alice/{PIN_SENTINEL}.md", "Plan")
+        conn.commit()
+
+
+class TestACorrespondentsTurn:
+    def test_it_withholds_all_but_the_allowlist(self, config):
+        seen = _run(config, _thread_turn)
+        assert {"calendar", "health", "nextcloud", "memory", "kv"} <= seen["disabled"]
+        assert not {"calendar", "kv", "nextcloud", "memory", "health"} & seen["allowed_skills"]
+        assert {"email", "skills"} <= seen["allowed_skills"]
+        assert "HEALTH_DB_PATH" not in seen["proxy_base_env"]
+        assert seen["vault"] == {}
+
+    def test_the_mount_plan_has_no_users_or_group_or_talk_bind(self, config):
+        with db.get_db(config.db_path) as conn:
+            db.create_group(conn, "fam", kind="family", display_name="Fam", created_by="op")
+            db.add_group_member(conn, "fam", "alice", added_by="op")
+            conn.commit()
+        for make_turn in (_thread_turn, _roomless_turn):
+            binds = _binds(_run(config, make_turn)["argv"])
+            assert _user_dir(config) not in binds
+            assert not [b for b in binds if "/Groups/" in b or b.endswith("/Talk")]
+
+    def test_the_temp_dir_is_its_own(self, config):
+        argv = _run(config, _thread_turn)["argv"]
+        host_dir = str((config.temp_dir / "alice").resolve())
+        rw = [argv[i + 1] for i, tok in enumerate(argv) if tok == "--bind"]
+        assert host_dir not in rw
+        assert len([p for p in rw if p.startswith(host_dir + "/room-task-")]) == 1
+
+    def test_user_md_and_an_overlay_load(self, config):
         _user_md(config)
+        _overlay(config)
         seen = _run(config, _thread_turn)
         assert SENTINEL in seen["prompt"] + seen["system"]
+        assert OVERLAY_SENTINEL in seen["prompt"] + seen["system"]
 
-    def test_the_card_is_the_email_one(self, config):
+    def test_the_reply_and_untrusted_input_bodies_load(self, config):
+        # The bundled catalogue, where `untrusted_input` is `shared_room: safe`.
+        system = _run(config, _thread_turn)["system"]
+        assert "### Email" in system
+        assert "### Untrusted" in system
+
+    def test_the_rest_of_the_memory_does_not(self, config):
+        _user_md(config)
+        _ambient(config)
+        with patch("istota.memory.search.search") as search:
+            for make_turn in (_thread_turn, _roomless_turn):
+                seen = _run(config, make_turn)
+                text = seen["prompt"] + seen["system"]
+                for sentinel in (DATED_SENTINEL, FACT_SENTINEL, PIN_SENTINEL):
+                    assert sentinel not in text
+                assert SENTINEL in text
+        search.assert_not_called()
+
+    def test_control_the_hosts_own_turn_loads_all_of_it(self, config):
+        _user_md(config)
+        _ambient(config)
+        seen = _run(config, _own_thread_turn)
+        text = seen["prompt"] + seen["system"]
+        for sentinel in (SENTINEL, DATED_SENTINEL, FACT_SENTINEL, PIN_SENTINEL):
+            assert sentinel in text
+        assert _user_dir(config) in _binds(seen["argv"])
+        assert "calendar" not in seen["disabled"]
+
+    def test_the_card_says_what_it_withholds(self, config):
         seen = _run(config, _thread_turn)
         assert "on their correspondence" in seen["system"]
         assert "answer `NO_ACTION:`" in seen["system"]
-        assert "Withheld from this turn" not in seen["system"]
+        assert "you can answer the mail and nothing else of 'alice'" in seen["system"]
+        assert "did not write this message" in seen["system"]
+        assert "their yes would not make it available" in seen["system"]
+        assert "You can also use" not in seen["system"]
+        assert "You are responding to a request from user" not in seen["system"]
+
+    def test_an_unattributed_row_is_not_called_the_hosts(self, config):
+        def _turn(conn):
+            room = db.register_bound_room(conn, "alice", origin="email", name="Dinner",
+                                          surface="email", surface_ref="<na@example.com>")
+            task_id = db.create_task(conn, prompt="p", user_id="alice", source_type="email",
+                                     conversation_token=room.token, is_group_chat=True)
+            db.add_message(conn, room.token, role="user", body="p", origin_surface="email",
+                           task_id=task_id)
+            db.mark_email_processed(conn, f"uid-{task_id}", CORRESPONDENT, user_id="alice",
+                                    task_id=task_id, routing_method="plus_address")
+            return task_id
+
+        system = _run(config, _turn)["system"]
+        assert "This message is from 'alice'" not in system
+        assert "did not write this message" in system
+
+    def test_a_widened_set_is_named(self, config, monkeypatch):
+        from istota.rooms import scopes
+
+        monkeypatch.setattr(
+            scopes, "correspondent_scopes",
+            lambda *a, **k: scopes.CorrespondentAllowance(
+                scopes=frozenset({"email", "skills", "calendar"}), web=True,
+            ),
+        )
+        seen = _run(config, _thread_turn)
+        assert "You can also use: calendar, the web." in seen["system"]
+        assert "calendar" not in seen["disabled"]
+
+    def test_the_line_is_in_the_system_half_on_a_roomless_turn(self, config):
+        seen = _run(config, _roomless_turn)
+        assert "did not write this message" in seen["system"]
+        assert "You are responding to a request from user" not in seen["system"]
+
+    def test_control_the_hosts_own_turn_has_no_line(self, config):
+        system = _run(config, _own_thread_turn)["system"]
+        assert "did not write this message" not in system
+        assert "This message is from 'alice'" in system
+
+    def test_a_staged_attachment_is_named_and_the_inbox_path_is_not(self, config):
+        inbox = config.workspace_path / "Users" / "alice" / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        source = inbox / "note.pdf"
+        source.write_bytes(b"%PDF-1.4")
+
+        seen = _run(config, lambda conn: _thread_turn(conn, attachments=[str(source)]))
+        assert "room-attachments/note.pdf" in seen["prompt"]
+        assert str(source) not in seen["prompt"]
+
+
+class TestTheDefaultsWorkWithFilesWithheld:
+    """`transcribe` and `whisper` are in the default because they read the
+    mail's own staged attachments: checked through each CLI's real parser."""
+
+    @pytest.fixture
+    def roots(self, tmp_path, monkeypatch):
+        attachments = tmp_path / "control" / "room-attachments"
+        attachments.mkdir(parents=True)
+        inbox = tmp_path / "mount" / "Users" / "alice" / "inbox"
+        inbox.mkdir(parents=True)
+        monkeypatch.setenv("ISTOTA_ATTACHMENTS_DIR", str(attachments))
+        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(tmp_path / "mount"))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(tmp_path / "deferred"))
+        monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", "files,memory,calendar")
+        (attachments / "a.bin").write_bytes(b"x")
+        (inbox / "a.bin").write_bytes(b"x")
+        return attachments, inbox
+
+    @pytest.mark.parametrize("skill,verb", [("transcribe", "ocr"), ("whisper", "transcribe")])
+    def test_the_staged_copy_is_accepted_and_the_workspace_refused(
+        self, roots, skill, verb, capsys,
+    ):
+        from istota.skills import _cli
+        from istota.skills import transcribe as transcribe_skill
+        from istota.skills.whisper import cli as whisper_cli
+
+        attachments, inbox = roots
+        parser = (transcribe_skill if skill == "transcribe" else whisper_cli).build_parser()
+        staged = attachments / "a.bin"
+        args = _cli.parse_and_resolve(parser, [verb, str(staged)])
+        assert str(staged.resolve()) in [str(v) for v in vars(args).values()]
+        with pytest.raises(SystemExit):
+            _cli.parse_and_resolve(parser, [verb, str(inbox / "a.bin")])
+        assert "host_path_refused" in capsys.readouterr().out
 
 
 class TestControlATalkGuestsTurn:
@@ -131,13 +323,13 @@ class TestControlATalkGuestsTurn:
 
 
 class TestTheOfficeTurn:
-    """Email on rooms stage 3, the `office` regression: a stranger's mail at
-    the plus-address of a user who trusts every sender is a thread room turn,
-    and it runs at that user's reach with their USER.md loaded. Driven from the
-    poller rather than a hand-built row."""
+    """Email on rooms stage 3, the `office` regression, narrowed: a stranger's
+    mail at the plus-address of a user who trusts every sender is a thread room
+    turn with that user's USER.md loaded and every other scope withheld. Driven
+    from the poller rather than a hand-built row."""
 
-    def test_a_strangers_first_mail_runs_at_the_users_reach(self, config):
-        from istota.config import EmailConfig, UserConfig
+    def test_a_strangers_first_mail_loads_user_md_and_withholds_the_rest(self, config):
+        from istota.config import EmailConfig
 
         from .test_email_thread_rooms import _poll
 
@@ -157,8 +349,9 @@ class TestTheOfficeTurn:
             return task_id
 
         seen = _run(config, _turn)
-        assert "calendar" not in seen["disabled"]
-        assert _user_dir(config) in _binds(seen["argv"])
+        assert "calendar" in seen["disabled"]
+        assert "email" not in seen["disabled"]
+        assert _user_dir(config) not in _binds(seen["argv"])
         assert SENTINEL in seen["prompt"] + seen["system"]
         assert "on their correspondence" in seen["system"]
-        assert "Withheld from this turn" not in seen["system"]
+        assert "did not write this message" in seen["system"]
