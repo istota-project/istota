@@ -60,6 +60,10 @@ PUSH_CHAT_ALERTS_VALUES = ("alerts", "badge", "off")
 # is no "both": an accepted invitation and the same UID in a subscribed feed
 # show as two events in most calendar apps.
 CALENDAR_DELIVERY_VALUES = ("invite", "feed")
+# Never widened by a setting. `files` and `memory` would undo the two writes the
+# correspondent posture exists to stop, and a correspondent's mail would be the
+# query for `recall`. Widening any of them is a code change.
+CORRESPONDENT_REFUSED_SCOPES = ("files", "memory", "recall")
 
 
 @dataclass
@@ -125,6 +129,9 @@ class UserProfile:
     # `/` with no leading or trailing slash. None is unset. Validated against
     # the workspace by `workspace.quick_notes.normalize_folder`.
     quick_notes_folder: str | None = None
+    # Scopes and the `web` token a correspondent's turn keeps beyond the default.
+    # Read at a task by `rooms.scopes.correspondent_scopes`, from the row.
+    correspondent_scopes: list[str] = field(default_factory=list)
 
 
 _PROFILE_COLUMNS = (
@@ -138,14 +145,14 @@ _PROFILE_COLUMNS = (
     "calendar_delivery", "default_briefings", "briefing_email_html",
     "timezone_follow_location", "show_nav_unread_badges",
     "push_chat_alerts", "push_preview", "push_inbox_categories",
-    "google_scopes", "quick_notes_folder",
+    "google_scopes", "quick_notes_folder", "correspondent_scopes",
 )
 
 # Columns whose value is a JSON-encoded dict (vs the JSON-list columns).
 _DICT_COLUMNS = frozenset({"routing", "google_scopes", "push_inbox_categories"})
 _LIST_COLUMNS = frozenset({
     "email_addresses", "disabled_skills", "trusted_email_senders",
-    "quiet_email_senders", "disabled_modules",
+    "quiet_email_senders", "disabled_modules", "correspondent_scopes",
 })
 # Columns stored as INTEGER 0/1 booleans, mapped to the default a missing
 # value means. Per-column rather than one shared default: the briefing pair are
@@ -183,6 +190,60 @@ ADMIN_EDITABLE_FIELDS = (
     "disabled_skills", "disabled_modules",
     "max_foreground_workers", "max_background_workers", "sms_phone_number",
 )
+# Written only by `istota user ensure` and the settings plan, never by a web
+# route: a user widening their own correspondents' reach is the wrong direction.
+OPERATOR_ONLY_FIELDS = ("correspondent_scopes",)
+
+
+def validate_correspondent_scopes(value: object) -> list[str]:
+    """A widening a writer may store: a list of strings naming nothing refused.
+
+    An unknown name passes, so a skill removed later does not fail a config
+    load; the reader drops it.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(name, str) for name in value):
+        raise ValueError("correspondent_scopes must be a list of strings")
+    refused = [name for name in value if name in CORRESPONDENT_REFUSED_SCOPES]
+    if refused:
+        raise ValueError(
+            f"correspondent_scopes may not name {', '.join(refused)}: "
+            "a correspondent's turn never reaches these"
+        )
+    return list(value)
+
+
+def stored_correspondent_scopes(conn: sqlite3.Connection, user_id: str) -> list[str]:
+    """The widening in `user_id`'s row, which nothing widens on a doubt.
+
+    A database without the column, or a value that is not a JSON array of
+    strings, reads as none, with a WARNING.
+    """
+    try:
+        row = conn.execute(
+            "SELECT correspondent_scopes FROM user_profiles WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        logger.warning(
+            "user_profiles: could not read correspondent_scopes for %s (%s); "
+            "reading none", user_id, type(exc).__name__,
+        )
+        return []
+    if row is None or row[0] is None:
+        return []
+    try:
+        parsed = json.loads(row[0])
+    except (TypeError, ValueError):
+        parsed = None
+    if not isinstance(parsed, list) or not all(isinstance(name, str) for name in parsed):
+        logger.warning(
+            "user_profiles: correspondent_scopes for %s is not a JSON array of "
+            "strings; reading none", user_id,
+        )
+        return []
+    return parsed
 
 
 def is_e164(value: object) -> bool:
@@ -438,6 +499,8 @@ def _row_to_profile(row: sqlite3.Row, *, strict: bool = False) -> UserProfile:
         if not set(_PROFILE_COLUMNS) <= set(row.keys()):
             raise ValueError("profile table is missing a column")
         for name in _LIST_COLUMNS | (_DICT_COLUMNS - {"google_scopes", "push_inbox_categories"}):
+            if name == "correspondent_scopes" and row[name] is None:
+                continue
             value = json.loads(row[name])
             expected = list if name in _LIST_COLUMNS else dict
             items = value if isinstance(value, list) else value.values() if isinstance(value, dict) else ()
@@ -488,6 +551,7 @@ def _row_to_profile(row: sqlite3.Row, *, strict: bool = False) -> UserProfile:
         push_inbox_categories=stored_inbox_categories(_row_get(row, "push_inbox_categories") or {}, strict=strict),
         google_scopes=_parse_json_dict(_row_get(row, "google_scopes")),
         quick_notes_folder=_row_get(row, "quick_notes_folder") or None,
+        correspondent_scopes=_parse_json_list(_row_get(row, "correspondent_scopes")),
     )
 
 
@@ -664,6 +728,7 @@ def _seeded_profile(
         quiet_email_senders=list(_attr(seed_from, "quiet_email_senders") or []),
         disabled_skills=list(_attr(seed_from, "disabled_skills") or []),
         disabled_modules=list(_attr(seed_from, "disabled_modules") or []),
+        correspondent_scopes=list(_attr(seed_from, "correspondent_scopes") or []),
         routing=dict(_attr(seed_from, "routing") or {}),
         default_destination=_attr(seed_from, "default_destination") or "talk",
         outbound_approval=str(_attr(seed_from, "outbound_approval") or ""),
@@ -1091,6 +1156,7 @@ def insert_profile(conn: sqlite3.Connection, profile: UserProfile, *, replace: b
         json.dumps(_normalized_profile_value("push_inbox_categories", profile.push_inbox_categories)),
         json.dumps(dict(profile.google_scopes)),
         _normalized_profile_value("quick_notes_folder", profile.quick_notes_folder),
+        json.dumps(_normalized_profile_value("correspondent_scopes", profile.correspondent_scopes)),
     )
     cols_sql = ", ".join(insert_cols)
     if replace:
@@ -1156,6 +1222,7 @@ def import_from_user_configs(
             trusted_email_senders=list(getattr(user_config, "trusted_email_senders", []) or []),
             quiet_email_senders=list(getattr(user_config, "quiet_email_senders", []) or []),
             disabled_modules=list(getattr(user_config, "disabled_modules", []) or []),
+            correspondent_scopes=list(getattr(user_config, "correspondent_scopes", []) or []),
             routing=dict(getattr(user_config, "routing", {}) or {}),
             default_destination=getattr(user_config, "default_destination", "") or "talk",
             outbound_approval=str(getattr(user_config, "outbound_approval", "") or ""),
@@ -1237,6 +1304,17 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
         "trusted_email_senders", "quiet_email_senders", "disabled_modules",
     ):
         setattr(user_config, attr, list(getattr(profile, attr) or []))
+
+    # TOML is seed-only, so a key added for a user who already has a row does
+    # nothing, and here that is a tool the operator thinks they allowed.
+    toml_scopes = list(getattr(user_config, "correspondent_scopes", None) or [])
+    if toml_scopes and toml_scopes != list(profile.correspondent_scopes or []):
+        logger.warning(
+            "[users.%s] correspondent_scopes is ignored, the saved profile wins; "
+            "change it with `istota user ensure --name %s --correspondent-scope NAME`",
+            profile.user_id, profile.user_id,
+        )
+    setattr(user_config, "correspondent_scopes", list(profile.correspondent_scopes or []))
 
     # routing is a dict but follows the same "DB owns it once the row exists"
     # rule as the list fields.
@@ -1333,6 +1411,8 @@ def _normalized_profile_value(col: str, value: object) -> object:
     """The value stored by a profile update, before SQLite/JSON encoding."""
     if col == "sms_phone_number":
         return normalize_sms_phone_number(value, allow_empty=True)
+    if col == "correspondent_scopes":
+        return validate_correspondent_scopes(value)
     if col in _LIST_COLUMNS:
         return list(value or [])
     if col == "push_inbox_categories":
@@ -1370,7 +1450,7 @@ def validate_provisioning_fields(
 
     if "default_briefings" in updates:
         raise ValueError("default_briefings is migration input only; use All users delivery preferences")
-    unknown = set(updates) - set(SELF_EDITABLE_FIELDS) - set(ADMIN_EDITABLE_FIELDS)
+    unknown = set(updates) - set(SELF_EDITABLE_FIELDS) - set(ADMIN_EDITABLE_FIELDS) - set(OPERATOR_ONLY_FIELDS)
     if unknown:
         raise ValueError(f"unknown profile field(s): {sorted(unknown)}")
     fields = {name: _normalized_profile_value(name, value) for name, value in updates.items()}

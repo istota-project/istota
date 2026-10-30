@@ -978,6 +978,7 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     timezone_follow_location INTEGER NOT NULL DEFAULT 0, -- follow the GPS timezone on travel (opt-in; rewrites a user-chosen value)
     google_scopes TEXT NOT NULL DEFAULT '{}',            -- JSON object: Google service -> off|readonly|full (bounded by the operator's ceiling; {} = unset = the whole ceiling)
     quick_notes_folder TEXT,                             -- folder below My files that quick notes are written to, no leading or trailing slash; NULL = unset
+    correspondent_scopes TEXT,                           -- JSON array: scopes and the `web` token a correspondent's turn keeps beyond the default; NULL = none
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

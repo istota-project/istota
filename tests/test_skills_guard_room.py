@@ -173,6 +173,19 @@ class TestACorrespondentsTurn:
         assert _list(capsys) == {"weather"}
         assert "disabled" in _show("calendar", capsys)
 
+    def test_a_widened_skill_opens_through_the_real_setting(self, env, monkeypatch, capsys):
+        from istota import user_profiles
+
+        config, shared, _solo = env
+        user_profiles.ensure_profile(config.db_path, "alice")
+        user_profiles.update_profile(
+            config.db_path, "alice", correspondent_scopes=["calendar"],
+        )
+        self._turn(config, monkeypatch, shared)
+        monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", "files,memory")
+        assert "calendar" in _list(capsys)
+        assert "# calendar body" in _show("calendar", capsys)
+
     def test_control_the_set_alone_with_no_task_still_refuses(self, env, monkeypatch, capsys):
         from istota.skills.skills import cmd_overlay
 

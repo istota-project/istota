@@ -1010,6 +1010,7 @@ class UserConfig:
     trusted_email_senders: list[str] = field(default_factory=list)  # patterns for trusted senders
     quiet_email_senders: list[str] = field(default_factory=list)  # patterns whose mail is filed silently (no task)
     disabled_modules: list[str] = field(default_factory=list)  # modules to disable (default-on otherwise)
+    correspondent_scopes: list[str] = field(default_factory=list)  # what a correspondent's turn keeps beyond the default
     routing: dict[str, str] = field(default_factory=dict)  # purpose -> output_target descriptor
     default_destination: str = "talk"  # fallback delivery descriptor
     # Outbound approval policy: "" (unset — follow the operator floor) | off |
@@ -3476,10 +3477,16 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
             "[users.%s] email_reply_routing is no longer used and is ignored", user_id,
         )
 
-    from .user_profiles import normalize_sms_phone_number
+    from .user_profiles import normalize_sms_phone_number, validate_correspondent_scopes
     sms_phone_number = normalize_sms_phone_number(
         user_data.get("sms_phone_number", ""), allow_empty=True,
     )
+    try:
+        correspondent_scopes = validate_correspondent_scopes(
+            user_data.get("correspondent_scopes", []),
+        )
+    except ValueError as exc:
+        raise ValueError(f"[users.{user_id}] {exc}") from None
 
     if "vault_path" in user_data:
         report_problem(
@@ -3501,6 +3508,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         trusted_email_senders=user_data.get("trusted_email_senders", []),
         quiet_email_senders=user_data.get("quiet_email_senders", []),
         disabled_modules=user_data.get("disabled_modules", []),
+        correspondent_scopes=correspondent_scopes,
         routing=dict(user_data.get("routing", {}) or {}),
         default_destination=user_data.get("default_destination", "talk") or "talk",
         # No `or` fallback: "" is a meaningful value here (follow the floor),

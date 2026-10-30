@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db
+from istota import db, user_profiles
 from istota.config import UserConfig
 from istota.memory.knowledge_graph import add_fact, ensure_table
 
@@ -131,6 +131,11 @@ def _own_thread_turn(conn) -> int:
     return task_id
 
 
+def _widen(config, *names) -> None:
+    user_profiles.ensure_profile(config.db_path, "alice")
+    user_profiles.update_profile(config.db_path, "alice", correspondent_scopes=list(names))
+
+
 def _overlay(config) -> None:
     path = (config.workspace_path / "Users" / "alice" / config.bot_dir_name
             / "config" / "skills" / "email.md")
@@ -243,15 +248,8 @@ class TestACorrespondentsTurn:
         assert "This message is from 'alice'" not in system
         assert "did not write this message" in system
 
-    def test_a_widened_set_is_named(self, config, monkeypatch):
-        from istota.rooms import scopes
-
-        monkeypatch.setattr(
-            scopes, "correspondent_scopes",
-            lambda *a, **k: scopes.CorrespondentAllowance(
-                scopes=frozenset({"email", "skills", "calendar"}), web=True,
-            ),
-        )
+    def test_a_widened_set_is_named(self, config):
+        _widen(config, "calendar", "web")
         seen = _run(config, _thread_turn)
         assert "You can also use: calendar, the web." in seen["system"]
         assert "calendar" not in seen["disabled"]
@@ -277,21 +275,34 @@ class TestACorrespondentsTurn:
         assert str(source) not in seen["prompt"]
 
 
+def _proxy_reason(allowed: frozenset[str], skill: str) -> str | None:
+    """What a real `SkillProxy` with this allowlist answers a skill call. The
+    spawn is stubbed to refuse, so an accepted name stops short of a real CLI."""
+    import socket
+    import tempfile
+    from pathlib import Path
+
+    from istota.sandbox.skill_proxy import SkillProxy
+
+    with tempfile.TemporaryDirectory(prefix="sp_", dir="/tmp") as directory:
+        path = Path(directory) / "s.sock"
+        with patch("istota.sandbox.skill_proxy.subprocess.Popen", side_effect=OSError("stub")), \
+                patch("istota.sandbox.peer_process.descends_from", return_value=True):
+            with SkillProxy(path, {}, {"PATH": "/usr/bin"}, allowed_skills=allowed, task_id=1):
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                sock.connect(str(path))
+                sock.sendall(json.dumps({"skill": skill, "args": []}).encode() + b"\n")
+                chunks = []
+                while chunk := sock.recv(65536):
+                    chunks.append(chunk)
+                sock.close()
+    return json.loads(b"".join(chunks).decode().strip()).get("reason")
+
+
 NO_WEB_LINE = "you have no search or fetch tool on this turn"
 
 
 class TestTheWebTools:
-    @staticmethod
-    def _allow_web(monkeypatch):
-        from istota.rooms import scopes
-
-        monkeypatch.setattr(
-            scopes, "correspondent_scopes",
-            lambda *a, **k: scopes.CorrespondentAllowance(
-                scopes=frozenset(scopes.CORRESPONDENT_DEFAULT_SCOPES), web=True,
-            ),
-        )
-
     def test_a_correspondents_turn_has_none(self, config):
         from istota.executor import harness_web_fetch_policy
 
@@ -303,7 +314,7 @@ class TestTheWebTools:
             assert "Web search: WebSearch" not in seen["system"]
 
     def test_they_come_back_when_web_is_allowed(self, config, monkeypatch):
-        self._allow_web(monkeypatch)
+        _widen(config, "web")
         seen = _run(config, _thread_turn)
         assert {"WebSearch", "WebFetch"} <= set(seen["allowed_tools"])
         assert "Web search: WebSearch" in seen["system"]
@@ -324,7 +335,7 @@ class TestTheWebTools:
         """Allowing `web` does not allow `browse`, so the read line points at
         WebFetch rather than a skill the proxy would refuse."""
         config.browser.enabled = True
-        self._allow_web(monkeypatch)
+        _widen(config, "web")
         system = _run(config, _thread_turn)["system"]
         assert "prefer the browse skill" not in system
         assert "Web browser for JS-rendered pages" not in system
@@ -411,6 +422,43 @@ class TestTheAutoIndex:
     def test_control_the_hosts_own_turn_is_in_both(self, config):
         token, namespaces = self._namespaces(config, _own_thread_turn)
         assert namespaces == {"alice", f"channel:{token}"}
+
+
+class TestAWidenedTurn:
+    def test_calendar_reaches_the_proxy_and_the_rest_stays_out(self, config):
+        _widen(config, "calendar")
+        seen = _run(config, _thread_turn)
+        assert "calendar" in seen["allowed_skills"]
+        assert "calendar" not in seen["disabled"]
+        assert "kv" not in seen["allowed_skills"]
+        assert "calendar" not in seen["proxy_base_env"]["ISTOTA_WITHHELD_SCOPES"].split(",")
+        assert {"files", "memory"} <= set(seen["proxy_base_env"]["ISTOTA_WITHHELD_SCOPES"].split(","))
+
+    def test_a_real_proxy_built_from_that_set_accepts_the_call(self, config):
+        _widen(config, "calendar")
+        allowed = frozenset(_run(config, _thread_turn)["allowed_skills"])
+        assert _proxy_reason(allowed, "calendar") != "unknown_skill"
+        assert _proxy_reason(allowed, "kv") == "unknown_skill"
+
+    def test_clearing_it_takes_the_tools_back(self, config):
+        _widen(config, "calendar", "web")
+        user_profiles.update_profile(config.db_path, "alice", correspondent_scopes=[])
+        seen = _run(config, _thread_turn)
+        assert "calendar" in seen["disabled"]
+        assert not {"WebSearch", "WebFetch"} & set(seen["allowed_tools"])
+
+    def test_a_guests_turn_ignores_the_setting(self, config):
+        _widen(config, "calendar", "web")
+        seen = _run(config, _talk_guest_turn)
+        assert "calendar" in seen["disabled"]
+        assert not {"WebSearch", "WebFetch"} & set(seen["allowed_tools"])
+
+    def test_recall_stays_off_whatever_is_widened(self, config):
+        _ambient(config)
+        _widen(config, "calendar", "web")
+        seen = _run(config, _thread_turn)
+        text = seen["prompt"] + seen["system"]
+        assert FACT_SENTINEL not in text and DATED_SENTINEL not in text
 
 
 class TestTheTurnAuthorReachesTheCli:

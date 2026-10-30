@@ -1363,6 +1363,7 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     _migrate_profile_generation(conn)
     # Same shape again.
     _migrate_user_profile_managed_fields(conn)
+    _migrate_correspondent_scopes(conn)
     # After the schema-creating migrations and before `executescript`, which is
     # what makes it one-way: `schema.sql` no longer declares the table, so
     # nothing recreates what this drops.
@@ -9841,6 +9842,12 @@ def _migrate_device_tokens(conn: sqlite3.Connection) -> None:
         )
     """)
     _add_columns(conn, "device_tokens", {"auth_method": "TEXT", "auth_epoch": "INTEGER"})
+
+
+def _migrate_correspondent_scopes(conn: sqlite3.Connection) -> None:
+    """What a user's correspondents' turns keep beyond the default. NULL is none,
+    so every row that predates the column stays at the default set."""
+    _add_columns(conn, "user_profiles", {"correspondent_scopes": "TEXT"})
 
 
 def _migrate_notifications_push_pending(conn: sqlite3.Connection) -> None:

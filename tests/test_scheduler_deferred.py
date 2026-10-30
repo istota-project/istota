@@ -1159,16 +1159,13 @@ class TestACorrespondentsDrain:
         with db.get_db(mail_config.db_path) as conn:
             assert conn.execute("SELECT COUNT(*) FROM outbound_drafts").fetchone()[0] == 0
 
-    def test_calendar_events_apply_when_calendar_is_allowed(self, mail_config, monkeypatch):
-        from istota.rooms import scopes
+    def test_calendar_events_apply_when_calendar_is_allowed(self, mail_config):
+        from istota import user_profiles
 
-        real = scopes.correspondent_scopes
-
-        def _widened(*args, **kwargs):
-            allowance = real(*args, **kwargs)
-            return scopes.CorrespondentAllowance(scopes=allowance.scopes | {"calendar"})
-
-        monkeypatch.setattr(scopes, "correspondent_scopes", _widened)
+        user_profiles.ensure_profile(mail_config.db_path, "alice")
+        user_profiles.update_profile(
+            mail_config.db_path, "alice", correspondent_scopes=["calendar"],
+        )
         task = _strangers_turn(mail_config)
         directory = _one_file_of_every_kind(mail_config, task)
 

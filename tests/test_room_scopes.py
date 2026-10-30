@@ -400,12 +400,10 @@ class TestTheAllowance:
         task = _roomless_mail(conn, "carol@example.com")
         assert room_scopes.withheld_for_task(conn, task, skill_index={}) == {"files", "memory"}
 
-    def test_a_widened_allowance_narrows_what_is_withheld(self, conn, monkeypatch):
-        monkeypatch.setattr(
-            room_scopes, "correspondent_scopes",
-            lambda *a, **k: room_scopes.CorrespondentAllowance(
-                scopes=frozenset({"email", "calendar"}), web=True,
-            ),
+    def test_a_widened_allowance_narrows_what_is_withheld(self, conn):
+        conn.execute(
+            "INSERT INTO user_profiles (user_id, correspondent_scopes) VALUES (?, ?)",
+            ("alice", '["calendar", "web"]'),
         )
         task = _roomless_mail(conn, "carol@example.com")
         reach = room_scopes.reach_for_task(conn, task, skill_index=self.INDEX)

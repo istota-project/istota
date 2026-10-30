@@ -58,6 +58,7 @@ def test_profile_and_job_fields_are_deliberate_subsets():
 
     assert set(PROFILE_FIELDS) == (
         set(user_profiles.SELF_EDITABLE_FIELDS) | set(user_profiles.ADMIN_EDITABLE_FIELDS)
+        | set(user_profiles.OPERATOR_ONLY_FIELDS)
     ) - {"google_scopes"}
     assert set(JOB_FIELDS) == {field.name for field in fields(CronJob) if field.compare}
 

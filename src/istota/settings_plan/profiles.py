@@ -117,6 +117,8 @@ def _validate_profile(conn, config, user, fields, existing):
             elif name == "disabled_skills":
                 if set(value) - set(load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)):
                     raise ValueError("unknown skill")
+            elif name == "correspondent_scopes":
+                user_profiles.validate_correspondent_scopes(value)
             elif name == "relay_delivery" and value not in user_profiles.RELAY_DELIVERY_VALUES:
                 raise ValueError("invalid relay preference")
             elif name == "calendar_delivery" and value not in user_profiles.CALENDAR_DELIVERY_VALUES:

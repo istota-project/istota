@@ -48,6 +48,7 @@ NEWEST_COLUMNS = [
     ("web_auth_step_ups", "method"),
     ("config_change_requests", "moves_json"),
     ("user_profiles", "quick_notes_folder"),
+    ("user_profiles", "correspondent_scopes"),
     ("device_tokens", "auth_epoch"),
     ("outbound_drafts", "account_id"),
 ]

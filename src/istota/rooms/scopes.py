@@ -63,6 +63,10 @@ _TURN_CHAIN_LIMIT = 64
 #: makes anything private readable by the sender who reads the reply.
 CORRESPONDENT_DEFAULT_SCOPES = frozenset({"email", "skills", "transcribe", "whisper", "markets"})
 
+#: (user, name) already warned about, so a stale setting is one line per process
+#: rather than one per seam per task.
+_warned_correspondent_names: set[tuple[str, str]] = set()
+
 
 @dataclass(frozen=True)
 class CorrespondentAllowance:
@@ -130,10 +134,43 @@ def correspondent_scopes(
     *,
     skill_index: Mapping[str, object],
 ) -> CorrespondentAllowance:
-    """What ``user_id``'s correspondents' turns keep: the default set, of the
-    scopes this index has."""
+    """What ``user_id``'s correspondents' turns keep: the default set and the
+    user's widening, of the scopes this index has.
+
+    The writers refuse the names no setting may widen; this drops them too, since
+    a hand-edited row reaches here unchecked. An unknown name is a typo or a
+    removed skill. `wallet.policy` passes an empty index, against which every
+    name looks unknown, so that case is not worth a warning.
+    """
+    from istota.user_profiles import (
+        CORRESPONDENT_REFUSED_SCOPES,
+        stored_correspondent_scopes,
+    )
+
+    widening = set(stored_correspondent_scopes(conn, user_id)) if conn is not None else set()
+    web = "web" in widening
+    widening.discard("web")
+    known = all_scopes(skill_index)
+    refused = widening & set(CORRESPONDENT_REFUSED_SCOPES)
+    widening -= refused
+    for name in sorted(refused):
+        _warn_about_correspondent_name(user_id, name, "may not be widened")
+    if skill_index:
+        for name in sorted(widening - known):
+            _warn_about_correspondent_name(user_id, name, "is not a scope")
     return CorrespondentAllowance(
-        scopes=CORRESPONDENT_DEFAULT_SCOPES & all_scopes(skill_index),
+        scopes=(CORRESPONDENT_DEFAULT_SCOPES | widening) & known,
+        web=web,
+    )
+
+
+def _warn_about_correspondent_name(user_id: str, name: str, why: str) -> None:
+    if (user_id, name) in _warned_correspondent_names:
+        return
+    _warned_correspondent_names.add((user_id, name))
+    logger.warning(
+        "room_scopes: correspondent_scopes for %s names %r, which %s; dropped",
+        user_id, name, why,
     )
 
 
