@@ -624,3 +624,71 @@ def test_estimate_names_income_cutoff(ctx, client, monkeypatch, today, months, t
     assert body["annualization_months"] == months
     assert body["se_income_through"] == through
     assert body["annualization_period_months"] == 12
+
+
+IN_PROGRESS_LEDGER = """2026-01-01 open Assets:Bank USD
+2026-01-01 open Income:Consulting USD
+2026-01-01 open Expenses:Business USD
+2026-09-10 * "Consulting"
+  Income:Consulting -900 USD
+  Assets:Bank 900 USD
+2026-10-10 * "Consulting"
+  Income:Consulting -500 USD
+  Assets:Bank 500 USD
+2026-10-11 * "Supplies"
+  Expenses:Business 50 USD
+  Assets:Bank -50 USD
+"""
+
+
+def _estimate_on(ctx, monkeypatch, today):
+    from datetime import date
+    from istota.money import routes
+    ledger = ctx.data_dir / "main.beancount"
+    ledger.write_text(IN_PROGRESS_LEDGER)
+    monkeypatch.setattr(routes, "_resolve_user_ledger", lambda *_: ledger)
+    monkeypatch.setattr(routes, "_resolve_today", lambda *_: date.fromisoformat(today))
+    config_store.save_tax(ctx.db_path, TaxConfig(
+        tax_year=2026,
+        se_income_accounts=["Income:Consulting"],
+        se_expense_accounts=["Expenses:Business"],
+    ))
+
+
+@pytest.mark.parametrize("method", ["get", "post"])
+def test_estimate_reports_the_month_left_out_of_the_projection(ctx, client, monkeypatch, method):
+    _estimate_on(ctx, monkeypatch, "2026-10-30")
+    url = f"{API}/tax/estimate?year=2026&quarter=4"
+    response = client.get(url) if method == "get" else client.post(url, json={})
+    body = response.json()
+    assert body["se_income_ytd"] == 900
+    assert body["se_income_in_progress"] == {"through": "2026-10-30", "amount": 450}
+
+
+@pytest.mark.parametrize("today,quarter", [
+    ("2026-11-05", 4),  # nothing posted in November
+    ("2026-01-20", 1),  # the one-month floor already counts January
+    ("2026-12-05", 1),  # a past quarter's span does not end before this month
+    ("2027-01-15", 4),  # the year is over
+])
+def test_estimate_has_no_in_progress_line(ctx, client, monkeypatch, today, quarter):
+    _estimate_on(ctx, monkeypatch, today)
+    response = client.get(f"{API}/tax/estimate?year=2026&quarter={quarter}")
+    assert response.status_code == 200
+    assert response.json()["se_income_in_progress"] is None
+
+
+def test_a_failed_in_progress_query_leaves_the_estimate(ctx, client, monkeypatch):
+    from istota.money.core import tax
+    real = tax.query_se_income
+
+    def fail_for_the_month(ledger_path, config, through_month, from_month=1):
+        if from_month > 1:
+            raise ValueError("bean-query failed")
+        return real(ledger_path, config, through_month)
+
+    _estimate_on(ctx, monkeypatch, "2026-10-30")
+    monkeypatch.setattr(tax, "query_se_income", fail_for_the_month)
+    body = client.get(f"{API}/tax/estimate?year=2026&quarter=4").json()
+    assert body["se_income_ytd"] == 900
+    assert body["se_income_in_progress"] is None

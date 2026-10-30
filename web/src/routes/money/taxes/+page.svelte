@@ -343,6 +343,22 @@
               <span class="breakdown-val num">{fmtDollar(data.se_income_ytd)}</span>
               {#if showState}<span class="breakdown-val num"></span>{/if}
             </div>
+            {#if data.se_income_in_progress}
+              <div class="record-row record-row--tree">
+                <span class="breakdown-label"
+                  ><Timestamp
+                    value={data.se_income_in_progress.through}
+                    options={{ month: 'long' }}
+                    title={false}
+                  /> to date (net)
+                  <span class="caption">not yet in the projection</span>
+                </span>
+                <span class="breakdown-val num dim"
+                  >{fmtDollar(data.se_income_in_progress.amount)}</span
+                >
+                {#if showState}<span class="breakdown-val num"></span>{/if}
+              </div>
+            {/if}
             <div class="record-row record-row--tree">
               <span class="breakdown-label"
                 >SE income (annualized)

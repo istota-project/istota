@@ -379,6 +379,17 @@ def annualization_months(
     return max(1, min(period_end, elapsed))
 
 
+def in_progress_month(tax_year: int, months: int, today: date) -> int | None:
+    """The current month, when an annualization span ends just before it.
+
+    None otherwise: another year, a past quarter whose span ended earlier, or
+    January, which the one-month floor already counts.
+    """
+    if today.year != tax_year or months != today.month - 1:
+        return None
+    return today.month
+
+
 def _project_full_year(ytd: float, months_elapsed: int, target_months: int) -> float:
     """Project a year-to-date amount to a full- or partial-year total.
 
@@ -770,15 +781,15 @@ def payment_quarter_from_date(today: date, tax_year: int | None = None) -> int:
 
 
 def query_se_income(
-    ledger_path: Path, config: TaxConfig, through_month: int,
+    ledger_path: Path, config: TaxConfig, through_month: int, from_month: int = 1,
 ) -> float:
     """Query beancount ledger for net SE income through the given month.
 
     ``through_month`` is the last month of the tax year to include (1-12) — e.g.
     5 includes Jan–May. Callers pass the annualization span
     (``annualization_months(...)``) so the queried income period matches the
-    period the estimate annualizes from. Returns net SE income as a positive
-    number.
+    period the estimate annualizes from. ``from_month`` is the first month to
+    include. Returns net SE income as a positive number.
     """
     from istota.money.core.ledger import _sanitize_bql_string, run_bean_query
 
@@ -798,7 +809,7 @@ def query_se_income(
         rows = run_bean_query(
             ledger_path,
             f"SELECT sum(position) WHERE ({matches}) "
-            f"AND year = {year} AND month <= {end_month}",
+            f"AND year = {year} AND month >= {int(from_month)} AND month <= {end_month}",
         )
         if not rows:
             return 0.0
