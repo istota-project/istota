@@ -174,7 +174,8 @@ _E164_PATTERN = re.compile(r"^\+[1-9][0-9]{7,14}$")
 # caps are a resource limit and are admin-only: a user raising their own cap is
 # the wrong direction. The SMS number is an operator-bound identity. The
 # WhatsApp number and the login email are not profile columns and are handled
-# beside these tuples, not in them.
+# beside these tuples, not in them. `correspondent_scopes` is admin-only too: a
+# user widening their own correspondents' reach is the wrong direction.
 SELF_EDITABLE_FIELDS = (
     "display_name", "timezone", "log_channel", "alerts_channel",
     "email_addresses", "trusted_email_senders", "quiet_email_senders",
@@ -189,10 +190,8 @@ ADMIN_EDITABLE_FIELDS = (
     "trusted_email_senders", "quiet_email_senders", "outbound_approval",
     "disabled_skills", "disabled_modules",
     "max_foreground_workers", "max_background_workers", "sms_phone_number",
+    "correspondent_scopes",
 )
-# Written only by `istota user ensure` and the settings plan, never by a web
-# route: a user widening their own correspondents' reach is the wrong direction.
-OPERATOR_ONLY_FIELDS = ("correspondent_scopes",)
 
 
 def validate_correspondent_scopes(value: object) -> list[str]:
@@ -1450,7 +1449,7 @@ def validate_provisioning_fields(
 
     if "default_briefings" in updates:
         raise ValueError("default_briefings is migration input only; use All users delivery preferences")
-    unknown = set(updates) - set(SELF_EDITABLE_FIELDS) - set(ADMIN_EDITABLE_FIELDS) - set(OPERATOR_ONLY_FIELDS)
+    unknown = set(updates) - set(SELF_EDITABLE_FIELDS) - set(ADMIN_EDITABLE_FIELDS)
     if unknown:
         raise ValueError(f"unknown profile field(s): {sorted(unknown)}")
     fields = {name: _normalized_profile_value(name, value) for name, value in updates.items()}

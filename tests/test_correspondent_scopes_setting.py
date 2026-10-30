@@ -190,8 +190,9 @@ class TestTheProfileStore:
             )
         assert not _stored(database) or json.loads(_stored(database)) == []
 
-    def test_a_user_cannot_write_it_for_themselves(self):
+    def test_only_an_admin_writes_it_on_the_web(self):
         assert "correspondent_scopes" not in user_profiles.SELF_EDITABLE_FIELDS
+        assert "correspondent_scopes" in user_profiles.ADMIN_EDITABLE_FIELDS
 
 
 class TestUserEnsure:
