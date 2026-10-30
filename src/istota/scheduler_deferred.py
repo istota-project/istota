@@ -783,7 +783,7 @@ def _process_deferred_kv_ops(
                     continue
                 # A correspondent's mail on an email thread room runs as the
                 # host; the skill's own refusal never ran for a sandboxed task.
-                if not _owners_own_turn(conn, task.id, task.user_id):
+                if not _owners_own_turn(conn, task.id, task.user_id, config=config):
                     logger.warning(
                         "shared KV write denied for task %d user %s: not the "
                         "user's own turn (%s %s/%s)",

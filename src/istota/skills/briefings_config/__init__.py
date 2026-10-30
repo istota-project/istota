@@ -96,7 +96,7 @@ def _own_turn_refusal(user_id: str) -> dict | None:
     full reach; it must not change a schedule or a shared block, which reaches
     every user unfenced. An admin's own turn in a shared room passes.
     """
-    if calling_turn_passes(user_id):
+    if calling_turn_passes(user_id, config=_load_config()):
         return None
     return error_envelope(
         "this change can only be made on the user's own turn; the message being "
@@ -603,7 +603,7 @@ def _private_chat_refusal(user_id: str) -> dict | None:
             is_group_chat=bool(task.is_group_chat),
         )
 
-    if calling_turn_passes(user_id, reads_privately):
+    if calling_turn_passes(user_id, reads_privately, config=_load_config()):
         return None
     return error_envelope(
         "group briefings are read and changed from the user's private chat only; "

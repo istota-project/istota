@@ -328,13 +328,14 @@ def _default_trusted_roots() -> frozenset[int]:
 _TURN_CHAIN_LIMIT = 64
 
 
-def _owners_own_turn(conn, task_id: int, user_id: str) -> bool:
+def _owners_own_turn(conn, task_id: int, user_id: str, *, config=None) -> bool:
     """Whether ``task_id`` answers a turn ``user_id`` wrote, ancestors included.
 
     A subtask gets its parent's user id and room token but no `messages` row,
     so a correspondent's turn would pass a check of the task's own row alone.
     The walk follows ``parent_task_id`` to the root; a missing row, a cycle or
-    a chain past the limit is not the owner's turn.
+    a chain past the limit is not the owner's turn. ``config`` gives the
+    user's own addresses for a roomless email turn (`written_by_someone_else`).
     """
     from istota import db
     from istota.rooms.scopes import written_by_someone_else
@@ -348,7 +349,7 @@ def _owners_own_turn(conn, task_id: int, user_id: str) -> bool:
         task = db.get_task(conn, current)
         if (task is None or task.user_id != user_id
                 or task.guest_participant_id is not None
-                or written_by_someone_else(conn, task)):
+                or written_by_someone_else(conn, task, config=config)):
             return False
         current = task.parent_task_id
     return True
@@ -984,7 +985,9 @@ class SkillProxy:
             with db.get_db(self.config.db_path) as database:
                 # A correspondent's mail on an email thread room runs as the
                 # host at full reach; it must not reach the host's other boxes.
-                someone_else = not _owners_own_turn(database, self.task_id, self.user_id)
+                someone_else = not _owners_own_turn(
+                    database, self.task_id, self.user_id, config=self.config,
+                )
             if someone_else:
                 refuse("not_owner_turn")
                 return
