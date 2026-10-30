@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 vi.mock('$app/paths', () => ({ base: '/istota', assets: '' }));
 import TextPreview from './TextPreview.svelte';
 import { HIGHLIGHT_MAX_CHARS } from '$lib/fileViewer/presentation';
-import { HTML_FRAME_SANDBOX, sandboxedDocument } from '$lib/fileViewer/html';
+import { HTML_FRAME_SANDBOX, framePage } from '$lib/fileViewer/html';
 import { viewer } from '$lib/fileViewer/store.svelte';
 import { VIEWPORT_DEFAULT, VIEWPORT_NO_ZOOM } from '$lib/zoomPin';
 
@@ -75,7 +75,7 @@ describe('shared text preview', () => {
     });
     expect(frame.getAttribute('sandbox')).toBe(HTML_FRAME_SANDBOX);
     expect(frame.getAttribute('sandbox')).not.toContain('allow-scripts');
-    expect(frame.getAttribute('srcdoc')).toBe(sandboxedDocument(text));
+    expect(frame.getAttribute('srcdoc')).toBe(framePage(text));
     expect(frame).toHaveAttribute('title', 'page.html');
     expect(frame).toHaveAttribute('referrerpolicy', 'no-referrer');
     expect(container.querySelector('script, p')).toBeNull();

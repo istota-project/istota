@@ -6,25 +6,81 @@ import {
   MAX_ASSET_BYTES,
   frameDocument,
   resolveRelative,
-  sandboxedDocument,
+  MAX_TOTAL_BYTES,
+  framePage,
 } from './html';
 
 const META = `<meta http-equiv="Content-Security-Policy" content="${HTML_FRAME_CSP}">`;
+const parse = (framed: string) => new DOMParser().parseFromString(framed, 'text/html');
 
-describe('sandboxedDocument', () => {
-  it('puts the policy after a leading doctype, so the page keeps standards mode', () => {
-    const page = '﻿\n<!DOCTYPE html>\n<html><head><title>T</title></head><body>Hi</body></html>';
-    const framed = sandboxedDocument(page);
-    expect(framed.startsWith('﻿\n<!DOCTYPE html>' + META)).toBe(true);
-    expect(framed.endsWith('<html><head><title>T</title></head><body>Hi</body></html>')).toBe(true);
+describe('framePage', () => {
+  it('keeps a doctype, so the page keeps standards mode', () => {
+    const framed = framePage(
+      '<!DOCTYPE html>\n<html><head><title>T</title></head><body>Hi</body></html>',
+    );
+    expect(framed.startsWith(`<!DOCTYPE html><html><head>${META}`)).toBe(true);
+    expect(parse(framed).title).toBe('T');
   });
 
-  it('puts the policy first in a fragment with no doctype', () => {
-    expect(sandboxedDocument('<p>Hi</p>').startsWith(META)).toBe(true);
+  it('adds no doctype to a page without one', () => {
+    expect(framePage('<p>Hi</p>').startsWith(`<html><head>${META}`)).toBe(true);
   });
 
-  it('opens links in a new tab, ahead of anything the page sets', () => {
-    expect(sandboxedDocument('<p>Hi</p>')).toContain(`${META}<base target="_blank">`);
+  // JS `\s` matches these and HTML does not: text ahead of the doctype opens
+  // the body, and a policy placed after it would be ignored.
+  it.each(['\u00A0', '\u000B', '\uFEFF\uFEFF', '\u2003', '\uFEFF', ' \n\t', 'x', '<!-- c -->'])(
+    'puts the policy first in the head whatever precedes the doctype: %j',
+    (prefix) => {
+      const framed = framePage(`${prefix}<!doctype html><img src="https://example.com/x.png">`);
+      expect(framed).toMatch(
+        /^(<!DOCTYPE html>)?<html><head><meta http-equiv="Content-Security-Policy"/,
+      );
+      const first = parse(framed).head.firstElementChild!;
+      expect(first.getAttribute('http-equiv')).toBe('Content-Security-Policy');
+      expect(first.getAttribute('content')).toBe(HTML_FRAME_CSP);
+    },
+  );
+
+  it('opens links in a new tab with no opener and no referrer', () => {
+    const doc = parse(
+      framePage(
+        '<meta name="referrer" content="unsafe-url"><a href="https://example.com" rel="opener" referrerpolicy="unsafe-url">a</a>' +
+          '<map><area href="https://example.com" rel="opener"></map><a rel="opener">no href</a>' +
+          '<svg><a href="https://example.com">svg</a></svg><img src="data:," referrerpolicy="unsafe-url">',
+      ),
+    );
+    expect(doc.querySelector('base')!.getAttribute('target')).toBe('_blank');
+    for (const link of doc.querySelectorAll('a, area')) {
+      expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+    }
+    expect(doc.querySelectorAll('a, area')).toHaveLength(4);
+    expect(doc.querySelector('[referrerpolicy]')).toBeNull();
+    const referrers = [...doc.querySelectorAll('meta[name="referrer" i]')];
+    expect(referrers.map((meta) => meta.getAttribute('content'))).toEqual(['no-referrer']);
+  });
+
+  it('drops resource hints, which CSP does not govern', () => {
+    const hints = [
+      'dns-prefetch',
+      'preconnect',
+      'prefetch',
+      'preload',
+      'prerender',
+      'modulepreload',
+    ];
+    const doc = parse(
+      framePage(
+        hints
+          .map((rel) => `<link rel="${rel.toUpperCase()}" href="//receipt.example.com">`)
+          .join('') + '<link rel="icon" href="data:,">',
+      ),
+    );
+    expect([...doc.querySelectorAll('link')].map((link) => link.getAttribute('rel'))).toEqual([
+      'icon',
+    ]);
+    expect(
+      doc.querySelector('meta[http-equiv="x-dns-prefetch-control" i]')!.getAttribute('content'),
+    ).toBe('off');
   });
 
   it('allows no script, no remote load and no form', () => {
@@ -90,10 +146,34 @@ describe('frameDocument', () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it('frames a page with nothing relative exactly as sandboxedDocument does, fetching nothing', async () => {
+  it('frames a page with nothing relative exactly as framePage does, fetching nothing', async () => {
     const text = '<!doctype html><p>Hi <img src="https://example.com/x.png"></p>';
-    expect(await frameDocument(text, '/docs/r.html', urlFor)).toBe(sandboxedDocument(text));
+    expect(await frameDocument(text, '/docs/r.html', urlFor)).toBe(framePage(text));
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('bounds the inlined copies, not only the fetched files', async () => {
+    // One file in every fetch cap, named many times, must not multiply into the srcdoc.
+    const bytes = new Uint8Array(MAX_ASSET_BYTES - 1);
+    fetchMock.mockImplementation(async () => respond(bytes, 'image/png'));
+    const framed = await frameDocument('<img src="a.png">'.repeat(10), '/docs/r.html', urlFor);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const srcs = [...parse(framed).querySelectorAll('img')].map((img) => img.getAttribute('src'));
+    const inlined = srcs.filter((src) => src!.startsWith('data:'));
+    expect(inlined.length).toBeGreaterThan(0);
+    expect(inlined.reduce((sum, src) => sum + src!.length, 0)).toBeLessThanOrEqual(MAX_TOTAL_BYTES);
+    expect(srcs.filter((src) => src === 'a.png')).toHaveLength(10 - inlined.length);
+  });
+
+  it('puts the policy first in the head on the inlining path too', async () => {
+    const framed = await frameDocument(
+      '\u00A0<!doctype html><img src="a.png">',
+      '/docs/r.html',
+      urlFor,
+    );
+    expect(parse(framed).head.firstElementChild!.getAttribute('http-equiv')).toBe(
+      'Content-Security-Policy',
+    );
   });
 
   it('inlines a relative raster through the viewer endpoint and drops its srcset', async () => {
@@ -104,7 +184,7 @@ describe('frameDocument', () => {
     const img = doc.querySelector('img')!;
     expect(img.getAttribute('src')).toBe('data:image/png;base64,iVBORw==');
     expect(img.hasAttribute('srcset')).toBe(false);
-    expect(framed.startsWith('<!DOCTYPE html>' + META)).toBe(true);
+    expect(framed.startsWith(`<!DOCTYPE html><html><head>${META}`)).toBe(true);
   });
 
   it('inlines a relative stylesheet as a style element', async () => {

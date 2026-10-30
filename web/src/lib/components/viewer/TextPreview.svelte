@@ -10,7 +10,7 @@
     HIGHLIGHT_MAX_CHARS,
   } from '$lib/fileViewer/presentation';
   import { csvRecords } from '$lib/fileViewer/csv';
-  import { HTML_FRAME_SANDBOX, frameDocument, sandboxedDocument } from '$lib/fileViewer/html';
+  import { HTML_FRAME_SANDBOX, frameDocument, framePage } from '$lib/fileViewer/html';
   import CsvTable from './CsvTable.svelte';
 
   let {
@@ -52,14 +52,14 @@
     if (presentation.kind !== 'html' || source) return;
     const page = text;
     if (!path || !assetUrl) {
-      framed = sandboxedDocument(page);
+      framed = framePage(page);
       return;
     }
     const controller = new AbortController();
     let active = true;
     framed = null;
     frameDocument(page, path, assetUrl, controller.signal)
-      .catch(() => sandboxedDocument(page))
+      .catch(() => framePage(page))
       .then((document) => {
         if (active) framed = document;
       });

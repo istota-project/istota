@@ -11,17 +11,62 @@ export const HTML_FRAME_SANDBOX = 'allow-popups allow-popups-to-escape-sandbox';
 export const HTML_FRAME_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:";
 
-const LEADING_DOCTYPE = /^﻿?\s*<!doctype[^>]*>/i;
+// Hints a browser acts on outside CSP, a DNS lookup at the least.
+const RESOURCE_HINTS = [
+  'dns-prefetch',
+  'preconnect',
+  'prefetch',
+  'preload',
+  'prerender',
+  'modulepreload',
+];
 
-/** The page as the frame's `srcdoc`, with the policy ahead of anything it loads. */
-export function sandboxedDocument(text: string): string {
-  // Links open in a new tab, as a Markdown document's do, rather than
-  // navigating the frame away from the file.
-  const head = `<meta http-equiv="Content-Security-Policy" content="${HTML_FRAME_CSP}"><base target="_blank">`;
-  // After a doctype, not before it: anything ahead of it puts the page in quirks mode.
-  const doctype = LEADING_DOCTYPE.exec(text);
-  if (!doctype) return head + text;
-  return doctype[0] + head + text.slice(doctype[0].length);
+function relTokens(element: Element): string[] {
+  return (element.getAttribute('rel') ?? '').toLowerCase().split(/\s+/);
+}
+
+function meta(doc: Document, attributes: Record<string, string>): HTMLMetaElement {
+  const element = doc.createElement('meta');
+  for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
+  return element;
+}
+
+/**
+ * The parsed page as the frame's `srcdoc`. Always built from the parsed tree,
+ * never by splicing into the text: whatever precedes the doctype (a no-break
+ * space, a second BOM) opens the body, and a policy spliced in after it would
+ * land outside the head, where browsers ignore it.
+ */
+function serializeFramed(doc: Document): string {
+  for (const link of doc.querySelectorAll('link[rel]')) {
+    if (relTokens(link).some((token) => RESOURCE_HINTS.includes(token))) link.remove();
+  }
+  for (const element of doc.querySelectorAll(
+    'meta[name="referrer" i], meta[http-equiv="x-dns-prefetch-control" i]',
+  )) {
+    element.remove();
+  }
+  for (const element of doc.querySelectorAll('[referrerpolicy]'))
+    element.removeAttribute('referrerpolicy');
+  // An escaped popup with an opener could navigate the app's tab, as Markdown links prevent too.
+  for (const link of doc.querySelectorAll('a, area'))
+    link.setAttribute('rel', 'noopener noreferrer');
+  // Links open in a new tab rather than navigating the frame away from the file.
+  const base = doc.createElement('base');
+  base.setAttribute('target', '_blank');
+  doc.head.prepend(
+    meta(doc, { 'http-equiv': 'Content-Security-Policy', content: HTML_FRAME_CSP }),
+    meta(doc, { name: 'referrer', content: 'no-referrer' }),
+    meta(doc, { 'http-equiv': 'x-dns-prefetch-control', content: 'off' }),
+    base,
+  );
+  // A doctype only where the page had one: without it the page is in quirks mode, as it was written.
+  return (doc.doctype ? '<!DOCTYPE html>' : '') + doc.documentElement.outerHTML;
+}
+
+/** The page as the frame's `srcdoc`, with nothing relative resolved. */
+export function framePage(text: string): string {
+  return serializeFramed(new DOMParser().parseFromString(text, 'text/html'));
 }
 
 /**
@@ -146,7 +191,7 @@ export async function frameDocument(
       : null;
     return path ? [{ element, asset: { kind: 'css', path } as Asset }] : [];
   });
-  if (images.length === 0 && sheets.length === 0) return sandboxedDocument(text);
+  if (images.length === 0 && sheets.length === 0) return serializeFramed(doc);
 
   const key = (asset: Asset) => `${asset.kind}:${asset.path}`;
   const wanted = new Map<string, Asset>();
@@ -171,8 +216,16 @@ export async function frameDocument(
   }
   await Promise.all(Array.from({ length: FETCH_CONCURRENCY }, worker));
 
-  for (const { element, asset } of images) {
+  // The cap holds for what lands in the srcdoc: a file named many times is inlined many times.
+  let inlined = 0;
+  function take(asset: Asset): string | undefined {
     const value = loaded.get(key(asset));
+    if (value === undefined || inlined + value.length > MAX_TOTAL_BYTES) return undefined;
+    inlined += value.length;
+    return value;
+  }
+  for (const { element, asset } of images) {
+    const value = take(asset);
     if (value === undefined) continue;
     element.setAttribute('src', value);
     // A srcset would win over src and name files the frame cannot load.
@@ -180,13 +233,12 @@ export async function frameDocument(
     element.removeAttribute('sizes');
   }
   for (const { element, asset } of sheets) {
-    const value = loaded.get(key(asset));
+    const value = take(asset);
     if (value === undefined) continue;
     const style = doc.createElement('style');
     // Style text is serialized raw, so a closing tag in it would end the element.
     style.textContent = value.replace(/<\/style/gi, '<\\/style');
     element.replaceWith(style);
   }
-  const serialized = (doc.doctype ? '<!DOCTYPE html>' : '') + doc.documentElement.outerHTML;
-  return sandboxedDocument(serialized);
+  return serializeFramed(doc);
 }
