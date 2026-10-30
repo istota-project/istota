@@ -32,10 +32,16 @@ which had the proxy make the REST call itself against an endpoint
 allowlist. That allowlist could not describe what a real ``gh``
 invocation does (``gh pr create`` is several calls, ``gh pr checks``
 paginates), so the container now runs the real ``gh`` / ``glab`` behind
-``forge_cli.py`` and asks here only for the token. The container
-consequently *does* see the token, which it did not before; the git
-path already handed it one on every push, and the boundary that does
-the work is the token's own scope.
+``forge_cli.py`` and asks here only for the token.
+
+**A devbox gets no forge credential unless ``[devbox] forge_users`` names its
+user** (#887). Both token-bearing actions return the raw value, the configured
+tokens are the operator's and shared by every user, and any process in the box
+can write to this socket, so a build script or a dependency's install hook could
+take the token away. A task's own ``git``, ``gh`` and ``glab`` run in the sandbox
+behind the credential broker and are unaffected; builds are what reach the
+devbox. Naming a user accepts that their box can read the token, and the
+boundary left for them is its scope.
 """
 
 from __future__ import annotations
@@ -55,6 +61,7 @@ from istota.devbox.proxy_protocol import (
     ACTION_GIT_CREDENTIAL,
     ACTION_PING,
     ERR_BAD_REQUEST,
+    ERR_FORGE_NOT_GRANTED,
     ERR_INTERNAL,
     ERR_NO_TOKEN,
     ERR_UNKNOWN_ACTION,
@@ -92,6 +99,7 @@ class DevboxProxyContext:
     github_token: str
     gitlab_url: str
     github_url: str
+    forge_granted: bool = True
 
     @property
     def providers(self) -> list[str]:
@@ -240,6 +248,16 @@ def _provider_for_host(host: str, ctx: DevboxProxyContext) -> str | None:
     return None
 
 
+def _no_token_error(provider: str, ctx: DevboxProxyContext) -> str:
+    if not ctx.forge_granted:
+        return encode_error(
+            ERR_FORGE_NOT_GRANTED,
+            f"this devbox has no {provider} credential: the operator has not "
+            f"added {ctx.user_id!r} to [devbox] forge_users",
+        )
+    return encode_error(ERR_NO_TOKEN, f"no token configured for {provider}")
+
+
 # ---- Action handlers -------------------------------------------------------
 
 
@@ -309,10 +327,7 @@ async def handle_git_credential(request: dict, ctx: DevboxProxyContext) -> str:
             result="no_token", dur_ms=_elapsed_ms(start),
             op="get", host=host, provider=provider,
         )
-        return encode_error(
-            ERR_NO_TOKEN,
-            f"no token configured for {provider}",
-        )
+        return _no_token_error(provider, ctx)
 
     stdout = (
         f"protocol={protocol}\n"
@@ -369,7 +384,7 @@ async def handle_forge_token(request: dict, ctx: DevboxProxyContext) -> str:
             user_id=ctx.user_id, action=ACTION_FORGE_TOKEN,
             result="no_token", dur_ms=_elapsed_ms(start), provider=provider,
         )
-        return encode_error(ERR_NO_TOKEN, f"no token configured for {provider}")
+        return _no_token_error(provider, ctx)
 
     _audit(
         user_id=ctx.user_id, action=ACTION_FORGE_TOKEN,
@@ -495,12 +510,19 @@ async def _write_line(writer: asyncio.StreamWriter, line: str) -> None:
 
 
 async def build_context(user_id: str, config) -> DevboxProxyContext:
-    """Build a DevboxProxyContext from a loaded Config."""
+    """Build a DevboxProxyContext from a loaded Config.
+
+    A user outside ``[devbox] forge_users`` gets a context with no tokens, so
+    no action on their socket has one to return.
+    """
     dev = config.developer
+    forge_users = getattr(getattr(config, "devbox", None), "forge_users", None) or []
+    granted = user_id in forge_users
     return DevboxProxyContext(
         user_id=user_id,
-        gitlab_token=getattr(dev, "gitlab_token", "") or "",
-        github_token=getattr(dev, "github_token", "") or "",
+        gitlab_token=(getattr(dev, "gitlab_token", "") or "") if granted else "",
+        github_token=(getattr(dev, "github_token", "") or "") if granted else "",
+        forge_granted=granted,
         gitlab_url=getattr(dev, "gitlab_url", "https://gitlab.com") or "https://gitlab.com",
         github_url=getattr(dev, "github_url", "https://github.com") or "https://github.com",
     )

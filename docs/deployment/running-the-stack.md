@@ -269,7 +269,7 @@ What each devbox gets, and nothing else:
 
 - `devbox-home-<user>` at `/home/dev`, its persistent home.
 - `devbox-exec-<user>` at `/run/istota-exec`: the exec transport's socket, which the server inside the box creates and the daemon container reaches at `[developer.container] exec_socket_dir`/`<user>`.
-- `devbox-cred-<user>` at `/run/istota-cred`: the credential proxy's socket, which istota creates at `[developer] devbox_proxy_socket_dir`/`<user>`. The proxy answers on that socket as that user, whoever connects, so it matters that no other container mounts it and no task sandbox binds any credential socket directory.
+- `devbox-cred-<user>` at `/run/istota-cred`: the credential proxy's socket, which istota creates at `[developer] devbox_proxy_socket_dir`/`<user>`. The proxy answers on that socket as that user, whoever connects, so it matters that no other container mounts it and no task sandbox binds any credential socket directory. It has no forge token to give unless `[devbox] forge_users` names the user, and then any code in that devbox can read the token.
 - Its own subdirectory of the state directory, `/data/repos/<user>`, at the same path on both sides.
 
 `istota setup` writes both socket directories under `/data/devbox/` when the developer skill is on; the render refuses socket directories outside `/data`, because only mounts there are handed to uid 10001 when the daemon container starts.

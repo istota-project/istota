@@ -608,7 +608,7 @@ Deprecated migration input, with the old personal `name`/`cron`/`output`/`blocks
 | `forge_cli_permit` | `[]` | Baseline deny entries to turn off — each one removes a guard. The baseline lives in code because it is a safety default rather than a preference. An entry that matches no baseline rule is warned about at startup, because a hatch that silently stopped matching reads like one still open |
 | `gh_bin_path` | `"/usr/local/bin/gh"` | Real `gh` the wrapper execs. `istota setup` writes the image's path, `/usr/local/lib/istota_forge/gh` (off PATH, so the wrapper stays the only `gh` a task can resolve), since the default matches no shipped install |
 | `glab_bin_path` | `"/usr/local/bin/glab"` | Real `glab` the wrapper execs, rendered the same way |
-| `devbox_proxy_enabled` | `true` | Keep tokens host-side behind the devbox proxy |
+| `devbox_proxy_enabled` | `true` | Run the devbox credential proxy, which hands forge tokens to the users in `[devbox] forge_users` |
 | `devbox_proxy_socket_dir` | `"/var/run/istota"` | Where the per-user devbox proxy sockets live |
 | `devbox_proxy_audit_log` | `""` | Optional path for a devbox proxy audit log |
 | `worktree_reap_enabled` | `true` | Remove a task worktree under `repos_dir` once every commit on it is upstream (squash- and rebase-merged branches included), the checkout is clean (untracked and gitignored files included), it is unlocked, and it has been idle for the retention window (ISSUE-288). Everything else is kept and counted. To keep one indefinitely, `git worktree lock` it rather than turning the sweep off. The sweep runs on `[scheduler] worktree_reap_interval` |
@@ -870,6 +870,7 @@ A persistent per-user Linux container. It is where the agent installs packages a
 | `container_prefix` | `"devbox-"` | Container name is `{prefix}{user_id}` |
 | `max_output_bytes` | `102400` | Cap per output stream in the skill's JSON envelope |
 | `users` | `[]` | The users who get a devbox in the stack. `istota devbox compose-file` renders one service each, and the daemon runs one credential-proxy listener each |
+| `forge_users` | `[]` | The users whose devbox may fetch the `[developer] gitlab_token` and `github_token` over the credential socket. Any code in that devbox can read and export them, so give these users a narrowly scoped token. A task's own `git`, `gh` and `glab` run in the sandbox and do not need this; a build that clones a private dependency does |
 | `mem_limit` | `"4g"` | Memory limit per devbox container |
 | `cpus` | `2.0` | CPU limit per devbox container |
 | `pids_limit` | `512` | Process limit per devbox container |
@@ -880,7 +881,7 @@ A persistent per-user Linux container. It is where the agent installs packages a
 
 The raw-socket diagnostics — `traceroute`, `mtr`, `tcpdump` — no longer work inside the container. They need `CAP_NET_RAW`, which the deployment dropped: a build needs none of them, and a container holding that capability can pick its own source address and walk past address-scoped firewall rules. Tools that work over ordinary sockets are unaffected, and `ping` is probably one of them: it tries an unprivileged ICMP datagram socket first, which Docker's default sysctls permit.
 
-The devbox runs the same real `gh` and `glab` behind the same wrapper the sandbox uses. `docker/devbox/lib/istota_forge_cli.py` is a byte-identical copy of `src/istota/sandbox/forge_cli.py`, kept in sync by `scripts/sync-devbox-lib.sh`. The wrapper locates its policy beside whichever copy of itself is executing, and takes `real_bin`, the forge URL and the config dirs from that file rather than from `os.environ` — it runs as a child of the model's own shell, so the environment is not a trust anchor. With no URL resolvable it refuses rather than falling back to a public host. The token comes from the [devbox credential proxy](#developer), which injects it server-side.
+The devbox runs the same real `gh` and `glab` behind the same wrapper the sandbox uses. `docker/devbox/lib/istota_forge_cli.py` is a byte-identical copy of `src/istota/sandbox/forge_cli.py`, kept in sync by `scripts/sync-devbox-lib.sh`. The wrapper locates its policy beside whichever copy of itself is executing, and takes `real_bin`, the forge URL and the config dirs from that file rather than from `os.environ` — it runs as a child of the model's own shell, so the environment is not a trust anchor. With no URL resolvable it refuses rather than falling back to a public host. The token comes from the [devbox credential proxy](#developer), which returns it only for a user in `forge_users`. The wrapper puts the raw value in the CLI's environment.
 
 ## `[playbooks]`
 
