@@ -213,6 +213,7 @@ def build_task_runtime(
         SKILL_DAEMON_CREDENTIAL_VARS,
         SKILL_MODEL_CALLERS,
         _build_network_allowlist,
+        _network_private_hosts,
         _split_credential_env,
         attachments_dir,
         build_clean_env,
@@ -723,7 +724,7 @@ def build_task_runtime(
         _net_proxy_sock = Path(tempfile.gettempdir()) / f"istota-net-{os.getpid()}-{task.id}.sock"
         _net_proxy_ctx = NetworkProxy(
             _net_proxy_sock, allowed_hosts,
-            private_hosts=config.security.network.private_hosts,
+            private_hosts=_network_private_hosts(config, authorized_skills),
         )
 
     # Collect extra paths to RO bind-mount into the sandbox.

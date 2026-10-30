@@ -840,36 +840,43 @@ class TestTheNetworkProxyGate:
         assert runtime.net_proxy_ctx is not None
         assert runtime.net_proxy_sock is not None
 
-    def test_private_hosts_reach_the_proxy_from_config_toml(
+    def test_extra_hosts_reach_the_proxy_as_private_grants(
         self, tmp_path, runtime_inputs, monkeypatch,
     ):
-        """ISSUE-883: the grant is read from the file and handed to the proxy."""
+        """An `extra_hosts` entry the operator wrote may be a LAN address."""
         from istota.config import load_config
 
         monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
         path = tmp_path / "config.toml"
-        path.write_text('[security.network]\nprivate_hosts = ["Git.LAN"]\n')
+        path.write_text(
+            '[security.network]\nextra_hosts = ["192.0.2.10:8080", "Git.LAN:443"]\n'
+        )
         config = _config(tmp_path)
         config.security.network = load_config(path).security.network
 
         runtime = task_env.build_task_runtime(config, **runtime_inputs)
 
-        assert runtime.net_proxy_ctx.private_hosts == frozenset({"git.lan"})
+        assert runtime.net_proxy_ctx.private_hosts == frozenset({"192.0.2.10", "git.lan"})
 
-    def test_a_private_host_with_a_port_is_warned_about(self, tmp_path, caplog):
-        """`extra_hosts` beside it takes `host:port`; this key never matches one."""
+    def test_the_retired_private_hosts_key_is_warned_about_and_ignored(
+        self, tmp_path, runtime_inputs, monkeypatch, caplog,
+    ):
         import logging
 
         from istota.config import load_config
-        from istota.config_editor import schema
 
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
         caplog.set_level(logging.WARNING, logger="istota.config")
         path = tmp_path / "config.toml"
-        path.write_text('[security.network]\nprivate_hosts = ["git.lan:443"]\n')
-        load_config(path)
+        path.write_text('[security.network]\nprivate_hosts = ["git.lan"]\n')
+        config = _config(tmp_path)
+        config.security.network = load_config(path).security.network
         messages = [r.getMessage() for r in caplog.records if "private_hosts" in r.getMessage()]
-        assert len(messages) == 1 and "[security.network]" in messages[0]
-        assert ("security", "network", "private_hosts") in schema.RISKY_KEYS
+        assert len(messages) == 1 and "extra_hosts" in messages[0]
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        assert runtime.net_proxy_ctx.private_hosts == frozenset()
 
     def test_the_network_gate_ignores_the_bwrap_probe(
         self, tmp_path, runtime_inputs, monkeypatch,

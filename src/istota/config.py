@@ -1824,9 +1824,6 @@ class NetworkConfig:
     enabled: bool = True  # --unshare-net + proxy; false keeps current open-network behavior
     allow_pypi: bool = True  # add pypi.org + files.pythonhosted.org to allowlist
     extra_hosts: list[str] = field(default_factory=list)  # operator-specific additions
-    # Exact names an allowlisted connection may reach at a private, loopback or
-    # link-local address. Nothing else may, whatever its DNS says (ISSUE-883).
-    private_hosts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -4115,6 +4112,8 @@ _RETIRED = frozenset({
     "site.enabled",
     "site.base_path",
     "security.sandbox_admin_db_write",
+    # An `extra_hosts` entry is its own private-address grant now.
+    "security.network.private_hosts",
     "rooms",
     "devbox.docker_cli",
     # The tool harness is the only path for a `claude_code` request with tools.
@@ -6114,6 +6113,14 @@ def load_config(
                 "sandbox at all any more (for admins or anyone else); writes go "
                 "through skill CLIs and deferred ops. Remove the key."
             )
+        network = sec.get("network") if isinstance(sec, dict) else None
+        if isinstance(network, dict) and "private_hosts" in network:
+            report_problem(
+                "retired", ("security", "network", "private_hosts"),
+                "[security.network] private_hosts is no longer read. A host in "
+                "extra_hosts, or the host of a configured forge or Nextcloud URL, "
+                "may already resolve to a private address. Remove the key."
+            )
         # The second is a pair of settings that are each individually valid and
         # wrong together. The credential half leads, because it is the half an
         # operator will not otherwise find out about: `_split_credential_env`
@@ -6304,9 +6311,6 @@ def load_config(
     _warn_malformed_private_hosts("mail_accounts", config.mail_accounts.private_hosts, "account")
     _warn_malformed_private_hosts("sharing", config.sharing.private_hosts, "shared source")
     _warn_malformed_private_hosts("feeds", config.feeds.private_hosts, "feed")
-    _warn_malformed_private_hosts(
-        "security.network", config.security.network.private_hosts, "allowed host",
-    )
     _validate_servarr(config)
     _validate_claude_code_brain(config)
     _validate_configured_model_references(config)

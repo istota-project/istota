@@ -4292,22 +4292,14 @@ def _build_network_allowlist(
         hosts |= _PYPI_HOSTS
 
     hosts.update(config.security.network.extra_hosts)
+    hosts |= _configured_url_hosts(config, authorized_skills)
 
-    # Developer skill: add git remote hosts from config
     if "developer" in authorized_skills and config.developer.enabled:
         from urllib.parse import urlparse
 
-        # Package registries. Independent of the forge URLs below — a
-        # deployment with neither configured still installs dependencies.
+        # Package registries. Independent of the forge URLs — a deployment
+        # with neither configured still installs dependencies.
         hosts |= _REGISTRY_HOSTS
-
-        for url in [config.developer.gitlab_url, config.developer.github_url]:
-            if url:
-                parsed = urlparse(url)
-                host = parsed.hostname
-                port = parsed.port or 443
-                if host:
-                    hosts.add(f"{host}:{port}")
 
         # GitHub API lives on a separate host from github.com
         if config.developer.github_url:
@@ -4334,16 +4326,6 @@ def _build_network_allowlist(
                 # itself was already added above and is what gh talks to.
                 pass
 
-    # Nextcloud skill: the instance host. Only reachable when the skill proxy
-    # is off — with it on, the skill CLI runs server-side in the daemon's netns
-    # and never meets this allowlist.
-    if "nextcloud" in authorized_skills and config.nextcloud.url:
-        from urllib.parse import urlparse
-
-        parsed = urlparse(config.nextcloud.url)
-        if parsed.hostname:
-            hosts.add(f"{parsed.hostname}:{parsed.port or 443}")
-
     # Google Workspace skill: Google API hosts
     if "google_workspace" in authorized_skills:
         hosts.update({
@@ -4360,6 +4342,54 @@ def _build_network_allowlist(
         })
 
     return hosts
+
+
+def _configured_url_hosts(config: Config, authorized_skills: list[str]) -> set[str]:
+    """The allowlist entries taken from URLs the operator configured, as ``host:port``.
+
+    The forge URLs under the developer skill, and the Nextcloud instance under
+    the nextcloud skill. That one is only reachable with the skill proxy off:
+    with it on, the skill CLI runs in the daemon's netns and never meets this
+    allowlist.
+    """
+    from urllib.parse import urlparse
+
+    urls = []
+    if "developer" in authorized_skills and config.developer.enabled:
+        urls += [config.developer.gitlab_url, config.developer.github_url]
+    if "nextcloud" in authorized_skills:
+        urls.append(config.nextcloud.url)
+
+    hosts: set[str] = set()
+    for url in urls:
+        if not url:
+            continue
+        parsed = urlparse(url)
+        if parsed.hostname:
+            hosts.add(f"{parsed.hostname}:{parsed.port or 443}")
+    return hosts
+
+
+def _network_private_hosts(config: Config, authorized_skills: list[str]) -> set[str]:
+    """The allowlisted names the proxy lets reach a private address.
+
+    Every entry the operator wrote — ``extra_hosts`` and the configured URLs —
+    since choosing a LAN host there is the permission. The built-in defaults
+    (PyPI, the registries, GitHub's API and log hosts, Google) must resolve
+    public: a private answer for one of those is DNS somebody else controls.
+    """
+    from .sandbox.net_guard import normal_host
+
+    entries = [*config.security.network.extra_hosts,
+               *_configured_url_hosts(config, authorized_skills)]
+    names: set[str] = set()
+    for entry in entries:
+        host = str(entry).strip().rsplit(":", 1)[0]
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
+        if host:
+            names.add(normal_host(host))
+    return names
 
 
 # --- Manifest-derived credential / authorization helpers (Phase 3) ---

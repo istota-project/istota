@@ -9,10 +9,13 @@ import pytest
 
 from istota import db
 from istota.sandbox import credential_shim
-from istota.config import Config, DevboxConfig, DeveloperConfig, NetworkConfig, SecurityConfig
+from istota.config import (
+    Config, DevboxConfig, DeveloperConfig, NetworkConfig, NextcloudConfig, SecurityConfig,
+)
 from istota.executor import (
     SandboxProfile,
     _build_network_allowlist,
+    _network_private_hosts,
     build_bwrap_cmd,
     custom_system_prompt_path,
     ensure_task_control_dir,
@@ -1336,6 +1339,47 @@ class TestBuildNetworkAllowlist:
         )
         hosts = _build_network_allowlist(config, ["developer"])
         assert "registry.npmjs.org:443" in hosts
+
+
+class TestNetworkPrivateHosts:
+    """The names an operator wrote may reach a private address; the defaults may not."""
+
+    def test_extra_hosts_are_their_own_grant(self):
+        config = Config(security=SecurityConfig(network=NetworkConfig(
+            extra_hosts=["192.0.2.10:8080", "Git.LAN:443", "[fd00::5]:8080"],
+        )))
+        assert _network_private_hosts(config, []) == {"192.0.2.10", "git.lan", "fd00::5"}
+
+    def test_configured_urls_are_operator_hosts(self):
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            developer=DeveloperConfig(
+                enabled=True, repos_dir="/tmp/repos",
+                gitlab_url="https://gitlab.lan:8443", github_url="https://github.com",
+            ),
+            nextcloud=NextcloudConfig(url="https://cloud.lan"),
+        )
+        private = _network_private_hosts(config, ["developer", "nextcloud"])
+        assert private == {"gitlab.lan", "github.com", "cloud.lan"}
+
+    def test_built_in_defaults_must_stay_public(self):
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig(allow_pypi=True)),
+            developer=DeveloperConfig(
+                enabled=True, repos_dir="/tmp/repos", github_url="https://github.com",
+            ),
+        )
+        private = _network_private_hosts(config, ["developer", "google_workspace"])
+        for name in ("pypi.org", "registry.npmjs.org", "api.github.com",
+                     "results-receiver.actions.githubusercontent.com", "www.googleapis.com"):
+            assert name not in private
+
+    def test_an_unauthorized_skill_contributes_nothing(self):
+        config = Config(
+            security=SecurityConfig(network=NetworkConfig()),
+            nextcloud=NextcloudConfig(url="https://cloud.lan"),
+        )
+        assert _network_private_hosts(config, []) == set()
 
 
 class TestNetworkConfigParsing:
