@@ -37,9 +37,13 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from istota import db
 from istota.browser.owner import BRIEFINGS_IDENTITY
+
+if TYPE_CHECKING:
+    from istota.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -184,25 +188,58 @@ def is_current_member(conn: sqlite3.Connection, room_token: str, user_id: str) -
     return present[0] == 0 or present[1] > 0
 
 
-def written_by_someone_else(conn: sqlite3.Connection, task: "db.Task") -> bool:
+def written_by_someone_else(
+    conn: sqlite3.Connection, task: "db.Task", *, config: "Config | None" = None,
+) -> bool:
     """Whether the stored turn this task answers names an author other than
     the task's user. A row with neither column set predates attribution and is
     read as the user's, as every history reader reads it. A correspondent's
     mail on an email thread runs as the host, so two readers ask this: it
     carries none of the host's private notes (`private_replies.my_notes_room`)
     and reaches none of the host's connected mail accounts (the skill proxy's
-    `mail_account` channel)."""
+    `mail_account` channel).
+
+    No stored row is the owner's turn, except for email (ISSUE-874): an
+    approved held mail that no room admitted keeps no row and still runs as the
+    host on the sender's text, so it is read from its `processed_emails` row
+    and counts as someone else's unless the sender is one of the user's own
+    addresses. Pass ``config`` where one is in scope; without it the addresses
+    are what the database can prove (`db.own_addresses_without_config`), which
+    can only under-trust."""
     row = conn.execute(
         "SELECT author_user_id, author_label FROM messages "
         "WHERE task_id = ? AND role = 'user' ORDER BY id LIMIT 1",
         (task.id,),
     ).fetchone()
     if row is None:
-        return False
+        if task.source_type != "email":
+            return False
+        return _roomless_mail_is_someone_elses(conn, task, config)
     author_user_id, author_label = row[0], row[1]
     if author_user_id is None:
         return bool(author_label)
     return author_user_id != task.user_id
+
+
+def _roomless_mail_is_someone_elses(
+    conn: sqlite3.Connection, task: "db.Task", config: "Config | None",
+) -> bool:
+    # No ledger row leaves the sender unreadable, which is not proof the user
+    # wrote it; `author_for_email_task` answers "the user's" for that case.
+    # A `!retry` copy has none either: its parent's turn decides, as
+    # `skill_proxy._owners_own_turn` walks the chain.
+    if conn.execute(
+        "SELECT 1 FROM processed_emails WHERE task_id = ? LIMIT 1", (task.id,),
+    ).fetchone() is None:
+        return task.parent_task_id is None
+    own = None
+    if config is not None:
+        from istota.mail.support import own_addresses
+        own = sorted(own_addresses(config, task.user_id or ""))
+    author_user_id, author_label = db.author_for_email_task(
+        conn, task.id, task.user_id, own,
+    )
+    return bool(author_label) or author_user_id != task.user_id
 
 
 def ambient_memory_off(conn: sqlite3.Connection | None, task: "db.Task") -> bool:

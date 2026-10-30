@@ -382,7 +382,7 @@ class TestSetValueFile:
         payload.write_text('"x"')
         _env(monkeypatch, db_path, deferred=tmp_path)
         monkeypatch.delenv("ISTOTA_CONFIG_PATH", raising=False)
-        monkeypatch.setattr(kv_skill, "calling_turn_passes", lambda user_id: True)
+        monkeypatch.setattr(kv_skill, "calling_turn_passes", lambda user_id, **_: True)
         with pytest.raises(SystemExit):
             kv_main(["set", "ns", "k", "--value-file", str(payload), "--shared"])
         out = json.loads(capsys.readouterr().out)

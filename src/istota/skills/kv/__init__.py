@@ -757,7 +757,7 @@ def main(argv=None):
     # as the host) may not write it. `--group` needs no such check: a room with
     # a non-member reader resolves no groups. The deferred replay re-checks.
     if (args.command in ("set", "delete") and getattr(args, "shared", False)
-            and not calling_turn_passes(_user_id())):
+            and not calling_turn_passes(_user_id(), config=_load_config())):
         if not os.environ.get("ISTOTA_TASK_ID", ""):
             _fail(
                 "shared KV can only be changed from a task; outside one, use "

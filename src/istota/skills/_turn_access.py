@@ -23,11 +23,13 @@ def calling_task_id() -> int | None:
     return int(raw) if raw.isascii() and raw.isdigit() else None
 
 
-def calling_turn_passes(user_id: str, check=None) -> bool:
+def calling_turn_passes(user_id: str, check=None, *, config=None) -> bool:
     """Whether the calling task answers ``user_id``'s own turn, ancestors included.
 
     ``check(conn, task)``, when given, must also hold. Anything unanswerable
-    (no task, no database, a read error) is False.
+    (no task, no database, a read error) is False. ``config`` supplies the
+    user's own addresses for a roomless email turn; without it the database's
+    list is used, which can only under-trust.
     """
     from istota import db
     from istota.sandbox.skill_proxy import _owners_own_turn
@@ -41,7 +43,7 @@ def calling_turn_passes(user_id: str, check=None) -> bool:
         return False
     try:
         with db.get_db(Path(db_path)) as conn:
-            if not _owners_own_turn(conn, task_id, user_id):
+            if not _owners_own_turn(conn, task_id, user_id, config=config):
                 return False
             return check is None or bool(check(conn, db.get_task(conn, task_id)))
     except Exception as exc:  # noqa: BLE001 — an unreadable task refuses
