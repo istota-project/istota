@@ -35,6 +35,7 @@ stdlib-only leaf. Imports nothing from the package, raises nothing.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 
 logger = logging.getLogger("istota.sandbox.shell_exec")
@@ -211,3 +212,14 @@ SIGPIPE_NOTE = (
     "is what you wanted, this is not a failure — re-run without the early-exit "
     "consumer to get a status you can act on."
 )
+
+
+def on_daemon_path(name: str) -> str | None:
+    """Absolute path of ``name`` on the daemon's own ``PATH``, or None.
+
+    For a command spawned with a task's env. Given a bare name, ``subprocess``
+    searches that env's ``PATH``, which starts in directories under the temp dir
+    a model can write, so it could run a planted ``bwrap`` outside any sandbox.
+    """
+    found = shutil.which(name, path=os.environ.get("PATH") or os.defpath)
+    return os.path.abspath(found) if found else None

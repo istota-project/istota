@@ -31,15 +31,18 @@ module therefore imports ``executor`` inside functions only. A module-scope
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shlex
+import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from . import credential_shim
+from .bind_launcher import FD_PLACEHOLDER
 from .host_paths import linked_resource_parts
 from .user_scope import is_within, scoped_user_dir
 
@@ -141,6 +144,12 @@ class Mount:
     #: rather than producing an argv at all. The render therefore applies it
     #: to the *unresolved* source, before resolving.
     require_dir: bool = False
+    #: Set on a linked resource, whose path another user's task may control: the
+    #: daemon-composed root and the components ``bind_launcher`` walks down from
+    #: it, with no link followed, right before bwrap (ISSUE-881). The render emits
+    #: no source path for such an entry and does not touch the name.
+    walk_root: Path | None = None
+    walk_parts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -370,11 +379,11 @@ def user_data_mounts(
             # cannot.)
             if user_dir is not None and parts[:2] == ("Users", user_id):
                 continue
-            rpath = mount.joinpath(*parts)
-            if r.permissions == "readwrite":
-                _rw(rpath, "user_resource", user_data=True)
-            else:
-                _ro(rpath, "user_resource", user_data=True)
+            mode = "rw" if r.permissions == "readwrite" else "ro"
+            mounts.append(Mount(
+                mode, mount.joinpath(*parts), None, "user_resource",
+                user_data=True, walk_root=mount, walk_parts=parts,
+            ))
 
     return mounts
 
@@ -938,6 +947,8 @@ def render_bwrap_argv(
     from istota import executor
 
     args: list[str] = ["bwrap"]
+    fd_binds: list[dict[str, object]] = []
+    bwrap_binary: str | None = None
 
     for entry in plan.mounts:
         if entry.mode == "flag":
@@ -957,6 +968,22 @@ def render_bwrap_argv(
             )
         if entry.mode == "tmpfs":
             args.extend(["--tmpfs", str(entry.source.resolve())])
+            continue
+        if entry.walk_root is not None:
+            bwrap_binary = bwrap_binary or executor._bwrap_fd_bind_binary()
+            if bwrap_binary is None:
+                # Dropped, never a bind by name: that is the swap this closes.
+                logger.error(
+                    "sandbox: not binding linked resource %s: this bwrap has no "
+                    "--ro-bind-fd", entry.source,
+                )
+                continue
+            fd_binds.append({
+                "root": str(entry.walk_root),
+                "parts": list(entry.walk_parts),
+            })
+            flag = "--ro-bind-fd" if entry.mode == "ro" else "--bind-fd"
+            args.extend([flag, FD_PLACEHOLDER, str(entry.source)])
             continue
         if entry.reason == EXTRA_RO_BIND and not entry.source.exists():
             logger.warning(
@@ -1043,6 +1070,12 @@ def render_bwrap_argv(
     else:
         args.extend(cmd)
 
+    if fd_binds:
+        args[0] = bwrap_binary
+        return [
+            sys.executable, "-I", "-m", "istota.sandbox.bind_launcher",
+            "--binds", json.dumps(fd_binds), "--", *args,
+        ]
     return args
 
 
