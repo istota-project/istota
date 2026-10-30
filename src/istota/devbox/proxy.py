@@ -16,10 +16,8 @@ binds any credential socket directory. The proxy used to authenticate each
 peer with ``docker container inspect`` and a ``/proc/<pid>/cgroup``
 comparison, which needs the Docker socket and the host's PID namespace; the
 istota container has neither, and giving it both would hand the daemon root
-of the VM. The other processes that can reach the socket are the daemon
-itself and an admin's unsandboxed cron ``command`` or heartbeat
-``shell-command``, which can read the database and the secret key already.
-The one-deployment-shape spec's Decisions section records the reasoning.
+of the VM. The other process that can reach the socket is the daemon itself,
+which holds the tokens already. The one-deployment-shape spec's Decisions section records the reasoning.
 
 In the istota container the scheduler starts every user's listener on its
 own event loop (``start_in_daemon``). The bare-metal role still runs one

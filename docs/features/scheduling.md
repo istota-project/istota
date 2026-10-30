@@ -26,7 +26,7 @@ silent_unless_action = true
 [[jobs]]
 name = "disk-check"
 cron = "0 */6 * * *"
-command = "df -h / | tail -1"
+command = "df -h \"$NEXTCLOUD_MOUNT_PATH/Users/$ISTOTA_USER_ID\" | tail -1"
 ```
 ````
 
@@ -35,6 +35,8 @@ command = "df -h / | tail -1"
 - A non-final stage that exits non-zero to *report* something rather than to fail now fails the whole job. `grep` finding no match is the common one; `diff` and `git diff --quiet` behave the same way. Put those on their own line, or append `|| true` where the status genuinely does not matter.
 - A pipeline ending in `head` or `grep -q` closes the pipe early and reports status 141. That is SIGPIPE rather than a failure, the job's `last_error` says so, and it is failed without retrying — the retry would re-run a command whose first stage already did its work.
 - The interpreter is bash, not `/bin/sh`. If a job was written against dash, note that `echo` no longer expands backslash escapes such as `\t`.
+
+**Where a `command` job runs.** In the same sandbox as a task's Bash call. CRON.md is a file the bot can edit, so a job has no more reach than the bot has. It sees your own workspace and its per-user temp directory, reaches the network through the task allowlist, and calls skills through `istota-skill`, which runs them outside the sandbox with their credentials. It does not see the host's files, another user's workspace or the databases, and neither a credential nor a database path is in its environment. Its working directory is your temp directory. A script it runs has to live in your workspace. `/` is the sandbox's own empty root, so `df -h /` reads near zero whatever the host's disk holds: name a path in your workspace instead. A nested `bash script.sh` runs with `pipefail` on as well. A job that needs the host, such as a backup of the machine, belongs in a system cron entry or a systemd timer, outside anything the bot can write.
 
 CRON.md is the source of truth. `cron_loader.py` reads it and syncs job definitions to the `scheduled_jobs` DB table.
 

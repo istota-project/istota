@@ -133,6 +133,7 @@ src/istota/
 │   ├── bind_launcher.py  # Opens a task's linked resources by descriptor and execs bwrap holding them, so a swapped name cannot change what is bound; imports only `confined` → sandbox.md
 │   ├── confined.py       # Opening a file in a task-writable tree by fd from a daemon-composed root, never by name; the guard in `tests/test_confined_file_access.py` → sandbox.md
 │   ├── claude_runtime_env.py  # What a task env carries only because the outer process is the `claude` CLI → sandbox.md
+│   ├── confined_command.py  # A CRON `command:` job or HEARTBEAT `shell-command` check, run in the task's sandbox with its proxies → sandbox.md
 │   ├── tool_server.py    # Every brain's tool server, one process per task attempt, inside the sandbox: `--fd` for native, `--mcp --hello` for the CLI → sandbox.md
 │   ├── tool_server_protocol.py  # The wire format between the two, stdlib-only → sandbox.md
 │   ├── tool_launcher.py  # What the CLI runs as its MCP server: clears env, reports its pid down a FIFO, execs the bwrapped tool server; stdlib-only → sandbox.md

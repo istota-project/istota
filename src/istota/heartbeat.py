@@ -1,5 +1,6 @@
 """Heartbeat monitoring system for periodic health checks."""
 
+import itertools
 import json
 import logging
 import os
@@ -14,7 +15,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from . import db
-from istota.sandbox.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, shell_argv
+from istota.sandbox.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE
 from istota.lib.toml_fence import BACKTICK_RUN_RE, find_toml_block
 
 if TYPE_CHECKING:
@@ -341,55 +342,7 @@ def _check_file_watch(check: HeartbeatCheck, config: "Config", user_id: str) -> 
     return CheckResult(healthy=True, message=f"File OK: {file_path}")
 
 
-def _build_heartbeat_skill_env(
-    config: "Config", user_id: str,
-) -> dict[str, str]:
-    """Resolve skill-manifest env vars + setup_env hooks for a heartbeat
-    shell-command. Mirrors what ``scheduler._execute_command_task`` does
-    for command-type scheduled jobs (ISSUE-097) — without it, a heartbeat
-    invoking ``istota-skill location current`` / ``istota-skill health …``
-    would emit a JSON error envelope that the returncode-0 path silently
-    treats as healthy.
-
-    CalDAV discovery is intentionally skipped (``discovered_calendars=[]``)
-    so heartbeats don't issue a PROPFIND on every tick. Heartbeats are not
-    the right place to invoke calendar-skill CLIs anyway; the gate
-    correctly drops CALDAV_* from the env.
-    """
-    from .skills._env import EnvContext, build_skill_env, dispatch_setup_env_hooks
-    from .skills._loader import load_skill_index
-
-    skill_index = load_skill_index(config.skills_dir, config.bundled_skills_dir)
-    try:
-        with db.get_db(config.db_path) as conn:
-            user_resources = db.get_user_resources(conn, user_id)
-    except Exception:
-        user_resources = []
-
-    user_temp_dir = config.temp_dir / user_id
-    user_temp_dir.mkdir(parents=True, exist_ok=True)
-
-    fake_task = db.Task(
-        id=0, status="running", source_type="heartbeat",
-        user_id=user_id, prompt="", conversation_token="",
-    )
-    ctx = EnvContext(
-        config=config,
-        task=fake_task,
-        user_resources=user_resources,
-        user_config=config.get_user(user_id),
-        user_temp_dir=user_temp_dir,
-        is_admin=config.is_admin(user_id),
-        discovered_calendars=[],
-    )
-
-    from .llm.providers import strip_model_credentials
-
-    env: dict[str, str] = {}
-    env.update(build_skill_env(list(skill_index), skill_index, ctx))
-    env.update(dispatch_setup_env_hooks(list(skill_index), skill_index, ctx))
-    # A shell check carries no model credential, whatever a merge brought.
-    return strip_model_credentials(env)
+_shell_check_ids = itertools.count(1)
 
 
 def _check_shell_command(check: HeartbeatCheck, config: "Config", user_id: str | None = None) -> CheckResult:
@@ -410,52 +363,35 @@ def _check_shell_command(check: HeartbeatCheck, config: "Config", user_id: str |
     if not command:
         return CheckResult(healthy=False, message="No command configured")
 
+    # HEARTBEAT.md is model-writable, so a check runs where a task's Bash call
+    # would (ISSUE-886), and that needs someone to run it as.
+    if not user_id:
+        return CheckResult(healthy=False, message="shell-command check has no user")
+
+    from .executor import make_daemon_control_dir, remove_daemon_control_dir
+    from .sandbox.confined_command import run_confined_command
+
+    control_dir = None
     try:
-        from .executor import build_stripped_env
-        env = build_stripped_env()
-        # Mirror scheduler._execute_command_task: module-skill CLIs (feeds, money)
-        # spawned from a heartbeat check need to find the daemon's config and
-        # know which user they're acting for. Without these, load_config() returns
-        # a default Config() with empty users and the skill exits with a JSON
-        # error envelope — but the shell command's exit 0 makes the heartbeat
-        # look healthy.
-        if config.config_path:
-            env["ISTOTA_CONFIG_PATH"] = str(config.config_path)
-        if config.db_path:
-            env["ISTOTA_DB_PATH"] = str(config.db_path)
-        if user_id:
-            env["ISTOTA_USER_ID"] = user_id
-        env["ISTOTA_EXPERIMENTAL_FEATURES"] = ",".join(config.experimental.features)
-        # Skill-manifest env + setup_env hooks. Without these, heartbeat
-        # shell-commands that invoke `istota-skill location current` /
-        # `istota-skill health …` etc. see LOCATION_DB_PATH / HEALTH_DB_PATH
-        # unset and emit a JSON error envelope — which the returncode-0
-        # branch below would silently treat as healthy. ISSUE-097 fixed the
-        # same shape for the scheduler command-task path.
-        if user_id:
-            try:
-                env.update(_build_heartbeat_skill_env(config, user_id))
-            except Exception as e:
-                logger.warning(
-                    "heartbeat skill-env resolution failed for user=%s: %s",
-                    user_id, e,
-                )
-        # `shell_argv` rather than `shell=True` (`/bin/sh -c`, dash, no
-        # `pipefail`): a probe ending in a pipe reported its last stage, so a
-        # check whose real command failed read as healthy indefinitely — the
-        # exact condition a heartbeat exists to detect.
-        result = subprocess.run(
-            shell_argv(command),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
+        control_dir = make_daemon_control_dir(config, user_id)
+        # No row: a negative id names the proxy socket and the cgroup, and every
+        # check that asks after the task's row finds none and refuses. Nothing
+        # drains a check's deferred ops, so its skill calls write directly.
+        probe = db.Task(
+            id=-next(_shell_check_ids), status="running", source_type="heartbeat",
+            user_id=user_id, prompt="", conversation_token="",
+        )
+        result = run_confined_command(
+            config, probe, command, timeout=timeout, control_dir=control_dir,
+            defer_ops=False,
         )
         value = result.stdout.strip()
     except subprocess.TimeoutExpired:
         return CheckResult(healthy=False, message=f"Command timed out after {timeout}s")
     except Exception as e:
         return CheckResult(healthy=False, message=f"Command error: {e}")
+    finally:
+        remove_daemon_control_dir(control_dir)
 
     if not condition:
         # No condition: healthy if exit code is 0. But: istota-skill CLIs
@@ -918,8 +854,7 @@ def run_check(
             message=f"Unknown check type: {check.type}",
         )
 
-    # _check_shell_command pulls build_stripped_env(); non-admins must
-    # not be able to run arbitrary shell.
+    # Non-admins must not be able to run arbitrary shell, confined or not.
     if check.type == "shell-command" and not config.is_admin(user_id):
         return CheckResult(
             healthy=False,
@@ -928,8 +863,7 @@ def run_check(
     # A GET from the daemon's own network namespace, outside the sandbox's
     # CONNECT allowlist, to a URL the HEARTBEAT.md author chose: for anyone
     # else that is a probe of every internal address the host can reach, with
-    # the status or error read back in the alert (ISSUE-596). An admin can
-    # already run any command through shell-command.
+    # the status or error read back in the alert (ISSUE-596).
     if check.type == "url-health" and not config.is_admin(user_id):
         return CheckResult(
             healthy=False,

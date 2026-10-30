@@ -38,7 +38,7 @@ awk '{print $3, $4}' /srv/app/istota/allowed_signers | ssh-keygen -lf -
 
 Every task starts from a minimal environment built by `build_clean_env()`: only PATH, HOME, PYTHONUNBUFFERED, and configured passthrough vars (`LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`). Task-specific variables (Nextcloud credentials, CalDAV, email, etc.) are added per-task. No task env carries the `claude` CLI's credential; see [The model's tools and the CLI's credential](#the-models-tools-and-the-clis-credential).
 
-For heartbeat/cron shell commands, `build_stripped_env()` removes all credential-pattern vars (PASSWORD, TOKEN, SECRET, API_KEY, etc.) from the environment.
+Heartbeat and cron shell commands run in the task sandbox with the same environment split as a task, since the bot can edit both files.
 
 ## Filesystem sandbox (bubblewrap)
 
