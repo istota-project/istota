@@ -164,6 +164,62 @@ class TestTheSandboxRunsInsideTheContainer:
         )
 
 
+RESOURCE_DIR = "/data/workspace/Shared/smoke-linked-resource"
+RESOURCE_SENTINEL = "LINKED_RESOURCE_CONTENTS"
+
+RESOURCE_SCRIPT = [
+    {
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "name": "Bash",
+                "arguments": {
+                    "command": (
+                        f'echo "read=$(cat {RESOURCE_DIR}/note.txt 2>&1)"; '
+                        f'if touch {RESOURCE_DIR}/new 2>/dev/null; '
+                        'then echo "write=yes"; else echo "write=no"; fi'
+                    ),
+                },
+            }
+        ]
+    },
+    {"text": "I looked at the linked resource"},
+]
+
+
+class TestALinkedResourceBindsByDescriptor:
+    """`bind_launcher` and `--ro-bind-fd` under the shipped run contract (ISSUE-881).
+
+    bwrap unprivileged, with the shipped seccomp profile, which the linux tier's
+    root runner has neither of. A read-only refusal is what a run with no namespace
+    cannot produce: the daemon owns this directory. The row stays on the session's
+    stack, so later tasks there go through the launcher too.
+    """
+
+    @pytest.mark.script(RESOURCE_SCRIPT)
+    def test_a_read_only_resource_is_readable_and_refuses_a_write(self, stack):
+        made = stack.exec(["sh", "-c", (
+            f"mkdir -p {RESOURCE_DIR} && "
+            f"printf {RESOURCE_SENTINEL} > {RESOURCE_DIR}/note.txt"
+        )])
+        assert made.returncode == 0, made.stderr
+        ensured = stack.exec([
+            "istota", "resource", "ensure", "--user", "testuser", "--type", "folder",
+            "--path", "Shared/smoke-linked-resource", "--permissions", "read",
+        ])
+        assert ensured.returncode == 0, ensured.stderr
+
+        task_id = stack.submit("look at the linked resource")
+        stack.probe.wait_for_task(status="completed", task_id=task_id, timeout=180)
+
+        transcript = stack.endpoint.transcript()
+        logs = stack.logs(120)
+        assert f"read={RESOURCE_SENTINEL}" in transcript, f"--- daemon logs ---\n{logs}"
+        assert "write=no" in transcript, f"--- daemon logs ---\n{logs}"
+        check = stack.exec(["sh", "-c", f"test -e {RESOURCE_DIR}/new"])
+        assert check.returncode != 0, "the write landed on the source"
+
+
 @parity.witness(1)
 class TestTheDatabaseMasks:
     """The boundary, observed from inside a live task in the shipped artifact.

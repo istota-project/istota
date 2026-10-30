@@ -3626,6 +3626,37 @@ def _bwrap_supports_remount_ro() -> bool:
     return supported
 
 
+def _bwrap_fd_bind_binary() -> str | None:
+    """Absolute path of a bwrap that accepts ``--ro-bind-fd``, or None.
+
+    A linked resource is bound only this way (ISSUE-881). Read from ``--help``,
+    since a working probe would have to hold a descriptor open across the run.
+    Absolute because ``bind_launcher`` searches nothing: it runs with the task's
+    env, whose ``PATH`` starts in directories the model can write.
+    """
+    from .sandbox.shell_exec import on_daemon_path
+
+    with _bwrap_probe_lock:
+        supported = _bwrap_flag_support.get("--ro-bind-fd")
+        if supported is None:
+            supported = False
+            if _bwrap_available():
+                try:
+                    result = subprocess.run(
+                        ["bwrap", "--help"], capture_output=True, timeout=5,
+                    )
+                    supported = b"--ro-bind-fd" in result.stdout
+                except (subprocess.TimeoutExpired, OSError) as exc:
+                    logger.warning(
+                        "bwrap --help could not run (%s); linked resources will "
+                        "not be bound for the rest of this process", exc,
+                    )
+            _bwrap_flag_support["--ro-bind-fd"] = supported
+    if not supported:
+        return None
+    return on_daemon_path("bwrap")
+
+
 def build_clean_env(config: Config) -> dict[str, str]:
     """Build the minimal environment every task and model subprocess starts from.
 

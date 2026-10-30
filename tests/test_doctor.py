@@ -7749,3 +7749,22 @@ class TestSecurityAdmins:
         result = self._run(config)
         assert result.status == OK
         assert "1 admin" in result.detail
+
+
+class TestLinkedResourceBinds:
+    def _check(self, monkeypatch, *, sandboxed=True, binary="/usr/bin/bwrap", probe=True):
+        monkeypatch.setattr(doctor_executor, "effective_sandboxing", lambda config: sandboxed)
+        monkeypatch.setattr(doctor_executor, "_bwrap_fd_bind_binary", lambda: binary)
+        return doctor.check_linked_resource_binds(object(), probe)
+
+    def test_ok_with_a_bwrap_that_binds_from_a_descriptor(self, monkeypatch):
+        assert self._check(monkeypatch).status == OK
+
+    def test_warns_on_a_bwrap_without_the_flag(self, monkeypatch):
+        result = self._check(monkeypatch, binary=None)
+        assert result.status == WARN
+        assert "linked folders" in result.detail
+
+    def test_skips_with_no_sandbox_and_when_not_probing(self, monkeypatch):
+        assert self._check(monkeypatch, sandboxed=False).status == SKIP
+        assert self._check(monkeypatch, probe=False).status == SKIP

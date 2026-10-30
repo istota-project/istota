@@ -304,7 +304,7 @@ class TestMountScoping:
              f'|| echo LINK_UNREADABLE'],
             layout, task, False, resources, user_temp, profile=SandboxProfile.NATIVE,
         )
-        assert cmd[0] == "bwrap", "sandbox unavailable — probe would have run unsandboxed"
+        assert "--unshare-pid" in cmd, "sandbox unavailable — probe would have run unsandboxed"
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         out = result.stdout
         assert "project notes" in out, result.stderr

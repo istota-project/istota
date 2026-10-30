@@ -57,6 +57,7 @@ that the slice comes first and that nothing moved across its boundary.
 from __future__ import annotations
 
 import os
+import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -545,6 +546,7 @@ def build_argv(case: Case, root: Path, monkeypatch, *, raw: bool = False) -> lis
             "istota.executor._bwrap_requires_unshare_user",
             return_value=case.requires_unshare_user,
         ),
+        patch("istota.executor._bwrap_fd_bind_binary", return_value="<BWRAP>"),
     ):
         argv = build_bwrap_cmd(
             list(CMD),
@@ -577,6 +579,7 @@ def normalize(argv: list[str], root: Path, world: dict[str, Path]) -> list[str]:
     all live under the world root and a shorter match would eat their prefix.
     """
     table = [
+        (sys.executable, "<PYTHON>"),
         (str(world["home"]), "<HOME>"),
         (str(world["src"]), "<SRC>"),
         (str(world["venv"]), "<VENV>"),
@@ -605,12 +608,17 @@ def _collapse_host_system(argv: list[str]) -> list[str]:
         # bwrap unavailable: the argv is the command, untouched.
         return list(argv)
     index = argv.index("--unshare-pid")
-    return argv[:1] + [HOST_SYSTEM_TOKEN] + argv[index:]
+    return argv[:_after_bwrap(argv)] + [HOST_SYSTEM_TOKEN] + argv[index:]
+
+
+def _after_bwrap(argv: list[str]) -> int:
+    """Where bwrap's own flags start, past `bind_launcher` where a resource put it."""
+    return 1 if argv[0] == "bwrap" else argv.index("--") + 2
 
 
 def host_system_prologue(argv: list[str]) -> list[str]:
     """The slice ``_collapse_host_system`` throws away, for the shape test."""
-    return argv[1 : argv.index("--unshare-pid")]
+    return argv[_after_bwrap(argv) : argv.index("--unshare-pid")]
 
 
 # --------------------------------------------------------------- the rendering

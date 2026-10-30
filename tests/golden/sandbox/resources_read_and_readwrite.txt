@@ -1,4 +1,6 @@
-bwrap	<HOST-SYSTEM-BINDS>
+<PYTHON>	-I	-m	istota.sandbox.bind_launcher
+--binds	[{"root": "<TMP>/mount", "parts": ["Docs"]}, {"root": "<TMP>/mount", "parts": ["Notes"]}]
+--	<BWRAP>	<HOST-SYSTEM-BINDS>
 --unshare-pid
 --proc	/proc
 --dev	/dev
@@ -10,8 +12,8 @@ bwrap	<HOST-SYSTEM-BINDS>
 --bind	<TMP>/mount/Users/alice	<TMP>/mount/Users/alice
 --bind	<TMP>/mount/Channels/room123	<TMP>/mount/Channels/room123
 --ro-bind	<HOME>/.cache/huggingface	<HOME>/.cache/huggingface
---bind	<TMP>/mount/Docs	<TMP>/mount/Docs
---ro-bind	<TMP>/mount/Notes	<TMP>/mount/Notes
+--bind-fd	<fd>	<TMP>/mount/Docs
+--ro-bind-fd	<fd>	<TMP>/mount/Notes
 --tmpfs	<TMP>/data
 --remount-ro	<TMP>/data
 --unshare-user

@@ -1,4 +1,6 @@
-bwrap	<HOST-SYSTEM-BINDS>
+<PYTHON>	-I	-m	istota.sandbox.bind_launcher
+--binds	[{"root": "<TMP>/mount", "parts": ["Docs"]}, {"root": "<TMP>/mount", "parts": ["Notes"]}]
+--	<BWRAP>	<HOST-SYSTEM-BINDS>
 --unshare-pid
 --proc	/proc
 --dev	/dev
@@ -18,8 +20,8 @@ bwrap	<HOST-SYSTEM-BINDS>
 --bind	<TMP>/repos/alice/.package-caches	<TMP>/repos/alice/.package-caches
 --bind	<TMP>/repos/alice	<TMP>/repos/alice
 --bind	<TMP>/run/istota-exec/alice	<TMP>/run/istota-exec/alice
---bind	<TMP>/mount/Docs	<TMP>/mount/Docs
---ro-bind	<TMP>/mount/Notes	<TMP>/mount/Notes
+--bind-fd	<fd>	<TMP>/mount/Docs
+--ro-bind-fd	<fd>	<TMP>/mount/Notes
 --ro-bind	<TMP>/extra/doc.pdf	<TMP>/extra/doc.pdf
 --tmpfs	<TMP>/data
 --remount-ro	<TMP>/data

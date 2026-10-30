@@ -292,6 +292,29 @@ def check_bwrap(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def check_linked_resource_binds(config: "Config", probe: bool) -> CheckResult:
+    """This bwrap can bind from a descriptor, the only way a linked folder is bound.
+
+    Without ``--ro-bind-fd`` every task runs with no linked folders (ISSUE-881),
+    and the only other sign is an ERROR line per task. It runs ``bwrap --help``,
+    so it skips under ``probe=False``.
+    """
+    name = "security.linked_resource_binds"
+    if not probe:
+        return CheckResult(name, SKIP, "not probed")
+    from . import executor
+
+    if not executor.effective_sandboxing(config):
+        return CheckResult(name, SKIP, "no sandbox here, so nothing is bound")
+    if executor._bwrap_fd_bind_binary() is None:
+        return CheckResult(
+            name, WARN,
+            "this bwrap has no --ro-bind-fd, so tasks run without linked folders",
+            remedy="Install the bubblewrap Debian 13 ships.",
+        )
+    return CheckResult(name, OK, "bwrap binds linked folders from a descriptor")
+
+
 def check_pdf_tools(config: "Config", probe: bool) -> CheckResult:
     """``pdftotext`` and ``pdftoppm`` (poppler-utils) for the health module.
 
@@ -10850,6 +10873,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.skill_proxy", check_skill_proxy),
     ("security.sandbox_effective", check_sandbox_effective),
     ("security.task_cgroups", check_task_cgroups),
+    ("security.linked_resource_binds", check_linked_resource_binds),
     ("security.sandbox_credentials", check_sandbox_credentials),
     ("security.proxy_peer_check", check_proxy_peer_check),
     ("security.credential_broker", check_credential_broker),
@@ -10982,6 +11006,8 @@ CHECK_SCOPES: dict[str, str] = {
     # Deployment: a delegated cgroup subtree is a property of how the install
     # runs the daemon (the container's root phase, or a unit's Delegate=).
     "security.task_cgroups": DEPLOYMENT,
+    # Deployment: it asks `effective_sandboxing`, which is the run contract's.
+    "security.linked_resource_binds": DEPLOYMENT,
     # Deployment, not image: it reaches `istota.executor` for the bwrap
     # capability probe, and the pairing it reports is a posture an operator
     # chose in a rendered config. The image tier asserts over `--scope image`
