@@ -101,6 +101,7 @@ def _run(config, make_turn) -> dict:
         "disabled": disabled_seen[0],
         "allowed_skills": set(kwargs["allowed_skills"]),
         "proxy_base_env": args[2],
+        "model_env": req.env,
         "argv": argv,
         "system": open(req.composed_system_prompt_path).read(),
         "prompt": req.prompt,
@@ -272,6 +273,37 @@ class TestACorrespondentsTurn:
         seen = _run(config, lambda conn: _thread_turn(conn, attachments=[str(source)]))
         assert "room-attachments/note.pdf" in seen["prompt"]
         assert str(source) not in seen["prompt"]
+
+
+class TestTheTurnAuthorReachesTheCli:
+    """The posture the email CLI refuses on, from the daemon's own derivation.
+    It goes to the proxy alone: the model's env is the model's to change."""
+
+    @pytest.mark.parametrize("make_turn,author", [
+        (_thread_turn, "correspondent"),
+        (_roomless_turn, "correspondent"),
+        (_own_thread_turn, "own"),
+        (_talk_guest_turn, "guest"),
+    ], ids=["thread", "roomless", "own", "guest"])
+    def test_the_proxy_has_it_and_the_model_does_not(self, config, make_turn, author):
+        from istota.sandbox.host_paths import TURN_AUTHOR_VAR
+
+        seen = _run(config, make_turn)
+        assert seen["proxy_base_env"][TURN_AUTHOR_VAR] == author
+        assert TURN_AUTHOR_VAR not in seen["model_env"]
+
+    def test_the_cli_refuses_on_what_the_runtime_handed_it(
+        self, config, monkeypatch, capsys,
+    ):
+        from istota.sandbox.host_paths import TURN_AUTHOR_VAR
+        from istota.skills import email as email_skill
+
+        seen = _run(config, _thread_turn)
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv(TURN_AUTHOR_VAR, seen["proxy_base_env"][TURN_AUTHOR_VAR])
+        with pytest.raises(SystemExit):
+            email_skill.main(["list"])
+        assert '"reason": "not_owner_turn"' in capsys.readouterr().out
 
 
 class TestTheDefaultsWorkWithFilesWithheld:

@@ -216,6 +216,11 @@ def user_workspace_root() -> Path | None:
 #: route to a skill CLI.
 WITHHELD_SCOPES_VAR = "ISTOTA_WITHHELD_SCOPES"
 
+#: Set by `task_env` in the proxy's base env beside the withheld scopes: who
+#: wrote this turn, as `rooms.scopes.turn_author` answers it (`own`, `guest` or
+#: `correspondent`). Never in the model's env, for the reason above.
+TURN_AUTHOR_VAR = "ISTOTA_TURN_AUTHOR"
+
 #: Set by `task_env`: the task's own attachment copies, under its control
 #: directory (`executor.stage_attachments`), a read-only root (ISSUE-880).
 ATTACHMENTS_DIR_VAR = "ISTOTA_ATTACHMENTS_DIR"
