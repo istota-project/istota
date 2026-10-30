@@ -92,8 +92,8 @@ def _writer_refusal(config, user_id: str) -> dict | None:
 def _own_turn_refusal(user_id: str) -> dict | None:
     """Refuse a write on a turn somebody else wrote.
 
-    A correspondent's admitted mail on an email thread room runs as the host at
-    full reach; it must not change a schedule or a shared block, which reaches
+    A correspondent's admitted mail runs as the host; behind that turn's
+    allowlist, it still must not change a schedule or a shared block, which reaches
     every user unfenced. An admin's own turn in a shared room passes.
     """
     if calling_turn_passes(user_id, config=_load_config()):

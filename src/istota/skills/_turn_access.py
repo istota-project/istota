@@ -1,7 +1,7 @@
 """Whether a skill CLI's calling task answers its user's own turn.
 
-A correspondent's admitted mail on an email thread room runs as the host at
-full reach, so identity alone does not say who asked. A skill that writes
+A correspondent's admitted mail runs as the host, so identity alone does not
+say who asked. Behind that turn's allowlist, as a backstop, a skill that writes
 content other users read (a shared briefing block, a schedule, shared KV)
 refuses a turn somebody else wrote. The task is read from ``ISTOTA_TASK_ID``,
 which the proxy sets from the task, never from the command line.

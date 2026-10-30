@@ -46,6 +46,13 @@ def _load_context():
                          overlays_load=reach.standing_memory_loads)
 
 
+def _overlay_out_of_reach(name: str, ctx: dict) -> bool:
+    # A correspondent's turn reads overlays with `memory` withheld. The prompt
+    # loads one only for a skill the turn can use, and the sender can ask for
+    # whatever this prints, so the verbs stop at the same line.
+    return "memory" in ctx["withheld"] and _guard_skill(name, ctx) is not None
+
+
 def skill_context(
     config, user_id: str, skill_index, withheld: frozenset[str],
     *, overlays_load: bool | None = None,
@@ -463,6 +470,8 @@ def cmd_overlay(args) -> None:
     from istota.skills._loader import OVERLAY_READ_CAP_BYTES, read_overlay_bytes
 
     ctx = _load_context()
+    if ctx["overlays_load"] and _overlay_out_of_reach(args.name, ctx):
+        _output_error("memory_withheld", skill=args.name)
     path, dir_fd = _overlay_path(args.name, ctx)
     if path is None:
         # No mount, so this deployment has no overlays for anyone. Printing an
@@ -549,6 +558,7 @@ def cmd_overlays(args) -> None:
                 names = sorted(e.name for e in entries if e.name.endswith(".md"))
         except OSError:
             names = []
+        names = [n for n in names if not _overlay_out_of_reach(n[:-3], ctx)]
         for name in names:
             found = inspect_overlay(
                 d / name,

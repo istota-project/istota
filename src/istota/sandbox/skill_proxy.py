@@ -965,8 +965,8 @@ class SkillProxy:
 
         try:
             with db.get_db(self.config.db_path) as database:
-                # A correspondent's mail on an email thread room runs as the
-                # host at full reach; it must not reach the host's other boxes.
+                # A correspondent's mail runs as the host; behind the turn's
+                # allowlist, this keeps it out of the host's other boxes.
                 someone_else = not _owners_own_turn(
                     database, self.task_id, self.user_id,
                     own_addresses=own_addresses(self.config, self.user_id),
