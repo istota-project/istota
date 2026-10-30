@@ -45,6 +45,10 @@ def _check(command: str) -> HeartbeatCheck:
     )
 
 
+def _on_daemon_path(name):
+    return f"/usr/bin/{name}"
+
+
 def _capture_spawn():
     """What the runner hands the kernel, in place of running it."""
     seen: dict = {}
@@ -77,6 +81,7 @@ class TestWrappedInTheTaskSandbox:
         seen, fake = _capture_spawn()
         with (
             patch("istota.executor._bwrap_available", return_value=True),
+            patch("istota.sandbox.confined_command.on_daemon_path", _on_daemon_path),
             patch("istota.sandbox.confined_command.run_capture", side_effect=fake),
             patch("istota.scheduler.discover_calendars_for_task", return_value=[]),
         ):
@@ -89,6 +94,7 @@ class TestWrappedInTheTaskSandbox:
         seen, fake = _capture_spawn()
         with (
             patch("istota.executor._bwrap_available", return_value=True),
+            patch("istota.sandbox.confined_command.on_daemon_path", _on_daemon_path),
             patch("istota.sandbox.confined_command.run_capture", side_effect=fake),
         ):
             result = _check_shell_command(_check("cat /etc/hostname"), config, "alice")
@@ -102,10 +108,37 @@ class TestWrappedInTheTaskSandbox:
         seen, fake = _capture_spawn()
         with (
             patch("istota.executor._bwrap_available", return_value=True),
+            patch("istota.sandbox.confined_command.on_daemon_path", _on_daemon_path),
             patch("istota.sandbox.confined_command.run_capture", side_effect=fake),
         ):
             _execute_command_task(_task("true"), config)
         assert Path(seen["argv"][0]).name != "bwrap"
+
+
+class TestTheBinaryIsTheDaemons:
+    def test_a_bwrap_planted_on_the_task_s_path_is_not_what_runs(self, db_path, tmp_path):
+        """The env's PATH starts under the temp dir a model can write."""
+        config = _config(db_path, tmp_path)
+        seen, fake = _capture_spawn()
+        with (
+            patch("istota.executor._bwrap_available", return_value=True),
+            patch("istota.sandbox.confined_command.on_daemon_path", _on_daemon_path),
+            patch("istota.sandbox.confined_command.run_capture", side_effect=fake),
+        ):
+            _execute_command_task(_task("true"), config)
+        assert seen["argv"][0] == "/usr/bin/bwrap"
+
+    def test_a_missing_binary_fails_the_run(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        marker = tmp_path / "ran"
+        with (
+            patch("istota.executor._bwrap_available", return_value=True),
+            patch("istota.sandbox.confined_command.on_daemon_path", return_value=None),
+        ):
+            success, result = _execute_command_task(_task(f"touch {marker}"), config)
+        assert success is False
+        assert "PATH" in result
+        assert not marker.exists()
 
 
 class TestTheEnvironment:
@@ -251,6 +284,7 @@ class TestTheBridgeIsWaitedFor:
         seen, fake = _capture_spawn()
         with (
             patch("istota.executor._bwrap_available", return_value=True),
+            patch("istota.sandbox.confined_command.on_daemon_path", _on_daemon_path),
             patch("istota.sandbox.confined_command.run_capture", side_effect=fake),
         ):
             _execute_command_task(_task("curl https://example.com/x"), config)

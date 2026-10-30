@@ -17,6 +17,7 @@ socket and hosts that a turn of the same user does not have.
 from __future__ import annotations
 
 import contextlib
+import os
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,7 +25,7 @@ from typing import TYPE_CHECKING
 from .network_proxy import BRIDGE_PORT
 from .peer_process import reporting_pid
 from .process_group import run_capture
-from .shell_exec import shell_argv
+from .shell_exec import on_daemon_path, shell_argv
 
 if TYPE_CHECKING:
     from istota import db
@@ -157,6 +158,13 @@ def run_confined_command(
                 group_ids=group_ids,
                 sandbox_env=runtime.sandbox_env,
             )
+        # `runtime.env`'s PATH starts in directories the model can write, and
+        # `subprocess` would search it for a bare name.
+        if not os.path.isabs(argv[0]):
+            found = on_daemon_path(argv[0])
+            if found is None:
+                raise FileNotFoundError(f"{argv[0]!r} is not on the daemon's PATH")
+            argv = [found, *argv[1:]]
         with task_cgroup.placement(cgroup_path) as place, \
                 reporting_pid(on_pid, place, report_reap=True) as preexec:
             return run_capture(
