@@ -36,18 +36,20 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from collections.abc import Collection, Mapping
+from typing import Literal
 
 from istota import db
 from istota.browser.owner import BRIEFINGS_IDENTITY
 
-if TYPE_CHECKING:
-    from istota.config import Config
-
 logger = logging.getLogger(__name__)
 
 SYNTHETIC_SCOPES = ("files", "memory")
+
+TurnAuthor = Literal["own", "guest", "correspondent"]
+
+# Far above `scheduler.max_subtask_depth`; a chain this long is not trusted.
+_TURN_CHAIN_LIMIT = 64
 
 
 #: Research tasks run as `__briefings__` behind the executor's research gate:
@@ -188,58 +190,124 @@ def is_current_member(conn: sqlite3.Connection, room_token: str, user_id: str) -
     return present[0] == 0 or present[1] > 0
 
 
-def written_by_someone_else(
-    conn: sqlite3.Connection, task: "db.Task", *, config: "Config | None" = None,
-) -> bool:
-    """Whether the stored turn this task answers names an author other than
-    the task's user. A row with neither column set predates attribution and is
-    read as the user's, as every history reader reads it. A correspondent's
-    mail on an email thread runs as the host, so two readers ask this: it
-    carries none of the host's private notes (`private_replies.my_notes_room`)
-    and reaches none of the host's connected mail accounts (the skill proxy's
-    `mail_account` channel).
+def turn_author(
+    conn: sqlite3.Connection | None,
+    task: "db.Task",
+    *,
+    own_addresses: Collection[str] | None,
+) -> TurnAuthor:
+    """Who wrote the turn this task answers: the one authorship predicate.
 
-    No stored row is the owner's turn, except for email (ISSUE-874): an
-    approved held mail that no room admitted keeps no row and still runs as the
-    host on the sender's text, so it is read from its `processed_emails` row
-    and counts as someone else's unless the sender is one of the user's own
-    addresses. Pass ``config`` where one is in scope; without it the addresses
-    are what the database can prove (`db.own_addresses_without_config`), which
-    can only under-trust."""
+    Walks ``parent_task_id`` to the root, because a subtask or a `!retry` copy
+    has its parent's user and room but no turn of its own. The chain is
+    ``guest`` if any link is, else ``correspondent`` if any link is, else
+    ``own``. A missing ancestor, a cycle or a chain past the limit is
+    ``correspondent``, and so is a link belonging to another user.
+
+    ``own_addresses`` is the user's own addresses (`mail.support.own_addresses`)
+    and is required so a caller has to decide: ``None`` falls back to
+    `db.own_addresses_without_config`, which misses TOML-only addresses and so
+    can only misread the user's own mail as a correspondent's.
+
+    With no database (``conn`` is ``None``) nothing can be walked or attributed:
+    an email task is not trusted and any other task is the user's own. Raises
+    what the reads raise; each caller chooses its failure direction.
+    """
+    if conn is None:
+        if task.guest_participant_id is not None:
+            return "guest"
+        return "correspondent" if task.source_type == "email" else "own"
+
+    someone_else = False
+    seen: set[int] = set()
+    current = task
+    while True:
+        if current.id in seen or len(seen) >= _TURN_CHAIN_LIMIT:
+            someone_else = True
+            break
+        seen.add(current.id)
+        link = _link_author(conn, current, task.user_id, own_addresses)
+        if link == "guest":
+            return "guest"
+        if link == "correspondent":
+            someone_else = True
+        if current.parent_task_id is None:
+            break
+        parent = db.get_task(conn, current.parent_task_id)
+        if parent is None:
+            someone_else = True
+            break
+        current = parent
+    return "correspondent" if someone_else else "own"
+
+
+def _link_author(
+    conn: sqlite3.Connection,
+    task: "db.Task",
+    user_id: str,
+    own_addresses: Collection[str] | None,
+) -> TurnAuthor:
+    """One link of `turn_author`'s chain, read off its own rows."""
+    if task.user_id != user_id:
+        return "correspondent"
+    if task.guest_participant_id is not None:
+        return "guest"
+    stored = _stored_turn_author(conn, task)
+    if stored is not None:
+        return stored
+    if task.source_type == "email":
+        return _mail_author(conn, task, own_addresses)
+    return "own"
+
+
+def _stored_turn_author(conn: sqlite3.Connection, task: "db.Task") -> TurnAuthor | None:
+    """What the task's stored user row says, or None where it says nothing: no
+    row, or an email row with neither column set, which must not read as the
+    host's by default. On any other surface such a row predates attribution
+    and is the user's, as every history reader reads it.
+    """
     row = conn.execute(
         "SELECT author_user_id, author_label FROM messages "
         "WHERE task_id = ? AND role = 'user' ORDER BY id LIMIT 1",
         (task.id,),
     ).fetchone()
     if row is None:
-        if task.source_type != "email":
-            return False
-        return _roomless_mail_is_someone_elses(conn, task, config)
+        return None
     author_user_id, author_label = row[0], row[1]
-    if author_user_id is None:
-        return bool(author_label)
-    return author_user_id != task.user_id
+    if author_user_id is not None:
+        return "own" if author_user_id == task.user_id else "correspondent"
+    if author_label:
+        return "correspondent"
+    return None if task.source_type == "email" else "own"
 
 
-def _roomless_mail_is_someone_elses(
-    conn: sqlite3.Connection, task: "db.Task", config: "Config | None",
-) -> bool:
-    # No ledger row leaves the sender unreadable, which is not proof the user
-    # wrote it; `author_for_email_task` answers "the user's" for that case.
-    # A `!retry` copy has none either: its parent's turn decides, as
-    # `skill_proxy._owners_own_turn` walks the chain.
-    if conn.execute(
-        "SELECT 1 FROM processed_emails WHERE task_id = ? LIMIT 1", (task.id,),
-    ).fetchone() is None:
-        return task.parent_task_id is None
-    own = None
-    if config is not None:
-        from istota.mail.support import own_addresses
-        own = sorted(own_addresses(config, task.user_id or ""))
-    author_user_id, author_label = db.author_for_email_task(
-        conn, task.id, task.user_id, own,
-    )
-    return bool(author_label) or author_user_id != task.user_id
+def _mail_author(
+    conn: sqlite3.Connection,
+    task: "db.Task",
+    own_addresses: Collection[str] | None,
+) -> TurnAuthor:
+    """An email task with no attributed row, read from its `processed_emails`
+    row (ISSUE-874): an approved held mail no room admitted keeps no stored row
+    and still runs as the host on the sender's text.
+    """
+    ledger = conn.execute(
+        "SELECT sender_email, routing_method FROM processed_emails "
+        "WHERE task_id = ? ORDER BY id LIMIT 1",
+        (task.id,),
+    ).fetchone()
+    if ledger is None:
+        # A `!retry` copy has neither row and its parent decides on the chain.
+        # Any other such task has a sender nobody can read, which is not proof
+        # the user wrote it; `author_for_email_task` answers "the user's" here.
+        return "own" if task.parent_task_id is not None else "correspondent"
+    if not ledger[0] and ledger[1] != "sender_match":
+        # `external_email_sender` reads no sender as a non-email turn.
+        return "correspondent"
+    own = None if own_addresses is None else sorted(own_addresses)
+    author_user_id, author_label = db.author_for_email_task(conn, task.id, task.user_id, own)
+    if author_label or author_user_id != task.user_id:
+        return "correspondent"
+    return "own"
 
 
 def ambient_memory_off(conn: sqlite3.Connection | None, task: "db.Task") -> bool:

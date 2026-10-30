@@ -324,35 +324,16 @@ def _default_trusted_roots() -> frozenset[int]:
     return frozenset()
 
 
-# Far above `scheduler.max_subtask_depth`; a chain this long is refused.
-_TURN_CHAIN_LIMIT = 64
-
-
-def _owners_own_turn(conn, task_id: int, user_id: str, *, config=None) -> bool:
-    """Whether ``task_id`` answers a turn ``user_id`` wrote, ancestors included.
-
-    A subtask gets its parent's user id and room token but no `messages` row,
-    so a correspondent's turn would pass a check of the task's own row alone.
-    The walk follows ``parent_task_id`` to the root; a missing row, a cycle or
-    a chain past the limit is not the owner's turn. ``config`` gives the
-    user's own addresses for a roomless email turn (`written_by_someone_else`).
-    """
+def _owners_own_turn(conn, task_id: int, user_id: str, *, own_addresses=None) -> bool:
+    """Whether ``task_id`` is ``user_id``'s and answers a turn they wrote,
+    ancestors included (`rooms.scopes.turn_author`). ``own_addresses`` is the
+    user's own addresses; without it the check can only under-trust."""
     from istota import db
-    from istota.rooms.scopes import written_by_someone_else
+    from istota.rooms.scopes import turn_author
 
-    seen: set[int] = set()
-    current = task_id
-    while current is not None:
-        if current in seen or len(seen) >= _TURN_CHAIN_LIMIT:
-            return False
-        seen.add(current)
-        task = db.get_task(conn, current)
-        if (task is None or task.user_id != user_id
-                or task.guest_participant_id is not None
-                or written_by_someone_else(conn, task, config=config)):
-            return False
-        current = task.parent_task_id
-    return True
+    task = db.get_task(conn, task_id)
+    return (task is not None and task.user_id == user_id
+            and turn_author(conn, task, own_addresses=own_addresses) == "own")
 
 
 class SkillProxy:
@@ -980,13 +961,15 @@ class SkillProxy:
             return
         from istota import db
         from istota.mail import accounts
+        from istota.mail.support import own_addresses
 
         try:
             with db.get_db(self.config.db_path) as database:
                 # A correspondent's mail on an email thread room runs as the
                 # host at full reach; it must not reach the host's other boxes.
                 someone_else = not _owners_own_turn(
-                    database, self.task_id, self.user_id, config=self.config,
+                    database, self.task_id, self.user_id,
+                    own_addresses=own_addresses(self.config, self.user_id),
                 )
             if someone_else:
                 refuse("not_owner_turn")
