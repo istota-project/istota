@@ -997,3 +997,324 @@ class TestSubtaskAudienceInheritance:
         assert _process_deferred_subtasks(config, task, user_temp) == 1
         with db.get_db(db_path) as conn:
             assert task_group_ids(conn, _subtask(db_path)) == []
+
+
+# ---------------------------------------------------------------------------
+# The replay allowlist on a correspondent's turn
+# ---------------------------------------------------------------------------
+
+
+STRANGER = "carol@example.com"
+REPLY_BODY = "We open at ten on Sunday."
+
+
+@pytest.fixture
+def mail_config(config):
+    from istota.config import EmailConfig, SiteConfig
+
+    config.email = EmailConfig(
+        enabled=True, imap_host="imap.test", imap_port=993, imap_user="user",
+        imap_password="pass", smtp_host="smtp.test", smtp_port=587,
+        bot_email="bot@test.com",
+    )
+    config.bot_name = "Zorg"
+    config.site = SiteConfig(hostname="bot.example.com")
+    config.users = {"alice": UserConfig(email_addresses=["alice@test.com"],
+                                        trusted_email_senders=["*"])}
+    return config
+
+
+def _strangers_turn(config):
+    """A stranger's mail through the poller, as the run leaves it: the task's own
+    directory exists, because `execute_task` made one."""
+    from istota.executor import RESTRICTED_DIR_PREFIX, get_user_temp_dir
+
+    from .test_email_thread_rooms import _poll
+
+    (task_id,) = _poll(config, sender=STRANGER, to=("bot+alice@test.com",),
+                       message_id="<s1@example.com>", body="Are you open Sunday?")
+    (get_user_temp_dir(config, "alice") / f"{RESTRICTED_DIR_PREFIX}{task_id}").mkdir(
+        parents=True, exist_ok=True)
+    with db.get_db(config.db_path) as conn:
+        return db.get_task(conn, task_id)
+
+
+def _own_turn(config, output_target=None):
+    with db.get_db(config.db_path) as conn:
+        task_id = db.create_task(conn, prompt="p", user_id="alice", source_type="web",
+                                 output_target=output_target)
+        return db.get_task(conn, task_id)
+
+
+def _one_file_of_every_kind(config, task) -> Path:
+    from istota.executor import task_deferred_dir
+    from istota.sharing import events
+
+    fields = {"summary": "Planted", "dtstart": "2026-10-29T13:00:00Z",
+              "dtend": "2026-10-29T15:00:00Z", "all_day": False}
+    contents = {
+        "subtasks": [{"prompt": "planted subtask"}],
+        "tracked_transactions": [],
+        "sent_emails": [{"message_id": "<planted@example.com>", "to_addr": "x@example.com"}],
+        "kv_ops": [{"op": "set", "namespace": "ns", "key": "k", "value": '"planted"'}],
+        "kg_ops": [{"op": "add_fact", "subject": "alice", "predicate": "knows",
+                    "object": "planted"}],
+        "health_ops": [],
+        "garmin_import": {"days_back": 1},
+        "istota_events": [events.upsert_op("planted@bot.example.com", create=True, fields=fields)],
+        "user_alerts": [{"message": "This mail reads like phishing", "type": "security"}],
+        "email_output": {"subject": "", "body": REPLY_BODY, "format": "plain"},
+    }
+    directory = task_deferred_dir(config, task)
+    directory.mkdir(parents=True, exist_ok=True)
+    for suffix, content in contents.items():
+        (directory / f"task_{task.id}_{suffix}.json").write_text(json.dumps(content))
+    return directory
+
+
+def _left(directory, task) -> set[str]:
+    prefix, suffix = f"task_{task.id}_", ".json"
+    return {p.name[len(prefix):-len(suffix)] for p in directory.iterdir()
+            if p.name.startswith(prefix) and p.name.endswith(suffix)}
+
+
+def _drain(config, task, result="done"):
+    """The drain, with the two handlers whose own effect needs a module database
+    or a Garmin account replaced by spies, and no invitation mailed. The table
+    resolves the handlers at call time."""
+    from unittest.mock import patch
+
+    from istota.scheduler import _drain_deferred_ops
+
+    with patch("istota.scheduler._process_deferred_health_ops") as health, \
+            patch("istota.scheduler._process_deferred_garmin_import") as garmin, \
+            patch("istota.sharing.itip.deliver_invitations"):
+        _drain_deferred_ops(config, task, result)
+    return health, garmin
+
+
+def _written(config) -> dict:
+    from istota.memory.knowledge_graph import ensure_table, get_current_facts
+    from istota.sharing import events
+
+    with db.get_db(config.db_path) as conn:
+        ensure_table(conn)
+        return {
+            "subtasks": conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE source_type = 'subtask' "
+                "AND prompt = 'planted subtask'").fetchone()[0],
+            "sent_emails": conn.execute(
+                "SELECT COUNT(*) FROM sent_emails WHERE message_id = '<planted@example.com>'",
+            ).fetchone()[0],
+            "kv": db.kv_get(conn, "alice", "ns", "k"),
+            "facts": len(get_current_facts(conn, "alice")),
+            "events": len(events.events_for_user(conn, "alice", include_cancelled=True)),
+        }
+
+
+def _alerts(config) -> list[str]:
+    with db.get_db(config.db_path) as conn:
+        return [r["body"] for r in conn.execute(
+            "SELECT body FROM notifications WHERE source = 'task_alert'")]
+
+
+class TestACorrespondentsDrain:
+    def test_it_keeps_the_reply_and_writes_nothing(self, mail_config):
+        task = _strangers_turn(mail_config)
+        directory = _one_file_of_every_kind(mail_config, task)
+        assert directory.name.startswith("room-task-")
+
+        health, garmin = _drain(mail_config, task)
+
+        assert _left(directory, task) == {"email_output"}
+        health.assert_not_called()
+        garmin.assert_not_called()
+        assert _written(mail_config) == {
+            "subtasks": 0, "sent_emails": 0, "kv": None, "facts": 0, "events": 0,
+        }
+
+    def test_a_user_alert_reaches_the_host(self, mail_config):
+        task = _strangers_turn(mail_config)
+        _one_file_of_every_kind(mail_config, task)
+        _drain(mail_config, task)
+        assert ["phishing" in body for body in _alerts(mail_config)] == [True]
+
+    @pytest.mark.asyncio
+    async def test_the_reply_is_sent_after_the_drain_with_no_draft(self, mail_config):
+        from unittest.mock import patch
+
+        from istota.scheduler import post_result_to_email
+
+        task = _strangers_turn(mail_config)
+        directory = _one_file_of_every_kind(mail_config, task)
+        _drain(mail_config, task)
+
+        with patch("istota.transport.email.outbound.reply_to_email",
+                   return_value="<out@test.com>") as reply:
+            assert await post_result_to_email(mail_config, task, "the model's report") is True
+
+        assert reply.call_args.kwargs["to_addr"] == STRANGER
+        assert reply.call_args.kwargs["body"] == REPLY_BODY
+        assert _left(directory, task) == set()
+        with db.get_db(mail_config.db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM outbound_drafts").fetchone()[0] == 0
+
+    def test_calendar_events_apply_when_calendar_is_allowed(self, mail_config, monkeypatch):
+        from istota.rooms import scopes
+
+        real = scopes.correspondent_scopes
+
+        def _widened(*args, **kwargs):
+            allowance = real(*args, **kwargs)
+            return scopes.CorrespondentAllowance(scopes=allowance.scopes | {"calendar"})
+
+        monkeypatch.setattr(scopes, "correspondent_scopes", _widened)
+        task = _strangers_turn(mail_config)
+        directory = _one_file_of_every_kind(mail_config, task)
+
+        _drain(mail_config, task)
+
+        assert _left(directory, task) == {"email_output"}
+        written = _written(mail_config)
+        assert written["events"] == 1
+        assert written["kv"] is None and written["subtasks"] == 0
+
+    def test_a_subtask_of_the_turn_is_held_to_the_same_list(self, mail_config):
+        parent = _strangers_turn(mail_config)
+        with db.get_db(mail_config.db_path) as conn:
+            child = db.get_task(conn, db.create_task(
+                conn, prompt="t", user_id="alice", source_type="subtask",
+                parent_task_id=parent.id, output_target="email",
+            ))
+        directory = _one_file_of_every_kind(mail_config, child)
+
+        _drain(mail_config, child)
+
+        assert _left(directory, child) == {"email_output"}
+        assert _written(mail_config)["kv"] is None
+
+    def test_a_file_that_will_not_unlink_is_still_not_replayed(self, mail_config):
+        from unittest.mock import patch
+
+        from istota.sandbox import deferred
+
+        task = _strangers_turn(mail_config)
+        directory = _one_file_of_every_kind(mail_config, task)
+        real_unlink = deferred.unlink
+
+        def _refuses_kv(path, **kwargs):
+            if path.name.endswith("_kv_ops.json"):
+                raise OSError("read-only")
+            return real_unlink(path, **kwargs)
+
+        with patch("istota.scheduler_deferred.deferred.unlink", _refuses_kv):
+            _drain(mail_config, task)
+
+        assert "kv_ops" in _left(directory, task)
+        assert _written(mail_config)["kv"] is None
+
+    def test_a_turn_that_cannot_be_read_replays_nothing_but_keeps_the_reply(
+        self, mail_config, monkeypatch,
+    ):
+        from istota.rooms import scopes
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(scopes, "turn_author", _boom)
+        task = _own_turn(mail_config, output_target="email")
+        directory = _one_file_of_every_kind(mail_config, task)
+
+        _drain(mail_config, task)
+
+        assert _left(directory, task) == {"email_output"}
+        assert _written(mail_config)["kv"] is None
+        assert _written(mail_config)["subtasks"] == 0
+        assert len(_alerts(mail_config)) == 1
+
+    def test_every_handler_reads_a_suffix_the_purge_knows(self):
+        import re
+
+        from istota.scheduler import _drain_deferred_ops
+        from istota.scheduler_deferred import _KNOWN_DEFERRED_SUFFIXES
+
+        from .support.drift import source_of
+
+        named = set(re.findall(r'\("(\w+)", _\w+\),', source_of(_drain_deferred_ops)))
+        assert "subtasks" in named
+        assert named - {"retired_files"} <= set(_KNOWN_DEFERRED_SUFFIXES)
+
+    def test_the_kept_map_names_only_known_suffixes(self):
+        from istota.scheduler import CORRESPONDENT_KEPT_SUFFIXES
+        from istota.scheduler_deferred import _KNOWN_DEFERRED_SUFFIXES
+
+        assert set(CORRESPONDENT_KEPT_SUFFIXES) <= set(_KNOWN_DEFERRED_SUFFIXES)
+        assert CORRESPONDENT_KEPT_SUFFIXES == {
+            "email_output": None, "user_alerts": None, "istota_events": "calendar",
+        }
+
+
+class TestControlOtherTurnsDrainAsBefore:
+    def test_an_own_turn_replays_every_handler(self, mail_config):
+        task = _own_turn(mail_config)
+        directory = _one_file_of_every_kind(mail_config, task)
+        assert not directory.name.startswith("room-task-")
+
+        health, garmin = _drain(mail_config, task)
+
+        health.assert_called_once()
+        garmin.assert_called_once()
+        written = _written(mail_config)
+        assert written["subtasks"] == 1
+        assert written["sent_emails"] == 1
+        assert written["kv"]["value"] == '"planted"'
+        assert written["facts"] == 1
+        assert written["events"] == 1
+        assert len(_alerts(mail_config)) == 1
+        # A web task has no email leg, so the orphan is removed as it always was.
+        assert "email_output" not in _left(directory, task)
+
+    def test_a_guests_drain_purges_all_of_it(self, mail_config):
+        with db.get_db(mail_config.db_path) as conn:
+            task_id = db.create_task(conn, prompt="p", user_id="alice", source_type="web")
+            conn.execute("UPDATE tasks SET guest_participant_id = 1 WHERE id = ?", (task_id,))
+            task = db.get_task(conn, task_id)
+        directory = _one_file_of_every_kind(mail_config, task)
+
+        health, garmin = _drain(mail_config, task)
+
+        assert _left(directory, task) == set()
+        health.assert_not_called()
+        assert _alerts(mail_config) == []
+        assert _written(mail_config)["kv"] is None
+
+
+class TestThePurgesKeepList:
+    def _task(self):
+        return db.Task(id=7, status="running", source_type="email", user_id="alice", prompt="x")
+
+    def test_keep_spares_only_what_it_names(self, tmp_path):
+        from istota.scheduler_deferred import _purge_deferred_files_for_retry
+
+        for suffix in ("email_output", "kv_ops", "user_alerts"):
+            (tmp_path / f"task_7_{suffix}.json").write_text("[]")
+        _purge_deferred_files_for_retry(self._task(), tmp_path, keep={"email_output"})
+        assert _left(tmp_path, self._task()) == {"email_output"}
+
+    def test_a_retry_keeps_nothing(self, tmp_path):
+        from istota.scheduler_deferred import _purge_deferred_files_for_retry
+
+        for suffix in ("email_output", "kv_ops"):
+            (tmp_path / f"task_7_{suffix}.json").write_text("[]")
+        _purge_deferred_files_for_retry(self._task(), tmp_path)
+        assert _left(tmp_path, self._task()) == set()
+
+    def test_the_log_names_the_task_and_the_kinds(self, tmp_path, caplog):
+        from istota.scheduler_deferred import _purge_deferred_files_for_retry
+
+        (tmp_path / "task_7_kv_ops.json").write_text("[]")
+        with caplog.at_level(logging.INFO, logger="istota.scheduler"):
+            _purge_deferred_files_for_retry(self._task(), tmp_path)
+        lines = [r.getMessage() for r in caplog.records if "kv_ops" in r.getMessage()]
+        assert len(lines) == 1
+        assert "task 7" in lines[0]

@@ -9,6 +9,7 @@ harness is the control: it still withholds everything.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from unittest.mock import patch
 
@@ -387,3 +388,47 @@ class TestTheOfficeTurn:
         assert SENTINEL in seen["prompt"] + seen["system"]
         assert "on their correspondence" in seen["system"]
         assert "did not write this message" in seen["system"]
+
+    @pytest.mark.asyncio
+    async def test_the_reply_is_sent_with_no_draft(self, config):
+        from istota.config import EmailConfig
+        from istota.executor import task_deferred_dir
+        from istota.scheduler import _drain_deferred_ops, post_result_to_email
+
+        from .test_email_thread_rooms import _poll
+
+        config.email = EmailConfig(
+            enabled=True, imap_host="imap.test", imap_port=993, imap_user="user",
+            imap_password="pass", smtp_host="smtp.test", smtp_port=587,
+            bot_email="bot@test.com",
+        )
+        config.bot_name = "Zorg"
+        config.users["alice"] = UserConfig(email_addresses=["alice@test.com"],
+                                           trusted_email_senders=["*"])
+        _user_md(config)
+        made: list[int] = []
+
+        def _turn(conn):
+            (task_id,) = _poll(config, sender=CORRESPONDENT, to=("bot+alice@test.com",),
+                               message_id="<s2@example.com>", body="Are you open Sunday?")
+            made.append(task_id)
+            return task_id
+
+        seen = _run(config, _turn)
+        assert "did not write this message" in seen["system"]
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, made[0])
+        directory = task_deferred_dir(config, task)
+        assert directory.name.startswith("room-task-")
+        (directory / f"task_{task.id}_email_output.json").write_text(json.dumps(
+            {"subject": "", "body": "We open at ten.", "format": "plain"}))
+
+        _drain_deferred_ops(config, task, "done")
+        with patch("istota.transport.email.outbound.reply_to_email",
+                   return_value="<out@test.com>") as reply:
+            assert await post_result_to_email(config, task, "done") is True
+
+        assert reply.call_args.kwargs["to_addr"] == CORRESPONDENT
+        assert reply.call_args.kwargs["body"] == "We open at ten."
+        with db.get_db(config.db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM outbound_drafts").fetchone()[0] == 0

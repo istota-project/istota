@@ -3003,12 +3003,68 @@ def _record_deferred_handler_failure(
         )
 
 
+#: What the drain leaves of a correspondent's turn, each under the scope it needs
+#: (`None`: always). The reply is sent after the drain, from the file, so it must
+#: stay on disk; a user alert is how the model flags a suspicious mail to the host.
+#: A suffix not named here is purged, including one added later.
+CORRESPONDENT_KEPT_SUFFIXES = {
+    "email_output": None,
+    "user_alerts": None,
+    "istota_events": "calendar",
+}
+
+
+def _correspondent_kept_suffixes(config: Config, task: db.Task) -> frozenset[str] | None:
+    """What of this task's deferred files may be replayed, or None for all of
+    them on the user's own turn.
+
+    Their deferred directory is model-writable, so the skill-side refusals do
+    not bind it. A turn that cannot be read is treated as a correspondent's with
+    nothing widened: its writes are dropped, and the reply stays, since it still
+    has the outbound gate to pass. A chain with a guest on it keeps nothing, the
+    same as a guest's own turn.
+    """
+    from .mail.support import own_addresses
+    from .rooms import scopes
+    from .skills._loader import load_skill_index
+
+    allowed: frozenset[str] = frozenset()
+    try:
+        with db.get_db(config.db_path) as conn:
+            author = scopes.turn_author(
+                conn, task, own_addresses=own_addresses(config, task.user_id),
+            )
+            if author == "own":
+                return None
+            if author == "guest":
+                return frozenset()
+            allowed = scopes.correspondent_scopes(
+                conn, task.user_id,
+                skill_index=load_skill_index(
+                    config.skills_dir, bundled_dir=config.bundled_skills_dir,
+                ),
+            ).scopes
+    except Exception as exc:
+        logger.warning(
+            "Task %d: could not read who wrote the turn, its deferred writes "
+            "are dropped: %s", task.id, type(exc).__name__,
+        )
+    return frozenset(
+        suffix for suffix, scope in CORRESPONDENT_KEPT_SUFFIXES.items()
+        if scope is None or scope in allowed
+    )
+
+
 def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
     """Replay a completed task's deferred-op files (memory / kv / KG / health /
     subtasks / sent-emails / email-output), discard any file whose handler has
     been retired, and warn on unconsumed files. The single source of truth for
     the post-success drain — shared by ``process_one_task`` and
     ``run_task_inline`` so the two can't drift.
+
+    On a correspondent's turn (`_correspondent_kept_suffixes`) everything but
+    the reply, user alerts and, with ``calendar`` allowed, Istota calendar events
+    is purged before any handler runs.
 
     **No ``Exception`` escapes this function** (ISSUE-469). Each handler is
     guarded on its own, so one that raises costs its own files and nothing
@@ -3045,6 +3101,9 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
         _purge_deferred_files_for_retry(task, user_temp_dir)
         logger.info("Task %d: restricted task, deferred ops dropped", task.id)
         return
+    kept = _correspondent_kept_suffixes(config, task)
+    if kept is not None:
+        _purge_deferred_files_for_retry(task, user_temp_dir, keep=kept)
     # One end of the order is load-bearing: `_warn_unconsumed_deferred_files`
     # runs last so it reports only what the handlers genuinely left behind.
     # The retired-file sweep leads because it depends on nothing, which is a
@@ -3065,6 +3124,10 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
         ("email_output", _deliver_deferred_email_output),
     )
     for name, handler in handlers:
+        # Beside the purge, not instead of it: a file that would not unlink, or
+        # a handler whose suffix is not in the purge's list, stays unreplayed.
+        if kept is not None and name not in kept:
+            continue
         try:
             handler(config, task, user_temp_dir)
         except Exception as exc:
