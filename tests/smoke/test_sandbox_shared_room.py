@@ -13,6 +13,11 @@ The lean stack uses local storage: attachments live under
 included. No turn binds the flat `Talk/` directory used on a Nextcloud mount.
 We seed it anyway to prove it stays hidden, alongside the other rooms' media.
 
+A correspondent's turn is the same question asked by real mail on the `email`
+profile: mail somebody else wrote runs as the host, withholding all but a short
+allowlist, and what the `email` CLI refuses on that turn it refuses through the
+live skill proxy, which the default suite mocks.
+
 The default suite patches `_bwrap_available` and reads argv, so it has never
 run any of that. This tier does. Every scenario reads the same probe from
 inside a task, and the private-room control runs the same probe in the same
@@ -32,6 +37,9 @@ import re
 
 import pytest
 
+from testbed.services import mail
+from tests.support import email_flow as flow
+from tests.support import email_people as people
 from tests.support import parity
 
 pytestmark = pytest.mark.smoke
@@ -125,10 +133,8 @@ done
 MARK = "SHARED_ROOM_PROBE"
 
 #: Facts about the task's view, each a line.
-PROBE = f"""
-M={MARK}
+FACTS = f"""
 S=SENTINEL
-echo "${{M}}_BEGIN"
 present() {{ if [ -e "$1" ]; then echo yes; else echo no; fi; }}
 echo "user_dir=$(present {USER_DIR})"
 echo "talk_dir=$(present {WORKSPACE}/Talk)"
@@ -155,6 +161,12 @@ else
   echo "fam_writable=no"
 fi
 echo "other_group=$(present {GROUPS}/other)"
+"""
+
+PROBE = f"""
+M={MARK}
+echo "${{M}}_BEGIN"
+{FACTS}
 echo "${{M}}_END"
 """
 
@@ -190,11 +202,11 @@ def _task(stack, token: str, source_type: str) -> int:
     return int(match.group(1))
 
 
-def _observe(stack, task_id: int) -> dict[str, str]:
+def _observe(stack, task_id: int, mark: str = MARK) -> dict[str, str]:
     task = stack.probe.wait_for_task(status="completed", task_id=task_id, timeout=180)
     transcript = stack.endpoint.transcript()
-    begin = transcript.find(f"{MARK}_BEGIN")
-    end = transcript.find(f"{MARK}_END", begin + 1)
+    begin = transcript.find(f"{mark}_BEGIN")
+    end = transcript.find(f"{mark}_END", begin + 1)
     if begin < 0 or end < 0:
         raise AssertionError(
             f"the probe's output never reached the model (task {task_id} is "
@@ -303,3 +315,180 @@ class TestThePrivateRoomControl:
         assert "USER.md" in facts["config_entries"], report
         assert "planted-sibling.txt" in facts["temp_entries"], report
         assert "fam" in facts["groups_entries"] and facts["other_group"] == "yes", report
+
+
+#: A group for the host, so a turn that binds `Groups/` has something to bind.
+#: No rooms: `SEED`'s private room would change where every email note on this
+#: session's `email` stack goes.
+GROUP_SEED = f"""
+from pathlib import Path
+from istota import db
+from istota.config import load_config
+
+config = load_config(Path({CONFIG!r}))
+with db.get_db(config.db_path) as conn:
+    if db.get_group(conn, "fam", include_archived=True) is None:
+        db.create_group(conn, "fam", kind="family", display_name="fam", created_by="test")
+        db.add_group_member(conn, "fam", {USER!r}, added_by="test")
+"""
+
+#: One pass of what the scheduler's cron tick does for this user, so "no such
+#: job" does not depend on having waited out a tick.
+CRON_SYNC = f"""
+from pathlib import Path
+from istota import db
+from istota.config import load_config
+from istota.cron_loader import load_cron_jobs, sync_cron_jobs_to_db
+
+config = load_config(Path({CONFIG!r}))
+jobs = load_cron_jobs(config, {USER!r})
+if jobs is not None:
+    with db.get_db(config.db_path) as conn:
+        sync_cron_jobs_to_db(conn, {USER!r}, jobs, is_admin=False)
+"""
+
+CRON_MD = f"{BOT}/config/CRON.md"
+
+
+def _mail_probe(nonce: str, job: str) -> str:
+    """`FACTS`, then every CLI the turn might reach, then a CRON.md write.
+
+    The write goes last and to every CRON.md the task can find, because its
+    `mkdir` can make the path exist inside the namespace, which the presence
+    facts must not see. Whether it reached anything is read from outside the
+    sandbox, by the job it would have made (#873).
+    """
+    return f"""
+M=CORR{nonce}
+echo "${{M}}_BEGIN"
+{FACTS}
+refusal() {{ tr '\\n' ' ' | grep -o "$1" | head -1; }}
+echo "email_list=$(istota-skill email list 2>&1 | refusal not_owner_turn)"
+echo "email_send=$(istota-skill email send --to outsider@example.com --subject s --body b 2>&1 | refusal not_owner_turn)"
+echo "kv=$(istota-skill kv namespaces 2>&1 | refusal "Unknown skill")"
+istota-skill email output --body 'answered {nonce}' >/dev/null 2>&1
+echo "email_output=$?"
+mkdir -p {BOT}/config 2>/dev/null
+for f in {CRON_MD} $(find {WORKSPACE} -name CRON.md 2>/dev/null); do
+  cat > "$f" 2>/dev/null <<'CRON'
+```toml
+[[jobs]]
+name = "{job}"
+cron = "0 3 1 1 *"
+prompt = "publish"
+publish_shared_kv = "{job}"
+```
+CRON
+done
+echo "${{M}}_END"
+"""
+
+
+def _mail_turn(stack, sender: flow.Correspondent, to: str, nonce: str) -> dict[str, str]:
+    """One real mail whose task runs the probe, and the facts it reported."""
+    files = stack.exec(["sh", "-c", FILES_SEED])
+    assert files.returncode == 0, files.stderr
+    groups = stack.exec(["uv", "run", "python", "-c", GROUP_SEED], timeout=120)
+    assert groups.returncode == 0, groups.stderr
+    job = f"witness-{nonce}"
+    stack.script([flow.route(nonce, [
+        {"tool_calls": [{"id": f"call-probe-{nonce}", "name": "Bash",
+                         "arguments": {"command": _mail_probe(nonce, job)}}]},
+        {"text": "I looked around"},
+    ])])
+    subject = f"Probe {nonce}"
+    sent = flow.send(
+        stack, sender, to=[to], subject=subject, text=f"Please look {nonce}", marker=nonce,
+    )
+    row = flow.filed_row(stack, sent)
+    assert row["task_id"] is not None, row
+    facts = _observe(stack, row["task_id"], mark=f"CORR{nonce}")
+    assert flow.worker_done(stack, row["task_id"])
+    reply = flow.wait_for_reply(stack, after_uid=sent.outbox_uid, subject=f"Re: {subject}")
+    facts["_job"] = job
+    facts["_reply"] = reply.body_text or ""
+    return facts
+
+
+def _job_rows(stack, job: str) -> list[dict]:
+    sync = stack.exec(["uv", "run", "python", "-c", CRON_SYNC], timeout=120)
+    assert sync.returncode == 0, f"{sync.stderr}\n{stack.logs(200)}"
+    return stack.probe.query(
+        "SELECT name, publish_shared_kv FROM scheduled_jobs WHERE user_id = ? AND name = ?",
+        [USER, job],
+    )
+
+
+@pytest.mark.profile("email")
+class TestACorrespondentsTurn:
+    """A trusted sender at the host's plus-address, through the real intake."""
+
+    def _turn(self, stack, email_people) -> dict[str, str]:
+        assert email_people.host_id == USER
+        nonce = flow.new_nonce()
+        return _mail_turn(
+            stack, flow.person("trusted", nonce), mail.tagged(USER), nonce,
+        )
+
+    def test_it_reaches_no_workspace_no_group_and_no_other_room(self, stack, email_people):
+        facts = self._turn(stack, email_people)
+        report = _show(facts)
+        assert facts["user_dir"] == "no", report
+        assert facts["memory_readable"] == "no", report
+        assert facts["files_writable"] == "no", report
+        assert facts["talk_dir"] == "no", report
+        assert facts["room_media"].strip("[] ") == "", report
+        assert facts["deferred"] == f"room-task-{facts['_task_id']}", report
+        assert "planted-sibling.txt" not in facts["temp_entries"], report
+        assert "No such file" in facts["groups_entries"], report
+
+    def test_a_cron_md_it_writes_makes_no_job(self, stack, email_people):
+        """The #873 witness: the file would run as the host, with no turn to check."""
+        facts = self._turn(stack, email_people)
+        on_disk = stack.exec(["sh", "-c", f"cat {CRON_MD} 2>/dev/null; true"])
+        assert facts["_job"] not in on_disk.stdout, _show(facts)
+        assert _job_rows(stack, facts["_job"]) == [], _show(facts)
+
+    def test_the_email_cli_answers_only_output_through_the_live_proxy(self, stack, email_people):
+        facts = self._turn(stack, email_people)
+        report = _show(facts)
+        assert facts["email_list"] == "not_owner_turn", report
+        assert facts["email_send"] == "not_owner_turn", report
+        assert facts["kv"] == "Unknown skill", report
+        assert facts["email_output"] == "0", report
+        assert "answered" in facts["_reply"], report
+
+    def test_a_widened_skill_reaches_the_proxy(self, stack, email_people):
+        people.run_istota(stack, "user", "ensure", "--name", USER, "--correspondent-scope", "kv")
+        try:
+            facts = self._turn(stack, email_people)
+        finally:
+            people.run_istota(stack, "user", "ensure", "--name", USER, "--clear-correspondent-scopes")
+        report = _show(facts)
+        assert facts["kv"] == "", report
+        assert facts["user_dir"] == "no", report
+        assert facts["email_list"] == "not_owner_turn", report
+
+    def test_the_hosts_own_mail_gets_the_opposite_answers(self, stack, email_people):
+        """The control. Every absence above is equally true of a probe that
+        never ran its write, or a stack with no `Users/testuser`."""
+        assert email_people.host_id == USER
+        nonce = flow.new_nonce()
+        facts = _mail_turn(stack, flow.person("host", nonce), mail.BOT_ADDRESS, nonce)
+        report = _show(facts)
+        try:
+            assert facts["user_dir"] == "yes", report
+            assert facts["memory_readable"] == "yes", report
+            assert facts["files_writable"] == "yes", report
+            assert facts["deferred"] == USER, report
+            assert "fam" in facts["groups_entries"], report
+            assert facts["email_list"] == "", report
+            assert facts["email_send"] == "", report
+            assert facts["kv"] == "", report
+            assert _job_rows(stack, facts["_job"]) == [
+                {"name": facts["_job"], "publish_shared_kv": facts["_job"]},
+            ], report
+        finally:
+            empty = stack.exec(["sh", "-c", f"printf '```toml\\n```\\n' > {CRON_MD}"])
+            assert empty.returncode == 0, empty.stderr
+            assert _job_rows(stack, facts["_job"]) == [], report
