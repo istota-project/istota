@@ -17,6 +17,10 @@ describe('presentationFor', () => {
     expect(presentationFor(name)).toEqual({ kind: 'table', delimiter });
   });
 
+  it.each(['html', 'htm', 'HTML'])('renders %s as a sandboxed document', (ext) => {
+    expect(presentationFor(`page.${ext}`)).toEqual({ kind: 'html' });
+  });
+
   it.each([
     ['py', 'python'],
     ['ts', 'typescript'],
@@ -27,8 +31,6 @@ describe('presentationFor', () => {
     ['yml', 'yaml'],
     ['sh', 'bash'],
     ['css', 'css'],
-    ['html', 'xml'],
-    ['htm', 'xml'],
     ['svg', 'xml'],
     ['xml', 'xml'],
     ['sql', 'sql'],

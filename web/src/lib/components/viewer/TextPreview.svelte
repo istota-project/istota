@@ -10,6 +10,7 @@
     HIGHLIGHT_MAX_CHARS,
   } from '$lib/fileViewer/presentation';
   import { csvRecords } from '$lib/fileViewer/csv';
+  import { HTML_FRAME_SANDBOX, frameDocument, sandboxedDocument } from '$lib/fileViewer/html';
   import CsvTable from './CsvTable.svelte';
 
   let {
@@ -18,22 +19,55 @@
     source = false,
     fill = false,
     untrusted = false,
+    path,
+    assetUrl,
   }: {
     name: string;
     text: string;
-    /** Show a Markdown document or a table as its readonly source. The caller owns the toggle. */
+    /** Show a Markdown document, a table or an HTML page as its source. The caller owns the toggle. */
     source?: boolean;
     fill?: boolean;
     untrusted?: boolean;
+    /** The file's own path, which an HTML page's relative images and stylesheets resolve against. */
+    path?: string;
+    /** The URL a resolved path is fetched from; without it nothing relative is fetched. */
+    assetUrl?: (path: string) => string;
   } = $props();
   let presentation = $derived(presentationFor(name));
   let split = $derived(splitFrontmatter(text));
-  let language = $derived(presentation.kind === 'code' ? presentation.language : null);
+  let language = $derived(
+    presentation.kind === 'code'
+      ? presentation.language
+      : presentation.kind === 'html' && source
+        ? 'xml'
+        : null,
+  );
   let highlighted = $derived(
     language && text.length <= HIGHLIGHT_MAX_CHARS
       ? hljs.highlight(text, { language, ignoreIllegals: true }).value
       : null,
   );
+  let framed = $state<string | null>(null);
+  $effect(() => {
+    if (presentation.kind !== 'html' || source) return;
+    const page = text;
+    if (!path || !assetUrl) {
+      framed = sandboxedDocument(page);
+      return;
+    }
+    const controller = new AbortController();
+    let active = true;
+    framed = null;
+    frameDocument(page, path, assetUrl, controller.signal)
+      .catch(() => sandboxedDocument(page))
+      .then((document) => {
+        if (active) framed = document;
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  });
   let table = $derived(
     presentation.kind === 'table' && !source ? csvRecords(text, presentation.delimiter) : null,
   );
@@ -51,6 +85,14 @@
           {@html (untrusted ? renderUntrustedDocument : renderDocument)(split.body)}
         </div>
       </article>
+    {:else if presentation.kind === 'html' && !source}
+      {#if framed !== null}<iframe
+          class="html-frame"
+          title={name}
+          sandbox={HTML_FRAME_SANDBOX}
+          referrerpolicy="no-referrer"
+          srcdoc={framed}
+        ></iframe>{/if}
     {:else if table}
       {#key table}<CsvTable {name} records={table} />{/key}
     {:else if highlighted !== null}
@@ -102,6 +144,21 @@
     .fill .document {
       padding: var(--space-4) var(--space-3) var(--space-6);
     }
+  }
+  /* The page brings its own colours or none, and a page with none is
+     written for a white sheet, whatever the app's theme. */
+  .html-frame {
+    display: block;
+    width: 100%;
+    height: 60vh;
+    border: 0;
+    background: white;
+    color-scheme: light;
+  }
+  .fill .html-frame {
+    flex: 1;
+    height: auto;
+    min-height: 0;
   }
   .fill :global(textarea) {
     flex: 1;

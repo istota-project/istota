@@ -42,7 +42,7 @@
     direct?.name ?? preview?.name ?? (path.split('/').pop() || share?.name) ?? 'File',
   );
   let rendersView = $derived(
-    preview?.kind === 'text' && ['markdown', 'table'].includes(presentationFor(name).kind),
+    preview?.kind === 'text' && ['markdown', 'table', 'html'].includes(presentationFor(name).kind),
   );
   // The year only when it is not this one (at every width), so a phone keeps size and time on one line.
   function shortModified(iso: string): DateFormatOptions {
@@ -201,6 +201,8 @@
           {name}
           text={preview.text ?? ''}
           {source}
+          {path}
+          assetUrl={fileUrl}
           fill
           untrusted={nextcloud || !!share}
         />

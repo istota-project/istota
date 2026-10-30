@@ -195,6 +195,31 @@ describe('workspace file viewer through the host', () => {
     expect(screen.getByRole('heading', { name: 'Hello' })).toBeTruthy();
     expect(screen.queryByRole('textbox')).toBeNull();
   });
+  it('renders an HTML page in a sandboxed frame, with its source a toggle away', async () => {
+    preview.mockResolvedValue(text('page.html', '<h1>Hello</h1><script>alert(1)</script>'));
+    open('/page.html');
+    await screen.findByRole('group', { name: 'Document view' });
+    await waitFor(() => expect(document.querySelector('iframe[title="page.html"]')).not.toBeNull());
+    expect(document.querySelector('script, h1')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Source' }));
+    expect(document.querySelector('iframe')).toBeNull();
+    expect(document.querySelector('pre code.hljs')).toHaveTextContent('<h1>Hello</h1><script>');
+    expect(document.querySelector('script')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Rendered' }));
+    await waitFor(() => expect(document.querySelector('iframe[title="page.html"]')).not.toBeNull());
+  });
+  it("fetches an HTML page's relative image from the viewer's own file endpoint", async () => {
+    const fetchMock = vi.fn(async () => new Response('', { status: 404 }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      preview.mockResolvedValue(text('r.html', '<img src="../img/a.png">'));
+      open('/docs/r.html');
+      await waitFor(() => expect(document.querySelector('iframe')).not.toBeNull());
+      expect(fetchMock).toHaveBeenCalledWith(chatFileUrl('/img/a.png'), expect.anything());
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it('renders a CSV as a table, with its source a toggle away', async () => {
     const body = 'name,note\nAda,"likes <b>, commas"\n';
     preview.mockResolvedValue(text('data.csv', body));
@@ -310,12 +335,6 @@ describe('workspace file viewer through the host', () => {
     expect(document.querySelector('.ui-viewer-metadata .metadata-verb')).toHaveTextContent(
       'modified',
     );
-  });
-  it('shows HTML as escaped source', async () => {
-    preview.mockResolvedValue(text('note.html', '<script>alert(1)</script>'));
-    open('/note.html');
-    await waitFor(() => expect(document.querySelector('pre')?.textContent).toContain('<script>'));
-    expect(document.querySelector('script')).toBeNull();
   });
   it('keeps binary download available', async () => {
     preview.mockResolvedValue({ ...text(), kind: 'binary', text: undefined });

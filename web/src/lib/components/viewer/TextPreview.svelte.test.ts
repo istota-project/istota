@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 vi.mock('$app/paths', () => ({ base: '/istota', assets: '' }));
 import TextPreview from './TextPreview.svelte';
 import { HIGHLIGHT_MAX_CHARS } from '$lib/fileViewer/presentation';
+import { HTML_FRAME_SANDBOX, sandboxedDocument } from '$lib/fileViewer/html';
 import { viewer } from '$lib/fileViewer/store.svelte';
 import { VIEWPORT_DEFAULT, VIEWPORT_NO_ZOOM } from '$lib/zoomPin';
 
@@ -56,12 +57,61 @@ describe('shared text preview', () => {
     }
   });
 
-  it.each(['html', 'svg'])('shows %s as highlighted source, never live markup', (extension) => {
+  it('shows svg as highlighted source, never live markup', () => {
     const text = '<svg onload="alert(1)"><script>alert(1)</script></svg>';
-    const { container } = render(TextPreview, { name: `file.${extension}`, text });
+    const { container } = render(TextPreview, { name: 'file.svg', text });
     expect(container.querySelector('pre code')).toHaveTextContent(text);
     expect(container.querySelector('svg, script, iframe, object, embed')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Rendered' })).toBeNull();
+  });
+
+  it('renders html only inside a scriptless sandboxed frame, or as source when asked', async () => {
+    const text = '<p onclick="alert(1)">Hi</p><script>alert(1)</script>';
+    const { container, rerender } = render(TextPreview, { name: 'page.html', text });
+    const frame = await vi.waitFor(() => {
+      const frame = container.querySelector('iframe');
+      if (!frame) throw new Error('no frame yet');
+      return frame;
+    });
+    expect(frame.getAttribute('sandbox')).toBe(HTML_FRAME_SANDBOX);
+    expect(frame.getAttribute('sandbox')).not.toContain('allow-scripts');
+    expect(frame.getAttribute('srcdoc')).toBe(sandboxedDocument(text));
+    expect(frame).toHaveAttribute('title', 'page.html');
+    expect(frame).toHaveAttribute('referrerpolicy', 'no-referrer');
+    expect(container.querySelector('script, p')).toBeNull();
+    await rerender({ source: true });
+    expect(container.querySelector('iframe')).toBeNull();
+    expect(container.querySelector('pre code.hljs')).toHaveTextContent(text);
+  });
+
+  it("inlines a page's relative image through the caller's file URL", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), {
+          headers: { 'Content-Type': 'image/png' },
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const { container } = render(TextPreview, {
+        name: 'r.html',
+        text: '<img src="img/a.png">',
+        path: '/docs/r.html',
+        assetUrl: (path: string) => `/files?path=${encodeURIComponent(path)}`,
+      });
+      const frame = await vi.waitFor(() => {
+        const frame = container.querySelector('iframe');
+        if (!frame) throw new Error('no frame yet');
+        return frame;
+      });
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/files?path=%2Fdocs%2Fimg%2Fa.png',
+        expect.anything(),
+      );
+      expect(frame.getAttribute('srcdoc')).toContain('src="data:image/png;base64,iVBORw=="');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('highlights code up to the limit and uses readonly text above it', async () => {

@@ -3,6 +3,7 @@ import hljs from 'highlight.js/lib/common';
 export type Presentation =
   | { kind: 'markdown' }
   | { kind: 'table'; delimiter: ',' | '\t' }
+  | { kind: 'html' }
   | { kind: 'code'; language: string }
   | { kind: 'plain' };
 
@@ -18,8 +19,6 @@ const LANGUAGES: Record<string, string> = {
   yml: 'yaml',
   sh: 'bash',
   css: 'css',
-  html: 'xml',
-  htm: 'xml',
   svg: 'xml',
   xml: 'xml',
   sql: 'sql',
@@ -36,6 +35,7 @@ export function presentationFor(name: string): Presentation {
   if (['md', 'markdown', 'mdown'].includes(ext)) return { kind: 'markdown' };
   if (ext === 'csv') return { kind: 'table', delimiter: ',' };
   if (ext === 'tsv') return { kind: 'table', delimiter: '\t' };
+  if (ext === 'html' || ext === 'htm') return { kind: 'html' };
   const language = Object.hasOwn(LANGUAGES, ext) ? LANGUAGES[ext] : undefined;
   if (language && hljs.getLanguage(language)) return { kind: 'code', language };
   return { kind: 'plain' };
