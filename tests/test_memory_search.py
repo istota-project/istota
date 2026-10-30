@@ -961,6 +961,68 @@ class TestReindexAll:
         conn.close()
 
 
+class TestOnlyTheUsersOwnTurnsAreReindexed:
+    @staticmethod
+    def _turns(conn):
+        """The user's own task and mail, and one task each by somebody else."""
+        from istota import db
+
+        def _completed(prompt, **columns):
+            task_id = db.create_task(conn, prompt=prompt, user_id="alice", **columns)
+            db.update_task_status(conn, task_id, "completed", result="the answer")
+            return task_id
+
+        own = _completed("own talk turn", source_type="talk", conversation_token="r1")
+        own_mail = _completed("own mail turn", source_type="email")
+        db.mark_email_processed(conn, "uid-own", "alice@example.com", user_id="alice",
+                                task_id=own_mail, routing_method="sender_match")
+        labelled = _completed("labelled turn", source_type="email", conversation_token="r2")
+        db.add_message(conn, "r2", role="user", body="b", origin_surface="email",
+                       task_id=labelled, author_label="carol@example.com")
+        roomless = _completed("roomless turn", source_type="email")
+        db.mark_email_processed(conn, "uid-stranger", "carol@example.com", user_id="alice",
+                                task_id=roomless, routing_method="plus_address")
+        guest = _completed("guest turn", source_type="talk", conversation_token="r3")
+        conn.execute("UPDATE tasks SET guest_participant_id = 1 WHERE id = ?", (guest,))
+        conn.commit()
+        return {"own": own, "labelled": labelled, "guest": guest}
+
+    def test_a_correspondents_and_a_guests_text_stay_out(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        self._turns(conn)
+        config = MagicMock()
+        config.workspace_path = None
+
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            stats = reindex_all(conn, config, "alice", lookback_days=1)
+
+        blob = "\n".join(
+            r["content"] for r in conn.execute("SELECT content FROM memory_chunks").fetchall()
+        )
+        assert "own talk turn" in blob and "own mail turn" in blob
+        assert stats["conversations"] == 2
+        for text in ("labelled turn", "roomless turn", "guest turn"):
+            assert text not in blob
+        conn.close()
+
+    def test_the_index_verb_refuses_somebody_elses_turn(self, tmp_path, monkeypatch):
+        from istota.skills.memory_search import cmd_index_conversation
+
+        conn = _init_db(tmp_path / "test.db")
+        ids = self._turns(conn)
+        conn.close()
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(tmp_path / "test.db"))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            for name in ("labelled", "guest"):
+                out = cmd_index_conversation(SimpleNamespace(task_id=ids[name]))
+                assert out["reason"] == "not_owner_turn"
+            out = cmd_index_conversation(SimpleNamespace(task_id=ids["own"]))
+
+        assert out["status"] == "ok" and out["chunks_inserted"] > 0
+
+
 class TestIncludeUserIds:
     """Tests for multi-user search support (include_user_ids parameter)."""
 

@@ -503,17 +503,33 @@ class TestSleepCycleAttribution:
 
         assert speaker_labels(conn, config, [task]) == {}
 
-    def test_day_data_renders_the_external_label(self, conn):
+    def test_a_correspondents_roomless_mail_is_not_in_the_day_data(self, conn):
+        """It is not the user's to learn from, labelled or not. Their own mail
+        beside it still is."""
         from istota.memory.sleep_cycle import gather_day_data
+
+        config = self._config(conn.execute(
+            "PRAGMA database_list").fetchone()["file"])
+        theirs = _completed_task(conn, prompt="from the stranger", result="a", token=None)
+        _record_email(conn, theirs, STRANGER, routing_method="plus_address")
+        own = _completed_task(conn, prompt="from the user", result="a", token=None)
+        _record_email(conn, own, "alice@example.com", routing_method="sender_match")
+
+        day_data = gather_day_data(config, conn, "alice", 24, None)
+        assert "from the stranger" not in day_data
+        assert "User: from the user" in day_data
+
+    def test_channel_data_renders_the_external_label(self, conn):
+        from istota.memory.sleep_cycle import gather_channel_data
 
         config = self._config(conn.execute(
             "PRAGMA database_list").fetchone()["file"])
         tid = _completed_task(conn, prompt="do the thing", result="a")
         _record_email(conn, tid, STRANGER)
 
-        day_data = gather_day_data(config, conn, "alice", 24, None)
-        assert f"External sender <{STRANGER}>: do the thing" in day_data
-        assert "User: do the thing" not in day_data
+        data = gather_channel_data(config, conn, "room1", 24, None)
+        assert f"External sender <{STRANGER}>: do the thing" in data
+        assert "User: do the thing" not in data
 
 
 class TestMemoryIndexAttribution:

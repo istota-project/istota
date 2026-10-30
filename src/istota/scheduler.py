@@ -4536,23 +4536,31 @@ def _process_one_task(
                     and task.source_type not in NO_DELIVERY_SOURCE_TYPES
                 ):
                     try:
+                        from .mail.support import own_addresses
                         from .memory.sleep_cycle import speaker_labels
+                        from .rooms.scopes import turn_author
                         # An indexed chunk is recalled back into a later prompt,
                         # so it must not label an external contact's mail as the
                         # user's own words (ISSUE-226).
                         _speaker = speaker_labels(conn, config, [task]).get(
                             task_id, "User",
                         )
-                        # A guest's turn is the host's by authority only,
-                        # never by memory (multiplayer D2): nothing a guest
-                        # wrote is recalled back into the host's own tasks.
+                        # A guest's or a correspondent's turn is the host's by
+                        # authority only, never by memory (multiplayer D2):
+                        # nothing they wrote is recalled back into the host's
+                        # own private tasks. A correspondent's text stays in
+                        # the thread room's namespace, for the host's later
+                        # turns there; their own later turns recall nothing.
+                        _author = turn_author(
+                            conn, task,
+                            own_addresses=own_addresses(config, task.user_id),
+                        )
                         _indexed_body = normalized["body"] if briefing_document else result
-                        if task.guest_participant_id is None:
+                        if _author == "own":
                             conversations_to_index.append(
                                 (task.user_id, _indexed_body, _speaker))
                         # Also index under channel namespace if in a channel.
-                        if (task.conversation_token
-                                and task.guest_participant_id is None):
+                        if task.conversation_token and _author != "guest":
                             channel_uid = f"channel:{task.conversation_token}"
                             conversations_to_index.append(
                                 (channel_uid, _indexed_body, _speaker))

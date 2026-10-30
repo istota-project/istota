@@ -4137,7 +4137,7 @@ def harness_web_fetch_policy(config: Config, allowed_tools: list[str]):
     """`HarnessSpec.web_fetch`: the daemon-side WebFetch's policy, or None.
 
     None when the grant leaves `WebFetch` out (`build_allowed_tools` drops it
-    for a non-admin under `admin_only`, and a guest turn's grant has none) or
+    for a non-admin under `admin_only`, and a turn with no web tools has none) or
     the tool is disabled. This widens a CLI task's egress on purpose: the
     CLI's own WebFetch ran inside the CONNECT allowlist, this one reaches any
     public host under the SSRF rules, as a native task's always has.
@@ -4671,8 +4671,10 @@ def build_allowed_tools(
     if emissary:
         # A guest's turn takes no outbound action beyond its reply (multiplayer
         # D2), and a query or a URL is one: the host's notes about the room may be in
-        # its prompt. Native builds only what this list names; a CLI brain keeps
-        # its own web tools behind `--unshare-net` and the CONNECT allowlist.
+        # its prompt. A correspondent's turn is the same unless the user allowed
+        # `web` (`Reach.web_tools_load`): USER.md is in its prompt. Native builds
+        # only what this list names, and the tool harness's `--tools` and
+        # `istota_web` follow it.
         return tools
     tools.append("WebSearch")
     if is_admin or not web_fetch_admin_only:
@@ -7866,7 +7868,8 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 
     # Browser tool line (only when enabled)
     browser_tool = ""
-    if config.browser.enabled:
+    browser_reachable = config.browser.enabled and "browse" not in (withheld_scopes or ())
+    if browser_reachable:
         browser_tool = "\n- Web browser for JS-rendered pages: istota-skill browse (see browse skill for details)"
 
     # Web tools line. WebSearch is always allowed; WebFetch goes to everyone
@@ -7913,7 +7916,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
         "it does not fetch page content."
     )
     no_harness_fetch = harness_denies_web_fetch(task, config)
-    if config.browser.enabled:
+    if browser_reachable:
         read_line = (
             "\n- Reading web pages: prefer the browse skill (istota-skill browse) — "
             "it renders JavaScript and follows links."
@@ -7946,6 +7949,12 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
         web_tools = (
             "\n- Web: do not search or fetch in this turn. You are answering a "
             "guest, and your reply is the only action you take."
+        )
+    elif reach is not None and not reach.web_tools_load:
+        web_tools = (
+            "\n- Web: you have no search or fetch tool on this turn. Say that "
+            "plainly if you are asked for something from the web, rather than "
+            "guessing at it."
         )
 
     # Bash runs with `pipefail` on (ISSUE-321), which the model has to be told
@@ -9415,7 +9424,7 @@ def execute_task(
             is_admin,
             selected_skills,
             web_fetch_admin_only=config.brain.native.web_fetch.admin_only,
-            emissary=task.guest_participant_id is not None,
+            emissary=not _reach.web_tools_load,
         )
 
         # Which attempt of this task is running, bound once and read twice: it

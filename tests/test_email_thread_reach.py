@@ -107,6 +107,7 @@ def _run(config, make_turn) -> dict:
         "system": open(req.composed_system_prompt_path).read(),
         "prompt": req.prompt,
         "vault": kwargs["vault_credentials"],
+        "allowed_tools": req.allowed_tools,
     }
 
 
@@ -274,6 +275,142 @@ class TestACorrespondentsTurn:
         seen = _run(config, lambda conn: _thread_turn(conn, attachments=[str(source)]))
         assert "room-attachments/note.pdf" in seen["prompt"]
         assert str(source) not in seen["prompt"]
+
+
+NO_WEB_LINE = "you have no search or fetch tool on this turn"
+
+
+class TestTheWebTools:
+    @staticmethod
+    def _allow_web(monkeypatch):
+        from istota.rooms import scopes
+
+        monkeypatch.setattr(
+            scopes, "correspondent_scopes",
+            lambda *a, **k: scopes.CorrespondentAllowance(
+                scopes=frozenset(scopes.CORRESPONDENT_DEFAULT_SCOPES), web=True,
+            ),
+        )
+
+    def test_a_correspondents_turn_has_none(self, config):
+        from istota.executor import harness_web_fetch_policy
+
+        for make_turn in (_thread_turn, _roomless_turn):
+            seen = _run(config, make_turn)
+            assert not {"WebSearch", "WebFetch"} & set(seen["allowed_tools"])
+            assert harness_web_fetch_policy(config, seen["allowed_tools"]) is None
+            assert NO_WEB_LINE in seen["system"]
+            assert "Web search: WebSearch" not in seen["system"]
+
+    def test_they_come_back_when_web_is_allowed(self, config, monkeypatch):
+        self._allow_web(monkeypatch)
+        seen = _run(config, _thread_turn)
+        assert {"WebSearch", "WebFetch"} <= set(seen["allowed_tools"])
+        assert "Web search: WebSearch" in seen["system"]
+        assert NO_WEB_LINE not in seen["system"]
+
+    def test_control_the_hosts_own_turn_has_them(self, config):
+        seen = _run(config, _own_thread_turn)
+        assert {"WebSearch", "WebFetch"} <= set(seen["allowed_tools"])
+        assert NO_WEB_LINE not in seen["system"]
+
+    def test_control_a_guests_line_is_its_own(self, config):
+        seen = _run(config, _talk_guest_turn)
+        assert not {"WebSearch", "WebFetch"} & set(seen["allowed_tools"])
+        assert "You are answering a guest" in seen["system"]
+        assert NO_WEB_LINE not in seen["system"]
+
+    def test_the_browser_is_not_named_where_browse_is_withheld(self, config, monkeypatch):
+        """Allowing `web` does not allow `browse`, so the read line points at
+        WebFetch rather than a skill the proxy would refuse."""
+        config.browser.enabled = True
+        self._allow_web(monkeypatch)
+        system = _run(config, _thread_turn)["system"]
+        assert "prefer the browse skill" not in system
+        assert "Web browser for JS-rendered pages" not in system
+        assert "WebFetch fetches a URL" in system
+
+    def test_control_the_hosts_own_turn_is_pointed_at_the_browser(self, config):
+        config.browser.enabled = True
+        system = _run(config, _own_thread_turn)["system"]
+        assert "prefer the browse skill" in system
+        assert "Web browser for JS-rendered pages" in system
+
+
+CHANNEL_SENTINEL = "alice-thread-channel-sentinel"
+
+
+def _with_channel_chunk(make_turn):
+    """A turn whose room already has this exchange in its namespace, under the
+    words the turn's prompt will search for."""
+    from istota.memory.search import index_conversation
+
+    def _turn(conn):
+        task_id = make_turn(conn)
+        token = db.get_task(conn, task_id).conversation_token
+        with patch("istota.memory.search.ensure_vec_table", return_value=False), \
+                patch("istota.memory.search.enable_vec_extension", return_value=False):
+            assert index_conversation(
+                conn, f"channel:{token}", task_id + 1000,
+                "what is on Thursday?", CHANNEL_SENTINEL,
+            ) > 0
+        return task_id
+    return _turn
+
+
+class TestNoRecallAtAll:
+    """Their text stays in the thread's namespace for the host, and a
+    correspondent's own later turns do not read it back: the mail would be the
+    query and the reply a way out."""
+
+    @pytest.fixture(autouse=True)
+    def _recall_on(self, config):
+        config.memory_search.enabled = True
+        config.memory_search.auto_recall = True
+
+    def test_a_correspondents_turn_recalls_nothing_from_the_room(self, config):
+        seen = _run(config, _with_channel_chunk(_thread_turn))
+        assert CHANNEL_SENTINEL not in seen["prompt"] + seen["system"]
+
+    def test_control_the_hosts_own_turn_there_recalls_it(self, config):
+        seen = _run(config, _with_channel_chunk(_own_thread_turn))
+        assert CHANNEL_SENTINEL in seen["prompt"] + seen["system"]
+
+
+class TestTheAutoIndex:
+    """Through `process_one_task` and the real index."""
+
+    @staticmethod
+    def _namespaces(config, make_turn) -> tuple[str | None, set[str]]:
+        from istota.config import MemorySearchConfig
+        from istota.scheduler import process_one_task
+
+        config.memory_search = MemorySearchConfig(enabled=True, auto_index_conversations=True)
+        with db.get_db(config.db_path) as conn:
+            task_id = make_turn(conn)
+            token = db.get_task(conn, task_id).conversation_token
+        with patch("istota.scheduler.execute_task", return_value=(True, "The answer.", None, None)), \
+                patch("istota.scheduler.post_result_to_email", return_value=True), \
+                patch("istota.scheduler.run_coro", return_value=True), \
+                patch("istota.memory.search.ensure_vec_table", return_value=False), \
+                patch("istota.memory.search.enable_vec_extension", return_value=False):
+            process_one_task(config)
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "completed"
+            rows = conn.execute("SELECT DISTINCT user_id FROM memory_chunks").fetchall()
+        return token, {row[0] for row in rows}
+
+    def test_a_correspondents_turn_is_in_the_channel_namespace_only(self, config):
+        token, namespaces = self._namespaces(config, _thread_turn)
+        assert namespaces == {f"channel:{token}"}
+
+    def test_a_roomless_correspondents_turn_is_nowhere(self, config):
+        _, namespaces = self._namespaces(config, _roomless_turn)
+        assert namespaces == set()
+
+    def test_control_the_hosts_own_turn_is_in_both(self, config):
+        token, namespaces = self._namespaces(config, _own_thread_turn)
+        assert namespaces == {"alice", f"channel:{token}"}
 
 
 class TestTheTurnAuthorReachesTheCli:

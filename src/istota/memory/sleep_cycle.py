@@ -15,6 +15,8 @@ from .. import db
 from ..brain import BrainRequest, make_brain
 from ..brain import primary_brain_unavailable, report_brain_result
 from ..config import Config
+from ..mail.support import own_addresses
+from ..rooms.scopes import turn_author
 from istota.usage.telemetry import SYSTEM_USER_ID
 from ..storage import (
     _contained_under_user_root,
@@ -577,6 +579,9 @@ def gather_day_data(
     # co-participant's fact does not make it theirs to keep; the channel sleep
     # cycle is that room's one writer.
     tasks = [t for t in tasks if not t.is_group_chat]
+    # Roomless mail somebody else wrote is theirs too, not the user's to learn from.
+    addresses = own_addresses(config, user_id)
+    tasks = [t for t in tasks if turn_author(conn, t, own_addresses=addresses) == "own"]
 
     if not tasks:
         return ""

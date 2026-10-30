@@ -32,8 +32,9 @@ later starts out of reach. The host's standing instructions, `USER.md` and
 per-skill overlays, still load although ``memory`` is withheld
 (`Reach.standing_memory_loads`), since they are fixed text the host wrote. The
 rest of their memory does not: the correspondent's mail would be the search
-query and the reply a way out. The reply itself goes through the unchanged
-outbound gate. The host's own tasks on a thread room withhold nothing.
+query and the reply a way out. The native web tools go too unless the user
+allowed `web` (`Reach.web_tools_load`). The reply itself goes through the
+unchanged outbound gate. The host's own tasks on a thread room withhold nothing.
 """
 
 from __future__ import annotations
@@ -88,6 +89,15 @@ class Reach:
     def standing_memory_loads(self) -> bool:
         """Whether `USER.md` and per-skill overlays may reach this task."""
         return "memory" not in self.withheld or self.author == "correspondent"
+
+    @property
+    def web_tools_load(self) -> bool:
+        """Whether the native web tools reach this task. A query or a URL is an
+        outbound action, which a guest's turn never takes and a correspondent's
+        takes only where the user allowed `web`."""
+        if self.author == "correspondent":
+            return self.allowance.web
+        return self.author != "guest"
 
 
 #: Research tasks run as `__briefings__` behind the executor's research gate:
