@@ -54,7 +54,7 @@ ways and no single variable covers all of them:
 |---|---|
 | `ISTOTA_SANDBOXED` | every task the model runs |
 | `DEVELOPER_REPOS_DIR` | a task additionally authorized for the developer skill |
-| `PRECOMMIT_SCANS_REQUIRED=1` | cron `command` jobs and heartbeat shell commands, via `build_stripped_env` — they carry neither of the above |
+| `PRECOMMIT_SCANS_REQUIRED=1` | cron `command` jobs and heartbeat shell commands, via `sandbox.confined_command` — on an unsandboxed shape they carry neither of the above |
 
 `PRECOMMIT_SCANS_REQUIRED` is also the manual override, in both directions:
 `1`/`true`/`yes`/`on` demands the scans, `0`/`false`/`no`/`off` releases them.

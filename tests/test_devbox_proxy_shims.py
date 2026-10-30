@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -188,6 +189,27 @@ class TestGitCredentialHelper:
         )
         assert result.returncode == 0
         assert "password=" not in result.stdout
+
+    def test_an_ungranted_devbox_is_told_which_setting_to_ask_for(self, sock_path, daemon_factory):
+        ctx = replace(_ctx(github_token="", gitlab_token=""), forge_granted=False)
+        daemon_factory(ctx)
+        result = _run_script(
+            "git-credential-istota", ["get"],
+            sock_path=sock_path, stdin="protocol=https\nhost=github.com\n",
+        )
+        assert result.returncode == 0
+        assert result.stdout == ""
+        assert "[devbox] forge_users" in result.stderr
+
+    def test_an_ungranted_devbox_says_nothing_about_another_host(self, sock_path, daemon_factory):
+        ctx = replace(_ctx(github_token="", gitlab_token=""), forge_granted=False)
+        daemon_factory(ctx)
+        result = _run_script(
+            "git-credential-istota", ["get"],
+            sock_path=sock_path, stdin="protocol=https\nhost=bitbucket.org\n",
+        )
+        assert result.returncode == 0
+        assert result.stderr == ""
 
     def test_store_is_quiet_noop(self, sock_path, daemon_factory):
         daemon_factory(_ctx())

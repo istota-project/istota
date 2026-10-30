@@ -38,7 +38,7 @@ awk '{print $3, $4}' /srv/app/istota/allowed_signers | ssh-keygen -lf -
 
 Every task starts from a minimal environment built by `build_clean_env()`: only PATH, HOME, PYTHONUNBUFFERED, and configured passthrough vars (`LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`). Task-specific variables (Nextcloud credentials, CalDAV, email, etc.) are added per-task. No task env carries the `claude` CLI's credential; see [The model's tools and the CLI's credential](#the-models-tools-and-the-clis-credential).
 
-For heartbeat/cron shell commands, `build_stripped_env()` removes all credential-pattern vars (PASSWORD, TOKEN, SECRET, API_KEY, etc.) from the environment.
+Heartbeat and cron shell commands run in the task sandbox with the same environment split as a task, since the bot can edit both files.
 
 ## Filesystem sandbox (bubblewrap)
 
@@ -193,6 +193,8 @@ A deployment may run project code — `npm`, `uv`, `cargo`, a test suite — ins
 **What replaces it is gated, and that is the difference that matters.** Commands reach the container over a Unix socket into a server running inside it. That socket's directory is bound into a task's sandbox only when `"developer" in authorized_skills` — byte for byte the predicate that already decides whether the task's CONNECT allowlist gets the package registries and the forge. An allowlist is safe to hand every task; an unauthenticated arbitrary-command channel into a container with permissive egress is not, because it would be a route around the per-task, skill-scoped network allowlist described below.
 
 **What does not improve, stated plainly.** What the model may do *inside* the devbox is not narrowed by any of this. `dev` has passwordless sudo, so a task with access was already root in that container, and the transport widens the degree: no output cap, no timeout of its own, stdin, and a real exit status. One axis narrows — a working directory the caller names must resolve under that user's repos root, where `docker exec -w` took any path in the container.
+
+**Forge credentials stay out of a devbox by default.** The credential socket in a devbox returns the raw forge token, and any process in the box can ask it. So it has no token to give unless `[devbox] forge_users` names the user. The tokens are the operator's and shared by every user, so for a listed user the token's own scope is the only limit on what code in that box can do with it. A task's own `git`, `gh` and `glab` run in the sandbox and do not use this socket.
 
 **Every containment decision is made inside the container**, by the server, at the moment of use. A file path is resolved with `realpath` and refused unless the result is under an explicit root list: that user's repos root, `/home/dev`, and the staging directory. A caller-named working directory is narrower still, and must resolve under the repos root. The credential and transport socket directories are refused by their literal default paths as well, `/run/istota-cred` and `/run/istota-exec` — a deployment that repoints either keeps the root-list refusal and loses the named one. This replaces four daemon-side mechanisms that each encoded a guess about what the container's mount table looked like, which is what the two file-copy defects before it were. A process inside the container sees what the container sees.
 

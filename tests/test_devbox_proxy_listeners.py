@@ -23,10 +23,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from istota.config import DevboxConfig, load_config
 from istota.devbox import proxy
 
 
-def _config(sock_dir: Path, users: list[str], **developer) -> SimpleNamespace:
+def _config(
+    sock_dir: Path, users: list[str], *, forge_users: list[str] | None = None, **developer,
+) -> SimpleNamespace:
     return SimpleNamespace(
         developer=SimpleNamespace(
             devbox_proxy_enabled=True,
@@ -37,7 +40,9 @@ def _config(sock_dir: Path, users: list[str], **developer) -> SimpleNamespace:
             github_url="https://github.com",
             gitlab_url="https://gitlab.com",
         ),
-        devbox=SimpleNamespace(enabled=True, users=list(users)),
+        devbox=SimpleNamespace(
+            enabled=True, users=list(users), forge_users=list(forge_users or []),
+        ),
     )
 
 
@@ -156,19 +161,57 @@ class TestOneListenerPerUser:
         finally:
             await proxy.stop_listeners(listeners)
 
-    async def test_the_forge_token_comes_from_the_users_listener(self, sock_dir):
+    async def test_a_devbox_gets_no_forge_credential_by_default(self, sock_dir):
+        """A hand-written socket request is what a build script would send (#887)."""
         listeners = await proxy.start_listeners(
-            _config(sock_dir, ["alice"], github_token="gh-alice")
+            _config(sock_dir, ["alice"], github_token="gh-operator", gitlab_token="gl-operator")
         )
+        sock = sock_dir / "alice" / "sock"
         try:
+            for provider in ("github", "gitlab"):
+                reply = await _ask(sock, {"action": "forge_token", "provider": provider})
+                assert reply["ok"] is False
+                assert reply["error"] == "forge_not_granted"
+                assert "forge_users" in reply["message"]
+                assert "token" not in reply
             reply = await _ask(
-                sock_dir / "alice" / "sock",
-                {"action": "forge_token", "provider": "github"},
+                sock,
+                {"action": "git_credential", "op": "get",
+                 "input": "protocol=https\nhost=github.com\n\n"},
             )
-            assert reply["ok"] is True
-            assert reply["token"] == "gh-alice"
+            assert reply["error"] == "forge_not_granted"
+            assert "gh-operator" not in json.dumps(reply)
+            ping = await _ask(sock, {"action": "ping"})
+            assert ping["providers"] == []
         finally:
             await proxy.stop_listeners(listeners)
+
+    async def test_forge_users_grants_only_the_user_it_names(self, sock_dir):
+        listeners = await proxy.start_listeners(
+            _config(sock_dir, ["alice", "bob"], forge_users=["alice"], github_token="gh-operator")
+        )
+        request = {"action": "forge_token", "provider": "github"}
+        try:
+            alice = await _ask(sock_dir / "alice" / "sock", request)
+            bob = await _ask(sock_dir / "bob" / "sock", request)
+            assert alice["ok"] is True
+            assert alice["token"] == "gh-operator"
+            assert bob["ok"] is False
+            assert "token" not in bob
+        finally:
+            await proxy.stop_listeners(listeners)
+
+    async def test_the_config_loader_reads_forge_users(self, sock_dir, tmp_path):
+        toml = tmp_path / "config.toml"
+        toml.write_text(
+            f'[developer]\ngithub_token = "gh-operator"\ndevbox_proxy_socket_dir = "{sock_dir}"\n'
+            '[devbox]\nenabled = true\nusers = ["alice", "bob"]\nforge_users = ["bob"]\n'
+        )
+        config = load_config(toml)
+        assert config.devbox.forge_users == ["bob"]
+        assert (await proxy.build_context("alice", config)).github_token == ""
+        assert (await proxy.build_context("bob", config)).github_token == "gh-operator"
+        assert DevboxConfig().forge_users == []
 
 
 class TestTheDaemonDecidesWhetherToRunThem:

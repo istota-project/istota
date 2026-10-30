@@ -120,7 +120,7 @@ from .consumers import (
 )
 from istota.maintenance.db_health import CheckReport, check_and_repair
 from .events import EventWriter, PROGRESS_MESSAGES
-from istota.sandbox.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, is_sigpipe_failure, shell_argv
+from istota.sandbox.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, is_sigpipe_failure
 from .skills.briefing import (
     get_briefings_for_user,
     parse_briefing_json,
@@ -163,7 +163,7 @@ from istota.notifications.store import (
 )
 from istota.notifications.delivery import effective_log_destinations, send_notification
 from istota.sandbox import process_group
-from istota.sandbox.process_group import kill_group_if_live
+from istota.sandbox.process_group import run_capture as _run_capture
 from istota.sandbox.host_paths import owner_path_parts, path_under_roots
 from .session.session_log import (
     SWEEP_STATE_KEY,
@@ -2587,56 +2587,6 @@ def _run_garmin_sync_inprocess(
     return (not res.auth_error), result_text
 
 
-def _run_capture(
-    cmd, *, timeout: float, cwd: str, env: dict,
-) -> subprocess.CompletedProcess:
-    """Run a subprocess capturing stdout/stderr, killing the whole process
-    *group* on timeout.
-
-    ``subprocess.run(timeout=…)`` only SIGKILLs the direct child, then calls
-    ``communicate()`` again to reap it — which blocks indefinitely when an
-    orphaned grandchild inherited the stdout/stderr pipe. A CRON ``command:``
-    that backgrounds a child (or a skill CLI that shells out) therefore wedges
-    its worker past the timeout, and because the per-task heartbeat thread keeps
-    pinging, the stuck-running reaper never reclaims it — the location-alert task
-    held its only background slot for 6+ hours that way. ``start_new_session``
-    puts the child in its own process group so the timeout can ``os.killpg`` the
-    whole tree, releasing the pipe. Re-raises ``TimeoutExpired`` so callers
-    handle the deadline exactly as before; otherwise returns a CompletedProcess
-    so call sites keep using ``.returncode`` / ``.stdout`` / ``.stderr``.
-    """
-    # Always an argv list, never `shell=True`. A caller wanting a shell builds
-    # one with `shell_exec.shell_argv`, which sets `pipefail`; reintroducing
-    # `shell=True` here would quietly reintroduce the status bug it fixes.
-    proc = subprocess.Popen(
-        cmd, cwd=cwd, env=env, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True,
-    )
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        # `start_new_session=True` above, so the child leads its own group and
-        # the shared helper takes the group path; the single-process fallback
-        # covers a group that is already gone.
-        #
-        # The helper's reaped guard is dead code *here* and must not be leaned
-        # on: `communicate(timeout=…)` raises from inside `_communicate`,
-        # before its trailing `wait()`, so `returncode` is still None. A
-        # `proc.poll()` added between the two — the natural thing to reach for
-        # when adding a log line — would set it and silently turn this kill
-        # into a no-op, orphaning the group. That is the ISSUE-257 shape.
-        kill_group_if_live(proc)
-        # The group is dead now, so this drains the pipes and reaps without
-        # blocking; bound it anyway so a pathological case can't hang the worker.
-        try:
-            proc.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            pass
-        raise
-    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
-
-
 def _skill_error_envelope(stdout: str | None) -> str | None:
     """The error a skill CLI reported in its stdout envelope, or None.
 
@@ -2834,7 +2784,7 @@ def _execute_skill_task(
 def _execute_command_task(
     task: db.Task, config: Config,
 ) -> tuple[bool, str]:
-    """Execute a shell command task via subprocess.
+    """Execute a shell command task in the task sandbox.
 
     Returns (success, result) — same interface as execute_task().
     """
@@ -2848,80 +2798,17 @@ def _execute_command_task(
 
     timeout = config.scheduler.task_timeout_minutes * 60
 
-    from .executor import build_stripped_env, get_user_temp_dir
-    from .skills._env import EnvContext, build_skill_env, dispatch_setup_env_hooks
-    from .skills._loader import load_skill_index
-    user_temp_dir = get_user_temp_dir(config, task.user_id)
-    user_temp_dir.mkdir(parents=True, exist_ok=True)
-
-    env = build_stripped_env()
-    env["ISTOTA_TASK_ID"] = str(task.id)
-    # See ``_execute_skill_task``: the attempt travels with the id (ISSUE-377).
-    env["ISTOTA_TASK_ATTEMPT"] = str(task.attempt_count + 1)
-    env["ISTOTA_USER_ID"] = task.user_id
-    # Both sibling paths (``_execute_skill_task``, ``executor.execute_task``)
-    # export this, and every skill CLI keys its deferred writes off it. Without
-    # it a CRON ``command:`` row invoking a skill CLI silently lost whatever
-    # the CLI had no direct-write fallback for — notably the email skill's
-    # ``sent_emails`` record, so a correspondent's reply had nothing to thread
-    # back against (ISSUE-233).
-    env["ISTOTA_DEFERRED_DIR"] = str(user_temp_dir)
-    env["ISTOTA_EXPERIMENTAL_FEATURES"] = ",".join(config.experimental.features)
-    # Propagate the config path so module skills (feeds, money) loading
-    # istota config from a fresh subprocess find the same file the daemon
-    # did — the subprocess cwd is `config.temp_dir`, which doesn't contain
-    # the relative `config/config.toml` candidate.
-    if config.config_path:
-        env["ISTOTA_CONFIG_PATH"] = str(config.config_path)
-    if config.db_path:
-        env["ISTOTA_DB_PATH"] = str(config.db_path)
-    if config.workspace_path:
-        env["ISTOTA_WORKSPACE_PATH"] = str(config.workspace_path)
-        env["NEXTCLOUD_MOUNT_PATH"] = str(config.workspace_path)
-    if task.conversation_token:
-        env["ISTOTA_CONVERSATION_TOKEN"] = task.conversation_token
-
-    # Resolve credential / connection env vars from skill manifests
-    # (NC_URL/USER/PASS, CALDAV_*, etc.) instead of hardcoding them.
-    # Same trusted resolution path the skill-task dispatcher uses; the
-    # operator's command may invoke any istota-skill CLI, so we expose
-    # the union over the full skill_index. CalDAV vars are gated on
-    # discovered calendars to mirror the LLM path.
-    with db.get_db(config.db_path) as conn:
-        user_resources = db.get_user_resources(conn, task.user_id)
-    skill_index = load_skill_index(config.skills_dir, config.bundled_skills_dir)
-    ctx = EnvContext(
-        config=config,
-        task=task,
-        user_resources=user_resources,
-        user_config=config.get_user(task.user_id),
-        user_temp_dir=user_temp_dir,
-        is_admin=config.is_admin(task.user_id),
-        discovered_calendars=discover_calendars_for_task(task, config),
-    )
-    for k, v in build_skill_env(list(skill_index), skill_index, ctx).items():
-        if k not in env:
-            env[k] = v
-    # Run setup_env hooks. Without this, declarative env specs marked
-    # ``from: "setup_env"`` (notably ``LOCATION_DB_PATH``, ``HEALTH_DB_PATH``)
-    # resolve to None in build_skill_env — operator-defined CRON.md
-    # command rows that shell out to skill CLIs needing those vars would
-    # fail silently. Mirrors the _execute_skill_task path. Hook values
-    # win over the daemon's ambient env because they are computed
-    # per-user; a stray LOCATION_DB_PATH inherited from systemd would
-    # point at the wrong user's DB.
-    env.update(dispatch_setup_env_hooks(list(skill_index), skill_index, ctx))
+    from .executor import ensure_task_control_dir
+    from .sandbox.confined_command import run_confined_command
     try:
-        # `shell_argv` rather than `shell=True`: the latter is `/bin/sh -c`,
-        # which on Debian is dash and starts with `pipefail` off, so a CRON
-        # `command:` row ending in a pipe reported its last stage. A job whose
-        # real work failed was recorded as healthy indefinitely — the inverse of
-        # what the five-consecutive-failure auto-disable exists to catch.
-        proc = _run_capture(
-            shell_argv(task.command),
+        # CRON.md is model-writable, so the row's command runs where a task's
+        # Bash call would (ISSUE-886). A failure to build that is a failed run,
+        # never a run outside it.
+        proc = run_confined_command(
+            config, task, task.command,
             timeout=timeout,
-            cwd=str(config.temp_dir),
-            env=env,
+            control_dir=ensure_task_control_dir(config, task.user_id, task.id),
+            discovered_calendars=discover_calendars_for_task(task, config),
         )
     except subprocess.TimeoutExpired:
         return False, f"Command timed out after {config.scheduler.task_timeout_minutes} minutes"

@@ -84,7 +84,10 @@ def _run_bwrap(config, task, is_admin, resources=None, user_temp=None,
         user_temp.mkdir(parents=True, exist_ok=True)
     if resources is None:
         resources = []
-    with _patch_linux():
+    with (
+        _patch_linux(),
+        patch("istota.executor._bwrap_fd_bind_binary", return_value="/usr/bin/bwrap"),
+    ):
         return build_bwrap_cmd(
             ["claude", "-p", "test"],
             config, task, is_admin, resources, user_temp,
@@ -244,8 +247,9 @@ class TestBuildBwrapCmdNonAdmin:
         )
         result = _run_bwrap(sandbox_config, task, False, resources=[resource])
         resolved = str(shared_path.resolve())
-        ro_pairs = _get_bind_pairs(result, "--ro-bind")
-        assert any(src == resolved for src, _ in ro_pairs)
+        pairs = _get_bind_pairs(result, "--ro-bind-fd")
+        assert any(dest == resolved for _, dest in pairs)
+        assert resolved not in [src for src, _ in _get_bind_pairs(result, "--ro-bind")]
 
     def test_resource_extra_mount_rw(self, sandbox_config, make_sandbox_task):
         task = make_sandbox_task()
@@ -259,8 +263,9 @@ class TestBuildBwrapCmdNonAdmin:
         )
         result = _run_bwrap(sandbox_config, task, False, resources=[resource])
         resolved = str(shared_path.resolve())
-        bind_pairs = _get_bind_pairs(result, "--bind")
-        assert any(src == resolved for src, _ in bind_pairs)
+        pairs = _get_bind_pairs(result, "--bind-fd")
+        assert any(dest == resolved for _, dest in pairs)
+        assert resolved not in [src for src, _ in _get_bind_pairs(result, "--bind")]
 
     def test_resource_inside_user_dir_not_duplicated(self, sandbox_config, make_sandbox_task):
         task = make_sandbox_task()
@@ -314,8 +319,9 @@ class TestBuildBwrapCmdAdmin:
         )
         result = _run_bwrap(sandbox_config, task, True, resources=[resource])
         resolved = str(shared_path.resolve())
-        ro_pairs = _get_bind_pairs(result, "--ro-bind")
-        assert any(src == resolved for src, _ in ro_pairs)
+        pairs = _get_bind_pairs(result, "--ro-bind-fd")
+        assert any(dest == resolved for _, dest in pairs)
+        assert resolved not in [src for src, _ in _get_bind_pairs(result, "--ro-bind")]
 
     def test_admin_resource_mount_rw(self, sandbox_config, make_sandbox_task):
         task = make_sandbox_task()
@@ -329,8 +335,9 @@ class TestBuildBwrapCmdAdmin:
         )
         result = _run_bwrap(sandbox_config, task, True, resources=[resource])
         resolved = str(shared_path.resolve())
-        bind_pairs = _get_bind_pairs(result, "--bind")
-        assert any(src == resolved for src, _ in bind_pairs)
+        pairs = _get_bind_pairs(result, "--bind-fd")
+        assert any(dest == resolved for _, dest in pairs)
+        assert resolved not in [src for src, _ in _get_bind_pairs(result, "--bind")]
 
     def test_db_not_bound_for_admin(self, sandbox_config, make_sandbox_task):
         """Admins used to get an RO bind of the framework DB. They no longer do.

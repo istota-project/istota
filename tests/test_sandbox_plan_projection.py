@@ -227,7 +227,10 @@ class TestReadOnlyNestedInsideReadWrite:
         nested.mkdir()
         channel = (config.workspace_path / "Channels" / "room123").resolve()
 
-        with patch("istota.executor._bwrap_available", return_value=True):
+        with (
+            patch("istota.executor._bwrap_available", return_value=True),
+            patch("istota.executor._bwrap_fd_bind_binary", return_value="/usr/bin/bwrap"),
+        ):
             argv = build_bwrap_cmd(
                 ["cmd"], config, task, False,
                 [self._resource("Channels/room123/ref")], user_temp,
@@ -237,7 +240,7 @@ class TestReadOnlyNestedInsideReadWrite:
         rw_at = argv.index(str(channel))
         ro_at = argv.index(str(nested.resolve()))
         assert argv[rw_at - 1] == "--bind"
-        assert argv[ro_at - 1] == "--ro-bind"
+        assert argv[ro_at - 2] == "--ro-bind-fd"
         assert ro_at > rw_at, "the read-only re-bind has to come after the bind"
 
     def test_an_unnested_read_only_resource_is_still_a_read_root(

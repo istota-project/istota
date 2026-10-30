@@ -65,7 +65,6 @@ import os
 import re
 import secrets
 import select
-import shutil
 import signal
 import stat
 import sys
@@ -87,6 +86,7 @@ from istota.sandbox.peer_process import (
     start_time,
 )
 from istota.sandbox.process_group import kill_process_group
+from istota.sandbox.shell_exec import on_daemon_path
 from istota.session.tools.dispatch import HARNESS_TEXT_CAP_CHARS
 
 from ._cli_config_dir import _write_new_file, make_cli_config_dir
@@ -467,10 +467,10 @@ class _DirectHarness:
             # `build_bwrap_cmd` returns a bare `bwrap`, and `execve` searches
             # nothing (Stage 1). The daemon's PATH, never the task's: the
             # task's starts with directories under the model-writable temp dir.
-            found = shutil.which(command[0], path=os.environ.get("PATH") or os.defpath)
+            found = on_daemon_path(command[0])
             if found is None:
                 raise _StartFailed(f"{command[0]!r} is not on the daemon's PATH")
-            command[0] = os.path.abspath(found)
+            command[0] = found
 
         hello = request_hello(req, bash_spill_full_output=spec.bash_spill_full_output)
         hello["text_cap"] = HARNESS_TEXT_CAP_CHARS

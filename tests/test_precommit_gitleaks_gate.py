@@ -259,9 +259,9 @@ class TestTheOtherHalfOfTheGateFailsClosedToo:
 
 
 class TestTheDaemonMarksItsOwnUnattendedShells:
-    """Cron `command` jobs and heartbeat shell commands get `build_stripped_env`,
-    which is the daemon's own environment — neither per-task marker is in it, so
-    a `git commit` from one used to read as a human at a terminal."""
+    """`build_stripped_env` is the daemon's own environment: neither per-task
+    marker is in it, so a `git commit` from one used to read as a human at a
+    terminal. Cron and heartbeat commands now set this in `confined_command`."""
 
     def test_the_stripped_env_demands_the_scans(self):
         from istota.executor import build_stripped_env

@@ -77,6 +77,7 @@ from istota.agent.tools import AgentTool, ToolResult
 from istota.llm.types import ImageContent, TextContent, ToolSchema
 from istota.sandbox.peer_process import report_child_reaped
 from istota.sandbox.process_group import kill_group_if_live
+from istota.sandbox.shell_exec import on_daemon_path
 
 from .bash import BASH_SCHEMA
 from .files import (
@@ -657,6 +658,11 @@ async def start_tool_server(
         cmd = base_cmd + ["--fd", str(raw)]
         if sandbox_wrap is not None:
             cmd = sandbox_wrap(cmd)
+        if not os.path.isabs(cmd[0]):
+            found = on_daemon_path(cmd[0])
+            if found is None:
+                raise FileNotFoundError(f"{cmd[0]!r} is not on the daemon's PATH")
+            cmd = [found, *cmd[1:]]
         # Placement from `preexec_fn`, not a write after the spawn: membership
         # is inherited at fork and bwrap forks during namespace setup, so a pid
         # moved afterwards leaves everything it already forked outside the

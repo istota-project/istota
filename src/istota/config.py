@@ -499,6 +499,9 @@ class DevboxConfig:
     # one credential-proxy listener each in the daemon. Empty on bare metal,
     # where the role runs its own containers and proxy units.
     users: list[str] = field(default_factory=list)
+    # The users whose devbox may fetch the operator's [developer] forge tokens
+    # over the credential socket. Code in such a box can read and export them.
+    forge_users: list[str] = field(default_factory=list)
     # Per-container limits and logging, rendered into each service.
     mem_limit: str = "4g"
     cpus: float = 2.0
@@ -1302,11 +1305,10 @@ class DeveloperConfig:
     gh_bin_path: str = "/usr/local/bin/gh"
     glab_bin_path: str = "/usr/local/bin/glab"
     # Devbox credential proxy. See src/istota/devbox/proxy.py + the
-    # `devbox-credential-proxy` spec for the design. It answers two things
-    # for the container: a git credential (injected server-side, so git
-    # never holds the token) and, for `gh` / `glab`, the forge token itself
-    # — those run the real binaries behind forge_cli.py and need it in
-    # their own environment.
+    # `devbox-credential-proxy` spec for the design. For a user in
+    # [devbox] forge_users it answers two things for the container: a git
+    # credential and, for `gh` / `glab`, the forge token. Both are the raw
+    # token. Everyone else's socket has none to give.
     devbox_proxy_enabled: bool = True
     devbox_proxy_socket_dir: str = "/var/run/istota"
     devbox_proxy_audit_log: str = ""   # empty = journal only; set to a path for file fan-out

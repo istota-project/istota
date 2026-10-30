@@ -44,9 +44,9 @@ istota-skill devbox reset --yes    # wipe /home/dev, restart the container (dest
 
 This skill appears only where an operator has configured a devbox container for you, one per user.
 
-Everything in this section that needs a forge token depends on a credential proxy, which {BOT_NAME} runs for each devbox user. Where one is missing, `gh` and `glab` exit 4 and `git push` fails through its credential helper instead, exiting 1 and naming the shape in its message. Either way the answer is the same: don't retry, don't hunt for a workaround inside the container, say what happened and do the forge work outside it. Everything else in the box is unaffected.
+Everything in this section that needs a forge token depends on a credential proxy, which {BOT_NAME} runs for each devbox user, and on the operator listing that user in `[devbox] forge_users`. Most devboxes are not listed. There, `gh` and `glab` exit 5 and name the setting, and `git` over HTTPS gets no credential and fails authentication on anything private. Where the proxy is missing, `gh` and `glab` exit 4 and `git push` fails through its credential helper instead, exiting 1 and naming the shape in its message. Either way the answer is the same: don't retry, don't hunt for a workaround inside the container, say what happened and do the forge work outside it. Everything else in the box is unaffected.
 
-- **`git clone` / `git push` over HTTPS** to GitHub / GitLab. The image's `/etc/gitconfig` wires `[credential] helper = istota`, which proxies every credential lookup to {BOT_NAME}'s proxy over `/run/istota-cred/sock`. The daemon answers with `username=x-access-token` + `password=<token>` for the duration of the request. Unknown hosts (e.g. `bitbucket.org`) get a no-token response so git fails cleanly with its standard "authentication failed".
+- **`git clone` / `git push` over HTTPS** to GitHub / GitLab. The image's `/etc/gitconfig` wires `[credential] helper = istota`, which proxies every credential lookup to {BOT_NAME}'s proxy over `/run/istota-cred/sock`. For a user in `[devbox] forge_users` the daemon answers with `username=x-access-token` + `password=<token>` for the duration of the request. Unknown hosts (e.g. `bitbucket.org`) get a no-token response so git fails cleanly with its standard "authentication failed".
 - **`gh` and `glab`** — the real CLIs, in full. They run behind a wrapper that fetches the token from the proxy, checks the argv against a policy, and execs the real binary; everything after that is the real CLI, so any subcommand and any flag works. Use them exactly as the developer skill documents them.
   - A refused command exits 3 and says which rule refused it. The policy denies things that destroy (`repo delete`, `release delete`), print credentials (`auth`), grant persistence (`secret set`, `ssh-key add`), publish (`gist`, `snippet`), or run code elsewhere (`codespace ssh`, `runner`). It is an accident guard, not a security boundary — ask the user if you need one of them.
   - Exit 4 means no credential proxy is configured; exit 5 means it could not be reached, or had no token for that forge; exit 7 means no forge URL was resolvable and it refused to guess one.
@@ -56,7 +56,7 @@ Everything in this section that needs a forge token depends on a credential prox
 
 The proxy runs outside the container, one socket per user; the in-container helper is a thin client that frames JSON requests. Stale tokens are fixed by restarting {BOT_NAME} with the new token, not by anything inside the container.
 
-Where a token is provided at all, it does enter the container — `gh` and `glab` need it in their own environment, and `git push` has always had one. Treat the devbox as trusted with that credential and scoped by it: what the token may do is what the box may do.
+Where a token is provided at all, it enters the container, and any process there can ask the socket for it. Treat the devbox as trusted with that credential and scoped by it: what the token may do is what the box may do.
 
 ## Output format
 
