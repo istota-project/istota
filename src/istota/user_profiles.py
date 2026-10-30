@@ -62,8 +62,8 @@ PUSH_CHAT_ALERTS_VALUES = ("alerts", "badge", "off")
 CALENDAR_DELIVERY_VALUES = ("invite", "feed")
 # Never widened by a setting. `files` and `memory` would undo the two writes the
 # correspondent posture exists to stop, and a correspondent's mail would be the
-# query for `recall`. Widening any of them is a code change.
-CORRESPONDENT_REFUSED_SCOPES = ("files", "memory", "recall")
+# query for `recall` or `memory_search`. Widening any of them is a code change.
+CORRESPONDENT_REFUSED_SCOPES = ("files", "memory", "recall", "memory_search")
 
 
 @dataclass

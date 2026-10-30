@@ -22,7 +22,7 @@ from istota.settings_plan import engine
 from istota.settings_plan.schema import parse_plan
 
 SCOPES_LOGGER = "istota.rooms.scopes"
-REFUSED = ["files", "memory", "recall"]
+REFUSED = ["files", "memory", "recall", "memory_search"]
 INDEX = {
     name: SimpleNamespace(shared_room="private")
     for name in ("email", "skills", "transcribe", "whisper", "markets", "calendar", "kv")
