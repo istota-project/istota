@@ -28,7 +28,7 @@ interval_minutes = 15                  # Run this check every 15 min (default: e
 [[checks]]
 name = "disk-space"
 type = "shell-command"
-command = "df -h / | tail -1 | awk '{print $5}' | tr -d '%'"
+command = "df -h \"$NEXTCLOUD_MOUNT_PATH/Users/$ISTOTA_USER_ID\" | tail -1 | awk '{print $5}' | tr -d '%'"
 condition = "< 90"
 message = "Disk usage at {value}%"
 

@@ -52,7 +52,7 @@ If the task names a `skill`, it runs via `_execute_skill_task()` — a direct su
 
 ### Command tasks
 
-If the task has a `command` field (shell scheduled jobs), it runs via `_execute_command_task()` — through `_run_capture` (a `Popen` with `start_new_session=True`, so a timeout SIGKILLs the whole process group rather than blocking on an orphaned grandchild). Its env is `build_stripped_env()` plus propagated `ISTOTA_*` vars, `ISTOTA_EXPERIMENTAL_FEATURES`, and manifest-derived credential / connection vars resolved by `build_skill_env` + `dispatch_setup_env_hooks`. No skill selection, no Claude, no prompt assembly.
+If the task has a `command` field (shell scheduled jobs), it runs via `_execute_command_task()` — through `_run_capture` (a `Popen` with `start_new_session=True`, so a timeout SIGKILLs the whole process group rather than blocking on an orphaned grandchild). It runs in the task sandbox with both proxies, through `sandbox.confined_command`, and its env is `build_task_runtime`'s, so credentials stay with the proxy. No skill selection, no Claude, no prompt assembly.
 
 ### Prompt tasks
 

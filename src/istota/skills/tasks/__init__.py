@@ -174,8 +174,7 @@ def _db_path() -> str:
     if not path:
         # No longer the admin gate it used to describe: the executor sets this
         # for every user and hands it to the skill proxy, so a task reaching
-        # here is one whose caller built an env without it — a heartbeat
-        # shell-command (build_stripped_env doesn't carry it) or a hand-rolled
+        # here is one whose caller built an env without it — a hand-rolled
         # operator shell. Name the condition rather than asserting a cause.
         _fail(
             "the framework database path is not available to this task; it is "

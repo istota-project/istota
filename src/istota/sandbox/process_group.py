@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import subprocess
 
 __all__ = [
     "kill_group_if_live",
@@ -151,3 +152,53 @@ def _signal(pid: int, sig: int) -> str:
         return "process"
     except (ProcessLookupError, PermissionError, OSError):
         return "gone"
+
+
+def run_capture(
+    cmd, *, timeout: float, cwd: str, env: dict, preexec_fn=None,
+) -> subprocess.CompletedProcess:
+    """Run a subprocess capturing stdout/stderr, killing the whole process
+    *group* on timeout.
+
+    ``subprocess.run(timeout=…)`` only SIGKILLs the direct child, then calls
+    ``communicate()`` again to reap it — which blocks indefinitely when an
+    orphaned grandchild inherited the stdout/stderr pipe. A CRON ``command:``
+    that backgrounds a child (or a skill CLI that shells out) therefore wedges
+    its worker past the timeout, and because the per-task heartbeat thread keeps
+    pinging, the stuck-running reaper never reclaims it — the location-alert task
+    held its only background slot for 6+ hours that way. ``start_new_session``
+    puts the child in its own process group so the timeout can ``os.killpg`` the
+    whole tree, releasing the pipe. Re-raises ``TimeoutExpired`` so callers
+    handle the deadline exactly as before; otherwise returns a CompletedProcess
+    so call sites keep using ``.returncode`` / ``.stdout`` / ``.stderr``.
+    """
+    # Always an argv list, never `shell=True`. A caller wanting a shell builds
+    # one with `shell_exec.shell_argv`, which sets `pipefail`; reintroducing
+    # `shell=True` here would quietly reintroduce the status bug it fixes.
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True, preexec_fn=preexec_fn,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # `start_new_session=True` above, so the child leads its own group and
+        # the shared helper takes the group path; the single-process fallback
+        # covers a group that is already gone.
+        #
+        # The helper's reaped guard is dead code *here* and must not be leaned
+        # on: `communicate(timeout=…)` raises from inside `_communicate`,
+        # before its trailing `wait()`, so `returncode` is still None. A
+        # `proc.poll()` added between the two — the natural thing to reach for
+        # when adding a log line — would set it and silently turn this kill
+        # into a no-op, orphaning the group. That is the ISSUE-257 shape.
+        kill_group_if_live(proc)
+        # The group is dead now, so this drains the pipes and reaps without
+        # blocking; bound it anyway so a pathological case can't hang the worker.
+        try:
+            proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
