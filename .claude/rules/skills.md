@@ -190,7 +190,7 @@ The query pipeline is `istota.location.logic`, shared with the web routes; `test
 - Library-only: `files/`, `markets/finviz.py`.
 
 ### `money/` - accounting (in-process)
-Ledger, `invoice`, `work` and `portfolio` verb groups. Env `MONEY_USER`. Tax config is operator-only (`istota money tax`, see money.md).
+Ledger, `invoice`, `work` and `portfolio` verb groups. Env `MONEY_USER`. Tax config is operator-only (`istota money tax`, see money.md), except the SE account patterns (`tax pattern list|add|remove`).
 
 - **Facade**: Click via `CliRunner`; config only in `config_store`. `istota money <op>` routes via `cli_money.dispatch_operational`. `edit-transaction` rewrites by `id:` under a flock with `bean-check` and rollback; `edited:` entries are skipped by Monarch sync.
 - **Invoice auto-matching** (`core/invoice_matching.py`): a credit settles an invoice only when exactly one open invoice matches to the cent (or `--tolerance`) and was not issued after it, compared against the stored `invoices.total`; paid, voided and partly unrecognised invoices (a `_manual` line counts) are excluded. The date is `invoices.issue_date`; the import set it with `work.invoice_issue_date` (earliest stamp, else `max(entry.date)`, ISSUE-256). Marks paid via `work.mark_paid` on the caller's connection (no double post). Ambiguity goes to `invoice_matching.review` (`_demote_contested`), as does a zero-row write. Runs once across profiles, in integer cents, best-effort in one `try`. `--no-match-invoices`; `invoice unpaid` undoes.

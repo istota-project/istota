@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Taxes page shows income it has not projected yet.** Self-employment income already posted in the current month appears on its own line, marked as not yet in the projection, so it no longer looks missing from the estimate.
+- **See what the SE account patterns match.** Settings > Taxes lists the accounts each pattern list matches and their totals for the tax year, and follows your edits before you save. A list that matches nothing says so.
+- **Change SE account patterns from chat.** The bot can list, add and remove the accounts counted as self-employment, with the same checks as the settings page.
+
 - **Change briefings from chat.** The bot can make the edits the Briefings settings page makes: change one setting of a source in place, build a block with its sources in one step, reorder sources, manage archived editions and change your schedule, with the same checks as the page.
 - **Shared blocks and group briefings from chat.** Admins can create, change, run and remove shared blocks. From your private chat, group owners can edit, preview, publish and delete group briefings, and members can read editions and mute delivery. Approving personal sources and retrying deliveries stay on the web.
 - **Admin browser console in the web app.** View on Admin > Browsers opens a user's live browser in the page after a password or code confirmation, so an operator can finish a login without an SSH tunnel. A reverse proxy in front must forward websocket upgrades; see docs/deployment/running-the-stack.md.
@@ -51,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - CRON.md `command` jobs and HEARTBEAT.md `shell-command` checks run in the task sandbox instead of on the host, since the bot can edit both files. **Upgrade note:** a job that reads a host path, calls a script in the checkout or probes an internal service stops working, and a `df -h /` check keeps passing while reading the sandbox's empty root, so point it at your workspace. Move other scripts into your workspace, or make them a system timer. See docs/features/scheduling.md.
+- A linked folder is now mounted from the exact folder that was checked. Someone who could write to its location could swap the name just before a task's sandbox started and get another folder mounted in its place; now the swap leaves the task without that folder, or stops the sandbox from starting.
 - A held email you approved that could not be placed in a room no longer runs as your own message. Unless it came from one of your own addresses, it cannot read your other connected mailboxes or change shared settings, as with any outside sender's mail.
 - **The claude CLI's credential is out of the model's reach.** On the `claude_code` brain the CLI now runs outside the sandbox, and every tool it uses runs in the same sandboxed tool server as the native brain's, so on the sandboxed stack no task environment, file or process the model can reach holds the token or API key. Nothing in the sandbox talks to Anthropic any more, so `api.anthropic.com` and `mcp-proxy.anthropic.com` are off the network allowlist. **Upgrade note:** a task that called Anthropic's API from Bash needs `api.anthropic.com:443` in `[security.network] extra_hosts`; `[brain] tool_harness` is gone and is ignored with a warning.
 - The sandbox's network allowlist now holds for the address it reaches, not only the name. A connection is made to the address that was checked, and a built-in host (PyPI, the package registries, GitHub's API, Google) is refused when it resolves to a private, loopback or link-local address, so a DNS change cannot point one at an internal service. Hosts you configured, in `extra_hosts` or as a forge or Nextcloud URL, may be on your own network. A tunnel to an allowed host also has to carry TLS for that host: plain bytes, or a TLS connection asking for another name or none, are cut off. **Upgrade note:** an `extra_hosts` entry used for something other than TLS, such as SSH, no longer works through the proxy. `[security.network] private_hosts` is no longer read; remove it.
@@ -89,6 +94,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The tmux brain.** `tmux_claude`, which drove the interactive `claude` interface inside tmux, is gone; the native brain covers what it was kept for. A config that still names it loads as `claude_code` with a warning, and a `[brain.tmux]` block is ignored except that its model fills an unset `[brain.claude_code]` model on a deployment that ran on tmux. A room or scheduled job pinned to it runs on the deployment's brain.
 
 ### Fixed
+
+- The tax estimate now labels self-employment income as net income through a specific date and explains the span used for its annual projection. It no longer reads zero when income patterns are set and no expense pattern is.
+
+- Money → Settings → Taxes now lets you edit the income and expense account patterns, with account suggestions. Patterns that are empty, malformed or would match every account are refused, including on `istota money config import`, and the CLI keeps the last pattern of each kind.
 
 - A task that starts many skill commands at once no longer sees some of them fail at random with `BlockingIOError`. The skill proxy queues more waiting connections, and `istota-skill` waits for room instead of failing. If the proxy stays busy or does not answer, the command prints one line saying so, with no traceback.
 

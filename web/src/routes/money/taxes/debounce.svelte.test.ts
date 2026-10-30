@@ -57,6 +57,9 @@ function estimate(): TaxEstimateResponse {
     filing_status: 'single',
     w2_months: 12,
     annualization_months: 3,
+    annualization_period_months: 3,
+    se_income_through: '2026-03-31',
+    se_income_in_progress: null,
     se_taxable_fraction: 0.9235,
     state_installment_schedule: [],
     state: '',
@@ -94,5 +97,53 @@ describe('taxes recalculation debounce', () => {
     view.unmount();
     await vi.advanceTimersByTimeAsync(1000);
     expect(recalculateTaxEstimate).not.toHaveBeenCalled();
+  });
+});
+
+describe('SE income period', () => {
+  it('shows the current month beside the projection when income is posted', async () => {
+    vi.mocked(getTaxEstimate).mockResolvedValue({
+      ...estimate(),
+      annualization_months: 9,
+      se_income_through: '2026-09-30',
+      se_income_in_progress: { through: '2026-10-30', amount: 450 },
+    });
+    render(Page);
+    expect(await screen.findByText('not yet in the projection')).toBeTruthy();
+    expect(screen.getByText(/October/)).toBeTruthy();
+    expect(screen.getByText('$450.00')).toBeTruthy();
+  });
+
+  it('has no current month line when there is nothing to show', async () => {
+    vi.mocked(getTaxEstimate).mockResolvedValue(estimate());
+    render(Page);
+    await screen.findByText('How income is annualized');
+    expect(screen.queryByText('not yet in the projection')).toBeNull();
+  });
+
+  it.each([
+    [9, '2026-09-30', 'Sep 30', true],
+    [12, '2026-12-31', 'Dec 31', false],
+  ])('labels the net income cutoff for %i months', async (months, through, label, capped) => {
+    vi.mocked(getTaxEstimate).mockResolvedValue({
+      ...estimate(),
+      quarter: 4,
+      annualization_months: months,
+      annualization_period_months: 12,
+      se_income_through: through,
+    });
+    render(Page);
+    expect(
+      await screen.findByText(
+        (_, element) =>
+          element?.classList.contains('breakdown-label') === true &&
+          element.textContent?.replace(/\s+/g, ' ').trim() === `SE income (net, through ${label})`,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText('SE income (YTD)')).toBeNull();
+    await fireEvent.click(screen.getByText('How income is annualized'));
+    expect(screen.getByText(/For Q4, the IRS period is the first 12 months/)).toBeTruthy();
+    expect(screen.getAllByText(new RegExp(`12/${months}`)).length).toBeGreaterThan(0);
+    expect(!!screen.queryByText(/This projection uses a shorter span/)).toBe(capped);
   });
 });

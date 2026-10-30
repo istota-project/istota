@@ -17,6 +17,7 @@
     StatTile,
     LoadState,
     Disclosure,
+    Timestamp,
   } from '@minot/ui';
   import RateProvenanceLine from '$lib/components/money/RateProvenanceLine.svelte';
   import TaxDisclaimer from '$lib/components/money/TaxDisclaimer.svelte';
@@ -332,12 +333,43 @@
 
             <div class="record-group micro-label">Income</div>
             <div class="record-row record-row--tree">
-              <span class="breakdown-label">SE income (YTD)</span>
+              <span class="breakdown-label"
+                >SE income (net, through <Timestamp
+                  value={data.se_income_through}
+                  options={{ month: 'short', day: 'numeric' }}
+                  title={false}
+                />)</span
+              >
               <span class="breakdown-val num">{fmtDollar(data.se_income_ytd)}</span>
               {#if showState}<span class="breakdown-val num"></span>{/if}
             </div>
+            {#if data.se_income_in_progress}
+              <div class="record-row record-row--tree">
+                <span class="breakdown-label"
+                  ><Timestamp
+                    value={data.se_income_in_progress.through}
+                    options={{ month: 'long' }}
+                    title={false}
+                  /> to date (net)
+                  <span class="caption">not yet in the projection</span>
+                </span>
+                <span class="breakdown-val num dim"
+                  >{fmtDollar(data.se_income_in_progress.amount)}</span
+                >
+                {#if showState}<span class="breakdown-val num"></span>{/if}
+              </div>
+            {/if}
             <div class="record-row record-row--tree">
-              <span class="breakdown-label">SE income (annualized)</span>
+              <span class="breakdown-label"
+                >SE income (annualized)
+                <span class="caption"
+                  >× 12/{data.annualization_months} from Jan{#if data.annualization_months > 1}–<Timestamp
+                      value={data.se_income_through}
+                      options={{ month: 'short' }}
+                      title={false}
+                    />{/if}</span
+                >
+              </span>
               <span class="breakdown-val num">{fmtDollar(data.se_income_annualized)}</span>
               {#if showState}<span class="breakdown-val num"
                   >{fmtDollar(data.se_income_annualized)}</span
@@ -352,21 +384,21 @@
             </div>
             <Disclosure class="info-panel" summary="How income is annualized">
               <p class="caption">
-                This uses the IRS annualized-income method (Form 2210). For the Q{data.quarter}
-                payment, SE income is pulled from the ledger through the first
-                {data.annualization_months} months of the year and annualized &times;{(
-                  12 / data.annualization_months
-                ).toFixed(2)} to project a full year.
+                For Q{data.quarter}, the IRS period is the first {data.annualization_period_months} months
+                of the year (Form 2210). Net SE income is revenue minus the configured SE expenses, through
+                <Timestamp value={data.se_income_through} title={false} />. It is multiplied by 12/{data.annualization_months}
+                to project a full year.
+                {#if data.annualization_months < data.annualization_period_months}
+                  This projection uses a shorter span than the IRS period. It uses completed months
+                  where available, with January as the minimum span, so an incomplete month is not
+                  normally scaled as a full month.
+                {/if}
                 {#if data.w2_months < 12}
                   W-2 income is projected from those {data.annualization_months} months to
                   {data.w2_months} months of employment (the job ending early), and never falls below
                   the amount already earned.
                 {:else}
                   W-2 income is projected from the same {data.annualization_months} months to a full year.
-                {/if}
-                {#if method === 'annualized'}
-                  The period grows each quarter (3, 5, 8, then 12 months), so the projection
-                  tightens toward your actual annual income.
                 {/if}
               </p>
             </Disclosure>

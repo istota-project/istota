@@ -115,6 +115,25 @@ def _load_tax_config(user_ctx: UserContext):
     return None
 
 
+def _se_income_in_progress(ledger_path, config, months: int, today) -> dict | None:
+    """Net SE income posted in the current month the projection leaves out.
+
+    Informational, so a failed query drops the line and not the estimate.
+    """
+    from istota.money.core.tax import in_progress_month, query_se_income
+
+    month = in_progress_month(config.tax_year, months, today)
+    if month is None:
+        return None
+    try:
+        amount = query_se_income(ledger_path, config, month, from_month=month)
+    except Exception:
+        return None
+    if amount <= 0:
+        return None
+    return {"through": today.isoformat(), "amount": amount}
+
+
 def _resolve_user_ledger(user_ctx: UserContext, ledger_name: str | None):
     if not user_ctx.ledgers:
         return None
@@ -1552,6 +1571,7 @@ async def api_tax_estimate(
     use_method = method if method != "annualized" else saved.get("method", method)
 
     se_income_ytd = 0.0
+    se_income_in_progress = None
     ledger_path = _resolve_user_ledger(user_ctx, ledger)
     if ledger_path:
         try:
@@ -1559,6 +1579,9 @@ async def api_tax_estimate(
                 **{**config.__dict__, "tax_year": tax_year}
             ) if tax_year != config.tax_year else config
             se_income_ytd = query_se_income(ledger_path, config_for_query, months)
+            se_income_in_progress = _se_income_in_progress(
+                ledger_path, config_for_query, months, today,
+            )
         except Exception:
             pass
 
@@ -1585,7 +1608,11 @@ async def api_tax_estimate(
         config=config,
         state=config.state,
     )
-    return {"status": "ok", **result.__dict__}
+    return {
+        "status": "ok",
+        **result.__dict__,
+        "se_income_in_progress": se_income_in_progress,
+    }
 
 
 @router.post("/tax/estimate")
@@ -1641,6 +1668,7 @@ async def api_tax_estimate_recalculate(
     })
 
     se_income_ytd = 0.0
+    se_income_in_progress = None
     ledger_path = _resolve_user_ledger(user_ctx, ledger)
     if ledger_path:
         try:
@@ -1648,6 +1676,9 @@ async def api_tax_estimate_recalculate(
                 **{**config.__dict__, "tax_year": tax_year}
             ) if tax_year != config.tax_year else config
             se_income_ytd = query_se_income(ledger_path, config_for_query, months)
+            se_income_in_progress = _se_income_in_progress(
+                ledger_path, config_for_query, months, today,
+            )
         except Exception:
             pass
 
@@ -1670,7 +1701,11 @@ async def api_tax_estimate_recalculate(
         config=config,
         state=config.state,
     )
-    return {"status": "ok", **result.__dict__}
+    return {
+        "status": "ok",
+        **result.__dict__,
+        "se_income_in_progress": se_income_in_progress,
+    }
 
 
 # =============================================================================

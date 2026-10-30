@@ -130,6 +130,7 @@ src/istota/
 ├── sandbox/              # A task's runtime and its boundaries → sandbox.md
 │   ├── task_env.py       # `build_task_runtime`: one task's env, the credential split, the proxies, the bind list → sandbox.md
 │   ├── plan.py           # The sandbox mount plan, as data: what `build_bwrap_cmd` binds, masks and unshares
+│   ├── bind_launcher.py  # Opens a task's linked resources by descriptor and execs bwrap holding them, so a swapped name cannot change what is bound; imports only `confined` → sandbox.md
 │   ├── confined.py       # Opening a file in a task-writable tree by fd from a daemon-composed root, never by name; the guard in `tests/test_confined_file_access.py` → sandbox.md
 │   ├── claude_runtime_env.py  # What a task env carries only because the outer process is the `claude` CLI → sandbox.md
 │   ├── confined_command.py  # A CRON `command:` job or HEARTBEAT `shell-command` check, run in the task's sandbox with its proxies → sandbox.md
