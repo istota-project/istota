@@ -1648,6 +1648,120 @@ class TestResearchDefinitionWriters:
         assert json.loads(response["stdout"])["reason"] != "egress_limited"
 
 
+class TestPersonalBriefingWriters:
+    """A personal briefing's sources are fetched by the daemon, past every limit on
+    the task, so a limited task choosing a source would have a way out. It needs no
+    admin and no group."""
+
+    BROWSE = json.dumps({"url": EVIL_URL})
+    SOURCES = json.dumps([{"kind": "browse", "config": {"url": EVIL_URL}}])
+    WRITERS = [
+        ["sources", "add", "--block", "1", "--kind", "browse", "--config", BROWSE],
+        ["sources", "set", "--id", "1", "--config", BROWSE],
+        ["sources", "set", "--id", "1", "--merge-config", BROWSE],
+        ["sources", "set", "--id", "1", "--enabled"],
+        ["blocks", "add", "--briefing", "morning", "--title", "canary", "--sources", SOURCES],
+        ["blocks", "add", "--briefing", "morning", "--title", "canary"],
+        ["blocks", "save", "--file", "{file}"],
+        ["--", "sources", "add", "--block", "1", "--kind", "browse", "--config", BROWSE],
+    ]
+    IDS = ["sources-add", "sources-set", "sources-merge", "sources-enable", "blocks-add-sources",
+           "blocks-add", "blocks-save", "dashes"]
+
+    @pytest.fixture
+    def base_env(self, tmp_path):
+        """A real user and a real module database, so a refusal cannot be a missing one."""
+        (tmp_path / "db").mkdir()
+        (tmp_path / "mount" / "Users" / "alice").mkdir(parents=True)
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            f'db_path = "{tmp_path / "db" / "istota.db"}"\n'
+            f'temp_dir = "{tmp_path / "temp"}"\n'
+            f'workspace_path = "{tmp_path / "mount"}"\n'
+            '[users.alice]\ndisplay_name = "Alice"\n'
+        )
+        planted = tmp_path / "mount" / "Users" / "alice" / "planted.json"
+        planted.write_text(json.dumps({
+            "briefing_name": "morning", "title": "canary",
+            "sources": [{"kind": "browse", "config": {"url": EVIL_URL}}],
+        }))
+        env = {
+            "PATH": os.environ["PATH"], "ISTOTA_USER_ID": "alice", "BRIEFINGS_USER": "alice",
+            "ISTOTA_CONFIG_PATH": str(config_path), "NEXTCLOUD_MOUNT_PATH": str(tmp_path / "mount"),
+            "ISTOTA_DEFERRED_DIR": str(tmp_path),
+        }
+        return env, str(planted)
+
+    def _call(self, sock_path, base, args):
+        request = {"skill": "briefings", "args": args}
+        with SkillProxy(sock_path, {}, base, allowed_skills=frozenset({"briefings"})):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(60)
+                client.connect(str(sock_path))
+                client.sendall((json.dumps(request) + "\n").encode())
+                answer = b""
+                while b"\n" not in answer:
+                    chunk = client.recv(65536)
+                    if not chunk:
+                        break
+                    answer += chunk
+        return json.loads(answer.decode().strip())
+
+    @pytest.mark.parametrize("argv", WRITERS, ids=IDS)
+    def test_a_real_cli_refuses_a_limited_task(self, sock_path, base_env, argv):
+        env, planted = base_env
+        args = [part.replace("{file}", planted) for part in argv]
+        response = self._call(sock_path, {**env, "ISTOTA_EGRESS_LIMITED": "1"}, args)
+        assert response["returncode"] == 1, response
+        envelope = json.loads(response["stdout"])
+        assert envelope["reason"] == "egress_limited"
+        assert "evil.example" not in response["stdout"]
+        assert "canary" not in response["stdout"]
+
+    @pytest.mark.parametrize("argv", [
+        ["list"],
+        ["kinds"],
+        ["blocks", "list", "--briefing", "morning"],
+        ["sources", "list", "--block", "1"],
+        ["archive", "list"],
+    ], ids=["list", "kinds", "blocks-list", "sources-list", "archive-list"])
+    def test_a_limited_task_keeps_the_reads(self, sock_path, base_env, argv):
+        env, _ = base_env
+        response = self._call(sock_path, {**env, "ISTOTA_EGRESS_LIMITED": "1"}, argv)
+        assert "egress_limited" not in response["stdout"]
+
+    def test_control_an_open_task_writes_the_source(self, sock_path, base_env):
+        env, _ = base_env
+        added = self._call(sock_path, env, ["blocks", "add", "--briefing", "morning", "--title", "News"])
+        assert added["returncode"] == 0, added
+        block_id = json.loads(added["stdout"])["block"]["id"]
+        source = self._call(sock_path, env, [
+            "sources", "add", "--block", str(block_id), "--kind", "browse", "--config", self.BROWSE,
+        ])
+        assert source["returncode"] == 0, source
+        listed = self._call(sock_path, env, ["sources", "list", "--block", str(block_id)])
+        assert json.loads(listed["stdout"])["sources"][0]["config"] == {"url": EVIL_URL}
+
+    def test_the_operator_cli_has_no_such_rule_without_the_flag(self, tmp_path, monkeypatch):
+        """The same Click tree serves `istota briefings`, whose environment has no flag."""
+        from click.testing import CliRunner
+
+        from istota.briefings.cli import cli
+        from istota.briefings.workspace import synthesize_briefings_context
+
+        monkeypatch.delenv("ISTOTA_EGRESS_LIMITED", raising=False)
+        context = synthesize_briefings_context("alice", tmp_path)
+        context.ensure_dirs()
+        from istota.briefings import db as bdb
+        bdb.init_db(context.db_path)
+        result = CliRunner().invoke(
+            cli, ["blocks", "add", "--briefing", "morning", "--title", "News"],
+            obj=context, standalone_mode=False, catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.output)["status"] == "ok"
+
+
 class TestVerbRules:
     @pytest.fixture
     def limited(self, monkeypatch):
