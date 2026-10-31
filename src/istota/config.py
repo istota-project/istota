@@ -284,10 +284,17 @@ class EmailConfig:
 
 @dataclass
 class BrowserConfig:
-    """Browser container configuration."""
+    """Browser container configuration.
+
+    ``private_hosts`` has ``[wordpress] private_hosts``'s meaning: exact names
+    Chrome may reach on a non-public address. The container mounts no config,
+    since it runs hostile pages, so `istota-stack` hands it this list alone.
+    A change restarts the stack. No entry reaches the container's own loopback.
+    """
     enabled: bool = False
     api_url: str = "http://localhost:9223"
     vnc_url: str = ""  # external noVNC URL for user access
+    private_hosts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -360,11 +367,12 @@ class SharingConfig:
 ICS_POLL_INTERVAL_MIN = 300
 
 
-# What a `private_hosts` entry (`[wordpress]`, `[servarr]`,
+# What a `private_hosts` entry (`[wordpress]`, `[servarr]`, `[browser]`,
 # `[mail_accounts]`, `[sharing]`, `[feeds]`, `[security.network]`) may look like: a
 # host name (with an optional trailing dot) or an IP literal. The skills match
 # entries by exact name, so a URL, a port or a wildcard matches nothing. The
-# Ansible role asserts with this same string.
+# Ansible role asserts with this same string, and `host/istota-stack`'s
+# `browser_private_hosts` carries a copy a test holds equal.
 PRIVATE_HOST_PATTERN = (
     r"^([A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\.?|[0-9A-Fa-f.]*:[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*)$"
 )
@@ -6313,6 +6321,7 @@ def load_config(
     _warn_malformed_private_hosts("mail_accounts", config.mail_accounts.private_hosts, "account")
     _warn_malformed_private_hosts("sharing", config.sharing.private_hosts, "shared source")
     _warn_malformed_private_hosts("feeds", config.feeds.private_hosts, "feed")
+    _warn_malformed_private_hosts("browser", config.browser.private_hosts, "site")
     _validate_servarr(config)
     _validate_claude_code_brain(config)
     _validate_configured_model_references(config)

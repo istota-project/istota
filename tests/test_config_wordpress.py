@@ -64,6 +64,20 @@ class TestTheLoader:
         assert entry in config.wordpress.private_hosts
 
 
+class TestTheBrowsersList:
+    def test_it_loads(self, tmp_path):
+        config = _load(tmp_path, """
+            [browser]
+            private_hosts = ["wiki.example.internal"]
+        """)
+        assert config.browser.private_hosts == ["wiki.example.internal"]
+
+    def test_a_malformed_entry_is_named_in_a_warning(self, tmp_path, caplog):
+        caplog.set_level(logging.WARNING, logger="istota.config")
+        _load(tmp_path, '[browser]\nprivate_hosts = ["https://wiki.example.internal"]\n')
+        assert [r for r in caplog.records if "[browser] private_hosts" in r.getMessage()]
+
+
 class TestThePattern:
     @pytest.mark.parametrize("entry", GOOD)
     def test_the_pattern_accepts(self, entry):

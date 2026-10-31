@@ -225,10 +225,11 @@ A Baileys session is paired from the running stack, the first time and every tim
 
 The browser image builds for the machine's own architecture, x86-64 or arm64, since Chrome ships Linux packages for both. `BROWSER_PLATFORM=linux/amd64` in `.env` forces an x86-64 image.
 
-The browser reaches public addresses only. Every Chrome connection goes through a proxy in the container that refuses a private, loopback or link-local address, for redirects, subresources and WebSockets as well as the page itself. To let it reach an internal site, list the exact names in `.env` and run `istota-stack up`:
+The browser reaches public addresses only. Every Chrome connection goes through a proxy in the container that refuses a private, loopback or link-local address, for redirects, subresources and WebSockets as well as the page itself. To let it reach an internal site, list the exact names in `config.toml`, or under Admin > Configuration, which restarts the stack for you:
 
-```bash
-BROWSER_PRIVATE_HOSTS=wiki.example.internal,git.example.internal
+```toml
+[browser]
+private_hosts = ["wiki.example.internal", "git.example.internal"]
 ```
 
 A listed name still cannot reach the browser container's own loopback, where its API and debugging ports are.

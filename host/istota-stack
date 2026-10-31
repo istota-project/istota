@@ -362,8 +362,9 @@ compose() {
     fi
     local certs="${STACK}/certs"
     if [ "$(env_get "$HOST_ENV" TLS_CERT_SOURCE)" = "acme" ]; then certs="${STACK}/letsencrypt"; fi
-    local pin apt_mirror site
+    local pin apt_mirror site browser_hosts
     site="$(site_dir)"
+    browser_hosts="$(browser_private_hosts)"
     pin="$(env_get "$HOST_ENV" CLAUDE_CODE_VERSION)"
     apt_mirror="$(env_get "$HOST_ENV" APT_MIRROR)"
     if [ -n "$apt_mirror" ] && ! valid_apt_mirror "$apt_mirror"; then
@@ -385,6 +386,8 @@ compose() {
         if [ -n "$apt_mirror" ]; then export APT_MIRROR="$apt_mirror"; else unset APT_MIRROR; fi
         # Empty rather than unset, since .env would otherwise supply one unchecked.
         export ISTOTA_SITE_DIR="$site"
+        # The same for the config's list, which is the one place a grant lives.
+        export BROWSER_PRIVATE_HOSTS="$browser_hosts"
         # The image has no .git: the commit being built and its deployed name
         # are how a running stack says which code it is. Every build caller
         # sets ISTOTA_TAG and has the checkout at that commit.
@@ -577,6 +580,29 @@ kinds |= set((brain.get("source_type_overrides") or {}).values())
 kinds |= set(brain.get("room_selectable") or [])
 # tmux_claude is retired, and a config still naming it runs claude_code.
 print(1 if kinds & {"claude_code", "tmux_claude"} else 0)
+PY
+}
+
+# `[browser] private_hosts`, comma-separated, for the browser's egress proxy. The
+# container mounts no config, since it runs hostile pages, so this list is all of
+# it that crosses. A config that cannot be read grants nothing, and an entry that
+# is not a bare name grants nothing either; the loader warns about it.
+# The pattern is config.PRIVATE_HOST_PATTERN, held equal by a test.
+browser_private_hosts() {
+    local path="${CONFIG_DIR}/config.toml"
+    [ -f "$path" ] || return 0
+    python3 - "$path" <<'PY' 2>/dev/null || true
+import os, re, stat, sys, tomllib
+PATTERN = r"^([A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\.?|[0-9A-Fa-f.]*:[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*)$"
+# Root reading a file uid 10001 writes: no link followed, and no FIFO to hang on.
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+if not stat.S_ISREG(os.fstat(fd).st_mode):
+    sys.exit(0)
+with os.fdopen(fd, "rb") as f:
+    hosts = tomllib.loads(f.read(1 << 20).decode()).get("browser", {}).get("private_hosts")
+if not isinstance(hosts, list):
+    hosts = []
+print(",".join(h.strip() for h in hosts if isinstance(h, str) and re.fullmatch(PATTERN, h.strip())))
 PY
 }
 

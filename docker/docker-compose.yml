@@ -407,6 +407,7 @@ services:
     environment:
       VNC_PASSWORD: ${VNC_PASSWORD:-}
       BROWSER_VNC_URL: ${ISTOTA_BROWSER_VNC_URL:-}
+      # `[browser] private_hosts`, which istota-stack reads from the config.
       BROWSER_PRIVATE_HOSTS: ${BROWSER_PRIVATE_HOSTS:-}
       BROWSER_MAX_INSTANCES: ${BROWSER_MAX_INSTANCES:-2}
       BROWSER_INSTANCE_IDLE_S: ${BROWSER_INSTANCE_IDLE_S:-900}
