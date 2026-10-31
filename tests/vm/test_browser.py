@@ -102,6 +102,13 @@ done
         finally:
             vm.run("systemctl restart istota-devbox-egress.service")
         return
+    if lima.control() == "no-vm-reach-rule":
+        lima.remove_vm_reach_rules(vm)
+        try:
+            yield vm
+        finally:
+            vm.run("systemctl restart istota-devbox-egress.service")
+        return
     yield vm
 
 
@@ -194,6 +201,61 @@ python3 {script} {config} {name}""")
     def test_the_refresh_timer_runs(self, stack):
         assert stack.out("systemctl is-enabled istota-browser-grants.timer") == "enabled"
         assert stack.out("systemctl is-active istota-browser-grants.timer") == "active"
+
+
+@parity.witness(17)
+class TestTheVmsOwnAddresses:
+    """#903: traffic to an address the VM holds goes through INPUT, which DOCKER-USER
+    never sees, and a published port is rewritten before FORWARD. A raw socket from the
+    browser reaches neither. The VM's answer and the daemon's are the in-session
+    controls; only a rule outside the container can tell them from the browser.
+
+    Control `no-vm-reach-rule`: the INPUT rules are removed.
+    """
+
+    @pytest.fixture(scope="class")
+    def listener(self, stack):
+        with lima.listening_on_the_vm(stack, lima.running_image(stack, "browser")):
+            yield stack
+
+    def test_the_browser_reaches_no_listener_on_the_vm(self, listener):
+        targets = [f"{a}:{lima.VM_LISTENER_PORT}" for a in lima.vm_addresses(listener)]
+        gateway = listener.out(
+            "docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' istota_browser")
+        assert f"{gateway}:{lima.VM_LISTENER_PORT}" in targets
+        for target in targets:
+            assert listener.ok(f"curl -s -m 5 -o /dev/null http://{target}/"), f"{target} does not answer the VM"
+        outcome = _connect(listener, lima.container(listener, "browser"), targets)
+        reached = sorted(t for t, result in outcome.items() if result == "reached")
+        assert reached == [], f"the browser reached {reached}: {outcome}"
+
+    def test_the_browser_reaches_no_published_port_on_the_vm(self, listener):
+        targets = [f"{a}:{lima.VM_PUBLISHED_PORT}" for a in lima.vm_addresses(listener)]
+        for target in targets:
+            assert listener.ok(f"curl -s -m 5 -o /dev/null http://{target}/"), f"{target} does not answer the VM"
+        outcome = _connect(listener, lima.container(listener, "browser"), targets)
+        reached = sorted(t for t, result in outcome.items() if result == "reached")
+        assert reached == [], f"the browser reached {reached}: {outcome}"
+
+    def test_the_daemon_keeps_its_reach_to_the_vm(self, listener):
+        targets = [f"{a}:{lima.VM_LISTENER_PORT}" for a in lima.vm_addresses(listener)]
+        outcome = _connect(listener, lima.container(listener, "daemon"), targets, user="10001")
+        assert set(outcome.values()) == {"reached"}, outcome
+
+    def test_the_vm_still_reaches_the_browser(self, listener):
+        """The rule drops what the browser opens and leaves the replies alone."""
+        address = listener.out(
+            "docker inspect -f '{{(index .NetworkSettings.Networks \"istota_browser\").IPAddress}}' "
+            + lima.container(listener, "browser"))
+        assert listener.ok(f"curl -s -m 5 -o /dev/null http://{address}:9223/health")
+
+    def test_a_restart_of_the_unit_leaves_one_copy_of_each_rule(self, listener):
+        """The script finds its rules by their comment as iptables lists them, which
+        the default suite's stub can only imitate."""
+        listener.run("systemctl restart istota-devbox-egress.service")
+        listener.run("systemctl restart istota-devbox-egress.service")
+        rules = listener.out("iptables -w 5 -S INPUT | grep -F 'istota-vm-reach:'").splitlines()
+        assert len(rules) == 2, rules
 
 
 class TestWhatChromesUserCanReach:

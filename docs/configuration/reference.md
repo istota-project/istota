@@ -828,7 +828,7 @@ Which hosts each part of Istota may reach on a private, loopback or reserved add
 
 | Consumer | Who chooses the address | What a grant lets happen |
 |---|---|---|
-| `browser` | The model and any page it loads | Chrome reaches the host through the egress proxy, and on a VM the firewall opens the addresses it resolves to, refreshed every five minutes. Loopback stays refused whatever is listed, since the browser's API and debugging ports are there. A change restarts the stack |
+| `browser` | The model and any page it loads | Chrome reaches the host through the egress proxy, and on a VM the firewall opens the addresses it resolves to, refreshed every five minutes. Loopback stays refused whatever is listed, since the browser's API and debugging ports are there, and so does the VM's own address. A change restarts the stack |
 | `wordpress` | The user who connects a site | The [`wordpress` skill](../features/wordpress.md) calls the host with that site's credentials. HTTPS is still required |
 | `mail_accounts` | The user who types a server name | The daemon sends that user's mail password to the host. [Certificates are still verified](../features/email.md) |
 | `sharing` | A user adding a calendar feed, or the sharing server a share names | The daemon [fetches the host](../features/sharing.md), and plain HTTP is allowed to it. A redirect may reach a private address only on the same listed host |
