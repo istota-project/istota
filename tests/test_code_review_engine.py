@@ -1561,3 +1561,50 @@ class TestRunReview:
             kwargs[missing] = None
             with pytest.raises(ReviewError):
                 run_review(repo, base="main", **kwargs)
+
+
+class TestTheGitNamespace:
+    """The argv here; `tests/test_host_path_races_linux.py` runs it for real."""
+
+    @pytest.fixture
+    def bwrap(self, monkeypatch):
+        monkeypatch.setattr("istota.executor._bwrap_available", lambda: True)
+        monkeypatch.setattr("istota.executor._bwrap_requires_unshare_user", lambda: True)
+        monkeypatch.setattr("istota.executor._bwrap_supports_disable_userns", lambda: False)
+        monkeypatch.setattr(
+            "istota.sandbox.shell_exec.on_daemon_path", lambda name: f"/daemon/{name}"
+        )
+
+    def test_it_binds_the_root_read_only_and_nothing_of_the_daemons(self, bwrap, tmp_path):
+        root = tmp_path / "repos" / "alice"
+        root.mkdir(parents=True)
+        worktree = root / "project"
+
+        argv = engine._namespaced(["git", "status"], root, worktree)
+
+        assert argv[0] == "/daemon/bwrap" and "--unshare-user" in argv
+        assert "--unshare-net" in argv and "--proc" not in argv
+        pairs = list(zip(argv, argv[1:], argv[2:]))
+        assert ("--ro-bind", str(root), str(root)) in pairs
+        binds = {c for flag, _, c in pairs if flag in ("--bind", "--ro-bind", "--ro-bind-try")}
+        assert not binds & {"/", "/tmp", "/data", str(tmp_path), str(root.parent)}
+        assert "--bind" not in argv
+        assert argv[argv.index("--chdir") + 1] == str(worktree)
+        assert argv[argv.index("--") + 1:] == ["git", "status"]
+
+    def test_it_binds_a_root_reached_through_a_link_at_both_paths(self, bwrap, tmp_path):
+        real = tmp_path / "real" / "alice"
+        real.mkdir(parents=True)
+        (tmp_path / "link").symlink_to(tmp_path / "real")
+        root = tmp_path / "link" / "alice"
+
+        argv = engine._namespaced(["git", "status"], root, root / "project")
+
+        pairs = list(zip(argv, argv[1:], argv[2:]))
+        assert ("--ro-bind", str(root), str(root)) in pairs
+        assert ("--ro-bind", str(root), str(real.resolve())) in pairs
+
+    def test_without_bwrap_git_runs_as_it_was(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("istota.executor._bwrap_available", lambda: False)
+
+        assert engine._namespaced(["git", "status"], tmp_path, tmp_path) is None
