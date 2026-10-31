@@ -76,6 +76,13 @@ def stack(local_stack):
         lambda: vm.out(f"docker inspect -f '{{{{.State.Health.Status}}}}' {cid}", check=False) == "healthy",
         timeout=900, interval=10, what="the browser container to become healthy",
     )
+    # web waits on the daemon's health, so on a session that just deployed it comes
+    # up after the browser, and the in-session controls below ask it to answer.
+    web = f"{_default_network_address(vm, 'web')}:8766"
+    lima.wait_for(
+        lambda: _connect(vm, lima.container(vm, "daemon"), [web], user="10001") == {web: "reached"},
+        timeout=120, interval=3, what="web to listen",
+    )
     if lima.control() == "browser-on-default-network":
         vm.run(f"docker network connect istota_default {cid}")
         try:
