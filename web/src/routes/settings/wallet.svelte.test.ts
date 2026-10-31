@@ -219,11 +219,16 @@ it('keeps the daemon amount exponents consistent with the UI currency data', () 
     [...table.matchAll(/"([A-Z]{3})": (\d)/g)].map((match) => [match[1], Number(match[2])]),
   );
   expect(exponents.size).toBeGreaterThan(3);
+  // Stored amounts are minor units of the table's exponent, so a runtime's newer
+  // currency data cannot move an entry: CLDR 49 gives PKR 2 digits, the table keeps 0.
+  const keptAgainstRuntime = new Set(['PKR']);
   for (const currency of new Set([...Intl.supportedValuesOf('currency'), ...exponents.keys()])) {
+    if (keptAgainstRuntime.has(currency)) continue;
     const digits = new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions()
       .maximumFractionDigits;
     expect(exponents.get(currency) ?? 2, currency).toBe(digits);
   }
+  expect(exponents.get('PKR')).toBe(0);
 });
 
 it('uses API precision even when browser currency defaults differ', async () => {
