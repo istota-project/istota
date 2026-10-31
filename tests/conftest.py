@@ -766,8 +766,8 @@ LEGACY_PROJECT_PREFIXES = ("istota-smoke-",)
 _XDIST_MESSAGE = (
     "the smoke, full and testbed tiers must run with -n0. Session-scoped "
     "fixtures are per-worker, so N workers would each build the image and bring "
-    "up their own stacks under one project prefix, race the same daemon, and "
-    "sweep each other's projects. The wire tier is milder and still wrong: N "
+    "up their own stacks under one project prefix and race the same daemon. "
+    "The wire tier is milder and still wrong: N "
     "workers would each start a mail container, and the assertions there are "
     "about what is in a mailbox."
 )
@@ -867,7 +867,8 @@ def _sweep_leftover_stacks():
     containers mid-flight, but it also means nothing ever reclaims them: a killed
     session leaves a container and a named volume behind for good. One sweep at
     the first stack request closes that, scoped by prefix so it can never touch a
-    developer's own stack.
+    developer's own stack, and by owner so it leaves the stacks of a session
+    running in another worktree.
     """
     if stack_support.docker_available():
         for prefix in (PROJECT_PREFIX, *LEGACY_PROJECT_PREFIXES):

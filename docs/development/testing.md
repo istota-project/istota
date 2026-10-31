@@ -105,7 +105,7 @@ Native mode never sources that script, and that is the one thing it deliberately
 
 A tenth marker, `requires_dac`, is not deselected: it skips itself when the process can bypass permission bits, which is what happens as root inside the Linux runner.
 
-`image`, `smoke`, `full`, `testbed` and `vm` must run with `-n0`. Their fixtures are session-scoped and build one tagged image; N xdist workers would each race to build it, and on the two compose tiers would also bring up their own stacks under one project prefix and sweep each other's projects. `testbed` is on the list for the same reason at a smaller scale — its mail container and two mailboxes are session-scoped, and `vm` because its whole session drives one VM. All five conftests fail the session with that reason rather than letting it happen.
+`image`, `smoke`, `full`, `testbed` and `vm` must run with `-n0`. Their fixtures are session-scoped and build one tagged image; N xdist workers would each race to build it, and on the two compose tiers would also bring up their own stacks under one project prefix. `testbed` is on the list for the same reason at a smaller scale — its mail container and two mailboxes are session-scoped, and `vm` because its whole session drives one VM. All five conftests fail the session with that reason rather than letting it happen.
 
 **One shape, with and without a Nextcloud.** `smoke` and `full` are the same fixtures over the same compose file: the shipped `docker/docker-compose.yml` plus `testbed/compose/testbed.yml`, booted through the shipped entrypoint from a `config.toml` the testbed writes. The *lean* shape stops there: istota, web and nginx with local storage, seconds to boot, right for a subsystem whose external is an HTTP endpoint. The *full* shape adds `testbed/compose/nextcloud.yml`, a Nextcloud fixture provisioned by `testbed/compose/provision-nc.sh`, and runs istota in full Nextcloud integration against it. Full detail on both, and on everything below, is in `.claude/rules/testbed.md`.
 
@@ -206,8 +206,6 @@ The same file covers the three direct callers on the harness, health OCR, the co
 
 `cli-witness` then runs a second control, `docker/test/Dockerfile.cli-env-not-stripped`, an image with `without_claude_runtime_env` replaced by a copy. A direct caller's `BrainRequest.env` is `build_model_cli_env`, which holds the credential, so that strip is what keeps it from the tool server. The control requires doctor's result and process-environment tests red and OCR's and the reviewer's green, read from `PASSED` lines, since a test that never ran has no `FAILED` line either.
 
-Run these with no other stack session starting. Each session of the tier begins by sweeping every `istota-testbed-` project, so a session started in another worktree removes a running stack, and the tests then error with `No such container` or `service "daemon" is not running`. That red says nothing about the code.
-
 `host/istota-stack` has its controls in `scripts/test-stack-negative-control.sh`. Each breaks one property in a copy of the script and hands the copy to the default suite's `tests/test_istota_stack.py` through `ISTOTA_STACK_SCRIPT`, so most of them need neither Docker nor a VM. With no argument it runs the two release-integrity controls, `skip-verify` and `user-keyring`. `setup-web` runs five controls for `istota-stack setup --web`, and each must turn exactly its named node ids red, with every other test in the setup classes green:
 
 | Control | Breaks | Turns red |
@@ -287,7 +285,7 @@ Because every lean profile runs local storage, `runtime.mount_liveness` reports 
 
 The pieces under `testbed/` are general, not forge-specific. The forge chain is the first thing to use them, and it should not be the last:
 
-- `stack.py` — bringing a compose stack up and down, waiting for a service to report healthy, sweeping leftovers from an interrupted run, and `Stack`, which is what a scenario is handed: `submit`, `script`, `exec`, `doctor`, `restart`, `logs`, `diagnostics`.
+- `stack.py` — bringing a compose stack up and down, waiting for a service to report healthy, sweeping leftovers from an interrupted run (a project whose owning pid is still alive is left alone), and `Stack`, which is what a scenario is handed: `submit`, `script`, `exec`, `doctor`, `restart`, `logs`, `diagnostics`.
 - `probe.py` — reading the framework database of a stack that is currently running, or of a local file.
 - `httpstub.py` and `services/` — the `Service` protocol every external the daemon talks to conforms to, and the shared `ThreadingHTTPServer` base under the ones we wrote. `services/model_endpoint.py` is a deterministic model endpoint serving canned turns over HTTP, so a task's path through the daemon is reproducible without an LLM; `services/gitlab.py` answers enough REST v4 for `glab` plus a real git over HTTP.
 - `profiles.py` — what a scenario declares it needs: a shape, a set of services, and any extra config.
@@ -376,7 +374,7 @@ Three failures are harness conditions rather than code defects, and each says so
 
 Every session prints two diagnostic lines of its own: how many `docker compose exec` calls the probe made, and how long each profile waited on which service to come up.
 
-**There is no way to keep a lean stack alive for inspection.** `ISTOTA_TESTBED_KEEP` is full-shape only, keeps volumes rather than containers, and `tests/full/` refuses to run under it. Lean project names are random, and the session sweep reaps them.
+**There is no way to keep a lean stack alive for inspection.** `ISTOTA_TESTBED_KEEP` is full-shape only, keeps volumes rather than containers, and `tests/full/` refuses to run under it. Lean project names are random, and once the session that owns one has exited, the next session's sweep reaps it.
 
 ### Prompt goldens
 

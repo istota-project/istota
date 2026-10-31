@@ -144,6 +144,12 @@ Four non-obvious points:
 
 `nextcloud.reset()` deletes only the rooms this object created. The boot leaves baseline rooms (the entrypoint's 1:1, `#general`, `#logs`, `#alerts`, plus Talk's own `Talk updates` and `Note to self` per account), so a scenario asserts on a room it made, never on a count.
 
+## The session sweep
+
+A session's first stack request runs `stack.sweep_projects` once per prefix, to reclaim what a killed session left. `owned_project` puts the session's pid in the project name (`<prefix>[full-]p<pid>-<hex>`), and the sweep skips a project whose pid is alive, so sessions in other worktrees can run beside each other (ISSUE-900). A project with no pid in its name is swept, which is how a stack from before this is reclaimed. A `-full-keep-` project is never swept, so its fixed name needs no owner. A new compose project under a swept prefix takes its name from `owned_project`, or the next session removes it while it runs.
+
+The pid means something only in the sweeping process's pid namespace. A session driving Docker from inside a container would read as dead and be swept; nothing does that today. Sessions still share the Docker VM's disk, and a full disk (`No space left on device`, an empty `/data/.secret_key`) looks much like a swept stack; see "Still open". They also share the daemon's network address pools, and a session holds every stack it booted until it ends. Two whole-tier `-m smoke` sessions at once may run out (`all predefined address pools have been fully subnetted`), a limit the old sweep hid by removing the first session's stacks. That comes from reading the compose file and is unmeasured; per-file runs and the full tier stay well inside it.
+
 ## What the stack concedes
 
 `testbed/compose/testbed.yml` is a harness concession file, not a deployment recipe. It is the complete list of ways a stack this tier boots differs from what an operator boots, each with its reason inline:

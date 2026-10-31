@@ -600,6 +600,88 @@ class TestTheKeptProjectIsNotSwept:
         assert torn_down == ["istota-testbed-lean-99999999"]
 
 
+def _dead_pid() -> int:
+    finished = subprocess.Popen(["true"])
+    finished.wait()
+    return finished.pid
+
+
+def _swept(monkeypatch, names: list[str], prefix: str = "istota-testbed-") -> list[str]:
+    listing = json.dumps([{"Name": name} for name in names])
+    torn_down = []
+
+    def fake_run(argv, **kwargs):
+        if argv[:3] == ["docker", "compose", "ls"]:
+            return subprocess.CompletedProcess(argv, 0, listing, "")
+        torn_down.append(argv[argv.index("--project-name") + 1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(compose_support.subprocess, "run", fake_run)
+    compose_support.sweep_projects(prefix)
+    return torn_down
+
+
+class TestTheSweepLeavesALiveSessionsStacks:
+    """ISSUE-900: a session starting in another worktree removed running stacks."""
+
+    @pytest.mark.parametrize("profile", [profiles.BASE, profiles.FULL])
+    def test_a_stack_from_a_live_session_is_left_alone(
+        self, tmp_path, monkeypatch, profile
+    ):
+        args, _ = _pool(tmp_path)._compose_args(profile, tmp_path)
+
+        assert _swept(monkeypatch, [_project(args)]) == []
+
+    @pytest.mark.parametrize("infix", ["", "full-", "websetup-"])
+    def test_a_stack_whose_owner_is_gone_is_reclaimed(self, monkeypatch, infix):
+        name = f"istota-testbed-{infix}p{_dead_pid()}-abcd1234"
+
+        assert _swept(monkeypatch, [name]) == [name]
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "istota-testbed-abcd1234",
+            "istota-testbed-12345678",
+            "istota-testbed-full-abcd1234",
+            "istota-testbed-websetup-abcd1234",
+        ],
+    )
+    def test_a_stack_recording_no_owner_is_swept_as_before(self, monkeypatch, name):
+        assert _swept(monkeypatch, [name]) == [name]
+
+    def test_a_pid_too_large_for_the_kernel_is_a_dead_owner(self, monkeypatch):
+        name = f"istota-testbed-p{'9' * 40}-abcd1234"
+
+        assert _swept(monkeypatch, [name]) == [name]
+
+    def test_an_owner_the_process_may_not_signal_is_alive(self, monkeypatch):
+        def refuse(pid, signal):
+            raise PermissionError
+
+        monkeypatch.setattr(compose_support.os, "kill", refuse)
+
+        assert _swept(monkeypatch, ["istota-testbed-p4242-abcd1234"]) == []
+
+    def test_a_kept_project_keeps_its_rule_with_an_owner_shaped_digest(
+        self, monkeypatch
+    ):
+        name = f"istota-testbed{compose_support.KEEP_PROJECT_MARKER}p{_dead_pid()}-abcd1234"
+
+        assert _swept(monkeypatch, [name]) == []
+
+    def test_a_consumers_own_prefix_gets_the_same_rule(self, tmp_path, monkeypatch):
+        pool = compose_support.StackPool(
+            workdir=tmp_path,
+            shape=_pool(tmp_path).shape,
+            project_prefix="rig-",
+        )
+        live = _project(pool._compose_args(profiles.BASE, tmp_path)[0])
+        dead = f"rig-p{_dead_pid()}-abcd1234"
+
+        assert _swept(monkeypatch, [live, dead, "other-abcd1234"], prefix="rig-") == [dead]
+
+
 class TestTheComposeInvocation:
     def test_the_overlays_go_on_in_their_order(self, tmp_path):
         """Shipped file, profile overlays, concessions, then the Nextcloud

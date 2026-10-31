@@ -23,7 +23,6 @@ import os
 import re
 import subprocess
 import time
-import uuid
 from dataclasses import dataclass
 from html import unescape
 from pathlib import Path
@@ -137,7 +136,7 @@ def web_booted(pytestconfig, tmp_path_factory):
     environment["ISTOTA_CONFIG_DIR"] = str(config_dir)
     environment["ISTOTA_HOST_ENV"] = str(vm / "host.env")
     env_file = stack_support.write_env_file(scratch / "compose.env", environment)
-    project = f"{PROJECT_PREFIX}websetup-{uuid.uuid4().hex[:8]}"
+    project = stack_support.owned_project(f"{PROJECT_PREFIX}websetup-")
     setup_overlay = scratch / "setup.yml"
     setup_overlay.write_text(SETUP_OVERLAY)
     setup_args = stack_support.compose_args(
