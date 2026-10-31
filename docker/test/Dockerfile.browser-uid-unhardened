@@ -1,0 +1,18 @@
+# Negative control for #902's witnesses in tests/image/test_browser_image.py: the
+# shipped browser image with what closes Chrome's user out taken back, one change
+# at a time, so each witness goes red on its own read.
+#
+#   docker build -f docker/test/Dockerfile.browser-uid-unhardened \
+#       --build-arg BASE=<browser image tag> -t istota-test/browser-uid-unhardened:<suffix> docker/test
+#
+# Expected: scripts/test-image-negative-control.sh names the tests that fail.
+ARG BASE
+FROM ${BASE}
+
+RUN sed -i 's|^    _close_this_process_to_its_own_uid()$|    pass|' /app/browse_api.py \
+    && ! grep -q '^    _close_this_process_to_its_own_uid()$' /app/browse_api.py \
+    && sed -i 's|"--no-default-browser-check",|"--no-default-browser-check", "--no-sandbox",|' /app/chrome.py \
+    && grep -q -- '"--no-sandbox"' /app/chrome.py \
+    && sed -i 's|^as_browser websockify|websockify|; s|python -s /app/browse_api.py|python /app/browse_api.py|' /app/entrypoint.sh \
+    && ! grep -q 'as_browser websockify\|python -s /app/browse_api.py' /app/entrypoint.sh \
+    && chown -R browser:browser /app

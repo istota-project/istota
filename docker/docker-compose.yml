@@ -399,6 +399,14 @@ services:
     # ~1.1G into /app in the writable layer, which a restart keeps.
     ulimits:
       core: 0
+    # Chrome's own sandbox needs a user namespace, which Docker's default seccomp
+    # refuses (measured). The daemon's profile is the grant, one file to keep level
+    # with Docker's, and Chrome will not start without it. No capability is added:
+    # the namespace is the browser user's. no-new-privileges takes Chrome's setuid
+    # helper out of play as well.
+    security_opt:
+      - seccomp=./istota/seccomp-istota.json
+      - no-new-privileges:true
     profiles:
       - browser
     ports:
