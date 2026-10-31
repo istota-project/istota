@@ -820,7 +820,7 @@ Set all three fields or none. Each falls back to `[nextcloud]` on its own rather
 | `enabled` | `false` | Enable the headless browser container |
 | `api_url` | `"http://localhost:9223"` | Browser container's Flask API |
 | `vnc_url` | `""` | External noVNC console URL, for operators. The browser service builds each live instance's viewer link from it and passes it to tasks as `BROWSER_VNC_URL`. The admin Browsers page no longer uses it: its console opens in the page. Do not hand it to users: the console exposes live user IDs to anyone who can reach it (see [browser profiles](../deployment/running-the-stack.md#browser-profiles)) |
-| `private_hosts` | `[]` | Exact host names Chrome may reach on a private or reserved address (an internal wiki). Every other address must be public, and loopback is refused whatever is listed, since the browser's API and debugging ports are there. On a VM, the addresses these names resolve to also go in `ISTOTA_BROWSER_EGRESS_ALLOW` in `host.env`, since the firewall outside the container cannot read names. Operator-only, and a change restarts the stack |
+| `private_hosts` | `[]` | Exact host names Chrome may reach on a private or reserved address (an internal wiki). Every other address must be public, and loopback is refused whatever is listed, since the browser's API and debugging ports are there. On a VM, the firewall outside the container opens the addresses these names resolve to and refreshes them every five minutes. Operator-only, and a change restarts the stack |
 
 ## `[wordpress]`
 

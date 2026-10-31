@@ -25,6 +25,7 @@
 #                               print the fingerprint of KEY, one line of an SSH public
 #                               key, and make it the one key releases are verified against
 #   istota-stack latest-tag     print the name update --unsigned latest would install; changes nothing
+#   istota-stack browser-grant-addresses   print what [browser] private_hosts resolves to, for the firewall
 #   istota-stack rollback       back to the previous tag, if its image can run the database;
 #                               reprovisions the host as update does
 #   istota-stack setup [args]   run `istota setup` for this VM (first install, or --force;
@@ -645,6 +646,40 @@ browser_subnet() {
     echo "$subnet"
 }
 
+# What the firewall opens for `[browser] private_hosts`, one IPv4 address a line:
+# the addresses those names resolve to now, as far as the firewall drops them (a
+# public one passes anyway). A name that will not resolve grants nothing.
+cmd_browser_grant_addresses() {
+    [ "$#" -eq 0 ] || { usage >&2; exit 64; }
+    local names
+    names="$(browser_private_hosts)"
+    [ -n "$names" ] || return 0
+    python3 - "$names" <<'PY'
+import ipaddress, subprocess, sys
+# The ranges host/istota-devbox-egress.sh drops for the browser, held equal by a test.
+DROPPED = "169.254.0.0/16 168.63.129.16/32 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10"
+networks = [ipaddress.ip_network(n) for n in DROPPED.split()]
+found = set()
+for name in sys.argv[1].split(","):
+    try:
+        output = subprocess.run(["getent", "ahostsv4", "--", name], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        output = ""
+    addresses = [line.split()[0] for line in output.splitlines() if line.strip()]
+    if not addresses:
+        print(f"[istota-stack] [browser] private_hosts: {name} has no IPv4 address now; the firewall opens nothing for it", file=sys.stderr)
+    for address in addresses:
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        if any(ip in network for network in networks):
+            found.add(ip)
+for ip in sorted(found):
+    print(ip)
+PY
+}
+
 # One field of the browser network's address pool, empty with no network.
 browser_network_inspect() {
     docker network inspect "${PROJECT}_browser" \
@@ -656,6 +691,8 @@ browser_network_inspect() {
 # Only an IP range says pinned, since Docker sets none on a network it allocated.
 release_pinned_browser_network() {
     [ ! -f "$BROWSER_NETWORK_OVERLAY" ] || return 0
+    # Its egress script would ignore the flag and redo the whole chain on each tick.
+    systemctl disable --now istota-browser-grants.timer 2>/dev/null || true
     [ -n "$(browser_network_inspect '.IPRange')" ] || return 0
     log "stopping the stack to remove the browser's fixed network, which this release does not use"
     compose stop
@@ -688,10 +725,9 @@ stack_up() {
         render_devbox_compose "$tag" \
             || die "the devbox compose file could not be rendered; the stack was not started."
     fi
-    # A name passes the proxy and the firewall then drops its private address.
-    if [ -n "$(browser_private_hosts)" ] && [ -z "$(env_get "$HOST_ENV" ISTOTA_BROWSER_EGRESS_ALLOW)" ]; then
-        log "WARNING: [browser] private_hosts names a host, and ISTOTA_BROWSER_EGRESS_ALLOW in host.env names no address: the firewall drops what those names resolve to. See docs/deployment/running-the-stack.md."
-    fi
+    # A changed [browser] private_hosts need not wait for the timer. Not a child of
+    # this: that unit asks this script for the addresses, and takes no lock to do it.
+    systemctl start --no-block istota-browser-grants.service 2>/dev/null || true
     active="$(compose config --services)"
     # The app's images came from a release archive: an `up` that built one
     # would fetch from the network (Chrome, for the browser's), which a VM
@@ -3366,6 +3402,7 @@ main() {
         config-apply) cmd_config_apply "$@" ;;
         check-image) cmd_check_image "$@" ;;
         latest-tag) cmd_latest_tag "$@" ;;
+        browser-grant-addresses) cmd_browser_grant_addresses "$@" ;;
         up) cmd_up ;;
         down) compose down ;;
         exec) [ "$#" -gt 0 ] || { usage >&2; exit 64; }; stack_exec "$@" ;;

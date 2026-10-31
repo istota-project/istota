@@ -2239,20 +2239,88 @@ class TestTheBrowsersFixedAddress:
         for text in (firewall, SCRIPT.read_text()):
             assert 'BROWSER_SUBNET_DEFAULT="172.29.0.0/24"' in text
 
-    def test_a_named_grant_with_no_firewall_grant_is_warned_about(self, fx):
-        (fx.stack / "config").mkdir(parents=True, exist_ok=True)
-        (fx.stack / "config" / "config.toml").write_text('[browser]\nprivate_hosts = ["wiki.example.internal"]\n')
-        result = fx.run("up")
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert "ISTOTA_BROWSER_EGRESS_ALLOW" in result.stdout + result.stderr
 
-    def test_no_warning_once_the_firewall_grant_is_there(self, fx):
+class TestTheBrowsersGrantReachesTheFirewall:
+    """`[browser] private_hosts` is the one setting (#884): this verb turns its names
+    into the addresses the firewall opens, since a firewall cannot read a name."""
+
+    def _lookup(self, fx, tmp_path, hosts: str, answers: dict[str, str]) -> subprocess.CompletedProcess:
         (fx.stack / "config").mkdir(parents=True, exist_ok=True)
-        (fx.stack / "config" / "config.toml").write_text('[browser]\nprivate_hosts = ["wiki.example.internal"]\n')
-        (fx.stack / "host.env").write_text("ISTOTA_BROWSER_EGRESS_ALLOW=10.0.0.5\n")
-        result = fx.run("up")
+        (fx.stack / "config" / "config.toml").write_text(f"[browser]\nprivate_hosts = {hosts}\n")
+        bindir = tmp_path / "getent-bin"
+        bindir.mkdir()
+        cases = "".join(f"  {name}) printf '{answer}' ;;\n" for name, answer in answers.items())
+        stub = bindir / "getent"
+        stub.write_text(f'#!/bin/bash\necho "$*" >> {tmp_path}/getent-calls\ncase "${{@: -1}}" in\n{cases}  *) exit 2 ;;\nesac\n')
+        stub.chmod(0o755)
+        return subprocess.run(
+            ["bash", str(SCRIPT), "browser-grant-addresses"], capture_output=True, text=True,
+            env={**fx.env, "PATH": f"{bindir}:{fx.env['PATH']}"}, timeout=60,
+        )
+
+    def test_a_name_gives_its_private_addresses(self, fx, tmp_path):
+        result = self._lookup(fx, tmp_path, '["wiki.example.internal"]', {
+            "wiki.example.internal": "10.0.0.5 STREAM wiki\\n10.0.0.5 DGRAM\\n192.168.8.7 STREAM\\n",
+        })
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["10.0.0.5", "192.168.8.7"]
+
+    def test_a_public_or_loopback_answer_needs_no_rule(self, fx, tmp_path):
+        result = self._lookup(fx, tmp_path, '["a.example"]', {
+            "a.example": "198.51.100.7 STREAM\\n127.0.0.1 STREAM\\n10.0.0.5 STREAM\\n",
+        })
+        assert result.stdout.split() == ["10.0.0.5"]
+
+    def test_a_name_that_will_not_resolve_grants_nothing_and_says_so(self, fx, tmp_path):
+        result = self._lookup(fx, tmp_path, '["gone.example", "a.example"]', {"a.example": "10.0.0.5 STREAM\\n"})
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["10.0.0.5"]
+        assert "gone.example" in result.stderr
+
+    def test_a_name_cannot_be_read_as_an_option(self, fx, tmp_path):
+        self._lookup(fx, tmp_path, '["-s"]', {"-s": "10.0.0.5 STREAM\\n"})
+        assert (tmp_path / "getent-calls").read_text().strip() == "ahostsv4 -- -s"
+
+    def test_no_grant_looks_nothing_up(self, fx, tmp_path):
+        result = self._lookup(fx, tmp_path, "[]", {})
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == ""
+        assert not (tmp_path / "getent-calls").exists()
+
+    def test_it_takes_no_lock(self, fx, tmp_path):
+        """The timer's unit must not wait on an update holding the stack lock."""
+        lock = HeldLock(fx.stack / ".stack.lock", "update")
+        try:
+            result = self._lookup(fx, tmp_path, "[]", {})
+        finally:
+            lock.release()
+        assert result.returncode == 0, result.stderr
+
+    def test_up_refreshes_the_firewall_without_waiting_for_the_timer(self, fx, tmp_path):
+        bindir = tmp_path / "systemctl-bin"
+        bindir.mkdir()
+        calls = tmp_path / "systemctl-calls"
+        stub = bindir / "systemctl"
+        stub.write_text(f'#!/bin/bash\necho "$*" >> {calls}\n')
+        stub.chmod(0o755)
+        result = fx.run("up", PATH=f"{bindir}:{fx.env['PATH']}")
         assert result.returncode == 0, result.stdout + result.stderr
-        assert "ISTOTA_BROWSER_EGRESS_ALLOW" not in result.stdout + result.stderr
+        assert "start --no-block istota-browser-grants.service" in calls.read_text()
+
+    def test_it_keeps_what_the_firewall_drops(self):
+        """A copy, since one script cannot read the other's list on a host."""
+        import re
+
+        stack = re.search(r'DROPPED = "([^"]+)"', SCRIPT.read_text()).group(1)
+        egress = (REPO / "host" / "istota-devbox-egress.sh").read_text()
+        firewall = re.search(r"for dest in ([^;]+); do\n    browser_rule", egress).group(1)
+        assert stack == firewall
+
+    def test_the_second_setting_is_gone(self):
+        assert "ISTOTA_BROWSER_EGRESS_ALLOW" not in SCRIPT.read_text()
+        assert "ISTOTA_BROWSER_EGRESS_ALLOW" not in (REPO / "host" / "provision.sh").read_text()
+        assert "EGRESS_ALLOW" not in (REPO / "ansible" / "defaults" / "main.yml").read_text()
+        assert "egress_allow" not in (REPO / "ansible" / "defaults" / "main.yml").read_text()
 
 
 class TestLeavingThePinnedBrowserNetwork:
@@ -2275,6 +2343,24 @@ class TestLeavingThePinnedBrowserNetwork:
         stop = lines.index("compose stop")
         remove = next(i for i, line in enumerate(lines) if line.startswith("docker network rm "))
         assert stop < remove
+
+    def test_an_older_release_does_not_keep_the_grants_timer(self, fx, tmp_path):
+        """Its egress script ignores the flag, so the timer would re-run the whole
+        chain, a gap in every rule, every five minutes."""
+        result = _source(fx, (
+            'systemctl() { echo "systemctl $*"; }; docker() { :; }; compose() { :; }; '
+            'release_pinned_browser_network'
+        ))
+        assert result.returncode == 0, result.stderr
+        assert "systemctl disable --now istota-browser-grants.timer" in result.stdout
+
+    def test_a_checkout_with_the_overlay_keeps_the_grants_timer(self, fx):
+        self._overlay(fx)
+        result = _source(fx, (
+            'systemctl() { echo "systemctl $*"; }; docker() { :; }; compose() { :; }; '
+            'release_pinned_browser_network'
+        ))
+        assert "systemctl" not in result.stdout
 
     def test_an_unpinned_network_is_left_alone(self, fx):
         result = _source(fx, 'docker() { :; }; compose() { echo "compose $*"; }; release_pinned_browser_network')
