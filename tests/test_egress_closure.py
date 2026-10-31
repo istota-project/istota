@@ -447,3 +447,69 @@ class TestTheAcceptedRisk:
         assert not result.is_error
         assert wire.sent[0].headers["host"] == EVIL
         assert wire.sent[0].url.params["data"] == CANARY
+
+
+class TestTheDevboxExecSocket:
+    """`developer` is `local`, and its exec socket reaches a container with open egress."""
+
+    def _devbox_on(self, config, tmp_path):
+        from istota.config import ContainerConfig, DevboxConfig, DeveloperConfig
+
+        exec_root = tmp_path / "exec"
+        (exec_root / USER).mkdir(parents=True)
+        config.developer = DeveloperConfig(
+            enabled=True, repos_dir=str(tmp_path / "repos"),
+            container=ContainerConfig(exec_socket_dir=str(exec_root)),
+        )
+        config.devbox = DevboxConfig(enabled=True)
+
+    def _mount_reasons(self, config, task, reach, tmp_path):
+        from istota.sandbox.plan import SandboxProfile, build_mount_plan
+
+        plan = build_mount_plan(
+            config, task, True, [], config.temp_dir / USER, profile=SandboxProfile.NATIVE,
+            authorized_skills=["developer"], withheld_scopes=reach.withheld,
+        )
+        return {mount.reason for mount in plan.mounts}
+
+    def test_a_limited_job_has_no_socket_to_the_container(self, config, index, limited, tmp_path):
+        self._devbox_on(config, tmp_path)
+        reach = _reach(config, index, limited)
+        assert "developer" not in reach.withheld
+        assert "devbox_exec_socket" not in self._mount_reasons(config, limited, reach, tmp_path)
+
+    def test_control_a_devbox_grant_keeps_it(self, config, index, limited, tmp_path):
+        self._devbox_on(config, tmp_path)
+        with db.get_db(config.db_path) as conn:
+            egress.add_grant(conn, USER, SUBJECT, "skill:devbox", decided_via="cli", skill_index=index)
+            conn.commit()
+        reach = _reach(config, index, limited)
+        assert "devbox_exec_socket" in self._mount_reasons(config, limited, reach, tmp_path)
+
+    def test_control_an_attended_turn_keeps_it(self, config, index, attended, tmp_path):
+        self._devbox_on(config, tmp_path)
+        reach = _reach(config, index, attended)
+        assert "devbox_exec_socket" in self._mount_reasons(config, attended, reach, tmp_path)
+
+    def test_a_shim_with_no_socket_fails_at_once_and_says_so(self, tmp_path):
+        """What a limited job's `node -e ...` meets: a refusal, never a wait."""
+        import subprocess
+        import sys
+
+        missing = tmp_path / "nothing-here.sock"
+        result = subprocess.run(
+            [sys.executable, "-m", "istota.devbox.exec_client", "--socket", str(missing),
+             "--connect-timeout", "5", "--", "node", "-e", "1"],
+            capture_output=True, text=True, timeout=20,
+        )
+        assert result.returncode == 120
+        assert "could not connect" in result.stderr
+
+    def test_the_model_env_does_not_name_the_container(self, config, index, limited, tmp_path):
+        from istota.config import DevboxConfig
+
+        config.devbox = DevboxConfig(enabled=True)
+        reach = _reach(config, index, limited)
+        runtime, _ = _runtime(config, index, limited, reach, tmp_path)
+        assert "ISTOTA_DEVBOX_CONTAINER" not in runtime.env
+        assert "ISTOTA_DEVBOX_MAX_OUTPUT_BYTES" not in runtime.env

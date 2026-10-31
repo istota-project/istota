@@ -326,7 +326,7 @@ def build_task_runtime(
     # `ISTOTA_DEVBOX_EXEC_TIMEOUT` went with the 300-second default it
     # carried: the transport imposes no timeout, the task's own budget
     # governs, and a caller wanting a kill passes `--timeout`.
-    if config.devbox.enabled:
+    if config.devbox.enabled and "devbox" not in withheld_scopes:
         env["ISTOTA_DEVBOX_CONTAINER"] = (
             f"{config.devbox.container_prefix}{task.user_id}"
         )

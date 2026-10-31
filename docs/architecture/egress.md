@@ -48,7 +48,7 @@ Only an authenticated person writes a grant: the web route for the signed-in use
 | Shell, git, pip, npm, cron `command:` jobs | `extra_hosts`, the Nextcloud host and each grant at 443. Registries and forges only if granted | The skill-keyed allowlist |
 | WebSearch | Unchanged | Unchanged |
 | Browser | Withheld without `skill:browse`. With it, the isolated profile | The user's profile |
-| Devbox and other `external` skills | Withheld without a `skill:` grant | Available |
+| Devbox and other `external` skills | Withheld without a `skill:` grant. `developer` stays, and without `skill:devbox` it has no exec socket, so a shimmed `npm` or `node` exits 120 | Available |
 | `feeds add`, `feeds import-opml`, `bookmarks add`, `ntfy --topic` | Refused, `egress_limited` | Available |
 | `briefings` `sources add`, `sources set`, `blocks add`, `blocks save` | Refused. The daemon fetches what they name | Available |
 | `briefings_config` `shared-block set`, `set-prompt`, `run`, `remove`, `group save`, `group set` | Refused. Research runs with open web on what they write | Available |

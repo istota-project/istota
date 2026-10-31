@@ -458,3 +458,34 @@ class TestSystemBinaries:
             layout, task, user_temp,
         )
         assert "AWK_OK" in result.stdout, (result.stdout, result.stderr)
+
+
+class TestTheDevboxExecSocket:
+    """A task limited to approved hosts has no way into the container's open egress."""
+
+    def _probe(self, layout, task, user_temp, tmp_path, withheld):
+        from istota.config import ContainerConfig, DevboxConfig, DeveloperConfig
+
+        exec_root = tmp_path / "exec"
+        (exec_root / "alice").mkdir(parents=True)
+        (exec_root / "alice" / "alive").write_text("exec-dir")
+        (tmp_path / "repos" / "alice").mkdir(parents=True)
+        layout.developer = DeveloperConfig(
+            enabled=True, repos_dir=str(tmp_path / "repos"),
+            container=ContainerConfig(exec_socket_dir=str(exec_root)),
+        )
+        layout.devbox = DevboxConfig(enabled=True)
+        return run_probe(
+            f'cat {_q(exec_root / "alice" / "alive")} 2>/dev/null || echo ABSENT',
+            layout, task, user_temp, is_admin=True,
+            authorized_skills=frozenset({"developer"}), withheld_scopes=withheld,
+        )
+
+    def test_a_withheld_devbox_leaves_no_socket_directory(self, layout, task, user_temp, tmp_path):
+        result = self._probe(layout, task, user_temp, tmp_path, frozenset({"devbox"}))
+        assert "ABSENT" in result.stdout, (result.stdout, result.stderr)
+        assert "exec-dir" not in result.stdout
+
+    def test_control_otherwise_it_is_bound(self, layout, task, user_temp, tmp_path):
+        result = self._probe(layout, task, user_temp, tmp_path, frozenset())
+        assert "exec-dir" in result.stdout, (result.stdout, result.stderr)
