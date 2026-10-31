@@ -116,6 +116,7 @@ src/istota/
 ├── rooms/                # The multiplayer room model → transport.md
 │   ├── speech_gate.py    # Whether the bot answers a turn in a multi-human room; every turn is recorded first → transport.md
 │   ├── ack_reaction.py   # A friendly room's thanks answered with a reaction: the held task and settling it → transport.md
+│   ├── egress.py         # What an owner approved for a task's network reach, what it was refused, and the page's view of a subject → sandbox.md
 │   ├── scopes.py         # The withheld-scope set every reach seam reads, the ambient-memory rule, and a task's resolved group set → sandbox.md
 │   ├── policy.py         # Per-room host, guest_reply, audience class and readers; who may change a shared room → transport.md
 │   ├── veto.py           # `!<bot> off|on`, the one-time announcement, and the room-notices queue → transport.md
@@ -193,6 +194,7 @@ src/istota/
 │   ├── map_basemap.py    # Where the map's background tiles come from → leaf-modules.md
 │   ├── admin_logs.py     # Read-only log sources for the admin UI: the rotating app log (+ rotation chain, paged reader, live tail) and `task_logs`
 │   ├── admin_config_view.py  # Redacted, sectioned rendering of the loaded Config for the admin UI (credentials never leave the process)
+│   ├── egress_routes.py  # Settings, Network access: a user's own approvals and refusals → sandbox.md
 │   ├── chat_files.py     # Which paths `/chat/files` will serve, and the stored-answer check that rewrites links it would refuse
 │   └── nextcloud_sharing.py  # The user's calendars and address books, and their DAV shares to the bot, over the user's own token through `nextcloud_files.dav_request` → web-ui.md
 ├── maintenance/          # Backups, migrators, sweepers, host instrumentation → maintenance.md

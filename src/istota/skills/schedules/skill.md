@@ -58,6 +58,7 @@ These are TOML basic strings: a backslash or a double quote inside one must be e
 - `room`: The conversation the job runs in. See "Delivering into a room" — it is a *room* token and not always a Talk one
 - `enabled`: Set to `false` to pause the job (default: true). Use `!cron disable/enable` for runtime control
 - `once`: When `true`, the job auto-deletes from both the DB and CRON.md after successful execution. Failed jobs are kept for retry. Used by the reminders skill for one-shot fire-and-forget entries
+- `reach`: `"private"` (default) or `"public"`. A job fetches only hosts its owner approved in Settings, Network access. `"public"` asks to run with open web and nothing private: no memory, files or credentials. It grants nothing until the owner approves the job's exact text, and editing that text drops the approval. Tell the user when you set it
 - `silent_unless_action`: When `true`, only posts output if response starts with `ACTION:`. Useful for monitoring jobs
 - `skip_log_channel`: When `true`, this job's run is not mirrored to the verbose execution log channel. Useful for noisy, frequent jobs
 - `model`: Per-job model override (canonical id, provider alias like `opus-high`, or a role alias like `fast`/`general`/`smart`). Empty = the instance default
