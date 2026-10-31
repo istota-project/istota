@@ -135,6 +135,7 @@ class TestSchemeAndAddress:
         client = make(fake, private_hosts=())
         err = refused(client, "GET", "system/status")
         assert err.reason == "host_refused"
+        assert '[private_hosts] "10.0.0.5" = ["servarr"]' in str(err)
         assert fake.requests == []
 
     def test_http_to_a_listed_ip_literal_is_sent_without_resolving(self):
@@ -150,6 +151,7 @@ class TestSchemeAndAddress:
         client = make(fake, base="https://arr.example.test", private_hosts=(), ips=("10.1.2.3",))
         err = refused(client, "GET", "system/status")
         assert err.reason == "host_refused"
+        assert '[private_hosts] "arr.example.test" = ["servarr"]' in str(err)
         assert fake.requests == []
 
     def test_one_private_address_among_public_ones_refuses(self):

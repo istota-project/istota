@@ -49,7 +49,7 @@ WordPress login and the site URL. The URL decides where requests go and the
 entry's ``bound_hosts`` decide where they may go (`client.py`).
 
 The user id is ``ISTOTA_USER_ID`` and the config is the daemon's own
-(``ISTOTA_CONFIG_PATH``), read host-side for ``[wordpress] private_hosts``.
+(``ISTOTA_CONFIG_PATH``), read host-side for the hosts ``[private_hosts]`` grants to ``wordpress``.
 """
 
 from __future__ import annotations

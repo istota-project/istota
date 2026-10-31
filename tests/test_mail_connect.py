@@ -409,6 +409,10 @@ class TestClassifyError:
         exc = connect.ConnectRefused("address_not_public", TYPED)
         assert TYPED in str(exc)
 
+    def test_the_refusal_message_says_what_to_write(self):
+        exc = connect.ConnectRefused("address_not_public", TYPED)
+        assert f'[private_hosts] "{TYPED}" = ["mail_accounts"]' in str(exc)
+
 
 # --------------------------------------------------------------------------
 # config

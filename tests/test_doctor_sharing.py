@@ -59,7 +59,8 @@ def test_every_feed_failing_warns_with_a_remedy(db_path):
         _feed(conn, "alice", "a", failing=True)
         conn.commit()
     result = _check(db_path)
-    assert result.status == doctor.WARN and result.remedy
+    assert result.status == doctor.WARN
+    assert '[private_hosts] "<host>" = ["sharing"]' in result.remedy
 
 
 def test_an_unmigrated_database_warns_rather_than_raising(tmp_path):

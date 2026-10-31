@@ -10,8 +10,8 @@ request passes, in order:
    password somewhere else.
 2. **The SSRF guard.** The host is resolved, and the request is refused if *any*
    address is non-public (`istota.sandbox.net_guard.ip_is_public`, the rule the native
-   WebFetch tool uses), unless the operator listed the exact host in
-   ``[wordpress] private_hosts``. The connection is then made to the address
+   WebFetch tool uses), unless the operator granted the exact host to
+   ``wordpress`` in ``[private_hosts]``. The connection is then made to the address
    that was checked, with the Host header and TLS SNI on the name, so DNS cannot
    change its answer between the check and the connect.
 3. **No redirects.** ``follow_redirects=False``, and a 3xx is reported naming its
@@ -145,8 +145,8 @@ class WordPressClient:
         if refused is not None:
             raise WordPressError(
                 f"{name} resolves to a private or reserved address ({refused}). "
-                f"Only a host the operator lists in [wordpress] private_hosts "
-                f"may; nothing was sent.",
+                f"It needs a grant from the operator, "
+                f"[private_hosts] \"{name}\" = [\"wordpress\"]; nothing was sent.",
                 "host_refused",
             )
         if not addresses:

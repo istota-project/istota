@@ -188,6 +188,7 @@ class TestTheSsrfGuard:
         with pytest.raises(WordPressError) as err:
             client.get("wp/v2/posts")
         assert err.value.reason == "host_refused"
+        assert '[private_hosts] "wp.example.test" = ["wordpress"]' in str(err.value)
         assert recorder.requests == []
 
     def test_an_operator_listed_host_may_resolve_privately(self):
