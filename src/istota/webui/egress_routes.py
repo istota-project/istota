@@ -53,21 +53,20 @@ def _config(request: Request):
 
 def _usable_external_skills(config, user_id: str) -> dict:
     """The `external` skills this user could use at all, name to metadata."""
-    from istota.skills._loader import load_skill_index, user_skill_names
+    from istota.skills._loader import usable_external_skills
 
     try:
-        index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
-        names = user_skill_names(config, user_id, index, count_user_disabled=False)
+        return usable_external_skills(config, user_id)
     except Exception as exc:  # noqa: BLE001 — a page with no skills to offer still works
         logger.warning("egress_skills_unavailable: %s", type(exc).__name__)
         return {}
-    return {name: index[name] for name in names if getattr(index[name], "egress", "") != "local"}
 
 
 def _listing(config, user_id: str) -> dict:
+    open_default = config.security.scheduled_job_egress == "open"
     with db.get_db(Path(config.db_path)) as conn:
         subjects = [
-            egress.describe_subject(conn, user_id, subject)
+            egress.describe_subject(conn, user_id, subject, open_default=open_default)
             for subject in egress.list_subject_names(conn, user_id)
         ]
     return {

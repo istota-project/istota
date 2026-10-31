@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import logging
 import re
 import sqlite3
@@ -42,13 +43,16 @@ TASK_TEXT_COLUMNS = ("prompt", "command", "skill", "skill_args")
 #: The publish target sends a job's answer into other users' briefings, so an
 #: approval covers it, and a limited task can write it into CRON.md.
 DIGEST_COLUMNS = (*TASK_TEXT_COLUMNS, "publish_shared_kv", "publish_shared_kv_trusted")
-_JOB_ROW_COLUMNS = "name, reach, " + ", ".join(DIGEST_COLUMNS)
+_JOB_ROW_COLUMNS = "name, reach, once, egress_request, " + ", ".join(DIGEST_COLUMNS)
 DECIDERS = frozenset({"web", "cli", "migration"})
 POSTURE_PUBLIC = "public"
 POSTURE_PRIVATE = "private"
 #: Refusal entries that ask for a decision about a job, rather than name a host.
 JOB_REQUESTS = ("open", "public")
 MAX_REFUSED_PER_SUBJECT = 20
+#: What a job's `egress` may list. Room is left for both job requests: at the table's
+#: cap, a declared row and a `public` row would evict each other on every sync.
+MAX_DECLARED = MAX_REFUSED_PER_SUBJECT - len(JOB_REQUESTS)
 #: `egress-refused.jsonl` channels whose entry is a name somebody else can choose.
 _HOST_CHANNELS = frozenset({"web_fetch", "connect"})
 _MAX_HOST_CHARS = 253
@@ -279,6 +283,90 @@ def record_posture(conn: sqlite3.Connection, task_id: int, posture: str) -> None
         "UPDATE tasks SET egress_posture = ? WHERE id = ? AND egress_posture IS NULL",
         (posture, task_id),
     )
+
+
+def record_open_by_default(conn: sqlite3.Connection, task_id: int) -> None:
+    """This occurrence was created where jobs need no approval, on the caller's
+    transaction. Daemon only, and held to its one caller like `record_posture`."""
+    conn.execute("UPDATE tasks SET egress_open_by_default = 1 WHERE id = ?", (task_id,))
+
+
+def open_by_default(conn: sqlite3.Connection, task_id: int) -> bool:
+    row = conn.execute(
+        "SELECT egress_open_by_default FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    return row is not None and bool(row[0])
+
+
+def declared_entries(raw: str | None) -> tuple[str, ...]:
+    """`scheduled_jobs.egress_request` as entries. What will not read asks for nothing."""
+    if not raw:
+        return ()
+    try:
+        values = json.loads(raw)
+    except ValueError:
+        logger.warning("egress_request_malformed: dropped on read")
+        return ()
+    if not isinstance(values, list):
+        return ()
+    return tuple(value for value in values if isinstance(value, str))
+
+
+def unmet_entries(raw: str | None, grants: frozenset[str]) -> list[str]:
+    """What a job declared and its owner has not granted."""
+    return [entry for entry in declared_entries(raw) if entry not in grants]
+
+
+def sync_declared(
+    conn: sqlite3.Connection,
+    user_id: str,
+    subject: str,
+    declared: str | None,
+    previous: str | None,
+    *,
+    ask: bool,
+) -> bool:
+    """File a job's declared requests as rows the owner answers, on the caller's
+    transaction. True if a row is new. It grants nothing.
+
+    Decided from the rows rather than from an edit, so a request is asked again when
+    a flood evicted its row or the deployment went back to requiring approval. A
+    dismissed row is still a row and does not ask again. A request taken out of the
+    file stops asking; a real refusal of that entry can raise it again.
+    """
+    entries = declared_entries(declared)
+    for entry in declared_entries(previous):
+        if entry not in entries:
+            clear_refused(conn, user_id, subject, entry)
+    if not ask or not entries:
+        return False
+    grants = grants_for(conn, user_id, subject)
+    present = {row["entry"] for row in list_refused(conn, user_id, subject)}
+    missing = [entry for entry in entries if entry not in grants and entry not in present]
+    for entry in missing:
+        note_refused(conn, user_id, subject, entry)
+    return bool(missing)
+
+
+def once_job_waiting(
+    conn: sqlite3.Connection, user_id: str, job_name: str, *, open_default: bool,
+) -> bool:
+    """Whether a due `once` job holds its fire for its owner.
+
+    It would run limited and delete itself, taking the request with it, so there
+    would be no moment to approve it. An approved `public` or `open` needs nothing
+    further. An unapproved `reach = "public"` waits under either default: it asked
+    for something narrower than open.
+    """
+    row = job_row_by_subject(conn, user_id, cron_subject(job_name))
+    if row is None or not row["once"]:
+        return False
+    grants = grants_for(conn, user_id, cron_subject(job_name))
+    if job_state(grants, row) != "limited":
+        return False
+    if row["reach"] == POSTURE_PUBLIC:
+        return True
+    return not open_default and bool(unmet_entries(row["egress_request"], grants))
 
 
 def add_grant(
@@ -581,14 +669,31 @@ def list_subject_names(conn: sqlite3.Connection, user_id: str) -> list[str]:
     return sorted(names)
 
 
-def describe_subject(conn: sqlite3.Connection, user_id: str, subject: str) -> dict:
+def describe_subject(
+    conn: sqlite3.Connection, user_id: str, subject: str, *, open_default: bool = False,
+) -> dict:
     """One subject as the page and `istota egress list` show it. Hostnames and job
-    text are for the owner's own session or the operator's terminal, and are data."""
+    text are for the owner's own session or the operator's terminal, and are data.
+
+    `waiting_on` lists a `once` job's declared entries while it holds its fire, a
+    dismissed one included, since the job waits on it all the same.
+    """
     grants = grants_for(conn, user_id, subject)
     row = job_row_by_subject(conn, user_id, subject)
     job = None
+    waiting_on: list[str] = []
+    by_default = (
+        open_default and row is not None and row["reach"] != POSTURE_PUBLIC
+        and job_state(grants, row) == "limited"
+    )
     if row is not None:
+        waiting = once_job_waiting(conn, user_id, row["name"], open_default=open_default)
+        # An unapproved `public` waits on that approval whatever its hosts say.
+        if waiting and row["reach"] != POSTURE_PUBLIC:
+            waiting_on = unmet_entries(row["egress_request"], grants)
         job = {
+            "once": bool(row["once"]),
+            "waiting": waiting,
             "digest": job_digest(row),
             "reach": row["reach"],
             "prompt": row["prompt"] or "",
@@ -603,12 +708,14 @@ def describe_subject(conn: sqlite3.Connection, user_id: str, subject: str) -> di
         "kind": subject.partition(":")[0],
         "label": subject_label(subject),
         "state": job_state(grants, row),
+        "open_by_default": by_default,
         "hosts": sorted(_entries_of_kind(grants, "host")),
         "skills": sorted(_entries_of_kind(grants, "skill")),
         "approvals": sorted(
             text for text in grants if text.partition(":")[0] in JOB_REQUESTS
         ),
         "job": job,
+        "waiting_on": waiting_on,
         "refused": [
             {"entry": item["entry"], "hits": item["hits"], "last_seen": item["last_seen"]}
             for item in list_refused(conn, user_id, subject)

@@ -44,6 +44,7 @@ def _cron_definition(job):
     # the reference, never a copy of the referenced file.
     if job.prompt_file:
         definition["prompt"] = ""
+    definition["egress"] = list(job.egress)
     return definition
 
 

@@ -308,6 +308,13 @@ features = []
 # credential_audit_days = 365
 # credential_backup_retention = 30
 # credential_exports_per_day = 3
+# scheduled_job_egress = "approval" # what a scheduled job may reach with no approval.
+#                                  # "approval": what its owner granted in Settings, Network
+#                                  # access. "open": no approval, as if each job had Full access:
+#                                  # the user's browser profile, every skill, any public host and
+#                                  # unheld mail, so a page a job reads can send what it holds
+#                                  # anywhere, and a limited task can plant such a job in CRON.md.
+#                                  # reach = "public" still needs approving. Doctor warns on "open".
 # wallet_requests_per_task = 3    # purchase requests, including refusals
 # wallet_fills_per_purchase = 3   # card fills within one authorization
 # wallet_authorization_minutes = 30 # clamped to 5..240 minutes

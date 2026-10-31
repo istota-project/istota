@@ -473,6 +473,12 @@ class CronJob:
     # open web. A request and never a grant: the file is model-writable, so the
     # job runs limited until its owner approves (`rooms.egress`).
     reach: str = "private"
+    # Hosts and `skill:` entries this job asks its owner for, in normal form. A
+    # request and never a grant, like `reach`: it runs with what it has been given.
+    egress: tuple[str, ...] = ()
+    # `skill:` entries the owner cannot approve today. Asks for nothing, and the file
+    # keeps them, as it keeps a refused `model`.
+    egress_kept: tuple[str, ...] = field(default=(), compare=False)
     # Set at parse when the owner may not pick ``model`` (a non-admin naming a
     # model outside `[models] enabled`). The file keeps the field, so a rewrite
     # never deletes what the user wrote; the sync stores no model for it.
@@ -619,6 +625,74 @@ def _validate_reach(name: str, user_id: str, value, errors: list[str] | None = N
         if errors is not None:
             errors.append(f"Job '{name}': reach must be \"private\" or \"public\", got {shown}")
     return "private"
+
+
+def _validate_egress(
+    name: str, config, user_id: str, value, errors: list[str] | None = None,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The requests a job's `egress` may hold, normal form, duplicates gone, and the
+    skills refused for now, which the file keeps.
+
+    Names no entry in a log line: a hostname can carry data and this file is
+    model-writable. `open:` and `public:` are refused because they name a job's
+    text, which has its own request. A skill its owner could not approve is
+    dropped, or a `once` job would wait on a button that refuses.
+    """
+    if errors is None:
+        errors = []
+    if not isinstance(value, list):
+        logger.warning("Job '%s' (user %s): egress is not a list; ignoring it", name, user_id)
+        errors.append(f"Job '{name}': egress must be a list of hosts and skill:<name> entries")
+        return (), ()
+    entries: dict[str, None] = {}
+    kept: list[str] = []
+    skills = None
+    for position, raw in enumerate(value, start=1):
+        try:
+            parsed = egress.parse_entry(raw)
+        except egress.EntryRefused as exc:
+            logger.warning("Job '%s' (user %s): egress entry %d refused", name, user_id, position)
+            errors.append(f"Job '{name}': egress entry {position}: {exc}")
+            continue
+        if parsed.kind not in ("host", "skill"):
+            logger.warning("Job '%s' (user %s): egress entry %d refused", name, user_id, position)
+            errors.append(
+                f"Job '{name}': egress entry {position} must be a host or skill:<name>; "
+                'use reach = "public" to ask for public access'
+            )
+            continue
+        if parsed.kind == "skill":
+            if skills is None:
+                skills = _approvable_skills(config, user_id)
+            if skills is not None and parsed.value not in skills:
+                logger.warning(
+                    "Job '%s' (user %s): egress entry %d refused", name, user_id, position,
+                )
+                errors.append(
+                    f"Job '{name}': egress entry {position}: skill:{parsed.value} is not a "
+                    "skill that needs approval and that you can use"
+                )
+                kept.append(parsed.text)
+                continue
+        entries[parsed.text] = None
+    if len(entries) > egress.MAX_DECLARED:
+        errors.append(
+            f"Job '{name}': egress lists more than {egress.MAX_DECLARED} entries; "
+            "the rest are ignored"
+        )
+    return tuple(entries)[:egress.MAX_DECLARED], tuple(kept)
+
+
+def _approvable_skills(config, user_id: str):
+    """The skills this owner could approve, or None when that cannot be read now. A
+    passing fault must not cost a job its request, so None keeps the entry."""
+    from .skills import _loader
+
+    try:
+        return _loader.usable_external_skills(config, user_id)
+    except Exception as exc:  # noqa: BLE001 - one job's field must not stop the file
+        logger.warning("cron_egress_skills_unavailable: %s", type(exc).__name__)
+        return None
 
 
 def load_cron_document(config, user_id: str) -> "CronDocument | None":
@@ -892,6 +966,9 @@ def _parse_jobs(
                 name, user_id, target,
                 _str_field(name, user_id, "room", j.get("room", "")),
             )
+        declared, egress_kept = _validate_egress(
+            name, config, user_id, j.get("egress", []), errors,
+        )
         job = CronJob(
             name=name,
             cron=cron,
@@ -925,6 +1002,8 @@ def _parse_jobs(
                 name, user_id, "publish_shared_kv_trusted",
                 j.get("publish_shared_kv_trusted", False), False, errors),
             reach=_validate_reach(name, user_id, j.get("reach", "private"), errors),
+            egress=declared,
+            egress_kept=egress_kept,
             model_refused=model_refused,
             model_split=model_split,
         )
@@ -1074,6 +1153,10 @@ def render_jobs_block(jobs: list[CronJob]) -> str:
             lines.append("publish_shared_kv_trusted = true")
         if job.reach != "private":
             lines.append(_toml_string("reach", job.reach))
+        if job.egress or job.egress_kept:
+            # `parse_entry`'s normal form holds nothing a basic string has to escape.
+            quoted = ", ".join(f'"{entry}"' for entry in (*job.egress, *job.egress_kept))
+            lines.append(f"egress = [{quoted}]")
 
     if not lines:
         return ""
@@ -1322,6 +1405,7 @@ FILE_OWNED_COLUMNS = frozenset({
     "publish_shared_kv",
     "publish_shared_kv_trusted",
     "reach",
+    "egress_request",
 })
 
 #: Columns the daemon authors. The sync never writes one *from the file*, and
@@ -1428,6 +1512,7 @@ def _file_owned_values(
         "publish_shared_kv": fj.publish_shared_kv or None,
         "publish_shared_kv_trusted": 1 if fj.publish_shared_kv_trusted else 0,
         "reach": fj.reach,
+        "egress_request": json.dumps(list(fj.egress)) if fj.egress else None,
     }
 
 
@@ -1448,6 +1533,7 @@ def sync_cron_jobs_to_db(
     *,
     is_admin: bool = True,
     unread_names: frozenset[str] = frozenset(),
+    egress_requests: bool = True,
 ) -> list[str]:
     """
     Sync CRON.md job definitions into the scheduled_jobs DB table.
@@ -1466,7 +1552,9 @@ def sync_cron_jobs_to_db(
       shell-command tasks must remain admin-only)
     - a new job has no egress grants; an edit to what it dispatches drops its
       `open:` and `public:` approvals; a removed job takes its rows with it; and
-      `reach = "public"` asks the owner and grants nothing (`_sync_job_approvals`)
+      `reach = "public"` and `egress` ask the owner and grant nothing
+      (`_sync_job_approvals`); ``egress_requests`` is False where the deployment
+      needs no approval, so `egress` has nothing to ask
     - ``unread_names`` are jobs whose `prompt_file` could not be read this tick:
       kept, not orphaned
 
@@ -1523,7 +1611,7 @@ def sync_cron_jobs_to_db(
         if publisher_retired(conn, user_id, fj.name):
             file_values["enabled"] = 0
         existing = db_by_name.get(fj.name)
-        if _sync_job_approvals(conn, user_id, fj, existing, file_values):
+        if _sync_job_approvals(conn, user_id, fj, existing, file_values, egress_requests):
             refused_subjects.append(egress.cron_subject(fj.name))
         if existing:
             # Update definition fields, preserve state
@@ -1650,6 +1738,7 @@ def sync_cron_jobs_to_db(
 
 def _sync_job_approvals(
     conn, user_id: str, fj: "CronJob", existing, file_values: dict[str, object],
+    egress_requests: bool = True,
 ) -> bool:
     """What this tick's edit does to a job's egress grants. True if it asked the
     owner something new.
@@ -1682,7 +1771,12 @@ def _sync_job_approvals(
             ask.append("public")
     for entry in ask:
         egress.note_refused(conn, user_id, subject, entry, reopen=True)
-    return bool(ask)
+    declared_new = egress.sync_declared(
+        conn, user_id, subject, file_values["egress_request"],
+        existing.egress_request if existing is not None else None,
+        ask=egress_requests,
+    )
+    return bool(ask) or declared_new
 
 
 def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False) -> bool:
@@ -1773,6 +1867,7 @@ def _migrate_db_jobs_locked(conn, config, user_id: str, config_dir, overwrite: b
             publish_shared_kv=j.publish_shared_kv or "",
             publish_shared_kv_trusted=bool(j.publish_shared_kv_trusted),
             reach=j.reach,
+            egress=egress.declared_entries(j.egress_request),
         ))
 
     if not _write_cron_md(config, user_id, file_jobs):
