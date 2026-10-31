@@ -52,7 +52,7 @@ def _read_only() -> dict[tuple[str, ...], str]:
             f"stack onto an empty database. {_ON_THE_HOST}"
         )
     found[("site", "hostname")] = (
-        "Must equal host.env's DOMAIN, or the stack refuses to start. Change it on "
+        "Its name must equal host.env's DOMAIN, or the stack refuses to start. Change it on "
         "the host: host.env and `provision.sh`, then `istota-stack setup --force`."
     )
     mount = (
