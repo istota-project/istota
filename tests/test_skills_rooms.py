@@ -81,6 +81,17 @@ class TestTheDescriptor:
         deliver the result twice."""
         assert room_target_descriptor("9erk", "talk", "9erk") == "talk:9erk"
 
+    def test_a_minted_talk_room_names_its_conversation(self):
+        """ISSUE-909. The token is the room's identity, and Nextcloud has no
+        conversation by that name."""
+        assert (
+            room_target_descriptor("rm_fake", "talk", "k3mq7wza")
+            == "talk:k3mq7wza"
+        )
+
+    def test_a_minted_talk_room_with_no_binding_is_not_a_talk_target(self):
+        assert room_target_descriptor("rm_fake", "talk") == "web:rm_fake"
+
     def test_it_is_never_the_room_meta_destination(self):
         """`room:<token>` is the spelling a reader reaches for. It resolves to
         an empty plan for a scheduled task and its only signal is one load-time
@@ -117,6 +128,13 @@ class TestTheListing:
         _room(db_path, "p8vt2cnd", origin="talk", name="general")
         row = _by_token(_run(capsys, ["list"])[0])["p8vt2cnd"]
         assert row["target"] == "talk:p8vt2cnd"
+
+    def test_a_minted_talk_room_lists_its_conversation(self, capsys, db_path):
+        _room(db_path, "rm_fake", origin="talk", name="general",
+              talk_ref="k3mq7wza")
+        row = _by_token(_run(capsys, ["list"])[0])["rm_fake"]
+        assert row["talk_token"] == "k3mq7wza"
+        assert row["target"] == "talk:k3mq7wza"
 
     def test_another_user_s_rooms_are_not_listed(self, capsys, db_path):
         _room(db_path, "web-bob-1", user_id="bob", origin="web", name="#bobs")

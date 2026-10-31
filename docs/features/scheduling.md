@@ -94,13 +94,13 @@ The descriptor comes from the room rather than being written by hand. `istota-sk
 
 | The room | `target` |
 |---|---|
-| Made in Talk | `talk:<token>` |
+| Made in Talk | `talk:<talk_token>` |
 | Made in web chat | `web:<token>` |
 | Web chat, also open in Talk | `web:<token>,talk:<talk_token>` |
 
 The last one is two legs because the web leg writes the room's own transcript and pushes nothing to Talk, so naming only the web half leaves the room's Talk members with nothing.
 
-Set `room` to the same canonical token. `target` decides where the result goes; `room` decides which conversation the job runs in, and it is what makes the result render as a reply in the room rather than as a standalone system note.
+Set `room` to the room's canonical token, never its Talk token. `target` decides where the result goes; `room` decides which conversation the job runs in, and it is what makes the result render as a reply in the room rather than as a standalone system note.
 
 ```toml
 [[jobs]]

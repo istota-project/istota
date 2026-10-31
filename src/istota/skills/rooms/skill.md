@@ -59,7 +59,7 @@ tell them where it is.
 Copy the `target` field. It is a full `output_target` descriptor and needs no
 assembly:
 
-- a Talk-origin room is `talk:<token>`
+- a Talk-origin room is `talk:<talk_token>`
 - a web room is `web:<token>`
 - a web room that is also open in Talk is `web:<token>,talk:<talk_token>` —
   **both legs**, because the web leg writes the room's own transcript and pushes
@@ -70,7 +70,7 @@ assembly:
 at the time". Use the canonical `token` above, not `talk_token`. Prefer the descriptor above: it names the surfaces, so a room
 later unbound from one of them is legible rather than silently narrowed.
 
-In `CRON.md`, pair it with `room` set to the same canonical token:
+In `CRON.md`, pair it with `room` set to the canonical `token` field, never `talk_token`:
 
 ```toml
 [[jobs]]

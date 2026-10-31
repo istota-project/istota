@@ -126,6 +126,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A skill refused for want of network approval now answers with the JSON error a skill's caller reads (`status: error`, `reason: egress_not_approved`), rather than plain text that broke anything parsing `status`.
+- **Scheduled jobs targeting a Talk room reach Talk again.** `rooms list` and the prompt header handed out a room token that names no Talk conversation, so the post failed while the answer still reached web chat. They now name the conversation, and jobs already written with the token are repaired at delivery. When the answer is in the room, the failed-post alert says so instead of repeating it.
 - The browser no longer loses Japanese, Chinese or other non-Latin characters from a web address on a busy machine, which could land it on the wrong page. A host name with a character the browser cannot convert faithfully is now refused and asks for its `xn--` form, and an address that hides a blocked scheme behind such characters is refused too.
 - A page could fail with `navigation_mismatch` when an earlier visit had used the same address in a different case, such as `gl=US` after `gl=us`, and retrying never helped. The browser now reaches the address you asked for. A different document still fails.
 - `istota doctor` no longer skips the model credential, master key and servarr key checks because `PRECOMMIT_SCANS_REQUIRED` is set. A missing credential on a daemon with that override now reports as a failure.

@@ -82,6 +82,14 @@ class TestTheLine:
         assert "on Talk" in line
         assert 'target = "talk:p8vt2cnd"' in line
 
+    def test_a_minted_talk_room_targets_its_conversation(self, db_path):
+        """ISSUE-909: `target` is the conversation, `room` the room's identity."""
+        _room(db_path, "rm_fake", origin="talk", name="general",
+              talk_ref="k3mq7wza")
+        line = _line(db_path, "rm_fake", source_type="talk")
+        assert 'target = "talk:k3mq7wza"' in line
+        assert 'room = "rm_fake"' in line
+
     def test_a_promoted_room_says_both_and_carries_both_legs(self, db_path):
         _room(db_path, "web-alice-1", origin="web", name="#general",
               talk_ref="k3mq7wza")
