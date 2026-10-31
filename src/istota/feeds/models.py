@@ -233,8 +233,8 @@ class FeedsContext:
     discovery) must consult this field — ``data_dir.parent`` is
     unreliable in that case.
 
-    ``private_hosts`` is ``[feeds] private_hosts``: the only hosts an RSS
-    fetch may reach on a non-public address.
+    ``private_hosts`` is what ``[private_hosts]`` grants to ``feeds``: the only
+    hosts an RSS fetch may reach on a non-public address.
     """
     user_id: str
     data_dir: Path

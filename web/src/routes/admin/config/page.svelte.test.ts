@@ -883,8 +883,20 @@ describe('the [servarr] apps editor', () => {
     );
   }
 
-  function servarrFields(appsOver: Partial<AdminConfigField> = {}) {
+  function servarrFields(
+    appsOver: Partial<AdminConfigField> = {},
+    grants: Record<string, string[]> = { '10.0.0.5': ['servarr'] },
+  ) {
     return [
+      configField({
+        path: ['private_hosts'],
+        type: 'dict',
+        editor: 'table',
+        value: grants,
+        default: {},
+        in_file: true,
+        toml: '[private_hosts]\n"10.0.0.5" = ["servarr"]\n',
+      }),
       configField({
         path: ['servarr', 'apps'],
         type: 'dict',
@@ -892,14 +904,6 @@ describe('the [servarr] apps editor', () => {
         value: { radarr: null },
         in_file: true,
         ...appsOver,
-      }),
-      configField({
-        path: ['servarr', 'private_hosts'],
-        type: 'list',
-        editor: 'list',
-        value: ['10.0.0.5'],
-        default: [],
-        in_file: true,
       }),
     ];
   }
@@ -981,7 +985,7 @@ describe('the [servarr] apps editor', () => {
     expect(sent.secrets).toEqual({ istota_servarr_sonarr_api_key: 'fixture-arr-key-1' });
   });
 
-  it('refuses plain HTTP to a host not in the private hosts before any preview', async () => {
+  it('refuses plain HTTP to a host with no grant before any preview, and says what to write', async () => {
     mountServarr();
     const radarr = await block('radarr');
     await fireEvent.input(radarr.getByLabelText(/^URL/), {
@@ -989,16 +993,43 @@ describe('the [servarr] apps editor', () => {
     });
     await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
     expect(api.previewConfigChange).not.toHaveBeenCalled();
-    expect(radarr.getAllByText(/not in the private hosts/).length).toBeGreaterThan(0);
+    expect(radarr.getAllByText(/Under General/)[0].textContent).toContain(
+      'add "10.0.0.9" = ["servarr"] below [private_hosts]',
+    );
+    expect(radarr.queryByRole('button', { name: /private hosts/ })).toBeNull();
+  });
 
-    await fireEvent.click(radarr.getByRole('button', { name: 'Add 10.0.0.9 to private hosts' }));
-    expect(radarr.queryByText(/not in the private hosts/)).toBeNull();
-    const sent = await review();
-    expect(sent.ops).toContainEqual({
-      op: 'set',
-      path: ['servarr', 'private_hosts'],
-      value: ['10.0.0.5', '10.0.0.9'],
+  it('takes a host the table grants to servarr, and not one it grants to another consumer', async () => {
+    api.getAdminConnections.mockResolvedValue({ connections: [servarrConnection()] });
+    const grants = { '10.0.0.9': ['servarr'], '10.0.0.7': ['browser'] };
+    mount(configView([imapHost, ...servarrFields({}, grants)], { secrets: keyFiles() }));
+    const radarr = await block('radarr');
+    await fireEvent.input(radarr.getByLabelText(/^URL/), {
+      target: { value: 'http://10.0.0.7:7878' },
     });
+    await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    expect(api.previewConfigChange).not.toHaveBeenCalled();
+
+    await fireEvent.input(radarr.getByLabelText(/^URL/), {
+      target: { value: 'http://10.0.0.9:7878' },
+    });
+    const sent = await review();
+    expect(sent.ops).toEqual([
+      { op: 'set', path: ['servarr', 'apps', 'radarr', 'url'], value: 'http://10.0.0.9:7878' },
+    ]);
+  });
+
+  it('does not refuse an app while the table has a pending edit it cannot read', async () => {
+    mountServarr();
+    const radarr = await block('radarr');
+    await fireEvent.input(radarr.getByLabelText(/^URL/), {
+      target: { value: 'http://10.0.0.9:7878' },
+    });
+    const toml = '[private_hosts]\n"10.0.0.9" = ["servarr"]\n';
+    await fireEvent.input(screen.getByLabelText(/^private_hosts/), { target: { value: toml } });
+    expect(radarr.queryByText(/Under General/)).toBeNull();
+    const sent = await review();
+    expect(sent.ops).toContainEqual({ op: 'set_toml', path: ['private_hosts'], toml });
   });
 
   it('shows a read-only key with its reason and no input', async () => {

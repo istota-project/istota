@@ -45,6 +45,9 @@ remove_rules_commented() {
 }
 
 BROWSER_SUBNET_DEFAULT="172.29.0.0/24"
+# An identifier, not a description: this exact string is how the script finds its
+# own rules. A new value would strand every open rule on an upgrade, with its
+# RETURN above the DROPs. Held by tests/test_host_units.py.
 BROWSER_GRANT_COMMENT="istota-browser-grant: an address of a name in [browser] private_hosts"
 browser_failed=0
 
@@ -57,8 +60,8 @@ if ! [[ "$browser_subnet" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.0/24$ ]] \
 fi
 browser_addr="${browser_subnet%.0/24}.2"
 
-# The firewall's half of `[browser] private_hosts`, the one place a grant lives: the
-# addresses those names resolve to now, from istota-stack, which reads the config.
+# The firewall's half of a browser grant, which lives only in the config: the
+# addresses those names resolve to now, from istota-stack, which reads it.
 # Adds before it removes and writes nothing unchanged, because istota-browser-grants
 # runs this on a timer and the rest of this script would open a gap each tick. An
 # address that moved is dropped until the next run, and a name that will not resolve
@@ -67,7 +70,7 @@ refresh_browser_grants() {
     local stack="${ISTOTA_STACK_BIN:-/usr/local/sbin/istota-stack}" answer="" wanted="" entry current rule
     if [ -x "$stack" ]; then
         answer="$("$stack" browser-grant-addresses)" \
-            || { echo "could not read [browser] private_hosts; granting none" >&2; answer=""; }
+            || { echo "could not read the browser's private hosts; granting none" >&2; answer=""; }
     fi
     for entry in $answer; do
         if is_ipv4 "$entry"; then

@@ -17,8 +17,8 @@ so the two cannot drift:
   failure records ``error``, and a success after an error records ``active``.
 - **Listing entries** (`entry_fields`): file or folder, size, modified time.
 
-Every request goes through `sandbox.guarded_http` with ``[sharing]
-private_hosts``, the secret as the Basic user with an empty password, to the
+Every request goes through `sandbox.guarded_http` with the hosts
+``[private_hosts]`` grants to ``sharing``, the secret as the Basic user with an empty password, to the
 share's verified WebDAV base and nowhere else.
 """
 

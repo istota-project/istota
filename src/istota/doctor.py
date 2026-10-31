@@ -8707,8 +8707,8 @@ def _servarr_remedy(app: str, reason: str, http_status) -> str:
         return (f"{app} may be down, or a firewall between this host and it is dropping the "
                 f"connection, such as a Docker host's DOCKER-USER allowlist.")
     if reason == "host_refused":
-        return (f"{app}'s host resolves to a private address. List it in [servarr] "
-                f"private_hosts if that is the app.")
+        return (f"{app}'s host resolves to a private address. If that is the app, grant "
+                f"it with [private_hosts] \"<host>\" = [\"servarr\"].")
     if reason == "redirect_refused":
         return f"{where} answers with a redirect; set it to the address {app} serves on."
     if reason in ("not_found", "bad_response", "response_too_large"):
@@ -8775,8 +8775,8 @@ def check_servarr_connection(
                 name, FAIL, problem,
                 remedy=(f"Set [servarr.apps.{app}] url to the app's address, such as "
                         f"https://{app}.example.com, with no user name, password or query; "
-                        f"plain HTTP or a private address needs its host in "
-                        f"[servarr] private_hosts."),
+                        f"plain HTTP or a private address needs "
+                        f"[private_hosts] \"<host>\" = [\"servarr\"]."),
                 scope=DEPLOYMENT,
             ))
             continue
@@ -10479,7 +10479,7 @@ def check_sharing_ics_feeds(config: "Config", probe: bool) -> CheckResult:
     Never a URL, a host or a calendar's name: the address is a bearer secret
     and the rest belongs to the user. WARNs when there are feeds and none of
     them is answering, which points at the daemon's own egress (or a
-    `[sharing] private_hosts` entry) rather than at one provider.
+    `[private_hosts]` grant to `sharing`) rather than at one provider.
 
     Also WARNs when invitations for Istota's own calendar go out by mail and
     `[email] authserv_id` is unset: the user's answers are then consumed and
@@ -10536,7 +10536,7 @@ def check_sharing_ics_feeds(config: "Config", probe: bool) -> CheckResult:
             name, WARN, detail + "; none is answering",
             remedy=(
                 "Check that the daemon can reach the internet over https; a feed "
-                "on an internal host needs that host in `[sharing] private_hosts`."
+                "on an internal host needs `[private_hosts] \"<host>\" = [\"sharing\"]`."
             ),
         )
     return CheckResult(name, OK, detail)

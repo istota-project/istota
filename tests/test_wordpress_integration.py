@@ -28,8 +28,8 @@ Optional:
 
 Point these at a local development copy of a site, never at production: the
 test writes. Make a local-only application password in wp-admin and revoke it
-afterwards. A site on a local address works because its host is put in
-`[wordpress] private_hosts` for the run; for a locally signed certificate,
+afterwards. A site on a local address works because its host is granted to
+`wordpress` for the run; for a locally signed certificate,
 export `SSL_CERT_FILE` at a bundle carrying that CA.
 
 The CLI runs end to end through `main`, with the real client, resolver and

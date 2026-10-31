@@ -91,7 +91,6 @@ The settings are in `config.toml`:
 
 ```toml
 [sharing]
-private_hosts = []              # exact host names allowed a private address, and plain http
 ics_poll_interval = 900         # seconds between reads of one calendar; at least 300
 ics_max_bytes = 2097152         # largest calendar read
 ics_max_feeds_per_user = 10
@@ -106,7 +105,7 @@ max_discovery_fetches_per_minute = 30
 
 ### Private hosts
 
-Every address Istota fetches for this feature, a calendar or a sharing server, must resolve to a public address and be reached over https. `[sharing] private_hosts` lists exact host names that may resolve to a private address and may be reached over plain http, for a calendar server or a Nextcloud on your own network. Names only, with no wildcards or ports. A redirect may reach a private address only when it stays on the same listed host, so a public calendar cannot send Istota onto your network.
+Every address Istota fetches for this feature, a calendar or a sharing server, must resolve to a public address and be reached over https. A `sharing` grant in [`[private_hosts]`](../configuration/reference.md#private_hosts), as `"cal.example.internal" = ["sharing"]`, lets that exact host name resolve to a private address and be reached over plain http, for a calendar server or a Nextcloud on your own network. Names only, with no wildcards or ports. If the host is already in the table for another consumer, add `"sharing"` to its existing list: a second line for the same host is a TOML error. A redirect may reach a private address only when it stays on the same listed host, so a public calendar cannot send Istota onto your network.
 
 ### Invitations
 
@@ -137,4 +136,4 @@ A Nextcloud that shares with Istota on the same network, as in the test environm
 - `occ config:system:set allow_local_remote_servers --value true --type boolean`, so Nextcloud will talk to a server on a private address.
 - Nextcloud must trust the certificate Istota is served with. Its federated sharing calls use the system certificate store, so a private CA goes into the container's store (`update-ca-certificates`); `occ security:certificates:import` is not enough.
 - `overwritehost` and `overwrite.cli.url` set to the name Istota reaches Nextcloud by. Nextcloud puts that name in the sender's cloud id (`alice@https://cloud.example.org`), and Istota answers to that name.
-- That name in Istota's `[sharing] private_hosts` when it resolves to a private address or is served over plain http.
+- That name granted to `sharing` in Istota's `[private_hosts]` when it resolves to a private address or is served over plain http.

@@ -409,7 +409,7 @@ Substitutes credential placeholders in authentication headers, for hosts a crede
 | `enabled` | `true` | Network isolation via CONNECT proxy |
 | `allow_pypi` | `true` | Allow PyPI access |
 | `extra_hosts` | `[]` | Additional allowed hosts, as `host:port`. An entry may be on your own network (a private, loopback or link-local address). No Anthropic host is on the default list; a task that calls Anthropic's API from Bash needs `api.anthropic.com:443` here |
-| `private_hosts` | | Retired and ignored, with a warning. An `extra_hosts` entry already allows a private address |
+| `private_hosts` | | Retired and ignored, with a warning. An `extra_hosts` entry already allows a private address. The top-level [`[private_hosts]`](#private_hosts) table is a different permission |
 
 ## `[skills]`
 
@@ -813,6 +813,49 @@ Explicit CalDAV override. When any field is set it wins over the value derived f
 
 Set all three fields or none. Each falls back to `[nextcloud]` on its own rather than as a group, so a half-set block mixes the two: a URL with no password names a foreign host and hands it the Nextcloud app password, and a password with no URL authenticates to Nextcloud's own DAV endpoint with the wrong secret. `istota setup` refuses the first pairing outright. Where there is no Nextcloud, `istota setup` offers this block, writing the URL and username into the config and the password to the stack's `secrets/istota_caldav_password`, which reaches the daemon as `ISTOTA_CALDAV_PASSWORD`.
 
+## `[private_hosts]`
+
+Which hosts each part of Istota may reach on a private, loopback or reserved address. Every other address must be public. The table is keyed by host, and each value names the consumers the grant is for:
+
+```toml
+[private_hosts]
+"wiki.example.internal" = ["browser"]
+"rss.example.internal" = ["browser", "feeds"]
+"10.0.0.5" = ["servarr"]
+```
+
+A grant reaches only the consumers it names. The same host means something different to each one, because the person who chooses the address differs and so does what gets sent:
+
+| Consumer | Who chooses the address | What a grant lets happen |
+|---|---|---|
+| `browser` | The model and any page it loads | Chrome reaches the host through the egress proxy, and on a VM the firewall opens the addresses it resolves to, refreshed every five minutes. Loopback stays refused whatever is listed, since the browser's API and debugging ports are there. A change restarts the stack |
+| `wordpress` | The user who connects a site | The [`wordpress` skill](../features/wordpress.md) calls the host with that site's credentials. HTTPS is still required |
+| `mail_accounts` | The user who types a server name | The daemon sends that user's mail password to the host. [Certificates are still verified](../features/email.md) |
+| `sharing` | A user adding a calendar feed, or the sharing server a share names | The daemon [fetches the host](../features/sharing.md), and plain HTTP is allowed to it. A redirect may reach a private address only on the same listed host |
+| `servarr` | The operator, in `[servarr.apps.*]` | The [`servarr` skill](../features/servarr.md) sends the app's API key, and plain HTTP is allowed to it |
+| `feeds` | A user, or a task through `feeds add` | The poller [fetches the host](../features/feeds.md) on a timer. Plain HTTP is allowed to any feed, listed or not, and each redirect is checked again |
+
+So there is no shared list. An arr app on `10.0.0.5` granted for `servarr` does not become a target for a user's RSS feed, a user's mail account or a page Chrome loads.
+
+The rules for writing the table:
+
+- A key is an exact host name or IP address, compared ignoring case and a trailing dot. A scheme, port, path or wildcard matches nothing, and the loader warns about it.
+- Quote a host name with a dot in it. TOML reads `wiki.internal = ["browser"]` as a nested table; it is discarded and grants nothing.
+- To add a consumer to a host already in the table, add it to that host's list. A second line for the same host is a TOML error, which `istota apply` and Admin > Configuration refuse.
+- A host with `[]` grants nothing. A consumer not in the table above is discarded while the others on that line still apply, and `istota apply` and Admin > Configuration refuse the change.
+
+Admin > Configuration shows the table as `private_hosts` under General, written as TOML. Any edit to it needs the typed confirmation.
+
+This table does not touch `[security.network] extra_hosts` or the hosts of the forge and Nextcloud URLs. Those are the sandbox's own allowlist, a different permission.
+
+### Moving from the old keys
+
+`private_hosts` under `[browser]`, `[wordpress]`, `[mail_accounts]`, `[sharing]`, `[servarr]` and `[feeds]` still works, and a later release removes it. Each host in an old key is added to the table for that consumer, on top of whatever the table already says, and each non-empty old key logs a warning saying what to write. Nothing rewrites `config.toml` for you.
+
+To move by hand or in a plan, write the table and delete the old keys. Saving any edit to the table in Admin > Configuration moves every old key into it in the same change, with no grant lost. That can leave an empty section header such as `[feeds]` in the file, which loads the same as no header. The raw editor moves nothing, and neither it nor any other edit may add to an old key. A history entry holding an old key cannot be restored until you move that key into the table.
+
+Move the keys after you have settled on a release that has this table. A release without it treats `[private_hosts]` as one unknown key and refuses every private host. A move made in Admin > Configuration leaves a `config.toml.bak.<timestamp>` with the old keys; after a hand edit or a plan you restore them yourself.
+
 ## `[browser]`
 
 | Setting | Default | Description |
@@ -820,7 +863,8 @@ Set all three fields or none. Each falls back to `[nextcloud]` on its own rather
 | `enabled` | `false` | Enable the headless browser container |
 | `api_url` | `"http://localhost:9223"` | Browser container's Flask API |
 | `vnc_url` | `""` | External noVNC console URL, for operators. The browser service builds each live instance's viewer link from it and passes it to tasks as `BROWSER_VNC_URL`. The admin Browsers page no longer uses it: its console opens in the page. Do not hand it to users: the console exposes live user IDs to anyone who can reach it (see [browser profiles](../deployment/running-the-stack.md#browser-profiles)) |
-| `private_hosts` | `[]` | Exact host names Chrome may reach on a private or reserved address (an internal wiki). Every other address must be public, and loopback is refused whatever is listed, since the browser's API and debugging ports are there. On a VM, the firewall outside the container opens the addresses these names resolve to and refreshes them every five minutes. Operator-only, and a change restarts the stack |
+
+An internal site Chrome should reach is a `browser` grant in [`[private_hosts]`](#private_hosts).
 
 ## `[wordpress]`
 
@@ -828,8 +872,9 @@ Operator settings for the [`wordpress` skill](../features/wordpress.md). Sites a
 
 | Setting | Default | Description |
 |---|---|---|
-| `private_hosts` | `[]` | Exact host names a site may resolve to a private, loopback or reserved address (a local development site, an internal backend). Everything else that resolves non-public is refused. Operator-only, since it is the rule that stops a user-chosen URL reaching the daemon's own network |
 | `max_upload_mb` | `25` | Largest file one media upload may send |
+
+A site on a private, loopback or reserved address, such as a local development site or an internal backend, is a `wordpress` grant in [`[private_hosts]`](#private_hosts).
 
 ## `[servarr]`
 
@@ -838,7 +883,6 @@ Operator settings for the [`servarr` skill](../features/servarr.md): one install
 | Setting | Default | Description |
 |---|---|---|
 | `requesters` | `[]` | User ids, besides admins, who get the requester tier: search, request with the defaults below, see the queue and their requests. Matched ignoring case. Empty leaves the skill to admins |
-| `private_hosts` | `[]` | Exact host names or IP addresses an app may resolve to a private, loopback or reserved address. Plain HTTP is allowed only to a host listed here; everything else must be public HTTPS. Same rule as `[wordpress] private_hosts` |
 | `lookup_timeout_seconds` | `30` | Timeout for the `*/lookup` calls, which reach TMDB, TVDB or MusicBrainz through the app |
 | `release_search_timeout_seconds` | `120` | Timeout for an interactive release search (`why --releases`) and an indexer test (`indexers --test`). Warned about when it leaves less than 60 seconds under the skill's own proxy timeout |
 
@@ -916,9 +960,7 @@ Procedural memory — see [memory](../features/memory.md#layer-6-learned-playboo
 
 ## `[feeds]`
 
-| Setting | Default | Description |
-|---|---|---|
-| `private_hosts` | `[]` | Exact host names an RSS or Atom feed may resolve to a private, loopback or reserved address. Every other feed must be on a public address; a redirect is checked again at each hop. Plain HTTP is allowed to any public host. Same rule as `[wordpress] private_hosts`, and operator-only for the same reason. See [feeds](../features/feeds.md) |
+No settings of its own. A feed on a private, loopback or reserved address is a `feeds` grant in [`[private_hosts]`](#private_hosts). See [feeds](../features/feeds.md).
 
 ## `[users.<id>]`
 

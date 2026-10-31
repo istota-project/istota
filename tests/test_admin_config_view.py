@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from istota.webui import admin_config_view as view
-from istota.config import Config
+from istota.config import PRIVATE_HOST_CONSUMERS, Config
 
 
 def _fields(payload: dict, section_key: str) -> dict[str, dict]:
@@ -143,7 +143,34 @@ class TestValueRendering:
         fields = _fields(view.build_config_view(cfg), "servarr")
         assert "incomplete_apps" not in fields
         assert "keyless_apps" not in fields
-        assert {"apps", "requesters", "private_hosts", "defaults"} <= set(fields)
+        assert {"apps", "requesters", "defaults"} <= set(fields)
+
+    def test_private_hosts_is_one_table_in_general_and_in_no_section(self):
+        payload = view.build_config_view(Config(private_hosts={"compass.lan": ["browser"]}))
+        field = _fields(payload, "general")["private_hosts"]
+        assert field["value"] == {"compass.lan": ["browser"]}
+        assert field["editor"] == "table"
+        assert field["risky"] is True
+        keys = {entry["key"] for section in payload["sections"] for entry in section["fields"]}
+        assert not {f"{name}.private_hosts" for name in PRIVATE_HOST_CONSUMERS} & keys
+
+    def test_an_old_key_shows_in_the_table_and_warns_without_a_remove_action(self):
+        import tomllib
+
+        from istota import apply
+        from istota.config_mapper import collect_problems
+
+        document = '[feeds]\nprivate_hosts = ["rss.example.internal"]\n'
+        check = apply.collect(tomllib.loads(document))
+        with collect_problems() as reported:
+            payload = view.build_config_view(Config(), document=document, check=check)
+        assert not [problem for problem in reported if "private_hosts" in problem["path"]]
+        field = _fields(payload, "general")["private_hosts"]
+        assert field["in_file"] is True
+        assert tomllib.loads(field["toml"]) == {"private_hosts": {"rss.example.internal": ["feeds"]}}
+        [problem] = [p for p in payload["problems"] if p["path"] == ["feeds", "private_hosts"]]
+        assert problem["kind"] == "warning" and "action" not in problem
+        assert 'private_hosts = ["rss.example.internal"]' in payload["raw_toml"]
 
     def test_every_value_is_json_serializable(self):
         import json

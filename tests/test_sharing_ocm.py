@@ -8,7 +8,7 @@ rate limit, no outbound fetch at all), and an unknown user answers exactly as
 an unknown host does, and only once the sender is verified and the offer has
 passed every check that holds for any recipient.
 
-The sender is a stdlib server on loopback, named in `[sharing] private_hosts`,
+The sender is a stdlib server on loopback, granted to `sharing` in `[private_hosts]`,
 serving a Nextcloud-shaped `/ocm-provider/` document. The offer bodies are the
 OCM 1.0 shape Nextcloud 30 and 31 were observed to send (Stage 1's
 `stage-1-captures.md`), with example names; the signatures are made here with

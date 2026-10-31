@@ -225,16 +225,19 @@ A Baileys session is paired from the running stack, the first time and every tim
 
 The browser image builds for the machine's own architecture, x86-64 or arm64, since Chrome ships Linux packages for both. `BROWSER_PLATFORM=linux/amd64` in `.env` forces an x86-64 image.
 
-The browser reaches public addresses only. Every Chrome connection goes through a proxy in the container that refuses a private, loopback or link-local address, for redirects, subresources and WebSockets as well as the page itself. To let it reach an internal site, list the exact names in `config.toml`, or under Admin > Configuration, which restarts the stack for you:
+The browser reaches public addresses only. Every Chrome connection goes through a proxy in the container that refuses a private, loopback or link-local address, for redirects, subresources and WebSockets as well as the page itself. To let it reach an internal site, grant the exact names to `browser` in `config.toml`, or in `private_hosts` under General in Admin > Configuration, which asks for the typed confirmation and restarts the stack for you:
 
 ```toml
-[browser]
-private_hosts = ["wiki.example.internal", "git.example.internal"]
+[private_hosts]
+"wiki.example.internal" = ["browser"]
+"git.example.internal" = ["browser"]
 ```
+
+If the host is already in the table for another consumer, add `"browser"` to its existing list: a second line for the same host is a TOML error. A grant reaches only the consumers it names; [the configuration reference](../configuration/reference.md#private_hosts) lists them.
 
 A listed name still cannot reach the browser container's own loopback, where its API and debugging ports are.
 
-On a VM there is a second check outside the container, a firewall that drops the browser's traffic to every private range. It follows this same list: the VM resolves each name and opens the addresses it gets, when the stack starts and every five minutes after. If a listed site's address changes, the browser cannot reach it until the next refresh. A name that will not resolve opens nothing and logs a warning in the journal of `istota-browser-grants.service`.
+On a VM there is a second check outside the container, a firewall that drops the browser's traffic to every private range. It follows the same grants: the VM resolves each name and opens the addresses it gets, when the stack starts and every five minutes after. If a listed site's address changes, the browser cannot reach it until the next refresh. A name that will not resolve opens nothing and logs a warning in the journal of `istota-browser-grants.service`.
 
 The firewall identifies the browser by a fixed address, `172.29.0.2`. If `172.29.0.0/24` is taken on your host, set `ISTOTA_BROWSER_SUBNET` in `host.env` to another `x.y.z.0/24`, then run `systemctl restart istota-devbox-egress` and `istota-stack up`.
 

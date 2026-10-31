@@ -6,9 +6,11 @@
  * `secrets` under the file name the view's `secrets` entry carries, never in
  * an op; the host applier writes the file. A stored key never reaches the
  * browser: the form only knows whether one is set. The rest of `[servarr]`
- * (requesters, private hosts, add defaults) is ordinary fields.
+ * (requesters, add defaults) is ordinary fields, and a grant for a private host
+ * is an entry in the `[private_hosts]` table under General.
  */
 import type {
+  AdminConfigField,
   AdminServarrConnection,
   ConfigOp,
   ConfigSecretFile,
@@ -143,6 +145,31 @@ function typedHost(url: string): string {
   return host.toLowerCase().replace(/\.$/, '');
 }
 
+/**
+ * The hosts `[private_hosts]` grants to `consumer` once the pending op lands,
+ * or null while a whole-table `set_toml` is pending: that op holds TOML text,
+ * which the server parses and the page cannot read.
+ */
+export function hostsGrantedTo(
+  consumer: string,
+  field: AdminConfigField | undefined,
+  op: ConfigOp | undefined,
+): string[] | null {
+  if (op?.op === 'set_toml') return null;
+  if (op?.op === 'unset') return [];
+  const table = op?.op === 'set' ? op.value : field?.value;
+  if (!table || typeof table !== 'object' || Array.isArray(table)) return [];
+  const hosts: string[] = [];
+  for (const [host, consumers] of Object.entries(table)) {
+    if (Array.isArray(consumers) && consumers.includes(consumer)) hosts.push(host);
+  }
+  return hosts;
+}
+
+function grantAdvice(host: string): string {
+  return `Under General, add "${host}" = ["servarr"] below [private_hosts], writing that header if it is missing, or add "servarr" to the host's list if it is already there`;
+}
+
 export interface PrivateHostNeed {
   host: string;
   /** True when the skill refuses the URL without it; false when it likely will. */
@@ -151,12 +178,18 @@ export interface PrivateHostNeed {
 }
 
 /**
- * The host a URL needs in `private_hosts`, or null. Plain HTTP and a private
+ * The grant a URL needs in `[private_hosts]`, or null. Plain HTTP and a private
  * IP literal are refused without it, as the skill's guard 2 refuses them; a
  * local-looking name only probably resolves to a private address, so it is a
- * warning rather than a refusal.
+ * warning rather than a refusal. Null `privateHosts` means the grants cannot be
+ * read (`hostsGrantedTo`), so nothing is said: the host may be in the pending
+ * table. Only the skill and doctor judge the URL after that: `apply --check` does not.
  */
-export function privateHostNeed(url: string, privateHosts: string[]): PrivateHostNeed | null {
+export function privateHostNeed(
+  url: string,
+  privateHosts: string[] | null,
+): PrivateHostNeed | null {
+  if (privateHosts === null) return null;
   let parsed: URL;
   try {
     parsed = new URL(url.trim());
@@ -171,34 +204,28 @@ export function privateHostNeed(url: string, privateHosts: string[]): PrivateHos
     return {
       host,
       required: true,
-      message: `Plain HTTP goes only to a host in the private hosts, and ${host} is not in the private hosts. Add it there or use https://.`,
+      message: `Plain HTTP goes only to a host granted to servarr. ${grantAdvice(host)}, or use https://.`,
     };
   }
   if (privateAddress(host)) {
     return {
       host,
       required: true,
-      message: `${host} is a private address, which the skill reaches only when it is in the private hosts.`,
+      message: `${host} is a private address, which the skill reaches only with a grant. ${grantAdvice(host)}.`,
     };
   }
   if (localName(host)) {
     return {
       host,
       required: false,
-      message: `${host} looks like a local name. If it resolves to a private address, add it to the private hosts.`,
+      message: `${host} looks like a local name, and a private address needs a grant. ${grantAdvice(host)} if it resolves to one.`,
     };
   }
   return null;
 }
 
-/** `privateHosts` with `host` added, once. */
-export function withPrivateHost(privateHosts: string[], host: string): string[] {
-  if (privateHosts.map(normalHost).includes(normalHost(host))) return privateHosts;
-  return [...privateHosts, host];
-}
-
 /** What is wrong with the URL, mirroring the skill's checks before a request. */
-function urlProblem(url: string, privateHosts: string[]): string | null {
+function urlProblem(url: string, privateHosts: string[] | null): string | null {
   const text = url.trim();
   if (!text) return 'Enter the URL of the app.';
   let parsed: URL;
@@ -231,7 +258,7 @@ function urlProblem(url: string, privateHosts: string[]): string | null {
 export function appProblems(
   form: ServarrAppsForm,
   initial: ServarrAppsForm,
-  privateHosts: string[],
+  privateHosts: string[] | null,
 ): Record<string, string> {
   const problems: Record<string, string> = {};
   for (const name of SERVARR_APPS) {

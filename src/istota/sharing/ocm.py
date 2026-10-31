@@ -523,7 +523,7 @@ def fetch_discovery(config, cloud: CloudId, *, resolve=None) -> dict | None:
     """The sender's ``/ocm-provider/`` document, or None for any failure.
 
     Through the guarded client: no redirect, 5 s, 64 KiB, plain http and a
-    private address only for a ``[sharing] private_hosts`` host.
+    private address only for a host granted to ``sharing`` in ``[private_hosts]``.
     """
     from istota.sandbox import guarded_http
 

@@ -10,13 +10,15 @@ Nothing is required. Two optional settings in `config.toml`:
 
 ```toml
 [wordpress]
-private_hosts = []   # exact host names allowed to resolve to a private or loopback address
 max_upload_mb = 25   # largest file one media upload may send
+
+[private_hosts]
+"dev.example.internal" = ["wordpress"]   # a host allowed to resolve to a private or loopback address
 ```
 
-The skill runs host-side, in the daemon's network namespace, so every site address is checked before anything is sent. A host that resolves to a private, loopback or reserved address is refused unless it is listed in `private_hosts`. That covers a local development site and a backend on the internal network, including a public name that internal DNS answers with a private address from the istota host. It is never a general switch. The list is operator-only, since it is the rule that stops a user-chosen URL from reaching the daemon's own network.
+The skill runs host-side, in the daemon's network namespace, so every site address is checked before anything is sent. A host that resolves to a private, loopback or reserved address is refused unless [`[private_hosts]`](../configuration/reference.md#private_hosts) grants it to `wordpress`. That covers a local development site and a backend on the internal network, including a public name that internal DNS answers with a private address from the istota host. It is never a general switch. The table is operator-only, since it is the rule that stops a user-chosen URL from reaching the daemon's own network.
 
-Each entry is a bare host name or IP address, compared exactly (case and a trailing dot aside) with the host in the site's URL: no scheme, port, path or wildcard. The config loader logs a warning for an entry that is not, since it would lift the refusal for no site. An internationalised domain is written in its ASCII (punycode) form, in the entry and in the site's URL alike.
+Each entry is a bare host name or IP address, compared exactly (case and a trailing dot aside) with the host in the site's URL: no scheme, port, path or wildcard. The config loader logs a warning for an entry that is not, since it would lift the refusal for no site. If the host is already in the table for another consumer, add `"wordpress"` to its existing list: a second line for the same host is a TOML error. An internationalised domain is written in its ASCII (punycode) form, in the entry and in the site's URL alike.
 
 Both are ordinary `config.toml` keys. On an install managed by a config manager, set them in its plan rather than in the file, which the next `istota apply` rewrites.
 

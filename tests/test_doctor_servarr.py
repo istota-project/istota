@@ -98,7 +98,7 @@ class TestConfigProblems:
         ("ftp://10.0.0.5:7878", "http(s)"),
         ("10.0.0.5:7878", "http(s)"),
         ("http://10.0.0.5:7878?x=1", "query"),
-        ("http://arr.example.com:7878", "private_hosts"),
+        ("http://arr.example.com:7878", '[private_hosts] "arr.example.com" = ["servarr"]'),
     ])
     def test_a_url_no_request_should_go_to(self, bad_url, expect):
         results, fake = _run(_config(urls={"radarr": bad_url}))
@@ -242,7 +242,7 @@ class TestTheProbe:
         results, fake = _run(config, resolve=lambda host, port: ["192.168.1.20"])
         [result] = results
         assert result.status == WARN
-        assert "private_hosts" in result.detail + result.remedy
+        assert '[private_hosts] "<host>" = ["servarr"]' in result.remedy
         assert fake.requests == []
 
     def test_one_app_down_leaves_the_others_alone(self):

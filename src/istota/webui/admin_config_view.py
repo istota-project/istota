@@ -201,10 +201,15 @@ def is_secret_path(path: tuple[str, ...] | list[str]) -> bool:
     nothing by its name, as in the view's own walk, so every key under
     ``[security.credential_broker]`` is not secret for being there. From the
     first non-section segment on, the path is secret when any prefix is.
+
+    ``[private_hosts]`` holds no credentials and its keys are host names, which
+    the name patterns would misread (`compass.lan` holds `PASS`).
     """
     from istota.config import Config
 
     segments = [str(segment) for segment in path]
+    if segments[:1] == ["private_hosts"]:
+        return False
     section: Any = Config
     for index, name in enumerate(segments):
         key = ".".join(segments[: index + 1])
@@ -294,6 +299,17 @@ def _field_entry(prefix: str, name: str, value: Any) -> dict:
             "type": "count",
             "secret": False,
             "set": size > 0,
+        }
+    if key == "private_hosts":
+        # Not `_render_value`: its per-key name check reads a host name as a
+        # credential's and would hide that host's consumers.
+        return {
+            "key": key,
+            "name": name,
+            "value": {str(host): list(consumers) for host, consumers in value.items()},
+            "type": "dict",
+            "secret": False,
+            "set": _is_set(value),
         }
     rendered, type_name = _render_value(value)
     return {

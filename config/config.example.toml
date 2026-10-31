@@ -1361,18 +1361,30 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # vnc_url = ""                    # external noVNC URL, if you expose the live view.
 #                                 #   The console no longer binds all interfaces;
 #                                 #   put it behind the reverse proxy, not on 0.0.0.0.
-# private_hosts = []              # exact host names Chrome may reach on a private
-#                                 #   address. Every other address must be public,
-#                                 #   and loopback is refused whatever is listed.
+
+# ============================================================================
+# Private hosts (docs/configuration/reference.md)
+# ============================================================================
+# Hosts a part of Istota may reach on a private, loopback or reserved address;
+# every other address must be public. Each host lists the consumers it is for,
+# and reaches no others: browser, wordpress, mail_accounts, sharing, servarr,
+# feeds. A grant means something different to each. sharing and servarr may also
+# use plain http to it, and Chrome stays off loopback whatever is listed. Entries
+# are exact names or IP addresses, quoted when they hold a dot. For a host already
+# here, add the consumer to its list: a second line for it is a TOML error. The
+# old [<consumer>] private_hosts keys still load, with a warning.
+# [private_hosts]
+# "wiki.example.internal" = ["browser"]
+# "rss.example.internal" = ["browser", "feeds"]
+# "192.168.1.10" = ["servarr"]
 
 # ============================================================================
 # WordPress skill (docs/features/wordpress.md)
 # ============================================================================
 # Each site is a vault entry named wordpress_<name> in the user's vault.
+# A site on a private address, e.g. a local ddev site, needs a wordpress grant
+# in [private_hosts]. Every other site must be public.
 # [wordpress]
-# private_hosts = []              # exact host names allowed to resolve to a
-#                                 #   private or loopback address, e.g. a local
-#                                 #   ddev site. Every other site must be public.
 # max_upload_mb = 25              # largest file one media upload may send
 
 # ============================================================================
@@ -1380,25 +1392,21 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # ============================================================================
 # Users connect their own IMAP (and optionally SMTP) mailboxes in Settings >
 # Connections or with `istota mail-account`. Separate from [email], which is
-# the bot's own mailbox.
+# the bot's own mailbox. A server on a private address needs a mail_accounts
+# grant in [private_hosts]; every other host must resolve to a public one.
 # [mail_accounts]
 # enabled = true                  # off: rows kept, every account unreachable
 # allow_send = true               # off: every account behaves as read-only
 # max_per_user = 10
-# private_hosts = []              # exact host names a user account may reach
-#                                 #   on a private address; every other host
-#                                 #   must resolve to a public one
 
 # ============================================================================
 # Shared with Istota: calendar feeds and federated folder shares
 # ============================================================================
 # Users subscribe Istota to a calendar's secret ICS address in Settings >
 # Connections, and share a folder from their own Nextcloud with
-# <user_id>@<site hostname> when [sharing.ocm] is on.
+# <user_id>@<site hostname> when [sharing.ocm] is on. A feed or sharing server
+# on a private address or plain http needs a sharing grant in [private_hosts].
 # [sharing]
-# private_hosts = []              # exact host names a feed or sharing server
-#                                 #   may reach on a private address; also the
-#                                 #   only hosts reachable over plain http
 # ics_poll_interval = 900         # seconds between polls of one feed (min 300)
 # ics_max_bytes = 2097152         # largest feed body read
 # ics_max_feeds_per_user = 10
@@ -1420,11 +1428,10 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # The API keys are stack secret files, never inline here: one per app,
 # istota_servarr_<app>_api_key in the stack's secrets/ directory (read as
 # ISTOTA_SERVARR_<APP>_API_KEY). They never reach a task. Do not add the arr
-# ports to [security.network] extra_hosts.
+# ports to [security.network] extra_hosts. An app on a private address or plain
+# HTTP needs a servarr grant in [private_hosts].
 # [servarr]
 # requesters = []                 # user ids besides admins who may request
-# private_hosts = ["192.168.1.10"]  # exact hosts allowed a private address; plain
-#                                 #   HTTP is allowed only to these
 # lookup_timeout_seconds = 30     # */lookup calls (they reach TMDB, TVDB, MusicBrainz)
 # release_search_timeout_seconds = 120  # interactive release search; keep at
 #                                 #   least 60s under the skill's own timeout
@@ -1622,11 +1629,9 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # max_document_bytes = 26214400   # 25 MiB. 0 = unlimited, for a scanner that
                                   # produces genuinely large files
 
-# Feeds module. Every RSS or Atom fetch must reach a public address; list the
-# exact host names of feeds served on your own network.
+# Feeds module. Every RSS or Atom fetch must reach a public address; a feed
+# served on your own network needs a feeds grant in [private_hosts].
 # [feeds]
-# private_hosts = []              # exact host names a feed may reach on a
-#                                 #   private address
 
 # User configuration
 # Map Nextcloud usernames to their settings

@@ -195,10 +195,15 @@ def _unset_everywhere(document: dict, path: tuple[str, ...]) -> None:
 
 def normalized(document: dict) -> dict:
     """A copy of `document` with the loader's legacy rewrites applied, so a
-    credential is found where `load_config` reads it, whatever its spelling."""
-    from istota.config import normalize_legacy_document
+    credential is found where `load_config` reads it, whatever its spelling.
+
+    The private-hosts fold runs first with its result dropped: this runs several
+    times per preview and page load, and the first real load reports each old key.
+    """
+    from istota.config import fold_section_private_hosts, normalize_legacy_document
 
     found = copy.deepcopy(document)
+    fold_section_private_hosts(found)
     try:
         normalize_legacy_document(found)
     except ValueError:
@@ -227,11 +232,26 @@ def _snippet_value(path: tuple[str, ...], snippet: Any) -> Any:
     return parsed[path[-1]]
 
 
+def _is_on_private_hosts(op: Any) -> bool:
+    """Whether `op` touches the table. It has not been checked yet; the loop does that."""
+    path = op.get("path") if isinstance(op, dict) else None
+    return isinstance(path, list) and path[:1] == ["private_hosts"]
+
+
 def apply_ops(document: dict, ops: Any) -> dict:
-    """A copy of `document` with `ops` applied in order."""
+    """A copy of `document` with `ops` applied in order.
+
+    An op on `[private_hosts]` moves the old section keys into the table first,
+    so a host removed in the table does not come back from an old key and no
+    grant is lost. `apply_raw` does not: the text is the operator's.
+    """
+    from istota.config import fold_section_private_hosts
+
     if not isinstance(ops, list):
         raise ChangeError("ops is not a list")
     new = copy.deepcopy(document)
+    if any(_is_on_private_hosts(op) for op in ops):
+        fold_section_private_hosts(new)
     for op in ops:
         if not isinstance(op, dict):
             raise ChangeError("an op is not an object")

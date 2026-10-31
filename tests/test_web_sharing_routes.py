@@ -3,7 +3,7 @@
 A feed address is a bearer secret, so the properties that matter are that no
 response carries it, a refusal echoes nothing it was sent, another user's id
 reaches nothing, and a failed add writes nothing. The feed is a stdlib server
-on loopback, named in `[sharing] private_hosts`.
+on loopback, granted to `sharing` in `[private_hosts]`.
 """
 
 import pytest
