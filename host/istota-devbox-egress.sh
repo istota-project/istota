@@ -3,7 +3,7 @@
 # and cloud metadata, the Azure host agent, RFC 1918 or CGNAT addresses. The
 # host-loopback block, the browser's rules and the proxied listener's rule,
 # further down, are the stack's other DOCKER-USER rules, kept here so one script
-# owns the chain.
+# owns the chain. The VM's-own-addresses rules are the one part in INPUT.
 #
 # Ported from the Ansible role's istota-devbox-iptables.sh.j2, with the same
 # rules and the same three properties, each found on a live host:
@@ -24,8 +24,6 @@
 # every rule here is scoped to a range no container uses.
 set -euo pipefail
 
-SUBNET="${ISTOTA_DEVBOX_SUBNET:-172.30.0.0/24}"
-
 is_ipv4() {
     local IFS=.
     local -a octets
@@ -36,8 +34,18 @@ is_ipv4() {
     done
 }
 
+DEVBOX_SUBNET_DEFAULT="172.30.0.0/24"
+devbox_failed=0
+SUBNET="${ISTOTA_DEVBOX_SUBNET:-$DEVBOX_SUBNET_DEFAULT}"
+# A value iptables refuses would stop the script here, ahead of every other rule.
+if ! [[ "$SUBNET" =~ ^[0-9.]+/[0-9]{1,2}$ ]] || ! is_ipv4 "${SUBNET%/*}" || [ "$((10#${SUBNET#*/}))" -gt 32 ]; then
+    echo "ISTOTA_DEVBOX_SUBNET is an IPv4 CIDR, not '${SUBNET}'; using ${DEVBOX_SUBNET_DEFAULT}" >&2
+    devbox_failed=1
+    SUBNET="$DEVBOX_SUBNET_DEFAULT"
+fi
+
 remove_rules_commented() {
-    iptables -w 5 -S DOCKER-USER | { grep -F -- "--comment \"$1\"" || true; } \
+    iptables -w 5 -S "${2:-DOCKER-USER}" | { grep -F -- "--comment \"$1\"" || true; } \
         | sed 's/^-A /-D /' | while read -r rule; do
             # iptables' own output, re-read as arguments (the comment is quoted).
             eval "iptables -w 5 ${rule}"
@@ -207,6 +215,30 @@ iptables -w 5 -I DOCKER-USER 1 -s "$browser_addr" -m conntrack --ctstate ESTABLI
     -m comment --comment "$BROWSER_COMMENT" -j RETURN
 refresh_browser_grants
 
+# --- The VM's own addresses (#903) ---
+#
+# Traffic to an address the VM holds is delivered through INPUT and never meets
+# DOCKER-USER, so the browser and a devbox reached every listener on the VM
+# (measured, on eth0 and on each bridge's gateway). Nothing they run needs one: the
+# devbox's sockets are Unix ones, and Docker's resolver asks a loopback upstream from
+# the VM's namespace. It asks any other upstream from the container's address
+# (measured), so a resolver on a non-loopback address of the VM is cut off too.
+# Everything either opens is dropped, on any address and protocol, and a browser
+# grant does not open it. Replies to what the VM opened pass. The daemon is not
+# matched. Only compose bridges match (`br-+`): with no devbox nothing here holds its
+# subnet, and a real host in that range still reaches the VM over eth0. A published
+# port needs nothing here: it is rewritten before FORWARD, and the private-range
+# drops above see the container's address (measured).
+# No apostrophe: iptables lists one as \', and this string has to find the rule again.
+VM_REACH_COMMENT="istota-vm-reach: a browser or devbox opens nothing to an address of this VM"
+
+remove_rules_commented "$VM_REACH_COMMENT" INPUT
+
+for source in "$SUBNET" "$browser_addr"; do
+    iptables -w 5 -I INPUT 1 -i br-+ -s "$source" -m conntrack ! --ctstate ESTABLISHED,RELATED \
+        -m comment --comment "$VM_REACH_COMMENT" -j DROP
+done
+
 # --- The proxied listener (INGRESS=proxied) ---
 #
 # Only the upstream proxy may reach the published nginx port: with
@@ -242,4 +274,4 @@ if [ "${INGRESS:-}" = "proxied" ]; then
     done
 fi
 
-[ "$loopback_failed" = 0 ] && [ "$browser_failed" = 0 ] || exit 1
+[ "$loopback_failed" = 0 ] && [ "$browser_failed" = 0 ] && [ "$devbox_failed" = 0 ] || exit 1

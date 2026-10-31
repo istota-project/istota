@@ -26,7 +26,9 @@ Controls (`scripts/test-vm-negative-control.sh`):
   user's credential volume into every devbox;
 - `exec-socket-symlink`: the skill's no-follow open is replaced, in the skill's
   own process, by a plain `connect(path)`, so a planted link at one devbox's
-  socket is followed into another's.
+  socket is followed into another's;
+- `no-vm-reach-rule`: the INPUT rules that keep a devbox off the VM's own
+  addresses are removed.
 """
 
 from __future__ import annotations
@@ -137,6 +139,13 @@ istota-stack compose up -d
             vm.run(f"cp {lima.SCRATCH}/compose.devbox.yml.orig {DEVBOX_COMPOSE} && istota-stack compose up -d",
                    timeout=900)
         return
+    if name == "no-vm-reach-rule":
+        lima.remove_vm_reach_rules(vm)
+        try:
+            yield vm
+        finally:
+            vm.run("systemctl restart istota-devbox-egress.service")
+        return
     yield vm
 
 
@@ -224,6 +233,33 @@ class TestADevboxReachesNoPrivateRange:
     def test_doctor_reports_the_egress_probe_ok(self, stack):
         result = lima.doctor(stack, "security.devbox_netfilter")
         assert result["status"] == "ok", result
+
+
+@parity.witness(10)
+class TestADevboxReachesNoListenerOnTheVm:
+    """#903: the browser's question, asked from a devbox. `TestTheVmsOwnAddresses` in
+    test_browser.py has the reasoning and the daemon's half. Control: `no-vm-reach-rule`."""
+
+    @pytest.fixture(scope="class")
+    def listener(self, stack):
+        with lima.listening_on_the_vm(stack, lima.running_image(stack, "browser")):
+            yield stack
+
+    def test_a_devbox_reaches_no_listener_on_the_vm(self, listener):
+        targets = [f"{a}:{lima.VM_LISTENER_PORT}" for a in lima.vm_addresses(listener)]
+        for target in targets:
+            assert listener.ok(f"curl -s -m 5 -o /dev/null http://{target}/"), f"{target} does not answer the VM"
+        outcome = _connect_from_devbox(listener, lima.USER, targets)
+        reached = sorted(t for t, result in outcome.items() if result == "reached")
+        assert reached == [], f"row 10: a devbox reached {reached}: {outcome}"
+
+    def test_a_devbox_reaches_no_published_port_on_the_vm(self, listener):
+        targets = [f"{a}:{lima.VM_PUBLISHED_PORT}" for a in lima.vm_addresses(listener)]
+        for target in targets:
+            assert listener.ok(f"curl -s -m 5 -o /dev/null http://{target}/"), f"{target} does not answer the VM"
+        outcome = _connect_from_devbox(listener, lima.USER, targets)
+        reached = sorted(t for t, result in outcome.items() if result == "reached")
+        assert reached == [], f"row 10: a devbox reached {reached}: {outcome}"
 
 
 @parity.witness(11)

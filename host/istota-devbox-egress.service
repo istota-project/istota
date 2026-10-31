@@ -1,5 +1,5 @@
 [Unit]
-Description=Istota devbox egress rules in DOCKER-USER
+Description=Istota devbox and browser egress rules in DOCKER-USER and INPUT
 # Docker creates DOCKER-USER at start and preserves it across daemon restarts,
 # so riding in behind it once per boot is enough.
 After=docker.service
