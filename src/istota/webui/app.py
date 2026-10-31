@@ -16365,10 +16365,15 @@ def _ocm_people(source) -> dict:
 
 
 def _ocm_offer_dict(source) -> dict:
-    """An offer as the card shows it: the sender's words and host, never the WebDAV base."""
+    """An offer as the card shows it: the sender's words and host, never the WebDAV base.
+
+    ``signed`` is null on an offer stored before receiving recorded it.
+    """
+    signed = source.extras.get("sender_signed")
     return {
         "id": source.id, "name": source.extras.get("name"), **_ocm_people(source),
         "host": source.remote_host, "reoffer": source.state != "pending",
+        "signed": signed if isinstance(signed, bool) else None,
         "created_at": source.created_at,
     }
 

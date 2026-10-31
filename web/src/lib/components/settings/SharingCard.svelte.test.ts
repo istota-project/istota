@@ -279,6 +279,24 @@ it('lists pending offers, the sender words as text', () => {
   expect(within(rows[0]).getByRole('button', { name: 'Decline Taxes 2026' })).toBeInTheDocument();
 });
 
+it('says whether the sending server signed an offer, here and when accepting', async () => {
+  mount(
+    withFolders([
+      { ...OFFER, signed: false },
+      { ...OFFER, id: 8, name: 'Signed plans', signed: true },
+      { ...OFFER, id: 9, name: 'Older offer', signed: null },
+    ]),
+  );
+  const rows = within(screen.getByRole('list', { name: 'Folder offers' })).getAllByRole('listitem');
+  expect(rows[0]).toHaveTextContent('Not signed');
+  expect(rows[1]).toHaveTextContent('Signed by server');
+  expect(rows[2]).not.toHaveTextContent(/signed/i);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Accept Taxes 2026' }));
+  const dialog = await screen.findByRole('dialog');
+  expect(dialog).toHaveTextContent('cloud.example.org did not sign this offer');
+});
+
 const SHARE = {
   id: 7,
   name: 'Taxes 2026',
