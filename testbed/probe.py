@@ -33,13 +33,14 @@ POLL_INTERVAL = 0.5
 #: Tables the watermark covers. Every one is keyed by an integer `id`, which is
 #: what makes `MAX(id)` a usable high-water mark at all.
 #:
-#: Two deliberate absences. `rooms` is keyed by `token TEXT PRIMARY KEY`
+#: Three deliberate absences. `rooms` is keyed by `token TEXT PRIMARY KEY`
 #: (`schema.sql:797`), so it has no `id` to take a maximum of and a scenario
 #: asserting "no room was created" has to scope by token instead.
 #: `trusted_email_senders` is *reset* rather than watermarked: a test that
 #: trusts a sender does not add a row a later test can filter past, it changes
 #: what every later scenario means, and a watermark on it would invite exactly
-#: the assertion shape that hides that.
+#: the assertion shape that hides that. `email_sender_flags` is reset for the
+#: same reason.
 #:
 #: `notifications` has a caveat the others do not: a row that is *bumped* or
 #: *reopened* keeps its id, so a watermark finds only rows created after it.

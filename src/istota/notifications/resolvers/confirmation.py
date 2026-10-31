@@ -54,6 +54,10 @@ HELD_STATUS = "pending_confirmation"
 # How much of a bot-composed question survives into the notification body. The
 # title already carries the one-line label; this is the rest of what was asked.
 _BODY_CHARS = 400
+# A flagged hold's body is fixed words plus one address and the answer line, and
+# its command has to arrive whole, so it takes neither that cap nor the label rule.
+_FLAGGED_BODY_CHARS = 1000
+_FLAGGED_HOLD_PARAM = "flagged_hold"
 
 # The stored title and body of a held room post (a `room post` or a guest
 # proposal), which is what a push carries: fixed words, never the preview.
@@ -128,6 +132,14 @@ def body_for(confirmation_prompt: str | None) -> str:
     return flatten(confirmation_prompt or "")[:_BODY_CHARS]
 
 
+def flagged_body(text: str | None) -> str:
+    """A flagged hold's stored body, which the bell renders instead of the task's
+    prompt: that prompt stays neutral because it reaches the model on a re-run."""
+    from .task_alert import flatten_body
+
+    return flatten_body(text)[:_FLAGGED_BODY_CHARS]
+
+
 def write(
     conn: "sqlite3.Connection",
     user_id: str,
@@ -137,6 +149,7 @@ def write(
     body: str = "",
     room_token: str | None = None,
     in_room: bool = True,
+    flagged_hold: bool = False,
 ) -> "RaiseResult | None":
     """Write the row on the producer's own connection, inside its transaction.
 
@@ -166,6 +179,7 @@ def write(
             actionable=True,
             object_type=OBJECT_TYPE,
             object_id=str(task_id),
+            params={_FLAGGED_HOLD_PARAM: True} if flagged_hold else None,
             room_token=room_token,
         ),
     )
@@ -334,7 +348,10 @@ class ConfirmationResolver:
 
         return NotificationView(
             title=_title(conn, row, task),
-            body=body_for(task.confirmation_prompt),
+            body=(
+                flagged_body(row.body) if row.params.get(_FLAGGED_HOLD_PARAM)
+                else body_for(task.confirmation_prompt)
+            ),
             severity=row.severity,
             actions=(
                 NotificationAction(

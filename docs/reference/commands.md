@@ -36,6 +36,8 @@ Commands prefixed with `!` are intercepted before task creation and handled sync
 | `!search QUERY` | Search conversation history via memory index + Talk API |
 | `!trust [EMAIL]` | List trusted email addresses, or add one — trust runs in both directions (see below) |
 | `!untrust EMAIL` | Remove a runtime trusted email address, in both directions |
+| `!flagged` | List email senders flagged for suspected prompt injection, and which are held (private conversations only) |
+| `!unflag EMAIL` | Clear the suspected-injection flags on an email sender (private conversations only) |
 | `!drafts` | List outbound mail held for your approval, with ids |
 | `!drafts send ID` | Release one held draft (id optional when exactly one is waiting) |
 | `!drafts discard ID` | Bin one held draft |
@@ -130,6 +132,12 @@ Formats: `markdown` (default) or `text`.
 ## Trust
 
 `!trust` manages runtime trusted email addresses (stored in the database, checked alongside config-time `trusted_email_senders` patterns). One list, two meanings: mail **from** a trusted address is processed without asking, and mail **to** it is sent without waiting for your approval under the `untrusted` outbound policy. `!untrust` reverses both. See [email](../features/email.md) for the full confirmation gate flow and [what trusting a sender means](../features/email.md#what-trusting-a-sender-means).
+
+## Flagged senders
+
+Mail that looked like a prompt injection attempt is recorded per address, and an address with enough flags has its mail held for your approval, even when a pattern in your trust list matches it. An address you named as trusted is not held. See [flagged senders](../features/email.md#flagged-senders).
+
+`!flagged` lists each address with a counted flag: how many, the last flag's date, the reasons, and whether its mail is held now. `!unflag <address>` deletes all of that address's flags. Mail already held still waits for your answer. An argument with no `@` gets the usage line, and an address with no flags is told so. Approving a held mail with `!confirm` does not clear anything. Both commands refuse in a shared room, since the reply names your correspondents.
 
 ## Drafts
 

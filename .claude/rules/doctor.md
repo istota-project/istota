@@ -41,6 +41,8 @@ Runtime self-check: every environmental fact istota depends on, named once. A wh
 
 `email.sender_match` warns while email is on and `confirm_sender_match` is `off`, naming what that trusts and where the authserv-id is found; OK under `verify` or `gate` (ISSUE-746). Reads config only.
 
+`email.sender_flags` (`DEPLOYMENT`) says whether a sender flag can be earned, since a flag takes a strict DMARC pass under `[email] authserv_id` (#897, `.claude/rules/transport.md`). OK with email or holding off, OK with `authserv_id` set, and OK with it unset when no user's `trusted_email_senders` holds a pattern (`config.is_trust_pattern`), since such mail is already gated. WARN when it is unset and some user does: flags are ignored and those users' mail runs unheld. A count, never user ids or addresses, because the detail reaches the boot log and the admin Health pane. Reads config only.
+
 `mail.connect_verified` (`IMAGE`) builds `istota.mail.connect.tls_context`, the one context every IMAP and SMTP connection hands its TLS layer, and FAILs unless it is `CERT_REQUIRED` with `check_hostname` (ISSUE-798). `mail.account_isolation` is `security.credential_isolation`'s question for the mail accounts users connect: SKIP with `[mail_accounts]` off, OK with one user or an effective sandbox, WARN otherwise or when `_deployment_sandboxing` cannot say. Neither spawns anything.
 
 `email.confirmation_answers` warns when a user's `alert` route resolves to email alone and answers by mail are off (no `[email] authserv_id`, ISSUE-649), since the gate's request then reaches them only where they cannot answer it. A count, not user ids; reads config only, so it is safe under `probe=False`. SKIP with email disabled, OK once `authserv_id` is set.
