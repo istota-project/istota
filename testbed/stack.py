@@ -125,6 +125,11 @@ FULL_READY_TIMEOUT = 1500
 #: and `StackPool._compose_args` is what puts it there.
 KEEP_PROJECT_MARKER = "-full-keep-"
 
+#: How `owned_project` records its session in a project name. Unanchored at the
+#: front because `project_prefix` need not end in a dash; a false match only
+#: keeps a project until the pid is gone, which is the safe way to be wrong.
+_OWNER_IN_PROJECT = re.compile(r"p(\d+)-[0-9a-f]{8}$")
+
 READY_SERVICES: dict[str, tuple[str, ...]] = {
     "lean": (DAEMON_SERVICE,),
     "full": ("nextcloud", DAEMON_SERVICE),
@@ -631,6 +636,36 @@ def wait_all_ready(
             on_ready(service, time.monotonic() - at)
 
 
+def owned_project(prefix: str) -> str:
+    """A unique project name recording this process as the stack's owner.
+
+    The name is the one place `sweep_projects` can read without a compose file:
+    a label would have to be read back per container, and a project whose
+    containers are gone has no label left to read.
+    """
+    return f"{prefix}p{os.getpid()}-{uuid.uuid4().hex[:8]}"
+
+
+def _owner_is_alive(project: str) -> bool:
+    """Whether the session named in `project` is still running.
+
+    False for a name recording no owner, so a stack from before owners were
+    recorded is reclaimed. A reused pid only delays reclaiming a leftover. The
+    pid is read in this machine's pid namespace, which holds because the compose
+    tiers run on the host: `scripts/test-linux.sh` gets no Docker socket.
+    """
+    owner = _OWNER_IN_PROJECT.search(project)
+    if owner is None:
+        return False
+    try:
+        os.kill(int(owner.group(1)), 0)
+    except (ProcessLookupError, OverflowError):
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def sweep_projects(prefix: str) -> None:
     """Tear down leftover compose projects whose name starts with `prefix`.
 
@@ -648,6 +683,9 @@ def sweep_projects(prefix: str) -> None:
     `postgres_data`, which are the entire point. Compose adopts and recreates
     the leftover containers on the next `up` under the same project name, so
     leaving them is not a leak.
+
+    A project whose owner is alive (`owned_project`) is skipped too: it is a
+    stack another session is using, not a leftover (ISSUE-900).
 
     Never raises. A failed sweep must not stop the run that would otherwise
     clean up after itself.
@@ -675,6 +713,9 @@ def sweep_projects(prefix: str) -> None:
                 "exists to keep, and the next boot adopts its containers",
                 name,
             )
+            continue
+        if _owner_is_alive(name):
+            logger.info("leaving %s alone: the session that owns it is running", name)
             continue
         logger.warning("sweeping leftover compose project %s", name)
         try:
@@ -2505,9 +2546,9 @@ class StackPool:
             ).hexdigest()[:8]
             project = f"{self.project_prefix.rstrip('-')}{KEEP_PROJECT_MARKER}{digest}"
         elif profile.shape == "full":
-            project = f"{self.project_prefix}full-{uuid.uuid4().hex[:8]}"
+            project = owned_project(f"{self.project_prefix}full-")
         else:
-            project = f"{self.project_prefix}{uuid.uuid4().hex[:8]}"
+            project = owned_project(self.project_prefix)
         overlays = [*profile.compose_overlays, self.shape.overlay]
         if profile.shape == "full":
             overlays.append(self.shape.nextcloud_overlay)
