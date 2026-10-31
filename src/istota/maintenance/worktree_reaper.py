@@ -96,6 +96,19 @@ mtimes the retention window reads, so every sweep would reset the idle clock of
 every worktree it looked at and nothing would ever be reaped after the first
 pass.
 
+**So is where a git directory points (#906).** ``repos_dir`` is one subtree per
+user and this sweep crosses all of them, while the hardening above says nothing
+about ``worktrees``, ``refs`` or ``objects`` as links, a ``commondir`` file or an
+alternates line. Measured unwrapped: links in one user's clone made git list
+another user's worktree, read its unmerged head as merged, remove it and delete
+its branch, and a pruning fetch through a linked ``refs/heads`` deleted that
+user's branches with no worktree involved. So every call runs in
+:mod:`istota.sandbox.git_namespace` with only the subtree the repository is in,
+and a record naming a path outside that subtree is out of scope. A repository
+pointing out of its subtree then fails to answer, and holds back like any other
+unanswered question. Whatever a user plants reaches only their own repositories,
+which they can already edit.
+
 Where the answer cannot be established the worktree stays. A bare clone with no
 resolvable ``refs/remotes/origin/HEAD`` has no upstream to compare against, so
 its worktrees are all held rather than compared against a guess — this is a
@@ -106,8 +119,8 @@ silence. The accumulation the entry describes is a problem precisely because
 nobody could see it; a sweep that removes two and says nothing about the eleven
 it kept reproduces that.
 
-stdlib-only leaf. The root is a parameter, no function here raises, and nothing
-reads configuration or environment of its own.
+The root is a parameter, no function here raises, and nothing reads
+configuration or environment of its own.
 """
 
 from __future__ import annotations
@@ -250,7 +263,13 @@ class ReapOutcome(NamedTuple):
 # git
 # --------------------------------------------------------------------------
 
-def _git(cwd: Path, *args: str, timeout: int = _GIT_TIMEOUT) -> tuple[int, str]:
+def _git(
+    cwd: Path,
+    *args: str,
+    timeout: int = _GIT_TIMEOUT,
+    scope: Path | None = None,
+    network: bool = False,
+) -> tuple[int, str]:
     """``(exit_status, stdout)``, through :func:`istota.sandbox.git_hardening.run_git`.
 
     Stdout only, and an empty string when git could not be run at all: every
@@ -259,7 +278,7 @@ def _git(cwd: Path, *args: str, timeout: int = _GIT_TIMEOUT) -> tuple[int, str]:
     ``GIT_SUBPROCESS_ENV`` is what keeps ``git status`` from rewriting the
     worktree's index, which is one of the mtimes :func:`_last_activity` reads.
     """
-    return run_git(cwd, *args, timeout=timeout)
+    return run_git(cwd, *args, timeout=timeout, scope=scope, network=network)
 
 
 def parse_worktree_list(data: str) -> list[WorktreeRecord] | None:
@@ -323,7 +342,7 @@ def parse_worktree_list(data: str) -> list[WorktreeRecord] | None:
     return records
 
 
-def _upstream_head(bare: Path) -> str:
+def _upstream_head(bare: Path, *, scope: Path | None = None) -> str:
     """The sha ``refs/remotes/origin/HEAD`` resolves to, or ``""``.
 
     Fetches first, best-effort. Without any fetch the comparison runs against
@@ -352,7 +371,11 @@ def _upstream_head(bare: Path) -> str:
     anything that does not resolve it. The developer skill's setup repairs that
     state (ISSUE-269); this module only has to notice it.
     """
-    code, _ = _git(bare, "fetch", "--quiet", "--prune", "origin", timeout=_FETCH_TIMEOUT)
+    # No automatic gc: it runs `worktree prune --expire`, in the namespace's view.
+    code, _ = _git(
+        bare, "fetch", "--quiet", "--prune", "--no-auto-maintenance", "origin",
+        timeout=_FETCH_TIMEOUT, scope=scope, network=True,
+    )
     if code != 0:
         logger.info(
             "worktree_reaper: could not fetch %s (expected on a private repo — "
@@ -364,11 +387,12 @@ def _upstream_head(bare: Path) -> str:
         )
     code, out = _git(
         bare, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/HEAD^{commit}",
+        scope=scope,
     )
     return out.strip() if code == 0 else ""
 
 
-def _is_ancestor(bare: Path, head: str, upstream: str) -> bool:
+def _is_ancestor(bare: Path, head: str, upstream: str, *, scope: Path | None = None) -> bool:
     """Whether ``head`` is reachable from ``upstream``. False when unanswerable.
 
     The cheapest containment answer there is, and the only one that needs no
@@ -390,11 +414,11 @@ def _is_ancestor(bare: Path, head: str, upstream: str) -> bool:
     """
     if not head or not upstream:
         return False
-    code, _ = _git(bare, "merge-base", "--is-ancestor", head, upstream)
+    code, _ = _git(bare, "merge-base", "--is-ancestor", head, upstream, scope=scope)
     return code == 0
 
 
-def _is_merge_commit(bare: Path, head: str) -> bool | None:
+def _is_merge_commit(bare: Path, head: str, *, scope: Path | None = None) -> bool | None:
     """Whether ``head`` has more than one parent. ``None`` when git could not say.
 
     ``git cherry`` reports the commits a merge brought in and never the merge's
@@ -402,14 +426,16 @@ def _is_merge_commit(bare: Path, head: str) -> bool | None:
     invisible to the merged test. Refusing a merge head outright is cheaper
     than reasoning about when that matters.
     """
-    code, out = _git(bare, "rev-list", "--parents", "-n", "1", head)
+    code, out = _git(bare, "rev-list", "--parents", "-n", "1", head, scope=scope)
     if code != 0:
         return None
     # `<sha> <parent> [<parent> ...]` — more than two fields is a merge.
     return len(out.split()) > 2
 
 
-def _has_unique_commits(bare: Path, upstream: str, head: str) -> bool | None:
+def _has_unique_commits(
+    bare: Path, upstream: str, head: str, *, scope: Path | None = None,
+) -> bool | None:
     """Whether ``head`` carries a commit that exists nowhere upstream.
 
     ``None`` when git could not answer, which the caller treats as "held back"
@@ -424,7 +450,7 @@ def _has_unique_commits(bare: Path, upstream: str, head: str) -> bool | None:
         # No head, or the all-zero sha an unborn branch reports. Nothing to
         # compare, so nothing that can be established — hold.
         return None
-    code, out = _git(bare, "cherry", upstream, head)
+    code, out = _git(bare, "cherry", upstream, head, scope=scope)
     if code != 0:
         return None
     return any(line.startswith("+") for line in out.splitlines())
@@ -465,7 +491,7 @@ def _is_reconstructible(entry: str) -> bool:
     )
 
 
-def _is_dirty(worktree: Path) -> bool | None:
+def _is_dirty(worktree: Path, *, scope: Path | None = None) -> bool | None:
     """Whether the checkout holds anything not committed. ``None`` on failure.
 
     ``--untracked-files=all`` and ``--ignored`` both, because the files most
@@ -500,6 +526,7 @@ def _is_dirty(worktree: Path) -> bool | None:
     code, out = _git(
         worktree, "status", "--porcelain", "-z",
         "--untracked-files=all", "--ignored=matching",
+        scope=scope,
     )
     if code != 0:
         return None
@@ -689,6 +716,8 @@ def _classify(
     upstream: str,
     cutoff: float,
     protect: set[Path],
+    *,
+    scope: Path | None = None,
 ) -> str:
     """The reason this worktree is or is not reapable. ``REASON_MERGED`` means go.
 
@@ -709,7 +738,7 @@ def _classify(
     if _touched_since(record.path, cutoff):
         return REASON_RECENT
 
-    dirty = _is_dirty(record.path)
+    dirty = _is_dirty(record.path, scope=scope)
     if dirty is None or dirty:
         return REASON_DIRTY
 
@@ -719,20 +748,20 @@ def _classify(
     # MRs as merge commits, that tip is usually a merge. Refusing first held
     # every never-committed worktree forever, which is exactly the set with
     # nothing in it to lose.
-    if _is_ancestor(bare, record.head, upstream):
+    if _is_ancestor(bare, record.head, upstream, scope=scope):
         return REASON_MERGED
 
-    merge_head = _is_merge_commit(bare, record.head)
+    merge_head = _is_merge_commit(bare, record.head, scope=scope)
     if merge_head is None or merge_head:
         return REASON_MERGE_HEAD
 
-    unique = _has_unique_commits(bare, upstream, record.head)
+    unique = _has_unique_commits(bare, upstream, record.head, scope=scope)
     if unique is None or unique:
         return REASON_UNMERGED
     return REASON_MERGED
 
 
-def _remove(bare: Path, record: WorktreeRecord) -> bool:
+def _remove(bare: Path, record: WorktreeRecord, *, scope: Path | None = None) -> bool:
     """Remove the worktree and, if it had one, its branch ref.
 
     The dirty check runs **again**, immediately before the removal. Everything
@@ -771,20 +800,21 @@ def _remove(bare: Path, record: WorktreeRecord) -> bool:
     branch here including the merged ones — and the ``git cherry`` proof is
     stronger than the check ``branch -d`` performs anyway.
     """
-    if _is_dirty(record.path) is not False:
+    if _is_dirty(record.path, scope=scope) is not False:
         logger.info(
             "worktree_reaper: %s changed between the check and the removal; "
             "keeping it.", record.path,
         )
         return False
 
-    code, _ = _git(bare, "worktree", "remove", str(record.path))
+    code, _ = _git(bare, "worktree", "remove", str(record.path), scope=scope)
     if code != 0:
         return False
 
     if record.branch and record.head:
         code, _ = _git(
             bare, "update-ref", "-d", f"refs/heads/{record.branch}", record.head,
+            scope=scope,
         )
         if code != 0:
             logger.warning(
@@ -869,27 +899,58 @@ def _reap(
         # the sweep and leave every later repository unswept while the caller
         # reads the result as complete.
         try:
-            outcomes.extend(_sweep_repo(git_dir, resolved_root, cutoff, protected))
+            outcomes.extend(_sweep_repo(git_dir, resolved_root, root_path, cutoff, protected))
         except Exception:  # noqa: BLE001 — see above
             logger.exception("worktree_reaper: sweeping %s failed", git_dir)
     return outcomes
 
 
-def _list_worktrees(git_dir: Path) -> list[WorktreeRecord] | None:
-    code, listing = _git(git_dir, "worktree", "list", "--porcelain", "-z")
+def _list_worktrees(git_dir: Path, *, scope: Path | None = None) -> list[WorktreeRecord] | None:
+    code, listing = _git(git_dir, "worktree", "list", "--porcelain", "-z", scope=scope)
     if code != 0:
         return None
     return parse_worktree_list(listing)
 
 
+def _user_subtree(git_dir: Path, root: Path, configured_root: Path) -> Path | None:
+    """The directory directly under the root that holds ``git_dir``, or None.
+
+    ``git_dir`` and ``root`` are already resolved: :func:`find_git_dirs` resolves
+    its root and the target of any link it reports. None for a repository linked
+    in from outside the root, which is nobody's to sweep.
+
+    Answered in the configured spelling, so the namespace binds that one as well
+    as the resolved one. A task's namespace shows it the configured one, git
+    records what it sees there, and a worktree recorded under a spelling the
+    namespace lacks reads as gone.
+    """
+    try:
+        parts = git_dir.relative_to(root).parts
+    except ValueError:
+        return None
+    return configured_root / parts[0] if parts else configured_root
+
+
 def _sweep_repo(
     git_dir: Path,
     root: Path,
+    configured_root: Path,
     cutoff: float,
     protect: set[Path],
 ) -> list[ReapOutcome]:
-    records = _list_worktrees(git_dir)
+    scope = _user_subtree(git_dir, root, configured_root)
+    if scope is None:
+        logger.warning(
+            "worktree_reaper: %s is linked in from outside %s; not swept.", git_dir, root,
+        )
+        return []
+
+    records = _list_worktrees(git_dir, scope=scope)
     if records is None:
+        logger.warning(
+            "worktree_reaper: could not list the worktrees of %s; nothing swept "
+            "there. A repository pointing outside %s reads this way.", git_dir, scope,
+        )
         return []
 
     # Prune administrative entries whose directory is already gone — there is
@@ -898,14 +959,19 @@ def _sweep_repo(
     # it is a worktree this sweep owns: `git worktree prune` also unregisters a
     # worktree whose directory is merely *unreadable* right now (an unmounted
     # volume, a permissions blip), and doing that to a path outside `root` is
-    # not this sweep's business.
-    if any(r.prunable and not r.bare and _is_within(r.path, root) for r in records):
-        _git(git_dir, "worktree", "prune")
-        records = _list_worktrees(git_dir)
+    # not this sweep's business. So no prune at all while any worktree is outside
+    # the scope: the namespace cannot see one, so git lists it as prunable and
+    # prune would unregister a checkout that is still in use.
+    linked = [r for r in records if not r.bare]
+    if any(r.prunable and _is_within(r.path, scope) for r in linked) and all(
+        _is_within(r.path, scope) for r in linked
+    ):
+        _git(git_dir, "worktree", "prune", scope=scope)
+        records = _list_worktrees(git_dir, scope=scope)
         if records is None:
             return []
 
-    upstream = _upstream_head(git_dir)
+    upstream = _upstream_head(git_dir, scope=scope)
     outcomes: list[ReapOutcome] = []
 
     for index, record in enumerate(records):
@@ -915,18 +981,18 @@ def _sweep_repo(
         if record.bare or index == 0:
             outcomes.append(ReapOutcome(record.path, record.branch, False, REASON_MAIN))
             continue
-        if not _is_within(record.path, root):
+        if not _is_within(record.path, scope):
             outcomes.append(
                 ReapOutcome(record.path, record.branch, False, REASON_OUTSIDE)
             )
             continue
 
-        reason = _classify(record, git_dir, upstream, cutoff, protect)
+        reason = _classify(record, git_dir, upstream, cutoff, protect, scope=scope)
         if reason != REASON_MERGED:
             outcomes.append(ReapOutcome(record.path, record.branch, False, reason))
             continue
 
-        removed = _remove(git_dir, record)
+        removed = _remove(git_dir, record, scope=scope)
         outcomes.append(ReapOutcome(
             record.path, record.branch, removed,
             REASON_MERGED if removed else REASON_FAILED,

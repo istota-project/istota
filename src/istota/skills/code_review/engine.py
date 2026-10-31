@@ -48,7 +48,7 @@ swapped after the check, `objects` or `refs` as symlinks, and an
 `objects/info/alternates` line each took a contained repository's reads to one
 outside the root (`tests/test_host_path_races_linux.py`). So `_run_git` runs git
 in a namespace binding the user's subtree and the system directories, by
-`_namespaced`, where a path out of the root names nothing. `git_dir`'s own
+`sandbox.git_namespace`, where a path out of the root names nothing. `git_dir`'s own
 `rev-parse` stays outside it, since it reads no content and has to see the
 outside path to name the refusal.
 
@@ -81,6 +81,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from istota.lib.untrusted import frame_untrusted
+from istota.sandbox.git_namespace import namespaced
 from istota.sandbox.host_paths import developer_repos_root, resolve_under_repos
 
 if TYPE_CHECKING:
@@ -355,52 +356,6 @@ def _feed_stdin(stream, data: bytes) -> None:
             pass
 
 
-def _namespaced(argv: list[str], root: Path, worktree: Path) -> list[str] | None:
-    """`argv` in a namespace holding the system and `root` read-only, or None.
-
-    None where bwrap cannot make one. Not `build_bwrap_cmd`, which needs a
-    `Config` and a task and binds the venv, the temp dir and the workspace.
-
-    Function-scope imports because `executor` imports this package's neighbours.
-    """
-    from istota.executor import (
-        _bwrap_available,
-        _bwrap_requires_unshare_user,
-        _bwrap_supports_disable_userns,
-    )
-    from istota.sandbox.plan import _ETC_BINDS
-    from istota.sandbox.shell_exec import on_daemon_path
-
-    bwrap = on_daemon_path("bwrap") if _bwrap_available() else None
-    if bwrap is None:
-        return None
-    wrapped = [bwrap]
-    disable_userns = _bwrap_supports_disable_userns()
-    if disable_userns or _bwrap_requires_unshare_user():
-        wrapped.append("--unshare-user")
-    if disable_userns:
-        wrapped.append("--disable-userns")
-    wrapped += [
-        "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net",
-        "--unshare-cgroup-try", "--die-with-parent",
-        "--ro-bind", "/usr", "/usr",
-    ]
-    for compat in ("/bin", "/lib", "/lib64", "/sbin"):
-        path = Path(compat)
-        if path.is_symlink():
-            wrapped += ["--symlink", str(path.readlink()), compat]
-        elif path.exists():
-            wrapped += ["--ro-bind", compat, compat]
-    for etc in _ETC_BINDS:
-        wrapped += ["--ro-bind-try", etc, etc]
-    wrapped += ["--dev", "/dev", "--tmpfs", "/tmp"]
-    # Both spellings, because a `.git` file holds whichever the task's own
-    # namespace showed it, and the variable's may run through a link.
-    for dest in dict.fromkeys((str(root), str(root.resolve()))):
-        wrapped += ["--ro-bind", str(root), dest]
-    return [*wrapped, "--chdir", str(worktree), "--", *argv]
-
-
 def _run_git(
     worktree: Path,
     args: list[str],
@@ -413,7 +368,7 @@ def _run_git(
     """The one runner behind `_git` and `_git_batch`."""
     root = _repos_root()
     argv = ["git", *GIT_HARDENING, *args]
-    wrapped = _namespaced(argv, root, worktree) if in_namespace else None
+    wrapped = namespaced(argv, root, worktree) if in_namespace else None
     writer: threading.Thread | None = None
     with tempfile.TemporaryFile() as errfile:
         proc = subprocess.Popen(
