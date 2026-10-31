@@ -252,8 +252,8 @@ class TestWebFetch:
 class TestConnect:
     """Below the brain: the namespace's one way out, on either."""
 
-    def _proxy(self, config, reach, tmp_path, log):
-        allowed = _build_network_allowlist(config, set(), egress_hosts=reach.egress_hosts)
+    def _proxy(self, config, reach, tmp_path, log, skills=()):
+        allowed = _build_network_allowlist(config, set(skills), egress_hosts=reach.egress_hosts)
         sock_path = _socket_path()
         return allowed, sock_path, NetworkProxy(
             sock_path, allowed, trusted_roots={os.getpid()}, refusal_log=log,
@@ -286,7 +286,16 @@ class TestConnect:
     @pytest.mark.parametrize("host", ["pypi.org", "github.com", "registry.npmjs.org"])
     def test_a_registry_or_a_forge_is_not_a_way_out(self, config, index, limited, tmp_path, host):
         """Both serve anybody's account, so neither is on the list until it is granted."""
-        allowed, _, _ = self._proxy(config, _reach(config, index, limited), tmp_path, tmp_path / "log")
+        from istota.config import DeveloperConfig
+
+        config.developer = DeveloperConfig(
+            enabled=True, repos_dir=str(tmp_path / "repos"), github_url="https://github.com",
+        )
+        config.security.network.allow_pypi = True
+        reach = _reach(config, index, limited)
+        skills = {"developer"}
+        assert f"{host}:443" in _build_network_allowlist(config, skills, egress_hosts=None)
+        allowed, _, _ = self._proxy(config, reach, tmp_path, tmp_path / "log", skills)
         assert f"{host}:443" not in allowed
 
 
