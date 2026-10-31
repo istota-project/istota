@@ -37,7 +37,7 @@ A row in `egress_grants` means approved, and there is no pending or denied state
 
 The digest covers a job's `prompt`, `command`, `skill` and `skill_args`. The sync resolves `prompt_file` into `prompt`, so the file's content is covered. Editing any of them drops the job's `open:` and `public:` approvals and asks again. A schedule, model or delivery edit does not.
 
-Only an authenticated person writes a grant: the web route for the signed-in user's own subjects, the operator's `istota egress`, and the one-time seed. `tests/test_egress_grants.py` holds that list, and no skill CLI or deferred handler imports the module. An approval over the web carries the digest of the text the page showed, and a row that has moved since is refused.
+Only an authenticated person writes a grant: the web route for the signed-in user's own subjects, the operator's `istota egress`, and the one-time seed. `tests/test_egress_grants.py` holds that list, and no skill CLI or deferred handler imports the module. An approval over the web carries the digest of the text the page showed, and a row that has moved since is refused. An approval also binds the task: an occurrence whose `prompt`, `command`, `skill` or `skill_args` differ from its job row runs limited, so a task queued before an edit does not run on the edited row's approval.
 
 ## What enforces it
 

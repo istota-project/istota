@@ -97,7 +97,8 @@ def _public_task(conn, make_task):
     row = conn.execute("SELECT * FROM scheduled_jobs WHERE id = ?", (job_id,)).fetchone()
     egress.add_grant(conn, "alice", "cron:digest", f"public:{egress.job_digest(row)}", decided_via="cli")
     task_id = db.create_task(
-        conn, prompt="p", user_id="alice", source_type="scheduled", scheduled_job_id=job_id,
+        conn, prompt="read the news", user_id="alice", source_type="scheduled",
+        scheduled_job_id=job_id,
     )
     return db.get_task(conn, task_id)
 

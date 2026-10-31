@@ -37,7 +37,9 @@ logger = logging.getLogger(__name__)
 _ASSIGNMENT_SOURCE_TYPE = "assignment"
 
 TASKS_FILE_SUBJECT = "tasks-file"
-DIGEST_COLUMNS = ("prompt", "command", "skill", "skill_args")
+#: What a job occurrence copies from its row, and so what it can be compared on.
+TASK_TEXT_COLUMNS = ("prompt", "command", "skill", "skill_args")
+DIGEST_COLUMNS = TASK_TEXT_COLUMNS
 DECIDERS = frozenset({"web", "cli", "migration"})
 POSTURE_PUBLIC = "public"
 POSTURE_PRIVATE = "private"
@@ -129,8 +131,12 @@ def job_digest(row: "Mapping | sqlite3.Row") -> str:
     NULL and empty read the same: an older row can hold `''` where the sync writes
     NULL, and reading that as an edit would drop a seeded approval on the first tick.
     """
+    return _digest_over(row, DIGEST_COLUMNS)
+
+
+def _digest_over(row: "Mapping | sqlite3.Row", columns: tuple[str, ...]) -> str:
     digest = hashlib.sha256()
-    for column in DIGEST_COLUMNS:
+    for column in columns:
         value = row[column]
         data = ("" if value is None else str(value)).encode("utf-8", "surrogatepass")
         digest.update(f"{len(data)}:".encode())
@@ -213,8 +219,8 @@ def approved_skills(conn: sqlite3.Connection, user_id: str, subject: str | None)
 
 def job_approved(conn: sqlite3.Connection, root: "db.Task", kind: str) -> bool:
     """Whether this scheduled root's job, as its row reads now, has an approved
-    `open:` or `public:` for that exact text. A digest that moved answers False,
-    so a race with the sync cannot widen anything."""
+    `open:` or `public:` for that exact text, and the root is running that text. A
+    digest that moved answers False, so a race with the sync cannot widen anything."""
     return _row_approved(conn, root, job_row(conn, root), kind)
 
 
@@ -231,10 +237,23 @@ def public_job_approved(conn: sqlite3.Connection, root: "db.Task") -> bool:
 def _row_approved(
     conn: sqlite3.Connection, root: "db.Task", row: sqlite3.Row | None, kind: str,
 ) -> bool:
-    if row is None:
+    if row is None or not _task_runs_row_text(conn, root, row):
         return False
     grants = grants_for(conn, root.user_id, cron_subject(row["name"]))
     return f"{kind}:{job_digest(row)}" in grants
+
+
+def _task_runs_row_text(conn: sqlite3.Connection, root: "db.Task", row: sqlite3.Row) -> bool:
+    """Whether the task is running the text its job row holds. An approval is of the
+    row, and the task is what runs. From the table, since `execute_task` enriches the
+    prompt on the object it holds. `db.create_task` is the one writer of these fields
+    on an occurrence, and `_create_scheduled_job_task` copies them from the row."""
+    stored = conn.execute(
+        "SELECT prompt, command, skill, skill_args FROM tasks WHERE id = ?", (root.id,),
+    ).fetchone()
+    if stored is None:
+        return False
+    return _digest_over(stored, TASK_TEXT_COLUMNS) == _digest_over(row, TASK_TEXT_COLUMNS)
 
 
 def stored_posture(conn: sqlite3.Connection, task_id: int) -> str | None:
