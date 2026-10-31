@@ -263,6 +263,35 @@ with browse_api.app.test_client() as client:
     assert_ok(result, "browser secret capture capability")
 
 
+def test_the_isolated_profile_in_the_shipped_api(browser_image):
+    """The name, the refusals and the old directory's removal, in the image's own modules."""
+    result = run_in(browser_image, ["-c", """
+import os, pathlib, tempfile
+os.environ['BROWSER_PROFILE_DIR'] = tempfile.mkdtemp()
+import browse_api, pool
+from browse_api import ISOLATED_PROFILE
+assert ISOLATED_PROFILE == '__isolated__'
+users = pathlib.Path(os.environ['BROWSER_PROFILE_DIR']) / 'users'
+(users / '__briefings__').mkdir(parents=True)
+(users / 'kept').mkdir()
+pool.remove_retired_profiles()
+assert not (users / '__briefings__').exists() and (users / 'kept').is_dir()
+headers = {'X-Istota-User': ISOLATED_PROFILE, 'X-Istota-Owner': 'task-1'}
+credential = {'session_id': 's1', 'actions': [
+    {'type': 'fill', 'selector': '#p', 'value': 'x', 'credential': True, 'bound_hosts': []}]}
+with browse_api.app.test_client() as client:
+    assert client.get('/health').get_json()['isolated_browser_profile'] is True
+    refused = client.post('/interact', headers=headers, json=credential)
+    assert refused.status_code == 403, refused.text
+    assert refused.get_json()['error'] == 'isolated_browser_credentials_refused'
+    assert client.get('/state', headers=headers).status_code == 403
+    retired = {'X-Istota-User': '__briefings__', 'X-Istota-Owner': 'task-1'}
+    assert client.post('/render', headers=retired, json={'url': 'https://example.com'}).status_code == 403
+assert not (users / '__briefings__').exists()
+"""], entrypoint="python", timeout=60)
+    assert_ok(result, "the isolated profile")
+
+
 # --- the base and Chrome stages ----------------------------------------------
 #
 # A release ships istota-browser-base, built with `--target base`, because

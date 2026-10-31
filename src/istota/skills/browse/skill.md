@@ -15,7 +15,9 @@ Group briefing research uses the dedicated Briefings profile. Use `render`, `get
 
 **Reach for `render` first.** It returns the page as markdown, so headings, list position and link URLs arrive together — which is what lets you tell an article link from footer chrome. `get` returns flattened text with every URL stripped out, and `links` returns a position-stripped list where nav items and articles look identical. Use those two only when you specifically want plain text or a bare link list.
 
-Your browser profile belongs to the requesting user. Cookies and site storage persist across tasks, closed sessions and container restarts; other users do not inherit these logins. A later task for the same user can use an existing login without fetching a credential again. Closing a session closes its tabs, not the profile.
+A result with `"user_scope": "__isolated__"` ran on the isolated profile, shared by tasks that hold no user's data and signed in as nobody. Everything below works there except `state`, `forget`, and the credential, one-time code, card and capture flags, which are refused as `isolated_browser_credentials_refused`. Other tasks share its cookies, so do not sign in to anything on it.
+
+Otherwise your browser profile belongs to the requesting user. Cookies and site storage persist across tasks, closed sessions and container restarts; other users do not inherit these logins. A later task for the same user can use an existing login without fetching a credential again. Closing a session closes its tabs, not the profile.
 
 ## Commands
 

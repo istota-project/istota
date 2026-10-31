@@ -27,7 +27,13 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from istota.browser.owner import BRIEFINGS_IDENTITY, browser_headers, require_briefings_profile, with_browser_owner
+from istota.browser.owner import (
+    ISOLATED_PROFILE,
+    browser_headers,
+    browser_profile,
+    require_isolated_profile,
+    with_browser_owner,
+)
 from istota.browser.admission import BrowserQueueTimeout, browser_request
 
 import httpx
@@ -150,7 +156,7 @@ logger = logging.getLogger(__name__)
 def _profile_result(data, scope):
     """Keep the applied scope visible even when a verb rebuilds its result."""
     global _shared_profile_warned
-    if scope == os.environ.get("ISTOTA_USER_ID") and scope:
+    if scope == browser_profile() and scope:
         return {**data, "user_scope": scope}
     if not _shared_profile_warned:
         logger.warning(
@@ -1632,13 +1638,13 @@ def cmd_interact(args):
         return _scrub(_note_unanswered_interaction(url, args.command, actions, exc), secrets)
 
     decoded = _decode(resp)
-    scope_confirmed = decoded.get("user_scope") == os.environ.get("ISTOTA_USER_ID")
+    scope_confirmed = decoded.get("user_scope") == browser_profile()
     decoded, saved_codes = _save_recovered(decoded, actions, store=scope_confirmed)
     secrets.extend(saved_codes)
     session_confirmed = decoded.get("session_id") == args.session_id
     decoded = _note_stale_container(_scrub(decoded, secrets))
     if scope_confirmed and isinstance(purchase, CardSecret):
-        decoded["user_scope"] = os.environ.get("ISTOTA_USER_ID")
+        decoded["user_scope"] = browser_profile()
     if session_confirmed and isinstance(purchase, CardSecret):
         decoded["session_id"] = args.session_id
     if credential_fill and not scope_confirmed:
@@ -2078,17 +2084,51 @@ def build_parser():
     return parser
 
 
+ISOLATED_VERBS = frozenset(
+    {"get", "render", "screenshot", "extract", "interact", "links", "challenge", "close"}
+)
+ISOLATED_REFUSED_FLAGS = (
+    "--fill-credential", "--fill-otp", "--fill-recovery", "--fill-card", "--purchase",
+    "--capture-otp", "--capture-codes", "--capture-phrase", "--capture-codes-download",
+    "--save-recovery", "--find-secrets",
+)
+
+
+def _names_a_credential_flag(raw) -> bool:
+    """Read off the raw argv, because parsing is what fetches the credential.
+
+    argparse takes an unambiguous prefix, so a prefix counts. `--fill` itself is
+    the plain fill and a prefix of two refused flags; argparse takes an exact
+    match first, so it is the one to let through.
+    """
+    for token in raw:
+        name = token.split("=", 1)[0]
+        if len(name) <= 2 or not name.startswith("--") or name == "--fill":
+            continue
+        if any(flag.startswith(name) for flag in ISOLATED_REFUSED_FLAGS):
+            return True
+    return False
+
+
+def _isolated_refusal(raw) -> str | None:
+    """Cookies on this profile are shared, so nothing here may sign in as anyone."""
+    if not raw or raw[0] not in ISOLATED_VERBS:
+        return "isolated_browser_operation_refused"
+    if _names_a_credential_flag(raw[1:]):
+        return "isolated_browser_credentials_refused"
+    try:
+        require_isolated_profile(get_api_url())
+    except Exception:
+        return "isolated_browser_unavailable"
+    return None
+
+
 def main(argv=None):
     parser = build_parser()
-    if os.environ.get("ISTOTA_USER_ID") == BRIEFINGS_IDENTITY:
-        raw = list(sys.argv[1:] if argv is None else argv)
-        if not raw or raw[0] not in {"get", "render", "extract", "links", "close"}:
-            print(json.dumps(error_envelope("briefing_browser_operation_refused")))
-            return 1
-        try:
-            require_briefings_profile(get_api_url())
-        except Exception:
-            print(json.dumps(error_envelope("briefing_browser_isolation_unavailable")))
+    if browser_profile() == ISOLATED_PROFILE:
+        refusal = _isolated_refusal(list(sys.argv[1:] if argv is None else argv))
+        if refusal:
+            print(json.dumps(error_envelope(refusal)))
             return 1
     args = parse_and_resolve(parser, argv)
     if getattr(args, "fill_card", None) and not getattr(args, "purchase", None):

@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit, parse_qsl
 import logging
+import shutil
 import socket
 import stat
 import subprocess
@@ -28,6 +29,7 @@ RUNTIME_DIR = Path("/run/istota-browser")
 CONSOLE_DIR = Path("/run/istota-browser-console")
 CONSOLE_SOCKET_WAIT_S = 15
 PROFILE_ROOT = chrome.PROFILE_ROOT
+RETIRED_PROFILE = "__briefings__"
 MAX_INSTANCES = int(os.environ.get("BROWSER_MAX_INSTANCES", "2"))
 INSTANCE_IDLE_S = int(os.environ.get("BROWSER_INSTANCE_IDLE_S", "900"))
 CDP_PORT_BASE = 9300
@@ -264,6 +266,29 @@ def reap_idle(now, *, exclude=(), on_release=None):
         release_slot(inst)
         reaped.append(inst.user_id)
     return reaped
+
+
+def remove_retired_profiles():
+    """Delete the profile research used before `__isolated__`.
+
+    Boot is the only caller, before any browser starts. Nothing recreates the
+    directory, since the API refuses the name, so this acts once. A failure is
+    retried on the next boot rather than stopping the browser.
+    """
+    users = scoped_user_dir(PROFILE_ROOT, "users")
+    if users is None:
+        return
+    # By the plain join: `scoped_user_dir` refuses a name resolving elsewhere,
+    # and a link planted here is exactly what must be removed unfollowed.
+    retired = Path(users) / RETIRED_PROFILE
+    try:
+        if retired.is_symlink():
+            retired.unlink()
+        elif retired.is_dir():
+            shutil.rmtree(retired)
+    except OSError:
+        log.warning("Could not remove the retired profile %s; retrying next boot",
+                    retired, exc_info=True)
 
 
 def acquire(user_id, *, on_acquire=None, exclude=(), memory_pct=None,

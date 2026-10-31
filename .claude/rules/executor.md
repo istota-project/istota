@@ -94,6 +94,7 @@ Only this task's directory is bound, never `.control/{user_id}`, so no task read
 | `ISTOTA_TASK_ATTEMPT` | `attempt_count + 1`, bound once as `task_attempt` and also used for `BrainRequest.attempt`, since `tasks transcript` excludes the live log by equality and drift would be permissive. Set by all three task paths. Derived per call before, which the liveness reaper broke (ISSUE-377). In `_EXECUTOR_PROXY_ONLY_VARS`. |
 | `ISTOTA_DB_PATH` | Set for every user, split into the proxy's base env; never in the sandbox. Set unsplit by the unsandboxed skill-task path. |
 | `ISTOTA_TURN_AUTHOR` | `Reach.author`, the proxy's base env only. Read by the `email` CLI. |
+| `ISTOTA_BROWSER_PROFILE` | `__isolated__` when `Reach.isolated_browser`, else the task's user. The proxy's base env only. Read by `browser/owner`. |
 | `HEALTH_DB_PATH`, `LOCATION_DB_PATH` | Manifest `proxy_only: true`. Location via `setup_env`. |
 | `ISTOTA_SANDBOXED` | `"1"` when `skill_proxy_enabled and effective_sandboxing`. Model env only, added after the proxy snapshot. `skill_client._run_direct` refuses when set. |
 | `ISTOTA_DEFERRED_DIR` | user temp dir, always |

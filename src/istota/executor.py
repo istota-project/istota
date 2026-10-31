@@ -9458,6 +9458,7 @@ def execute_task(
             discovered_calendars=discovered_calendars,
             withheld_scopes=_withheld,
             turn_author=_reach.author,
+            isolated_browser=_reach.isolated_browser,
             group_ids=task_group_ids,
             conn=conn,
         )

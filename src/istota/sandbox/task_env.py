@@ -184,6 +184,7 @@ def build_task_runtime(
     discovered_calendars: list | None = None,
     withheld_scopes: frozenset[str] = frozenset(),
     turn_author: str = "own",
+    isolated_browser: bool = True,
     group_ids: "list[str] | None" = None,
     conn: "db.sqlite3.Connection | None" = None,
 ) -> TaskRuntime:
@@ -202,6 +203,10 @@ def build_task_runtime(
     ``turn_author`` is the same derivation's posture (``Reach.author``), handed
     to the proxy's skill CLIs as ``ISTOTA_TURN_AUTHOR``. The ``email`` CLI
     refuses on it.
+
+    ``isolated_browser`` is ``Reach.isolated_browser``, handed to the proxy's
+    skill CLIs as ``ISTOTA_BROWSER_PROFILE``: the shared isolated profile, or
+    the user's own.
 
     ``group_ids`` is the task's resolved group set
     (``room_scopes.task_group_ids``), handed to the proxy's skill CLIs as
@@ -486,6 +491,8 @@ def build_task_runtime(
             proxy_base_env[WITHHELD_SCOPES_VAR] = ",".join(sorted(withheld_scopes))
         from istota.sandbox.host_paths import TURN_AUTHOR_VAR
         proxy_base_env[TURN_AUTHOR_VAR] = turn_author
+        from istota.browser.owner import BROWSER_PROFILE_VAR, ISOLATED_PROFILE
+        proxy_base_env[BROWSER_PROFILE_VAR] = ISOLATED_PROFILE if isolated_browser else task.user_id
         if group_ids:
             from istota.sandbox.host_paths import TASK_GROUPS_VAR
             proxy_base_env[TASK_GROUPS_VAR] = ",".join(sorted(group_ids))

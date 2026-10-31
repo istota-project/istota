@@ -68,7 +68,7 @@ def run_confined_command(
         _record_worker_pid,
         _release_task_cgroup,
         _resolve_task_groups,
-        _task_withheld_scopes,
+        _task_reach,
         build_bwrap_cmd,
         task_temp_dir,
     )
@@ -80,7 +80,8 @@ def run_confined_command(
     skill_index = load_skill_index(
         config.skills_dir, bundled_dir=config.bundled_skills_dir,
     )
-    withheld = _task_withheld_scopes(config, None, task, skill_index)
+    reach = _task_reach(config, None, task, skill_index)
+    withheld = reach.withheld
     temp_dir = task_temp_dir(config, task, restricted=bool(withheld))
     # Bound read-write under this name, so a planted link would decide what the
     # namespace sees. Checked before the mkdir, as `execute_task` does.
@@ -106,6 +107,7 @@ def run_confined_command(
         user_config=config.get_user(task.user_id),
         discovered_calendars=discovered_calendars,
         withheld_scopes=withheld,
+        isolated_browser=reach.isolated_browser,
         group_ids=group_ids,
     )
 

@@ -88,6 +88,9 @@ class Reach:
     withheld: frozenset[str]
     author: TurnAuthor
     allowance: CorrespondentAllowance = CorrespondentAllowance()
+    #: False only for an own task that holds the user's private data: nothing
+    #: else may drive a browser signed in to their accounts (#899).
+    isolated_browser: bool = True
 
     @property
     def standing_memory_loads(self) -> bool:
@@ -242,7 +245,8 @@ def reach_for_task(
     if author == "correspondent":
         allowance = correspondent_scopes(conn, task.user_id, skill_index=skill_index)
         return Reach(all_scopes(skill_index) - allowance.scopes, author, allowance)
-    return Reach(_withheld_from_own_task(conn, task, skill_index), "own")
+    withheld = _withheld_from_own_task(conn, task, skill_index)
+    return Reach(withheld, "own", isolated_browser=bool(withheld))
 
 
 def _withheld_from_own_task(
