@@ -14,6 +14,7 @@
     CheckCheck,
     Users,
     PowerOff,
+    EyeOff,
   } from '@lucide/svelte';
   import PhoneSurfaceIcon from '$lib/components/chat/PhoneSurfaceIcon.svelte';
   import ViewFilters from '$lib/components/ViewFilters.svelte';
@@ -33,6 +34,7 @@
     Alert,
     Button,
     CategoryGroup,
+    IconButton,
     Input,
   } from '@minot/ui';
   import LoadingOctopus from '$lib/components/chat/LoadingOctopus.svelte';
@@ -42,6 +44,7 @@
   import Message from '$lib/components/chat/Message.svelte';
   import Composer from '$lib/components/chat/Composer.svelte';
   import RoomSettings from '$lib/components/chat/RoomSettings.svelte';
+  import NewIncognitoRoomDialog from '$lib/components/chat/NewIncognitoRoomDialog.svelte';
   import { modelRefusalOf, type ModelRefusal } from '$lib/components/chat/modelPicker';
   import RoomMemory from '$lib/components/chat/RoomMemory.svelte';
   import { roomMenuItems } from '$lib/components/chat/roomMenu';
@@ -292,6 +295,8 @@
   const userId = $derived(identity.live ? identity.user.username || null : null);
   let creatingRoom = $state(false);
   let newRoomName = $state('');
+  let creatingIncognito = $state(false);
+  const INCOGNITO_ROOM_TITLE = 'Incognito room: nothing here reaches your memory';
   let listEl: HTMLDivElement | undefined = $state();
   // The rows inside the scroller, apart from the composer reserve and fade. Its
   // size is what the content ResizeObserver below watches.
@@ -1151,6 +1156,11 @@
     sidebarOpen = false;
   }
 
+  async function createIncognitoRoom(name: string) {
+    await session.newRoom(name, { incognito: true });
+    sidebarOpen = false;
+  }
+
   async function saveRoomSettings(patch: RoomPatch) {
     if (!settingsRoom) return;
     // A refusal (a setting only the host may change) keeps the modal open
@@ -1265,6 +1275,16 @@
             />
           </span>
         {/if}
+        {#if !inViewMode && activeRoom?.incognito}
+          <span
+            class="header-shared"
+            role="img"
+            title={INCOGNITO_ROOM_TITLE}
+            aria-label={INCOGNITO_ROOM_TITLE}
+          >
+            <Icon icon={EyeOff} size="sm" />
+          </span>
+        {/if}
         {#if !inViewMode && activeRoom?.shared}
           <!-- The sidebar marks this too, but it is closed most of the time on
                a phone, and who reads a message is what a sender needs before
@@ -1334,7 +1354,16 @@
       {@const waiting = room.id === $activeRoomId ? 0 : ($queuedCounts[room.token] ?? 0)}
       {@const tint = roomColorVar(room.color)}
       {#snippet roomIcon()}
-        {#if room.shared && room.phone_surface !== 'whatsapp'}
+        {#if room.incognito}
+          <span
+            class="room-origin"
+            role="img"
+            title={INCOGNITO_ROOM_TITLE}
+            aria-label={INCOGNITO_ROOM_TITLE}
+          >
+            <Icon icon={EyeOff} size="sm" />
+          </span>
+        {:else if room.shared && room.phone_surface !== 'whatsapp'}
           <!-- More than one human reads this room, so it outranks the
 							     origin glyph: who will see a message matters more than which
 							     surface mirrors it. The Talk fact moves into the title. -->
@@ -1448,9 +1477,17 @@
             }}
           />
         {:else}
-          <button class="room-add" onclick={() => (creatingRoom = true)} type="button">
-            <Icon icon={Plus} size="sm" /> New room
-          </button>
+          <div class="room-add-row">
+            <button class="room-add" onclick={() => (creatingRoom = true)} type="button">
+              <Icon icon={Plus} size="sm" /> New room
+            </button>
+            <IconButton
+              icon={EyeOff}
+              label="New incognito room"
+              title="New incognito room"
+              onclick={() => (creatingIncognito = true)}
+            />
+          </div>
         {/if}
       </div>
 
@@ -1725,6 +1762,8 @@
       </div>
     {/if}
   </div>
+
+  <NewIncognitoRoomDialog bind:open={creatingIncognito} onCreate={createIncognitoRoom} />
 
   {#if settingsRoom}
     <RoomSettings
@@ -2008,6 +2047,11 @@
 	   insets its children, so the button lines up with the rows around it. */
   .room-new {
     padding: 0 0 var(--space-2);
+  }
+  .room-add-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
   }
   .room-add {
     display: flex;

@@ -741,24 +741,34 @@
       </Field>
     {/if}
 
-    <Field label="Members">
-      {#key membersEpoch}
-        <RoomMembers
-          roomId={room.id}
-          {userId}
-          talkBound={onTalk}
-          phoneLabel={room.read_only && !room.phone_group ? phoneLabel : null}
-          onChanged={onMembersChanged}
-          {onLeft}
-          onRequestAdd={requestAdd}
-          {addError}
-        />
-      {/key}
-    </Field>
+    {#if room.incognito}
+      <Field label="Incognito">
+        <p class="caption incognito-note">
+          None of your memory is loaded here and nothing said here is added to it. This room has one
+          member, stays in web chat, and can't stop being incognito. Deleting it removes the
+          conversation and this room's memory.
+        </p>
+      </Field>
+    {:else}
+      <Field label="Members">
+        {#key membersEpoch}
+          <RoomMembers
+            roomId={room.id}
+            {userId}
+            talkBound={onTalk}
+            phoneLabel={room.read_only && !room.phone_group ? phoneLabel : null}
+            onChanged={onMembersChanged}
+            {onLeft}
+            onRequestAdd={requestAdd}
+            {addError}
+          />
+        {/key}
+      </Field>
 
-    <Field label="Group">
-      <RoomGroupLink roomId={room.id} />
-    </Field>
+      <Field label="Group">
+        <RoomGroupLink roomId={room.id} />
+      </Field>
+    {/if}
 
     <CopyField
       label="Room token"
@@ -782,7 +792,7 @@
           {/if}
         </p>
       </Field>
-    {:else}
+    {:else if !room.incognito}
       <Field label="Nextcloud Talk">
         {#if onTalk}
           <p class="caption talk-on">

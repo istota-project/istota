@@ -5034,6 +5034,7 @@ def _room_snapshot(username: str) -> dict[str, dict]:
                 "name": db.room_display_name(r, handle),
                 "origin": r.origin,
                 "talk_token": talk_refs.get(r.token),
+                "incognito": r.incognito,
                 **_room_phone_fields(
                     r, phone_bindings.get(r.token),
                     email_thread=r.token in email_threads,
@@ -7595,6 +7596,7 @@ def _chat_list_rooms(username: str) -> list[dict]:
             d["model"] = r.model
             d["effort"] = r.effort
             d["brain"] = r.brain
+            d["incognito"] = r.incognito
             # The sidebar renders this list in order and re-sorts on this stamp
             # as messages stream in, so it is normalized the same way a message
             # row's `created_at` is — the client compares the two directly.
@@ -7630,11 +7632,12 @@ def _noted_room_tokens(conn, username: str) -> set[str]:
     return {canonical_token(conn, token) or token for token in names}
 
 
-def _chat_create_room(username: str, name: str) -> dict:
+def _chat_create_room(username: str, name: str, *, incognito: bool = False) -> dict:
     from istota import db
     with db.get_db(_config.db_path) as conn:
-        room = db.create_web_chat_room(conn, username, name)
+        room = db.create_web_chat_room(conn, username, name, incognito=incognito)
     d = _room_to_dict(room)
+    d["incognito"] = incognito
     # Nothing has been said in it yet, so its activity stamp is its birth — but
     # it has to carry one, or the sidebar's activity sort would file the room
     # the user just created below every room they haven't touched in weeks.
@@ -8152,6 +8155,7 @@ def _chat_update_room(
         d["model"] = reg.model if reg else None
         d["effort"] = reg.effort if reg else None
         d["brain"] = reg.brain if reg else None
+        d["incognito"] = bool(reg and reg.incognito)
         if cleared:
             # Not room state: a report of what this request did, so a client
             # that PATCHed a brain alongside a model or an effort can say what
@@ -8249,8 +8253,11 @@ def _chat_delete_room(username: str, room_id: int) -> str:
         # about the room go with it.
         members = db.list_room_members(conn, room.token)
         aliases = db._room_ref_tokens(conn, room.token, include_surface_refs=False)
+        incognito_tasks = _incognito_room_tasks(conn, reg)
         db.delete_web_chat_room(conn, room_id, username)
         token = room.token
+    if incognito_tasks is not None:
+        _wipe_incognito_room(username, token, incognito_tasks)
     from istota import storage
     try:
         storage.delete_room_notes_for(_config, members, token, aliases=aliases)
@@ -8265,6 +8272,65 @@ def _chat_delete_room(username: str, room_id: int) -> str:
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("chat room delete: CHANNEL.md cleanup failed: %s", exc)
     return "ok"
+
+
+def _incognito_room_tasks(conn, reg) -> list | None:
+    """The tasks an incognito room's delete has to clear files for, read before
+    their rows go. None for any other room, whose files stay as they always have."""
+    from istota import db
+
+    if reg is None or not reg.incognito:
+        return None
+    rows = conn.execute(
+        "SELECT id FROM tasks WHERE conversation_token = ?", (reg.token,),
+    ).fetchall()
+    return [db.get_task(conn, row[0]) for row in rows]
+
+
+def _wipe_incognito_room(username: str, token: str, tasks: list) -> None:
+    """What deleting an incognito room removes beyond the rows and `Channels/<token>`:
+    indexed chunks, held drafts, inbox rows, the sent-mail ledger's rows for its
+    tasks, session transcripts and the files uploaded in it.
+
+    Best-effort after the commit, like the `CHANNEL.md` removal. A failure is
+    logged by kind, and never with a path, which can carry an upload's name.
+    """
+    from istota import db
+    from istota.memory.search import delete_namespace_chunks
+    from istota.session.session_log import resolve_session_log_dir
+    from istota.session.session_log_read import find_logs
+    from istota.workspace.listing import ListingError
+    from istota.workspace.writes import delete_entry
+
+    try:
+        with db.get_db(_config.db_path) as conn:
+            delete_namespace_chunks(conn, f"channel:{token}")
+            conn.execute("DELETE FROM outbound_drafts WHERE room_token = ?", (token,))
+            conn.execute("DELETE FROM notifications WHERE room_token = ?", (token,))
+            conn.execute("DELETE FROM sent_emails WHERE conversation_token = ?", (token,))
+    except Exception as exc:
+        logger.warning("incognito room delete: rows not removed: %s", type(exc).__name__)
+    log_root = resolve_session_log_dir(_config.db_path, _config.brain.native.session_log.dir)
+    roots = _chat_upload_roots(username)
+    for task in tasks:
+        for log in find_logs(log_root, username, task_id=task.id):
+            try:
+                log.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("incognito room delete: log not removed: %s", type(exc).__name__)
+        for name in task.attachments or []:
+            path = Path(name)
+            root = next((r for r in roots if path.is_relative_to(r) and path != r), None)
+            if root is None or ".." in path.parts:
+                continue
+            # Walked from above the task-writable tree, as admission does, so a
+            # link swapped in there cannot aim this at another file.
+            anchor = _config.temp_dir if root == roots[-1] else _config.workspace_path
+            parts = path.relative_to(anchor).parts
+            try:
+                delete_entry(anchor, list(parts[:-1]), parts[-1])
+            except (OSError, ValueError, ListingError) as exc:
+                logger.warning("incognito room delete: upload not removed: %s", type(exc).__name__)
 
 
 def _chat_member_room(conn, username: str, room_id: int):
@@ -8429,6 +8495,8 @@ def _chat_add_member(
             from istota.groups.rooms import managed_refusal
             return 409, managed_refusal(
                 conn, reg, "This room's members are its group's; add them to the group in Groups.")
+        if reg.incognito:
+            return 409, {"error": "An incognito room has one member, so nobody can be added."}
         if _is_talk_backed(conn, reg, handle.token):
             return 409, {"error": "membership of a Talk room is managed in Talk"}
         # A private phone thread has one reader. A second member makes it
@@ -8870,6 +8938,7 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
     - `raced` — another promote bound the room while this one was creating its
       conversation. Its ref stands.
     - `not_found` — unknown / not owned / not web-origin / Talk unconfigured.
+    - `incognito` — an incognito room, which stays in web chat.
     - `refused` — a shared room, and the caller is not its host.
     - `failed` — Nextcloud created no conversation.
     """
@@ -8884,6 +8953,9 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
         reg = db.get_room(conn, token)
         if reg is None or reg.origin != "web":
             return "not_found", None  # only web-origin rooms promote
+        if reg.incognito:
+            return "incognito", {"error": "An incognito room stays in web chat: "
+                                          "Talk would keep its own copy of the conversation."}
         # A Talk conversation keeps a roster nothing synchronizes with the
         # group, so a group's room never gets one.
         if db.is_group_owned_room(reg):
@@ -11444,7 +11516,13 @@ async def chat_create_room(
         return JSONResponse({"error": "name required"}, status_code=400)
     if len(name) > 80:
         name = name[:80]
-    room = await asyncio.to_thread(_chat_create_room, user["username"], name)
+    # A strict bool, since `bool("no")` is True and this cannot be undone.
+    incognito = data.get("incognito", False)
+    if not isinstance(incognito, bool):
+        return JSONResponse({"error": "invalid incognito"}, status_code=400)
+    room = await asyncio.to_thread(
+        _chat_create_room, user["username"], name, incognito=incognito,
+    )
     return room
 
 
@@ -11456,6 +11534,11 @@ async def chat_update_room(
     _csrf: None = Depends(_verify_origin),
 ):
     data = await request.json()
+    if "incognito" in data:
+        return JSONResponse(
+            {"error": "whether a room is incognito is set when it is created and cannot change"},
+            status_code=400,
+        )
     name = data.get("name")
     archived = data.get("archived")
     if name is not None:
@@ -11716,7 +11799,7 @@ async def chat_promote_room(
     does nothing.
     """
     status, room = await _chat_promote_to_talk(user["username"], room_id)
-    if status == "group_managed":
+    if status in ("group_managed", "incognito"):
         return JSONResponse(room, status_code=409)
     if status == "refused":
         return JSONResponse(
@@ -17697,7 +17780,7 @@ def _user_web_rooms(user_id: str) -> list[dict]:
                 if not db.is_room_member(conn, r.token, user_id):
                     continue
                 room = db.visible_room(conn, user_id, r.token)
-                if room is None:
+                if room is None or room.incognito:
                     continue
                 out.append({
                     "token": r.token,

@@ -85,6 +85,9 @@ def _is_user_turn(conn: sqlite3.Connection, task: db.Task) -> bool:
 
     if task.source_type not in USER_TURN_SOURCES:
         return False
+    # A charter and its scratchpad outlive the room they started in.
+    if task.incognito:
+        return False
     if (task.guest_participant_id is not None or task.is_group_chat
             or task.parent_task_id is not None or task.scheduled_job_id is not None
             or task.command or task.skill):

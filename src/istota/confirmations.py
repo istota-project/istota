@@ -98,9 +98,11 @@ def pending_for_user(conn, user_id: str) -> list[db.Task]:
     """Every task this user has been asked about, oldest first.
 
     Oldest first because that is the order the questions arrived in, and a
-    listing the user reads top-down should match it.
+    listing the user reads top-down should match it. Every caller reads across
+    rooms, so an incognito room's question is left out: it is answered in that
+    room or from the bell.
     """
-    return db.list_pending_confirmations_for_user(conn, user_id)
+    return [t for t in db.list_pending_confirmations_for_user(conn, user_id) if not t.incognito]
 
 
 # Characters that turn a label into markup once a surface renders it. Talk
@@ -640,7 +642,8 @@ def resolve(
             if asked_here.ambiguous:
                 return asked_here
             task = asked_here.task
-    if task is None:
+    in_incognito = bool(conversation_token) and db.room_is_incognito(conn, conversation_token)
+    if task is None and not in_incognito:
         open_for_user = pending_for_user(conn, user_id)
         if len(open_for_user) > 1:
             return Resolution(ambiguous=tuple(open_for_user))

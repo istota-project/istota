@@ -61,12 +61,11 @@ async def test_local_workspace_has_no_talk_attachments_place(client, config):
     assert "talk" not in [p["id"] for p in response.json()["places"]]
 
 
-async def test_nextcloud_workspace_has_the_talk_attachments_place(client, config):
+async def test_nextcloud_workspace_has_no_talk_place(client, config):
     config.nextcloud.url = "https://cloud.example.com"
     config.workspace_mount_path = config.workspace_path
     response = await client.get("/workspace/places")
-    talk = [p for p in response.json()["places"] if p["id"] == "talk"]
-    assert len(talk) == 1 and talk[0]["browsable"] is False
+    assert [p for p in response.json()["places"] if p["id"] == "talk"] == []
     response = await client.get("/workspace/list", params={"place": "talk", "path": ""})
     assert response.status_code == 404
 

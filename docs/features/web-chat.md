@@ -16,6 +16,22 @@ Each room is a persistent conversation backed by its own per-surface channel tok
 
 Deleting a room is a hard, token-scoped cascade across `task_events`, `tasks`, `web_chat_messages`, and `channel_sleep_cycle_state`, plus a best-effort removal of the `Channels/<token>/` workspace folder. (Channel `memory_chunks` are a documented residual.)
 
+## Incognito rooms
+
+The icon beside New room creates an incognito room. This is decided when the room is created and can't be changed afterwards. The dialog and the room's settings both say so.
+
+A turn in an incognito room loads the room's own conversation and its `CHANNEL.md`, and none of the user's memory: no `USER.md`, dated or recalled memories, knowledge facts, playbooks, pinned files or group notes. Nothing said there reaches long-term memory: neither sleep cycle reads the room, conversations are not indexed, and a reindex leaves the room out.
+
+Asking the bot to remember something writes to the room's `CHANNEL.md`, the one thing the room keeps. From inside the room the `memory` CLI answers only for `--channel`, and `memory_search`, `kv`, `relay`, `room`, `rooms` and `assignment` are refused, as are `!memory user`, `!memory facts`, `!search`, `!status` and the other personal commands. `tasks status`, `tasks recent` and `tasks transcript` read only that room from inside it, and no other room can read its tasks. `!more` follows the same rule. `rooms list` and room lookups by name in other rooms leave it out, and `!confirm` and `!drafts` elsewhere don't list its held questions or drafts. The room is left out of the search dialog. It stays in the Unread and Starred views and in push previews, and the room's push setting controls the previews.
+
+An incognito room has one member and stays in web chat: adding a member, opening it in Talk and linking a group are refused.
+
+Deleting the room removes its conversation, tasks, task logs, session transcripts, the files uploaded in it, held mail drafts, inbox rows, its `Channels/<token>` folder and any index entries for that folder. Nothing expires on a timer. Copies in existing database backups stay until those backups age out, and token counts in the usage tables stay, since they hold no text.
+
+The room never receives deliveries: it can't be a default room or a route, and alerts and notes from elsewhere don't land in it. Its tool activity is not sent to your log route, and an alert the model writes from inside it is dropped.
+
+It is a rule about memory, not a limit on tools. Files, calendar, email and other tools work as they do elsewhere, and a file the bot writes to your workspace stays there after the room is deleted, as does anything saved with `!export`. The workspace is still mounted, so the model could read or write `USER.md` as a plain file; the room's standing instruction tells it not to, and the sandbox does not stop it. An operator can still see the room's task logs in the admin views until the room is deleted.
+
 ## Sharing a room
 
 The room's creator can add other Istota users under **Members** in the room settings. The add dialog says how many messages the new member will see, since they get the whole transcript. Only the creator adds or removes members; any other member can leave. A room bound to Talk takes its members from Talk instead.

@@ -15,7 +15,7 @@ MEMORY_TYPES = ["memory_file", "user_memory", "channel_memory", "channel_memory_
 
 
 def _visible_rooms(conn, user_id):
-    hidden = db.hidden_room_tokens_for_member(conn, user_id)
+    hidden = db.hidden_room_tokens_for_member(conn, user_id) | db.incognito_room_tokens(conn, user_id)
     handles = {row["token"]: row["name"] for row in conn.execute(
         "SELECT token, name FROM web_chat_rooms WHERE user_id=?", (user_id,),
     )}
@@ -26,7 +26,9 @@ def _visible_rooms(conn, user_id):
 def chats(ctx, terms, mode, limit, offset):
     with open_with_deadline(lambda **options: db.get_db(ctx.config.db_path, **options), ctx.deadline) as conn:
         rows = db.search_messages(conn, ctx.user_id, fts5_match(terms, mode), limit=limit + 1,
-                                  offset=offset, exclude_tokens=db.hidden_room_tokens_for_member(conn, ctx.user_id))
+                                  offset=offset,
+                                  exclude_tokens=db.hidden_room_tokens_for_member(conn, ctx.user_id)
+                                  | db.incognito_room_tokens(conn, ctx.user_id))
         hits = []
         for row in rows[:limit]:
             if row["role"] == "assistant":

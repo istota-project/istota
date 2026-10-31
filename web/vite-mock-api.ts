@@ -454,6 +454,7 @@ interface MockChatRoom {
   token: string;
   name: string;
   archived: boolean;
+  incognito?: boolean;
   created_at: string;
   updated_at: string;
   model?: string | null;
@@ -2010,6 +2011,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
       token: `web-carol-${mockChatRoomSeq}`,
       name: (body?.name || 'room').slice(0, 80),
       archived: false,
+      incognito: body?.incognito === true,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };

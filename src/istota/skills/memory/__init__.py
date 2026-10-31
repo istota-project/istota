@@ -74,6 +74,7 @@ from typing import NamedTuple
 
 from istota.lib.atomic_write import write_text_atomic
 from istota.skills._cli import emit, error_envelope, parse_and_resolve, status_exit_code
+from istota.skills._turn_access import INCOGNITO_HINT, INCOGNITO_REFUSAL, calling_task_incognito
 from istota.skills._group_access import (
     GROUP_MEMORY_LABEL,
     group_access_denied,
@@ -397,6 +398,9 @@ def _resolve_target(args, *, verb: str) -> Target:
         sys.exit(1)
     if room and (token or group_id is not None):
         _err("--room cannot be combined with --channel or --group")
+        sys.exit(1)
+    if not token and calling_task_incognito():
+        _err(INCOGNITO_REFUSAL, hint=INCOGNITO_HINT)
         sys.exit(1)
     if room:
         path, room_token = _room_notes_path(room)

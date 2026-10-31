@@ -1252,11 +1252,22 @@ def _private_only(ctx: CommandContext, what: str) -> str | None:
 
     On Talk a command's reply is posted into the conversation, so in a group
     everyone reads it (ISSUE-609). The refusal holds on every surface, since the
-    request itself was seen.
+    request itself was seen. An incognito room refuses too, since these replies
+    would carry the user's memory and other rooms into it.
     """
-    if _in_shared_room(ctx):
+    if _in_shared_room(ctx) or _in_incognito_room(ctx):
         return f"Use your private chat with me to see {what}."
     return None
+
+
+def _in_incognito_room(ctx: CommandContext) -> bool:
+    if ctx.conn is None:
+        return False
+    try:
+        return db.room_is_incognito(ctx.conn, _room_token(ctx))
+    except Exception:  # noqa: BLE001 — fail toward the refusal
+        logger.warning("could not read the room %s", ctx.conversation_token, exc_info=True)
+        return True
 
 
 def _task_refusal(ctx: CommandContext, task: "db.Task") -> str | None:
@@ -1274,6 +1285,8 @@ def _task_refusal(ctx: CommandContext, task: "db.Task") -> str | None:
     )
     if task_room == here and task.id > db.front_stage_cutoff(conn, here).task_id:
         return None
+    if task.incognito:
+        return f"Task #{task.id} not found."
     return _private_only(ctx, "that task")
 
 
@@ -2195,6 +2208,7 @@ async def cmd_status(ctx: CommandContext):
         """
         SELECT id, status, prompt, created_at, source_type FROM tasks
         WHERE user_id = ? AND status IN ('pending', 'locked', 'running', 'pending_confirmation')
+        AND incognito = 0
         ORDER BY created_at ASC
         """,
         (user_id,),

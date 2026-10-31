@@ -19,9 +19,14 @@ from pathlib import Path
 
 from istota.sandbox import deferred
 from istota.sandbox.host_paths import read_resolved_text
-from istota.skills._cli import parse_and_resolve, run_skill_cli
+from istota.skills._cli import fail, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import EGRESS, host_path
-from istota.skills._turn_access import calling_task_id
+from istota.skills._turn_access import (
+    INCOGNITO_HINT,
+    INCOGNITO_REFUSAL,
+    calling_task_id,
+    calling_task_incognito,
+)
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -106,6 +111,14 @@ def cmd_index_conversation(args) -> dict:
     if not row:
         conn.close()
         return {"status": "error", "error": f"Task {args.task_id} not found for user {user_id}"}
+
+    if get_task(conn, args.task_id).incognito:
+        conn.close()
+        return {
+            "status": "error",
+            "reason": INCOGNITO_REFUSAL,
+            "error": f"Task {args.task_id} is in an incognito room, so it stays out of memory",
+        }
 
     # With no config the address fallback can only misread own mail as someone
     # else's, which refuses.
@@ -548,6 +561,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None):
     parser = build_parser()
     args = parse_and_resolve(parser, argv)
+
+    if calling_task_incognito():
+        fail(INCOGNITO_HINT, reason=INCOGNITO_REFUSAL)
 
     commands = {
         "search": cmd_search,

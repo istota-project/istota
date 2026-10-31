@@ -91,6 +91,8 @@ def room_candidates(
             noted.add(token)
     rooms: dict[str, db.Room] = {}
     for room in db.list_member_rooms(conn, user_id, include_dismissed=include_dismissed):
+        if room.incognito:
+            continue
         if room.token in noted:
             rooms[room.token] = room
             continue

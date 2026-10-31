@@ -210,6 +210,8 @@ def refuse_shared_destination(conn, room_token: str | None, what: str) -> None:
     """
     from istota import db
 
+    if room_token and db.room_is_incognito(conn, room_token):
+        raise ValueError(f"{what} is incognito, and deliveries never go there")
     if room_token and db.room_is_shared(conn, room_token):
         raise ValueError(
             f"{what} is shared with other people, and personal deliveries never go there"

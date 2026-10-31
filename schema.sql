@@ -172,6 +172,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- `source_type = 'assignment'` task. NULL on every other task.
     assignment_id INTEGER,
 
+    -- 1 for a task in an incognito room (ISSUE-892), frozen at creation by
+    -- db.create_task from the room or the parent task.
+    incognito INTEGER NOT NULL DEFAULT 0,
+
     FOREIGN KEY (parent_task_id) REFERENCES tasks(id)
 );
 
@@ -1452,7 +1456,12 @@ CREATE TABLE IF NOT EXISTS rooms (
     -- stored value reads as 'group' (db.is_group_owned_room). The group link
     -- filters memory either way. db._migrate_group_owned_rooms adds it and
     -- converts nothing.
-    membership_source TEXT NOT NULL DEFAULT 'room'
+    membership_source TEXT NOT NULL DEFAULT 'room',
+    -- Set at creation and never changed (ISSUE-892): the next ordinary turn
+    -- would read the old ones as history and put them in memory through its
+    -- answer. Web rooms with one member only. `tasks.incognito` is what the
+    -- memory writers read. db._migrate_room_incognito adds it.
+    incognito   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived);
 CREATE INDEX IF NOT EXISTS idx_rooms_group_source ON rooms (group_id, membership_source);

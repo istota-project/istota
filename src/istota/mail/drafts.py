@@ -342,7 +342,11 @@ def get(conn: sqlite3.Connection, draft_id: int) -> OutboundDraft | None:
 
 def pending_for_user(conn: sqlite3.Connection, user_id: str) -> list[OutboundDraft]:
     rows = conn.execute(
-        _SELECT_DRAFTS + " WHERE d.user_id = ? AND d.status = ? ORDER BY d.id",
+        _SELECT_DRAFTS + " WHERE d.user_id = ? AND d.status = ? "
+        # Read from other rooms and from email: a draft held in an incognito
+        # room is acted on from its own card.
+        "AND (d.room_token IS NULL OR d.room_token NOT IN "
+        "(SELECT token FROM rooms WHERE incognito = 1)) ORDER BY d.id",
         (user_id, STATUS_PENDING),
     ).fetchall()
     return [_row(r) for r in rows]

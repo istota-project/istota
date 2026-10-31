@@ -3454,7 +3454,7 @@ def _process_one_task(
     # / email / ntfy / comma list); effective_log_destinations returns [] when
     # the user configured neither a log route nor a legacy log_channel.
     log_dests: list[Destination] = []
-    if not task.skip_log_channel:
+    if not task.skip_log_channel and not task.incognito:
         log_dests = effective_log_destinations(config, task.user_id)
     log_channel_prefix = ""
     log_callback = None
@@ -4426,6 +4426,7 @@ def _process_one_task(
                     config.memory_search.enabled
                     and config.memory_search.auto_index_conversations
                     and not task.heartbeat_silent
+                    and not task.incognito
                     and not is_no_final_answer(result)
                     and task.source_type not in NO_DELIVERY_SOURCE_TYPES
                 ):

@@ -373,7 +373,7 @@ export interface ChatSession {
   ) => Promise<boolean>;
   scrollToCid: (cid: number) => void;
   scrollTarget: Writable<{ cid: number; nonce: number } | null>;
-  newRoom: (name: string) => Promise<void>;
+  newRoom: (name: string, options?: { incognito?: boolean }) => Promise<void>;
   renameRoom: (id: number, name: string) => Promise<void>;
   updateRoomSettings: (id: number, patch: RoomPatch) => Promise<void>;
   promoteRoom: (id: number) => Promise<void>;
@@ -1743,6 +1743,7 @@ function createSession(): ChatSession {
           read_only: fresh.read_only ?? false,
           phone_group: fresh.phone_group ?? false,
           email_thread: fresh.email_thread ?? false,
+          incognito: fresh.incognito ?? false,
           // Per user like the tint, and for the same reason: a thread listed
           // or hidden on another device reaches this tab here.
           listed: fresh.listed ?? false,
@@ -2345,6 +2346,7 @@ function createSession(): ChatSession {
         read_only: fresh.read_only ?? false,
         phone_group: fresh.phone_group ?? false,
         email_thread: fresh.email_thread ?? false,
+        incognito: fresh.incognito ?? false,
         listed: fresh.listed ?? false,
         // `in` rather than `??`: null is a room with its own roster, while a
         // frame without the key (an older server) says nothing (ISSUE-819).
@@ -3630,8 +3632,8 @@ function createSession(): ChatSession {
       });
   }
 
-  async function newRoom(name: string) {
-    const room = await createChatRoom(name);
+  async function newRoom(name: string, options: { incognito?: boolean } = {}) {
+    const room = await createChatRoom(name, options);
     invalidateNavUnreadCounts();
     rooms.update((r) => sortRoomsByActivity([...r, room]));
     await selectRoom(room.id);

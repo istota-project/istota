@@ -770,6 +770,20 @@ def _stale_overlay_sources(
     return [r[0] for r in rows if r[0] not in live]
 
 
+def delete_namespace_chunks(conn: sqlite3.Connection, namespace: str) -> None:
+    """Every chunk under one namespace. Leaves the commit to the caller."""
+    rows = conn.execute(
+        "SELECT id FROM memory_chunks WHERE user_id = ?", (namespace,),
+    ).fetchall()
+    if rows and enable_vec_extension(conn):
+        try:
+            for row in rows:
+                conn.execute("DELETE FROM memory_chunks_vec WHERE chunk_id = ?", (row[0],))
+        except Exception:
+            pass  # vec table might not exist
+    conn.execute("DELETE FROM memory_chunks WHERE user_id = ?", (namespace,))
+
+
 def reindex_all(
     conn: sqlite3.Connection,
     config,
@@ -797,7 +811,7 @@ def reindex_all(
     rows = conn.execute(
         "SELECT id, prompt, result FROM tasks "
         "WHERE user_id = ? AND status = 'completed' AND created_at >= ? "
-        "ORDER BY id",
+        "AND incognito = 0 ORDER BY id",
         (user_id, since),
     ).fetchall()
 
@@ -848,6 +862,8 @@ def reindex_all(
                 if not token_dir.is_dir():
                     continue
                 token = token_dir.name
+                if db.room_is_incognito(conn, token):
+                    continue
                 channel_user_id = f"channel:{token}"
                 memories_dir = token_dir / "memories"
                 if memories_dir.is_dir():

@@ -117,6 +117,36 @@ function mount(r: ChatRoom, onSave = vi.fn()) {
   });
 }
 
+describe('RoomSettings — incognito', () => {
+  function renderRoom(incognito: boolean) {
+    render(RoomSettings, {
+      props: {
+        open: true,
+        room: room({ origin: 'web', incognito }),
+        onSave: vi.fn(),
+        onDelete: vi.fn(),
+        onPromote: vi.fn(),
+        onClose: vi.fn(),
+      },
+    });
+  }
+
+  it('says it is permanent and offers no way to share the room', () => {
+    renderRoom(true);
+    expect(screen.getByText(/can't stop being incognito/)).toBeTruthy();
+    expect(screen.queryByText('Members')).toBeNull();
+    expect(screen.queryByText('Group')).toBeNull();
+    expect(screen.queryByRole('button', { name: /open in Talk/i })).toBeNull();
+  });
+
+  it('leaves an ordinary room as it was', () => {
+    renderRoom(false);
+    expect(screen.queryByText(/can't stop being incognito/)).toBeNull();
+    expect(screen.getByText('Members')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /open in Talk/i })).toBeTruthy();
+  });
+});
+
 describe('RoomSettings — room token', () => {
   it('copies the token through copyText', async () => {
     const writeText = vi.fn(async () => undefined);

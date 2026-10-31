@@ -33,6 +33,8 @@ def _dispatch(args):
         ).fetchone()
         if owned_task is None:
             raise RequestError("task_unavailable")
+        if owned_task["incognito"]:
+            raise RequestError("incognito_room")
         config = load_config()
         if args.command == "ask":
             return hold_question(conn, config, actor_user_id=actor, task_id=int(task),

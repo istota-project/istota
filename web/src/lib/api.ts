@@ -3675,6 +3675,9 @@ export interface ChatRoom {
   archived: boolean;
   created_at: string;
   updated_at: string;
+  /** Set at creation and never changed: no memory in, nothing into long-term
+   * memory out, one member, web only. */
+  incognito?: boolean;
   /** Surface the room was created on. Talk-origin rooms surface here
    * automatically once the bot is messaged in them. */
   origin?: 'web' | 'talk' | 'sms' | 'whatsapp' | 'email';
@@ -4305,11 +4308,14 @@ export function getChatRooms(timeoutMs = 0): Promise<{ rooms: ChatRoom[] }> {
   return apiFetch<{ rooms: ChatRoom[] }>('/chat/rooms', undefined, timeoutMs);
 }
 
-export function createChatRoom(name: string): Promise<ChatRoom> {
+export function createChatRoom(
+  name: string,
+  options: { incognito?: boolean } = {},
+): Promise<ChatRoom> {
   return apiFetch<ChatRoom>('/chat/rooms', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify(options.incognito ? { name, incognito: true } : { name }),
   });
 }
 

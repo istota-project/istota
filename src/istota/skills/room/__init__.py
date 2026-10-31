@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 
 from .._cli import parse_and_resolve, run_skill_cli
+from .._turn_access import INCOGNITO_REFUSAL, calling_task_incognito
 
 
 def _dispatch(args):
@@ -28,6 +29,8 @@ def _dispatch(args):
     path = os.environ.get("ISTOTA_DB_PATH", "")
     if not actor or not task.isdecimal() or not path:
         raise RequestError("task_unavailable")
+    if calling_task_incognito():
+        raise RequestError(INCOGNITO_REFUSAL)
     config = load_config()
     if args.command in {"location", "locations", "location-stop"}:
         from istota.location import sharing

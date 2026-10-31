@@ -434,8 +434,10 @@ def build_task_runtime(
         skill_cred_map = derive_skill_credential_map(
             authorized_skills, skill_index,
         )
+        from istota.rooms.scopes import INCOGNITO_DISABLED_SKILLS
         cli_skills = frozenset(
-            name for name, meta in reach_index.items() if meta.cli
+            name for name, meta in reach_index.items()
+            if meta.cli and not (task.incognito and name in INCOGNITO_DISABLED_SKILLS)
         )
         logger.info(
             "proxy_authorization task_id=%d selected=%d authorized=%d "
