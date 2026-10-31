@@ -151,6 +151,12 @@ A session's first stack request runs `stack.sweep_projects` once per prefix, to 
 
 The pid means something only in the sweeping process's pid namespace. A session driving Docker from inside a container would read as dead and be swept; nothing does that today. Sessions still share the Docker VM's disk, and a full disk (`No space left on device`, an empty `/data/.secret_key`) looks much like a swept stack; see "Still open". They also share the daemon's network address pools, and a session holds every stack it booted until it ends. Two whole-tier `-m smoke` sessions at once may run out (`all predefined address pools have been fully subnetted`), a limit the old sweep hid by removing the first session's stacks. That comes from reading the compose file and is unmeasured; per-file runs and the full tier stay well inside it.
 
+## The images a run builds
+
+A run removes every image it built when it ends: `testbed/images.py` records each tag at its build site and `tests/conftest.py`'s `pytest_sessionfinish` removes them, after fixture teardown has taken the stacks down. An image named by `ISTOTA_IMAGE_TAG` or a profile was not built here and stays. Docker refuses to remove an image a container is running, and the session prints what it left. A driver running several sessions over one image (`scripts/test-image-negative-control.sh`, `scripts/test-stack-negative-control.sh`) sources `scripts/test-image-ledger.sh`, which sets `ISTOTA_TEST_IMAGE_LEDGER` so sessions leave their tags to it, and removes everything when it exits. `scripts/test-linux.sh` uses the same ledger for its runner image, unless the caller named the tag.
+
+A run that built anything also drops build cache unused for `images.BUILD_CACHE_MAX_AGE` (48 hours), and says so if that fails. By age because a size limit does nothing on Docker Desktop 29: `--keep-storage` and `--max-used-space` reclaimed 0 B at 3 GB under a 9.5 GB cache, where `--filter until=` reclaimed all of it. So `istota-stack update`'s spelling is not reused here, and its `BUILDX_BUILDER=default` fails on that context too. `docker system df` overstates the cache, since it counts layers images share: that 9.5 GB was 1.8 GB of disk. The cache is the machine's, so another project's next build after a long gap can be slower; no image or volume of theirs goes. A session killed with SIGKILL removes nothing. The vm tier's images are inside its VM, and are kept because a session on an unchanged tree reuses them. `tests/test_testbed_images.py` fails on a Python build site that does not record, and on a driver that does not clear its ledger.
+
 ## What the stack concedes
 
 `testbed/compose/testbed.yml` is a harness concession file, not a deployment recipe. It is the complete list of ways a stack this tier boots differs from what an operator boots, each with its reason inline:
@@ -238,6 +244,7 @@ No variable names the checkout a stack builds from. `Shape` takes `compose_file`
 | `ISTOTA_TESTBED_MAIL_IMAGE` | override the pinned Maddy digest |
 | `ISTOTA_IMAGE_TAG` | use a prebuilt image instead of building; how the upgrade tier's negative control is fed |
 | `ISTOTA_UPDATE_GOLDEN` | rewrite the prompt goldens instead of comparing |
+| `ISTOTA_KEEP_TEST_IMAGES` | keep the images a run built, for reaching for one by hand |
 | `ISTOTA_TESTBED_CONTROL_OVERLAYS` | extra compose overlays on every stack; how the run-contract negative controls break one line |
 
 `KEEP` does **not** wipe `shared_files`: that volume holds `/mnt/shared/.istota-provisioned`, which `provision-nc.sh` never rewrites, because it is a `post-installation` hook and `nextcloud:30-apache` runs those only when the installed version is `0.0.0.0`. Wiping it leaves the fixture's healthcheck waiting for a flag nothing writes, so `istota`, which depends on it being healthy, never starts. The host port is also pinned across kept sessions, since the OAuth2 redirect URI is baked at first install.
@@ -257,4 +264,3 @@ One developer machine, August 2026 (arm64, 10 cores, Docker Desktop 29.6), warm 
 - The positive half of ISSUE-245 on a deployed shape: a confirmation prompt that reaches a surface. Reachable on the full profile (Talk plus an auto-provisioned `alerts_channel`); the lean shape has no surface.
 - Feeds image dedupe. Its only caller is the authenticated web reader, so a deployed-path scenario cannot reach it until the Svelte components carry `data-testid` hooks.
 - `Probe` cannot read a *module* database, so the feeds scenario asserts through the CLI's output rather than on rows.
-- Per-session image tags (`istota-test/istota:*`, `istota-test/no-forge:*`, and the full shape's per-project `<project>-istota` and `-web`) are built every session and removed by nothing. Remove them by hand.

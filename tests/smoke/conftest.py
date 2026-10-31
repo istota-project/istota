@@ -47,6 +47,7 @@ import subprocess
 
 import pytest
 
+from testbed import images
 from testbed import stack as stack_support
 
 from ..conftest import REPO, _require_no_xdist, require_docker, resolve_platform
@@ -109,6 +110,7 @@ def no_forge_image(pytestconfig) -> str:
             + "\n".join((result.stderr or result.stdout or "").splitlines()[-40:]),
             pytrace=False,
         )
+    images.record(tag)
     return tag
 
 

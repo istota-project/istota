@@ -30,7 +30,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from testbed import profiles
+from testbed import images, profiles
 from testbed import stack as stack_support
 from testbed.services import build as build_service
 from testbed.services.model_endpoint import ENDPOINT_CREDENTIAL, SCRIPTED_MODEL
@@ -147,6 +147,7 @@ def web_booted(pytestconfig, tmp_path_factory):
     )
 
     try:
+        images.record(lean_image_tag())
         built = subprocess.run(
             [*lean_args, "build", "daemon"], capture_output=True, text=True, timeout=BUILD_TIMEOUT,
         )

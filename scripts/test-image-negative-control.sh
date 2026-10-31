@@ -88,6 +88,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Several sessions share one built image here, so the sessions leave them and this
+# script removes them all when it ends.
+source scripts/test-image-ledger.sh
+trap 'remove_ledger_images' EXIT
+
 platform="${1:-}"
 only_run_contract=""
 only_secrets=""

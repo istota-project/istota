@@ -36,6 +36,7 @@ only-include = [
     "__init__.py",
     "certs.py",
     "httpstub.py",
+    "images.py",
     "probe.py",
     "profiles.py",
     "stack.py",

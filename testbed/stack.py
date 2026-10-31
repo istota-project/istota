@@ -45,6 +45,7 @@ from pathlib import Path
 
 from istota.lib import toml_write
 
+from . import images
 from . import probe as probe_support
 from . import services as service_support
 from .probe import Probe
@@ -2415,6 +2416,8 @@ class StackPool:
             write_env_file(env_file, environment)
 
             build = not profile.image and not self._built
+            if build:
+                images.record(image)
             skip = () if full or profile.web else ("web", "nginx")
             try:
                 up(args, platform=self.platform, build=build, skip=skip)
