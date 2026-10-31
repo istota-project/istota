@@ -1,0 +1,18 @@
+# Negative control for the CLI credential witness's direct callers (#901): OCR
+# and the reviewer build their namespace, and their tool server runs without it.
+#
+# `build_daemon_sandbox`'s wrap hands back the command it was given, so the
+# request still carries a wrap and the tool server's roots still refuse.
+#
+#   docker build -f docker/test/Dockerfile.daemon-sandbox-no-wrap --build-arg BASE=<lean tag> \
+#       -t istota-test/daemon-sandbox-no-wrap:<suffix> docker/test
+#
+# Expected: test_the_running_tool_server_is_in_a_namespace fails for OCR and the
+# reviewer in tests/smoke/test_cli_credential_unreachable.py. Their refusal tests
+# stay green, and so does the doctor, which builds its own wrap.
+ARG BASE
+FROM ${BASE}
+
+RUN sed -i '/^    def _wrap(raw_cmd: list\[str\]) -> list\[str\]:$/a\        return raw_cmd  # control: no namespace' \
+        /app/src/istota/executor.py \
+    && test "$(grep -c '# control: no namespace' /app/src/istota/executor.py)" = 1
