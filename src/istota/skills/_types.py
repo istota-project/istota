@@ -92,6 +92,12 @@ class SkillMeta:
     # to read nothing user-specific; anything else, including a value the loader
     # does not recognise, is "private", so a skill added later fails closed.
     shared_room: str = "private"
+    # Whether a task limited to approved hosts may use this skill without a
+    # `skill:` grant (`rooms.scopes.reach_for_task`). "local" only for Istota or a
+    # service the operator configured, where the model cannot pick a destination;
+    # anything else, including a value the loader does not recognise, is
+    # "external", so a skill added later fails closed.
+    egress: str = "external"
     # Experimental skill — operator must opt in via the matching
     # ``skill_<name>`` entry in ``[experimental] features``. Filtered out of
     # ``select_skills`` otherwise.

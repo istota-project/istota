@@ -4,6 +4,7 @@ triggers: [shared folder, federated share, ocm, folder share]
 description: Read and write folders users shared with Istota from their own file server over Open Cloud Mesh
 cli: true
 companion_skills: [untrusted_input]
+egress: external
 ---
 # Shared folders
 

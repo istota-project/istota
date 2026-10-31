@@ -964,3 +964,83 @@ async def test_held_then_approved_sends_the_bytes_the_user_read(
             "SELECT message_id FROM sent_emails WHERE user_id = 'alice'",
         ).fetchall()
         assert [r["message_id"] for r in recorded] == [row.sent_message_id]
+
+
+class TestALimitedTask:
+    """`ISTOTA_EGRESS_LIMITED` holds outward mail and refuses mail to the bot."""
+
+    @pytest.fixture
+    def limited(self, skill_env, monkeypatch):
+        monkeypatch.setenv("ISTOTA_EGRESS_LIMITED", "1")
+        return skill_env
+
+    def _gate(self, **kw):
+        from istota.skills.email import _outbound_gate
+
+        fields = {"to": [STRANGER], "cc": [], "bcc": [], "subject": "s", "body": "b",
+                  "html": False, "attachments": []}
+        return _outbound_gate(**{**fields, **kw})
+
+    def test_the_flag_is_the_policy(self, limited):
+        from istota.mail.outbound_policy import effective_policy
+
+        assert effective_policy(limited, "alice") == "all"
+
+    def test_the_policy_is_unchanged_without_it(self, skill_env, monkeypatch):
+        from istota.mail.outbound_policy import effective_policy
+
+        monkeypatch.delenv("ISTOTA_EGRESS_LIMITED", raising=False)
+        assert effective_policy(skill_env, "alice") == "untrusted"
+
+    def test_a_trusted_recipient_is_held(self, limited):
+        with patch("istota.skills.email._send_smtp") as smtp:
+            result = cmd_send(_Args(to=TRUSTED))
+        smtp.assert_not_called()
+        assert result["status"] == "held"
+        assert len(_pending(limited)) == 1
+
+    def test_a_user_with_approval_off_is_still_held(self, limited):
+        limited.email.outbound_approval_floor = "off"
+        limited.users["alice"].outbound_approval = "off"
+        with patch("istota.skills.email._send_smtp") as smtp:
+            result = cmd_send(_Args())
+        smtp.assert_not_called()
+        assert result["status"] == "held"
+
+    def test_the_users_own_address_goes_out(self, limited):
+        held, _ = self._gate(to=[OWN])
+        assert held is None
+
+    @pytest.mark.parametrize("fields", [
+        {"to": [BOT]},
+        {"to": ["BOT+alice@test.invalid"]},
+        {"to": [f"Istota <{BOT}>"]},
+        {"to": [f"{OWN}, bot+alice@test.invalid"]},
+        {"to": [OWN], "cc": ["bot+alice@test.invalid"]},
+        {"to": [OWN], "bcc": ["bot+alice@test.invalid"]},
+    ])
+    def test_mail_to_the_bot_is_refused_with_no_draft(self, limited, fields):
+        refused, paths = self._gate(account_id=7, **fields)
+        assert refused["status"] == "error"
+        assert refused["reason"] == "egress_limited"
+        assert paths == []
+        assert _pending(limited) == []
+
+    def test_refused_when_the_bot_is_listed_as_an_own_address(self, limited):
+        limited.users["alice"].email_addresses = [OWN, BOT]
+        refused, _ = self._gate(to=[BOT], account_id=7)
+        assert refused["reason"] == "egress_limited"
+
+    def test_the_verb_reports_it_and_sends_nothing(self, limited):
+        with patch("istota.skills.email._send_smtp") as smtp:
+            result = run_skill_main(main, [
+                "send", "--to", "bot+alice@test.invalid", "--subject", "s", "--body", "b",
+            ])
+        smtp.assert_not_called()
+        assert result.exit_code == 1
+        assert result.envelope["reason"] == "egress_limited"
+
+    def test_an_open_task_is_held_as_before(self, skill_env, monkeypatch):
+        monkeypatch.delenv("ISTOTA_EGRESS_LIMITED", raising=False)
+        held, _ = self._gate(to=[BOT], account_id=7)
+        assert held["status"] == "held"

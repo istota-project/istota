@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Literal
 from . import credential_shim
 from .bind_launcher import FD_PLACEHOLDER
 from .host_paths import linked_resource_parts
-from .user_scope import is_within, scoped_user_dir
+from .user_scope import ROOM_NOTES_WITHHELD, is_within, scoped_user_dir
 
 if TYPE_CHECKING:
     from istota import db
@@ -344,7 +344,7 @@ def user_data_mounts(
         # No `{mount}/Talk`, for any task (ISSUE-880): it is flat and holds
         # every conversation's files. `execute_task` copies the task's own
         # attachments into its control directory instead.
-        if conversation_token:
+        if conversation_token and ROOM_NOTES_WITHHELD not in withheld_scopes:
             channel_dir = mount / "Channels" / conversation_token
             if channel_dir.exists():
                 _rw(channel_dir, "nextcloud_channel_dir", user_data=True)
@@ -420,8 +420,9 @@ def build_mount_plan(
     per-resource mounts are not bound at all, which is what makes the
     disclosure gate a boundary rather than advice: no skill gate touches a
     bind. Without ``developer`` the repos subtree goes, and with it the cache
-    derived inside it (``resolve_sandbox_cache_dir``). The exec socket already
-    follows ``authorized_skills``, which the same scope narrowed.
+    derived inside it (``resolve_sandbox_cache_dir``). The exec socket follows
+    ``authorized_skills``, which the same scope narrowed, and goes when ``devbox``
+    is withheld.
 
     ``profile`` is required and keyword-only — see :class:`SandboxProfile`.
     The plan is generic, including the ordering, which is load-bearing in four places
@@ -817,10 +818,11 @@ def build_mount_plan(
 
     # --- The devbox exec socket (RW) ---
     #
-    # Gated on `"developer" in authorized_skills`, byte for byte the predicate
-    # at `_build_network_allowlist` that already decides whether this task gets
-    # the package registries and the forge. The exec socket is bound exactly
-    # where the package registries are allowed.
+    # Gated on `"developer" in authorized_skills`, the predicate at
+    # `_build_network_allowlist` for the package registries and the forge, and on
+    # `devbox` not being withheld. `developer` is `egress: local` and the container
+    # has open egress, so a task limited to approved hosts binds this only with a
+    # `skill:devbox` grant.
     #
     # **The gate is about the mechanism, not caution.** The retired docker
     # socket proxy this replaced was bound into every sandbox ungated, and that
@@ -842,6 +844,7 @@ def build_mount_plan(
     if (
         istota_config.devbox_container_backend(config)
         and "developer" in (authorized_skills or ())
+        and "devbox" not in withheld_scopes
     ):
         exec_dir = istota_config.exec_socket_dir(config, task.user_id)
         if exec_dir is not None and exec_dir.is_dir():

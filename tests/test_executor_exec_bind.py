@@ -245,3 +245,21 @@ class TestTheRepoBindIsPerUser:
         assert str((Path(config.developer.repos_dir) / "alice").resolve()) in sources
         assert str(Path(config.developer.repos_dir).resolve()) not in sources
         assert str((Path(config.developer.repos_dir) / "bob").resolve()) not in sources
+
+
+class TestAWithheldDevbox:
+    def test_it_is_absent_when_devbox_is_withheld(self, sandbox):
+        config, task, exec_root = sandbox
+        user_temp = Path(config.temp_dir) / task.user_id
+        user_temp.mkdir(parents=True, exist_ok=True)
+        with patch("istota.executor._bwrap_available", return_value=True), \
+             patch("istota.executor._bwrap_supports", return_value=False), \
+             patch("istota.executor._bwrap_supports_remount_ro", return_value=False), \
+             patch("platform.system", return_value="Linux"):
+            argv = build_bwrap_cmd(
+                ["echo", "hi"], config, task, True, [], user_temp,
+                authorized_skills=frozenset({"developer"}),
+                withheld_scopes=frozenset({"devbox"}),
+                profile=SandboxProfile.NATIVE,
+            )
+        assert str((exec_root / "alice").resolve()) not in _bind_sources(argv)

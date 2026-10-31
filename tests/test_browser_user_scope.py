@@ -162,20 +162,20 @@ def test_close_missing_session_does_not_launch(api):
     assert api.pool.live() == []
 
 
-def test_briefings_profile_requires_task_and_refuses_mutating_operations(api):
+def test_isolated_profile_requires_task_and_refuses_state_operations(api):
     client = api.app.test_client()
-    headers = {"X-Istota-User": "__briefings__"}
+    headers = {"X-Istota-User": "__isolated__"}
     assert client.post("/render", headers=headers, json={"url": "https://example.com"}).status_code == 403
     headers["X-Istota-Owner"] = "research-1"
-    for path in ("/interact", "/evaluate", "/state", "/challenge", "/screenshot"):
+    for path in ("/evaluate", "/state"):
         assert client.post(path, headers=headers, json={}).status_code == 403
     assert client.delete("/state", headers=headers, json={"all": True}).status_code == 403
     assert api.pool.live() == []
 
 
-def test_briefings_sessions_belong_to_task_inside_shared_profile(api):
+def test_isolated_sessions_belong_to_task_inside_shared_profile(api):
     client = api.app.test_client()
-    headers = {"X-Istota-User": "__briefings__", "X-Istota-Owner": "research-1"}
+    headers = {"X-Istota-User": "__isolated__", "X-Istota-Owner": "research-1"}
     created = client.post("/render", headers=headers,
                           json={"url": "https://example.com", "keep_session": True, "owner": "forged"})
     assert created.status_code == 200
@@ -188,7 +188,7 @@ def test_briefings_sessions_belong_to_task_inside_shared_profile(api):
     assert client.post("/render", headers=other, json={"session_id": sid}).status_code == 404
     assert client.get(f"/sessions/{sid}", headers=headers).status_code == 200
     assert client.delete(f"/sessions/{sid}", headers=headers).status_code == 200
-    assert client.get("/health").json["briefing_task_isolation"] is True
+    assert client.get("/health").json["isolated_browser_profile"] is True
 
 
 def test_pool_errors_keep_scope_and_retry_metadata(api, monkeypatch):

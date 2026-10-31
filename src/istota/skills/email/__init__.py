@@ -40,6 +40,7 @@ from istota.sandbox import credential_shim
 from istota.skills._cli import error_envelope, fail, parse_and_resolve, run_skill_cli
 from istota.skills._credref import SecretValue
 from istota.skills._hostpath import EGRESS, WRITE, host_path
+from istota.lib.egress_log import EGRESS_LIMITED_REASON, egress_limited, limited_refusal
 from istota.lib.untrusted import frame_untrusted
 from istota.lib.duration_parse import DurationTooLong, parse_duration
 
@@ -3109,6 +3110,19 @@ def _outbound_gate(
         app_config = load_config()
     except Exception as e:  # noqa: BLE001 — any load failure is a refusal
         return _gate_error(f"the configuration could not be loaded ({e})"), []
+
+    if egress_limited():
+        from ...mail.ownership import is_bot_address
+
+        recipients = [e for e in (*to, *cc, *bcc) if isinstance(e, str)]
+        if any(is_bot_address(app_config, addr) for _, addr in getaddresses(recipients)):
+            # From a connected account this comes back as the user's own attended
+            # turn, at full reach with open egress. Refused, not held: approving a
+            # draft reads as sending a mail, not as granting that.
+            return error_envelope(
+                limited_refusal("Mail to this assistant's own address"),
+                reason=EGRESS_LIMITED_REASON,
+            ), []
 
     # Resolved before the connection is opened, so `off` costs no database at
     # all. Opening first made an unreachable or merely busy DB fail a send on an

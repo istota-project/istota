@@ -351,7 +351,16 @@ def delete_briefing(
             "DELETE FROM briefing_configs WHERE user_id = ? AND name = ?",
             (user_id, name),
         )
+        _forget_egress(conn, user_id, name)
         return cur.rowcount > 0
+
+
+def _forget_egress(conn: sqlite3.Connection, user_id: str, name: str) -> None:
+    """What its owner approved for a briefing goes with it, so one made again under
+    the name starts with nothing."""
+    from istota.rooms import egress
+
+    egress.forget_subject(conn, user_id, f"briefing:{name}")
 
 
 def delete_briefing_by_id(db_path: Path, user_id: str, briefing_id: int) -> bool:
@@ -362,10 +371,16 @@ def delete_briefing_by_id(db_path: Path, user_id: str, briefing_id: int) -> bool
     removed.
     """
     with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT name FROM briefing_configs WHERE id = ? AND user_id = ?",
+            (briefing_id, user_id),
+        ).fetchone()
         cur = conn.execute(
             "DELETE FROM briefing_configs WHERE id = ? AND user_id = ?",
             (briefing_id, user_id),
         )
+        if row is not None:
+            _forget_egress(conn, user_id, row[0])
         return cur.rowcount > 0
 
 

@@ -104,7 +104,13 @@ def policy_from_document(document: dict[str, Any]):
     values = {}
     for name, value in raw.items():
         default = getattr(defaults, name)
-        if isinstance(default, bool):
+        if name == "exact_hosts":
+            # None and empty differ: no limit, and every host refused.
+            ok = value is None or (
+                isinstance(value, list) and all(isinstance(item, str) for item in value)
+            )
+            value = tuple(value) if isinstance(value, list) else value
+        elif isinstance(default, bool):
             ok = isinstance(value, bool)
         elif isinstance(default, int):
             ok = isinstance(value, int) and not isinstance(value, bool)

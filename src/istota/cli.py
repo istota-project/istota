@@ -1688,6 +1688,70 @@ def cmd_web(args):
         sys.exit(1)
 
 
+def cmd_egress(args):
+    """What a user's scheduled work may reach: read and change their approvals.
+
+    The operator's door beside the settings page, and the one place another user's
+    approvals can be changed, since this is the host's terminal. Hostnames and job
+    text are printed here for that operator.
+    """
+    from .rooms import egress
+
+    config = load_config(Path(args.config) if args.config else None)
+    if not config.db_path.exists():
+        print("Error: DB not found; run `istota init` first", file=sys.stderr)
+        sys.exit(1)
+    with db.get_db(config.db_path) as conn:
+        if args.egress_action == "list":
+            subjects = [
+                egress.describe_subject(conn, args.user, subject)
+                for subject in egress.list_subject_names(conn, args.user)
+            ]
+            if args.json:
+                print(json.dumps({"user": args.user, "subjects": subjects}, indent=2))
+                return
+            for item in subjects:
+                entries = [*item["hosts"], *(f"skill:{name}" for name in item["skills"])]
+                print(f"{item['subject']} {item['state']} {' '.join(entries)}".rstrip())
+                for refused in item["refused"]:
+                    print(f"  refused {refused['entry']} hits={refused['hits']}")
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        if not egress.subject_exists(conn, args.user, args.subject):
+            print(f"Error: {args.user} has no such subject", file=sys.stderr)
+            sys.exit(1)
+        try:
+            if args.egress_action == "revoke":
+                egress.remove_grant(conn, args.user, args.subject, args.entry)
+            elif args.entry in egress.JOB_REQUESTS:
+                egress.approve_job(
+                    conn, args.user, args.subject, args.entry, args.digest, decided_via="cli",
+                )
+                print(json.dumps(egress.describe_subject(conn, args.user, args.subject)["job"], indent=2))
+            else:
+                skills = None
+                if args.entry.startswith("skill:"):
+                    from .skills._loader import load_skill_index
+
+                    skills = load_skill_index(
+                        config.skills_dir, bundled_dir=config.bundled_skills_dir,
+                    )
+                parsed = egress.parse_entry(args.entry)
+                if parsed.kind in egress.JOB_REQUESTS:
+                    raise egress.EntryRefused(
+                        "Name the kind alone, `open` or `public`, and pass --digest to pin the text.",
+                    )
+                egress.add_grant(
+                    conn, args.user, args.subject, parsed.text, decided_via="cli", skill_index=skills,
+                )
+                egress.clear_refused(conn, args.user, args.subject, parsed.text)
+        except egress.EntryRefused as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        conn.commit()
+    print("state=changed")
+
+
 def cmd_auth(args):
     """Manage web identities separately from profiles and routing addresses."""
     from istota.webui import auth as web_auth
@@ -5784,6 +5848,24 @@ def main():
 
     # user (with subparsers)
     # Disable option abbreviation: --password must never mean --password-stdin.
+    egress_parser = subparsers.add_parser(
+        "egress", help="What a user's scheduled work may reach", allow_abbrev=False,
+    )
+    egress_subparsers = egress_parser.add_subparsers(dest="egress_action", required=True)
+    egress_list = egress_subparsers.add_parser("list", help="A user's subjects", allow_abbrev=False)
+    egress_list.add_argument("user")
+    egress_list.add_argument("--json", action="store_true")
+    egress_grant = egress_subparsers.add_parser(
+        "grant", help="Approve a host, skill:<name>, open or public", allow_abbrev=False,
+    )
+    egress_grant.add_argument("user")
+    egress_grant.add_argument("subject", help="cron:<job>, briefing:<name>, assignment:<id> or tasks-file")
+    egress_grant.add_argument("entry")
+    egress_grant.add_argument("--digest", help="For open or public: refuse unless the job's text has this digest")
+    egress_revoke = egress_subparsers.add_parser("revoke", help="Remove an entry", allow_abbrev=False)
+    egress_revoke.add_argument("user")
+    egress_revoke.add_argument("subject")
+    egress_revoke.add_argument("entry", help="A stored entry, as `istota egress list --json` shows it")
     auth_parser = subparsers.add_parser("auth", help="Web login identities", allow_abbrev=False)
     auth_subparsers = auth_parser.add_subparsers(dest="auth_action", required=True)
     auth_subparsers.add_parser("list", help="List web identities and profile status", allow_abbrev=False)
@@ -6307,6 +6389,7 @@ def main():
         "briefing": cmd_briefing,
         "secret": cmd_secret,
         "auth": cmd_auth,
+        "egress": cmd_egress,
         "web": cmd_web,
         "email": cmd_email,
         "repl": cmd_repl,

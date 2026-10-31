@@ -2847,7 +2847,13 @@ class Config:
 
     def get_user(self, nc_username: str) -> UserConfig | None:
         """Get user config by Nextcloud username. Returns None if user not configured."""
-        return self.users.get(self.resolve_user_id(nc_username))
+        from istota.browser.owner import ISOLATED_PROFILE
+
+        user_id = self.resolve_user_id(nc_username)
+        # A person by this name would share a cookie jar with every isolated task.
+        if user_id == ISOLATED_PROFILE:
+            return None
+        return self.users.get(user_id)
 
     def find_user_by_email(self, email_address: str) -> str | None:
         """Find user_id by email address. Returns None if not found."""

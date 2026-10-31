@@ -2846,6 +2846,7 @@ class TestDatedMemoriesAutoLoad:
         briefing_dir.mkdir(parents=True)
         (briefing_dir / "skill.toml").write_text(
             'description = "Briefing"\nsource_types = ["briefing"]\nexclude_memory = true\n'
+            'egress = "local"\n'
         )
         assert "Should not appear" not in self._prompt(config, mock_run, "briefing")
 

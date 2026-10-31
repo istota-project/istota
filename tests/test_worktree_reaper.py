@@ -1575,3 +1575,118 @@ class TestSchedulerIntegration:
 
         assert setup_env(ctx) is not None
         assert path.exists()
+
+
+class TestTheFetchGoesOnlyToAConfiguredForge:
+    """`repos_dir` is model-writable, including by a task limited to approved hosts,
+    so `remote.origin.url` is not a destination the daemon may fetch by itself."""
+
+    FORGE = "gitlab.example.com:443"
+
+    @pytest.fixture
+    def argv(self, monkeypatch):
+        """`run_git` as it is, except that a fetch is recorded rather than sent."""
+        real = worktree_reaper.run_git
+        seen: list[tuple[str, ...]] = []
+
+        def run_git(cwd, *args, **kwargs):
+            seen.append(args)
+            if "fetch" in args:
+                return 1, ""
+            return real(cwd, *args, **kwargs)
+
+        monkeypatch.setattr(worktree_reaper, "run_git", run_git)
+        return seen
+
+    def _head(self, bare, url, forge_hosts=(FORGE,)):
+        _git(bare, "remote", "set-url", "origin", url)
+        return worktree_reaper._upstream_head(bare, forge_hosts=forge_hosts)
+
+    def _fetched(self, argv):
+        return any("fetch" in args for args in argv)
+
+    def test_an_origin_off_the_list_is_not_fetched(self, repos, argv):
+        _, bare, _ = repos
+        head = self._head(bare, "https://secret-data.evil.example/repo.git")
+        assert not self._fetched(argv)
+        assert head == _git(bare, "rev-parse", "refs/remotes/origin/HEAD^{commit}").strip()
+
+    def test_control_the_forge_is_fetched(self, repos, argv):
+        _, bare, _ = repos
+        self._head(bare, "https://gitlab.example.com/group/repo.git")
+        assert self._fetched(argv)
+
+    def test_no_forge_configured_fetches_nothing(self, repos, argv):
+        _, bare, _ = repos
+        self._head(bare, "https://gitlab.example.com/group/repo.git", forge_hosts=())
+        assert not self._fetched(argv)
+
+    @pytest.mark.parametrize("url", [
+        "http://gitlab.example.com/group/repo.git",
+        "https://gitlab.example.com:8443/group/repo.git",
+        "https://gitlab.example.com.evil.example/group/repo.git",
+        "https://user@gitlab.example.com/group/repo.git",
+        "https://gitlab.example.com\\@evil.example/repo.git",
+        "https://evil.example\\@gitlab.example.com/repo.git",
+        "git@gitlab.example.com:group/repo.git",
+    ])
+    def test_a_near_miss_is_not_the_forge(self, repos, argv, url):
+        _, bare, _ = repos
+        self._head(bare, url)
+        assert not self._fetched(argv)
+
+    def test_a_rewrite_in_the_repos_config_is_read_through(self, repos, argv):
+        """Reading `remote.origin.url` alone would see the forge and fetch elsewhere."""
+        _, bare, _ = repos
+        _git(bare, "config", "url.https://evil.example/.insteadOf", "https://gitlab.example.com/")
+        self._head(bare, "https://gitlab.example.com/group/repo.git")
+        assert not self._fetched(argv)
+
+    def test_a_second_url_off_the_list_refuses(self, repos, argv):
+        _, bare, _ = repos
+        _git(bare, "remote", "set-url", "origin", "https://gitlab.example.com/group/repo.git")
+        _git(bare, "config", "--add", "remote.origin.url", "https://evil.example/repo.git")
+        worktree_reaper._upstream_head(bare, forge_hosts=(self.FORGE,))
+        assert not self._fetched(argv)
+
+    @pytest.mark.parametrize("key", [
+        "http.proxy",
+        "http.https://gitlab.example.com.proxy",
+        "remote.origin.proxy",
+    ])
+    def test_a_proxy_in_the_repos_config_refuses(self, repos, argv, key):
+        """A proxy name of the writer's choosing is looked up and connected to."""
+        _, bare, _ = repos
+        _git(bare, "config", key, "http://secret-data.evil.example:3128")
+        self._head(bare, "https://gitlab.example.com/group/repo.git")
+        assert not self._fetched(argv)
+
+    def test_the_sweep_passes_the_hosts_down(self, repos, argv):
+        repos_dir, bare, _ = repos
+        _git(bare, "remote", "set-url", "origin", "https://secret-data.evil.example/repo.git")
+        reap_worktrees(repos_dir, forge_hosts=(self.FORGE,))
+        assert not self._fetched(argv)
+        argv.clear()
+        _git(bare, "remote", "set-url", "origin", "https://gitlab.example.com/group/repo.git")
+        reap_worktrees(repos_dir, forge_hosts=(self.FORGE,))
+        assert self._fetched(argv)
+
+    def test_the_scheduler_names_the_configured_forges(self, repos, monkeypatch):
+        from istota.config import Config, DeveloperConfig
+        from istota import scheduler
+
+        repos_dir, _, _ = repos
+        seen = {}
+
+        def report(root, **kwargs):
+            seen.update(kwargs)
+            return []
+
+        monkeypatch.setattr("istota.maintenance.worktree_reaper.reap_and_report", report)
+        config = Config()
+        config.developer = DeveloperConfig(
+            enabled=True, repos_dir=str(repos_dir), worktree_reap_enabled=True,
+            gitlab_url="https://gitlab.example.com", github_url="https://code.example.org:8443",
+        )
+        scheduler.check_worktree_reap(config)
+        assert set(seen["forge_hosts"]) == {"gitlab.example.com:443", "code.example.org:8443"}

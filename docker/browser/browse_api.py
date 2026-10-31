@@ -89,6 +89,20 @@ _sessions_lock = threading.Lock()
 SESSION_TTL = 600  # 10 minutes
 MAX_SESSIONS = int(os.environ.get("MAX_BROWSER_SESSIONS", "2"))
 MAX_TOTAL_SESSIONS = int(os.environ.get("BROWSER_MAX_TOTAL_SESSIONS", "4"))
+# One profile for every browse use that holds no user data, shared across tasks
+# and users, so a session belongs to the owner the host-side skill names rather
+# than to the profile. `istota.browser.owner` writes the name too, and
+# tests/test_browser_profile.py holds the two equal.
+ISOLATED_PROFILE = "__isolated__"
+ISOLATED_ENDPOINTS = frozenset({
+    "browse", "render_page", "extract", "interact", "screenshot", "challenge",
+    "get_session_info", "delete_session",
+})
+_SECRET_ACTION_TYPES = frozenset({
+    "read_recovery", "read_secret", "read_secret_download", "find_secrets", "recovery_fill",
+})
+_SECRET_ACTION_KEYS = ("credential", "credential_name", "bound_hosts", "card_field", "expires_at")
+_ISOLATED_FOREGROUND_DETAIL = "the tab switch could not be confirmed on the shared profile"
 MEMORY_EVICT_PCT = 80  # evict oldest session above this on non-creation requests
 MEMORY_REJECT_PCT = MEMORY_EVICT_PCT  # never add a tab while eviction is needed
 
@@ -319,8 +333,10 @@ def _capacity_response(error):
 def _create_session(owner=None):
     """Create a new browser tab session.
 
-    Owner is provenance metadata. Capacity is per user, then global; within
-    either budget the requesting user's oldest session is replaced first.
+    Owner is provenance metadata, except on the isolated profile, where tasks
+    share a user id and it is what the budget counts. Capacity is per user or
+    owner, then global; within either budget the requester's oldest session is
+    replaced first.
     """
     if not isinstance(owner, str) or not owner.strip():
         owner = None
@@ -337,8 +353,10 @@ def _create_session(owner=None):
 
     with _sessions_lock:
         _evict_expired()
+        user_id = _request_instance().user_id
         own_sessions = [sid for sid, session in _sessions.items()
-                        if session.get("user_id") == _request_instance().user_id]
+                        if session.get("user_id") == user_id
+                        and (user_id != ISOLATED_PROFILE or session.get("owner") == owner)]
         while len(own_sessions) >= MAX_SESSIONS or len(_sessions) >= MAX_TOTAL_SESSIONS:
             candidates = own_sessions or list(_sessions)
             if not candidates:
@@ -2218,6 +2236,18 @@ def _foreground_tabs(page):
     return [p for p in pages if p is not page], _opened_by(page, pages)
 
 
+def _bring_to_front(page, others=(), owned=()):
+    """`visual.bring_to_front` for this request's browser.
+
+    Its detail quotes the title of whichever tab is showing, and on the isolated
+    profile that can be another task's page, so the detail is fixed text there.
+    """
+    verdict = visual.bring_to_front(page, others, owned, display=_request_instance().display)
+    if _request_instance().user_id == ISOLATED_PROFILE and verdict.detail:
+        verdict.detail = _ISOLATED_FOREGROUND_DETAIL
+    return verdict
+
+
 def _foreground(page, action_type, others=(), owned=()):
     """Put the named session's tab in front, or say why the action must not run.
 
@@ -2232,7 +2262,7 @@ def _foreground(page, action_type, others=(), owned=()):
     interleave selector and coordinate actions and because the tab in front is
     not this request's to assume between two of them.
     """
-    verdict = visual.bring_to_front(page, others, owned, display=_request_instance().display)
+    verdict = _bring_to_front(page, others, owned)
     if verdict.ok:
         if not verdict.confirmed:
             log.info("%s on tab %s: %s", action_type, verdict.code, verdict.detail)
@@ -2274,7 +2304,7 @@ def _capture_foreground(page):
     only ever meant to improve it.
     """
     try:
-        return visual.bring_to_front(page, display=_request_instance().display)
+        return _bring_to_front(page)
     except Exception as e:  # pragma: no cover - bring_to_front catches its own
         log.info("Capture foreground check failed: %s", e)
         return None
@@ -3126,7 +3156,7 @@ def _selector_action(session, page, action, others=(), owned=()):
     # wrong page. The CDP call addresses the tab directly, so this is a
     # fallback rather than a refusal -- unlike the coordinate path, where
     # there is no correct alternative and the action must not run at all.
-    verdict = visual.bring_to_front(page, others, owned, display=_request_instance().display)
+    verdict = _bring_to_front(page, others, owned)
     if not verdict.ok:
         return _cdp_selector_action(page, action, "cdp", verdict.detail)
 
@@ -3676,7 +3706,7 @@ def health():
     data = {
         "status": "degraded" if (not running or wedged or looping) else "ok",
         "per_user_profiles": True,
-        "briefing_task_isolation": True,
+        "isolated_browser_profile": True,
         "credential_origin_check": True,
         "otp_expiry_check": True,
         "recovery_save": True,
@@ -3962,6 +3992,22 @@ def _track_request_instance(inst):
         }
 
 
+def _asks_for_a_secret(body):
+    """Whether an action list would put a credential into, or read one out of,
+    a profile whose cookies other tasks share. `/interact` is the only endpoint
+    taking one."""
+    actions = body.get("actions")
+    if not isinstance(actions, list):
+        return False
+    for action in actions:
+        if not isinstance(action, dict):
+            return True
+        if (action.get("type") in _SECRET_ACTION_TYPES or action.get("selector") == "auto"
+                or any(key in action for key in _SECRET_ACTION_KEYS)):
+            return True
+    return False
+
+
 @app.before_request
 def _log_request_start():
     request._start_time = time.time()
@@ -3979,11 +4025,15 @@ def _log_request_start():
     request.browser_instance = pool.instance_for(user_id)
     body = request.get_json(silent=True)
     body = body if isinstance(body, dict) else {}
-    if user_id == "__briefings__":
+    # The old name would otherwise open a fresh ordinary profile, with no owner rule.
+    if user_id == pool.RETIRED_PROFILE:
+        return jsonify({"status": "error", "error": "isolated_browser_operation_refused"}), 403
+    if user_id == ISOLATED_PROFILE:
         owner = request.headers.get("X-Istota-Owner")
-        if (not owner or request.endpoint not in {
-                "browse", "render_page", "extract", "get_session_info", "delete_session"}):
-            return jsonify({"status": "error", "error": "briefing_browser_operation_refused"}), 403
+        if not owner or request.endpoint not in ISOLATED_ENDPOINTS:
+            return jsonify({"status": "error", "error": "isolated_browser_operation_refused"}), 403
+        if _asks_for_a_secret(body):
+            return jsonify({"status": "error", "error": "isolated_browser_credentials_refused"}), 403
         # The host-side skill sets this header; page content cannot choose it.
         body["owner"] = owner
     session_id = (request.view_args or {}).get("session_id") or body.get("session_id")
@@ -3995,7 +4045,7 @@ def _log_request_start():
         with _sessions_lock:
             session = _sessions.get(session_id)
             if session is not None and (session.get("user_id") != user_id or (
-                    user_id == "__briefings__" and session.get("owner") != owner)):
+                    user_id == ISOLATED_PROFILE and session.get("owner") != owner)):
                 return jsonify({"status": "not_found"}), 404
         if request.browser_instance is None and request.endpoint != "delete_session":
             return jsonify({"status": "not_found"}), 404
@@ -4389,6 +4439,7 @@ if __name__ == "__main__":
         log.error("no ISTOTA_BROWSER_API_TOKEN: every request but /health is refused")
     signal.signal(signal.SIGTERM, _exit_on_sigterm)
     chrome.migrate_legacy_profile(chrome.PROFILE_ROOT)
+    pool.remove_retired_profiles()
     mon = threading.Thread(target=_resource_monitor, daemon=True)
     mon.start()
     _start_liveness_server()

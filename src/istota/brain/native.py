@@ -2912,23 +2912,27 @@ class NativeBrain:
         from istota.session.tools import build_remote_tools
 
         tools = list(build_remote_tools(server)) if server is not None else []
-        web_fetch = request_web_fetch_tool(req, self._web_fetch_policy())
+        web_fetch = request_web_fetch_tool(req, self._web_fetch_policy(req))
         if web_fetch is not None:
             tools.append(web_fetch)
 
         allowed = set(req.allowed_tools)
         return [t for t in tools if t.schema.name in allowed]
 
-    def _web_fetch_policy(self):
-        """Map the configured ``WebFetchConfig`` → the tool's ``WebFetchPolicy``.
+    def _web_fetch_policy(self, req: BrainRequest):
+        """Map the configured ``WebFetchConfig`` and this task's limit → the tool's
+        ``WebFetchPolicy``.
 
         Returns ``None`` (tool omitted) when the config is absent or disabled.
         The native harness has no other web-reaching tool once Bash is confined
         behind the CONNECT allowlist, so this is the daemon-side fetch path.
         """
-        from istota.session.tools import web_fetch_policy_from_config
+        from istota.session.tools import web_fetch_policy_for_task
 
-        return web_fetch_policy_from_config(getattr(self._config, "web_fetch", None))
+        return web_fetch_policy_for_task(
+            getattr(self._config, "web_fetch", None), req.egress_hosts,
+            refusal_log=req.egress_log,
+        )
 
     def _convert_to_llm(self, messages: list[AgentMessage]) -> list[Message]:
         """Render AgentMessages to provider wire format, then repair tool pairs.

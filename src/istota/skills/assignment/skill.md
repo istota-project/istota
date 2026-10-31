@@ -6,6 +6,7 @@ admin_only: true
 cli: true
 shared_room: private
 source_types: [assignment]
+egress: local
 ---
 # Assignments
 

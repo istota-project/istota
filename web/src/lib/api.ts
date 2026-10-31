@@ -6189,6 +6189,62 @@ export interface WalletSettings {
   policy: WalletPolicy;
   purchases: WalletPurchase[];
 }
+export interface NetworkRefusal {
+  entry: string;
+  hits: number;
+  last_seen: string;
+}
+export interface NetworkJob {
+  digest: string;
+  reach: 'private' | 'public';
+  prompt: string;
+  command: string;
+  skill: string;
+  skill_args: string;
+  publish_shared_kv: string;
+  publish_shared_kv_trusted: boolean;
+}
+export interface NetworkSubject {
+  subject: string;
+  kind: string;
+  label: string;
+  state: 'open' | 'public' | 'limited';
+  hosts: string[];
+  skills: string[];
+  approvals: string[];
+  job: NetworkJob | null;
+  refused: NetworkRefusal[];
+}
+export interface NetworkAccess {
+  subjects: NetworkSubject[];
+  external_skills: string[];
+}
+export function getNetworkAccess(): Promise<NetworkAccess> {
+  return apiFetch('/settings/network');
+}
+function postNetwork(path: string, body: Record<string, string>): Promise<{ ok: boolean }> {
+  return apiFetch(`/settings/network${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+export function addNetworkGrant(subject: string, entry: string): Promise<{ ok: boolean }> {
+  return postNetwork('/grants', { subject, entry });
+}
+export function approveNetworkJob(
+  subject: string,
+  kind: 'open' | 'public',
+  digest: string,
+): Promise<{ ok: boolean }> {
+  return postNetwork('/approvals', { subject, kind, digest });
+}
+export function removeNetworkGrant(subject: string, entry: string): Promise<{ ok: boolean }> {
+  return postNetwork('/grants/remove', { subject, entry });
+}
+export function dismissNetworkRefusal(subject: string, entry: string): Promise<{ ok: boolean }> {
+  return postNetwork('/refused/dismiss', { subject, entry });
+}
 export function getWallet(): Promise<WalletSettings> {
   return apiFetch('/settings/wallet');
 }

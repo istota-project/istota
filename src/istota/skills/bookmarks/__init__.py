@@ -24,7 +24,8 @@ import os
 
 import httpx
 
-from istota.skills._cli import parse_and_resolve, run_skill_cli
+from istota.lib.egress_log import EGRESS_LIMITED_REASON, egress_limited, limited_refusal
+from istota.skills._cli import fail, parse_and_resolve, run_skill_cli
 
 
 REQUEST_TIMEOUT = 30.0
@@ -464,6 +465,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None):
     parser = build_parser()
     args = parse_and_resolve(parser, argv)
+
+    if args.command == "add" and egress_limited():
+        fail(limited_refusal("bookmarks add"), reason=EGRESS_LIMITED_REASON)
 
     commands = {
         "search": cmd_search,

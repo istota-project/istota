@@ -275,6 +275,10 @@ def local_fetch(monkeypatch):
         git_hardening, "GIT_SUBPROCESS_ENV",
         MappingProxyType({**git_hardening.GIT_SUBPROCESS_ENV, "GIT_ALLOW_PROTOCOL": "file"}),
     )
+    # A local path is no configured forge, and without this no fetch would run at all.
+    monkeypatch.setattr(
+        "istota.maintenance.worktree_reaper._origin_is_a_forge", lambda *a, **k: True,
+    )
 
 
 class TestTheReapersFetch:

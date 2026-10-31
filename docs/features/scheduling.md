@@ -79,6 +79,7 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `model` | no | Model override for this job (e.g. `"general"` for the active brain's current general model) |
 | `effort` | no | Effort override: `low`, `medium`, `high`, `xhigh`, or `max` |
 | `brain` | no | Brain kind this job runs on: `claude_code` or `native`. Admin-only, and bounded by `[brain] room_selectable`. See below |
+| `reach` | no | `private` (default) or `public`. `public` asks to run with open web and nothing private, and grants nothing until you approve it. See "Network access" below |
 | `publish_shared_kv` | no | On success, publish the result text to the shared KV store as `"<namespace>/<key>"` (a bare key means the `briefing_shared_blocks` namespace) |
 | `publish_shared_kv_trusted` | no | Mark the published value trusted, so consuming briefings splice it without the untrusted-content wrapper |
 
@@ -136,6 +137,24 @@ The sync answers who may write the field, not what they may write. `!cron` shows
 `publish_shared_kv` lets an admin's job write its result where every user's briefings can read it — the escape hatch for shared content the built-in shared-block generator can't produce (it runs tool-less, while a scheduled `prompt` job gets the full sandbox and tools). Shared-KV writes are admin-only: the job's user must pass the writer check, and an unauthorized or failed publish fails loudly (error log, operator alert, and a job-failure increment that the success path withholds). An empty result is a clean skip, leaving the last-known-good value in place.
 
 Consume the published value with a `shared_block` source on a briefing block. See [briefings](briefings.md#shared-curated-content).
+
+## Network access
+
+A job runs with nobody watching, and a page it reads can tell it to send your data somewhere. So a new job can fetch only hosts you approved, plus services your operator configured. The same holds for a personal briefing, an assignment wake and a TASKS.md line. Settings, Network access is where you decide.
+
+When a job is refused a host, the bell shows one row for that job. It names no host, and it opens the page, which lists what was refused with Add and Dismiss. A page the job reads can make it ask for a host, so add one only if you expect the job to use it. Hosts are exact: `news.example.com` does not cover `www.news.example.com`.
+
+A job is in one of three states:
+
+- **Limited**: the hosts and skills you listed, and nothing else. A new job starts here.
+- **Public**: open web and nothing private: no memory, no files, no credentials and no notes in its room. Set `reach = "public"` in CRON.md to ask, then approve its text on the page. A job that needs to keep state should stay limited and use hosts.
+- **Full access**: it runs with your browser profile and every skill, and can reach any public host. Every job that existed when this feature arrived starts here. Remove Full access on the page to narrow it, and expect the next run to be refused the hosts it needs.
+
+Public and Full access are approved against the exact text of the job, which the page shows you. Editing `prompt`, a `prompt_file`, `command`, `skill`, `skill_args`, `publish_shared_kv` or `publish_shared_kv_trusted` drops the approval, and the job runs limited until you approve the new text. Changing the schedule, model or delivery does not. Host and skill entries stay through an edit.
+
+Renaming a job counts as removing it and adding a new one: the new name starts with nothing.
+
+While limited, a job cannot add a feed or a bookmark, change a briefing's sources, a shared block or a group briefing, or push to another ntfy topic. Its mail to anyone but you waits as a draft. An operator can use `istota egress list|grant|revoke`. What stays open is in [Where a task may send bytes](../architecture/egress.md).
 
 ## Failure handling
 

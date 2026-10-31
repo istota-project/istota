@@ -5,6 +5,7 @@ description: Manage briefing content blocks and sources, and read and mark the b
 cli: true
 companion_skills: [untrusted_input]
 env: [{"var":"BRIEFINGS_USER","from":"user_id"}]
+egress: local
 ---
 # Briefings (content management)
 
@@ -103,5 +104,6 @@ A refusal is `{"status": "error", "reason": "<code>", "error": "<text>"}` at exi
 | `confirmation_required` | `archive delete` without `--confirmed`; `would` names the entry |
 | `host_path_refused` | `--directive-file` or `--file` is outside the allowed folders |
 | `unavailable` | the check needs configuration this run does not have |
+| `egress_limited` | `blocks add`, `blocks save`, `sources add` or `sources set` from a task limited to approved hosts; the owner can make the change in Istota |
 
 `blocks list` for an unknown briefing still answers `status: "not_found"` at exit 0, with `reason: "not_found"` and an `available` list of names.

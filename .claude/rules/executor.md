@@ -94,6 +94,7 @@ Only this task's directory is bound, never `.control/{user_id}`, so no task read
 | `ISTOTA_TASK_ATTEMPT` | `attempt_count + 1`, bound once as `task_attempt` and also used for `BrainRequest.attempt`, since `tasks transcript` excludes the live log by equality and drift would be permissive. Set by all three task paths. Derived per call before, which the liveness reaper broke (ISSUE-377). In `_EXECUTOR_PROXY_ONLY_VARS`. |
 | `ISTOTA_DB_PATH` | Set for every user, split into the proxy's base env; never in the sandbox. Set unsplit by the unsandboxed skill-task path. |
 | `ISTOTA_TURN_AUTHOR` | `Reach.author`, the proxy's base env only. Read by the `email` CLI. |
+| `ISTOTA_BROWSER_PROFILE` | `__isolated__` when `Reach.isolated_browser`, else the task's user. The proxy's base env only. Read by `browser/owner`. |
 | `HEALTH_DB_PATH`, `LOCATION_DB_PATH` | Manifest `proxy_only: true`. Location via `setup_env`. |
 | `ISTOTA_SANDBOXED` | `"1"` when `skill_proxy_enabled and effective_sandboxing`. Model env only, added after the proxy snapshot. `skill_client._run_direct` refuses when set. |
 | `ISTOTA_DEFERRED_DIR` | user temp dir, always |
@@ -107,7 +108,7 @@ Only this task's directory is bound, never `.control/{user_id}`, so no task read
 | `MONEY_USER`, `FEEDS_USER` | user id / feeds resource |
 | `DEVELOPER_REPOS_DIR` | `{repos_dir}/{user_id}` via `setup_env`, admins only, never the root |
 | `GITLAB_*`, `GITHUB_*`, `DEVELOPER_AUTHOR_CREDIT`, `GIT_CONFIG_*` | `config.developer.*` |
-| `ISTOTA_PATH_PREPEND` | `.developer` (forge token set) and `.developer/exec-shims` (devbox deployment: `[devbox] enabled` + `developer.enabled` + `repos_dir`, replacing the retired `[developer.container] backend`), `.developer` first so wrappers win collisions. Folded onto PATH and stripped. Shims are gated on configuration, never selection: `developer` is menu-only and selected only via sticky skills, so a selection gate would 403 the first build. The socket bind is gated separately on `authorized_skills`. Absent from `proxy_base_env`. |
+| `ISTOTA_PATH_PREPEND` | `.developer` (forge token set) and `.developer/exec-shims` (devbox deployment: `[devbox] enabled` + `developer.enabled` + `repos_dir`, replacing the retired `[developer.container] backend`), `.developer` first so wrappers win collisions. Folded onto PATH and stripped. Shims are gated on configuration, never selection: `developer` is menu-only and selected only via sticky skills, so a selection gate would 403 the first build. The socket bind is gated separately, on `authorized_skills` and on `devbox` not being withheld. Absent from `proxy_base_env`. |
 
 **No database is reachable from the sandbox.** `build_bwrap_cmd` ends with `--tmpfs` masks over `db_path.parent` and `module_db_root()`, each followed by `--remount-ro` (`_bwrap_supports_remount_ro()`): a writable mask lets `sqlite3` create an empty file that reads as corruption. Read-only makes a nested mask fatal, so `_mask_dir` skips a candidate an earlier mask covers, even a refused one. `--disable-userns` ships with the `--unshare-user` it requires. Nothing binds the framework DB; `sandbox_admin_db_write` is gone. Masks rather than "don't bind it" because not binding it did not hold: module DBs sat inside the old `sandbox_ro_paths = ["/srv/app"]` default. That now defaults to `[]` and is actually parsed. The boundary is skill CLIs scoping by `ISTOTA_USER_ID`, plus the files being absent; the proxy therefore starts unconditionally (the old `if credential_env:` gate ran skills inside the sandbox). Not covered: shapes where the bwrap probe fails, and a config with the sandbox off.
 
@@ -221,7 +222,7 @@ Background types excluded from context: `scheduled`, `briefing`. Control dir `CO
 ### `build_bwrap_cmd()`
 - Binds `{repos_dir}/{user_id}` RW for an admin with the skill enabled; never the root.
 - Binds the cache dir RW before the repos bind and the masks, for every task (ISSUE-305).
-- Binds the exec socket directory `{[developer.container] exec_socket_dir}/{user_id}` on a devbox deployment when `"developer" in authorized_skills`, the same conjunct that allows package registries. Directory because restarts recreate the inode; per user because the parent holds all sockets. Must stay gated: it is an arbitrary-command channel. No Docker socket, no `docker` CLI.
+- Binds the exec socket directory `{[developer.container] exec_socket_dir}/{user_id}` on a devbox deployment when `"developer" in authorized_skills`, the conjunct that allows package registries, and `devbox` is not withheld. Directory because restarts recreate the inode; per user because the parent holds all sockets. Must stay gated: it is an arbitrary-command channel. No Docker socket, no `docker` CLI.
 - Required keyword-only `profile`, no default, so a forgotten one is a `TypeError` (ISSUE-389). `SandboxProfile` has one member, `NATIVE`, for this release, kept so the signature does not ripple; the Claude runtime block, the credentials file, the custom system prompt bind and `cli_auth_mode` went with `CLAUDE`.
 
 ### `native_fs_roots(...)`

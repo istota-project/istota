@@ -12,8 +12,9 @@ import os
 import sys
 from pathlib import Path
 
+from istota.lib.egress_log import EGRESS_LIMITED_REASON, egress_limited, limited_refusal
 from istota.sandbox.host_paths import stage_resolved, write_resolved
-from istota.skills._cli import emit, parse_and_resolve, run_skill_cli
+from istota.skills._cli import emit, fail, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import READ, WRITE, host_path
 
 
@@ -239,6 +240,9 @@ def build_parser():
 def main(argv=None):
     parser = build_parser()
     args = parse_and_resolve(parser, argv)
+
+    if args.command in ("add", "import-opml") and egress_limited():
+        fail(limited_refusal(f"feeds {args.command}"), reason=EGRESS_LIMITED_REASON)
 
     commands = {
         "list": cmd_list,

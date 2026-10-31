@@ -481,3 +481,113 @@ class TestTheNamespace:
             _check(f"cat {canary} || echo refused"), config, "alice",
         )
         assert "canary-value" not in result.details["value"]
+
+
+class TestTheEgressLimit:
+    """The list a command gets comes from its task's reach, and a heartbeat check,
+    which has no task row, states its own."""
+
+    def _spied(self):
+        from istota.sandbox import task_env
+
+        return patch.object(task_env, "build_task_runtime", wraps=task_env.build_task_runtime)
+
+    def _job_task(self, config, *, grant=None, command="true"):
+        from istota.rooms import egress
+
+        db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            job = conn.execute(
+                "INSERT INTO scheduled_jobs (user_id, name, cron_expression, command) "
+                "VALUES ('alice', 'digest', '0 9 * * *', ?)", (command,),
+            ).lastrowid
+            if grant:
+                egress.add_grant(conn, "alice", "cron:digest", grant, decided_via="cli")
+            task_id = db.create_task(
+                conn, prompt="", user_id="alice", source_type="scheduled",
+                scheduled_job_id=job, command=command,
+            )
+            conn.commit()
+            return db.get_task(conn, task_id)
+
+    def _unsandboxed(self, db_path, tmp_path):
+        return _config(
+            db_path, tmp_path, admin_users={"alice"},
+            security=SecurityConfig(sandbox_enabled=False),
+        )
+
+    def test_a_command_job_uses_its_tasks_reach(self, db_path, tmp_path):
+        config = self._unsandboxed(db_path, tmp_path)
+        task = self._job_task(config, grant="news.example.com")
+        with self._spied() as build:
+            success, result = _execute_command_task(task, config)
+        assert success, result
+        kwargs = build.call_args.kwargs
+        assert kwargs["egress_hosts"] == {"news.example.com"}
+        assert kwargs["egress_log"].name == "egress-refused.jsonl"
+
+    def test_an_approved_open_job_is_not_limited(self, db_path, tmp_path):
+        from istota.rooms import egress
+
+        config = self._unsandboxed(db_path, tmp_path)
+        task = self._job_task(config)
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute("SELECT * FROM scheduled_jobs").fetchone()
+            egress.add_grant(
+                conn, "alice", "cron:digest", f"open:{egress.job_digest(row)}", decided_via="cli",
+            )
+        with self._spied() as build:
+            _execute_command_task(task, config)
+        assert build.call_args.kwargs["egress_hosts"] is None
+
+    def test_its_refusals_are_read_when_it_ends(self, db_path, tmp_path):
+        from istota.executor import get_task_control_dir
+        from istota.lib.egress_log import append_refusal
+        from istota.rooms import egress
+
+        config = self._unsandboxed(db_path, tmp_path)
+        task = self._job_task(config)
+        log = get_task_control_dir(config, "alice", task.id) / "egress-refused.jsonl"
+
+        def fails_after_a_refusal(argv, **kwargs):
+            append_refusal(log, "connect", "evil.example")
+            return subprocess.CompletedProcess(argv, 1, "", "nope")
+
+        with patch("istota.sandbox.confined_command.run_capture", fails_after_a_refusal):
+            success, _ = _execute_command_task(task, config)
+        assert not success
+        with db.get_db(config.db_path) as conn:
+            rows = egress.list_refused(conn, "alice", "cron:digest")
+        assert [row["entry"] for row in rows] == ["evil.example"]
+        assert not log.exists()
+
+    def test_a_timeout_still_files_them(self, db_path, tmp_path):
+        from istota.executor import get_task_control_dir
+        from istota.lib.egress_log import append_refusal
+        from istota.rooms import egress
+
+        config = self._unsandboxed(db_path, tmp_path)
+        task = self._job_task(config)
+        log = get_task_control_dir(config, "alice", task.id) / "egress-refused.jsonl"
+
+        def times_out(argv, **kwargs):
+            append_refusal(log, "connect", "evil.example")
+            raise subprocess.TimeoutExpired(argv, 1)
+
+        with patch("istota.sandbox.confined_command.run_capture", times_out):
+            success, _ = _execute_command_task(task, config)
+        assert not success
+        with db.get_db(config.db_path) as conn:
+            assert [r["entry"] for r in egress.list_refused(conn, "alice", "cron:digest")] == [
+                "evil.example",
+            ]
+
+    def test_a_heartbeat_check_states_an_empty_limit_and_no_log(self, db_path, tmp_path):
+        config = self._unsandboxed(db_path, tmp_path)
+        db.init_db(config.db_path)
+        with self._spied() as build:
+            result = _check_shell_command(_check("echo hi"), config, "alice")
+        assert result.healthy
+        kwargs = build.call_args.kwargs
+        assert kwargs["egress_hosts"] == frozenset()
+        assert kwargs["egress_log"] is None

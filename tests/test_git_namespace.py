@@ -111,10 +111,22 @@ def _record_calls(module, monkeypatch) -> list:
 
     def recording(cwd, *args, **kwargs):
         calls.append((Path(cwd), args, kwargs))
+        # The forge these tests name does not exist, so the fetch stops here.
+        if args[0] == "fetch":
+            return 1, ""
         return real(cwd, *args, **kwargs)
 
     monkeypatch.setattr(module, "run_git", recording)
     return calls
+
+
+FORGE_URL = "https://forge.example.com/ns/project.git"
+FORGE_HOSTS = ("forge.example.com:443",)
+
+
+def _aim_at_the_forge(clones) -> None:
+    for bare in clones.values():
+        _git(bare, "config", "remote.origin.url", FORGE_URL)
 
 
 class TestTheReapersScope:
@@ -122,12 +134,13 @@ class TestTheReapersScope:
         root, clones = two_users
         for bare in clones.values():
             _age(_worktree(bare, "wt", "origin/main"), 48)
+        _aim_at_the_forge(clones)
         calls = _record_calls(worktree_reaper, monkeypatch)
 
-        outcomes = reap_worktrees(root, retention_hours=24)
+        outcomes = reap_worktrees(root, retention_hours=24, forge_hosts=FORGE_HOSTS)
 
         assert sum(o.removed for o in outcomes) == 2
-        assert {"worktree", "fetch", "status", "merge-base", "rev-parse"} <= {
+        assert {"worktree", "remote", "config", "fetch", "status", "merge-base", "rev-parse"} <= {
             args[0] for _, args, _ in calls
         }
         for cwd, args, kwargs in calls:
@@ -135,9 +148,10 @@ class TestTheReapersScope:
 
     def test_only_the_fetch_has_a_network(self, two_users, monkeypatch):
         root, clones = two_users
+        _aim_at_the_forge(clones)
         calls = _record_calls(worktree_reaper, monkeypatch)
 
-        reap_worktrees(root, retention_hours=24)
+        reap_worktrees(root, retention_hours=24, forge_hosts=FORGE_HOSTS)
 
         networked = [args[0] for _, args, kwargs in calls if kwargs.get("network")]
         assert networked == ["fetch"] * len(clones)

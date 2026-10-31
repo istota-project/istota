@@ -6,6 +6,7 @@ admin_only: true
 cli: true
 companion_skills: [untrusted_input]
 env: [{"var":"ISTOTA_SESSION_LOG_DIR","from":"setup_env","proxy_only":true}]
+egress: local
 ---
 # Tasks
 

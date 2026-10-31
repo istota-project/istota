@@ -205,7 +205,7 @@ def test_ordinary_brains_follow_article_through_skill_and_proxy(env, api, tmp_pa
             task = create_research_task(conn, env, run["id"], claim["attempt_token"], now=NOW)
         success, text, actions, trace = executor.execute_task(task, env, [])
         assert success, text
-        assert visited == [(base + path, "__briefings__", str(task.id)) for path in ("/front", "/article")]
+        assert visited == [(base + path, "__isolated__", str(task.id)) for path in ("/front", "/article")]
         with db.get_db(env.db_path) as conn:
             db.update_task_status(conn, task.id, "completed", result=text)
             conn.commit()

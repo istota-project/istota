@@ -135,7 +135,7 @@ def test_boot_parks_before_starting_any_service(runtime, fails, monkeypatch):
     calls.chrome.PROFILE_ROOT = chrome.PROFILE_ROOT
     if fails:
         calls.chrome.migrate_legacy_profile.side_effect = OSError("park failed")
-    namespace = {"__name__": "__main__", "chrome": calls.chrome,
+    namespace = {"__name__": "__main__", "chrome": calls.chrome, "pool": calls.pool,
                  "_close_this_process_to_its_own_uid": mock.Mock(),
                  "signal": mock.Mock(), "_exit_on_sigterm": mock.Mock(),
                  "threading": calls.threading, "_resource_monitor": mock.Mock(),
@@ -150,5 +150,6 @@ def test_boot_parks_before_starting_any_service(runtime, fails, monkeypatch):
     else:
         exec(code, namespace)
         assert calls.mock_calls[0] == mock.call.chrome.migrate_legacy_profile(chrome.PROFILE_ROOT)
+        assert calls.mock_calls[1] == mock.call.pool.remove_retired_profiles()
         calls.make_server.assert_called_once_with(calls.app, token="")
         calls.serve.assert_called_once_with("server", "pending")

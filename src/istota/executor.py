@@ -30,6 +30,7 @@ from istota.mail import support as email_support
 from istota.credentials import names as secrets_vault
 from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox import task_env
+from istota.lib.egress_log import REFUSED_LOG_NAME
 from istota.rooms import speech_gate
 from istota.rooms.scopes import CHANNEL_NOTES_LABEL as CHANNEL_MEMORY_LABEL
 from istota.sandbox.claude_runtime_env import (
@@ -4149,20 +4150,65 @@ def harness_denies_web_fetch(task: "db.Task", config: Config) -> bool:
     return not (wf and wf.enabled)
 
 
-def harness_web_fetch_policy(config: Config, allowed_tools: list[str]):
+def harness_web_fetch_policy(
+    config: Config,
+    allowed_tools: list[str],
+    *,
+    egress_hosts: frozenset[str] | None = None,
+    refusal_log: Path | None = None,
+):
     """`HarnessSpec.web_fetch`: the daemon-side WebFetch's policy, or None.
 
     None when the grant leaves `WebFetch` out (`build_allowed_tools` drops it
     for a non-admin under `admin_only`, and a turn with no web tools has none) or
     the tool is disabled. This widens a CLI task's egress on purpose: the
     CLI's own WebFetch ran inside the CONNECT allowlist, this one reaches any
-    public host under the SSRF rules, as a native task's always has.
+    public host under the SSRF rules, as a native task's always has, unless the
+    task is limited to the hosts in ``egress_hosts``.
     """
     if "WebFetch" not in allowed_tools:
         return None
-    from .session.tools import web_fetch_policy_from_config
+    from .session.tools import web_fetch_policy_for_task
 
-    return web_fetch_policy_from_config(config.brain.native.web_fetch)
+    return web_fetch_policy_for_task(
+        config.brain.native.web_fetch, egress_hosts, refusal_log=refusal_log,
+    )
+
+
+def record_egress_refusals(config: Config, task: "db.Task", log_path: Path) -> None:
+    """Task end: turn `egress-refused.jsonl` into `egress_refused` rows under the
+    task's subject, then raise the bell. On a connection of its own, since this
+    follows the task on every path out and must commit before the bell.
+
+    Never raises and never changes the result. Names no host in a log line: a
+    refused name can carry data.
+    """
+    from .lib.egress_log import consume_refusals
+
+    file_egress_refusals(config, task, consume_refusals(log_path))
+
+
+def file_egress_refusals(
+    config: Config, task: "db.Task", pairs: list[tuple[str, str]],
+) -> None:
+    """`record_egress_refusals`' second half, for a seam already in the daemon."""
+    from .rooms import egress as room_egress, scopes as room_scopes
+
+    if not pairs:
+        return
+    try:
+        with db.get_db(config.db_path) as conn:
+            subject = room_scopes.egress_subject(conn, task)
+            if subject is None:
+                return
+            asks = room_egress.record_log(conn, task.user_id, subject, pairs)
+            conn.commit()
+            if asks:
+                room_egress.raise_refused_bell(config, conn, task.user_id, [subject])
+    except Exception as exc:  # noqa: BLE001 — logging never decides
+        logger.warning(
+            "egress_log_record_failed task=%s: %s", task.id, type(exc).__name__,
+        )
 
 
 # Defense-in-depth: instance-wide credentials that must never be returned
@@ -4260,6 +4306,7 @@ _REGISTRY_HOSTS = frozenset({
 def _build_network_allowlist(
     config: Config,
     authorized_skills: list[str],
+    egress_hosts: frozenset[str] | None = None,
 ) -> set[str]:
     """Build per-task network allowlist from config and authorized skills.
 
@@ -4267,7 +4314,20 @@ def _build_network_allowlist(
     and skills auto-authorized via credential presence) so a user with
     GitLab tokens configured can reach gitlab.com even when ``developer``
     wasn't selected — symmetric with credential authorization.
+
+    ``egress_hosts`` (`Reach.egress_hosts`) not None replaces all of that: the
+    operator's ``extra_hosts``, the Nextcloud host, and each grant at 443. A
+    registry or a forge is there only if granted, and a host bound to a
+    credential only if granted: the broker intercepts what is on this list and
+    adds nothing to it.
     """
+    if egress_hosts is not None:
+        return {
+            *config.security.network.extra_hosts,
+            *_configured_url_hosts(config, ["nextcloud"]),
+            *(f"{host}:443" for host in egress_hosts),
+        }
+
     hosts: set[str] = set()
 
     if config.security.network.allow_pypi:
@@ -4352,18 +4412,25 @@ def _configured_url_hosts(config: Config, authorized_skills: list[str]) -> set[s
     return hosts
 
 
-def _network_private_hosts(config: Config, authorized_skills: list[str]) -> set[str]:
+def _network_private_hosts(
+    config: Config,
+    authorized_skills: list[str],
+    egress_hosts: frozenset[str] | None = None,
+) -> set[str]:
     """The allowlisted names the proxy lets reach a private address.
 
     Every entry the operator wrote — ``extra_hosts`` and the configured URLs —
     since choosing a LAN host there is the permission. The built-in defaults
     (PyPI, the registries, GitHub's API and log hosts, Google) must resolve
     public: a private answer for one of those is DNS somebody else controls.
+    So must a user's grant, unless it names a host the operator also wrote. A
+    limited task keeps Nextcloud whatever its skills, as its list does.
     """
     from .sandbox.net_guard import normal_host
 
+    url_skills = list(authorized_skills) if egress_hosts is None else [*authorized_skills, "nextcloud"]
     entries = [*config.security.network.extra_hosts,
-               *_configured_url_hosts(config, authorized_skills)]
+               *_configured_url_hosts(config, url_skills)]
     names: set[str] = set()
     for entry in entries:
         host = str(entry).strip().rsplit(":", 1)[0]
@@ -7664,9 +7731,13 @@ def build_prompt(
     # The room card (multiplayer D7). The persona below is the operator's on
     # every turn; reach, which the card describes, follows the principal.
     correspondent_line = _correspondent_line(task, reach)
+    # The card says why a room withholds. A limited job's skills are not that.
+    card_withheld = withheld_scopes
+    if withheld_scopes is not None and reach is not None:
+        card_withheld = frozenset(withheld_scopes) - reach.egress_withheld
     card = room_card(
         config, task, conn,
-        withheld_scopes=withheld_scopes,
+        withheld_scopes=card_withheld,
         room_cli_available=cli_skill_names is None or "room" in cli_skill_names,
         correspondent_line=correspondent_line,
     )
@@ -7950,6 +8021,17 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
             "plainly if you are asked for something from the web, rather than "
             "guessing at it."
         )
+    if reach is not None and reach.egress_hosts is not None and reach.web_tools_load:
+        approved = _one_line(", ".join(sorted(reach.egress_hosts)))
+        web_tools += (
+            f"\n- Network: this task runs unattended and reaches only the hosts its owner approved: {approved}."
+            if approved else
+            "\n- Network: this task runs unattended, and no hosts are approved for this task yet."
+        )
+        web_tools += (
+            " WebFetch and shell network calls to anything else are refused. Do not "
+            "retry a refused host; the owner can add it in Settings, Network access."
+        )
 
     # Bash runs with `pipefail` on (ISSUE-321), which the model has to be told
     # once because it changes what an exit status means.
@@ -8152,7 +8234,8 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 
     # Per-user plus-addressed email line
     per_user_email_line = ""
-    _per_user_email = email_support.per_user_address(config, task.user_id)
+    # A public job has no `email` skill, and its model reads strangers' pages.
+    _per_user_email = None if reach is not None and reach.public else email_support.per_user_address(config, task.user_id)
     if _per_user_email:
         per_user_email_line = f"\nPer-user email: {_one_line(_per_user_email)}"
 
@@ -8353,6 +8436,55 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
 
 #: The fence label on a quoted reply parent in a shared room.
 REPLY_QUOTE_LABEL = "QUOTED MESSAGE"
+
+
+def public_posture_refusal(config: Config) -> str | None:
+    """Why a task with open web and no private data may not run here, or None.
+
+    Research and a public job hold nothing private only because the sandbox, the
+    network proxy and the skill proxy make that true, and they exist to browse.
+    """
+    for capability, enabled in (
+        ("sandbox", effective_sandboxing(config)),
+        ("network", config.security.network.enabled),
+        ("skill_proxy", config.security.skill_proxy_enabled),
+        ("browser", config.browser.enabled),
+    ):
+        if not enabled:
+            return f"briefing_research_{capability}_unavailable"
+    return None
+
+
+#: Failed by return: a public job whose posture is not on its row would have its
+#: deferred files read as a private job's if the row moved under it.
+EGRESS_POSTURE_UNRECORDED = "egress_posture_unrecorded"
+
+
+def record_egress_posture(
+    config: Config,
+    conn: "db.sqlite3.Connection | None",
+    task: db.Task,
+    reach: "Reach",
+) -> str | None:
+    """Put what this job occurrence was decided as on its row, before the model
+    runs, on each of the three paths. Returns why it may not run, or None.
+
+    Only a public answer needs the write to have happened. A failed `private` is a
+    WARNING: the drain and descendants then read the job row, or narrow if it is gone.
+    """
+    from istota.rooms import egress, scopes as room_scopes
+
+    if not room_scopes.is_occurrence(task):
+        return None
+    posture = egress.POSTURE_PUBLIC if reach.public else egress.POSTURE_PRIVATE
+    try:
+        with db.get_db_if_present(config.db_path, conn) as c:
+            if c is not None:
+                egress.record_posture(c, task.id, posture)
+    except Exception as exc:  # noqa: BLE001 — the answer depends on the posture
+        logger.warning("egress_posture_unrecorded task=%s: %s", task.id, type(exc).__name__)
+        return EGRESS_POSTURE_UNRECORDED if reach.public else None
+    return None
 
 
 def _task_reach(
@@ -8580,16 +8712,6 @@ def execute_task(
                 or task.conversation_token or task.attachments or workspace_dir is not None
                 or config.get_user(BRIEFINGS_IDENTITY) is not None):
             return False, "briefing_research_identity_refused", None, None
-        for capability, enabled in (
-            ("sandbox", effective_sandboxing(config)),
-            ("network", config.security.network.enabled),
-            ("skill_proxy", config.security.skill_proxy_enabled),
-            ("browser", config.browser.enabled),
-        ):
-            if not enabled:
-                return False, f"briefing_research_{capability}_unavailable", None, None
-        use_context = False
-        user_resources = []
 
     skill_index = load_skill_index(
         config.skills_dir, bundled_dir=config.bundled_skills_dir,
@@ -8597,9 +8719,21 @@ def execute_task(
     _reach = _task_reach(config, conn, task, skill_index)
     _withheld = _reach.withheld
 
+    _holds_nothing = research or _reach.public
+    if _holds_nothing:
+        refusal = public_posture_refusal(config)
+        if refusal is not None:
+            return False, refusal, None, None
+        use_context = False
+        user_resources = []
+    if not dry_run:
+        refusal = record_egress_posture(config, conn, task, _reach)
+        if refusal is not None:
+            return False, refusal, None, None
+
     # Ensure the task's temp directory exists: the per-user one, or a
     # restricted task's own directory inside it.
-    user_temp_dir = task_temp_dir(config, task, restricted=bool(_withheld))
+    user_temp_dir = task_temp_dir(config, task, restricted=_reach.restricted)
     # Bound read-write into the sandbox under this name: a link planted here
     # would put wherever it points in front of the room. Checked before the
     # mkdir, which raises on a dangling one; failed by return, not by raise.
@@ -8653,7 +8787,7 @@ def execute_task(
     from .workspace.places import user_resources_for
 
     user_config = config.get_user(task.user_id)
-    user_resources = [] if research else user_resources_for(config, conn, task.user_id, resources=user_resources)
+    user_resources = [] if _holds_nothing else user_resources_for(config, conn, task.user_id, resources=user_resources)
 
     # Briefing tasks defer their prompt build to here (ISSUE-143): building a
     # briefing prompt does slow network I/O (news, yfinance, FinViz, IMAP).
@@ -9110,13 +9244,15 @@ def execute_task(
     # the sender's own memory and group material has its own audience rule.
     group_memory = None
     task_group_ids: list[str] = []
-    if not any(m.exclude_memory for m in _selected_metas):
+    # The reach, not a second read: a sync landing mid-task cannot put group
+    # material in front of a task already holding open web.
+    if not any(m.exclude_memory for m in _selected_metas) and not _reach.public:
         task_group_ids = _resolve_task_groups(config, task, conn)
         group_memory = _load_group_memory(config, conn, task_group_ids)
 
     # Load channel memory if in a conversation
     channel_memory = None
-    if task.conversation_token:
+    if task.conversation_token and not _reach.public:
         try:
             channel_memory = read_channel_memory(config, task.conversation_token)
             if channel_memory is None:
@@ -9193,7 +9329,7 @@ def execute_task(
 
     # Get user's email addresses for confirmation policy
     user_email_addresses = []
-    if user_config:
+    if user_config and not _reach.public:
         user_email_addresses = user_config.email_addresses
 
     # Load emissaries (constitutional principles)
@@ -9282,7 +9418,7 @@ def execute_task(
         # cannot answer is worse than no line.
         shared_credentials=(
             config.security.skill_proxy_enabled
-            and not _withheld
+            and not _reach.restricted
             and secrets_vault.has_shared_credentials(config.db_path, task.user_id)
         ),
         assignment_prompt=wake_start.prompt if wake_start is not None else None,
@@ -9444,6 +9580,7 @@ def execute_task(
         # Both proxies come back *constructed and not entered*. They are
         # entered in the `ExitStack` below, which has to wrap the primary call,
         # the reroute and the fallback call alike.
+        _egress_log = control_dir / REFUSED_LOG_NAME
         _runtime = task_env.build_task_runtime(
             config,
             task,
@@ -9457,9 +9594,14 @@ def execute_task(
             user_config=user_config,
             discovered_calendars=discovered_calendars,
             withheld_scopes=_withheld,
+            restricted=_reach.restricted,
             turn_author=_reach.author,
+            isolated_browser=_reach.isolated_browser,
             group_ids=task_group_ids,
             conn=conn,
+            egress_hosts=_reach.egress_hosts,
+            egress_withheld=_reach.egress_withheld,
+            egress_log=_egress_log,
         )
         env = _runtime.env
         _proxy_ctx = _runtime.proxy_ctx
@@ -9603,6 +9745,8 @@ def execute_task(
         req = BrainRequest(
             prompt=prompt,
             allowed_tools=allowed,
+            egress_hosts=_reach.egress_hosts,
+            egress_log=_egress_log,
             # Non-sandbox path (Mac/dev/Docker): the REPL points the brain's
             # working directory at the launch dir directly. No blocklist here —
             # without bwrap the process already runs with the user's own FS
@@ -9741,7 +9885,10 @@ def execute_task(
                 ),
                 harness_root=ensure_task_harness_dir(config, task.user_id, task.id),
                 bash_spill_full_output=config.brain.native.bash_spill_full_output,
-                web_fetch=harness_web_fetch_policy(config, allowed),
+                web_fetch=harness_web_fetch_policy(
+                    config, allowed,
+                    egress_hosts=_reach.egress_hosts, refusal_log=_egress_log,
+                ),
                 # Bound read-only by `_tool_server_wrap` above: where the
                 # harness hands the CLI-spawned tool server its hello and gate.
                 control_dir=control_dir,
@@ -9784,6 +9931,8 @@ def execute_task(
                 _primary_kind = _failover.primary_kind
                 _fallback_kind = _failover.fallback_kind
         finally:
+            # After the ExitStack, so the proxies have stopped writing to it.
+            record_egress_refusals(config, task, _egress_log)
             # Final flush: emit any buffered streamed thinking + text before the
             # scheduler emits the terminal event. Thinking first so its rows keep
             # a lower seq than any trailing answer text. On success this precedes

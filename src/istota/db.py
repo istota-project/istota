@@ -309,6 +309,9 @@ class ScheduledJob:
     # ("<ns>/<key>" or bare "<key>") + trusted flag.
     publish_shared_kv: str | None = None
     publish_shared_kv_trusted: bool = False
+    #: CRON.md's `reach`: 'private' or 'public'. A request, never a grant
+    #: (`rooms.egress`).
+    reach: str = "private"
 
 
 @dataclass
@@ -506,6 +509,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         "assignment_id": "INTEGER",
         # ISSUE-892. No backfill: no room was incognito before this column.
         "incognito": "INTEGER NOT NULL DEFAULT 0",
+        # `rooms.egress.record_posture`. No backfill: NULL is "not decided", and a
+        # task from before this column is decided when it next runs.
+        "egress_posture": "TEXT",
     })
     # The same for a wake's spend, so the ledger outlives the task row.
     _add_columns(conn, "task_usage", {"assignment_id": "INTEGER"})
@@ -554,6 +560,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # shared_kv on success (gated on is_shared_kv_writer at write time).
         "publish_shared_kv": "TEXT",
         "publish_shared_kv_trusted": "INTEGER NOT NULL DEFAULT 0",
+        # Unified egress policy: CRON.md's `reach`, a request and never a grant.
+        "reach": "TEXT NOT NULL DEFAULT 'private'",
     })
 
     # Places table: drop source column (moved to config)
@@ -1387,6 +1395,8 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     _rebuild_skill_request_kinds(conn, "recovery_fill")
     _rebuild_skill_request_kinds(conn, "location_share")
     _rebuild_skill_request_kinds(conn, "assignment_activation")
+    # Reads the `scheduled_jobs` columns added above. Its own transaction.
+    _migrate_egress_seed_open(conn)
     # And then the inbox's one-shot seed, which needs that table to exist. It
     # takes a transaction of its own, so it commits whatever the migrations
     # above left open first (ISSUE-261); nothing after it depends on the
@@ -9239,6 +9249,58 @@ def _migrate_group_owned_rooms(conn: sqlite3.Connection) -> None:
         return  # marker table not created yet
 
 
+def _migrate_egress_seed_open(conn: sqlite3.Connection) -> None:
+    """Bring each existing scheduled job in as `open`, once (unified egress policy).
+
+    Upgrading breaks no job: each runs as it did until its owner narrows it. The
+    table's absence is the marker, so the table and the seed are one transaction:
+    a crash between them would leave every job limited and nothing to say why. On
+    a fresh install `scheduled_jobs` does not exist yet and nothing is seeded.
+    """
+    from istota.rooms import egress
+
+    def _table_exists(name: str) -> bool:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,),
+        ).fetchone() is not None
+
+    if _table_exists("egress_grants"):
+        return
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Asked again under the lock: another process may have run this.
+        if not _table_exists("egress_grants"):
+            conn.execute(
+                """
+                CREATE TABLE egress_grants (
+                    user_id TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    entry TEXT NOT NULL,
+                    decided_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    decided_via TEXT NOT NULL,
+                    PRIMARY KEY (user_id, subject, entry)
+                )
+                """
+            )
+            rows = []
+            if _table_exists("scheduled_jobs"):
+                rows = conn.execute(
+                    "SELECT user_id, name, prompt, command, skill, skill_args, "
+                    "publish_shared_kv, publish_shared_kv_trusted FROM scheduled_jobs"
+                ).fetchall()
+            for row in rows:
+                egress.add_grant(
+                    conn, row["user_id"], egress.cron_subject(row["name"]),
+                    f"open:{egress.job_digest(row)}", decided_via="migration",
+                )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
 def _migrate_room_incognito(conn: sqlite3.Connection) -> None:
     """Add `rooms.incognito` (ISSUE-892). Nothing is backfilled: the flag is
     set when a room is created, so no existing room can have it."""
@@ -12567,7 +12629,7 @@ def get_enabled_scheduled_jobs(conn: sqlite3.Connection) -> list[ScheduledJob]:
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
                once, model, effort, brain, provider, skill, skill_args,
-               publish_shared_kv, publish_shared_kv_trusted
+               publish_shared_kv, publish_shared_kv_trusted, reach
         FROM scheduled_jobs
         WHERE enabled = 1 AND auto_disabled_at IS NULL
         """
@@ -12585,7 +12647,7 @@ def get_user_scheduled_jobs(conn: sqlite3.Connection, user_id: str) -> list[Sche
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
                once, model, effort, brain, provider, skill, skill_args,
-               publish_shared_kv, publish_shared_kv_trusted
+               publish_shared_kv, publish_shared_kv_trusted, reach
         FROM scheduled_jobs
         WHERE user_id = ?
         ORDER BY name
@@ -12631,6 +12693,7 @@ def _row_to_scheduled_job(row: sqlite3.Row) -> ScheduledJob:
             if "publish_shared_kv_trusted" in row.keys()
             else False
         ),
+        reach=row["reach"] if "reach" in row.keys() else "private",
     )
 
 
@@ -12737,7 +12800,7 @@ def get_scheduled_job(conn: sqlite3.Connection, job_id: int) -> ScheduledJob | N
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
                once, model, effort, brain, provider, skill, skill_args,
-               publish_shared_kv, publish_shared_kv_trusted
+               publish_shared_kv, publish_shared_kv_trusted, reach
         FROM scheduled_jobs
         WHERE id = ?
         """,
@@ -12750,8 +12813,15 @@ def get_scheduled_job(conn: sqlite3.Connection, job_id: int) -> ScheduledJob | N
 
 
 def delete_scheduled_job(conn: sqlite3.Connection, job_id: int) -> None:
-    """Delete a scheduled job from the database."""
+    """Delete a scheduled job from the database, with what its owner approved for it."""
+    from istota.rooms import egress
+
+    row = conn.execute(
+        "SELECT user_id, name FROM scheduled_jobs WHERE id = ?", (job_id,),
+    ).fetchone()
     conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (job_id,))
+    if row is not None:
+        egress.forget_subject(conn, row[0], egress.cron_subject(row[1]))
 
 
 def enable_scheduled_job(conn: sqlite3.Connection, job_id: int) -> None:
@@ -12797,7 +12867,7 @@ def get_scheduled_job_by_name(
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
                once, model, effort, brain, provider, skill, skill_args,
-               publish_shared_kv, publish_shared_kv_trusted
+               publish_shared_kv, publish_shared_kv_trusted, reach
         FROM scheduled_jobs
         WHERE user_id = ? AND name = ?
         """,
