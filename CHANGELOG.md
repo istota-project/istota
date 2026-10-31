@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A code review can no longer read another repository.** A task could plant links inside a checkout's git directory, or swap it during a review, and have the review read any repository the daemon could. The review's git now runs where only that user's repositories exist. See docs/deployment/security.md.
 - **Chrome now runs in its own sandbox.** A compromised page's renderer has no files, sockets or view of other processes, and Chrome's user can no longer get the browser API's token. Memory use is unchanged. A browser service started without the shipped compose file's seccomp profile cannot launch Chrome. See docs/deployment/security.md.
 - **A firewall outside the browser container.** On a VM, the browser can no longer reach private addresses or cloud metadata even if a compromised page gets past Chrome's own proxy settings. Sites listed in `[browser] private_hosts` keep working, since the firewall follows that list and looks up their addresses every five minutes; a site whose address changes can be unreachable until the next lookup. The browser's network gets a fixed subnet, so the next update recreates it.
 - **Federated share offers reveal less about your users.** Another server no longer receives a user's display name, and refusals that depend on the recipient are limited per day; past the limit, an offer to an unknown address looks accepted and is dropped. The offer card, accept dialog and bell now say whether the sending server signed the offer.

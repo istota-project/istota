@@ -42,12 +42,19 @@ happily. `git show <rev>:<path>` returns the link *text* instead, so the class
 does not arise. Nothing here opens a path inside a worktree directly, and
 nothing here should start.
 
-What this does not close: validation is not atomic with use. The tree stays
-writable throughout, so a component can be replaced between a check and a read.
-Reading through git shrinks that to git's own resolution. The honest
-description is that the boundary is robust against a path argument and advisory
-against a model writing concurrently into its own worktree; the admin gate in
-the CLI is doing real work behind it.
+**A read runs where nothing but the root exists.** Validation is not atomic with
+use, and `git_dir` cannot see what is inside the directories it checks: `.git`
+swapped after the check, `objects` or `refs` as symlinks, and an
+`objects/info/alternates` line each took a contained repository's reads to one
+outside the root (`tests/test_host_path_races_linux.py`). So `_run_git` runs git
+in a namespace binding the user's subtree and the system directories, by
+`_namespaced`, where a path out of the root names nothing. `git_dir`'s own
+`rev-parse` stays outside it, since it reads no content and has to see the
+outside path to name the refusal.
+
+Where bwrap is unavailable git runs unwrapped, and all of the above is open
+there: the model's own tools have the daemon's view on those shapes too. Within
+the namespace a task can still swap one of its own repositories for another.
 
 The reviewer reads the code itself, with Read, Grep and Glob, but never the
 worktree: `snapshot.py` writes the reviewed commit out of the object store into
@@ -293,17 +300,21 @@ def _git(
     *,
     reason: str = "git_failed",
     allow_codes: tuple[int, ...] = (0,),
+    in_namespace: bool = True,
 ) -> str:
     """Run one hardened git command in `worktree` and return its stdout.
 
     `allow_codes` exists for `git grep`, which exits 1 to mean "no match".
+    `in_namespace=False` exists for `git_dir` alone.
 
     stdout is read incrementally against `MAX_GIT_OUTPUT_BYTES` rather than
     collected whole, and stderr goes to a temporary file rather than a pipe.
     Both are about the same thing: a pipe that nobody drains blocks the child,
     and a child that nobody bounds fills the daemon.
     """
-    out = _run_git(worktree, args, reason=reason, allow_codes=allow_codes)
+    out = _run_git(
+        worktree, args, reason=reason, allow_codes=allow_codes, in_namespace=in_namespace
+    )
     return out.decode("utf-8", "replace")
 
 
@@ -344,6 +355,52 @@ def _feed_stdin(stream, data: bytes) -> None:
             pass
 
 
+def _namespaced(argv: list[str], root: Path, worktree: Path) -> list[str] | None:
+    """`argv` in a namespace holding the system and `root` read-only, or None.
+
+    None where bwrap cannot make one. Not `build_bwrap_cmd`, which needs a
+    `Config` and a task and binds the venv, the temp dir and the workspace.
+
+    Function-scope imports because `executor` imports this package's neighbours.
+    """
+    from istota.executor import (
+        _bwrap_available,
+        _bwrap_requires_unshare_user,
+        _bwrap_supports_disable_userns,
+    )
+    from istota.sandbox.plan import _ETC_BINDS
+    from istota.sandbox.shell_exec import on_daemon_path
+
+    bwrap = on_daemon_path("bwrap") if _bwrap_available() else None
+    if bwrap is None:
+        return None
+    wrapped = [bwrap]
+    disable_userns = _bwrap_supports_disable_userns()
+    if disable_userns or _bwrap_requires_unshare_user():
+        wrapped.append("--unshare-user")
+    if disable_userns:
+        wrapped.append("--disable-userns")
+    wrapped += [
+        "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net",
+        "--unshare-cgroup-try", "--die-with-parent",
+        "--ro-bind", "/usr", "/usr",
+    ]
+    for compat in ("/bin", "/lib", "/lib64", "/sbin"):
+        path = Path(compat)
+        if path.is_symlink():
+            wrapped += ["--symlink", str(path.readlink()), compat]
+        elif path.exists():
+            wrapped += ["--ro-bind", compat, compat]
+    for etc in _ETC_BINDS:
+        wrapped += ["--ro-bind-try", etc, etc]
+    wrapped += ["--dev", "/dev", "--tmpfs", "/tmp"]
+    # Both spellings, because a `.git` file holds whichever the task's own
+    # namespace showed it, and the variable's may run through a link.
+    for dest in dict.fromkeys((str(root), str(root.resolve()))):
+        wrapped += ["--ro-bind", str(root), dest]
+    return [*wrapped, "--chdir", str(worktree), "--", *argv]
+
+
 def _run_git(
     worktree: Path,
     args: list[str],
@@ -351,15 +408,17 @@ def _run_git(
     reason: str,
     allow_codes: tuple[int, ...] = (0,),
     stdin_bytes: bytes | None = None,
+    in_namespace: bool = True,
 ) -> bytes:
     """The one runner behind `_git` and `_git_batch`."""
     root = _repos_root()
     argv = ["git", *GIT_HARDENING, *args]
+    wrapped = _namespaced(argv, root, worktree) if in_namespace else None
     writer: threading.Thread | None = None
     with tempfile.TemporaryFile() as errfile:
         proc = subprocess.Popen(
-            argv,
-            cwd=str(worktree),
+            wrapped or argv,
+            cwd=None if wrapped else str(worktree),
             stdin=subprocess.DEVNULL if stdin_bytes is None else subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=errfile,
@@ -395,7 +454,8 @@ def _run_git(
             f"git {' '.join(args)}: output exceeded {MAX_GIT_OUTPUT_BYTES} bytes",
             reason="git_output_too_large",
         )
-    if proc.returncode not in allow_codes:
+    # bwrap's own failure exits 1, which `git grep` would read as "no match".
+    if proc.returncode not in allow_codes or (wrapped and stderr.startswith("bwrap:")):
         raise ReviewError(
             f"git {' '.join(args)}: {stderr or f'git exited {proc.returncode}'}",
             reason=reason,
@@ -477,7 +537,9 @@ def git_dir(worktree: Path) -> Path:
         ("--absolute-git-dir", "git_dir_not_allowed"),
         ("--git-common-dir", "common_dir_not_allowed"),
     ):
-        raw = _git(worktree, ["rev-parse", flag], reason="not_a_repository").strip()
+        raw = _git(
+            worktree, ["rev-parse", flag], reason="not_a_repository", in_namespace=False
+        ).strip()
         # `--git-common-dir` answers `.git` for an ordinary repository, relative
         # to the command's working directory rather than to the git dir. It
         # only comes back absolute for a linked worktree.
