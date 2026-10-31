@@ -55,6 +55,15 @@ two are the ones review found missing:
 3. A translated path that escapes the namespace is refused. ``relative_to`` is
    lexical, so ``..`` in a record survives it.
 
+**The precondition in rule 2 is not enough on its own (#906).** It reads names,
+and git then follows them: an entry under ``worktrees/`` that is a link to
+another repository's administrative directory, or a ``commondir`` file, passes
+it, because the ``.git`` it asks about names the clone's old path, which no
+longer exists to resolve. Measured unwrapped, both rewrote the other repository's
+``gitdir`` record. So ``git worktree repair`` runs in
+:mod:`istota.sandbox.git_namespace` with only the moved namespace directory, and
+rule 2 stays as what tells an operator why a planted worktree was not repaired.
+
 **The move is a rename per namespace, and its repairs run immediately after
 it.** Worktrees are siblings of their bare clone inside the namespace
 directory, so moving ``{repos_dir}/{namespace}`` wholesale takes the clone and
@@ -134,11 +143,8 @@ nothing raises out of :func:`main`, what could not be done is reported rather
 than passed over in silence, and a refusal is distinguishable from a success by
 the exit code as well as by the text. ``--dry-run`` touches nothing.
 
-The planning and applying halves are a stdlib-only leaf — the root and the
-admin set are parameters. Only :func:`main` reads configuration, the admins
-file and the task table. The two package imports are
-:mod:`istota.sandbox.git_hardening` and :mod:`istota.sandbox.git_remote_scrub`, both of which
-are themselves leaves.
+The root and the admin set are parameters to the planning and applying halves.
+Only :func:`main` reads configuration, the admins file and the task table.
 """
 
 from __future__ import annotations
@@ -218,6 +224,9 @@ class Repair:
     already happened, so ``clone_src`` names a path that no longer exists —
     that is correct and deliberate; it is a record, not a location to open.
 
+    ``scope`` is the moved namespace directory, the only thing git can see while
+    it repairs this clone.
+
     ``worktrees`` holds ``(recorded, translated)`` pairs. ``stale`` holds
     records no translation can follow, which are reported rather than guessed
     at.
@@ -226,6 +235,7 @@ class Repair:
     namespace: str
     clone_src: Path
     clone_dst: Path
+    scope: Path
     worktrees: tuple[tuple[Path, Path], ...] = ()
     stale: tuple[str, ...] = ()
 
@@ -650,6 +660,7 @@ def _plan_repairs(
                 namespace=namespace,
                 clone_src=clone_src,
                 clone_dst=clone_dst,
+                scope=dst,
                 worktrees=tuple(pairs),
                 stale=tuple(stale),
             )
@@ -828,7 +839,7 @@ def plan(
 # ---------------------------------------------------------------------------
 
 
-def _git(cwd: Path, *args: str) -> tuple[int, str]:
+def _git(cwd: Path, *args: str, scope: Path | None = None) -> tuple[int, str]:
     """``(exit_status, output)``, through :func:`istota.sandbox.git_hardening.run_git`.
 
     stderr is merged into stdout and a failure to run git at all comes back as
@@ -837,7 +848,9 @@ def _git(cwd: Path, *args: str) -> tuple[int, str]:
     repair`` says what it refused on stderr and nothing on stdout, so a
     stdout-only wrapper would report a bare exit code.
     """
-    return run_git(cwd, *args, timeout=_GIT_TIMEOUT, merge_stderr=True, on_error=None)
+    return run_git(
+        cwd, *args, timeout=_GIT_TIMEOUT, merge_stderr=True, on_error=None, scope=scope,
+    )
 
 
 def _links_back(worktree: Path, git_dir: Path) -> bool:
@@ -905,8 +918,11 @@ def _run_repair(repair: Repair) -> tuple[list[str], list[str], list[str]]:
     if not targets:
         return repaired, unrepaired, notes
 
+    # Realpaths, because the namespace binds the one spelling and git writes what
+    # it sees there into the records.
     status, output = _git(
-        repair.clone_dst, "worktree", "repair", *[str(t) for t in targets]
+        _real(repair.clone_dst), "worktree", "repair", *[str(_real(t)) for t in targets],
+        scope=_real(repair.scope),
     )
     if status != 0:
         tail = output.strip().splitlines()

@@ -381,6 +381,8 @@ class TestHardening:
         )
         shim.chmod(0o755)
         monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+        # The shim is outside any namespace, so a wrapped git would not find it.
+        monkeypatch.setattr("istota.executor._bwrap_available", lambda: False)
 
         def read():
             if not log.exists():

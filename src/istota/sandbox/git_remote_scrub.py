@@ -60,8 +60,7 @@ dropped, because a caller must never mistake a failed sweep for a clean one.
 
 stdlib-only leaf: imported by the developer skill's ``setup_env`` hook, and
 usable from a maintenance one-liner. The one package import is
-:mod:`istota.sandbox.git_hardening`, which is itself a leaf and has no imports of its
-own beyond the stdlib.
+:mod:`istota.sandbox.git_hardening`, for its environment policy.
 """
 
 from __future__ import annotations

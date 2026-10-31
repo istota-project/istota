@@ -917,7 +917,7 @@ class TestHoldsBack:
         path = _worktree(bare, "project--main", "origin/main")
         (path / "README").write_text("uncommitted work\n")
         _age(path, 48)
-        monkeypatch.setattr(mod, "_is_dirty", lambda _wt: False)
+        monkeypatch.setattr(mod, "_is_dirty", lambda _wt, **_: False)
 
         outcomes = reap_worktrees(repos_dir, retention_hours=24)
 
@@ -1160,7 +1160,7 @@ class TestFailClosed:
         repos_dir, bare, _ = repos
         path = _worktree(bare, "project--main", "origin/main")
         _age(path, 48)
-        monkeypatch.setattr(mod, "_is_dirty", lambda _wt: None)
+        monkeypatch.setattr(mod, "_is_dirty", lambda _wt, **_: None)
 
         outcomes = reap_worktrees(repos_dir, retention_hours=24)
 
@@ -1197,7 +1197,7 @@ class TestFailClosed:
             "precondition: not an ancestor, so the cherry check is what decides"
         )
         _age(path, 48)
-        monkeypatch.setattr(mod, "_has_unique_commits", lambda *a: None)
+        monkeypatch.setattr(mod, "_has_unique_commits", lambda *a, **k: None)
 
         outcomes = reap_worktrees(repos_dir, retention_hours=24)
 
@@ -1291,7 +1291,7 @@ class TestFailClosed:
 
         path = _worktree(bare, "project--topic", "origin/main", branch="topic")
         _age(path, 48)
-        monkeypatch.setattr(mod, "_is_ancestor", lambda *a: False)
+        monkeypatch.setattr(mod, "_is_ancestor", lambda *a, **k: False)
 
         outcomes = reap_worktrees(repos_dir, retention_hours=24)
 
@@ -1312,7 +1312,7 @@ class TestBranchRef:
         path = _worktree(bare, "project--topic", "origin/main", branch="topic")
         _age(path, 48)
 
-        def advance_then_report_clean(_wt):
+        def advance_then_report_clean(_wt, **_):
             if not (path / "late").exists():
                 (path / "late").write_text("y\n")
                 _git(path, "add", "late")
@@ -1399,9 +1399,9 @@ class TestRecheckBeforeRemoval:
         # worktree the sweep is about to remove.)
         real = mod._is_ancestor
 
-        def write_then_answer(bare_dir, head, upstream_ref):
+        def write_then_answer(bare_dir, head, upstream_ref, **kwargs):
             (path / ".env").write_text("SECRET=x\n")
-            return real(bare_dir, head, upstream_ref)
+            return real(bare_dir, head, upstream_ref, **kwargs)
 
         monkeypatch.setattr(mod, "_is_ancestor", write_then_answer)
 
