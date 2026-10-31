@@ -19,6 +19,8 @@ import urllib.request
 
 from patchright.sync_api import sync_playwright
 
+import egress_proxy
+
 log = logging.getLogger(__name__)
 
 PROFILE_ROOT = os.environ.get("BROWSER_PROFILE_DIR", "/data/browser-profile")
@@ -452,6 +454,7 @@ def launch_chrome(inst):
         "--disable-features=DnsOverHttps",
         "--disable-client-side-phishing-detection",
         "--disable-component-update",
+        *egress_proxy.chrome_args(),
         # Modal browser UI nothing in this container can dismiss. Xvfb runs with
         # no window manager, xdotool addresses the largest window on the display
         # rather than a modal child of it, and each of these blocks Chrome's UI

@@ -101,6 +101,32 @@ def test_a_pdf_in_chromes_viewer_is_read_as_text(browser_image):
     assert "Padded but readable" in report["unbombed"]["text"], report
 
 
+def test_chrome_reaches_nothing_private_through_the_egress_proxy(browser_image):
+    """#884: direct, redirected, subresource, WebSocket and WebRTC, on real Chrome.
+
+    The unguarded arm is the control, run in the same container: it must reach
+    the same listeners, and the granted name proves the guarded path carries
+    traffic, so a Chrome that merely failed to start cannot pass.
+    """
+    script = Path(__file__).with_name("egress_guard_run.py").read_text()
+    result = run_in(browser_image, ["-c", script], entrypoint="python", timeout=300)
+    report = json.loads(assert_ok(result, "egress guard").strip().splitlines()[-1])
+
+    unguarded, guarded = report["unguarded"], report["guarded"]
+    for path in ("/direct", "/loopback", "/localhost", "/redirected",
+                 "/subresource-private", "/subresource-loopback", "/fetch", "/websocket"):
+        assert path in unguarded["hits"], report
+    assert unguarded["udp"] > 0, report
+    assert unguarded["quic"] > 0, report
+
+    # Chrome asks the granted host for its favicon too.
+    assert set(guarded["hits"]) - {"/favicon.ico"} == {"/granted"}, report
+    assert guarded["udp"] == 0, report
+    assert guarded["quic"] == 0, report
+    assert guarded["visits"]["granted"] == "loaded", report
+    assert "ERR_TUNNEL_CONNECTION_FAILED" in guarded["visits"]["https_refused"], report
+
+
 # --- the console socket -------------------------------------------------------
 #
 # The web container's console relay reaches each live instance's x11vnc
@@ -308,5 +334,21 @@ def test_the_browser_service_starts_on_the_layer(browser_chrome_layer):
         assert live is not None and live.returncode == 0, subprocess.run(
             ["docker", "logs", container], capture_output=True, text=True, timeout=30,
         ).stdout[-3000:]
+        # The entrypoint started the proxy Chrome is pointed at, and it refuses the API.
+        refused = subprocess.run(
+            ["docker", "exec", container, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+             "--proxy", "http://127.0.0.1:9225", "--retry", "5", "--retry-connrefused",
+             "http://127.0.0.1:9223/health"],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert refused.stdout.strip() == "403", (refused.stdout, refused.stderr)
+        # The real launch: `launch_chrome`, the omnibox, through the service's own API.
+        browsed = subprocess.run(
+            ["docker", "exec", container, "curl", "-s", "-X", "POST", "http://localhost:9223/browse",
+             "-H", "Content-Type: application/json", "-H", "X-Istota-User: egress-witness",
+             "-d", json.dumps({"url": "http://localhost:9224/live", "timeout": 60})],
+            capture_output=True, text=True, timeout=240,
+        )
+        assert "Refused: this is a private address" in browsed.stdout, browsed.stdout[-2000:]
     finally:
         subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=60)
