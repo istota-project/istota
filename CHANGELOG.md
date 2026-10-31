@@ -54,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The browser can no longer reach private addresses.** Every Chrome connection now goes through a proxy in the browser container that refuses private, loopback and link-local addresses, including redirects, subresources and WebSockets, so a page or a task cannot reach internal services or the container's own API and debugging ports. If you browse an internal site, list its name in `BROWSER_PRIVATE_HOSTS` in `.env`.
 - **A devbox no longer gets forge tokens unless the operator grants them.** The credential socket handed the shared `[developer]` GitLab and GitHub tokens to any process in any devbox, so a build script could take them. Add a user to the new `[devbox] forge_users` to restore the old behaviour for their devbox, for example for builds that clone private dependencies. A task's own `git`, `gh` and `glab` run in the sandbox and are unaffected. If a devbox ran untrusted builds before this release, rotate those tokens.
 - CRON.md `command` jobs and HEARTBEAT.md `shell-command` checks run in the task sandbox instead of on the host, since the bot can edit both files. **Upgrade note:** a job that reads a host path, calls a script in the checkout or probes an internal service stops working, and a `df -h /` check keeps passing while reading the sandbox's empty root, so point it at your workspace. Move other scripts into your workspace, or make them a system timer. See docs/features/scheduling.md.
 - A linked folder is now mounted from the exact folder that was checked. Someone who could write to its location could swap the name just before a task's sandbox started and get another folder mounted in its place; now the swap leaves the task without that folder, or stops the sandbox from starting.
@@ -98,6 +99,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The tmux brain.** `tmux_claude`, which drove the interactive `claude` interface inside tmux, is gone; the native brain covers what it was kept for. A config that still names it loads as `claude_code` with a warning, and a `[brain.tmux]` block is ignored except that its model fills an unset `[brain.claude_code]` model on a deployment that ran on tmux. A room or scheduled job pinned to it runs on the deployment's brain.
 
 ### Fixed
+
+- `istota doctor` no longer skips the model credential, master key and servarr key checks because `PRECOMMIT_SCANS_REQUIRED` is set. A missing credential on a daemon with that override now reports as a failure.
 
 - The tax estimate now labels self-employment income as net income through a specific date and explains the span used for its annual projection. It no longer reads zero when income patterns are set and no expense pattern is.
 

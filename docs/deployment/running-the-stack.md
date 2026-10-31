@@ -225,6 +225,14 @@ A Baileys session is paired from the running stack, the first time and every tim
 
 The browser image builds for the machine's own architecture, x86-64 or arm64, since Chrome ships Linux packages for both. `BROWSER_PLATFORM=linux/amd64` in `.env` forces an x86-64 image.
 
+The browser reaches public addresses only. Every Chrome connection goes through a proxy in the container that refuses a private, loopback or link-local address, for redirects, subresources and WebSockets as well as the page itself. To let it reach an internal site, list the exact names in `.env` and run `istota-stack up`:
+
+```bash
+BROWSER_PRIVATE_HOSTS=wiki.example.internal,git.example.internal
+```
+
+A listed name still cannot reach the browser container's own loopback, where its API and debugging ports are.
+
 ### Talk over the signaling server
 
 The `signaling` profile replaces polling Nextcloud for Talk messages with a WebSocket that Nextcloud pushes to. It cuts inbound latency to a single round trip and removes a request per room per cycle, which is what makes it worth the extra container on a deployment with more than a handful of rooms.

@@ -31,7 +31,6 @@ from pathlib import Path
 import pytest
 
 from .support.env_isolation import (
-    CREDENTIAL_PATTERNS,
     NO_PROXY_NAMES,
     NO_PROXY_VALUE,
     NO_SCRUB_FLAG,
@@ -109,24 +108,6 @@ class TestTheManifestNamesAreDerivedNotTyped:
         # wrong SKILLS_ROOT produces an empty set rather than an error — which
         # is what `test_the_scrape_found_the_manifests` is there to catch.
         assert manifest_env_names(tmp_path / "no-such-dir") == frozenset()
-
-
-class TestTheCredentialPatternsHaveNotDrifted:
-    """`env_isolation.CREDENTIAL_PATTERNS` is a copy, so it needs a guard.
-
-    The import is here rather than at module scope in `env_isolation` because
-    `istota.executor` costs 666ms on top of what `conftest.py` already pulls
-    in, and a conftest import is paid at collection by every xdist worker on
-    every run. Here it is paid once.
-    """
-
-    def test_the_copy_matches_the_original(self):
-        from istota.executor import _CREDENTIAL_ENV_PATTERNS
-
-        assert CREDENTIAL_PATTERNS == _CREDENTIAL_ENV_PATTERNS, (
-            "executor's credential patterns changed; copy the new set into "
-            "tests/support/env_isolation.py"
-        )
 
 
 class TestThePolicy:

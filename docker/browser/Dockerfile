@@ -124,7 +124,10 @@ RUN curl -fsSL -o /tmp/autoconsent-bundle.js \
        /app/stealth-extension/autoconsent-suffix.js
 
 COPY browse_api.py browser_server.py chrome.py pool.py browsing.py render.py text_budget.py visual.py xdotool.py ./
-COPY document_render.py pdf_text.py pdf_child.py ./
+COPY document_render.py pdf_text.py pdf_child.py egress_proxy.py ./
+# WebRTC's UDP skips a proxy. Chrome ignores --force-webrtc-ip-handling-policy
+# here (measured in tests/image), and this path is root's, out of a profile's reach.
+COPY chrome-policy.json /etc/opt/chrome/policies/managed/istota-egress.json
 COPY lib/ ./lib/
 COPY novnc-web/ /usr/share/novnc/
 COPY entrypoint.sh .

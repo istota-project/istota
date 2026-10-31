@@ -129,7 +129,6 @@ def _every_env(config, make_task, monkeypatch, tmp_path) -> dict[str, dict]:
     envs["build_harness_cli_env"] = executor.build_harness_cli_env(
         config, "alice", timeout_seconds=60,
     )
-    envs["build_stripped_env"] = executor.build_stripped_env()
 
     # The hook dispatcher iterates modules with a skill_dir; give the echoer one.
     index = _skill_index()
@@ -221,8 +220,8 @@ def test_each_sentinel_appears_only_where_its_mode_carries_it(world, mode, monke
             assert not _carries(env, OAUTH), name
 
     # No model credential name survives into an env that carries none.
-    for name in ("build_clean_env", "task_env", "build_stripped_env",
-                 "skill_proxy_base_env", "scheduler_skill_task:kv"):
+    for name in ("build_clean_env", "task_env", "skill_proxy_base_env",
+                 "scheduler_skill_task:kv"):
         assert not [k for k in envs[name] if is_model_credential_name(k)], name
 
 

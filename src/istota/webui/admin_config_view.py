@@ -18,8 +18,7 @@ an admin reading the page has no need for any of their values — only for
 whether they are set. A credential-named field is therefore emitted with
 `value: null` and `set: true|false`.
 
-Matching is by field *name* against `SECRET_NAME_PATTERNS`, the same shape
-`executor._CREDENTIAL_ENV_PATTERNS` uses for env stripping. A name-pattern rule
+Matching is by field *name* against `SECRET_NAME_PATTERNS`. A name-pattern rule
 is only as good as its coverage, so `tests/test_admin_config_view.py` asserts
 the coverage two ways: every known credential field redacts, and no
 credential-named field anywhere in the rendered tree is exposed. A new secret
@@ -38,9 +37,8 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from istota.config import Config
 
-# Substring patterns marking a field name as a credential. Mirrors
-# `executor._CREDENTIAL_ENV_PATTERNS`; `PASS` also catches `app_password` and a
-# bare `password`, and is broad on purpose — a false positive costs an admin one
+# Substring patterns marking a field name as a credential. `PASS` also catches
+# `app_password` and a bare `password`, and is broad on purpose — a false positive costs an admin one
 # unshown value, a false negative leaks a live secret. `AUTH` and the hyphen
 # spellings exist for HTTP *header* names (`authorization`, `x-api-key`), which
 # `_render_value` checks per dict key; a header dict is an auth channel.

@@ -47,6 +47,16 @@ fi
 websockify --web "$BROWSER_RUNTIME_DIR/web" --cert "$CERT_DIR/combined.pem" \
     --token-plugin TokenFile --token-source "$BROWSER_RUNTIME_DIR/vnc-tokens" 6080 &
 
+# Chrome's only way out (egress_proxy.py). Restarted, not waited for: while it is
+# down Chrome reaches nothing.
+(
+    while true; do
+        setpriv --reuid=browser --regid=browser --init-groups \
+            python /app/egress_proxy.py || true
+        sleep 1
+    done
+) &
+
 # Forward Docker stop to the API only, then reap orphaned children. su kills
 # its shell after two seconds, before the API can flush every Chrome profile.
 # setpriv execs directly and preserves the configured environment without a

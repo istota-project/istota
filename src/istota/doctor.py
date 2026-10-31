@@ -3412,30 +3412,28 @@ def _probe_output_line(text: str | None, limit: int = 160) -> str:
 
 
 #: Names that only an environment istota itself built for something other than
-#: the daemon carries. Each is set by one of the two env builders and by
-#: nothing else on a deployment, so finding one is evidence that ``os.environ``
-#: here is not the daemon's.
+#: the daemon carries. Istota's task env builders set them
+#: (`task_env.build_task_runtime`, and the scheduler's skill-task env sets the
+#: id) and nothing else on a deployment does, so finding one is evidence that
+#: ``os.environ`` here is not the daemon's.
 #:
-#: * ``ISTOTA_TASK_ID`` — `task_env.build_task_runtime` sets it on every task
-#:   env, and it is not in ``_EXECUTOR_PROXY_ONLY_VARS``, so it survives into
-#:   both the model's own environment and ``proxy_base_env``, which is what a
-#:   host-side skill CLI runs with. The general marker.
-#: * ``ISTOTA_SANDBOXED`` — narrower (it needs the sandbox in effect and the
-#:   proxy on), and kept because its meaning is exactly "this environment was
-#:   built for the model".
-#: * ``PRECOMMIT_SCANS_REQUIRED`` — `sandbox.confined_command` sets it for a cron
-#:   ``command`` job and a heartbeat ``shell-command``; the runtime's env holds
-#:   no credential, so all three names below are gone from it by construction.
-#:   Unlike the other two an
-#:   operator can also set this one by hand (ISSUE-291 made it an override), so
-#:   it is evidence rather than proof. It errs toward a skip, which is the safe
-#:   direction for a check whose observed failure mode is crying wolf.
+#: * ``ISTOTA_TASK_ID`` is on every task env and is not in
+#:   ``_EXECUTOR_PROXY_ONLY_VARS``, so it survives into both the model's own
+#:   environment and ``proxy_base_env``, which is what a host-side skill CLI
+#:   runs with. A cron ``command`` job and a heartbeat ``shell-command`` carry
+#:   it too (a check's id is negative). The general marker.
+#: * ``ISTOTA_SANDBOXED`` is narrower (it needs the sandbox in effect and the
+#:   proxy on), and kept so the answer does not depend on one name.
+#:
+#: ``PRECOMMIT_SCANS_REQUIRED`` is deliberately not one. Those two shells carry
+#: it, but they carry ``ISTOTA_TASK_ID`` as well, and an operator may set it on
+#: the daemon (ISSUE-291 made it an override), where it would turn a real FAIL
+#: into a SKIP.
 #:
 #: Named markers rather than the ``ISTOTA_`` namespace: the daemon's own
 #: environment carries ``ISTOTA_CONFIG_PATH`` and ``ISTOTA_ADMINS_FILE``, so a
 #: namespace test would skip everywhere and the check would never fail at all.
-_NON_DAEMON_ENV_MARKERS = ("ISTOTA_TASK_ID", "ISTOTA_SANDBOXED",
-                           "PRECOMMIT_SCANS_REQUIRED")
+_NON_DAEMON_ENV_MARKERS = ("ISTOTA_TASK_ID", "ISTOTA_SANDBOXED")
 
 
 def _non_daemon_env_markers() -> list[str]:
@@ -3695,8 +3693,8 @@ def check_secret_key(config: "Config", probe: bool) -> CheckResult:
     **There is a fourth arm between those two, and it is the one the marker
     list cannot reach.** Under ``istota serve`` the key can live in
     ``istota.env``, and ``cmd_serve`` is the only thing in the tree that sources
-    it — so ``istota doctor`` in an operator's shell is a process that carries none of the three
-    markers *and* has never read the file, and taking its own environment as
+    it — so ``istota doctor`` in an operator's shell is a process that carries neither
+    marker *and* has never read the file, and taking its own environment as
     the answer meant a FAIL and an exit 1 about an install whose key was
     exactly where it belonged, with a remedy telling the operator to add a line
     already in the file. So an absent variable falls back to reading the
@@ -3747,7 +3745,7 @@ def check_secret_key(config: "Config", probe: bool) -> CheckResult:
     # answer there reported FAIL, and exited 1, about an install whose key was
     # sitting in the file the daemon reads at start-up: the same mistake
     # `check_skill_model_credential` records making, in a shape its marker list
-    # cannot see, since an operator's shell carries none of the three.
+    # cannot see, since an operator's shell carries neither.
     env_file, file_key = _secret_key_from_env_file(config, var)
     if file_key:
         if len(file_key) >= floor:
@@ -11140,22 +11138,13 @@ def _named_path(raw: str) -> str:
     return flat[:_NAMED_PATH_CHARS] + "\u2026"
 
 
-#: Names that mean "this process is a *task*, not the daemon". Either is
-#: enough. ``ISTOTA_TASK_ID`` is the general one — `task_env.build_task_runtime`
-#: sets it on every task env unconditionally — and ``ISTOTA_SANDBOXED`` is a
-#: subset of it, kept so the answer does not depend on one name.
-#:
-#: **Not** ``_non_daemon_env_markers``, which is wider by one:
-#: ``PRECOMMIT_SCANS_REQUIRED`` marks a cron ``command`` job and a heartbeat
-#: shell command, both of which run unsandboxed as the daemon user with the
-#: config directory in front of them. Telling those to "run it on the host as
-#: the daemon user" would be telling them to do what they are already doing.
-_TASK_ENV_MARKERS = ("ISTOTA_TASK_ID", "ISTOTA_SANDBOXED")
-
-
 def _is_task_process() -> bool:
-    """Was this process's environment built for a task by ``build_task_runtime``."""
-    return any(os.environ.get(name) for name in _TASK_ENV_MARKERS)
+    """Was this process's environment built for a task.
+
+    That includes a cron ``command`` job and a heartbeat ``shell-command``: they
+    run in the task sandbox, with ``config/`` unbound (ISSUE-886).
+    """
+    return bool(_non_daemon_env_markers())
 
 
 def config_visibility(

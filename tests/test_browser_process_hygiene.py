@@ -200,6 +200,20 @@ def launched(monkeypatch):
 # The wedge itself: Chrome's stderr must never be an unread pipe
 # ---------------------------------------------------------------------------
 
+def test_chrome_launches_behind_the_egress_proxy(launched):
+    """#884: the flags reach the argv, so no launch path leaves them out."""
+    chrome.launch_chrome(browse_api._instance)
+    args = launched[0]["args"]
+    assert any(a.startswith("--proxy-server=http://127.0.0.1:") for a in args)
+    assert "--proxy-bypass-list=<-loopback>" in args
+
+
+def test_the_deep_probe_reports_a_proxy_that_is_down(monkeypatch):
+    """#884: with no proxy every page fails while Chrome reads healthy."""
+    monkeypatch.setattr(browse_api.egress_proxy, "is_up", lambda timeout=1: False)
+    assert browse_api._probe(deep=True) == (503, b"egress-proxy-down\n")
+
+
 class TestChromeStderrIsNeverAnUnreadPipe:
     """The root cause. A PIPE nobody reads blocks Chrome's UI thread at 64 KiB."""
 

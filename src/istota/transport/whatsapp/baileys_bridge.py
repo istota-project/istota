@@ -273,10 +273,7 @@ CONNECTION_REPLACED_WINDOW_SECONDS = 600.0
 #: `os.environ`: the daemon's own environment carries every credential on the
 #: deployment — the Claude token, the Nextcloud password, the forge tokens, the
 #: master Fernet key — and a Node program that needs none of them should be
-#: given none of them. `build_stripped_env` is the near neighbour and is not
-#: reused: it is `os.environ` minus a pattern list, i.e. an allowlist's
-#: opposite, and it stamps `PRECOMMIT_SCANS_REQUIRED`, which means nothing
-#: here.
+#: given none of them.
 _CHILD_ENV_PASSTHROUGH = ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "NODE_ENV")
 
 #: How the sidecar learns where to dial and where its session lives. In the
