@@ -3,6 +3,7 @@
 import json
 import logging
 from dataclasses import replace
+from unittest.mock import patch
 
 import pytest
 
@@ -11,8 +12,10 @@ from istota.config import Config, EmailConfig, SchedulerConfig, UserConfig
 from istota.executor import build_prompt, task_deferred_dir
 from istota.mail import sender_flags
 from istota.notifications.resolvers.confirmation import body_for
+from istota.notifications.resolvers import task_alert
 from istota.notifications.resolvers.task_alert import flatten_body
 from istota.rooms import scopes
+from istota.scheduler import run_cleanup_checks
 from istota.skills.email import Email
 from istota.transport.email import inbound
 from istota.transport.email.inbound import _strict_dmarc_refusal
@@ -1100,3 +1103,112 @@ class TestAFlaggedPersonOnAThread:
                 (token, held),
             ).fetchone()[0]
         assert stored == 1
+
+
+def _age_the_holds(config):
+    with db.get_db(config.db_path) as conn:
+        conn.execute(
+            "UPDATE tasks SET updated_at = datetime('now', '-1 days') "
+            "WHERE status = 'pending_confirmation'",
+        )
+        conn.commit()
+
+
+def _expire(config):
+    """One real cleanup pass over the aged holds; the notices it sent."""
+    _age_the_holds(config)
+    # The cleanup pass's IMAP sweep has nothing to do with these tests.
+    config.scheduler.email_retention_days = 0
+    with patch("istota.scheduler.send_notification", return_value=True) as send:
+        run_cleanup_checks(config)
+    return send.call_args_list
+
+
+def _expiry_alerts(config):
+    with db.get_db(config.db_path) as conn:
+        rows = conn.execute(
+            "SELECT dedup_key FROM notifications "
+            "WHERE source = 'task_alert' AND dedup_key LIKE 'expired:%' ORDER BY id",
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+def _confirmation_rows(config, task_ids):
+    with db.get_db(config.db_path) as conn:
+        return [
+            tuple(conn.execute(
+                "SELECT state, resolved_by FROM notifications "
+                "WHERE source = 'confirmation' AND object_id = ?",
+                (str(task_id),),
+            ).fetchone())
+            for task_id in task_ids
+        ]
+
+
+class TestAnExpiredHold:
+    def test_a_sender_still_held_expires_quietly(self, make_config, caplog):
+        config = _front_desk(make_config)
+        _seed_flags(config)
+        created, _ = _budget._run_poll(config, _budget.FakeMailbox([1, 2, 3]))
+        assert len(created) == 3
+
+        with caplog.at_level(logging.INFO, logger="istota.scheduler"):
+            notices = _expire(config)
+
+        assert notices == []
+        assert _expiry_alerts(config) == []
+        assert _statuses_from(config, HELD_SENDER) == ["cancelled"] * 3
+        assert _confirmation_rows(config, created) == [("resolved", "system")] * 3
+        for task_id in created:
+            assert f"expired quietly: task {task_id}" in caplog.text
+
+    def test_an_unflagged_sender_still_notifies(self, make_config):
+        config = make_config()
+        (task_id,), _ = _budget._run_poll(config, _budget.FakeMailbox([1]))
+
+        notices = _expire(config)
+
+        assert len(notices) == 1
+        assert _expiry_alerts(config) == [task_alert.expired_key(task_id)]
+
+    def test_a_sender_cleared_before_expiry_notifies(self, make_config):
+        config = _front_desk(make_config)
+        _seed_flags(config)
+        (task_id,), _ = _budget._run_poll(config, _budget.FakeMailbox([1]))
+        with db.get_db(config.db_path) as conn:
+            assert sender_flags.clear(conn, "alice", HELD_SENDER) == 3
+            conn.commit()
+
+        notices = _expire(config)
+
+        assert len(notices) == 1
+        assert _expiry_alerts(config) == [task_alert.expired_key(task_id)]
+        assert _confirmation_rows(config, [task_id]) == [("resolved", "system")]
+
+    def test_one_pass_treats_each_sender_on_its_own(self, make_config):
+        config = make_config()
+        _seed_flags(config)
+        (quiet,), _ = _budget._run_poll(config, _budget.FakeMailbox([1]))
+        (told,), _ = _budget._run_poll(
+            config, _budget.FakeMailbox([2], sender="unflagged@example.com"),
+        )
+
+        notices = _expire(config)
+
+        assert len(notices) == 1
+        assert _expiry_alerts(config) == [task_alert.expired_key(told)]
+        assert _confirmation_rows(config, [quiet, told]) == [("resolved", "system")] * 2
+
+    def test_an_email_task_with_no_mail_row_notifies(self, make_config):
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="A retried mail", user_id="alice", source_type="email",
+            )
+            db.set_task_confirmation(conn, task_id, "May I?")
+            conn.commit()
+
+        notices = _expire(config)
+
+        assert len(notices) == 1
+        assert _expiry_alerts(config) == [task_alert.expired_key(task_id)]

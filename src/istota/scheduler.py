@@ -103,6 +103,7 @@ def _warn_once(key: str, message: str) -> None:
     logger.warning("%s", message)
 
 from istota import confirmations, db
+from istota.mail import sender_flags
 from istota.webui import admin_browsers, avatars
 from istota.rooms import speech_gate
 from .brain import (
@@ -8597,6 +8598,23 @@ def _expired_confirmation_notice(conn, task_info: dict) -> str:
     return f"{lead}\n\nSubmit it again if you still need it."
 
 
+def _expires_quietly(conn, config: Config, task_info: dict) -> bool:
+    """Whether this expired hold is from a sender whose flags still hold them.
+
+    A flagged sender at the per-sender budget gives one prompt, then one timeout
+    notice per mail two hours later. The prompt or the held notice already told
+    the user and nothing new has happened since.
+    """
+    if task_info.get("source_type") != "email":
+        return False
+    mail = db.get_email_for_task(conn, task_info["id"])
+    if mail is None:
+        return False
+    return sender_flags.holding_count(
+        conn, config, task_info["user_id"], mail.sender_email,
+    ) > 0
+
+
 def run_cleanup_checks(config: Config) -> None:
     """
     Run all cleanup checks for scheduler robustness.
@@ -8648,7 +8666,6 @@ def run_cleanup_checks(config: Config) -> None:
                 f"Expired stale confirmation: task {task_info['id']} "
                 f"(user: {task_info['user_id']})"
             )
-            notice = _expired_confirmation_notice(conn, task_info)
             # The question is gone, so the inbox item is answered — by the
             # clock, which is what `resolved_by='system'` records. On this
             # connection, inside the transaction the expiry itself ran in.
@@ -8657,6 +8674,13 @@ def run_cleanup_checks(config: Config) -> None:
             confirmation_source.resolve_for_task(
                 conn, task_info["user_id"], task_info["id"], by="system",
             )
+            if _expires_quietly(conn, config, task_info):
+                logger.info(
+                    "Held sender's mail expired quietly: task %d (user: %s)",
+                    task_info["id"], task_info["user_id"],
+                )
+                continue
+            notice = _expired_confirmation_notice(conn, task_info)
             # And a fire-and-forget row takes its place, saying what was
             # dropped. A separate row rather than a reuse of the confirmation
             # one: they are different items with different lifecycles — the
@@ -8759,7 +8783,6 @@ def run_cleanup_checks(config: Config) -> None:
             logger.info(f"Pruned {email_rows} processed-email row(s)")
         db.prune_signup_bodies(conn, config.email.signup_body_retention_days)
 
-        from istota.mail import sender_flags
         flag_rows = sender_flags.prune(conn, sched.email_sender_flag_window_days)
         if flag_rows > 0:
             logger.info(f"Pruned {flag_rows} email sender flag(s)")
