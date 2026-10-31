@@ -355,6 +355,26 @@ class TestTheTestOverlaysLeaveTheContractAlone:
         assert 'ENTRYPOINT ["/usr/local/sbin/istota-root-phase", "/entrypoint.sh"]' in dockerfile
 
 
+class TestChromesSandboxGrant:
+    """#902: Chrome will not start without the seccomp grant, on any stack."""
+
+    def test_the_browser_service_carries_the_grant_and_no_capability(self):
+        service = yaml.safe_load(SHIPPED_COMPOSE.read_text())["services"]["browser"]
+        assert service["security_opt"] == ["seccomp=./istota/seccomp-istota.json", "no-new-privileges:true"]
+        assert "cap_add" not in service
+
+    def test_chrome_is_launched_with_its_sandbox(self):
+        source = (REPO / "docker" / "browser" / "chrome.py").read_text()
+        assert '"--no-sandbox"' not in source
+
+    def test_the_api_runs_nothing_chromes_user_can_write(self):
+        dockerfile = (REPO / "docker" / "browser" / "Dockerfile").read_text()
+        entrypoint = (REPO / "docker" / "browser" / "entrypoint.sh").read_text()
+        assert "chown -R browser:browser /data/browser-profile && \\" in dockerfile
+        assert "python -s /app/browse_api.py" in entrypoint
+        assert "as_browser websockify" in entrypoint
+
+
 class TestTheBrowserNetwork:
     """Row 17's shape: the browser shares a network with the daemon only."""
 

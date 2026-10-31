@@ -92,7 +92,7 @@ RUN --mount=type=cache,id=browser-apt-archives,target=/var/cache/apt-build,shari
     && rm "google-chrome-stable_current_${arch}.deb" /tmp/chrome-plan \
     && rm -f /etc/apt/apt.conf.d/zz-build-cache
 
-# Create non-root user so Chrome doesn't show --no-sandbox infobar
+# Chrome's user, and the API's: see the note on /app below.
 RUN groupadd -r browser && useradd -r -g browser -G audio,video -d /home/browser -m browser
 
 WORKDIR /app
@@ -133,9 +133,12 @@ COPY novnc-web/ /usr/share/novnc/
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
 
-# Set up directories the browser user needs write access to
+# Set up directories the browser user needs write access to. Not /app, which stays
+# root's: a restart keeps the writable layer, and the API reads the token at start,
+# so code Chrome's uid could edit there would get it. Compiled here for the same reason.
 RUN mkdir -p /data/browser-profile /tmp/.X11-unix && \
-    chown -R browser:browser /data/browser-profile /app
+    chown -R browser:browser /data/browser-profile && \
+    python -m compileall -q /app
 
 # API port and noVNC port
 EXPOSE 9223 6080

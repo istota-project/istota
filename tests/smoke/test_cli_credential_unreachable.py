@@ -39,6 +39,8 @@ harness's link to it and of `/proc/<cli pid>/environ`, each of which must come
 back as the roots' refusal, and a Bash call, which must not run. On those two
 the roots answer first, so these reads say nothing about the namespace behind
 them, and doctor's Bash does not reach it, since doctor builds its own wrap.
+What does reach it is the fake reading each running tool server's namespace
+links from outside (GitLab #901), which needs no tool at all.
 
 **The third class is that namespace.** `build_daemon_sandbox`, as OCR and the
 reviewer each call it, wraps the same shell probes in a driver that holds the
@@ -50,8 +52,9 @@ proxy and no `--unshare-net`: a direct caller's tool server shares the daemon's
 network namespace, so the task path's refused connect does not apply and
 doctor's Bash can reach what the daemon can. OCR and the reviewer offer no tool
 that opens a socket. What keeps the credential safe here is that the namespace
-holds none, not where it could be sent. The doctor case asserts the shared
-namespace, and the task class asserts the opposite with the same comparison.
+holds none, not where it could be sent. All three callers assert the shared
+namespace, the doctor from inside too, and the task class asserts the opposite
+with the same comparison.
 
 **The negative control** is `scripts/test-image-negative-control.sh
 cli-witness`, which sets `ISTOTA_CLI_WITNESS_CONTROL=cli-runs-tools`: the fake
@@ -60,6 +63,8 @@ CLI whose own tools were left on would. On the task path it must go red on
 `env`, `/proc`, the result, the network namespace and the connect in both
 modes, and on the direct callers on every probe that can see the credential.
 It replaced the old path's switch-off arm, which the old path's removal ended.
+The same script runs an image whose `build_daemon_sandbox` wraps nothing, which
+must turn the namespace test red for OCR and the reviewer alone.
 
 The fake and its plan go in `$HOME/.local/bin`, on the task's `PATH` and
 holding no system binary. The fixture removes them again.
@@ -188,7 +193,7 @@ def fake_cli(stack):
     )
     yield stack
     stack.exec(["sh", "-c", (
-        'bin="$HOME/.local/bin"; rm -f "$bin/claude" "$bin/fake_claude_cli.py" "$bin/plan.json" "$bin/results.json"; '
+        'bin="$HOME/.local/bin"; rm -f "$bin/claude" "$bin/fake_claude_cli.py" "$bin/plan.json" "$bin/results.json" "$bin/namespaces.json"; '
         'rmdir "$bin" 2>/dev/null; '
         'c="$HOME/.claude/.credentials.json"; rm -f "$c"; '
         'if [ -e "$c.witness-bak" ]; then mv "$c.witness-bak" "$c"; fi; '
@@ -385,6 +390,8 @@ print("DRIVER", json.dumps({"answer": answer}))
 #: The reads a Read-only caller makes after its own document, in order.
 READS = ("daemon_file", "harness_file", "cli_environ")
 
+TOOL_SERVER_MODULE = "istota.sandbox.tool_server"
+
 
 def _reads(home: str) -> list[dict]:
     return [
@@ -399,6 +406,7 @@ def _direct_plan(caller: str, home: str) -> dict:
         "host_probe": HOST_PROBE,
         "run_in_cli": CONTROL == "cli-runs-tools",
         "results_file": f"{home}/.local/bin/results.json",
+        "namespaces_file": f"{home}/.local/bin/namespaces.json",
     }
     if caller == "doctor":
         return base | {"calls": [
@@ -487,7 +495,7 @@ def _run_direct(stack, caller: str, mode: str) -> dict:
         f"mkdir -p {USER_TEMP}",
         f"echo {DOCUMENT_TEXT} > {DOCUMENT}",
         _b64_write(f"{home}/.local/bin/plan.json", json.dumps(plan), "0644"),
-        f'rm -f "{plan["results_file"]}"',
+        f'rm -f "{plan["results_file"]}" "{plan["namespaces_file"]}"',
     ])])
     assert setup.returncode == 0, f"writing the plan failed\n{setup.stderr}"
 
@@ -500,6 +508,8 @@ def _run_direct(stack, caller: str, mode: str) -> dict:
             f"this says nothing about the credential\n--- output ---\n{output[-6000:]}"
         )
     host_text, *calls = json.loads(results.stdout)
+    namespaces = stack.exec(["cat", plan["namespaces_file"]])
+    assert namespaces.returncode == 0, f"the fake wrote no namespaces\n{namespaces.stderr}"
     run = {
         "caller": caller,
         "mode": mode,
@@ -507,6 +517,7 @@ def _run_direct(stack, caller: str, mode: str) -> dict:
         "output": output,
         "calls": calls,
         "host": dict(re.findall(r"^(host_\w+)=(\S*)$", host_text, re.M)),
+        "namespaces": json.loads(namespaces.stdout),
     }
     if caller == "doctor":
         marked = re.search(r"^WITNESS_BEGIN$(.*?)^WITNESS_END$", calls[0], re.S | re.M)
@@ -537,6 +548,16 @@ def _driver_line(run) -> dict:
         if line.startswith("DRIVER "):
             return json.loads(line[len("DRIVER "):])
     raise AssertionError(f"{run['caller']} printed no result line\n{_show_direct(run)}")
+
+
+def _tool_servers(run) -> list[dict]:
+    """The tool server's processes. bwrap's first process names the tool server
+    in its argv too and stays in the CLI's mount namespace, so it is left out."""
+    return [
+        process for process in run["namespaces"]["servers"]["istota"]
+        if any(TOOL_SERVER_MODULE in arg for arg in process["argv"])
+        and os.path.basename(process["argv"][0]) != "bwrap"
+    ]
 
 
 def _envelope(run) -> dict:
@@ -613,6 +634,23 @@ class TestTheDirectCallersToolsCannotReachIt:
         host = run["host"].get("host_netns", "")
         assert host.startswith("net:["), _show_direct(run)
         assert host in run["sections"]["netns"], _show_direct(run)
+
+    @pytest.mark.parametrize(("caller", "mode"), _params("doctor", "ocr", "reviewer"))
+    def test_the_running_tool_server_is_in_a_namespace(self, fake_cli, caller, mode):
+        """The roots answer the same with or without bubblewrap, so this reads
+        the server itself, from outside: its own mount namespace, and the CLI's
+        network namespace, since this path has no `--unshare-net`."""
+        run = _run_direct(fake_cli, caller, mode)
+        report = json.dumps(run["namespaces"])
+        cli = run["namespaces"]["cli"]
+        assert cli["mnt"].startswith("mnt:["), report
+        assert cli["net"].startswith("net:["), report
+        servers = _tool_servers(run)
+        assert servers, report
+        for server in servers:
+            assert server["mnt"].startswith("mnt:["), report
+            assert server["mnt"] != cli["mnt"], report
+            assert server["net"] == cli["net"], report
 
 
 # -- The namespace OCR and the reviewer run in (GitLab #867) ------------------

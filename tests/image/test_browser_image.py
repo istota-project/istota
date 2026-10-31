@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -174,6 +175,14 @@ API_TOKEN = "image-tier-browser-token"
 API_AUTH = f"Authorization: Bearer {API_TOKEN}"
 
 
+#: The compose file's `security_opt` for this service. Chrome's sandbox needs the
+#: seccomp grant, so a container started without it cannot launch Chrome.
+RUN_CONTRACT = [
+    "--security-opt", f"seccomp={REPO / 'docker' / 'istota' / 'seccomp-istota.json'}",
+    "--security-opt", "no-new-privileges:true",
+]
+
+
 def _docker(*argv: str, timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(["docker", *argv], capture_output=True, text=True, timeout=timeout)
 
@@ -191,7 +200,7 @@ def test_the_web_uid_reads_x11vnc_through_the_console_socket(browser_image):
     platform = ["--platform", browser_image.platform] if browser_image.platform else []
     assert _docker("volume", "create", volume).returncode == 0
     started = _docker(
-        "run", "-d", "--rm", "--init", "--shm-size", "1g", *platform,
+        "run", "-d", "--rm", "--init", "--shm-size", "1g", *platform, *RUN_CONTRACT,
         "-e", f"ISTOTA_BROWSER_API_TOKEN={API_TOKEN}",
         "-v", f"{volume}:{CONSOLE_DIR}", browser_image.tag,
     )
@@ -242,6 +251,153 @@ def test_the_web_uid_reads_x11vnc_through_the_console_socket(browser_image):
         if started.returncode == 0:
             _docker("rm", "-f", started.stdout.strip())
         _docker("volume", "rm", "-f", volume)
+
+
+# --- what Chrome's user can reach (#902) ---------------------------------------
+#
+# As compose runs it: the run contract, and the token in a file only uid 10001
+# may read, which a bind from Docker Desktop cannot show, so in a volume. The
+# probe runs as the browser user. Root in `docker exec` has no CAP_SYS_PTRACE
+# and reads no environ, which is how an earlier check here was vacuous.
+
+SECRETS_DIR = "/run/secrets"
+
+
+def _wait_live(container: str) -> None:
+    deadline = time.monotonic() + 180
+    live = None
+    while time.monotonic() < deadline:
+        live = _docker("exec", container, "curl", "-sf", "http://localhost:9224/live", timeout=30)
+        if live.returncode == 0:
+            return
+        time.sleep(2)
+    assert live is not None and live.returncode == 0, _docker("logs", container).stderr[-3000:]
+
+
+@pytest.fixture(scope="session")
+def native_browser_image(pytestconfig):
+    """Native, not `browser_image`'s amd64: emulation has no say in what a sandbox can do."""
+    _require_no_xdist(pytestconfig)
+    dockerfile = REPO / "docker" / "browser" / "Dockerfile"
+    tag = os.environ.get("ISTOTA_BROWSER_NATIVE_IMAGE_TAG")
+    if tag:
+        require_docker()
+        return BuiltImage(tag, dockerfile, "")
+    return build_image(dockerfile, dockerfile.parent, prefix="browser-native")
+
+
+@contextmanager
+def _browser_service(image: str):
+    volume = f"istota-test-browser-secret-{uuid.uuid4().hex[:10]}"
+    secret = f"{SECRETS_DIR}/istota_browser_api_token"
+    assert _docker("volume", "create", volume).returncode == 0
+    seeded = _docker(
+        "run", "--rm", "--entrypoint", "sh", "-v", f"{volume}:{SECRETS_DIR}", image,
+        "-c", f"printf %s {API_TOKEN} > {secret} && chown 10001:10001 {secret} && chmod 0400 {secret}",
+        timeout=120,
+    )
+    assert seeded.returncode == 0, seeded.stderr
+    started = _docker(
+        "run", "-d", "--init", "--shm-size", "1g", *RUN_CONTRACT,
+        "-v", f"{volume}:{SECRETS_DIR}:ro", image,
+    )
+    try:
+        assert started.returncode == 0, started.stderr
+        container = started.stdout.strip()
+        _wait_live(container)
+        yield container
+    finally:
+        if started.returncode == 0:
+            _docker("rm", "-f", started.stdout.strip())
+        _docker("volume", "rm", "-f", volume)
+
+
+def _browse(container: str, user: str) -> None:
+    browsed = _docker(
+        "exec", container, "curl", "-s", "-X", "POST", "http://localhost:9223/browse",
+        "-H", "Content-Type: application/json", "-H", f"X-Istota-User: {user}", "-H", API_AUTH,
+        "-d", json.dumps({"url": "http://localhost:9224/live", "timeout": 60}),
+        timeout=300,
+    )
+    listed = _docker("exec", container, "curl", "-sf", "-H", API_AUTH, "http://localhost:9223/instances")
+    users = [row.get("user") for row in json.loads(listed.stdout or "{}").get("instances", [])]
+    assert user in users, (
+        f"Chrome did not start for {user}: {browsed.stdout[-1000:]}\n{_docker('logs', container).stderr[-3000:]}")
+
+
+def _probe(container: str) -> dict:
+    script = Path(__file__).with_name("browser_uid_probe.py").read_text()
+    result = subprocess.run(
+        ["docker", "exec", "-i", "-u", "browser", container, "python", "-"],
+        input=script, capture_output=True, text=True, timeout=180,
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+@pytest.fixture(scope="module")
+def uid_report(native_browser_image):
+    """One live service and one probe, read by a test per closure, so each goes red alone."""
+    with _browser_service(native_browser_image.tag) as container:
+        _browse(container, "uid-witness")
+        yield _probe(container)
+
+
+def test_the_read_works_on_a_stand_in_holding_a_token(uid_report):
+    """The in-session control: the same read succeeds without the change."""
+    assert uid_report["control_as_shipped_before"] == {"environ": "holds the token", "mem": "holds the token"}
+    assert uid_report["control_non_dumpable"] == {"environ": "PermissionError", "mem": "PermissionError"}
+    assert uid_report["chrome_environ_readable"] is True
+
+
+@pytest.mark.parametrize("read", ["api_environ", "api_mem"])
+def test_chromes_user_cannot_read_the_api_process(uid_report, read):
+    """Negative control for this and the next three, and the sandbox and user-site
+    tests: `scripts/test-image-negative-control.sh browser-uid`, against
+    `docker/test/Dockerfile.browser-uid-unhardened`."""
+    assert uid_report[read] == "PermissionError"
+
+
+def test_no_process_shows_chromes_user_the_token(uid_report):
+    assert uid_report["holders"] == []
+
+
+def test_websockify_serves_chromes_user_no_link_out_of_its_web_root(uid_report):
+    assert uid_report["websockify"]["plain_file"] == 200
+    assert uid_report["websockify"]["link"] != 200
+
+
+def test_chromes_user_cannot_edit_what_the_api_runs(uid_report):
+    assert uid_report["api_source"] == "PermissionError"
+
+
+def test_chromes_user_cannot_read_the_secret_file(uid_report):
+    assert uid_report["secret_file"] == "PermissionError"
+
+
+def test_every_renderer_is_in_chromes_sandbox(uid_report):
+    """Chrome's own report, and the kernel's for each renderer."""
+    assert "Layer 1 Sandbox\tNamespace" in uid_report["chrome_sandbox_page"]
+    assert "Seccomp-BPF sandbox\tYes" in uid_report["chrome_sandbox_page"]
+    assert "You are adequately sandboxed." in uid_report["chrome_sandbox_page"]
+    assert uid_report["renderer_pid_namespaces"]
+    assert min(uid_report["renderer_pid_namespaces"]) >= 2
+
+
+def test_a_user_site_planted_by_chromes_user_does_not_run_at_the_next_start(native_browser_image):
+    """A restart keeps the writable layer, and the restarted API reads the token."""
+    with _browser_service(native_browser_image.tag) as container:
+        plant = _docker(
+            "exec", "-u", "browser", container, "sh", "-c",
+            'site="$(python -m site --user-site)" && mkdir -p "$site" && '
+            'echo "import os; open(\'/tmp/planted-ran\', \'w\').close()" > "$site/planted.pth" && '
+            'python -c "import os; assert os.path.exists(\'/tmp/planted-ran\')" && rm /tmp/planted-ran',
+        )
+        assert plant.returncode == 0, plant.stderr
+        assert _docker("restart", container, timeout=120).returncode == 0
+        _wait_live(container)
+        ran = _docker("exec", container, "test", "-e", "/tmp/planted-ran")
+        assert ran.returncode == 1, "the API's interpreter ran a .pth from the browser user's home"
 
 
 def test_browser_card_checkout(browser_image):
@@ -356,7 +512,7 @@ def test_the_browser_service_starts_on_the_layer(browser_chrome_layer, tmp_path)
     token_file.write_text(API_TOKEN)
     token_file.chmod(0o444)
     started = subprocess.run(
-        ["docker", "run", "-d", "--rm", "--init", "--shm-size", "1g",
+        ["docker", "run", "-d", "--rm", "--init", "--shm-size", "1g", *RUN_CONTRACT,
          "-v", f"{token_file}:/run/secrets/istota_browser_api_token:ro", browser_chrome_layer.tag],
         capture_output=True, text=True, timeout=60,
     )

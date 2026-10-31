@@ -8,6 +8,7 @@ cannot detect an attached debugger.
 
 import atexit
 from contextlib import contextmanager
+import ctypes
 from html import escape
 import json
 import egress_proxy
@@ -19,6 +20,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -4414,7 +4416,23 @@ def _exit_on_sigterm(_signum, _frame):
 
 atexit.register(pool.cleanup)
 
+PR_SET_DUMPABLE = 4
+
+
+def _close_this_process_to_its_own_uid():
+    """Refuse Chrome's user this process's /proc/<pid>/environ and mem, and ptrace.
+
+    Chrome runs as this uid, and popping the token leaves it in the initial
+    environment block. An exec resets the flag, so children are unaffected.
+    """
+    if sys.platform != "linux":
+        return
+    if ctypes.CDLL(None, use_errno=True).prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+        log.error("PR_SET_DUMPABLE failed: errno %d", ctypes.get_errno())
+
+
 if __name__ == "__main__":
+    _close_this_process_to_its_own_uid()
     # Popped before anything starts, so Chrome, Xvfb and x11vnc do not inherit it.
     api_token = os.environ.pop("ISTOTA_BROWSER_API_TOKEN", "").strip()
     if not api_token:

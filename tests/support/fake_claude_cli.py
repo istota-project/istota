@@ -30,6 +30,10 @@ built from an allowlist and carries no variable of ours):
 - `results_file`: a file to write the host probe's output (when there is one)
   and each call's result to, as a JSON list. For a caller that prints no
   result of its own: doctor reads a marker, OCR parses JSON.
+- `namespaces_file`: a file to write, once every server has answered, this
+  process's mount and network namespaces and those of every process in each
+  server's tree, as read from outside it. A link that cannot be read is recorded
+  as `ERROR: ...`, so a refusal cannot look like a namespace.
 
 `{harness_dir}` and `{cli_pid}` in a call's arguments or the host probe are
 replaced with the harness directory, read from the MCP config, and this
@@ -107,6 +111,58 @@ def _plan_path() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "plan.json")
 
 
+def _namespaces(pid) -> dict:
+    links = {}
+    for name in ("mnt", "net"):
+        try:
+            links[name] = os.readlink(f"/proc/{pid}/ns/{name}")
+        except OSError as exc:
+            links[name] = f"ERROR: {exc.strerror}"
+    return links
+
+
+def _process_tree(root: int) -> list[int]:
+    children: dict[int, list[int]] = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat") as fh:
+                # The name in field 2 may hold spaces and parentheses.
+                parent = int(fh.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            continue
+        children.setdefault(parent, []).append(int(entry))
+    tree = []
+    pending = [root]
+    while pending:
+        pid = pending.pop()
+        tree.append(pid)
+        pending.extend(children.get(pid, []))
+    return tree
+
+
+def _describe_process(pid: int) -> dict:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            argv = [part.decode(errors="replace") for part in fh.read().split(b"\0") if part]
+    except OSError:
+        argv = []
+    return {"pid": pid, "argv": argv, **_namespaces(pid)}
+
+
+def _write_namespaces(path: str, servers: list) -> None:
+    report = {
+        "cli": _namespaces("self"),
+        "servers": {
+            mcp.name: [_describe_process(pid) for pid in _process_tree(mcp.proc.pid)]
+            for mcp in servers
+        },
+    }
+    with open(path, "w") as fh:
+        json.dump(report, fh)
+
+
 def _without_mcp(argv: list[str], plan: dict) -> int:
     """A run with no `--mcp-config`: text-only.
 
@@ -168,6 +224,8 @@ def main(argv: list[str]) -> int:
                              "source": "dynamic"})
     for name in plan.get("init_extra_servers", []):
         statuses.append({"name": name, "status": "connected", "source": "dynamic"})
+    if plan.get("namespaces_file"):
+        _write_namespaces(plan["namespaces_file"], servers)
 
     tools += plan.get("init_extra_tools", [])
     tools = [t for t in tools if t not in plan.get("init_drop_tools", [])]
