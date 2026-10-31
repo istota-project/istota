@@ -192,7 +192,7 @@ Quiet senders and over-budget mail keep their order ahead of the hold: that mail
 
 The flag wording stays out of the model's sight. An approved mail runs as a correspondent's turn, and what that turn sees of the question is a neutral "held sender" text with nothing about flags. Telling the model about earlier flags would make the next flag more likely.
 
-You get one prompt per sender per window. Later mail is covered by the held notice, and each held task stays answerable with `!confirm <task-id>`. With `email_confirmation_prompts_per_window = 0` nothing collapses, as for any held mail. The prompt count is in memory, so a restart can cost one extra prompt. The hold is in the database and a restart cannot reset it.
+You get one prompt per sender per window, counted apart from prompts about the same address before it was flagged, so the first flagged mail always prompts. Later mail is covered by the held notice and shows the same explanation in the bell, and each held task stays answerable with `!confirm <task-id>`. With `email_confirmation_prompts_per_window = 0` nothing collapses, as for any held mail. The prompt count is in memory, so a restart can cost one extra prompt. The hold is in the database and a restart cannot reset it.
 
 **Approving and clearing.** Approving runs that one mail and leaves the flags alone, so the next mail is asked about too. The approved turn can flag again. `!flagged` lists addresses with their counts, last flag date, reasons and whether they are held now, and `!unflag <address>` deletes all of an address's flags. Mail already held stays held until you answer it. There is no web control for either, and both refuse in a shared room, since the reply names your correspondents.
 

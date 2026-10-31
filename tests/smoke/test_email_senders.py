@@ -408,7 +408,7 @@ class TestAFlaggedSender:
 
         task = flow.held_task(stack, sent)
         stored = task["confirmation_prompt"] or ""
-        assert stored.startswith(f"Email from held sender {sender.address}\n"), stored
+        assert stored.startswith(f"Email from held sender {address}\n"), stored
         assert "flagged" not in stored
         assert "unflag" not in stored
 
@@ -420,7 +420,7 @@ class TestAFlaggedSender:
             "suspected prompt injection. Reply 'yes' to process it, or 'no' to "
             "discard. Approving runs a turn on it, which can answer the sender and "
             "anyone on its thread, and does not clear the flags, so the next mail "
-            f"is asked about too. Send !unflag {sender.address} to clear them.\n"
+            f"is asked about too. Send !unflag {address} to clear them.\n"
             + answer_line
         )
         flow.assert_outcome(stack, sent, flow.Expected(

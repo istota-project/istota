@@ -50,8 +50,10 @@ class SenderFlagSummary:
 def address_key(sender: str | None) -> str | None:
     """The lowercased addr-spec, or None. No fallback to the raw string, unlike
     ``inbound._sender_key``: an unparseable sender has no address to hold a
-    durable record against."""
-    return (parseaddr(sender or "")[1] or "").strip().lower() or None
+    durable record against. That includes the bare word a mail with no From is
+    filed under, which ``!unflag`` could never name."""
+    key = (parseaddr(sender or "")[1] or "").strip().lower()
+    return key if "@" in key else None
 
 
 def normalize_reason(value: object) -> str:

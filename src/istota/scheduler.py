@@ -8603,9 +8603,15 @@ def _expires_quietly(conn, config: Config, task_info: dict) -> bool:
 
     A flagged sender at the per-sender budget gives one prompt, then one timeout
     notice per mail two hours later. The prompt or the held notice already told
-    the user and nothing new has happened since.
+    the user and nothing new has happened since. A task that ran parked on the
+    model's own question, and that question timing out is news.
     """
     if task_info.get("source_type") != "email":
+        return False
+    ran = conn.execute(
+        "SELECT started_at FROM tasks WHERE id = ?", (task_info["id"],),
+    ).fetchone()
+    if ran is None or ran[0]:
         return False
     mail = db.get_email_for_task(conn, task_info["id"])
     if mail is None:

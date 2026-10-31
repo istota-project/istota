@@ -13,6 +13,8 @@ from istota import confirmations, db
 from istota.config import Config, EmailConfig, SchedulerConfig, UserConfig
 from istota.executor import build_prompt, task_deferred_dir
 from istota.mail import sender_flags
+from istota.notifications import store as notification_store
+from istota.notifications.resolvers import confirmation as confirmation_source
 from istota.notifications.resolvers.confirmation import body_for
 from istota.notifications.resolvers import task_alert
 from istota.notifications.resolvers.task_alert import flatten_body
@@ -91,7 +93,9 @@ class TestAddressKey:
     def test_one_key_per_address(self, raw, expected):
         assert sender_flags.address_key(raw) == expected
 
-    @pytest.mark.parametrize("raw", [None, "", "   ", "<>", "Display Name <>"])
+    @pytest.mark.parametrize(
+        "raw", [None, "", "   ", "<>", "Display Name <>", "unknown"],
+    )
     def test_no_address_has_no_key(self, raw):
         assert sender_flags.address_key(raw) is None
 
@@ -984,6 +988,90 @@ class TestTheHold:
         assert len(_prompts(sent)) == 1
 
 
+def _open_item(config, task_id):
+    """What the bell renders for this task's confirmation row."""
+    with db.get_db(config.db_path) as conn:
+        items, _ = notification_store.list_open(config, conn, "alice")
+    (item,) = [
+        item for item in items
+        if item.source == "confirmation" and item.object_id == str(task_id)
+    ]
+    return item
+
+
+class TestTheBell:
+    def test_a_flagged_hold_explains_itself_in_the_bell(self, make_config):
+        config = _front_desk(make_config)
+        _seed_flags(config)
+        (task_id,), _ = _budget._run_poll(config, _budget.FakeMailbox([1]))
+
+        item = _open_item(config, task_id)
+
+        assert "Held because 3 earlier mails" in item.body
+        assert "can answer the sender and anyone on its thread" in item.body
+        assert f"!unflag {HELD_SENDER}" in item.body
+        assert [action.id for action in item.actions] == ["confirm", "discard"]
+
+    def test_a_collapsed_hold_explains_itself_too(self, make_config):
+        config = _front_desk(make_config)
+        _seed_flags(config)
+        created, sent = _budget._run_poll(config, _budget.FakeMailbox([1, 2]))
+
+        assert len(_prompts(sent)) == 1
+        assert "Held because 3" in _open_item(config, created[1]).body
+
+    def test_an_address_and_the_answer_line_survive_whole(self, make_config):
+        sender = "mallory_x+tag@example.com"
+        config = _front_desk(make_config)
+        _seed_flags(config, sender)
+        (task_id,), _ = _budget._run_poll(
+            config, _budget.FakeMailbox([1], sender=sender),
+        )
+
+        body = _open_item(config, task_id).body
+
+        assert f"!unflag {sender} " in body
+        assert f"!confirm {task_id} no" in body
+        assert f"!unflag {sender} " in _row_body(config, task_id)
+
+    def test_an_ordinary_hold_still_renders_the_question(self, make_config):
+        config = make_config()
+        (task_id,), _ = _budget._run_poll(config, _budget.FakeMailbox([1]))
+
+        body = _open_item(config, task_id).body
+
+        assert "unflag" not in body
+        assert "Email from" in body
+
+    def test_a_flagged_hold_answered_then_parked_renders_the_question(self, make_config):
+        """A park rewrites the same row with no marker, so the bell is the model's."""
+        config = _front_desk(make_config)
+        _seed_flags(config)
+        (task_id,), _ = _budget._run_poll(config, _budget.FakeMailbox([1]))
+        with db.get_db(config.db_path) as conn:
+            db.set_task_confirmation(conn, task_id, "May I reply?")
+            confirmation_source.write(
+                conn, "alice", task_id=task_id, title="t",
+                body=confirmation_source.PARK_BODY,
+            )
+
+        assert "May I reply?" in _open_item(config, task_id).body
+
+
+class TestTheFirstFlaggedPrompt:
+    def test_it_is_not_spent_by_an_ordinary_prompt(self, make_config):
+        config = make_config()
+        mailbox = _budget.FakeMailbox([1])
+        _budget._run_poll(config, mailbox)
+
+        _seed_flags(config)
+        mailbox.uids = [1, 2]
+        _, sent = _budget._run_poll(config, mailbox)
+
+        (prompt,) = _prompts(sent)
+        assert "Held because 3 earlier mails" in prompt
+
+
 class TestTheTwoStrings:
     def _held(self, make_config, mailbox=None):
         config = _front_desk(make_config)
@@ -1166,6 +1254,23 @@ class TestAnExpiredHold:
         assert _confirmation_rows(config, created) == [("resolved", "system")] * 3
         for task_id in created:
             assert f"expired quietly: task {task_id}" in caplog.text
+
+    def test_a_question_the_model_asked_still_notifies(self, make_config):
+        """A park on a task that ran is news, even from a sender now held."""
+        config = _front_desk(make_config)
+        _seed_flags(config)
+        (task_id,), _ = _budget._run_poll(config, _budget.FakeMailbox([1]))
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "UPDATE tasks SET started_at = datetime('now') WHERE id = ?",
+                (task_id,),
+            )
+            db.set_task_confirmation(conn, task_id, "May I reply?")
+
+        notices = _expire(config)
+
+        assert len(notices) == 1
+        assert _expiry_alerts(config) == [task_alert.expired_key(task_id)]
 
     def test_an_unflagged_sender_still_notifies(self, make_config):
         config = make_config()
