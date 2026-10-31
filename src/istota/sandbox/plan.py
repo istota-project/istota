@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Literal
 from . import credential_shim
 from .bind_launcher import FD_PLACEHOLDER
 from .host_paths import linked_resource_parts
-from .user_scope import is_within, scoped_user_dir
+from .user_scope import ROOM_NOTES_WITHHELD, is_within, scoped_user_dir
 
 if TYPE_CHECKING:
     from istota import db
@@ -344,7 +344,7 @@ def user_data_mounts(
         # No `{mount}/Talk`, for any task (ISSUE-880): it is flat and holds
         # every conversation's files. `execute_task` copies the task's own
         # attachments into its control directory instead.
-        if conversation_token:
+        if conversation_token and ROOM_NOTES_WITHHELD not in withheld_scopes:
             channel_dir = mount / "Channels" / conversation_token
             if channel_dir.exists():
                 _rw(channel_dir, "nextcloud_channel_dir", user_data=True)

@@ -10,6 +10,7 @@ import pytest
 
 from istota import db
 from istota.assignments.wakes import SOURCE_TYPE as ASSIGNMENT_SOURCE_TYPE
+from istota.config import Config, UserConfig
 from istota.rooms import egress
 from istota.rooms import scopes as room_scopes
 from istota.skills._loader import load_skill_index
@@ -73,6 +74,14 @@ def _reach(conn, task, *, index=INDEX):
 def _digest(conn, job_id) -> str:
     row = conn.execute("SELECT * FROM scheduled_jobs WHERE id = ?", (job_id,)).fetchone()
     return egress.job_digest(row)
+
+
+def _public_job(conn, name="digest") -> int:
+    """A job that asks for `public`, and whose owner approved that text."""
+    job_id = _job(conn, name)
+    conn.execute("UPDATE scheduled_jobs SET reach = 'public' WHERE id = ?", (job_id,))
+    _grant(conn, f"cron:{name}", f"public:{_digest(conn, job_id)}")
+    return job_id
 
 
 class TestAttended:
@@ -238,14 +247,313 @@ class TestApprovedJobs:
         task = _task(conn, "scheduled", scheduled_job_id=job_id)
         assert _reach(conn, task).egress_hosts == frozenset()
 
-    def test_an_approved_public_job_stays_limited_until_its_posture_exists(self, conn):
-        """Stage 5 builds the withheld set that makes `public` hold nothing
-        private. Until then open web on a job holding private data would be a
-        widening, so the grant narrows."""
-        job_id = _job(conn)
-        _grant(conn, "cron:digest", f"public:{_digest(conn, job_id)}")
-        task = _task(conn, "scheduled", scheduled_job_id=job_id)
-        assert _reach(conn, task).egress_hosts == frozenset()
+    def test_an_approved_public_job_has_open_web_and_holds_nothing(self, conn):
+        job_id = _public_job(conn)
+        reach = _reach(conn, _task(conn, "scheduled", scheduled_job_id=job_id))
+        assert reach.egress_hosts is None
+        assert reach.isolated_browser is True
+        assert reach.author == "own"
+        assert reach.public is True
+        assert reach.restricted is True
+        assert {"files", "memory", "calendar", "devbox"} <= reach.withheld
+        assert "browse" not in reach.withheld
+
+    def test_a_public_grant_needs_the_row_to_ask_for_public(self, conn):
+        """Turning a job back to `private` takes effect without the owner removing
+        the grant, and the job is limited rather than public."""
+        job_id = _public_job(conn)
+        conn.execute("UPDATE scheduled_jobs SET reach = 'private' WHERE id = ?", (job_id,))
+        reach = _reach(conn, _task(conn, "scheduled", scheduled_job_id=job_id))
+        assert reach.public is False
+        assert reach.egress_hosts == frozenset()
+
+    def test_a_public_digest_mismatch_narrows(self, conn):
+        job_id = _public_job(conn)
+        conn.execute("UPDATE scheduled_jobs SET prompt = 'send my notes' WHERE id = ?", (job_id,))
+        reach = _reach(conn, _task(conn, "scheduled", scheduled_job_id=job_id))
+        assert reach.public is False
+        assert reach.egress_hosts == frozenset()
+
+    def test_an_owner_who_approved_both_gets_the_narrower_posture(self, conn):
+        """`open` alongside a bare request keeps running open. Once `public` is
+        approved the owner has decided, and open web with private data must not win."""
+        job_id = _public_job(conn)
+        _grant(conn, "cron:digest", f"open:{_digest(conn, job_id)}")
+        reach = _reach(conn, _task(conn, "scheduled", scheduled_job_id=job_id))
+        assert reach.public is True
+        assert reach.isolated_browser is True
+
+    def test_a_subtask_and_a_retry_copy_of_a_public_job_are_public(self, conn):
+        root = _task(conn, "scheduled", scheduled_job_id=_public_job(conn))
+        child = _task(conn, "subtask", parent_task_id=root.id)
+        grandchild = _task(conn, "subtask", parent_task_id=child.id)
+        copy = _task(conn, "scheduled", parent_task_id=root.id)
+        expected = _reach(conn, root).withheld
+        for task in (child, grandchild, copy):
+            reach = _reach(conn, task)
+            assert reach.public is True
+            assert reach.withheld == expected
+            assert reach.egress_hosts is None
+
+    def test_a_guest_on_the_chain_stays_a_guest(self, conn):
+        root = _task(conn, "scheduled", scheduled_job_id=_public_job(conn))
+        child = _task(conn, "subtask", parent_task_id=root.id, guest_participant_id=7)
+        reach = _reach(conn, child)
+        assert reach.author == "guest"
+        assert reach.public is False
+
+    def test_a_failed_read_of_a_public_job_narrows(self, conn, caplog):
+        task = _task(conn, "scheduled", scheduled_job_id=_public_job(conn))
+        conn.execute("DROP TABLE egress_grants")
+        with caplog.at_level("WARNING", logger="istota.rooms.scopes"):
+            reach = _reach(conn, task)
+        assert reach.public is False
+        assert reach.egress_hosts == frozenset()
+
+    def test_the_shipped_index_keeps_only_the_three_kept_skills(self, conn):
+        index = load_skill_index(NO_OPERATOR_SKILLS)
+        reach = _reach(conn, _task(conn, "scheduled", scheduled_job_id=_public_job(conn)), index=index)
+        assert set(index) - reach.withheld == room_scopes.PUBLIC_KEPT_SKILLS
+        assert room_scopes.PUBLIC_KEPT_SKILLS == {"browse", "skills", "untrusted_input"}
+
+    def test_the_wallet_gate_sees_a_public_job_as_withholding(self, conn):
+        task = _task(conn, "scheduled", scheduled_job_id=_public_job(conn))
+        assert room_scopes.withheld_for_task(conn, task, skill_index={})
+
+
+SENTINEL = "PUBLIC-JOB-CANARY-7731"
+ROOM = "roompublic1"
+
+
+class TestPublicExecution:
+    """What `execute_task` and the seams beside it do with the public reach."""
+
+    @pytest.fixture
+    def config(self, tmp_path, monkeypatch):
+        from istota import executor
+
+        monkeypatch.setattr(executor, "effective_sandboxing", lambda cfg: True)
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        cfg = Config(
+            db_path=tmp_path / "app.db", temp_dir=tmp_path / "temp", workspace_path=mount,
+            users={USER: UserConfig(timezone="UTC")},
+        )
+        cfg.browser.enabled = True
+        cfg.security.network.enabled = True
+        cfg.security.skill_proxy_enabled = True
+        db.init_db(cfg.db_path)
+        return cfg
+
+    @pytest.fixture
+    def db_conn(self, config):
+        with db.get_db(config.db_path) as c:
+            yield c
+
+    def _private_material(self, config):
+        user_md = config.workspace_path / "Users" / USER / config.bot_dir_name / "config" / "USER.md"
+        user_md.parent.mkdir(parents=True)
+        user_md.write_text(f"# Memory\n\nusermd {SENTINEL}\n")
+        channel = config.workspace_path / "Channels" / ROOM
+        channel.mkdir(parents=True)
+        (channel / "CHANNEL.md").write_text(f"# Notes\n\nchannelmd {SENTINEL}\n")
+        return channel
+
+    def _scheduled(self, conn, job_id):
+        task = _task(conn, "scheduled", scheduled_job_id=job_id, conversation_token=ROOM)
+        conn.commit()
+        return task
+
+    def test_the_prompt_holds_no_private_material(self, config, db_conn, caplog):
+        from istota import executor
+
+        self._private_material(config)
+        task = self._scheduled(db_conn, _public_job(db_conn))
+        resource = db.UserResource(
+            id=1, user_id=USER, resource_type="folder",
+            resource_path=f"/Users/{USER}/{SENTINEL}", display_name=SENTINEL, permissions="read",
+        )
+        with caplog.at_level("INFO", logger="istota.executor"):
+            ok, text, *_ = executor.execute_task(task, config, [resource], dry_run=True)
+        assert ok, text
+        assert SENTINEL not in text
+        assert "use_context=False" in caplog.text
+
+    def test_control_a_limited_job_still_holds_them(self, config, db_conn):
+        from istota import executor
+
+        self._private_material(config)
+        task = self._scheduled(db_conn, _job(db_conn))
+        ok, text, *_ = executor.execute_task(task, config, [], dry_run=True)
+        assert ok, text
+        assert f"usermd {SENTINEL}" in text
+        assert f"channelmd {SENTINEL}" in text
+
+    def test_no_group_is_read_even_if_the_row_moved_after_the_reach(self, config, db_conn, monkeypatch):
+        """The reach is the one answer: a sync landing mid-task must not leave a
+        public reach holding group material."""
+        from istota import executor
+
+        task = self._scheduled(db_conn, _public_job(db_conn))
+        monkeypatch.setattr(
+            executor, "_resolve_task_groups",
+            lambda *a, **k: pytest.fail("a public job read its groups"),
+        )
+        ok, text, *_ = executor.execute_task(task, config, [], dry_run=True)
+        assert ok, text
+
+    @pytest.mark.parametrize("capability", ["sandbox", "browser", "network", "skill_proxy"])
+    def test_a_missing_capability_fails_the_task(self, config, db_conn, monkeypatch, capability):
+        from unittest.mock import Mock
+
+        from istota import executor
+
+        monkeypatch.setattr(executor, "make_brain", Mock(side_effect=AssertionError("refused first")))
+        self._break(config, monkeypatch, capability)
+        task = self._scheduled(db_conn, _public_job(db_conn))
+        ok, text, *_ = executor.execute_task(task, config, [])
+        assert (ok, text) == (False, f"briefing_research_{capability}_unavailable")
+
+    def _break(self, config, monkeypatch, capability):
+        from istota import executor
+
+        if capability == "sandbox":
+            monkeypatch.setattr(executor, "effective_sandboxing", lambda cfg: False)
+        elif capability == "browser":
+            config.browser.enabled = False
+        elif capability == "network":
+            config.security.network.enabled = False
+        else:
+            config.security.skill_proxy_enabled = False
+
+    def test_control_a_limited_job_needs_none_of_them(self, config, db_conn):
+        from istota import executor
+
+        config.browser.enabled = False
+        task = self._scheduled(db_conn, _job(db_conn))
+        ok, text, *_ = executor.execute_task(task, config, [], dry_run=True)
+        assert ok, text
+
+    def test_the_rooms_notes_are_not_bound(self, config, db_conn):
+        from istota.sandbox.plan import user_data_mounts
+
+        channel = self._private_material(config)
+        public = _reach(db_conn, self._scheduled(db_conn, _public_job(db_conn)))
+        limited = _reach(db_conn, self._scheduled(db_conn, _job(db_conn, "other")))
+
+        def sources(reach):
+            return [
+                str(mount.source) for mount in user_data_mounts(
+                    config, user_id=USER, conversation_token=ROOM, user_resources=[],
+                    withheld_scopes=reach.withheld, group_ids=[],
+                )
+            ]
+
+        assert str(channel) not in sources(public)
+        assert str(channel) in sources(limited)
+
+    def test_a_skill_cli_loses_the_room_root(self, config, db_conn, monkeypatch, tmp_path):
+        from istota.sandbox import host_paths
+
+        channel = self._private_material(config)
+        reach = _reach(db_conn, self._scheduled(db_conn, _public_job(db_conn)))
+        monkeypatch.setenv("ISTOTA_USER_ID", USER)
+        monkeypatch.setenv("ISTOTA_WORKSPACE_PATH", str(config.workspace_path))
+        monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", ROOM)
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(tmp_path))
+        monkeypatch.setenv(host_paths.WITHHELD_SCOPES_VAR, ",".join(sorted(reach.withheld)))
+        roots = [str(root) for root in host_paths.env_host_roots()]
+        assert not any(str(channel) in root or str(channel.resolve()) in root for root in roots)
+        monkeypatch.delenv(host_paths.WITHHELD_SCOPES_VAR)
+        roots = [str(root) for root in host_paths.env_host_roots()]
+        assert any(str(channel.resolve()) in root or str(channel) in root for root in roots)
+
+    def test_the_drain_replays_subtasks_and_nothing_else(self, config, db_conn, monkeypatch):
+        import json
+
+        from istota.executor import task_temp_dir
+        from istota.scheduler import _drain_deferred_ops
+
+        monkeypatch.setattr(type(config), "is_admin", lambda self, user_id: True)
+        task = self._scheduled(db_conn, _public_job(db_conn))
+        directory = task_temp_dir(config, task, restricted=True)
+        directory.mkdir(parents=True)
+        (directory / f"task_{task.id}_subtasks.json").write_text(
+            json.dumps([{"prompt": "read another page"}]),
+        )
+        (directory / f"task_{task.id}_kv_ops.json").write_text(json.dumps(
+            [{"op": "set", "namespace": "planted", "key": "k", "value": SENTINEL}],
+        ))
+        db_conn.commit()
+        _drain_deferred_ops(config, task, "done")
+        assert not (directory / f"task_{task.id}_kv_ops.json").exists()
+        assert db_conn.execute(
+            "SELECT COUNT(*) FROM istota_kv WHERE value LIKE ?", (f"%{SENTINEL}%",),
+        ).fetchone()[0] == 0
+        rows = db_conn.execute(
+            "SELECT id FROM tasks WHERE parent_task_id = ?", (task.id,),
+        ).fetchall()
+        assert len(rows) == 1
+        child = db.get_task(db_conn, rows[0]["id"])
+        assert _reach(db_conn, child).public is True
+
+    def test_control_a_limited_jobs_drain_replays_its_kv_ops(self, config, db_conn):
+        import json
+
+        from istota.executor import task_temp_dir
+        from istota.scheduler import _drain_deferred_ops
+
+        task = self._scheduled(db_conn, _job(db_conn))
+        directory = task_temp_dir(config, task)
+        directory.mkdir(parents=True)
+        (directory / f"task_{task.id}_kv_ops.json").write_text(json.dumps(
+            [{"op": "set", "namespace": "planted", "key": "k", "value": SENTINEL}],
+        ))
+        db_conn.commit()
+        _drain_deferred_ops(config, task, "done")
+        assert db_conn.execute(
+            "SELECT COUNT(*) FROM istota_kv WHERE value LIKE ?", (f"%{SENTINEL}%",),
+        ).fetchone()[0] == 1
+
+    def test_a_command_job_takes_the_capability_check(self, config, db_conn, monkeypatch, tmp_path):
+        from istota import executor
+        from istota.sandbox.confined_command import run_confined_command
+
+        monkeypatch.setattr(executor, "effective_sandboxing", lambda cfg: False)
+        task = self._scheduled(db_conn, _public_job(db_conn))
+        with pytest.raises(RuntimeError, match="briefing_research_sandbox_unavailable"):
+            run_confined_command(config, task, "true", timeout=5, control_dir=tmp_path)
+
+    def test_a_command_job_gets_no_resources_groups_or_calendars(
+        self, config, db_conn, monkeypatch, tmp_path,
+    ):
+        from istota import executor
+        from istota.sandbox import confined_command, task_env
+        from istota.workspace import places
+
+        task = self._scheduled(db_conn, _public_job(db_conn))
+        monkeypatch.setattr(places, "user_resources_for", lambda *a, **k: pytest.fail("read resources"))
+        monkeypatch.setattr(executor, "_resolve_task_groups", lambda *a, **k: pytest.fail("read groups"))
+        seen = {}
+
+        class Stop(Exception):
+            pass
+
+        def runtime(*args, **kwargs):
+            seen.update(kwargs)
+            raise Stop
+
+        monkeypatch.setattr(task_env, "build_task_runtime", runtime)
+        with pytest.raises(Stop):
+            confined_command.run_confined_command(
+                config, task, "true", timeout=5, control_dir=tmp_path,
+                discovered_calendars=[object()],
+            )
+        assert seen["user_resources"] == []
+        assert seen["group_ids"] == []
+        assert seen["discovered_calendars"] == []
+        assert seen["restricted"] is True
+        assert seen["egress_hosts"] is None
 
 
 class TestReadFailures:
@@ -427,6 +735,106 @@ class TestASkillJobWithNoProxy:
         conn.commit()
         _ok, message = self._run(task, tmp_path, make_config)
         assert not message.startswith("egress_not_approved")
+
+
+class TestAPublicSkillJob:
+    """A public grant on a `skill:` job has no proxy either, so the withheld set is
+    checked in `_execute_skill_task` and the proxy's env is set there."""
+
+    @pytest.fixture
+    def config(self, tmp_path, monkeypatch):
+        from istota import executor, scheduler
+
+        monkeypatch.setattr(executor, "effective_sandboxing", lambda cfg: True)
+        monkeypatch.setattr(scheduler, "discover_calendars_for_task", lambda *a, **k: [])
+        cfg = Config(db_path=tmp_path / "istota.db", temp_dir=tmp_path / "temp")
+        cfg.browser.enabled = True
+        cfg.security.network.enabled = True
+        cfg.security.skill_proxy_enabled = True
+        return cfg
+
+    @pytest.fixture
+    def env_of_the_run(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from istota import scheduler
+
+        seen = {}
+
+        def run(cmd, **kwargs):
+            seen.update(kwargs["env"])
+            seen["cmd"] = cmd
+            return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+
+        monkeypatch.setattr(scheduler, "_run_capture", run)
+        return seen
+
+    def _skill_task(self, conn, job_id, skill):
+        task = _task(conn, "scheduled", scheduled_job_id=job_id, skill=skill, skill_args="[]")
+        conn.commit()
+        return task
+
+    def test_a_withheld_skill_is_refused_and_asks_for_nothing(self, conn, config, env_of_the_run):
+        from istota.scheduler import _execute_skill_task
+
+        job_id = _public_job(conn)
+        ok, message = _execute_skill_task(self._skill_task(conn, job_id, "calendar"), config)
+        assert ok is False
+        assert message.startswith("public_job_skill_withheld")
+        assert "cmd" not in env_of_the_run
+        assert egress.list_refused(conn, USER, "cron:digest") == []
+
+    def test_an_external_skill_is_refused_the_same_way(self, conn, config, env_of_the_run):
+        from istota.scheduler import _execute_skill_task
+
+        job_id = _public_job(conn)
+        ok, message = _execute_skill_task(self._skill_task(conn, job_id, "devbox"), config)
+        assert ok is False
+        assert message.startswith("public_job_skill_withheld")
+
+    def test_a_kept_skill_runs_on_the_isolated_profile(self, conn, config, env_of_the_run):
+        from istota.browser.owner import BROWSER_PROFILE_VAR, ISOLATED_PROFILE
+        from istota.sandbox.host_paths import WITHHELD_SCOPES_VAR
+        from istota.scheduler import _execute_skill_task
+
+        job_id = _public_job(conn)
+        ok, _ = _execute_skill_task(self._skill_task(conn, job_id, "browse"), config)
+        assert ok is True
+        assert env_of_the_run[BROWSER_PROFILE_VAR] == ISOLATED_PROFILE
+        assert "files" in env_of_the_run[WITHHELD_SCOPES_VAR].split(",")
+        assert "ISTOTA_EGRESS_LIMITED" not in env_of_the_run
+
+    def test_a_missing_capability_fails_it(self, conn, config, env_of_the_run):
+        from istota.scheduler import _execute_skill_task
+
+        config.browser.enabled = False
+        job_id = _public_job(conn)
+        ok, message = _execute_skill_task(self._skill_task(conn, job_id, "browse"), config)
+        assert (ok, message) == (False, "briefing_research_browser_unavailable")
+        assert "cmd" not in env_of_the_run
+
+    def test_a_limited_jobs_browse_grant_is_on_the_isolated_profile(self, conn, config, env_of_the_run):
+        from istota.browser.owner import BROWSER_PROFILE_VAR, ISOLATED_PROFILE
+        from istota.scheduler import _execute_skill_task
+
+        job_id = _job(conn)
+        _grant(conn, "cron:digest", "skill:browse", skill_index=load_skill_index(NO_OPERATOR_SKILLS))
+        ok, _ = _execute_skill_task(self._skill_task(conn, job_id, "browse"), config)
+        assert ok is True
+        assert env_of_the_run[BROWSER_PROFILE_VAR] == ISOLATED_PROFILE
+
+    def test_control_an_open_job_keeps_its_users_profile(self, conn, config, env_of_the_run):
+        from istota.browser.owner import BROWSER_PROFILE_VAR
+        from istota.sandbox.host_paths import WITHHELD_SCOPES_VAR
+        from istota.scheduler import _execute_skill_task
+
+        job_id = _job(conn)
+        _grant(conn, "cron:digest", f"open:{_digest(conn, job_id)}")
+        config.browser.enabled = False
+        ok, _ = _execute_skill_task(self._skill_task(conn, job_id, "calendar"), config)
+        assert ok is True
+        assert env_of_the_run[BROWSER_PROFILE_VAR] == USER
+        assert WITHHELD_SCOPES_VAR not in env_of_the_run
 
 
 class TestTheSubjectOfATask:

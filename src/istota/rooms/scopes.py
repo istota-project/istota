@@ -48,6 +48,7 @@ from typing import Literal
 from istota import db
 from istota.browser.owner import BRIEFINGS_IDENTITY
 from istota.rooms import egress
+from istota.sandbox.user_scope import ROOM_NOTES_WITHHELD
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,10 @@ class Reach:
     #: The part of `withheld` that is there only because this task is limited to
     #: those hosts: each `external` skill with no `skill:` grant.
     egress_withheld: frozenset[str] = frozenset()
+    #: An approved public job, or a subtask or `!retry` copy of one: the research
+    #: posture on the job's own identity and room. It holds nothing private, which
+    #: is why `egress_hosts` is None.
+    public: bool = False
 
     @property
     def restricted(self) -> bool:
@@ -125,6 +130,10 @@ class Reach:
 #: Research tasks run as `__briefings__` behind the executor's research gate:
 #: a group edition's research, and an agent shared block's whole run.
 BRIEFING_RESEARCH_SOURCE_TYPES = frozenset({"group_briefing_research", "shared_block_research"})
+
+#: All research and a public job keep. `browse` is what they are for, `skills` opens
+#: its body and `untrusted_input` is its companion.
+PUBLIC_KEPT_SKILLS = frozenset({"browse", "skills", "untrusted_input"})
 
 
 #: Off the menu and off the proxy in an incognito room (ISSUE-892), and their
@@ -238,7 +247,9 @@ def reach_for_task(
 
     An own task that is unattended and holds private data is limited as well
     (`_egress_for`): `egress_hosts` is what its owner approved, and each `external`
-    skill with no `skill:` grant joins the set (`Reach.egress_withheld`).
+    skill with no `skill:` grant joins the set (`Reach.egress_withheld`). A job its
+    owner approved as public has open web and holds nothing (`Reach.public`), asked
+    first, so an owner who has approved both `public` and `open` gets the narrower.
 
     ``conn`` is ``None`` for a database that does not exist, which holds no
     room. ``own_addresses`` is `turn_author`'s, and the default can only misread
@@ -247,8 +258,7 @@ def reach_for_task(
     memory.
     """
     if is_briefing_research(task):
-        withheld = frozenset(set(skill_index) - {"browse", "skills", "untrusted_input"})
-        return Reach(withheld | frozenset(SYNTHETIC_SCOPES), "own")
+        return Reach(_public_withheld(skill_index), "own")
     if task.guest_participant_id is not None:
         return Reach(all_scopes(skill_index), "guest")
     try:
@@ -264,6 +274,10 @@ def reach_for_task(
     if author == "correspondent":
         allowance = correspondent_scopes(conn, task.user_id, skill_index=skill_index)
         return Reach(all_scopes(skill_index) - allowance.scopes, author, allowance)
+    if _public_job_approved(conn, task):
+        return Reach(
+            _public_withheld(skill_index) | {ROOM_NOTES_WITHHELD}, "own", public=True,
+        )
     withheld = _withheld_from_own_task(conn, task, skill_index)
     egress_hosts, granted_skills = _egress_for(conn, task)
     if egress_hosts is None:
@@ -273,6 +287,28 @@ def reach_for_task(
         withheld | egress_withheld, "own", isolated_browser=True,
         egress_hosts=egress_hosts, egress_withheld=egress_withheld,
     )
+
+
+def _public_withheld(skill_index: Mapping[str, object]) -> frozenset[str]:
+    return frozenset(set(skill_index) - PUBLIC_KEPT_SKILLS) | frozenset(SYNTHETIC_SCOPES)
+
+
+def is_public_job(conn: sqlite3.Connection, task: "db.Task") -> bool:
+    """Whether this task's root is an approved public job. Raises what the reads
+    raise; each caller chooses its failure direction."""
+    return egress.public_job_approved(conn, _root_of(conn, task))
+
+
+def _public_job_approved(conn: sqlite3.Connection | None, task: "db.Task") -> bool:
+    """`is_public_job`, where a failure narrows: the task falls through to
+    `_egress_for`, which limits it."""
+    if conn is None:
+        return False
+    try:
+        return is_public_job(conn, task)
+    except Exception as exc:  # noqa: BLE001 — a read failure narrows
+        logger.warning("egress_decide_failed task=%s: %s", task.id, type(exc).__name__)
+        return False
 
 
 def _external_skills(skill_index: Mapping[str, object]) -> frozenset[str]:
@@ -299,9 +335,8 @@ def _egress_for(
     """Where an own task may send bytes: ``(hosts, granted skills)``, with None
     hosts for any public host. A subtask or `!retry` copy has its root's answer.
 
-    `public:` grants do not open anything yet: the job would hold private data
-    until the public posture is built (the spec's Stage 5). Reading the grants
-    can fail only toward the empty set.
+    `reach_for_task` has already asked about a public job, whose posture is more
+    than an answer here. Reading the grants can fail only toward the empty set.
     """
     if conn is None:
         return frozenset(), frozenset()
@@ -729,6 +764,8 @@ def task_group_ids(
     if is_briefing_research(task) or task.guest_participant_id is not None or task.audience == "mixed":
         return []
     if turn_author(conn, task, own_addresses=own_addresses) != "own":
+        return []
+    if is_public_job(conn, task):
         return []
     groups = db.list_user_groups(conn, task.user_id)
     automatic = {g for g in groups if db.get_group(conn, g)["system_key"] == "all_users"}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -83,6 +84,48 @@ def test_briefing_research_has_no_ambient_memory_or_groups(conn, make_task):
     task = make_task(user_id="__briefings__", source_type="group_briefing_research")
     assert room_scopes.ambient_memory_off(conn, task)
     assert room_scopes.task_group_ids(conn, task) == []
+
+
+def _public_task(conn, make_task):
+    """A scheduled task on a job whose owner approved it as public."""
+    from istota.rooms import egress
+
+    job_id = conn.execute(
+        "INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, reach) "
+        "VALUES ('alice', 'digest', '0 9 * * *', 'read the news', 'public')",
+    ).lastrowid
+    row = conn.execute("SELECT * FROM scheduled_jobs WHERE id = ?", (job_id,)).fetchone()
+    egress.add_grant(conn, "alice", "cron:digest", f"public:{egress.job_digest(row)}", decided_via="cli")
+    task_id = db.create_task(
+        conn, prompt="p", user_id="alice", source_type="scheduled", scheduled_job_id=job_id,
+    )
+    return db.get_task(conn, task_id)
+
+
+def test_a_public_job_withholds_what_research_does_and_the_rooms_notes(conn, make_task):
+    index = _index(browse="private", skills="safe", untrusted_input="safe",
+                   calendar="private", developer="private", tasks="safe",
+                   email="private")
+    research = make_task(user_id="__briefings__", source_type="group_briefing_research")
+    public = room_scopes.reach_for_task(conn, _public_task(conn, make_task), skill_index=index)
+    expected = room_scopes.withheld_for_task(None, research, skill_index=index)
+    assert public.withheld == expected | {room_scopes.ROOM_NOTES_WITHHELD}
+    assert public.egress_withheld == frozenset()
+
+
+def test_a_public_job_and_its_subtask_have_no_groups(conn, make_task):
+    task = _public_task(conn, make_task)
+    child = db.get_task(conn, db.create_task(
+        conn, prompt="c", user_id="alice", source_type="subtask", parent_task_id=task.id,
+    ))
+    with patch.object(db, "list_user_groups", return_value=["fam"]), \
+            patch.object(db, "get_group", return_value={"system_key": None}):
+        assert room_scopes.task_group_ids(conn, task) == []
+        assert room_scopes.task_group_ids(conn, child) == []
+        limited = db.get_task(conn, db.create_task(
+            conn, prompt="l", user_id="alice", source_type="scheduled",
+        ))
+        assert room_scopes.task_group_ids(conn, limited) == ["fam"]
 
 
 def _job(conn, user_id: str, token: str) -> int:

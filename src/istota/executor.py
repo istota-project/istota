@@ -8437,6 +8437,23 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
 REPLY_QUOTE_LABEL = "QUOTED MESSAGE"
 
 
+def public_posture_refusal(config: Config) -> str | None:
+    """Why a task with open web and no private data may not run here, or None.
+
+    Research and a public job hold nothing private only because the sandbox, the
+    network proxy and the skill proxy make that true, and they exist to browse.
+    """
+    for capability, enabled in (
+        ("sandbox", effective_sandboxing(config)),
+        ("network", config.security.network.enabled),
+        ("skill_proxy", config.security.skill_proxy_enabled),
+        ("browser", config.browser.enabled),
+    ):
+        if not enabled:
+            return f"briefing_research_{capability}_unavailable"
+    return None
+
+
 def _task_reach(
     config: Config,
     conn: "db.sqlite3.Connection | None",
@@ -8662,22 +8679,20 @@ def execute_task(
                 or task.conversation_token or task.attachments or workspace_dir is not None
                 or config.get_user(BRIEFINGS_IDENTITY) is not None):
             return False, "briefing_research_identity_refused", None, None
-        for capability, enabled in (
-            ("sandbox", effective_sandboxing(config)),
-            ("network", config.security.network.enabled),
-            ("skill_proxy", config.security.skill_proxy_enabled),
-            ("browser", config.browser.enabled),
-        ):
-            if not enabled:
-                return False, f"briefing_research_{capability}_unavailable", None, None
-        use_context = False
-        user_resources = []
 
     skill_index = load_skill_index(
         config.skills_dir, bundled_dir=config.bundled_skills_dir,
     )
     _reach = _task_reach(config, conn, task, skill_index)
     _withheld = _reach.withheld
+
+    _holds_nothing = research or _reach.public
+    if _holds_nothing:
+        refusal = public_posture_refusal(config)
+        if refusal is not None:
+            return False, refusal, None, None
+        use_context = False
+        user_resources = []
 
     # Ensure the task's temp directory exists: the per-user one, or a
     # restricted task's own directory inside it.
@@ -8735,7 +8750,7 @@ def execute_task(
     from .workspace.places import user_resources_for
 
     user_config = config.get_user(task.user_id)
-    user_resources = [] if research else user_resources_for(config, conn, task.user_id, resources=user_resources)
+    user_resources = [] if _holds_nothing else user_resources_for(config, conn, task.user_id, resources=user_resources)
 
     # Briefing tasks defer their prompt build to here (ISSUE-143): building a
     # briefing prompt does slow network I/O (news, yfinance, FinViz, IMAP).
@@ -9192,13 +9207,15 @@ def execute_task(
     # the sender's own memory and group material has its own audience rule.
     group_memory = None
     task_group_ids: list[str] = []
-    if not any(m.exclude_memory for m in _selected_metas):
+    # The reach, not a second read: a sync landing mid-task cannot put group
+    # material in front of a task already holding open web.
+    if not any(m.exclude_memory for m in _selected_metas) and not _reach.public:
         task_group_ids = _resolve_task_groups(config, task, conn)
         group_memory = _load_group_memory(config, conn, task_group_ids)
 
     # Load channel memory if in a conversation
     channel_memory = None
-    if task.conversation_token:
+    if task.conversation_token and not _reach.public:
         try:
             channel_memory = read_channel_memory(config, task.conversation_token)
             if channel_memory is None:

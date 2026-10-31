@@ -80,6 +80,7 @@ def run_confined_command(
         _resolve_task_groups,
         _task_reach,
         build_bwrap_cmd,
+        public_posture_refusal,
         record_egress_refusals,
         task_temp_dir,
     )
@@ -94,6 +95,11 @@ def run_confined_command(
     )
     reach = _task_reach(config, None, task, skill_index)
     withheld = reach.withheld
+    if reach.public:
+        refusal = public_posture_refusal(config)
+        if refusal is not None:
+            raise RuntimeError(refusal)
+        discovered_calendars = []
     from_reach = egress_hosts is FROM_TASK_REACH
     limit = reach.egress_hosts if from_reach else egress_hosts
     egress_log = control_dir / REFUSED_LOG_NAME if from_reach else None
@@ -104,9 +110,12 @@ def run_confined_command(
         raise OSError(f"task temp directory {temp_dir} is a symlink")
     temp_dir.mkdir(parents=True, exist_ok=True)
 
-    with _db.get_db_if_present(config.db_path) as conn:
-        user_resources = user_resources_for(config, conn, task.user_id)
-    group_ids = _resolve_task_groups(config, task, None)
+    user_resources: list = []
+    group_ids: list[str] = []
+    if not reach.public:
+        with _db.get_db_if_present(config.db_path) as conn:
+            user_resources = user_resources_for(config, conn, task.user_id)
+        group_ids = _resolve_task_groups(config, task, None)
     is_admin = config.is_admin(task.user_id)
 
     runtime = task_env.build_task_runtime(

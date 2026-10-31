@@ -141,7 +141,7 @@ def _job_row(conn: sqlite3.Connection, task: "db.Task") -> sqlite3.Row | None:
     if task.source_type != "scheduled" or task.scheduled_job_id is None:
         return None
     return conn.execute(
-        "SELECT name, prompt, command, skill, skill_args FROM scheduled_jobs "
+        "SELECT name, reach, prompt, command, skill, skill_args FROM scheduled_jobs "
         "WHERE id = ? AND user_id = ?",
         (task.scheduled_job_id, task.user_id),
     ).fetchone()
@@ -209,7 +209,22 @@ def job_approved(conn: sqlite3.Connection, root: "db.Task", kind: str) -> bool:
     """Whether this scheduled root's job, as its row reads now, has an approved
     `open:` or `public:` for that exact text. A digest that moved answers False,
     so a race with the sync cannot widen anything."""
+    return _row_approved(conn, root, _job_row(conn, root), kind)
+
+
+def public_job_approved(conn: sqlite3.Connection, root: "db.Task") -> bool:
+    """Whether this root's job runs public: its row asks for it now and its exact
+    text is approved. Turning the job back to `private` takes effect without the
+    owner removing the grant."""
     row = _job_row(conn, root)
+    if row is None or row["reach"] != "public":
+        return False
+    return _row_approved(conn, root, row, "public")
+
+
+def _row_approved(
+    conn: sqlite3.Connection, root: "db.Task", row: sqlite3.Row | None, kind: str,
+) -> bool:
     if row is None:
         return False
     grants = grants_for(conn, root.user_id, cron_subject(row["name"]))
