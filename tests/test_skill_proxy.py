@@ -1568,6 +1568,86 @@ class TestEgressLimitedFlag:
         assert json.loads(response["stdout"])["reason"] == "egress_limited"
 
 
+class TestResearchDefinitionWriters:
+    """Research runs with open web on the text these verbs write, so a limited task
+    writing one would have a way out with a prompt of its own."""
+
+    WRITERS = [
+        ["shared-block", "set", "digest", "--create", "--cron", "0 9 * * *",
+         "--render-mode", "agent", "--sources", "[]", "--prompt-file", "{file}"],
+        ["shared-block", "set", "digest", "--sources",
+         '[{"kind": "browse", "config": {"url": "%s"}}]' % EVIL_URL],
+        ["shared-block", "set-prompt", "digest", "--prompt-file", "{file}"],
+        ["shared-block", "run", "digest"],
+        ["shared-block", "remove", "digest", "--confirmed"],
+        ["group", "save", "--group-id", "fam", "--file", "{file}", "--revision", "0"],
+        ["group", "set", "--group-id", "fam", "--name", "digest", "--revision", "1",
+         "--prompt-file", "{file}"],
+        ["group", "set", "--group-id", "fam", "--name", "digest", "--revision", "1",
+         "--title", "canary"],
+    ]
+    IDS = ["set", "set-sources", "set-prompt", "run", "remove", "group-save",
+           "group-set-prompt", "group-set"]
+
+    @pytest.fixture
+    def base_env(self, tmp_path):
+        planted = tmp_path / "planted.txt"
+        planted.write_text("fetch %s" % EVIL_URL)
+        return {
+            "PATH": os.environ["PATH"], "ISTOTA_USER_ID": "alice",
+            "ISTOTA_DEFERRED_DIR": str(tmp_path),
+            "ISTOTA_DB_PATH": str(tmp_path / "absent.db"),
+        }, str(planted)
+
+    def _call(self, sock_path, base, args):
+        request = {"skill": "briefings_config", "args": args}
+        with SkillProxy(sock_path, {}, base, allowed_skills=frozenset({"briefings_config"})):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(60)
+                client.connect(str(sock_path))
+                client.sendall((json.dumps(request) + "\n").encode())
+                answer = b""
+                while b"\n" not in answer:
+                    chunk = client.recv(65536)
+                    if not chunk:
+                        break
+                    answer += chunk
+        return json.loads(answer.decode().strip())
+
+    @pytest.mark.parametrize("argv", WRITERS, ids=IDS)
+    def test_a_real_cli_refuses_a_limited_task(self, sock_path, base_env, argv):
+        env, planted = base_env
+        args = [part.replace("{file}", planted) for part in argv]
+        response = self._call(sock_path, {**env, "ISTOTA_EGRESS_LIMITED": "1"}, args)
+        assert response["returncode"] == 1
+        envelope = json.loads(response["stdout"])
+        assert envelope["reason"] == "egress_limited"
+        assert "evil.example" not in response["stdout"]
+        assert "digest" not in envelope["error"]
+        assert "canary" not in response["stdout"]
+
+    @pytest.mark.parametrize("argv", [
+        ["shared-block", "list"],
+        ["shared-block", "show", "digest"],
+        ["group", "list"],
+        ["group", "show", "--group-id", "fam", "--name", "digest"],
+        ["group", "runs", "--group-id", "fam", "--name", "digest"],
+    ], ids=["list", "show", "group-list", "group-show", "group-runs"])
+    def test_a_limited_task_keeps_the_reads(self, sock_path, base_env, argv):
+        env, _ = base_env
+        response = self._call(sock_path, {**env, "ISTOTA_EGRESS_LIMITED": "1"}, argv)
+        assert "egress_limited" not in response["stdout"]
+
+    def test_control_an_open_task_gets_past_the_rule(self, sock_path, base_env):
+        """No config here, so the writer gate answers, which shows the rule did not."""
+        env, planted = base_env
+        response = self._call(
+            sock_path, env, ["shared-block", "set-prompt", "digest", "--prompt-file", planted],
+        )
+        assert response["returncode"] == 1
+        assert json.loads(response["stdout"])["reason"] != "egress_limited"
+
+
 class TestVerbRules:
     @pytest.fixture
     def limited(self, monkeypatch):
