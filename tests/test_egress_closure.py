@@ -283,6 +283,27 @@ class TestConnect:
             assert b"403" in self._connect(sock_path, f"{EVIL}:443")
         assert json.loads(log.read_text()) == {"channel": "connect", "entry": EVIL}
 
+    def test_no_log_line_names_a_limited_tasks_refused_host(
+        self, config, index, limited, tmp_path, caplog,
+    ):
+        """A refused name can carry the data itself, as `secret.evil.example`."""
+        _, sock_path, proxy = self._proxy(
+            config, _reach(config, index, limited), tmp_path, tmp_path / REFUSED_LOG_NAME,
+        )
+        target = f"{CANARY}.{EVIL}:443"
+        with caplog.at_level("DEBUG", logger="istota.sandbox.network_proxy"), proxy:
+            assert b"403" in self._connect(sock_path, target)
+        assert "Network proxy blocked" in caplog.text
+        assert CANARY not in caplog.text
+        assert EVIL not in caplog.text
+
+    def test_control_an_open_task_still_logs_the_target(self, config, index, attended, tmp_path, caplog):
+        sock_path = _socket_path()
+        proxy = NetworkProxy(sock_path, set(), trusted_roots={os.getpid()})
+        with caplog.at_level("DEBUG", logger="istota.sandbox.network_proxy"), proxy:
+            assert b"403" in self._connect(sock_path, f"{EVIL}:443")
+        assert f"{EVIL}:443" in caplog.text
+
     @pytest.mark.parametrize("host", ["pypi.org", "github.com", "registry.npmjs.org"])
     def test_a_registry_or_a_forge_is_not_a_way_out(self, config, index, limited, tmp_path, host):
         """Both serve anybody's account, so neither is on the list until it is granted."""

@@ -498,7 +498,8 @@ class NetworkProxy:
     ) -> None:
         target = f"{host}:{port}"
         if target not in self.allowed_hosts:
-            logger.debug("Network proxy blocked: %s", target)
+            # A refused name can carry data, so a limited task's stays in its refusal log.
+            logger.debug("Network proxy blocked: %s", "(not logged)" if self.refusal_log else target)
             append_refusal(self.refusal_log, "connect", host.lower())
             client.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
             return
