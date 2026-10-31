@@ -20,6 +20,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -4374,6 +4375,8 @@ def _close_this_process_to_its_own_uid():
     Chrome runs as this uid, and popping the token leaves it in the initial
     environment block. An exec resets the flag, so children are unaffected.
     """
+    if sys.platform != "linux":
+        return
     if ctypes.CDLL(None, use_errno=True).prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
         log.error("PR_SET_DUMPABLE failed: errno %d", ctypes.get_errno())
 
