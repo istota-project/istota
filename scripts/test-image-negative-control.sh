@@ -506,6 +506,14 @@ cli_harness_half() {
 # strip exists to stop. A direct caller's `BrainRequest.env` is
 # `build_model_cli_env`, which holds the credential, so doctor's Bash must now
 # find it. OCR and the reviewer grant no Bash and must stay green.
+#
+# A third removes OCR's and the reviewer's namespace (docker/test/Dockerfile.daemon-sandbox-no-wrap,
+# GitLab #901). Only the fake's outside reading of the running server can see it:
+# the roots still refuse, and the doctor builds its own wrap. This one runs the
+# direct callers' class alone, since the third class calls the same wrap and goes
+# red on it by construction. An unprivileged reader can read those links under
+# the shipped AppArmor profile, measured on the test VM; this script's run is on
+# Docker Desktop, which has none.
 
 CLI_WITNESS_TESTS="tests/smoke/test_cli_credential_unreachable.py::TestTheCliCredentialIsOutOfTheToolsReach"
 CLI_WITNESS_DIRECT="tests/smoke/test_cli_credential_unreachable.py::TestTheDirectCallersToolsCannotReachIt"
@@ -643,6 +651,61 @@ print(lean_image_tag())
     done
     rm -f "$witness_out"
     echo "[control] OK: cli-witness saw the strip removed on doctor's path and not on the read-only callers."
+
+    echo
+    echo "[control] cli-witness: an image whose daemon sandbox wraps nothing"
+    no_wrap_tag="istota-test/daemon-sandbox-no-wrap:${strip_base##*:}"
+    docker build -q -f docker/test/Dockerfile.daemon-sandbox-no-wrap \
+        --build-arg "BASE=$strip_base" -t "$no_wrap_tag" docker/test >/dev/null
+    no_wrap_dir="$(mktemp -d)"
+    printf 'services:\n  daemon:\n    build: !reset null\n    image: %s\n' "$no_wrap_tag" > "$no_wrap_dir/no-wrap.yml"
+    witness_out="$(mktemp)"
+    set +e
+    ISTOTA_TESTBED_CONTROL_OVERLAYS="$no_wrap_dir/no-wrap.yml" \
+        uv run pytest -m smoke -n0 -q --no-header -p no:randomly -rfEp \
+        "$CLI_WITNESS_DIRECT" 2>&1 | tee "$witness_out"
+    set -e
+    rm -rf "$no_wrap_dir"
+    namespace_test=test_the_running_tool_server_is_in_a_namespace
+    for mode in subscription api_key; do
+        for test in "$namespace_test" \
+                    test_the_caller_ran_and_the_cli_held_the_credential \
+                    test_no_tool_result_or_output_carries_it \
+                    test_the_credentials_files_are_out_of_reach \
+                    test_the_clis_process_environment_is_out_of_reach \
+                    test_doctors_tools_share_the_daemons_network_namespace; do
+            node="${CLI_WITNESS_DIRECT}::${test}[doctor-${mode}]"
+            if ! grep -Fq "PASSED ${node}" "$witness_out"; then
+                rm -f "$witness_out"
+                echo "[control] FAILED: ${node} did not pass without the wrap;"
+                echo "[control] the doctor builds its own, so this red is not the control's."
+                exit 1
+            fi
+        done
+        for caller in ocr reviewer; do
+            node="${CLI_WITNESS_DIRECT}::${namespace_test}[${caller}-${mode}]"
+            if ! grep -Fq "FAILED ${node}" "$witness_out"; then
+                rm -f "$witness_out"
+                echo "[control] FAILED: cli-witness did not turn ${node} red without the wrap."
+                exit 1
+            fi
+            for test in test_the_caller_ran_and_the_cli_held_the_credential \
+                        test_no_tool_result_or_output_carries_it \
+                        test_the_credentials_files_are_out_of_reach \
+                        test_the_clis_process_environment_is_out_of_reach \
+                        test_a_read_only_caller_has_no_bash; do
+                node="${CLI_WITNESS_DIRECT}::${test}[${caller}-${mode}]"
+                if ! grep -Fq "PASSED ${node}" "$witness_out"; then
+                    rm -f "$witness_out"
+                    echo "[control] FAILED: ${node} did not pass without the wrap;"
+                    echo "[control] the roots answer with or without bubblewrap."
+                    exit 1
+                fi
+            done
+        done
+    done
+    rm -f "$witness_out"
+    echo "[control] OK: cli-witness saw the namespace gone on OCR and the reviewer, and nowhere else."
 }
 
 # --------------------------------------------------------------------------
