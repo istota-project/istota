@@ -198,7 +198,7 @@ describe('appProblems', () => {
     const edited = form();
     edited.radarr.url = 'http://arr.example.com:7878';
     expect(appProblems(edited, form(), HOSTS)['radarr.url']).toContain(
-      'Add "arr.example.com" = ["servarr"] to [private_hosts] under General',
+      'Under General, add "arr.example.com" = ["servarr"] below [private_hosts], writing that header if it is missing, or add "servarr" to the host\'s list if it is already there',
     );
     expect(appProblems(edited, form(), ['192.0.2.10', 'ARR.example.com.'])).toEqual({});
     edited.radarr.url = 'https://arr.example.org';
@@ -210,7 +210,7 @@ describe('appProblems', () => {
     edited.radarr.url = 'https://10.1.2.3:7878';
     const problem = appProblems(edited, form(), HOSTS)['radarr.url'];
     expect(problem).toMatch(/private address/);
-    expect(problem).toContain('Add "10.1.2.3" = ["servarr"] to [private_hosts] under General');
+    expect(problem).toContain('add "10.1.2.3" = ["servarr"] below [private_hosts]');
     expect(appProblems(edited, form(), ['10.1.2.3'])).toEqual({});
   });
 

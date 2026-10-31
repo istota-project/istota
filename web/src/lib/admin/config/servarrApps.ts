@@ -167,7 +167,7 @@ export function hostsGrantedTo(
 }
 
 function grantAdvice(host: string): string {
-  return `Add "${host}" = ["servarr"] to [private_hosts] under General`;
+  return `Under General, add "${host}" = ["servarr"] below [private_hosts], writing that header if it is missing, or add "servarr" to the host's list if it is already there`;
 }
 
 export interface PrivateHostNeed {
@@ -183,7 +183,7 @@ export interface PrivateHostNeed {
  * local-looking name only probably resolves to a private address, so it is a
  * warning rather than a refusal. Null `privateHosts` means the grants cannot be
  * read (`hostsGrantedTo`), so nothing is said: the host may be in the pending
- * table, and `apply --check` and the skill still judge the URL.
+ * table. Only the skill and doctor judge the URL after that: `apply --check` does not.
  */
 export function privateHostNeed(
   url: string,

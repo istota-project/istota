@@ -993,8 +993,8 @@ describe('the [servarr] apps editor', () => {
     });
     await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
     expect(api.previewConfigChange).not.toHaveBeenCalled();
-    expect(radarr.getAllByText(/under General/)[0].textContent).toContain(
-      'Add "10.0.0.9" = ["servarr"] to [private_hosts] under General',
+    expect(radarr.getAllByText(/Under General/)[0].textContent).toContain(
+      'add "10.0.0.9" = ["servarr"] below [private_hosts]',
     );
     expect(radarr.queryByRole('button', { name: /private hosts/ })).toBeNull();
   });
@@ -1027,7 +1027,7 @@ describe('the [servarr] apps editor', () => {
     });
     const toml = '[private_hosts]\n"10.0.0.9" = ["servarr"]\n';
     await fireEvent.input(screen.getByLabelText(/^private_hosts/), { target: { value: toml } });
-    expect(radarr.queryByText(/under General/)).toBeNull();
+    expect(radarr.queryByText(/Under General/)).toBeNull();
     const sent = await review();
     expect(sent.ops).toContainEqual({ op: 'set_toml', path: ['private_hosts'], toml });
   });
