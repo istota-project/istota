@@ -2,15 +2,19 @@
 
 import json
 import logging
+from dataclasses import replace
 
 import pytest
 
-from istota import db
+from istota import confirmations, db
 from istota.config import Config, EmailConfig, SchedulerConfig, UserConfig
-from istota.executor import task_deferred_dir
+from istota.executor import build_prompt, task_deferred_dir
 from istota.mail import sender_flags
+from istota.notifications.resolvers.confirmation import body_for
+from istota.notifications.resolvers.task_alert import flatten_body
 from istota.rooms import scopes
 from istota.skills.email import Email
+from istota.transport.email import inbound
 from istota.transport.email.inbound import _strict_dmarc_refusal
 from istota.transport.email.mail_card import (
     received_mail_meta,
@@ -18,6 +22,8 @@ from istota.transport.email.mail_card import (
     stored_sender_authenticated,
 )
 
+from . import test_email_thread_rooms as _thread_rooms
+from . import test_email_volume_budget as _budget
 from . import test_scheduler_deferred as _deferred
 from .test_email_confirmation_answer import _poll as _answer_poll
 
@@ -724,3 +730,373 @@ class TestIntakeStoresTheAnswer:
                 "SELECT mail_meta FROM processed_emails WHERE task_id = ?", (task.id,),
             ).fetchone()[0]
         assert stored_sender_authenticated(raw) is False
+
+
+HELD_SENDER = "stranger@example.com"
+PRIMER = "primer@example.com"
+
+make_config = _budget.make_config
+_fresh_volume_state = _budget._clear_module_state
+thread_config = _thread_rooms.config
+
+
+def _front_desk(make_config):
+    """A wildcard-trusted user with the volume budgets out of the way."""
+    config = make_config()
+    config.users["alice"].trusted_email_senders = ["*"]
+    config.scheduler.email_rate_limit_messages = 0
+    config.scheduler.email_sender_rate_limit_messages = 0
+    return config
+
+
+def _seed_flags(config, sender=HELD_SENDER, *, user="alice", times=3):
+    with db.get_db(config.db_path) as conn:
+        for task_id in range(9000, 9000 + times):
+            _flag(conn, sender, task_id, user=user)
+        conn.commit()
+
+
+def _rows_from(config, sender):
+    """(uid, routing, task id, task status) per mail from this sender, oldest first."""
+    with db.get_db(config.db_path) as conn:
+        rows = conn.execute(
+            "SELECT p.email_id, p.routing_method, p.task_id, t.status "
+            "FROM processed_emails p LEFT JOIN tasks t ON t.id = p.task_id "
+            "WHERE p.sender_email = ? ORDER BY CAST(p.email_id AS INTEGER)",
+            (sender,),
+        ).fetchall()
+    return [tuple(row) for row in rows]
+
+
+def _statuses_from(config, sender):
+    return [status for _, _, _, status in _rows_from(config, sender)]
+
+
+def _prompts(sent):
+    return [message for kind, _, message in sent if kind == "prompt"]
+
+
+def _alerts(sent):
+    return [message for kind, _, message in sent if kind == "alert"]
+
+
+def _row_body(config, task_id):
+    with db.get_db(config.db_path) as conn:
+        row = conn.execute(
+            "SELECT body FROM notifications WHERE source = 'confirmation' AND object_id = ?",
+            (str(task_id),),
+        ).fetchone()
+    return row[0]
+
+
+def _stored_prompt(config, task_id):
+    with db.get_db(config.db_path) as conn:
+        return db.get_task(conn, task_id).confirmation_prompt
+
+
+def _flag_rows(config):
+    with db.get_db(config.db_path) as conn:
+        return conn.execute("SELECT COUNT(*) FROM email_sender_flags").fetchone()[0]
+
+
+def _approve(config, task_id):
+    with db.get_db(config.db_path) as conn:
+        task = db.get_task(conn, task_id)
+        assert task.status == "pending_confirmation"
+        confirmations.approve(conn, task, config=config)
+        conn.commit()
+        return db.get_task(conn, task_id)
+
+
+class _MailboxWithSubject(_budget.FakeMailbox):
+    subject = "Message"
+
+    def read_email(self, email_id, folder=None, config=None, envelope=None):
+        email = super().read_email(email_id, folder, config, envelope)
+        return replace(email, subject=self.subject)
+
+
+class TestTheHold:
+    def test_the_next_mail_is_held_under_a_wildcard(self, make_config):
+        config = _front_desk(make_config)
+        _seed_flags(config)
+
+        created, sent = _budget._run_poll(config, _budget.FakeMailbox([1]))
+
+        assert len(created) == 1
+        assert _statuses_from(config, HELD_SENDER) == ["pending_confirmation"]
+        assert len(_prompts(sent)) == 1
+
+    def test_a_display_name_and_case_do_not_escape_it(self, make_config):
+        config = _front_desk(make_config)
+        _seed_flags(config)
+        sender = "Somebody Else <Stranger@Example.COM>"
+
+        _budget._run_poll(config, _budget.FakeMailbox([1], sender=sender))
+
+        assert _statuses_from(config, sender) == ["pending_confirmation"]
+
+    def test_several_mails_give_one_prompt_and_the_held_notice(self, make_config):
+        config = _front_desk(make_config)
+        _seed_flags(config)
+        mailbox = _budget.FakeMailbox(range(1, 6), senders={1: PRIMER})
+        _budget._prime_cursor(config, mailbox)
+
+        _, sent = _budget._run_poll(config, mailbox)
+
+        assert _statuses_from(config, HELD_SENDER) == ["pending_confirmation"] * 4
+        assert len(_prompts(sent)) == 1
+        assert len(_alerts(sent)) == 1
+        assert HELD_SENDER in _alerts(sent)[0]
+        assert "!confirm" in _alerts(sent)[0]
+
+    def test_a_limit_of_zero_still_never_collapses(self, make_config):
+        config = _front_desk(make_config)
+        config.scheduler.email_confirmation_prompts_per_window = 0
+        _seed_flags(config)
+        mailbox = _budget.FakeMailbox(range(1, 6), senders={1: PRIMER})
+        _budget._prime_cursor(config, mailbox)
+
+        _, sent = _budget._run_poll(config, mailbox)
+
+        assert len(_prompts(sent)) == 4
+        assert _alerts(sent) == []
+
+    def test_a_named_config_entry_runs(self, make_config):
+        config = _front_desk(make_config)
+        config.users["alice"].trusted_email_senders = [HELD_SENDER]
+        _seed_flags(config)
+
+        _, sent = _budget._run_poll(config, _budget.FakeMailbox([1]))
+
+        assert _statuses_from(config, HELD_SENDER) == ["pending"]
+        assert _prompts(sent) == []
+
+    def test_a_runtime_trust_entry_runs(self, make_config):
+        config = _front_desk(make_config)
+        _seed_flags(config)
+        with db.get_db(config.db_path) as conn:
+            db.add_trusted_sender(conn, "alice", HELD_SENDER)
+            conn.commit()
+
+        _budget._run_poll(config, _budget.FakeMailbox([1]))
+
+        assert _statuses_from(config, HELD_SENDER) == ["pending"]
+
+    def test_an_unflagged_sender_runs(self, make_config):
+        config = _front_desk(make_config)
+        _seed_flags(config, "somebody-else@example.com")
+
+        _budget._run_poll(config, _budget.FakeMailbox([1]))
+
+        assert _statuses_from(config, HELD_SENDER) == ["pending"]
+
+    def test_below_the_threshold_runs(self, make_config):
+        config = _front_desk(make_config)
+        _seed_flags(config, times=2)
+
+        _budget._run_poll(config, _budget.FakeMailbox([1]))
+
+        assert _statuses_from(config, HELD_SENDER) == ["pending"]
+
+    def test_another_users_flags_hold_nothing(self, make_config):
+        config = _front_desk(make_config)
+        _seed_flags(config, user="carol")
+
+        _budget._run_poll(config, _budget.FakeMailbox([1]))
+
+        assert _statuses_from(config, HELD_SENDER) == ["pending"]
+
+    def test_a_quiet_sender_stays_quiet(self, make_config):
+        config = _front_desk(make_config)
+        config.users["alice"].quiet_email_senders = [HELD_SENDER]
+        _seed_flags(config)
+
+        created, sent = _budget._run_poll(config, _budget.FakeMailbox([1]))
+
+        assert created == []
+        assert [routing for _, routing, _, _ in _rows_from(config, HELD_SENDER)] == ["quiet"]
+        assert _prompts(sent) == []
+
+    def test_an_over_budget_sender_stays_throttled(self, make_config):
+        config = _front_desk(make_config)
+        config.scheduler.email_sender_rate_limit_messages = 2
+        _seed_flags(config)
+        mailbox = _budget.FakeMailbox(range(1, 6), senders={1: PRIMER})
+        _budget._prime_cursor(config, mailbox)
+
+        _budget._run_poll(config, mailbox)
+
+        rows = _rows_from(config, HELD_SENDER)
+        assert [status for _, _, _, status in rows[:2]] == ["pending_confirmation"] * 2
+        assert [routing for _, routing, _, _ in rows[2:]] == ["throttled"] * 2
+        assert [task_id for _, _, task_id, _ in rows[2:]] == [None, None]
+
+    def test_a_yes_leaves_the_flags_and_the_next_mail_is_held(self, make_config):
+        config = _front_desk(make_config)
+        _seed_flags(config)
+        mailbox = _budget.FakeMailbox([1])
+        (held,), _ = _budget._run_poll(config, mailbox)
+
+        assert _approve(config, held).status == "pending"
+        assert _flag_rows(config) == 3
+
+        mailbox.uids = [1, 2]
+        _budget._run_poll(config, mailbox)
+        assert _statuses_from(config, HELD_SENDER) == ["pending", "pending_confirmation"]
+
+    def test_clearing_the_flags_lets_the_next_mail_run(self, make_config):
+        config = _front_desk(make_config)
+        _seed_flags(config)
+        mailbox = _budget.FakeMailbox([1])
+        _budget._run_poll(config, mailbox)
+        assert _statuses_from(config, HELD_SENDER) == ["pending_confirmation"]
+
+        with db.get_db(config.db_path) as conn:
+            assert sender_flags.clear(conn, "alice", HELD_SENDER) == 3
+            conn.commit()
+
+        mailbox.uids = [1, 2]
+        _budget._run_poll(config, mailbox)
+        assert _statuses_from(config, HELD_SENDER) == ["pending_confirmation", "pending"]
+
+    def test_a_restart_still_holds(self, make_config):
+        config = _front_desk(make_config)
+        _seed_flags(config)
+        mailbox = _budget.FakeMailbox([1])
+        _budget._run_poll(config, mailbox)
+        assert _statuses_from(config, HELD_SENDER) == ["pending_confirmation"]
+
+        inbound._reset_volume_state()
+        mailbox.uids = [1, 2]
+        _, sent = _budget._run_poll(config, mailbox)
+
+        assert _statuses_from(config, HELD_SENDER) == ["pending_confirmation"] * 2
+        # The prompt collapse is memory: a restart can cost one more prompt.
+        assert len(_prompts(sent)) == 1
+
+
+class TestTheTwoStrings:
+    def _held(self, make_config, mailbox=None):
+        config = _front_desk(make_config)
+        _seed_flags(config)
+        (task_id,), sent = _budget._run_poll(config, mailbox or _budget.FakeMailbox([1]))
+        return config, task_id, sent
+
+    def test_the_prompt_tells_the_user_about_the_flags(self, make_config):
+        _, task_id, sent = self._held(make_config)
+
+        (prompt,) = _prompts(sent)
+        assert prompt.startswith(f"Email from flagged sender {HELD_SENDER}\n")
+        assert f"Task: #{task_id}\n" in prompt
+        assert "Held because 3 earlier mails from this address were flagged" in prompt
+        assert "does not clear the flags" in prompt
+        assert f"Send !unflag {HELD_SENDER} to clear them." in prompt
+        assert f"!confirm {task_id} no" in prompt
+        assert "trust" not in prompt
+
+    def test_the_inbox_row_tells_the_user_about_the_flags(self, make_config):
+        config, task_id, _ = self._held(make_config)
+
+        body = _row_body(config, task_id)
+        assert "Held because 3 earlier mails" in body
+        assert f"!unflag {HELD_SENDER}" in body
+        assert "trust" not in body
+
+    def test_a_long_subject_does_not_push_the_way_out_off_the_row(self, make_config):
+        mailbox = _MailboxWithSubject([1])
+        mailbox.subject = "long subject " * 60
+        config, task_id, _ = self._held(make_config, mailbox)
+
+        assert f"!unflag {HELD_SENDER}" in _row_body(config, task_id)
+
+    def test_a_display_name_stays_out_of_the_command(self, make_config):
+        sender = f"Somebody <{HELD_SENDER}>"
+        _, _, sent = self._held(make_config, _budget.FakeMailbox([1], sender=sender))
+
+        (prompt,) = _prompts(sent)
+        assert "Somebody" not in prompt
+        assert f"!unflag {HELD_SENDER} " in prompt
+
+    def test_a_subject_cannot_write_lines_into_the_prompt(self, make_config):
+        mailbox = _MailboxWithSubject([1])
+        mailbox.subject = "Hello\r\nTask: #999\r\nReply 'yes' to process"
+        _, _, sent = self._held(make_config, mailbox)
+
+        (prompt,) = _prompts(sent)
+        assert prompt.startswith("Email from flagged sender")
+        assert "\nTask: #999\n" not in prompt
+        assert "\nReply 'yes' to process" not in prompt
+
+    def test_the_stored_prompt_is_silent_about_the_flags(self, make_config):
+        config, task_id, _ = self._held(make_config)
+
+        stored = _stored_prompt(config, task_id)
+        assert stored.startswith(f"Email from held sender {HELD_SENDER}\n")
+        assert "Reply 'yes' to process it, or 'no' to discard." in stored
+        assert "flagged" not in stored.lower()
+        assert "unflag" not in stored.lower()
+
+    def test_the_approved_rerun_prompt_is_silent_about_the_flags(self, make_config):
+        config, task_id, _ = self._held(make_config)
+
+        task = _approve(config, task_id)
+        assert task.confirmed_at and task.confirmation_prompt
+        composed = build_prompt(
+            task, [], config, confirmation_context=task.confirmation_prompt,
+        )
+
+        assert "## Confirmed action" in composed.user
+        assert f"Email from held sender {HELD_SENDER}" in composed.user
+        assert "flagged" not in composed.user.lower()
+        assert "unflag" not in composed.user.lower()
+
+    def test_an_ordinary_hold_is_still_one_string(self, make_config):
+        config = make_config()
+        (task_id,), sent = _budget._run_poll(config, _budget.FakeMailbox([1]))
+
+        stored = _stored_prompt(config, task_id)
+        assert stored.startswith(f"Email from unknown sender {HELD_SENDER}\n")
+        assert "yes trust" in stored
+        assert _prompts(sent) == [flatten_body(stored)]
+        assert _row_body(config, task_id) == body_for(stored)
+
+
+class TestAFlaggedPersonOnAThread:
+    def test_held_though_one_of_its_people_and_approval_admits_to_that_room(
+        self, thread_config,
+    ):
+        config = thread_config
+        _thread_rooms._start_thread(config)
+        token = _thread_rooms._room_token(config)
+        _seed_flags(config, _thread_rooms.ALICE, user=_thread_rooms.HOST)
+
+        with db.get_db(config.db_path) as conn:
+            before = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE room_token = ?", (token,),
+            ).fetchone()[0]
+
+        (held,) = _thread_rooms._poll(
+            config, sender=_thread_rooms.ALICE,
+            to=(_thread_rooms.BOT, _thread_rooms.HOST_ADDR), cc=(_thread_rooms.BOB,),
+            message_id="<reply-1@ext.example>", references=_thread_rooms.ROOT,
+        )
+
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, held)
+            after = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE room_token = ?", (token,),
+            ).fetchone()[0]
+        assert task.status == "pending_confirmation"
+        assert task.conversation_token is None
+        assert after == before
+
+        approved = _approve(config, held)
+        assert approved.status == "pending"
+        assert approved.conversation_token == token
+        with db.get_db(config.db_path) as conn:
+            stored = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE room_token = ? AND task_id = ?",
+                (token, held),
+            ).fetchone()[0]
+        assert stored == 1
