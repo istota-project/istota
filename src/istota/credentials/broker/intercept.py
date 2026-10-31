@@ -1,14 +1,20 @@
 """Bound-host HTTP/1.1 interception; values stay on the daemon side.
 
-Request prefixes are scanned before any HTTP bytes reach upstream. Responses
-up to the cap are scrubbed; larger responses deliberately stream unscanned.
-Content encodings and trailers are refused, rather than silently bypassing the
-scan. TLS and HTTP failures use fixed reasons, never parser exception text.
+Request prefixes are scanned before any HTTP bytes reach upstream. A response
+to a request that carried a value is scrubbed whole: buffered up to the cap,
+streamed past it with the last bytes held back so a value split across reads
+is still seen. The scrub matches the spellings in ``_echo_forms``; a service
+that transforms a value any other way is not caught, and no literal scrub can
+catch it. Content encodings and trailers are refused, rather than silently
+bypassing the scan. TLS and HTTP failures use fixed reasons, never parser
+exception text.
 """
 
 import base64
 from contextlib import nullcontext
-from urllib.parse import urlsplit
+import html
+import json
+from urllib.parse import quote, quote_plus, urlsplit
 import ipaddress
 from dataclasses import dataclass
 import logging
@@ -97,10 +103,81 @@ def _relay_body(parser, sock, destination_parser, destination):
         _send(destination_parser, destination, event)
 
 
+def _scrub_pattern(replacements):
+    # Longest first, so a value beats a shorter one it begins with.
+    values = sorted(replacements, key=len, reverse=True)
+    return re.compile(b"|".join(re.escape(value) for value in values))
+
+
+def _scrub_decided(pending, pattern, replacements, limit):
+    """Scrub the matches starting before ``limit``; return output and the rest.
+
+    A caller holding back the longest value's length minus one sets ``limit``
+    so every match starting before it is wholly in ``pending``.
+    """
+    out = bytearray()
+    position = 0
+    while position < limit:
+        match = pattern.search(pending, position)
+        if match is None or match.start() >= limit:
+            out += pending[position:limit]
+            position = limit
+            break
+        out += pending[position:match.start()]
+        out += replacements[match[0]]
+        position = match.end()
+    return bytes(out), pending[position:]
+
+
 def _replace(data, replacements):
-    for value in sorted(replacements, key=len, reverse=True):
-        data = data.replace(value, replacements[value])
-    return data
+    if not replacements:
+        return data
+    return _scrub_decided(data, _scrub_pattern(replacements), replacements, len(data))[0]
+
+
+def _relay_scrubbed(parser, sock, destination_parser, destination, pending, replacements):
+    pattern = _scrub_pattern(replacements)
+    hold = max(map(len, replacements)) - 1
+    while True:
+        # Before the next read: a stream that goes quiet still gets what is decided.
+        out, pending = _scrub_decided(pending, pattern, replacements, len(pending) - hold)
+        if out:
+            _send(destination_parser, destination, h11.Data(data=out))
+        event = _event(parser, sock)
+        if isinstance(event, h11.EndOfMessage):
+            if event.headers:
+                raise Refused("unsupported_trailers")
+            out, _ = _scrub_decided(pending, pattern, replacements, len(pending))
+            if out:
+                _send(destination_parser, destination, h11.Data(data=out))
+            _send(destination_parser, destination, h11.EndOfMessage())
+            return
+        if not isinstance(event, h11.Data):
+            raise Refused("invalid_framing")
+        pending += bytes(event.data)
+
+
+def _echo_forms(value):
+    """The spellings of a substituted value a service commonly echoes."""
+    text = value.decode("utf-8")
+    standard = base64.b64encode(value)
+    urlsafe = base64.urlsafe_b64encode(value)
+    json_form = json.dumps(text).encode("ascii")[1:-1]
+    percent = quote(value, safe="")
+    return {
+        value,
+        standard, standard.rstrip(b"="),
+        standard.replace(b"/", b"\\/"), standard.rstrip(b"=").replace(b"/", b"\\/"),
+        urlsafe, urlsafe.rstrip(b"="),
+        percent.encode("ascii"),
+        re.sub(r"%[0-9A-F]{2}", lambda m: m[0].lower(), percent).encode("ascii"),
+        quote(value, safe="!~*'()").encode("ascii"),
+        quote_plus(value).encode("ascii"),
+        value.hex().encode("ascii"), value.hex().upper().encode("ascii"),
+        json_form, json_form.replace(b"/", b"\\/"),
+        json.dumps(text, ensure_ascii=False).encode("utf-8")[1:-1],
+        html.escape(text).encode("utf-8"),
+    }
 
 
 def _headers(broker, request, host):
@@ -141,7 +218,8 @@ def _headers(broker, request, host):
                 encoded = secret.encode("utf-8")
                 if any(byte < 32 or byte == 127 for byte in encoded):
                     raise Refused("credential_invalid_value")
-                replacements[encoded] = match[0]
+                for form in _echo_forms(encoded):
+                    replacements[form] = match[0]
                 names.add(name)
                 return encoded
             substituted = PLACEHOLDER.sub(resolve, value)
@@ -149,7 +227,10 @@ def _headers(broker, request, host):
             if b"{{cred:" in PLACEHOLDER.sub(b"", value):
                 raise Refused("invalid_placeholder")
             if basic:
-                substituted = b"Basic " + base64.b64encode(substituted)
+                encoded_pair = base64.b64encode(substituted)
+                if substituted != value:
+                    replacements[encoded_pair] = base64.b64encode(value)
+                substituted = b"Basic " + encoded_pair
             if substituted != original:
                 replacements[substituted] = original
             headers.append((header, substituted))
@@ -222,11 +303,11 @@ def intercept(broker, client, host, port, *, private_hosts=()):
         logger.warning("credential_tls_failed task=%s user=%s", broker.task_id, broker.user_id)
 
 
-def _audit(broker, names, target, method, status, request_limited, response_limited):
+def _audit(broker, names, target, method, status, request_limited, response_streamed):
     for name in sorted(names):
-        logger.info("credential_substituted task=%s user=%s name=%s host=%s method=%s status=%s request_scan_limited=%s response_scrub_limited=%s",
+        logger.info("credential_substituted task=%s user=%s name=%s host=%s method=%s status=%s request_scan_limited=%s response_streamed=%s",
                     broker.task_id, broker.user_id, name, target, method.decode("ascii"),
-                    status, request_limited, response_limited)
+                    status, request_limited, response_streamed)
 
 
 def _requests(broker, tls, host, port, target, *, plain_http=False, initial_data=b"", private_hosts=()):
@@ -323,25 +404,28 @@ def _requests(broker, tls, host, port, target, *, plain_http=False, initial_data
                     _send(downstream, tls, h11.Response(status_code=response.status_code,
                           reason=_replace(response.reason, replacements), headers=headers))
                     response_started = True
-                    if payload:
-                        _send(downstream, tls, h11.Data(data=payload))
-                    if small:
-                        _send(downstream, tls, h11.EndOfMessage())
+                    if not small and replacements:
+                        _relay_scrubbed(outbound, upstream, downstream, tls, payload, replacements)
                     else:
-                        _relay_body(outbound, upstream, downstream, tls)
-                    _audit(broker, sent_names, target, method, status, not complete, not small)
+                        if payload:
+                            _send(downstream, tls, h11.Data(data=payload))
+                        if small:
+                            _send(downstream, tls, h11.EndOfMessage())
+                        else:
+                            _relay_body(outbound, upstream, downstream, tls)
+                    _audit(broker, sent_names, target, method, status, not complete, response_started and not small)
                     sent_names = set()
             if downstream.our_state is h11.MUST_CLOSE or downstream.their_state is h11.MUST_CLOSE:
                 return
             downstream.start_next_cycle()
     except Refused as exc:
-        _audit(broker, sent_names, target, method, status, not complete, not small)
+        _audit(broker, sent_names, target, method, status, not complete, response_started and not small)
         if not response_started:
             reason = str(exc)
             _refusal(broker, tls, reason, 502 if reason in (
                 "credential_in_response_header_name", "upstream_requires_h2", "invalid_upstream",
             ) else 403)
     except (OSError, h11.ProtocolError, ValueError):
-        _audit(broker, sent_names, target, method, status, not complete, not small)
+        _audit(broker, sent_names, target, method, status, not complete, response_started and not small)
         if not response_started:
             _refusal(broker, tls, "broker_protocol_error", 502)
