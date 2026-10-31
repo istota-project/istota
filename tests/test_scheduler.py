@@ -5212,10 +5212,8 @@ class TestExecuteCommandTask:
         assert str(config.config_path) in result
 
     def test_config_path_absent_when_unset(self, db_path, tmp_path):
-        # Same reading as the CalDAV pair above: the assertion is about what
-        # the scheduler adds. An ambient ISTOTA_CONFIG_PATH would reach the
-        # child through `build_stripped_env`, which is why this failed on the
-        # deployment host until conftest started scrubbing it (ISSUE-301).
+        # The child's env is an allowlist, so an ambient ISTOTA_CONFIG_PATH
+        # does not reach it; only the config's own path does.
         config = self._make_config(db_path, tmp_path)
         # config.config_path defaults to None
         task = self._make_task(command="echo path=[$ISTOTA_CONFIG_PATH]")
@@ -5421,15 +5419,8 @@ class TestExecuteCommandTask:
         calendar manifest must drop CALDAV_* when the user owns no
         calendars. NC_* is ungated and remains.
 
-        What this proves is what the scheduler *adds*, which is narrower than
-        "the child cannot see a CALDAV_URL" (ISSUE-301). ``_execute_command_task``
-        starts from ``build_stripped_env()``, i.e. the daemon's own environment
-        minus the credential-shaped names, so a daemon host that exports
-        ``CALDAV_URL`` hands it to the child by inheritance and the gate drops
-        nothing. ``CALDAV_PASSWORD`` is the one that matters and is stripped by
-        pattern either way. The suite reads the gate rather than the
-        inheritance only because ``conftest.py`` now scrubs the ambient value;
-        before that this test failed on any host with a real config."""
+        The child's env starts from ``build_clean_env``, an allowlist, so a
+        daemon host that exports ``CALDAV_URL`` does not hand it down."""
         config = Config(
             db_path=db_path,
             nextcloud=NextcloudConfig(url="https://nc.example.com", username="ncuser", app_password="ncpass"),
@@ -5454,8 +5445,7 @@ class TestExecuteCommandTask:
         """Phase 4 acceptance — the operator command-task path must not
         propagate ``ISTOTA_SECRET_KEY`` to the subprocess. Phase 1.4
         already removed direct injection; this regression pins the
-        property end-to-end in case a future commit re-introduces it via
-        ``build_stripped_env`` or otherwise."""
+        property end-to-end in case a future commit re-introduces it."""
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 64)
         config = self._make_config(db_path, tmp_path)
         config.admin_users = {"alice"}

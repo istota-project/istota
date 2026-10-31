@@ -139,7 +139,7 @@ class TestConfigProblems:
         assert "ISTOTA_TASK_ID" in radarr.detail
 
     def test_a_missing_key_in_the_daemon_fails(self, monkeypatch):
-        for name in ("ISTOTA_TASK_ID", "ISTOTA_SANDBOXED", "PRECOMMIT_SCANS_REQUIRED"):
+        for name in ("ISTOTA_TASK_ID", "ISTOTA_SANDBOXED"):
             monkeypatch.delenv(name, raising=False)
         results, _ = _run(_config(apps=(), incomplete=("radarr",), keyless=("radarr",)))
         assert _by_app(results)["radarr"].status == FAIL

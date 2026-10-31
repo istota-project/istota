@@ -99,7 +99,7 @@ _VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: code the child loads before its own first line — ``BASH_ENV`` and ``ENV``
 #: are here because the overwhelmingly common child is ``sh -c``, and bash
 #: sources ``$BASH_ENV`` for a non-interactive shell, which would run the
-#: credential value as a script (``executor.build_stripped_env`` strips that
+#: credential value as a script (``executor.build_clean_env`` refuses that
 #: same name for the same reason). ``IFS`` re-splits every unquoted expansion
 #: in such a script.
 #:

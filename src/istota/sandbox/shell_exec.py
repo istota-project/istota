@@ -21,7 +21,8 @@ bash does not, so ``echo "a\\tb"`` emitted a real tab before and emits a literal
 compares it against a condition, the scheduler returns it as the task result),
 so that is a silent change of answer rather than a failure. ``$0`` changes too,
 and bash sources ``$BASH_ENV`` for a non-interactive shell where dash does not —
-``executor.build_stripped_env`` strips that variable for exactly this reason.
+``executor.build_clean_env`` refuses to pass that variable for exactly this
+reason.
 
 **The fallback is the old behaviour, not a degraded one.** Every caller was
 ``shell=True`` before, which is ``/bin/sh -c``; Debian ships dash there, which
@@ -110,9 +111,7 @@ def pipefail_env() -> dict[str, str]:
     for the guarantee to hold — three things that can each fail silently, since
     bash ignores an unreadable ``BASH_ENV`` without a word.
     ``executor._SHELL_STARTUP_ENV_VARS`` strips it for exactly that reason,
-    from ``build_stripped_env`` and — since this change was reviewed — from
-    ``build_clean_env``'s passthrough loop as well, which is the path that
-    actually mattered here and did not filter. ``SHELLOPTS`` carries option
+    from ``build_clean_env``'s passthrough loop. ``SHELLOPTS`` carries option
     *names*: a value of ``pipefail:$(touch /tmp/x)`` is rejected as an invalid
     option name rather than evaluated, measured, so there is no file and no
     inlet. The same set now strips an *inherited* ``SHELLOPTS`` before this
@@ -147,16 +146,11 @@ def pipefail_env() -> dict[str, str]:
     | wc -l`` returns 1 where it returned 0 — which nothing can distinguish
     from a real failure and is documented instead.
 
-    **One caller, and the asymmetry is deliberate.** ``build_clean_env`` uses
-    this, so a model subprocess has the option at every depth. The cron
-    ``command:`` and heartbeat ``shell-command`` paths build their env with
-    ``build_stripped_env`` and get ``pipefail`` from ``shell_argv`` alone, at
-    depth one — a pipeline inside a script such a row invokes is unguarded.
-    Folding this in there too would be consistent, and it is not done: those
-    commands are *operator*-authored, the operator can put ``set -euo
-    pipefail`` at the top of their own script, and changing the meaning of a
-    deployed cron row's exit status at depth is a second behaviour change with
-    a different blast radius from the one ISSUE-321 asked for.
+    **One caller, and every task-shaped shell goes through it.**
+    ``build_clean_env`` uses this, so a model subprocess has the option at every
+    depth. A cron ``command:`` or heartbeat ``shell-command`` takes that env too
+    since ISSUE-886, so a pipeline inside a script such a row invokes is guarded
+    as well.
 
     A fresh dict each call: callers merge it into an env they go on to mutate.
     """
