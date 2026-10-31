@@ -2,14 +2,14 @@ import { describe, expect, it } from 'vitest';
 
 import type { AdminServarrApp, AdminServarrConnection, ConfigSecretFile } from '$lib/api';
 import { buildChangeSet } from '$lib/admin/config/changeSet';
-import { configSecret } from '$lib/test/adminConfig';
+import { configField, configSecret } from '$lib/test/adminConfig';
 import {
   appProblems,
+  hostsGrantedTo,
   privateHostNeed,
   rebaseApps,
   servarrAppsDraft,
   servarrAppsForm,
-  withPrivateHost,
   type ServarrAppsForm,
 } from './servarrApps';
 
@@ -194,19 +194,23 @@ describe('appProblems', () => {
     }
   });
 
-  it('refuses plain HTTP to a host not in the private hosts, as the skill does', () => {
+  it('refuses plain HTTP to a host with no grant, saying what to write', () => {
     const edited = form();
     edited.radarr.url = 'http://arr.example.com:7878';
-    expect(appProblems(edited, form(), HOSTS)['radarr.url']).toMatch(/private hosts/);
+    expect(appProblems(edited, form(), HOSTS)['radarr.url']).toContain(
+      'Add "arr.example.com" = ["servarr"] to [private_hosts] under General',
+    );
     expect(appProblems(edited, form(), ['192.0.2.10', 'ARR.example.com.'])).toEqual({});
     edited.radarr.url = 'https://arr.example.org';
     expect(appProblems(edited, form(), HOSTS)).toEqual({});
   });
 
-  it('refuses HTTPS to a private IP literal not in the private hosts, as guard 2 does', () => {
+  it('refuses HTTPS to a private IP literal with no grant, as guard 2 does', () => {
     const edited = form();
     edited.radarr.url = 'https://10.1.2.3:7878';
-    expect(appProblems(edited, form(), HOSTS)['radarr.url']).toMatch(/private address/);
+    const problem = appProblems(edited, form(), HOSTS)['radarr.url'];
+    expect(problem).toMatch(/private address/);
+    expect(problem).toContain('Add "10.1.2.3" = ["servarr"] to [private_hosts] under General');
     expect(appProblems(edited, form(), ['10.1.2.3'])).toEqual({});
   });
 
@@ -236,6 +240,17 @@ describe('appProblems', () => {
     const edited = form();
     edited.radarr = { ...edited.radarr, enabled: false, url: 'nonsense' };
     expect(appProblems(edited, form(), HOSTS)).toEqual({});
+  });
+
+  it('skips only the private-host refusal when the grants cannot be read', () => {
+    const edited = form();
+    edited.radarr.url = 'http://arr.example.com:7878';
+    expect(appProblems(edited, form(), null)).toEqual({});
+    edited.radarr.url = 'ftp://192.0.2.10';
+    expect(appProblems(edited, form(), null)['radarr.url']).toMatch(/http/);
+    edited.radarr.url = 'http://192.0.2.10:7878';
+    edited.sonarr = { ...edited.sonarr, enabled: true, url: 'http://192.0.2.10:8989' };
+    expect(appProblems(edited, form(), null)['sonarr.key']).toBeTruthy();
   });
 });
 
@@ -272,15 +287,53 @@ describe('privateHostNeed', () => {
     expect(privateHostNeed('http://Arr.Example.com:7878', ['arr.example.com.'])).toBeNull();
     expect(privateHostNeed('not a url', [])).toBeNull();
   });
+
+  it('says nothing while the grants cannot be read', () => {
+    expect(privateHostNeed('http://arr.example.com:7878', null)).toBeNull();
+    expect(privateHostNeed('https://nas.lan', null)).toBeNull();
+  });
 });
 
-describe('withPrivateHost', () => {
-  it('appends a host once', () => {
-    expect(withPrivateHost(HOSTS, '10.0.0.9')).toEqual(['192.0.2.10', '10.0.0.9']);
-    expect(withPrivateHost(['192.0.2.10', '10.0.0.9'], '10.0.0.9')).toEqual([
-      '192.0.2.10',
+describe('hostsGrantedTo', () => {
+  const table = configField({
+    path: ['private_hosts'],
+    type: 'dict',
+    editor: 'table',
+    value: {
+      '10.0.0.5': ['servarr'],
+      'wiki.example.internal': ['browser'],
+      'rss.example.internal': ['browser', 'servarr'],
+      'none.example.internal': [],
+    },
+  });
+
+  it('reads the hosts naming the consumer, and no other', () => {
+    expect(hostsGrantedTo('servarr', table, undefined)).toEqual([
+      '10.0.0.5',
+      'rss.example.internal',
+    ]);
+    expect(hostsGrantedTo('feeds', table, undefined)).toEqual([]);
+  });
+
+  it('is null while a whole-table edit is pending, whatever the table says now', () => {
+    const op = { op: 'set_toml' as const, path: table.path, toml: '[private_hosts]\n' };
+    expect(hostsGrantedTo('servarr', table, op)).toBeNull();
+  });
+
+  it('follows a reset and a set value over what the field holds', () => {
+    expect(hostsGrantedTo('servarr', table, { op: 'unset', path: table.path })).toEqual([]);
+    const value = { '10.0.0.9': ['servarr'] };
+    expect(hostsGrantedTo('servarr', table, { op: 'set', path: table.path, value })).toEqual([
       '10.0.0.9',
     ]);
+  });
+
+  it('grants nothing for a missing field or a value of another shape', () => {
+    expect(hostsGrantedTo('servarr', undefined, undefined)).toEqual([]);
+    for (const value of [null, ['10.0.0.5'], { '10.0.0.5': 'servarr' }, 'servarr']) {
+      const field = configField({ path: ['private_hosts'], value });
+      expect(hostsGrantedTo('servarr', field, undefined)).toEqual([]);
+    }
   });
 });
 
