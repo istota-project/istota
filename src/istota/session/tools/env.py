@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from istota.sandbox.user_scope import is_within
@@ -52,6 +52,12 @@ class WebFetchPolicy:
     # said "or prior tool output" from the day the knob shipped and no code has
     # ever put one there.
     require_url_provenance: bool = False
+    # The exact hosts a limited task's owner approved (`Reach.egress_hosts`). None
+    # is no limit and an empty tuple refuses every host. Beside `allow_hosts`,
+    # whose suffix match is the operator's: both must pass.
+    exact_hosts: tuple[str, ...] | None = None
+    # Where a refusal by `exact_hosts` is recorded (`lib/egress_log.py`).
+    refusal_log: str = ""
 
 
 def web_fetch_policy_from_config(cfg) -> WebFetchPolicy | None:
@@ -77,6 +83,23 @@ def web_fetch_policy_from_config(cfg) -> WebFetchPolicy | None:
         block_hosts=tuple(cfg.block_hosts),
         extra_blocked_cidrs=tuple(cfg.extra_blocked_cidrs),
         require_url_provenance=cfg.require_url_provenance,
+    )
+
+
+def web_fetch_policy_for_task(
+    cfg, egress_hosts: frozenset[str] | None, *, refusal_log=None,
+) -> WebFetchPolicy | None:
+    """One task's policy: the configured one, narrowed to `Reach.egress_hosts`.
+
+    The log path is carried only with a limit. An open task has nothing to ask for.
+    """
+    policy = web_fetch_policy_from_config(cfg)
+    if policy is None or egress_hosts is None:
+        return policy
+    return replace(
+        policy,
+        exact_hosts=tuple(sorted(egress_hosts)),
+        refusal_log=str(refusal_log) if refusal_log else "",
     )
 
 

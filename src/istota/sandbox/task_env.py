@@ -188,6 +188,9 @@ def build_task_runtime(
     isolated_browser: bool = True,
     group_ids: "list[str] | None" = None,
     conn: "db.sqlite3.Connection | None" = None,
+    egress_hosts: frozenset[str] | None = None,
+    egress_withheld: frozenset[str] = frozenset(),
+    egress_log: Path | None = None,
 ) -> TaskRuntime:
     """Build the model's environment and the per-task proxies for one attempt.
 
@@ -212,6 +215,13 @@ def build_task_runtime(
     ``isolated_browser`` is ``Reach.isolated_browser``, handed to the proxy's
     skill CLIs as ``ISTOTA_BROWSER_PROFILE``: the shared isolated profile, or
     the user's own.
+
+    ``egress_hosts`` is ``Reach.egress_hosts``: not None narrows the CONNECT list
+    to the operator's hosts, Nextcloud and those. ``egress_log`` is where a refusal
+    is recorded. The CONNECT proxy records hosts only for a limited task, since
+    anything else has no host to ask for; a skill CLI gets the path regardless, as
+    ``EGRESS_LOG_VAR``, and only ever records a request about the job. A heartbeat
+    check passes None and records nothing.
 
     ``group_ids`` is the task's resolved group set
     (``room_scopes.task_group_ids``), handed to the proxy's skill CLIs as
@@ -499,6 +509,9 @@ def build_task_runtime(
         proxy_base_env[TURN_AUTHOR_VAR] = turn_author
         from istota.browser.owner import BROWSER_PROFILE_VAR, ISOLATED_PROFILE
         proxy_base_env[BROWSER_PROFILE_VAR] = ISOLATED_PROFILE if isolated_browser else task.user_id
+        if egress_log is not None:
+            from istota.lib.egress_log import EGRESS_LOG_VAR
+            proxy_base_env[EGRESS_LOG_VAR] = str(egress_log)
         if group_ids:
             from istota.sandbox.host_paths import TASK_GROUPS_VAR
             proxy_base_env[TASK_GROUPS_VAR] = ",".join(sorted(group_ids))
@@ -587,6 +600,7 @@ def build_task_runtime(
             skill_credential_map=skill_cred_map,
             allowed_skills=cli_skills,
             authorized_skills=frozenset(authorized_skills),
+            egress_withheld=egress_withheld,
             task_id=task.id,
             vault_credentials=vault_credentials,
             vault_fetch_limit=config.security.vault_fetch_limit_per_task,
@@ -740,7 +754,9 @@ def build_task_runtime(
     if config.security.network.enabled and config.security.sandbox_enabled:
         from .network_proxy import NetworkProxy, write_bridge_script
 
-        allowed_hosts = _build_network_allowlist(config, authorized_skills)
+        allowed_hosts = _build_network_allowlist(
+            config, authorized_skills, egress_hosts=egress_hosts,
+        )
 
         # Write bridge script to .developer/ (RO inside sandbox)
         dev_dir = Path(user_temp_dir) / ".developer"
@@ -750,8 +766,11 @@ def build_task_runtime(
         _net_proxy_sock = Path(tempfile.gettempdir()) / f"istota-net-{os.getpid()}-{task.id}.sock"
         _net_proxy_ctx = NetworkProxy(
             _net_proxy_sock, allowed_hosts,
-            private_hosts=_network_private_hosts(config, authorized_skills),
+            private_hosts=_network_private_hosts(
+                config, authorized_skills, egress_hosts=egress_hosts,
+            ),
             max_connections=config.security.network_proxy_max_connections,
+            refusal_log=egress_log if egress_hosts is not None else None,
         )
 
     # Collect extra paths to RO bind-mount into the sandbox.

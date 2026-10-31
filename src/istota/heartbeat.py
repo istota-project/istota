@@ -383,7 +383,7 @@ def _check_shell_command(check: HeartbeatCheck, config: "Config", user_id: str |
         )
         result = run_confined_command(
             config, probe, command, timeout=timeout, control_dir=control_dir,
-            defer_ops=False,
+            defer_ops=False, egress_hosts=frozenset(),
         )
         value = result.stdout.strip()
     except subprocess.TimeoutExpired:

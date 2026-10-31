@@ -1,5 +1,6 @@
 """Tests for network proxy (CONNECT proxy on Unix socket)."""
 
+import json
 import os
 import socket
 import subprocess
@@ -14,6 +15,7 @@ import pytest
 from istota.sandbox.network_proxy import (
     BRIDGE_PORT,
     NetworkProxy,
+    UpstreamRefused,
     write_bridge_script,
 )
 
@@ -523,3 +525,208 @@ class TestNetworkProxyInnerAuthority:
         assert _closed(client)
         upstream.close()
         assert upstream.received in ([], [b""])
+
+
+def _connect_reply(sock_path, target):
+    client, response = _connect(sock_path, target)
+    client.close()
+    return response
+
+
+class TestRefusalsAreLogged:
+    def test_a_refused_host_is_logged_unresolved(self, proxy_sock, tmp_path):
+        log = tmp_path / "egress-refused.jsonl"
+        with patch("socket.getaddrinfo") as resolve, NetworkProxy(
+            proxy_sock, {"news.example.com:443"}, trusted_roots={os.getpid()}, refusal_log=log,
+        ):
+            assert b"403" in _connect_reply(proxy_sock, "evil.example:443")
+        resolve.assert_not_called()
+        assert json.loads(log.read_text()) == {"channel": "connect", "entry": "evil.example"}
+
+    def test_with_no_log_nothing_is_written(self, proxy_sock, tmp_path):
+        with NetworkProxy(proxy_sock, set(), trusted_roots={os.getpid()}):
+            assert b"403" in _connect_reply(proxy_sock, "evil.example:443")
+        assert list(tmp_path.iterdir()) == []
+
+    def test_an_address_refusal_is_not_a_host_to_approve(self, proxy_sock, tmp_path):
+        """The host is on the list and answered privately: adding it again helps nothing."""
+        log = tmp_path / "egress-refused.jsonl"
+        with patch(
+            "istota.sandbox.network_proxy.checked_addresses",
+            side_effect=UpstreamRefused(),
+        ), NetworkProxy(
+            proxy_sock, {"news.example.com:443"}, trusted_roots={os.getpid()}, refusal_log=log,
+        ):
+            assert b"403" in _connect_reply(proxy_sock, "news.example.com:443")
+        assert not log.exists()
+
+
+class _CoveringBroker:
+    """A broker whose task snapshot binds every host: what a limited task with a
+    vault and a credential grant has for its bound hosts."""
+
+    def __init__(self):
+        self.asked = []
+
+    def covers(self, host):
+        self.asked.append(host)
+        return True
+
+
+class TestABoundCredentialDoesNotWidenTheList:
+    def test_connect_refuses_before_the_broker_is_asked(self, proxy_sock, tmp_path):
+        broker = _CoveringBroker()
+        log = tmp_path / "egress-refused.jsonl"
+        with patch("istota.credentials.broker.intercept.intercept") as intercept, NetworkProxy(
+            proxy_sock, set(), trusted_roots={os.getpid()}, broker=broker, refusal_log=log,
+        ):
+            assert b"403" in _connect_reply(proxy_sock, "api.bound.example:443")
+        intercept.assert_not_called()
+        assert broker.asked == []
+        assert json.loads(log.read_text())["entry"] == "api.bound.example"
+
+    def test_plain_http_refuses_too(self, proxy_sock, tmp_path):
+        broker = _CoveringBroker()
+        log = tmp_path / "egress-refused.jsonl"
+        with patch("istota.credentials.broker.intercept._requests") as requests, NetworkProxy(
+            proxy_sock, set(), trusted_roots={os.getpid()}, broker=broker, refusal_log=log,
+        ):
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(5)
+            client.connect(str(proxy_sock))
+            client.sendall(
+                b"POST http://api.bound.example/ HTTP/1.1\r\nHost: api.bound.example\r\n\r\n",
+            )
+            assert b"403" in client.recv(4096)
+            client.close()
+        requests.assert_not_called()
+        assert json.loads(log.read_text())["entry"] == "api.bound.example"
+
+    def test_the_list_never_reads_a_binding(self):
+        """Nothing about a user's credentials is an input to the list."""
+        import inspect
+
+        from istota.executor import _build_network_allowlist
+
+        assert set(inspect.signature(_build_network_allowlist).parameters) == {
+            "config", "authorized_skills", "egress_hosts",
+        }
+
+
+class TestTheLimitedAllowlist:
+    def _config(self):
+        from istota.config import (
+            Config,
+            DeveloperConfig,
+            NetworkConfig,
+            NextcloudConfig,
+            SecurityConfig,
+        )
+
+        return Config(
+            nextcloud=NextcloudConfig(url="https://nc.example.com"),
+            developer=DeveloperConfig(
+                enabled=True,
+                gitlab_url="https://gitlab.example.com",
+                github_url="https://github.com",
+            ),
+            security=SecurityConfig(network=NetworkConfig(
+                allow_pypi=True, extra_hosts=["ops.example.com:8443"],
+            )),
+        )
+
+    def _list(self, hosts, skills=("developer", "google_workspace", "nextcloud")):
+        from istota.executor import _build_network_allowlist
+
+        return _build_network_allowlist(self._config(), list(skills), egress_hosts=hosts)
+
+    def test_open_egress_keeps_the_skill_keyed_list(self):
+        hosts = self._list(None)
+        assert "pypi.org:443" in hosts
+        assert "registry.npmjs.org:443" in hosts
+        assert "gitlab.example.com:443" in hosts
+        assert "api.github.com:443" in hosts
+        assert "www.googleapis.com:443" in hosts
+
+    def test_nothing_approved_is_the_operators_hosts_and_nextcloud(self):
+        assert self._list(frozenset()) == {"ops.example.com:8443", "nc.example.com:443"}
+
+    def test_nextcloud_is_there_without_the_skill(self):
+        assert "nc.example.com:443" in self._list(frozenset(), skills=())
+
+    def test_a_grant_is_host_443(self):
+        hosts = self._list(frozenset({"news.example.com"}))
+        assert "news.example.com:443" in hosts
+        assert [h for h in hosts if h.startswith("news.example.com:")] == ["news.example.com:443"]
+
+    def test_a_registry_or_forge_returns_only_when_granted(self):
+        hosts = self._list(frozenset({"pypi.org", "gitlab.example.com"}))
+        assert {"pypi.org:443", "gitlab.example.com:443"} <= hosts
+        assert "files.pythonhosted.org:443" not in hosts
+        assert "api.github.com:443" not in hosts
+
+    def test_a_private_address_stays_for_what_the_operator_wrote(self):
+        from istota.executor import _network_private_hosts
+
+        names = _network_private_hosts(
+            self._config(), [], egress_hosts=frozenset({"news.example.com"}),
+        )
+        assert names == {"ops.example.com", "nc.example.com"}
+
+    def test_a_grant_never_makes_a_name_private(self):
+        from istota.executor import _network_private_hosts
+
+        assert "news.example.com" not in _network_private_hosts(
+            self._config(), ["developer"], egress_hosts=frozenset({"news.example.com"}),
+        )
+
+
+class TestTheRuntimeBuildsIt:
+    def _runtime(self, tmp_path, source_type, **kwargs):
+        from istota import db
+        from istota.config import Config, NetworkConfig, NextcloudConfig, SecurityConfig
+        from istota.sandbox import task_env
+
+        control = tmp_path / "control"
+        control.mkdir()
+        (tmp_path / "t").mkdir()
+        config = Config(
+            db_path=tmp_path / "istota.db",
+            workspace_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+            nextcloud=NextcloudConfig(url="https://nc.example.com"),
+            security=SecurityConfig(
+                sandbox_enabled=True, skill_proxy_enabled=True,
+                network=NetworkConfig(enabled=True, allow_pypi=True),
+            ),
+        )
+        db.init_db(config.db_path)
+        task = db.Task(id=5, status="running", source_type=source_type, user_id="alice",
+                       prompt="p", conversation_token="")
+        log = control / "egress-refused.jsonl"
+        runtime = task_env.build_task_runtime(
+            config, task, user_temp_dir=tmp_path / "t", control_dir=control, task_attempt=1,
+            selected_skills=[], skill_index={}, is_admin=False, user_resources=[],
+            user_config=None, egress_log=log, **kwargs,
+        )
+        return runtime, log
+
+    def test_a_limited_task_builds_the_limited_proxy(self, tmp_path):
+        from istota.lib.egress_log import EGRESS_LOG_VAR
+
+        runtime, log = self._runtime(
+            tmp_path, "scheduled", egress_hosts=frozenset({"news.example.com"}),
+        )
+        proxy = runtime.net_proxy_ctx
+        assert proxy.allowed_hosts == {"nc.example.com:443", "news.example.com:443"}
+        assert proxy.refusal_log == log
+        assert runtime.proxy_ctx.base_env[EGRESS_LOG_VAR] == str(log)
+        assert EGRESS_LOG_VAR not in runtime.env
+
+    def test_an_open_task_logs_no_host_but_browse_can_still_ask(self, tmp_path):
+        from istota.lib.egress_log import EGRESS_LOG_VAR
+
+        runtime, log = self._runtime(tmp_path, "web")
+        assert "pypi.org:443" in runtime.net_proxy_ctx.allowed_hosts
+        assert runtime.net_proxy_ctx.refusal_log is None
+        assert runtime.proxy_ctx.base_env[EGRESS_LOG_VAR] == str(log)

@@ -23,6 +23,7 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 
+from istota.lib.egress_log import append_refusal
 from istota.sandbox import net_guard, peer_process
 from istota.sandbox.unix_server import UnixSocketServer, arm_until, drain_queued
 
@@ -323,8 +324,11 @@ class NetworkProxy:
         broker=None,
         private_hosts: Iterable[str] = (),
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
+        refusal_log: Path | None = None,
     ):
         self.allowed_hosts = allowed_hosts
+        # A limited task's `egress-refused.jsonl`; None records nothing.
+        self.refusal_log = refusal_log
         self.broker = broker
         # Exact names whose addresses may be non-public; nothing is implied.
         self.private_hosts = net_guard.host_set(private_hosts)
@@ -476,7 +480,11 @@ class NetworkProxy:
             host = parsed.hostname
             port = parsed.port or 80
             authority = f"[{host}]" if ":" in host else host
-            if f"{authority}:{port}" not in self.allowed_hosts or not self.broker.covers(target):
+            if f"{authority}:{port}" not in self.allowed_hosts:
+                append_refusal(self.refusal_log, "connect", host.lower())
+                client.sendall(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
+                return
+            if not self.broker.covers(target):
                 client.sendall(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
                 return
         except ValueError:
@@ -491,6 +499,7 @@ class NetworkProxy:
         target = f"{host}:{port}"
         if target not in self.allowed_hosts:
             logger.debug("Network proxy blocked: %s", target)
+            append_refusal(self.refusal_log, "connect", host.lower())
             client.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
             return
 

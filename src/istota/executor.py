@@ -30,6 +30,7 @@ from istota.mail import support as email_support
 from istota.credentials import names as secrets_vault
 from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox import task_env
+from istota.lib.egress_log import REFUSED_LOG_NAME
 from istota.rooms import speech_gate
 from istota.rooms.scopes import CHANNEL_NOTES_LABEL as CHANNEL_MEMORY_LABEL
 from istota.sandbox.claude_runtime_env import (
@@ -4149,20 +4150,65 @@ def harness_denies_web_fetch(task: "db.Task", config: Config) -> bool:
     return not (wf and wf.enabled)
 
 
-def harness_web_fetch_policy(config: Config, allowed_tools: list[str]):
+def harness_web_fetch_policy(
+    config: Config,
+    allowed_tools: list[str],
+    *,
+    egress_hosts: frozenset[str] | None = None,
+    refusal_log: Path | None = None,
+):
     """`HarnessSpec.web_fetch`: the daemon-side WebFetch's policy, or None.
 
     None when the grant leaves `WebFetch` out (`build_allowed_tools` drops it
     for a non-admin under `admin_only`, and a turn with no web tools has none) or
     the tool is disabled. This widens a CLI task's egress on purpose: the
     CLI's own WebFetch ran inside the CONNECT allowlist, this one reaches any
-    public host under the SSRF rules, as a native task's always has.
+    public host under the SSRF rules, as a native task's always has, unless the
+    task is limited to the hosts in ``egress_hosts``.
     """
     if "WebFetch" not in allowed_tools:
         return None
-    from .session.tools import web_fetch_policy_from_config
+    from .session.tools import web_fetch_policy_for_task
 
-    return web_fetch_policy_from_config(config.brain.native.web_fetch)
+    return web_fetch_policy_for_task(
+        config.brain.native.web_fetch, egress_hosts, refusal_log=refusal_log,
+    )
+
+
+def record_egress_refusals(config: Config, task: "db.Task", log_path: Path) -> None:
+    """Task end: turn `egress-refused.jsonl` into `egress_refused` rows under the
+    task's subject, then raise the bell. On a connection of its own, since this
+    follows the task on every path out and must commit before the bell.
+
+    Never raises and never changes the result. Names no host in a log line: a
+    refused name can carry data.
+    """
+    from .lib.egress_log import consume_refusals
+
+    file_egress_refusals(config, task, consume_refusals(log_path))
+
+
+def file_egress_refusals(
+    config: Config, task: "db.Task", pairs: list[tuple[str, str]],
+) -> None:
+    """`record_egress_refusals`' second half, for a seam already in the daemon."""
+    from .rooms import egress as room_egress, scopes as room_scopes
+
+    if not pairs:
+        return
+    try:
+        with db.get_db(config.db_path) as conn:
+            subject = room_scopes.egress_subject(conn, task)
+            if subject is None:
+                return
+            asks = room_egress.record_log(conn, task.user_id, subject, pairs)
+            conn.commit()
+            if asks:
+                room_egress.raise_refused_bell(conn, task.user_id, [subject])
+    except Exception as exc:  # noqa: BLE001 — logging never decides
+        logger.warning(
+            "egress_log_record_failed task=%s: %s", task.id, type(exc).__name__,
+        )
 
 
 # Defense-in-depth: instance-wide credentials that must never be returned
@@ -4260,6 +4306,7 @@ _REGISTRY_HOSTS = frozenset({
 def _build_network_allowlist(
     config: Config,
     authorized_skills: list[str],
+    egress_hosts: frozenset[str] | None = None,
 ) -> set[str]:
     """Build per-task network allowlist from config and authorized skills.
 
@@ -4267,7 +4314,20 @@ def _build_network_allowlist(
     and skills auto-authorized via credential presence) so a user with
     GitLab tokens configured can reach gitlab.com even when ``developer``
     wasn't selected — symmetric with credential authorization.
+
+    ``egress_hosts`` (`Reach.egress_hosts`) not None replaces all of that: the
+    operator's ``extra_hosts``, the Nextcloud host, and each grant at 443. A
+    registry or a forge is there only if granted, and a host bound to a
+    credential only if granted: the broker intercepts what is on this list and
+    adds nothing to it.
     """
+    if egress_hosts is not None:
+        return {
+            *config.security.network.extra_hosts,
+            *_configured_url_hosts(config, ["nextcloud"]),
+            *(f"{host}:443" for host in egress_hosts),
+        }
+
     hosts: set[str] = set()
 
     if config.security.network.allow_pypi:
@@ -4352,18 +4412,25 @@ def _configured_url_hosts(config: Config, authorized_skills: list[str]) -> set[s
     return hosts
 
 
-def _network_private_hosts(config: Config, authorized_skills: list[str]) -> set[str]:
+def _network_private_hosts(
+    config: Config,
+    authorized_skills: list[str],
+    egress_hosts: frozenset[str] | None = None,
+) -> set[str]:
     """The allowlisted names the proxy lets reach a private address.
 
     Every entry the operator wrote — ``extra_hosts`` and the configured URLs —
     since choosing a LAN host there is the permission. The built-in defaults
     (PyPI, the registries, GitHub's API and log hosts, Google) must resolve
     public: a private answer for one of those is DNS somebody else controls.
+    So must a user's grant, unless it names a host the operator also wrote. A
+    limited task keeps Nextcloud whatever its skills, as its list does.
     """
     from .sandbox.net_guard import normal_host
 
+    url_skills = list(authorized_skills) if egress_hosts is None else [*authorized_skills, "nextcloud"]
     entries = [*config.security.network.extra_hosts,
-               *_configured_url_hosts(config, authorized_skills)]
+               *_configured_url_hosts(config, url_skills)]
     names: set[str] = set()
     for entry in entries:
         host = str(entry).strip().rsplit(":", 1)[0]
@@ -7954,6 +8021,17 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
             "plainly if you are asked for something from the web, rather than "
             "guessing at it."
         )
+    if reach is not None and reach.egress_hosts is not None and reach.web_tools_load:
+        approved = _one_line(", ".join(sorted(reach.egress_hosts)))
+        web_tools += (
+            f"\n- Network: this task runs unattended and reaches only the hosts its owner approved: {approved}."
+            if approved else
+            "\n- Network: this task runs unattended, and no hosts are approved for this task yet."
+        )
+        web_tools += (
+            " WebFetch and shell network calls to anything else are refused. Do not "
+            "retry a refused host; the owner can add it in Settings, Network access."
+        )
 
     # Bash runs with `pipefail` on (ISSUE-321), which the model has to be told
     # once because it changes what an exit status means.
@@ -9448,6 +9526,7 @@ def execute_task(
         # Both proxies come back *constructed and not entered*. They are
         # entered in the `ExitStack` below, which has to wrap the primary call,
         # the reroute and the fallback call alike.
+        _egress_log = control_dir / REFUSED_LOG_NAME
         _runtime = task_env.build_task_runtime(
             config,
             task,
@@ -9466,6 +9545,9 @@ def execute_task(
             isolated_browser=_reach.isolated_browser,
             group_ids=task_group_ids,
             conn=conn,
+            egress_hosts=_reach.egress_hosts,
+            egress_withheld=_reach.egress_withheld,
+            egress_log=_egress_log,
         )
         env = _runtime.env
         _proxy_ctx = _runtime.proxy_ctx
@@ -9609,6 +9691,8 @@ def execute_task(
         req = BrainRequest(
             prompt=prompt,
             allowed_tools=allowed,
+            egress_hosts=_reach.egress_hosts,
+            egress_log=_egress_log,
             # Non-sandbox path (Mac/dev/Docker): the REPL points the brain's
             # working directory at the launch dir directly. No blocklist here —
             # without bwrap the process already runs with the user's own FS
@@ -9747,7 +9831,10 @@ def execute_task(
                 ),
                 harness_root=ensure_task_harness_dir(config, task.user_id, task.id),
                 bash_spill_full_output=config.brain.native.bash_spill_full_output,
-                web_fetch=harness_web_fetch_policy(config, allowed),
+                web_fetch=harness_web_fetch_policy(
+                    config, allowed,
+                    egress_hosts=_reach.egress_hosts, refusal_log=_egress_log,
+                ),
                 # Bound read-only by `_tool_server_wrap` above: where the
                 # harness hands the CLI-spawned tool server its hello and gate.
                 control_dir=control_dir,
@@ -9790,6 +9877,8 @@ def execute_task(
                 _primary_kind = _failover.primary_kind
                 _fallback_kind = _failover.fallback_kind
         finally:
+            # After the ExitStack, so the proxies have stopped writing to it.
+            record_egress_refusals(config, task, _egress_log)
             # Final flush: emit any buffered streamed thinking + text before the
             # scheduler emits the terminal event. Thinking first so its rows keep
             # a lower seq than any trailing answer text. On success this precedes

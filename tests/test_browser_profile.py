@@ -28,6 +28,7 @@ from istota.browser.owner import (
     with_browser_owner,
 )
 from istota.config import Config, SecurityConfig, UserConfig
+from istota.lib.egress_log import EGRESS_LOG_VAR
 from istota.rooms import scopes as room_scopes
 from istota.sandbox import task_env
 from istota.sandbox.skill_proxy import SkillProxy
@@ -515,3 +516,29 @@ class TestTheOldProfileGoes:
         source = BROWSE_API.read_text()
         boot = source[source.index('if __name__ == "__main__":'):]
         assert boot.index("pool.remove_retired_profiles()") < boot.index("_start_liveness_server()")
+
+
+class TestACredentialRefusalAsksForFullAccess:
+    @pytest.fixture(autouse=True)
+    def on_the_isolated_profile(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("ISTOTA_TASK_ID", "21")
+        monkeypatch.setenv(BROWSER_PROFILE_VAR, ISOLATED_PROFILE)
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(tmp_path / "db" / "istota.db"))
+        self.log = tmp_path / "egress-refused.jsonl"
+        monkeypatch.setenv(EGRESS_LOG_VAR, str(self.log))
+
+    def test_it_logs_the_entry_open(self, capsys):
+        assert browse_skill.main(["interact", "s1", "--fill-credential", "#p=acme"]) == 1
+        assert "isolated_browser_credentials_refused" in capsys.readouterr().out
+        assert json.loads(self.log.read_text()) == {"channel": "browse", "entry": "open"}
+
+    def test_an_operation_refusal_asks_for_nothing(self, capsys):
+        assert browse_skill.main(["state"]) == 1
+        assert "isolated_browser_operation_refused" in capsys.readouterr().out
+        assert not self.log.exists()
+
+    def test_with_no_variable_nothing_is_written(self, monkeypatch, capsys):
+        monkeypatch.delenv(EGRESS_LOG_VAR)
+        assert browse_skill.main(["interact", "s1", "--fill-otp", "#p=acme"]) == 1
+        assert not self.log.exists()

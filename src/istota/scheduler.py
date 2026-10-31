@@ -2660,6 +2660,9 @@ def _execute_skill_task(
     with db.get_db(config.db_path) as conn:
         reach = reach_for_task(conn, task, skill_index=skill_index)
     if skill_name in reach.egress_withheld:
+        from .executor import file_egress_refusals
+
+        file_egress_refusals(config, task, [("skill", f"skill:{skill_name}")])
         return False, (
             f"egress_not_approved: the {skill_name} skill is not approved for this "
             "job; the owner can add it in Settings, Network access."

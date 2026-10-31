@@ -18,6 +18,7 @@ from pathlib import Path
 from time import monotonic, sleep, time
 
 from istota import skill_client
+from istota.lib.egress_log import EGRESS_LOG_VAR, append_refusal
 from istota.sandbox import peer_process
 from istota.sandbox.host_paths import skill_file_env
 from istota.credentials.names import label_for_display
@@ -400,7 +401,11 @@ class SkillProxy:
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         max_concurrent_skills: int = DEFAULT_MAX_CONCURRENT_SKILLS,
         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+        egress_withheld: frozenset[str] = frozenset(),
     ):
+        # `Reach.egress_withheld`: refused like any skill off the list, and asked
+        # for in the refusal log. Only names from this set reach the log.
+        self.egress_withheld = egress_withheld
         self.credential_env = credential_env
         self.base_env = base_env
         self.timeout = timeout
@@ -794,6 +799,23 @@ class SkillProxy:
             args = request.get("args", [])
 
             # Validate skill name against CLI-capable skills from skill index
+            if skill in self.egress_withheld:
+                logger.warning(
+                    "proxy_rejected task_id=%s type=skill skill=%s reason=egress_not_approved",
+                    self.task_id, skill,
+                )
+                append_refusal(self.base_env.get(EGRESS_LOG_VAR), "skill", f"skill:{skill}")
+                self._send_response(conn, {
+                    "stdout": "",
+                    "stderr": (
+                        f"egress_not_approved: the {skill} skill is not approved for this "
+                        "task; the owner can add it in Settings, Network access. Do not retry."
+                    ),
+                    "returncode": 1,
+                    "reason": "egress_not_approved",
+                    "skill": skill,
+                })
+                return
             if self.allowed_skills is not None and skill not in self.allowed_skills:
                 logger.warning(
                     "proxy_rejected task_id=%s type=skill skill=%s reason=unknown_skill",

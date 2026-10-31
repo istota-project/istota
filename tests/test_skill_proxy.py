@@ -470,6 +470,21 @@ class TestProxyInformativeRejections:
         assert "Authorized skills" in resp["stderr"]
         assert "email" in resp["stderr"]
 
+    def test_a_limited_tasks_withheld_skill_says_so_and_is_logged(self, sock_path, tmp_path):
+        log = tmp_path / "egress-refused.jsonl"
+        with SkillProxy(
+            sock_path, {}, {"PATH": "/usr/bin", "ISTOTA_EGRESS_LOG": str(log)},
+            allowed_skills=frozenset({"email"}),
+            egress_withheld=frozenset({"browse"}),
+            task_id=42,
+        ):
+            resp = self._send_request(sock_path, {"skill": "browse", "args": []})
+            unknown = self._send_request(sock_path, {"skill": "evil_skill", "args": []})
+        assert resp["reason"] == "egress_not_approved"
+        assert resp["stderr"].startswith("egress_not_approved: the browse skill is not approved")
+        assert json.loads(log.read_text()) == {"channel": "skill", "entry": "skill:browse"}
+        assert unknown["reason"] == "unknown_skill"
+
     def test_unknown_skill_falls_back_to_allowed_when_no_authorized(self, sock_path):
         """If authorized_skills not set, error message lists all CLI skills."""
         with SkillProxy(

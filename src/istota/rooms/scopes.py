@@ -321,6 +321,11 @@ def _egress_for(
         return frozenset(), frozenset()
 
 
+def egress_subject(conn: sqlite3.Connection, task: "db.Task") -> str | None:
+    """What this task's refusals and grants hang on: its root's subject."""
+    return egress.subject_for(conn, _root_of(conn, task))
+
+
 def _root_of(conn: sqlite3.Connection, task: "db.Task") -> "db.Task":
     """The task at the end of the `parent_task_id` walk. `turn_author` has just
     read this chain as whole, so a break here is a race, and raises."""

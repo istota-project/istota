@@ -40,6 +40,7 @@ import pytest
 from istota import db
 from istota.config import SecurityConfig
 from istota.executor import SandboxProfile, _bwrap_available, build_bwrap_cmd
+from istota.lib.egress_log import consume_refusals
 from istota.sandbox.network_proxy import NetworkProxy, write_bridge_script
 from istota.session.tools import hello_payload, start_tool_server
 
@@ -285,3 +286,24 @@ class TestTheAllowlistStillDecides:
         )
         assert "ALLOWED=OK" in out, out
         assert "UNLISTED=REFUSED" in out, out
+
+
+class TestALimitedTasksRefusalIsLogged:
+    def test_a_bash_child_refused_by_the_proxy_is_on_the_log(
+        self, layout, task, user_temp, tmp_path,
+    ):
+        """Through the namespace and the bridge, for a limited task: the refusal
+        reaches the file the executor reads at task end. Control: the same run
+        with the allowed host logs nothing."""
+        sock = tmp_path / "limited.sock"
+        log = tmp_path / "egress-refused.jsonl"
+        with NetworkProxy(
+            sock, ["example.com:443"], trusted_roots={os.getpid()}, refusal_log=log,
+        ):
+            _run(layout, task, user_temp, sock, fetch_probe("https://example.com/", "ALLOWED"))
+            assert not log.exists()
+            out = _run(
+                layout, task, user_temp, sock, fetch_probe("https://example.org/", "REACHED"),
+            )
+        assert "REACHED=REFUSED" in out, out
+        assert consume_refusals(log) == [("connect", "example.org")]

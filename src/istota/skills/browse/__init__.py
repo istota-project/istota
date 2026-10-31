@@ -38,6 +38,7 @@ from istota.browser.admission import BrowserQueueTimeout, browser_request
 
 import httpx
 
+from istota.lib.egress_log import EGRESS_LOG_VAR, append_refusal
 from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
 from istota.sandbox.host_paths import (
     resolve_host_path,
@@ -2127,6 +2128,9 @@ def main(argv=None):
     parser = build_parser()
     if browser_profile() == ISOLATED_PROFILE:
         refusal = _isolated_refusal(list(sys.argv[1:] if argv is None else argv))
+        if refusal == "isolated_browser_credentials_refused":
+            # The way past this refusal is full access, so that is what the owner sees.
+            append_refusal(os.environ.get(EGRESS_LOG_VAR), "browse", "open")
         if refusal:
             print(json.dumps(error_envelope(refusal)))
             return 1

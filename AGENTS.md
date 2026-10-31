@@ -244,6 +244,7 @@ src/istota/
 │   ├── fixed_get.py      # One credentialed GET to a fixed URL, no redirect, no proxy: the usage poll and Anthropic's model list → leaf-modules.md
 │   ├── rate_limit.py     # A sliding-window hit counter per key, in bounded memory, for public routes with no table behind them → leaf-modules.md
 │   ├── browser_console.py  # A user's browser console socket name, shared by the browser pool and the web relay; vendored into the browser image → leaf-modules.md
+│   ├── egress_log.py     # `egress-refused.jsonl`: what a task was refused, on its way from a seam with no database to the table → leaf-modules.md
 │   └── unix_connect.py   # Connecting to a Unix socket without following a symlink at its leaf → leaf-modules.md
 ├── briefings/            # Personal/group briefings — source grants, generation, edition/delivery ledger, reader/settings routes (group operations in `group_service.py`, HTTP-free, so a skill CLI can call them) and migration → briefings.md
 ├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML, image_dedupe

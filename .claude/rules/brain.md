@@ -260,6 +260,7 @@ One `python -m istota.sandbox.tool_server` per attempt via `build_bwrap_cmd(...,
 - `_ip_is_public` on every resolved IP of every hop, fail closed; connection pinned to the validated IP (Host + SNI); manual redirects; no https->http unless `allow_http`.
 - Caps on bytes, chars, redirects, time; honours abort.
 - Output framed `[UNTRUSTED WEB CONTENT …]` with a bounded `Fetched:` header (see `lib/untrusted.py`, `.claude/rules/leaf-modules.md`). The executor folds `untrusted_input` into eager skills when the daemon-side WebFetch is on and not withheld (`_native_web_fetch_enabled`), on either brain.
+- **Per task**: `web_fetch_policy_for_task(cfg, egress_hosts, refusal_log=)` narrows the configured policy to `Reach.egress_hosts` (`.claude/rules/sandbox.md`, "The egress decision"). Native builds it from `BrainRequest.egress_hosts` in `_web_fetch_policy(req)`, and the harness from `HarnessSpec.web_fetch`. The refusal is `egress_not_approved: <host> ...`, bounded by `_header_scalar`, because a redirect's host sits outside any fence.
 - Residual: GET exfiltration (as `browse`). `require_url_provenance` corpus is `_extract_urls(req.prompt)` only, never tool output.
 
 ### Session logs (native-only, `session/session_log.py`)

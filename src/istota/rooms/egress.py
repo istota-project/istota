@@ -23,7 +23,7 @@ import ipaddress
 import logging
 import re
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -42,6 +42,8 @@ DECIDERS = frozenset({"web", "cli", "migration"})
 #: Refusal entries that ask for a decision about a job, rather than name a host.
 JOB_REQUESTS = ("open", "public")
 MAX_REFUSED_PER_SUBJECT = 20
+#: `egress-refused.jsonl` channels whose entry is a name somebody else can choose.
+_HOST_CHANNELS = frozenset({"web_fetch", "connect"})
 _MAX_HOST_CHARS = 253
 
 _LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
@@ -318,6 +320,52 @@ def note_refused(
         "  LIMIT -1 OFFSET ?"
         ")",
         (user_id, subject, MAX_REFUSED_PER_SUBJECT),
+    )
+
+
+def entries_from_log(pairs: "Iterable[tuple[str, str]]") -> set[str]:
+    """What the lines of `egress-refused.jsonl` may become.
+
+    The channel decides. A page chooses a hostname, so a name a network seam
+    refused can only ever be a host: `https://open/` must not read as a request for
+    full access, nor `CONNECT skill:browse:443` as one for a skill. A name no grant
+    could hold (an IP literal, one label) is dropped, since there is nothing to add.
+    """
+    entries = set()
+    for channel, text in pairs:
+        if channel in _HOST_CHANNELS:
+            try:
+                parsed = parse_entry(text)
+            except EntryRefused:
+                continue
+            if parsed.kind == "host":
+                entries.add(parsed.text)
+        elif channel == "browse" and text == "open":
+            entries.add(text)
+        elif channel == "skill" and text.startswith("skill:"):
+            try:
+                entries.add(parse_entry(text).text)
+            except EntryRefused:
+                continue
+    return entries
+
+
+def record_log(
+    conn: sqlite3.Connection, user_id: str, subject: str, pairs: "Iterable[tuple[str, str]]",
+) -> bool:
+    """File a finished task's log under its subject, on the caller's transaction.
+
+    One hit per entry per read, however many times the task tried. Answers whether
+    any of it still asks the owner: a dismissed entry does not ask again.
+    """
+    entries = entries_from_log(pairs)
+    for entry in entries:
+        note_refused(conn, user_id, subject, entry)
+    if not entries:
+        return False
+    return any(
+        row["entry"] in entries and not row["dismissed"]
+        for row in list_refused(conn, user_id, subject)
     )
 
 

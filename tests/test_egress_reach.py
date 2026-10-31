@@ -414,6 +414,8 @@ class TestASkillJobWithNoProxy:
         assert ok is False
         assert message.startswith("egress_not_approved")
         assert "evil.example" not in message
+        rows = egress.list_refused(conn, USER, "cron:digest")
+        assert [row["entry"] for row in rows] == ["skill:browse"]
 
     def test_control_an_approved_job_gets_past_the_gate(self, conn, tmp_path, make_config):
         job_id = _job(conn)
@@ -425,3 +427,14 @@ class TestASkillJobWithNoProxy:
         conn.commit()
         _ok, message = self._run(task, tmp_path, make_config)
         assert not message.startswith("egress_not_approved")
+
+
+class TestTheSubjectOfATask:
+    def test_a_subtask_answers_with_its_root(self, conn):
+        job = _job(conn)
+        root = _task(conn, "scheduled", scheduled_job_id=job)
+        child = _task(conn, "subtask", parent_task_id=root.id)
+        assert room_scopes.egress_subject(conn, child) == "cron:digest"
+
+    def test_an_attended_task_has_none(self, conn):
+        assert room_scopes.egress_subject(conn, _task(conn, "web")) is None
