@@ -134,6 +134,8 @@ Adding a sensitive credential to a skill's `env:` block is the only step needed 
 
 Skill CLI commands run through the proxy (`sandbox/skill_proxy.py`) in the executor thread. The proxy injects credentials server-side, scoped per skill: `derive_skill_credential_map(authorized, skill_index)` returns the per-skill credential map, so a CLI invocation only ever sees credentials its own manifest declared. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled.
 
+Proxied skills run in the task's cgroup, so `task_memory_max_mb`, `task_pids_max` and `task_cpu_max_percent` now cover them along with the task's own tools; a task that relies on a heavy skill may need a higher memory limit. Each proxy also limits its own work in the daemon: request size and arrival time, open connections, concurrent skills and skill output. When a task ends, its proxies close their connections and kill any skill still running. The settings are in the [configuration reference](../configuration/reference.md).
+
 The proxy's Unix socket path includes the host process PID — `istota-proxy-{pid}-{task_id}.sock` (and the same shape for the network proxy). This prevents collisions when multiple processes (xdist test workers, parallel `istota run` instances, the daemon plus a manual scheduler) pick the same `task.id` from independent SQLite databases.
 
 ### Who may connect
@@ -209,6 +211,8 @@ A deployment may run project code — `npm`, `uv`, `cargo`, a test suite — ins
 ### The model's tools and the CLI's credential
 
 On the `claude_code` brain the `claude` CLI runs outside the sandbox, and none of its own tools that act on the machine are available to it. Its tools come from the same tool server the native brain uses, inside the task's namespace, through one MCP server. The CLI's credential is in the CLI's own environment and, under `auth = "subscription"`, a per-run config directory linking to the daemon's credentials file. Nothing inside the namespace holds it: not the task env, not a file the namespace binds, not a process environment a tool can read under `/proc`. The smoke tier's `tests/smoke/test_cli_credential_unreachable.py` runs those probes, and `scripts/test-image-negative-control.sh cli-witness` turns them red by running the tool calls in the CLI's process instead.
+
+The model calls with no task behind them that grant tools (health OCR, the code reviewer and doctor's model probe) run the same way, with one difference: they have no CONNECT proxy and no `--unshare-net`, so their tool server shares the daemon's network namespace. OCR offers only `Read` and the reviewer `Read`, `Grep` and `Glob`, none of which opens a socket. Doctor's fixed prompt grants `Bash`, which can reach what the daemon can. What protects the credential on this path is that the namespace does not hold it. The same test file covers them.
 
 Each run of the CLI gets a fresh `CLAUDE_CONFIG_DIR` with an empty `settings.json`, so the operator's own `~/.claude/settings.json` no longer applies to tasks, and the CLI's own transcripts land in that directory, removed with the rest of the harness directory by the temp-file sweep. `istota-skill tasks transcript` reads the native brain's session logs only.
 

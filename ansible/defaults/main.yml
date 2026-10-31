@@ -170,6 +170,7 @@ istota_secret_names:
   - istota_provider_openrouter_api_key
   - istota_provider_openrouter_extra_headers
   - istota_anthropic_listing_key
+  - istota_browser_api_token
 # name: value, from the vault. A name given here is written exactly, "" included.
 # A name left out is created empty if missing and otherwise left alone, so a
 # file the wizard or the import wrote survives a play that does not manage it.
