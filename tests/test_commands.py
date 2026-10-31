@@ -27,6 +27,7 @@ from istota.commands import (
 from istota.brain import BrainConfig, make_brain, set_alias_overrides
 from istota.brain.claude_code import DEFAULT_ALIASES, HAIKU, OPUS, SONNET
 from istota.config import Config, NextcloudConfig, SchedulerConfig, TalkConfig, UserConfig
+from istota.mail import sender_flags
 from istota.memory.knowledge_graph import add_fact, ensure_table
 
 from .support.rooms import plain_talk_room
@@ -2612,6 +2613,173 @@ class TestTrustCommand:
 
     async def test_trust_list_empty(self, make_config):
         assert "No trusted senders" in await _trust(make_config(), "")
+
+
+# =============================================================================
+# TestSenderFlagCommands
+# =============================================================================
+
+
+_FLAGGED = "mallory@example.net"
+
+
+def _seed_flags(config, sender=_FLAGGED, *, user="alice", reasons=("other",), flagged_at=None):
+    with db.get_db(config.db_path) as conn:
+        for reason in reasons:
+            task_id = _task(conn, user_id=user, source_type="email", status="completed")
+            conn.execute(
+                "INSERT INTO email_sender_flags (user_id, sender, task_id, reason, flagged_at) "
+                "VALUES (?, ?, ?, ?, COALESCE(?, datetime('now')))",
+                (user, sender, task_id, reason, flagged_at),
+            )
+        conn.commit()
+
+
+def _flag_rows(config, user="alice"):
+    with db.get_db(config.db_path) as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM email_sender_flags WHERE user_id = ?", (user,),
+        ).fetchone()[0]
+
+
+async def _flag_command(config, content, user="alice"):
+    """Through `dispatch`, in a web room that user has alone."""
+    with db.get_db(config.db_path) as conn:
+        token = db.register_room(conn, None, user, origin="web", name="own").token
+        conn.commit()
+    result = await dispatch(config, user, token, content, surface="web")
+    return result.text
+
+
+class TestFlaggedCommand:
+    async def test_lists_count_date_reasons_and_hold(self, make_config):
+        config = make_config()
+        _seed_flags(
+            config, reasons=("impersonation", "other", "impersonation"),
+            flagged_at="2099-03-04 05:06:07",
+        )
+
+        text = await _flag_command(config, "!flagged")
+
+        assert f"`{_FLAGGED}`" in text
+        assert "3 flags" in text
+        assert "2099-03-04" in text
+        assert "05:06:07" not in text
+        assert "impersonation, other" in text
+        assert "held now" in text
+        assert "not held" not in text
+
+    async def test_below_the_threshold_is_not_held(self, make_config):
+        config = make_config()
+        _seed_flags(config, reasons=("other",))
+
+        text = await _flag_command(config, "!flagged")
+
+        assert "1 flag," in text
+        assert "not held" in text
+
+    async def test_a_named_address_is_listed_and_not_held(self, make_config):
+        config = make_config()
+        config.users["alice"] = UserConfig(trusted_email_senders=[_FLAGGED])
+        _seed_flags(config, reasons=("other", "other", "other"))
+
+        text = await _flag_command(config, "!flagged")
+
+        assert _FLAGGED in text
+        assert "not held" in text
+
+    async def test_a_flag_past_the_window_is_not_listed(self, make_config):
+        config = make_config()
+        _seed_flags(config, flagged_at="2001-01-01 00:00:00")
+
+        assert "No flagged senders" in await _flag_command(config, "!flagged")
+
+    async def test_empty(self, make_config):
+        assert "No flagged senders" in await _flag_command(make_config(), "!flagged")
+
+    async def test_a_backtick_in_an_address_cannot_close_the_code_span(self, make_config):
+        config = make_config()
+        _seed_flags(config, sender="a`b@example.net")
+
+        text = await _flag_command(config, "!flagged")
+
+        assert "`a'b@example.net`" in text
+
+    async def test_shows_only_this_users_flags(self, make_config):
+        config = make_config()
+        config.users["bob"] = UserConfig()
+        _seed_flags(config, user="bob")
+
+        text = await _flag_command(config, "!flagged")
+
+        assert "No flagged senders" in text
+        assert _FLAGGED not in text
+
+
+class TestUnflagCommand:
+    async def test_clears_every_row_for_the_address(self, make_config):
+        config = make_config()
+        _seed_flags(config, reasons=("other", "other", "other"))
+        _seed_flags(config, flagged_at="2001-01-01 00:00:00")
+        _seed_flags(config, sender="someone@example.net")
+
+        text = await _flag_command(config, f"!unflag {_FLAGGED}")
+
+        assert "Cleared 4 flags" in text
+        assert _FLAGGED in text
+        assert _flag_rows(config) == 1
+        with db.get_db(config.db_path) as conn:
+            assert sender_flags.holding_count(conn, config, "alice", _FLAGGED) == 0
+
+    @pytest.mark.parametrize("typed", [
+        "MALLORY@Example.NET", f"Mallory Q <{_FLAGGED}>",
+    ])
+    async def test_case_and_display_name_are_one_key(self, make_config, typed):
+        config = make_config()
+        _seed_flags(config)
+
+        assert "Cleared 1 flag " in await _flag_command(config, f"!unflag {typed}")
+        assert _flag_rows(config) == 0
+
+    @pytest.mark.parametrize("args", [
+        "", "mallory", "@", "a@example.net b@example.net",
+    ])
+    async def test_usage(self, make_config, args):
+        config = make_config()
+        _seed_flags(config)
+
+        assert "Usage" in await _flag_command(config, f"!unflag {args}".strip())
+        assert _flag_rows(config) == 1
+
+    async def test_an_address_with_no_rows_says_so(self, make_config):
+        text = await _flag_command(make_config(), f"!unflag {_FLAGGED}")
+
+        assert "has no flags" in text
+        assert "failed" not in text
+
+    async def test_one_user_cannot_clear_anothers(self, make_config):
+        config = make_config()
+        config.users["bob"] = UserConfig()
+        _seed_flags(config, user="bob")
+
+        text = await _flag_command(config, f"!unflag {_FLAGGED}")
+
+        assert "has no flags" in text
+        assert _flag_rows(config, "bob") == 1
+
+
+class TestSenderFlagCommandsInASharedRoom:
+    @pytest.mark.parametrize("content", ["!flagged", f"!unflag {_FLAGGED}", "!unflag"])
+    async def test_refused_and_nothing_changes(self, make_config, content):
+        config = make_config()
+        token, _ = _shared_room(config)
+        _seed_flags(config)
+
+        result = await dispatch(config, "alice", token, content, surface="web")
+
+        assert "private chat with me" in result.text
+        assert _FLAGGED not in result.text
+        assert _flag_rows(config) == 1
 
 
 # =============================================================================
