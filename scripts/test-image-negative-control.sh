@@ -475,8 +475,18 @@ cli_harness_half() {
 # file stays green: the harness CLI's HOME is empty and its file is under
 # CLAUDE_CONFIG_DIR, which the probe does not read. The probes-ran test is the
 # control's own control and must stay green.
+#
+# The same control covers the direct callers' class (GitLab #867): doctor, OCR
+# and the reviewer, whose probes the fake then also makes itself. Doctor's
+# credentials-file case under "api_key" stays green, since there is no file to
+# find there, and its network namespace case stays green because the fake is in
+# the daemon's namespace too; the task class's namespace case is the one that
+# shows that comparison can fail. The third class runs the shell probes in
+# `build_daemon_sandbox`'s wrap; the control runs them unwrapped instead.
 
 CLI_WITNESS_TESTS="tests/smoke/test_cli_credential_unreachable.py::TestTheCliCredentialIsOutOfTheToolsReach"
+CLI_WITNESS_DIRECT="tests/smoke/test_cli_credential_unreachable.py::TestTheDirectCallersToolsCannotReachIt"
+CLI_WITNESS_WRAP="tests/smoke/test_cli_credential_unreachable.py::TestTheDaemonSandboxHoldsNoCredential"
 
 cli_witness_half() {
     echo
@@ -491,6 +501,7 @@ cli_witness_half() {
         for test in test_the_environment_holds_no_credential \
                     test_no_readable_process_environment_holds_it \
                     test_no_result_carries_it \
+                    test_the_tools_network_namespace_is_not_the_clis \
                     test_the_anthropic_connect_is_refused; do
             node="${CLI_WITNESS_TESTS}::${test}[${mode}]"
             if ! grep -Fq "FAILED ${node}" "$witness_out"; then
@@ -506,6 +517,53 @@ cli_witness_half() {
             echo "[control] so the red above says nothing about the credential."
             exit 1
         fi
+    done
+    red_nodes="test_the_credentials_files_are_out_of_reach[doctor-subscription]"
+    for caller in doctor ocr reviewer; do
+        for mode in subscription api_key; do
+            red_nodes="${red_nodes} test_no_tool_result_or_output_carries_it[${caller}-${mode}]"
+            red_nodes="${red_nodes} test_the_clis_process_environment_is_out_of_reach[${caller}-${mode}]"
+            if [ "$caller" != doctor ]; then
+                red_nodes="${red_nodes} test_the_credentials_files_are_out_of_reach[${caller}-${mode}]"
+                red_nodes="${red_nodes} test_a_read_only_caller_has_no_bash[${caller}-${mode}]"
+            fi
+            node="${CLI_WITNESS_DIRECT}::test_the_caller_ran_and_the_cli_held_the_credential[${caller}-${mode}]"
+            if grep -Fq "FAILED ${node}" "$witness_out" || grep -Fq "ERROR ${node}" "$witness_out"; then
+                rm -f "$witness_out"
+                echo "[control] FAILED: cli-witness broke the caller itself (${node}),"
+                echo "[control] so the red above says nothing about the credential."
+                exit 1
+            fi
+        done
+    done
+    for test in $red_nodes; do
+        node="${CLI_WITNESS_DIRECT}::${test}"
+        if ! grep -Fq "FAILED ${node}" "$witness_out"; then
+            rm -f "$witness_out"
+            echo "[control] FAILED: cli-witness did not turn ${node} red."
+            exit 1
+        fi
+    done
+    for caller in ocr reviewer; do
+        for mode in subscription api_key; do
+            for test in test_it_is_a_real_namespace \
+                        test_the_credentials_file_and_harness_root_are_out_of_reach \
+                        test_no_environment_it_can_read_holds_it; do
+                node="${CLI_WITNESS_WRAP}::${test}[${caller}-${mode}]"
+                if ! grep -Fq "FAILED ${node}" "$witness_out"; then
+                    rm -f "$witness_out"
+                    echo "[control] FAILED: cli-witness did not turn ${node} red."
+                    exit 1
+                fi
+            done
+            node="${CLI_WITNESS_WRAP}::test_the_probes_ran_and_the_daemon_held_the_credential[${caller}-${mode}]"
+            if grep -Fq "FAILED ${node}" "$witness_out" || grep -Fq "ERROR ${node}" "$witness_out"; then
+                rm -f "$witness_out"
+                echo "[control] FAILED: cli-witness broke the probe itself (${node}),"
+                echo "[control] so the red above says nothing about the credential."
+                exit 1
+            fi
+        done
     done
     rm -f "$witness_out"
     echo "[control] OK: cli-witness turned its witnesses red."

@@ -168,6 +168,12 @@ print("PROBE=" + json.dumps(out))
 """
 
 
+#: What the compose stack's secret file carries, passed as the variable the
+#: entrypoint falls back to, since these containers run with no compose file.
+API_TOKEN = "image-tier-browser-token"
+API_AUTH = f"Authorization: Bearer {API_TOKEN}"
+
+
 def _docker(*argv: str, timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(["docker", *argv], capture_output=True, text=True, timeout=timeout)
 
@@ -186,6 +192,7 @@ def test_the_web_uid_reads_x11vnc_through_the_console_socket(browser_image):
     assert _docker("volume", "create", volume).returncode == 0
     started = _docker(
         "run", "-d", "--rm", "--init", "--shm-size", "1g", *platform,
+        "-e", f"ISTOTA_BROWSER_API_TOKEN={API_TOKEN}",
         "-v", f"{volume}:{CONSOLE_DIR}", browser_image.tag,
     )
     try:
@@ -205,10 +212,11 @@ def test_the_web_uid_reads_x11vnc_through_the_console_socket(browser_image):
         browsed = _docker(
             "exec", container, "curl", "-s", "-X", "POST", "http://localhost:9223/browse",
             "-H", "Content-Type: application/json", "-H", f"X-Istota-User: {CONSOLE_USER}",
+            "-H", API_AUTH,
             "-d", json.dumps({"url": "http://localhost:9224/live", "timeout": 60}),
             timeout=300,
         )
-        listed = _docker("exec", container, "curl", "-sf", "http://localhost:9223/instances")
+        listed = _docker("exec", container, "curl", "-sf", "-H", API_AUTH, "http://localhost:9223/instances")
         users = [row.get("user") for row in json.loads(listed.stdout or "{}").get("instances", [])]
         assert CONSOLE_USER in users, (
             f"no live instance for {CONSOLE_USER}: {listed.stdout}\nbrowse: {browsed.stdout[-2000:]}"
@@ -312,10 +320,15 @@ def test_chrome_runs_in_the_layer(browser_chrome_layer):
     assert "Google Chrome" in result.stdout
 
 
-def test_the_browser_service_starts_on_the_layer(browser_chrome_layer):
-    """The image's own entrypoint, as compose starts the browser service."""
+def test_the_browser_service_starts_on_the_layer(browser_chrome_layer, tmp_path):
+    """The image's own entrypoint, as compose starts the browser service, with
+    the token in a mounted secret file as compose provides it."""
+    token_file = tmp_path / "istota_browser_api_token"
+    token_file.write_text(API_TOKEN)
+    token_file.chmod(0o444)
     started = subprocess.run(
-        ["docker", "run", "-d", "--rm", "--init", "--shm-size", "1g", browser_chrome_layer.tag],
+        ["docker", "run", "-d", "--rm", "--init", "--shm-size", "1g",
+         "-v", f"{token_file}:/run/secrets/istota_browser_api_token:ro", browser_chrome_layer.tag],
         capture_output=True, text=True, timeout=60,
     )
     assert started.returncode == 0, started.stderr
@@ -346,9 +359,45 @@ def test_the_browser_service_starts_on_the_layer(browser_chrome_layer):
         browsed = subprocess.run(
             ["docker", "exec", container, "curl", "-s", "-X", "POST", "http://localhost:9223/browse",
              "-H", "Content-Type: application/json", "-H", "X-Istota-User: egress-witness",
+             "-H", API_AUTH,
              "-d", json.dumps({"url": "http://localhost:9224/live", "timeout": 60})],
             capture_output=True, text=True, timeout=240,
         )
         assert "Refused: this is a private address" in browsed.stdout, browsed.stdout[-2000:]
+
+        # The closure test's forged header (#884), from a second container on
+        # the service's own network: a peer, as the audit described.
+        address = _docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", container)
+        peer = (
+            "import json, urllib.error, urllib.request\n"
+            "def code(headers, path):\n"
+            f"    req = urllib.request.Request('http://{address.stdout.strip()}:9223' + path, headers=headers)\n"
+            "    try:\n"
+            "        return urllib.request.urlopen(req, timeout=30).status\n"
+            "    except urllib.error.HTTPError as err:\n"
+            "        return err.code\n"
+            "print(json.dumps([\n"
+            "    code({'X-Istota-User': 'victim'}, '/state'),\n"
+            "    code({'X-Istota-User': 'victim', 'Authorization': 'Bearer wrong'}, '/state'),\n"
+            "    code({}, '/instances'),\n"
+            f"    code({{'Authorization': 'Bearer {API_TOKEN}'}}, '/instances'),\n"
+            "]))\n"
+        )
+        probed = _docker(
+            "run", "--rm", "--entrypoint", "python", browser_chrome_layer.tag, "-c", peer, timeout=120,
+        )
+        assert json.loads(probed.stdout) == [401, 401, 401, 200], (probed.stdout, probed.stderr)
+        # And no Chrome process holds it: the API popped it first. As the browser
+        # user, since root here has no CAP_SYS_PTRACE and reads no environ, and
+        # DISPLAY proves the read worked. By name, since `pgrep -f` matches this
+        # shell's own command line.
+        chrome_env = _docker(
+            "exec", "-u", "browser", container, "sh", "-c",
+            "for p in $(pgrep -x chrome); do tr '\\0' '\\n' < /proc/$p/environ; done > /tmp/chrome-env; "
+            "grep -c '^DISPLAY=' /tmp/chrome-env; grep -c '^ISTOTA_BROWSER_API_TOKEN=' /tmp/chrome-env || true",
+        )
+        readable, holding = chrome_env.stdout.split()
+        assert int(readable) > 0, (chrome_env.stdout, chrome_env.stderr)
+        assert holding == "0", (chrome_env.stdout, chrome_env.stderr)
     finally:
         subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=60)

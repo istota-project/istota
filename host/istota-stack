@@ -613,6 +613,8 @@ PY
 stack_up() {
     local active id service tag missing up_args=(up -d --remove-orphans)
     ensure_data_dir
+    # A restore or an import can reach here with the generated secret empty.
+    ensure_secret_files || { log "could not create the secret files compose declares in ${SECRETS_DIR}"; return 1; }
     tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     # Rendered by the script that starts the stack, so it names this script's
     # /data: one an older istota-stack rendered names a volume nothing mounts.
@@ -1455,6 +1457,8 @@ cmd_rollback() {
 # Every credential file compose declares, empty where it does not exist yet:
 # compose refuses to start a service whose secret file is missing, before
 # anything in a container could write one.
+GENERATED_SECRET=istota_browser_api_token
+
 secret_names() {
     # Names are [a-z0-9_] only; the single quotes are sed's, not the shell's.
     # shellcheck disable=SC2016
@@ -1469,6 +1473,7 @@ warn_unread_secrets() {
     now=" $( (secret_names 2>/dev/null || true) | tr '\n' ' ') "
     for name in $declared; do
         case "$now" in *" ${name} "*) continue ;; esac
+        [ "$name" = "$GENERATED_SECRET" ] && continue
         if [ -n "$(find -P "${SECRETS_DIR}/${name}" -maxdepth 0 -type f -size +0 2>/dev/null)" ]; then
             unread="${unread} ${name}"
         fi
@@ -1478,14 +1483,21 @@ warn_unread_secrets() {
 }
 
 ensure_secret_files() {
-    local name owner=() request rc=0
+    local name owner=() request value rc=0
     # Root on the VM; the tests run as themselves.
     if [ "$(id -u)" -eq 0 ]; then owner=(-o "$ISTOTA_UID" -g "$ISTOTA_UID"); fi
-    install -d -m 0700 "${owner[@]}" "$SECRETS_DIR" || return 1
+    install -d -m 0700 ${owner[@]+"${owner[@]}"} "$SECRETS_DIR" || return 1
     # The files themselves go through put-files: secrets/ is uid 10001's.
     request='{"secrets": {'
     for name in $(secret_names); do
-        request="${request}\"${name}\": null, "
+        value=null
+        # The one no person supplies. The value stays on the stdin below, out of
+        # every argv. A new one reaches a running stack when the stack restarts.
+        if [ "$name" = "$GENERATED_SECRET" ] \
+            && [ -z "$(find -P "${SECRETS_DIR}/${name}" -maxdepth 0 -type f -size +0 2>/dev/null)" ]; then
+            value="\"$(python3 -I -c 'import secrets; print(secrets.token_hex(32))')\"" || return 1
+        fi
+        request="${request}\"${name}\": ${value}, "
     done
     request="${request%, }}}"
     printf '%s' "$request" | cmd_put_files >/dev/null || rc=$?
@@ -2785,7 +2797,7 @@ cmd_put_files() {
     if [ "$(id -u)" -eq 0 ]; then
         drop=(setpriv "--reuid=${ISTOTA_UID}" "--regid=${ISTOTA_UID}" --clear-groups --no-new-privs)
     fi
-    "${drop[@]}" python3 -I -c "$PUT_FILES_PY" "$SECRETS_DIR" "$CONFIG_DIR" "$dry_run"
+    ${drop[@]+"${drop[@]}"} python3 -I -c "$PUT_FILES_PY" "$SECRETS_DIR" "$CONFIG_DIR" "$dry_run"
 }
 
 # host.env is root's and read by provision.sh and the units; the Mac CLI

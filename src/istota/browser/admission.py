@@ -6,6 +6,7 @@ from pathlib import Path
 
 import httpx
 
+from istota.config import BROWSER_API_TOKEN_VAR
 from istota.lib.file_lock import exclusive_lock
 
 QUEUE_WAIT_TIMEOUT = 90.0
@@ -68,6 +69,12 @@ class BrowserIdentityMissing(ValueError):
     """A browser request named no user, so the API would refuse it."""
 
 
+def browser_api_auth() -> dict[str, str]:
+    """The header that lets this process name a user to the browser API (#884)."""
+    token = os.environ.get(BROWSER_API_TOKEN_VAR, "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 def browser_call(method, url, **kwargs):
     """One browser API request, for a caller already holding admission.
 
@@ -84,6 +91,7 @@ def browser_call(method, url, **kwargs):
             f"browser request to {url} names no user (X-Istota-User); "
             "pass browser_headers() or browser_headers(user_id)"
         )
+    kwargs["headers"] = {**headers, **browser_api_auth()}
     # httpx.delete deliberately has no body parameter; the state endpoint
     # needs a JSON selection while retaining the same admission lock.
     if method == "delete" and "json" in kwargs:

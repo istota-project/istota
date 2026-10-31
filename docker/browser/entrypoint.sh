@@ -57,6 +57,16 @@ websockify --web "$BROWSER_RUNTIME_DIR/web" --cert "$CERT_DIR/combined.pem" \
     done
 ) &
 
+# The API's service token (#884). Read here because the file is uid 10001's and
+# the browser user is not. Exported after the children above started, and never
+# passed as an argument below, where tini's argv would show it to the whole
+# container.
+TOKEN_FILE=/run/secrets/istota_browser_api_token
+if [ -s "$TOKEN_FILE" ]; then
+    ISTOTA_BROWSER_API_TOKEN="$(cat "$TOKEN_FILE")"
+fi
+export ISTOTA_BROWSER_API_TOKEN="${ISTOTA_BROWSER_API_TOKEN:-}"
+
 # Forward Docker stop to the API only, then reap orphaned children. su kills
 # its shell after two seconds, before the API can flush every Chrome profile.
 # setpriv execs directly and preserves the configured environment without a

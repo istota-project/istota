@@ -114,10 +114,11 @@ x-istota-secrets: &istota_secrets
   - istota_provider_openrouter_extra_headers
 
 # The daemon mounts every secret the web service does, plus the key used only
-# to list Anthropic's models: discovery runs in the daemon and nowhere else
-# (setup_wizard.DAEMON_ONLY_SECRETS). YAML cannot extend an aliased list, so
+# to list Anthropic's models, since discovery runs in the daemon and nowhere
+# else, and the browser API's token (setup_wizard.DAEMON_ONLY_SECRETS). YAML cannot extend an aliased list, so
 # the names are restated; tests/test_setup_container.py holds both lists.
 x-daemon-secrets: &daemon_secrets
+  - istota_browser_api_token
   - anthropic_api_key
   - claude_code_oauth_token
   - istota_brain_native_api_key
@@ -404,6 +405,9 @@ services:
       - "${BROWSER_API_BIND:-127.0.0.1}:${BROWSER_API_PORT:-9223}:9223"
       - "${BROWSER_VNC_BIND:-127.0.0.1}:${BROWSER_VNC_PORT:-6080}:6080"
     shm_size: ${BROWSER_SHM_SIZE:-2gb}
+    # The token a caller of the API must hold; entrypoint.sh reads it as root.
+    secrets:
+      - istota_browser_api_token
     environment:
       VNC_PASSWORD: ${VNC_PASSWORD:-}
       BROWSER_VNC_URL: ${ISTOTA_BROWSER_VNC_URL:-}
@@ -646,6 +650,8 @@ networks:
 # 0400 and uid 10001 are the writer's job: `istota setup --vm-dir`, run in the
 # image as uid 10001, creates them that way.
 secrets:
+  istota_browser_api_token:
+    file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_browser_api_token
   anthropic_api_key:
     file: ${ISTOTA_SECRETS_DIR:-./secrets}/anthropic_api_key
   claude_code_oauth_token:

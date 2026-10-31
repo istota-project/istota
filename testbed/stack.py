@@ -778,11 +778,15 @@ SECRET_NAMES: tuple[str, ...] = (
     "istota_provider_openrouter_api_key",
     "istota_provider_openrouter_extra_headers",
     "istota_anthropic_listing_key",
+    "istota_browser_api_token",
 )
 
 #: What the scripted endpoint is sent as a key. Nothing in this tier can use a
 #: real one: the endpoint ignores the Authorization header entirely.
 SCRIPTED_ENDPOINT_KEY = "unused-by-the-scripted-endpoint"
+
+#: The browser API's service token on a testbed stack, in place of a generated one.
+BROWSER_API_TOKEN = "testbed-browser-api-token"
 
 #: The tree's one TOML writer (`istota.lib.toml_write`), the same one `istota
 #: setup` and `istota apply` render a config with. A stdlib-only leaf that
@@ -857,9 +861,13 @@ def lean_secrets() -> dict[str, str]:
 
     Through a file like any credential, so the daemon reads it the way an
     operator's does (`istota-secrets`), and never from a developer's exported
-    `ISTOTA_BRAIN_NATIVE_API_KEY`.
+    `ISTOTA_BRAIN_NATIVE_API_KEY`. The browser refuses every caller without its
+    token, and the stack has no `istota-stack` to generate one.
     """
-    return {"istota_brain_native_api_key": SCRIPTED_ENDPOINT_KEY}
+    return {
+        "istota_brain_native_api_key": SCRIPTED_ENDPOINT_KEY,
+        "istota_browser_api_token": BROWSER_API_TOKEN,
+    }
 
 
 def write_config(

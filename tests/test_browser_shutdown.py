@@ -44,8 +44,8 @@ def test_sigterm_runs_cleanup_on_the_main_thread(tmp_path, repeat_signal):
         sys.modules['pool'] = types.SimpleNamespace(cleanup=cleanup)
         import browser_server
         make_server = browser_server.make_browser_server
-        def make_test_server(app):
-            server, pending = make_server(app, host="127.0.0.1", port=0)
+        def make_test_server(app, token=""):
+            server, pending = make_server(app, host="127.0.0.1", port=0, token=token)
             ready.touch()
             return server, pending
         browser_server.make_browser_server = make_test_server

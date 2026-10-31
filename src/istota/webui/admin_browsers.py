@@ -15,6 +15,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 import httpx
 
+from istota.browser.admission import browser_api_auth
 from istota.config import BrowserConfig, Config
 
 logger = logging.getLogger("istota.webui.admin_browsers")
@@ -53,6 +54,7 @@ async def snapshot(config: BrowserConfig) -> dict:
             async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
                 response = await client.get(
                     config.api_url.rstrip("/") + "/instances", params={"vnc_url": base},
+                    headers=browser_api_auth(),
                 )
                 response.raise_for_status()
                 data = response.json()

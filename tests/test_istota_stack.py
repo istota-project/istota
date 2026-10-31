@@ -627,6 +627,51 @@ class TestASignedTagIsDeployed:
         assert (secrets / "new_one").read_text() == ""
         assert (secrets / "old_one").read_text() == "kept"
 
+    def _generated_secret_release(self, fx):
+        compose = fx.origin / "docker" / "docker-compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text(
+            "secrets:\n"
+            "  new_one:\n    file: ${ISTOTA_SECRETS_DIR:-./secrets}/new_one\n"
+            "  istota_browser_api_token:\n"
+            "    file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_browser_api_token\n"
+        )
+        _git(fx.origin, "add", "docker/docker-compose.yml", env=fx.env)
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+
+    def test_an_update_generates_the_browser_api_token_once(self, fx):
+        """#884: an install that predates the token gets one from its first
+        update, in the file compose mounts, and nothing else gets a value."""
+        self._generated_secret_release(fx)
+
+        result = fx.run("update", "v1")
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        secrets = fx.stack / "secrets"
+        token = (secrets / "istota_browser_api_token").read_text()
+        assert re.fullmatch(r"[0-9a-f]{64}", token)
+        assert stat.S_IMODE((secrets / "istota_browser_api_token").stat().st_mode) == 0o400
+        assert (secrets / "new_one").read_text() == ""
+        assert token not in result.stdout + result.stderr
+        assert token not in fx.calls.read_text()
+
+        again = fx.run("up")
+        assert again.returncode == 0, again.stdout + again.stderr
+        assert (secrets / "istota_browser_api_token").read_text() == token
+
+    def test_an_emptied_token_file_is_generated_again_by_up(self, fx):
+        """A restore or an import leaves the file empty and goes straight to `up`."""
+        self._generated_secret_release(fx)
+        assert fx.run("update", "v1").returncode == 0
+        path = fx.stack / "secrets" / "istota_browser_api_token"
+        _replace(path, "")
+
+        result = fx.run("up")
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert re.fullmatch(r"[0-9a-f]{64}", path.read_text())
+
     def test_a_link_planted_at_a_new_secret_is_replaced_not_followed(self, fx, tmp_path):
         """secrets/ is uid 10001's, so the missing-file pass goes through
         put-files rather than root's own install."""
@@ -1015,7 +1060,11 @@ class TestARollbackPastASecretFile:
         _git(fx.origin, "add", "docker/docker-compose.yml", env=fx.env)
         fx.commit("v1")
         fx.tag("v1", key=fx.release_key)
-        compose.write_text(old + "  new_one:\n    file: ${ISTOTA_SECRETS_DIR:-./secrets}/new_one\n")
+        compose.write_text(
+            old + "  new_one:\n    file: ${ISTOTA_SECRETS_DIR:-./secrets}/new_one\n"
+            "  istota_browser_api_token:\n"
+            "    file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_browser_api_token\n"
+        )
         _git(fx.origin, "add", "docker/docker-compose.yml", env=fx.env)
         fx.commit("v2")
         fx.tag("v2", key=fx.release_key)
@@ -1041,6 +1090,16 @@ class TestARollbackPastASecretFile:
         assert result.returncode == 0, result.stdout + result.stderr
         assert "ISTOTA_TAG=v1\n" in fx.env_text()
         assert "WARNING: v1 does not read the secret files new_one." in result.stderr
+
+    def test_the_generated_browser_token_is_not_named(self, rolled_forward):
+        """Nobody chose it and there is nothing to do about it; the older
+        browser and daemon simply run without one."""
+        fx = rolled_forward
+        _replace(fx.stack / "secrets" / "istota_browser_api_token", "generated")
+        result = fx.run("rollback")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "WARNING" not in result.stderr
+        assert (fx.stack / "secrets" / "istota_browser_api_token").read_text() == "generated"
 
     def test_an_empty_secret_file_is_not_named(self, rolled_forward):
         result = rolled_forward.run("rollback")

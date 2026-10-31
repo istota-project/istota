@@ -722,7 +722,9 @@ class TestHealthEndpoint:
     def _plain_request(self, monkeypatch):
         """health() reads request.args to decide whether to add diagnostics."""
         monkeypatch.setattr(
-            browse_api, "request", types.SimpleNamespace(args={}), raising=False,
+            browse_api, "request",
+            types.SimpleNamespace(args={}, environ={"istota.browser_api_token_matched": True}),
+            raising=False,
         )
 
     def test_a_wedged_binding_degrades_the_status(self, monkeypatch):
