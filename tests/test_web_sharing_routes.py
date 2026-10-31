@@ -253,10 +253,20 @@ async def test_the_federated_id_and_pending_offers(signed_client, config):  # no
     assert offer == {
         "id": source_id, "name": "Taxes 2026", "owner": "carol@https://cloud.example.org",
         "owner_display_name": None, "shared_by": None, "shared_by_display_name": None,
-        "host": "cloud.example.org", "reoffer": False, "created_at": offer["created_at"],
+        "host": "cloud.example.org", "reoffer": False, "signed": None,
+        "created_at": offer["created_at"],
     }
     me = await signed_client.get("/istota/api/me")
     assert me.json()["features"]["sharing_ocm"] is True
+
+
+@pytest.mark.parametrize("signed", [True, False])
+async def test_an_offer_says_whether_it_was_signed(signed_client, config, signed):  # noqa: F811
+    config.sharing.ocm.enabled = True
+    _pending_offer(config, sender_signed=signed)
+    response = await signed_client.get(BASE)
+    [offer] = response.json()["ocm"]["pending"]
+    assert offer["signed"] is signed
 
 
 async def test_an_offer_names_its_sharer_when_it_is_not_the_owner(signed_client, config):  # noqa: F811

@@ -22,8 +22,9 @@ Emails from untrusted senders require explicit user confirmation before processi
 - Plus-addressed emails (`bot+user_id@domain`) from senders not in the user's trusted list
 - Emails whose `From:` names one of the user's own addresses, when `confirm_sender_match` is `"verify"` (and the message did not authenticate) or `"gate"` (default: `"off"`, never)
 - Replies on an email thread whose `From:` is not one of the thread's people, or, on a thread sent before rooms were created at the send, not one of the addresses the bot wrote to
+- Mail from an address with enough [injection flags](#flagged-senders), even when a pattern in the trust list matches it or the sender is one of the thread's people
 
-When an email is gated, a confirmation prompt is posted to the user's alerts channel (Talk) asking them to approve, discard, or — for an external sender — trust them so later mail passes. Trusted senders bypass the gate.
+When an email is gated, a confirmation prompt is posted to the user's alerts channel (Talk) asking them to approve, discard, or — for an external sender — trust them so later mail passes. Trusted senders bypass the gate, apart from a flagged sender matched only by a pattern.
 
 A reply from the contact the bot wrote to is not gated: that address is the one the bot chose to correspond with, so the reply carries the same evidence the send did. Someone *else* replying on that thread is, and it takes one approval per thread: a plain `yes` processes the mail and adds its sender to the thread's people, so their later mail on that thread is not gated again, while mail from them on any other thread still is. `yes trust` lets their mail through everywhere. The `Message-ID` alone is no longer enough, because it is not a secret: it travels to everyone Cc'd, everyone the thread is forwarded to, and into any public archive the thread reaches, and it never expires.
 
@@ -148,7 +149,7 @@ Mail you did not write runs as you, on a short list of tools. That applies to a 
 
 - **What loads.** Your `USER.md`, your overlays for the skills the turn can use, and the thread room's own notes (its `CHANNEL.md` and memory folder). The sender can ask about anything here, so keep private notes about a correspondent out of that thread's room. Dated memories, recalled memories, remembered facts, playbooks, pinned files and group notebooks do not, because the sender's mail would be the search and the reply would carry the result. Recall has no setting, and is off the same way on a guest's turn in other shared rooms.
 - **What it can use.** By default `email`, `skills`, `transcribe`, `whisper` and `markets`: the reply, the mail's own attachments, and public market data. On this turn `email` makes only the reply (`email output`). Every other verb, including reading the mailbox and sending elsewhere, answers `not_owner_turn`.
-- **What it cannot do.** Your workspace is not mounted, so the turn cannot read your files or write `CRON.md`, `HEARTBEAT.md`, `TASKS.md`, `USER.md` or an overlay. No other skill, web search, web fetch or stored credential is there, and a skill added later starts out of reach. Writes it queues for after the task are dropped, except the reply, alerts to you and, when `calendar` is allowed, Istota calendar events.
+- **What it cannot do.** Your workspace is not mounted, so the turn cannot read your files or write `CRON.md`, `HEARTBEAT.md`, `TASKS.md`, `USER.md` or an overlay. No other skill, web search, web fetch or stored credential is there, and a skill added later starts out of reach. Writes it queues for after the task are dropped, except the reply, alerts to you, a [sender flag](#flagged-senders) and, when `calendar` is allowed, Istota calendar events.
 - **What stays open.** The turn can still write the thread room's `CHANNEL.md`, as a guest's turn can in its room. Your own later turns on that thread see the file fenced as room notes, so a correspondent can plant text there.
 - **What it leaves behind.** The turn is indexed under the thread room only, so your own later turns on that thread can recall it and your private recall cannot. The nightly memory pass does not read it.
 
@@ -165,6 +166,39 @@ Two limits depend on the deployment. On a shape with no sandbox, such as `istota
 ### Suspicious email alerts
 
 During task execution, if the agent detects suspicious content in an email (social engineering, prompt injection, exfiltration attempts), it writes an alert to a deferred JSON file. After task completion, the scheduler posts these alerts to the user's alerts channel in Talk.
+
+### Flagged senders
+
+Istota keeps a per-address record of mail that looked like a prompt injection attempt. Once an address has enough flags, its mail to you is held for your approval before any model reads it. This is what bounds repeat attempts on an account that trusts everyone with `trusted_email_senders = ["*"]`, where every mail otherwise gets a paid model turn and an unheld reply.
+
+**How a flag is earned.** A turn answering someone else's mail can write a deferred file saying the mail looks like an attempt, with a reason from a fixed set. It has one field, the reason. The daemon takes the sender and the user from the task and its mail record, so a mail telling the model to flag somebody else has nowhere to name them. The mail's text and the model's wording are not stored.
+
+No flag is recorded unless all of these hold:
+
+- The turn is a correspondent's. Your own turn records nothing, so forwarding an injected mail to the bot does not flag anyone, and neither does a guest's turn or a briefing.
+- The task has its own mail record, so a `!retry` copy does not count the mail twice. One mail earns at most one flag.
+- The sender is not one of your own addresses.
+- The mail passed the strict DMARC reading used for [answering a held mail by email](#answering-a-held-mail-by-email): an aligned pass on the topmost `Authentication-Results` header under your `authserv_id`, with no other stamp of yours disagreeing. A failed, absent or unstamped check says nothing about the address.
+
+That last rule stops someone forging another person's address to get it held. It relies on the same thing answers by mail rely on: your mail server stamps every inbound mail and removes incoming stamps that carry its own id. **Without `authserv_id` no flag is recorded at all**, and `istota doctor` warns (`email.sender_flags`) when that leaves a user whose trust list holds a pattern with no protection from this.
+
+**The hold.** At `email_sender_flag_hold_threshold` flags (default 3) within `email_sender_flag_window_days` (default 90) the address's mail is held. A flag older than the window stops counting and is pruned. A threshold of 0 or less turns holding off while flags are still recorded, and a window of 0 or less means flags never age. The hold reads the address and the table and not this mail's DMARC verdict, so sending unauthenticated mail does not get a flagged sender past it.
+
+Quiet senders and over-budget mail keep their order ahead of the hold: that mail is filed with no task, so there is nothing to hold.
+
+**Trust.** The hold outranks a pattern and does not outrank an address you named. `*` and `*@corp.com` do not exempt a sender. `partner@corp.com` in your config, or an address added with `!trust` or `yes trust`, does. A flag on a named address is still recorded and listed, but never holds; removing the name with `!untrust` makes the existing count apply at once. Your own addresses are neither flagged nor held.
+
+**What you are asked.** The prompt says how many earlier mails were flagged, that approving runs a turn which can answer the sender and anyone on the thread, and how to clear the flags. It does not offer `yes trust`, because a one-word answer should not switch off the control it was asked about. Typing it anyway still names the sender as trusted. The bell row carries the same explanation without the header lines, since its title already has the sender and subject.
+
+The flag wording stays out of the model's sight. An approved mail runs as a correspondent's turn, and what that turn sees of the question is a neutral "held sender" text with nothing about flags. Telling the model about earlier flags would make the next flag more likely.
+
+You get one prompt per sender per window, counted apart from prompts about the same address before it was flagged, so the first flagged mail always prompts. Later mail is covered by the held notice and shows the same explanation in the bell, and each held task stays answerable with `!confirm <task-id>`. With `email_confirmation_prompts_per_window = 0` nothing collapses, as for any held mail. The prompt count is in memory, so a restart can cost one extra prompt. The hold is in the database and a restart cannot reset it.
+
+**Approving and clearing.** Approving runs that one mail and leaves the flags alone, so the next mail is asked about too. The approved turn can flag again. `!flagged` lists addresses with their counts, last flag date, reasons and whether they are held now, and `!unflag <address>` deletes all of an address's flags. Mail already held stays held until you answer it. There is no web control for either, and both refuse in a shared room, since the reply names your correspondents.
+
+**A hold nobody answers** is cancelled at `confirmation_timeout_minutes`, as every held mail is. While the sender is still held there is no timeout notice for it, because you were already told and a flood would otherwise send one notice per mail. A sender cleared in the meantime gets the ordinary notice. The message stays in the mailbox and the flags stay.
+
+**Limits to know.** A flag lands when its task completes, so mail already queued when the threshold is crossed can still run. An honest correspondent who quotes or forwards an injection can be flagged by mistake: the model is told to judge only what the sender newly wrote, and no test can prove it does. A wrongly flagged sender is held and never dropped, so `!flagged` is the place to watch and `!unflag` is the remedy. A flagged sender who is on a thread and did not address the bot is held too, and approving that mail runs a turn on it, because no answer records a mail without one. A new address starts clean, and flags are per address, not per domain or display name.
 
 ## Sending email
 

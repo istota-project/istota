@@ -80,6 +80,11 @@ istota_zram_enabled: true
 istota_host_loopback_block: false
 istota_host_gateway_addr: ""
 istota_host_loopback_allow: []
+# The browser's network, when the default 172.29.0.0/24 is taken on this host, and
+# the private addresses the browser container may reach: the addresses of
+# [browser] private_hosts, which the firewall cannot read as names.
+istota_browser_subnet: ""
+istota_browser_egress_allow: []
 
 # The keys, as provision.sh documents them. Derived for the ingress mode the
 # same way `istota setup` derives them, so a role-managed host.env matches a
@@ -103,6 +108,8 @@ istota_host_env:
   HOST_LOOPBACK_BLOCK: "{{ '1' if istota_host_loopback_block | bool else '0' }}"
   HOST_GATEWAY_ADDR: "{{ istota_host_gateway_addr }}"
   HOST_LOOPBACK_ALLOW: "{{ istota_host_loopback_allow | join(' ') }}"
+  ISTOTA_BROWSER_SUBNET: "{{ istota_browser_subnet }}"
+  ISTOTA_BROWSER_EGRESS_ALLOW: "{{ istota_browser_egress_allow | join(' ') }}"
   LOCAL_FORWARD_PORT: ""
   ISTOTA_LOCAL_LAYERS: ""
   ISTOTA_DESKTOP_APP: ""
@@ -163,6 +170,7 @@ istota_secret_names:
   - istota_provider_openrouter_api_key
   - istota_provider_openrouter_extra_headers
   - istota_anthropic_listing_key
+  - istota_browser_api_token
 # name: value, from the vault. A name given here is written exactly, "" included.
 # A name left out is created empty if missing and otherwise left alone, so a
 # file the wizard or the import wrote survives a play that does not manage it.

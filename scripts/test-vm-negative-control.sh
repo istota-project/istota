@@ -19,7 +19,7 @@
 #   local:     mac-home-mounted (row 7), secret-owned-by-root (row 12),
 #              apparmor-unconfined, apparmor-unnarrowed (row 20), no-egress-unit (row 10),
 #              every-cred-volume-everywhere (row 11), exec-socket-symlink (row 11),
-#              browser-on-default-network (row 17),
+#              browser-on-default-network, no-browser-firewall (row 17),
 #              update-without-up, update-without-reprovision (istota-stack update),
 #              rollback-without-reprovision (istota-stack rollback)
 #              config-apply-not-triggered (the web config editor's host applier)
@@ -114,6 +114,9 @@ control exec-socket-symlink \
 control browser-on-default-network \
     "row 17: the browser container on the default network" \
     "$VM/test_browser.py::TestTheBrowserReachesNoPublishedPort::test_the_browser_reaches_nothing_on_the_default_network_by_address"
+control no-browser-firewall \
+    "row 17: the VM without the firewall outside Chrome" \
+    "$VM/test_browser.py::TestTheFirewallOutsideChrome::test_a_raw_socket_reaches_no_private_range_and_does_reach_the_internet"
 
 control config-apply-not-triggered \
     "the config editor's applier with istota-config-apply.path and .timer disabled: still pending at the threshold" \

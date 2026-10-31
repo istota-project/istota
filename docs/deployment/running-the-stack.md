@@ -234,6 +234,14 @@ private_hosts = ["wiki.example.internal", "git.example.internal"]
 
 A listed name still cannot reach the browser container's own loopback, where its API and debugging ports are.
 
+On a VM there is a second check outside the container, a firewall that drops the browser's traffic to every private range. It cannot read names, so also list the addresses those names resolve to in `/srv/app/istota/host.env`, then run `systemctl restart istota-devbox-egress`:
+
+```
+ISTOTA_BROWSER_EGRESS_ALLOW=192.0.2.10 192.0.2.128/25
+```
+
+`istota-stack up` warns when `private_hosts` names a host and this list is empty. If a name's address changes, the firewall drops it until you update the list. The firewall identifies the browser by a fixed address, `172.29.0.2`. If `172.29.0.0/24` is taken on your host, set `ISTOTA_BROWSER_SUBNET` in `host.env` to another `x.y.z.0/24`, restart that unit and run `istota-stack up`.
+
 ### Talk over the signaling server
 
 The `signaling` profile replaces polling Nextcloud for Talk messages with a WebSocket that Nextcloud pushes to. It cuts inbound latency to a single round trip and removes a request per room per cycle, which is what makes it worth the extra container on a deployment with more than a handful of rooms.
@@ -452,6 +460,8 @@ The browser console is for operators only. A web admin opens it from Admin > Bro
 The web container reaches each display through a Unix socket in the `browser-console` volume, which only the `browser` and `web` services mount. It has no route to the browser API. The noVNC listener on port 6080 still runs, bound to loopback, as the way in when the web app is down: open an SSH tunnel to the VM (`ssh -L 6080:127.0.0.1:6080 <vm>`), browse to `https://localhost:6080/instances.html` and choose the user. Its index lists live user IDs to anyone who can reach the port, so leave it on loopback. Do not give users console links or publish the port.
 
 **Upgrade:** Rebuild and recreate the browser container when updating the skill (`istota-stack update` does both). On first boot the old shared profile is parked under `legacy-profile/` in the same volume; no user inherits it. Each user signs in again unless an operator deliberately recovers the old profile. TLS certificates and existing per-user profiles stay in place. A parking collision needs operator attention and does not overwrite either copy. Until the image is updated, non-credential calls warn with `shared_profile` and credential fills refuse. After upgrading, verify `/health` advertises `per_user_profiles: true`. Direct API clients must send `X-Istota-User` on scoped requests; IDs must be single path components, ASCII, without control characters or surrounding whitespace.
+
+**API token:** Every path on the browser API except `/health` needs `Authorization: Bearer <token>`. The token is `secrets/istota_browser_api_token`. `istota-stack` generates it, and an existing install gets one from its next update. A browser container with no token refuses everything but `/health` with 503. To replace the token, empty the file, run `istota-stack up`, and restart the stack so the daemon and the browser read the same value. `istota doctor` reports a mismatch as `browser.api_token`. If you start the stack without `istota-stack`, put a random value in that file yourself.
 
 ## Security
 

@@ -134,6 +134,8 @@ Adding a sensitive credential to a skill's `env:` block is the only step needed 
 
 Skill CLI commands run through the proxy (`sandbox/skill_proxy.py`) in the executor thread. The proxy injects credentials server-side, scoped per skill: `derive_skill_credential_map(authorized, skill_index)` returns the per-skill credential map, so a CLI invocation only ever sees credentials its own manifest declared. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled.
 
+Proxied skills run in the task's cgroup, so `task_memory_max_mb`, `task_pids_max` and `task_cpu_max_percent` now cover them along with the task's own tools; a task that relies on a heavy skill may need a higher memory limit. Each proxy also limits its own work in the daemon: request size and arrival time, open connections, concurrent skills and skill output. When a task ends, its proxies close their connections and kill any skill still running. The settings are in the [configuration reference](../configuration/reference.md).
+
 The proxy's Unix socket path includes the host process PID — `istota-proxy-{pid}-{task_id}.sock` (and the same shape for the network proxy). This prevents collisions when multiple processes (xdist test workers, parallel `istota run` instances, the daemon plus a manual scheduler) pick the same `task.id` from independent SQLite databases.
 
 ### Who may connect
@@ -210,6 +212,8 @@ A deployment may run project code — `npm`, `uv`, `cargo`, a test suite — ins
 
 On the `claude_code` brain the `claude` CLI runs outside the sandbox, and none of its own tools that act on the machine are available to it. Its tools come from the same tool server the native brain uses, inside the task's namespace, through one MCP server. The CLI's credential is in the CLI's own environment and, under `auth = "subscription"`, a per-run config directory linking to the daemon's credentials file. Nothing inside the namespace holds it: not the task env, not a file the namespace binds, not a process environment a tool can read under `/proc`. The smoke tier's `tests/smoke/test_cli_credential_unreachable.py` runs those probes, and `scripts/test-image-negative-control.sh cli-witness` turns them red by running the tool calls in the CLI's process instead.
 
+The model calls with no task behind them that grant tools (health OCR, the code reviewer and doctor's model probe) run the same way, with one difference: they have no CONNECT proxy and no `--unshare-net`, so their tool server shares the daemon's network namespace. OCR offers only `Read` and the reviewer `Read`, `Grep` and `Glob`, none of which opens a socket. Doctor's fixed prompt grants `Bash`, which can reach what the daemon can. What protects the credential on this path is that the namespace does not hold it. The same test file covers them.
+
 Each run of the CLI gets a fresh `CLAUDE_CONFIG_DIR` with an empty `settings.json`, so the operator's own `~/.claude/settings.json` no longer applies to tasks, and the CLI's own transcripts land in that directory, removed with the rest of the harness directory by the temp-file sweep. `istota-skill tasks transcript` reads the native brain's session logs only.
 
 This holds on the sandboxed shape. Where nothing is sandboxed, the tool server runs as the daemon user without a namespace, and a Bash call can read any process of that user, the CLI included.
@@ -244,6 +248,8 @@ Additional hosts added automatically:
 The forge wrapper sets `GH_TELEMETRY=0` and `DO_NOT_TRACK=1`, so no telemetry host needs allowlisting and no command spends a rejected CONNECT on one. GitHub Enterprise Server needs no extra entry: its API is a path on the same host (`<host>/api/v3`), already added as the git remote.
 
 TLS is end-to-end except for hosts bound to a credential in the task's grant snapshot, which the credential broker intercepts (below). Every other connection is a raw tunnel.
+
+**The browser container has a firewall outside it.** Chrome's proxy flags hold only while Chrome honours them, and it runs with `--no-sandbox`, so a compromised renderer could open its own sockets. On a VM, `DOCKER-USER` rules drop the browser's traffic to link-local and cloud metadata addresses, RFC 1918 and carrier-grade NAT ranges, and leave public addresses open. The addresses in `ISTOTA_BROWSER_EGRESS_ALLOW` are the operator's exceptions. The rules match the browser's own address, so the daemon on the same network is not filtered. They cover forwarded traffic only: the VM's own addresses are not filtered, as for a devbox. A stack started without `istota-stack` (Docker Desktop, the testbed) has no such rules.
 
 ## Credential broker
 
@@ -289,6 +295,7 @@ With no database reachable from inside the sandbox at all, skills write JSON req
 - `task_{id}_kv_ops.json` -- KV store set/delete operations
 - `task_{id}_kg_ops.json` -- knowledge-graph fact add/invalidate/delete (per-op commit)
 - `task_{id}_user_alerts.json` -- notices the model raised, graded `security` / `action_needed` / `note`; the first two are pushed to the user's alerts channel, a `note` is recorded in the panel only
+- `task_{id}_sender_flags.json` -- the model's flag that the mail it answered looks like an injection attempt; only a reason from a fixed set is read, the sender comes from the task's mail record, and the flag counts only on a correspondent's turn on mail that passed strict DMARC ([flagged senders](../features/email.md#flagged-senders))
 - `task_{id}_email_output.json` -- deferred email sends (SMTP delivery after task completion)
 - `task_{id}_health_ops.json` -- health module writes (stats, bloodwork, encounters)
 - `task_{id}_garmin_import.json` -- Garmin Connect sync requests

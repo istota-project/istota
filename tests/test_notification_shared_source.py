@@ -16,7 +16,7 @@ from istota import db
 from istota.notifications import sources as notification_sources
 from istota.notifications import store
 from istota.notifications.resolvers import shared_source
-from istota.sharing import sources
+from istota.sharing import ocm, sources
 from tests.test_sharing_ocm import (  # noqa: F401 -- shared fixtures
     Sender, _offers, _receive, _receive_signed, config, fresh_limits, key, secret_key_env, sender,
 )
@@ -153,3 +153,36 @@ def test_a_re_offer_of_an_active_share_keeps_it_open(config, sender, key):  # no
     _receive_signed(config, sender, key, _offer(sender))
     [row], _ = _panel(config)
     assert FOLDER in row.body
+
+
+def _detail(config, user="alice"):  # noqa: F811
+    with db.get_db(config.db_path) as conn:
+        return conn.execute(
+            "SELECT id FROM notifications WHERE user_id = ? AND source = 'shared_source'"
+            " AND dedup_key = ?", (user, shared_source.TURNED_AWAY_KEY),
+        ).fetchone()
+
+
+def test_the_detail_says_when_an_offer_was_not_signed(config, sender, key):  # noqa: F811
+    _receive(config, _offer(sender))
+    [row], _ = _panel(config)
+    assert "not signed" in row.body
+    with db.get_db(config.db_path) as conn:
+        conn.execute("DELETE FROM shared_sources WHERE kind = 'ocm_share'")
+        conn.commit()
+    _receive_signed(config, sender, key, _offer(sender, provider_id=6))
+    [row], _ = _panel(config)
+    assert "not signed" not in row.body
+
+
+def test_an_offer_dropped_for_a_full_inbox_tells_the_recipient(config, sender):  # noqa: F811
+    config.sharing.ocm.max_pending_per_user = 1
+    assert _receive(config, _offer(sender)).status == 201
+    for n in range(ocm.RECIPIENT_REFUSALS_PER_DAY):
+        assert _receive(config, _offer(sender, provider_id=100 + n)).status == 429
+    assert _detail(config) is None
+    assert _receive(config, _offer(sender, provider_id=200)).status == 201
+    assert _detail(config) is not None
+    rows = {row["dedup_key"]: row for row in _rows(config)}
+    assert FOLDER not in rows[shared_source.TURNED_AWAY_KEY]["body"]
+    assert rows[shared_source.TURNED_AWAY_KEY]["title"] == shared_source.TURNED_AWAY_TITLE

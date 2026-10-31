@@ -89,6 +89,21 @@ class TestWrappedInTheTaskSandbox:
         assert success, result
         self._assert_confined(seen, config)
 
+    def test_a_command_s_output_is_capped(self, db_path, tmp_path):
+        """#890: CRON.md is model-writable, so its output is too."""
+        config = _config(db_path, tmp_path)
+        seen, fake = _capture_spawn()
+        with (
+            patch("istota.executor._bwrap_available", return_value=True),
+            patch("istota.sandbox.confined_command.on_daemon_path", _on_daemon_path),
+            patch("istota.sandbox.confined_command.run_capture", side_effect=fake),
+            patch("istota.scheduler.discover_calendars_for_task", return_value=[]),
+        ):
+            _execute_command_task(_task("cat /etc/hostname"), config)
+        assert seen["max_output_bytes"] == (
+            config.security.skill_proxy_max_output_mb * 1024 * 1024
+        )
+
     def test_a_heartbeat_shell_check(self, db_path, tmp_path):
         config = _config(db_path, tmp_path)
         seen, fake = _capture_spawn()

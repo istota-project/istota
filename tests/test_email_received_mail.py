@@ -211,6 +211,8 @@ class TestHeldThenApproved:
 
         with db.get_db(db_path) as conn:
             confirmations.approve(conn, db.get_task(conn, held), config=config)
+        # All of the card; the drain's answer stays on the ledger row.
+        del stored["sender_authenticated"]
         assert _received(db_path, _thread_token(config))[-1] == stored
 
     def test_a_held_private_mail_is_copied_too(self, config, db_path):
@@ -266,6 +268,8 @@ class TestTheStoredSchema:
     def test_what_the_builder_writes_reads_back_unchanged(self):
         meta = self._meta()
         assert meta["attachments"][0]["content_type"] == "application/pdf"
+        # Everything but the drain's answer, which is not the card's.
+        assert meta.pop("sender_authenticated") is False
         assert stored_received_mail(json.dumps(meta)) == meta
 
     def test_a_string_over_the_cap_is_cut_on_read(self):

@@ -19,11 +19,12 @@ import ipaddress
 import logging
 import socket
 import threading
+import time
 from collections.abc import Iterable
 from pathlib import Path
 
 from istota.sandbox import net_guard, peer_process
-from istota.sandbox.unix_server import UnixSocketServer
+from istota.sandbox.unix_server import UnixSocketServer, arm_until, drain_queued
 
 logger = logging.getLogger("istota.sandbox.network_proxy")
 
@@ -35,6 +36,15 @@ SOCKET_MODE = 0o600
 # Listen backlog. Every connection is a sandboxed process reaching for the
 # network, and the bridge opens one per outbound TCP connection.
 LISTEN_BACKLOG = 32
+
+# Connections one task may hold open; a raw tunnel costs two host threads.
+DEFAULT_MAX_CONNECTIONS = 128
+BUSY_REPLY = b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n"
+
+# One request head, the size h11 holds the broker's to, and the whole time it
+# may take to arrive (#890).
+MAX_REQUEST_HEAD_BYTES = 65536
+REQUEST_DEADLINE_SECONDS = 30
 
 # The child may connect before its spawn callback registers the root.
 PEER_REGISTRATION_GRACE_SECONDS = 2.0
@@ -94,6 +104,32 @@ class UpstreamRefused(Exception):
     """The destination resolved to a non-public address no grant covers."""
 
 
+class _RequestTooLarge(Exception):
+    """The request head passed `MAX_REQUEST_HEAD_BYTES`."""
+
+
+class _RequestTimedOut(Exception):
+    """The request head did not arrive by its deadline."""
+
+
+def _read_until(client: socket.socket, data: bytes, marker: bytes, deadline: float) -> bytes | None:
+    """``data`` grown until it holds ``marker``; None if the client closed first."""
+    while marker not in data:
+        if len(data) > MAX_REQUEST_HEAD_BYTES:
+            raise _RequestTooLarge()
+        try:
+            arm_until(client, deadline)
+            chunk = client.recv(4096)
+        except TimeoutError:
+            raise _RequestTimedOut() from None
+        if not chunk:
+            return None
+        data += chunk
+    if len(data.split(marker, 1)[0]) > MAX_REQUEST_HEAD_BYTES:
+        raise _RequestTooLarge()
+    return data
+
+
 # A ClientHello is a few KiB; one larger than this is refused, not buffered.
 MAX_CLIENT_HELLO_BYTES = 65536
 # RFC 8446 5.1: a plaintext record carries at most 2^14 bytes.
@@ -139,9 +175,11 @@ def checked_connection(host: str, port: int, *, private_hosts, timeout: float = 
     )
 
 
-def _recv_exact(sock: socket.socket, size: int) -> bytes | None:
+def _recv_exact(sock: socket.socket, size: int, deadline: float | None = None) -> bytes | None:
     data = b""
     while len(data) < size:
+        if deadline is not None:
+            arm_until(sock, deadline)
         chunk = sock.recv(size - len(data))
         if not chunk:
             return None
@@ -202,24 +240,26 @@ def _server_name(hello: bytes) -> str | None:
     return names[0] if names else None
 
 
-def read_client_hello(sock: socket.socket) -> tuple[bytes, str | None] | None:
+def read_client_hello(
+    sock: socket.socket, deadline: float | None = None,
+) -> tuple[bytes, str | None] | None:
     """The records carrying a client's first ClientHello, and the name it asks for.
 
     None when the first bytes are not a TLS handshake, the hello is malformed
-    or over `MAX_CLIENT_HELLO_BYTES`, or the client closed first. The records
-    are returned whole, to be forwarded upstream unchanged.
+    or over `MAX_CLIENT_HELLO_BYTES`, the client closed first, or ``deadline``
+    passed. The records are returned whole, to be forwarded upstream unchanged.
     """
     raw = b""
     handshake = b""
     try:
         while True:
-            header = _recv_exact(sock, 5)
+            header = _recv_exact(sock, 5, deadline)
             if header is None or header[0] != 0x16 or header[1] != 0x03:
                 return None
             length = _u16(header, 3)
             if not 0 < length <= _MAX_RECORD_BYTES:
                 return None
-            body = _recv_exact(sock, length)
+            body = _recv_exact(sock, length, deadline)
             if body is None:
                 return None
             raw += header + body
@@ -282,11 +322,15 @@ class NetworkProxy:
         trusted_roots: Iterable[int] = (),
         broker=None,
         private_hosts: Iterable[str] = (),
+        max_connections: int = DEFAULT_MAX_CONNECTIONS,
     ):
         self.allowed_hosts = allowed_hosts
         self.broker = broker
         # Exact names whose addresses may be non-public; nothing is implied.
         self.private_hosts = net_guard.host_set(private_hosts)
+        # Raw tunnels' upstream sockets, which have no timeout: `stop` wakes them.
+        self._upstreams: set[socket.socket] = set()
+        self._upstreams_lock = threading.Lock()
         self._peer_roots = peer_process.PeerRoots()
         for pid in trusted_roots:
             self.authorize_pid(pid)
@@ -301,6 +345,8 @@ class NetworkProxy:
             socket_mode=SOCKET_MODE,
             backlog=LISTEN_BACKLOG,
             logger=logger,
+            max_connections=max_connections,
+            busy_reply=BUSY_REPLY,
         )
 
     def authorize_pid(self, pid: int) -> None:
@@ -322,6 +368,13 @@ class NetworkProxy:
 
     def stop(self) -> None:
         self._server.stop()
+        with self._upstreams_lock:
+            upstreams = list(self._upstreams)
+        for upstream in upstreams:
+            try:
+                upstream.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         logger.debug("Network proxy stopped")
 
     def __enter__(self):
@@ -350,14 +403,10 @@ class NetworkProxy:
                 client.settimeout(1)
                 client.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
                 return
-            client.settimeout(30)
-            # Read until we have the full request line
-            data = b""
-            while b"\r\n" not in data:
-                chunk = client.recv(4096)
-                if not chunk:
-                    return
-                data += chunk
+            deadline = time.monotonic() + REQUEST_DEADLINE_SECONDS
+            data = _read_until(client, b"", b"\r\n", deadline)
+            if data is None:
+                return
 
             first_line = data.split(b"\r\n")[0].decode("utf-8", errors="replace")
             parts = first_line.split()
@@ -369,12 +418,11 @@ class NetworkProxy:
 
             if method == "CONNECT":
                 # Consume remaining headers up to blank line
-                while b"\r\n\r\n" not in data:
-                    chunk = client.recv(4096)
-                    if not chunk:
-                        return
-                    data += chunk
+                data = _read_until(client, data, b"\r\n\r\n", deadline)
+                if data is None:
+                    return
 
+                client.settimeout(30)
                 target = parts[1]
                 if ":" in target:
                     host, port_str = target.rsplit(":", 1)
@@ -389,10 +437,15 @@ class NetworkProxy:
 
                 self._handle_connect(client, host, port)
             elif self.broker is not None:
+                client.settimeout(30)
                 self._handle_http(client, parts[1], data)
             else:
                 client.sendall(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
 
+        except _RequestTooLarge:
+            self._answer(client, b"HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n")
+        except _RequestTimedOut:
+            self._answer(client, b"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n")
         except Exception:
             logger.debug("Error handling network proxy connection", exc_info=True)
         finally:
@@ -400,6 +453,16 @@ class NetworkProxy:
                 client.close()
             except OSError:
                 pass
+
+    @staticmethod
+    def _answer(client: socket.socket, reply: bytes) -> None:
+        """Best-effort, because a peer past a limit may no longer be reading."""
+        try:
+            drain_queued(client)
+            client.settimeout(1)
+            client.sendall(reply)
+        except OSError:
+            pass
 
     def _handle_http(self, client, url, data):
         from urllib.parse import urlsplit
@@ -455,9 +518,11 @@ class NetworkProxy:
             client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
             return
 
+        with self._upstreams_lock:
+            self._upstreams.add(upstream)
         try:
             client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            hello = read_client_hello(client)
+            hello = read_client_hello(client, time.monotonic() + REQUEST_DEADLINE_SECONDS)
             if hello is None or not _sni_matches(hello[1], host):
                 logger.warning("network_proxy_rejected target=%s reason=sni", target)
                 return
@@ -476,6 +541,8 @@ class NetworkProxy:
 
             self._bridge(client, upstream, target)
         finally:
+            with self._upstreams_lock:
+                self._upstreams.discard(upstream)
             try:
                 upstream.close()
             except OSError:
@@ -512,4 +579,14 @@ class NetworkProxy:
         t.start()
         forward(b, a, f"{label} upstream→client")
         t.join(timeout=5)
+        # The handler's connection slot is what bounds this thread, so it may
+        # not outlive the handler. On Linux closing a socket does not wake a
+        # blocked `recv`; a shutdown does.
+        if t.is_alive():
+            for sock in (a, b):
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            t.join()
         logger.debug("Network proxy tunnel closed: %s", target)

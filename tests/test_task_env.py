@@ -153,6 +153,12 @@ class TestTheServarrKeys:
         assert executor.SKILL_DAEMON_CREDENTIAL_VARS["servarr"] == names
         assert names <= executor._PROXY_LOOKUP_BLOCKED
 
+    @pytest.mark.parametrize("skill", ["browse", "markets"])
+    def test_the_browser_token_goes_to_the_skills_that_call_the_api(self, skill):
+        """#884: the daemon's copy, for a CLI the model runs but cannot read."""
+        assert executor.SKILL_DAEMON_CREDENTIAL_VARS[skill] == {"ISTOTA_BROWSER_API_TOKEN"}
+        assert "ISTOTA_BROWSER_API_TOKEN" in executor._PROXY_LOOKUP_BLOCKED
+
     def test_a_lookup_over_the_socket_is_refused(self, tmp_path):
         """Through a real proxy, with the allowlist the task runtime builds:
         even a skill that declared the key `sensitive` in its manifest would
@@ -1073,6 +1079,26 @@ class TestTheClientWaitExport:
 
         assert runtime.env["ISTOTA_SKILL_CLIENT_WAIT"] == "900"
         assert runtime.proxy_ctx.client_wait_seconds == 900
+
+    def test_the_resource_limits_reach_both_proxies(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        """#890: from the config fields, per task."""
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        config = _config(
+            tmp_path,
+            skill_proxy_max_connections=5, skill_proxy_max_concurrent=3,
+            skill_proxy_max_output_mb=2, network_proxy_max_connections=7,
+        )
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        assert runtime.proxy_ctx._server.max_connections == 5
+        assert runtime.proxy_ctx.max_output_bytes == 2 * 1024 * 1024
+        assert runtime.net_proxy_ctx._server.max_connections == 7
+        for _ in range(3):
+            assert runtime.proxy_ctx._skill_slots.acquire(blocking=False)
+        assert not runtime.proxy_ctx._skill_slots.acquire(blocking=False)
 
     def test_the_export_goes_through_the_proxy_own_coercion(
         self, tmp_path, runtime_inputs, monkeypatch,

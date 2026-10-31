@@ -62,6 +62,7 @@ _KNOWN_DEFERRED_SUFFIXES = (
     "kv_ops",
     "kg_ops",
     "user_alerts",
+    "sender_flags",
     "email_output",
     "health_ops",
     "garmin_import",
@@ -878,6 +879,41 @@ def _process_deferred_kv_ops(
         logger.info("Processed %d deferred KV ops for task %d", count, task.id)
     deferred.unlink(path)
     return count
+
+
+def _process_deferred_sender_flags(
+    config: Config, task: db.Task, user_temp_dir: Path,
+) -> int:
+    """Record that the mail a task answered looks like an injection attempt.
+
+    The file is model-written, and the first dict entry's ``reason`` is all that
+    is read from it. The sender and the user come from the task and its
+    ``processed_emails`` row (`sender_flags.record_flag`), so a mail telling the
+    model to name someone else has nowhere to name them. A database error leaves
+    the file for the retry purge and reaches the drain's per-handler guard.
+
+    Returns the number of rows written.
+    """
+    loaded = _load_deferred_json(user_temp_dir, task.id, "sender_flags")
+    if loaded is None:
+        return 0
+    path, data = loaded
+
+    from istota.mail import sender_flags
+
+    entry = next((item for item in data if isinstance(item, dict)), None)
+    if entry is None:
+        logger.info("Task %d: sender flag not recorded: no_entry", task.id)
+        deferred.unlink(path)
+        return 0
+
+    reason = sender_flags.normalize_reason(entry.get("reason"))
+    with db.get_db(config.db_path) as conn:
+        outcome = sender_flags.record_flag(conn, config, task, reason)
+        conn.commit()
+    logger.info("Task %d: sender flag %s (reason %s)", task.id, outcome, reason)
+    deferred.unlink(path)
+    return 1 if outcome == sender_flags.RECORDED else 0
 
 
 def _process_deferred_user_alerts(

@@ -362,9 +362,21 @@ compose() {
     fi
     local certs="${STACK}/certs"
     if [ "$(env_get "$HOST_ENV" TLS_CERT_SOURCE)" = "acme" ]; then certs="${STACK}/letsencrypt"; fi
-    local pin apt_mirror site browser_hosts
+    local pin apt_mirror site browser_hosts browser_net browser_prefix
     site="$(site_dir)"
     browser_hosts="$(browser_private_hosts)"
+    browser_net="$(browser_subnet)"
+    browser_prefix="${browser_net%.0/24}"
+    # The browser's fixed address, for the firewall. Only `up` may change the
+    # network: anything else (an update's one-shot) meets it with containers on it,
+    # and compose then fails trying to replace it, so it takes the network as it is.
+    if [ -f "$BROWSER_NETWORK_OVERLAY" ]; then
+        local browser_now=""
+        if [ "${1:-}" != up ]; then browser_now="$(browser_network_inspect '.Subnet')"; fi
+        if [ -z "$browser_now" ] || [ "$browser_now" = "$browser_net" ]; then
+            files+=(-f "$BROWSER_NETWORK_OVERLAY")
+        fi
+    fi
     pin="$(env_get "$HOST_ENV" CLAUDE_CODE_VERSION)"
     apt_mirror="$(env_get "$HOST_ENV" APT_MIRROR)"
     if [ -n "$apt_mirror" ] && ! valid_apt_mirror "$apt_mirror"; then
@@ -388,6 +400,8 @@ compose() {
         export ISTOTA_SITE_DIR="$site"
         # The same for the config's list, which is the one place a grant lives.
         export BROWSER_PRIVATE_HOSTS="$browser_hosts"
+        export ISTOTA_BROWSER_SUBNET="$browser_net" ISTOTA_BROWSER_GATEWAY="${browser_prefix}.1" \
+            ISTOTA_BROWSER_ADDR="${browser_prefix}.2" ISTOTA_BROWSER_IP_RANGE="${browser_prefix}.128/25"
         # The image has no .git: the commit being built and its deployed name
         # are how a running stack says which code it is. Every build caller
         # sets ISTOTA_TAG and has the checkout at that commit.
@@ -606,6 +620,58 @@ print(",".join(h.strip() for h in hosts if isinstance(h, str) and re.fullmatch(P
 PY
 }
 
+BROWSER_NETWORK_OVERLAY="${SRC}/docker/docker-compose.browser-network.yml"
+
+# The browser network's subnet. host/istota-devbox-egress.sh keeps the same default
+# on the same refusal, so a malformed value still leaves the two naming one address.
+BROWSER_SUBNET_DEFAULT="172.29.0.0/24"
+browser_subnet() {
+    local subnet octets octet
+    subnet="$(env_get "$HOST_ENV" ISTOTA_BROWSER_SUBNET)"
+    subnet="${subnet:-$BROWSER_SUBNET_DEFAULT}"
+    if [[ "$subnet" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.0/24$ ]]; then
+        octets=("${BASH_REMATCH[@]:1}")
+        for octet in "${octets[@]}"; do
+            [ "$((10#$octet))" -le 255 ] || subnet=""
+        done
+    else
+        subnet=""
+    fi
+    if [ -z "$subnet" ]; then
+        # On stderr: the caller captures stdout, which log() writes to.
+        log "WARNING: ISTOTA_BROWSER_SUBNET in host.env is not a x.y.z.0/24; using ${BROWSER_SUBNET_DEFAULT}." >&2
+        subnet="$BROWSER_SUBNET_DEFAULT"
+    fi
+    echo "$subnet"
+}
+
+# One field of the browser network's address pool, empty with no network.
+browser_network_inspect() {
+    docker network inspect "${PROJECT}_browser" \
+        --format "{{(index .IPAM.Config 0)$1}}" 2>/dev/null || true
+}
+
+# Going to a checkout with no overlay, whose script runs one-shots from the base
+# file alone: compose cannot do that while the pinned network has containers on it.
+# Only an IP range says pinned, since Docker sets none on a network it allocated.
+release_pinned_browser_network() {
+    [ ! -f "$BROWSER_NETWORK_OVERLAY" ] || return 0
+    [ -n "$(browser_network_inspect '.IPRange')" ] || return 0
+    log "stopping the stack to remove the browser's fixed network, which this release does not use"
+    compose stop
+    docker network rm "${PROJECT}_browser" >/dev/null
+}
+
+# The same going forward to an older tag, where a build comes first: stopping here
+# would hold the stack down for it, and the failure path says it kept running.
+refuse_older_checkout_on_pinned_browser_network() {
+    local before="$1" tag="$2"
+    [ ! -f "$BROWSER_NETWORK_OVERLAY" ] || return 0
+    [ -n "$(browser_network_inspect '.IPRange')" ] || return 0
+    verified_git checkout --quiet --detach "$before" || true
+    die "${tag} predates the browser's fixed network, and cannot build while the stack runs on it. Run \`istota-stack down\`, then this update again; nothing was changed."
+}
+
 # `up -d`, then the containers of services no active profile names removed:
 # compose counts a service whose profile was turned off as defined, so neither
 # `down` nor `--remove-orphans` stops its container. One-off containers (setup,
@@ -613,12 +679,18 @@ PY
 stack_up() {
     local active id service tag missing up_args=(up -d --remove-orphans)
     ensure_data_dir
+    # A restore or an import can reach here with the generated secret empty.
+    ensure_secret_files || { log "could not create the secret files compose declares in ${SECRETS_DIR}"; return 1; }
     tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     # Rendered by the script that starts the stack, so it names this script's
     # /data: one an older istota-stack rendered names a volume nothing mounts.
     if [ -s "$DEVBOX_COMPOSE" ]; then
         render_devbox_compose "$tag" \
             || die "the devbox compose file could not be rendered; the stack was not started."
+    fi
+    # A name passes the proxy and the firewall then drops its private address.
+    if [ -n "$(browser_private_hosts)" ] && [ -z "$(env_get "$HOST_ENV" ISTOTA_BROWSER_EGRESS_ALLOW)" ]; then
+        log "WARNING: [browser] private_hosts names a host, and ISTOTA_BROWSER_EGRESS_ALLOW in host.env names no address: the firewall drops what those names resolve to. See docs/deployment/running-the-stack.md."
     fi
     active="$(compose config --services)"
     # The app's images came from a release archive: an `up` that built one
@@ -1279,6 +1351,7 @@ cmd_update() {
     verified_git checkout --quiet --detach "${object}^{commit}"
     # Here, not after the handoff: an older release's script has no such check.
     warn_unread_secrets "$tag" "$declared"
+    refuse_older_checkout_on_pinned_browser_network "$before" "$tag"
     hand_update_to_release "$tag" "$unsigned" "$before" "$(verified_git rev-parse HEAD)"
     update_from_checkout "$tag" "$unsigned" "$before"
 }
@@ -1447,6 +1520,7 @@ cmd_rollback() {
         "ISTOTA_PREVIOUS_TAG=${current}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${current_unsigned}" \
         "ISTOTA_IMAGE=$(image_for_switch "$previous")"
     warn_unread_secrets "$previous" "$declared"
+    release_pinned_browser_network
     release_stack_up
     log "rolled back to ${previous} (previous: ${current})"
     reprovision_if_changed
@@ -1455,6 +1529,8 @@ cmd_rollback() {
 # Every credential file compose declares, empty where it does not exist yet:
 # compose refuses to start a service whose secret file is missing, before
 # anything in a container could write one.
+GENERATED_SECRET=istota_browser_api_token
+
 secret_names() {
     # Names are [a-z0-9_] only; the single quotes are sed's, not the shell's.
     # shellcheck disable=SC2016
@@ -1469,6 +1545,7 @@ warn_unread_secrets() {
     now=" $( (secret_names 2>/dev/null || true) | tr '\n' ' ') "
     for name in $declared; do
         case "$now" in *" ${name} "*) continue ;; esac
+        [ "$name" = "$GENERATED_SECRET" ] && continue
         if [ -n "$(find -P "${SECRETS_DIR}/${name}" -maxdepth 0 -type f -size +0 2>/dev/null)" ]; then
             unread="${unread} ${name}"
         fi
@@ -1478,14 +1555,21 @@ warn_unread_secrets() {
 }
 
 ensure_secret_files() {
-    local name owner=() request rc=0
+    local name owner=() request value rc=0
     # Root on the VM; the tests run as themselves.
     if [ "$(id -u)" -eq 0 ]; then owner=(-o "$ISTOTA_UID" -g "$ISTOTA_UID"); fi
-    install -d -m 0700 "${owner[@]}" "$SECRETS_DIR" || return 1
+    install -d -m 0700 ${owner[@]+"${owner[@]}"} "$SECRETS_DIR" || return 1
     # The files themselves go through put-files: secrets/ is uid 10001's.
     request='{"secrets": {'
     for name in $(secret_names); do
-        request="${request}\"${name}\": null, "
+        value=null
+        # The one no person supplies. The value stays on the stdin below, out of
+        # every argv. A new one reaches a running stack when the stack restarts.
+        if [ "$name" = "$GENERATED_SECRET" ] \
+            && [ -z "$(find -P "${SECRETS_DIR}/${name}" -maxdepth 0 -type f -size +0 2>/dev/null)" ]; then
+            value="\"$(python3 -I -c 'import secrets; print(secrets.token_hex(32))')\"" || return 1
+        fi
+        request="${request}\"${name}\": ${value}, "
     done
     request="${request%, }}}"
     printf '%s' "$request" | cmd_put_files >/dev/null || rc=$?
@@ -2785,7 +2869,7 @@ cmd_put_files() {
     if [ "$(id -u)" -eq 0 ]; then
         drop=(setpriv "--reuid=${ISTOTA_UID}" "--regid=${ISTOTA_UID}" --clear-groups --no-new-privs)
     fi
-    "${drop[@]}" python3 -I -c "$PUT_FILES_PY" "$SECRETS_DIR" "$CONFIG_DIR" "$dry_run"
+    ${drop[@]+"${drop[@]}"} python3 -I -c "$PUT_FILES_PY" "$SECRETS_DIR" "$CONFIG_DIR" "$dry_run"
 }
 
 # host.env is root's and read by provision.sh and the units; the Mac CLI

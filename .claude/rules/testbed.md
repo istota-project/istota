@@ -127,7 +127,7 @@ Two package properties behave like rules. `testbed/pyproject.toml` keeps an expl
 
 `Stack.reset(turns)` runs before each test, not after, so a failed test's state stays inspectable. The order is forced and the script goes **last**:
 
-1. `reset_framework_state`: release any parked confirmation, cancel retry rows, clear `trusted_email_senders`.
+1. `reset_framework_state`: release any parked confirmation, cancel retry rows, clear `trusted_email_senders` and `email_sender_flags`.
 2. Quiesce: poll until nothing is `pending`, `locked` or `running` whose `scheduled_for` has arrived, compared on the database's clock. That set is `IN_FLIGHT`. `pending_confirmation` is deliberately outside it: a task waiting for a human will not move, and counting it would make every reset wait out its timeout. `Probe.wait_for_task` draws the same line.
 3. `service.reset()` on every service except `model`, then `clear_container_state()`.
 4. Quiesce again and install the script behind the endpoint's barrier.
@@ -137,7 +137,7 @@ The script goes last because `script` only holds the barrier across the swap; in
 
 Four non-obvious points:
 
-- **Nothing is truncated.** Deleting rows under a running dispatcher is a race. The three exceptions above are forced: a parked `pending_confirmation` blocks its room for two hours, a retry row can fire mid-test and take a scripted turn the barrier cannot see, and a trusted sender changes what later scenarios mean.
+- **Nothing is truncated.** Deleting rows under a running dispatcher is a race. The four exceptions above are forced: a parked `pending_confirmation` blocks its room for two hours, a retry row can fire mid-test and take a scripted turn the barrier cannot see, a trusted sender changes what later scenarios mean, and a flagged sender's next mail is held.
 - **The retry ladder wedges a naive quiesce.** A failed task is rewritten `pending` with `scheduled_for` one, four, then sixteen minutes out, so a status-only quiesce waits out a backoff. The barrier's refusal is a 403 rather than 409 for the same reason: 409 is in neither the transient nor the permanent status set, so the daemon retried it and created the wedging row.
 - **The daemon writes inside the container too.** A host-side stub cannot reach `/data/repos`, where the model cloned on the previous test, so each service declares its dirtied container directories beside the `config()` key that put the daemon there.
 - **The workspace is never cleared.** On the full shape `/mnt/shared/.istota-provisioned` lives there, and the fixture's healthcheck (which `daemon` waits on) requires it. A storage scenario writes under a generated name and asserts on that name.

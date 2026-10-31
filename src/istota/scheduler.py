@@ -103,6 +103,7 @@ def _warn_once(key: str, message: str) -> None:
     logger.warning("%s", message)
 
 from istota import confirmations, db
+from istota.mail import sender_flags
 from istota.webui import admin_browsers, avatars
 from istota.rooms import speech_gate
 from .brain import (
@@ -213,6 +214,7 @@ from .scheduler_deferred import (  # noqa: F401  -- re-exported for back-compat
     _process_deferred_kv_ops,
     _process_deferred_sent_emails,
     _process_deferred_subtasks,
+    _process_deferred_sender_flags,
     _process_deferred_user_alerts,
     _process_retired_deferred_files,
     _purge_deferred_files_for_retry,
@@ -2751,6 +2753,8 @@ def _execute_skill_task(
                 timeout=timeout,
                 cwd=str(config.temp_dir),
                 env=env,
+                # CRON.md names the skill and its arguments, and a task can write it.
+                max_output_bytes=config.security.skill_proxy_max_output_mb * 1024 * 1024,
             )
     except subprocess.TimeoutExpired:
         return (
@@ -2892,11 +2896,13 @@ def _record_deferred_handler_failure(
 
 #: What the drain leaves of a correspondent's turn, each under the scope it needs
 #: (`None`: always). The reply is sent after the drain, from the file, so it must
-#: stay on disk; a user alert is how the model flags a suspicious mail to the host.
+#: stay on disk; a user alert is how the model flags a suspicious mail to the host;
+#: a sender flag names nobody, since its handler takes the sender from the task.
 #: A suffix not named here is purged, including one added later.
 CORRESPONDENT_KEPT_SUFFIXES = {
     "email_output": None,
     "user_alerts": None,
+    "sender_flags": None,
     "istota_events": "calendar",
 }
 
@@ -2950,8 +2956,8 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
     ``run_task_inline`` so the two can't drift.
 
     On a correspondent's turn (`_correspondent_kept_suffixes`) everything but
-    the reply, user alerts and, with ``calendar`` allowed, Istota calendar events
-    is purged before any handler runs.
+    the reply, user alerts, a sender flag and, with ``calendar`` allowed, Istota
+    calendar events is purged before any handler runs.
 
     **No ``Exception`` escapes this function** (ISSUE-469). Each handler is
     guarded on its own, so one that raises costs its own files and nothing
@@ -3007,6 +3013,7 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
         ("health_ops", _process_deferred_health_ops),
         ("garmin_import", _process_deferred_garmin_import),
         ("istota_events", _process_deferred_istota_events),
+        ("sender_flags", _process_deferred_sender_flags),
         ("user_alerts", _process_deferred_user_alerts),
         ("email_output", _deliver_deferred_email_output),
     )
@@ -8593,6 +8600,29 @@ def _expired_confirmation_notice(conn, task_info: dict) -> str:
     return f"{lead}\n\nSubmit it again if you still need it."
 
 
+def _expires_quietly(conn, config: Config, task_info: dict) -> bool:
+    """Whether this expired hold is from a sender whose flags still hold them.
+
+    A flagged sender at the per-sender budget gives one prompt, then one timeout
+    notice per mail two hours later. The prompt or the held notice already told
+    the user and nothing new has happened since. A task that ran parked on the
+    model's own question, and that question timing out is news.
+    """
+    if task_info.get("source_type") != "email":
+        return False
+    ran = conn.execute(
+        "SELECT started_at FROM tasks WHERE id = ?", (task_info["id"],),
+    ).fetchone()
+    if ran is None or ran[0]:
+        return False
+    mail = db.get_email_for_task(conn, task_info["id"])
+    if mail is None:
+        return False
+    return sender_flags.holding_count(
+        conn, config, task_info["user_id"], mail.sender_email,
+    ) > 0
+
+
 def run_cleanup_checks(config: Config) -> None:
     """
     Run all cleanup checks for scheduler robustness.
@@ -8644,7 +8674,6 @@ def run_cleanup_checks(config: Config) -> None:
                 f"Expired stale confirmation: task {task_info['id']} "
                 f"(user: {task_info['user_id']})"
             )
-            notice = _expired_confirmation_notice(conn, task_info)
             # The question is gone, so the inbox item is answered — by the
             # clock, which is what `resolved_by='system'` records. On this
             # connection, inside the transaction the expiry itself ran in.
@@ -8653,6 +8682,13 @@ def run_cleanup_checks(config: Config) -> None:
             confirmation_source.resolve_for_task(
                 conn, task_info["user_id"], task_info["id"], by="system",
             )
+            if _expires_quietly(conn, config, task_info):
+                logger.info(
+                    "Held sender's mail expired quietly: task %d (user: %s)",
+                    task_info["id"], task_info["user_id"],
+                )
+                continue
+            notice = _expired_confirmation_notice(conn, task_info)
             # And a fire-and-forget row takes its place, saying what was
             # dropped. A separate row rather than a reuse of the confirmation
             # one: they are different items with different lifecycles — the
@@ -8754,6 +8790,10 @@ def run_cleanup_checks(config: Config) -> None:
         if email_rows > 0:
             logger.info(f"Pruned {email_rows} processed-email row(s)")
         db.prune_signup_bodies(conn, config.email.signup_body_retention_days)
+
+        flag_rows = sender_flags.prune(conn, sched.email_sender_flag_window_days)
+        if flag_rows > 0:
+            logger.info(f"Pruned {flag_rows} email sender flag(s)")
 
         # 4b. Age out the per-message deletion ledger. It exists only to tell a
         # live client what vanished; one further behind than this reloaded from
@@ -11302,6 +11342,28 @@ def _dispatch_sleep(
             logger.error("Error dispatching workers: %s", e)
 
 
+# One task at its proxy limits holds several hundred descriptors, and Docker
+# Engine hands a container a soft limit of 1024 under a much higher hard one.
+OPEN_FILE_SOFT_LIMIT = 16384
+
+
+def _raise_open_file_limit() -> None:
+    """Raise the soft limit toward the hard one, so one task's load is not everyone's."""
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = OPEN_FILE_SOFT_LIMIT
+        if hard != resource.RLIM_INFINITY:
+            target = min(target, hard)
+        if soft != resource.RLIM_INFINITY and soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            soft = target
+        logger.info("STARTUP Open file limit: %s", soft)
+    except (ImportError, OSError, ValueError) as e:
+        logger.warning("STARTUP Open file limit: could not raise it: %s", e)
+
+
 def _report_task_cgroups(config: Config) -> None:
     """Sweep cgroups a previous run left behind, and say at startup what A6 will do.
 
@@ -11529,6 +11591,7 @@ def run_daemon(
         else "disabled",
     )
     _report_task_cgroups(config)
+    _raise_open_file_limit()
     logger.info("STARTUP Scheduled job check interval: %ds", config.scheduler.briefing_check_interval)
     logger.info("STARTUP Cleanup interval: %ds", config.scheduler.briefing_check_interval)
     logger.info("STARTUP Confirmation timeout: %d min", config.scheduler.confirmation_timeout_minutes)

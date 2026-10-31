@@ -16,6 +16,8 @@ import time
 
 import pytest
 
+from testbed.stack import BROWSER_API_TOKEN
+
 from istota.lib.browser_console import console_socket_name
 
 from .test_run_contract import _connect
@@ -24,6 +26,7 @@ pytestmark = [pytest.mark.smoke, pytest.mark.profile("browser")]
 
 CONSOLE_DIR = "/run/istota-browser-console"
 CONSOLE_USER = "console-smoke"
+AUTH = f"Authorization: Bearer {BROWSER_API_TOKEN}"
 WEB_UID = "10001:10001"
 
 BANNER_PROBE = r"""
@@ -47,19 +50,19 @@ def _start_instance(stack) -> None:
     deadline = time.monotonic() + 180
     listed = None
     while time.monotonic() < deadline:
-        listed = stack.exec(["curl", "-sf", "http://localhost:9223/instances"], service="browser")
+        listed = stack.exec(["curl", "-sf", "-H", AUTH, "http://localhost:9223/instances"], service="browser")
         if listed.returncode == 0:
             break
         time.sleep(2)
     assert listed is not None and listed.returncode == 0, listed
 
     browsed = stack.exec(
-        ["curl", "-s", "-X", "POST", "http://localhost:9223/browse",
+        ["curl", "-s", "-X", "POST", "-H", AUTH, "http://localhost:9223/browse",
          "-H", "Content-Type: application/json", "-H", f"X-Istota-User: {CONSOLE_USER}",
          "-d", json.dumps({"url": "http://localhost:9224/live", "timeout": 60})],
         service="browser", timeout=300,
     )
-    listed = stack.exec(["curl", "-sf", "http://localhost:9223/instances"], service="browser")
+    listed = stack.exec(["curl", "-sf", "-H", AUTH, "http://localhost:9223/instances"], service="browser")
     users = [row.get("user") for row in json.loads(listed.stdout or "{}").get("instances", [])]
     assert CONSOLE_USER in users, f"no live instance: {listed.stdout}\nbrowse: {browsed.stdout[-2000:]}"
 

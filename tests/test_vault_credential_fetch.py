@@ -185,10 +185,11 @@ class TestVaultCredential:
             captured.update(env or {})
             return _Result()
 
-        monkeypatch.setattr("istota.sandbox.skill_proxy.subprocess.run", _fake_run)
+        monkeypatch.setattr("istota.sandbox.skill_proxy.run_capture", _fake_run)
         with proxy(sock_path, allowed_skills=frozenset({"email"})):
             request(sock_path, {"skill": "email", "args": ["send"]})
 
+        assert captured, "the spawn was not reached, so this checked nothing"
         blob = "\n".join(f"{k}={v}" for k, v in captured.items())
         for name, value in VAULT.items():
             assert value not in blob, name

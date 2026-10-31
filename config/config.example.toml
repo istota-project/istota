@@ -322,6 +322,13 @@ features = []
 # skill_client_wait_seconds = 600  # how long the sandboxed istota-skill client waits
 #                                  # on the proxy socket. Every skill timeout is capped
 #                                  # at this minus 30s.
+# skill_proxy_max_connections = 64 # open connections one task may hold on the skill
+#                                  # proxy; past it a call is refused as busy.
+# skill_proxy_max_concurrent = 8   # skills one task may run at once; the rest wait.
+# skill_proxy_max_output_mb = 16   # stdout plus stderr of one skill or CRON command;
+#                                  # past it the process group is killed.
+# network_proxy_max_connections = 128  # open connections one task may hold on the
+#                                  # network proxy; past it a connect gets a 503.
 # vault_fetch_limit_per_task = 10  # distinct shared credentials one task attempt may
 #                                  # read; reading one again is free. 0 is unlimited.
 #                                  # A name not yet served (absent or refused) counts
@@ -688,6 +695,12 @@ email_poll_batch_size = 50
 email_rate_limit_messages = 60          # email tasks per user per window
 email_sender_rate_limit_messages = 20   # …and per sender, so one loud correspondent throttles alone
 email_rate_limit_window_seconds = 3600
+# Mail flagged as a suspected prompt injection, per user and address. At the
+# threshold the address's mail is held for the user's approval before any model
+# sees it. 0 or less turns holding off; flags are still recorded.
+email_sender_flag_hold_threshold = 3
+# Age past which a flag stops counting and is pruned. 0 or less means flags never age.
+email_sender_flag_window_days = 90
 # Untrusted-sender confirmation prompts per user and sender per window before
 # they collapse into one summary notice. 0 = never collapse.
 email_confirmation_prompts_per_window = 3
