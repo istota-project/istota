@@ -183,7 +183,7 @@ fi
 # --- The browser (#884) ---
 #
 # The egress proxy in the browser container depends on Chrome honouring its flags,
-# and a renderer running --no-sandbox could open its own sockets. These hold
+# and code that escapes Chrome's sandbox could open its own sockets. These hold
 # without Chrome's help. Scoped to the browser's one address, never the network:
 # the daemon is on that network too and can take its default route through it.
 # The replies' RETURN comes first because DOCKER-USER runs ahead of Docker's own

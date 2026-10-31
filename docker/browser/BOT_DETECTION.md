@@ -133,7 +133,7 @@ Init script (`_STEALTH_SCRIPT` in `browse_api.py`). Sections 1, 4, 5, 7, 8, 9 re
 ## Container Configuration
 
 - **Base:** `python:3.12-slim-trixie` with real `google-chrome-stable`
-- **User:** Non-root `browser` user (entrypoint drops from root via `su`), suppresses `--no-sandbox` infobar
+- **User:** Non-root `browser` user (entrypoint drops from root via `setpriv`), with Chrome's own sandbox on, so no `--no-sandbox` infobar
 - **Display:** Xvfb 1440x900, x11vnc, noVNC on port 6080. Each x11vnc also listens on a Unix socket, `/run/istota-browser-console/<sha256(user)[:32]>.sock` (`-unixsock`), which the web container's admin console connects to through the shared `browser-console` volume
 - **Input:** `xdotool` for OS-level X11 mouse/keyboard events (replaces CDP input)
 - **Browser window:** `--window-size=1440,900` (Chrome sizes itself without a WM; `no_viewport=True` ensures viewport matches window). The real X11 window comes out 1439x899 and the page viewport inside it 1439x812 — an 87px UI inset that `visual.py` derives per capture rather than assuming
@@ -347,7 +347,7 @@ Pinned to Patchright 1.50.0. Version 1.57.2 regressed on `Runtime.enable` avoida
 
 ### ~~Container Runs as Root~~ — Fixed
 
-Entrypoint runs Xvfb/VNC as root, then drops to a non-root `browser` user via `su` for Flask + Chrome. Chrome still uses `--no-sandbox` (Docker containers lack namespace privileges for Chrome's native sandbox), but the yellow infobar warning only appears for root — non-root users don't see it.
+Entrypoint drops to a non-root `browser` user via `setpriv` for every service: websockify, the egress proxy and the API, which starts Xvfb, x11vnc and Chrome. Chrome runs with its own namespace sandbox, which the compose file's seccomp profile allows, so nothing shows the `--no-sandbox` infobar and the flag is not on its command line.
 
 ## References
 

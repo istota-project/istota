@@ -190,6 +190,8 @@ The first-run setup server has its own control, `scripts/test-image-negative-con
 
 The admin browser console's socket has its own control, `scripts/test-image-negative-control.sh browser-console`. It builds `docker/test/Dockerfile.browser-no-console-socket` on top of the built browser image: the same image with x11vnc's `-unixsock` argument removed from `pool.py`, so the instance starts and the console directory exists but no socket appears. Against it, `tests/image/test_browser_image.py::test_the_web_uid_reads_x11vnc_through_the_console_socket` goes red on the banner (`'connect': 'FileNotFoundError'`), and the script refuses a red that came from an instance that never started. It needs the browser image built by running that test first.
 
+What Chrome's user can reach has its own control, `scripts/test-image-negative-control.sh browser-uid`. It builds `docker/test/Dockerfile.browser-uid-unhardened` on the native browser image, with Chrome's sandbox, the API's closure to its own uid, websockify's drop and the root-owned `/app` taken back. A test per closure in `tests/image/test_browser_image.py` goes red on its own read, and the script refuses the run if the probe's read of a stand-in failed too, since that would mean the probe broke. The vm tier's `browser-uid-unhardened` does the same on the VM's real AppArmor and 0400 secret.
+
 The upgrade tier's control is the forge-less istota image passed through `ISTOTA_IMAGE_TAG`:
 
 ```bash

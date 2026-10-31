@@ -20,6 +20,7 @@
 #              apparmor-unconfined, apparmor-unnarrowed (row 20), no-egress-unit (row 10),
 #              every-cred-volume-everywhere (row 11), exec-socket-symlink (row 11),
 #              browser-on-default-network, no-browser-firewall (row 17),
+#              browser-uid-unhardened (#902),
 #              update-without-up, update-without-reprovision (istota-stack update),
 #              rollback-without-reprovision (istota-stack rollback)
 #              config-apply-not-triggered (the web config editor's host applier)
@@ -117,6 +118,13 @@ control browser-on-default-network \
 control no-browser-firewall \
     "row 17: the VM without the firewall outside Chrome" \
     "$VM/test_browser.py::TestTheFirewallOutsideChrome::test_a_raw_socket_reaches_no_private_range_and_does_reach_the_internet"
+
+control browser-uid-unhardened \
+    "#902: the browser with its sandbox and the API's closure taken back" \
+    "$VM/test_browser.py::TestWhatChromesUserCanReach::test_every_renderer_is_in_chromes_sandbox" \
+    "$VM/test_browser.py::TestWhatChromesUserCanReach::test_chromes_user_cannot_read_the_api_process" \
+    "$VM/test_browser.py::TestWhatChromesUserCanReach::test_websockify_serves_chromes_user_no_link_out_of_its_web_root" \
+    "$VM/test_browser.py::TestWhatChromesUserCanReach::test_chromes_user_cannot_edit_what_the_api_runs"
 
 control config-apply-not-triggered \
     "the config editor's applier with istota-config-apply.path and .timer disabled: still pending at the threshold" \

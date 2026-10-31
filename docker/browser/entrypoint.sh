@@ -8,17 +8,36 @@ CERT_DIR="/data/browser-profile/ssl"
 PROFILE_DIR="${BROWSER_PROFILE_DIR:-/data/browser-profile}"
 BROWSER_RUNTIME_DIR="/run/istota-browser"
 
+# A token passed in the environment (no compose file) stays out of the children below.
+INHERITED_TOKEN="${ISTOTA_BROWSER_API_TOKEN:-}"
+unset ISTOTA_BROWSER_API_TOKEN
+
+as_browser() {
+    setpriv --reuid=browser --regid=browser --init-groups "$@"
+}
+
 # Ensure browser user owns the profile directory (volume may be owned by root)
 chown -R browser:browser "$PROFILE_DIR"
 
-# Generate self-signed cert on first run (persisted in volume)
+# Chrome refuses to start without its sandbox, which needs this. The API stays up
+# so /health can answer; the failed launch is what a caller sees.
+if ! as_browser unshare --user --pid --net --fork true 2>/dev/null; then
+    echo "istota-browser: cannot create a user namespace, so Chrome will not start." \
+        "The service needs docker/istota/seccomp-istota.json (compose sets it) and" \
+        "user namespaces on the host." >&2
+fi
+
+# Generate self-signed cert on first run (persisted in volume). As the browser
+# user, since Chrome's uid can write this directory and root opens no file in it.
 if [ ! -f "$CERT_DIR/cert.pem" ]; then
-    mkdir -p "$CERT_DIR"
-    openssl req -x509 -newkey rsa:2048 -keyout "$CERT_DIR/key.pem" \
-        -out "$CERT_DIR/cert.pem" -days 3650 -nodes \
-        -subj "/CN=stealth-browser"
-    cat "$CERT_DIR/key.pem" "$CERT_DIR/cert.pem" > "$CERT_DIR/combined.pem"
-    chown -R browser:browser "$CERT_DIR"
+    as_browser sh -c '
+        set -e
+        mkdir -p "$1"
+        openssl req -x509 -newkey rsa:2048 -keyout "$1/key.pem" \
+            -out "$1/cert.pem" -days 3650 -nodes \
+            -subj "/CN=stealth-browser"
+        cat "$1/key.pem" "$1/cert.pem" > "$1/combined.pem"
+    ' sh "$CERT_DIR"
 fi
 
 # The non-root pool starts one X server per instance. Prepare its socket dir.
@@ -43,16 +62,17 @@ if [ -d "$CONSOLE_DIR" ]; then
     find "$CONSOLE_DIR" -mindepth 1 -maxdepth 1 -name '*.sock' -delete
 fi
 
-# One TLS listener routes operator viewers to the requested live instance.
-websockify --web "$BROWSER_RUNTIME_DIR/web" --cert "$CERT_DIR/combined.pem" \
+# One TLS listener routes operator viewers to the requested live instance. As the
+# browser user: it serves files from a tree that user writes, and as root it
+# followed a link there to the token's secret file.
+as_browser websockify --web "$BROWSER_RUNTIME_DIR/web" --cert "$CERT_DIR/combined.pem" \
     --token-plugin TokenFile --token-source "$BROWSER_RUNTIME_DIR/vnc-tokens" 6080 &
 
 # Chrome's only way out (egress_proxy.py). Restarted, not waited for: while it is
 # down Chrome reaches nothing.
 (
     while true; do
-        setpriv --reuid=browser --regid=browser --init-groups \
-            python /app/egress_proxy.py || true
+        as_browser python -s /app/egress_proxy.py || true
         sleep 1
     done
 ) &
@@ -65,12 +85,14 @@ TOKEN_FILE=/run/secrets/istota_browser_api_token
 if [ -s "$TOKEN_FILE" ]; then
     ISTOTA_BROWSER_API_TOKEN="$(cat "$TOKEN_FILE")"
 fi
-export ISTOTA_BROWSER_API_TOKEN="${ISTOTA_BROWSER_API_TOKEN:-}"
+export ISTOTA_BROWSER_API_TOKEN="${ISTOTA_BROWSER_API_TOKEN:-$INHERITED_TOKEN}"
 
 # Forward Docker stop to the API only, then reap orphaned children. su kills
 # its shell after two seconds, before the API can flush every Chrome profile.
 # setpriv execs directly and preserves the configured environment without a
-# second shell parsing paths or values. Keep the browser account's HOME too.
+# second shell parsing paths or values. Keep the browser account's HOME too, and
+# -s, because a user site under it is Chrome's uid's to write and would run here
+# with the token at the next start.
 exec tini -- setpriv --reuid=browser --regid=browser --init-groups \
     env HOME=/home/browser USER=browser LOGNAME=browser SHELL=/bin/bash \
-    BROWSER_PROFILE_DIR="$PROFILE_DIR" python /app/browse_api.py
+    BROWSER_PROFILE_DIR="$PROFILE_DIR" python -s /app/browse_api.py

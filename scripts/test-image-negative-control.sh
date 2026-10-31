@@ -49,6 +49,7 @@
 #   scripts/test-image-negative-control.sh cli-harness
 #   scripts/test-image-negative-control.sh cli-witness
 #   scripts/test-image-negative-control.sh browser-console
+#   scripts/test-image-negative-control.sh browser-uid
 #
 # The second form runs only the third half, the daemon container's run
 # contract (the one-deployment-shape spec's parity rows 1, 2, 3, 4, 5, 6, 8,
@@ -77,7 +78,9 @@
 # the smoke tier's CLI credential witness with the probe run in the CLI's own
 # process, where the credential is, as a CLI whose own Bash were left on would.
 # The eleventh runs the browser image's console socket witness against an image
-# whose x11vnc has no `-unixsock` (needs the tier's browser image built).
+# whose x11vnc has no `-unixsock` (needs the tier's browser image built). The
+# twelfth, `browser-uid`, runs #902's witnesses against the native browser image
+# with those changes taken back.
 #
 # No arrays anywhere: macOS ships bash 3.2, where `"${empty[@]}"` under `set -u`
 # is fatal, and this script's whole audience is a developer machine.
@@ -130,6 +133,10 @@ only_cli_witness=""
 if [ "$platform" = "cli-witness" ]; then
     only_cli_witness=1
     platform=""
+fi
+only_browser_uid=""
+if [ "$platform" = "browser-uid" ]; then
+    only_browser_uid=1
 fi
 only_browser_console=""
 if [ "$platform" = "browser-console" ]; then
@@ -831,12 +838,71 @@ print(_tag_for(REPO / "docker" / "browser" / "Dockerfile", "linux/amd64", "brows
     echo "[control] OK: browser-console turned the socket witness red without -unixsock."
 }
 
+# The browser image with #902's changes taken back: Chrome's user reads the API's
+# token, Chrome reports no sandbox, and a planted user site runs at the next start.
+# test_the_read_works_on_a_stand_in_holding_a_token stays green and is not named,
+# nor is the secret file's own test: the control does not change that file's mode.
+BROWSER_UID_NODES="
+${DOCUMENT_RENDER_TESTS}::test_chromes_user_cannot_read_the_api_process[api_environ]
+${DOCUMENT_RENDER_TESTS}::test_chromes_user_cannot_read_the_api_process[api_mem]
+${DOCUMENT_RENDER_TESTS}::test_no_process_shows_chromes_user_the_token
+${DOCUMENT_RENDER_TESTS}::test_websockify_serves_chromes_user_no_link_out_of_its_web_root
+${DOCUMENT_RENDER_TESTS}::test_chromes_user_cannot_edit_what_the_api_runs
+${DOCUMENT_RENDER_TESTS}::test_every_renderer_is_in_chromes_sandbox
+${DOCUMENT_RENDER_TESTS}::test_a_user_site_planted_by_chromes_user_does_not_run_at_the_next_start
+"
+
+browser_uid_half() {
+    browser_base="$(uv run python -c '
+import sys
+sys.path.insert(0, ".")
+from tests.image.conftest import REPO, _tag_for
+print(_tag_for(REPO / "docker" / "browser" / "Dockerfile", "", "browser-native"))
+')"
+    if ! docker image inspect "$browser_base" >/dev/null 2>&1; then
+        echo "[control] not built yet — run \`uv run pytest -m image -n0 ${DOCUMENT_RENDER_TESTS} -k chromes_sandbox\` first." >&2
+        exit 2
+    fi
+    echo
+    echo "[control] browser-uid: #902 taken back (base ${browser_base})"
+    browser_uid_tag="istota-test/browser-uid-unhardened:${browser_base##*:}"
+    docker build -q -f docker/test/Dockerfile.browser-uid-unhardened \
+        --build-arg "BASE=$browser_base" -t "$browser_uid_tag" docker/test >/dev/null
+    browser_uid_out="$(mktemp)"
+    set +e
+    ISTOTA_BROWSER_NATIVE_IMAGE_TAG="$browser_uid_tag" \
+        uv run pytest -m image -n0 -q --no-header -rf -p no:randomly \
+        "${DOCUMENT_RENDER_TESTS}" -k "chromes_user or chromes_sandbox or stand_in or websockify or no_process" \
+        2>&1 | tee "$browser_uid_out"
+    set -e
+    for browser_uid_node in $BROWSER_UID_NODES; do
+        if ! grep -Fq "FAILED ${browser_uid_node}" "$browser_uid_out"; then
+            rm -f "$browser_uid_out"
+            echo "[control] FAILED: browser-uid did not turn ${browser_uid_node} red."
+            exit 1
+        fi
+    done
+    # A probe that broke would turn all of them red, the stand-in's read included.
+    if grep -Fq "FAILED ${DOCUMENT_RENDER_TESTS}::test_the_read_works_on_a_stand_in_holding_a_token" "$browser_uid_out" \
+            || grep -Fq "ERROR ${DOCUMENT_RENDER_TESTS}" "$browser_uid_out"; then
+        rm -f "$browser_uid_out"
+        echo "[control] FAILED: browser-uid's probe did not run; the stand-in's read failed too."
+        exit 1
+    fi
+    rm -f "$browser_uid_out"
+    echo "[control] OK: browser-uid turned each closure's witness red on its own read."
+}
+
 if [ -n "$only_run_contract" ]; then
     run_contract_half
     exit 0
 fi
 if [ -n "$only_browser_console" ]; then
     browser_console_half
+    exit 0
+fi
+if [ -n "$only_browser_uid" ]; then
+    browser_uid_half
     exit 0
 fi
 if [ -n "$only_document_render" ]; then
