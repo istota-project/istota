@@ -4245,6 +4245,9 @@ _NOT_CONFIGURATION = frozenset({
     "servarr.incomplete_apps",
     "servarr.keyless_apps",
     "servarr.daemon_keyed_apps",
+    # Set by `_settle_private_hosts`. The fold pops an old key before the walk,
+    # so the walk's rejection never sees one and the old spelling still grants.
+    *(f"{consumer}.private_hosts" for consumer in PRIVATE_HOST_CONSUMERS),
     # The resolved providers and the unconfigured brain kinds, built at load.
     "brain.provider_specs",
     "brain.unconfigured",

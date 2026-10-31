@@ -462,7 +462,7 @@ def _servarr_change(setup) -> dict:
         "base_digest": _digest(setup),
         "ops": [
             {"op": "set", "path": ["servarr", "apps", "radarr", "url"], "value": "http://192.0.2.10:7878"},
-            {"op": "set", "path": ["servarr", "private_hosts"], "value": ["192.0.2.10"]},
+            {"op": "set_toml", "path": ["private_hosts"], "toml": '[private_hosts]\n"192.0.2.10" = ["servarr"]\n'},
             {"op": "set", "path": ["servarr", "requesters"], "value": ["bob"]},
             {"op": "set", "path": ["servarr", "defaults", "radarr", "root_folder"], "value": "/data/films"},
         ],
@@ -481,7 +481,8 @@ class TestServarrCardChangeSet:
         assert ARR_KEY not in response.text
         assert body["errors"] == [] and body["problems"]["blocking"] == []
         assert body["secret_names"] == [ARR_KEY_FILE]
-        assert body["changed_sections"] == ["servarr"]
+        assert body["changed_sections"] == ["private_hosts", "servarr"]
+        assert body["risky_keys"] == ["private_hosts"]
         assert '+url = "http://192.0.2.10:7878"' in body["diff"]
         assert not [line for line in body["diff"] if "api_key" in line]
         # The checked document has no key: it reaches the check as the
@@ -504,11 +505,7 @@ class TestServarrCardChangeSet:
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["problems"]["blocking"] == []
-        about_servarr = [
-            p for p in body["problems"]["warnings"]
-            if p["path"][:1] == ["servarr"] and p["path"] != ["servarr", "private_hosts"]
-        ]
-        assert not about_servarr, body
+        assert not [p for p in body["problems"]["warnings"] if p["path"][:1] == ["servarr"]], body
         assert seen[-1]["environ"] == {"ISTOTA_SERVARR_RADARR_API_KEY": ARR_KEY}
 
     async def test_an_inline_label_for_the_key_is_refused(self, alice, setup):
@@ -531,6 +528,7 @@ class TestServarrCardChangeSet:
 
         body = _servarr_change(setup)
         body["step_up"] = await _step_up(alice, setup)
+        body["confirm"] = ["private_hosts"]
         response = await alice.post(f"{BASE}/requests", json=body, headers=ORIGIN)
         assert response.status_code == 202, response.text
         assert ARR_KEY not in response.text
@@ -577,6 +575,127 @@ class TestServarrCardChangeSet:
         assert ARR_KEY not in response.text
         assert response.json()["errors"] == []
         assert "servarr" not in setup["checked"][-1]
+
+
+RSS_HOST = "rss.example.internal"
+WIKI_HOST = "wiki.example.internal"
+RAW_CURRENT = CURRENT.replace(INLINE_SECRET, SENTINEL)
+
+
+def _table_snippet(*hosts: tuple[str, str]) -> str:
+    lines = [f'"{host}" = ["{consumer}"]' for host, consumer in hosts]
+    return "\n".join(["[private_hosts]", *lines, ""])
+
+
+class TestPrivateHostsEdits:
+    """The table is the one place a grant is written, and an old key is moved
+    into it by a form edit of the table rather than lost or left to come back."""
+
+    OLD_KEY = f'\n[feeds]\nprivate_hosts = ["{RSS_HOST}", "{WIKI_HOST}"]\n'
+
+    async def _preview(self, alice, setup, **change) -> dict:
+        response = await alice.post(
+            f"{BASE}/preview", json={"base_digest": _digest(setup), **change}, headers=ORIGIN,
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    async def test_a_form_op_on_the_table_moves_an_old_key_and_keeps_its_grant(self, alice, setup):
+        from istota.config import config_from_document
+
+        setup["file"].write_text(CURRENT + self.OLD_KEY, encoding="utf-8")
+        body = await self._preview(alice, setup, ops=[
+            {"op": "set", "path": ["private_hosts", "other.example.internal"], "value": ["browser"]},
+        ])
+        assert body["errors"] == [] and body["problems"]["blocking"] == []
+        checked = setup["checked"][-1]
+        assert "private_hosts" not in checked.get("feeds", {})
+        assert checked["private_hosts"] == {
+            RSS_HOST: ["feeds"], WIKI_HOST: ["feeds"], "other.example.internal": ["browser"],
+        }
+        loaded = config_from_document(checked)
+        assert loaded.feeds.private_hosts == [RSS_HOST, WIKI_HOST]
+        assert loaded.browser.private_hosts == ["other.example.internal"]
+
+    async def test_a_host_removed_from_the_table_does_not_come_back(self, alice, setup):
+        from istota.config import config_from_document
+
+        setup["file"].write_text(CURRENT + self.OLD_KEY, encoding="utf-8")
+        body = await self._preview(alice, setup, ops=[{
+            "op": "set_toml", "path": ["private_hosts"], "toml": _table_snippet((RSS_HOST, "feeds")),
+        }])
+        assert body["errors"] == []
+        assert config_from_document(setup["checked"][-1]).feeds.private_hosts == [RSS_HOST]
+
+    async def test_unsetting_the_table_takes_the_old_key_with_it(self, alice, setup):
+        from istota.config import config_from_document
+
+        setup["file"].write_text(CURRENT + self.OLD_KEY, encoding="utf-8")
+        body = await self._preview(alice, setup, ops=[{"op": "unset", "path": ["private_hosts"]}])
+        assert body["errors"] == []
+        assert config_from_document(setup["checked"][-1]).feeds.private_hosts == []
+
+    async def test_an_edit_elsewhere_leaves_the_old_key_where_it_is(self, alice, setup):
+        setup["file"].write_text(CURRENT + self.OLD_KEY, encoding="utf-8")
+        body = await self._preview(alice, setup, ops=_change(setup)["ops"])
+        assert body["errors"] == [] and body["risky_keys"] == []
+        assert setup["checked"][-1]["feeds"]["private_hosts"] == [RSS_HOST, WIKI_HOST]
+        assert "private_hosts" not in setup["checked"][-1]
+
+    @pytest.mark.parametrize("consumer", [
+        "browser", "wordpress", "mail_accounts", "sharing", "servarr", "feeds",
+    ])
+    async def test_a_form_op_may_not_write_an_old_key(self, alice, setup, consumer):
+        body = await self._preview(alice, setup, ops=[
+            {"op": "set", "path": [consumer, "private_hosts"], "value": [RSS_HOST]},
+        ])
+        assert len(body["errors"]) == 1
+        assert f"{consumer}.private_hosts is not edited here" in body["errors"][0]
+        assert "[private_hosts]" in body["errors"][0]
+
+    async def test_a_raw_edit_may_delete_an_old_key(self, alice, setup):
+        setup["file"].write_text(CURRENT + self.OLD_KEY, encoding="utf-8")
+        body = await self._preview(alice, setup, raw=RAW_CURRENT)
+        assert body["errors"] == []
+        assert "feeds" not in setup["checked"][-1]
+
+    async def test_a_raw_edit_may_not_add_to_an_old_key(self, alice, setup):
+        setup["file"].write_text(CURRENT + self.OLD_KEY, encoding="utf-8")
+        raw = RAW_CURRENT + f'\n[feeds]\nprivate_hosts = ["{RSS_HOST}", "{WIKI_HOST}", "new.example.internal"]\n'
+        body = await self._preview(alice, setup, raw=raw)
+        assert len(body["errors"]) == 1
+        assert "feeds.private_hosts is not edited here" in body["errors"][0]
+
+    async def test_a_raw_edit_is_not_folded(self, alice, setup):
+        setup["file"].write_text(CURRENT + self.OLD_KEY, encoding="utf-8")
+        raw = RAW_CURRENT + self.OLD_KEY + f'\n{_table_snippet(("other.example.internal", "browser"))}'
+        body = await self._preview(alice, setup, raw=raw)
+        assert body["errors"] == []
+        assert setup["checked"][-1]["feeds"]["private_hosts"] == [RSS_HOST, WIKI_HOST]
+        assert setup["checked"][-1]["private_hosts"] == {"other.example.internal": ["browser"]}
+
+    async def test_any_table_edit_needs_the_typed_confirmation(self, alice, setup):
+        ops = [{"op": "set_toml", "path": ["private_hosts"], "toml": _table_snippet((RSS_HOST, "feeds"))}]
+        response = await _submit(alice, setup, ops=ops, step_up={})
+        assert response.status_code == 409
+        assert response.json()["error"] == "confirm_required"
+        assert response.json()["keys"] == ["private_hosts"]
+        response = await _submit(alice, setup, ops=ops, confirm=["private_hosts"])
+        assert response.status_code == 202, response.text
+
+    async def test_a_history_entry_holding_an_old_key_says_to_move_it(self, alice, setup):
+        request_id = (await _submit(alice, setup)).json()["id"]
+        with db.get_db(setup["config"].db_path) as conn:
+            config_requests.cancel(conn, request_id)
+            conn.execute(
+                "UPDATE config_change_requests SET document_toml = ? WHERE id = ?",
+                (RAW_CURRENT + self.OLD_KEY, request_id),
+            )
+        response = await alice.post(f"{BASE}/requests/{request_id}/restore", headers=ORIGIN)
+        assert response.status_code == 200, response.text
+        [error] = response.json()["preview"]["errors"]
+        assert "feeds.private_hosts is not edited here" in error
+        assert "history entry" in error
 
 
 class TestMoveToFile:

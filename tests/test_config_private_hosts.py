@@ -355,11 +355,34 @@ class TestAHostNamedLikeACredential:
         assert found.errors == []
         assert found.inline_secrets == {}
         assert found.document["private_hosts"] == {host: ["browser"]}
+        assert "private_hosts" not in found.document.get("feeds", {})
         assert SENTINEL not in str(found.document)
 
     def test_the_handoff_holds_no_credential_for_it(self, tmp_path, host):
         handoff.write(tmp_path, {"config": {"private_hosts": {host: ["browser"]}}}, {}, False)
         assert handoff._credential_values(tmp_path) == set()
+
+
+class TestTheEditorsReadOfAnOldKey:
+    DOCUMENT = {"feeds": {"private_hosts": [HOST]}}
+
+    def test_normalized_folds_it_and_reports_nothing(self):
+        with collect_problems() as problems:
+            read = edits.normalized(self.DOCUMENT)
+        assert problems == []
+        assert read["private_hosts"] == {HOST: ["feeds"]}
+        assert "private_hosts" not in read["feeds"]
+        assert self.DOCUMENT == {"feeds": {"private_hosts": [HOST]}}
+
+    def test_normalized_reports_a_bad_shape_no_more_than_an_old_key(self):
+        with collect_problems() as problems:
+            edits.normalized({"feeds": {"private_hosts": "not a list"}, "private_hosts": ["a"]})
+        assert problems == []
+
+    def test_the_real_load_still_reports_after_normalized_has_run(self, tmp_path):
+        edits.normalized(self.DOCUMENT)
+        _, problems = _load(tmp_path, f'[feeds]\nprivate_hosts = ["{HOST}"]\n')
+        assert _kinds(problems) == [("warning", ("feeds", "private_hosts"))]
 
 
 def test_the_table_uses_the_editors_table_control():

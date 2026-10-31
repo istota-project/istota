@@ -46,6 +46,12 @@ def _read_only() -> dict[tuple[str, ...], str]:
         "Per-user settings are edited on the Users page. [users.*] in config.toml "
         "is seed-only and is kept as it is."
     )
+    for consumer in config_module.PRIVATE_HOST_CONSUMERS:
+        found[(consumer, "private_hosts")] = (
+            "This setting moved to [private_hosts], where each host lists its consumers, "
+            f'as in "<host>" = ["{consumer}"]. A history entry holding this key can be '
+            "restored once the key is moved into that table."
+        )
     for name in reference.setup_paths():
         found[(name,)] = (
             "The container layout `istota setup` writes. Changing it would move the "
@@ -87,6 +93,7 @@ READ_ONLY: dict[tuple[str, ...], str] = _read_only()
 RETIRED: frozenset[tuple[str, ...]] = frozenset({
     ("default_briefings",),
     ("users", "*", "briefings"),
+    *((consumer, "private_hosts") for consumer in config_module.PRIVATE_HOST_CONSUMERS),
 })
 
 
@@ -121,10 +128,9 @@ RISKY_KEYS: frozenset[tuple[str, ...]] = frozenset({
     ("brain", "room_selectable"),
     # Opens unauthenticated public routes that write per-user rows.
     ("sharing", "ocm", "enabled"),
-    # Lifts the private-address refusal for daemon-side fetches.
-    ("sharing", "private_hosts"),
-    # Lifts it for Chrome, which runs pages somebody else wrote.
-    ("browser", "private_hosts"),
+    # Lifts the private-address refusal, for any consumer a host names: Chrome,
+    # a daemon-side fetch, a mail password or an API key.
+    ("private_hosts",),
 })
 
 
