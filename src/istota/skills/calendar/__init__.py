@@ -12,7 +12,7 @@ once the task succeeds, at most `[sharing] events_per_task` per task.
 every text field and the organizer fenced.
 
 Also provides a CLI for calendar operations from Claude Code:
-    python -m istota.skills.calendar list [--calendar URL|feed:ID] [--date today|tomorrow|DATE | --week] [--tz TZ]
+    python -m istota.skills.calendar list [--calendar URL|feed:ID] [--date today|tomorrow|DATE | --week | --start DATE [--end DATE]] [--tz TZ]
     python -m istota.skills.calendar calendars
     python -m istota.skills.calendar create --calendar URL --summary TEXT --start DATETIME [--end DATETIME]
     python -m istota.skills.calendar update --calendar URL --uid UID [--summary TEXT] [--start DT] [--end DT] [--all-day] ...
@@ -604,8 +604,37 @@ def _parse_all_day_date(date_str: str) -> date:
         ) from exc
 
 
+# `list` without --calendar fans out over every calendar and feed, so a window
+# is refused past this rather than cut short. 400 covers a 395-day mirror job.
+MAX_LIST_RANGE_DAYS = 400
+
+
+class ListRangeRefused(ValueError):
+    def __init__(self, reason: str, error: str):
+        super().__init__(error)
+        self.reason = reason
+
+
 def _get_date_range(args) -> tuple[datetime, datetime, str]:
-    """Compute (start, end, label) from --week or --date flags."""
+    """Compute (start, end, label) from --start/--end, --week or --date flags."""
+    range_start = getattr(args, "start", None)
+    range_end = getattr(args, "end", None)
+    if range_end is not None and range_start is None:
+        raise ListRangeRefused("end_without_start", "--end needs --start")
+    if range_end is not None:
+        start = _parse_date(range_start, args.tz)
+        last_day = _parse_date(range_end, args.tz)
+        if last_day < start:
+            raise ListRangeRefused("end_before_start", f"--end {range_end} is before --start {range_start}")
+        if (last_day - start).days + 1 > MAX_LIST_RANGE_DAYS:
+            raise ListRangeRefused(
+                "range_too_long", f"The range is limited to {MAX_LIST_RANGE_DAYS} days; split it into shorter ones",
+            )
+        label = f"{start.date().isoformat()}..{last_day.date().isoformat()}"
+        return start, last_day + timedelta(days=1), label
+    if range_start is not None:
+        start = _parse_date(range_start, args.tz)
+        return start, start + timedelta(days=1), range_start
     if getattr(args, "week", False):
         start = _parse_date("today", args.tz)
         end = start + timedelta(days=7)
@@ -1107,7 +1136,10 @@ def _istota_delete(args, user_id: str) -> dict:
 
 def cmd_list(args) -> dict:
     """List calendar events."""
-    start, end, label = _get_date_range(args)
+    try:
+        start, end, label = _get_date_range(args)
+    except ListRangeRefused as exc:
+        return {"status": "error", "reason": exc.reason, "error": str(exc)}
     user_id = task_user_id()
 
     if args.calendar and is_istota_calendar(args.calendar):
@@ -1372,6 +1404,16 @@ def build_parser():
     date_group.add_argument(
         "--week", "-w", action="store_true", default=False,
         help="Show events for the next 7 days"
+    )
+    date_group.add_argument(
+        "--start",
+        help="First day of a range: 'today', 'tomorrow', or YYYY-MM-DD (alone, that one day)"
+    )
+    # Outside the group, which allows only one of its members. --end without
+    # --start is refused by _get_date_range, and that covers --date and --week.
+    p_list.add_argument(
+        "--end",
+        help=f"Last day of the range, inclusive; needs --start (at most {MAX_LIST_RANGE_DAYS} days)"
     )
     p_list.add_argument("--tz", help="Timezone (e.g., America/Los_Angeles)")
 

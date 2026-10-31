@@ -707,7 +707,7 @@ The deployment's public DNS name.
 
 | Setting | Default | Description |
 |---|---|---|
-| `hostname` | `""` | Public DNS name; used by the web app for OAuth2 redirect derivation, origin/CSRF checks, and webhook URLs. On the stack `istota setup --hostname` writes it, and in `direct` and `proxied` ingress it must equal `DOMAIN` in the VM's `host.env`, or the daemon refuses to start; change both with `istota-stack setup --force`. The local VM writes `localhost:<port>` |
+| `hostname` | `""` | Public DNS name; used by the web app for OAuth2 redirect derivation, origin/CSRF checks, and webhook URLs. The origin check compares scheme, name and port, so a public install browsers reach on a port other than 443 names it here (`istota.example.com:8443`). On the stack `istota setup --hostname` writes it, and in `direct` and `proxied` ingress its name must equal `DOMAIN` in the VM's `host.env`, which holds the name without the port, or the daemon refuses to start; change both with `istota-stack setup --force`. The local VM writes `localhost:<port>` |
 
 The agent-writable static web root (`enabled` / `base_path`) was removed. A publicly-served directory the agent could write to with an ordinary `cp` was an outbound egress channel the confirmation model treated as a benign local write, so anything the agent could read could be published to a public URL without a gate. Serve static assets outside istota, from a directory the agent cannot reach. A stale `enabled` / `base_path` key logs a warning at config load and is ignored.
 

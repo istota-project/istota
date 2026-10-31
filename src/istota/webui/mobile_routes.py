@@ -11,7 +11,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from istota.webui.origin import external_origin
-from istota.webui.request_guards import BodyError, read_bounded_body
+from istota.webui.request_guards import BodyError, origin_key, read_bounded_body
 
 
 router = APIRouter()
@@ -69,15 +69,12 @@ async def read_handoff_fields(request: Request, config, *, json_body: bool, name
     origins = request.headers.getlist("origin")
     try:
         host, scheme = external_origin(config)
-        canonical = urlsplit(f"{scheme}://{host}")
         if origins:
             origin = urlsplit(origins[0])
-            origin_port = origin.port if origin.port is not None else (443 if origin.scheme == "https" else 80)
-            canonical_port = canonical.port if canonical.port is not None else (443 if canonical.scheme == "https" else 80)
+            seen = origin_key(origins[0])
             if (len(origins) != 1 or origin.username is not None or origin.password is not None
                     or origin.path or origin.query or origin.fragment
-                    or origin.scheme != canonical.scheme or origin.hostname != canonical.hostname
-                    or origin_port != canonical_port):
+                    or seen is None or seen != origin_key(f"{scheme}://{host}")):
                 raise ValueError("origin mismatch")
     except ValueError:
         raise BodyError(403, "origin refused") from None

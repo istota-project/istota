@@ -990,13 +990,25 @@ def local_address(port: int) -> str:
     return f"localhost:{port}"
 
 
+def stack_domain(a: ContainerAnswers) -> str:
+    """``DOMAIN`` for these answers: the hostname, without a public port behind TLS.
+
+    Certbot and the self-signed certificate take a bare name. `local` keeps the
+    port, which nginx strips and the local VM's scripts read back.
+    """
+    if a.ingress == "local":
+        return a.hostname
+    name, sep, port = a.hostname.rpartition(":")
+    return name if sep and port.isdigit() else a.hostname
+
+
 def stack_env_values(a: ContainerAnswers) -> dict[str, str]:
     """The compose ``.env`` keys the wizard owns: stack-level, never istota config."""
     plain, tls = nginx_publish(a)
     return {
         "COMPOSE_PROJECT_NAME": "istota",
         "COMPOSE_PROFILES": ",".join(a.compose_profiles),
-        "DOMAIN": a.hostname,
+        "DOMAIN": stack_domain(a),
         "ISTOTA_SECRETS_DIR": "./secrets",
         "NGINX_PUBLISH": plain,
         "NGINX_PUBLISH_TLS": tls,
@@ -1025,7 +1037,7 @@ def host_env_values(a: ContainerAnswers) -> dict[str, str]:
     return {
         "STORAGE": a.storage,
         "INGRESS": a.ingress,
-        "DOMAIN": a.hostname,
+        "DOMAIN": stack_domain(a),
         "TLS_CERT_SOURCE": tls_cert_source(a),
         "UPSTREAM_PROXY": a.upstream_proxy,
         "LISTEN_ADDR": a.listen_addr,

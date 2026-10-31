@@ -8,8 +8,11 @@ rather than the text, because the loader is the reader that matters.
 
 from __future__ import annotations
 
+import os
 import re
 import stat
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 from datetime import datetime, timezone
@@ -911,6 +914,39 @@ class TestWhatNginxPublishes:
         assert values["NGINX_PUBLISH"] == "127.0.0.1:8282:80"
         assert values["NGINX_PUBLISH_TLS"] == "127.0.0.1::443"
         assert _env(render_host_env(a))["TLS_CERT_SOURCE"] == ""
+
+    @pytest.mark.parametrize("ingress, hostname, domain", [
+        ("proxied", "bot.example.test:8443", "bot.example.test"),
+        ("direct", "bot.example.test:8443", "bot.example.test"),
+        ("proxied", "bot.example.test", "bot.example.test"),
+        ("local", "localhost:8282", "localhost:8282"),
+    ])
+    def test_domain_is_a_bare_name_behind_tls(self, ingress, hostname, domain):
+        a = _full_answers(ingress=ingress, hostname=hostname, upstream_proxy="10.0.0.5", listen_addr="10.0.0.20")
+
+        assert _env(render_stack_env(a))["DOMAIN"] == domain
+        assert _env(render_host_env(a))["DOMAIN"] == domain
+        assert tomllib.loads(render_container_config(a, inline_credentials=False))["site"]["hostname"] == hostname
+
+    @pytest.mark.parametrize("hostname, domain, refused", [
+        ("bot.example.test", "bot.example.test", False),
+        ("bot.example.test:8443", "bot.example.test", False),
+        ("other.example.test:8443", "bot.example.test", True),
+        ("other.example.test", "bot.example.test", True),
+    ])
+    def test_the_preflight_compares_the_hostnames_name_with_domain(self, tmp_path, hostname, domain, refused):
+        entrypoint = (REPO / "docker" / "istota" / "entrypoint.sh").read_text()
+        preflight = entrypoint.split("""python3 - "$CONFIG_FILE" <<'PY' || exit 78\n""", 1)[1].split("\nPY\n", 1)[0]
+        config = tmp_path / "config.toml"
+        config.write_text(f'[site]\nhostname = "{hostname}"\n')
+
+        result = subprocess.run(
+            [sys.executable, "-", str(config)], input=preflight, text=True, capture_output=True, timeout=60,
+            env={**os.environ, "INGRESS": "proxied", "DOMAIN": domain, "PYTHONPATH": str(REPO / "src")},
+        )
+
+        assert result.returncode == (1 if refused else 0), result.stderr
+        assert ("the stack's DOMAIN" in result.stderr) is refused
 
     def test_proxied_refuses_acme(self):
         args = SimpleNamespace(

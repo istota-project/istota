@@ -166,6 +166,13 @@ class TestUnlock:
         resp = _unlock(client, headers={"host": host, "origin": f"http://{host}"})
         assert resp.status_code == 200
 
+    @pytest.mark.parametrize("origin", ["http://localhost:9999", "http://localhost"])
+    def test_a_local_run_refuses_a_page_on_another_port(self, dirs, clock, origin):
+        app, client = _make(dirs, clock, local=True)
+        resp = _unlock(client, headers={"host": "localhost:8080", "origin": origin})
+        assert resp.status_code == 403
+        assert app.state.setup.failures_total == 0
+
     def test_a_local_run_refuses_a_rebound_name(self, dirs, clock):
         # A page that rebinds its own name to 127.0.0.1 sends a matching Origin.
         app, client = _make(dirs, clock, local=True)

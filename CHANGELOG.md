@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tasks can read a calendar over a range of dates in one call, with `--start` and `--end` on `calendar list`. A window that was not today, tomorrow or the next seven days used to take one call per day. A range over the limit is refused rather than cut short.
 - **The Taxes page shows income it has not projected yet.** Self-employment income already posted in the current month appears on its own line, marked as not yet in the projection, so it no longer looks missing from the estimate.
 - **See what the SE account patterns match.** Settings > Taxes lists the accounts each pattern list matches and their totals for the tax year, and follows your edits before you save. A list that matches nothing says so.
 - **Change SE account patterns from chat.** The bot can list, add and remove the accounts counted as self-employment, with the same checks as the settings page.
@@ -54,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The web app now checks the whole origin of a change, not only its hostname.** A page on another port or over http on the same hostname could pass the check that guards signed-in changes. The scheme and port must now match `[site] hostname` too. **Upgrade note:** if browsers reach a public install on a port other than 443, run `istota-stack setup --force --hostname <name>:<port>`, or every change there is refused. `DOMAIN` stays the bare name.
 - **A credential echoed in a large response is now scrubbed.** Responses past `scan_max_bytes` used to stream to the task unscanned, so a service that echoed the credential in one showed it to the task. The scrub now covers any size and common encodings of the value (base64, percent-encoding, hex, JSON and HTML escaping). It is not a secrecy guarantee: see the limits in the credentials docs.
 - **The browser can no longer reach private addresses.** Every Chrome connection now goes through a proxy in the browser container that refuses private, loopback and link-local addresses, including redirects, subresources and WebSockets, so a page or a task cannot reach internal services or the container's own API and debugging ports. If you browse an internal site, list its name in `[browser] private_hosts`.
 - **The browser API now needs a token.** It used to believe whichever user a request named, so anything that could reach it could act in another user's browser. `istota-stack` generates the token on your next update. If you start the stack without `istota-stack`, see docs/deployment/running-the-stack.md.
