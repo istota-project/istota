@@ -159,6 +159,11 @@
             <Timestamp value={offer.created_at} format="relative" empty="just now" /></span
           >
         </div>
+        {#if offer.signed === false}
+          <Badge size="sm" variant="warn">Not signed</Badge>
+        {:else if offer.signed === true}
+          <Badge size="sm" variant="neutral">Signed by server</Badge>
+        {/if}
         <Badge size="sm" variant="info">{offer.reoffer ? 'Offered again' : 'Waiting'}</Badge>
         <div class="row-actions">
           <Button
@@ -235,6 +240,14 @@
       Istota opens {folderName(accepting)} from {accepting.host} once now to check the share. Then your
       tasks can read it, and change it if the share allows that.
     </p>
+    {#if accepting.signed === false}
+      <p>
+        {accepting.host} did not sign this offer, so anyone could have sent it in that server's name.
+        Accept it only if you expected it.
+      </p>
+    {:else if accepting.signed === true}
+      <p>{accepting.host} signed this offer. That proves the server, not the person named.</p>
+    {/if}
   {/if}
   <Checkbox
     bind:checked={allowScheduled}

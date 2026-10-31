@@ -215,7 +215,7 @@ src/istota/
 │   ├── talk.py, ocs.py   # The Talk client and the OCS envelope leaf
 │   ├── user_metadata.py  # NC user metadata
 │   └── compat.py         # The None-returning variants four best-effort daemon paths depend on
-├── mail/                 # Email plumbing that is not a transport: support (get_email_config, thread helpers, cleanup), ownership, outbound_policy, drafts, accounts (the mail accounts users connect: registry, passwords, `resolve_for_daemon`), connect (the one place an IMAP or SMTP connection is built: verified TLS, `imap_security`/`smtp_security`, resolve-check-connect for a typed host, `classify_error`), html_template (the document and inline styles of every HTML mail Istota composes itself: briefings and auth mail)
+├── mail/                 # Email plumbing that is not a transport: support (get_email_config, thread helpers, cleanup), ownership, outbound_policy, drafts, sender_flags (the per-sender record of suspected injection attempts and the hold it causes), accounts (the mail accounts users connect: registry, passwords, `resolve_for_daemon`), connect (the one place an IMAP or SMTP connection is built: verified TLS, `imap_security`/`smtp_security`, resolve-check-connect for a typed host, `classify_error`), html_template (the document and inline styles of every HTML mail Istota composes itself: briefings and auth mail)
 ├── browser/              # Admission to the single-threaded browser API, and browser profile identity
 │   └── document_render.py  # A web render bundle (`web/src/render/`) sent to the browser's `/render-document`, an image back; the page never calls istota → leaf-modules.md
 ├── lib/                  # Dependency-free leaves; nothing here imports from `istota` → leaf-modules.md

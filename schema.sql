@@ -705,6 +705,21 @@ CREATE TABLE IF NOT EXISTS trusted_email_senders (
 
 CREATE INDEX IF NOT EXISTS idx_trusted_email_senders_user ON trusted_email_senders(user_id);
 
+-- One row per mail flagged as a suspected injection attempt. Rows outlive their
+-- task on purpose, so task_id is not a reference anything follows.
+CREATE TABLE IF NOT EXISTS email_sender_flags (
+    id INTEGER PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    sender TEXT NOT NULL,           -- lowercased addr-spec
+    task_id INTEGER NOT NULL,
+    reason TEXT NOT NULL,           -- sender_flags.REASONS
+    flagged_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, task_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_sender_flags_lookup
+    ON email_sender_flags(user_id, sender, flagged_at);
+
 -- Sent emails (outbound email tracking for emissary thread matching)
 CREATE TABLE IF NOT EXISTS sent_emails (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

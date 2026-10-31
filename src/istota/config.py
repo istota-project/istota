@@ -55,6 +55,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger("istota.config")
 
 
+def is_trust_pattern(entry: str) -> bool:
+    """Whether a `trusted_email_senders` entry matches many addresses rather
+    than naming one."""
+    return any(char in entry for char in "*?[")
+
+
 @dataclass
 class LoggingConfig:
     """Logging configuration."""
@@ -620,6 +626,8 @@ class SchedulerConfig:
     email_rate_limit_messages: int = 60  # email-origin tasks per user per window
     email_sender_rate_limit_messages: int = 20  # …and per (user, sender), so one loud correspondent throttles alone
     email_rate_limit_window_seconds: int = 3600  # the sliding window both counts run over
+    email_sender_flag_hold_threshold: int = 3  # counted injection flags that hold an address's mail; 0 or less turns holding off, flags are still recorded
+    email_sender_flag_window_days: int = 90  # age past which a flag stops counting and is pruned; 0 or less means flags never age
     # Which queue inbound mail lands on. Background by default: email is the one
     # surface an unauthenticated stranger can create work on, and the one whose
     # latency expectation is loosest (the poll interval alone is 60s), so it
@@ -2880,6 +2888,35 @@ class Config:
                 return True
 
         # Check runtime-managed trusted senders in DB
+        if conn is not None:
+            from . import db
+            if db.is_sender_trusted_in_db(conn, user_id, sender_lower):
+                return True
+
+        return False
+
+    def is_sender_named_as_trusted(
+        self, user_id: str, sender_email: str, conn: "sqlite3.Connection | None" = None,
+    ) -> bool:
+        """Whether the user named this exact address as trusted.
+
+        Narrower than :meth:`is_trusted_email_sender`: an own address does not
+        count, and neither does a config pattern, since ``*@corp.com`` says
+        nothing about any one sender. The runtime table counts whole, because
+        ``!trust`` and ``yes trust`` write exact addresses.
+        """
+        user = self.users.get(user_id)
+        if not user:
+            return False
+
+        sender_lower = sender_email.lower()
+
+        for entry in user.trusted_email_senders:
+            if is_trust_pattern(entry):
+                continue
+            if entry.lower() == sender_lower:
+                return True
+
         if conn is not None:
             from . import db
             if db.is_sender_trusted_in_db(conn, user_id, sender_lower):

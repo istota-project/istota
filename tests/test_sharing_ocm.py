@@ -5,7 +5,8 @@ so the properties held here are the refusal ones: every refusal writes
 nothing (read with a watermark on `shared_sources`, `secrets` and
 `notifications` plus a column filter), the steps run in a fixed order (over a
 rate limit, no outbound fetch at all), and an unknown user answers exactly as
-an unknown host does, and only once the sender is verified.
+an unknown host does, and only once the sender is verified and the offer has
+passed every check that holds for any recipient.
 
 The sender is a stdlib server on loopback, named in `[sharing] private_hosts`,
 serving a Nextcloud-shaped `/ocm-provider/` document. The offer bodies are the
@@ -32,6 +33,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from istota import db
+from istota.lib.rate_limit import SlidingWindow
 from istota.config import Config, SharingConfig, SharingOcmConfig, SiteConfig, UserConfig
 from istota.credentials import store as secrets_store
 from istota.sharing import ocm, sources
@@ -402,7 +404,7 @@ class TestRoutes:
         with _ocm_client(config) as client:
             response = client.post("/ocm/shares", json=sender.offer())
         assert response.status_code == 201, response.text
-        assert response.json() == {"recipientDisplayName": "Alice Example"}
+        assert response.json() == {"recipientDisplayName": "alice"}
         assert response.headers["cache-control"] == "no-store"
         assert [o.state for o in _offers(config)] == ["pending"]
 
@@ -437,7 +439,7 @@ class TestRoutes:
 class TestTheCapturedOffer:
     def test_the_nextcloud_30_body_unsigned(self, config, sender):
         answer = _receive(config, sender.offer())
-        assert (answer.status, answer.body) == (201, {"recipientDisplayName": "Alice Example"})
+        assert (answer.status, answer.body) == (201, {"recipientDisplayName": "alice"})
         [offer] = _offers(config)
         assert offer.state == "pending"
         assert offer.access == "read"
@@ -608,6 +610,176 @@ class TestRecipient:
     ])
     def test_the_host_is_compared_exactly(self, config, sender, share_with):
         assert _receive(config, sender.offer(shareWith=share_with)).status == 404
+
+
+class TestWhatASenderLearns:
+    """Issue 891: no name before consent, and a recipient costs a sender its budget to test."""
+
+    def _unknown(self, sender, **overrides):
+        return sender.offer(shareWith=f"mallory@https://{SITE}", **overrides)
+
+    def _spend_budget(self, config, sender, **kwargs):
+        for n in range(ocm.RECIPIENT_REFUSALS_PER_DAY):
+            answer = _receive(config, self._unknown(sender, providerId=200 + n), **kwargs)
+            assert answer.status == 404
+
+    def test_the_answer_echoes_the_spelling_the_sender_wrote(self, config, sender):
+        answer = _receive(config, sender.offer(shareWith=f"ALICE@https://{SITE}"))
+        assert (answer.status, answer.body) == (201, {"recipientDisplayName": "ALICE"})
+
+    def test_a_signed_offer_learns_no_name_either(self, config, sender, key):
+        answer = _receive_signed(config, sender, key, sender.offer())
+        assert (answer.status, answer.body) == (201, {"recipientDisplayName": "alice"})
+
+    def test_a_repeat_offer_learns_no_name_either(self, config, sender):
+        assert _receive(config, sender.offer()).status == 201
+        answer = _receive(config, sender.offer())
+        assert (answer.status, answer.body) == (201, {"recipientDisplayName": "alice"})
+
+    def test_a_bad_uri_answers_the_same_for_any_recipient(self, config, sender):
+        options = {"sharedSecret": SECRET, "uri": "../../remote.php/dav/"}
+        protocol = {"name": "webdav", "options": options}
+        known = _receive(config, sender.offer(protocol=protocol))
+        unknown = _receive(config, self._unknown(sender, protocol=protocol))
+        assert (known.status, known.body) == (unknown.status, unknown.body)
+        assert known.status == 400
+
+    def test_a_document_with_no_webdav_answers_the_same_for_any_recipient(self, config, sender):
+        document = sender.discovery()
+        document["resourceTypes"] = []
+        sender.publish(document)
+        known = _receive(config, sender.offer())
+        unknown = _receive(config, self._unknown(sender))
+        assert (known.status, known.body) == (unknown.status, unknown.body)
+        assert known.status == 403
+
+    def test_no_master_key_answers_the_same_for_any_recipient(self, config, sender, monkeypatch):
+        monkeypatch.delenv("ISTOTA_SECRET_KEY")
+        known = _receive(config, sender.offer())
+        unknown = _receive(config, self._unknown(sender))
+        assert (known.status, known.body) == (unknown.status, unknown.body)
+        assert known.status == 503
+
+    def test_a_mistyped_address_is_still_refused_within_the_budget(self, config, sender):
+        self._spend_budget(config, sender)
+
+    def test_past_the_budget_an_unknown_recipient_answers_as_a_known_one(self, config, sender):
+        self._spend_budget(config, sender)
+        mark = _watermark(config)
+        unknown = _receive(config, self._unknown(sender, providerId=300))
+        assert (unknown.status, unknown.body) == (201, {"recipientDisplayName": "mallory"})
+        assert _written_since(config, mark) == NOTHING
+
+    def test_past_the_budget_a_real_offer_still_arrives(self, config, sender):
+        self._spend_budget(config, sender)
+        answer = _receive(config, sender.offer())
+        assert (answer.status, answer.body) == (201, {"recipientDisplayName": "alice"})
+        assert [o.state for o in _offers(config)] == ["pending"]
+
+    def test_past_the_budget_a_full_inbox_is_not_a_tell(self, config, sender):
+        config.sharing.ocm.max_pending_per_user = 1
+        assert _receive(config, sender.offer()).status == 201
+        self._spend_budget(config, sender)
+        mark = _watermark(config)
+        answer = _receive(config, sender.offer(providerId=301))
+        assert (answer.status, answer.body) == (201, {"recipientDisplayName": "alice"})
+        written = _written_since(config, mark)
+        assert (written["shared_sources"], written["secrets"]) == (0, 0)
+        assert written["notifications"] == 1
+
+    def test_a_lone_surrogate_answers_the_same_for_any_recipient(self, config, sender):
+        protocol = {"name": "webdav", "options": {"sharedSecret": "\ud800"}}
+        known = _receive(config, sender.offer(protocol=protocol))
+        unknown = _receive(config, self._unknown(sender, protocol=protocol))
+        assert (known.status, known.body) == (unknown.status, unknown.body)
+        assert known.status == 400
+
+    def test_a_lone_surrogate_in_the_address_is_refused(self, config, sender):
+        answer = _receive(config, sender.offer(shareWith=f"\ud800@https://{SITE}"))
+        assert answer.status == 400
+
+    def test_a_lone_surrogate_in_a_notification_is_refused(self, config):
+        assert _notify(config, {
+            "notificationType": "SHARE_UNSHARED", "resourceType": "file", "providerId": "5",
+            "notification": {"sharedSecret": "\ud800"},
+        }).status == 400
+
+    def _unshare(self, config, provider_id):
+        return _notify(config, {
+            "notificationType": "SHARE_UNSHARED", "resourceType": "file",
+            "providerId": str(provider_id), "notification": {"sharedSecret": SECRET},
+        })
+
+    def test_a_notification_cannot_tell_a_dropped_offer_from_a_stored_one(self, config, sender):
+        self._spend_budget(config, sender)
+        assert _receive(config, self._unknown(sender, providerId=300)).status == 201
+        assert _receive(config, sender.offer(providerId=301)).status == 201
+        fetched = sender.fetches
+        dropped = self._unshare(config, 300)
+        after_dropped = sender.fetches
+        stored = self._unshare(config, 301)
+        assert (dropped.status, dropped.body) == (stored.status, stored.body) == (201, [])
+        assert after_dropped - fetched == sender.fetches - after_dropped == 1
+        # Unsharing ends both: a second notification matches neither.
+        assert self._unshare(config, 300).status == self._unshare(config, 301).status == 403
+
+    def test_a_notification_with_another_secret_does_not_match_a_dropped_offer(self, config, sender):
+        self._spend_budget(config, sender)
+        assert _receive(config, self._unknown(sender, providerId=300)).status == 201
+        answer = _notify(config, {
+            "notificationType": "SHARE_UNSHARED", "resourceType": "file", "providerId": "300",
+            "notification": {"sharedSecret": "another-secret"},
+        })
+        assert answer.status == 403
+
+    def test_the_budget_has_a_total_across_every_host(self, config, sender, monkeypatch):
+        monkeypatch.setattr(ocm, "_recipient_refusal_total", SlidingWindow(60, 1, max_keys=1))
+        assert _receive(config, self._unknown(sender)).status == 404
+        other = Sender()
+        try:
+            assert _receive(config, self._unknown(other)).status == 201
+        finally:
+            other.close()
+
+    def test_a_full_inbox_is_answered_within_the_budget(self, config, sender):
+        config.sharing.ocm.max_pending_per_user = 1
+        assert _receive(config, sender.offer()).status == 201
+        assert _receive(config, sender.offer(providerId=301)).status == 429
+
+    def test_the_budget_is_per_sending_host(self, config, sender):
+        self._spend_budget(config, sender)
+        other = Sender()
+        try:
+            assert _receive(config, self._unknown(other)).status == 404
+        finally:
+            other.close()
+
+    def test_the_budget_is_per_client_address(self, config, sender):
+        self._spend_budget(config, sender, client_address="198.51.100.7")
+        other = Sender()
+        try:
+            answer = _receive(config, self._unknown(other), client_address="198.51.100.7")
+            assert answer.status == 201
+            assert _receive(config, self._unknown(other), client_address="198.51.100.8").status == 404
+        finally:
+            other.close()
+
+    def test_an_offer_records_whether_it_was_signed(self, config, sender, key):
+        assert _receive(config, sender.offer()).status == 201
+        assert _receive_signed(config, sender, key, sender.offer(providerId=6)).status == 201
+        signed = {o.extras["provider_id"]: o.extras["sender_signed"] for o in _offers(config)}
+        assert signed == {"5": False, "6": True}
+
+    def test_a_signed_reoffer_of_an_unsigned_share_counts_as_signed(self, config, sender, key):
+        assert _receive(config, sender.offer()).status == 201
+        [offer] = _offers(config)
+        with db.get_db(config.db_path) as conn:
+            sources.set_state(conn, offer.id, "alice", "active")
+            conn.commit()
+        assert _receive_signed(config, sender, key, sender.offer()).status == 201
+        [offer] = _offers(config)
+        assert offer.extras["reoffer_pending"] is True
+        assert offer.extras["sender_signed"] is True
 
 
 class TestStepOrder:
