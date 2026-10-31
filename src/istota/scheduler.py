@@ -5621,17 +5621,26 @@ def _process_one_task(
     # Flipping it would leave those records disagreeing about whether the task
     # ran, and would offer a re-run — another model call — for a failure that
     # was never in the model. The inbox row is what makes the loss durable.
+    #
+    # When the user can read the stored row, that row is the copy (ISSUE-909):
+    # the alert names the failed leg and closes on being seen like any alert.
+    undelivered_key = None
     if talk_undelivered and held_notification is None \
             and not _talk_is_mirror and failure_alert is None:
-        # "message", not "reply": on the permanent-failure path this body is the
-        # apology for a task that failed, not an answer to anything.
-        failure_alert = (
-            f"⚠️ **Could not post to Talk** (task #{task.id})\n\n"
-            "The message is below so it is not lost:\n\n"
-            f"{post_talk_message}"
-        )
         failure_alert_title = f"Could not post to Talk — task #{task.id}"
-        failure_alert_push = task_alert_source.undelivered_push(failure_alert_title)
+        if _answer_readable_in_room(config, task, transcript_token):
+            failure_alert = task_alert_source.TALK_LEG_FAILED_DETAIL
+            failure_alert_push = task_alert_source.talk_leg_failed_push(failure_alert_title)
+            undelivered_key = task_alert_source.talk_leg_failed_key(task.id)
+        else:
+            # "message", not "reply": on the permanent-failure path this body is
+            # the apology for a task that failed, not an answer to anything.
+            failure_alert = (
+                f"⚠️ **Could not post to Talk** (task #{task.id})\n\n"
+                "The message is below so it is not lost:\n\n"
+                f"{post_talk_message}"
+            )
+            failure_alert_push = task_alert_source.undelivered_push(failure_alert_title)
 
     if failure_alert:
         # Last, and after every DB transaction above has closed. Best-effort by
@@ -5648,6 +5657,7 @@ def _process_one_task(
         # the row, because the alert route can be a room (#638).
         notification_id = _write_undelivered_row(
             config, task, failure_alert_title, failure_alert,
+            dedup_key=undelivered_key,
         )
         try:
             delivered = send_notification(
@@ -8615,8 +8625,32 @@ def _confirmation_notice_token(task_info: dict, conn=None) -> str | None:
     return token
 
 
+def _answer_readable_in_room(
+    config: Config, task: db.Task, room_token: str | None,
+) -> bool:
+    """Whether this user can read this task's answer in the room's web view.
+
+    An unreadable database answers False, so the alert keeps its own copy.
+    """
+    if not room_token or not config.web.enabled:
+        return False
+    try:
+        with db.get_db(config.db_path) as conn:
+            return (
+                db.is_room_member(conn, room_token, task.user_id)
+                and db.visible_room(conn, task.user_id, room_token) is not None
+                and db.task_has_assistant_row(conn, room_token, task.id)
+            )
+    except Exception:
+        logger.warning(
+            "could not read the room row for task %s", task.id, exc_info=True,
+        )
+        return False
+
+
 def _write_undelivered_row(
     config: Config, task: db.Task, title: str | None, message: str,
+    *, dedup_key: str | None = None,
 ) -> int | None:
     """Record a task result that reached nobody, on a connection of its own.
 
@@ -8626,13 +8660,14 @@ def _write_undelivered_row(
 
     Nothing will ever change to close this row, and its push carries only a
     pointer to it, so it is the user's copy: an `undelivered:` row is kept
-    until dismissed rather than closed on being seen (#638).
+    until dismissed rather than closed on being seen (#638). ``dedup_key`` names
+    any other kind of row, for a notice that holds no copy.
     """
     try:
         with db.get_db(config.db_path) as conn:
             result = task_alert_source.write(
                 conn, task.user_id,
-                dedup_key=task_alert_source.undelivered_key(task.id),
+                dedup_key=dedup_key or task_alert_source.undelivered_key(task.id),
                 title=title or f"A task result could not be delivered — task #{task.id}",
                 body=message,
                 severity="warning",

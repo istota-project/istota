@@ -82,7 +82,7 @@ Both hand back a ready-made `target`:
 
 | the room | `target` |
 |---|---|
-| created in Talk | `talk:<token>` |
+| created in Talk | `talk:<talk_token>` |
 | created in web chat | `web:<token>` |
 | web chat, also open in Talk | `web:<token>,talk:<talk_token>` |
 
@@ -90,7 +90,7 @@ The third row is two legs on purpose. The web leg writes the room's own
 transcript and pushes nothing to Talk, so naming only the web half leaves the
 room's Talk members seeing nothing.
 
-**Set `room` to the same canonical token.** `target` is where the result goes;
+**Set `room` to the room's canonical `token`, never its `talk_token`.** `target` is where the result goes;
 `room` is which conversation the job runs in, and it is what makes the result
 render as a reply in the room rather than as a standalone system note. It also
 gives the job the room's conversation history as context.

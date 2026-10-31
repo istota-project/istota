@@ -7100,6 +7100,17 @@ def clear_room_external_ids(
     return changed
 
 
+def task_has_assistant_row(
+    conn: sqlite3.Connection, room_token: str, task_id: int,
+) -> bool:
+    """True when a room's transcript holds this task's answer."""
+    return conn.execute(
+        "SELECT 1 FROM messages "
+        "WHERE room_token = ? AND task_id = ? AND role = 'assistant' LIMIT 1",
+        (room_token, task_id),
+    ).fetchone() is not None
+
+
 def user_turn_has_external_id(
     conn: sqlite3.Connection, task_id: int, surface: str,
 ) -> bool:
