@@ -214,6 +214,8 @@ On the `claude_code` brain the `claude` CLI runs outside the sandbox, and none o
 
 The model calls with no task behind them that grant tools (health OCR, the code reviewer and doctor's model probe) run the same way, with one difference: they have no CONNECT proxy and no `--unshare-net`, so their tool server shares the daemon's network namespace. OCR offers only `Read` and the reviewer `Read`, `Grep` and `Glob`, none of which opens a socket. Doctor's fixed prompt grants `Bash`, which can reach what the daemon can. What protects the credential on this path is that the namespace does not hold it. The same test file covers them.
 
+The code review's own git commands run host-side over a checkout the model can write, so a checkout's git directory could point them at another repository. Each one that reads content runs in a namespace of its own, with the system directories and that user's repositories bound read-only and no network, so a path out of the user's repositories names nothing. Where bubblewrap is unavailable they run unwrapped, as the model's own tools do on those shapes.
+
 Each run of the CLI gets a fresh `CLAUDE_CONFIG_DIR` with an empty `settings.json`, so the operator's own `~/.claude/settings.json` no longer applies to tasks, and the CLI's own transcripts land in that directory, removed with the rest of the harness directory by the temp-file sweep. `istota-skill tasks transcript` reads the native brain's session logs only.
 
 This holds on the sandboxed shape. Where nothing is sandboxed, the tool server runs as the daemon user without a namespace, and a Bash call can read any process of that user, the CLI included.
