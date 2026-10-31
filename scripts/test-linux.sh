@@ -594,6 +594,13 @@ run_container_tier() {
         progress_args+=("$progress_arg")
     done < <(build_progress_args)
 
+    # Removed at exit unless the caller named the tag. The uv cache volume stays,
+    # so the next run's sync is not a cold one.
+    if [ -z "${ISTOTA_TEST_IMAGE:-}" ]; then
+        source "$REPO_ROOT/scripts/test-image-ledger.sh"
+        trap 'remove_ledger_images' EXIT
+    fi
+
     docker build ${progress_args[@]+"${progress_args[@]}"} \
         -f "$REPO_ROOT/docker/test/Dockerfile" -t "$IMAGE_TAG" "$REPO_ROOT"
 

@@ -722,6 +722,7 @@ import hashlib  # noqa: E402 - this file's imports are split by section, above
 import time  # noqa: E402
 from dataclasses import replace  # noqa: E402
 
+from testbed import images as built_images  # noqa: E402
 from testbed import probe as probe_support  # noqa: E402
 from testbed import profiles  # noqa: E402
 from testbed import stack as stack_support  # noqa: E402
@@ -796,6 +797,24 @@ def lean_image_tag() -> str:
     """
     digest = hashlib.sha256(str(REPO).encode()).hexdigest()[:8]
     return f"istota-test/lean:{digest}"
+
+
+def pytest_sessionfinish(session):
+    """Remove the images this session built. Fixture teardown has already taken the
+    stacks down by now, so nothing of ours still holds one."""
+    removed, left = built_images.remove_built()
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is None:  # pragma: no cover - only under a custom -p
+        return
+    if removed or left:
+        reporter.write_line("")
+    if removed:
+        reporter.write_line(f"images: removed {len(removed)} this session built")
+        problem = built_images.trim_build_cache()
+        if problem:
+            reporter.write_line(f"images: could not trim the build cache: {problem}")
+    for tag in left:
+        reporter.write_line(f"images: left {tag} (still in use, or {built_images.KEEP_VAR} is set)")
 
 
 @pytest.hookimpl(trylast=True)

@@ -41,6 +41,7 @@ import pytest
 # place for the other two to import from. Re-exported here so every existing
 # `image.conftest.resolve_platform` reference still resolves.
 from ..conftest import resolve_platform  # noqa: F401
+from testbed import images  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 ISTOTA_DOCKERFILE = REPO / "docker" / "istota" / "Dockerfile"
@@ -226,6 +227,7 @@ def build_image(
             f"docker build failed for {dockerfile}:\n{tail}{where}",
             returncode=1,
         )
+    images.record(tag)
     return BuiltImage(tag=tag, dockerfile=dockerfile, platform=platform)
 
 

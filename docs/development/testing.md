@@ -198,7 +198,7 @@ The upgrade tier's control is the forge-less istota image passed through `ISTOTA
 ISTOTA_IMAGE_TAG=istota-test/no-forge:control uv run pytest -m image -n0 tests/image/test_upgrade.py
 ```
 
-A clean run there is the failure.
+A clean run there is the failure. Build that image yourself first, or run the control script with `ISTOTA_KEEP_TEST_IMAGES=1`, since the script removes what it built.
 
 The group-owned-rooms witness in that file (`TestGroupOwnedRoomsUpgrade`, #816) has its own two controls, `scripts/test-image-negative-control.sh group-rooms`. `Dockerfile.group-rooms-converted` makes the migration convert every linked room to group-owned, which must turn `test_no_linked_room_is_converted` red; `Dockerfile.group-rooms-drifted` adds `rooms.membership_source` as a nullable column, unlike `schema.sql`'s, which must turn `test_an_upgraded_database_matches_a_fresh_one` red. Each requires the other test green. The oracle there is `schema.sql` applied to an empty file, not a fresh database: `db._run_migrations` creates `rooms` before `schema.sql` runs, so a fresh database takes the migration's column definition too and agrees with a drifted one.
 

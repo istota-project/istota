@@ -43,7 +43,8 @@ cd "$(dirname "$0")/.."
 SCRIPT=host/istota-stack
 mode="${1:-row13}"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+source scripts/test-image-ledger.sh
+trap 'rm -rf "$work"; remove_ledger_images' EXIT
 
 ROW13=tests/test_istota_stack.py::TestARefusedTagChangesNothing
 BUNDLE_TESTS=tests/test_istota_stack_bundle.py
@@ -350,8 +351,9 @@ ${ISTOTA_STACK_EXEC} "$@"')"
 rollback() {
     # The upgrade tier's rollback case against an image that never refuses.
     local base output="$work/rollback.out" node=tests/image/test_upgrade.py::TestAnOlderImageRefusesANewerSchema
-    base="$(docker images --format '{{.Repository}}:{{.Tag}}' istota-test/istota | head -1)"
-    [ -n "$base" ] || { echo "no istota-test/istota image yet: run the image tier first" >&2; exit 2; }
+    # Built here: a test run removes its images, so the image tier's is gone.
+    base=istota-test/rollback-base:control
+    docker build -q -f docker/istota/Dockerfile -t "$base" . >/dev/null
     docker build -q -f docker/test/Dockerfile.no-schema-refusal --build-arg "BASE=$base" \
         -t istota-test/no-schema-refusal:control docker/test >/dev/null
     ISTOTA_IMAGE_TAG=istota-test/no-schema-refusal:control uv run pytest -m image -n0 \
