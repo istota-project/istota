@@ -8234,7 +8234,8 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 
     # Per-user plus-addressed email line
     per_user_email_line = ""
-    _per_user_email = email_support.per_user_address(config, task.user_id)
+    # A public job has no `email` skill, and its model reads strangers' pages.
+    _per_user_email = None if reach is not None and reach.public else email_support.per_user_address(config, task.user_id)
     if _per_user_email:
         per_user_email_line = f"\nPer-user email: {_one_line(_per_user_email)}"
 
@@ -9328,7 +9329,7 @@ def execute_task(
 
     # Get user's email addresses for confirmation policy
     user_email_addresses = []
-    if user_config:
+    if user_config and not _reach.public:
         user_email_addresses = user_config.email_addresses
 
     # Load emissaries (constitutional principles)

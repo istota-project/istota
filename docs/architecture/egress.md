@@ -69,7 +69,7 @@ A verb refusal logs nothing, since no grant could allow a verb.
 
 A public job is the research posture applied to one approved job. It keeps its user identity, its room and its delivery target. It has `browse`, `skills` and `untrusted_input`, and loses everything else.
 
-- It has no memory, no files, no vault and no conversation context.
+- It has no memory, no files, no vault and no conversation context, and its prompt names none of the user's email addresses. Its prompt keeps the user id and the user's timezone.
 - It has no notes of its own in its room. `Channels/<token>` is not bound and `CHANNEL.md` is not loaded, because in a private room that file is the user's notes.
 - Its deferred files are purged except `subtasks`, because the directory is writable by a model reading strangers' pages.
 - A subtask of a public job is public too, and so is a `!retry` copy.

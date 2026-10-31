@@ -390,6 +390,10 @@ class TestPublicExecution:
         from istota import executor
 
         self._private_material(config)
+        config.users[USER].email_addresses = [f"{SENTINEL}@example.com"]
+        config.users[USER].display_name = SENTINEL
+        config.email.enabled = True
+        config.email.bot_email = "bot@example.com"
         task = self._scheduled(db_conn, _public_job(db_conn))
         resource = db.UserResource(
             id=1, user_id=USER, resource_type="folder",
@@ -399,15 +403,21 @@ class TestPublicExecution:
             ok, text, *_ = executor.execute_task(task, config, [resource], dry_run=True)
         assert ok, text
         assert SENTINEL not in text
+        assert "Per-user email" not in text
         assert "use_context=False" in caplog.text
 
     def test_control_a_limited_job_still_holds_them(self, config, db_conn):
         from istota import executor
 
         self._private_material(config)
+        config.users[USER].email_addresses = [f"{SENTINEL}@example.com"]
+        config.email.enabled = True
+        config.email.bot_email = "bot@example.com"
         task = self._scheduled(db_conn, _job(db_conn))
         ok, text, *_ = executor.execute_task(task, config, [], dry_run=True)
         assert ok, text
+        assert f"{SENTINEL}@example.com" in text
+        assert "Per-user email" in text
         assert f"usermd {SENTINEL}" in text
         assert f"channelmd {SENTINEL}" in text
 
