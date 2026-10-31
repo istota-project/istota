@@ -23,8 +23,8 @@ afterwards is not followed), no redirect is followed blind (each hop is checked
 again, at most `MAX_REDIRECTS`), and the body is read in chunks against
 `MAX_PDF_BYTES`, after gzip or deflate is undone under the same cap. Any other
 content encoding is refused. The cookies are the tab's for each hop's URL
-(`context.cookies`), and none it sets are kept. It leaves from the network
-Chrome uses, since the container has no proxy.
+(`context.cookies`), and none it sets are kept. It leaves directly rather than
+through `egress_proxy.py`, applying that proxy's rule and grant itself.
 
 Residual: this is a second GET, not the document Chrome showed, so a PDF that
 answered a POST, or a single-use link, may not come back.
@@ -202,7 +202,7 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
 
 
-def _target(url, *, resolve, private_hosts):
+def _target(url, *, resolve, private_hosts, deny_address=None):
     """`(scheme, host, port, address, path)` for a fetchable URL, or raise _Refused."""
     try:
         parts = urlsplit(url)
@@ -224,6 +224,8 @@ def _target(url, *, resolve, private_hosts):
         raise _Refused("pdf_fetch_refused")
     if not addresses:
         raise _Refused("pdf_fetch_failed")
+    if deny_address is not None and any(deny_address(address) for address in addresses):
+        raise _Refused("pdf_fetch_refused")
     path = parts.path or "/"
     if parts.query:
         path += "?" + parts.query
@@ -282,17 +284,18 @@ def _cookie_header(cookies_for, url):
 
 
 def fetch(url, *, deadline, user_agent=None, cookies_for=None,
-          resolve=None, private_hosts=(), tls_context=None):
+          resolve=None, private_hosts=(), deny_address=None, tls_context=None):
     """The document's bytes as `(bytes, None)`, or `(None, PdfFailure)`.
 
-    `resolve` and `private_hosts` are the net guard's; production passes
-    neither. `cookies_for(url)` answers Playwright's cookie dicts for a URL.
+    `resolve` and `private_hosts` are the net guard's, and `deny_address` refuses
+    an address even for a listed name; production passes the proxy's grant and
+    its loopback rule. `cookies_for(url)` answers Playwright's cookie dicts for a URL.
     """
     target = url
     try:
         for _hop in range(MAX_REDIRECTS + 1):
             scheme, host, port, address, path = _target(
-                target, resolve=resolve, private_hosts=private_hosts,
+                target, resolve=resolve, private_hosts=private_hosts, deny_address=deny_address,
             )
             remaining = deadline - time.monotonic()
             if remaining < MIN_FETCH_S:
