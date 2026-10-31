@@ -235,7 +235,7 @@ The browser reaches public addresses only. Every Chrome connection goes through 
 
 If the host is already in the table for another consumer, add `"browser"` to its existing list: a second line for the same host is a TOML error. A grant reaches only the consumers it names; [the configuration reference](../configuration/reference.md#private_hosts) lists them.
 
-A listed name still cannot reach the browser container's own loopback, where its API and debugging ports are.
+A listed name still cannot reach the browser container's own loopback, where its API and debugging ports are, or a service on the VM itself: the browser's connection to an address the VM holds is dropped and times out. Run an internal site on another machine to grant it. The same rule cuts the browser and a devbox off from a DNS resolver on one of the VM's non-loopback addresses, so point the VM at a resolver on loopback or elsewhere.
 
 On a VM there is a second check outside the container, a firewall that drops the browser's traffic to every private range. It follows the same grants: the VM resolves each name and opens the addresses it gets, when the stack starts and every five minutes after. If a listed site's address changes, the browser cannot reach it until the next refresh. A name that will not resolve opens nothing and logs a warning in the journal of `istota-browser-grants.service`.
 

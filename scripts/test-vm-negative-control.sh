@@ -20,7 +20,7 @@
 #              apparmor-unconfined, apparmor-unnarrowed (row 20), no-egress-unit (row 10),
 #              every-cred-volume-everywhere (row 11), exec-socket-symlink (row 11),
 #              browser-on-default-network, no-browser-firewall (row 17),
-#              browser-uid-unhardened (#902),
+#              browser-uid-unhardened (#902), no-vm-reach-rule (#903),
 #              update-without-up, update-without-reprovision (istota-stack update),
 #              rollback-without-reprovision (istota-stack rollback)
 #              config-apply-not-triggered (the web config editor's host applier)
@@ -103,7 +103,8 @@ D="$VM/test_devbox.py"
 control no-egress-unit \
     "row 10: the VM without the devbox egress rules" \
     "$D::TestADevboxReachesNoPrivateRange::test_a_devbox_reaches_neither_and_does_reach_the_internet" \
-    "$D::TestADevboxReachesNoPrivateRange::test_doctor_reports_the_egress_probe_ok"
+    "$D::TestADevboxReachesNoPrivateRange::test_doctor_reports_the_egress_probe_ok" \
+    "$D::TestADevboxReachesNoListenerOnTheVm::test_a_devbox_reaches_no_published_port_on_the_vm"
 control every-cred-volume-everywhere \
     "row 11: every credential volume mounted into every devbox" \
     "$D::TestACredentialSocketReachesOnlyItsOwner::test_each_devbox_mounts_only_its_own_credential_volume" \
@@ -117,7 +118,12 @@ control browser-on-default-network \
     "$VM/test_browser.py::TestTheBrowserReachesNoPublishedPort::test_the_browser_reaches_nothing_on_the_default_network_by_address"
 control no-browser-firewall \
     "row 17: the VM without the firewall outside Chrome" \
-    "$VM/test_browser.py::TestTheFirewallOutsideChrome::test_a_raw_socket_reaches_no_private_range_and_does_reach_the_internet"
+    "$VM/test_browser.py::TestTheFirewallOutsideChrome::test_a_raw_socket_reaches_no_private_range_and_does_reach_the_internet" \
+    "$VM/test_browser.py::TestTheVmsOwnAddresses::test_the_browser_reaches_no_published_port_on_the_vm"
+control no-vm-reach-rule \
+    "#903: the VM without the INPUT rules for the browser and the devbox" \
+    "$VM/test_browser.py::TestTheVmsOwnAddresses::test_the_browser_reaches_no_listener_on_the_vm" \
+    "$D::TestADevboxReachesNoListenerOnTheVm::test_a_devbox_reaches_no_listener_on_the_vm"
 
 control browser-uid-unhardened \
     "#902: the browser with its sandbox and the API's closure taken back" \

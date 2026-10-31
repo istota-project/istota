@@ -98,7 +98,7 @@ class TestTheEgressRules:
             assert call[:2] == ["-w", "5"], call
             assert "-A" not in call, call
             if "-I" in call:
-                assert call[call.index("-I") + 1:call.index("-I") + 3] == ["DOCKER-USER", "1"]
+                assert call[call.index("-I") + 1:call.index("-I") + 3] in (["DOCKER-USER", "1"], ["INPUT", "1"])
 
     def test_the_subnet_default_is_the_renderers(self):
         from istota.config import Config, ContainerConfig, DeveloperConfig
@@ -112,7 +112,7 @@ class TestTheEgressRules:
         config.devbox = DevboxConfig(enabled=True, users=["alice"])
         doc = yaml.safe_load(compose_file.render_devbox_compose(config))
         subnet = doc["networks"]["devbox"]["ipam"]["config"][0]["subnet"]
-        assert f'ISTOTA_DEVBOX_SUBNET:-{subnet}' in EGRESS_SH.read_text()
+        assert f'DEVBOX_SUBNET_DEFAULT="{subnet}"' in EGRESS_SH.read_text()
 
     def test_the_unit_runs_after_docker_once_per_boot(self):
         unit = _unit(EGRESS_UNIT)
@@ -267,9 +267,9 @@ class TestTheProxiedListenerRule:
         assert result.returncode != 0
 
 
-# A stateful `iptables` for DOCKER-USER alone: `-C`, `-I`, `-A`, `-D` and `-S`
-# against a JSON list, so a second run meets the first run's rules the way the
-# unit meets the chain on a re-run, and the comment-keyed removal is exercised.
+# A stateful `iptables` for DOCKER-USER and INPUT: `-C`, `-I`, `-A`, `-D` and `-S`
+# against a JSON list per chain, so a second run meets the first run's rules the way
+# the unit meets the chain on a re-run, and the comment-keyed removal is exercised.
 STATEFUL_IPTABLES = r'''
 import json, os, sys
 args = sys.argv[1:]
@@ -277,15 +277,17 @@ with open(os.environ["IPT_CALLS"], "a") as log:
     log.write(json.dumps(args) + "\n")
 if args[:2] == ["-w", "5"]:
     args = args[2:]
-path = os.environ["IPT_STATE"]
-rules = json.load(open(path)) if os.path.exists(path) else [["-j", "RETURN"]]
 op, chain, rest = args[0], args[1], args[2:]
-if chain != "DOCKER-USER":
+if chain not in ("DOCKER-USER", "INPUT"):
     sys.exit(2)
+path = os.environ["IPT_STATE"] + ("" if chain == "DOCKER-USER" else ".INPUT")
+seed = [["-j", "RETURN"]] if chain == "DOCKER-USER" else []
+rules = json.load(open(path)) if os.path.exists(path) else seed
 if op == "-S":
-    print("-N DOCKER-USER")
+    print("-N DOCKER-USER" if chain == "DOCKER-USER" else "-P INPUT ACCEPT")
     for rule in rules:
-        print("-A DOCKER-USER " + " ".join('"%s"' % t if " " in t else t for t in rule))
+        # iptables lists an apostrophe as \', so a comment holding one is never found again.
+        print(f"-A {chain} " + " ".join('"%s"' % t.replace("'", "\\'") if " " in t else t for t in rule))
     sys.exit(0)
 if op == "-C":
     sys.exit(0 if rest in rules else 1)
@@ -358,6 +360,77 @@ BROWSER_NETWORK_PEER = "172.29.0.129"
 BROWSER_COMMENT_PREFIX = "istota-browser:"
 BROWSER_GRANT_PREFIX = "istota-browser-grant:"
 BROWSER_GRANT_COMMENT = "istota-browser-grant: an address of a name in [browser] private_hosts"
+
+
+class TestTheVmsOwnAddresses:
+    """#903: traffic to an address the VM holds goes through INPUT, which DOCKER-USER
+    never sees. `tests/vm/test_browser.py::TestTheVmsOwnAddresses` is the witness on a
+    real kernel; this holds the rule's shape and its convergence."""
+
+    @pytest.fixture
+    def rig(self):
+        return TestTheHostLoopbackBlock()
+
+    def _input(self, tmp_path: Path) -> list[list[str]]:
+        import json
+
+        path = tmp_path / "chain.json.INPUT"
+        return json.loads(path.read_text()) if path.exists() else []
+
+    def test_the_browser_and_the_devbox_subnet_are_dropped_and_nothing_else(self, rig, tmp_path):
+        rig._run(tmp_path, {})
+        rules = self._input(tmp_path)
+        assert sorted(r[r.index("-s") + 1] for r in rules) == sorted([BROWSER, DevboxConfig().network_subnet])
+
+    def test_only_what_they_open_is_dropped_on_every_address_and_protocol(self, rig, tmp_path):
+        rig._run(tmp_path, {})
+        for rule in self._input(tmp_path):
+            assert rule[-2:] == ["-j", "DROP"]
+            assert rule[rule.index("--ctstate") - 1:rule.index("--ctstate") + 2] == [
+                "!", "--ctstate", "ESTABLISHED,RELATED"]
+            assert "-d" not in rule and "-p" not in rule
+
+    def test_only_a_compose_bridge_matches(self, rig, tmp_path):
+        """With no devbox nothing here holds its subnet, and a real host in that range
+        reaches the VM over eth0: dropping it could cut off the operator's SSH."""
+        rig._run(tmp_path, {})
+        assert {r[r.index("-i") + 1] for r in self._input(tmp_path)} == {"br-+"}
+
+    @pytest.mark.parametrize("subnet", ["not-a-subnet", "172.30.0.0", "172.30.0.256/24", "172.30.0.0/33"])
+    def test_a_bad_devbox_subnet_fails_the_unit_after_every_rule_is_applied(self, rig, tmp_path, subnet):
+        result = rig._run(tmp_path, {"ISTOTA_DEVBOX_SUBNET": subnet}, ok=False)
+        assert result.returncode == 1
+        assert "ISTOTA_DEVBOX_SUBNET" in result.stderr
+        assert sorted(r[r.index("-s") + 1] for r in self._input(tmp_path)) == sorted(
+            [BROWSER, DevboxConfig().network_subnet])
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 80, dst="10.0.0.1") == "DROP"
+        assert rig._verdict(tmp_path, DEVBOX, "tcp", 80, dst="10.0.0.1") == "DROP"
+
+    def test_a_rerun_leaves_one_copy_of_each(self, rig, tmp_path):
+        rig._run(tmp_path, {})
+        first = self._input(tmp_path)
+        rig._run(tmp_path, {})
+        assert self._input(tmp_path) == first
+
+    def test_a_changed_address_leaves_no_old_rule(self, rig, tmp_path):
+        rig._run(tmp_path, {})
+        rig._run(tmp_path, {"ISTOTA_BROWSER_SUBNET": "172.28.0.0/24", "ISTOTA_DEVBOX_SUBNET": "172.31.0.0/24"})
+        assert sorted(r[r.index("-s") + 1] for r in self._input(tmp_path)) == ["172.28.0.2", "172.31.0.0/24"]
+
+    def test_a_browser_grant_does_not_open_it(self, rig, tmp_path):
+        stack = TestTheBrowserFirewall()._stack_bin(tmp_path, "10.0.0.5\n")
+        rig._run(tmp_path, {"ISTOTA_STACK_BIN": stack})
+        assert [r for r in self._input(tmp_path) if r[r.index("-j") + 1] != "DROP"] == []
+
+    def test_a_grant_refresh_writes_nothing_here(self, rig, tmp_path):
+        """It runs on a timer, and a rewrite here would open a gap each tick."""
+        import json
+
+        stack = TestTheBrowserFirewall()._stack_bin(tmp_path, "10.0.0.5\n")
+        rig._run(tmp_path, {"ISTOTA_STACK_BIN": stack})
+        (tmp_path / "calls").write_text("")
+        rig._run(tmp_path, {"ISTOTA_STACK_BIN": stack}, args=["--browser-grants"])
+        assert [c for c in map(json.loads, (tmp_path / "calls").read_text().splitlines()) if "INPUT" in c] == []
 
 
 class TestTheBrowserFirewall:
@@ -644,7 +717,7 @@ class TestTheHostLoopbackBlock:
             assert call[:2] == ["-w", "5"], call
             assert "-A" not in call, call
             if "-I" in call:
-                assert call[call.index("-I") + 1:call.index("-I") + 3] == ["DOCKER-USER", "1"]
+                assert call[call.index("-I") + 1:call.index("-I") + 3] in (["DOCKER-USER", "1"], ["INPUT", "1"])
 
     @pytest.mark.parametrize("gateway", ["", "lima-host", "192.168.5", "192.168.5.256"])
     def test_without_a_usable_gateway_it_fails_and_the_devbox_drops_stand(self, tmp_path, gateway):

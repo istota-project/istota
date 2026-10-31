@@ -31,6 +31,7 @@ script on stdin.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -1061,6 +1062,53 @@ systemctl is-active --quiet istota-vmtier-meta.service || \
     systemd-run --unit istota-vmtier-meta --quiet ip netns exec istota-meta python3 -m http.server 80 --bind 0.0.0.0
 for i in $(seq 1 20); do curl -s -m 2 -o /dev/null http://{METADATA_ADDR}/ && exit 0; sleep 0.5; done
 echo "the metadata stand-in did not answer" >&2; exit 1
+""")
+
+
+#: Where `listening_on_the_vm` answers, on the VM itself and through a published port.
+VM_LISTENER_PORT = 18902
+VM_PUBLISHED_PORT = 18903
+
+
+def vm_addresses(vm: Vm) -> list[str]:
+    """Every IPv4 address the VM holds but loopback: its own and each bridge's gateway."""
+    rows = vm.out("ip -4 -o addr show | awk '$2 != \"lo\" {print $4}'").split()
+    return sorted({row.split("/")[0] for row in rows})
+
+
+@contextlib.contextmanager
+def listening_on_the_vm(vm: Vm, image: str):
+    """A listener in the VM's own namespace, and a container publishing a port on all
+    its addresses, each answering the VM. A drop and nothing-listening look alike, so
+    the answer from the VM is what makes a refused probe mean something."""
+    vm.run(f"""
+systemctl stop istota-vmtier-listener.service 2>/dev/null || true
+systemctl reset-failed istota-vmtier-listener.service 2>/dev/null || true
+docker rm -f istota-vmtier-published >/dev/null 2>&1 || true
+install -d {SCRATCH}/listener-root
+systemd-run --unit istota-vmtier-listener --collect --quiet --working-directory={SCRATCH}/listener-root \
+    python3 -m http.server {VM_LISTENER_PORT} --bind 0.0.0.0
+docker run -d --name istota-vmtier-published -p {VM_PUBLISHED_PORT}:8000 --entrypoint python3 {shlex.quote(image)} \
+    -m http.server 8000 --bind 0.0.0.0 >/dev/null
+""")
+    try:
+        for port in (VM_LISTENER_PORT, VM_PUBLISHED_PORT):
+            wait_for(
+                lambda port=port: vm.ok(f"curl -s -m 2 -o /dev/null http://{vm_addresses(vm)[0]}:{port}/"),
+                timeout=60, interval=1, what=f"the listener on port {port} to answer the VM",
+            )
+        yield
+    finally:
+        vm.run("systemctl stop istota-vmtier-listener.service 2>/dev/null || true; "
+               "docker rm -f istota-vmtier-published >/dev/null 2>&1 || true", check=False)
+
+
+def remove_vm_reach_rules(vm: Vm) -> None:
+    """The `no-vm-reach-rule` control: as on a VM whose egress unit predates #903."""
+    vm.run("""
+iptables -w 5 -S INPUT | { grep -F 'istota-vm-reach:' || true; } | sed 's/^-A /-D /' | while read -r rule; do
+    eval "iptables -w 5 ${rule}"
+done
 """)
 
 
