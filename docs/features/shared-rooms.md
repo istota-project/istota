@@ -131,7 +131,7 @@ The unanswered turns still reach the bot as context, so when somebody does addre
 
 Every shared room has a **host**: on web, the person who created it; on Talk, the first Istota member the bot saw there; on WhatsApp, the person who added the bot's number; on email, the person whose thread it is.
 
-A guest's message never runs on the guest's authority. When the bot answers a guest, it acts **for the host**, as the host's emissary. An email thread is the exception: it has no guest mode, and a correspondent's mail runs as the host at full reach, bounded by the email gates instead (see [email thread rooms](email.md#email-thread-rooms)). The guest's words are passed to the model as data, not as instructions, and the task:
+A guest's message never runs on the guest's authority. When the bot answers a guest, it acts **for the host**, as the host's emissary. An email thread works differently: a correspondent's mail runs as the host with `USER.md` and a short list of tools, and the email gates decide what is answered and what is sent (see [what someone else's mail can reach](email.md#what-someone-elses-mail-can-reach)). The guest's words are passed to the model as data, not as instructions, and the task:
 
 - reads nothing private of the host's, whatever the host has shared in that room,
 - takes no action beyond its reply (no calendar write, no email, no web fetch on the native brain),
@@ -149,7 +149,7 @@ A guest's `!commands` are ignored, apart from switching the bot off. A guest can
 
 If the host leaves, the room goes quiet: turns are recorded and nobody is answered until a member runs `!room host` to take over. Nobody becomes host automatically. On WhatsApp the bot leaves the group instead. A [group room](groups.md#group-rooms) is different: when its host leaves the group, another owner of the group becomes host.
 
-After three of its own replies in a row with no member speaking, the bot stops answering guests until a member writes again, so a guest's autoresponder cannot keep it talking. The cap applies to guests only and never holds back a member's turn. An email thread has no cap: a correspondent's mail runs as the host, and the email volume limits bound a mail loop instead. Another bot is never answered at all.
+After three of its own replies in a row with no member speaking, the bot stops answering guests until a member writes again, so a guest's autoresponder cannot keep it talking. The cap applies to guests only and never holds back a member's turn. An email thread has no cap: the email volume limits bound a mail loop instead. Another bot is never answered at all.
 
 ## What a task can reach
 
@@ -157,7 +157,7 @@ A turn runs with its sender's reach. When you ask the bot something in a shared 
 
 This holds with a guest in the room too. Having the guest there, and asking in front of them, is your choice. The room card tells the bot that a guest is reading.
 
-One thing is left out, except on an email thread, which is your correspondence and loads it as any email does. In a shared room the bot does not load your personal memory into the prompt: `USER.md`, dated memories, recalled memories, remembered facts and playbooks. Those reach a private prompt without you asking for them, so a question about lunch could otherwise come back with something from your health notes. The memory files are still there, so "what did I note about X" works when you ask for it. A [group room](groups.md#group-rooms) leaves personal memory out even while you are its only member, since everyone who joins the group later can read what it said.
+One thing is left out, except on your own turns on an email thread, which is your correspondence and loads it as any email does. In a shared room the bot does not load your personal memory into the prompt: `USER.md`, dated memories, recalled memories, remembered facts and playbooks. Those reach a private prompt without you asking for them, so a question about lunch could otherwise come back with something from your health notes. The memory files are still there, so "what did I note about X" works when you ask for it. A [group room](groups.md#group-rooms) leaves personal memory out even while you are its only member, since everyone who joins the group later can read what it said.
 
 Two kinds of task run with less:
 

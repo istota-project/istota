@@ -1047,6 +1047,8 @@ export interface AdminUserProfile {
   max_foreground_workers: number;
   max_background_workers: number;
   sms_phone_number: string;
+  /** Skills, and the `web` token, that mail somebody else wrote may also use. */
+  correspondent_scopes: string[];
 }
 
 export type AdminWhatsAppStatus = 'unbound' | 'awaiting_first_message' | 'enrolled' | 'opted_out';
@@ -1077,6 +1079,10 @@ export interface AdminUserDetail {
   options: {
     modules: string[];
     skills: string[];
+    /** What may be added. The server refuses `files`, `memory` and the rest regardless. */
+    correspondent_scopes: string[];
+    /** What such mail keeps with nothing added. */
+    correspondent_default_scopes: string[];
     outbound_approval: AdminUserProfile['outbound_approval'][];
     outbound_approval_floor: 'off' | 'untrusted' | 'all';
     /** The `[email]` transport. */

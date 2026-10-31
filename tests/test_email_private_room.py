@@ -234,7 +234,9 @@ class TestStrangerFirstContact:
             index = {"calendar": SkillMeta(name="calendar", description="x",
                                            shared_room="private")}
             assert db.list_room_members(conn, token) == [HOST]
-            assert withheld_for_task(conn, task, skill_index=index) == frozenset()
+            assert withheld_for_task(conn, task, skill_index=index) == {
+                "calendar", "files", "memory",
+            }
 
     def test_a_held_stranger_mints_nothing_until_approved(self, config, db_path):
         from istota import confirmations

@@ -30,7 +30,7 @@ PROFILE_FIELDS = {
     "briefing_email_html": bool, "timezone_follow_location": bool,
     "show_nav_unread_badges": bool,
     "push_chat_alerts": str, "push_preview": bool, "push_inbox_categories": dict,
-    "quick_notes_folder": str,
+    "quick_notes_folder": str, "correspondent_scopes": list,
 }
 JOB_FIELDS = {
     "name": str, "cron": str, "prompt": str, "command": str, "prompt_file": str,

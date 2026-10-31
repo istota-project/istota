@@ -1962,6 +1962,11 @@ def user_ensure_updates(args):
         updates["disabled_skills"] = list(args.disabled_skill)
     if args.disabled_module is not None:
         updates["disabled_modules"] = [name for name in args.disabled_module if name]
+    correspondent_scope = getattr(args, "correspondent_scope", None)
+    if correspondent_scope is not None:
+        updates["correspondent_scopes"] = list(correspondent_scope)
+    elif getattr(args, "clear_correspondent_scopes", False):
+        updates["correspondent_scopes"] = []
     if args.default_destination is not None:
         updates["default_destination"] = args.default_destination or "talk"
     if args.default_room is not None:
@@ -2113,6 +2118,8 @@ def cmd_user_ensure(args):
         print(f"  quiet_senders: {', '.join(profile.quiet_email_senders)}")
     if profile.disabled_modules:
         print(f"  disabled_modules: {', '.join(profile.disabled_modules)}")
+    if profile.correspondent_scopes:
+        print(f"  correspondent_scopes: {', '.join(profile.correspondent_scopes)}")
     if profile.default_destination and profile.default_destination != "talk":
         print(f"  default_destination: {profile.default_destination}")
     if profile.default_room:
@@ -2176,6 +2183,7 @@ def cmd_user_show(args):
         "max_background_workers": profile.max_background_workers,
         "disabled_skills": profile.disabled_skills,
         "disabled_modules": profile.disabled_modules,
+        "correspondent_scopes": profile.correspondent_scopes,
         "trusted_email_senders": profile.trusted_email_senders,
         "quiet_email_senders": profile.quiet_email_senders,
         "routing": profile.routing,
@@ -5079,6 +5087,19 @@ def add_user_ensure_arguments(user_ensure_parser):
             "Module to opt this user out of (repeatable). One of "
             "feeds, money, location. Pass an empty value to clear."
         ),
+    )
+    correspondent_assignment = user_ensure_parser.add_mutually_exclusive_group()
+    correspondent_assignment.add_argument(
+        "--correspondent-scope", action="append",
+        help=(
+            "Skill, or `web` for the native web tools, that mail somebody else "
+            "wrote may reach beyond the default (repeatable; replaces the list). "
+            "Refuses files, memory, recall and memory_search."
+        ),
+    )
+    correspondent_assignment.add_argument(
+        "--clear-correspondent-scopes", action="store_true",
+        help="Back to the default set for mail somebody else wrote.",
     )
     user_ensure_parser.add_argument(
         "--default-destination",

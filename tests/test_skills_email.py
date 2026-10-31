@@ -884,6 +884,109 @@ from istota.skills.email import AND as _AND
     _AND is None,
     reason="imap_tools not installed (install with: uv sync --extra email)",
 )
+class TestACorrespondentsTurn:
+    """On mail somebody else wrote only the reply can be made: the verbs that
+    read the mailbox or send to an address of the model's choosing would hand
+    the sender the host's mail, or a way past the thread's recipients."""
+
+    REFUSED = [
+        ["list"],
+        ["read", "1"],
+        ["search", "UNSEEN"],
+        ["thread", "1"],
+        ["attachments", "1", "--dest", "{deferred}/out"],
+        ["from-senders", "--senders", "a@example.com"],
+        ["newsletters", "--sources", "example.com"],
+        ["signup-inbox", "--slug", "x"],
+        ["accounts"],
+        ["folders"],
+        ["send", "--to", "a@example.com", "--subject", "s", "--body", "b"],
+        ["reply", "1", "--body", "b"],
+        ["reply-all", "1", "--body", "b"],
+        ["mark", "1", "read", "--confirmed"],
+        ["delete", "1", "--confirmed"],
+    ]
+
+    @pytest.fixture
+    def turn(self, tmp_path, monkeypatch):
+        deferred_dir = tmp_path / "deferred"
+        deferred_dir.mkdir()
+        monkeypatch.setenv("ISTOTA_TASK_ID", "99")
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(deferred_dir))
+        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(tmp_path / "mount"))
+        monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", "files,memory,calendar")
+        monkeypatch.setenv("ISTOTA_TURN_AUTHOR", "correspondent")
+        return deferred_dir
+
+    @pytest.mark.parametrize("argv", REFUSED, ids=lambda argv: argv[0])
+    def test_every_other_verb_is_refused_before_anything_is_opened(
+        self, argv, turn, capsys,
+    ):
+        argv = [arg.replace("{deferred}", str(turn)) for arg in argv]
+        no_touch = AssertionError("nothing may be opened on this turn")
+        with patch("istota.skills.email._get_mailbox", side_effect=no_touch) as mailbox, \
+                patch("istota.skills.email._config_from_env", side_effect=no_touch) as env_config, \
+                patch("istota.skills.email.resolve_account", side_effect=no_touch) as account, \
+                patch("istota.skills.email.send_email", side_effect=no_touch) as send, \
+                pytest.raises(SystemExit) as exit_info:
+            main(argv)
+
+        assert exit_info.value.code == 1
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "error"
+        assert output["reason"] == "not_owner_turn"
+        assert "alice" in output["error"]
+        for seam in (mailbox, env_config, account, send):
+            seam.assert_not_called()
+        assert list(turn.iterdir()) == []
+
+    def test_the_refused_list_is_every_verb_but_output(self):
+        from istota.skills.email import build_parser
+
+        subparsers = next(
+            action for action in build_parser()._actions
+            if getattr(action, "dest", None) == "command"
+        )
+        assert set(subparsers.choices) == {argv[0] for argv in self.REFUSED} | {"output"}
+
+    def test_output_still_writes_the_reply(self, turn, capsys):
+        main(["output", "--subject", "Re: Thursday", "--body", "Nothing on Thursday."])
+
+        assert json.loads(capsys.readouterr().out)["status"] == "ok"
+        data = json.loads((turn / "task_99_email_output.json").read_text())
+        assert data["body"] == "Nothing on Thursday."
+
+    def test_output_reads_a_body_file_from_the_task_dir_and_not_the_workspace(
+        self, turn, tmp_path, capsys,
+    ):
+        body = turn / "body.txt"
+        body.write_text("From the task's own directory.", encoding="utf-8")
+        main(["output", "--body-file", str(body)])
+        capsys.readouterr()
+        data = json.loads((turn / "task_99_email_output.json").read_text())
+        assert data["body"] == "From the task's own directory."
+
+        workspace = tmp_path / "mount" / "Users" / "alice"
+        workspace.mkdir(parents=True)
+        (workspace / "USER.md").write_text("private", encoding="utf-8")
+        with pytest.raises(SystemExit):
+            main(["output", "--body-file", str(workspace / "USER.md")])
+        assert json.loads(capsys.readouterr().out)["reason"] == "host_path_refused"
+
+    @pytest.mark.parametrize("author", ["own", None])
+    def test_the_users_own_turn_reaches_the_verb(self, author, turn, monkeypatch, capsys):
+        if author is None:
+            monkeypatch.delenv("ISTOTA_TURN_AUTHOR")
+        else:
+            monkeypatch.setenv("ISTOTA_TURN_AUTHOR", author)
+        with patch("istota.skills.email.cmd_list", return_value={"status": "ok"}) as verb:
+            main(["list"])
+
+        verb.assert_called_once()
+        assert json.loads(capsys.readouterr().out)["status"] == "ok"
+
+
 class TestDownloadAttachmentsSecurity:
     """Every attachment name is re-resolved under the destination directory.
 

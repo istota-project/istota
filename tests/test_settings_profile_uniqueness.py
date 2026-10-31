@@ -117,6 +117,16 @@ async def test_worker_caps_are_not_self_editable(client, seeded, field):  # noqa
     assert getattr(profile, field) == 0
 
 
+async def test_a_user_cannot_widen_their_own_correspondents_reach(client, seeded):  # noqa: F811
+    cookies = await _login(client, "alice")
+    resp = await client.put(
+        URL, json={"correspondent_scopes": ["calendar"]}, cookies=cookies, headers=ORIGIN,
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "unknown field: correspondent_scopes"
+    assert user_profiles.get_profile(seeded.db_path, "alice").correspondent_scopes == []
+
+
 async def test_the_profile_get_still_reports_worker_caps(client, seeded):  # noqa: F811
     # Read-only on the user's page: the value is the admin's to set.
     user_profiles.update_profile(seeded.db_path, "alice", max_foreground_workers=3)

@@ -380,7 +380,7 @@ def effective_disabled_skills(
     (``room_scopes.withheld_for_task``; the synthetic scopes name no skill
     and fall out of the intersection). This is the single place the executor
     and the ``skills`` CLI both call so their view of "disabled" can't drift;
-    the CLI passes its task's (`skills.skills._room_withheld`). ``config`` is
+    the CLI passes its task's (`skills.skills._room_reach`). ``config`` is
     duck-typed (no import) to avoid a config→loader cycle.
 
     ``include_user=False`` leaves the user's own list out, for the picker that

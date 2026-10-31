@@ -25,29 +25,83 @@ What a member's turn in a shared room loses is the *ambient* part of their
 memory, which reaches the prompt without being asked for (`ambient_memory_off`):
 the memory skill stays, so a member who asks for a note gets it.
 
-An email thread room is the exception to both (`is_email_thread_room`): it is
-the host's correspondence, so every admitted turn on it runs as the host at
-full reach with their ambient memory loaded, as an email turn always has. The
-mail is fenced as untrusted input, and the admit gate and the outbound gate are
-what bound such a turn, not a scope rail.
+A correspondent's turn (`turn_author`: mail somebody else wrote, on an email
+thread room or roomless) is a third posture. It runs as the host and withholds
+every scope except a short allowlist (`correspondent_scopes`), so a skill added
+later starts out of reach. The host's standing instructions, `USER.md` and
+per-skill overlays, still load although ``memory`` is withheld
+(`Reach.standing_memory_loads`), since they are fixed text the host wrote. The
+rest of their memory does not: the correspondent's mail would be the search
+query and the reply a way out. The native web tools go too unless the user
+allowed `web` (`Reach.web_tools_load`). The reply itself goes through the
+unchanged outbound gate. The host's own tasks on a thread room withhold nothing.
 """
 
 from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass
+from typing import Literal
 
 from istota import db
 from istota.browser.owner import BRIEFINGS_IDENTITY
 
-if TYPE_CHECKING:
-    from istota.config import Config
-
 logger = logging.getLogger(__name__)
 
 SYNTHETIC_SCOPES = ("files", "memory")
+
+TurnAuthor = Literal["own", "guest", "correspondent"]
+
+# Far above `scheduler.max_subtask_depth`; a chain this long is not trusted.
+_TURN_CHAIN_LIMIT = 64
+
+#: What a correspondent's turn keeps. `email` for its body, the reply format;
+#: `skills` so a widened menu skill can be opened; `transcribe` and `whisper`
+#: read the mail's own staged attachments, and `markets` public data, so none
+#: makes anything private readable by the sender who reads the reply.
+CORRESPONDENT_DEFAULT_SCOPES = frozenset({"email", "skills", "transcribe", "whisper", "markets"})
+
+#: (user, name) already warned about, so a stale setting is one line per process
+#: rather than one per seam per task.
+_warned_correspondent_names: set[tuple[str, str]] = set()
+
+
+@dataclass(frozen=True)
+class CorrespondentAllowance:
+    """What a correspondent's turn may reach. ``web`` names the native web
+    tools, which are not a scope."""
+
+    scopes: frozenset[str] = frozenset()
+    web: bool = False
+
+
+@dataclass(frozen=True)
+class Reach:
+    """One task's withheld set and the posture it was derived under.
+
+    The set alone cannot say "`memory` withheld, but `USER.md` and overlays
+    load", nor carry the allowance's ``web``.
+    """
+
+    withheld: frozenset[str]
+    author: TurnAuthor
+    allowance: CorrespondentAllowance = CorrespondentAllowance()
+
+    @property
+    def standing_memory_loads(self) -> bool:
+        """Whether `USER.md` and per-skill overlays may reach this task."""
+        return "memory" not in self.withheld or self.author == "correspondent"
+
+    @property
+    def web_tools_load(self) -> bool:
+        """Whether the native web tools reach this task. A query or a URL is an
+        outbound action, which a guest's turn never takes and a correspondent's
+        takes only where the user allowed `web`."""
+        if self.author == "correspondent":
+            return self.allowance.web
+        return self.author != "guest"
 
 
 #: Research tasks run as `__briefings__` behind the executor's research gate:
@@ -74,33 +128,124 @@ def all_scopes(skill_index: Mapping[str, object]) -> frozenset[str]:
     return frozenset(scope_names(skill_index))
 
 
+def correspondent_scopes(
+    conn: sqlite3.Connection | None,
+    user_id: str,
+    *,
+    skill_index: Mapping[str, object],
+) -> CorrespondentAllowance:
+    """What ``user_id``'s correspondents' turns keep: the default set and the
+    user's widening, of the scopes this index has.
+
+    The writers refuse the names no setting may widen; this drops them too, since
+    a hand-edited row reaches here unchecked. An unknown name is a typo or a
+    removed skill. `wallet.policy` passes an empty index, against which every
+    name looks unknown, so that case is not worth a warning.
+    """
+    from istota.user_profiles import (
+        CORRESPONDENT_REFUSED_SCOPES,
+        stored_correspondent_scopes,
+    )
+
+    widening = set(stored_correspondent_scopes(conn, user_id)) if conn is not None else set()
+    web = "web" in widening
+    widening.discard("web")
+    known = all_scopes(skill_index)
+    refused = widening & set(CORRESPONDENT_REFUSED_SCOPES)
+    widening -= refused
+    for name in sorted(refused):
+        _warn_about_correspondent_name(user_id, name, "may not be widened")
+    if skill_index:
+        for name in sorted(widening - known):
+            _warn_about_correspondent_name(user_id, name, "is not a scope")
+    return CorrespondentAllowance(
+        scopes=(CORRESPONDENT_DEFAULT_SCOPES | widening) & known,
+        web=web,
+    )
+
+
+def _warn_about_correspondent_name(user_id: str, name: str, why: str) -> None:
+    if (user_id, name) in _warned_correspondent_names:
+        return
+    _warned_correspondent_names.add((user_id, name))
+    logger.warning(
+        "room_scopes: correspondent_scopes for %s names %r, which %s; dropped",
+        user_id, name, why,
+    )
+
+
 def withheld_for_task(
     conn: sqlite3.Connection | None,
     task: "db.Task",
     *,
     skill_index: Mapping[str, object],
+    own_addresses: Collection[str] | None = None,
 ) -> frozenset[str]:
-    """What one task may not reach, from its own row. The one derivation the
-    executor's reach seams and the `skills` CLI's guard both read.
+    """What one task may not reach: `reach_for_task`'s set, for the callers
+    that read nothing else."""
+    return reach_for_task(
+        conn, task, skill_index=skill_index, own_addresses=own_addresses,
+    ).withheld
 
-    Every scope on a guest's turn. Every scope, too, on a task in a room more
-    than one human reads that no member asked there: one with no origin
-    surface (a subtask, a CLI task, a heartbeat) unless it is the user's own
-    cron job or briefing and the user is a current member. Such a task's
-    answer lands in the room with no member asking, so the consent a member's
-    turn carries does not reach it. Nothing otherwise: a member's turn runs at
-    full reach in every room (ISSUE-576), and nothing is withheld in an email
-    thread room, which is the host's correspondence (`is_email_thread_room`).
+
+def reach_for_task(
+    conn: sqlite3.Connection | None,
+    task: "db.Task",
+    *,
+    skill_index: Mapping[str, object],
+    own_addresses: Collection[str] | None = None,
+) -> Reach:
+    """What one task may not reach and who wrote its turn, from its own row.
+    The one derivation the executor's reach seams and the `skills` CLI's guard
+    both read.
+
+    Every scope on a guest's turn. All but the allowlist on a correspondent's
+    (`correspondent_scopes`), with a room or without one. Every scope, too, on
+    a task in a room more than one human reads that no member asked there: one
+    with no origin surface (a subtask, a CLI task, a heartbeat) unless it is
+    the user's own cron job or briefing and the user is a current member. Such
+    a task's answer lands in the room with no member asking, so the consent a
+    member's turn carries does not reach it. Nothing otherwise: a member's turn
+    runs at full reach in every room (ISSUE-576), and the host's own tasks in
+    an email thread room withhold nothing (`is_email_thread_room`).
 
     ``conn`` is ``None`` for a database that does not exist, which holds no
-    room. Any error reading the room withholds every scope.
+    room. ``own_addresses`` is `turn_author`'s, and the default can only misread
+    the user's own mail as a correspondent's. Any error reading the turn or the
+    room withholds every scope, and an unreadable author loads no standing
+    memory.
     """
+    if is_briefing_research(task):
+        withheld = frozenset(set(skill_index) - {"browse", "skills", "untrusted_input"})
+        return Reach(withheld | frozenset(SYNTHETIC_SCOPES), "own")
+    if task.guest_participant_id is not None:
+        return Reach(all_scopes(skill_index), "guest")
+    try:
+        author = turn_author(conn, task, own_addresses=own_addresses)
+    except Exception as exc:
+        logger.warning(
+            "room_scopes: could not read who wrote task %s, withholding every "
+            "scope: %s", task.id, exc,
+        )
+        return Reach(all_scopes(skill_index), "guest")
+    if author == "guest":
+        return Reach(all_scopes(skill_index), "guest")
+    if author == "correspondent":
+        allowance = correspondent_scopes(conn, task.user_id, skill_index=skill_index)
+        return Reach(all_scopes(skill_index) - allowance.scopes, author, allowance)
+    return Reach(_withheld_from_own_task(conn, task, skill_index), "own")
+
+
+def _withheld_from_own_task(
+    conn: sqlite3.Connection | None,
+    task: "db.Task",
+    skill_index: Mapping[str, object],
+) -> frozenset[str]:
+    """`reach_for_task` for a task whose turn is the user's own: what its room
+    says. A thread room is asked first, since the poller marks its turns group
+    chats and the host's subtask there has no origin surface."""
     from .surfaces import origin_surface_for_source_type
 
-    if is_briefing_research(task):
-        return frozenset(set(skill_index) - {"browse", "skills", "untrusted_input"}) | frozenset(SYNTHETIC_SCOPES)
-    if task.guest_participant_id is not None:
-        return all_scopes(skill_index)
     if not task.conversation_token:
         return frozenset()
     if conn is not None:
@@ -188,58 +333,124 @@ def is_current_member(conn: sqlite3.Connection, room_token: str, user_id: str) -
     return present[0] == 0 or present[1] > 0
 
 
-def written_by_someone_else(
-    conn: sqlite3.Connection, task: "db.Task", *, config: "Config | None" = None,
-) -> bool:
-    """Whether the stored turn this task answers names an author other than
-    the task's user. A row with neither column set predates attribution and is
-    read as the user's, as every history reader reads it. A correspondent's
-    mail on an email thread runs as the host, so two readers ask this: it
-    carries none of the host's private notes (`private_replies.my_notes_room`)
-    and reaches none of the host's connected mail accounts (the skill proxy's
-    `mail_account` channel).
+def turn_author(
+    conn: sqlite3.Connection | None,
+    task: "db.Task",
+    *,
+    own_addresses: Collection[str] | None,
+) -> TurnAuthor:
+    """Who wrote the turn this task answers: the one authorship predicate.
 
-    No stored row is the owner's turn, except for email (ISSUE-874): an
-    approved held mail that no room admitted keeps no row and still runs as the
-    host on the sender's text, so it is read from its `processed_emails` row
-    and counts as someone else's unless the sender is one of the user's own
-    addresses. Pass ``config`` where one is in scope; without it the addresses
-    are what the database can prove (`db.own_addresses_without_config`), which
-    can only under-trust."""
+    Walks ``parent_task_id`` to the root, because a subtask or a `!retry` copy
+    has its parent's user and room but no turn of its own. The chain is
+    ``guest`` if any link is, else ``correspondent`` if any link is, else
+    ``own``. A missing ancestor, a cycle or a chain past the limit is
+    ``correspondent``, and so is a link belonging to another user.
+
+    ``own_addresses`` is the user's own addresses (`mail.support.own_addresses`)
+    and is required so a caller has to decide: ``None`` falls back to
+    `db.own_addresses_without_config`, which misses TOML-only addresses and so
+    can only misread the user's own mail as a correspondent's.
+
+    With no database (``conn`` is ``None``) nothing can be walked or attributed:
+    an email task is not trusted and any other task is the user's own. Raises
+    what the reads raise; each caller chooses its failure direction.
+    """
+    if conn is None:
+        if task.guest_participant_id is not None:
+            return "guest"
+        return "correspondent" if task.source_type == "email" else "own"
+
+    someone_else = False
+    seen: set[int] = set()
+    current = task
+    while True:
+        if current.id in seen or len(seen) >= _TURN_CHAIN_LIMIT:
+            someone_else = True
+            break
+        seen.add(current.id)
+        link = _link_author(conn, current, task.user_id, own_addresses)
+        if link == "guest":
+            return "guest"
+        if link == "correspondent":
+            someone_else = True
+        if current.parent_task_id is None:
+            break
+        parent = db.get_task(conn, current.parent_task_id)
+        if parent is None:
+            someone_else = True
+            break
+        current = parent
+    return "correspondent" if someone_else else "own"
+
+
+def _link_author(
+    conn: sqlite3.Connection,
+    task: "db.Task",
+    user_id: str,
+    own_addresses: Collection[str] | None,
+) -> TurnAuthor:
+    """One link of `turn_author`'s chain, read off its own rows."""
+    if task.user_id != user_id:
+        return "correspondent"
+    if task.guest_participant_id is not None:
+        return "guest"
+    stored = _stored_turn_author(conn, task)
+    if stored is not None:
+        return stored
+    if task.source_type == "email":
+        return _mail_author(conn, task, own_addresses)
+    return "own"
+
+
+def _stored_turn_author(conn: sqlite3.Connection, task: "db.Task") -> TurnAuthor | None:
+    """What the task's stored user row says, or None where it says nothing: no
+    row, or an email row with neither column set, which must not read as the
+    host's by default. On any other surface such a row predates attribution
+    and is the user's, as every history reader reads it.
+    """
     row = conn.execute(
         "SELECT author_user_id, author_label FROM messages "
         "WHERE task_id = ? AND role = 'user' ORDER BY id LIMIT 1",
         (task.id,),
     ).fetchone()
     if row is None:
-        if task.source_type != "email":
-            return False
-        return _roomless_mail_is_someone_elses(conn, task, config)
+        return None
     author_user_id, author_label = row[0], row[1]
-    if author_user_id is None:
-        return bool(author_label)
-    return author_user_id != task.user_id
+    if author_user_id is not None:
+        return "own" if author_user_id == task.user_id else "correspondent"
+    if author_label:
+        return "correspondent"
+    return None if task.source_type == "email" else "own"
 
 
-def _roomless_mail_is_someone_elses(
-    conn: sqlite3.Connection, task: "db.Task", config: "Config | None",
-) -> bool:
-    # No ledger row leaves the sender unreadable, which is not proof the user
-    # wrote it; `author_for_email_task` answers "the user's" for that case.
-    # A `!retry` copy has none either: its parent's turn decides, as
-    # `skill_proxy._owners_own_turn` walks the chain.
-    if conn.execute(
-        "SELECT 1 FROM processed_emails WHERE task_id = ? LIMIT 1", (task.id,),
-    ).fetchone() is None:
-        return task.parent_task_id is None
-    own = None
-    if config is not None:
-        from istota.mail.support import own_addresses
-        own = sorted(own_addresses(config, task.user_id or ""))
-    author_user_id, author_label = db.author_for_email_task(
-        conn, task.id, task.user_id, own,
-    )
-    return bool(author_label) or author_user_id != task.user_id
+def _mail_author(
+    conn: sqlite3.Connection,
+    task: "db.Task",
+    own_addresses: Collection[str] | None,
+) -> TurnAuthor:
+    """An email task with no attributed row, read from its `processed_emails`
+    row (ISSUE-874): an approved held mail no room admitted keeps no stored row
+    and still runs as the host on the sender's text.
+    """
+    ledger = conn.execute(
+        "SELECT sender_email, routing_method FROM processed_emails "
+        "WHERE task_id = ? ORDER BY id LIMIT 1",
+        (task.id,),
+    ).fetchone()
+    if ledger is None:
+        # A `!retry` copy has neither row and its parent decides on the chain.
+        # Any other such task has a sender nobody can read, which is not proof
+        # the user wrote it; `author_for_email_task` answers "the user's" here.
+        return "own" if task.parent_task_id is not None else "correspondent"
+    if not ledger[0] and ledger[1] != "sender_match":
+        # `external_email_sender` reads no sender as a non-email turn.
+        return "correspondent"
+    own = None if own_addresses is None else sorted(own_addresses)
+    author_user_id, author_label = db.author_for_email_task(conn, task.id, task.user_id, own)
+    if author_label or author_user_id != task.user_id:
+        return "correspondent"
+    return "own"
 
 
 def ambient_memory_off(conn: sqlite3.Connection | None, task: "db.Task") -> bool:
@@ -259,7 +470,9 @@ def ambient_memory_off(conn: sqlite3.Connection | None, task: "db.Task") -> bool
 
     Not in an email thread room, asked ahead of the audience and the roster
     (the poller marks every thread turn a group chat): the thread is the
-    host's correspondence and their memory loads as on any email turn.
+    host's correspondence. Their memory loads on their own turn there; on a
+    correspondent's, the executor loads `USER.md` and overlays alone, from
+    the withheld ``memory`` scope and the posture.
     """
     if is_briefing_research(task) or task.guest_participant_id is not None:
         return True
@@ -299,7 +512,8 @@ def is_email_thread_room(conn, token: str | None) -> bool:
 
     The one rule the three seams ask (the guest branch at ingest, the withheld
     scopes, the ambient memory): such a room is the host's correspondence, so
-    an admitted turn on it runs as the host at full reach. The token form of
+    an admitted turn on it runs as the host, not as a guest, at whatever reach
+    its author has (`reach_for_task`). The token form of
     `transport.email.threads.thread_room_for_task`. Raises what the reads
     raise; each caller chooses its failure direction.
 
@@ -360,7 +574,12 @@ def _is_own_push_token(user_id: str, token: str) -> bool:
     )
 
 
-def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
+def task_group_ids(
+    conn: sqlite3.Connection,
+    task: "db.Task",
+    *,
+    own_addresses: Collection[str] | None = None,
+) -> list[str]:
     """The groups whose material this task may carry, sorted; the one answer
     the prompt's ``## Group memory``, the ``Groups/<id>`` binds and the
     ``kv --group`` gate (multiplayer D21) all read.
@@ -373,7 +592,9 @@ def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
     principal participants; in a room linked to a group (``rooms.group_id``),
     that group alone, under the same rule.
 
-    Nothing at all on a guest's turn (emissary mode), on a turn whose stored
+    Nothing at all on a turn the user did not write (`turn_author`: a guest's,
+    or a correspondent's, which off a room would otherwise be every group),
+    on a turn whose stored
     audience is ``mixed``, or while any guest or agent is present: the charter
     is "may be said in front of every member", and a guest or another bot is
     not one. Nothing either where the audience cannot be read: a room with no
@@ -392,6 +613,8 @@ def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
     on a database error; the caller treats that as the empty set.
     """
     if is_briefing_research(task) or task.guest_participant_id is not None or task.audience == "mixed":
+        return []
+    if turn_author(conn, task, own_addresses=own_addresses) != "own":
         return []
     groups = db.list_user_groups(conn, task.user_id)
     automatic = {g for g in groups if db.get_group(conn, g)["system_key"] == "all_users"}

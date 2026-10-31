@@ -37,9 +37,10 @@ a task on a thread hash, mirrored into a room only by the existing routing.
 - **Membership** is the host alone, for good (ISSUE-606). The thread is the
   host's correspondence: another istota user on it is a correspondent like
   anyone else, and the web refuses to add them as a member. Every admitted
-  turn runs as the host at the host's full reach, with no guest mode
-  (`rooms.scopes.is_email_thread_room`); the admit gate and the outbound gate
-  are what bound it.
+  turn runs as the host, with no guest mode
+  (`rooms.scopes.is_email_thread_room`), at the reach its author has: the
+  host's own at full reach, a correspondent's with all but an allowlist
+  withheld (`rooms.scopes.reach_for_task`).
 - **Addressed** is decided in code from the message's own headers
   (`intake_facts`, `thread_addressed`). The host's mail: the bot in To, or
   named in the new text (ISSUE-607). Anyone else's: named, or the host not on

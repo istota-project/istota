@@ -778,9 +778,17 @@ def reindex_all(
 ) -> dict:
     """Reindex completed tasks and memory files for a user.
 
+    Only the user's own turns go under their namespace, as in the scheduler's
+    auto-index: a guest's or a correspondent's text would be recalled back into
+    their private tasks.
+
     Returns stats dict with counts.
     """
     from datetime import datetime, timedelta, timezone
+
+    from .. import db
+    from ..mail.support import own_addresses
+    from ..rooms.scopes import turn_author
 
     stats = {"conversations": 0, "memory_files": 0, "chunks": 0}
 
@@ -793,9 +801,13 @@ def reindex_all(
         (user_id, since),
     ).fetchall()
 
+    addresses = own_addresses(config, user_id)
     for row in rows:
         task_id, prompt, result = row[0], row[1], row[2]
         if prompt or result:
+            task = db.get_task(conn, task_id)
+            if task is None or turn_author(conn, task, own_addresses=addresses) != "own":
+                continue
             n = index_conversation(conn, user_id, task_id, prompt or "", result or "")
             if n > 0:
                 stats["conversations"] += 1

@@ -200,6 +200,9 @@ class TestRefusals:
     def test_a_user_turn_verb_from_an_email_task(self, config, monkeypatch):
         with db.get_db(config.db_path) as conn:
             task_id = _running(conn, user_id="alice", source_type="email")
+            # The user's own mail: a correspondent's has no such skill at all.
+            db.mark_email_processed(conn, "uid-own", "alice@example.com", user_id="alice",
+                                    task_id=task_id, routing_method="sender_match")
         monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
         code, out = _run(*CREATE)
         assert (code, out["error"]) == (1, "not_a_user_turn")

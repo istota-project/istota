@@ -231,6 +231,28 @@ class TestSharedWritesNeedTheUsersOwnTurn:
         assert json.loads(capsys.readouterr().out)["reason"] == "not_owner_turn"
         assert not (tmp_path / f"task_{task_id}_kv_ops.json").exists()
 
+    @pytest.mark.parametrize("stored_row", [False, True], ids=["no_row", "unattributed_row"])
+    def test_a_strangers_mail_with_no_attributed_row_is_refused(
+        self, stored_row, _shared_env, db_path, capsys, monkeypatch,
+    ):
+        _patch_config(monkeypatch, db_path, {"alice"})
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="hi", user_id="alice", source_type="email")
+            db.mark_email_processed(conn, "uid-1", "someone@elsewhere.example", user_id="alice",
+                                    task_id=task_id, routing_method="plus_address")
+            if stored_row:
+                token = db.create_web_chat_room(conn, "alice", "thread").token
+                db.add_message(conn, token, role="user", body="hi", origin_surface="email",
+                               task_id=task_id)
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+
+        with pytest.raises(SystemExit):
+            kv_main(["set", "ns", "k", '"evil"', "--shared"])
+
+        assert json.loads(capsys.readouterr().out)["reason"] == "not_owner_turn"
+        with db.get_db(db_path) as conn:
+            assert db.shared_kv_get(conn, "ns", "k") is None
+
     def test_no_task_is_refused(self, _shared_env, db_path, capsys, monkeypatch):
         _patch_config(monkeypatch, db_path, {"alice"})
         monkeypatch.delenv("ISTOTA_TASK_ID", raising=False)

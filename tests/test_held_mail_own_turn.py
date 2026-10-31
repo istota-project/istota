@@ -3,9 +3,9 @@
 `confirmations.approve` admits a held mail to its room through
 `threads.admit_approved_mail`; when that admits nothing the task keeps a NULL
 conversation token and no stored `role='user'` row, and still runs as the host
-on the sender's text. `rooms.scopes.written_by_someone_else` used to read a
-missing row as the owner's turn, which opened the host's other mailboxes and
-the shared-KV write to an outside sender. Driven through `poll_emails` and the
+on the sender's text. The turn check used to read a missing row as the owner's
+turn, which opened the host's other mailboxes and the shared-KV write to an
+outside sender. Driven through `poll_emails` and the
 real approval, then through each reader of the predicate.
 """
 
@@ -19,7 +19,8 @@ import pytest
 from istota import commands, confirmations, db
 from istota.config import Config, EmailConfig, UserConfig
 from istota.mail import accounts
-from istota.rooms.scopes import written_by_someone_else
+from istota.mail.support import own_addresses
+from istota.rooms.scopes import turn_author
 from istota.sandbox.skill_proxy import SkillProxy, _owners_own_turn
 from istota.skills import kv as kv_skill
 from istota.skills._turn_access import calling_turn_passes
@@ -117,10 +118,19 @@ def roomless_outsider(config):
     return task
 
 
+def _author(conn, task, config=None):
+    own = None if config is None else own_addresses(config, task.user_id)
+    return turn_author(conn, task, own_addresses=own)
+
+
+def _owns(conn, task_id, config):
+    return _owners_own_turn(conn, task_id, HOST, own_addresses=own_addresses(config, HOST))
+
+
 class TestAnOutsideSendersRoomlessTurnIsNotTheHosts:
     def test_the_predicate_names_someone_else(self, config, roomless_outsider):
         with db.get_db(config.db_path) as conn:
-            assert written_by_someone_else(conn, roomless_outsider)
+            assert _author(conn, roomless_outsider) == "correspondent"
             assert not _owners_own_turn(conn, roomless_outsider.id, HOST)
 
     def test_its_subtask_is_refused_too(self, config, roomless_outsider):
@@ -180,7 +190,7 @@ class TestTheHostsOwnRoomlessMailIsStillTheirs:
         assert task.conversation_token is None
         assert _stored_rows(config, held) == []
         with db.get_db(config.db_path) as conn:
-            assert not written_by_someone_else(conn, task)
+            assert _author(conn, task) == "own"
             assert _owners_own_turn(conn, task.id, HOST)
 
     def test_own_mail_at_the_plus_address_is_read_against_the_config(self, config):
@@ -195,9 +205,9 @@ class TestTheHostsOwnRoomlessMailIsStillTheirs:
             row = conn.execute("SELECT routing_method FROM processed_emails WHERE task_id = ?",
                                (held,)).fetchone()
             assert row["routing_method"] == "plus_address"
-            assert not written_by_someone_else(conn, task, config=config)
-            assert _owners_own_turn(conn, task.id, HOST, config=config)
-            assert written_by_someone_else(conn, task)
+            assert _author(conn, task, config) == "own"
+            assert _owns(conn, task.id, config)
+            assert _author(conn, task) == "correspondent"
 
 
 class TestOtherRowlessTasksAreUnchanged:
@@ -206,13 +216,13 @@ class TestOtherRowlessTasksAreUnchanged:
         with db.get_db(config.db_path) as conn:
             task_id = db.create_task(conn, user_id=HOST, prompt="tick", source_type=source_type)
             conn.commit()
-            assert not written_by_someone_else(conn, db.get_task(conn, task_id))
+            assert _author(conn, db.get_task(conn, task_id)) == "own"
 
     def test_an_email_task_with_no_ledger_row_is_not_the_owners(self, config):
         with db.get_db(config.db_path) as conn:
             task_id = db.create_task(conn, user_id=HOST, prompt="hi", source_type="email")
             conn.commit()
-            assert written_by_someone_else(conn, db.get_task(conn, task_id))
+            assert _author(conn, db.get_task(conn, task_id)) == "correspondent"
 
 
 class TestARetryDefersToItsParent:
@@ -234,12 +244,12 @@ class TestARetryDefersToItsParent:
         retry = self._retry(config, original)
         with db.get_db(config.db_path) as conn:
             assert db.get_task(conn, retry).source_type == "email"
-            assert _owners_own_turn(conn, retry, HOST, config=config)
+            assert _owns(conn, retry, config)
 
     def test_a_retry_of_the_outsiders_mail_stays_refused(self, config, roomless_outsider):
         retry = self._retry(config, roomless_outsider.id)
         with db.get_db(config.db_path) as conn:
-            assert not _owners_own_turn(conn, retry, HOST, config=config)
+            assert not _owns(conn, retry, config)
 
 
 class TestTheSkillGateReadsTheConfig:

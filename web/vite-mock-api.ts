@@ -6148,6 +6148,7 @@ const mockAdminUserDetail = (userId: string): AdminUserDetail | undefined => {
     max_foreground_workers: 0,
     max_background_workers: 0,
     sms_phone_number: userId === 'bob' ? '+15550100002' : '',
+    correspondent_scopes: [],
   });
   const whatsapp = mockAdminUserWhatsApp[userId];
   return {
@@ -6169,6 +6170,8 @@ const mockAdminUserDetail = (userId: string): AdminUserDetail | undefined => {
     options: {
       modules: ['briefings', 'feeds', 'health', 'location', 'money'],
       skills: ['browse', 'calendar', 'developer', 'email', 'files', 'whisper'],
+      correspondent_scopes: ['web', 'browse', 'calendar', 'developer'],
+      correspondent_default_scopes: ['email', 'markets', 'skills', 'transcribe', 'whisper'],
       outbound_approval: ['', 'off', 'untrusted', 'all'],
       outbound_approval_floor: 'untrusted',
       email_enabled: true,

@@ -212,55 +212,228 @@ def _email_thread_room(conn) -> str:
     return room.token
 
 
+#: Every default of `CORRESPONDENT_DEFAULT_SCOPES` plus one private skill nobody
+#: listed and one safe skill, which is never a scope.
+_CORRESPONDENT_INDEX = _index(
+    calendar="private", email="private", skills="private", transcribe="private",
+    whisper="private", markets="private", untrusted_input="safe",
+)
+_WITHHELD_FROM_A_CORRESPONDENT = {"calendar", "files", "memory"}
+
+
+def _email_turn(conn, token, **author):
+    tid = db.create_task(conn, user_id="alice", source_type="email",
+                         prompt="p", conversation_token=token, is_group_chat=True,
+                         audience="mixed")
+    db.add_message(conn, token, role="user", body="p", origin_surface="email",
+                   task_id=tid, **author)
+    return db.get_task(conn, tid)
+
+
+def _roomless_mail(conn, sender, routing_method="plus_address"):
+    """An approved held mail no room admitted: no token and no stored row."""
+    tid = db.create_task(conn, user_id="alice", source_type="email", prompt="p")
+    db.mark_email_processed(conn, f"uid-{tid}", sender, user_id="alice", task_id=tid,
+                            routing_method=routing_method)
+    return db.get_task(conn, tid)
+
+
 class TestAnEmailThreadRoom:
-    """Email on rooms, section 2a: the thread is the host's correspondence, so
-    a correspondent's turn runs as the host at full reach with their memory."""
+    """A correspondent's turn runs as the host and withholds all but the
+    allowlist; the host's own tasks on the thread still withhold nothing."""
 
-    INDEX = _index(calendar="private")
+    INDEX = _CORRESPONDENT_INDEX
 
-    def _turn(self, conn, token, **author):
-        tid = db.create_task(conn, user_id="alice", source_type="email",
-                             prompt="p", conversation_token=token, is_group_chat=True,
-                             audience="mixed")
-        db.add_message(conn, token, role="user", body="p", origin_surface="email",
-                       task_id=tid, **author)
-        return db.get_task(conn, tid)
+    def _withheld(self, conn, task):
+        return room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX)
 
     def test_it_is_recognised_by_its_email_binding(self, conn):
         assert room_scopes.is_email_thread_room(conn, _email_thread_room(conn))
         assert not room_scopes.is_email_thread_room(conn, _shared_room(conn))
         assert not room_scopes.is_email_thread_room(conn, "no-such-room")
 
-    def test_a_correspondents_turn_withholds_nothing(self, conn):
-        task = self._turn(conn, _email_thread_room(conn), author_label="carol@example.com")
-        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == frozenset()
+    def test_a_correspondents_turn_withholds_all_but_the_allowlist(self, conn):
+        task = _email_turn(conn, _email_thread_room(conn), author_label="carol@example.com")
+        assert self._withheld(conn, task) == _WITHHELD_FROM_A_CORRESPONDENT
 
-    def test_a_correspondents_turn_loads_ambient_memory(self, conn):
-        task = self._turn(conn, _email_thread_room(conn), author_label="carol@example.com")
+    def test_a_skill_added_later_starts_withheld(self, conn):
+        task = _email_turn(conn, _email_thread_room(conn), author_label="carol@example.com")
+        index = {**self.INDEX, **_index(brand_new="private")}
+        assert "brand_new" in room_scopes.withheld_for_task(conn, task, skill_index=index)
+
+    def test_its_ambient_memory_is_not_switched_off_by_the_room(self, conn):
+        # The room rule stays: `executor` splits USER.md from recall by posture.
+        task = _email_turn(conn, _email_thread_room(conn), author_label="carol@example.com")
         assert room_scopes.ambient_memory_off(conn, task) is False
+
+    def test_the_hosts_own_mail_withholds_nothing(self, conn):
+        task = _email_turn(conn, _email_thread_room(conn), author_user_id="alice")
+        assert self._withheld(conn, task) == frozenset()
+
+    @pytest.mark.parametrize("source_type", ["cli", "subtask"])
+    def test_the_hosts_own_task_with_no_origin_surface_withholds_nothing(
+        self, conn, source_type,
+    ):
+        tid = db.create_task(conn, user_id="alice", source_type=source_type, prompt="p",
+                             conversation_token=_email_thread_room(conn), is_group_chat=True)
+        assert self._withheld(conn, db.get_task(conn, tid)) == frozenset()
+
+    def test_a_subtask_of_a_correspondents_turn_is_one(self, conn):
+        token = _email_thread_room(conn)
+        parent = _email_turn(conn, token, author_label="carol@example.com")
+        tid = db.create_task(conn, user_id="alice", source_type="subtask", prompt="p",
+                             conversation_token=token, parent_task_id=parent.id)
+        assert self._withheld(conn, db.get_task(conn, tid)) == _WITHHELD_FROM_A_CORRESPONDENT
 
     def test_control_a_talk_guests_turn_still_withholds_everything(self, conn):
         token = _shared_room(conn)
         db.add_room_binding(conn, token, "talk", "talk-ref-9")
-        task = self._turn(conn, token, author_label="max")
+        task = _email_turn(conn, token, author_label="max")
         conn.execute("UPDATE tasks SET guest_participant_id = 3 WHERE id = ?", (task.id,))
         task = db.get_task(conn, task.id)
-        assert room_scopes.withheld_for_task(conn, task, skill_index=self.INDEX) == {
-            "calendar", "files", "memory",
-        }
+        assert self._withheld(conn, task) == room_scopes.all_scopes(self.INDEX)
         assert room_scopes.ambient_memory_off(conn, task) is True
 
     def test_control_a_shared_web_room_still_leaves_memory_out(self, conn):
-        task = self._turn(conn, _shared_room(conn), author_user_id="alice")
+        task = _email_turn(conn, _shared_room(conn), author_user_id="alice")
         assert room_scopes.ambient_memory_off(conn, task) is True
 
-    def test_an_unreadable_room_withholds_everything(self, make_task):
+    def test_an_unreadable_database_withholds_everything(self, make_task):
         broken = sqlite3.connect(":memory:")
         task = make_task(user_id="alice", conversation_token="t", source_type="email")
-        assert room_scopes.withheld_for_task(broken, task, skill_index=self.INDEX) == {
-            "calendar", "files", "memory",
-        }
-        assert room_scopes.ambient_memory_off(broken, task) is True
+        assert self._withheld(broken, task) == room_scopes.all_scopes(self.INDEX)
+
+
+class TestARoomlessCorrespondent:
+    """A held mail approved and admitted into no room (ISSUE-874)."""
+
+    INDEX = _CORRESPONDENT_INDEX
+
+    def test_a_strangers_mail_withholds_the_same_set(self, conn):
+        task = _roomless_mail(conn, "carol@example.com")
+        assert room_scopes.withheld_for_task(
+            conn, task, skill_index=self.INDEX, own_addresses=["alice@example.com"],
+        ) == _WITHHELD_FROM_A_CORRESPONDENT
+
+    def test_the_hosts_own_held_mail_withholds_nothing(self, conn):
+        task = _roomless_mail(conn, "alice@example.com")
+        assert room_scopes.withheld_for_task(
+            conn, task, skill_index=self.INDEX, own_addresses=["alice@example.com"],
+        ) == frozenset()
+
+    def test_with_no_database_an_email_task_is_not_trusted(self, make_task):
+        task = make_task(user_id="alice", source_type="email")
+        assert room_scopes.withheld_for_task(
+            None, task, skill_index=self.INDEX,
+        ) == _WITHHELD_FROM_A_CORRESPONDENT
+
+    def test_control_with_no_database_a_cli_task_withholds_nothing(self, make_task):
+        task = make_task(user_id="alice", source_type="cli")
+        assert room_scopes.withheld_for_task(None, task, skill_index=self.INDEX) == frozenset()
+
+
+class TestTheReach:
+    INDEX = _CORRESPONDENT_INDEX
+
+    def test_it_carries_the_posture_beside_the_set(self, conn):
+        task = _roomless_mail(conn, "carol@example.com")
+        reach = room_scopes.reach_for_task(conn, task, skill_index=self.INDEX)
+        assert reach.author == "correspondent"
+        assert reach.withheld == _WITHHELD_FROM_A_CORRESPONDENT
+        assert reach.allowance.web is False
+        assert reach.standing_memory_loads is True
+
+    def test_a_guests_standing_memory_does_not_load(self, make_task):
+        task = make_task(user_id="alice", source_type="web", guest_participant_id=1)
+        reach = room_scopes.reach_for_task(None, task, skill_index=self.INDEX)
+        assert reach.author == "guest"
+        assert reach.standing_memory_loads is False
+
+    def test_a_guest_up_the_chain_withholds_everything(self, conn):
+        room = _shared_room(conn)
+        parent = db.create_task(conn, user_id="alice", source_type="web", prompt="p",
+                                conversation_token=room)
+        conn.execute("UPDATE tasks SET guest_participant_id = 3 WHERE id = ?", (parent,))
+        child = db.create_task(conn, user_id="alice", source_type="subtask", prompt="p",
+                               parent_task_id=parent)
+        reach = room_scopes.reach_for_task(conn, db.get_task(conn, child), skill_index=self.INDEX)
+        assert reach.withheld == room_scopes.all_scopes(self.INDEX)
+
+    def test_a_task_nobody_asked_in_a_room_loads_no_standing_memory(self, conn):
+        tid = db.create_task(conn, user_id="alice", source_type="subtask", prompt="p",
+                             conversation_token=_shared_room(conn))
+        reach = room_scopes.reach_for_task(conn, db.get_task(conn, tid), skill_index=self.INDEX)
+        assert reach.author == "own"
+        assert reach.standing_memory_loads is False
+
+    def test_an_unreadable_author_loads_no_standing_memory(self, make_task):
+        task = make_task(user_id="alice", source_type="email")
+        reach = room_scopes.reach_for_task(
+            sqlite3.connect(":memory:"), task, skill_index=self.INDEX,
+        )
+        assert reach.withheld == room_scopes.all_scopes(self.INDEX)
+        assert reach.standing_memory_loads is False
+
+    def test_an_own_turn_loads_it(self, make_task):
+        task = make_task(user_id="alice", source_type="cli")
+        assert room_scopes.reach_for_task(
+            None, task, skill_index=self.INDEX,
+        ).standing_memory_loads is True
+
+
+class TestTheAllowance:
+    INDEX = _CORRESPONDENT_INDEX
+
+    def test_it_is_the_default_set_in_the_index(self):
+        index = _index(email="private", calendar="private", skills="private")
+        allowance = room_scopes.correspondent_scopes(None, "alice", skill_index=index)
+        assert allowance.scopes == {"email", "skills"}
+        assert allowance.web is False
+
+    def test_an_empty_index_warns_about_nothing(self, caplog):
+        with caplog.at_level("WARNING", logger="istota.rooms.scopes"):
+            allowance = room_scopes.correspondent_scopes(None, "alice", skill_index={})
+        assert allowance.scopes == frozenset()
+        assert caplog.records == []
+
+    def test_an_empty_index_still_withholds_for_the_wallet(self, conn):
+        task = _roomless_mail(conn, "carol@example.com")
+        assert room_scopes.withheld_for_task(conn, task, skill_index={}) == {"files", "memory"}
+
+    def test_a_widened_allowance_narrows_what_is_withheld(self, conn):
+        conn.execute(
+            "INSERT INTO user_profiles (user_id, correspondent_scopes) VALUES (?, ?)",
+            ("alice", '["calendar", "web"]'),
+        )
+        task = _roomless_mail(conn, "carol@example.com")
+        reach = room_scopes.reach_for_task(conn, task, skill_index=self.INDEX)
+        assert "calendar" not in reach.withheld
+        assert reach.allowance.web is True
+
+
+class TestACorrespondentsGroups:
+    def _member(self, conn):
+        db.create_group(conn, "fam", kind="family", display_name="Fam", created_by="op")
+        db.add_group_member(conn, "fam", "alice", added_by="op")
+
+    def test_a_roomless_correspondent_gets_none(self, conn):
+        self._member(conn)
+        task = _roomless_mail(conn, "carol@example.com")
+        assert room_scopes.task_group_ids(
+            conn, task, own_addresses=["alice@example.com"],
+        ) == []
+
+    def test_control_the_hosts_own_roomless_mail_gets_them(self, conn):
+        self._member(conn)
+        task = _roomless_mail(conn, "alice@example.com")
+        assert room_scopes.task_group_ids(
+            conn, task, own_addresses=["alice@example.com"],
+        ) == ["fam"]
+
+    def test_a_thread_room_correspondent_gets_none(self, conn):
+        self._member(conn)
+        task = _email_turn(conn, _email_thread_room(conn), author_label="carol@example.com")
+        assert room_scopes.task_group_ids(conn, task) == []
 
 
 class TestAmbientMemory:

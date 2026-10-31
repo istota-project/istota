@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from istota import db, executor
-from istota.config import Config, CredentialBrokerConfig, DevboxConfig, MailAccountsConfig, SecurityConfig
+from istota.config import Config, CredentialBrokerConfig, DevboxConfig, MailAccountsConfig, SecurityConfig, UserConfig
 from istota.mail import accounts
 from istota.sandbox import credential_shim, skill_proxy as skill_proxy_module, task_env
 from istota.sandbox.skill_proxy import SkillProxy
@@ -282,6 +282,31 @@ class TestASubtaskAnswersForItsParentsTurn:
         _turn(env, author_user_id="alice")
         child = self._child_of(env, env["task_id"])
         assert "imap" in self._ask_as(env, tmp_path, child)
+
+    def _email_task(self, env, sender, *, stored_row):
+        with db.get_db(env["path"]) as conn:
+            task_id = db.create_task(conn, user_id="alice", prompt="mail?", source_type="email")
+            db.mark_email_processed(conn, f"uid-{task_id}", sender, user_id="alice",
+                                    task_id=task_id, routing_method="plus_address")
+            if stored_row:
+                token = db.create_web_chat_room(conn, "alice", "thread").token
+                db.add_message(conn, token, role="user", body="b", origin_surface="email",
+                               task_id=task_id)
+            conn.commit()
+        return task_id
+
+    def test_a_strangers_mail_with_no_stored_row_is_refused(self, env, tmp_path):
+        task_id = self._email_task(env, "mallory@elsewhere.example", stored_row=False)
+        assert self._ask_as(env, tmp_path, task_id)["reason"] == "not_owner_turn"
+
+    def test_a_strangers_mail_with_an_unattributed_row_is_refused(self, env, tmp_path):
+        task_id = self._email_task(env, "mallory@elsewhere.example", stored_row=True)
+        assert self._ask_as(env, tmp_path, task_id)["reason"] == "not_owner_turn"
+
+    def test_the_owners_own_mail_with_an_unattributed_row_is_served(self, env, tmp_path):
+        env["config"].users["alice"] = UserConfig(email_addresses=["alice@home.example"])
+        task_id = self._email_task(env, "alice@home.example", stored_row=True)
+        assert "imap" in self._ask_as(env, tmp_path, task_id)
 
     def test_a_missing_parent_is_refused(self, env, tmp_path):
         child = self._child_of(env, 999_999)
