@@ -224,12 +224,12 @@ class TestOneStatementOfEachIdiom:
 
     def test_the_scoping_equality_is_not_written_out_anywhere(self):
         assert _offenders(_find_scoped_user_dir_copies) == [
-            "executor.py:get_task_control_dir",
+            "executor.py:_task_dir_under",
         ], (
             "the two-term scoping equality written out again; call "
             "user_scope.scoped_user_dir. The one permitted site is "
-            "executor.get_task_control_dir, whose root is deliberately "
-            "unresolved — see its docstring and user_scope's."
+            "executor._task_dir_under, the body of get_task_control_dir, whose "
+            "root is deliberately unresolved — see that docstring and user_scope's."
         )
 
 
