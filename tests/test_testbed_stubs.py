@@ -14,13 +14,16 @@ scenario has to be able to trust.
 
 from __future__ import annotations
 
+import http.client
 import json
+import socket
+import ssl
 import urllib.error
 import urllib.request
 
 import pytest
 
-from testbed.services import feeds, ntfy
+from testbed.services import feeds, ntfy, tls_target
 
 
 def _request(url: str, *, method: str = "GET", data=None, headers=None):
@@ -57,6 +60,44 @@ def documents():
         yield stub
     finally:
         stub.close()
+
+
+class TestTheTlsTarget:
+    @pytest.fixture
+    def target(self, tmp_path):
+        stub = tls_target.serve(tmp_path / "tls")
+        yield stub
+        stub.close()
+
+    def test_it_answers_over_tls_and_records_the_request(self, target):
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+
+        with urllib.request.urlopen(f"{target.url}/seen?x=1", context=context, timeout=10) as reply:
+            assert reply.status == 204
+        assert [call.path for call in target.calls_matching(method="GET")] == ["/seen"]
+
+    def test_it_refuses_plain_http_without_recording_it(self, target):
+        plain = target.url.replace("https://", "http://")
+        with pytest.raises((urllib.error.URLError, http.client.HTTPException, OSError)):
+            urllib.request.urlopen(f"{plain}/plain", timeout=10)
+        assert target.calls == []
+
+    def test_a_silent_client_does_not_stop_the_serve_loop(self, target):
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+
+        with socket.create_connection(("127.0.0.1", target.port), timeout=10):
+            with urllib.request.urlopen(f"{target.url}/next", context=context, timeout=4) as reply:
+                assert reply.status == 204
+
+    def test_its_config_allowlists_the_name_the_container_reaches_it_by(self, target):
+        assert target.container_url == f"https://host.docker.internal:{target.port}"
+        assert target.config() == {
+            "security": {"network": {"extra_hosts": [f"host.docker.internal:{target.port}"]}}
+        }
 
 
 class TestTheNtfyStub:

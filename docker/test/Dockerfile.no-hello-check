@@ -1,0 +1,16 @@
+# Negative control for parity row 2: a raw tunnel with no ClientHello check.
+#
+# The CONNECT proxy still allowlists, but it bridges a tunnel as soon as it is
+# open, so plain HTTP to an allowlisted host crosses it and the host answers.
+#
+#   docker build -f docker/test/Dockerfile.no-hello-check --build-arg BASE=<lean tag> \
+#       -t istota-test/no-hello-check:<suffix> docker/test
+#
+# Expected: tests/smoke/test_run_contract.py::TestATasksNetworkAndItsProxies
+# fails on "row 2: the proxy did not close a tunnel carrying no TLS".
+ARG BASE
+FROM ${BASE}
+
+RUN sed -i 's/^\( *\)hello = read_client_hello(client)$/\1client.settimeout(None); upstream.settimeout(None); self._bridge(client, upstream, target); return  # control: no hello check/' \
+        /app/src/istota/sandbox/network_proxy.py \
+    && grep -q 'return  # control: no hello check' /app/src/istota/sandbox/network_proxy.py

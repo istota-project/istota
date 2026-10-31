@@ -133,10 +133,12 @@ FORGE_CONFIG: dict = {"security": {"network": {"enabled": False}}}
 
 FORGE = Profile("forge", services=("model", "gitlab"), config=FORGE_CONFIG)
 
-#: Parity rows 2 and 3: the forge stub is the allowlisted host (the developer
-#: skill allowlists a configured forge's URL), the scripted model endpoint the
-#: host that is not, and the network sandbox is on as `istota setup` leaves it.
-NETWORK = Profile("network", services=("model", "gitlab"))
+#: Parity rows 2 and 3: the TLS stub is the allowlisted host a tunnel can reach,
+#: the forge stub the allowlisted host that speaks no TLS (the developer skill
+#: allowlists a configured forge's URL), the scripted model endpoint the host
+#: that is not allowlisted, and the network sandbox is on as `istota setup`
+#: leaves it.
+NETWORK = Profile("network", services=("model", "gitlab", "tls"))
 
 # ntfy needs no config at all: it is a per-user connected service in the
 # encrypted secrets store rather than a config block, so the scenario points

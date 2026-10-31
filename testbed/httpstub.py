@@ -15,6 +15,7 @@ worth keeping.
 
 from __future__ import annotations
 
+import ssl
 import threading
 from http.server import ThreadingHTTPServer
 
@@ -70,6 +71,7 @@ class HttpStub:
         host: str = LOOPBACK,
         port: int = 0,
         credential: str | None = None,
+        tls: ssl.SSLContext | None = None,
     ) -> None:
         """Bind, and serve `handler_cls` on a background thread.
 
@@ -114,6 +116,12 @@ class HttpStub:
             )
 
         server = ThreadingHTTPServer((host, port), handler_cls)
+        if tls is not None:
+            # The handshake waits for the handler's thread: done on accept, one
+            # silent client would stop the serve loop and `close()` behind it.
+            server.socket = tls.wrap_socket(
+                server.socket, server_side=True, do_handshake_on_connect=False
+            )
         # Set explicitly, and it is `daemon_threads` that matters rather than
         # `block_on_close`: in `socketserver.ThreadingMixIn` the two are
         # independent class attributes, not derived from each other. What joins
