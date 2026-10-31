@@ -91,7 +91,9 @@ def cmd_search(args) -> dict:
 
 def cmd_index_conversation(args) -> dict:
     """Index a specific conversation by task ID."""
+    from istota.db import get_task
     from istota.memory.search import index_conversation
+    from istota.rooms.scopes import turn_author
 
     conn = _get_conn()
     user_id = _get_user_id()
@@ -104,6 +106,16 @@ def cmd_index_conversation(args) -> dict:
     if not row:
         conn.close()
         return {"status": "error", "error": f"Task {args.task_id} not found for user {user_id}"}
+
+    # With no config the address fallback can only misread own mail as someone
+    # else's, which refuses.
+    if turn_author(conn, get_task(conn, args.task_id), own_addresses=None) != "own":
+        conn.close()
+        return {
+            "status": "error",
+            "reason": "not_owner_turn",
+            "error": f"Task {args.task_id} answered somebody else's message, so it stays out of {user_id}'s memory",
+        }
 
     n = index_conversation(conn, user_id, args.task_id, row[0] or "", row[1] or "")
     conn.close()

@@ -190,3 +190,30 @@ class TestSharedDeferredWritesNeedTheUsersOwnTurn:
         assert _process_deferred_kv_ops(config, task, user_temp) == 1
         with db.get_db(db_path) as conn:
             assert db.shared_kv_get(conn, "ns", "k")["value"] == '"x"'
+
+
+class TestTheDrainPurgesBeforeTheSharedCheck:
+    def test_a_correspondents_kv_file_never_reaches_the_handler(self, db_path, tmp_path):
+        from unittest.mock import patch
+
+        from istota.scheduler import _drain_deferred_ops
+
+        config = _make_config(db_path, tmp_path, {"alice"})
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+        task = _seed_correspondents_task(db_path, "alice")
+        ops = [
+            {"op": "set", "namespace": "ns", "key": "k", "value": '"evil"', "scope": "shared"},
+            {"op": "set", "namespace": "ns", "key": "own", "value": '"y"'},
+        ]
+        path = user_temp / f"task_{task.id}_kv_ops.json"
+        path.write_text(json.dumps(ops))
+
+        with patch("istota.scheduler._process_deferred_kv_ops") as handler:
+            _drain_deferred_ops(config, task, "done")
+
+        handler.assert_not_called()
+        assert not path.exists()
+        with db.get_db(db_path) as conn:
+            assert db.shared_kv_get(conn, "ns", "k") is None
+            assert db.kv_get(conn, "alice", "ns", "own") is None

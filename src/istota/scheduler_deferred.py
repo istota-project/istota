@@ -24,6 +24,7 @@ an op count, and its lifecycle is owned by the result-delivery code.
 import json
 import logging
 import os
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -442,13 +443,17 @@ def _process_deferred_istota_events(
         return 0
     path, data = loaded
 
+    from istota.mail.support import own_addresses
     from istota.rooms.scopes import withheld_for_task
     from istota.sharing import events
     from istota.skills._loader import load_skill_index
 
     skill_index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
     with db.get_db(config.db_path) as conn:
-        if "calendar" in withheld_for_task(conn, task, skill_index=skill_index):
+        if "calendar" in withheld_for_task(
+            conn, task, skill_index=skill_index,
+            own_addresses=own_addresses(config, task.user_id),
+        ):
             logger.warning(
                 "Task %d: the calendar scope is withheld, %d queued event op(s) dropped",
                 task.id, len(data),
@@ -630,12 +635,15 @@ def _is_member(conn, group_id: str, user_id: str) -> bool:
         return False
 
 
-def _task_groups(conn, task) -> list[str]:
+def _task_groups(config, conn, task) -> list[str]:
     """``room_scopes.task_group_ids``, with a database error read as none."""
+    from istota.mail.support import own_addresses
     from istota.rooms.scopes import task_group_ids
 
     try:
-        return task_group_ids(conn, task)
+        return task_group_ids(
+            conn, task, own_addresses=own_addresses(config, task.user_id),
+        )
     except Exception as e:  # noqa: BLE001
         logger.warning("group resolution failed for task %d: %s", task.id, e)
         return []
@@ -783,7 +791,12 @@ def _process_deferred_kv_ops(
                     continue
                 # A correspondent's mail on an email thread room runs as the
                 # host; the skill's own refusal never ran for a sandboxed task.
-                if not _owners_own_turn(conn, task.id, task.user_id, config=config):
+                from istota.mail.support import own_addresses
+
+                if not _owners_own_turn(
+                    conn, task.id, task.user_id,
+                    own_addresses=own_addresses(config, task.user_id),
+                ):
                     logger.warning(
                         "shared KV write denied for task %d user %s: not the "
                         "user's own turn (%s %s/%s)",
@@ -813,7 +826,7 @@ def _process_deferred_kv_ops(
             if scope is not None:
                 group_id = _group_of_scope(scope)
                 if task_groups is None:
-                    task_groups = _task_groups(conn, task)
+                    task_groups = _task_groups(config, conn, task)
                 if (
                     group_id is None
                     or group_id not in task_groups
@@ -1955,8 +1968,13 @@ def _process_deferred_garmin_import(
     return result.inserted_total
 
 
-def _purge_deferred_files_for_retry(task: db.Task, user_temp_dir: Path) -> None:
+def _purge_deferred_files_for_retry(
+    task: db.Task, user_temp_dir: Path, *, keep: Collection[str] = (),
+) -> None:
     """Delete the task's accumulated deferred-op files before a retry.
+
+    ``keep`` names suffixes to leave on disk, for the one caller that is not a
+    retry: the drain on a correspondent's turn, whose reply is sent after it.
 
     ISSUE-074: producers like ``_defer_kg_op`` *append* to ``task_{id}_*.json``;
     on retry the same task.id is reused, so a previously-failed attempt's ops
@@ -1972,6 +1990,8 @@ def _purge_deferred_files_for_retry(task: db.Task, user_temp_dir: Path) -> None:
     """
     purged: list[str] = []
     for suffix in _KNOWN_DEFERRED_SUFFIXES:
+        if suffix in keep:
+            continue
         path = user_temp_dir / f"task_{task.id}_{suffix}.json"
         if deferred.exists(path):
             try:
@@ -1979,12 +1999,12 @@ def _purge_deferred_files_for_retry(task: db.Task, user_temp_dir: Path) -> None:
                 purged.append(suffix)
             except OSError as e:
                 logger.warning(
-                    "Could not purge deferred %s for task %d retry: %s",
+                    "Could not purge deferred %s for task %d: %s",
                     suffix, task.id, e,
                 )
     if purged:
         logger.info(
-            "Purged deferred files for task %d retry: %s",
+            "Purged deferred files for task %d: %s",
             task.id, ", ".join(purged),
         )
 

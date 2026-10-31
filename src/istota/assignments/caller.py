@@ -81,7 +81,7 @@ def classify(conn: sqlite3.Connection, *, task_id: object, user_id: str) -> Call
 
 
 def _is_user_turn(conn: sqlite3.Connection, task: db.Task) -> bool:
-    from istota.rooms.scopes import canonical_token, written_by_someone_else
+    from istota.rooms.scopes import canonical_token, turn_author
 
     if task.source_type not in USER_TURN_SOURCES:
         return False
@@ -89,7 +89,7 @@ def _is_user_turn(conn: sqlite3.Connection, task: db.Task) -> bool:
             or task.parent_task_id is not None or task.scheduled_job_id is not None
             or task.command or task.skill):
         return False
-    if written_by_someone_else(conn, task):
+    if turn_author(conn, task, own_addresses=None) != "own":
         return False
     if task.conversation_token:
         room = canonical_token(conn, task.conversation_token)

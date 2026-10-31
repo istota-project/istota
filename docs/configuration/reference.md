@@ -393,7 +393,7 @@ Substitutes credential placeholders in authentication headers, for hosts a crede
 |---|---|---|
 | `enabled` | `true` on Linux with `sandbox_enabled` and `[security.network] enabled`, otherwise `false` | Turn the broker on. When the key is absent the default follows the sandbox and the network proxy; a value you write is kept |
 | `enforce_reveal` | same as `enabled` | `true` refuses public value reads (`istota-credential get`, `run`, `env`) of entries without the `istota:reveal` tag. `false` returns them and logs each one (`credential_reveal`, `action=would_refuse`). No effect while `enabled = false` |
-| `scan_max_bytes` | `1048576` | Request scan and response scrub limit |
+| `scan_max_bytes` | `1048576` | Request scan limit; responses past it stream, still scrubbed |
 | `leaf_validity_hours` | `24` | Lifetime of the per-host TLS certificates the broker issues |
 
 ### `[security.network]`

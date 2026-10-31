@@ -60,6 +60,8 @@ const editorDetail = (userId: string) => ({
   options: {
     modules: [],
     skills: [],
+    correspondent_scopes: ['web'],
+    correspondent_default_scopes: ['email'],
     outbound_approval: ['', 'off', 'untrusted', 'all'],
     outbound_approval_floor: 'untrusted',
     email_enabled: true,
