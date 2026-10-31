@@ -9501,6 +9501,8 @@ def execute_task(
                 # together with whatever of its tree escaped the kill.
                 attempt=task.attempt_count,
             )
+            if _proxy_ctx is not None:
+                _proxy_ctx.task_cgroup = _task_cg
 
         def _on_pid(pid: int) -> None:
             _record_worker_pid(
@@ -9736,15 +9738,17 @@ def execute_task(
         # live across the primary call, the reroute and the fallback call.
         try:
             with contextlib.ExitStack() as stack:
+                # Every exit path — success, failure, timeout, cancellation,
+                # a fallback brain replacing the primary — gives the directory
+                # back and kills anything still in it. Registered first so it
+                # runs last: a stopped proxy can start no skill into a cgroup
+                # that is going away.
+                if _task_cg is not None:
+                    stack.callback(_release_task_cgroup, task.id, _task_cg)
                 if _proxy_ctx is not None:
                     stack.enter_context(_proxy_ctx)
                 if _net_proxy_ctx is not None:
                     stack.enter_context(_net_proxy_ctx)
-                # Every exit path — success, failure, timeout, cancellation,
-                # a fallback brain replacing the primary — gives the directory
-                # back and kills anything still in it.
-                if _task_cg is not None:
-                    stack.callback(_release_task_cgroup, task.id, _task_cg)
 
                 _failover = run_with_failover(
                     brain, req,

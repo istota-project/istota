@@ -128,7 +128,12 @@ def _run_via_proxy(sock_path: str, skill: str, args: list[str]) -> None:
 
     try:
         sock = _connect(sock_path, wait)
-        sock.sendall(request.encode("utf-8"))
+        try:
+            sock.sendall(request.encode("utf-8"))
+        except BrokenPipeError:
+            # A proxy past its limit answers and closes without reading. Its
+            # answer is still there to read.
+            pass
 
         # Read response until newline
         chunks = []
@@ -171,6 +176,10 @@ def _run_via_proxy(sock_path: str, skill: str, args: list[str]) -> None:
         sys.exit(1)
     except ConnectionRefusedError:
         print(f"Skill proxy not running at: {sock_path}", file=sys.stderr)
+        sys.exit(1)
+    except ConnectionError:
+        # A proxy past its connection limit closes without reading the request.
+        print("Skill proxy closed the connection: it may be busy", file=sys.stderr)
         sys.exit(1)
     except json.JSONDecodeError as e:
         print(f"Invalid response from skill proxy: {e}", file=sys.stderr)

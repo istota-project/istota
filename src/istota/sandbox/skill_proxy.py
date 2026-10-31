@@ -15,13 +15,17 @@ import threading
 from collections.abc import Iterable
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from time import sleep, time
+from time import monotonic, sleep, time
 
 from istota import skill_client
 from istota.sandbox import peer_process
 from istota.sandbox.host_paths import skill_file_env
 from istota.credentials.names import label_for_display
-from istota.sandbox.unix_server import UnixSocketServer
+from istota.sandbox import cgroup as task_cgroup
+from istota.sandbox.process_group import OutputLimitExceeded, kill_group_if_live, run_capture
+from istota.sandbox.unix_server import (
+    UnixSocketServer, arm_until, drain_queued, peer_has_closed,
+)
 
 logger = logging.getLogger("istota.sandbox.skill_proxy")
 
@@ -109,6 +113,27 @@ PEER_REGISTRATION_GRACE_SECONDS = 2.0
 # Listen backlog. Connections are skill calls from one sandboxed task, and a
 # model fanning out tool calls starts dozens at once; 8 overflowed (#876).
 LISTEN_BACKLOG = 32
+
+# What one task may make this process hold (#890). Connections past the first
+# limit are refused from the accept loop; calls past the second wait for a slot.
+DEFAULT_MAX_CONNECTIONS = 64
+DEFAULT_MAX_CONCURRENT_SKILLS = 8
+DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+BUSY_REFUSAL = {
+    "error": "Skill proxy is busy: too many calls at once from this task",
+    "reason": "proxy_busy",
+    "stdout": "",
+    "stderr": "Skill proxy is busy: too many calls at once from this task\n",
+    "returncode": 1,
+}
+
+# One request and the whole time it may take to arrive. A request is one JSON
+# line of argv, which the client's own `execve` limit keeps far under this.
+MAX_REQUEST_BYTES = 4 * 1024 * 1024
+REQUEST_DEADLINE_SECONDS = 30
+
+# How often a call waiting for a slot checks whether the task has ended.
+SLOT_POLL_SECONDS = 0.25
 
 # How much longer than the subprocess budget a connection stays armed, so the
 # handler outlives the command it is waiting on and can report the timeout
@@ -336,6 +361,10 @@ def _owners_own_turn(conn, task_id: int, user_id: str, *, own_addresses=None) ->
             and turn_author(conn, task, own_addresses=own_addresses) == "own")
 
 
+class _RequestTooLarge(Exception):
+    """A request passed `MAX_REQUEST_BYTES`."""
+
+
 class SkillProxy:
     """Unix socket server that proxies skill CLI commands with credentials.
 
@@ -368,6 +397,9 @@ class SkillProxy:
         config=None,
         user_id: str | None = None,
         trusted_roots: Iterable[int] | None = None,
+        max_connections: int = DEFAULT_MAX_CONNECTIONS,
+        max_concurrent_skills: int = DEFAULT_MAX_CONCURRENT_SKILLS,
+        max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
     ):
         self.credential_env = credential_env
         self.base_env = base_env
@@ -444,6 +476,15 @@ class SkillProxy:
             _default_trusted_roots() if trusted_roots is None else trusted_roots
         ):
             self.authorize_pid(pid)
+        self.max_output_bytes = max_output_bytes
+        # The task's cgroup, set by the caller once it exists: a skill runs on
+        # the task's budget rather than the daemon's, and `cgroup.kill` at task
+        # end reaches a descendant that left the process group.
+        self.task_cgroup: Path | None = None
+        self._skill_slots = threading.BoundedSemaphore(max_concurrent_skills)
+        self._stopping = threading.Event()
+        self._live_children: set[subprocess.Popen] = set()
+        self._live_children_lock = threading.Lock()
         self._server = UnixSocketServer(
             socket_path,
             # Resolved per connection, not captured here: the accept loop
@@ -455,6 +496,8 @@ class SkillProxy:
             socket_mode=SOCKET_MODE,
             backlog=LISTEN_BACKLOG,
             logger=logger,
+            max_connections=max_connections,
+            busy_reply=json.dumps(BUSY_REFUSAL).encode("utf-8") + b"\n",
         )
 
     def authorize_pid(self, pid: int) -> None:
@@ -487,12 +530,46 @@ class SkillProxy:
         return self._server.socket_path
 
     def start(self) -> None:
+        self._stopping.clear()
         self._server.start()
         logger.debug("Skill proxy started on %s", self.socket_path)
 
     def stop(self) -> None:
+        """End the task's host-side work with it: connections, then children."""
+        self._stopping.set()
         self._server.stop()
+        with self._live_children_lock:
+            children = list(self._live_children)
+        for child in children:
+            kill_group_if_live(child)
         logger.debug("Skill proxy stopped")
+
+    def _queue_budget(self, skill_timeout: int) -> float:
+        """How long a call may wait for a slot and still answer inside the client's wait."""
+        return max(
+            0.0,
+            effective_client_wait(self.client_wait_seconds)
+            - skill_timeout - CLIENT_WAIT_MARGIN_SECONDS,
+        )
+
+    def _acquire_skill_slot(self, skill_timeout: int) -> bool:
+        deadline = monotonic() + self._queue_budget(skill_timeout)
+        while not self._stopping.is_set():
+            remaining = deadline - monotonic()
+            if self._skill_slots.acquire(timeout=max(0.0, min(remaining, SLOT_POLL_SECONDS))):
+                return True
+            if remaining <= SLOT_POLL_SECONDS:
+                return False
+        return False
+
+    def _track_child(self, proc: subprocess.Popen) -> None:
+        with self._live_children_lock:
+            self._live_children.add(proc)
+        # `stop` may have read the set just before this add.
+        if self._stopping.is_set():
+            kill_group_if_live(proc)
+        if self.task_cgroup is not None:
+            task_cgroup.verify_placement(proc.pid, self.task_cgroup)
 
     def __enter__(self):
         self.start()
@@ -561,9 +638,22 @@ class SkillProxy:
             # Armed at the global here because the skill is not known until the
             # request is parsed.
             conn.settimeout(self.timeout + CONNECTION_SLACK_SECONDS)
-            data = self._recv_all(conn)
+            try:
+                data = self._recv_all(conn)
+            except _RequestTooLarge:
+                drain_queued(conn)
+                conn.settimeout(1)
+                self._send_response(conn, {
+                    "error": "Request too large",
+                    "reason": "request_too_large",
+                    "stdout": "",
+                    "stderr": f"Skill request too large: over {MAX_REQUEST_BYTES} bytes\n",
+                    "returncode": 1,
+                })
+                return
             if not data:
                 return
+            conn.settimeout(self.timeout + CONNECTION_SLACK_SECONDS)
 
             try:
                 request = json.loads(data)
@@ -755,6 +845,20 @@ class SkillProxy:
                 # Backward compat: no map means all credentials
                 merged_env.update(self.credential_env)
 
+            if not self._acquire_skill_slot(skill_timeout):
+                if not self._stopping.is_set():
+                    self._send_response(conn, BUSY_REFUSAL)
+                return
+
+            # The wait for a slot can outlast the caller. A killed client's
+            # call must not fire later, or twice if the model retried it.
+            if peer_has_closed(conn):
+                self._skill_slots.release()
+                logger.info(
+                    "proxy_call_abandoned task_id=%s skill=%s", self.task_id, skill,
+                )
+                return
+
             try:
                 # Legacy skill callers can still connect back for other proxy
                 # operations, and they descend from the daemon rather
@@ -763,9 +867,7 @@ class SkillProxy:
                 # nothing. The reader is joined before the revoke, so a late
                 # registration cannot land after it. The cost is a `preexec_fn`,
                 # which takes CPython off its vfork fast path, so each skill call
-                # is a full fork of the daemon; `Popen` and a registration after
-                # it returns would avoid that, at the price of moving the nine
-                # tests that patch `subprocess.run` here.
+                # is a full fork of the daemon.
                 spawned: list[int] = []
 
                 def _register(pid: int) -> None:
@@ -774,19 +876,26 @@ class SkillProxy:
 
                 try:
                     with self._credential_channel(skill_timeout, skill) as credential_fd, \
-                            peer_process.reporting_pid(_register) as preexec, \
+                            task_cgroup.placement(self.task_cgroup) as place, \
+                            peer_process.reporting_pid(_register, place) as preexec, \
                             skill_file_env(merged_env) as merged_env:
                         merged_env["ISTOTA_CRED_FD"] = str(credential_fd)
-                        result = subprocess.run(
+                        result = run_capture(
                             cmd,
                             env=merged_env,
-                            capture_output=True,
-                            text=True,
                             timeout=skill_timeout,
                             preexec_fn=preexec,
                             pass_fds=(credential_fd,),
+                            max_output_bytes=self.max_output_bytes,
+                            on_spawn=self._track_child,
                         )
                 finally:
+                    with self._live_children_lock:
+                        self._live_children = {
+                            child for child in self._live_children
+                            if child.returncode is None
+                        }
+                    self._skill_slots.release()
                     for pid in spawned:
                         self.revoke_pid(pid)
                 self._send_response(conn, {
@@ -799,6 +908,19 @@ class SkillProxy:
                     "stdout": "",
                     "stderr": f"Skill command timed out after {skill_timeout}s",
                     "returncode": 124,
+                })
+            except OutputLimitExceeded as e:
+                logger.warning(
+                    "proxy_output_limit task_id=%s skill=%s limit=%d",
+                    self.task_id, skill, e.limit,
+                )
+                self._send_response(conn, {
+                    "stdout": "",
+                    "stderr": (
+                        f"Skill stopped: its output passed the {e.limit} byte limit "
+                        "and nothing was kept\n"
+                    ),
+                    "returncode": 1,
                 })
             except Exception as e:
                 self._send_response(conn, {
@@ -1765,16 +1887,22 @@ class SkillProxy:
 
     @staticmethod
     def _recv_all(conn: socket.socket) -> str:
-        """Read until newline (protocol delimiter)."""
+        """Read until newline (protocol delimiter), bounded in size and time."""
         chunks = []
+        total = 0
+        deadline = monotonic() + REQUEST_DEADLINE_SECONDS
         while True:
             try:
+                arm_until(conn, deadline)
                 chunk = conn.recv(65536)
             except socket.timeout:
                 break
             if not chunk:
                 break
             chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_REQUEST_BYTES:
+                raise _RequestTooLarge()
             if b"\n" in chunk:
                 break
         return b"".join(chunks).decode("utf-8", errors="replace").strip()

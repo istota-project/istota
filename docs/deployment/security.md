@@ -134,6 +134,8 @@ Adding a sensitive credential to a skill's `env:` block is the only step needed 
 
 Skill CLI commands run through the proxy (`sandbox/skill_proxy.py`) in the executor thread. The proxy injects credentials server-side, scoped per skill: `derive_skill_credential_map(authorized, skill_index)` returns the per-skill credential map, so a CLI invocation only ever sees credentials its own manifest declared. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled.
 
+Proxied skills run in the task's cgroup, so `task_memory_max_mb`, `task_pids_max` and `task_cpu_max_percent` now cover them along with the task's own tools; a task that relies on a heavy skill may need a higher memory limit. Each proxy also limits its own work in the daemon: request size and arrival time, open connections, concurrent skills and skill output. When a task ends, its proxies close their connections and kill any skill still running. The settings are in the [configuration reference](../configuration/reference.md).
+
 The proxy's Unix socket path includes the host process PID — `istota-proxy-{pid}-{task_id}.sock` (and the same shape for the network proxy). This prevents collisions when multiple processes (xdist test workers, parallel `istota run` instances, the daemon plus a manual scheduler) pick the same `task.id` from independent SQLite databases.
 
 ### Who may connect

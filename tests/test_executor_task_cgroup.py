@@ -257,3 +257,56 @@ def test_a_task_still_runs_when_no_cgroup_can_be_created(tmp_path):
 
     assert success is True
     assert output == "ran anyway"
+
+
+def test_the_skill_proxy_gets_the_task_cgroup_before_it_starts(tmp_path, cgroup_root):
+    """#890: a skill the proxy spawns runs on the task's budget."""
+    from istota.sandbox.skill_proxy import SkillProxy
+
+    config = _make_config(tmp_path)
+    config.security.skill_proxy_enabled = True
+    task = _make_task(id=78)
+    seen = {}
+    real_enter = SkillProxy.__enter__
+
+    def record(self):
+        seen["cgroup"] = self.task_cgroup
+        return real_enter(self)
+
+    with contextmanager_chain(
+        _patches(cgroup_root) + [patch.object(SkillProxy, "__enter__", record)]
+    ):
+        success, _result, _actions, _trace = execute_task(task, config, [])
+
+    assert success is True
+    assert seen["cgroup"] == cgroup_root / "task-78-0"
+
+
+def test_the_cgroup_goes_after_the_proxies_stop(tmp_path, cgroup_root):
+    """A queued skill must not start into a cgroup that has been killed."""
+    from istota.sandbox.skill_proxy import SkillProxy
+
+    config = _make_config(tmp_path)
+    config.security.skill_proxy_enabled = True
+    task = _make_task(id=79)
+    order = []
+    real_stop = SkillProxy.stop
+    real_destroy = task_cgroup.destroy
+
+    def stop(self):
+        order.append("proxy")
+        real_stop(self)
+
+    def destroy(path):
+        order.append("cgroup")
+        return real_destroy(path)
+
+    with contextmanager_chain(
+        _patches(cgroup_root) + [
+            patch.object(SkillProxy, "stop", stop),
+            patch("istota.sandbox.cgroup.destroy", side_effect=destroy),
+        ]
+    ):
+        execute_task(task, config, [])
+
+    assert order == ["proxy", "cgroup"]
