@@ -55,6 +55,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger("istota.config")
 
 
+def is_trust_pattern(entry: str) -> bool:
+    """Whether a `trusted_email_senders` entry matches many addresses rather
+    than naming one."""
+    return any(char in entry for char in "*?[")
+
+
 @dataclass
 class LoggingConfig:
     """Logging configuration."""
@@ -2895,7 +2901,7 @@ class Config:
         sender_lower = sender_email.lower()
 
         for entry in user.trusted_email_senders:
-            if any(char in entry for char in "*?["):
+            if is_trust_pattern(entry):
                 continue
             if entry.lower() == sender_lower:
                 return True
