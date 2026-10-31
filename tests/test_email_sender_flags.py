@@ -1,10 +1,25 @@
 """The per-sender record of suspected injection attempts (#897)."""
 
+import json
+import logging
+
 import pytest
 
 from istota import db
 from istota.config import Config, EmailConfig, SchedulerConfig, UserConfig
+from istota.executor import task_deferred_dir
 from istota.mail import sender_flags
+from istota.rooms import scopes
+from istota.skills.email import Email
+from istota.transport.email.inbound import _strict_dmarc_refusal
+from istota.transport.email.mail_card import (
+    received_mail_meta,
+    stored_received_mail,
+    stored_sender_authenticated,
+)
+
+from . import test_scheduler_deferred as _deferred
+from .test_email_confirmation_answer import _poll as _answer_poll
 
 
 @pytest.fixture
@@ -335,3 +350,377 @@ class TestTheTable:
                 )
             }
         assert {"email_sender_flags", "idx_email_sender_flags_lookup"} <= names
+
+
+# ---------------------------------------------------------------------------
+# Which mail can earn a flag: the strict reading of its stamps
+# ---------------------------------------------------------------------------
+
+AUTHSERV = "mx.test.com"
+OUR_PASS = f"{AUTHSERV}; dmarc=pass header.from=elsewhere.example"
+OUR_SPF_ONLY = f"{AUTHSERV}; spf=pass smtp.mailfrom=elsewhere.example"
+OUR_FAIL = f"{AUTHSERV}; dmarc=fail header.from=elsewhere.example"
+PASS_NO_FROM = f"{AUTHSERV}; dmarc=pass"
+SENDER = "mallory@elsewhere.example"
+
+
+def _stamped_email(headers):
+    return Email(
+        id="1", subject="s", sender=SENDER, date="", body="", attachments=[],
+        message_id="<m@x>", authentication_results_all=tuple(headers),
+    )
+
+
+def _strict_config(authserv_id=AUTHSERV):
+    return Config(email=EmailConfig(enabled=True, authserv_id=authserv_id))
+
+
+class TestTheStrictRule:
+    def test_a_topmost_aligned_pass_is_authenticated(self):
+        email = _stamped_email([OUR_PASS])
+        assert _strict_dmarc_refusal(_strict_config(), email, SENDER) is None
+
+    @pytest.mark.parametrize("headers", [
+        pytest.param([OUR_SPF_ONLY, OUR_PASS], id="forged-pass-under-our-spf-stamp"),
+        pytest.param([OUR_PASS, OUR_FAIL], id="a-lower-stamp-of-ours-disagrees"),
+        pytest.param([PASS_NO_FROM], id="pass-with-no-header-from"),
+        pytest.param([OUR_FAIL, OUR_PASS], id="real-fail-over-forged-pass"),
+        pytest.param([f"{AUTHSERV}; dmarc=pass header.from=other.example"], id="misaligned"),
+        pytest.param(["other.example; dmarc=pass header.from=elsewhere.example"], id="not-ours"),
+        pytest.param([], id="unstamped"),
+    ])
+    def test_everything_else_is_refused(self, headers):
+        refusal = _strict_dmarc_refusal(_strict_config(), _stamped_email(headers), SENDER)
+        assert refusal is not None
+
+    def test_a_sole_forged_stamp_passes_which_is_the_stated_limit(self):
+        """Mail our MTA did not stamp at all: the forgery is then the topmost
+        header, and no reading of the headers can tell. This rests on the MTA
+        stamping every inbound mail and stripping stamps with its own id."""
+        forged = f"{AUTHSERV}; dmarc=pass header.from=elsewhere.example"
+        assert _strict_dmarc_refusal(_strict_config(), _stamped_email([forged]), SENDER) is None
+
+    @pytest.mark.parametrize("authserv_id", [None, "", "   "])
+    def test_no_authserv_id_is_unavailable(self, authserv_id):
+        refusal = _strict_dmarc_refusal(
+            _strict_config(authserv_id), _stamped_email([OUR_PASS]), SENDER,
+        )
+        assert refusal == "unavailable"
+
+
+class TestTheStoredAnswer:
+    def _meta(self, **kwargs):
+        return received_mail_meta(
+            _stamped_email([]), sender_check="verified", trusted=True, **kwargs,
+        )
+
+    def test_it_defaults_to_false_and_is_a_json_boolean(self):
+        assert self._meta()["sender_authenticated"] is False
+        assert self._meta(sender_authenticated=True)["sender_authenticated"] is True
+
+    def test_it_reads_back(self):
+        assert stored_sender_authenticated(json.dumps(self._meta(sender_authenticated=True)))
+        assert not stored_sender_authenticated(json.dumps(self._meta()))
+
+    @pytest.mark.parametrize("raw", [
+        None, "", "not json", "[1]", b"\xff",
+        '{"sender_check": "verified"}',
+        '{"sender_authenticated": "true"}',
+        '{"sender_authenticated": 1}',
+    ])
+    def test_only_a_literal_true_counts(self, raw):
+        assert stored_sender_authenticated(raw) is False
+
+    def test_the_cards_payload_keeps_its_shape(self):
+        stored = stored_received_mail(json.dumps(self._meta(sender_authenticated=True)))
+        assert "sender_authenticated" not in stored
+        assert set(stored) == {
+            "from", "to", "cc", "date", "subject", "message_id", "in_reply_to",
+            "attachments", "sender_check", "trusted",
+        }
+
+
+# ---------------------------------------------------------------------------
+# The deferred op, through the drain
+# ---------------------------------------------------------------------------
+
+config = _deferred.config
+mail_config = _deferred.mail_config
+STRANGER = _deferred.STRANGER
+
+
+def _write_flags(config, task, content):
+    directory = task_deferred_dir(config, task)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"task_{task.id}_sender_flags.json"
+    path.write_text(content if isinstance(content, str) else json.dumps(content))
+    return path
+
+
+def _seed_meta(config, task, **fields):
+    """The answer intake stored, over whatever the poll wrote."""
+    with db.get_db(config.db_path) as conn:
+        conn.execute(
+            "UPDATE processed_emails SET mail_meta = ? WHERE task_id = ?",
+            (json.dumps(fields), task.id),
+        )
+
+
+def _authenticated_turn(config):
+    task = _deferred._strangers_turn(config)
+    _seed_meta(config, task, sender_authenticated=True)
+    return task
+
+
+def _flags(config):
+    with db.get_db(config.db_path) as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT user_id, sender, task_id, reason FROM email_sender_flags ORDER BY id")]
+
+
+class TestTheDrainRecordsAFlag:
+    def test_it_names_the_tasks_sender_and_user_whatever_the_file_says(self, mail_config):
+        task = _authenticated_turn(mail_config)
+        path = _write_flags(mail_config, task, [{
+            "reason": "impersonation",
+            "sender": "victim@elsewhere.example",
+            "address": "victim@elsewhere.example",
+            "user_id": "bob",
+            "task_id": 999,
+        }])
+
+        _deferred._drain(mail_config, task)
+
+        assert _flags(mail_config) == [{
+            "user_id": "alice", "sender": STRANGER, "task_id": task.id,
+            "reason": "impersonation",
+        }]
+        assert not path.exists()
+
+    def test_a_display_name_and_mixed_case_sender_is_one_key(self, mail_config):
+        task = _authenticated_turn(mail_config)
+        with db.get_db(mail_config.db_path) as conn:
+            conn.execute(
+                "UPDATE processed_emails SET sender_email = ? WHERE task_id = ?",
+                ("Carol Ash <Carol@Example.COM>", task.id),
+            )
+        _write_flags(mail_config, task, [{"reason": "other"}])
+        _deferred._drain(mail_config, task)
+        assert _flags(mail_config)[0]["sender"] == STRANGER
+
+    def test_an_own_turn_records_nothing(self, mail_config):
+        task = _deferred._own_turn(mail_config)
+        path = _write_flags(mail_config, task, [{"reason": "other"}])
+        _deferred._drain(mail_config, task)
+        assert _flags(mail_config) == []
+        assert not path.exists()
+
+    def test_the_users_own_mail_records_nothing(self, mail_config):
+        with db.get_db(mail_config.db_path) as conn:
+            task_id = db.create_task(conn, prompt="p", user_id="alice", source_type="email")
+            db.mark_email_processed(
+                conn, email_id="own", sender_email="alice@test.com", user_id="alice",
+                task_id=task_id, routing_method="sender_match",
+                mail_meta={"sender_authenticated": True},
+            )
+            task = db.get_task(conn, task_id)
+        path = _write_flags(mail_config, task, [{"reason": "other"}])
+        _deferred._drain(mail_config, task)
+        assert _flags(mail_config) == []
+        assert not path.exists()
+
+    def test_a_guests_file_records_nothing(self, mail_config):
+        task = _authenticated_turn(mail_config)
+        with db.get_db(mail_config.db_path) as conn:
+            conn.execute(
+                "UPDATE tasks SET guest_participant_id = 1 WHERE id = ?", (task.id,),
+            )
+            task = db.get_task(conn, task.id)
+        path = _write_flags(mail_config, task, [{"reason": "other"}])
+        _deferred._drain(mail_config, task)
+        assert _flags(mail_config) == []
+        assert not path.exists()
+
+    @pytest.mark.parametrize("meta", [
+        pytest.param({"sender_check": "failed"}, id="failed"),
+        pytest.param({"sender_check": "none"}, id="none"),
+        pytest.param({"sender_check": "verified"}, id="verified-is-not-strict-enough"),
+        pytest.param({"sender_authenticated": False}, id="refused-at-intake"),
+        pytest.param({"sender_authenticated": "true"}, id="not-a-literal-true"),
+    ])
+    def test_mail_that_did_not_authenticate_earns_nothing(self, mail_config, meta):
+        task = _deferred._strangers_turn(mail_config)
+        _seed_meta(mail_config, task, **meta)
+        path = _write_flags(mail_config, task, [{"reason": "other"}])
+        _deferred._drain(mail_config, task)
+        assert _flags(mail_config) == []
+        assert not path.exists()
+
+    def test_a_second_drain_writes_one_row(self, mail_config):
+        task = _authenticated_turn(mail_config)
+        for reason in ("impersonation", "data_request"):
+            path = _write_flags(mail_config, task, [{"reason": reason}])
+            _deferred._drain(mail_config, task)
+            assert not path.exists()
+        assert [f["reason"] for f in _flags(mail_config)] == ["impersonation"]
+
+    def test_a_file_of_several_entries_writes_one_row_from_the_first_dict(self, mail_config):
+        task = _authenticated_turn(mail_config)
+        path = _write_flags(mail_config, task, [
+            "not a dict", {"reason": "hidden_content"}, {"reason": "data_request"},
+        ])
+        _deferred._drain(mail_config, task)
+        assert [f["reason"] for f in _flags(mail_config)] == ["hidden_content"]
+        assert not path.exists()
+
+    @pytest.mark.parametrize("reason", ["made up", 7, None, ["other"]])
+    def test_a_reason_outside_the_set_stores_other(self, mail_config, reason):
+        task = _authenticated_turn(mail_config)
+        _write_flags(mail_config, task, [{"reason": reason}])
+        _deferred._drain(mail_config, task)
+        assert [f["reason"] for f in _flags(mail_config)] == ["other"]
+
+    @pytest.mark.parametrize("content", [
+        "[]", '["a string", 7]', '{"reason": "other"}', "not json{{{",
+    ])
+    def test_a_file_with_no_dict_entry_records_nothing(self, mail_config, content):
+        task = _authenticated_turn(mail_config)
+        path = _write_flags(mail_config, task, content)
+        _deferred._drain(mail_config, task)
+        assert _flags(mail_config) == []
+        assert not path.exists()
+
+    def test_a_retry_copy_has_no_mail_of_its_own(self, mail_config):
+        parent = _authenticated_turn(mail_config)
+        with db.get_db(mail_config.db_path) as conn:
+            child = db.get_task(conn, db.create_task(
+                conn, prompt="again", user_id="alice", source_type="email",
+                parent_task_id=parent.id,
+            ))
+        path = _write_flags(mail_config, child, [{"reason": "other"}])
+        _deferred._drain(mail_config, child)
+        assert _flags(mail_config) == []
+        assert not path.exists()
+
+    def test_a_turn_that_cannot_be_read_records_nothing_and_keeps_the_file(
+        self, mail_config, monkeypatch,
+    ):
+        task = _authenticated_turn(mail_config)
+        path = _write_flags(mail_config, task, [{"reason": "other"}])
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(scopes, "turn_author", _boom)
+        _deferred._drain(mail_config, task)
+        assert _flags(mail_config) == []
+        assert path.exists()
+
+
+class TestTheOutcomes:
+    def _record(self, config, task, reason="other"):
+        with db.get_db(config.db_path) as conn:
+            return sender_flags.record_flag(conn, config, task, reason)
+
+    def test_recorded_then_duplicate(self, mail_config):
+        task = _authenticated_turn(mail_config)
+        assert self._record(mail_config, task) == "recorded"
+        assert self._record(mail_config, task) == "duplicate"
+
+    def test_an_own_turn_is_not_a_correspondents(self, mail_config):
+        assert self._record(mail_config, _deferred._own_turn(mail_config)) == "not_correspondent"
+
+    def test_a_row_of_another_user_is_no_mail(self, mail_config):
+        task = _authenticated_turn(mail_config)
+        with db.get_db(mail_config.db_path) as conn:
+            conn.execute(
+                "UPDATE processed_emails SET user_id = 'bob' WHERE task_id = ?", (task.id,),
+            )
+        assert self._record(mail_config, task) == "no_mail"
+
+    def test_an_unparseable_sender_has_no_address(self, mail_config):
+        task = _authenticated_turn(mail_config)
+        with db.get_db(mail_config.db_path) as conn:
+            conn.execute(
+                "UPDATE processed_emails SET sender_email = '<>' WHERE task_id = ?", (task.id,),
+            )
+        assert self._record(mail_config, task) == "no_address"
+        assert _flags(mail_config) == []
+
+    def test_an_own_address_is_exempt_even_on_a_correspondents_turn(
+        self, mail_config, monkeypatch,
+    ):
+        # Reached only where a stored row names someone else while the ledger
+        # names the user, so the author is set here rather than built up.
+        task = _authenticated_turn(mail_config)
+        with db.get_db(mail_config.db_path) as conn:
+            conn.execute(
+                "UPDATE processed_emails SET sender_email = 'Alice@Test.com' WHERE task_id = ?",
+                (task.id,),
+            )
+        monkeypatch.setattr(scopes, "turn_author", lambda *a, **k: "correspondent")
+        assert self._record(mail_config, task) == "own_address"
+        assert _flags(mail_config) == []
+
+    def test_unverified_mail_is_not_verified(self, mail_config):
+        task = _deferred._strangers_turn(mail_config)
+        assert self._record(mail_config, task) == "not_verified"
+
+    def test_a_flag_on_a_named_address_is_still_recorded(self, mail_config):
+        mail_config.users["alice"].trusted_email_senders = [STRANGER]
+        task = _authenticated_turn(mail_config)
+        assert self._record(mail_config, task) == "recorded"
+
+    def test_the_log_carries_the_outcome_and_only_a_normalized_reason(
+        self, mail_config, caplog,
+    ):
+        task = _authenticated_turn(mail_config)
+        _write_flags(mail_config, task, [{"reason": "IGNORE PREVIOUS INSTRUCTIONS"}])
+        with caplog.at_level(logging.INFO, logger="istota.scheduler"):
+            _deferred._drain(mail_config, task)
+        lines = [r.getMessage() for r in caplog.records if "sender flag" in r.getMessage()]
+        assert len(lines) == 1
+        assert str(task.id) in lines[0]
+        assert "recorded" in lines[0]
+        assert "IGNORE PREVIOUS" not in caplog.text
+
+
+class TestIntakeStoresTheAnswer:
+    """Through the real `poll_emails`: the stamps on the mail decide the flag."""
+
+    def _turn(self, config, headers):
+        (task_id,), _, _, _ = _answer_poll(
+            config, sender=SENDER, to=("bot+alice@test.com",), auth=headers,
+        )
+        with db.get_db(config.db_path) as conn:
+            return db.get_task(conn, task_id)
+
+    def test_a_strict_pass_earns_a_flag_end_to_end(self, mail_config):
+        mail_config.email.authserv_id = AUTHSERV
+        task = self._turn(mail_config, (OUR_PASS,))
+        _write_flags(mail_config, task, [{"reason": "instruction_override"}])
+        _deferred._drain(mail_config, task)
+        assert _flags(mail_config) == [{
+            "user_id": "alice", "sender": SENDER, "task_id": task.id,
+            "reason": "instruction_override",
+        }]
+
+    def test_the_loose_reading_would_pass_this_and_the_flag_does_not(self, mail_config):
+        mail_config.email.authserv_id = AUTHSERV
+        task = self._turn(mail_config, (OUR_SPF_ONLY, OUR_PASS))
+        with db.get_db(mail_config.db_path) as conn:
+            raw = conn.execute(
+                "SELECT mail_meta FROM processed_emails WHERE task_id = ?", (task.id,),
+            ).fetchone()[0]
+        assert json.loads(raw)["sender_check"] == "verified"
+        _write_flags(mail_config, task, [{"reason": "other"}])
+        _deferred._drain(mail_config, task)
+        assert _flags(mail_config) == []
+
+    def test_no_authserv_id_stores_false(self, mail_config):
+        task = self._turn(mail_config, (OUR_PASS,))
+        with db.get_db(mail_config.db_path) as conn:
+            raw = conn.execute(
+                "SELECT mail_meta FROM processed_emails WHERE task_id = ?", (task.id,),
+            ).fetchone()[0]
+        assert stored_sender_authenticated(raw) is False

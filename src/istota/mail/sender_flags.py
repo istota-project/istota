@@ -13,8 +13,10 @@ import sqlite3
 from dataclasses import dataclass
 from email.utils import parseaddr
 
+from istota import db
 from istota.config import Config
 from istota.mail.support import own_addresses
+from istota.rooms import scopes
 
 REASONS = (
     "instruction_override",
@@ -25,6 +27,15 @@ REASONS = (
     "data_request",
     "other",
 )
+
+# What `record_flag` answers.
+RECORDED = "recorded"
+DUPLICATE = "duplicate"
+NOT_CORRESPONDENT = "not_correspondent"
+NO_MAIL = "no_mail"
+NO_ADDRESS = "no_address"
+OWN_ADDRESS = "own_address"
+NOT_VERIFIED = "not_verified"
 
 
 @dataclass(frozen=True)
@@ -49,6 +60,43 @@ def normalize_reason(value: object) -> str:
     if isinstance(value, str) and value in REASONS:
         return value
     return "other"
+
+
+def record_flag(conn: sqlite3.Connection, config: Config, task, reason: str) -> str:
+    """Record a flag on the mail this task answers; returns the outcome word.
+
+    Answers from the database alone, so nothing a model wrote can name the
+    sender, the user or whether the mail authenticated. ``task`` is a
+    ``db.Task``. Raises what the reads raise, so a turn whose author cannot be
+    read writes no row.
+    """
+    # Local: `transport.email` imports the inbound poll, which reads this module.
+    from istota.transport.email.mail_card import stored_sender_authenticated  # noqa: PLC0415
+
+    own = own_addresses(config, task.user_id)
+    if scopes.turn_author(conn, task, own_addresses=own) != "correspondent":
+        return NOT_CORRESPONDENT
+    # A `!retry` copy has no row of its own, so re-running a mail cannot count it
+    # again, and neither has a subtask.
+    mail = db.get_email_for_task(conn, task.id)
+    if mail is None or mail.user_id != task.user_id:
+        return NO_MAIL
+    address = address_key(mail.sender_email)
+    if address is None:
+        return NO_ADDRESS
+    if address in own:
+        return OWN_ADDRESS
+    row = conn.execute(
+        "SELECT mail_meta FROM processed_emails WHERE id = ?", (mail.id,),
+    ).fetchone()
+    if not stored_sender_authenticated(row[0]):
+        return NOT_VERIFIED
+    cursor = conn.execute(
+        "INSERT OR IGNORE INTO email_sender_flags (user_id, sender, task_id, reason) "
+        "VALUES (?, ?, ?, ?)",
+        (task.user_id, address, task.id, normalize_reason(reason)),
+    )
+    return RECORDED if cursor.rowcount else DUPLICATE
 
 
 def _window_filter(config: Config) -> tuple[str, tuple[str, ...]]:

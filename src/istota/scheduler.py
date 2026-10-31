@@ -213,6 +213,7 @@ from .scheduler_deferred import (  # noqa: F401  -- re-exported for back-compat
     _process_deferred_kv_ops,
     _process_deferred_sent_emails,
     _process_deferred_subtasks,
+    _process_deferred_sender_flags,
     _process_deferred_user_alerts,
     _process_retired_deferred_files,
     _purge_deferred_files_for_retry,
@@ -2892,11 +2893,13 @@ def _record_deferred_handler_failure(
 
 #: What the drain leaves of a correspondent's turn, each under the scope it needs
 #: (`None`: always). The reply is sent after the drain, from the file, so it must
-#: stay on disk; a user alert is how the model flags a suspicious mail to the host.
+#: stay on disk; a user alert is how the model flags a suspicious mail to the host;
+#: a sender flag names nobody, since its handler takes the sender from the task.
 #: A suffix not named here is purged, including one added later.
 CORRESPONDENT_KEPT_SUFFIXES = {
     "email_output": None,
     "user_alerts": None,
+    "sender_flags": None,
     "istota_events": "calendar",
 }
 
@@ -2950,8 +2953,8 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
     ``run_task_inline`` so the two can't drift.
 
     On a correspondent's turn (`_correspondent_kept_suffixes`) everything but
-    the reply, user alerts and, with ``calendar`` allowed, Istota calendar events
-    is purged before any handler runs.
+    the reply, user alerts, a sender flag and, with ``calendar`` allowed, Istota
+    calendar events is purged before any handler runs.
 
     **No ``Exception`` escapes this function** (ISSUE-469). Each handler is
     guarded on its own, so one that raises costs its own files and nothing
@@ -3007,6 +3010,7 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
         ("health_ops", _process_deferred_health_ops),
         ("garmin_import", _process_deferred_garmin_import),
         ("istota_events", _process_deferred_istota_events),
+        ("sender_flags", _process_deferred_sender_flags),
         ("user_alerts", _process_deferred_user_alerts),
         ("email_output", _deliver_deferred_email_output),
     )
