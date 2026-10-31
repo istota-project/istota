@@ -19,6 +19,8 @@ const job = {
   command: '',
   skill: '',
   skill_args: '',
+  publish_shared_kv: '',
+  publish_shared_kv_trusted: false,
 };
 
 function subject(overrides = {}) {
@@ -82,6 +84,17 @@ it('shows each state in words', async () => {
   expect(limited.getByText('Limited')).toBeInTheDocument();
   expect(limited.getByText('news.example.com')).toBeInTheDocument();
   expect(limited.getByText('browse')).toBeInTheDocument();
+});
+
+it('names a publish target with the job text it approves', async () => {
+  show(
+    subject({
+      job: { ...job, publish_shared_kv: 'ns/key', publish_shared_kv_trusted: true },
+    }),
+  );
+  const view = await card();
+  expect(view.getByText('ns/key')).toBeInTheDocument();
+  expect(view.getByText(/marked trusted/)).toBeInTheDocument();
 });
 
 it('says so when there is nothing to decide', async () => {

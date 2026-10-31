@@ -39,7 +39,10 @@ _ASSIGNMENT_SOURCE_TYPE = "assignment"
 TASKS_FILE_SUBJECT = "tasks-file"
 #: What a job occurrence copies from its row, and so what it can be compared on.
 TASK_TEXT_COLUMNS = ("prompt", "command", "skill", "skill_args")
-DIGEST_COLUMNS = TASK_TEXT_COLUMNS
+#: The publish target sends a job's answer into other users' briefings, so an
+#: approval covers it, and a limited task can write it into CRON.md.
+DIGEST_COLUMNS = (*TASK_TEXT_COLUMNS, "publish_shared_kv", "publish_shared_kv_trusted")
+_JOB_ROW_COLUMNS = "name, reach, " + ", ".join(DIGEST_COLUMNS)
 DECIDERS = frozenset({"web", "cli", "migration"})
 POSTURE_PUBLIC = "public"
 POSTURE_PRIVATE = "private"
@@ -125,8 +128,9 @@ def _normal_host(text: str) -> str:
 
 
 def job_digest(row: "Mapping | sqlite3.Row") -> str:
-    """The sha256 of what a job dispatches, length-prefixed so text cannot move
-    between fields. A schedule, model or delivery edit does not change it.
+    """The sha256 of what a job dispatches and where its answer is published,
+    length-prefixed so text cannot move between fields. A schedule, model or delivery
+    edit does not change it.
 
     NULL and empty read the same: an older row can hold `''` where the sync writes
     NULL, and reading that as an edit would drop a seeded approval on the first tick.
@@ -138,6 +142,9 @@ def _digest_over(row: "Mapping | sqlite3.Row", columns: tuple[str, ...]) -> str:
     digest = hashlib.sha256()
     for column in columns:
         value = row[column]
+        if column == "publish_shared_kv_trusted":
+            # A bool in the file, 0 or 1 in the row, and only its truth means anything.
+            value = "1" if value else ""
         data = ("" if value is None else str(value)).encode("utf-8", "surrogatepass")
         digest.update(f"{len(data)}:".encode())
         digest.update(data)
@@ -153,8 +160,7 @@ def job_row(conn: sqlite3.Connection, task: "db.Task") -> sqlite3.Row | None:
     if task.source_type != "scheduled" or task.scheduled_job_id is None:
         return None
     return conn.execute(
-        "SELECT name, reach, prompt, command, skill, skill_args FROM scheduled_jobs "
-        "WHERE id = ? AND user_id = ?",
+        f"SELECT {_JOB_ROW_COLUMNS} FROM scheduled_jobs WHERE id = ? AND user_id = ?",
         (task.scheduled_job_id, task.user_id),
     ).fetchone()
 
@@ -497,8 +503,7 @@ def job_row_by_subject(
     if not subject.startswith("cron:"):
         return None
     return conn.execute(
-        "SELECT name, reach, prompt, command, skill, skill_args FROM scheduled_jobs "
-        "WHERE user_id = ? AND name = ?",
+        f"SELECT {_JOB_ROW_COLUMNS} FROM scheduled_jobs WHERE user_id = ? AND name = ?",
         (user_id, subject[len("cron:"):]),
     ).fetchone()
 
@@ -590,6 +595,8 @@ def describe_subject(conn: sqlite3.Connection, user_id: str, subject: str) -> di
             "command": row["command"] or "",
             "skill": row["skill"] or "",
             "skill_args": row["skill_args"] or "",
+            "publish_shared_kv": row["publish_shared_kv"] or "",
+            "publish_shared_kv_trusted": bool(row["publish_shared_kv_trusted"]),
         }
     return {
         "subject": subject,
@@ -619,7 +626,7 @@ def open_job_count(conn: sqlite3.Connection) -> int:
         grants.setdefault((row[0], row[1]), set()).add(row[2])
     count = 0
     for job in conn.execute(
-        "SELECT user_id, name, reach, prompt, command, skill, skill_args FROM scheduled_jobs "
+        f"SELECT user_id, {_JOB_ROW_COLUMNS} FROM scheduled_jobs "
         "WHERE substr(name, 1, 8) != '_module.'"
     ):
         entries = frozenset(grants.get((job["user_id"], cron_subject(job["name"])), ()))

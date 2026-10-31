@@ -27,7 +27,8 @@ def _job(config, name, *, grant=None, prompt="p", reach="private", user="alice")
             (user, name, prompt, reach),
         )
         digest = egress.job_digest(
-            {"prompt": prompt, "command": None, "skill": None, "skill_args": None},
+            {"prompt": prompt, "command": None, "skill": None, "skill_args": None,
+             "publish_shared_kv": None, "publish_shared_kv_trusted": 0},
         )
         for kind in grant or ():
             conn.execute(

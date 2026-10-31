@@ -6201,6 +6201,8 @@ export interface NetworkJob {
   command: string;
   skill: string;
   skill_args: string;
+  publish_shared_kv: string;
+  publish_shared_kv_trusted: boolean;
 }
 export interface NetworkSubject {
   subject: string;

@@ -9287,8 +9287,8 @@ def _migrate_egress_seed_open(conn: sqlite3.Connection) -> None:
             rows = []
             if _table_exists("scheduled_jobs"):
                 rows = conn.execute(
-                    "SELECT user_id, name, prompt, command, skill, skill_args "
-                    "FROM scheduled_jobs"
+                    "SELECT user_id, name, prompt, command, skill, skill_args, "
+                    "publish_shared_kv, publish_shared_kv_trusted FROM scheduled_jobs"
                 ).fetchall()
             for row in rows:
                 egress.add_grant(

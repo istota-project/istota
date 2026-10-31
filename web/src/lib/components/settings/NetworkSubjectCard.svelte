@@ -130,6 +130,13 @@
     {#if job.prompt}<pre class="job-text">{job.prompt}</pre>{/if}
     {#if job.command}<pre class="job-text">{job.command}</pre>{/if}
     {#if job.skill}<pre class="job-text">{job.skill} {job.skill_args}</pre>{/if}
+    {#if job.publish_shared_kv}
+      <p>
+        Publishes its answer to shared content other users' briefings can read, as <code
+          >{job.publish_shared_kv}</code
+        >{job.publish_shared_kv_trusted ? ', marked trusted' : ''}.
+      </p>
+    {/if}
   {/if}
 {/snippet}
 

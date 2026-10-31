@@ -48,6 +48,7 @@ def _job(config, user="alice", name="digest", prompt="read the news", reach="pri
         conn.commit()
         return egress.job_digest({
             "prompt": prompt, "command": None, "skill": None, "skill_args": None,
+            "publish_shared_kv": None, "publish_shared_kv_trusted": 0,
         })
 
 
@@ -415,3 +416,18 @@ class TestTheOperatorCli:
     def test_an_unknown_subject_is_refused(self, config):  # noqa: F811
         with pytest.raises(SystemExit):
             cmd_egress(self._args(config, "grant", subject="cron:nothing"))
+
+
+class TestThePublishTargetIsShown:
+    def test_describe_subject_names_it(self, tmp_path):
+        path = tmp_path / "t.db"
+        db.init_db(path)
+        with db.get_db(path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, "
+                "publish_shared_kv, publish_shared_kv_trusted) VALUES "
+                "('alice', 'digest', '0 9 * * *', 'p', 'ns/key', 1)",
+            )
+            job = egress.describe_subject(conn, "alice", "cron:digest")["job"]
+        assert job["publish_shared_kv"] == "ns/key"
+        assert job["publish_shared_kv_trusted"] is True

@@ -35,7 +35,7 @@ A row in `egress_grants` means approved, and there is no pending or denied state
 | `public:<digest>` | This exact job text runs with no private data and open web |
 | `open:<digest>` | This exact job text runs as it did before, with the user's browser profile and every skill |
 
-The digest covers a job's `prompt`, `command`, `skill` and `skill_args`. The sync resolves `prompt_file` into `prompt`, so the file's content is covered. Editing any of them drops the job's `open:` and `public:` approvals and asks again. A schedule, model or delivery edit does not.
+The digest covers a job's `prompt`, `command`, `skill`, `skill_args`, `publish_shared_kv` and `publish_shared_kv_trusted`. The last two are there because a job's answer goes where they say, into other users' briefings. The sync resolves `prompt_file` into `prompt`, so the file's content is covered. Editing any of them drops the job's `open:` and `public:` approvals and asks again. A schedule, model or delivery edit does not.
 
 Only an authenticated person writes a grant: the web route for the signed-in user's own subjects, the operator's `istota egress`, and the one-time seed. `tests/test_egress_grants.py` holds that list, and no skill CLI or deferred handler imports the module. An approval over the web carries the digest of the text the page showed, and a row that has moved since is refused. An approval also binds the task: an occurrence whose `prompt`, `command`, `skill` or `skill_args` differ from its job row runs limited, so a task queued before an edit does not run on the edited row's approval.
 
@@ -97,6 +97,7 @@ Each of these is known and left open.
 - **Credentials a limited task keeps.** A limited task keeps its vault and grants. A placeholder can go only to an approved host, and `istota-credential get` for an entry marked readable returns the value into the task, where it can leave only by an approved host or an open verb.
 - **Writers left open on `briefings_config`.** `group run` (with `--mode publish`), `group delete`, `group delivery`, `group revoke-approval`, `schedule set` and `schedule remove` change no prompt or source and stay open under the flag. `group run` can start research on a definition its owner already wrote.
 - **Pollers.** An already-subscribed feed's poller, `feeds refresh` and `poll` keep fetching. A limited task cannot change what they fetch.
+- **A limited job's publish target.** A job needs no approval to run limited, so a limited admin task can plant a job whose `publish_shared_kv` sends its answer, written with memory in reach, to shared KV. That reaches other users' briefings and leaves no host. `_publish_result_to_shared_kv` gates on the writer and reads no reach, and it does not check for a reserved namespace.
 - **CRON.md `target`.** A planted job's `target` can name a room. A shared room is refused. Whether another user's private room is refused was not established in this work.
 
 ## Residuals

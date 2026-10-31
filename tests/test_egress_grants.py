@@ -100,10 +100,25 @@ class TestParseEntry:
 
 
 class TestJobDigest:
-    BASE = {"prompt": "p", "command": None, "skill": None, "skill_args": None, "cron_expression": "0 9 * * *"}
+    BASE = {
+        "prompt": "p", "command": None, "skill": None, "skill_args": None,
+        "publish_shared_kv": None, "publish_shared_kv_trusted": 0, "cron_expression": "0 9 * * *",
+    }
+
+    @pytest.mark.parametrize("value", [None, 0, False, ""])
+    def test_an_untrusted_publish_flag_reads_the_same_however_stored(self, value):
+        row = {**self.BASE, "publish_shared_kv_trusted": value}
+        assert egress.job_digest(row) == egress.job_digest(self.BASE)
+
+    @pytest.mark.parametrize("value", [1, True])
+    def test_a_trusted_publish_flag_reads_the_same_however_stored(self, value):
+        row = {**self.BASE, "publish_shared_kv_trusted": value}
+        trusted = {**self.BASE, "publish_shared_kv_trusted": 1}
+        assert egress.job_digest(row) == egress.job_digest(trusted)
 
     @pytest.mark.parametrize("column,value", [
         ("prompt", "q"), ("command", "c"), ("skill", "s"), ("skill_args", '["a"]'),
+        ("publish_shared_kv", "ns/key"), ("publish_shared_kv_trusted", 1),
     ])
     def test_changes_with_what_the_job_dispatches(self, column, value):
         assert egress.job_digest({**self.BASE, column: value}) != egress.job_digest(self.BASE)

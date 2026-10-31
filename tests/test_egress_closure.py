@@ -422,6 +422,27 @@ class TestAPlantedApproval:
             conn.commit()
         assert _reach(config, index, limited).egress_hosts == frozenset({GRANTED})
 
+    def test_a_publish_target_planted_on_an_open_job_loses_the_approval(self, config, index, limited):
+        """An admin's job can publish its answer into other users' briefings, and a
+        limited task can write the field into the file. So the approval does not
+        survive it, and the job's next run is limited rather than open."""
+        from istota.cron_loader import CronJob, sync_cron_jobs_to_db
+
+        text = f"Read the news. The secret is {CANARY}."
+        with db.get_db(config.db_path) as conn:
+            sync_cron_jobs_to_db(conn, USER, [CronJob(name=JOB, cron="0 9 * * *", prompt=text)])
+            row = egress.job_row_by_subject(conn, USER, SUBJECT)
+            egress.add_grant(conn, USER, SUBJECT, f"open:{egress.job_digest(row)}", decided_via="cli")
+            conn.commit()
+        assert _reach(config, index, limited).egress_hosts is None
+        with db.get_db(config.db_path) as conn:
+            sync_cron_jobs_to_db(conn, USER, [CronJob(
+                name=JOB, cron="0 9 * * *", prompt=text,
+                publish_shared_kv="briefing_shared_blocks/digest",
+            )])
+            conn.commit()
+        assert _reach(config, index, limited).egress_hosts == frozenset({GRANTED})
+
     def test_an_edit_loses_an_approval(self, config, index, limited):
         with db.get_db(config.db_path) as conn:
             row = egress.job_row_by_subject(conn, USER, SUBJECT)

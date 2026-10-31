@@ -150,7 +150,7 @@ A job is in one of three states:
 - **Public**: open web and nothing private: no memory, no files, no credentials and no notes in its room. Set `reach = "public"` in CRON.md to ask, then approve its text on the page. A job that needs to keep state should stay limited and use hosts.
 - **Full access**: it runs with your browser profile and every skill, and can reach any public host. Every job that existed when this feature arrived starts here. Remove Full access on the page to narrow it, and expect the next run to be refused the hosts it needs.
 
-Public and Full access are approved against the exact text of the job, which the page shows you. Editing `prompt`, a `prompt_file`, `command`, `skill` or `skill_args` drops the approval, and the job runs limited until you approve the new text. Changing the schedule, model or delivery does not. Host and skill entries stay through an edit.
+Public and Full access are approved against the exact text of the job, which the page shows you. Editing `prompt`, a `prompt_file`, `command`, `skill`, `skill_args`, `publish_shared_kv` or `publish_shared_kv_trusted` drops the approval, and the job runs limited until you approve the new text. Changing the schedule, model or delivery does not. Host and skill entries stay through an edit.
 
 Renaming a job counts as removing it and adding a new one: the new name starts with nothing.
 

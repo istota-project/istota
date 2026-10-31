@@ -4341,6 +4341,27 @@ class TestEgressLifecycle:
         assert self._entries(conn) == before
         assert self._refused(conn) == {}
 
+    @pytest.mark.parametrize("edit", [
+        {"publish_shared_kv": "briefing_shared_blocks/digest"},
+        {"publish_shared_kv_trusted": True},
+    ])
+    def test_adding_a_publish_target_drops_the_approval(self, conn, edit):
+        """It sends the job's answer into other users' briefings, so it is part of
+        what was approved. A limited task can write this field."""
+        sync_cron_jobs_to_db(conn, "alice", [self._job()])
+        self._approve(conn, "open")
+        sync_cron_jobs_to_db(conn, "alice", [self._job(**edit)])
+        assert self._entries(conn) == set()
+        assert "open" in self._refused(conn)
+
+    def test_a_repeated_sync_with_a_publish_target_keeps_the_approval(self, conn):
+        """The row reads back as text and 0/1, and the file as a string and a bool."""
+        job = self._job(publish_shared_kv="ns/key", publish_shared_kv_trusted=True)
+        sync_cron_jobs_to_db(conn, "alice", [job])
+        self._approve(conn, "open")
+        sync_cron_jobs_to_db(conn, "alice", [job])
+        assert len(self._entries(conn)) == 1
+
     def test_changing_a_command_drops_the_approval(self, conn):
         job = CronJob(name="j", cron="0 9 * * *", command="echo a")
         sync_cron_jobs_to_db(conn, "alice", [job])
