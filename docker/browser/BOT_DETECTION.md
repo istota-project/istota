@@ -171,6 +171,8 @@ Cloudflare challenge page ("Just a moment...") would spin forever when navigated
 
 **Fix:** Navigate via xdotool keyboard input — `Ctrl+L` (focus address bar), type URL, `Enter`. Uses X11 events identical to manual browsing. Falls back to CDP if xdotool fails. Applied to first navigation in new sessions; reused sessions already have the Cloudflare clearance cookie.
 
+**One exception:** the omnibox folds case against addresses it remembers, so typing `/article` goes to a remembered `/Article` and the server never sees the typed spelling. Turning off saved history does not stop it (measured; shortcuts are the likely second source). When a typed navigation lands on another spelling of the requested address, the one retry uses `page.goto`, because no keystroke reaches that address. Every other navigation stays on the keyboard.
+
 **2. CDP Runtime.evaluate during challenge window:** Immediately after navigation, we called `page.evaluate()` for DataDome detection. This sends `Runtime.evaluate` CDP commands while Cloudflare's challenge JS is running its fingerprinting checks. The challenge detects active CDP usage and fails.
 
 **Fix:** Added 3-5 second passive wait (no CDP evaluate calls) after navigation. DataDome and captcha checks moved to after this window. `page.wait_for_timeout()` is a pure timer that doesn't send CDP commands.
