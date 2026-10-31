@@ -141,6 +141,8 @@ def run_confined_command(
             )
             if cgroup_path is not None:
                 stack.callback(_release_task_cgroup, task.id, cgroup_path)
+                if runtime.proxy_ctx is not None:
+                    runtime.proxy_ctx.task_cgroup = cgroup_path
         if runtime.proxy_ctx is not None:
             stack.enter_context(runtime.proxy_ctx)
         if runtime.net_proxy_ctx is not None:
@@ -170,4 +172,5 @@ def run_confined_command(
             return run_capture(
                 argv, timeout=timeout, cwd=str(temp_dir), env=runtime.env,
                 preexec_fn=preexec,
+                max_output_bytes=config.security.skill_proxy_max_output_mb * 1024 * 1024,
             )

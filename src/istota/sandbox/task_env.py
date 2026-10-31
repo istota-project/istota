@@ -575,6 +575,9 @@ def build_task_runtime(
             task_id=task.id,
             vault_credentials=vault_credentials,
             vault_fetch_limit=config.security.vault_fetch_limit_per_task,
+            max_connections=config.security.skill_proxy_max_connections,
+            max_concurrent_skills=config.security.skill_proxy_max_concurrent,
+            max_output_bytes=config.security.skill_proxy_max_output_mb * 1024 * 1024,
             vault_write_limit=(
                 0 if withheld_scopes else config.security.vault_writes_per_task
             ),
@@ -732,6 +735,7 @@ def build_task_runtime(
         _net_proxy_ctx = NetworkProxy(
             _net_proxy_sock, allowed_hosts,
             private_hosts=_network_private_hosts(config, authorized_skills),
+            max_connections=config.security.network_proxy_max_connections,
         )
 
     # Collect extra paths to RO bind-mount into the sandbox.

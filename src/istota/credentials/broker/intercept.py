@@ -20,12 +20,16 @@ from dataclasses import dataclass
 import logging
 import re
 import ssl
+import time
 
 import h11
 
 from istota import db
 from istota.credentials import store as secrets_store
-from istota.sandbox.network_proxy import UpstreamRefused, checked_connection
+from istota.sandbox.network_proxy import (
+    REQUEST_DEADLINE_SECONDS, UpstreamRefused, checked_connection,
+)
+from istota.sandbox.unix_server import arm_until
 from . import ca
 from .bindings import get_entry_binding, https_host, credential_host, daemon_only_refusal
 from .grants import check_credential_grant
@@ -59,11 +63,13 @@ class Broker:
         return False
 
 
-def _event(parser, sock):
+def _event(parser, sock, deadline=None):
     while True:
         event = parser.next_event()
         if event is not h11.NEED_DATA:
             return event
+        if deadline is not None:
+            arm_until(sock, deadline)
         parser.receive_data(sock.recv(65536))
 
 
@@ -326,7 +332,9 @@ def _requests(broker, tls, host, port, target, *, plain_http=False, initial_data
             sent_names = set()
             status = 502
             small = False
-            request = _event(downstream, tls)
+            # h11 caps the head's size. This caps its time.
+            request = _event(downstream, tls, time.monotonic() + REQUEST_DEADLINE_SECONDS)
+            tls.settimeout(30)
             if isinstance(request, h11.ConnectionClosed):
                 return
             if not isinstance(request, h11.Request):

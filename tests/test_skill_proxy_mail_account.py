@@ -340,7 +340,7 @@ class TestTheSkillNameComesFromTheDispatch:
             return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
 
         proxy_env_account = env["reader"]
-        monkeypatch.setattr(skill_proxy_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(skill_proxy_module, "run_capture", fake_run)
         monkeypatch.setattr(skill_proxy_module.peer_process, "reporting_pid",
                             _no_report)
         return exchange(proxy, {"skill": skill, "args": [], "trusted_skill": "email"},
@@ -354,7 +354,7 @@ class TestTheSkillNameComesFromTheDispatch:
 
 
 class _no_report:
-    def __init__(self, register):
+    def __init__(self, register, preexec=None):
         pass
 
     def __enter__(self):

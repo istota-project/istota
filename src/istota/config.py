@@ -1917,6 +1917,13 @@ class SecurityConfig:
     # the name resolves, so probing for absent names is not free; `vault_list`
     # is not counted.
     vault_fetch_limit_per_task: int = 10
+    # What one task can make the daemon hold through its proxies (#890). A
+    # connection past a limit is refused; a skill past the concurrent limit
+    # waits for a slot, inside the client's wait.
+    skill_proxy_max_connections: int = 64
+    skill_proxy_max_concurrent: int = 8
+    skill_proxy_max_output_mb: int = 16
+    network_proxy_max_connections: int = 128
     # This is a capability gate: 0 disables model-requested vault writes.
     # Unlike the fetch limit above, it never means unlimited.
     vault_writes_per_task: int = 3
@@ -5639,6 +5646,10 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     # so clamping a negative value to it would remove the cap on shared-credential
     # fetches rather than tighten it. `_non_negative_int` keeps the shipped 10.
     "security.vault_fetch_limit_per_task": _non_negative_int,
+    "security.skill_proxy_max_connections": _positive_int,
+    "security.skill_proxy_max_concurrent": _positive_int,
+    "security.skill_proxy_max_output_mb": _positive_int,
+    "security.network_proxy_max_connections": _positive_int,
     "security.vault_writes_per_task": _non_negative_int,
     "security.wallet_requests_per_task": _non_negative_int,
     "security.wallet_fills_per_purchase": _non_negative_int,
