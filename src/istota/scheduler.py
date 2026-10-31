@@ -138,6 +138,7 @@ from .config import (
 )
 from .brain.claude_code import is_api_error_banner, is_permanent_api_error
 from .executor import (
+    _configured_url_hosts,
     detect_malformed_result,
     discover_calendars_for_task,
     execute_task,
@@ -2506,7 +2507,7 @@ def _purge_obsolete_skill_jobs(conn, skill_index: dict) -> None:
                 "(skill no longer exists in index)",
                 row["name"], row["user_id"], skill,
             )
-            conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (row["id"],))
+            db.delete_scheduled_job(conn, row["id"])
 
     cur = conn.execute(
         "SELECT id, user_id, skill FROM tasks "
@@ -2626,6 +2627,8 @@ def _execute_skill_task(
         SKILL_MODEL_CALLERS,
         build_clean_env,
         get_user_temp_dir,
+        public_posture_refusal,
+        record_egress_posture,
         skill_model_credentials,
     )
     from .llm.providers import (
@@ -2653,6 +2656,33 @@ def _execute_skill_task(
     if skill_name not in skill_index:
         return False, f"unknown skill: {skill_name}"
 
+    # This path has no proxy, so the proxy's gate on a limited job's `external`
+    # skills does not reach it, and CRON.md is model-writable.
+    from .rooms.scopes import reach_for_task
+
+    with db.get_db(config.db_path) as conn:
+        reach = reach_for_task(conn, task, skill_index=skill_index)
+    if reach.public:
+        if skill_name in reach.withheld:
+            return False, (
+                f"public_job_skill_withheld: the {skill_name} skill is not available "
+                "to a public job, which holds no private data."
+            )
+        refusal = public_posture_refusal(config)
+        if refusal is not None:
+            return False, refusal
+    refusal = record_egress_posture(config, None, task, reach)
+    if refusal is not None:
+        return False, refusal
+    if skill_name in reach.egress_withheld:
+        from .executor import file_egress_refusals
+
+        file_egress_refusals(config, task, [("skill", f"skill:{skill_name}")])
+        return False, (
+            f"egress_not_approved: the {skill_name} skill is not approved for this "
+            "job; the owner can add it in Settings, Network access."
+        )
+
     # In-process dispatch for skill-tasks that need read/write access to
     # the encrypted secrets store. The subprocess path strips
     # ``ISTOTA_SECRET_KEY`` by design (executor.build_clean_env), so
@@ -2667,8 +2697,10 @@ def _execute_skill_task(
     user_temp_dir = get_user_temp_dir(config, task.user_id)
     user_temp_dir.mkdir(parents=True, exist_ok=True)
 
-    with db.get_db(config.db_path) as conn:
-        user_resources = db.get_user_resources(conn, task.user_id)
+    user_resources: list[db.UserResource] = []
+    if not reach.public:
+        with db.get_db(config.db_path) as conn:
+            user_resources = db.get_user_resources(conn, task.user_id)
     user_cfg = config.get_user(task.user_id)
 
     ctx = EnvContext(
@@ -2678,7 +2710,7 @@ def _execute_skill_task(
         user_config=user_cfg,
         user_temp_dir=user_temp_dir,
         is_admin=config.is_admin(task.user_id),
-        discovered_calendars=discover_calendars_for_task(task, config),
+        discovered_calendars=[] if reach.public else discover_calendars_for_task(task, config),
     )
 
     env = build_clean_env(config)
@@ -2742,6 +2774,23 @@ def _execute_skill_task(
             os.environ, names=SKILL_DAEMON_CREDENTIAL_VARS[skill_name],
         ))
     env.update(servarr_daemon_keyed_env(os.environ))
+
+    # No proxy here to set it, and CRON.md can name any verb of a `local` skill.
+    from .lib.egress_log import EGRESS_LIMITED_VAR
+
+    if reach.egress_hosts is not None:
+        env[EGRESS_LIMITED_VAR] = "1"
+    else:
+        env.pop(EGRESS_LIMITED_VAR, None)
+    # The rest of what the proxy would have set. Without the profile a CLI falls
+    # back to its user's signed-in browser.
+    from .browser.owner import BROWSER_PROFILE_VAR, ISOLATED_PROFILE
+
+    env[BROWSER_PROFILE_VAR] = ISOLATED_PROFILE if reach.isolated_browser else task.user_id
+    if reach.public:
+        from .sandbox.host_paths import WITHHELD_SCOPES_VAR
+
+        env[WITHHELD_SCOPES_VAR] = ",".join(sorted(reach.withheld))
 
     cmd = [sys.executable, "-m", f"istota.skills.{skill_name}"] + skill_args
     from istota.sandbox.host_paths import skill_file_env
@@ -2907,6 +2956,35 @@ CORRESPONDENT_KEPT_SUFFIXES = {
 }
 
 
+#: A public job's model is reading strangers' pages, with its own deferred directory
+#: to write in. It may spawn a subtask, which is public too (`Reach.public`), and
+#: may not turn scratch files into writes to the user's data.
+PUBLIC_JOB_KEPT_SUFFIXES = frozenset({"subtasks"})
+
+
+def _public_job_kept_suffixes(config: Config, task: db.Task) -> frozenset[str] | None:
+    """`PUBLIC_JOB_KEPT_SUFFIXES` for a public job, else None for all of them.
+
+    From the occurrence's own row (`scopes.job_posture`), since a `once` job's row
+    is gone by now. An occurrence nobody decided whose job has gone keeps nothing,
+    and so does a read failure, as on a correspondent's turn."""
+    from .rooms import scopes
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            posture = scopes.job_posture(conn, task)
+        if posture == "unknown":
+            logger.warning("Task %d: no posture and no job row, its deferred writes are dropped", task.id)
+            return frozenset()
+        return PUBLIC_JOB_KEPT_SUFFIXES if posture == "public" else None
+    except Exception as exc:
+        logger.warning(
+            "Task %d: could not read whether its job is public, its deferred writes "
+            "are dropped: %s", task.id, type(exc).__name__,
+        )
+        return frozenset()
+
+
 def _correspondent_kept_suffixes(config: Config, task: db.Task) -> frozenset[str] | None:
     """What of this task's deferred files may be replayed, or None for all of
     them on the user's own turn.
@@ -2995,6 +3073,8 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
         logger.info("Task %d: restricted task, deferred ops dropped", task.id)
         return
     kept = _correspondent_kept_suffixes(config, task)
+    if kept is None:
+        kept = _public_job_kept_suffixes(config, task)
     if kept is not None:
         _purge_deferred_files_for_retry(task, user_temp_dir, keep=kept)
     # One end of the order is load-bearing: `_warn_unconsumed_deferred_files`
@@ -6970,6 +7050,7 @@ def check_worktree_reap(config: Config) -> list:
             # model-written `remote.origin.url`, from the unsandboxed
             # scheduler, outside the CONNECT allowlist, on every sweep.
             skip=_package_cache_dirs(dev.repos_dir),
+            forge_hosts=_configured_url_hosts(config, ["developer"]),
         )
     except Exception as exc:  # noqa: BLE001 - a periodic sweep must not kill the loop
         logger.error("worktree_reap_failed err=%s", exc, exc_info=True)
@@ -9228,6 +9309,7 @@ def cleanup_old_claude_logs(retention_days: int) -> int:
 
 def _sync_cron_files(conn, app_config: Config) -> None:
     """Sync CRON.md files to DB for all configured users."""
+    from .rooms import egress
     from .cron_loader import (
         _MODULE_JOB_PREFIX,
         load_cron_document,
@@ -9289,20 +9371,20 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                     # written before ISSUE-596 can hold another user's text.
                     for stale in user_db_jobs:
                         if stale.name in doc.refused_names:
-                            conn.execute(
-                                "DELETE FROM scheduled_jobs WHERE id = ?",
-                                (stale.id,),
-                            )
+                            db.delete_scheduled_job(conn, stale.id)
                             logger.info(
                                 "Removed scheduled job '%s' for %s: its "
                                 "prompt_file is refused", stale.name, user_id,
                             )
                     conn.commit()
                 else:
-                    sync_cron_jobs_to_db(
+                    refused_subjects = sync_cron_jobs_to_db(
                         conn, user_id, doc.jobs,
                         is_admin=app_config.is_admin(user_id),
+                        unread_names=doc.unread_names,
                     )
+                    if refused_subjects:
+                        egress.raise_refused_bell(app_config, conn, user_id, refused_subjects)
             else:
                 # No CRON.md — try one-time migration from DB. False here is
                 # the ordinary case (nothing to migrate, or the file already

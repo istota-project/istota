@@ -67,7 +67,7 @@ Current members can read and download retained editions, including editions from
 
 Group sources are public browse/market inputs, the shared newsletter pool, selected group notebook or text files, shared blocks, and explicitly approved personal file or calendar contributions. The newsletter pool is the same unowned mail a personal Newsletters source reads; mail addressed to a configured user never enters it. Direct personal RSS, notes, tasks and calendar sources cannot be copied into a group definition. Each contributor approves their exact resource and the recurring disclosure to current and future group members. Calendar approval states the date window and disclosed fields. Changing the resource, projection or channel requires renewed approval; an author or admin cannot approve for another person.
 
-Public research has its own prompt. It runs through the existing browse skill in an ordinary sandboxed service task with a dedicated Briefings browser profile. It does not inherit a human browser session, personal memory or group files. The research prompt is sent to the configured model provider. Mark prompts containing personal information and acknowledge the group audience before enabling them; a pasted path never grants file access. Final synthesis receives the saved research and approved private inputs without tools; put private generation instructions in that separate prompt. Browser networking keeps its normal behavior, with no additional domain or public-IP firewall promised by this feature.
+Public research has its own prompt. It runs through the existing browse skill in an ordinary sandboxed service task on the shared isolated browser profile, which is signed in as nobody. It does not inherit a human browser session, personal memory or group files. The research prompt is sent to the configured model provider. Mark prompts containing personal information and acknowledge the group audience before enabling them; a pasted path never grants file access. Final synthesis receives the saved research and approved private inputs without tools; put private generation instructions in that separate prompt. Browser networking keeps its normal behavior, with no additional domain or public-IP firewall promised by this feature.
 
 A refused selected source blocks publication, including structured-only editions. External outages can yield an edition labelled Incomplete sources when usable content remains. An all-empty requested gather fails and leaves the prior edition unchanged. An intentionally source-free prompt with research off remains valid. Revoking a contribution stops future use and pending delivery, but retained published history is not rewritten.
 
@@ -210,7 +210,7 @@ In the web UI, choose Agent as the render mode in Briefings → Settings → Sha
 
 The block's cron queues an ordinary background task under the reserved `__briefings__` identity, the same kind of sandboxed research task group briefings use. The task has:
 
-- the browse skill, limited to `render`, `get`, `links`, `extract` and `close`, on the anonymous Briefings browser profile;
+- the browse skill, without saved credentials, `state` or `forget`, on the shared isolated browser profile, which is signed in as nobody;
 - its own temp directory for scratch files;
 - the date and time in `[briefings] shared_block_timezone`, the clock the block's cron runs on, rather than UTC.
 

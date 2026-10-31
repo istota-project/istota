@@ -4,6 +4,7 @@ triggers: [accounting, ledger, beancount, invoice, invoicing, expense, transacti
 description: Accounting operations (ledger, invoicing, transactions, work log, investment portfolio) — runs in-process via the vendored money package
 cli: true
 env: [{"var":"MONEY_USER","from":"user_id"},{"var":"MONARCH_SESSION_ID","from":"secret","service":"monarch","key":"session_id","sensitive":true,"fallback_var":"MONARCH_SESSION_ID"},{"var":"MONARCH_CSRFTOKEN","from":"secret","service":"monarch","key":"csrftoken","sensitive":true,"fallback_var":"MONARCH_CSRFTOKEN"}]
+egress: local
 ---
 # Money Accounting Operations
 

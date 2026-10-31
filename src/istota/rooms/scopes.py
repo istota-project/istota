@@ -41,12 +41,14 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
 from istota import db
 from istota.browser.owner import BRIEFINGS_IDENTITY
+from istota.rooms import egress
+from istota.sandbox.user_scope import ROOM_NOTES_WITHHELD
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +90,28 @@ class Reach:
     withheld: frozenset[str]
     author: TurnAuthor
     allowance: CorrespondentAllowance = CorrespondentAllowance()
+    #: False only for an own task that holds the user's private data and is
+    #: attended or runs an approved `open` job: nothing else may drive a browser
+    #: signed in to their accounts (#899).
+    isolated_browser: bool = True
+    #: Where this task may send bytes. None: any public host. Otherwise the hosts
+    #: its owner approved (`rooms.egress`). Every egress seam reads this.
+    egress_hosts: frozenset[str] | None = None
+    #: The part of `withheld` that is there only because this task is limited to
+    #: those hosts: each `external` skill with no `skill:` grant.
+    egress_withheld: frozenset[str] = frozenset()
+    #: An approved public job, or a subtask or `!retry` copy of one: the research
+    #: posture on the job's own identity and room. It holds nothing private, which
+    #: is why `egress_hosts` is None. Decided once per occurrence and kept on its
+    #: row (`job_posture`).
+    public: bool = False
+
+    @property
+    def restricted(self) -> bool:
+        """Whether this task takes the restricted posture: its own temp dir, no
+        vault. That is for a task whose input somebody else wrote or nobody asked
+        for. A limited job loses named skills and is otherwise the user's own."""
+        return bool(self.withheld - self.egress_withheld)
 
     @property
     def standing_memory_loads(self) -> bool:
@@ -107,6 +131,10 @@ class Reach:
 #: Research tasks run as `__briefings__` behind the executor's research gate:
 #: a group edition's research, and an agent shared block's whole run.
 BRIEFING_RESEARCH_SOURCE_TYPES = frozenset({"group_briefing_research", "shared_block_research"})
+
+#: All research and a public job keep. `browse` is what they are for, `skills` opens
+#: its body and `untrusted_input` is its companion.
+PUBLIC_KEPT_SKILLS = frozenset({"browse", "skills", "untrusted_input"})
 
 
 #: Off the menu and off the proxy in an incognito room (ISSUE-892), and their
@@ -218,6 +246,12 @@ def reach_for_task(
     runs at full reach in every room (ISSUE-576), and the host's own tasks in
     an email thread room withhold nothing (`is_email_thread_room`).
 
+    An own task that is unattended and holds private data is limited as well
+    (`_egress_for`): `egress_hosts` is what its owner approved, and each `external`
+    skill with no `skill:` grant joins the set (`Reach.egress_withheld`). A job its
+    owner approved as public has open web and holds nothing (`Reach.public`), asked
+    first, so an owner who has approved both `public` and `open` gets the narrower.
+
     ``conn`` is ``None`` for a database that does not exist, which holds no
     room. ``own_addresses`` is `turn_author`'s, and the default can only misread
     the user's own mail as a correspondent's. Any error reading the turn or the
@@ -225,8 +259,7 @@ def reach_for_task(
     memory.
     """
     if is_briefing_research(task):
-        withheld = frozenset(set(skill_index) - {"browse", "skills", "untrusted_input"})
-        return Reach(withheld | frozenset(SYNTHETIC_SCOPES), "own")
+        return Reach(_public_withheld(skill_index), "own")
     if task.guest_participant_id is not None:
         return Reach(all_scopes(skill_index), "guest")
     try:
@@ -242,7 +275,146 @@ def reach_for_task(
     if author == "correspondent":
         allowance = correspondent_scopes(conn, task.user_id, skill_index=skill_index)
         return Reach(all_scopes(skill_index) - allowance.scopes, author, allowance)
-    return Reach(_withheld_from_own_task(conn, task, skill_index), "own")
+    posture = _job_posture_narrowing(conn, task)
+    if posture == "public":
+        return Reach(
+            _public_withheld(skill_index) | {ROOM_NOTES_WITHHELD}, "own", public=True,
+        )
+    if posture == "unknown" and _is_descendant(conn, task):
+        return Reach(all_scopes(skill_index), "own", egress_hosts=frozenset())
+    withheld = _withheld_from_own_task(conn, task, skill_index)
+    egress_hosts, granted_skills = _egress_for(conn, task)
+    if egress_hosts is None:
+        return Reach(withheld, "own", isolated_browser=bool(withheld))
+    egress_withheld = _external_skills(skill_index) - granted_skills - withheld
+    return Reach(
+        withheld | egress_withheld, "own", isolated_browser=True,
+        egress_hosts=egress_hosts, egress_withheld=egress_withheld,
+    )
+
+
+def _public_withheld(skill_index: Mapping[str, object]) -> frozenset[str]:
+    return frozenset(set(skill_index) - PUBLIC_KEPT_SKILLS) | frozenset(SYNTHETIC_SCOPES)
+
+
+JobPosture = Literal["public", "private", "unknown"]
+
+
+def job_posture(conn: sqlite3.Connection, task: "db.Task") -> JobPosture:
+    """What this task's occurrence was decided as, from its row, never asking the
+    job again once it has answered: the row can change or go while the task runs,
+    and a `once` job's goes ahead of the drain.
+
+    `private` is what makes a missing job row mean something. A `once` job that ran
+    as itself recorded `private`, and keeps its writes. `unknown` is an occurrence
+    nobody decided whose job has gone, so no one can say what it held or read, and
+    each reader narrows. Raises what the reads raise; each caller chooses its
+    failure direction.
+    """
+    root = _decision_root(conn, task)
+    stored = egress.stored_posture(conn, root.id)
+    if stored == egress.POSTURE_PUBLIC:
+        return "public"
+    if stored == egress.POSTURE_PRIVATE:
+        return "private"
+    if is_occurrence(root) and egress.job_row(conn, root) is None:
+        return "unknown"
+    return "public" if egress.public_job_approved(conn, root) else "private"
+
+
+def is_public_job(conn: sqlite3.Connection, task: "db.Task") -> bool:
+    """Whether this task's occurrence is a public job. Raises what the reads raise."""
+    return job_posture(conn, task) == "public"
+
+
+def _job_posture_narrowing(conn: sqlite3.Connection | None, task: "db.Task") -> JobPosture:
+    """`job_posture`, where a failure narrows: the task falls through to
+    `_egress_for`, which limits it."""
+    if conn is None:
+        return "private"
+    try:
+        return job_posture(conn, task)
+    except Exception as exc:  # noqa: BLE001 — a read failure narrows
+        logger.warning("egress_decide_failed task=%s: %s", task.id, type(exc).__name__)
+        return "private"
+
+
+def _is_descendant(conn: sqlite3.Connection, task: "db.Task") -> bool:
+    return _decision_root(conn, task).id != task.id
+
+
+def _external_skills(skill_index: Mapping[str, object]) -> frozenset[str]:
+    return frozenset(
+        name for name, meta in skill_index.items()
+        if getattr(meta, "egress", "external") != "local"
+    )
+
+
+def _root_is_attended(root: "db.Task") -> bool:
+    """Whether a person is there for this root task. TASKS.md is a surface and is
+    not attended, because a limited task can write a line into it."""
+    from .surfaces import origin_surface_for_source_type
+
+    if root.source_type == "cli":
+        return True
+    surface = origin_surface_for_source_type(root.source_type)
+    return surface is not None and surface != "istota_file"
+
+
+def _egress_for(
+    conn: sqlite3.Connection | None, task: "db.Task",
+) -> tuple[frozenset[str] | None, frozenset[str]]:
+    """Where an own task may send bytes: ``(hosts, granted skills)``, with None
+    hosts for any public host. A subtask or `!retry` copy has its root's answer.
+
+    `reach_for_task` has already asked about a public job, whose posture is more
+    than an answer here. Reading the grants can fail only toward the empty set.
+    """
+    if conn is None:
+        return frozenset(), frozenset()
+    try:
+        root = _decision_root(conn, task)
+        if is_briefing_research(root) or _root_is_attended(root):
+            return None, frozenset()
+        if egress.job_approved(conn, root, "open"):
+            return None, frozenset()
+        subject = egress.subject_for(conn, root)
+        return (
+            egress.approved_hosts(conn, task.user_id, subject),
+            egress.approved_skills(conn, task.user_id, subject),
+        )
+    except Exception as exc:  # noqa: BLE001 — a read failure narrows
+        logger.warning("egress_decide_failed task=%s: %s", task.id, type(exc).__name__)
+        return frozenset(), frozenset()
+
+
+def egress_subject(conn: sqlite3.Connection, task: "db.Task") -> str | None:
+    """What this task's refusals and grants hang on: its root's subject."""
+    return egress.subject_for(conn, _decision_root(conn, task))
+
+
+def is_occurrence(task: "db.Task") -> bool:
+    """Whether this task is one run of a job, made from the job's row."""
+    return task.source_type == "scheduled" and task.scheduled_job_id is not None
+
+
+def _decision_root(conn: sqlite3.Connection, task: "db.Task") -> "db.Task":
+    """The task whose answer this one takes: the nearest job occurrence up the
+    `parent_task_id` walk, else the task at its end.
+
+    A job re-run links to the failed occurrence it replaces and runs the job as it
+    stands now, so it decides for itself. A subtask or a `!retry` copy, which has
+    no job of its own, takes the answer of what it descends from. `turn_author` has
+    just read this chain as whole, so a break here is a race, and raises.
+    """
+    root = task
+    for link in _turn_chain(conn, task):
+        if link is None:
+            raise LookupError("broken task chain")
+        root = link
+        if is_occurrence(link):
+            break
+    return root
 
 
 def _withheld_from_own_task(
@@ -371,26 +543,36 @@ def turn_author(
         return "correspondent" if task.source_type == "email" else "own"
 
     someone_else = False
-    seen: set[int] = set()
-    current = task
-    while True:
-        if current.id in seen or len(seen) >= _TURN_CHAIN_LIMIT:
+    for current in _turn_chain(conn, task):
+        if current is None:
             someone_else = True
             break
-        seen.add(current.id)
         link = _link_author(conn, current, task.user_id, own_addresses)
         if link == "guest":
             return "guest"
         if link == "correspondent":
             someone_else = True
+    return "correspondent" if someone_else else "own"
+
+
+def _turn_chain(conn: sqlite3.Connection, task: "db.Task") -> "Iterator[db.Task | None]":
+    """``task``, then each ancestor up `parent_task_id`. Ends in None where the
+    chain breaks: a missing ancestor, a cycle or a chain past the limit."""
+    seen: set[int] = set()
+    current = task
+    while True:
+        if current.id in seen or len(seen) >= _TURN_CHAIN_LIMIT:
+            yield None
+            return
+        seen.add(current.id)
+        yield current
         if current.parent_task_id is None:
-            break
+            return
         parent = db.get_task(conn, current.parent_task_id)
         if parent is None:
-            someone_else = True
-            break
+            yield None
+            return
         current = parent
-    return "correspondent" if someone_else else "own"
 
 
 def _link_author(
@@ -627,6 +809,8 @@ def task_group_ids(
     if is_briefing_research(task) or task.guest_participant_id is not None or task.audience == "mixed":
         return []
     if turn_author(conn, task, own_addresses=own_addresses) != "own":
+        return []
+    if job_posture(conn, task) != "private":
         return []
     groups = db.list_user_groups(conn, task.user_id)
     automatic = {g for g in groups if db.get_group(conn, g)["system_key"] == "all_users"}

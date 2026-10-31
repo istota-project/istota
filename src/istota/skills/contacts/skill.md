@@ -6,6 +6,7 @@ cli: true
 companion_skills: [untrusted_input]
 dependencies: [vobject]
 env: [{"var":"CARDDAV_URL","from":"config","config_path":"carddav_url","when":"carddav_url"},{"var":"CARDDAV_USERNAME","from":"config","config_path":"carddav_username","when":"carddav_url"},{"var":"CARDDAV_PASSWORD","from":"config","config_path":"carddav_password","when":"carddav_url","sensitive":true},{"var":"GOOGLE_CONTACTS_TOKEN","from":"setup_env","sensitive":true},{"var":"GOOGLE_CONTACTS_SCOPES","from":"setup_env","sensitive":true}]
+egress: local
 ---
 
 # Contacts

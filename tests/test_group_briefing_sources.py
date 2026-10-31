@@ -318,7 +318,7 @@ def test_group_fence_cannot_be_closed_from_inside(env):
     assert "[delimiter removed]" in rendered
 
 
-def test_group_browse_reuses_source_client_with_briefings_identity(env, monkeypatch):
+def test_group_browse_reuses_source_client_on_the_isolated_profile(env, monkeypatch):
     from istota.briefings.sources.group import gather_group_sources
     import istota.briefings.sources.browse as browse
     browser = Mock(return_value=GatheredSource(kind="browse", title="Public", text="Public article", untrusted=True))
@@ -326,7 +326,7 @@ def test_group_browse_reuses_source_client_with_briefings_identity(env, monkeypa
     definition = define(env, [source("browse", "browse", url="https://example.com/"), source("public", "shared_block", name="public")])
     gathered = gather_group_sources(context(env, definition))
     assert gathered[0].text == "Public article" and gathered[0].untrusted
-    assert browser.call_args.args[1].user_id == "__briefings__"
+    assert browser.call_args.args[1].user_id == "__isolated__"
 
 
 def test_group_browse_refuses_reserved_identity_collision(env, monkeypatch):

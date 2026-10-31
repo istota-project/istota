@@ -2,6 +2,7 @@
 name: notes
 triggers: [note, save, write, markdown]
 description: Markdown file conventions and note-saving procedures
+egress: local
 ---
 ## File format
 

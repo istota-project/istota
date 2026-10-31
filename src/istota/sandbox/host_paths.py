@@ -90,7 +90,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .confined import open_dir, open_or_create_dirs, open_regular, valid_parts
-from .user_scope import is_within, scoped_user_dir
+from .user_scope import ROOM_NOTES_WITHHELD, is_within, scoped_user_dir
 
 
 def workspace_roots(
@@ -311,7 +311,9 @@ def env_host_roots(
         user_id=os.environ.get("ISTOTA_USER_ID", "").strip(),
         deferred_dir=os.environ.get("ISTOTA_DEFERRED_DIR", "").strip() or None,
         conversation_token=(
-            os.environ.get("ISTOTA_CONVERSATION_TOKEN", "").strip() if channel else ""
+            os.environ.get("ISTOTA_CONVERSATION_TOKEN", "").strip()
+            if channel and ROOM_NOTES_WITHHELD not in _withheld_from_env()
+            else ""
         ),
         writable=writable,
         attachments_dir=(

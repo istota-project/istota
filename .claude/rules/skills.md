@@ -7,7 +7,7 @@ paths:
 
 ## Skills Loader (`src/istota/skills/_loader.py`)
 
-`SkillMeta` (`_types.py`): `name`, `description`, `always_include`, `admin_only`, `keywords`, `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `requires_capability`, `env_specs`, `cli`, `experimental` (needs `skill_<name>` in `[experimental] features`), `exclude_memory`, `exclude_persona`, `exclude_resources`, `skill_dir`.
+`SkillMeta` (`_types.py`): `name`, `description`, `always_include`, `admin_only`, `keywords`, `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `requires_capability`, `env_specs`, `cli`, `experimental` (needs `skill_<name>` in `[experimental] features`), `exclude_memory`, `exclude_persona`, `exclude_resources`, `skill_dir`, `egress` (`local` or `external`, and anything else or nothing loads as `external`; every bundled manifest states one, `tests/test_egress_grants.py`; sandbox.md, "The egress decision"). An operator override of a bundled skill states its own: an override of `briefing` with no `egress` is withheld from a limited briefing, and its `exclude_memory` then does not apply.
 
 ### Functions
 - `load_skill_index(skills_dir, bundled_dir=None)`; `select_skills(prompt, source_type, user_resource_types, skill_index, is_admin=True, attachments=None, disabled_skills=None, sticky_skills=None, enabled_experimental_features=frozenset())` returns the sorted eager set.
@@ -149,6 +149,7 @@ Read: `list`, `read`, `search`, `thread`, `attachments --dest`, `from-senders`, 
 `get`, `render`, `screenshot`, `extract`, `interact`, `links`, `close`; env `BROWSER_API_URL`; `requires_capability: [browser]`.
 
 - `render` first for structured pages (keeps link URLs, ISSUE-192).
+- **The profile comes from `ISTOTA_BROWSER_PROFILE`, not the user id.** On `__isolated__` the verbs `state` and `forget` and every credential flag are refused before parsing (sandbox.md, "The isolated browser profile").
 - **Visual mode**: the model names points only in the delivered picture's pixels. The container measures the PNG and records the frame (`X-Browse-Capture`); one `delivered_size` (rounding down) shrinks captures under `image_attachments.MAX_EDGE` / `MAX_AREA_PIXELS`. Input via xdotool, since CDP clicks fail Cloudflare. Stale captures are refused (`stale_capture`, `viewport_changed`, `full_page_capture`, `no_capture`, `out_of_picture`).
 - **Scroll** (ISSUE-528): `--scroll-at X,Y` is a distinct `scroll_at` wheel action at a point (an old container answers `unknown`); bare `--scroll` sends Page keys via `key_native` (XTest) and refuses `window_not_focused`; no JS evaluation. `--scroll-amount` is retired but still declared, and the container refuses it (`retired_argument`). `--scroll-zoom` holds an allowlisted modifier with the keydown inside `modifier_held`'s `try`, and requires an explicit direction.
 - `--fill-credential` checks frame origin against the vault binding, requires HTTPS, fills in one CDP evaluation, needs capability `credential_origin_check`, and is selector-only.

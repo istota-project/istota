@@ -4,6 +4,7 @@ triggers: [wordpress, wp, blog post, cms, acf, custom post type, publish]
 description: Create, edit and administer WordPress sites over the REST API (posts, custom types, ACF, media, users, settings, plugins)
 cli: true
 companion_skills: [untrusted_input]
+egress: external
 ---
 # WordPress
 

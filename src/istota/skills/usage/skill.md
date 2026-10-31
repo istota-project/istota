@@ -3,6 +3,7 @@ name: usage
 description: Read token usage, costs and subscription list-price equivalents by model, origin, source or brain
 cli: true
 shared_room: private
+egress: local
 ---
 # Usage
 

@@ -4,6 +4,7 @@ triggers: [buy, purchase, order, checkout, pay for, wallet]
 description: Request purchase authorization and fill a payment card without reading its number
 cli: true
 companion_skills: [sensitive_actions, untrusted_input]
+egress: local
 ---
 # Wallet purchases
 

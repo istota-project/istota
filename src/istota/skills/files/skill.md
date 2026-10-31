@@ -3,6 +3,7 @@ name: files
 description: File operations in your workspace
 always_include: true
 env: [{"var":"NC_URL","from":"config","config_path":"nextcloud.url"},{"var":"NC_USER","from":"config","config_path":"nextcloud.username"},{"var":"NC_PASS","from":"config","config_path":"nextcloud.app_password","sensitive":true}]
+egress: local
 ---
 Your workspace files live under `{workspace}`. Use standard filesystem operations:
 

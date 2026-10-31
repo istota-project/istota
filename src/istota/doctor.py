@@ -10542,6 +10542,49 @@ def check_sharing_ics_feeds(config: "Config", probe: bool) -> CheckResult:
     return CheckResult(name, OK, detail)
 
 
+def check_egress_open_jobs(config: "Config", probe: bool) -> CheckResult:
+    """How many scheduled jobs still run with full access.
+
+    The migration brings every existing job in on `open`, and such a job keeps H-2
+    open until its owner narrows it. A count: a job name is the user's and is
+    model-writable, and this report reaches an admin page.
+    """
+    import sqlite3
+
+    from istota.rooms import egress
+
+    name = "security.egress_open_jobs"
+    db_path = Path(config.db_path)
+    if not db_path.exists():
+        return CheckResult(name, SKIP, f"no framework database at {db_path}")
+    try:
+        conn = sqlite_util.connect_read_only(db_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            count = egress.open_job_count(conn)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - a check never raises
+        return CheckResult(
+            name, WARN, f"could not read the scheduled jobs ({type(exc).__name__})",
+            remedy=(
+                "Check `runtime.framework_db`; a missing table means the "
+                "database has not been migrated, which `istota init` does."
+            ),
+        )
+    if not count:
+        return CheckResult(name, OK, "no scheduled job runs with full access")
+    return CheckResult(
+        name, WARN,
+        f"{count} scheduled job(s) run with full access, so instructions a job reads "
+        "can send private data to any public host",
+        remedy=(
+            "Each job's owner can narrow it in Settings, Network access, by removing "
+            "Full access and adding the hosts it needs."
+        ),
+    )
+
+
 def _fetch_ocm_discovery(url: str) -> tuple[int, dict | None]:
     """GET istota's own discovery document from outside: the status and the JSON object, if any."""
     import httpx
@@ -10962,6 +11005,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.credential_library", check_credential_library),
     ("security.credential_isolation", check_credential_isolation),
     ("security.wallet", check_wallet),
+    ("security.egress_open_jobs", check_egress_open_jobs),
     ("security.room_scope_confinement", check_room_scope_confinement),
     ("browser.api_token", check_browser_api_token),
     ("security.credential_backup", check_credential_backup),
@@ -11108,6 +11152,8 @@ CHECK_SCOPES: dict[str, str] = {
     # a row in its own secrets table. A bare `docker run` has none of the three.
     "security.credential_isolation": DEPLOYMENT,
     "security.wallet": DEPLOYMENT,
+    # Reads the framework database: a count over this install's users.
+    "security.egress_open_jobs": DEPLOYMENT,
     # Deployment: a room policy and a sandbox are properties of an install.
     "security.room_scope_confinement": DEPLOYMENT,
     "browser.api_token": DEPLOYMENT,

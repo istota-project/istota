@@ -5,6 +5,7 @@ exclude_memory: true
 exclude_persona: true
 source_types: [briefing]
 exclude_skills: [email]
+egress: local
 ---
 Briefings must be returned as a JSON object: `{"version": 2, "blocks": [{"block_id": 42, "body_md": "<content>"}]}`. Return each Block ID from the prompt exactly once, as an integer, with its complete Markdown content in `body_md`. Use `\n` for newlines inside strings. Do not output anything outside the JSON object. Do not write block titles, an edition title or a subject line; the delivery layer supplies them. Do not send emails or use email commands. Delivery is handled by the scheduler.
 

@@ -2,6 +2,7 @@
 name: commit
 triggers: [commit, commit message, changelog, git commit, staging]
 description: How to write a commit message, what to update alongside it, and what must never appear in either
+egress: local
 ---
 
 # Commit

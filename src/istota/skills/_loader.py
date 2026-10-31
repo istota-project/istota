@@ -156,6 +156,11 @@ def _shared_room_value(raw: object) -> str:
     return "safe" if raw == "safe" else "private"
 
 
+def _egress_value(raw: object) -> str:
+    """``"local"`` only when the manifest says exactly that; else ``"external"``."""
+    return "local" if raw == "local" else "external"
+
+
 def _load_skill_meta(skill_dir: Path) -> SkillMeta | None:
     """Load skill metadata from a directory.
 
@@ -225,6 +230,7 @@ def _load_skill_meta(skill_dir: Path) -> SkillMeta | None:
         exclude_persona=_get_bool("exclude_persona"),
         cli=_get_bool("cli"),
         shared_room=_shared_room_value(_get("shared_room")),
+        egress=_egress_value(_get("egress")),
         experimental=_get_bool("experimental"),
         skill_dir=str(skill_dir),
     )
@@ -277,6 +283,7 @@ def _load_legacy_index(skills_dir: Path) -> dict[str, SkillMeta]:
             exclude_persona=meta.get("exclude_persona", False),
             cli=meta.get("cli", False),
             shared_room=_shared_room_value(meta.get("shared_room")),
+            egress=_egress_value(meta.get("egress")),
             experimental=meta.get("experimental", False),
         )
         for name, meta in data.items()

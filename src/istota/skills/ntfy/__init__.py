@@ -28,8 +28,9 @@ import sys
 
 import httpx
 
+from istota.lib.egress_log import EGRESS_LIMITED_REASON, egress_limited, limited_refusal
 from istota.notifications import ntfy_headers
-from .._cli import emit, parse_and_resolve, status_exit_code
+from .._cli import emit, error_envelope, parse_and_resolve, status_exit_code
 
 DEFAULT_SERVER = "https://ntfy.sh"
 REQUEST_TIMEOUT = 10.0
@@ -171,6 +172,10 @@ def main() -> int:
     parser = build_parser()
     args = parse_and_resolve(parser)
     if args.command == "send":
+        if args.topic and egress_limited():
+            return _emit(error_envelope(
+                limited_refusal("--topic"), reason=EGRESS_LIMITED_REASON,
+            ))
         return cmd_send(args)
     parser.print_help()
     return 1

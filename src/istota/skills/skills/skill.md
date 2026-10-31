@@ -3,6 +3,7 @@ name: skills
 description: Load full instructions for a skill on demand, list available skills, or read the user's own per-skill additions
 always_include: true
 cli: true
+egress: local
 ---
 # Skills loader
 

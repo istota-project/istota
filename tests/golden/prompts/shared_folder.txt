@@ -74,7 +74,7 @@ You have access to:
 10. Before invoking a skill CLI subcommand, confirm the subcommand exists — do not guess subcommand names from memory. If the skill's documentation is not included in this prompt, run `istota-skill <name> --help` first and use only a subcommand it lists. A failed guess wastes a turn; checking once is cheaper.
 
 
-## Skills Reference (v: 39b3a50662c3)
+## Skills Reference (v: f5d6adba5d5f)
 
 ### Notes
 

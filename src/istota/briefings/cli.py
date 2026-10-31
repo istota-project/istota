@@ -15,6 +15,8 @@ Emits JSON to stdout. A refusal is ``{"status": "error", "reason": <code>,
 - ``confirmation_required``: ``archive delete`` without ``--confirmed``; nothing
   was removed, and ``would`` names the entry.
 - ``unavailable``: the tree was invoked without the context it needs.
+- ``egress_limited``: a limited task asked for a verb that chooses what the daemon
+  fetches (:func:`_refuse_if_limited`).
 - ``host_path_refused``: ``--directive-file`` or ``blocks save --file`` named a
   path outside the task's roots; raised by the ``READ`` stamp and rendered by
   the skill facade. The operator CLI offers neither flag.
@@ -50,6 +52,7 @@ from istota.briefings.models import (
     normalize_block_payload,
 )
 from istota.briefings.source_checks import SourceRefused, check_source
+from istota.lib.egress_log import EGRESS_LIMITED_REASON, egress_limited, limited_refusal
 from istota.skills._hostpath import READ, ReadRefused, click_host_path, read_resolved_text
 
 logger = logging.getLogger(__name__)
@@ -65,6 +68,15 @@ def _fail(reason: str, message: str, **extra) -> NoReturn:
     # `standalone_mode=False`, where Click returns an `Exit` code instead of
     # raising it and `CliRunner` then reports exit 0.
     sys.exit(1)
+
+
+def _refuse_if_limited(verb: str) -> None:
+    """A source's kind and config choose what the daemon fetches, past every limit
+    on the task, so a limited task setting one would have a way out. In the command
+    rather than the facade: the facade sees argv, and click reads `--` its own way.
+    The operator CLI shares this tree and its environment has no flag."""
+    if egress_limited():
+        _fail(EGRESS_LIMITED_REASON, limited_refusal(f"briefings {verb}"))
 
 
 def _log_write(action: str, bctx: BriefingsContext, target) -> None:
@@ -325,6 +337,7 @@ def blocks_list(ctx, briefing):
 )
 @click.pass_context
 def blocks_add(ctx, briefing, title, directive, directive_file, render_mode, options, sources_json):
+    _refuse_if_limited("blocks add")
     bctx = _ctx(ctx)
     payload = {
         "briefing_name": briefing, "title": title,
@@ -345,6 +358,7 @@ def blocks_add(ctx, briefing, title, directive, directive_file, render_mode, opt
 @click.pass_context
 def blocks_save(ctx, payload_file):
     """Create or update a block and its whole source list from one JSON body."""
+    _refuse_if_limited("blocks save")
     bctx = _ctx(ctx)
     try:
         payload = json.loads(_read_file("--file", payload_file))
@@ -469,6 +483,7 @@ def _id_list(raw: str) -> list[int]:
 @click.option("--disabled", is_flag=True, default=False, help="Store the source switched off")
 @click.pass_context
 def sources_add(ctx, block_id, kind, config_json, disabled):
+    _refuse_if_limited("sources add")
     bctx = _ctx(ctx)
     if kind not in SOURCE_KINDS:
         _fail("invalid_argument", f"invalid kind '{kind}' (one of {', '.join(SOURCE_KINDS)})")
@@ -494,6 +509,7 @@ def sources_add(ctx, block_id, kind, config_json, disabled):
 @click.pass_context
 def sources_set(ctx, source_id, config_json, merge_config, enabled):
     """Change a source in place; its id and position stay as they are."""
+    _refuse_if_limited("sources set")
     bctx = _ctx(ctx)
     if config_json is not None and merge_config is not None:
         _fail("invalid_argument", "--config and --merge-config are mutually exclusive")

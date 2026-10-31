@@ -12,6 +12,7 @@ from pathlib import Path
 import tomli
 
 from . import db
+from .rooms import egress
 from .workspace import text_files
 from .workspace.text_files import MemoryMdLocked
 from .workspace.writes import open_or_create_dirs as _open_or_create_dirs
@@ -468,6 +469,10 @@ class CronJob:
     # no publish. Gated on is_shared_kv_writer at write time (admin-only).
     publish_shared_kv: str = ""
     publish_shared_kv_trusted: bool = False
+    # "public" asks for this job's exact text to run with no private data and
+    # open web. A request and never a grant: the file is model-writable, so the
+    # job runs limited until its owner approves (`rooms.egress`).
+    reach: str = "private"
     # Set at parse when the owner may not pick ``model`` (a non-admin naming a
     # model outside `[models] enabled`). The file keeps the field, so a rewrite
     # never deletes what the user wrote; the sync stores no model for it.
@@ -508,6 +513,10 @@ class CronDocument:
     # deletes their rows even when it otherwise holds, since a pre-fix row
     # can carry another user's text as its prompt.
     refused_names: frozenset[str] = frozenset()
+    # Jobs whose `prompt_file` could not be read for now (a mount fault). The
+    # orphan sweep leaves their rows, or a passing fault would cost a job what
+    # its owner approved for it.
+    unread_names: frozenset[str] = frozenset()
     # Why a job was dropped, a field ignored, or a command job will not run
     # for this author, worded for the user. The sync does not read it; the
     # web editor's validator does (`cron_document_errors`).
@@ -594,6 +603,22 @@ def _str_field(
             f"got {type(value).__name__} {shown}"
         )
     return ""
+
+
+def _validate_reach(name: str, user_id: str, value, errors: list[str] | None = None) -> str:
+    """``"public"`` or ``"private"``, and anything else is private with a warning.
+    The narrow answer: a typo must not read as a request for open web."""
+    if not isinstance(value, str):
+        value = _str_field(name, user_id, "reach", value, errors)
+    if value in ("private", "public"):
+        return value
+    if value:
+        shown = repr(value[:80])
+        logger.warning("Job '%s' (user %s): reach %s is not private or public; using private",
+                       name, user_id, shown)
+        if errors is not None:
+            errors.append(f"Job '{name}': reach must be \"private\" or \"public\", got {shown}")
+    return "private"
 
 
 def load_cron_document(config, user_id: str) -> "CronDocument | None":
@@ -697,7 +722,8 @@ def _parse_cron_document(
         return None, [f"TOML error: {e}"]
 
     errors: list[str] = []
-    jobs, skipped, refused_names = _parse_jobs(data, config, user_id, errors)
+    unread: set[str] = set()
+    jobs, skipped, refused_names = _parse_jobs(data, config, user_id, errors, unread)
     return CronDocument(
         content=content,
         block=toml_str,
@@ -705,6 +731,7 @@ def _parse_cron_document(
         jobs=jobs,
         skipped_entries=skipped,
         refused_names=refused_names,
+        unread_names=frozenset(unread),
         errors=tuple(errors),
     ), errors
 
@@ -723,6 +750,7 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
 
 def _parse_jobs(
     data: dict, config, user_id: str, errors: list[str] | None = None,
+    unread: set[str] | None = None,
 ) -> tuple[list[CronJob], int, frozenset[str]]:
     """Build the ``CronJob`` list from a parsed toml block. Never raises.
 
@@ -809,6 +837,8 @@ def _parse_jobs(
                 )
                 if definitive:
                     refused.add(name)
+                elif unread is not None:
+                    unread.add(name)
                 continue
             prompt = text.strip()
         if prompt and command:
@@ -894,6 +924,7 @@ def _parse_jobs(
             publish_shared_kv_trusted=_coerce_bool(
                 name, user_id, "publish_shared_kv_trusted",
                 j.get("publish_shared_kv_trusted", False), False, errors),
+            reach=_validate_reach(name, user_id, j.get("reach", "private"), errors),
             model_refused=model_refused,
             model_split=model_split,
         )
@@ -1041,6 +1072,8 @@ def render_jobs_block(jobs: list[CronJob]) -> str:
             lines.append(_toml_string("publish_shared_kv", job.publish_shared_kv))
         if job.publish_shared_kv_trusted:
             lines.append("publish_shared_kv_trusted = true")
+        if job.reach != "private":
+            lines.append(_toml_string("reach", job.reach))
 
     if not lines:
         return ""
@@ -1288,6 +1321,7 @@ FILE_OWNED_COLUMNS = frozenset({
     "provider",
     "publish_shared_kv",
     "publish_shared_kv_trusted",
+    "reach",
 })
 
 #: Columns the daemon authors. The sync never writes one *from the file*, and
@@ -1393,6 +1427,7 @@ def _file_owned_values(
         "provider": None if fj.model_refused else _stored_model(fj, provider_val)[1],
         "publish_shared_kv": fj.publish_shared_kv or None,
         "publish_shared_kv_trusted": 1 if fj.publish_shared_kv_trusted else 0,
+        "reach": fj.reach,
     }
 
 
@@ -1412,9 +1447,13 @@ def sync_cron_jobs_to_db(
     file_jobs: list[CronJob],
     *,
     is_admin: bool = True,
-) -> None:
+    unread_names: frozenset[str] = frozenset(),
+) -> list[str]:
     """
     Sync CRON.md job definitions into the scheduled_jobs DB table.
+
+    Returns the egress subjects with a new refusal row, for the caller to hand to
+    `rooms.egress.raise_refused_bell` once this has committed.
 
     - New jobs are inserted
     - Existing jobs have definition fields updated (preserving state fields)
@@ -1425,6 +1464,11 @@ def sync_cron_jobs_to_db(
       dispatches
     - command-type jobs are rejected for non-admin users (arbitrary user
       shell-command tasks must remain admin-only)
+    - a new job has no egress grants; an edit to what it dispatches drops its
+      `open:` and `public:` approvals; a removed job takes its rows with it; and
+      `reach = "public"` asks the owner and grants nothing (`_sync_job_approvals`)
+    - ``unread_names`` are jobs whose `prompt_file` could not be read this tick:
+      kept, not orphaned
 
     Both write paths name exactly ``FILE_OWNED_COLUMNS``, so the daemon's
     state columns are left alone rather than surviving by omission.
@@ -1439,6 +1483,8 @@ def sync_cron_jobs_to_db(
     db_jobs = [j for j in db_jobs if not j.name.startswith(_MODULE_JOB_PREFIX)]
     db_by_name = {j.name: j for j in db_jobs}
     file_names = {j.name for j in file_jobs if not (fj_is_disallowed_command(j, is_admin))}
+    file_names |= unread_names
+    refused_subjects: list[str] = []
 
     for fj in file_jobs:
         if fj.name.startswith(_MODULE_JOB_PREFIX):
@@ -1477,6 +1523,8 @@ def sync_cron_jobs_to_db(
         if publisher_retired(conn, user_id, fj.name):
             file_values["enabled"] = 0
         existing = db_by_name.get(fj.name)
+        if _sync_job_approvals(conn, user_id, fj, existing, file_values):
+            refused_subjects.append(egress.cron_subject(fj.name))
         if existing:
             # Update definition fields, preserve state
             updates = {col: file_values[col] for col in file_columns}
@@ -1590,13 +1638,51 @@ def sync_cron_jobs_to_db(
     # Delete orphaned DB jobs (not in file)
     for db_job in db_jobs:
         if db_job.name not in file_names:
-            conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (db_job.id,))
+            db.delete_scheduled_job(conn, db_job.id)
             logger.info(
                 "Removed orphaned scheduled job '%s' for user %s",
                 db_job.name, user_id,
             )
 
     conn.commit()
+    return refused_subjects
+
+
+def _sync_job_approvals(
+    conn, user_id: str, fj: "CronJob", existing, file_values: dict[str, object],
+) -> bool:
+    """What this tick's edit does to a job's egress grants. True if it asked the
+    owner something new.
+
+    Compared against the row before the sync's own write, so an edit is seen on
+    the one tick it is visible. Not repeated on later ticks, so a dismissed
+    request stays dismissed. A row just inserted starts from nothing, whatever an
+    earlier job of that name left behind.
+    """
+    subject = egress.cron_subject(fj.name)
+    digest = egress.job_digest(file_values)
+    if existing is None:
+        egress.forget_subject(conn, user_id, subject)
+        dropped: list[str] = []
+        text_changed = True
+        was_public = False
+    else:
+        was_public = existing.reach == "public"
+        old = {column: getattr(existing, column) for column in egress.DIGEST_COLUMNS}
+        text_changed = egress.job_digest(old) != digest
+        dropped = (
+            egress.drop_job_approvals(conn, user_id, subject, keep_digest=digest)
+            if text_changed else []
+        )
+    if was_public and fj.reach != "public":
+        egress.clear_refused(conn, user_id, subject, "public")
+    ask = list(dropped)
+    if fj.reach == "public" and "public" not in ask and (text_changed or not was_public):
+        if f"public:{digest}" not in egress.grants_for(conn, user_id, subject):
+            ask.append("public")
+    for entry in ask:
+        egress.note_refused(conn, user_id, subject, entry, reopen=True)
+    return bool(ask)
 
 
 def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False) -> bool:
@@ -1686,6 +1772,7 @@ def _migrate_db_jobs_locked(conn, config, user_id: str, config_dir, overwrite: b
             provider=j.provider or "",
             publish_shared_kv=j.publish_shared_kv or "",
             publish_shared_kv_trusted=bool(j.publish_shared_kv_trusted),
+            reach=j.reach,
         ))
 
     if not _write_cron_md(config, user_id, file_jobs):

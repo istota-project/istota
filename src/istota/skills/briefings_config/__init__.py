@@ -42,6 +42,7 @@ import os
 import uuid
 
 from istota.briefings.models import TEXT_FILE_MAX_BYTES
+from istota.lib.egress_log import EGRESS_LIMITED_REASON, egress_limited, limited_refusal
 from istota.skills._cli import error_envelope, fail, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import READ, ReadRefused, host_path, read_resolved_text
 from istota.skills._turn_access import calling_turn_passes
@@ -1142,9 +1143,27 @@ def build_parser():
     return parser
 
 
+#: Research runs with open web on what these write, so a limited task writing one
+#: would have a way out with a prompt of its own. `run` is here because it starts
+#: that research, `remove` because it writes the same table.
+_RESEARCH_DEFINITION_WRITERS = frozenset({
+    ("shared-block", "set"),
+    ("shared-block", "set-prompt"),
+    ("shared-block", "run"),
+    ("shared-block", "remove"),
+    ("group", "save"),
+    ("group", "set"),
+})
+
+
 def main(argv=None):
     parser = build_parser()
     args = parse_and_resolve(parser, argv)
+    if (args.command, args.action) in _RESEARCH_DEFINITION_WRITERS and egress_limited():
+        fail(
+            limited_refusal(f"briefings_config {args.command} {args.action}"),
+            reason=EGRESS_LIMITED_REASON,
+        )
     run_skill_cli(
         {
             ("schedule", "list"): cmd_schedule_list,

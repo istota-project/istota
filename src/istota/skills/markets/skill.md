@@ -5,6 +5,7 @@ description: Market data for briefings and interactive queries
 cli: true
 source_types: [briefing]
 dependencies: [yfinance]
+egress: local
 ---
 For briefings, market data is pre-fetched and included directly in your prompt. You don't need to fetch it yourself.
 

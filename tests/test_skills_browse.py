@@ -52,15 +52,15 @@ def test_briefings_refuse_old_browser_before_render(monkeypatch, capsys):
         assert main(["render", "https://example.com"]) == 1
         assert request.call_count == 1
         assert request.call_args.args[1].endswith("/health")
-    assert "briefing_browser_isolation_unavailable" in capsys.readouterr().out
+    assert "isolated_browser_unavailable" in capsys.readouterr().out
 
 
 def test_briefings_refuse_credential_action_before_resolving(monkeypatch, capsys):
     monkeypatch.setenv("ISTOTA_USER_ID", "__briefings__")
     with patch("istota.skills.browse.parse_and_resolve") as parse:
-        assert main(["interact", "--fill", "#password=credential:password"]) == 1
+        assert main(["interact", "s1", "--fill-credential", "#password=acme"]) == 1
         parse.assert_not_called()
-    assert "briefing_browser_operation_refused" in capsys.readouterr().out
+    assert "isolated_browser_credentials_refused" in capsys.readouterr().out
 
 
 @pytest.fixture(autouse=True)

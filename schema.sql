@@ -172,6 +172,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- `source_type = 'assignment'` task. NULL on every other task.
     assignment_id INTEGER,
 
+    -- A scheduled occurrence's posture, written once by the daemon before the
+    -- model runs (`rooms.egress.record_posture`): 'public' or 'private', NULL until
+    -- decided. A job row can change or go while the task runs; this cannot.
+    egress_posture TEXT,
     -- 1 for a task in an incognito room (ISSUE-892), frozen at creation by
     -- db.create_task from the room or the parent task.
     incognito INTEGER NOT NULL DEFAULT 0,
@@ -419,10 +423,37 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     -- Gated on is_shared_kv_writer at write time.
     publish_shared_kv TEXT,
     publish_shared_kv_trusted INTEGER NOT NULL DEFAULT 0,
+    -- CRON.md's `reach`: 'private' or 'public'. A request, never a grant; what
+    -- is approved is in egress_grants.
+    reach TEXT NOT NULL DEFAULT 'private',
     UNIQUE(user_id, name)
 );
 
 CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_user ON scheduled_jobs(user_id);
+
+-- What an owner approved for a task's network reach. A row means approved.
+-- Created by db._migrate_egress_seed_open, which spells the same columns, so an
+-- existing job is brought in as `open` once.
+CREATE TABLE IF NOT EXISTS egress_grants (
+    user_id TEXT NOT NULL,
+    subject TEXT NOT NULL,            -- 'cron:<name>', 'briefing:<name>', 'assignment:<id>', 'tasks-file'
+    entry TEXT NOT NULL,              -- host, 'skill:<name>', 'public:<digest>', 'open:<digest>'
+    decided_at TEXT NOT NULL DEFAULT (datetime('now')),
+    decided_via TEXT NOT NULL,        -- 'web' | 'cli' | 'migration'
+    PRIMARY KEY (user_id, subject, entry)
+);
+
+-- What a subject tried and could not do: things the owner may want to add.
+-- Grants nothing. Holds names a hostile page chose, so only its owner reads it.
+CREATE TABLE IF NOT EXISTS egress_refused (
+    user_id TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    entry TEXT NOT NULL,              -- host, 'skill:<name>', 'public', 'open'
+    hits INTEGER NOT NULL DEFAULT 1,
+    last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    dismissed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, subject, entry)
+);
 
 -- Sleep cycle state (tracks last run for nightly memory extraction)
 CREATE TABLE IF NOT EXISTS sleep_cycle_state (

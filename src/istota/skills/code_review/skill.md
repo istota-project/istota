@@ -6,6 +6,7 @@ admin_only: true
 companion_skills: [untrusted_input]
 cli: true
 env: [{"var":"DEVELOPER_REPOS_DIR","from":"setup_env"}]
+egress: local
 ---
 
 # Code review

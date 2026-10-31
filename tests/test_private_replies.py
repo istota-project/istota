@@ -1811,3 +1811,43 @@ class TestMyNotesOnEverySurface:
             # The control: the same turn under `held` reads the host's notes.
             room_policy.set_guest_reply(conn, group, "held")
             assert private_replies.my_notes_room(conn, db.get_task(conn, ident)) == group
+
+
+class TestALimitedTasksRoomVerbs:
+    """The spec's `room` rule: only rooms the user is a current member of. These verbs
+    hold it for every task, so a limited one reads no flag here."""
+
+    def test_a_post_names_only_a_room_its_user_is_in(self, config):
+        from istota.relay.requests import RequestError
+
+        with db.get_db(config.db_path) as conn:
+            theirs = db.create_web_chat_room(conn, "bob", "Theirs").token
+            db.add_web_room_member(conn, theirs, "carol")
+            mine = _web_room(conn)
+            ident = _running(conn, "alice", mine, prompt="post it")
+        with pytest.raises(RequestError, match="parent_unavailable"):
+            _hold_post(config, ident, room=theirs)
+
+    @pytest.mark.parametrize("source_type", ["scheduled", "briefing", "assignment", "istota_file"])
+    def test_an_unattended_task_cannot_post_at_all(self, config, source_type):
+        from istota.relay.requests import RequestError
+
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            mine = _web_room(conn)
+            ident = _running(conn, "alice", mine, source_type=source_type)
+        with pytest.raises(RequestError, match="unsupported_origin"):
+            _hold_post(config, ident, room=parent)
+
+    def test_a_whisper_needs_a_shared_room_its_user_is_in(self, config):
+        from istota.relay.requests import RequestError
+        from istota.rooms import private_replies
+
+        with db.get_db(config.db_path) as conn:
+            theirs = db.create_web_chat_room(conn, "bob", "Theirs").token
+            db.add_web_room_member(conn, theirs, "carol")
+            ident = _running(conn, "alice", theirs, source_type="scheduled")
+            with pytest.raises(RequestError, match="not_a_shared_room"):
+                private_replies.enqueue_whisper(
+                    conn, config, actor_user_id="alice", task_id=ident,
+                    request_key="w1", text="canary")

@@ -36,7 +36,7 @@ JOB_FIELDS = {
     "name": str, "cron": str, "prompt": str, "command": str, "prompt_file": str,
     "target": str, "room": str, "enabled": bool, "silent_unless_action": bool,
     "skip_log_channel": bool, "once": bool, "model": str, "effort": str, "brain": str, "provider": str,
-    "publish_shared_kv": str, "publish_shared_kv_trusted": bool,
+    "publish_shared_kv": str, "publish_shared_kv_trusted": bool, "reach": str,
 }
 RESOURCE_FIELDS = {"type": str, "path": str, "name": str, "permissions": str, "extra": dict}
 BRIEFING_FIELDS = {

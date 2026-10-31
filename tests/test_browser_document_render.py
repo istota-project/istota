@@ -711,9 +711,9 @@ class TestTheEndpoint:
             assert post(endpoint, "/render-document", **_envelope()).status_code == 200
         assert not endpoint._document_renders
 
-    def test_the_briefings_identity_cannot_render(self, endpoint):
+    def test_the_isolated_profile_cannot_render(self, endpoint):
         response = endpoint.app.test_client().post(
             "/render-document", json=_envelope(),
-            headers={"X-Istota-User": "__briefings__", "X-Istota-Owner": "x"})
+            headers={"X-Istota-User": "__isolated__", "X-Istota-Owner": "x"})
         assert response.status_code == 403
         assert endpoint.opened == []

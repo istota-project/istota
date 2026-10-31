@@ -4,6 +4,7 @@ triggers: [location, gps, where, place, places, visit, visits, track, position, 
 description: Personal location tracking, room location sharing, place recognition, visit history, and calendar attendance
 cli: true
 env: [{"var":"LOCATION_DB_PATH","from":"setup_env","proxy_only":true},{"var":"CALDAV_URL","from":"config","config_path":"caldav_url","when":"caldav_url","gate_has_discovered_calendars":true},{"var":"CALDAV_USERNAME","from":"config","config_path":"caldav_username","when":"caldav_url","gate_has_discovered_calendars":true},{"var":"CALDAV_PASSWORD","from":"config","config_path":"caldav_password","when":"caldav_url","gate_has_discovered_calendars":true,"sensitive":true}]
+egress: local
 ---
 # Location Skill
 

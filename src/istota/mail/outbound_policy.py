@@ -44,6 +44,8 @@ import sqlite3
 from email.utils import getaddresses
 from typing import TYPE_CHECKING
 
+from istota.lib.egress_log import egress_limited
+
 if TYPE_CHECKING:
     from istota.config import Config
 
@@ -85,7 +87,13 @@ def effective_policy(config: "Config", user_id: str) -> str:
     A user value that is not one of the three is treated as unset — a
     hand-edited DB row should tighten toward the floor rather than silently
     disable a gate the operator asked for.
+
+    A skill CLI of a task limited to approved hosts answers ``all`` whatever
+    either setting says, so its mail to anyone but the user is held. Only the
+    daemon sets that variable, and only in a CLI's environment.
     """
+    if egress_limited():
+        return "all"
     floor = getattr(config.email, "outbound_approval_floor", "untrusted")
     if floor not in _ORDER:
         # Config load validates and rejects this, so reaching it means the

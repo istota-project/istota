@@ -84,6 +84,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+#: In a withheld set beside the scopes: the task's room notes, `Channels/<token>`,
+#: are not bound, loaded or a host-path root. A guest's turn keeps them, since a
+#: room's notes are shared by construction. A public job does not: it has open web,
+#: and in a private room those notes are the user's.
+ROOM_NOTES_WITHHELD = "room_notes"
+
 
 def is_scopable_user_id(user_id: object) -> bool:
     """Whether ``user_id`` can name a directory of its own under any root.

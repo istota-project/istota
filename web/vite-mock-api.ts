@@ -6394,6 +6394,87 @@ const mockWallet = {
   ],
 };
 let nextWalletCard = 2;
+const mockNetwork = {
+  external_skills: ['browse', 'devbox', 'nextcloud', 'wordpress'],
+  subjects: [
+    {
+      subject: 'cron:hackernews-digest',
+      kind: 'cron',
+      label: 'Scheduled job: hackernews-digest',
+      state: 'limited',
+      hosts: ['lobste.rs'],
+      skills: [] as string[],
+      approvals: [] as string[],
+      job: {
+        digest: 'a'.repeat(64),
+        reach: 'private',
+        prompt: 'Read the front page and summarise the five most interesting stories.',
+        command: '',
+        skill: '',
+        skill_args: '',
+      },
+      refused: [
+        { entry: 'news.ycombinator.com', hits: 3, last_seen: '2026-10-30 07:00:00' },
+        { entry: 'open', hits: 1, last_seen: '2026-10-30 07:00:00' },
+      ],
+    },
+    {
+      subject: 'cron:apartment-search',
+      kind: 'cron',
+      label: 'Scheduled job: apartment-search',
+      state: 'open',
+      hosts: [] as string[],
+      skills: [] as string[],
+      approvals: ['open:' + 'b'.repeat(64)],
+      job: {
+        digest: 'b'.repeat(64),
+        reach: 'private',
+        prompt: 'Check the listings site and tell me about anything new.',
+        command: '',
+        skill: '',
+        skill_args: '',
+      },
+      refused: [] as { entry: string; hits: number; last_seen: string }[],
+    },
+  ],
+};
+function mockNetworkRoutes(url: string, method: string, body: any): unknown | undefined {
+  const root = '/istota/api/settings/network';
+  if (url === root && method === 'GET') return mockNetwork;
+  if (!url.startsWith(root + '/') || method !== 'POST') return undefined;
+  const item = mockNetwork.subjects.find((s) => s.subject === body?.subject);
+  if (!item) return { __status: 404, error: 'not_found', detail: 'There is no such item.' };
+  const entry: string = body.entry ?? '';
+  const drop = () => {
+    item.refused = item.refused.filter((row) => row.entry !== entry);
+  };
+  if (url === root + '/grants') {
+    if (!entry.startsWith('skill:') && !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(entry))
+      return { __status: 400, field: 'entry', detail: 'A host is an exact name.' };
+    if (entry.startsWith('skill:')) item.skills.push(entry.slice('skill:'.length));
+    else item.hosts.push(entry);
+    drop();
+    return { ok: true };
+  }
+  if (url === root + '/grants/remove') {
+    item.hosts = item.hosts.filter((value) => value !== entry);
+    item.skills = item.skills.filter((value) => `skill:${value}` !== entry);
+    item.approvals = item.approvals.filter((value) => value !== entry);
+    if (entry.startsWith('open:') || entry.startsWith('public:')) item.state = 'limited';
+    return { ok: true };
+  }
+  if (url === root + '/refused/dismiss') {
+    drop();
+    return { ok: true };
+  }
+  if (url === root + '/approvals') {
+    item.approvals.push(`${body.kind}:${body.digest}`);
+    item.state = body.kind;
+    item.refused = item.refused.filter((row) => row.entry !== body.kind);
+    return { ok: true };
+  }
+  return undefined;
+}
 function mockWalletRoutes(url: string, method: string, body: any): unknown | undefined {
   const root = '/istota/api/settings/wallet';
   if (url === root && method === 'GET') return mockWallet;
@@ -8631,6 +8712,7 @@ const handlers: MockHandler[] = [
   workspaceHandler,
   searchHandler,
   ({ url, method, body }) => mockWalletRoutes(url, method, body),
+  ({ url, method, body }) => mockNetworkRoutes(url, method, body),
   ({ url, method, body }) => mockMailAccountRoutes(url, method, body),
   ({ url }) => (url === '/istota/api/me' ? user : undefined),
   ({ url }) =>

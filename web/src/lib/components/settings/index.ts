@@ -13,6 +13,7 @@ export { default as CredentialFormModal } from './CredentialFormModal.svelte';
 export { default as WalletCardsCard } from './WalletCardsCard.svelte';
 export { default as WalletPolicyCard } from './WalletPolicyCard.svelte';
 export { default as WalletPurchasesCard } from './WalletPurchasesCard.svelte';
+export { default as NetworkSubjectCard } from './NetworkSubjectCard.svelte';
 export { default as CardFormModal } from './CardFormModal.svelte';
 export { default as MailAccountsCard } from './MailAccountsCard.svelte';
 export { default as MailAccountFormModal } from './MailAccountFormModal.svelte';

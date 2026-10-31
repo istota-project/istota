@@ -6,6 +6,7 @@ cli: true
 file_types: [mp3, wav, ogg, flac, m4a, opus, webm, weba, mp4, aac, wma]
 companion_skills: [untrusted_input]
 dependencies: [faster_whisper>=1.1.0]
+egress: local
 ---
 # Audio Transcription with Whisper
 

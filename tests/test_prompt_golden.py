@@ -310,6 +310,10 @@ def _write_skills(bundled: Path, extra_skills: dict | None = None) -> None:
         ]
         if not any(line.startswith("cli:") for line in extra):
             front.append("cli: true")
+        # So a scheduled, briefing or wake case keeps its catalogue; what a limited
+        # task loses is `tests/test_egress_reach.py`.
+        if not any(line.startswith("egress:") for line in extra):
+            front.append("egress: local")
         front.extend(extra)
         front.append("---")
         (d / "skill.md").write_text("\n".join(front) + "\n" + body + "\n")

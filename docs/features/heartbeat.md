@@ -10,12 +10,14 @@ Heartbeat needs a configured on-disk workspace. The config file lives there, so 
 |---|---|
 | `file-watch` | Monitors file age and existence. `path` must be in your own folder, `/Users/<you>/...`; anything else, a `..` or a symlink reads as not found |
 | `shell-command` | Runs a command and evaluates a condition (**admin-only**) |
-| `url-health` | Checks HTTP status codes (**admin-only**) |
+| `url-health` | Checks HTTP status codes (**admin-only**, granted hosts only) |
 | `calendar-conflicts` | Detects overlapping calendar events |
 | `task-deadline` | Finds overdue items in TASKS.md |
 | `self-check` | System diagnostics: Claude binary, bwrap, DB connectivity, task failure rate, and a live sandboxed execution test |
 
 `shell-command` checks run in the same sandbox as a task's Bash call, because HEARTBEAT.md is a file the bot can edit. A check sees your own workspace and reaches the network through the task allowlist, so `df -h /` reads near zero whatever the host's disk holds (name a path in your workspace), and a probe of an internal service needs `url-health` or an `extra_hosts` entry. A check that needs the host belongs in a system timer. A skill call through `istota-skill` works and writes directly, except one the CLI refuses without a task row, such as `kv set --shared`. A non-admin's check returns unhealthy with "shell-command checks are admin-only" rather than running. `url-health` is admin-only too: the request goes out from the daemon's own network, outside the sandbox's allowlist, so for anyone but an admin it would probe internal addresses. The response body is never read, and `timeout` is held between 1 and 60 seconds.
+
+A `url-health` check runs from the daemon's network, outside the sandbox, so it reaches internal services a task cannot. Because the bot can edit this file and a request carries data in its URL, the check fetches only a host with a `heartbeat` grant in [`[private_hosts]`](../configuration/reference.md#private_hosts), public or private, and the same goes for every redirect it follows. Any other host reports unhealthy with no request made. A redirect to another name needs that name granted too, up to five redirects.
 
 `shell-command` runs under `bash -o pipefail -c`, so a probe ending in a pipe reports the first stage that failed rather than the last command. Two things follow. A non-final stage that exits non-zero to *report* something — `grep` with no match, `diff` — now makes the check unhealthy; append `|| true` where that is not what you mean. And a probe ending in `head` or `grep -q` reports status 141, which is the pipe being closed early rather than a failure; the alert message says so. Note also that these run under bash rather than `/bin/sh`, so `echo` no longer expands backslash escapes — if a check compares output against a `condition`, confirm it still matches.
 

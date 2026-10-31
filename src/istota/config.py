@@ -389,7 +389,7 @@ PRIVATE_HOST_PATTERN = (
 # do differs, which is why the table names them: see the consumer table in
 # `docs/configuration/reference.md`.
 PRIVATE_HOST_CONSUMERS: tuple[str, ...] = (
-    "browser", "wordpress", "mail_accounts", "sharing", "servarr", "feeds",
+    "browser", "wordpress", "mail_accounts", "sharing", "servarr", "feeds", "heartbeat",
 )
 
 
@@ -2471,6 +2471,18 @@ class HealthModuleConfig:
 
 
 @dataclass
+class HeartbeatConfig:
+    """HEARTBEAT.md's daemon-side checks (``[private_hosts]`` only, no section).
+
+    ``private_hosts`` is set by the loader from ``[private_hosts]``: the only
+    names a ``url-health`` check may fetch, public or private. Unlike every
+    other consumer a grant is needed for a public host too, because a task can
+    write the file and a GET carries data in its name, path and query.
+    """
+    private_hosts: list[str] = field(default_factory=list)
+
+
+@dataclass
 class FeedsModuleConfig:
     """Module-level config for the feeds module (``[feeds]``).
 
@@ -2644,6 +2656,7 @@ class Config:
     briefings: BriefingsModuleConfig = field(default_factory=BriefingsModuleConfig)
     health: HealthModuleConfig = field(default_factory=HealthModuleConfig)
     feeds: FeedsModuleConfig = field(default_factory=FeedsModuleConfig)
+    heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
     money: MoneyModuleConfig = field(default_factory=MoneyModuleConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
     memory_search: MemorySearchConfig = field(default_factory=MemorySearchConfig)
@@ -2834,7 +2847,13 @@ class Config:
 
     def get_user(self, nc_username: str) -> UserConfig | None:
         """Get user config by Nextcloud username. Returns None if user not configured."""
-        return self.users.get(self.resolve_user_id(nc_username))
+        from istota.browser.owner import ISOLATED_PROFILE
+
+        user_id = self.resolve_user_id(nc_username)
+        # A person by this name would share a cookie jar with every isolated task.
+        if user_id == ISOLATED_PROFILE:
+            return None
+        return self.users.get(user_id)
 
     def find_user_by_email(self, email_address: str) -> str | None:
         """Find user_id by email address. Returns None if not found."""

@@ -62,7 +62,7 @@ You have access to:
 Your final response is published verbatim as a shared briefing block. Write the block's content only: no preamble, no JSON envelope and no closing remarks.
 
 
-## Skills Reference (v: f6ba13b53ed6)
+## Skills Reference (v: fcacad29f1b6)
 
 ### Browse
 

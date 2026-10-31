@@ -2,6 +2,7 @@
 name: heartbeat
 triggers: [heartbeat, monitoring, health check, alert, file watch, url health, disk space, backup check]
 description: Heartbeat monitoring configuration in istota/config/
+egress: local
 ---
 HEARTBEAT.md is for monitoring — checking conditions and alerting on failures. For running tasks on a schedule (including AI-powered checks), use CRON.md instead.
 
@@ -59,7 +60,7 @@ Run a command and evaluate the output.
 - `timeout`: Command timeout in seconds (default: 30)
 
 ### url-health
-HTTP health check. Admin-only: for anyone else the check reports unhealthy without making a request.
+HTTP health check. Admin-only: for anyone else the check reports unhealthy without making a request. The host, and any host it redirects to, needs a `heartbeat` grant in the operator's `[private_hosts]` table in `config.toml`. Without one the check reports unhealthy without making a request. A task cannot add a grant, so ask the operator.
 - `url`: URL to check
 - `expected_status`: Expected HTTP status code (default: 200)
 - `timeout`: Request timeout in seconds (default: 10, between 1 and 60)

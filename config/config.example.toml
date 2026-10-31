@@ -1372,9 +1372,11 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # use plain http to it, and Chrome stays off loopback whatever is listed. Entries
 # are exact names or IP addresses, quoted when they hold a dot. For a host already
 # here, add the consumer to its list: a second line for it is a TOML error. The
-# old [<consumer>] private_hosts keys still load, with a warning.
+# old [<consumer>] private_hosts keys still load, with a warning. A HEARTBEAT.md
+# url-health check fetches only hosts with a heartbeat grant, public ones too.
 # [private_hosts]
 # "wiki.example.internal" = ["browser"]
+# "status.example.com" = ["heartbeat"]
 # "rss.example.internal" = ["browser", "feeds"]
 # "192.168.1.10" = ["servarr"]
 

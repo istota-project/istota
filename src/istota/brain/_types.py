@@ -285,6 +285,13 @@ class BrainRequest:
     # leaves the brain's configured cap alone.
     max_turns: int | None = None
 
+    # `Reach.egress_hosts`, for the daemon-side WebFetch: None for any public host.
+    # On the request so a reroute across brains keeps it. A direct caller grants
+    # no WebFetch, so its None is never read.
+    egress_hosts: frozenset[str] | None = None
+    # `egress-refused.jsonl` in the task's control directory.
+    egress_log: Path | None = None
+
     # ClaudeCodeBrain-specific: optional fallback file the model writes its
     # final result to when stream parsing fails. Other brains may ignore.
     result_file: Path | None = None

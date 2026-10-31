@@ -4,6 +4,7 @@ description: Send a separate message to your own WhatsApp
 cli: true
 requires_capability: [whatsapp]
 companion_skills: [sensitive_actions, untrusted_input]
+egress: local
 ---
 # WhatsApp
 

@@ -131,6 +131,7 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import urlsplit
 
 from istota.sandbox.git_hardening import run_git
 from istota.sandbox.git_remote_scrub import find_git_dirs
@@ -342,12 +343,61 @@ def parse_worktree_list(data: str) -> list[WorktreeRecord] | None:
     return records
 
 
-def _upstream_head(bare: Path, *, scope: Path | None = None) -> str:
+def _forge_host_of(url: str) -> str | None:
+    """``host:port`` for a plain https URL, or None for anything else.
+
+    Strict on purpose. Python's parser and libcurl read a backslash and userinfo
+    differently, and this answer decides where the daemon connects, so a URL they
+    could disagree about is no forge. A credential in the URL is refused too: the
+    scrub strips them from a real origin.
+    """
+    if any(c == "\\" or not c.isprintable() or c.isspace() for c in url):
+        return None
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme != "https" or "@" in parts.netloc or not parts.hostname:
+        return None
+    return f"{parts.hostname}:{port or 443}"
+
+
+def _origin_is_a_forge(
+    bare: Path, forge_hosts: Iterable[str], *, scope: Path | None = None,
+) -> bool:
+    """Whether ``git fetch origin`` here reaches only a host the operator configured.
+
+    A limited task can write this repository's config, and the sweep runs from the
+    daemon's network, so a model-written URL would be a way out carrying whatever it
+    likes in its name. ``remote get-url`` rather than ``config remote.origin.url``,
+    because ``url.<base>.insteadOf`` in the same file rewrites what a fetch uses. A
+    proxy in that file is refused for the same reason: git resolves and connects to
+    its name, and a URL-scoped key would outrank any ``-c`` override.
+    """
+    allowed = set(forge_hosts)
+    if not allowed:
+        return False
+    code, out = _git(bare, "remote", "get-url", "--all", "origin", scope=scope)
+    urls = out.splitlines()
+    if code != 0 or not urls or not all(_forge_host_of(url) in allowed for url in urls):
+        return False
+    code, _ = _git(
+        bare, "config", "--get-regexp", r"^http\.(.*\.)?proxy$|^remote\.origin\.proxy$",
+        scope=scope,
+    )
+    return code == 1
+
+
+def _upstream_head(
+    bare: Path, forge_hosts: Iterable[str] = (), *, scope: Path | None = None,
+) -> str:
     """The sha ``refs/remotes/origin/HEAD`` resolves to, or ``""``.
 
-    Fetches first, best-effort. Without any fetch the comparison runs against
-    whatever the last task left behind: a branch merged upstream an hour ago is
-    still ahead of a stale ``origin/HEAD`` and would be held.
+    Fetches first when ``origin`` is a configured forge (``_origin_is_a_forge``),
+    best-effort. Without a fetch the comparison runs against whatever the last task
+    left behind: a branch merged upstream an hour ago is still ahead of a stale
+    ``origin/HEAD`` and would be held.
 
     **The fetch usually fails on a private repository, by design.** The git
     credential helper is registered per task, through the ``GIT_CONFIG_KEY_*``
@@ -371,19 +421,25 @@ def _upstream_head(bare: Path, *, scope: Path | None = None) -> str:
     anything that does not resolve it. The developer skill's setup repairs that
     state (ISSUE-269); this module only has to notice it.
     """
-    # No automatic gc: it runs `worktree prune --expire`, in the namespace's view.
-    code, _ = _git(
-        bare, "fetch", "--quiet", "--prune", "--no-auto-maintenance", "origin",
-        timeout=_FETCH_TIMEOUT, scope=scope, network=True,
-    )
-    if code != 0:
+    if _origin_is_a_forge(bare, forge_hosts, scope=scope):
+        # No automatic gc: it runs `worktree prune --expire`, in the namespace's view.
+        code, _ = _git(
+            bare, "fetch", "--quiet", "--prune", "--no-auto-maintenance", "origin",
+            timeout=_FETCH_TIMEOUT, scope=scope, network=True,
+        )
+        if code != 0:
+            logger.info(
+                "worktree_reaper: could not fetch %s (expected on a private repo — "
+                "the git credential helper is registered per task, not for the "
+                "scheduler). Comparing against the local origin/HEAD, which can only "
+                "hold more back; the next developer task on this repository will "
+                "refresh it.", bare,
+            )
+    else:
         logger.info(
-            "worktree_reaper: could not fetch %s (expected on a private repo — "
-            "the git credential helper is registered per task, not for the "
-            "scheduler — and on any origin that is not https, which the "
-            "scheduler refuses to fetch from). Comparing against the local origin/HEAD, which can only "
-            "hold more back; the next developer task on this repository will "
-            "refresh it.", bare,
+            "worktree_reaper: not fetching %s: its origin is not a configured forge. "
+            "Comparing against the local origin/HEAD, which can only hold more back.",
+            bare,
         )
     code, out = _git(
         bare, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/HEAD^{commit}",
@@ -833,6 +889,7 @@ def reap_worktrees(
     protect: list[Path] | None = None,
     skip: Iterable[Path | str] = (),
     now: float | None = None,
+    forge_hosts: Iterable[str] = (),
 ) -> list[ReapOutcome]:
     """Sweep every repository under ``root``, removing what has already landed.
 
@@ -851,9 +908,13 @@ def reap_worktrees(
     :func:`git_remote_scrub.find_git_dirs`. Distinct from ``protect``, which
     names worktrees found and then held back: nothing under ``skip`` is a
     repository, so the sweep never has to decide about it.
+
+    ``forge_hosts`` is the ``host:port`` of each forge the operator configured. A
+    repository whose origin is anywhere else is compared with its local
+    ``origin/HEAD`` and not fetched.
     """
     try:
-        return _reap(root, retention_hours, protect, skip, now)
+        return _reap(root, retention_hours, protect, skip, now, forge_hosts)
     except Exception:  # noqa: BLE001 — the public entry point of a delete path
         logger.exception("worktree_reaper: sweep of %s failed", root)
         return []
@@ -865,6 +926,7 @@ def _reap(
     protect: list[Path] | None,
     skip: Iterable[Path | str],
     now: float | None,
+    forge_hosts: Iterable[str] = (),
 ) -> list[ReapOutcome]:
     root_path = Path(root)
     try:
@@ -899,7 +961,9 @@ def _reap(
         # the sweep and leave every later repository unswept while the caller
         # reads the result as complete.
         try:
-            outcomes.extend(_sweep_repo(git_dir, resolved_root, root_path, cutoff, protected))
+            outcomes.extend(
+                _sweep_repo(git_dir, resolved_root, root_path, cutoff, protected, forge_hosts)
+            )
         except Exception:  # noqa: BLE001 — see above
             logger.exception("worktree_reaper: sweeping %s failed", git_dir)
     return outcomes
@@ -937,6 +1001,7 @@ def _sweep_repo(
     configured_root: Path,
     cutoff: float,
     protect: set[Path],
+    forge_hosts: Iterable[str] = (),
 ) -> list[ReapOutcome]:
     scope = _user_subtree(git_dir, root, configured_root)
     if scope is None:
@@ -971,7 +1036,7 @@ def _sweep_repo(
         if records is None:
             return []
 
-    upstream = _upstream_head(git_dir, scope=scope)
+    upstream = _upstream_head(git_dir, forge_hosts, scope=scope)
     outcomes: list[ReapOutcome] = []
 
     for index, record in enumerate(records):
@@ -1006,6 +1071,7 @@ def reap_and_report(
     retention_hours: float = DEFAULT_RETENTION_HOURS,
     protect: list[Path] | None = None,
     skip: Iterable[Path | str] = (),
+    forge_hosts: Iterable[str] = (),
 ) -> list[ReapOutcome]:
     """:func:`reap_worktrees`, logged.
 
@@ -1015,6 +1081,7 @@ def reap_and_report(
     """
     outcomes = reap_worktrees(
         root, retention_hours=retention_hours, protect=protect, skip=skip,
+        forge_hosts=forge_hosts,
     )
 
     held: dict[str, int] = {}

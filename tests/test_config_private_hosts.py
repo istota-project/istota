@@ -52,9 +52,9 @@ def _kinds(problems) -> list[tuple[str, tuple[str, ...]]]:
 
 
 class TestTheConsumers:
-    def test_the_six_are_the_ones_with_the_field(self):
+    def test_the_seven_are_the_ones_with_the_field(self):
         assert PRIVATE_HOST_CONSUMERS == (
-            "browser", "wordpress", "mail_accounts", "sharing", "servarr", "feeds",
+            "browser", "wordpress", "mail_accounts", "sharing", "servarr", "feeds", "heartbeat",
         )
         for name in PRIVATE_HOST_CONSUMERS:
             assert getattr(Config(), name).private_hosts == []

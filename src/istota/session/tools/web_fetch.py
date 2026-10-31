@@ -35,6 +35,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 
 from istota.agent.tools import AgentTool, ToolResult
+from istota.lib.egress_log import append_refusal
 from istota.llm.types import TextContent, ToolParameter, ToolSchema
 from istota.sandbox.net_guard import ip_is_public as _ip_is_public
 from istota.lib.untrusted import frame_untrusted
@@ -78,6 +79,14 @@ class WebFetchAborted(WebFetchError):
 
 class WebFetchNetworkError(WebFetchError):
     pass
+
+
+class WebFetchNotApproved(WebFetchError):
+    """The host is not among those this limited task's owner approved."""
+
+    def __init__(self, host: str) -> None:
+        self.host = host
+        super().__init__(f"{host} is not approved for this task")
 
 
 class WebFetchSSRF(WebFetchError):
@@ -152,6 +161,9 @@ def _validate_url(
         raise WebFetchError(f"host {host} is not in the allow list")
     if _host_suffix_match(host, policy.block_hosts):
         raise WebFetchError(f"host {host} is blocked")
+    # Before anything resolves this name: a refused name can carry data.
+    if policy.exact_hosts is not None and host.lower().rstrip(".") not in policy.exact_hosts:
+        raise WebFetchNotApproved(host.lower().rstrip("."))
 
     # Provenance: fail-closed. An absent/empty corpus refuses every URL when the
     # knob is on and this hop enforces it.
@@ -590,6 +602,14 @@ def make_web_fetch_tool(env: ToolEnv) -> AgentTool:
             return _err(
                 f"WebFetch: refused — {exc.host} resolves to a private or "
                 "reserved address."
+            )
+        except WebFetchNotApproved as exc:
+            append_refusal(policy.refusal_log, "web_fetch", exc.host)
+            # A redirect's host is the server's choice, on a line outside any fence.
+            shown = _header_scalar(exc.host, _HEADER_URL_MAX_CHARS)
+            return _err(
+                f"egress_not_approved: {shown} is not approved for this task; the owner "
+                "can add it in Settings, Network access. Do not retry."
             )
         except WebFetchNetworkError as exc:
             return _err(f"WebFetch: {exc}")

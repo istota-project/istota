@@ -76,7 +76,12 @@ DOCUMENTED = REPO / "config" / "config.example.toml"
 #:
 #: An entry here is a claim that an operator has no way to learn the section
 #: exists and that this is correct. Write the reason, not just the name.
-EXEMPT: dict[str, str] = {}
+EXEMPT: dict[str, str] = {
+    "heartbeat": (
+        "No section to write. Its one field is set from a heartbeat grant in "
+        "[private_hosts], which the example documents."
+    ),
+}
 
 
 @dataclasses.dataclass(frozen=True)

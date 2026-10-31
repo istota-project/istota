@@ -304,6 +304,7 @@ def _register_all() -> None:
             "group_briefing",
             "shared_source",
             "assignment",
+            "egress_refused",
         ):
             try:
                 module = importlib.import_module(

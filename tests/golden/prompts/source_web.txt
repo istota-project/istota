@@ -74,7 +74,7 @@ You have access to:
 WEB GUIDELINES for alice.
 
 
-## Skills Reference (v: 2b425923f11d)
+## Skills Reference (v: f8da2d8f3811)
 
 ### Notes
 

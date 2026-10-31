@@ -3,6 +3,7 @@ name: briefings_config
 triggers: [shared block, shared briefing block, agent block, briefing config, briefing schedule, briefing setup, configure briefing, set up briefing, change briefing, edit briefing, briefing time, remove briefing, group briefing, team briefing]
 description: Read and change the user's briefing schedule, manage shared briefing blocks (admins), and manage group briefings from the user's private chat
 cli: true
+egress: local
 ---
 # Briefing schedule, shared blocks and group briefings
 

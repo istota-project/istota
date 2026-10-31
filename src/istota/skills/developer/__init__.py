@@ -379,9 +379,9 @@ def _install_exec_transport(ctx, dev, dev_bin: Path) -> str:
 
     The security half of the gate is elsewhere and is a different predicate:
     ``build_bwrap_cmd`` binds the socket only when ``"developer" in
-    authorized_skills``, byte for byte what already decides whether this task's
-    CONNECT allowlist gets the package registries. So a task that is not
-    authorized has shims on ``PATH`` and no socket behind them, and one invoked
+    authorized_skills``, which also decides whether this task's CONNECT allowlist
+    gets the package registries, and ``devbox`` is not withheld. So a task that is
+    not authorized, or a limited one with no ``skill:devbox``, has shims on ``PATH`` and no socket behind them, and one invoked
     anyway exits 120 naming what it could not reach — the same class of loud
     refusal a host-side ``npm ci`` gets from the CONNECT proxy today.
 

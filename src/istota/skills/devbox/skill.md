@@ -4,6 +4,7 @@ triggers: [devbox, apt install, arbitrary binary, scratch container, sandbox esc
 description: Persistent Linux container per user with dev tools and network access pre-installed. Escape hatch for one-off work the bwrap sandbox can't handle.
 cli: true
 requires_capability: [devbox]
+egress: external
 ---
 
 # Devbox
