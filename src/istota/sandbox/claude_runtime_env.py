@@ -3,8 +3,10 @@
 Since cli-brain-tools part 2, Stage 5, no task env carries the CLI's
 credential: `executor.build_clean_env` names the mode only, and the CLI's own
 env builders add the credential through `llm.providers.cli_credential_env`.
-The CLI runs outside the sandbox on the tool harness, and the strips below
-stay as defence in depth. The history they answer follows.
+The CLI runs outside the sandbox on the tool harness, and the strips below stay
+as defence in depth for a task. A direct caller's request env is
+`build_model_cli_env`, which holds the credential, so for it they are the
+boundary (#867). The history they answer follows.
 
 `executor.build_clean_env` copied `CLAUDE_CODE_OAUTH_TOKEN` out of the daemon's
 environment into **every** task's env, for every brain, because

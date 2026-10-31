@@ -483,6 +483,13 @@ cli_harness_half() {
 # the daemon's namespace too; the task class's namespace case is the one that
 # shows that comparison can fail. The third class runs the shell probes in
 # `build_daemon_sandbox`'s wrap; the control runs them unwrapped instead.
+#
+# A second control removes the strip itself (docker/test/Dockerfile.cli-env-not-stripped).
+# `cli-runs-tools` moves the probes to where the credential is; this one leaves
+# them in the tool server and moves the credential, which is the failure the
+# strip exists to stop. A direct caller's `BrainRequest.env` is
+# `build_model_cli_env`, which holds the credential, so doctor's Bash must now
+# find it. OCR and the reviewer grant no Bash and must stay green.
 
 CLI_WITNESS_TESTS="tests/smoke/test_cli_credential_unreachable.py::TestTheCliCredentialIsOutOfTheToolsReach"
 CLI_WITNESS_DIRECT="tests/smoke/test_cli_credential_unreachable.py::TestTheDirectCallersToolsCannotReachIt"
@@ -567,6 +574,59 @@ cli_witness_half() {
     done
     rm -f "$witness_out"
     echo "[control] OK: cli-witness turned its witnesses red."
+
+    echo
+    echo "[control] cli-witness: an image with the tool server's credential strip removed"
+    strip_base="$(uv run python -c '
+import sys
+sys.path.insert(0, ".")
+from tests.conftest import lean_image_tag
+print(lean_image_tag())
+')"
+    if ! docker image inspect "$strip_base" >/dev/null 2>&1; then
+        echo "[control] not built yet — run \`uv run pytest -m smoke -n0 tests/smoke/test_cli_credential_unreachable.py\` first." >&2
+        exit 2
+    fi
+    strip_tag="istota-test/cli-env-not-stripped:${strip_base##*:}"
+    docker build -q -f docker/test/Dockerfile.cli-env-not-stripped \
+        --build-arg "BASE=$strip_base" -t "$strip_tag" docker/test >/dev/null
+    strip_dir="$(mktemp -d)"
+    printf 'services:\n  daemon:\n    build: !reset null\n    image: %s\n' "$strip_tag" > "$strip_dir/strip.yml"
+    witness_out="$(mktemp)"
+    set +e
+    # -rfEp: "stayed green" below needs a PASSED line, since a test that never
+    # ran has no FAILED line either.
+    ISTOTA_TESTBED_CONTROL_OVERLAYS="$strip_dir/strip.yml" \
+        uv run pytest -m smoke -n0 -q --no-header -p no:randomly -rfEp \
+        "$CLI_WITNESS_DIRECT" 2>&1 | tee "$witness_out"
+    set -e
+    rm -rf "$strip_dir"
+    for mode in subscription api_key; do
+        for test in test_no_tool_result_or_output_carries_it \
+                    test_the_clis_process_environment_is_out_of_reach; do
+            node="${CLI_WITNESS_DIRECT}::${test}[doctor-${mode}]"
+            if ! grep -Fq "FAILED ${node}" "$witness_out"; then
+                rm -f "$witness_out"
+                echo "[control] FAILED: cli-witness did not turn ${node} red without the strip."
+                exit 1
+            fi
+        done
+        for caller in ocr reviewer; do
+            for test in test_the_caller_ran_and_the_cli_held_the_credential \
+                        test_no_tool_result_or_output_carries_it \
+                        test_the_clis_process_environment_is_out_of_reach; do
+                node="${CLI_WITNESS_DIRECT}::${test}[${caller}-${mode}]"
+                if ! grep -Fq "PASSED ${node}" "$witness_out"; then
+                    rm -f "$witness_out"
+                    echo "[control] FAILED: ${node} did not pass without the strip;"
+                    echo "[control] a caller granting no Bash cannot reach an environment."
+                    exit 1
+                fi
+            done
+        done
+    done
+    rm -f "$witness_out"
+    echo "[control] OK: cli-witness saw the strip removed on doctor's path and not on the read-only callers."
 }
 
 # --------------------------------------------------------------------------
