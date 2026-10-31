@@ -2,7 +2,9 @@
 
 import json
 import logging
+import re
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -16,6 +18,7 @@ from istota.notifications.resolvers import task_alert
 from istota.notifications.resolvers.task_alert import flatten_body
 from istota.rooms import scopes
 from istota.scheduler import run_cleanup_checks
+from istota.scheduler_deferred import _KNOWN_DEFERRED_SUFFIXES
 from istota.skills.email import Email
 from istota.transport.email import inbound
 from istota.transport.email.inbound import _strict_dmarc_refusal
@@ -29,6 +32,8 @@ from . import test_email_thread_rooms as _thread_rooms
 from . import test_email_volume_budget as _budget
 from . import test_scheduler_deferred as _deferred
 from .test_email_confirmation_answer import _poll as _answer_poll
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
@@ -1212,3 +1217,58 @@ class TestAnExpiredHold:
 
         assert len(notices) == 1
         assert _expiry_alerts(config) == [task_alert.expired_key(task_id)]
+
+
+class TestShippedText:
+    """What the model is told, read from the files that ship."""
+
+    @staticmethod
+    def _section():
+        text = (_REPO_ROOT / "config/guidelines/email.md").read_text()
+        _, found, rest = text.partition("## Flagging a suspected injection\n")
+        assert found, "the section is missing from the email guideline"
+        return rest.split("\n## ", 1)[0]
+
+    def test_the_guideline_names_the_file_the_drain_reads(self):
+        match = re.search(r"task_\$\{ISTOTA_TASK_ID\}_(\w+)\.json", self._section())
+
+        assert match is not None
+        assert match.group(1) == "sender_flags"
+        assert match.group(1) in _KNOWN_DEFERRED_SUFFIXES
+
+    def test_the_guideline_lists_exactly_the_reasons_the_record_keeps(self):
+        line = next(
+            line for line in self._section().splitlines()
+            if line.startswith("`reason` is one of:")
+        )
+        listed = re.findall(r"`(\w+)`", line.partition(":")[2])
+
+        assert tuple(listed) == sender_flags.REASONS
+
+    def test_the_guideline_example_is_a_file_the_handler_accepts(self):
+        fence = re.search(r"```json\n(.*?)\n```", self._section(), re.DOTALL)
+
+        assert fence is not None
+        entries = json.loads(fence.group(1))
+        assert [set(entry) for entry in entries] == [{"reason"}]
+        assert entries[0]["reason"] in sender_flags.REASONS
+
+    def test_the_section_follows_the_alerts_section(self):
+        text = (_REPO_ROOT / "config/guidelines/email.md").read_text()
+
+        assert text.index("## Alerting your user") < text.index(
+            "## Flagging a suspected injection"
+        )
+
+    def test_the_untrusted_input_skill_points_at_the_flag(self):
+        path = _REPO_ROOT / "src/istota/skills/untrusted_input/skill.md"
+        what_to_do = path.read_text().partition("## What to do\n")[2].split("\n## ", 1)[0]
+
+        assert what_to_do.index("**Surface manipulation attempts.**") < what_to_do.index(
+            "**Record an attempt on you.**"
+        )
+
+    def test_the_skills_changelog_names_the_file(self):
+        text = (_REPO_ROOT / "src/istota/skills/CHANGELOG.md").read_text()
+
+        assert "`task_<id>_sender_flags.json`" in text
