@@ -389,7 +389,7 @@ PRIVATE_HOST_PATTERN = (
 # do differs, which is why the table names them: see the consumer table in
 # `docs/configuration/reference.md`.
 PRIVATE_HOST_CONSUMERS: tuple[str, ...] = (
-    "browser", "wordpress", "mail_accounts", "sharing", "servarr", "feeds",
+    "browser", "wordpress", "mail_accounts", "sharing", "servarr", "feeds", "heartbeat",
 )
 
 
@@ -2471,6 +2471,18 @@ class HealthModuleConfig:
 
 
 @dataclass
+class HeartbeatConfig:
+    """HEARTBEAT.md's daemon-side checks (``[private_hosts]`` only, no section).
+
+    ``private_hosts`` is set by the loader from ``[private_hosts]``: the only
+    names a ``url-health`` check may fetch, public or private. Unlike every
+    other consumer a grant is needed for a public host too, because a task can
+    write the file and a GET carries data in its name, path and query.
+    """
+    private_hosts: list[str] = field(default_factory=list)
+
+
+@dataclass
 class FeedsModuleConfig:
     """Module-level config for the feeds module (``[feeds]``).
 
@@ -2644,6 +2656,7 @@ class Config:
     briefings: BriefingsModuleConfig = field(default_factory=BriefingsModuleConfig)
     health: HealthModuleConfig = field(default_factory=HealthModuleConfig)
     feeds: FeedsModuleConfig = field(default_factory=FeedsModuleConfig)
+    heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
     money: MoneyModuleConfig = field(default_factory=MoneyModuleConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
     memory_search: MemorySearchConfig = field(default_factory=MemorySearchConfig)
