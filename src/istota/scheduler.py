@@ -8755,6 +8755,11 @@ def run_cleanup_checks(config: Config) -> None:
             logger.info(f"Pruned {email_rows} processed-email row(s)")
         db.prune_signup_bodies(conn, config.email.signup_body_retention_days)
 
+        from istota.mail import sender_flags
+        flag_rows = sender_flags.prune(conn, sched.email_sender_flag_window_days)
+        if flag_rows > 0:
+            logger.info(f"Pruned {flag_rows} email sender flag(s)")
+
         # 4b. Age out the per-message deletion ledger. It exists only to tell a
         # live client what vanished; one further behind than this reloaded from
         # scratch long ago. Fixed 30 days rather than a knob — the row is tiny
