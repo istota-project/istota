@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh the browser's firewall grants every five minutes
+
+[Timer]
+# An address that moved stays dropped until this runs, so this bounds that window.
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=15s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

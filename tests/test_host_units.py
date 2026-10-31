@@ -356,6 +356,7 @@ BROWSER = "172.29.0.2"
 #: The daemon's address on the same network, which also holds its default route.
 BROWSER_NETWORK_PEER = "172.29.0.129"
 BROWSER_COMMENT_PREFIX = "istota-browser:"
+BROWSER_GRANT_PREFIX = "istota-browser-grant:"
 
 
 class TestTheBrowserFirewall:
@@ -413,31 +414,103 @@ class TestTheBrowserFirewall:
         assert rig._verdict(tmp_path, BROWSER, "udp", 53) == "DROP"
         assert rig._verdict(tmp_path, CONTAINER, "tcp", 11434) == "RETURN"
 
-    @pytest.mark.parametrize("allow", ["10.0.0.5 192.168.8.0/24", "10.0.0.5,192.168.8.0/24"])
-    def test_an_operators_grant_opens_that_destination_only(self, rig, tmp_path, allow):
-        rig._run(tmp_path, {"ISTOTA_BROWSER_EGRESS_ALLOW": allow})
+    def _stack_bin(self, tmp_path: Path, answer: str, rc: int = 0) -> str:
+        """Stands in for `istota-stack browser-grant-addresses`, reading the answer
+        from a file so that a test can change it between runs."""
+        answer_file = tmp_path / "grant-answer"
+        answer_file.write_text(answer)
+        stub = tmp_path / "stack-stub"
+        stub.write_text(f'#!/bin/bash\n[ "$1" = browser-grant-addresses ] || exit 64\ncat {answer_file}\nexit {rc}\n')
+        stub.chmod(0o755)
+        return str(stub)
+
+    def _grants(self, rig, tmp_path: Path) -> list[list[str]]:
+        return [r for r in rig._chain(tmp_path) if any(t.startswith(BROWSER_GRANT_PREFIX) for t in r)]
+
+    def test_a_granted_name_opens_its_addresses_only(self, rig, tmp_path):
+        rig._run(tmp_path, {"ISTOTA_STACK_BIN": self._stack_bin(tmp_path, "10.0.0.5\n192.168.8.7\n")})
         assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="10.0.0.5") == "RETURN"
-        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="192.168.8.77") == "RETURN"
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="192.168.8.7") == "RETURN"
         assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="10.0.0.6") == "DROP"
-        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="192.168.9.1") == "DROP"
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="192.168.8.8") == "DROP"
+        assert rig._verdict(tmp_path, BROWSER_NETWORK_PEER, "tcp", 443, dst="10.0.0.6") != "DROP"
 
-    @pytest.mark.parametrize("bad", [
-        "wiki.example.internal", "10.0.0.5 nonsense", "10.0.0.256", "10.0.0.0/33", "10.0.0.5/", "0.0.0.0/0", "10.0.0.5;id",
-    ])
-    def test_an_unreadable_grant_allows_nothing_and_fails_the_unit(self, rig, tmp_path, bad):
-        result = rig._run(tmp_path, {"ISTOTA_BROWSER_EGRESS_ALLOW": bad}, ok=False)
-        assert result.returncode == 1
-        assert "ISTOTA_BROWSER_EGRESS_ALLOW" in result.stderr
-        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="10.0.0.5") == "DROP"
-        assert not [r for r in self._browser_rules(rig, tmp_path) if "RETURN" in r and "-d" in r]
-
-    def test_a_removed_grant_is_closed_again_and_a_rerun_converges(self, rig, tmp_path):
+    def test_no_second_setting_is_read(self, rig, tmp_path):
         rig._run(tmp_path, {"ISTOTA_BROWSER_EGRESS_ALLOW": "10.0.0.5"})
-        rig._run(tmp_path, {})
         assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="10.0.0.5") == "DROP"
+
+    def test_a_refresh_follows_a_changed_address(self, rig, tmp_path):
+        env = {"ISTOTA_STACK_BIN": self._stack_bin(tmp_path, "10.0.0.5\n")}
+        rig._run(tmp_path, env)
+        (tmp_path / "grant-answer").write_text("10.0.0.9\n")
+        rig._run(tmp_path, env, args=["--browser-grants"])
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="10.0.0.9") == "RETURN"
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="10.0.0.5") == "DROP"
+
+    def test_a_refresh_adds_before_it_removes_and_touches_only_the_grants(self, rig, tmp_path):
+        """The whole script deletes and re-inserts every rule, which on a timer would
+        open a gap each tick."""
+        import json
+
+        env = {"ISTOTA_STACK_BIN": self._stack_bin(tmp_path, "10.0.0.5\n"), "HOST_LOOPBACK_BLOCK": "1",
+               "HOST_GATEWAY_ADDR": GATEWAY}
+        rig._run(tmp_path, env)
+        (tmp_path / "calls").write_text("")
+        (tmp_path / "grant-answer").write_text("10.0.0.9\n")
+        rig._run(tmp_path, env, args=["--browser-grants"])
+        writes = [c for c in map(json.loads, (tmp_path / "calls").read_text().splitlines())
+                  if c[2] in ("-I", "-D", "-A")]
+        assert [c[2] for c in writes] == ["-I", "-D"]
+        assert all(any(t.startswith(BROWSER_GRANT_PREFIX) for t in c) for c in writes)
+
+    def test_an_unchanged_refresh_writes_nothing(self, rig, tmp_path):
+        import json
+
+        env = {"ISTOTA_STACK_BIN": self._stack_bin(tmp_path, "10.0.0.5\n")}
+        rig._run(tmp_path, env)
         first = rig._chain(tmp_path)
-        rig._run(tmp_path, {})
+        (tmp_path / "calls").write_text("")
+        rig._run(tmp_path, env, args=["--browser-grants"])
         assert rig._chain(tmp_path) == first
+        calls = list(map(json.loads, (tmp_path / "calls").read_text().splitlines()))
+        assert not [c for c in calls if c[2] in ("-I", "-D", "-A")]
+
+    def test_a_name_that_stops_resolving_closes_its_grant(self, rig, tmp_path):
+        env = {"ISTOTA_STACK_BIN": self._stack_bin(tmp_path, "10.0.0.5\n")}
+        rig._run(tmp_path, env)
+        (tmp_path / "grant-answer").write_text("")
+        rig._run(tmp_path, env, args=["--browser-grants"])
+        assert self._grants(rig, tmp_path) == []
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="10.0.0.5") == "DROP"
+
+    def test_a_failed_lookup_grants_nothing_and_the_rest_still_applies(self, rig, tmp_path):
+        env = {"ISTOTA_STACK_BIN": self._stack_bin(tmp_path, "10.0.0.5\n", rc=1)}
+        rig._run(tmp_path, env)
+        assert self._grants(rig, tmp_path) == []
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 80, dst="10.0.0.5") == "DROP"
+
+    @pytest.mark.parametrize("junk", ["wiki.example.internal", "10.0.0.256", "0.0.0.0/0", "-j ACCEPT", "10.0.0.5;id"])
+    def test_an_answer_that_is_not_an_address_opens_nothing(self, rig, tmp_path, junk):
+        rig._run(tmp_path, {"ISTOTA_STACK_BIN": self._stack_bin(tmp_path, junk + "\n")})
+        assert self._grants(rig, tmp_path) == []
+
+    def test_a_full_run_keeps_grants_in_front_of_the_drops_and_converges(self, rig, tmp_path):
+        env = {"ISTOTA_STACK_BIN": self._stack_bin(tmp_path, "10.0.0.5\n")}
+        rig._run(tmp_path, env)
+        first = rig._chain(tmp_path)
+        rig._run(tmp_path, env)
+        assert rig._chain(tmp_path) == first
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="10.0.0.5") == "RETURN"
+
+    def test_the_refresh_unit_runs_on_a_timer(self):
+        service = _unit(HOST / "istota-browser-grants.service")
+        assert service["Service"]["Type"] == "oneshot"
+        assert service["Service"]["ExecStart"].endswith("istota-devbox-egress --browser-grants")
+        timer = _unit(HOST / "istota-browser-grants.timer")
+        assert timer["Timer"]["OnUnitActiveSec"]
+        assert timer["Timer"]["OnBootSec"]
+        provision = PROVISION.read_text()
+        assert "istota-browser-grants.service" in provision and "istota-browser-grants.timer" in provision
 
     def test_the_subnet_setting_moves_the_address(self, rig, tmp_path):
         rig._run(tmp_path, {"ISTOTA_BROWSER_SUBNET": "10.77.3.0/24"})
@@ -458,7 +531,7 @@ class TestTheHostLoopbackBlock:
     ports in HOST_LOOPBACK_ALLOW. Stage 1 of the local-VM spec measured Lima's DNS
     at the gateway itself, so port 53 there stays open; a devbox gets neither."""
 
-    def _run(self, tmp_path: Path, env: dict, *, ok: bool = True) -> subprocess.CompletedProcess:
+    def _run(self, tmp_path: Path, env: dict, *, ok: bool = True, args: tuple | list = ()) -> subprocess.CompletedProcess:
         bindir = tmp_path / "bin"
         bindir.mkdir(exist_ok=True)
         stub = bindir / "iptables"
@@ -471,7 +544,7 @@ class TestTheHostLoopbackBlock:
         run_env.update(PATH=f"{bindir}:{os.environ['PATH']}",
                        IPT_STATE=str(tmp_path / "chain.json"), IPT_CALLS=str(tmp_path / "calls"))
         run_env.update(env)
-        result = subprocess.run(["bash", str(EGRESS_SH)], capture_output=True,
+        result = subprocess.run(["bash", str(EGRESS_SH), *args], capture_output=True,
                                 text=True, env=run_env, timeout=30)
         if ok:
             assert result.returncode == 0, result.stderr
@@ -633,6 +706,7 @@ class TestProvision:
 
     def test_it_installs_every_host_file(self):
         for name in ("istota-stack.service", "istota-devbox-egress.service",
+                     "istota-browser-grants.service", "istota-browser-grants.timer",
                      "istota-browser-watchdog.service", "istota-browser-watchdog.timer",
                      "istota-certbot.service", "istota-certbot.timer", "mount-nextcloud.service",
                      "istota-config-apply.service", "istota-config-apply.path",

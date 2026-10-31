@@ -158,15 +158,38 @@ class TestTheFirewallOutsideChrome:
         outcome = _connect(stack, lima.container(stack, "daemon"), self.TARGETS, user="10001")
         assert set(outcome.values()) == {"reached"}, outcome
 
-    def test_an_operators_grant_opens_one_address(self, stack):
-        env_file = "/srv/app/istota/host.env"
-        stack.run(f"cp {env_file} {lima.SCRATCH}/host.env.browser-grant")
+    def test_a_name_in_the_config_opens_its_address_and_only_that(self, stack):
+        name = "wiki.vmtier.test"
+        config = "/srv/app/istota/config/config.toml"
+        script = lima.SCRATCH + "/browser-grant.py"
+        stack.run(f"cp -p {config} {lima.SCRATCH}/config.toml.browser-grant && "
+                  f"cp /etc/hosts {lima.SCRATCH}/hosts.browser-grant && "
+                  f"echo '{lima.PRIVATE_ADDR} {name}' >> /etc/hosts")
+        stack.run(f"""cat > {script} <<'PY'
+import re, sys
+path, name = sys.argv[1:]
+text = open(path).read()
+line = f'private_hosts = ["{{name}}"]'
+if re.search(r"^\\[browser\\]$", text, flags=re.M):
+    text = re.sub(r"^\\[browser\\]$", "[browser]\\n" + line, text, count=1, flags=re.M)
+else:
+    text += "\\n[browser]\\n" + line + "\\n"
+open(path, "w").write(text)
+PY
+python3 {script} {config} {name}""")
         try:
-            stack.run(f"istota-stack host-env ISTOTA_BROWSER_EGRESS_ALLOW={lima.PRIVATE_ADDR} && "
-                      "systemctl restart istota-devbox-egress.service")
+            assert stack.out("istota-stack browser-grant-addresses").split() == [lima.PRIVATE_ADDR]
+            stack.run("systemctl start istota-browser-grants.service")
             outcome = _connect(stack, lima.container(stack, "browser"), self.TARGETS)
             assert outcome[f"{lima.PRIVATE_ADDR}:80"] == "reached", outcome
             assert outcome[f"{lima.METADATA_ADDR}:80"] != "reached", outcome
         finally:
-            stack.run(f"cp {lima.SCRATCH}/host.env.browser-grant {env_file} && "
-                      "systemctl restart istota-devbox-egress.service")
+            stack.run(f"cp -p {lima.SCRATCH}/config.toml.browser-grant {config} && "
+                      f"cp {lima.SCRATCH}/hosts.browser-grant /etc/hosts && "
+                      "systemctl start istota-browser-grants.service")
+        outcome = _connect(stack, lima.container(stack, "browser"), self.TARGETS)
+        assert outcome[f"{lima.PRIVATE_ADDR}:80"] != "reached", outcome
+
+    def test_the_refresh_timer_runs(self, stack):
+        assert stack.out("systemctl is-enabled istota-browser-grants.timer") == "enabled"
+        assert stack.out("systemctl is-active istota-browser-grants.timer") == "active"
