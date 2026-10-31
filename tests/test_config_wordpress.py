@@ -48,14 +48,17 @@ class TestTheLoader:
 
     def test_well_formed_entries_load_without_a_warning(self, tmp_path, caplog):
         caplog.set_level(logging.WARNING, logger="istota.config")
-        hosts = ", ".join(f'"{h}"' for h in GOOD)
-        _load(tmp_path, f"[wordpress]\nprivate_hosts = [{hosts}]\n")
+        hosts = "".join(f'"{h}" = ["wordpress"]\n' for h in GOOD)
+        _load(tmp_path, f"[private_hosts]\n{hosts}")
         assert not [r for r in caplog.records if "private_hosts" in r.getMessage()]
 
     @pytest.mark.parametrize("entry", BAD)
     def test_a_malformed_entry_is_named_in_a_warning(self, tmp_path, caplog, entry):
         caplog.set_level(logging.WARNING, logger="istota.config")
-        config = _load(tmp_path, f'[wordpress]\nprivate_hosts = ["ok.example.com", "{entry}"]\n')
+        config = _load(
+            tmp_path,
+            f'[private_hosts]\n"ok.example.com" = ["wordpress"]\n"{entry}" = ["wordpress"]\n',
+        )
         messages = [r.getMessage() for r in caplog.records if "private_hosts" in r.getMessage()]
         assert len(messages) == 1
         assert repr(entry) in messages[0]
@@ -74,8 +77,8 @@ class TestTheBrowsersList:
 
     def test_a_malformed_entry_is_named_in_a_warning(self, tmp_path, caplog):
         caplog.set_level(logging.WARNING, logger="istota.config")
-        _load(tmp_path, '[browser]\nprivate_hosts = ["https://wiki.example.internal"]\n')
-        assert [r for r in caplog.records if "[browser] private_hosts" in r.getMessage()]
+        _load(tmp_path, '[private_hosts]\n"https://wiki.example.internal" = ["browser"]\n')
+        assert [r for r in caplog.records if "'https://wiki.example.internal'" in r.getMessage()]
 
 
 class TestThePattern:

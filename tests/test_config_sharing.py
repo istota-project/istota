@@ -50,9 +50,9 @@ class TestTheLoader:
 
     def test_a_malformed_private_host_is_warned_about_and_kept(self, tmp_path, caplog):
         caplog.set_level(logging.WARNING, logger="istota.config")
-        config = _load(tmp_path, '[sharing]\nprivate_hosts = ["https://cloud.example"]\n')
+        config = _load(tmp_path, '[private_hosts]\n"https://cloud.example" = ["sharing"]\n')
         messages = [r.getMessage() for r in caplog.records if "private_hosts" in r.getMessage()]
-        assert len(messages) == 1 and "[sharing]" in messages[0]
+        assert len(messages) == 1 and "'https://cloud.example'" in messages[0]
         assert config.sharing.private_hosts == ["https://cloud.example"]
 
 

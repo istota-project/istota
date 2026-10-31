@@ -292,7 +292,7 @@ class EmailConfig:
 class BrowserConfig:
     """Browser container configuration.
 
-    ``private_hosts`` has ``[wordpress] private_hosts``'s meaning: exact names
+    ``private_hosts`` is set by the loader from ``[private_hosts]``: exact names
     Chrome may reach on a non-public address. The container mounts no config,
     since it runs hostile pages, so `istota-stack` hands it this list alone.
     A change restarts the stack. No entry reaches the container's own loopback.
@@ -307,9 +307,10 @@ class BrowserConfig:
 class WordPressConfig:
     """Operator settings for the `wordpress` skill.
 
-    ``private_hosts`` are exact host names a site may resolve to a non-public
-    address (a ddev or wp-env site on loopback). Operator-only on purpose: it
-    is exactly what the skill's SSRF rule protects, so no user file reaches it.
+    ``private_hosts`` is set by the loader from ``[private_hosts]``: exact host
+    names a site may resolve to a non-public address (a ddev or wp-env site on
+    loopback). Operator-only on purpose: it is exactly what the skill's SSRF
+    rule protects, so no user file reaches it.
 
     ``max_upload_mb`` caps one file a media upload sends, checked against the
     open file's own size before any byte is read.
@@ -327,8 +328,9 @@ class MailAccountsConfig:
 
     ``enabled`` off keeps the rows but makes every account unreachable.
     ``allow_send`` off makes every account behave as ``read``.
-    ``private_hosts`` has ``[wordpress] private_hosts``'s meaning and reason for
-    being operator-only.
+    ``private_hosts`` is set by the loader from ``[private_hosts]``: exact names
+    a user's account may reach on a private address, where the daemon sends that
+    user's mail password. Operator-only for the reason WordPressConfig gives.
     """
     enabled: bool = True
     allow_send: bool = True
@@ -354,7 +356,7 @@ class SharingOcmConfig:
 class SharingConfig:
     """What users share with Istota through open protocols (`[sharing]`).
 
-    ``private_hosts`` has ``[wordpress] private_hosts``'s meaning: exact names
+    ``private_hosts`` is set by the loader from ``[private_hosts]``: exact names
     a feed or a sharing server may reach on a private address, and the only
     hosts plain http may reach. ``ics_poll_interval`` is clamped to at least
     300 seconds. ``events_per_task`` caps the creates, updates and cancels on
@@ -373,14 +375,21 @@ class SharingConfig:
 ICS_POLL_INTERVAL_MIN = 300
 
 
-# What a `private_hosts` entry (`[wordpress]`, `[servarr]`, `[browser]`,
-# `[mail_accounts]`, `[sharing]`, `[feeds]`, `[security.network]`) may look like: a
-# host name (with an optional trailing dot) or an IP literal. The skills match
-# entries by exact name, so a URL, a port or a wildcard matches nothing. The
-# Ansible role asserts with this same string, and `host/istota-stack`'s
-# `browser_private_hosts` carries a copy a test holds equal.
+# What a host in `[private_hosts]` may look like: a host name (with an optional
+# trailing dot) or an IP literal. The consumers match by exact name, so a URL, a
+# port or a wildcard matches nothing. `mail/accounts.py` validates with this
+# string, and `host/istota-stack`'s `browser_private_hosts` carries a copy a
+# test holds equal.
 PRIVATE_HOST_PATTERN = (
     r"^([A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\.?|[0-9A-Fa-f.]*:[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*)$"
+)
+
+# Who a `[private_hosts]` grant can name. Each is both the consumer's name in the
+# table and the `Config` attribute holding its field. What a grant lets each one
+# do differs, which is why the table names them: see the consumer table in
+# `docs/configuration/reference.md`.
+PRIVATE_HOST_CONSUMERS: tuple[str, ...] = (
+    "browser", "wordpress", "mail_accounts", "sharing", "servarr", "feeds",
 )
 
 
@@ -448,9 +457,10 @@ class ServarrConfig:
     ``requesters``: user ids, besides admins, who get the requester tier.
     Admins never need listing. Empty means only admins can use the skill.
 
-    ``private_hosts``: exact host names or IP literals an app may resolve to a
-    non-public address. Operator-only, same reasoning as WordPressConfig.
-    Plain HTTP is allowed only to a host in this list.
+    ``private_hosts``: set by the loader from ``[private_hosts]``. Exact host
+    names or IP literals an app may resolve to a non-public address.
+    Operator-only, same reasoning as WordPressConfig. Plain HTTP is allowed only
+    to a host in this list.
 
     ``defaults``: per-app add defaults, keyed by app name, each a table with any
     of quality_profile, root_folder, metadata_profile (lidarr only),
@@ -2464,7 +2474,7 @@ class HealthModuleConfig:
 class FeedsModuleConfig:
     """Module-level config for the feeds module (``[feeds]``).
 
-    ``private_hosts`` has ``[wordpress] private_hosts``'s meaning: exact names
+    ``private_hosts`` is set by the loader from ``[private_hosts]``: exact names
     an RSS or Atom feed may reach on a private address. Unlike ``[sharing]``,
     plain http to a public host is allowed: the user chose the scheme, and the
     request carries nothing the daemon adds.
@@ -2651,6 +2661,8 @@ class Config:
     push: PushConfig = field(default_factory=PushConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
     providers: dict[str, ProviderConfig] = field(default_factory=builtin_provider_configs)
+    # Host -> the consumers it is granted to; each consumer's field is set from it.
+    private_hosts: dict[str, list[str]] = field(default_factory=dict)
     experimental: ExperimentalConfig = field(default_factory=ExperimentalConfig)
     users: dict[str, UserConfig] = field(default_factory=dict)  # nc_username -> UserConfig
     # Legacy migration declarations. Never copied into new personal schedules.
@@ -4151,6 +4163,9 @@ _PARSED_BY_HAND = frozenset({
     # `[providers.<id>]` over the built-ins (`_providers`), refusing a table
     # per provider rather than the section.
     "providers",
+    # `[private_hosts]` keyed by host, whose grants `_settle_private_hosts` sets
+    # on each consumer's own field.
+    "private_hosts",
 
     # Cross-field: `confirm_sender_match = "verify"` is only meaningful with an
     # authserv-id to scope the verdict to, so the validator has to see both.
@@ -4472,6 +4487,77 @@ def legacy_spellings(path: tuple[str, ...]) -> list[tuple[str, ...]]:
     return [old for old, new in _MOVED_KEYS.items() if new == path]
 
 
+def fold_section_private_hosts(data: dict) -> list[dict]:
+    """Move each ``[<consumer>] private_hosts`` into ``data["private_hosts"]``.
+
+    A union with what the table already says, never "new spelling wins" as in
+    `_migrate_moved_keys`, because the failure to avoid is a dropped grant.
+    Mutates ``data``, logs nothing and returns what it found as
+    ``{kind, path, message}`` entries, so a caller that only wants the moved
+    document (the editor) can say nothing about it.
+
+    No message names a host from an old key. An old key is ``warning``, never
+    ``retired``: the editor offers to unset a retired key, which would drop the
+    grant. A bad value becomes ``discarded``, and grants nothing.
+    """
+    found: list[dict] = []
+
+    def problem(kind: str, path: tuple[str, ...], message: str) -> None:
+        found.append({"kind": kind, "path": path, "message": message})
+
+    # Replaced rather than left in place, so old keys beside it still load. It
+    # names no consumer, and a shared list is what this table refuses.
+    if "private_hosts" in data and not isinstance(data["private_hosts"], dict):
+        data["private_hosts"] = {}
+        problem(
+            "discarded", ("private_hosts",),
+            "private_hosts must be a table of hosts, each listing its consumers, "
+            'as in "<host>" = ["browser"]; a list names no consumer, so it is ignored',
+        )
+
+    for consumer in PRIVATE_HOST_CONSUMERS:
+        section = data.get(consumer)
+        if not isinstance(section, dict) or "private_hosts" not in section:
+            continue
+        entries = section.pop("private_hosts")
+        if not isinstance(entries, list):
+            problem(
+                "discarded", (consumer, "private_hosts"),
+                f"[{consumer}] private_hosts must be a list of host names; it grants nothing",
+            )
+            continue
+        if not entries:
+            continue
+        problem(
+            "warning", (consumer, "private_hosts"),
+            f"[{consumer}] private_hosts moved to [private_hosts], where each host "
+            f'lists its consumers, as in "<host>" = ["{consumer}"]. The old place '
+            "still works; move the entries.",
+        )
+        for index, host in enumerate(entries):
+            # A dict or a list must never reach a dict key: that raises in the loader.
+            if not isinstance(host, str):
+                problem(
+                    "discarded", (consumer, "private_hosts", str(index)),
+                    f"[{consumer}] private_hosts entry {index} is not a string; it grants nothing",
+                )
+                continue
+            table = data.setdefault("private_hosts", {})
+            consumers = table.get(host, [])
+            if not isinstance(consumers, list):
+                # The old grant wins over a value that granted nothing.
+                consumers = []
+                problem(
+                    "discarded", ("private_hosts", host),
+                    f"[private_hosts] {host!r} must be a list of consumers; replaced "
+                    f"by the grant in [{consumer}] private_hosts",
+                )
+            if consumer not in consumers:
+                consumers.append(consumer)
+            table[host] = consumers
+    return found
+
+
 def normalize_legacy_document(data: dict) -> None:
     """Every rewrite :func:`load_config` applies before the dataclass walk.
 
@@ -4486,6 +4572,8 @@ def normalize_legacy_document(data: dict) -> None:
     _migrate_web_login_link_ttl(data)
     _migrate_workspace_mount_path(data)
     _migrate_moved_keys(data)
+    for problem in fold_section_private_hosts(data):
+        report_problem(problem["kind"], problem["path"], problem["message"])
 
 
 def _migrate_workspace_mount_path(data: dict) -> None:
@@ -5835,6 +5923,7 @@ def _map_document(data: dict, config: Config) -> list[str]:
     )
     if "providers" in data:
         config.providers = _providers(data["providers"], "providers")
+    _settle_private_hosts(config, data)
     _migrate_workspace_fields(data, config, old_mount_spelling=old_mount_spelling)
     if config.workspace_path is None:
         config.workspace_path = config.workspace_mount_path
@@ -5852,6 +5941,54 @@ def _map_document(data: dict, config: Config) -> list[str]:
     # The walk sets fields after construction, so `__post_init__` saw the default.
     config.web.chat.attachment_extensions = admit_weba(config.web.chat.attachment_extensions)
     return unknown
+
+
+def _settle_private_hosts(config: Config, data: dict) -> None:
+    """Validate ``[private_hosts]`` into ``Config.private_hosts`` and each consumer.
+
+    Runs after :func:`fold_section_private_hosts`, so the old spellings are in
+    the table by now. Consumers keep reading their own field. A bad shape is a
+    ``discarded`` problem and grants nothing; a malformed host name is kept and
+    warned about, since it matches nothing and the admin view shows what was
+    written.
+    """
+    table = data.get("private_hosts")
+    grants: dict[str, list[str]] = {}
+    for host, consumers in (table.items() if isinstance(table, dict) else ()):
+        if isinstance(consumers, dict):
+            report_problem(
+                "discarded", ("private_hosts", host),
+                "[private_hosts] %r is a table: a host name with dots must be quoted, "
+                'as in "wiki.example.internal" = ["browser"]; it grants nothing',
+                host,
+            )
+            continue
+        if not isinstance(consumers, list):
+            report_problem(
+                "discarded", ("private_hosts", host),
+                "[private_hosts] %r must be a list of consumers; it grants nothing", host,
+            )
+            continue
+        named: list[str] = []
+        for consumer in consumers:
+            if consumer not in PRIVATE_HOST_CONSUMERS:
+                report_problem(
+                    "discarded", ("private_hosts", host),
+                    "[private_hosts] %r names %r, which is not a consumer (%s); it is ignored",
+                    host, consumer, ", ".join(PRIVATE_HOST_CONSUMERS),
+                )
+            elif consumer not in named:
+                named.append(consumer)
+        grants[host] = named
+
+    config.private_hosts = grants
+    _warn_malformed_private_hosts(grants)
+    for consumer in PRIVATE_HOST_CONSUMERS:
+        hosts: list[str] = []
+        for host, named in grants.items():
+            if consumer in named and host.strip() not in hosts:
+                hosts.append(host.strip())
+        getattr(config, consumer).private_hosts = hosts
 
 
 def _default_warn_on_missing_to_authserv_id(data: dict, config: Config) -> None:
@@ -6377,11 +6514,6 @@ def load_config(
 
     _validate_brain_fallback(config)
     _validate_room_selectable(config)
-    _validate_wordpress_private_hosts(config)
-    _warn_malformed_private_hosts("mail_accounts", config.mail_accounts.private_hosts, "account")
-    _warn_malformed_private_hosts("sharing", config.sharing.private_hosts, "shared source")
-    _warn_malformed_private_hosts("feeds", config.feeds.private_hosts, "feed")
-    _warn_malformed_private_hosts("browser", config.browser.private_hosts, "site")
     _validate_servarr(config)
     _validate_claude_code_brain(config)
     _validate_configured_model_references(config)
@@ -7280,29 +7412,24 @@ def _validate_brain_fallback(config: "Config") -> None:
         config.brain.fallback = ""
 
 
-def _validate_wordpress_private_hosts(config: "Config") -> None:
-    """Warn about a ``[wordpress] private_hosts`` entry that can match no host.
+def _warn_malformed_private_hosts(hosts) -> None:
+    """Warn about a ``[private_hosts]`` host that can match nothing.
 
-    Left on the field rather than dropped: it already grants nothing, and the
-    admin config view should show what the operator wrote.
+    Left in place rather than dropped: it already grants nothing, and the admin
+    config view should show what the operator wrote.
     """
-    _warn_malformed_private_hosts("wordpress", config.wordpress.private_hosts, "site")
-
-
-def _warn_malformed_private_hosts(section: str, entries, target: str) -> None:
-    """The one `private_hosts` shape warning, for each section that has the list."""
     malformed = [
-        entry for entry in (entries or [])
-        if not re.match(PRIVATE_HOST_PATTERN, str(entry).strip())
+        host for host in hosts
+        if not re.match(PRIVATE_HOST_PATTERN, host.strip())
     ]
     if malformed:
         report_problem(
-            "warning", (*section.split("."), "private_hosts"),
-            "[%s] private_hosts entry %s is not a bare host name or IP "
-            "address; entries are matched by exact name, so it lifts the "
-            "private-address refusal for no %s (write the host alone, with "
-            "no scheme, port, path or wildcard)",
-            section, ", ".join(repr(entry) for entry in malformed), target,
+            "warning", ("private_hosts",),
+            "[private_hosts] host %s is not a bare host name or IP address; "
+            "hosts are matched by exact name, so it lifts the private-address "
+            "refusal for nothing (write the host alone, with no scheme, port, "
+            "path or wildcard)",
+            ", ".join(repr(host) for host in malformed),
         )
 
 
@@ -7314,7 +7441,6 @@ def _validate_servarr(config: "Config") -> None:
     requester is a user who simply never calls the skill.
     """
     servarr = config.servarr
-    _warn_malformed_private_hosts("servarr", servarr.private_hosts, "app")
 
     for name in servarr.apps:
         if name in SERVARR_APPS:

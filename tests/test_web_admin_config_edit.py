@@ -504,7 +504,11 @@ class TestServarrCardChangeSet:
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["problems"]["blocking"] == []
-        assert not [p for p in body["problems"]["warnings"] if p["path"][:1] == ["servarr"]], body
+        about_servarr = [
+            p for p in body["problems"]["warnings"]
+            if p["path"][:1] == ["servarr"] and p["path"] != ["servarr", "private_hosts"]
+        ]
+        assert not about_servarr, body
         assert seen[-1]["environ"] == {"ISTOTA_SERVARR_RADARR_API_KEY": ARR_KEY}
 
     async def test_an_inline_label_for_the_key_is_refused(self, alice, setup):
