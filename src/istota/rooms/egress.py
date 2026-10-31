@@ -56,6 +56,10 @@ class EntryRefused(ValueError):
     """An entry, subject or decider no grant may hold. The text is for the person."""
 
 
+class StaleJob(EntryRefused):
+    """The job's text is not the text the person was shown."""
+
+
 @dataclass(frozen=True)
 class Entry:
     kind: str  # 'host' | 'skill' | 'public' | 'open'
@@ -264,6 +268,37 @@ def add_grant(
         "VALUES (?, ?, ?, ?)",
         (user_id, subject, parsed.text, decided_via),
     )
+    return parsed
+
+
+def approve_job(
+    conn: sqlite3.Connection,
+    user_id: str,
+    subject: str,
+    kind: str,
+    digest: str | None,
+    *,
+    decided_via: str,
+) -> Entry:
+    """Approve a job's exact text for `open` or `public`, on the caller's transaction.
+
+    A writer, held to the same short list as `add_grant`. `digest` is the text the
+    person was shown, and a row that has moved since refuses with `StaleJob`, so an
+    approval can never reach text nobody read. `None` is for the operator CLI, which
+    prints the row's text as it approves it.
+    """
+    if kind not in JOB_REQUESTS:
+        raise EntryRefused("Unknown kind of approval.")
+    row = job_row_by_subject(conn, user_id, subject)
+    if row is None:
+        raise EntryRefused("There is no such job.")
+    current = job_digest(row)
+    if digest is not None and digest != current:
+        raise StaleJob("This job's text has changed. Reload the page and read it again.")
+    if kind == "public" and row["reach"] != "public":
+        raise EntryRefused('This job does not ask for public access: its reach is not "public".')
+    parsed = add_grant(conn, user_id, subject, f"{kind}:{current}", decided_via=decided_via)
+    clear_refused(conn, user_id, subject, kind)
     return parsed
 
 
@@ -499,6 +534,40 @@ def list_subject_names(conn: sqlite3.Connection, user_id: str) -> list[str]:
             if subject_exists(conn, user_id, row[0]):
                 names.add(row[0])
     return sorted(names)
+
+
+def describe_subject(conn: sqlite3.Connection, user_id: str, subject: str) -> dict:
+    """One subject as the page and `istota egress list` show it. Hostnames and job
+    text are for the owner's own session or the operator's terminal, and are data."""
+    grants = grants_for(conn, user_id, subject)
+    row = job_row_by_subject(conn, user_id, subject)
+    job = None
+    if row is not None:
+        job = {
+            "digest": job_digest(row),
+            "reach": row["reach"],
+            "prompt": row["prompt"] or "",
+            "command": row["command"] or "",
+            "skill": row["skill"] or "",
+            "skill_args": row["skill_args"] or "",
+        }
+    return {
+        "subject": subject,
+        "kind": subject.partition(":")[0],
+        "label": subject_label(subject),
+        "state": job_state(grants, row),
+        "hosts": sorted(_entries_of_kind(grants, "host")),
+        "skills": sorted(_entries_of_kind(grants, "skill")),
+        "approvals": sorted(
+            text for text in grants if text.partition(":")[0] in JOB_REQUESTS
+        ),
+        "job": job,
+        "refused": [
+            {"entry": item["entry"], "hits": item["hits"], "last_seen": item["last_seen"]}
+            for item in list_refused(conn, user_id, subject)
+            if not item["dismissed"]
+        ],
+    }
 
 
 def open_job_count(conn: sqlite3.Connection) -> int:
