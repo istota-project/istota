@@ -50,6 +50,7 @@ A profile is a named shape plus the services it runs plus any extra config. `Sta
 | `mail` | lean | model, mail | the deployed email round trip, no Nextcloud; a user's connected mail account (Maddy's third mailbox, `me@personal.test`, with `mail` in the old `[mail_accounts] private_hosts`, deliberately) |
 | `signaling` | lean | model, signaling | the Talk signaling wire protocol against a real HPB |
 | `browser` | lean | model, signaling | parity row 17: the `browser` and `signaling` compose profiles booted from the shipped file |
+| `public-job` | lean | model | an approved public job and its subtask: `browser.enabled` set, since the job refuses to run without it, and no browser container, since what it holds is the question |
 | `email` | lean | model, mail, ntfy | the email suite: `confirm_sender_match = "verify"`, the default `untrusted` outbound floor |
 | `email-hold-all` | lean | model, mail, ntfy | the same with `ISTOTA_EMAIL_OUTBOUND_APPROVAL_FLOOR=all` |
 | `full` | full | model, nextcloud, mail, signaling, ntfy | provisioning, Talk, storage, attachments, the signaling event stream, email seen from the web app |

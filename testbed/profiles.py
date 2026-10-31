@@ -185,6 +185,10 @@ BROWSER = Profile(
     web=True,
 )
 
+#: A public job refuses to run with no browser configured, and what it holds is
+#: the question here rather than what it browses, so no container is started.
+PUBLIC_JOB = Profile("public-job", config={"browser": {"enabled": True}})
+
 # The negative control: the same profile on an image with the forge binaries
 # removed, reproducing ISSUE-263. The tag is empty here and filled in by the
 # fixture that builds the control, because it is derived from whatever the
@@ -327,6 +331,7 @@ ALL: tuple[Profile, ...] = (
     EMAIL_HOLD_ALL,
     SIGNALING,
     BROWSER,
+    PUBLIC_JOB,
     FULL,
 )
 
