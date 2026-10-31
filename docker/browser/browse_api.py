@@ -914,6 +914,33 @@ def _document_url(url):
     )
 
 
+def _differs_only_by_case(requested, landed):
+    """Whether two _document_url addresses are one spelling apart, scheme aside.
+
+    The omnibox folds case when it matches what was typed against addresses it
+    remembers, so typing /article goes to a remembered /Article and the server
+    never sees the typed spelling. Case can name a different document, so this
+    is grounds for asking again, never for accepting what landed.
+    """
+    if requested == landed or len(requested) == 1 or len(landed) == 1:
+        return False
+    return [str(part).lower() for part in requested[1:]] == [str(part).lower() for part in landed[1:]]
+
+
+def _navigate_verbatim(page, url, timeout_ms):
+    """Ask for `url` without the omnibox. A failure is left for the caller's check.
+
+    page.goto is the CDP navigation BOT_DETECTION.md warns about, so it is only
+    for the one address the keyboard has just shown it cannot reach.
+    """
+    if not urlsplit(url).scheme:
+        url = "https://" + url.lstrip("/")
+    try:
+        page.goto(url, wait_until="commit", timeout=timeout_ms)
+    except Exception as error:
+        log.warning("Verbatim navigation failed: %s", error)
+
+
 def _navigation_error_response(error, secrets=(), mask_secrets=False):
     if isinstance(error, NavigationMismatch):
         return jsonify(_scrub_extracted({
@@ -935,7 +962,8 @@ def _navigate_and_wait(page, url, timeout_ms=30000):
     2. Navigate via xdotool (pure X11 keyboard input)
     3. Wait for Cloudflare/security challenges to resolve
     4. Passive wait for page to settle
-    5. Require a committed navigation; retry a mismatch once
+    5. Require a committed navigation; retry a mismatch once, outside the
+       omnibox when it landed on another spelling of the requested address
 
     Returns the challenge phrase still showing when step 3 ran out of time,
     and None when the page is clear. Every caller has to branch on it: the
@@ -947,6 +975,7 @@ def _navigate_and_wait(page, url, timeout_ms=30000):
     chrome.connect_cdp(_request_instance())
 
     requested = _document_url(url)
+    landed = None
     for attempt in range(2):
         # A pending event from a previous attempt must not prove this one.
         page.wait_for_timeout(1)
@@ -981,7 +1010,10 @@ def _navigate_and_wait(page, url, timeout_ms=30000):
         page.on("framenavigated", on_commit)
         try:
             page.bring_to_front()
-            xdotool.navigate(url, timeout_s=timeout_ms // 1000, display=_request_instance().display)
+            if landed is not None and _differs_only_by_case(requested, _document_url(landed)):
+                _navigate_verbatim(page, url, timeout_ms)
+            else:
+                xdotool.navigate(url, timeout_s=timeout_ms // 1000, display=_request_instance().display)
             challenge = xdotool.wait_for_challenges(timeout_s=15, display=_request_instance().display)
             _challenge_settle_pause()
             if challenge:

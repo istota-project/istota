@@ -320,6 +320,82 @@ def test_path_normalization_does_not_merge_distinct_documents(navigation, reques
     assert navigate.call_count == 2
 
 
+@pytest.mark.parametrize(("requested", "remembered"), [
+    ("https://news.example/search?q=a&gl=us", "https://news.example/search?q=a&gl=US"),
+    ("https://news.example/Article", "https://news.example/article"),
+    ("news.example/Article", "https://news.example/article"),
+])
+def test_an_omnibox_case_substitution_is_retried_with_what_was_asked(navigation, requested, remembered):
+    # Chrome's omnibox folds case against addresses it remembers, so the typed
+    # spelling never reaches the server, on either attempt.
+    page, navigate = navigation
+    goto = mock.Mock(side_effect=lambda url, **kw: page.commit(url))
+    page.goto = goto
+
+    def typed(*a, **kw):
+        page.navigation(remembered)
+        page.commit(remembered)
+
+    navigate.side_effect = typed
+    assert browse_api._navigate_and_wait(page, requested) is None
+    assert navigate.call_count == 1
+    verbatim = requested if "://" in requested else "https://" + requested
+    goto.assert_called_once_with(verbatim, wait_until="commit", timeout=30000)
+    page.wait_for_timeout(1)
+    assert page.url == verbatim
+    assert not any(page.listeners.values())
+
+
+def test_a_verbatim_retry_follows_a_real_redirect(navigation):
+    page, navigate = navigation
+    requested = "https://news.example/search?gl=us"
+    remembered = "https://news.example/search?gl=US"
+
+    def verbatim(url, **kw):
+        first = page.navigation(url)
+        page.navigation(remembered, redirected_from=first)
+        page.commit(remembered)
+
+    page.goto = mock.Mock(side_effect=verbatim)
+
+    def typed(*a, **kw):
+        page.navigation(remembered)
+        page.commit(remembered)
+
+    navigate.side_effect = typed
+    assert browse_api._navigate_and_wait(page, requested) is None
+    page.goto.assert_called_once()
+    assert page.url == remembered
+
+
+def test_a_failed_verbatim_retry_is_still_a_mismatch(navigation):
+    page, navigate = navigation
+    requested = "https://news.example/Article"
+    remembered = "https://news.example/article"
+    page.goto = mock.Mock(side_effect=RuntimeError("net::ERR_ABORTED"))
+
+    def typed(*a, **kw):
+        page.navigation(remembered)
+        page.commit(remembered)
+
+    navigate.side_effect = typed
+    with pytest.raises(browse_api.NavigationMismatch) as raised:
+        browse_api._navigate_and_wait(page, requested)
+    assert raised.value.landed == remembered
+    assert not any(page.listeners.values())
+
+
+@pytest.mark.parametrize("wrong", [OLD, "https://other.example/", REQUESTED + "?page=2"])
+def test_a_wrong_document_is_never_retried_outside_the_omnibox(navigation, wrong):
+    page, navigate = navigation
+    page.goto = mock.Mock()
+    navigate.side_effect = lambda *a, **kw: page.commit(wrong)
+    with pytest.raises(browse_api.NavigationMismatch):
+        browse_api._navigate_and_wait(page, REQUESTED)
+    assert navigate.call_count == 2
+    page.goto.assert_not_called()
+
+
 def test_extract_keeps_textless_controls_and_scrubs_before_truncation(monkeypatch):
     page = mock.Mock()
     page.url = 'https://example.com/'
