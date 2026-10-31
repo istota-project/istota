@@ -234,13 +234,9 @@ private_hosts = ["wiki.example.internal", "git.example.internal"]
 
 A listed name still cannot reach the browser container's own loopback, where its API and debugging ports are.
 
-On a VM there is a second check outside the container, a firewall that drops the browser's traffic to every private range. It cannot read names, so also list the addresses those names resolve to in `/srv/app/istota/host.env`, then run `systemctl restart istota-devbox-egress`:
+On a VM there is a second check outside the container, a firewall that drops the browser's traffic to every private range. It follows this same list: the VM resolves each name and opens the addresses it gets, when the stack starts and every five minutes after. If a listed site's address changes, the browser cannot reach it until the next refresh. A name that will not resolve opens nothing and logs a warning in the journal of `istota-browser-grants.service`.
 
-```
-ISTOTA_BROWSER_EGRESS_ALLOW=192.0.2.10 192.0.2.128/25
-```
-
-`istota-stack up` warns when `private_hosts` names a host and this list is empty. If a name's address changes, the firewall drops it until you update the list. The firewall identifies the browser by a fixed address, `172.29.0.2`. If `172.29.0.0/24` is taken on your host, set `ISTOTA_BROWSER_SUBNET` in `host.env` to another `x.y.z.0/24`, restart that unit and run `istota-stack up`.
+The firewall identifies the browser by a fixed address, `172.29.0.2`. If `172.29.0.0/24` is taken on your host, set `ISTOTA_BROWSER_SUBNET` in `host.env` to another `x.y.z.0/24`, then run `systemctl restart istota-devbox-egress` and `istota-stack up`.
 
 ### Talk over the signaling server
 

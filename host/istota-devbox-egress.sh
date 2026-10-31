@@ -26,6 +26,76 @@ set -euo pipefail
 
 SUBNET="${ISTOTA_DEVBOX_SUBNET:-172.30.0.0/24}"
 
+is_ipv4() {
+    local IFS=.
+    local -a octets
+    [[ "$1" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+    read -r -a octets <<< "$1"
+    for octet in "${octets[@]}"; do
+        [ "$((10#$octet))" -le 255 ] || return 1
+    done
+}
+
+remove_rules_commented() {
+    iptables -w 5 -S DOCKER-USER | { grep -F -- "--comment \"$1\"" || true; } \
+        | sed 's/^-A /-D /' | while read -r rule; do
+            # iptables' own output, re-read as arguments (the comment is quoted).
+            eval "iptables -w 5 ${rule}"
+        done
+}
+
+BROWSER_SUBNET_DEFAULT="172.29.0.0/24"
+BROWSER_GRANT_COMMENT="istota-browser-grant: an address of a name in [browser] private_hosts"
+browser_failed=0
+
+browser_subnet="${ISTOTA_BROWSER_SUBNET:-$BROWSER_SUBNET_DEFAULT}"
+if ! [[ "$browser_subnet" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.0/24$ ]] \
+        || ! is_ipv4 "${browser_subnet%/24}"; then
+    echo "ISTOTA_BROWSER_SUBNET is a x.y.z.0/24, not '${browser_subnet}'; using ${BROWSER_SUBNET_DEFAULT}" >&2
+    browser_failed=1
+    browser_subnet="$BROWSER_SUBNET_DEFAULT"
+fi
+browser_addr="${browser_subnet%.0/24}.2"
+
+# The firewall's half of `[browser] private_hosts`, the one place a grant lives: the
+# addresses those names resolve to now, from istota-stack, which reads the config.
+# Adds before it removes and writes nothing unchanged, because istota-browser-grants
+# runs this on a timer and the rest of this script would open a gap each tick. An
+# address that moved is dropped until the next run, and a name that will not resolve
+# grants nothing.
+refresh_browser_grants() {
+    local stack="${ISTOTA_STACK_BIN:-/usr/local/sbin/istota-stack}" answer="" wanted="" entry current rule
+    if [ -x "$stack" ]; then
+        answer="$("$stack" browser-grant-addresses)" \
+            || { echo "could not read [browser] private_hosts; granting none" >&2; answer=""; }
+    fi
+    for entry in $answer; do
+        if is_ipv4 "$entry"; then
+            wanted="${wanted} ${entry}/32"
+        else
+            echo "browser-grant-addresses printed '${entry}', not an address; ignoring it" >&2
+        fi
+    done
+    current="$(iptables -w 5 -S DOCKER-USER | { grep -F -- "--comment \"${BROWSER_GRANT_COMMENT}\"" || true; })"
+    for entry in $wanted; do
+        grep -qF -- " -d ${entry} " <<<"$current" || iptables -w 5 -I DOCKER-USER 1 -s "$browser_addr" -d "$entry" \
+            -m comment --comment "$BROWSER_GRANT_COMMENT" -j RETURN
+    done
+    while read -r rule; do
+        [ -n "$rule" ] || continue
+        entry="$(sed -n 's/.* -d \([0-9.\/]*\) .*/\1/p' <<<"$rule")"
+        case " ${wanted} " in
+            *" ${entry} "*) ;;
+            *) eval "iptables -w 5 ${rule/#-A /-D }" ;;
+        esac
+    done <<<"$current"
+}
+
+if [ "${1:-}" = "--browser-grants" ]; then
+    refresh_browser_grants
+    exit 0
+fi
+
 ensure_drop() {
     local dest="$1"
     local comment="$2"
@@ -73,16 +143,6 @@ iptables -w 5 -S DOCKER-USER | { grep -F -- "--comment \"${LOOPBACK_COMMENT}\"" 
         eval "iptables -w 5 ${rule}"
     done
 
-is_ipv4() {
-    local IFS=.
-    local -a octets
-    [[ "$1" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
-    read -r -a octets <<< "$1"
-    for octet in "${octets[@]}"; do
-        [ "$((10#$octet))" -le 255 ] || return 1
-    done
-}
-
 is_port() {
     [[ "$1" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$1" -le 65535 ]
 }
@@ -129,38 +189,10 @@ fi
 # The replies' RETURN comes first because DOCKER-USER runs ahead of Docker's own
 # conntrack accept, and the API answers the daemon and its published ports.
 # After the loopback block, so these land in front of its RETURNs.
-#
-# ISTOTA_BROWSER_EGRESS_ALLOW (IPv4 addresses or CIDRs) is the firewall's half of
-# `[browser] private_hosts`: this cannot read names. As above, what it cannot read
-# fails the unit after applying the rest, and allows nothing. IPv4 only.
-BROWSER_SUBNET_DEFAULT="172.29.0.0/24"
 BROWSER_COMMENT="istota-browser: the browser reaches no private range but its grants"
-browser_failed=0
 
-iptables -w 5 -S DOCKER-USER | { grep -F -- "--comment \"${BROWSER_COMMENT}\"" || true; } \
-    | sed 's/^-A /-D /' | while read -r rule; do
-        eval "iptables -w 5 ${rule}"
-    done
-
-browser_subnet="${ISTOTA_BROWSER_SUBNET:-$BROWSER_SUBNET_DEFAULT}"
-if ! [[ "$browser_subnet" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\.0/24$ ]] \
-        || ! is_ipv4 "${browser_subnet%/24}"; then
-    echo "ISTOTA_BROWSER_SUBNET is a x.y.z.0/24, not '${browser_subnet}'; using ${BROWSER_SUBNET_DEFAULT}" >&2
-    browser_failed=1
-    browser_subnet="$BROWSER_SUBNET_DEFAULT"
-fi
-browser_addr="${browser_subnet%.0/24}.2"
-
-browser_allowed=""
-for entry in $(printf '%s' "${ISTOTA_BROWSER_EGRESS_ALLOW:-}" | tr ',' ' '); do
-    if ! [[ "$entry" =~ ^[0-9.]+(/([89]|[12][0-9]|3[0-2]))?$ ]] || ! is_ipv4 "${entry%/*}"; then
-        echo "ISTOTA_BROWSER_EGRESS_ALLOW: '${entry}' is not an IPv4 address or a /8 to /32 range; allowing none" >&2
-        browser_failed=1
-        browser_allowed=""
-        break
-    fi
-    browser_allowed="${browser_allowed} ${entry}"
-done
+remove_rules_commented "$BROWSER_COMMENT"
+remove_rules_commented "$BROWSER_GRANT_COMMENT"
 
 browser_rule() {
     iptables -w 5 -I DOCKER-USER 1 -s "$browser_addr" "$@" -m comment --comment "$BROWSER_COMMENT"
@@ -168,11 +200,9 @@ browser_rule() {
 for dest in 169.254.0.0/16 168.63.129.16/32 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10; do
     browser_rule -d "$dest" -j DROP
 done
-for entry in $browser_allowed; do
-    browser_rule -d "$entry" -j RETURN
-done
 iptables -w 5 -I DOCKER-USER 1 -s "$browser_addr" -m conntrack --ctstate ESTABLISHED,RELATED \
     -m comment --comment "$BROWSER_COMMENT" -j RETURN
+refresh_browser_grants
 
 # --- The proxied listener (INGRESS=proxied) ---
 #

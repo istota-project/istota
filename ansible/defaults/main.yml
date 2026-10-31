@@ -80,11 +80,8 @@ istota_zram_enabled: true
 istota_host_loopback_block: false
 istota_host_gateway_addr: ""
 istota_host_loopback_allow: []
-# The browser's network, when the default 172.29.0.0/24 is taken on this host, and
-# the private addresses the browser container may reach: the addresses of
-# [browser] private_hosts, which the firewall cannot read as names.
+# The browser's network, when the default 172.29.0.0/24 is taken on this host.
 istota_browser_subnet: ""
-istota_browser_egress_allow: []
 
 # The keys, as provision.sh documents them. Derived for the ingress mode the
 # same way `istota setup` derives them, so a role-managed host.env matches a
@@ -109,7 +106,6 @@ istota_host_env:
   HOST_GATEWAY_ADDR: "{{ istota_host_gateway_addr }}"
   HOST_LOOPBACK_ALLOW: "{{ istota_host_loopback_allow | join(' ') }}"
   ISTOTA_BROWSER_SUBNET: "{{ istota_browser_subnet }}"
-  ISTOTA_BROWSER_EGRESS_ALLOW: "{{ istota_browser_egress_allow | join(' ') }}"
   LOCAL_FORWARD_PORT: ""
   ISTOTA_LOCAL_LAYERS: ""
   ISTOTA_DESKTOP_APP: ""

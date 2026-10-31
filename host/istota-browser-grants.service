@@ -1,0 +1,9 @@
+[Unit]
+Description=Open the firewall for what [browser] private_hosts resolves to
+After=docker.service istota-devbox-egress.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/srv/app/istota/host.env
+ExecStart=/usr/local/sbin/istota-devbox-egress --browser-grants
