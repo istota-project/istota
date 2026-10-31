@@ -31,6 +31,7 @@ proxy, which is why it answers the same for an admin and a non-admin.
 import os
 
 from istota.skills._cli import fail as _fail, parse_and_resolve, run_skill_cli
+from istota.skills._turn_access import INCOGNITO_HINT, INCOGNITO_REFUSAL, calling_task_incognito
 from istota.lib.untrusted import frame_untrusted
 
 # A room's name is third-party text. On a shared Talk room any participant can
@@ -93,12 +94,14 @@ def _room_row(room, talk_ref, *, current_token, phone_surface=None):
 def cmd_list(args):
     from istota import db
 
+    if calling_task_incognito():
+        _fail(INCOGNITO_HINT, reason=INCOGNITO_REFUSAL)
     user_id = _user_id()
     current = os.environ.get("ISTOTA_CONVERSATION_TOKEN", "") or None
     with db.get_db(_db_path()) as conn:
-        rooms = db.list_member_rooms(
+        rooms = [r for r in db.list_member_rooms(
             conn, user_id, include_archived=args.include_archived,
-        )
+        ) if not r.incognito]
         # One query for every room's Talk binding rather than a lookup each:
         # scoped by membership, so it takes one parameter however many rooms
         # the user is in.

@@ -378,6 +378,8 @@ def group_link_refusal(
     room = db.get_room(conn, room_token)
     if room is None:
         return "This room isn't registered yet."
+    if room.incognito:
+        return "An incognito room cannot be linked to a group."
     if db.is_group_owned_room(room):
         return link_refusal(room)
     if not host_present(conn, room_token, user_id):

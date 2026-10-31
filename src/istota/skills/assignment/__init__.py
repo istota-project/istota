@@ -38,6 +38,8 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
+from istota.skills._cli import fail
+from istota.skills._turn_access import INCOGNITO_HINT, INCOGNITO_REFUSAL, calling_task_incognito
 from istota.skills._hostpath import NOT_A_PATH, host_path
 from istota.skills._turn_access import calling_task_id as _task_id
 
@@ -918,5 +920,7 @@ def _with_db(handler):
 
 def main(argv=None):
     args = parse_and_resolve(build_parser(), argv)
+    if calling_task_incognito():
+        fail(INCOGNITO_HINT, reason=INCOGNITO_REFUSAL)
     commands = {name: _with_db(handler) for name, handler in COMMANDS.items()}
     run_skill_cli(commands, args, command=_command_key(args), on_exception=_on_exception)

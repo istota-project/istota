@@ -7111,6 +7111,17 @@ def _email_room_card(
     return "".join(f"\n{line}" for line in lines)
 
 
+INCOGNITO_ROOM_LINE = (
+    "This is an incognito room. None of the user's memory was loaded and none "
+    "can be read or written from here, and nothing said here reaches their "
+    "long-term memory. If they ask you to remember something, write it to this "
+    "room's CHANNEL.md with `istota-skill memory append --channel`; say that it "
+    "is kept in this room only and is deleted with it. Asking another person, "
+    "posting to another room, sending an alert and starting an assignment are "
+    "refused here too."
+)
+
+
 def room_card(
     config: Config,
     task: "db.Task",
@@ -7189,6 +7200,8 @@ def room_card(
         # and a declinable one that it may decline, since the scheduler honours
         # the decline whether or not the card could be built.
         lines = [emissary] if guest_turn else []
+        if task.incognito:
+            lines.append(INCOGNITO_ROOM_LINE)
         if task.declinable:
             lines.append(speech_gate.DECLINE_TASK_LINE)
         return "".join(f"\n{line}" for line in lines)
@@ -8806,8 +8819,10 @@ def execute_task(
     # isn't available in this deployment is folded into the disabled set so it
     # drops from both selection and the on-demand menu (no wasted pull /
     # confusing CLI failure). See config.available_capabilities().
+    from istota.rooms.scopes import INCOGNITO_DISABLED_SKILLS
     _disabled = effective_disabled_skills(
-        config, task.user_id, skill_index, withheld_scopes=_withheld,
+        config, task.user_id, skill_index,
+        withheld_scopes=_withheld | INCOGNITO_DISABLED_SKILLS if task.incognito else _withheld,
     )
 
     # Build sticky skills from recent conversation + explicit reply parent

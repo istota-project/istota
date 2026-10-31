@@ -109,6 +109,15 @@ class Reach:
 BRIEFING_RESEARCH_SOURCE_TYPES = frozenset({"group_briefing_research", "shared_block_research"})
 
 
+#: Off the menu and off the proxy in an incognito room (ISSUE-892), and their
+#: CLIs refuse there as well. The `memory` skill stays, for the room's own
+#: CHANNEL.md. Not scopes: withholding one would give the task a restricted
+#: temp dir, which is for input somebody else wrote.
+INCOGNITO_DISABLED_SKILLS = frozenset(
+    {"memory_search", "kv", "relay", "room", "rooms", "assignment"}
+)
+
+
 def is_briefing_research(task: "db.Task") -> bool:
     return task.source_type in BRIEFING_RESEARCH_SOURCE_TYPES or task.user_id == BRIEFINGS_IDENTITY
 
@@ -474,7 +483,8 @@ def ambient_memory_off(conn: sqlite3.Connection | None, task: "db.Task") -> bool
     correspondent's, the executor loads `USER.md` and overlays alone, from
     the withheld ``memory`` scope and the posture.
     """
-    if is_briefing_research(task) or task.guest_participant_id is not None:
+    # An incognito room, at any headcount, by the task's own flag (ISSUE-892).
+    if task.incognito or is_briefing_research(task) or task.guest_participant_id is not None:
         return True
     if task.conversation_token and conn is not None:
         try:
@@ -612,6 +622,8 @@ def task_group_ids(
     full reach in a shared room is their own data and never widens it. Raises
     on a database error; the caller treats that as the empty set.
     """
+    if task.incognito:
+        return []
     if is_briefing_research(task) or task.guest_participant_id is not None or task.audience == "mixed":
         return []
     if turn_author(conn, task, own_addresses=own_addresses) != "own":

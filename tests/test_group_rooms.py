@@ -134,6 +134,8 @@ class TestTheMigration:
         db.init_db(old)
         raw = sqlite3.connect(old)
         raw.execute("DROP INDEX idx_rooms_group_source")
+        # Added after this column, so an older database has neither.
+        raw.execute("ALTER TABLE rooms DROP COLUMN incognito")
         raw.execute("ALTER TABLE rooms DROP COLUMN membership_source")
         raw.execute("DROP TABLE group_room_requests")
         raw.execute("DELETE FROM _migration_state WHERE name = 'group_owned_rooms_v1'")

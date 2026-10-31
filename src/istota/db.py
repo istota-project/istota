@@ -165,6 +165,9 @@ class Task:
     #: The assignment this task is a wake of (`assignments.id`); None for
     #: every task that is not `source_type = 'assignment'`.
     assignment_id: int | None = None
+    #: In an incognito room (ISSUE-892), frozen at creation by `create_task`,
+    #: so it outlives the room's row. What every memory writer asks.
+    incognito: bool = False
     # The namespace `model` was resolved in, frozen at creation beside it
     # (ISSUE-420). `executor._pin_origin_namespace` prefers it to inferring one
     # from `brain` or from the lane, because neither inference can tell a pin
@@ -501,6 +504,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         "audience": "TEXT",
         # Assignments: the wake's assignment. No backfill; no older task was one.
         "assignment_id": "INTEGER",
+        # ISSUE-892. No backfill: no room was incognito before this column.
+        "incognito": "INTEGER NOT NULL DEFAULT 0",
     })
     # The same for a wake's spend, so the ledger outlives the task row.
     _add_columns(conn, "task_usage", {"assignment_id": "INTEGER"})
@@ -1267,6 +1272,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_group_briefings(conn)
     _migrate_room_group(conn)
     _migrate_group_owned_rooms(conn)
+    _migrate_room_incognito(conn)
     # ISSUE-612. Nothing to backfill: no earlier row recorded its mail.
     _add_columns(conn, "messages", {"outgoing_mail": "TEXT"})
     # Hidden email threads, stage 3. A row from before it renders the card from
@@ -1624,6 +1630,25 @@ def find_task_by_talk_message_id(
     return int(row[0]) if row else None
 
 
+def _new_task_is_incognito(
+    conn: sqlite3.Connection, token: str | None, parent_task_id: int | None,
+) -> bool:
+    """Whether a task being created belongs to an incognito room (ISSUE-892).
+
+    Asked here rather than by each producer, so a subtask, a retry, a cron job
+    aimed at the room and whatever is added next cannot leave it out. A parent's
+    flag counts on its own, for a child that carries no room.
+    """
+    if token and room_is_incognito(conn, token):
+        return True
+    if parent_task_id is None:
+        return False
+    row = conn.execute(
+        "SELECT incognito FROM tasks WHERE id = ?", (parent_task_id,),
+    ).fetchone()
+    return bool(row and row[0])
+
+
 def create_task(
     conn: sqlite3.Connection,
     prompt: str = "",
@@ -1693,6 +1718,7 @@ def create_task(
         )
     if max_attempts is not None and max_attempts < 1:
         raise ValueError(f"create_task: max_attempts must be at least 1, not {max_attempts}")
+    incognito = _new_task_is_incognito(conn, conversation_token, parent_task_id)
     if source_type == "briefing" and briefing_name:
         from istota.briefings.group_migrate import require_personal_schedule
         require_personal_schedule(conn, user_id, briefing_name)
@@ -1730,8 +1756,8 @@ def create_task(
             about_room_token, host_absent, declinable,
             heartbeat_silent, skip_log_channel, scheduled_job_id, briefing_name,
             queue, model, effort, brain, model_namespace, provider,
-            talk_delivery_token, skill, skill_args, assignment_id{extra_columns}
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{", ?" * len(extra_values)})
+            talk_delivery_token, skill, skill_args, assignment_id, incognito{extra_columns}
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{", ?" * len(extra_values)})
         RETURNING id
         """,
         (
@@ -1769,6 +1795,7 @@ def create_task(
             skill,
             skill_args,
             assignment_id,
+            1 if incognito else 0,
             *extra_values,
         ),
     )
@@ -1793,7 +1820,7 @@ _TASK_COLUMNS = (
     "guest_participant_id, audience, about_room_token, host_absent, declinable, heartbeat_silent, skip_log_channel, scheduled_job_id, "
     "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
     "brain, provider, model_namespace, talk_delivery_token, skill, skill_args, whatsapp_confirmation_request_id, "
-    "assignment_id"
+    "assignment_id, incognito"
 )
 
 
@@ -1855,6 +1882,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         skill=row["skill"],
         skill_args=row["skill_args"],
         assignment_id=row["assignment_id"],
+        incognito=bool(row["incognito"]),
     )
 
 
@@ -2124,8 +2152,41 @@ _TASK_STATE_COLUMNS = (
 _TASK_PROMPT_EXCERPT_CHARS = 160
 
 
+def _incognito_read_filter(
+    conn: sqlite3.Connection, viewer_task_id: int | None,
+) -> tuple[str, list]:
+    """The SQL narrowing a task's read of other tasks across the incognito line.
+
+    A task in an incognito room reads that room alone, and a task anywhere else
+    reads no incognito task at all, so one room's answer cannot carry another's
+    turns into memory. ``None`` is a read from outside any task: the operator's.
+    """
+    if viewer_task_id is None:
+        return "", []
+    viewer = conn.execute(
+        "SELECT conversation_token, incognito FROM tasks WHERE id = ?", (viewer_task_id,),
+    ).fetchone()
+    if viewer is not None and viewer["incognito"]:
+        return " AND conversation_token = ?", [viewer["conversation_token"]]
+    return " AND incognito = 0", []
+
+
+def task_readable_from(
+    conn: sqlite3.Connection, task_id: int, viewer_task_id: int | None,
+) -> bool:
+    """Whether a task may read ``task_id``, by `_incognito_read_filter`. A task
+    with no row has nothing to hide, and the caller's own lookup answers it."""
+    if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
+        return True
+    clause, params = _incognito_read_filter(conn, viewer_task_id)
+    return conn.execute(
+        f"SELECT 1 FROM tasks WHERE id = ?{clause}", (task_id, *params),
+    ).fetchone() is not None
+
+
 def get_task_state_for_user(
     conn: sqlite3.Connection, task_id: int, user_id: str,
+    *, viewer_task_id: int | None = None,
 ) -> dict | None:
     """Read one task's lifecycle state and result, scoped to its owner.
 
@@ -2137,12 +2198,14 @@ def get_task_state_for_user(
 
     Returns a plain dict rather than a ``Task`` because the two most useful
     fields here (``started_at`` / ``completed_at``) are not on the dataclass.
+    ``viewer_task_id`` is the calling task, for `_incognito_read_filter`.
     """
+    clause, clause_params = _incognito_read_filter(conn, viewer_task_id)
     cursor = conn.execute(
         f"SELECT {_TASK_STATE_COLUMNS}, result, error, "
         f"substr(prompt, 1, {_TASK_PROMPT_EXCERPT_CHARS}) AS prompt_excerpt "
-        "FROM tasks WHERE id = ? AND user_id = ?",
-        (task_id, user_id),
+        f"FROM tasks WHERE id = ? AND user_id = ?{clause}",
+        (task_id, user_id, *clause_params),
     )
     row = cursor.fetchone()
     return dict(row) if row else None
@@ -2157,6 +2220,7 @@ def list_recent_tasks_for_user(
     status: str | None = None,
     source_type: str | None = None,
     limit: int = 20,
+    viewer_task_id: int | None = None,
 ) -> list[dict]:
     """List a user's own recent tasks, newest first.
 
@@ -2190,6 +2254,10 @@ def list_recent_tasks_for_user(
     # id DESC, not created_at DESC: created_at has one-second granularity, so
     # two tasks queued in the same second (a parent and its subtask) would come
     # back in arbitrary order.
+    clause, clause_params = _incognito_read_filter(conn, viewer_task_id)
+    query += clause
+    params.extend(clause_params)
+
     query += " ORDER BY id DESC LIMIT ?"
     params.append(limit)
 
@@ -4144,9 +4212,12 @@ def get_web_chat_room_by_token(
 
 
 def create_web_chat_room(
-    conn: sqlite3.Connection, user_id: str, name: str,
+    conn: sqlite3.Connection, user_id: str, name: str, *, incognito: bool = False,
 ) -> WebChatRoom:
     """Create a room with a freshly generated channel token.
+
+    ``incognito`` is decided here and nowhere later: nothing writes the column
+    after this (`room_is_incognito`).
 
     Also registers the room in the unified `rooms` registry (origin=web) with a
     self-referential `web` binding, so newly-created web rooms appear in the
@@ -4154,6 +4225,8 @@ def create_web_chat_room(
     """
     display = name.strip() or "general"
     token = register_room(conn, None, user_id, origin="web", name=display).token
+    if incognito:
+        conn.execute("UPDATE rooms SET incognito = 1 WHERE token = ?", (token,))
     row = conn.execute(
         "INSERT INTO web_chat_rooms (user_id, token, name) VALUES (?, ?, ?) "
         "RETURNING *",
@@ -4445,6 +4518,9 @@ def configured_default_room(conn: sqlite3.Connection, user_id: str) -> str | Non
         return None
     if _live_room(conn, token) is None:
         return None
+    # Refused at save too; this holds for a value written some other way.
+    if room_is_incognito(conn, token):
+        return None
     if not is_room_member(conn, token, user_id):
         return None
     if room_is_shared(conn, token):
@@ -4631,6 +4707,8 @@ def _usable_as_delivery_default(
     - **A group-owned room.** Its history is read by every future member of
       the group, so a one-member group room is not private either.
     """
+    if room_is_incognito(conn, token):
+        return False
     if token in channels:
         return False
     room = visible_room(conn, user_id, token)
@@ -4825,8 +4903,8 @@ def delete_web_chat_room(
     """Hard-delete a room and every row keyed on its token, in one transaction.
 
     Returns ``False`` (deleting nothing) when the room is unknown or owned by
-    another user. Removes, in order: the room's tasks' ``task_events``, those
-    tasks, its ``web_chat_messages``, its ``channel_sleep_cycle_state``, and the
+    another user. Removes, in order: the room's tasks' ``task_events``, grants,
+    ``task_logs`` and ``task_steers``, those tasks, its ``web_chat_messages``, its ``channel_sleep_cycle_state``, and the
     room row itself. The ``CHANNEL.md`` directory and channel ``memory_chunks``
     are not touched here — the caller removes the former best-effort; the latter
     is a documented residual.
@@ -4859,6 +4937,12 @@ def _delete_room_rows(conn: sqlite3.Connection, token: str) -> None:
         f"(SELECT id FROM tasks WHERE conversation_token IN ({ref_marks}))",
         refs,
     )
+    for table in ("task_logs", "task_steers"):
+        conn.execute(
+            f"DELETE FROM {table} WHERE task_id IN "
+            f"(SELECT id FROM tasks WHERE conversation_token IN ({ref_marks}))",
+            refs,
+        )
     conn.execute(f"DELETE FROM tasks WHERE conversation_token IN ({ref_marks})", refs)
     conn.execute(f"DELETE FROM web_chat_messages WHERE token IN ({ref_marks})", refs)
     conn.execute(
@@ -4933,6 +5017,8 @@ class Room:
     #: ``room`` keeps its own roster; ``group`` holds the linked group's
     #: current membership. See `is_group_owned_room`.
     membership_source: str = "room"
+    #: Set at creation and never changed (ISSUE-892). See `room_is_incognito`.
+    incognito: bool = False
 
 
 @dataclass
@@ -5000,6 +5086,7 @@ def _row_to_room(row: sqlite3.Row) -> Room:
         membership_source=(
             row["membership_source"] if "membership_source" in keys else "room"
         ),
+        incognito=bool(row["incognito"]) if "incognito" in keys else False,
     )
 
 
@@ -6379,6 +6466,25 @@ def hidden_room_tokens_for_member(
     return threads - listed
 
 
+def room_is_incognito(conn: sqlite3.Connection, room_token: str) -> bool:
+    """Whether this is an incognito room (ISSUE-892): one member, web only,
+    loading nothing of the user's memory and adding nothing to it. A task's own
+    flag (`Task.incognito`) is the answer for a task; this one is for a room."""
+    row = conn.execute(
+        "SELECT incognito FROM rooms WHERE token = ?", (room_token,),
+    ).fetchone()
+    return bool(row and row[0])
+
+
+def incognito_room_tokens(conn: sqlite3.Connection, user_id: str) -> set[str]:
+    """One user's incognito rooms, for the search that leaves them out."""
+    return {row[0] for row in conn.execute(
+        "SELECT r.token FROM rooms r "
+        "JOIN room_members m ON m.room_token = r.token "
+        "WHERE m.user_id = ? AND r.incognito = 1", (user_id,),
+    )}
+
+
 def room_has_phone_binding(conn: sqlite3.Connection, room_token: str) -> bool:
     """Whether the room is bound to SMS or WhatsApp at all, or is a user's
     private email room: each is a read-only transcript in web."""
@@ -6408,7 +6514,9 @@ def is_private_room_of(
     group-owned room, whatever its headcount: every future member reads it.
     """
     room = get_room(conn, token) if token else None
-    if room is None or room.archived or is_group_owned_room(room):
+    # An incognito room takes nothing from outside itself, and what lands there
+    # would go when it is deleted.
+    if room is None or room.archived or room.incognito or is_group_owned_room(room):
         return False
     if list_room_members(conn, room.token) != [user_id]:
         return False
@@ -9129,6 +9237,12 @@ def _migrate_group_owned_rooms(conn: sqlite3.Connection) -> None:
         )
     except sqlite3.OperationalError:
         return  # marker table not created yet
+
+
+def _migrate_room_incognito(conn: sqlite3.Connection) -> None:
+    """Add `rooms.incognito` (ISSUE-892). Nothing is backfilled: the flag is
+    set when a room is created, so no existing room can have it."""
+    _add_columns(conn, "rooms", {"incognito": "INTEGER NOT NULL DEFAULT 0"})
 
 
 def _migrate_room_group(conn: sqlite3.Connection) -> None:
@@ -13006,6 +13120,8 @@ def get_completed_channel_tasks_since(
 
     Excludes a guest's turn (multiplayer D2): a guest's words are extracted into
     nobody's memory, and `CHANNEL.md` is read by every later task in the room.
+    Excludes an incognito room's turns (ISSUE-892): its `CHANNEL.md` is the
+    user's to write, by hand or by asking, and nothing extracts into it.
     Excludes ``withheld_from_room`` (ISSUE-255): the channel sleep cycle distils
     what it collects into ``CHANNEL.md``, which is durable and reaches every
     later prompt in the room — so an exchange deliberately kept out of the room
@@ -13022,6 +13138,7 @@ def get_completed_channel_tasks_since(
         AND completed_at >= ?
         AND COALESCE(withheld_from_room, 0) = 0
         AND guest_participant_id IS NULL
+        AND incognito = 0
     """
     params: list = [*refs, since_datetime]
 
@@ -13063,6 +13180,7 @@ def get_active_channel_tokens(
         AND completed_at >= ?
         AND COALESCE(withheld_from_room, 0) = 0
         AND guest_participant_id IS NULL
+        AND incognito = 0
         ORDER BY conversation_token
         """,
         (since_datetime,),
@@ -13083,7 +13201,9 @@ def get_completed_tasks_since(
     Fetch completed tasks for a user since a given datetime.
 
     A guest's turn run as this user (multiplayer D2) is not theirs to learn
-    from: it is extracted into nobody's memory, so it is excluded here.
+    from: it is extracted into nobody's memory, so it is excluded here. So is a
+    turn in an incognito room (ISSUE-892), which the playbook distiller reads
+    through the same gather.
 
     Args:
         since_datetime: ISO format datetime string (UTC)
@@ -13099,6 +13219,7 @@ def get_completed_tasks_since(
         AND result IS NOT NULL
         AND completed_at >= ?
         AND guest_participant_id IS NULL
+        AND incognito = 0
     """
     params: list = [user_id, since_datetime]
 

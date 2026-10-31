@@ -27,7 +27,12 @@ from istota.sandbox import deferred
 from istota.sandbox.kv_namespaces import is_reserved_namespace
 from istota.skills._cli import fail as _fail, parse_and_resolve, run_skill_cli
 from istota.skills._group_access import group_access_denied, group_refusal
-from istota.skills._turn_access import calling_turn_passes
+from istota.skills._turn_access import (
+    INCOGNITO_HINT,
+    INCOGNITO_REFUSAL,
+    calling_task_incognito,
+    calling_turn_passes,
+)
 from istota.skills._hostpath import READ, ReadRefused, host_path, read_resolved_text
 from istota.lib.untrusted import frame_untrusted
 
@@ -733,6 +738,8 @@ _SET_OPS = frozenset({
 def main(argv=None):
     parser = build_parser()
     args = parse_and_resolve(parser, argv)
+    if calling_task_incognito():
+        _fail(INCOGNITO_HINT, reason=INCOGNITO_REFUSAL)
     namespace = getattr(args, "namespace", None)
     if is_reserved_namespace(namespace):
         _fail(

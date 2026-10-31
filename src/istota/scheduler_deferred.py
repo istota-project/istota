@@ -97,6 +97,17 @@ _KNOWN_ARTIFACT_SUFFIXES = (
 )
 
 
+def _drop_incognito_ops(task: db.Task, path: Path, name: str) -> bool:
+    """Whether this op file came from an incognito room, and so was removed
+    unapplied. The skill CLIs refuse first; the file is model-written, and the
+    sandbox reaches it without them."""
+    if not task.incognito:
+        return False
+    logger.warning("Dropped deferred %s from incognito task %d", name, task.id)
+    path.unlink(missing_ok=True)
+    return True
+
+
 def _load_deferred_json(
     user_temp_dir: Path,
     task_id: int,
@@ -738,6 +749,8 @@ def _process_deferred_kv_ops(
     if loaded is None:
         return 0
     path, data = loaded
+    if _drop_incognito_ops(task, path, "kv_ops"):
+        return 0
 
     count = 0
     task_groups: list[str] | None = None
@@ -945,6 +958,8 @@ def _process_deferred_user_alerts(
     if loaded is None:
         return 0
     path, data = loaded
+    if _drop_incognito_ops(task, path, "user_alerts"):
+        return 0
 
     from istota.notifications.resolvers import task_alert
 
@@ -1168,6 +1183,8 @@ def _process_deferred_kg_ops(
     if loaded is None:
         return 0
     path, data = loaded
+    if _drop_incognito_ops(task, path, "kg_ops"):
+        return 0
 
     from .memory.knowledge_graph import (
         add_fact as kg_add_fact,

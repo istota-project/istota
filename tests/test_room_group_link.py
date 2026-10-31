@@ -76,6 +76,7 @@ class TestTheColumn:
         raw = sqlite3.connect(old)
         # A database from before the link predates group-owned rooms too.
         raw.execute("DROP INDEX idx_rooms_group_source")
+        raw.execute("ALTER TABLE rooms DROP COLUMN incognito")
         raw.execute("ALTER TABLE rooms DROP COLUMN membership_source")
         raw.execute("ALTER TABLE rooms DROP COLUMN group_id")
         raw.execute("DELETE FROM _migration_state WHERE name IN "

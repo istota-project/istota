@@ -23,6 +23,51 @@ def calling_task_id() -> int | None:
     return int(raw) if raw.isascii() and raw.isdigit() else None
 
 
+INCOGNITO_REFUSAL = "incognito_room"
+INCOGNITO_HINT = (
+    "this is an incognito room: the user's memory cannot be read or written "
+    "from it. The room's own CHANNEL.md is the one place to keep a note, and "
+    "it is deleted with the room"
+)
+
+
+def calling_task_incognito() -> bool:
+    """Whether the calling task is in an incognito room (ISSUE-892).
+
+    False outside a task and with no database, which hold no room. A read that
+    fails is True: the room may be one, and being wrong costs a refused call.
+    """
+    from istota import db
+
+    task_id = calling_task_id()
+    db_path = os.environ.get("ISTOTA_DB_PATH", "")
+    if task_id is None or not db_path or not Path(db_path).is_file():
+        return False
+    try:
+        with db.get_db(Path(db_path)) as conn:
+            task = db.get_task(conn, task_id)
+    except Exception as exc:  # noqa: BLE001 — an unreadable task refuses
+        logger.warning("could not read the calling task: %s", exc)
+        return True
+    return task is not None and task.incognito
+
+
+def calling_task_may_read(task_id: int) -> bool:
+    """Whether the calling task may read ``task_id``, by the incognito rule
+    (`db.task_readable_from`). True with no database, False if the read fails."""
+    from istota import db
+
+    db_path = os.environ.get("ISTOTA_DB_PATH", "")
+    if not db_path or not Path(db_path).is_file():
+        return True
+    try:
+        with db.get_db(Path(db_path)) as conn:
+            return db.task_readable_from(conn, task_id, calling_task_id())
+    except Exception as exc:  # noqa: BLE001 — an unreadable task refuses
+        logger.warning("could not read the calling task: %s", exc)
+        return False
+
+
 def calling_turn_passes(user_id: str, check=None, *, config=None) -> bool:
     """Whether the calling task answers ``user_id``'s own turn, ancestors included.
 

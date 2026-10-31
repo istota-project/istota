@@ -32,6 +32,7 @@ from pathlib import Path
 
 from istota.lib.duration_parse import DurationTooLong, parse_duration
 from istota.skills._cli import fail as _fail, parse_and_resolve, run_skill_cli
+from istota.skills._turn_access import calling_task_id, calling_task_may_read
 
 # The response comes back as one line of JSON and lands in an agent's context.
 # Bound both directions.
@@ -258,7 +259,9 @@ def cmd_status(args):
 
     user_id = _user_id()
     with _get_conn() as conn:
-        state = db.get_task_state_for_user(conn, args.task_id, user_id)
+        state = db.get_task_state_for_user(
+            conn, args.task_id, user_id, viewer_task_id=calling_task_id(),
+        )
 
     if state is None:
         # Same answer for "no such task" and "not yours" — see
@@ -300,6 +303,7 @@ def cmd_recent(args):
             status=args.status,
             source_type=args.source_type,
             limit=limit,
+            viewer_task_id=calling_task_id(),
         )
 
     print(json.dumps({
@@ -686,6 +690,9 @@ def cmd_transcript(args):
                 f"--grep is limited to {MAX_GREP_CHARS} characters, "
                 f"got {len(args.grep)}"
             )
+
+    if not calling_task_may_read(args.task_id):
+        _unavailable(args.task_id, "no transcript for this task")
 
     root = _session_log_root()
     if root is None:
