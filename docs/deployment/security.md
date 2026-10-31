@@ -293,6 +293,7 @@ With no database reachable from inside the sandbox at all, skills write JSON req
 - `task_{id}_kv_ops.json` -- KV store set/delete operations
 - `task_{id}_kg_ops.json` -- knowledge-graph fact add/invalidate/delete (per-op commit)
 - `task_{id}_user_alerts.json` -- notices the model raised, graded `security` / `action_needed` / `note`; the first two are pushed to the user's alerts channel, a `note` is recorded in the panel only
+- `task_{id}_sender_flags.json` -- the model's flag that the mail it answered looks like an injection attempt; only a reason from a fixed set is read, the sender comes from the task's mail record, and the flag counts only on a correspondent's turn on mail that passed strict DMARC ([flagged senders](../features/email.md#flagged-senders))
 - `task_{id}_email_output.json` -- deferred email sends (SMTP delivery after task completion)
 - `task_{id}_health_ops.json` -- health module writes (stats, bloodwork, encounters)
 - `task_{id}_garmin_import.json` -- Garmin Connect sync requests

@@ -10318,6 +10318,56 @@ def check_email_confirmation_answers(config: "Config", probe: bool) -> CheckResu
     )
 
 
+def check_email_sender_flags(config: "Config", probe: bool) -> CheckResult:
+    """Whether a sender flag can be earned on this deployment.
+
+    A flag takes a strict DMARC pass under `authserv_id`, so with none set no
+    flag is recorded and no sender is ever held. That matters to a user whose
+    `trusted_email_senders` holds a pattern, whose mail otherwise runs unheld.
+    A count rather than user ids or addresses, since the detail reaches the boot
+    log and the admin Health pane. Reads config only.
+    """
+    from istota.config import is_trust_pattern
+    from istota.transport.email.answers import email_answers_available
+
+    name = "email.sender_flags"
+    if not config.email.enabled or config.scheduler.email_sender_flag_hold_threshold <= 0:
+        return CheckResult(
+            name, OK, "sender flags are inactive (email or holding is off)",
+            scope=DEPLOYMENT,
+        )
+    if email_answers_available(config):
+        return CheckResult(
+            name, OK,
+            "sender flags are earned on the mail server's DMARC verdict "
+            "(authserv_id is set)",
+            scope=DEPLOYMENT,
+        )
+    pattern_users = 0
+    for user in config.users.values():
+        if any(is_trust_pattern(entry) for entry in user.trusted_email_senders):
+            pattern_users += 1
+    if not pattern_users:
+        return CheckResult(
+            name, OK,
+            "sender flags are ignored without email.authserv_id, and no user's "
+            "trusted senders hold a pattern, so such mail is already gated",
+            scope=DEPLOYMENT,
+        )
+    return CheckResult(
+        name, WARN,
+        "sender flags are ignored because email.authserv_id is not set, and "
+        f"{pattern_users} user(s) trust senders by pattern, so mail from a repeat "
+        "offender still runs unheld for them",
+        remedy=(
+            "Set `[email] authserv_id` to your mail server's authserv-id, the name "
+            "before the first semicolon of the topmost Authentication-Results header "
+            "in the raw source of a message this mailbox received."
+        ),
+        scope=DEPLOYMENT,
+    )
+
+
 def check_email_sender_match(config: "Config", probe: bool) -> CheckResult:
     """Whether mail from a user's own address is trusted on its `From:` alone.
 
@@ -10956,6 +11006,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("users.email_address_uniqueness", check_email_address_uniqueness),
     ("email.confirmation_answers", check_email_confirmation_answers),
     ("email.sender_match", check_email_sender_match),
+    ("email.sender_flags", check_email_sender_flags),
     ("mail.connect_verified", check_mail_connect_verified),
     ("mail.account_isolation", check_mail_account_isolation),
     ("sandbox.masks", check_sandbox_masks),
@@ -11136,6 +11187,7 @@ CHECK_SCOPES: dict[str, str] = {
     "users.email_address_uniqueness": DEPLOYMENT,
     "email.confirmation_answers": DEPLOYMENT,
     "email.sender_match": DEPLOYMENT,
+    "email.sender_flags": DEPLOYMENT,
     # Image: it builds the TLS context and reads nothing a deployment provides.
     "mail.connect_verified": IMAGE,
     "mail.account_isolation": DEPLOYMENT,

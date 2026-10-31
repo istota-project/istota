@@ -27,6 +27,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -1407,7 +1408,7 @@ class TestStackReset:
         monkeypatch.setattr(
             compose_support.Stack,
             "reset_framework_state",
-            lambda self: order.append("framework") or (0, 0, 0),
+            lambda self: order.append("framework") or (0, 0, 0, 0),
         )
         monkeypatch.setattr(
             compose_support.Stack,
@@ -1573,7 +1574,7 @@ class TestStackReset:
 class TestResetFrameworkState:
     """The one place this harness writes to a live database."""
 
-    def _stack(self, monkeypatch, counts, *, exit_code=0, stdout="1 2 3\n"):
+    def _stack(self, monkeypatch, counts, *, exit_code=0, stdout="1 2 3 4\n"):
         stack = compose_support.Stack(
             profile=profiles.BASE,
             args=["docker", "compose", "--project-name", "p"],
@@ -1597,19 +1598,19 @@ class TestResetFrameworkState:
         six-tenths of a second. On a profile with no mail and no failed task
         the answer is always no."""
         stack, execs = self._stack(
-            monkeypatch, {"parked": 0, "retries": 0, "trusted": 0}
+            monkeypatch, {"parked": 0, "retries": 0, "trusted": 0, "flags": 0}
         )
 
-        assert stack.reset_framework_state() == (0, 0, 0)
+        assert stack.reset_framework_state() == (0, 0, 0, 0)
         assert execs == []
 
-    @pytest.mark.parametrize("dirty", ["parked", "retries", "trusted"])
-    def test_any_one_of_the_three_is_enough_to_run_it(self, monkeypatch, dirty):
-        counts = {"parked": 0, "retries": 0, "trusted": 0}
+    @pytest.mark.parametrize("dirty", ["parked", "retries", "trusted", "flags"])
+    def test_any_one_of_the_four_is_enough_to_run_it(self, monkeypatch, dirty):
+        counts = {"parked": 0, "retries": 0, "trusted": 0, "flags": 0}
         counts[dirty] = 1
         stack, execs = self._stack(monkeypatch, counts)
 
-        assert stack.reset_framework_state() == (1, 2, 3)
+        assert stack.reset_framework_state() == (1, 2, 3, 4)
         assert len(execs) == 1
 
     def test_a_failed_write_is_raised_rather_than_read_as_zero(self, monkeypatch):
@@ -1617,7 +1618,9 @@ class TestResetFrameworkState:
         place and report a clean reset, which is the cross-test dependency
         this method exists to prevent."""
         stack, _ = self._stack(
-            monkeypatch, {"parked": 1, "retries": 0, "trusted": 0}, exit_code=1
+            monkeypatch,
+            {"parked": 1, "retries": 0, "trusted": 0, "flags": 0},
+            exit_code=1,
         )
 
         with pytest.raises(compose_support.StackError, match="framework state"):
@@ -1630,7 +1633,68 @@ class TestResetFrameworkState:
 
         assert "db.cancel_task(" in body
         assert "db.remove_trusted_sender(" in body
+        assert "sender_flags.clear(" in body
         assert "UPDATE" not in body and "DELETE" not in body
+
+    @staticmethod
+    def _database_with_flags(path: Path) -> None:
+        from istota import db
+
+        db.init_db(path)
+        with db.get_db(path) as conn:
+            conn.executemany(
+                "INSERT INTO email_sender_flags (user_id, sender, task_id, reason) "
+                "VALUES (?, ?, ?, 'other')",
+                [
+                    ("alice", "mallory@example.com", 1),
+                    ("alice", "mallory@example.com", 2),
+                    ("bob", "mallory@example.com", 3),
+                ],
+            )
+
+    def test_a_flag_alone_is_dirty_on_the_real_schema(self, monkeypatch, tmp_path):
+        """The SQL and the guard's key list are two sites, and a column added
+        to the SQL only never triggers a reset. So the query runs for real."""
+        path = tmp_path / "istota.db"
+        self._database_with_flags(path)
+        stack, execs = self._stack(monkeypatch, {})
+
+        def real_query(_probe, sql, params=None):
+            connection = sqlite3.connect(path)
+            connection.row_factory = sqlite3.Row
+            try:
+                return [dict(row) for row in connection.execute(sql, params or [])]
+            finally:
+                connection.close()
+
+        monkeypatch.setattr(compose_support.Probe, "query", real_query)
+
+        stack.reset_framework_state()
+
+        assert len(execs) == 1
+
+    def test_the_write_clears_every_flag_in_a_fresh_interpreter(self, tmp_path):
+        """Fresh, because it is `python -c` in the container: an import cycle
+        the suite's own import order hides would stop every smoke reset."""
+        path = tmp_path / "istota.db"
+        self._database_with_flags(path)
+        repo = Path(__file__).resolve().parents[1]
+
+        result = subprocess.run(
+            [sys.executable, "-c", compose_support._RESET_FRAMEWORK_STATE, str(path)],
+            capture_output=True, text=True, timeout=120, cwd=repo,
+            env={**os.environ, "PYTHONPATH": str(repo / "src")},
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip().splitlines()[-1] == "0 0 0 3"
+        connection = sqlite3.connect(path)
+        try:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM email_sender_flags"
+            ).fetchone() == (0,)
+        finally:
+            connection.close()
 
 
 class _FakeEndpoint:
