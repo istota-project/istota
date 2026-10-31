@@ -22,17 +22,30 @@ refusal answers the OCM error shape with fixed text and writes nothing:
 3. the sender: its ``/ocm-provider/`` document fetched through the guarded
    client, and its signature verified when that document publishes a key
    (403 ``sender_unverified``);
-4. the recipient, after the sender, so an unverified sender learns nothing
-   about which users exist; an unknown user and an unknown host answer the
-   same 404;
-5. the WebDAV base, from the verified discovery document, never from the
-   offer alone;
+4. the WebDAV base, from the verified discovery document, never from the
+   offer alone, and the master key: refusals that hold for any recipient, so
+   they run first and a malformed offer cannot test an address unseen;
+5. the recipient; an unknown user and an unknown host answer the same 404;
 6. the store, keyed ``<sender host>|<providerId>``, with the secret in the
    secrets store under ``shared_source`` until the user accepts;
 7. the fixed-text bell row (`notifications.resolvers.shared_source`), whose
    push is handed to the daemon in the same transaction, since this runs in
    the web process;
-8. 201 with the user's display name.
+8. 201 naming the recipient only as the sender wrote them.
+
+**What a sender learns about a recipient** is bounded. The 201 never carries a
+profile's display name: the field is optional in OCM and Nextcloud does not read
+it, so it echoes the sender's own spelling. A refusal that depends on the
+recipient (unknown, or too many offers waiting) is answered honestly
+`RECIPIENT_REFUSALS_PER_DAY` times per sending host and per client address, and
+`RECIPIENT_REFUSALS_PER_DAY_TOTAL` times across all of them, so a mistyped
+address still fails at the sender. Past that the same offer gets the 201 a real
+recipient's would and nothing is stored; a real recipient with a full inbox gets
+a fixed-text bell row saying an offer was turned away. An offer with room is
+always stored, so spending a host's budget, which an unsigned sender can do in
+that host's name, costs the host that feedback and not its shares. A dropped
+offer is remembered (`_remember_dropped`) so that a notification naming it takes
+the path a stored offer's would, its discovery fetch included.
 
 The offer proves only that the sender runs OCM. That the secret is real is
 proved at accept, by a PROPFIND with it against the verified host.
@@ -75,6 +88,7 @@ import re
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
@@ -101,6 +115,12 @@ SENDER_MAX_PER_MINUTE = 20
 # known, and each check decrypts; this caps that work across all callers.
 SECRET_CHECKS_PER_MINUTE = 60
 WINDOW_SECONDS = 60
+RECIPIENT_REFUSALS_PER_DAY = 5
+# A sending host costs a subdomain and an address may be absent, so this is the
+# bound that holds. Past it a sender loses typo feedback, never a share.
+RECIPIENT_REFUSALS_PER_DAY_TOTAL = 50
+RECIPIENT_REFUSAL_WINDOW_SECONDS = 24 * 60 * 60
+DROPPED_OFFERS_REMEMBERED = 1024
 
 # What the signature must cover, as Nextcloud 31 signs it.
 REQUIRED_SIGNED_HEADERS = ("(request-target)", "content-length", "date", "digest", "host")
@@ -140,6 +160,10 @@ class _Refused(Exception):
     def answer(self) -> OcmAnswer:
         errors = [{"name": self.name, "message": self.detail}] if self.name else []
         return OcmAnswer(self.status, {"message": self.message, "validationErrors": errors})
+
+
+class _RecipientRefused(_Refused):
+    """A refusal that says something about the recipient, so it spends a sender's budget."""
 
 
 # ------------------------------------------------------------------ discovery
@@ -213,16 +237,26 @@ _address_window = SlidingWindow(WINDOW_SECONDS, ADDRESS_MAX_PER_MINUTE)
 _sender_window = SlidingWindow(WINDOW_SECONDS, SENDER_MAX_PER_MINUTE)
 _secret_check_window = SlidingWindow(WINDOW_SECONDS, SECRET_CHECKS_PER_MINUTE, max_keys=1)
 _discovery_window: SlidingWindow | None = None
+_recipient_refusal_window = SlidingWindow(RECIPIENT_REFUSAL_WINDOW_SECONDS, RECIPIENT_REFUSALS_PER_DAY)
+_recipient_refusal_total = SlidingWindow(RECIPIENT_REFUSAL_WINDOW_SECONDS,
+                                         RECIPIENT_REFUSALS_PER_DAY_TOTAL, max_keys=1)
+_dropped_offers: OrderedDict[tuple[str, str], tuple[str, str]] = OrderedDict()
 
 
 def reset_limits() -> None:
     """Forget every recorded hit; for tests."""
     global _address_window, _sender_window, _secret_check_window, _discovery_window
+    global _recipient_refusal_window, _recipient_refusal_total
     with _lock:
         _address_window = SlidingWindow(WINDOW_SECONDS, ADDRESS_MAX_PER_MINUTE)
         _sender_window = SlidingWindow(WINDOW_SECONDS, SENDER_MAX_PER_MINUTE)
         _secret_check_window = SlidingWindow(WINDOW_SECONDS, SECRET_CHECKS_PER_MINUTE, max_keys=1)
         _discovery_window = None
+        _recipient_refusal_window = SlidingWindow(RECIPIENT_REFUSAL_WINDOW_SECONDS,
+                                                  RECIPIENT_REFUSALS_PER_DAY)
+        _recipient_refusal_total = SlidingWindow(RECIPIENT_REFUSAL_WINDOW_SECONDS,
+                                                 RECIPIENT_REFUSALS_PER_DAY_TOTAL, max_keys=1)
+        _dropped_offers.clear()
 
 
 def _discovery_limit(max_per_minute: int) -> SlidingWindow:
@@ -246,6 +280,35 @@ def _admit_secret_check(address: str | None, tick: float) -> bool:
     if address is not None and not _address_window.admit(address, tick):
         return False
     return _secret_check_window.admit("secret_check", tick)
+
+
+def _admit_recipient_refusal(address: str | None, sender_host: str, tick: float) -> bool:
+    if address is not None and not _recipient_refusal_window.admit(("address", address), tick):
+        return False
+    if not _recipient_refusal_window.admit(("host", sender_host), tick):
+        return False
+    return _recipient_refusal_total.admit("all", tick)
+
+
+def _dropped_key(provider_id: str, secret: str) -> tuple[str, str]:
+    return provider_id, hashlib.sha256(secret.encode()).hexdigest()
+
+
+def _remember_dropped(provider_id: str, secret: str, host: str, owner: str) -> None:
+    with _lock:
+        _dropped_offers[_dropped_key(provider_id, secret)] = (host, owner)
+        while len(_dropped_offers) > DROPPED_OFFERS_REMEMBERED:
+            _dropped_offers.popitem(last=False)
+
+
+def _dropped_sender(provider_id: str, secret: str) -> tuple[str, str] | None:
+    with _lock:
+        return _dropped_offers.get(_dropped_key(provider_id, secret))
+
+
+def _forget_dropped(provider_id: str, secret: str) -> None:
+    with _lock:
+        _dropped_offers.pop(_dropped_key(provider_id, secret), None)
 
 
 # ----------------------------------------------------------------- signatures
@@ -361,11 +424,22 @@ def verify_signature(
 
 # ------------------------------------------------------------------ the offer
 
+def _encodable(value: str) -> bool:
+    # JSON can spell a lone surrogate. It fails only where a string is encoded,
+    # which on an offer is after the recipient, so it would answer for them.
+    try:
+        value.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _string(body: dict, name: str, *, required: bool = True) -> str:
     value = body.get(name)
     if value is None and not required:
         return ""
-    if not isinstance(value, str) or (required and not value) or len(value) > STRING_MAX_CHARS:
+    if not isinstance(value, str) or (required and not value) or len(value) > STRING_MAX_CHARS \
+            or not _encodable(value):
         raise _Refused(400, "invalid_offer", name)
     return value
 
@@ -419,10 +493,12 @@ def _parse_offer(raw: bytes) -> _Offer:
     if not isinstance(options, dict):
         raise _Refused(400, "invalid_offer", "protocol")
     secret = options.get("sharedSecret")
-    if not isinstance(secret, str) or not secret or len(secret) > STRING_MAX_CHARS:
+    if not isinstance(secret, str) or not secret or len(secret) > STRING_MAX_CHARS \
+            or not _encodable(secret):
         raise _Refused(400, "invalid_offer", "sharedSecret")
     uri = options.get("uri")
-    if uri is not None and (not isinstance(uri, str) or not uri or len(uri) > STRING_MAX_CHARS):
+    if uri is not None and (not isinstance(uri, str) or not uri or len(uri) > STRING_MAX_CHARS
+                            or not _encodable(uri)):
         raise _Refused(400, "invalid_offer", "uri")
     return _Offer(
         share_with=_string(body, "shareWith"),
@@ -572,12 +648,13 @@ def _store(conn, config, user_id: str, cloud: CloudId, offer: _Offer, base: str,
         "provider_id": offer.provider_id,
         "webdav": base,
         "share_path": share_path,
+        "sender_signed": signed,
     }
     cap = int(config.sharing.ocm.max_pending_per_user)
     existing = sources.find_source(conn, user_id, KIND, remote_key)
     if existing is None:
         if _pending_count(conn, user_id) >= cap:
-            raise _Refused(429, "too_many_pending")
+            raise _RecipientRefused(429, "too_many_pending")
         source_id = sources.create_source(
             conn, user_id=user_id, kind=KIND, state="pending", remote_host=cloud.host,
             remote_key=remote_key, access="read", extras=extras,
@@ -587,7 +664,7 @@ def _store(conn, config, user_id: str, cloud: CloudId, offer: _Offer, base: str,
         return "declined"
     elif existing.state == "revoked":
         if _pending_count(conn, user_id) >= cap:
-            raise _Refused(429, "too_many_pending")
+            raise _RecipientRefused(429, "too_many_pending")
         sources.set_state(conn, existing.id, user_id, "pending")
         sources.set_details(conn, existing.id, user_id, extras=extras)
         key, outcome = str(existing.id), "reopened"
@@ -600,7 +677,8 @@ def _store(conn, config, user_id: str, cloud: CloudId, offer: _Offer, base: str,
         # Active, or active in error: the live share stays on its credential,
         # and the new secret is held apart until the user accepts it.
         sources.set_details(conn, existing.id, user_id,
-                            extras={**existing.extras, "reoffer_pending": True})
+                            extras={**existing.extras, "reoffer_pending": True,
+                                    "sender_signed": True})
         key, outcome = f"{existing.id}:reoffer", "reoffer"
     secrets_store.set_secret(None, user_id, sources.SECRET_SERVICE, key, offer.secret,
                              connection=conn)
@@ -618,11 +696,30 @@ def _recipient(config, raw: str) -> str:
     cloud = parse_cloud_id(raw)
     site = (config.site.hostname or "").strip().lower()
     if cloud is None or not site or cloud.host != site or cloud.path:
-        raise _Refused(404, "recipient_not_found", "shareWith", "not_found")
+        raise _RecipientRefused(404, "recipient_not_found", "shareWith", "not_found")
     user_id = config.resolve_user_id(cloud.user)
     if user_id is None:
-        raise _Refused(404, "recipient_not_found", "shareWith", "not_found")
+        raise _RecipientRefused(404, "recipient_not_found", "shareWith", "not_found")
     return user_id
+
+
+def _tell_turned_away(conn: sqlite3.Connection, user_id: str) -> None:
+    from istota.notifications.resolvers import shared_source
+    from istota.notifications.store import hand_to_daemon
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        hand_to_daemon(conn, [shared_source.write_turned_away(conn, user_id)])
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def _created(offer: _Offer) -> OcmAnswer:
+    """The 201, the same for every recipient: only what the sender already wrote."""
+    written = offer.share_with.rpartition("@")[0] or offer.share_with
+    return OcmAnswer(201, {"recipientDisplayName": written})
 
 
 def receive_share(
@@ -642,6 +739,7 @@ def receive_share(
     """
     from istota.credentials import store as secrets_store
 
+    user_id = None
     try:
         if not config.sharing.ocm.enabled:
             return OcmAnswer(404, {"message": "not_found", "validationErrors": []})
@@ -662,11 +760,11 @@ def receive_share(
                 logger.info("ocm offer refused host=%s reason=%s", owner.host, refusal)
                 raise _Refused(403, "sender_unverified")
 
-        user_id = _recipient(config, offer.share_with)
         base = _webdav_base(owner, document)
         share_path = _share_path(base, offer.uri)
         if not secrets_store.secret_key_available():
             raise _Refused(503, "unavailable")
+        user_id = _recipient(config, offer.share_with)
 
         from istota.notifications.resolvers import shared_source
         from istota.notifications.store import hand_to_daemon
@@ -682,9 +780,15 @@ def receive_share(
             conn.rollback()
             raise
         logger.info("ocm offer received user=%s host=%s outcome=%s", user_id, owner.host, outcome)
-        profile = config.users.get(user_id)
-        name = (profile.display_name if profile is not None else "") or user_id
-        return OcmAnswer(201, {"recipientDisplayName": name})
+        return _created(offer)
+    except _RecipientRefused as refused:
+        if _admit_recipient_refusal(client_address, owner.host, time.monotonic()):
+            return refused.answer()
+        _remember_dropped(offer.provider_id, offer.secret, owner.host, offer.owner)
+        if user_id is not None:
+            _tell_turned_away(conn, user_id)
+        logger.info("ocm offer dropped host=%s reason=%s", owner.host, refused.message)
+        return _created(offer)
     except _Refused as refused:
         return refused.answer()
 
@@ -1162,7 +1266,8 @@ def _parse_notification(raw: bytes) -> _Notification:
     if not isinstance(notification, dict):
         raise _Refused(400, "invalid_notification", "notification")
     secret = notification.get("sharedSecret")
-    if not isinstance(secret, str) or not secret or len(secret) > STRING_MAX_CHARS:
+    if not isinstance(secret, str) or not secret or len(secret) > STRING_MAX_CHARS \
+            or not _encodable(secret):
         raise _Refused(400, "invalid_notification", "sharedSecret")
     return _Notification(kind, resource_type, provider_id, secret)
 
@@ -1219,14 +1324,19 @@ def receive_notification(
         if not _admit_secret_check(client_address, time.monotonic()):
             raise _Refused(429, "rate_limited")
         source = _matching_share(conn, note.provider_id, note.secret)
-        if source is None:
-            logger.info("ocm notification refused type=%s reason=secret_mismatch", note.kind)
-            raise _Refused(403, "forbidden")
+        if source is not None:
+            remote_host, owner_id = source.remote_host, source.extras.get("owner")
+        else:
+            dropped = _dropped_sender(note.provider_id, note.secret)
+            if dropped is None:
+                logger.info("ocm notification refused type=%s reason=secret_mismatch", note.kind)
+                raise _Refused(403, "forbidden")
+            remote_host, owner_id = dropped
         # The address was counted above.
-        if not _admit(config, None, source.remote_host, time.monotonic()):
+        if not _admit(config, None, remote_host, time.monotonic()):
             raise _Refused(429, "rate_limited")
-        owner = parse_cloud_id(source.extras.get("owner"))
-        if owner is None or owner.host != source.remote_host:
+        owner = parse_cloud_id(owner_id)
+        if owner is None or owner.host != remote_host:
             raise _Refused(403, "forbidden")
         document = _verified_document(config, owner, fetch_discovery(config, owner, resolve=resolve))
         key_pem = _public_key(document)
@@ -1234,9 +1344,14 @@ def receive_notification(
             refusal = verify_signature("POST", "/ocm/notifications", headers, body, key_pem,
                                        owner.host, time.time() if now is None else now)
             if refusal is not None:
-                logger.info("ocm notification refused source=%s reason=%s", source.id, refusal)
+                logger.info("ocm notification refused host=%s reason=%s", remote_host, refusal)
                 raise _Refused(403, "forbidden")
 
+        if source is None:
+            if note.kind == "SHARE_UNSHARED":
+                _forget_dropped(note.provider_id, note.secret)
+            logger.info("ocm notification for a dropped offer host=%s type=%s", remote_host, note.kind)
+            return OcmAnswer(201, [])
         if note.kind == "SHARE_UNSHARED":
             try:
                 conn.execute("BEGIN IMMEDIATE")
