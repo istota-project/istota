@@ -53,7 +53,7 @@ from istota.sandbox import net_guard
 
 CODES = ("host_refused", "too_large", "redirect_refused", "connection_failed", "timeout")
 
-_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 # Headers that described the bytes on the wire; the answer handed back carries
 # the decoded body, so they no longer describe it.
 _WIRE_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
@@ -263,7 +263,7 @@ def guarded_send(
             deadline=deadline,
         )
         location = response.headers.get("location")
-        if response.status_code not in _REDIRECT_STATUSES or not location:
+        if response.status_code not in REDIRECT_STATUSES or not location:
             return response
         if hops >= max_redirects:
             raise GuardRefused("redirect_refused")
@@ -322,7 +322,7 @@ def guarded_stream(
                                       content=None, auth=auth, timeout=timeout,
                                       deadline=deadline)
     try:
-        if response.status_code in _REDIRECT_STATUSES and response.headers.get("location"):
+        if response.status_code in REDIRECT_STATUSES and response.headers.get("location"):
             raise GuardRefused("redirect_refused")
 
         def chunks() -> Iterator[bytes]:

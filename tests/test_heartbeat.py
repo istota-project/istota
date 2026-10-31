@@ -1,6 +1,8 @@
 """Configuration loading for istota.heartbeat module."""
 
+import http.server
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 
@@ -21,7 +23,7 @@ from istota.heartbeat import (
     _check_shell_command,
     _check_url_health,
 )
-from istota.config import Config, NextcloudConfig, SecurityConfig, UserConfig
+from istota.config import Config, NextcloudConfig, SecurityConfig, UserConfig, load_config
 from istota import db
 
 
@@ -633,7 +635,7 @@ class TestRunCheckAdminGate:
         # Fails for "no path" reasons, not for admin-only — distinct path.
         assert "admin-only" not in result.message
 
-    @patch("istota.heartbeat.httpx.stream")
+    @patch("istota.heartbeat.httpx.Client")
     def test_non_admin_url_health_is_refused_before_any_request(
         self, mock_stream, tmp_path,
     ):
@@ -663,6 +665,16 @@ class TestRunCheckAdminGate:
 # ---------------------------------------------------------------------------
 
 
+def _url_stream(mock_client):
+    return mock_client.return_value.__enter__.return_value.stream
+
+
+def _url_config(tmp_path, *hosts):
+    config = Config(workspace_path=tmp_path)
+    config.heartbeat.private_hosts = list(hosts) or ["example.com"]
+    return config
+
+
 class TestCheckUrlHealth:
     def test_no_url(self, tmp_path):
         config = Config(workspace_path=tmp_path)
@@ -671,13 +683,13 @@ class TestCheckUrlHealth:
         assert result.healthy is False
         assert "No URL configured" in result.message
 
-    @patch("istota.heartbeat.httpx.stream")
+    @patch("istota.heartbeat.httpx.Client")
     def test_url_success(self, mock_get, tmp_path):
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_get.return_value.__enter__.return_value = mock_response
+        _url_stream(mock_get).return_value.__enter__.return_value = mock_response
 
-        config = Config(workspace_path=tmp_path)
+        config = _url_config(tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="url-health",
@@ -686,13 +698,13 @@ class TestCheckUrlHealth:
         result = _check_url_health(check, config)
         assert result.healthy is True
 
-    @patch("istota.heartbeat.httpx.stream")
+    @patch("istota.heartbeat.httpx.Client")
     def test_url_wrong_status(self, mock_get, tmp_path):
         mock_response = MagicMock()
         mock_response.status_code = 503
-        mock_get.return_value.__enter__.return_value = mock_response
+        _url_stream(mock_get).return_value.__enter__.return_value = mock_response
 
-        config = Config(workspace_path=tmp_path)
+        config = _url_config(tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="url-health",
@@ -702,12 +714,12 @@ class TestCheckUrlHealth:
         assert result.healthy is False
         assert "503" in result.message
 
-    @patch("istota.heartbeat.httpx.stream")
+    @patch("istota.heartbeat.httpx.Client")
     def test_url_timeout(self, mock_get, tmp_path):
         import httpx
-        mock_get.side_effect = httpx.TimeoutException("timeout")
+        _url_stream(mock_get).side_effect = httpx.TimeoutException("timeout")
 
-        config = Config(workspace_path=tmp_path)
+        config = _url_config(tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="url-health",
@@ -717,10 +729,10 @@ class TestCheckUrlHealth:
         assert result.healthy is False
         assert "timeout" in result.message.lower()
 
-    @patch("istota.heartbeat.httpx.stream")
+    @patch("istota.heartbeat.httpx.Client")
     def test_the_timeout_is_clamped(self, mock_stream, tmp_path):
-        mock_stream.return_value.__enter__.return_value = MagicMock(status_code=200)
-        config = Config(workspace_path=tmp_path)
+        _url_stream(mock_stream).return_value.__enter__.return_value = MagicMock(status_code=200)
+        config = _url_config(tmp_path)
         for given, used in ((100000, 60.0), (0, 1.0), ("x", 10.0)):
             check = HeartbeatCheck(
                 name="t", type="url-health",
@@ -728,6 +740,177 @@ class TestCheckUrlHealth:
             )
             _check_url_health(check, config)
             assert mock_stream.call_args.kwargs["timeout"] == used
+
+    @patch("istota.heartbeat.httpx.Client")
+    def test_an_unlisted_host_is_refused_before_any_request(self, mock_stream, tmp_path):
+        """ISSUE-907: a task can write this URL, and a GET carries data in its name."""
+        config = _url_config(tmp_path)
+        check = HeartbeatCheck(
+            name="t", type="url-health",
+            config={"url": "https://canary-host.attacker.test/canary-path?q=canary-query"},
+        )
+        result = _check_url_health(check, config)
+        assert result.healthy is False
+        assert "[private_hosts]" in result.message
+        assert "canary" not in result.message
+        assert result.details is None
+        _url_stream(mock_stream).assert_not_called()
+
+    @patch("istota.heartbeat.httpx.Client")
+    def test_nothing_is_listed_by_default(self, mock_stream, tmp_path):
+        check = HeartbeatCheck(name="t", type="url-health", config={"url": "https://example.com"})
+        result = _check_url_health(check, Config(workspace_path=tmp_path))
+        assert result.healthy is False
+        _url_stream(mock_stream).assert_not_called()
+
+    @pytest.mark.parametrize("url", [
+        "https://attacker.test#@example.com/",
+        "https://example.com\\@attacker.test/",
+        "https://example.com.attacker.test/",
+        "https://example.com@attacker.test/",
+        "https://xn--a.attacker.test/",
+        "https://xn--canary-secret-3ya.attacker.test/",
+        "file:///etc/passwd",
+        "not a url",
+        "http://[bad/",
+        12345,
+    ])
+    @patch("istota.heartbeat.httpx.Client")
+    def test_a_url_that_only_looks_listed_is_refused(self, mock_stream, url, tmp_path):
+        check = HeartbeatCheck(name="t", type="url-health", config={"url": url})
+        result = _check_url_health(check, _url_config(tmp_path))
+        assert result.message == "URL host has no heartbeat grant in [private_hosts]"
+        assert result.details is None
+        _url_stream(mock_stream).assert_not_called()
+
+    @patch("istota.heartbeat.httpx.Client")
+    def test_the_host_name_rule_is_the_listed_name_rule(self, mock_stream, tmp_path):
+        _url_stream(mock_stream).return_value.__enter__.return_value = MagicMock(status_code=200)
+        check = HeartbeatCheck(name="t", type="url-health", config={"url": "https://EXAMPLE.com./x"})
+        assert _check_url_health(check, _url_config(tmp_path)).healthy is True
+
+    @patch("istota.heartbeat.httpx.Client")
+    def test_a_grant_for_a_punycode_name_matches(self, mock_client, tmp_path):
+        _url_stream(mock_client).return_value.__enter__.return_value = MagicMock(status_code=200)
+        check = HeartbeatCheck(name="t", type="url-health", config={"url": "https://xn--bcher-kva.example/"})
+        assert _check_url_health(check, _url_config(tmp_path, "xn--bcher-kva.example")).healthy is True
+
+
+def _redirecting_server(hops, *, cookie_gate=False):
+    """A loopback server answering each path from ``hops``: ``(status, location)``.
+
+    With ``cookie_gate`` a request carrying a cookie gets a 200 and any other a cookie.
+    """
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            status, location = hops.get(self.path, (404, None))
+            if cookie_gate and self.headers.get("Cookie"):
+                status, location = 200, None
+            self.send_response(status)
+            if cookie_gate and status != 200:
+                self.send_header("Set-Cookie", "ok=1; Path=/")
+            if location:
+                self.send_header("Location", location)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, seen
+
+
+class TestUrlHealthRedirects:
+    """Every hop answers to the list, through a real server and real httpx."""
+
+    def _run(self, tmp_path, monkeypatch, hops, *, cookie_gate=False):
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            monkeypatch.delenv(name, raising=False)
+        server, seen = _redirecting_server(hops, cookie_gate=cookie_gate)
+        self.addr = f"127.0.0.1:{server.server_address[1]}"
+        hops.update({
+            path: (status, location.replace("SELF", self.addr) if location else None)
+            for path, (status, location) in hops.items()
+        })
+        config = _url_config(tmp_path, "127.0.0.1")
+        config.admin_users = {"root"}
+        check = HeartbeatCheck(
+            name="t", type="url-health",
+            config={"url": f"http://{self.addr}/start", "timeout": 5},
+        )
+        try:
+            return run_check(check, config, "root"), seen
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_a_redirect_to_a_listed_host_is_followed_to_its_answer(self, tmp_path, monkeypatch):
+        result, seen = self._run(tmp_path, monkeypatch, {
+            "/start": (302, "http://SELF/next"), "/next": (200, None),
+        })
+        assert result.healthy is True
+        assert seen == ["/start", "/next"]
+
+    def test_a_relative_redirect_stays_on_the_host(self, tmp_path, monkeypatch):
+        result, seen = self._run(tmp_path, monkeypatch, {
+            "/start": (301, "/next"), "/next": (503, None),
+        })
+        assert result.healthy is False
+        assert "503" in result.message
+        assert seen == ["/start", "/next"]
+
+    def test_a_granted_host_cannot_bounce_the_check_elsewhere(self, tmp_path, monkeypatch):
+        """An open redirect on a granted host must not carry the data on."""
+        other, other_seen = _redirecting_server({})
+        target = f"http://localhost:{other.server_address[1]}/canary-path"
+        try:
+            result, seen = self._run(tmp_path, monkeypatch, {"/start": (302, target)})
+        finally:
+            other.shutdown()
+            other.server_close()
+        assert result.healthy is False
+        assert "[private_hosts]" in result.message
+        assert "canary" not in result.message
+        assert seen == ["/start"]
+        assert other_seen == []
+
+    def test_an_invalid_redirect_target_is_refused_in_fixed_text(self, tmp_path, monkeypatch):
+        result, seen = self._run(tmp_path, monkeypatch, {
+            "/start": (302, "http://canary.test:notaport/"),
+        })
+        assert result.healthy is False
+        assert "canary" not in result.message and "notaport" not in result.message
+        assert seen == ["/start"]
+
+    def test_a_cookie_set_on_a_redirect_comes_back(self, tmp_path, monkeypatch):
+        result, seen = self._run(tmp_path, monkeypatch, {"/start": (302, "/start")}, cookie_gate=True)
+        assert result.healthy is True
+        assert seen == ["/start", "/start"]
+
+    def test_a_redirect_loop_ends(self, tmp_path, monkeypatch):
+        result, seen = self._run(tmp_path, monkeypatch, {"/start": (302, "/start")})
+        assert result.healthy is False
+        assert "redirect" in result.message.lower()
+        assert len(seen) == 6
+
+
+class TestHeartbeatGrants:
+    def test_a_heartbeat_grant_in_the_table_reaches_the_check(self, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text(
+            '[private_hosts]\n"status.internal" = ["heartbeat"]\n"feeds.internal" = ["feeds"]\n'
+        )
+        config = load_config(path)
+        assert config.heartbeat.private_hosts == ["status.internal"]
+        assert config.feeds.private_hosts == ["feeds.internal"]
+
+    def test_empty_by_default(self):
+        assert Config().heartbeat.private_hosts == []
 
 
 # ---------------------------------------------------------------------------
