@@ -88,7 +88,7 @@ class Service(Protocol):
     """What the stack fixture needs from any external service."""
 
     name: str
-    """Registry key: "gitlab", "ntfy", "feeds", "mail", "model", "nextcloud"."""
+    """Registry key: "gitlab", "ntfy", "feeds", "tls", "mail", "model", "nextcloud"."""
 
     @property
     def container_url(self) -> str:
@@ -163,6 +163,12 @@ def _feeds_service(*args, **kwargs) -> Service:
     return feeds.serve(*args, **kwargs)
 
 
+def _tls_service(*args, **kwargs) -> Service:
+    from . import tls_target
+
+    return tls_target.serve(*args, **kwargs)
+
+
 def _signaling_service(*args, **kwargs) -> Service:
     from . import signaling
 
@@ -180,6 +186,7 @@ REGISTRY: dict[str, Callable[..., Service]] = {
     "mail": _mail_service,
     "ntfy": _ntfy_service,
     "feeds": _feeds_service,
+    "tls": _tls_service,
     "signaling": _signaling_service,
 }
 
@@ -192,7 +199,7 @@ REGISTRY: dict[str, Callable[..., Service]] = {
 #: binds nothing has no such hazard and no credential to publish, so a guard
 #: iterating `REGISTRY` and demanding one of every member would be asserting
 #: something false about half of it.
-HOST_STUBS = frozenset({"model", "gitlab", "ntfy", "feeds"})
+HOST_STUBS = frozenset({"model", "gitlab", "ntfy", "feeds", "tls"})
 
 #: Registry names that attach to something a compose file already runs.
 #:
@@ -291,6 +298,13 @@ def build(name: str, *, scratch: Path, host: str, credentials=None) -> Service:
         # rebuilds its repositories rather than clearing them: a stack whose
         # documents were added at boot would lose them at the first reset.
         return feeds.serve(host=host, credential=feeds.FEEDS_CREDENTIAL)
+
+    if name == "tls":
+        from . import tls_target
+
+        return tls_target.serve(
+            scratch / "tls", host=host, credential=tls_target.TLS_TARGET_CREDENTIAL
+        )
 
     if name == "signaling":
         from . import signaling

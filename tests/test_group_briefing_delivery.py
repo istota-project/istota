@@ -399,6 +399,7 @@ def test_exclusion_stops_next_part_but_keeps_delivered_notice(env, clock, mail):
 
 def test_saved_document_keeps_its_sections_in_email(env, clock, mail):
     from istota.briefings.document import document_to_markdown
+    from istota.mail.html_template import open_tag
     document = {"version": 1, "title": "News", "blocks": [
         {"block_id": 0, "title": "Markets", "kind": "markdown", "body_md": "Up today",
          "presentation": {"width": "wide"}, "source_status": "complete"}]}
@@ -406,4 +407,5 @@ def test_saved_document_keeps_its_sections_in_email(env, clock, mail):
     run = published(env, body=body, document=document)
     assert run["document"]["blocks"][0]["presentation"] == {"width": "wide"}
     deliver(env)
-    assert "<h2>Markets</h2>" in mail[0].get_body(preferencelist=("html",)).get_content()
+    heading = open_tag("h2") + "Markets</h2>"
+    assert heading in mail[0].get_body(preferencelist=("html",)).get_content()
