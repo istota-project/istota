@@ -340,12 +340,45 @@ def test_busy_pool_refuses_without_stopping_live_session(api, monkeypatch):
     assert sid in api._sessions
 
 
+def test_open_health_names_nobody_through_the_real_dispatcher(api):
+    """#884: `/health` needs no token, so without one it gives flags and no users."""
+    import threading
+    import httpx
+    from browser_server import make_browser_server, serve_browser_requests
+
+    server, pending = make_browser_server(api.app, host="127.0.0.1", port=0, token="fixture")
+    stopping = threading.Event()
+    worker = threading.Thread(target=serve_browser_requests, args=(server, pending, stopping))
+    worker.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    auth = {"Authorization": "Bearer fixture"}
+    try:
+        browsed = httpx.post(base + "/browse", timeout=10, headers={"X-Istota-User": "alice", **auth},
+                             json={"url": "https://example.com/", "keep_session": True})
+        assert browsed.status_code == 200, browsed.text
+        for path in ("/health", "/health?v=1"):
+            anonymous = httpx.get(base + path, timeout=10,
+                                  headers={"Authorization": "Bearer wrong", "X-Istota-User": "alice"})
+            assert anonymous.status_code == 200
+            assert anonymous.json()["card_fill"] is True
+            assert "alice" not in anonymous.text
+            assert "instances" not in anonymous.json()
+            assert "cdp_last_error" not in anonymous.json()
+        assert [row["user"] for row in httpx.get(base + "/health", headers=auth, timeout=10).json()["instances"]] == ["alice"]
+    finally:
+        stopping.set()
+        worker.join(5)
+        assert not worker.is_alive()
+
+
 def test_health_reports_recovery_loop_of_one_instance(api):
     import time
     for user in ("alice", "bob"):
         post(api, "/browse", user, url="https://example.com/", keep_session=True)
     api.pool.instance_for("bob").wedge_recoveries = [time.monotonic()] * api.WEDGE_RECOVERY_THRESHOLD
-    response = api.app.test_client().get("/health")
+    response = api.app.test_client().get(
+        "/health", environ_overrides={"istota.browser_api_token_matched": True},
+    )
     assert response.json["status"] == "degraded"
     assert len(response.json["instances"]) == 2
 
@@ -974,17 +1007,18 @@ def test_instance_discovery_responds_during_browser_activity(api, operation_fail
         operation_threads.append(threading.get_ident())
         return {"ok": True}
 
-    server, pending = make_browser_server(api.app, host="127.0.0.1", port=0)
+    server, pending = make_browser_server(api.app, host="127.0.0.1", port=0, token="fixture")
     worker = threading.Thread(target=serve_browser_requests, args=(server, pending, stopping))
     worker.start()
     base = f"http://127.0.0.1:{server.server_port}"
+    auth = {"Authorization": "Bearer fixture"}
     try:
         with concurrent.futures.ThreadPoolExecutor() as clients:
             browsing = clients.submit(httpx.post, base + "/test-block",
-                                      headers={"X-Istota-User": "alice"}, timeout=10)
+                                      headers={"X-Istota-User": "alice", **auth}, timeout=10)
             try:
                 assert entered.wait(5)
-                response = httpx.get(base + "/instances", timeout=1)
+                response = httpx.get(base + "/instances", headers=auth, timeout=1)
                 assert response.status_code == 200
                 assert response.json() == {"instances": []}
                 assert response.headers["cache-control"] == "no-store"
@@ -993,7 +1027,7 @@ def test_instance_discovery_responds_during_browser_activity(api, operation_fail
             finally:
                 release.set()
             assert browsing.result().status_code == (500 if operation_fails else 200)
-        assert httpx.post(base + "/test-thread", headers={"X-Istota-User": "alice"}).status_code == 200
+        assert httpx.post(base + "/test-thread", headers={"X-Istota-User": "alice", **auth}).status_code == 200
         assert operation_threads == [worker.ident, worker.ident]
     finally:
         release.set()

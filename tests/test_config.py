@@ -1144,6 +1144,61 @@ class TestTrustedEmailSenders:
         assert cfg.is_trusted_email_sender("carol", "joe@example.com") is False
 
 
+class TestSenderNamedAsTrusted:
+    @pytest.mark.parametrize("entry", ["partner@corp.com", "Partner@Corp.COM"])
+    def test_a_named_entry_is_named_whatever_its_case(self, entry):
+        cfg = Config(users={"carol": UserConfig(trusted_email_senders=[entry])})
+        assert cfg.is_sender_named_as_trusted("carol", "PARTNER@corp.com") is True
+
+    @pytest.mark.parametrize("entry", ["*", "*@corp.com", "p?rtner@corp.com", "[p]artner@corp.com"])
+    def test_a_pattern_is_not_a_name(self, entry):
+        cfg = Config(users={"carol": UserConfig(trusted_email_senders=[entry])})
+        assert cfg.is_trusted_email_sender("carol", "partner@corp.com") is True
+        assert cfg.is_sender_named_as_trusted("carol", "partner@corp.com") is False
+
+    def test_another_named_entry_does_not_name_this_sender(self):
+        cfg = Config(users={"carol": UserConfig(trusted_email_senders=["other@corp.com"])})
+        assert cfg.is_sender_named_as_trusted("carol", "partner@corp.com") is False
+
+    def test_an_own_address_is_not_a_name(self):
+        cfg = Config(users={"carol": UserConfig(email_addresses=["carol@example.com"])})
+        assert cfg.is_sender_named_as_trusted("carol", "carol@example.com") is False
+
+    def test_unknown_user(self):
+        assert Config().is_sender_named_as_trusted("nobody", "a@b.com") is False
+
+    def test_a_runtime_row_is_a_name_only_with_a_connection(self, tmp_path):
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        cfg = Config(users={"carol": UserConfig()})
+        with db.get_db(db_path) as conn:
+            assert cfg.is_sender_named_as_trusted("carol", "joe@example.com", conn) is False
+            db.add_trusted_sender(conn, "carol", "joe@example.com")
+            assert cfg.is_sender_named_as_trusted("carol", "JOE@example.com", conn) is True
+            assert cfg.is_sender_named_as_trusted("carol", "joe@example.com") is False
+
+
+class TestSenderFlagSettings:
+    def test_defaults(self):
+        from istota.config import SchedulerConfig
+
+        sched = SchedulerConfig()
+        assert sched.email_sender_flag_hold_threshold == 3
+        assert sched.email_sender_flag_window_days == 90
+
+    def test_loaded_from_scheduler_section(self, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text(
+            "[scheduler]\n"
+            "email_sender_flag_hold_threshold = 5\n"
+            "email_sender_flag_window_days = 0\n"
+        )
+        cfg = load_config(path)
+        assert cfg.scheduler.email_sender_flag_hold_threshold == 5
+        assert cfg.scheduler.email_sender_flag_window_days == 0
+
+
 class TestTrustedEmailSendersExcludingOwnAddresses:
     """``include_own_addresses=False`` — the caller wants trust that is evidence
     of something beyond the (unauthenticated) ``From:`` claim itself. Used by the

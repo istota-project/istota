@@ -4391,6 +4391,36 @@ def check_wallet(config: "Config", probe: bool) -> list[CheckResult]:
     return results
 
 
+def check_browser_api_token(config: "Config", probe: bool) -> CheckResult:
+    """Whether the browser API takes the token this process holds (#884).
+
+    The daemon and the browser read one secrets file when they start, so a file
+    replaced under a running stack leaves them disagreeing, and every browse
+    then fails with a 401. `/instances` selects no user and starts nothing.
+    """
+    name = "browser.api_token"
+    if not config.browser.enabled:
+        return CheckResult(name, SKIP, "browser is disabled")
+    if not probe:
+        return CheckResult(name, SKIP, "browser API token was not probed")
+    import httpx
+
+    from istota.browser.admission import browser_api_auth
+
+    try:
+        response = httpx.get(config.browser.api_url.rstrip("/") + "/instances",
+                             headers=browser_api_auth(), timeout=5.0, follow_redirects=False)
+    except httpx.HTTPError:
+        return CheckResult(name, SKIP, "browser API did not answer")
+    if response.status_code in (401, 503):
+        return CheckResult(
+            name, FAIL, f"browser API refused this process's token (HTTP {response.status_code})",
+            remedy="Run `istota-stack up`, then restart the stack so the daemon and the browser "
+                   "read the same secrets/istota_browser_api_token.",
+        )
+    return CheckResult(name, OK, "browser API accepts this process's token")
+
+
 def check_room_scope_confinement(config: "Config", probe: bool) -> CheckResult:
     """Whether a guest's turn is kept out of the host's files on disk.
 
@@ -10288,6 +10318,56 @@ def check_email_confirmation_answers(config: "Config", probe: bool) -> CheckResu
     )
 
 
+def check_email_sender_flags(config: "Config", probe: bool) -> CheckResult:
+    """Whether a sender flag can be earned on this deployment.
+
+    A flag takes a strict DMARC pass under `authserv_id`, so with none set no
+    flag is recorded and no sender is ever held. That matters to a user whose
+    `trusted_email_senders` holds a pattern, whose mail otherwise runs unheld.
+    A count rather than user ids or addresses, since the detail reaches the boot
+    log and the admin Health pane. Reads config only.
+    """
+    from istota.config import is_trust_pattern
+    from istota.transport.email.answers import email_answers_available
+
+    name = "email.sender_flags"
+    if not config.email.enabled or config.scheduler.email_sender_flag_hold_threshold <= 0:
+        return CheckResult(
+            name, OK, "sender flags are inactive (email or holding is off)",
+            scope=DEPLOYMENT,
+        )
+    if email_answers_available(config):
+        return CheckResult(
+            name, OK,
+            "sender flags are earned on the mail server's DMARC verdict "
+            "(authserv_id is set)",
+            scope=DEPLOYMENT,
+        )
+    pattern_users = 0
+    for user in config.users.values():
+        if any(is_trust_pattern(entry) for entry in user.trusted_email_senders):
+            pattern_users += 1
+    if not pattern_users:
+        return CheckResult(
+            name, OK,
+            "sender flags are ignored without email.authserv_id, and no user's "
+            "trusted senders hold a pattern, so such mail is already gated",
+            scope=DEPLOYMENT,
+        )
+    return CheckResult(
+        name, WARN,
+        "sender flags are ignored because email.authserv_id is not set, and "
+        f"{pattern_users} user(s) trust senders by pattern, so mail from a repeat "
+        "offender still runs unheld for them",
+        remedy=(
+            "Set `[email] authserv_id` to your mail server's authserv-id, the name "
+            "before the first semicolon of the topmost Authentication-Results header "
+            "in the raw source of a message this mailbox received."
+        ),
+        scope=DEPLOYMENT,
+    )
+
+
 def check_email_sender_match(config: "Config", probe: bool) -> CheckResult:
     """Whether mail from a user's own address is trusted on its `From:` alone.
 
@@ -10883,6 +10963,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.credential_isolation", check_credential_isolation),
     ("security.wallet", check_wallet),
     ("security.room_scope_confinement", check_room_scope_confinement),
+    ("browser.api_token", check_browser_api_token),
     ("security.credential_backup", check_credential_backup),
     ("security.signup_tags", check_signup_tags),
     ("security.inline_credentials", check_inline_credentials),
@@ -10925,6 +11006,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("users.email_address_uniqueness", check_email_address_uniqueness),
     ("email.confirmation_answers", check_email_confirmation_answers),
     ("email.sender_match", check_email_sender_match),
+    ("email.sender_flags", check_email_sender_flags),
     ("mail.connect_verified", check_mail_connect_verified),
     ("mail.account_isolation", check_mail_account_isolation),
     ("sandbox.masks", check_sandbox_masks),
@@ -11028,6 +11110,7 @@ CHECK_SCOPES: dict[str, str] = {
     "security.wallet": DEPLOYMENT,
     # Deployment: a room policy and a sandbox are properties of an install.
     "security.room_scope_confinement": DEPLOYMENT,
+    "browser.api_token": DEPLOYMENT,
     "security.credential_backup": DEPLOYMENT,
     "security.signup_tags": DEPLOYMENT,
     "security.inline_credentials": DEPLOYMENT,
@@ -11104,6 +11187,7 @@ CHECK_SCOPES: dict[str, str] = {
     "users.email_address_uniqueness": DEPLOYMENT,
     "email.confirmation_answers": DEPLOYMENT,
     "email.sender_match": DEPLOYMENT,
+    "email.sender_flags": DEPLOYMENT,
     # Image: it builds the TLS context and reads nothing a deployment provides.
     "mail.connect_verified": IMAGE,
     "mail.account_isolation": DEPLOYMENT,

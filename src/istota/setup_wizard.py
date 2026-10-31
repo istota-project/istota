@@ -476,10 +476,19 @@ SECRET_NAMES: tuple[str, ...] = (
     # discovery fetch and never as a variable: `istota-secrets` skips it, and
     # compose mounts it on the daemon alone (DAEMON_ONLY_SECRETS).
     "istota_anthropic_listing_key",
+    # What a caller of the browser API must hold. Compose mounts it on the
+    # daemon and the browser, so not on web either.
+    "istota_browser_api_token",
 )
 
-#: Secret files compose mounts on the `daemon` service only.
-DAEMON_ONLY_SECRETS: frozenset[str] = frozenset({"istota_anthropic_listing_key"})
+#: Secret files that compose mounts on the `daemon` service and not on `web`.
+DAEMON_ONLY_SECRETS: frozenset[str] = frozenset({
+    "istota_anthropic_listing_key", "istota_browser_api_token",
+})
+
+#: Secret files no person supplies: `istota-stack` and setup generate them, and
+#: the admin page neither shows them nor takes a new value.
+GENERATED_SECRETS: frozenset[str] = frozenset({"istota_browser_api_token"})
 
 #: Ingress modes, as `host.env`'s INGRESS names them, mapped to the hop count the
 #: web app subtracts from X-Forwarded-For: one for the compose nginx, plus one
@@ -578,6 +587,7 @@ class ContainerAnswers:
     profiles: tuple[str, ...] = ()
     # Generated, and carried forward on a re-run.
     session_secret: str = ""
+    browser_api_token: str = ""
     #: The host port Lima forwards to this VM (host.env's LOCAL_FORWARD_PORT,
     #: which only the Mac writes), 0 off the local VM. Read, never asked, and
     #: written nowhere: it only holds a `local` hostname to that port.
@@ -750,6 +760,7 @@ def container_secret_values(a: ContainerAnswers) -> dict[str, str]:
         ),
         "istota_provider_openrouter_extra_headers": "",
         "istota_anthropic_listing_key": a.anthropic_listing_key,
+        "istota_browser_api_token": a.browser_api_token,
     }
     assert tuple(values) == SECRET_NAMES
     return values
@@ -2222,6 +2233,14 @@ def _carry_forward_session_secret(a: ContainerAnswers, config_path: Path, secret
     a.session_secret = prior.strip() or secrets.token_hex(32)
 
 
+def _carry_forward_browser_api_token(a: ContainerAnswers, secrets_dir: Path | None) -> None:
+    """The daemon and the browser read one file, so a re-run keeps its value."""
+    prior = ""
+    if secrets_dir is not None:
+        prior = _read_secret_file(secrets_dir / "istota_browser_api_token")
+    a.browser_api_token = prior.strip() or secrets.token_hex(32)
+
+
 def run_container_setup(args, *, input_fn, out, getpass_fn) -> int:
     """The container half. Returns a process exit code."""
     data_dir = Path(getattr(args, "data_dir", None) or CONTAINER_DATA_DIR)
@@ -2326,6 +2345,7 @@ def write_container_setup(
     config_path = data_dir / "config" / "config.toml"
     secrets_dir = vm_dir / "secrets" if vm_dir is not None else None
     _carry_forward_session_secret(a, config_path, secrets_dir)
+    _carry_forward_browser_api_token(a, secrets_dir)
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     inline = secrets_dir is None

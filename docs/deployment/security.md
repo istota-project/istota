@@ -134,6 +134,8 @@ Adding a sensitive credential to a skill's `env:` block is the only step needed 
 
 Skill CLI commands run through the proxy (`sandbox/skill_proxy.py`) in the executor thread. The proxy injects credentials server-side, scoped per skill: `derive_skill_credential_map(authorized, skill_index)` returns the per-skill credential map, so a CLI invocation only ever sees credentials its own manifest declared. The `istota-skill` client connects to the socket or falls back to direct execution when the proxy is disabled.
 
+Proxied skills run in the task's cgroup, so `task_memory_max_mb`, `task_pids_max` and `task_cpu_max_percent` now cover them along with the task's own tools; a task that relies on a heavy skill may need a higher memory limit. Each proxy also limits its own work in the daemon: request size and arrival time, open connections, concurrent skills and skill output. When a task ends, its proxies close their connections and kill any skill still running. The settings are in the [configuration reference](../configuration/reference.md).
+
 The proxy's Unix socket path includes the host process PID — `istota-proxy-{pid}-{task_id}.sock` (and the same shape for the network proxy). This prevents collisions when multiple processes (xdist test workers, parallel `istota run` instances, the daemon plus a manual scheduler) pick the same `task.id` from independent SQLite databases.
 
 ### Who may connect
@@ -291,6 +293,7 @@ With no database reachable from inside the sandbox at all, skills write JSON req
 - `task_{id}_kv_ops.json` -- KV store set/delete operations
 - `task_{id}_kg_ops.json` -- knowledge-graph fact add/invalidate/delete (per-op commit)
 - `task_{id}_user_alerts.json` -- notices the model raised, graded `security` / `action_needed` / `note`; the first two are pushed to the user's alerts channel, a `note` is recorded in the panel only
+- `task_{id}_sender_flags.json` -- the model's flag that the mail it answered looks like an injection attempt; only a reason from a fixed set is read, the sender comes from the task's mail record, and the flag counts only on a correspondent's turn on mail that passed strict DMARC ([flagged senders](../features/email.md#flagged-senders))
 - `task_{id}_email_output.json` -- deferred email sends (SMTP delivery after task completion)
 - `task_{id}_health_ops.json` -- health module writes (stats, bloodwork, encounters)
 - `task_{id}_garmin_import.json` -- Garmin Connect sync requests

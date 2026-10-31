@@ -567,14 +567,15 @@ class TestTopLevel:
         assert problems[-1] == {"kind": "error", "path": [], "message": "boom", "blocking": True}
 
     def test_secrets_list_every_credential_file_without_a_value(self, monkeypatch, no_overrides):
-        from istota.setup_wizard import SECRET_NAMES
+        from istota.setup_wizard import GENERATED_SECRETS, SECRET_NAMES
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "ANTHROPIC-SENTINEL")
         cfg = Config()
         cfg.email.imap_password = "IMAP-SENTINEL"
         payload = view.build_config_view(cfg)
         entries = {entry["name"]: entry for entry in payload["secrets"]}
-        assert list(entries) == list(SECRET_NAMES)
+        assert list(entries) == [name for name in SECRET_NAMES if name not in GENERATED_SECRETS]
+        assert GENERATED_SECRETS.isdisjoint(entries)
         assert entries["anthropic_api_key"]["set"] is True
         assert entries["anthropic_api_key"]["config_key"] is None
         assert entries["anthropic_api_key"]["label"] == "Anthropic API key"
