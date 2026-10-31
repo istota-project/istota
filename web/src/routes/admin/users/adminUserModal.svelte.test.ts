@@ -36,6 +36,7 @@ function detail(overrides: Partial<AdminUserDetail> = {}): AdminUserDetail {
       max_foreground_workers: 0,
       max_background_workers: 0,
       sms_phone_number: '+15550100002',
+      correspondent_scopes: [],
     },
     channels: { log_channel: 'logtoken', alerts_channel: '' },
     whatsapp: {
@@ -49,6 +50,8 @@ function detail(overrides: Partial<AdminUserDetail> = {}): AdminUserDetail {
     options: {
       modules: ['feeds', 'money'],
       skills: ['browse', 'email'],
+      correspondent_scopes: ['web', 'calendar', 'contacts'],
+      correspondent_default_scopes: ['email', 'markets', 'skills', 'transcribe', 'whisper'],
       outbound_approval: ['', 'off', 'untrusted', 'all'],
       outbound_approval_floor: 'untrusted',
       email_enabled: true,
@@ -139,6 +142,69 @@ describe('the admin user editor', () => {
     await waitFor(() =>
       expect(api.updateAdminUser).toHaveBeenCalledWith('bob', { disabled_skills: ['browse'] }),
     );
+  });
+
+  describe('what mail from others may also use', () => {
+    const NAME = 'Also available to mail from others';
+
+    it('says what such mail keeps, and adds a scope and the web token', async () => {
+      const { dialog } = await open();
+      expect(within(dialog).getByText(/can use only email, markets, skills/)).toBeTruthy();
+      expect(within(dialog).getByText(/writes included/)).toBeTruthy();
+      const search = within(dialog).getByRole('combobox', { name: NAME });
+      await fireEvent.input(search, { target: { value: 'cal' } });
+      await fireEvent.keyDown(search, { key: 'ArrowDown' });
+      await fireEvent.keyDown(search, { key: 'Enter' });
+      await within(dialog).findByRole('button', { name: 'Remove calendar' });
+      await fireEvent.input(search, { target: { value: 'web' } });
+      await fireEvent.keyDown(search, { key: 'ArrowDown' });
+      await fireEvent.keyDown(search, { key: 'Enter' });
+      await within(dialog).findByRole('button', { name: 'Remove web (search and fetch)' });
+      await fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+      await waitFor(() =>
+        expect(api.updateAdminUser).toHaveBeenCalledWith('bob', {
+          correspondent_scopes: ['calendar', 'web'],
+        }),
+      );
+    });
+
+    it('offers only what the server offers', async () => {
+      const { dialog } = await open();
+      const search = within(dialog).getByRole('combobox', { name: NAME });
+      await fireEvent.input(search, { target: { value: 'files' } });
+      await fireEvent.keyDown(search, { key: 'ArrowDown' });
+      await fireEvent.keyDown(search, { key: 'Enter' });
+      expect(within(dialog).queryByRole('button', { name: 'Remove files' })).toBeNull();
+      expect(within(dialog).queryByText(/recall/i)).toBeNull();
+    });
+
+    it('shows a server refusal beside the field and keeps the draft', async () => {
+      api.updateAdminUser.mockRejectedValueOnce(
+        new api.AdminUserWriteError('correspondent_scopes may not name files', [
+          'correspondent_scopes',
+        ]),
+      );
+      const stored = detail();
+      stored.profile.correspondent_scopes = ['files', 'calendar'];
+      const { dialog, onClose } = await open(stored);
+      await fireEvent.click(within(dialog).getByRole('button', { name: 'Remove calendar' }));
+      await fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+      expect(await within(dialog).findByText(/may not name files/)).toBeTruthy();
+      // A hand-edited name the list does not offer stays visible and removable.
+      expect(within(dialog).getByRole('button', { name: 'Remove files' })).toBeTruthy();
+      expect(within(dialog).queryByRole('button', { name: 'Remove calendar' })).toBeNull();
+      expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it('locks the control when the deployment manages it', async () => {
+      const managed = detail({ managed: ['correspondent_scopes'] });
+      managed.profile.correspondent_scopes = ['calendar'];
+      const { dialog } = await open(managed);
+      expect(within(dialog).getByText('Set by deployment')).toBeTruthy();
+      expect(within(dialog).getByText('calendar')).toBeTruthy();
+      expect(within(dialog).queryByRole('button', { name: 'Remove calendar' })).toBeNull();
+      expect(within(dialog).queryByRole('combobox', { name: NAME })).toBeNull();
+    });
   });
 
   it('warns before changing the login email, and saves it through its own route', async () => {

@@ -2762,16 +2762,22 @@ def _whatsapp_view(binding) -> dict:
 
 def _admin_user_options(config) -> dict:
     from istota.mail.outbound_policy import VALID_POLICIES
+    from istota.rooms.scopes import CORRESPONDENT_DEFAULT_SCOPES, scope_names
     from istota.skills._loader import load_skill_index
 
     try:
-        skills = sorted(load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir))
+        index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
     except Exception:
         logger.warning("admin user editor: skill index unavailable", exc_info=True)
-        skills = []
+        index = {}
+    not_a_choice = {*user_profiles.CORRESPONDENT_REFUSED_SCOPES, *CORRESPONDENT_DEFAULT_SCOPES}
     return {
         "modules": _visible_modules(config),
-        "skills": skills,
+        "skills": sorted(index),
+        "correspondent_scopes": [
+            "web", *(name for name in scope_names(index) if name not in not_a_choice),
+        ],
+        "correspondent_default_scopes": sorted(CORRESPONDENT_DEFAULT_SCOPES),
         "outbound_approval": ["", *VALID_POLICIES],
         "outbound_approval_floor": config.email.outbound_approval_floor,
         "email_enabled": config.email.enabled,
@@ -17459,6 +17465,7 @@ _PROFILE_FIELD_SPECS: dict[str, dict] = {
     # Admin-only, below: the authority table says who may send them.
     "sms_phone_number":       {"type": "sms_phone"},
     "outbound_approval":      {"type": "outbound_approval"},
+    "correspondent_scopes":   {"type": "correspondent_scopes"},
     "default_destination":    {"type": "descriptor"},
     # A canonical room token, not a descriptor: it names where a destination
     # that named no room lands, on whichever surface asks (ISSUE-477).
@@ -17960,6 +17967,8 @@ def coerce_profile_field(
             return normalize_folder(_config, user_id, value)
         except QuickNoteError as exc:
             raise ProfileFieldRefused(exc.status, exc.code, exc.message) from None
+    if t == "correspondent_scopes":
+        return user_profiles.validate_correspondent_scopes(value)
     if t == "push_categories":
         from istota.push.preferences import validate_inbox_categories
         return validate_inbox_categories(value)

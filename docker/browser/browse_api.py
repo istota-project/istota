@@ -10,6 +10,7 @@ import atexit
 from contextlib import contextmanager
 from html import escape
 import json
+import egress_proxy
 import ipaddress
 import logging
 import os
@@ -1213,6 +1214,7 @@ def _read_pdf(page, data, session_id):
     pdf = pdf_text.read_pdf(
         pdf_url, deadline=_pdf_deadline(), user_agent=user_agent,
         cookies_for=lambda url: page.context.cookies([url]),
+        private_hosts=egress_proxy.granted_hosts(), deny_address=egress_proxy.is_loopback,
     )
     if isinstance(pdf, pdf_text.PdfFailure):
         return _scrub_extracted(pdf_text.failure_response(pdf), _credential_values, mask), None
@@ -4211,6 +4213,9 @@ def _probe(deep):
     inside a thread loop — and the first version of its test passed with the bug
     restored; the same trap applies to a probe buried in a nested handler.
     """
+    # Without the proxy every page fails while Chrome itself looks healthy.
+    if deep and not egress_proxy.is_up():
+        return 503, b"egress-proxy-down\n"
     for inst in pool.live():
         status, body = _probe_instance(inst, deep)
         if status != 200:

@@ -43,10 +43,10 @@ alerts_channel = "room789"
 
 # Trusted email addresses, in both directions: their mail bypasses the inbound
 # confirmation gate, and mail to them is sent without waiting for approval.
-# On an email thread room their mail also runs as this user at full reach,
-# with this user's memory loaded, and the reply reaches everyone on the
-# thread; trust sparingly (docs/features/email.md, "What trusting a sender
-# means"). Supports fnmatch patterns.
+# Their mail runs as this user with USER.md and a short list of tools, and
+# the reply reaches everyone on the thread; trust sparingly
+# (docs/features/email.md, "What someone else's mail can reach").
+# Supports fnmatch patterns.
 trusted_email_senders = ["*@company.com", "boss@other.com"]
 
 # This user's outbound email approval policy: off | untrusted | all.
@@ -55,6 +55,13 @@ trusted_email_senders = ["*@company.com", "boss@other.com"]
 # profile row yet. For an existing user the DB row wins, so set it with
 # `istota user ensure --outbound-approval`.
 outbound_approval = "all"
+
+# What mail somebody else wrote may reach beyond email, skills, transcribe,
+# whisper and markets: skill names, plus `web` for the native web tools.
+# Refuses files, memory, recall and memory_search. Seed-only, as above: for an
+# existing user, `istota user ensure --correspondent-scope` or the admin user
+# editor.
+correspondent_scopes = ["calendar"]
 
 # How much of a turn that arrived from outside the room (an external contact's
 # email) shows inline in web chat: full | collapsed (default) | hidden.

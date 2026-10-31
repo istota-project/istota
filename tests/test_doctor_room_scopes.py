@@ -47,10 +47,10 @@ def test_an_unestablished_answer_says_so(monkeypatch):
 
 
 
-def test_every_arm_says_email_thread_rooms_withhold_nothing(monkeypatch):
-    """Email on rooms, stage 2: a correspondent's mail is no guest turn, so
-    the detail names the two gates that bound it instead."""
+def test_every_arm_says_what_a_correspondents_mail_withholds(monkeypatch):
+    """A correspondent's mail is no guest turn, so the detail says so itself,
+    and that the allowlist is prompt and env only with no sandbox."""
     for sandboxed in (True, False, None):
         detail = _check(monkeypatch, sandboxed=sandboxed).detail
-        assert "Email thread rooms withhold nothing" in detail
-        assert "outbound approval gate" in detail
+        assert "withholds everything but a short allowlist" in detail
+        assert "with no sandbox" in detail

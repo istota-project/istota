@@ -1629,6 +1629,12 @@ timezone = "America/New_York"  # IANA timezone for briefing scheduling
 # outbound_approval = "all"    # this user's outbound approval policy: off |
                                # untrusted | all. Omit to follow the [email] floor.
                                # Read only before the user has a profile row.
+# correspondent_scopes = ["calendar", "web"]  # what mail somebody else wrote may reach
+                               # beyond the default: skill names, plus `web` for the
+                               # native web tools. Refuses files, memory, recall and
+                               # memory_search.
+                               # Read only before the user has a profile row; after
+                               # that, `istota user ensure --correspondent-scope`.
 # external_turn_display = "full"  # how much of a turn that arrived from outside the
                                # room (an external contact's email) shows inline in
                                # web chat: full | collapsed (default) | hidden. The

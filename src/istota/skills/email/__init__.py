@@ -27,6 +27,7 @@ from istota.lib.filenames import (
     filename_parts, numbered_name, safe_filename,
 )
 from istota.sandbox.host_paths import (
+    TURN_AUTHOR_VAR,
     mkdir_resolved,
     path_under_roots,
     read_resolved,
@@ -36,7 +37,7 @@ from istota.sandbox.host_paths import (
     write_resolved,
 )
 from istota.sandbox import credential_shim
-from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
+from istota.skills._cli import error_envelope, fail, parse_and_resolve, run_skill_cli
 from istota.skills._credref import SecretValue
 from istota.skills._hostpath import EGRESS, WRITE, host_path
 from istota.lib.untrusted import frame_untrusted
@@ -3633,9 +3634,27 @@ def build_parser():
     return parser
 
 
+def _refuse_on_a_correspondents_turn(command: str) -> None:
+    """On mail somebody else wrote, only the reply can be made.
+
+    The reply goes through `deliver_email_result` and the outbound gate. Every
+    other verb would let the sender ask for the mailbox and get it in the
+    reply, or send to an address of the model's choosing.
+    """
+    if os.environ.get(TURN_AUTHOR_VAR) != "correspondent" or command == "output":
+        return
+    user = os.environ.get("ISTOTA_USER_ID", "").strip() or "the user"
+    fail(
+        f"this mail was not written by {user}; only the reply (email output) "
+        "can be made on this turn",
+        reason="not_owner_turn",
+    )
+
+
 def main(argv=None):
     parser = build_parser()
     args = parse_and_resolve(parser, argv)
+    _refuse_on_a_correspondents_turn(args.command)
 
     commands = {
         "list": cmd_list,

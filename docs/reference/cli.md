@@ -82,6 +82,8 @@ The former `--default-briefings` flags are retired and return a migration diagno
 
 `--default-destination` sets the fallback delivery surface (`talk` | `email` | `ntfy` | `web` | `surface:channel` | comma list). `--route` is repeatable and sets a purpose-keyed override; `PURPOSE` is one of `reply`, `alert`, `log`, `briefing`, `notification`. See [per-user delivery routing](../configuration/per-user.md#delivery-routing).
 
+`--correspondent-scope NAME` (repeatable; replaces the list) sets what mail somebody else wrote may reach beyond the default, a skill name or `web`; `--clear-correspondent-scopes` goes back to the default. `files`, `memory`, `recall` and `memory_search` are refused. See [what someone else's mail can reach](../features/email.md#what-someone-elses-mail-can-reach).
+
 `--outbound-approval` sets this user's outbound email approval policy (`off` | `untrusted` | `all`); pass `""` to clear it and follow the operator's `[email] outbound_approval_floor`, which is the default. The floor is a minimum — a user value weaker than it has no effect. This is the supported way to set the policy for an existing user: the `[users.X] outbound_approval` TOML key seeds only a user with no profile row yet. See [the outbound approval gate](../features/email.md#the-outbound-approval-gate).
 
 `--external-turn-display` controls how much of a turn that arrived from outside the room (an external contact's email) is shown inline in web chat: `full`, `collapsed` (default — sender and subject, expandable), or `hidden`. The turn itself always renders at every setting.

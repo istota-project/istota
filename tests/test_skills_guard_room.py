@@ -109,7 +109,7 @@ class TestTheSkillsCliReadsTheRoom:
     def test_an_unreadable_database_withholds_everything(self, env, monkeypatch, capsys):
         config, shared, _solo = env
         _task_in(config, monkeypatch, shared)
-        monkeypatch.setattr("istota.rooms.scopes.withheld_for_task",
+        monkeypatch.setattr("istota.rooms.scopes.reach_for_task",
                             lambda *a, **k: (_ for _ in ()).throw(OSError("gone")))
         assert _list(capsys) == {"weather"}
 
@@ -138,3 +138,74 @@ class TestOverlaysAreMemory:
                 call()
             out = capsys.readouterr().out
             assert "memory_withheld" in out and "Elm Street" not in out
+
+
+class TestACorrespondentsTurn:
+    """Overlays load on these turns, so `skills show` and `overlay` hand them
+    back, and the private skills stay out of reach."""
+
+    def _turn(self, config, monkeypatch, shared):
+        task_id = _task_in(config, monkeypatch, shared)
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE tasks SET source_type = 'email' WHERE id = ?", (task_id,))
+            db.add_message(conn, shared, role="user", body="p", origin_surface="email",
+                           task_id=task_id, author_label="carol@example.com")
+            conn.commit()
+        monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", "calendar,files,memory")
+
+    def test_show_returns_the_overlay(self, env, monkeypatch, capsys):
+        config, shared, _solo = env
+        self._turn(config, monkeypatch, shared)
+        assert "Elm Street" in _show("weather", capsys)
+
+    def test_the_overlay_verb_does_not_refuse(self, env, monkeypatch, capsys):
+        from istota.skills.skills import cmd_overlay
+
+        config, shared, _solo = env
+        self._turn(config, monkeypatch, shared)
+        cmd_overlay(argparse.Namespace(name="weather"))
+        out = capsys.readouterr().out
+        assert "memory_withheld" not in out and "Elm Street" in out
+
+    def test_a_withheld_skill_stays_out(self, env, monkeypatch, capsys):
+        config, shared, _solo = env
+        self._turn(config, monkeypatch, shared)
+        assert _list(capsys) == {"weather"}
+        assert "disabled" in _show("calendar", capsys)
+
+    def test_a_withheld_skills_overlay_stays_out(self, env, monkeypatch, capsys):
+        from istota.skills.skills import cmd_overlay, cmd_overlays
+
+        config, shared, _solo = env
+        self._turn(config, monkeypatch, shared)
+        from istota.storage import resolve_user_skill_overlays_dir
+
+        (resolve_user_skill_overlays_dir(config, "alice") / "calendar.md").write_text("- the host sees a specialist on Fridays\n")
+        with pytest.raises(SystemExit):
+            cmd_overlay(argparse.Namespace(name="calendar"))
+        out = capsys.readouterr().out
+        assert "memory_withheld" in out and "specialist" not in out
+        cmd_overlays(argparse.Namespace())
+        listed = {row["skill"] for row in json.loads(capsys.readouterr().out)["skills"]}
+        assert listed == {"weather"}
+
+    def test_a_widened_skill_opens_through_the_real_setting(self, env, monkeypatch, capsys):
+        from istota import user_profiles
+
+        config, shared, _solo = env
+        user_profiles.ensure_profile(config.db_path, "alice")
+        user_profiles.update_profile(
+            config.db_path, "alice", correspondent_scopes=["calendar"],
+        )
+        self._turn(config, monkeypatch, shared)
+        monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", "files,memory")
+        assert "calendar" in _list(capsys)
+        assert "# calendar body" in _show("calendar", capsys)
+
+    def test_control_the_set_alone_with_no_task_still_refuses(self, env, monkeypatch, capsys):
+        from istota.skills.skills import cmd_overlay
+
+        monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", "calendar,files,memory")
+        with pytest.raises(SystemExit):
+            cmd_overlay(argparse.Namespace(name="weather"))
+        assert "memory_withheld" in capsys.readouterr().out

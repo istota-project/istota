@@ -336,6 +336,8 @@ Report a confirmed outcome with `wallet complete ID --order-ref REFERENCE --amou
 
 **Failures**: If a site returns an error, empty content, captcha, or no `session_id` — try once more. If it fails twice, skip that site and use an alternative source.
 
+**Private addresses**: The browser cannot reach internal or private-network addresses unless the operator granted the name. A page reading `Refused: this is a private address` is final; say the address is not reachable from the browser. On https a refusal reads as `ERR_TUNNEL_CONNECTION_FAILED`, the same as a host that cannot be reached, so the one retry above applies.
+
 **No debugging**: Never read the browse skill source code, inspect docker containers, curl the browser API directly, test session internals, or debug the browser infrastructure. If the CLI fails, move on.
 
 **Scrolling**: Max 3 rounds. Infinite feeds never end.

@@ -183,6 +183,7 @@ def build_task_runtime(
     user_config: object | None,
     discovered_calendars: list | None = None,
     withheld_scopes: frozenset[str] = frozenset(),
+    turn_author: str = "own",
     group_ids: "list[str] | None" = None,
     conn: "db.sqlite3.Connection | None" = None,
 ) -> TaskRuntime:
@@ -197,6 +198,10 @@ def build_task_runtime(
     walks the whole index too, and the proxy's allowlist is every CLI skill.
     All three read ``reach_index``, the index minus withheld skills. The two
     credential splits keep the full index, since they only remove names.
+
+    ``turn_author`` is the same derivation's posture (``Reach.author``), handed
+    to the proxy's skill CLIs as ``ISTOTA_TURN_AUTHOR``. The ``email`` CLI
+    refuses on it.
 
     ``group_ids`` is the task's resolved group set
     (``room_scopes.task_group_ids``), handed to the proxy's skill CLIs as
@@ -477,6 +482,8 @@ def build_task_runtime(
         if withheld_scopes:
             from istota.sandbox.host_paths import WITHHELD_SCOPES_VAR
             proxy_base_env[WITHHELD_SCOPES_VAR] = ",".join(sorted(withheld_scopes))
+        from istota.sandbox.host_paths import TURN_AUTHOR_VAR
+        proxy_base_env[TURN_AUTHOR_VAR] = turn_author
         if group_ids:
             from istota.sandbox.host_paths import TASK_GROUPS_VAR
             proxy_base_env[TASK_GROUPS_VAR] = ",".join(sorted(group_ids))

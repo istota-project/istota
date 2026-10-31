@@ -13,5 +13,6 @@ def browser_instance(monkeypatch):
     monkeypatch.setattr(browse_api, "_request_instance", lambda: browse_api._instance)
     monkeypatch.setattr(browse_api, "_user_scope", "alice")
     monkeypatch.setattr(pool, "_instances", {"alice": inst})
+    monkeypatch.setattr(browse_api.egress_proxy, "is_up", lambda timeout=1: True)
     yield inst
     pool._instances.clear()

@@ -425,13 +425,13 @@ def my_notes_room(conn, task) -> str | None:
     answers guests ``direct``: an unreviewed reply could repeat the notes.
     None everywhere else, a private room included.
 
-    "Own turn" is read off the stored turn, as `rooms.scopes` reads it: an
-    outside correspondent's mail continuing an email thread room runs as the
-    host with no guest id, and must not carry the host's notes. An email turn
-    with no stored row (one kept out of the room) cannot show whose it is, so
-    it reads none.
+    "Own turn" is `rooms.scopes.turn_author`: an outside correspondent's mail
+    continuing an email thread room runs as the host with no guest id, and must
+    not carry the host's notes. An email turn needs a stored row naming the
+    user as well: one attributed only by its `processed_emails` row was kept
+    out of the room, so it reads none.
     """
-    from istota.rooms.scopes import written_by_someone_else
+    from istota.rooms.scopes import turn_author
 
     from istota.rooms import policy as room_policy
 
@@ -451,7 +451,7 @@ def my_notes_room(conn, task) -> str | None:
         return None
     if not is_shared_room(conn, token, is_group_chat=task.is_group_chat):
         return None
-    if written_by_someone_else(conn, task):
+    if turn_author(conn, task, own_addresses=None) != "own":
         return None
     if task.source_type == "email" and conn.execute(
         "SELECT 1 FROM messages WHERE task_id = ? AND role = 'user' AND author_user_id = ?",

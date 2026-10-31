@@ -39,6 +39,7 @@ def api(monkeypatch, tmp_path):
     monkeypatch.setattr(module.pool, "RUNTIME_DIR", tmp_path / "runtime")
     monkeypatch.setattr(module.pool, "_instances", {})
     monkeypatch.setattr(module, "_get_memory_pct", lambda: 0)
+    monkeypatch.setattr(module.egress_proxy, "is_up", lambda timeout=1: True)
 
     def launch(inst):
         page = MagicMock()

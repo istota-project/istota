@@ -183,6 +183,13 @@
     }));
   });
 
+  const correspondentOptions = $derived(
+    (detail?.options.correspondent_scopes ?? []).map((name) => ({
+      value: name,
+      label: name === 'web' ? 'web (search and fetch)' : name,
+    })),
+  );
+
   const whatsappStatus = $derived.by(() => {
     const w = detail?.whatsapp;
     if (!w) return { label: '', variant: 'neutral' as const };
@@ -511,6 +518,25 @@
                     v === DEFAULT_POLICY ? '' : v
                   ) as AdminUserProfile['outbound_approval'];
               }}
+            />
+          </Field>
+          <Field
+            label="Also available to mail from others"
+            badge={badge('correspondent_scopes')}
+            hint={hint('correspondent_scopes')}
+            description={`Mail someone else wrote can use only ${detail.options.correspondent_default_scopes.join(', ')}. Whoever sends it can ask for anything added here, writes included.`}
+            error={errors.correspondent_scopes}
+          >
+            <MultiSelect
+              value={form.correspondent_scopes}
+              options={correspondentOptions}
+              onValueChange={(next) => {
+                if (form) form.correspondent_scopes = next;
+              }}
+              disabled={locked('correspondent_scopes')}
+              placeholder="Search skills to add…"
+              emptyLabel="Nothing added."
+              ariaLabel="Also available to mail from others"
             />
           </Field>
         </section>

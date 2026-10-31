@@ -110,6 +110,91 @@ async def test_writes_require_origin(client, method, path):
     assert response.status_code == 403
 
 
+class TestCorrespondentScopes:
+    async def test_the_options_offer_web_and_scopes_and_nothing_refused(self, client):
+        options = (await client.get(URL + "/bob")).json()["options"]
+        offered = options["correspondent_scopes"]
+        assert "web" in offered and "calendar" in offered
+        assert not set(offered) & set(user_profiles.CORRESPONDENT_REFUSED_SCOPES)
+        assert "recall" not in offered
+        # Already kept on every such turn, so not a choice.
+        assert not set(offered) & set(options["correspondent_default_scopes"])
+        assert "email" in options["correspondent_default_scopes"]
+
+    async def test_web_is_offered_when_the_skill_index_cannot_be_read(self, client, monkeypatch):
+        def unreadable(*args, **kwargs):
+            raise OSError("no skills")
+
+        monkeypatch.setattr("istota.skills._loader.load_skill_index", unreadable)
+        options = (await client.get(URL + "/bob")).json()["options"]
+        assert options["correspondent_scopes"] == ["web"]
+
+    async def test_an_admin_write_reaches_what_a_turn_reads(self, client, configured):
+        from istota.rooms import scopes
+        from istota.skills._loader import load_skill_index
+
+        response = await client.patch(
+            URL + "/bob", json={"correspondent_scopes": ["calendar", "web"]},
+        )
+        assert response.status_code == 200
+        assert response.json()["profile"]["correspondent_scopes"] == ["calendar", "web"]
+        config = configured._config
+        index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+        with db.get_db(config.db_path) as conn:
+            allowance = scopes.correspondent_scopes(conn, "bob", skill_index=index)
+        assert "calendar" in allowance.scopes and allowance.web is True
+
+    async def test_an_empty_list_clears_it(self, client, configured):
+        user_profiles.update_profile(configured._config.db_path, "bob",
+                                     correspondent_scopes=["calendar"])
+        response = await client.patch(URL + "/bob", json={"correspondent_scopes": []})
+        assert response.status_code == 200
+        assert _profile(configured, "bob").correspondent_scopes == []
+
+    @pytest.mark.parametrize("name", user_profiles.CORRESPONDENT_REFUSED_SCOPES)
+    async def test_a_refused_name_is_a_field_refusal_and_writes_nothing(
+        self, client, configured, name,
+    ):
+        response = await client.patch(URL + "/bob", json={
+            "display_name": "Robert", "correspondent_scopes": ["calendar", name],
+        })
+        assert response.status_code == 400
+        body = response.json()
+        assert body["error"] == "invalid_field"
+        assert body["fields"] == ["correspondent_scopes"]
+        assert name in body["detail"]
+        profile = _profile(configured, "bob")
+        assert profile.correspondent_scopes == []
+        assert profile.display_name == "Bob"
+
+    @pytest.mark.parametrize("value", ["calendar", [1], {"calendar": True}])
+    async def test_a_malformed_value_is_a_field_refusal(self, client, value):
+        response = await client.patch(URL + "/bob", json={"correspondent_scopes": value})
+        assert response.status_code == 400
+        assert response.json()["fields"] == ["correspondent_scopes"]
+
+    async def test_a_name_the_index_lacks_is_kept_for_the_reader_to_drop(self, client, configured):
+        response = await client.patch(URL + "/bob", json={"correspondent_scopes": ["removed-skill"]})
+        assert response.status_code == 200
+        assert _profile(configured, "bob").correspondent_scopes == ["removed-skill"]
+
+    async def test_a_non_admin_cannot_write_it_for_anyone(self, client, configured):
+        session(client, configured, "bob")
+        for target in ("bob", "carol"):
+            response = await client.patch(
+                f"{URL}/{target}", json={"correspondent_scopes": ["calendar"]},
+            )
+            assert response.status_code == 403
+            assert _profile(configured, target).correspondent_scopes == []
+
+    async def test_a_managed_value_is_refused(self, client, configured):
+        _manage(configured, "bob", "correspondent_scopes")
+        response = await client.patch(URL + "/bob", json={"correspondent_scopes": ["calendar"]})
+        assert response.status_code == 409
+        assert response.json()["fields"] == ["correspondent_scopes"]
+        assert _profile(configured, "bob").correspondent_scopes == []
+
+
 class TestGet:
     async def test_shape(self, client, configured):
         _manage(configured, "bob", "email_addresses")
