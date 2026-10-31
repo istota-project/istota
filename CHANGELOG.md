@@ -79,6 +79,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One table for private hosts.** A host that several parts of Istota should reach on your own network is now one line in `[private_hosts]`, naming who it is for, as in `"rss.example.internal" = ["browser", "feeds"]`. A grant reaches only the parts it names, so an arr app you allow for `servarr` does not become a target for a user's feed or mail account. Any edit to the table in Admin > Configuration asks for the typed confirmation, and the Servarr form's "Add to private hosts" button is gone: the form says what to write instead.
+
+  **Upgrade note:** `private_hosts` under `[browser]`, `[wordpress]`, `[mail_accounts]`, `[sharing]`, `[servarr]` and `[feeds]` keeps working with a warning, so no edit is needed. Move the keys only after you have settled on this release: a rollback to one without the table ignores it and refuses every private host, until you put the old keys back from a `config.toml.bak.<timestamp>` or by hand.
 - **Compare a VM's host.env with the Ansible inventory.** `istota migrate role-vars` without `--old-vars` prints the VM's `host.env` and `.env` as the management role's deployment variables, `istota_site_dir` and `istota_apt_mirror` included. See ansible/README.md.
 - **Claude Code tasks reach their tools with fewer moving parts.** The claude CLI now starts the sandboxed tool server itself, so the daemon no longer relays tool calls, and both brains' calls pass the same checks inside it. WebFetch reaches Claude Code tasks as its own fetch server outside the sandbox, under the native brain's rules.
 - Briefing and sign-in emails share one HTML template. It keeps your mail app's own fonts and colours, and tidies the rest: lists line up with the text around them, headings are only a little larger than body text, and spacing between blocks is even.

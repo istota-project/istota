@@ -4,7 +4,7 @@ It serves one share root at Nextcloud's public WebDAV base and answers only
 Basic auth whose user is the share secret, with an empty password, as
 Nextcloud 30 does. The `shares` skill's tests and the Files page's share
 browsing tests both drive it, so the two readers of a share are held to one
-server's behaviour. `[sharing] private_hosts` names `127.0.0.1` in both.
+server's behaviour. `127.0.0.1` is a `sharing` grant in `[private_hosts]` in both.
 """
 
 from __future__ import annotations

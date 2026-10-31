@@ -11,7 +11,9 @@ The skill is a menu skill with a CLI (`istota-skill servarr`). It appears only o
 ```toml
 [servarr]
 requesters = ["bob"]              # user ids besides admins who may request
-private_hosts = ["192.168.1.10"]  # hosts allowed a private address and plain HTTP
+
+[private_hosts]
+"192.168.1.10" = ["servarr"]  # allowed a private address and plain HTTP
 
 [servarr.apps.sonarr]
 url = "http://192.168.1.10:8989"
@@ -44,7 +46,7 @@ Each app is a `[servarr.apps.<app>]` table with the app's URL. Its API key, from
 
 **`requesters`** lists the users, besides admins, who get the requester tier. Admins never need listing. An empty list leaves the skill to admins. Matching ignores case, and a listed id that is not a configured user is warned about at load.
 
-**`private_hosts`** lists the exact host names or IP addresses an app may resolve to a private or loopback address. Without it every app must be on a public address over HTTPS. Plain HTTP is allowed only to a host in this list, since an arr stack on a home or office network usually has no certificate. This is the same rule as `[wordpress] private_hosts`, and like that one it is operator-only.
+**[`[private_hosts]`](../configuration/reference.md#private_hosts)** grants the exact host names or IP addresses an app may resolve to a private or loopback address, as `"<host>" = ["servarr"]`. Without a grant every app must be on a public address over HTTPS. Plain HTTP is allowed only to a granted host, since an arr stack on a home or office network usually has no certificate. If the host is already in the table for another consumer, add `"servarr"` to its existing list: a second line for the same host is a TOML error.
 
 **`[servarr.defaults.<app>]`** is what an add uses when nobody names a profile or a root folder, which is always the case for a requester:
 
@@ -82,9 +84,9 @@ The rest of `[servarr]` goes in the plan like any other config table.
 
 ### Checking the connection
 
-Admin > Connections has a Servarr card. It lists each configured app with its URL, whether a key is set, and the result of the daemon's last `servarr.connection` check, which asks each app for its version with its key. A table missing its URL or its key, a URL with a user name or password in it, and plain HTTP to a host not in `private_hosts` show as setup incomplete. Check now runs the check again. `istota doctor --only servarr.connection` gives the same results from a terminal. The web interface never calls an arr app and never shows a key. The card only shows status: Configure, and Add apps on an install with none, open the `[servarr]` section of Admin > Configuration.
+Admin > Connections has a Servarr card. It lists each configured app with its URL, whether a key is set, and the result of the daemon's last `servarr.connection` check, which asks each app for its version with its key. A table missing its URL or its key, a URL with a user name or password in it, and plain HTTP to a host not granted to `servarr` in `[private_hosts]` show as setup incomplete. Check now runs the check again. `istota doctor --only servarr.connection` gives the same results from a terminal. The web interface never calls an arr app and never shows a key. The card only shows status: Configure, and Add apps on an install with none, open the `[servarr]` section of Admin > Configuration.
 
-The `[servarr]` section of Admin > Configuration has a block for each app: whether it is connected, its URL and its API key, with a badge saying where the key is held. The requesters, `private_hosts` and the add defaults are ordinary fields in the same section. When a URL needs its host in `private_hosts` (plain HTTP, or a private IP address), the block says so as you type and offers to add the host. The key field starts empty and an empty field keeps the stored key. A new key goes to its secret file, and turning an app off clears that file as well as removing the table. Where the secret files are managed by a deployment role, the key shows whether it is set and cannot be changed here. The change goes through the page's review, confirmation and host applier, and Istota restarts to load it. The section is read-only on an install with no config applier, and where a plan manages `config.toml` (an Ansible-managed install). Ownership is recorded for the whole of `config.toml`, not per section, so on a managed install `[servarr]` is changed in the settings plan and the keys in its secret files.
+The `[servarr]` section of Admin > Configuration has a block for each app: whether it is connected, its URL and its API key, with a badge saying where the key is held. The requesters and the add defaults are ordinary fields in the same section. When a URL needs a grant in `[private_hosts]` (plain HTTP, or a private IP address), the block says so as you type and says what to write in `private_hosts` under General: `"<host>" = ["servarr"]`. That edit needs the typed confirmation. The block cannot read a table edit that is still pending, so it stops judging the host while one is open, and the table edit and a new app on that host can go in one change. The key field starts empty and an empty field keeps the stored key. A new key goes to its secret file, and turning an app off clears that file as well as removing the table. Where the secret files are managed by a deployment role, the key shows whether it is set and cannot be changed here. The change goes through the page's review, confirmation and host applier, and Istota restarts to load it. The section is read-only on an install with no config applier, and where a plan manages `config.toml` (an Ansible-managed install). Ownership is recorded for the whole of `config.toml`, not per section, so on a managed install `[servarr]` is changed in the settings plan and the keys in its secret files.
 
 ## Network
 
