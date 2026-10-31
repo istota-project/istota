@@ -81,6 +81,7 @@ A public job is the research posture applied to one approved job. It keeps its u
 Each of these is known and left open.
 
 - **Attended turns.** As above: H-2 stays open for them.
+- **The worktree reaper's fetch.** The daemon runs `git fetch origin` only when the origin is a configured forge, read through the repository's own `insteadOf` and refused with a proxy in its config. A limited admin task can still point it at a path on that forge, and the repository's `http.*` config still applies; what that sends goes to the forge.
 - **HEARTBEAT.md `url-health`.** A limited admin task can plant a `url-health` URL that the daemon fetches with no egress limit. HEARTBEAT.md is writable by a task, the check runs from the daemon's network on the next sweep, and the URL can carry private data in its query. `url-health` is admin-only, and the check exists to probe internal services. This is open pending a decision.
 - **Delayed egress.** A limited task can write text into memory or a file, and a later attended turn can read it and act on it. A public job's answer is delivered, and may be indexed where a job's output is.
 - **Jobs on `open`.** Every job that existed at upgrade starts on `open` and keeps this risk until its owner narrows it. `istota doctor` counts them under `security.egress_open_jobs`.

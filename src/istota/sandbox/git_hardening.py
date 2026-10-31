@@ -136,10 +136,10 @@ GIT_HARDENING = (
 #: transport but https whatever the config says, and also stands behind the
 #: first on an older git. `worktree_reaper`'s explicit `git fetch origin` is the
 #: one caller that fetches on purpose, and only an https remote can still
-#: answer it. That closes program execution, not the fetch: it still goes to a
-#: URL the repository chose, outside the CONNECT allowlist, and still reads
-#: `http.*` config such as `http.cookieFile`, whose URL-scoped spelling would
-#: outrank a `-c` override.
+#: answer it. That closes program execution. It fetches only when the origin is a
+#: configured forge (`worktree_reaper._origin_is_a_forge`); it still reads `http.*`
+#: config such as `http.cookieFile`, whose URL-scoped spelling would outrank a `-c`
+#: override, and what that sends goes to the forge.
 #:
 #: Half the policy: what is *set*. The other half is `GIT_SUBPROCESS_ENV_UNSET`
 #: below, and `git_env` is what applies both — reach for that rather than for

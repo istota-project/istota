@@ -138,6 +138,7 @@ from .config import (
 )
 from .brain.claude_code import is_api_error_banner, is_permanent_api_error
 from .executor import (
+    _configured_url_hosts,
     detect_malformed_result,
     discover_calendars_for_task,
     execute_task,
@@ -7049,6 +7050,7 @@ def check_worktree_reap(config: Config) -> list:
             # model-written `remote.origin.url`, from the unsandboxed
             # scheduler, outside the CONNECT allowlist, on every sweep.
             skip=_package_cache_dirs(dev.repos_dir),
+            forge_hosts=_configured_url_hosts(config, ["developer"]),
         )
     except Exception as exc:  # noqa: BLE001 - a periodic sweep must not kill the loop
         logger.error("worktree_reap_failed err=%s", exc, exc_info=True)
