@@ -248,7 +248,7 @@ class TestNotificationsRefuseASharedRoom:
         with caplog.at_level(logging.WARNING):
             sent = notifications.send_notification(
                 config, "alice", "disk full", purpose="alert")
-        assert shared not in sends["talk"]
+        assert sends["talk"] == []
         assert sent is False
         assert any(shared in r.getMessage() and "alert" in r.getMessage()
                    for r in caplog.records)
@@ -260,20 +260,22 @@ class TestNotificationsRefuseASharedRoom:
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
             shared = _shared_talk_room(conn)
+            talk_ref = db.get_room_binding(conn, shared, "talk").surface_ref
         assert not notifications.send_notification(
             config, "alice", "cancelled", conversation_token=shared)
         assert notifications.send_notification(
             config, "alice", "cancelled", conversation_token=shared, task_room=shared)
-        assert sends["talk"] == [shared]
+        assert sends["talk"] == [talk_ref]
 
     def test_a_private_alerts_channel_still_gets_it(self, tmp_path, sends):
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
-            own = plain_talk_room(conn, "alice", name="alerts").canonical
+            alerts = plain_talk_room(conn, "alice", name="alerts")
+            own = alerts.canonical
             db.add_room_member(conn, own, "alice")
         config.users["alice"].alerts_channel = own
         assert notifications.send_notification(config, "alice", "x", purpose="alert")
-        assert sends["talk"] == [own]
+        assert sends["talk"] == [alerts.talk_ref]
 
     def test_a_routed_web_notification_into_a_shared_room_is_refused(
         self, tmp_path, sends,

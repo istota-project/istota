@@ -293,6 +293,130 @@ class TestATalkPostThatNeverLanded:
 
 
 # ---------------------------------------------------------------------------
+# The answer already in the room (ISSUE-909)
+# ---------------------------------------------------------------------------
+
+
+@patch("istota.scheduler.run_coro", side_effect=asyncio.run)
+class TestAnAnswerAlreadyInTheRoom:
+    """With a web view to read it in, the room's row is the copy. The alert still
+    says the Talk leg failed, because it did, and has no body to keep."""
+
+    @pytest.fixture
+    def web(self, config):
+        config.web.enabled = True
+        return config
+
+    def _alerts(self, config):
+        with db.get_db(config.db_path) as conn:
+            return conn.execute(
+                "SELECT * FROM notifications WHERE source = 'task_alert' ORDER BY id",
+            ).fetchall()
+
+    def test_the_alert_names_the_failure_and_not_the_answer(
+        self, mock_run, web, fake_talk, plain,
+    ):
+        _timeout(fake_talk, plain.talk_ref)
+        task_id = _queue(web, plain.canonical)
+        with patch(
+            "istota.scheduler.send_notification", return_value=True,
+        ) as send:
+            _run(web)
+
+        (row,) = self._alerts(web)
+        assert row["dedup_key"] == task_alert.talk_leg_failed_key(task_id)
+        assert "1,240" not in row["body"]
+        assert row["body"] == task_alert.TALK_LEG_FAILED_DETAIL
+        assert f"#{task_id}" in row["title"]
+        pushed = send.call_args.args[2]
+        assert "1,240" not in pushed
+        assert task_alert.TALK_LEG_FAILED_DETAIL in pushed
+        assert task_alert.UNDELIVERED_POINTER not in pushed
+
+    def test_the_row_closes_on_being_seen(
+        self, mock_run, web, fake_talk, plain,
+    ):
+        """It is nobody's only copy, so the kept-until-dismissed rule that holds
+        an `undelivered:` row open has no reason to apply."""
+        from istota.notifications import store
+
+        _timeout(fake_talk, plain.talk_ref)
+        _queue(web, plain.canonical)
+        with patch("istota.scheduler.send_notification", return_value=True):
+            _run(web)
+        with db.get_db(web.db_path) as conn:
+            items, _total = store.list_open(web, conn, USER)
+            store.mark_seen(conn, USER, [(i.id, i.updated_at) for i in items])
+        (row,) = self._alerts(web)
+        assert row["state"] == "resolved"
+
+    def test_a_conversation_with_no_room_keeps_the_body(
+        self, mock_run, web, fake_talk,
+    ):
+        fake_talk.known_channels.add("rawconv")
+        _timeout(fake_talk, "rawconv")
+        _queue(web, "rawconv")
+        with patch("istota.scheduler.send_notification", return_value=True):
+            _run(web)
+
+        (row,) = _rows(web)
+        assert "1,240 EUR" in row["body"]
+
+    def test_a_user_who_cannot_open_the_room_keeps_the_body(
+        self, mock_run, web, fake_talk, plain,
+    ):
+        with db.get_db(web.db_path) as conn:
+            conn.execute(
+                "DELETE FROM room_members WHERE room_token = ? AND user_id = ?",
+                (plain.canonical, USER),
+            )
+        _timeout(fake_talk, plain.talk_ref)
+        _queue(web, plain.canonical)
+        with patch("istota.scheduler.send_notification", return_value=True):
+            _run(web)
+
+        (row,) = _rows(web)
+        assert "1,240 EUR" in row["body"]
+
+    def test_an_archived_room_keeps_the_body(
+        self, mock_run, web, fake_talk, plain,
+    ):
+        """The bot left or the conversation went: the post fails for good, and
+        the web list no longer offers the room the row is in."""
+        with db.get_db(web.db_path) as conn:
+            db.set_room_archived(conn, plain.canonical, True)
+        _timeout(fake_talk, plain.talk_ref)
+        _queue(web, plain.canonical)
+        with patch("istota.scheduler.send_notification", return_value=True):
+            _run(web)
+
+        (row,) = _rows(web)
+        assert "1,240 EUR" in row["body"]
+
+    def test_an_apology_with_no_row_keeps_the_body(
+        self, mock_run, web, fake_talk, plain,
+    ):
+        """A permanently failed task stores no answer, so the notice is the only
+        place its message exists."""
+        with db.get_db(web.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="do the thing", user_id=USER, source_type="talk",
+                conversation_token=plain.canonical,
+            )
+            conn.execute(
+                "UPDATE tasks SET max_attempts = 1 WHERE id = ?", (task_id,),
+            )
+        _timeout(fake_talk, plain.talk_ref)
+        with patch("istota.scheduler.send_notification", return_value=True):
+            _run(web, result="the tool exited 1", success=False)
+
+        (row,) = _rows(web)
+        assert row["dedup_key"] == task_alert.undelivered_key(task_id)
+        assert row["body"]
+        assert row["body"] != task_alert.TALK_LEG_FAILED_DETAIL
+
+
+# ---------------------------------------------------------------------------
 # The guard
 # ---------------------------------------------------------------------------
 
