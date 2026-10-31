@@ -123,6 +123,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The browser no longer loses Japanese, Chinese or other non-Latin characters from a web address on a busy machine, which could land it on the wrong page. A host name with a character the browser cannot convert faithfully is now refused and asks for its `xn--` form, and an address that hides a blocked scheme behind such characters is refused too.
 - A page could fail with `navigation_mismatch` when an earlier visit had used the same address in a different case, such as `gl=US` after `gl=us`, and retrying never helped. The browser now reaches the address you asked for. A different document still fails.
 - `istota doctor` no longer skips the model credential, master key and servarr key checks because `PRECOMMIT_SCANS_REQUIRED` is set. A missing credential on a daemon with that override now reports as a failure.
 
