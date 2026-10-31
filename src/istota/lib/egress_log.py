@@ -27,6 +27,25 @@ EGRESS_LOG_VAR = "ISTOTA_EGRESS_LOG"
 MAX_LOG_BYTES = 64 * 1024
 _MAX_ENTRY_CHARS = 253
 
+#: In a skill CLI's environment only, set by the daemon when `Reach.egress_hosts` is
+#: not None. Never the model's. With `skill_proxy_enabled = false` nothing sets it.
+EGRESS_LIMITED_VAR = "ISTOTA_EGRESS_LIMITED"
+#: A verb rule's refusal. Unlike a refused host it logs no entry: the page cannot
+#: grant a verb.
+EGRESS_LIMITED_REASON = "egress_limited"
+
+
+def egress_limited() -> bool:
+    return os.environ.get(EGRESS_LIMITED_VAR) == "1"
+
+
+def limited_refusal(what: str) -> str:
+    """Fixed text apart from ``what``, which the verb names and the model never chose."""
+    return (
+        f"{what} is not available to a task limited to approved hosts. "
+        "The owner can do it in Istota. Do not retry."
+    )
+
 
 def append_refusal(path: "str | Path | None", channel: str, entry: str) -> None:
     """One line, in one `write`, so concurrent writers do not interleave."""

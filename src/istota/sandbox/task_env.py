@@ -221,7 +221,8 @@ def build_task_runtime(
     is recorded. The CONNECT proxy records hosts only for a limited task, since
     anything else has no host to ask for; a skill CLI gets the path regardless, as
     ``EGRESS_LOG_VAR``, and only ever records a request about the job. A heartbeat
-    check passes None and records nothing.
+    check passes None and records nothing. Not None also sets ``EGRESS_LIMITED_VAR``
+    in the proxy's snapshot, for the verb rules.
 
     ``group_ids`` is the task's resolved group set
     (``room_scopes.task_group_ids``), handed to the proxy's skill CLIs as
@@ -509,9 +510,13 @@ def build_task_runtime(
         proxy_base_env[TURN_AUTHOR_VAR] = turn_author
         from istota.browser.owner import BROWSER_PROFILE_VAR, ISOLATED_PROFILE
         proxy_base_env[BROWSER_PROFILE_VAR] = ISOLATED_PROFILE if isolated_browser else task.user_id
+        from istota.lib.egress_log import EGRESS_LIMITED_VAR, EGRESS_LOG_VAR
         if egress_log is not None:
-            from istota.lib.egress_log import EGRESS_LOG_VAR
             proxy_base_env[EGRESS_LOG_VAR] = str(egress_log)
+        if egress_hosts is not None:
+            proxy_base_env[EGRESS_LIMITED_VAR] = "1"
+        else:
+            proxy_base_env.pop(EGRESS_LIMITED_VAR, None)
         if group_ids:
             from istota.sandbox.host_paths import TASK_GROUPS_VAR
             proxy_base_env[TASK_GROUPS_VAR] = ",".join(sorted(group_ids))

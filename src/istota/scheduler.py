@@ -2758,6 +2758,14 @@ def _execute_skill_task(
         ))
     env.update(servarr_daemon_keyed_env(os.environ))
 
+    # No proxy here to set it, and CRON.md can name any verb of a `local` skill.
+    from .lib.egress_log import EGRESS_LIMITED_VAR
+
+    if reach.egress_hosts is not None:
+        env[EGRESS_LIMITED_VAR] = "1"
+    else:
+        env.pop(EGRESS_LIMITED_VAR, None)
+
     cmd = [sys.executable, "-m", f"istota.skills.{skill_name}"] + skill_args
     from istota.sandbox.host_paths import skill_file_env
 

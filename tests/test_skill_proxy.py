@@ -1,6 +1,7 @@
 """Tests for skill proxy server, client, and executor credential splitting."""
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -12,8 +13,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from istota.config import SecurityConfig
+from istota.config import Config, SecurityConfig
+from istota.sandbox import task_env
 from istota.skill_client import SKILL_CLIENT_WAIT_SECONDS
+from istota.skills.bookmarks import main as bookmarks_main
+from istota.skills.feeds import main as feeds_main
+from istota.skills.ntfy import main as ntfy_main
+from tests.support.skill_cli import run_skill_main
 from istota.sandbox.skill_proxy import (
     CLIENT_WAIT_MARGIN_SECONDS,
     CONNECTION_SLACK_SECONDS,
@@ -1488,3 +1494,160 @@ class TestTheConnectBurst:
         for i, (_out, err) in enumerate(results):
             assert f"Unknown skill: 'burst{i}'" in err, err
             assert "Traceback" not in err
+
+
+EVIL_URL = "https://evil.example/?d=canary"
+
+
+class TestEgressLimitedFlag:
+    """`ISTOTA_EGRESS_LIMITED`: from the reach, through `build_task_runtime`, to the CLI."""
+
+    def _runtime(self, tmp_path, make_task, **kwargs):
+        task = make_task(id=31, user_id="alice", source_type="scheduled")
+        temp = tmp_path / "temp" / "alice"
+        control = tmp_path / "temp" / ".control" / "alice" / "task_31"
+        temp.mkdir(parents=True)
+        control.mkdir(parents=True)
+        (tmp_path / "db").mkdir()
+        config = Config(
+            db_path=tmp_path / "db" / "test.db", temp_dir=tmp_path / "temp",
+            workspace_path=tmp_path / "mount",
+            security=SecurityConfig(sandbox_enabled=True, skill_proxy_enabled=True),
+        )
+        return task_env.build_task_runtime(
+            config, task, user_temp_dir=temp, control_dir=control, task_attempt=1,
+            selected_skills=[], skill_index={}, is_admin=False, user_resources=[],
+            user_config=None, discovered_calendars=[], **kwargs,
+        )
+
+    def test_a_limited_task_gets_it_in_the_proxy_and_not_the_model(self, tmp_path, make_task):
+        runtime = self._runtime(tmp_path, make_task, egress_hosts=frozenset())
+        assert runtime.proxy_ctx.base_env["ISTOTA_EGRESS_LIMITED"] == "1"
+        assert "ISTOTA_EGRESS_LIMITED" not in runtime.env
+
+    def test_a_host_grant_is_still_limited(self, tmp_path, make_task):
+        runtime = self._runtime(tmp_path, make_task, egress_hosts=frozenset({"news.example"}))
+        assert runtime.proxy_ctx.base_env["ISTOTA_EGRESS_LIMITED"] == "1"
+
+    def test_open_egress_does_not_carry_it_even_from_the_daemons_environment(
+        self, tmp_path, make_task, monkeypatch,
+    ):
+        monkeypatch.setenv("ISTOTA_EGRESS_LIMITED", "1")
+        runtime = self._runtime(tmp_path, make_task, egress_hosts=None)
+        assert "ISTOTA_EGRESS_LIMITED" not in runtime.proxy_ctx.base_env
+
+    @patch("istota.sandbox.skill_proxy.run_capture")
+    def test_a_client_cannot_clear_it(self, run, sock_path):
+        run.return_value = MagicMock(stdout="ok", stderr="", returncode=0)
+        request = {"skill": "feeds", "args": ["list"], "env": {"ISTOTA_EGRESS_LIMITED": "0"}}
+        with SkillProxy(sock_path, {}, {"PATH": "/usr/bin", "ISTOTA_EGRESS_LIMITED": "1"}):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(10)
+                client.connect(str(sock_path))
+                client.sendall((json.dumps(request) + "\n").encode())
+                while client.recv(4096):
+                    pass
+        assert run.call_args.kwargs["env"]["ISTOTA_EGRESS_LIMITED"] == "1"
+
+    def test_a_real_cli_refuses_through_the_real_proxy(self, sock_path):
+        base = {"PATH": os.environ["PATH"], "ISTOTA_EGRESS_LIMITED": "1", "ISTOTA_USER_ID": "alice"}
+        request = {"skill": "feeds", "args": ["add", "--url", EVIL_URL]}
+        with SkillProxy(sock_path, {}, base, allowed_skills=frozenset({"feeds"})):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(60)
+                client.connect(str(sock_path))
+                client.sendall((json.dumps(request) + "\n").encode())
+                answer = b""
+                while b"\n" not in answer:
+                    chunk = client.recv(65536)
+                    if not chunk:
+                        break
+                    answer += chunk
+        response = json.loads(answer.decode().strip())
+        assert response["returncode"] == 1
+        assert json.loads(response["stdout"])["reason"] == "egress_limited"
+
+
+class TestVerbRules:
+    @pytest.fixture
+    def limited(self, monkeypatch):
+        monkeypatch.setenv("ISTOTA_EGRESS_LIMITED", "1")
+
+    @pytest.fixture
+    def open_task(self, monkeypatch):
+        monkeypatch.delenv("ISTOTA_EGRESS_LIMITED", raising=False)
+
+    @pytest.fixture
+    def workspace_file(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(tmp_path))
+        home = tmp_path / "Users" / "alice"
+        home.mkdir(parents=True)
+        path = home / "planted.opml"
+        path.write_text("<opml/>")
+        return path
+
+    def test_feeds_add_is_refused(self, limited):
+        with patch("istota.skills.feeds._run") as run:
+            result = run_skill_main(feeds_main, ["add", "--url", EVIL_URL])
+        run.assert_not_called()
+        assert result.exit_code == 1
+        assert result.envelope["reason"] == "egress_limited"
+        assert "evil.example" not in result.envelope["error"]
+
+    def test_feeds_import_opml_is_refused(self, limited, workspace_file):
+        with patch("istota.skills.feeds._run") as run:
+            result = run_skill_main(feeds_main, ["import-opml", str(workspace_file)])
+        run.assert_not_called()
+        assert result.envelope["reason"] == "egress_limited"
+
+    def test_feeds_reading_still_works(self, limited):
+        with patch("istota.skills.feeds._run", return_value={"status": "ok"}) as run:
+            result = run_skill_main(feeds_main, ["list"])
+        run.assert_called_once()
+        assert result.exit_code == 0
+
+    def test_feeds_add_works_on_an_open_task(self, open_task):
+        with patch("istota.skills.feeds._run", return_value={"status": "ok"}) as run:
+            run_skill_main(feeds_main, ["add", "--url", "https://feeds.example/rss"])
+        run.assert_called_once()
+
+    @pytest.mark.parametrize("argv", [["add", EVIL_URL], ["add", "--text", "canary"]])
+    def test_bookmarks_add_is_refused(self, limited, argv):
+        with patch("istota.skills.bookmarks.get_client") as client:
+            result = run_skill_main(bookmarks_main, argv)
+        client.assert_not_called()
+        assert result.exit_code == 1
+        assert result.envelope["reason"] == "egress_limited"
+
+    def test_bookmarks_reading_still_works(self, limited):
+        with patch("istota.skills.bookmarks.get_client") as client:
+            run_skill_main(bookmarks_main, ["tags"])
+        client.assert_called_once()
+
+    def test_bookmarks_add_works_on_an_open_task(self, open_task):
+        with patch("istota.skills.bookmarks.get_client") as client:
+            run_skill_main(bookmarks_main, ["add", "https://example.com/page"])
+        client.assert_called_once()
+
+    def test_ntfy_topic_is_refused(self, limited, monkeypatch):
+        monkeypatch.setenv("NTFY_TOPIC", "mine")
+        with patch("httpx.post") as post:
+            result = run_skill_main(ntfy_main, ["send", "canary", "--topic", "theirs"])
+        post.assert_not_called()
+        assert result.exit_code == 1
+        assert result.envelope["reason"] == "egress_limited"
+
+    def test_ntfy_goes_to_the_users_own_topic(self, limited, monkeypatch):
+        monkeypatch.setenv("NTFY_TOPIC", "mine")
+        monkeypatch.setenv("NTFY_SERVER_URL", "https://ntfy.example")
+        with patch("httpx.post", return_value=MagicMock()) as post:
+            result = run_skill_main(ntfy_main, ["send", "hello"])
+        assert result.exit_code == 0
+        assert post.call_args.args[0] == "https://ntfy.example/mine"
+
+    def test_ntfy_topic_works_on_an_open_task(self, open_task, monkeypatch):
+        monkeypatch.setenv("NTFY_SERVER_URL", "https://ntfy.example")
+        with patch("httpx.post", return_value=MagicMock()) as post:
+            run_skill_main(ntfy_main, ["send", "hello", "--topic", "kitchen"])
+        assert post.call_args.args[0] == "https://ntfy.example/kitchen"

