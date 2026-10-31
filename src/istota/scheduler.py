@@ -9371,7 +9371,7 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                         unread_names=doc.unread_names,
                     )
                     if refused_subjects:
-                        egress.raise_refused_bell(conn, user_id, refused_subjects)
+                        egress.raise_refused_bell(app_config, conn, user_id, refused_subjects)
             else:
                 # No CRON.md — try one-time migration from DB. False here is
                 # the ordinary case (nothing to migrate, or the file already

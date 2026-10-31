@@ -337,7 +337,7 @@ class TestTheReadAtTaskEnd:
         log = self._write(tmp_path, ("connect", "evil.example"))
         seen = []
 
-        def spy(conn, user_id, subjects):
+        def spy(_config, conn, user_id, subjects):
             seen.append((conn.in_transaction, user_id, subjects))
 
         with patch.object(egress, "raise_refused_bell", spy):

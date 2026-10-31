@@ -4462,7 +4462,7 @@ class TestEgressLifecycle:
         ))
         raised = []
 
-        def hook(hook_conn, user_id, subjects):
+        def hook(_config, hook_conn, user_id, subjects):
             assert not hook_conn.in_transaction
             raised.append((user_id, subjects))
 

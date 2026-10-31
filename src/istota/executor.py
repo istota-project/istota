@@ -4204,7 +4204,7 @@ def file_egress_refusals(
             asks = room_egress.record_log(conn, task.user_id, subject, pairs)
             conn.commit()
             if asks:
-                room_egress.raise_refused_bell(conn, task.user_id, [subject])
+                room_egress.raise_refused_bell(config, conn, task.user_id, [subject])
     except Exception as exc:  # noqa: BLE001 — logging never decides
         logger.warning(
             "egress_log_record_failed task=%s: %s", task.id, type(exc).__name__,

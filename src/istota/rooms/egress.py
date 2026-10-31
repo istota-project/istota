@@ -399,12 +399,140 @@ def list_refused(conn: sqlite3.Connection, user_id: str, subject: str) -> list[s
     ).fetchall()
 
 
-def raise_refused_bell(conn: sqlite3.Connection, user_id: str, subjects: list[str]) -> None:
-    """Where the CRON.md sync hands over subjects with a new refusal row.
+def dismiss_refused(conn: sqlite3.Connection, user_id: str, subject: str, entry: str) -> None:
+    """The owner does not expect this: it stays recorded and does not ask again."""
+    conn.execute(
+        "UPDATE egress_refused SET dismissed = 1 WHERE user_id = ? AND subject = ? AND entry = ?",
+        (user_id, subject, entry),
+    )
 
-    Called after the sync's commit, with no transaction open. Stage 6 of the
-    unified egress policy spec fills this in with
-    `notifications/resolvers/egress_refused.py`. Logs a count: a job name is
-    model-writable.
+
+def has_open_refusal(conn: sqlite3.Connection, user_id: str, subject: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM egress_refused WHERE user_id = ? AND subject = ? AND dismissed = 0 LIMIT 1",
+        (user_id, subject),
+    ).fetchone()
+    return row is not None
+
+
+def job_row_by_subject(
+    conn: sqlite3.Connection, user_id: str, subject: str,
+) -> sqlite3.Row | None:
+    """The user's own job row a `cron:` subject names, or None."""
+    if not subject.startswith("cron:"):
+        return None
+    return conn.execute(
+        "SELECT name, reach, prompt, command, skill, skill_args FROM scheduled_jobs "
+        "WHERE user_id = ? AND name = ?",
+        (user_id, subject[len("cron:"):]),
+    ).fetchone()
+
+
+def subject_exists(conn: sqlite3.Connection, user_id: str, subject: object) -> bool:
+    """Whether this user owns a live thing this subject names. A closed assignment
+    will not wake again, so nothing is left to decide about it."""
+    if not _valid_subject(subject):
+        return False
+    if subject == TASKS_FILE_SUBJECT:
+        return True
+    kind, _, rest = str(subject).partition(":")
+    if kind == "cron":
+        return job_row_by_subject(conn, user_id, str(subject)) is not None
+    if kind == "briefing":
+        query = "SELECT 1 FROM briefing_configs WHERE user_id = ? AND name = ?"
+    else:
+        query = (
+            "SELECT 1 FROM assignments WHERE user_id = ? AND id = ? "
+            "AND state NOT IN ('completed', 'abandoned')"
+        )
+    return conn.execute(query, (user_id, rest)).fetchone() is not None
+
+
+def subject_label(subject: str) -> str:
+    """A subject in words. A job or briefing name is the owner's, or a limited
+    task's, so whoever draws this treats it as text."""
+    if subject == TASKS_FILE_SUBJECT:
+        return "TASKS.md"
+    kind, _, rest = subject.partition(":")
+    if kind == "cron":
+        return f"Scheduled job: {rest}"
+    if kind == "briefing":
+        return f"Briefing: {rest}"
+    return f"Assignment {rest}"
+
+
+def job_state(grants: frozenset[str], row: "sqlite3.Row | None") -> str:
+    """What a job runs as now, in `scopes._egress_for`'s order: an approved `public`
+    the row asks for, then an approved `open`. Anything else is limited."""
+    if row is None:
+        return "limited"
+    digest = job_digest(row)
+    if row["reach"] == "public" and f"public:{digest}" in grants:
+        return "public"
+    if f"open:{digest}" in grants:
+        return "open"
+    return "limited"
+
+
+def list_subject_names(conn: sqlite3.Connection, user_id: str) -> list[str]:
+    """Every subject this user can see on the page, sorted.
+
+    Their jobs and briefings, their assignments still running, and whatever else
+    has a row. A `_module.*` job is the module's and shows only with a row, so a
+    refusal filed under one has somewhere to be answered.
     """
-    logger.info("egress_refused_pending user=%s subjects=%d", user_id, len(subjects))
+    names = set()
+    for row in conn.execute(
+        "SELECT name FROM scheduled_jobs WHERE user_id = ? AND substr(name, 1, 8) != '_module.'",
+        (user_id,),
+    ):
+        names.add(cron_subject(row[0]))
+    for row in conn.execute("SELECT name FROM briefing_configs WHERE user_id = ?", (user_id,)):
+        names.add(f"briefing:{row[0]}")
+    for row in conn.execute(
+        "SELECT id FROM assignments WHERE user_id = ? AND state NOT IN ('completed', 'abandoned')",
+        (user_id,),
+    ):
+        names.add(f"assignment:{row[0]}")
+    for table in ("egress_grants", "egress_refused"):
+        for row in conn.execute(f"SELECT DISTINCT subject FROM {table} WHERE user_id = ?", (user_id,)):
+            if subject_exists(conn, user_id, row[0]):
+                names.add(row[0])
+    return sorted(names)
+
+
+def open_job_count(conn: sqlite3.Connection) -> int:
+    """How many live jobs run with full access, for `doctor`. A digest is computed
+    here, so a stale grant does not count, nor does a module's own row, whose grant
+    from the seed does nothing, nor a job whose approved `public` comes first."""
+    grants: dict[tuple[str, str], set[str]] = {}
+    for row in conn.execute("SELECT user_id, subject, entry FROM egress_grants"):
+        grants.setdefault((row[0], row[1]), set()).add(row[2])
+    count = 0
+    for job in conn.execute(
+        "SELECT user_id, name, reach, prompt, command, skill, skill_args FROM scheduled_jobs "
+        "WHERE substr(name, 1, 8) != '_module.'"
+    ):
+        entries = frozenset(grants.get((job["user_id"], cron_subject(job["name"])), ()))
+        if job_state(entries, job) == "open":
+            count += 1
+    return count
+
+
+def raise_refused_bell(
+    config, conn: sqlite3.Connection, user_id: str, subjects: list[str],
+) -> None:
+    """Open or bump one bell row per subject, then push what is new.
+
+    Called by the CRON.md sync and at task end, both in the daemon, with no
+    transaction open. Never raises and logs no name: a job name is model-writable.
+    """
+    from istota.notifications import store
+    from istota.notifications.resolvers import egress_refused
+
+    try:
+        results = [egress_refused.write(conn, user_id, subject) for subject in subjects]
+        conn.commit()
+        store.deliver_pending(config, results)
+    except Exception as exc:  # noqa: BLE001 — logging never decides
+        logger.warning("egress_bell_failed user=%s: %s", user_id, type(exc).__name__)
