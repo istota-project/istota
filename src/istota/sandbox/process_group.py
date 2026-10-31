@@ -39,13 +39,17 @@ from __future__ import annotations
 
 import logging
 import os
+import selectors
 import signal
 import subprocess
+import time
 
 __all__ = [
+    "OutputLimitExceeded",
     "kill_group_if_live",
     "kill_process_group",
     "own_task_pids",
+    "run_capture",
     "signal_task_worker",
     "task_pids_are_local",
 ]
@@ -154,8 +158,68 @@ def _signal(pid: int, sig: int) -> str:
         return "gone"
 
 
+class OutputLimitExceeded(subprocess.SubprocessError):
+    """A child wrote more than its caller agreed to hold in memory."""
+
+    def __init__(self, limit: int):
+        super().__init__(f"output exceeded {limit} bytes")
+        self.limit = limit
+
+
+def _read_bounded(proc: subprocess.Popen, timeout: float, limit: int) -> tuple[bytes, bytes]:
+    """Drain both pipes and reap ``proc``, under one deadline and one byte cap."""
+    deadline = time.monotonic() + timeout
+    chunks: dict = {proc.stdout: [], proc.stderr: []}
+    total = 0
+    with selectors.DefaultSelector() as selector:
+        for stream in chunks:
+            selector.register(stream, selectors.EVENT_READ)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(proc.args, timeout)
+            for key, _ in selector.select(remaining):
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                total += len(chunk)
+                if total > limit:
+                    raise OutputLimitExceeded(limit)
+                chunks[key.fileobj].append(chunk)
+    try:
+        proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        raise subprocess.TimeoutExpired(proc.args, timeout) from None
+    return b"".join(chunks[proc.stdout]), b"".join(chunks[proc.stderr])
+
+
+def _run_capture_bounded(
+    proc: subprocess.Popen, timeout: float, limit: int,
+) -> subprocess.CompletedProcess:
+    try:
+        out, err = _read_bounded(proc, timeout, limit)
+    except subprocess.SubprocessError:
+        kill_group_if_live(proc)
+        # Not a drain: a descendant that left the group can still feed these.
+        proc.stdout.close()
+        proc.stderr.close()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    proc.stdout.close()
+    proc.stderr.close()
+    return subprocess.CompletedProcess(
+        proc.args, proc.returncode,
+        out.decode("utf-8", errors="replace"), err.decode("utf-8", errors="replace"),
+    )
+
+
 def run_capture(
-    cmd, *, timeout: float, cwd: str, env: dict, preexec_fn=None,
+    cmd, *, timeout: float, cwd: str | None = None, env: dict, preexec_fn=None,
+    pass_fds=(), max_output_bytes: int | None = None, on_spawn=None,
 ) -> subprocess.CompletedProcess:
     """Run a subprocess capturing stdout/stderr, killing the whole process
     *group* on timeout.
@@ -171,15 +235,25 @@ def run_capture(
     whole tree, releasing the pipe. Re-raises ``TimeoutExpired`` so callers
     handle the deadline exactly as before; otherwise returns a CompletedProcess
     so call sites keep using ``.returncode`` / ``.stdout`` / ``.stderr``.
+
+    ``max_output_bytes`` bounds what stdout and stderr together may hold in this
+    process; a child past it loses its group and the call raises
+    `OutputLimitExceeded`. Set it wherever the child's output is somebody else's
+    to choose (#890). ``on_spawn`` receives the `Popen` before anything is read,
+    so a caller can kill the group when the work it belongs to ends.
     """
     # Always an argv list, never `shell=True`. A caller wanting a shell builds
     # one with `shell_exec.shell_argv`, which sets `pipefail`; reintroducing
     # `shell=True` here would quietly reintroduce the status bug it fixes.
     proc = subprocess.Popen(
-        cmd, cwd=cwd, env=env, text=True,
+        cmd, cwd=cwd, env=env, text=max_output_bytes is None,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True, preexec_fn=preexec_fn,
+        start_new_session=True, preexec_fn=preexec_fn, pass_fds=pass_fds,
     )
+    if on_spawn is not None:
+        on_spawn(proc)
+    if max_output_bytes is not None:
+        return _run_capture_bounded(proc, timeout, max_output_bytes)
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:

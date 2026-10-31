@@ -17,6 +17,7 @@ extracted from:
   blocking before a handler ever sees it.
 """
 
+import errno
 import logging
 import os
 import selectors
@@ -32,10 +33,58 @@ _module_logger = logging.getLogger("istota.sandbox.unix_server")
 # listener that fails forever must not spin. Give up after this many in a row.
 MAX_ACCEPT_FAILURES = 20
 ACCEPT_RETRY_DELAY_S = 0.05
+NO_DESCRIPTORS_RETRY_DELAY_S = 0.25
+
+# At most one refusal line per this many seconds: refusals are what a task
+# asks for by connecting, so one per connection would hand it the log too.
+REFUSAL_LOG_INTERVAL_S = 60
 
 # How long stop() waits for the accept loop to notice the wake before deciding
 # the thread is stuck and its sockets must be left alone.
 JOIN_TIMEOUT_S = 5
+
+
+def arm_until(sock: socket.socket, deadline: float) -> None:
+    """Make the next operation on ``sock`` end by ``deadline`` (monotonic).
+
+    A socket timeout restarts on every read, so on its own it never ends a peer
+    that keeps sending. `TimeoutError` once the deadline has passed.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("deadline passed")
+    sock.settimeout(remaining)
+
+
+def drain_queued(conn: socket.socket) -> None:
+    """Read what has already arrived, without waiting for more.
+
+    Unread bytes at close make Linux reset the connection, which can discard a
+    refusal before the peer reads it. Leaves ``conn`` non-blocking.
+    """
+    conn.setblocking(False)
+    try:
+        for _ in range(16):
+            if not conn.recv(65536):
+                break
+    except OSError:
+        pass
+
+
+def peer_has_closed(conn: socket.socket) -> bool:
+    """Whether the peer is gone, without waiting or consuming anything.
+
+    Asks for readability first: `recv` on a socket with a timeout waits for data
+    whatever flags it is given.
+    """
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(conn, selectors.EVENT_READ)
+            if not selector.select(0):
+                return False
+        return conn.recv(1, socket.MSG_PEEK) == b""
+    except OSError:
+        return True
 
 
 class UnixSocketServer:
@@ -52,6 +101,11 @@ class UnixSocketServer:
     ``label`` is the human prefix in log lines and defaults to ``name``.
     ``logger`` defaults to this module's, so a caller that wants its own
     logger's level and handlers applied to lifecycle messages passes it in.
+
+    ``max_connections`` bounds the handler threads. Past it a connection is
+    answered ``busy_reply`` and closed from the accept loop, so a refusal costs
+    no thread and cannot stall the listener (#890). ``stop()`` shuts down every
+    live connection, which wakes a handler blocked on it.
     """
 
     def __init__(
@@ -64,6 +118,8 @@ class UnixSocketServer:
         backlog: int = 64,
         label: str | None = None,
         logger: logging.Logger | None = None,
+        max_connections: int | None = None,
+        busy_reply: bytes = b"",
     ):
         self.socket_path = socket_path
         self.handler = handler
@@ -78,6 +134,13 @@ class UnixSocketServer:
         self._wake_r: socket.socket | None = None
         self._wake_w: socket.socket | None = None
         self._accept_failures = 0
+        self.max_connections = max_connections
+        self.busy_reply = busy_reply
+        # A dup of each connection, because a handler may detach the socket it
+        # was given: `wrap_socket` does, which leaves that object no fd to shut.
+        self._live: set[socket.socket] = set()
+        self._live_lock = threading.Lock()
+        self._last_refusal_log = 0.0
 
     def start(self) -> None:
         # A second start() over a live one would orphan the first listener and
@@ -139,6 +202,7 @@ class UnixSocketServer:
             self._thread.join(timeout=JOIN_TIMEOUT_S)
             stuck = self._thread.is_alive()
         self._thread = None
+        self._shut_live_connections()
 
         if stuck:
             # Never close a socket the accept loop may still be selecting on:
@@ -167,6 +231,41 @@ class UnixSocketServer:
 
     def __exit__(self, *exc):
         self.stop()
+
+    def _shut_live_connections(self) -> None:
+        with self._live_lock:
+            live = list(self._live)
+        for handle in live:
+            try:
+                handle.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def _refuse(self, conn: socket.socket) -> None:
+        """Answer from the accept loop: nothing here may block."""
+        now = time.monotonic()
+        if now - self._last_refusal_log >= REFUSAL_LOG_INTERVAL_S:
+            self._last_refusal_log = now
+            self.logger.warning(
+                "%s at its limit of %d connections; refusing",
+                self.label, self.max_connections,
+            )
+        try:
+            drain_queued(conn)
+            if self.busy_reply:
+                conn.send(self.busy_reply)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def _serve(self, conn: socket.socket, handle: socket.socket) -> None:
+        try:
+            self.handler(conn)
+        finally:
+            with self._live_lock:
+                self._live.discard(handle)
+            handle.close()
 
     def _close_sockets(self) -> None:
         for sock in (self._server_sock, self._wake_r, self._wake_w):
@@ -212,6 +311,17 @@ class UnixSocketServer:
         except BlockingIOError:
             return True
         except OSError as exc:
+            # Out of descriptors clears when something closes, so it never
+            # counts toward giving up: another task's load must not end this
+            # task's listener for good. Slower than the retry below, since
+            # the connection stays queued and the listener stays readable.
+            if exc.errno in (errno.EMFILE, errno.ENFILE):
+                now = time.monotonic()
+                if now - self._last_refusal_log >= REFUSAL_LOG_INTERVAL_S:
+                    self._last_refusal_log = now
+                    self.logger.warning("%s accept failed: %s", self.label, exc)
+                time.sleep(NO_DESCRIPTORS_RETRY_DELAY_S)
+                return True
             # One failed accept must not end the server. The listening socket
             # stays bound either way, so a dead loop turns every later connect
             # into a hang in the backlog instead of a clean refusal.
@@ -225,6 +335,14 @@ class UnixSocketServer:
             return True
 
         self._accept_failures = 0
+        with self._live_lock:
+            full = (
+                self.max_connections is not None
+                and len(self._live) >= self.max_connections
+            )
+        if full:
+            self._refuse(conn)
+            return True
         # accept() on a non-blocking listener yields a non-blocking socket on
         # BSD/macOS and a blocking one on Linux. Normalize, so a handler never
         # depends on which platform it woke up on.
@@ -232,13 +350,24 @@ class UnixSocketServer:
         # One thread per connection, so several can be served at once and a
         # slow handler does not deafen the listener.
         try:
+            handle = conn.dup()
+        except OSError as exc:
+            self.logger.error("%s could not track a connection: %s", self.label, exc)
+            conn.close()
+            return True
+        with self._live_lock:
+            self._live.add(handle)
+        try:
             threading.Thread(
-                target=self.handler, args=(conn,),
+                target=self._serve, args=(conn, handle),
                 daemon=True, name=f"{self.name}-handler",
             ).start()
         except RuntimeError as exc:
             self.logger.error(
                 "%s could not start a handler thread: %s", self.label, exc,
             )
+            with self._live_lock:
+                self._live.discard(handle)
+            handle.close()
             conn.close()
         return True

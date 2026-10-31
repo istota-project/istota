@@ -114,7 +114,7 @@ def test_channel_closed_after_invocation(sock_path, monkeypatch, failure):
         if failure == "spawn":
             raise OSError("spawn failed")
         return subprocess.CompletedProcess(args[0], 0, "ok", "")
-    monkeypatch.setattr("istota.sandbox.skill_proxy.subprocess.run", run)
+    monkeypatch.setattr("istota.sandbox.skill_proxy.run_capture", run)
     try:
         with start_proxy(sock_path) as proxy:
             response = request(sock_path, {"skill": "probe", "args": []})

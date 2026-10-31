@@ -2751,6 +2751,8 @@ def _execute_skill_task(
                 timeout=timeout,
                 cwd=str(config.temp_dir),
                 env=env,
+                # CRON.md names the skill and its arguments, and a task can write it.
+                max_output_bytes=config.security.skill_proxy_max_output_mb * 1024 * 1024,
             )
     except subprocess.TimeoutExpired:
         return (
@@ -11302,6 +11304,28 @@ def _dispatch_sleep(
             logger.error("Error dispatching workers: %s", e)
 
 
+# One task at its proxy limits holds several hundred descriptors, and Docker
+# Engine hands a container a soft limit of 1024 under a much higher hard one.
+OPEN_FILE_SOFT_LIMIT = 16384
+
+
+def _raise_open_file_limit() -> None:
+    """Raise the soft limit toward the hard one, so one task's load is not everyone's."""
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = OPEN_FILE_SOFT_LIMIT
+        if hard != resource.RLIM_INFINITY:
+            target = min(target, hard)
+        if soft != resource.RLIM_INFINITY and soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            soft = target
+        logger.info("STARTUP Open file limit: %s", soft)
+    except (ImportError, OSError, ValueError) as e:
+        logger.warning("STARTUP Open file limit: could not raise it: %s", e)
+
+
 def _report_task_cgroups(config: Config) -> None:
     """Sweep cgroups a previous run left behind, and say at startup what A6 will do.
 
@@ -11529,6 +11553,7 @@ def run_daemon(
         else "disabled",
     )
     _report_task_cgroups(config)
+    _raise_open_file_limit()
     logger.info("STARTUP Scheduled job check interval: %ds", config.scheduler.briefing_check_interval)
     logger.info("STARTUP Cleanup interval: %ds", config.scheduler.briefing_check_interval)
     logger.info("STARTUP Confirmation timeout: %d min", config.scheduler.confirmation_timeout_minutes)
