@@ -1,7 +1,7 @@
 """Deferred-op files are UTF-8 on both sides of the sandbox boundary.
 
 The producers run inside a task subprocess whose environment is rebuilt from
-scratch (``build_stripped_env``); the consumer runs in the daemon, which
+scratch (``build_clean_env``); the consumer runs in the daemon, which
 inherits systemd's. Nothing guarantees the two agree on a locale, so both ends
 name the encoding explicitly instead of taking ``locale.getencoding()``.
 

@@ -160,6 +160,58 @@ class TestTheEnvironment:
         )
         assert result.details["value"] == "db=[]:user=[alice]"
 
+    def test_a_pipeline_in_a_nested_script_reports_its_failing_stage(
+        self, db_path, tmp_path,
+    ):
+        """`SHELLOPTS` from `build_clean_env`; `-o pipefail` stops at one shell."""
+        config = _config(db_path, tmp_path)
+        success, result = _execute_command_task(
+            _task("bash -c 'false | true; echo status=$?'"), config,
+        )
+        assert success, result
+        assert result == "status=1"
+
+    def test_doctor_reads_a_command_job_as_a_task(self, db_path, tmp_path):
+        """`doctor._is_task_process` keys on this: `config/` is out of the
+        namespace, so a doctor run in here answers about defaults."""
+        config = _config(db_path, tmp_path)
+        success, result = _execute_command_task(_task('echo "$ISTOTA_TASK_ID"'), config)
+        assert success, result
+        assert result == "7"
+
+    def test_doctor_reads_a_heartbeat_check_as_a_task(self, db_path, tmp_path):
+        config = _config(db_path, tmp_path)
+        result = _check_shell_command(_check('echo "$ISTOTA_TASK_ID"'), config, "alice")
+        assert int(result.details["value"]) < 0
+
+    def test_nothing_credential_shaped_reaches_a_command(
+        self, db_path, tmp_path, monkeypatch,
+    ):
+        """The names the old stripped env's tests held, through the real seam.
+        By value, so a renamed copy counts as a leak."""
+        from istota.setup_wizard import SECRET_NAMES
+
+        names = {
+            "DB_PASSWORD", "IMAP_PASSWORD", "SMTP_PASSWORD", "GITLAB_TOKEN",
+            "API_TOKEN", "MY_SECRET", "SERVICE_API_KEY", "NC_PASS",
+            "ISTOTA_NEXTCLOUD_APP_PASSWORD", "SSH_PRIVATE_KEY",
+            "ISTOTA_SECRET_KEY", "ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS", "BASH_ENV",
+            *(name.upper() for name in SECRET_NAMES),
+        }
+        for name in names:
+            monkeypatch.setenv(name, f"planted-{name}")
+        # An allowlist, so a name no pattern matches is gone too.
+        monkeypatch.setenv("NOT_A_SECRET", "planted-plain")
+        config = _config(db_path, tmp_path)
+
+        success, job = _execute_command_task(_task("env"), config)
+        check = _check_shell_command(_check("env"), config, "alice")
+
+        assert success, job
+        for dump in (job, check.details["value"]):
+            assert "HOME=" in dump
+            assert "planted-" not in dump
+
     def test_the_skill_proxy_socket_is_live(self, db_path, tmp_path):
         config = _config(db_path, tmp_path)
         success, result = _execute_command_task(

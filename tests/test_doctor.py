@@ -2852,7 +2852,7 @@ class TestTaskCgroups:
         monkeypatch.setattr(doctor, "_CGROUP_PROC_ROOT", proc)
         monkeypatch.setattr(doctor, "_CGROUP_FS_ROOT", cg)
         monkeypatch.setattr(doctor.sys, "platform", "linux")
-        for marker in doctor._TASK_ENV_MARKERS:
+        for marker in doctor._NON_DAEMON_ENV_MARKERS:
             monkeypatch.delenv(marker, raising=False)
         monkeypatch.delenv("ISTOTA_TASK_CGROUP_ROOT", raising=False)
         self._mount(proc, cg, "/")
@@ -3029,8 +3029,8 @@ class TestProxyPeerCheck:
         assert doctor._ptrace_scope(tmp_path / "scope") == 2
 
 
-#: The three variables istota's own env builders set in a non-daemon process.
-_NON_DAEMON_MARKERS = ("ISTOTA_TASK_ID", "ISTOTA_SANDBOXED", "PRECOMMIT_SCANS_REQUIRED")
+#: The two variables `build_task_runtime` sets in a non-daemon process.
+_NON_DAEMON_MARKERS = ("ISTOTA_TASK_ID", "ISTOTA_SANDBOXED")
 _MODEL_CREDENTIALS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
 
@@ -3176,6 +3176,16 @@ class TestSkillModelCredential:
         # What was observed, which is the marker rather than a verdict.
         assert marker in value.detail
 
+    def test_the_scan_override_says_nothing_about_whose_env_this_is(
+        self, make_config, monkeypatch
+    ):
+        """An operator may set `PRECOMMIT_SCANS_REQUIRED` on the daemon, so it
+        must not turn this FAIL into a SKIP. A cron `command` job carries
+        `ISTOTA_TASK_ID` (`test_confined_command.py`)."""
+        _clear_env(monkeypatch, *_MODEL_CREDENTIALS, *_NON_DAEMON_MARKERS)
+        monkeypatch.setenv("PRECOMMIT_SCANS_REQUIRED", "1")
+        assert self._run(make_config())[self.VALUE].status == FAIL
+
     def test_the_wiring_half_still_answers_from_a_task_env(
         self, make_config, monkeypatch
     ):
@@ -3285,6 +3295,12 @@ class TestSecretKey:
         result = self._run(make_config())
         assert result.status == SKIP
         assert marker in result.detail
+
+    def test_the_scan_override_does_not_excuse_a_missing_key(
+        self, make_config, monkeypatch
+    ):
+        monkeypatch.setenv("PRECOMMIT_SCANS_REQUIRED", "1")
+        assert self._run(make_config()).status == FAIL
 
     def test_presence_still_answers_from_a_non_daemon_env(
         self, make_config, monkeypatch
@@ -7057,12 +7073,11 @@ class TestConfigVisibility:
         assert "default" in r.detail.lower()
         assert exit_code([r]) == 0
 
-    def test_a_cron_command_job_is_not_a_task_arm(
+    def test_the_scan_override_is_not_a_task_arm(
         self, make_config, tmp_path, monkeypatch
     ):
-        """`PRECOMMIT_SCANS_REQUIRED` is deliberately not in this predicate: a
-        cron `command` job runs unsandboxed as the daemon user with the config
-        directory in front of it."""
+        """`PRECOMMIT_SCANS_REQUIRED` is an operator's override as well as what
+        a cron `command` job sets, and such a job carries `ISTOTA_TASK_ID`."""
         r = self._gate(make_config, monkeypatch, {
             "PRECOMMIT_SCANS_REQUIRED": "1", "ISTOTA_CONFIG_PATH": str(tmp_path / "absent.toml"),
         })

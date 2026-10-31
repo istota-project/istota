@@ -277,11 +277,11 @@ class TestTheStrips:
         env = {name: OTHER for name in MODEL_NAMES} | {"KEEP": "1"}
         assert strip_model_credentials(env) == {"KEEP": "1"}
 
-    def test_build_stripped_env_carries_no_model_credential(self):
-        from istota.executor import build_stripped_env
+    def test_build_clean_env_carries_no_model_credential(self):
+        from istota.executor import build_clean_env
 
         with patch.dict(os.environ, {name: OTHER for name in MODEL_NAMES} | {"PATH": "/bin"}, clear=True):
-            env = build_stripped_env()
+            env = build_clean_env(Config())
         assert not any(is_model_credential_name(k) for k in env)
 
 

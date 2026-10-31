@@ -3218,32 +3218,18 @@ def build_speech_gate_completer(
     return _cli
 
 
-# Credential-related env var patterns to strip from subprocess environments
-_CREDENTIAL_ENV_PATTERNS = frozenset({
-    "PASSWORD", "SECRET", "TOKEN", "API_KEY",
-    "APP_PASSWORD", "NC_PASS", "PRIVATE_KEY",
-})
-
-#: Shell startup controls, stripped by exact name rather than by substring.
+#: Shell startup controls, which ``build_clean_env``'s passthrough loop refuses.
 #:
-#: Cron ``command:`` rows and heartbeat shell commands run under bash now
-#: (``shell_exec.shell_argv``) where they used to run under ``/bin/sh``. Bash
-#: sources ``$BASH_ENV`` for a *non-interactive* shell and dash sources nothing,
-#: so a value inherited from the daemon's own environment would newly execute
-#: before every one of those commands. Not reachable by a task or by the model —
-#: it needs control of the daemon's environment — but it is a capability the
-#: previous interpreter did not have, so it goes.
+#: Bash sources ``$BASH_ENV`` for a *non-interactive* shell, so a value passed
+#: through would execute before every command below a task.
 #:
 #: ``SHELLOPTS`` and ``BASHOPTS`` are the same mechanism one step along: bash
 #: imports them at startup, before any startup file, and they are readonly
 #: thereafter. They name options rather than a file, so neither is an exec
-#: inlet — but an inherited ``SHELLOPTS=xtrace`` would echo every expanded
-#: command line, credential values the manifest injected included, into the
-#: captured output of every cron job, and ``noexec`` would have each one parse
-#: its script and run nothing while exiting 0. ``shell_argv``'s ``-o pipefail``
-#: cannot undo either. Reachability is low, since bash only exports
-#: ``SHELLOPTS`` if it imported it in the first place, so this closes a gap
-#: rather than a live bug.
+#: inlet, but an inherited ``SHELLOPTS=xtrace`` would echo every expanded
+#: command line into captured output, and ``noexec`` would have each command
+#: parse its script and run nothing while exiting 0. ``shell_argv``'s
+#: ``-o pipefail`` cannot undo either.
 #:
 #: **``build_clean_env`` filters by this set and then re-adds ``SHELLOPTS``
 #: deliberately**, to a fixed value it owns (``shell_exec.pipefail_env``,
@@ -3252,11 +3238,8 @@ _CREDENTIAL_ENV_PATTERNS = frozenset({
 #:
 #: ``ENV`` is deliberately **not** here. POSIX shells read it only for
 #: *interactive* shells, and bash invoked as ``bash -c`` is not in POSIX mode
-#: and reads ``BASH_ENV`` instead — so stripping it would buy nothing and would
-#: break an operator whose command reads ``$ENV`` as a deployment name.
-#:
-#: Exact match, because these go through a substring test above: ``ENV`` as a
-#: substring would strip most of the environment.
+#: and reads ``BASH_ENV`` instead, so refusing it would buy nothing and would
+#: break an operator who passes it through as a deployment name.
 _SHELL_STARTUP_ENV_VARS = frozenset({"BASH_ENV", "SHELLOPTS", "BASHOPTS"})
 
 _bwrap_checked: bool | None = None
@@ -3696,10 +3679,9 @@ def build_clean_env(config: Config) -> dict[str, str]:
         # operator listed. This env is otherwise an allowlist built from
         # scratch, so the passthrough loop was the one way an inherited
         # `BASH_ENV` could reach a model subprocess — and that is a file bash
-        # sources before every command the model runs. `build_stripped_env`
-        # has filtered the same set since the interpreter swap; this is the
-        # sibling path, which never did (found in review of ISSUE-321, whose
-        # own comment below claimed the protection this line supplies).
+        # sources before every command the model runs (found in review of
+        # ISSUE-321, whose own comment below claimed the protection this line
+        # supplies).
         if key.upper() in _SHELL_STARTUP_ENV_VARS:
             logger.warning(
                 "passthrough_env_vars names %s, which is a shell-startup "
@@ -4177,41 +4159,6 @@ def harness_web_fetch_policy(config: Config, allowed_tools: list[str]):
     from .session.tools import web_fetch_policy_from_config
 
     return web_fetch_policy_from_config(config.brain.native.web_fetch)
-
-
-def build_stripped_env() -> dict[str, str]:
-    """Build os.environ minus credential vars. For heartbeat/cron commands.
-
-    Phase 1.4 of the unified credential resolution refactor: the master
-    Fernet key (``ISTOTA_SECRET_KEY``) is no longer preserved here. Skill
-    subprocesses that need per-user encrypted secrets get them
-    pre-resolved via the manifest ``env:`` blocks.
-
-    ``PRECOMMIT_SCANS_REQUIRED`` is added rather than filtered (ISSUE-291).
-    The repository's pre-commit hook refuses a commit whose secret scan could
-    not run, but only where it can tell nobody is watching, and the markers it
-    reads for that — ``ISTOTA_SANDBOXED``, ``DEVELOPER_REPOS_DIR`` — are built
-    per task by ``build_claude_env``. This env is the daemon's own, so a cron
-    ``command`` job or a heartbeat shell command carries neither and would be
-    read as a human at a terminal. It is as unattended as any of them, so it
-    says so.
-    """
-    from istota.setup_wizard import SECRET_NAMES
-
-    # Every secret file by exact name too: the native brain's headers and the
-    # Telnyx ids match none of the patterns.
-    secret_file_vars = {name.upper() for name in SECRET_NAMES}
-    env = {
-        k: v for k, v in os.environ.items()
-        if not any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
-        and k.upper() not in _SHELL_STARTUP_ENV_VARS
-        and k.upper() not in secret_file_vars
-        # An operator provider's `_EXTRA_HEADERS` matches no pattern and has
-        # no secret file, and can reach the daemon through host.env.
-        and not is_model_credential_name(k)
-    }
-    env["PRECOMMIT_SCANS_REQUIRED"] = "1"
-    return env
 
 
 # Defense-in-depth: instance-wide credentials that must never be returned

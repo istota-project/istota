@@ -1,4 +1,4 @@
-"""Tests for security hardening: clean env, stripped env, allowed tools, config overrides."""
+"""Tests for security hardening: clean env, allowed tools, config overrides."""
 
 import logging
 import os
@@ -12,13 +12,13 @@ import pytest
 
 
 from istota import db
+from .support.env_isolation import CREDENTIAL_PATTERNS
 from istota.config import (
     Config,
     SecurityConfig,
     load_config,
 )
 from istota.executor import (
-    _CREDENTIAL_ENV_PATTERNS,
     _PROXY_LOOKUP_BLOCKED,
     _SHELL_STARTUP_ENV_VARS,
     CLAUDE_RUNTIME_ENV_VARS,
@@ -28,7 +28,6 @@ from istota.executor import (
     build_clean_env,
     build_model_cli_env,
     resolve_sandbox_cache_dir,
-    build_stripped_env,
     derive_authorized_skills,
     derive_credential_set,
     derive_lookup_allowlist,
@@ -202,7 +201,7 @@ class TestBuildCleanEnv:
                 if k not in MODEL_CLI_SWITCHES
                 and (
                     k.upper().startswith("CLAUDE")
-                    or any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
+                    or any(p in k.upper() for p in CREDENTIAL_PATTERNS)
                 )
             }
 
@@ -351,9 +350,8 @@ class TestBuildCleanEnvTurnsPipefailOn:
 
         BASH_ENV names a *file* bash sources before every non-interactive
         shell, so forwarding one is arbitrary code execution before every
-        command the model runs. `build_stripped_env` has filtered
-        `_SHELL_STARTUP_ENV_VARS` since the interpreter swap; `build_clean_env`
-        never did, and its passthrough loop was an unfiltered
+        command the model runs. `build_clean_env` did not filter
+        `_SHELL_STARTUP_ENV_VARS`, and its passthrough loop was an unfiltered
         `env[key] = os.environ[key]` — so an operator listing BASH_ENV in
         `passthrough_env_vars` got it forwarded, while the comment added
         alongside the pipefail fix claimed the strip covered this path.
@@ -396,7 +394,7 @@ class TestBuildCleanEnvTurnsPipefailOn:
         assert "xtrace" not in env[SHELLOPTS_VAR]
 
     def test_the_startup_family_is_named_in_one_place(self):
-        """Both filters read the same set, so neither can drift alone."""
+        """The names the passthrough loop refuses."""
         assert {"BASH_ENV", "SHELLOPTS", "BASHOPTS"} <= _SHELL_STARTUP_ENV_VARS
         assert "ENV" not in _SHELL_STARTUP_ENV_VARS, (
             "deliberately excluded — POSIX shells read it only when "
@@ -528,142 +526,6 @@ class TestSandboxCacheDirEnv:
             resolve_sandbox_cache_dir(config, "alice")
         hits = [r for r in caplog.records if "sandbox_cache_dir" in r.getMessage()]
         assert len(hits) == 1, [r.getMessage() for r in hits]
-
-
-class TestBuildStrippedEnv:
-    def test_strips_password_vars(self):
-        with patch.dict(os.environ, {
-            "PATH": "/usr/bin",
-            "HOME": "/home/test",
-            "DB_PASSWORD": "secret",
-            "IMAP_PASSWORD": "secret",
-            "SMTP_PASSWORD": "secret",
-        }, clear=True):
-            env = build_stripped_env()
-        assert "PATH" in env
-        assert "HOME" in env
-        assert "DB_PASSWORD" not in env
-        assert "IMAP_PASSWORD" not in env
-        assert "SMTP_PASSWORD" not in env
-
-    def test_strips_token_vars(self):
-        with patch.dict(os.environ, {
-            "PATH": "/usr/bin",
-            "GITLAB_TOKEN": "glpat-xxx",
-            "API_TOKEN": "tok-123",
-        }, clear=True):
-            env = build_stripped_env()
-        assert "GITLAB_TOKEN" not in env
-        assert "API_TOKEN" not in env
-
-    def test_strips_secret_and_api_key_vars(self):
-        with patch.dict(os.environ, {
-            "PATH": "/usr/bin",
-            "MY_SECRET": "shh",
-            "SERVICE_API_KEY": "key-123",
-        }, clear=True):
-            env = build_stripped_env()
-        assert "MY_SECRET" not in env
-        assert "SERVICE_API_KEY" not in env
-
-    def test_strips_bash_env(self):
-        """Cron rows and heartbeat commands run under bash now, not `/bin/sh`.
-
-        Bash sources `$BASH_ENV` for a non-interactive shell where dash sources
-        nothing, so an inherited value would newly execute a file before every
-        one of those commands — a capability the previous interpreter did not
-        have. Needs control of the daemon's environment to reach, so it is a
-        capability removal rather than a hole being closed.
-        """
-        with patch.dict(os.environ, {
-            "PATH": "/usr/bin",
-            "BASH_ENV": "/tmp/evil.sh",
-        }, clear=True):
-            env = build_stripped_env()
-        assert "BASH_ENV" not in env
-        assert "PATH" in env
-
-    def test_does_not_strip_env(self):
-        """`ENV` is a deployment name far more often than a startup file.
-
-        POSIX shells read it only for *interactive* shells, and `bash -c` is
-        not in POSIX mode and reads `BASH_ENV` instead — so stripping it would
-        buy nothing and break an operator command that reads `$ENV`.
-        """
-        with patch.dict(os.environ, {"PATH": "/usr/bin", "ENV": "production"}, clear=True):
-            env = build_stripped_env()
-        assert env.get("ENV") == "production"
-
-    def test_strips_native_extra_headers(self):
-        """The native brain's headers are a secret file whose variable matches
-        none of the substring patterns."""
-        with patch.dict(os.environ, {
-            "PATH": "/usr/bin",
-            "ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS": '{"X-Key": "header-value"}',
-        }, clear=True):
-            env = build_stripped_env()
-        assert "ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS" not in env
-        assert env["PATH"] == "/usr/bin"
-
-    def test_strips_every_secret_file_variable(self):
-        from istota.setup_wizard import SECRET_NAMES
-
-        planted = {name.upper(): f"value-of-{name}" for name in SECRET_NAMES}
-        with patch.dict(os.environ, {"PATH": "/usr/bin", **planted}, clear=True):
-            env = build_stripped_env()
-        assert sorted(set(planted) & set(env)) == []
-        assert env["PATH"] == "/usr/bin"
-
-    def test_strips_nc_pass(self):
-        with patch.dict(os.environ, {
-            "PATH": "/usr/bin",
-            "NC_PASS": "nextcloud-pw",
-        }, clear=True):
-            env = build_stripped_env()
-        assert "NC_PASS" not in env
-
-    def test_strips_app_password(self):
-        with patch.dict(os.environ, {
-            "PATH": "/usr/bin",
-            "ISTOTA_NEXTCLOUD_APP_PASSWORD": "pw-123",
-        }, clear=True):
-            env = build_stripped_env()
-        assert "ISTOTA_NEXTCLOUD_APP_PASSWORD" not in env
-
-    def test_strips_private_key(self):
-        with patch.dict(os.environ, {
-            "PATH": "/usr/bin",
-            "SSH_PRIVATE_KEY": "-----BEGIN",
-        }, clear=True):
-            env = build_stripped_env()
-        assert "SSH_PRIVATE_KEY" not in env
-
-    def test_preserves_non_credential_vars(self):
-        with patch.dict(os.environ, {
-            "PATH": "/usr/bin",
-            "HOME": "/home/test",
-            "LANG": "en_US.UTF-8",
-            "ISTOTA_TASK_ID": "42",
-        }, clear=True):
-            env = build_stripped_env()
-        assert env["PATH"] == "/usr/bin"
-        assert env["HOME"] == "/home/test"
-        assert env["LANG"] == "en_US.UTF-8"
-        assert env["ISTOTA_TASK_ID"] == "42"
-
-    def test_strips_istota_secret_key(self):
-        # Phase 1.4 of the unified credential resolution refactor: the
-        # master Fernet key never enters any subprocess env. Per-user
-        # secrets are pre-resolved on the trusted side via skill manifest
-        # ``env: from: "secret"`` blocks and routed through the proxy.
-        with patch.dict(os.environ, {
-            "PATH": "/usr/bin",
-            "ISTOTA_SECRET_KEY": "a" * 64,
-            "OTHER_SECRET": "should-be-stripped",
-        }, clear=True):
-            env = build_stripped_env()
-        assert "ISTOTA_SECRET_KEY" not in env
-        assert "OTHER_SECRET" not in env
 
 
 class TestBuildAllowedTools:
@@ -1064,18 +926,6 @@ class TestPhase1MasterKeyEgress:
             "PATH": "/usr/bin",
         }, clear=True):
             env = build_clean_env(Config())
-        assert "ISTOTA_SECRET_KEY" not in env
-
-    def test_build_stripped_env_excludes_master_key(self):
-        """Phase 1.4 — build_stripped_env (heartbeat / command-task path)
-        also strips the master key. Operator-defined heartbeat shells that
-        called istota-skill feeds/money directly stop working; documented
-        in CHANGELOG."""
-        with patch.dict(os.environ, {
-            "ISTOTA_SECRET_KEY": "k" * 64,
-            "PATH": "/usr/bin",
-        }, clear=True):
-            env = build_stripped_env()
         assert "ISTOTA_SECRET_KEY" not in env
 
 
