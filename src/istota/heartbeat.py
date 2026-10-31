@@ -15,6 +15,8 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from . import db
+from istota.sandbox.guarded_http import REDIRECT_STATUSES
+from istota.sandbox.net_guard import host_set, normal_host
 from istota.sandbox.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE
 from istota.lib.toml_fence import BACKTICK_RUN_RE, find_toml_block
 
@@ -474,6 +476,9 @@ def _check_shell_command(check: HeartbeatCheck, config: "Config", user_id: str |
 #: on the heartbeat tick.
 _URL_TIMEOUT_MIN = 1.0
 _URL_TIMEOUT_MAX = 60.0
+_URL_MAX_REDIRECTS = 5
+# Fixed text: a refused name can hold data, and an alert can reach a push service.
+_URL_NOT_GRANTED = "URL host has no heartbeat grant in [private_hosts]"
 
 
 def _clamped_timeout(value: object) -> float:
@@ -482,9 +487,24 @@ def _clamped_timeout(value: object) -> float:
     return min(max(float(value), _URL_TIMEOUT_MIN), _URL_TIMEOUT_MAX)
 
 
+def _url_host_granted(url: object, granted: frozenset) -> bool:
+    # httpx's parser, so the name checked is the one it connects to. `raw_host`
+    # because `host` decodes punycode, which raises with the refused name in it.
+    try:
+        host = normal_host(httpx.URL(url).raw_host.decode("ascii"))
+    except (httpx.InvalidURL, TypeError):
+        return False
+    return bool(host) and host in granted
+
+
 def _check_url_health(check: HeartbeatCheck, config: "Config") -> CheckResult:
     """
-    HTTP health check.
+    HTTP health check, from the daemon's network.
+
+    A task can write HEARTBEAT.md and a GET carries data in its host, path and
+    query, so the first request and every redirect hop go only to a host the
+    operator granted (ISSUE-907). `guarded_http` is not used: it would let a
+    hop reach any public host, and it reads the body this never needs.
 
     Config fields:
         url: URL to check
@@ -498,11 +518,27 @@ def _check_url_health(check: HeartbeatCheck, config: "Config") -> CheckResult:
     if not url:
         return CheckResult(healthy=False, message="No URL configured")
 
+    granted = host_set(config.heartbeat.private_hosts)
     try:
-        # Streamed and never read: only the status matters, and buffering a
-        # body the far end chooses the size of is a memory bound left open.
-        with httpx.stream("GET", url, timeout=timeout, follow_redirects=True) as response:
-            status_code = response.status_code
+        target = url
+        # One client across the hops, for the cookies a redirect sets.
+        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+            for _hop in range(_URL_MAX_REDIRECTS + 1):
+                if not _url_host_granted(target, granted):
+                    return CheckResult(healthy=False, message=_URL_NOT_GRANTED)
+                # Streamed and never read: only the status matters, and buffering a
+                # body the far end chooses the size of is a memory bound left open.
+                with client.stream("GET", target) as response:
+                    status_code = response.status_code
+                    location = response.headers.get("location")
+                if status_code not in REDIRECT_STATUSES or not location:
+                    break
+                target = str(httpx.URL(target).join(location))
+            else:
+                return CheckResult(
+                    healthy=False,
+                    message=f"URL redirected more than {_URL_MAX_REDIRECTS} times",
+                )
         if status_code == expected_status:
             return CheckResult(
                 healthy=True,
@@ -520,6 +556,13 @@ def _check_url_health(check: HeartbeatCheck, config: "Config") -> CheckResult:
             healthy=False,
             message=f"URL timeout after {timeout}s: {url}",
             details={"url": url, "timeout": timeout},
+        )
+    except httpx.RemoteProtocolError:
+        # Its text can quote the answer, a Location header included.
+        return CheckResult(
+            healthy=False,
+            message="URL check failed: invalid HTTP answer",
+            details={"url": url},
         )
     except Exception as e:
         return CheckResult(
@@ -862,8 +905,8 @@ def run_check(
         )
     # A GET from the daemon's own network namespace, outside the sandbox's
     # CONNECT allowlist, to a URL the HEARTBEAT.md author chose: for anyone
-    # else that is a probe of every internal address the host can reach, with
-    # the status or error read back in the alert (ISSUE-596).
+    # else that is a probe of every host granted to the check, with the status
+    # or error read back in the alert (ISSUE-596).
     if check.type == "url-health" and not config.is_admin(user_id):
         return CheckResult(
             healthy=False,

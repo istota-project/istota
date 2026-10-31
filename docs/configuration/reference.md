@@ -824,7 +824,7 @@ Which hosts each part of Istota may reach on a private, loopback or reserved add
 "10.0.0.5" = ["servarr"]
 ```
 
-A grant reaches only the consumers it names. The same host means something different to each one, because the person who chooses the address differs and so does what gets sent:
+`heartbeat` differs: its grant is needed for a public host too. A grant reaches only the consumers it names. The same host means something different to each one, because the person who chooses the address differs and so does what gets sent:
 
 | Consumer | Who chooses the address | What a grant lets happen |
 |---|---|---|
@@ -834,6 +834,7 @@ A grant reaches only the consumers it names. The same host means something diffe
 | `sharing` | A user adding a calendar feed, or the sharing server a share names | The daemon [fetches the host](../features/sharing.md), and plain HTTP is allowed to it. A redirect may reach a private address only on the same listed host |
 | `servarr` | The operator, in `[servarr.apps.*]` | The [`servarr` skill](../features/servarr.md) sends the app's API key, and plain HTTP is allowed to it |
 | `feeds` | A user, or a task through `feeds add` | The poller [fetches the host](../features/feeds.md) on a timer. Plain HTTP is allowed to any feed, listed or not, and each redirect is checked again |
+| `heartbeat` | The author of `HEARTBEAT.md`, which a task can write | A [`url-health` check](../features/heartbeat.md) fetches the host and reads its status, from the daemon's network. Without a grant nothing is fetched, even a public host, and every redirect needs a grant too |
 
 So there is no shared list. An arr app on `10.0.0.5` granted for `servarr` does not become a target for a user's RSS feed, a user's mail account or a page Chrome loads.
 

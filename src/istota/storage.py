@@ -186,7 +186,7 @@ execution_test = true                  # Test actual Claude CLI invocation
 
 - **file-watch** — Check file age or existence (`path` inside `/Users/<your id>/`, `max_age_hours`)
 - **shell-command** — Run command, evaluate condition (`command`, `condition`, `message`, `timeout`)
-- **url-health** — HTTP health check, admin-only (`url`, `expected_status`, `timeout`)
+- **url-health** — HTTP health check, admin-only, to a host with a `heartbeat` grant in the operator's `[private_hosts]` (`url`, `expected_status`, `timeout`)
 - **calendar-conflicts** — Find overlapping events (`lookahead_hours`)
 - **task-deadline** — Check for overdue tasks (`warn_hours_before`)
 - **self-check** — System health diagnostics: Claude binary, bwrap, DB, failure rate, execution test (`execution_test`)
