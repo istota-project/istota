@@ -39,6 +39,12 @@
 #   HOST_GATEWAY_ADDR    the host gateway's IPv4 address, for that block
 #   HOST_LOOPBACK_ALLOW  TCP ports on it containers may still reach, separated
 #                        by spaces or commas
+#   ISTOTA_BROWSER_SUBNET  a x.y.z.0/24 for the browser's network, when the default
+#                        172.29.0.0/24 is taken here; the browser is its .2
+#   ISTOTA_BROWSER_EGRESS_ALLOW  IPv4 addresses or ranges the browser container may
+#                        reach though they are private, separated by spaces or
+#                        commas: the addresses of [browser] private_hosts. The
+#                        egress unit
 #   LOCAL_FORWARD_PORT   the Mac port Lima forwards to this VM, written by the
 #                        Mac's istota-stack and empty on a server; setup
 #                        publishes nginx and its setup page on it

@@ -2087,6 +2087,175 @@ def _source(fx: Fixture, script: str, **extra_env: str) -> subprocess.CompletedP
     )
 
 
+class TestTheBrowsersFixedAddress:
+    """The VM's firewall names the browser by address (#884), so the VM alone gives
+    it one, through an overlay: the base file's network stays unpinned, or the
+    testbed's stacks on one machine would all ask for the same subnet."""
+
+    OVERLAY = "docker-compose.browser-network.yml"
+    SEEN = ('docker() { [ "$1" != network ] || return 0; '
+            'echo "addr=${ISTOTA_BROWSER_ADDR-unset} subnet=${ISTOTA_BROWSER_SUBNET-unset} '
+            'gw=${ISTOTA_BROWSER_GATEWAY-unset} range=${ISTOTA_BROWSER_IP_RANGE-unset} args=$*"; }; compose ps')
+
+    @staticmethod
+    def _with_network(subnet: str, verb: str) -> str:
+        """compose, with Docker reporting the network on this subnet."""
+        return (f'docker() {{ if [ "$1" = network ]; then echo "{subnet}"; return 0; fi; '
+                f'echo "args=$*"; }}; compose {verb}')
+
+    def _overlay(self, fx):
+        shutil.copy(REPO / "docker" / self.OVERLAY, fx.src / "docker")
+
+    def test_a_checkout_with_the_file_uses_it(self, fx):
+        self._overlay(fx)
+        result = _source(fx, self.SEEN)
+        assert result.returncode == 0, result.stderr
+        assert f"-f {fx.src}/docker/{self.OVERLAY}" in result.stdout
+        assert ("addr=172.29.0.2 subnet=172.29.0.0/24 gw=172.29.0.1 range=172.29.0.128/25"
+                in result.stdout)
+
+    def test_a_rollback_to_a_checkout_without_it_does_not_name_it(self, fx):
+        result = _source(fx, self.SEEN)
+        assert result.returncode == 0, result.stderr
+        assert self.OVERLAY not in result.stdout
+
+    def test_host_env_moves_the_subnet(self, fx):
+        self._overlay(fx)
+        (fx.stack / "host.env").write_text("ISTOTA_BROWSER_SUBNET=10.77.3.0/24\n")
+        result = _source(fx, self.SEEN)
+        assert ("addr=10.77.3.2 subnet=10.77.3.0/24 gw=10.77.3.1 range=10.77.3.128/25"
+                in result.stdout)
+
+    @pytest.mark.parametrize("bad", ["172.29.0.0/16", "172.29.0.1/24", "not-a-subnet", "300.29.0.0/24"])
+    def test_a_malformed_subnet_keeps_the_default_the_firewall_keeps(self, fx, bad):
+        self._overlay(fx)
+        (fx.stack / "host.env").write_text(f"ISTOTA_BROWSER_SUBNET={bad}\n")
+        result = _source(fx, self.SEEN)
+        assert "addr=172.29.0.2 " in result.stdout
+        assert "ISTOTA_BROWSER_SUBNET" in result.stderr + result.stdout
+
+    def test_a_one_shot_leaves_an_existing_unpinned_network_alone(self, fx):
+        """Found by the vm tier: an update's one-shot runs against the live stack,
+        and compose cannot replace a network with containers on it. Only `up` can."""
+        self._overlay(fx)
+        result = _source(fx, self._with_network("172.20.0.0/16", "run --rm --no-deps daemon true"))
+        assert result.returncode == 0, result.stderr
+        assert "args=" in result.stdout
+        assert self.OVERLAY not in result.stdout
+
+    def test_up_moves_an_existing_unpinned_network(self, fx):
+        self._overlay(fx)
+        result = _source(fx, self._with_network("172.20.0.0/16", "up -d"))
+        assert self.OVERLAY in result.stdout
+
+    def test_a_one_shot_uses_the_overlay_on_the_pinned_network(self, fx):
+        """Without it, a pinned network diverges from the base file the other way."""
+        self._overlay(fx)
+        result = _source(fx, self._with_network("172.29.0.0/24", "run --rm --no-deps daemon true"))
+        assert self.OVERLAY in result.stdout
+
+    def test_a_one_shot_with_no_network_yet_creates_it_pinned(self, fx):
+        self._overlay(fx)
+        result = _source(fx, self._with_network("", "run --rm --no-deps daemon true"))
+        assert self.OVERLAY in result.stdout
+
+    def test_the_address_is_outside_what_docker_hands_out(self):
+        import yaml
+
+        doc = yaml.safe_load((REPO / "docker" / self.OVERLAY).read_text())
+        pool = doc["networks"]["browser"]["ipam"]["config"][0]
+        assert pool == {"subnet": "${ISTOTA_BROWSER_SUBNET:?}", "gateway": "${ISTOTA_BROWSER_GATEWAY:?}",
+                        "ip_range": "${ISTOTA_BROWSER_IP_RANGE:?}"}
+        assert doc["services"]["browser"]["networks"]["browser"]["ipv4_address"] == "${ISTOTA_BROWSER_ADDR:?}"
+        assert list(doc["services"]) == ["browser"]
+
+    def test_the_base_file_pins_nothing(self):
+        import yaml
+
+        doc = yaml.safe_load((REPO / "docker" / "docker-compose.yml").read_text())
+        assert doc["networks"]["browser"] is None
+
+    def test_the_firewall_and_the_stack_share_a_default(self):
+        firewall = (REPO / "host" / "istota-devbox-egress.sh").read_text()
+        for text in (firewall, SCRIPT.read_text()):
+            assert 'BROWSER_SUBNET_DEFAULT="172.29.0.0/24"' in text
+
+    def test_a_named_grant_with_no_firewall_grant_is_warned_about(self, fx):
+        (fx.stack / "config").mkdir(parents=True, exist_ok=True)
+        (fx.stack / "config" / "config.toml").write_text('[browser]\nprivate_hosts = ["wiki.example.internal"]\n')
+        result = fx.run("up")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_BROWSER_EGRESS_ALLOW" in result.stdout + result.stderr
+
+    def test_no_warning_once_the_firewall_grant_is_there(self, fx):
+        (fx.stack / "config").mkdir(parents=True, exist_ok=True)
+        (fx.stack / "config" / "config.toml").write_text('[browser]\nprivate_hosts = ["wiki.example.internal"]\n')
+        (fx.stack / "host.env").write_text("ISTOTA_BROWSER_EGRESS_ALLOW=10.0.0.5\n")
+        result = fx.run("up")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_BROWSER_EGRESS_ALLOW" not in result.stdout + result.stderr
+
+
+class TestLeavingThePinnedBrowserNetwork:
+    """An older release's script runs one-shots with no overlay, which compose
+    cannot do while a pinned network has containers on it."""
+
+    SCRIPT_BODY = (
+        'exec 3>&1; docker() {{ echo "docker $*" >&3; '
+        'if [ "$1" = network ] && [ "$2" = inspect ]; then echo "{pinned}"; fi; }}; '
+        'compose() {{ echo "compose $*"; }}; release_pinned_browser_network'
+    )
+
+    def _overlay(self, fx):
+        shutil.copy(REPO / "docker" / "docker-compose.browser-network.yml", fx.src / "docker")
+
+    def test_a_pinned_network_is_removed_after_the_stack_stops(self, fx):
+        result = _source(fx, self.SCRIPT_BODY.format(pinned="172.29.0.128/25"))
+        assert result.returncode == 0, result.stderr
+        lines = result.stdout.splitlines()
+        stop = lines.index("compose stop")
+        remove = next(i for i, line in enumerate(lines) if line.startswith("docker network rm "))
+        assert stop < remove
+
+    def test_an_unpinned_network_is_left_alone(self, fx):
+        result = _source(fx, 'docker() { :; }; compose() { echo "compose $*"; }; release_pinned_browser_network')
+        assert result.returncode == 0, result.stderr
+        assert "compose stop" not in result.stdout
+
+    def test_a_checkout_that_has_the_overlay_keeps_the_network(self, fx):
+        self._overlay(fx)
+        result = _source(fx, self.SCRIPT_BODY.format(pinned="172.29.0.128/25"))
+        assert result.returncode == 0, result.stderr
+        assert "compose stop" not in result.stdout
+
+    def test_rollback_releases_it_before_the_older_script_runs(self):
+        body = SCRIPT.read_text().split("cmd_rollback() {", 1)[1].split("\n}\n", 1)[0]
+        assert body.index('verified_git checkout --quiet --detach "${object}^{commit}"') \
+            < body.index("release_pinned_browser_network") < body.index("release_stack_up")
+
+    def test_an_update_to_an_older_tag_refuses_rather_than_stopping_for_a_build(self):
+        body = SCRIPT.read_text().split("cmd_update() {", 1)[1].split("\n}\n", 1)[0]
+        assert body.index("refuse_older_checkout_on_pinned_browser_network") < body.index("hand_update_to_release")
+        assert "release_pinned_browser_network" not in body
+
+    def test_the_refusal_puts_the_checkout_back_and_names_down(self, fx):
+        result = _source(fx, (
+            'docker() { echo "172.29.0.128/25"; }; verified_git() { echo "git $*"; }; '
+            'refuse_older_checkout_on_pinned_browser_network abc123 v1'
+        ))
+        assert result.returncode != 0
+        assert "git checkout --quiet --detach abc123" in result.stdout
+        assert "istota-stack down" in result.stderr
+
+    def test_no_refusal_on_an_unpinned_network(self, fx):
+        result = _source(fx, (
+            'docker() { :; }; verified_git() { echo "git $*"; }; '
+            'refuse_older_checkout_on_pinned_browser_network abc123 v1; echo went-on'
+        ))
+        assert "went-on" in result.stdout
+        assert "git checkout" not in result.stdout
+
+
 class TestTheBrowsersPrivateHostsComeFromTheConfig:
     """`[browser] private_hosts` is the one place a grant lives (#884): the
     container mounts no config, so compose() hands it this list alone."""
