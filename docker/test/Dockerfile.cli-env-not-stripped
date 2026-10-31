@@ -1,0 +1,20 @@
+# Negative control for the CLI credential witness's direct callers (#867): the
+# strip that keeps the credential from the tool server does nothing.
+#
+# A direct caller's `BrainRequest.env` is `build_model_cli_env`, which holds the
+# credential, so `without_claude_runtime_env` in `brain/_tool_harness.py` is all
+# that stands between it and the tool server. This control replaces it with a
+# copy.
+#
+#   docker build -f docker/test/Dockerfile.cli-env-not-stripped --build-arg BASE=<lean tag> \
+#       -t istota-test/cli-env-not-stripped:<suffix> docker/test
+#
+# Expected: the doctor's environment and process witnesses fail in
+# tests/smoke/test_cli_credential_unreachable.py, and the Read-granting callers
+# stay green.
+ARG BASE
+FROM ${BASE}
+
+RUN printf '\n\ndef without_claude_runtime_env(env):  # control: nothing stripped\n    return dict(env) if env is not None else None\n' \
+        >> /app/src/istota/sandbox/claude_runtime_env.py \
+    && grep -q '# control: nothing stripped' /app/src/istota/sandbox/claude_runtime_env.py

@@ -188,9 +188,9 @@ def request_hello(req: BrainRequest, *, bash_spill_full_output: bool) -> dict:
 
     ``subprocess_env`` is ``req.env`` minus the Claude runtime names
     (ISSUE-390). No task env carries the CLI's credential any more
-    (``build_clean_env`` names the mode only), so this is defence in depth: a
-    future env builder that put it back would hand it to a Bash ``echo``,
-    since nothing in the tool server reads it.
+    (``build_clean_env`` names the mode only), so for a task this is defence in
+    depth. A direct caller's ``req.env`` is ``build_model_cli_env``, which holds
+    it, so there this strip is all that keeps it from a Bash ``echo`` (#867).
 
     **The strip happens here and at the spawn, and both are needed.** This
     frame decides what a Bash child is handed; the spawn decides what the
