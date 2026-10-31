@@ -786,12 +786,14 @@ def _secret_files(config: "Config", ctx: dict) -> list[dict]:
     import os
 
     from istota.config_editor.reference import credential_files
-    from istota.setup_wizard import DAEMON_ONLY_SECRETS, SECRET_NAMES
+    from istota.setup_wizard import DAEMON_ONLY_SECRETS, GENERATED_SECRETS, SECRET_NAMES
 
     schema = ctx["schema"]
     config_keys = {name: dotted for dotted, name in credential_files().items() if name}
     entries = []
     for name in SECRET_NAMES:
+        if name in GENERATED_SECRETS:
+            continue
         dotted = config_keys.get(name)
         if dotted:
             path = tuple(dotted.split("."))

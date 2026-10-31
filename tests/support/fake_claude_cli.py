@@ -23,13 +23,17 @@ built from an allowlist and carries no variable of ours):
   server, or the one a call names with `"server"`.
 - `host_probe`: a shell command the fake runs itself first, from the CLI's
   unwrapped view, its output put ahead of the call results.
-- `run_in_cli`: on a harness run, make the planned `Bash` calls in the fake's
-  own process rather than through the MCP server, as a CLI whose own Bash were
-  left on would. The smoke witness's negative control
+- `run_in_cli`: on a harness run, make the planned `Bash` and `Read` calls in
+  the fake's own process rather than through the MCP server, as a CLI whose own
+  tools were left on would. The smoke witness's negative control
   (`scripts/test-image-negative-control.sh cli-witness`).
+- `results_file`: a file to write the host probe's output (when there is one)
+  and each call's result to, as a JSON list. For a caller that prints no
+  result of its own: doctor reads a marker, OCR parses JSON.
 
-`{harness_dir}` in a call's arguments or the host probe is replaced with the
-harness directory, read from the MCP config.
+`{harness_dir}` and `{cli_pid}` in a call's arguments or the host probe are
+replaced with the harness directory, read from the MCP config, and this
+process's pid.
 - `sleep_before_calls`, `sleep_before_result`, `sleep_after_result`: seconds.
 - `exit`: the exit status, 0 by default.
 
@@ -136,7 +140,7 @@ def main(argv: list[str]) -> int:
         return _without_mcp(argv, plan)
     servers = [_Mcp(name, entry) for name, entry in _servers(config_path).items()]
     by_name = {mcp.name: mcp for mcp in servers}
-    places = {"{harness_dir}": os.path.dirname(config_path)}
+    places = {"{harness_dir}": os.path.dirname(config_path), "{cli_pid}": str(os.getpid())}
 
     def subst(value):
         if isinstance(value, str):
@@ -193,12 +197,22 @@ def main(argv: list[str]) -> int:
                                  capture_output=True, text=True)
             texts.append(ran.stdout + ran.stderr)
             continue
+        if plan.get("run_in_cli") and call["name"] == "Read":
+            try:
+                with open(args["file_path"], errors="replace") as fh:
+                    texts.append(fh.read())
+            except OSError as exc:
+                texts.append(f"ERROR: {exc}")
+            continue
         reply = mcp.request("tools/call", {"name": call["name"], "arguments": args})
         result = reply.get("result") or {}
         text = "".join(b.get("text", "") for b in result.get("content", []) if b.get("type") == "text")
         if result.get("isError") or "error" in reply:
             text = "ERROR: " + (text or json.dumps(reply.get("error")))
         texts.append(text)
+    if plan.get("results_file"):
+        with open(plan["results_file"], "w") as fh:
+            json.dump(texts, fh)
     time.sleep(plan.get("sleep_before_result", 0))
     for mcp in servers:
         mcp.close()

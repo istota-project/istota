@@ -4391,6 +4391,36 @@ def check_wallet(config: "Config", probe: bool) -> list[CheckResult]:
     return results
 
 
+def check_browser_api_token(config: "Config", probe: bool) -> CheckResult:
+    """Whether the browser API takes the token this process holds (#884).
+
+    The daemon and the browser read one secrets file when they start, so a file
+    replaced under a running stack leaves them disagreeing, and every browse
+    then fails with a 401. `/instances` selects no user and starts nothing.
+    """
+    name = "browser.api_token"
+    if not config.browser.enabled:
+        return CheckResult(name, SKIP, "browser is disabled")
+    if not probe:
+        return CheckResult(name, SKIP, "browser API token was not probed")
+    import httpx
+
+    from istota.browser.admission import browser_api_auth
+
+    try:
+        response = httpx.get(config.browser.api_url.rstrip("/") + "/instances",
+                             headers=browser_api_auth(), timeout=5.0, follow_redirects=False)
+    except httpx.HTTPError:
+        return CheckResult(name, SKIP, "browser API did not answer")
+    if response.status_code in (401, 503):
+        return CheckResult(
+            name, FAIL, f"browser API refused this process's token (HTTP {response.status_code})",
+            remedy="Run `istota-stack up`, then restart the stack so the daemon and the browser "
+                   "read the same secrets/istota_browser_api_token.",
+        )
+    return CheckResult(name, OK, "browser API accepts this process's token")
+
+
 def check_room_scope_confinement(config: "Config", probe: bool) -> CheckResult:
     """Whether a guest's turn is kept out of the host's files on disk.
 
@@ -10883,6 +10913,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.credential_isolation", check_credential_isolation),
     ("security.wallet", check_wallet),
     ("security.room_scope_confinement", check_room_scope_confinement),
+    ("browser.api_token", check_browser_api_token),
     ("security.credential_backup", check_credential_backup),
     ("security.signup_tags", check_signup_tags),
     ("security.inline_credentials", check_inline_credentials),
@@ -11028,6 +11059,7 @@ CHECK_SCOPES: dict[str, str] = {
     "security.wallet": DEPLOYMENT,
     # Deployment: a room policy and a sandbox are properties of an install.
     "security.room_scope_confinement": DEPLOYMENT,
+    "browser.api_token": DEPLOYMENT,
     "security.credential_backup": DEPLOYMENT,
     "security.signup_tags": DEPLOYMENT,
     "security.inline_credentials": DEPLOYMENT,
