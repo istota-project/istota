@@ -176,6 +176,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- model runs (`rooms.egress.record_posture`): 'public' or 'private', NULL until
     -- decided. A job row can change or go while the task runs; this cannot.
     egress_posture TEXT,
+    -- 1 for an occurrence created under `[security] scheduled_job_egress = "open"`
+    -- (`rooms.egress.record_open_by_default`). The occurrence's, so a config change
+    -- moves nothing already queued.
+    egress_open_by_default INTEGER NOT NULL DEFAULT 0,
     -- 1 for a task in an incognito room (ISSUE-892), frozen at creation by
     -- db.create_task from the room or the parent task.
     incognito INTEGER NOT NULL DEFAULT 0,
@@ -426,6 +430,9 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     -- CRON.md's `reach`: 'private' or 'public'. A request, never a grant; what
     -- is approved is in egress_grants.
     reach TEXT NOT NULL DEFAULT 'private',
+    -- CRON.md's `egress`, a JSON list of hosts and `skill:` entries, NULL when none.
+    -- A request, never a grant (`cron_loader._sync_job_approvals`).
+    egress_request TEXT,
     UNIQUE(user_id, name)
 );
 

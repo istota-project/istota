@@ -1053,6 +1053,7 @@ class TestColumnOwnership:
             publish_shared_kv="ns/key",
             publish_shared_kv_trusted=True,
             reach="public",
+            egress=("news.example.com",),
         )
         expected = {
             "cron_expression": "5 4 * * *",
@@ -1074,6 +1075,7 @@ class TestColumnOwnership:
             "publish_shared_kv": "ns/key",
             "publish_shared_kv_trusted": 1,
             "reach": "public",
+            "egress_request": '["news.example.com"]',
             **expected_dispatch,
         }
         assert set(expected) == FILE_OWNED_COLUMNS, "expect a value for every file-owned column"

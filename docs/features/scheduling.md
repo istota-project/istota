@@ -80,6 +80,7 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `effort` | no | Effort override: `low`, `medium`, `high`, `xhigh`, or `max` |
 | `brain` | no | Brain kind this job runs on: `claude_code` or `native`. Admin-only, and bounded by `[brain] room_selectable`. See below |
 | `reach` | no | `private` (default) or `public`. `public` asks to run with open web and nothing private, and grants nothing until you approve it. See "Network access" below |
+| `egress` | no | The hosts and skills the job needs, such as `["news.example.com", "skill:browse"]`. Asks you ahead of the first run and grants nothing. See "Network access" below |
 | `publish_shared_kv` | no | On success, publish the result text to the shared KV store as `"<namespace>/<key>"` (a bare key means the `briefing_shared_blocks` namespace) |
 | `publish_shared_kv_trusted` | no | Mark the published value trusted, so consuming briefings splice it without the untrusted-content wrapper |
 
@@ -151,6 +152,10 @@ A job is in one of three states:
 - **Full access**: it runs with your browser profile and every skill, and can reach any public host. Every job that existed when this feature arrived starts here. Remove Full access on the page to narrow it, and expect the next run to be refused the hosts it needs.
 
 Public and Full access are approved against the exact text of the job, which the page shows you. Editing `prompt`, a `prompt_file`, `command`, `skill`, `skill_args`, `publish_shared_kv` or `publish_shared_kv_trusted` drops the approval, and the job runs limited until you approve the new text. Changing the schedule, model or delivery does not. Host and skill entries stay through an edit.
+
+A job can ask ahead of its first run. `egress = ["news.example.com", "skill:browse"]` lists what it needs, and the page and the bell show the request as soon as the job is written. Nothing is granted until you add it, and a recurring job runs with what it has until then. A `once` job with `egress` or an unapproved `reach = "public"` does not fire until you approve, however long that takes, because it would otherwise run limited and delete itself along with the request. Dismissing a request does not release the job: add the entry or remove the job from CRON.md. A `once` job that asks for nothing still fires limited and is gone afterwards.
+
+Your operator can turn the approval off for scheduled jobs with `[security] scheduled_job_egress = "open"`. Each job then runs as if it had Full access, with no grant: your browser profile, every skill, any public host and mail that is not held as a draft. The page says so, and `egress` asks for nothing. A job with `reach = "public"` still waits for your approval. Briefings, assignment wakes and TASKS.md lines stay limited, though a limited task can write a job into CRON.md, which then runs with all of this.
 
 Renaming a job counts as removing it and adding a new one: the new name starts with nothing.
 

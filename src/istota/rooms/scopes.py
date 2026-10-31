@@ -376,7 +376,7 @@ def _egress_for(
         root = _decision_root(conn, task)
         if is_briefing_research(root) or _root_is_attended(root):
             return None, frozenset()
-        if egress.job_approved(conn, root, "open"):
+        if egress.job_approved(conn, root, "open") or egress.open_by_default(conn, root.id):
             return None, frozenset()
         subject = egress.subject_for(conn, root)
         return (

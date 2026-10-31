@@ -412,6 +412,14 @@ def effective_disabled_skills(
     return disabled
 
 
+def usable_external_skills(config, user_id: str) -> dict[str, SkillMeta]:
+    """The `external` skills this user could use at all, name to metadata: what a
+    `skill:` network grant may name. Raises what reading the index raises."""
+    index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+    names = user_skill_names(config, user_id, index, count_user_disabled=False)
+    return {name: index[name] for name in names if getattr(index[name], "egress", "") != "local"}
+
+
 def user_skill_names(
     config,
     user_id: str,

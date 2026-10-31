@@ -18,6 +18,7 @@ A task that can read private data and also fetch an arbitrary URL can be made to
 | An attended own turn (Talk, web, email, SMS, WhatsApp, REPL, CLI) | None |
 | Briefing or shared block research | None. It holds nothing private |
 | A job with an approved `open:` for its current text | None |
+| An occurrence created under `[security] scheduled_job_egress = "open"`, whose job did not ask for `public`, and any subtask of it | None |
 | A job with an approved `public:` for its current text, whose row asks for `public` | None. It holds nothing private |
 | Any other scheduled job, personal briefing, assignment wake or TASKS.md line | The hosts in its grants |
 | Any other unattended source type, a read failure, no database | The empty set |
@@ -38,6 +39,18 @@ A row in `egress_grants` means approved, and there is no pending or denied state
 The digest covers a job's `prompt`, `command`, `skill`, `skill_args`, `publish_shared_kv` and `publish_shared_kv_trusted`. The last two are there because a job's answer goes where they say, into other users' briefings. The sync resolves `prompt_file` into `prompt`, so the file's content is covered. Editing any of them drops the job's `open:` and `public:` approvals and asks again. A schedule, model or delivery edit does not.
 
 Only an authenticated person writes a grant: the web route for the signed-in user's own subjects, the operator's `istota egress`, and the one-time seed. `tests/test_egress_grants.py` holds that list, and no skill CLI or deferred handler imports the module. An approval over the web carries the digest of the text the page showed, and a row that has moved since is refused. An approval also binds the task: an occurrence whose `prompt`, `command`, `skill` or `skill_args` differ from its job row runs limited, so a task queued before an edit does not run on the edited row's approval.
+
+## Asking ahead
+
+A job's `egress` in CRON.md lists hosts and `skill:` entries. The sync stores it in `scheduled_jobs.egress_request` and files each entry with no grant and no row in `egress_refused`, which is the one list the owner answers and the bell reads. So a declaration is the same kind of thing as a refusal: it grants nothing, and the file is model-writable. It is outside the digest, because it widens nothing. A skill the owner could not approve is dropped at parse, along with `open:` and `public:`, and no log line names an entry.
+
+A `once` job with an unmet declaration, or an unapproved `reach = "public"`, holds its fire in `check_scheduled_jobs`. The hold comes ahead of the staleness check and such a job is exempt from that check, since an approval can take days and a fire skipped as stale would spend its only slot. A manual run does not wait. The hold is read from the grants and not from the rows, so a dismissal does not release the job and the page keeps naming what it waits for. A `once` job that declared nothing still fires limited and takes its refusal rows with it when it deletes itself.
+
+## The deployment default
+
+`[security] scheduled_job_egress` is `approval` by default. `open` reopens H-2 for scheduled jobs: each occurrence runs as an approved `open:` does, with the user's browser profile, every skill, no verb rules and unheld mail, so instructions a job reads can send what it holds to any public host. A typo reads as `approval`, the config editor asks for a typed confirmation, and `istota doctor` warns under `security.egress_open_jobs` while it is `open`.
+
+The answer is on the occurrence. `_create_scheduled_job_task` writes `tasks.egress_open_by_default`, so a config change moves nothing already queued. It covers no other source type, and not a job asking for `public`, which stays limited until approved because it asked for something narrower than open. A module's backfill task is not made there and stays limited.
 
 ## What enforces it
 
@@ -84,6 +97,7 @@ Each of these is known and left open.
 - **The worktree reaper's fetch.** The daemon runs `git fetch origin` only when the origin is a configured forge, read through the repository's own `insteadOf` and refused with a proxy in its config. A limited admin task can still point it at a path on that forge, and the repository's `http.*` config still applies; what that sends goes to the forge.
 - **HEARTBEAT.md `url-health`.** HEARTBEAT.md is writable by a task, so a limited admin task can plant a check, and it runs from the daemon's network on the next sweep. The check and every redirect hop reach only a host with a `heartbeat` grant in `[private_hosts]`. What remains: the task can read a status code from a granted host and send it a path and query, a grant covers every port and scheme on the host, and a granted shared platform also serves other people's accounts.
 - **Delayed egress.** A limited task can write text into memory or a file, and a later attended turn can read it and act on it. A public job's answer is delivered, and may be indexed where a job's output is.
+- **`scheduled_job_egress = "open"`.** An operator's choice: every scheduled job has what `open:` gives, with no person reading its text. A limited task can then plant a job in CRON.md and have all of that on its next run, which is an escalation out of limited. `istota doctor` warns.
 - **Jobs on `open`.** Every job that existed at upgrade starts on `open` and keeps this risk until its owner narrows it. `istota doctor` counts them under `security.egress_open_jobs`.
 - **What an `open` job reads.** The digest does not cover a workspace file the job follows or a script it runs. Anyone who can edit that file can steer a job with full access, a limited task included.
 - **WebSearch.** The query reaches the search provider. That is a deliberate disclosure: the provider is not a recipient an attacker can read.

@@ -10554,6 +10554,16 @@ def check_egress_open_jobs(config: "Config", probe: bool) -> CheckResult:
     from istota.rooms import egress
 
     name = "security.egress_open_jobs"
+    if config.security.scheduled_job_egress == "open":
+        return CheckResult(
+            name, WARN,
+            "[security] scheduled_job_egress is open, so every scheduled job runs with full "
+            "access and instructions it reads can send private data to any public host",
+            remedy=(
+                'Set scheduled_job_egress = "approval" to limit each job to what its '
+                "owner approved in Settings, Network access."
+            ),
+        )
     db_path = Path(config.db_path)
     if not db_path.exists():
         return CheckResult(name, SKIP, f"no framework database at {db_path}")

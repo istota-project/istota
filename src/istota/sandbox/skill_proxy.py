@@ -805,12 +805,19 @@ class SkillProxy:
                     self.task_id, skill,
                 )
                 append_refusal(self.base_env.get(EGRESS_LOG_VAR), "skill", f"skill:{skill}")
+                message = (
+                    f"egress_not_approved: the {skill} skill is not approved for this "
+                    "task; the owner can add it in Settings, Network access. Do not retry."
+                )
+                # On stdout too: a caller of a skill parses its JSON `status` there.
                 self._send_response(conn, {
-                    "stdout": "",
-                    "stderr": (
-                        f"egress_not_approved: the {skill} skill is not approved for this "
-                        "task; the owner can add it in Settings, Network access. Do not retry."
-                    ),
+                    "stdout": json.dumps({
+                        "status": "error",
+                        "reason": "egress_not_approved",
+                        "skill": skill,
+                        "error": message,
+                    }) + "\n",
+                    "stderr": message,
                     "returncode": 1,
                     "reason": "egress_not_approved",
                     "skill": skill,

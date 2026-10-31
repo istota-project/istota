@@ -6196,6 +6196,8 @@ export interface NetworkRefusal {
 }
 export interface NetworkJob {
   digest: string;
+  once: boolean;
+  waiting: boolean;
   reach: 'private' | 'public';
   prompt: string;
   command: string;
@@ -6209,10 +6211,12 @@ export interface NetworkSubject {
   kind: string;
   label: string;
   state: 'open' | 'public' | 'limited';
+  open_by_default: boolean;
   hosts: string[];
   skills: string[];
   approvals: string[];
   job: NetworkJob | null;
+  waiting_on: string[];
   refused: NetworkRefusal[];
 }
 export interface NetworkAccess {

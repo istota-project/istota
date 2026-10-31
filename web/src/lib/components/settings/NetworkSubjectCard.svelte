@@ -35,7 +35,11 @@
   const JOB_REQUESTS = new Set(['open', 'public']);
 
   const job = $derived(subject.job);
-  const stateBadge = $derived(STATES[subject.state]);
+  const stateBadge = $derived(
+    subject.open_by_default
+      ? ({ label: 'Full access by default', variant: 'warn' } as const)
+      : STATES[subject.state],
+  );
   const hostRefusals = $derived(subject.refused.filter((row) => !JOB_REQUESTS.has(row.entry)));
   const asksOpen = $derived(subject.refused.some((row) => row.entry === 'open'));
   const asksPublic = $derived(subject.refused.some((row) => row.entry === 'public'));
@@ -144,7 +148,12 @@
   {#snippet status()}<Badge size="sm" variant={stateBadge.variant}>{stateBadge.label}</Badge
     >{/snippet}
 
-  {#if subject.state === 'open'}
+  {#if subject.open_by_default}
+    <p class="caption">
+      Your operator lets scheduled jobs run with no approval: your browser profile, every skill, any
+      public host, and mail to anyone. What you list here applies only if that changes.
+    </p>
+  {:else if subject.state === 'open'}
     <p class="caption">
       This job runs as it did before, with your browser profile and every skill, and can reach any
       public host.
@@ -159,6 +168,18 @@
 
   {#if job}
     <Disclosure summary="Job text">{@render jobText()}</Disclosure>
+  {/if}
+
+  {#if job?.waiting}
+    <Alert appearance="inline" variant="warn">
+      This one-time job will not run until you approve
+      {#if subject.waiting_on.length > 0}
+        <span class="mono">{subject.waiting_on.join(', ')}</span>.
+      {:else}
+        public access.
+      {/if}
+      Removing it from CRON.md cancels it.
+    </Alert>
   {/if}
 
   {#if asksOpen}<p>This job asked for full access.</p>{/if}
@@ -206,10 +227,10 @@
   {/if}
 
   {#if hostRefusals.length > 0}
-    <h3>Recently refused</h3>
+    <h3>Asked for or refused</h3>
     <Alert appearance="inline" variant="warn">
-      A page the job reads can make it ask for a host. Add one only if you expect this job to use
-      it.
+      A job's own file or a page it reads can make it ask for a host. Add one only if you expect
+      this job to use it.
     </Alert>
     <ul class="divided-list">
       {#each hostRefusals as row (row.entry)}

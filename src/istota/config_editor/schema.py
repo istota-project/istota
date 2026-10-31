@@ -121,6 +121,8 @@ RISKY_KEYS: frozenset[tuple[str, ...]] = frozenset({
     ("email", "outbound_approval_floor"),
     ("email", "confirm_sender_match"),
     ("security", "sandbox_enabled"),
+    # Open lets every scheduled job send what it holds to any public host.
+    ("security", "scheduled_job_egress"),
     ("security", "skill_proxy_enabled"),
     ("security", "credential_broker", "enabled"),
     ("brain", "kind"),
