@@ -183,6 +183,7 @@ def build_task_runtime(
     user_config: object | None,
     discovered_calendars: list | None = None,
     withheld_scopes: frozenset[str] = frozenset(),
+    restricted: bool | None = None,
     turn_author: str = "own",
     isolated_browser: bool = True,
     group_ids: "list[str] | None" = None,
@@ -200,6 +201,10 @@ def build_task_runtime(
     All three read ``reach_index``, the index minus withheld skills. The two
     credential splits keep the full index, since they only remove names.
 
+    ``restricted`` is `Reach.restricted`: whether the vault and the broker's grants
+    are withheld too. A task limited to approved hosts loses its `external` skills
+    and keeps its credentials. None reads any withheld scope as restricted.
+
     ``turn_author`` is the same derivation's posture (``Reach.author``), handed
     to the proxy's skill CLIs as ``ISTOTA_TURN_AUTHOR``. The ``email`` CLI
     refuses on it.
@@ -216,6 +221,7 @@ def build_task_runtime(
     ``resolve_sandbox_cache_dir`` raise, as the inline block did. Nothing here
     is entered, started or bound, so a raise leaks nothing.
     """
+    vault_withheld = bool(withheld_scopes) if restricted is None else restricted
     from istota.executor import (
         HOOK_PATH_PREPEND_KEY,
         SANDBOX_CACHE_NPM,
@@ -570,7 +576,7 @@ def build_task_runtime(
         # A shared room serves none of them: every name in it is a credential
         # of the sender's that no grant covers.
         vault_credentials = (
-            {} if withheld_scopes else _vault_credentials(config, task.user_id)
+            {} if vault_withheld else _vault_credentials(config, task.user_id)
         )
         _proxy_ctx = SkillProxy(
             _proxy_sock, credential_env, proxy_base_env,
@@ -588,7 +594,7 @@ def build_task_runtime(
             max_concurrent_skills=config.security.skill_proxy_max_concurrent,
             max_output_bytes=config.security.skill_proxy_max_output_mb * 1024 * 1024,
             vault_write_limit=(
-                0 if withheld_scopes else config.security.vault_writes_per_task
+                0 if vault_withheld else config.security.vault_writes_per_task
             ),
             config=config,
             user_id=task.user_id,
@@ -676,7 +682,8 @@ def build_task_runtime(
             if config.security.credential_broker.enabled:
                 grant_what_exists(c, task.user_id)
             ensure_credential_grants(
-                c, task.id, task.user_id, withheld_scopes=withheld_scopes,
+                c, task.id, task.user_id,
+                withheld_scopes=withheld_scopes if vault_withheld else frozenset(),
             )
             if began and c is conn:
                 c.commit()

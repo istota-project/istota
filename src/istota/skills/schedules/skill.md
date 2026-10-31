@@ -2,6 +2,7 @@
 name: schedules
 triggers: [schedule, scheduled, recurring, cron, every day, every week, every morning, every evening, periodic, nightly, daily, weekly]
 description: Scheduled recurring job management
+egress: local
 ---
 **Always use CRON.md for all scheduled jobs.** Never use session-scoped cron tools (like CronCreate) — they don't survive restarts. CRON.md is persistent and the only supported way to schedule recurring work.
 

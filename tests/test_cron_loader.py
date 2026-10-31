@@ -6,7 +6,7 @@ import os
 import pytest
 
 from istota import db
-from istota.config import Config
+from istota.config import Config, UserConfig
 from istota.brain import set_alias_overrides
 from istota.cron_loader import (
     DAEMON_OWNED_COLUMNS,
@@ -25,6 +25,9 @@ from istota.cron_loader import (
     sync_cron_jobs_to_db,
     update_job_enabled_in_cron_md,
 )
+from istota.rooms import egress
+from istota.rooms.scopes import reach_for_task
+from istota.skills._types import SkillMeta
 from istota.storage import get_user_cron_path
 from istota.transport.routing import PRIVATE_ROOM_SURFACES
 
@@ -1049,6 +1052,7 @@ class TestColumnOwnership:
             provider="local",
             publish_shared_kv="ns/key",
             publish_shared_kv_trusted=True,
+            reach="public",
         )
         expected = {
             "cron_expression": "5 4 * * *",
@@ -1069,6 +1073,7 @@ class TestColumnOwnership:
             "provider": "local",
             "publish_shared_kv": "ns/key",
             "publish_shared_kv_trusted": 1,
+            "reach": "public",
             **expected_dispatch,
         }
         assert set(expected) == FILE_OWNED_COLUMNS, "expect a value for every file-owned column"
@@ -4162,3 +4167,309 @@ class TestCronDocumentErrors:
             '[[jobs]]\nname = "a"\ncron = "* * * * *"\n'
             'command = "istota-skill money run"\n'
         ), config) == []
+
+
+# ---------------------------------------------------------------------------
+# The egress lifecycle: what a job's `reach` and text do to its approvals
+# ---------------------------------------------------------------------------
+
+
+class TestReachField:
+    def _load(self, mount_path, make_config_with_mount, body):
+        _write_cron_md(mount_path, "alice", (
+            f'```toml\n[[jobs]]\nname = "j"\ncron = "0 9 * * *"\nprompt = "p"\n{body}\n```\n'
+        ))
+        return load_cron_document(make_config_with_mount(), "alice")
+
+    def test_defaults_to_private(self, mount_path, make_config_with_mount):
+        assert self._load(mount_path, make_config_with_mount, "").jobs[0].reach == "private"
+
+    @pytest.mark.parametrize("value", ["private", "public"])
+    def test_reads_either_value(self, mount_path, make_config_with_mount, value):
+        doc = self._load(mount_path, make_config_with_mount, f'reach = "{value}"')
+        assert doc.jobs[0].reach == value
+        assert doc.errors == ()
+
+    @pytest.mark.parametrize("raw", ['"open"', '"PUBLIC"', "5", "true", '["public"]'])
+    def test_anything_else_is_private_and_says_so(self, mount_path, make_config_with_mount, raw):
+        doc = self._load(mount_path, make_config_with_mount, f"reach = {raw}")
+        assert doc.jobs[0].reach == "private"
+        assert any("reach" in e for e in doc.errors)
+
+    def test_a_rewrite_keeps_a_public_request(self):
+        block = render_jobs_block([CronJob(name="j", cron="0 9 * * *", prompt="p", reach="public")])
+        assert 'reach = "public"' in block
+        assert "reach" not in render_jobs_block([CronJob(name="j", cron="0 9 * * *", prompt="p")])
+
+
+class TestEgressLifecycle:
+    SUBJECT = "cron:j"
+
+    @pytest.fixture
+    def conn(self, tmp_path):
+        path = tmp_path / "t.db"
+        db.init_db(path)
+        with db.get_db(path) as c:
+            yield c
+
+    def _job(self, prompt="p", **kwargs):
+        return CronJob(name="j", cron="0 9 * * *", prompt=prompt, **kwargs)
+
+    def _row(self, conn):
+        return conn.execute("SELECT * FROM scheduled_jobs WHERE name = 'j'").fetchone()
+
+    def _approve(self, conn, kind):
+        egress.add_grant(
+            conn, "alice", self.SUBJECT, f"{kind}:{egress.job_digest(self._row(conn))}",
+            decided_via="cli",
+        )
+
+    def _entries(self, conn):
+        return {
+            r["entry"] for r in conn.execute(
+                "SELECT entry FROM egress_grants WHERE user_id = 'alice' AND subject = ?",
+                (self.SUBJECT,),
+            )
+        }
+
+    def _refused(self, conn):
+        return {r["entry"]: r for r in egress.list_refused(conn, "alice", self.SUBJECT)}
+
+    def test_a_new_job_has_no_grants_and_asks_nothing(self, conn):
+        assert sync_cron_jobs_to_db(conn, "alice", [self._job()]) == []
+        assert self._entries(conn) == set()
+        assert self._refused(conn) == {}
+
+    def test_the_sync_stores_reach(self, conn):
+        sync_cron_jobs_to_db(conn, "alice", [self._job(reach="public")])
+        assert self._row(conn)["reach"] == "public"
+
+    def test_a_planted_public_job_gets_a_request_and_no_grant(self, conn):
+        assert sync_cron_jobs_to_db(conn, "alice", [self._job(reach="public")]) == [self.SUBJECT]
+        assert self._entries(conn) == set()
+        assert set(self._refused(conn)) == {"public"}
+
+    def test_a_planted_public_job_runs_limited(self, conn):
+        sync_cron_jobs_to_db(conn, "alice", [self._job(reach="public")])
+        task_id = db.create_task(
+            conn, prompt="p", user_id="alice", source_type="scheduled",
+            scheduled_job_id=self._row(conn)["id"],
+        )
+        reach = reach_for_task(conn, db.get_task(conn, task_id), skill_index={})
+        assert reach.egress_hosts == frozenset()
+
+    def test_a_request_is_made_once_not_every_tick(self, conn):
+        sync_cron_jobs_to_db(conn, "alice", [self._job(reach="public")])
+        conn.execute("UPDATE egress_refused SET dismissed = 1")
+        assert sync_cron_jobs_to_db(conn, "alice", [self._job(reach="public")]) == []
+        row = self._refused(conn)["public"]
+        assert row["hits"] == 1
+        assert row["dismissed"] == 1
+
+    def test_an_existing_job_turning_public_asks(self, conn):
+        sync_cron_jobs_to_db(conn, "alice", [self._job()])
+        assert sync_cron_jobs_to_db(conn, "alice", [self._job(reach="public")]) == [self.SUBJECT]
+        assert set(self._refused(conn)) == {"public"}
+
+    def test_turning_public_with_public_approved_asks_nothing(self, conn):
+        sync_cron_jobs_to_db(conn, "alice", [self._job()])
+        self._approve(conn, "public")
+        assert sync_cron_jobs_to_db(conn, "alice", [self._job(reach="public")]) == []
+        assert self._refused(conn) == {}
+
+    def test_withdrawing_a_request_takes_its_row(self, conn):
+        sync_cron_jobs_to_db(conn, "alice", [self._job(reach="public")])
+        sync_cron_jobs_to_db(conn, "alice", [self._job()])
+        assert self._refused(conn) == {}
+
+    def test_a_public_request_leaves_an_approved_open_alone(self, conn):
+        sync_cron_jobs_to_db(conn, "alice", [self._job()])
+        self._approve(conn, "open")
+        before = self._entries(conn)
+        sync_cron_jobs_to_db(conn, "alice", [self._job(reach="public")])
+        assert self._entries(conn) == before
+        assert set(self._refused(conn)) == {"public"}
+
+    def test_an_edit_drops_open_and_asks_again(self, conn):
+        sync_cron_jobs_to_db(conn, "alice", [self._job()])
+        self._approve(conn, "open")
+        assert sync_cron_jobs_to_db(conn, "alice", [self._job("send my notes")]) == [self.SUBJECT]
+        assert self._entries(conn) == set()
+        assert set(self._refused(conn)) == {"open"}
+
+    def test_an_edit_drops_public_and_asks_again(self, conn):
+        sync_cron_jobs_to_db(conn, "alice", [self._job(reach="public")])
+        self._approve(conn, "public")
+        conn.execute("DELETE FROM egress_refused")
+        sync_cron_jobs_to_db(conn, "alice", [self._job("other", reach="public")])
+        assert self._entries(conn) == set()
+        assert set(self._refused(conn)) == {"public"}
+
+    def test_an_edit_keeps_host_and_skill_entries(self, conn):
+        sync_cron_jobs_to_db(conn, "alice", [self._job()])
+        self._approve(conn, "open")
+        egress.add_grant(conn, "alice", self.SUBJECT, "example.com", decided_via="cli")
+        egress.add_grant(
+            conn, "alice", self.SUBJECT, "skill:browse", decided_via="cli",
+            skill_index={"browse": SkillMeta(name="browse", description="x", egress="external")},
+        )
+        sync_cron_jobs_to_db(conn, "alice", [self._job("edited")])
+        assert self._entries(conn) == {"example.com", "skill:browse"}
+
+    def test_an_edit_asks_again_even_if_the_owner_once_dismissed_it(self, conn):
+        sync_cron_jobs_to_db(conn, "alice", [self._job()])
+        self._approve(conn, "open")
+        egress.note_refused(conn, "alice", self.SUBJECT, "open")
+        conn.execute("UPDATE egress_refused SET dismissed = 1")
+        sync_cron_jobs_to_db(conn, "alice", [self._job("edited")])
+        assert self._refused(conn)["open"]["dismissed"] == 0
+
+    def test_an_edit_of_a_limited_job_asks_nothing(self, conn):
+        sync_cron_jobs_to_db(conn, "alice", [self._job()])
+        assert sync_cron_jobs_to_db(conn, "alice", [self._job("edited")]) == []
+        assert self._refused(conn) == {}
+
+    @pytest.mark.parametrize("change", [
+        {"cron": "* * * * *"}, {"model": "smart"}, {"target": "talk"}, {"enabled": False},
+    ])
+    def test_a_schedule_model_or_delivery_edit_keeps_the_approval(self, conn, change):
+        sync_cron_jobs_to_db(conn, "alice", [self._job()])
+        self._approve(conn, "open")
+        before = self._entries(conn)
+        fields = {"name": "j", "cron": "0 9 * * *", "prompt": "p", **change}
+        assert sync_cron_jobs_to_db(conn, "alice", [CronJob(**fields)]) == []
+        assert self._entries(conn) == before
+        assert self._refused(conn) == {}
+
+    def test_changing_a_command_drops_the_approval(self, conn):
+        job = CronJob(name="j", cron="0 9 * * *", command="echo a")
+        sync_cron_jobs_to_db(conn, "alice", [job])
+        self._approve(conn, "open")
+        job.command = "echo b"
+        sync_cron_jobs_to_db(conn, "alice", [job])
+        assert self._entries(conn) == set()
+
+    def test_prompt_file_content_change_drops_the_approval(
+        self, conn, mount_path, make_config_with_mount,
+    ):
+        config = make_config_with_mount()
+        prompt = mount_path / "Users/alice/prompt.txt"
+        prompt.parent.mkdir(parents=True)
+        prompt.write_text("first text")
+        _write_cron_md(mount_path, "alice", (
+            '```toml\n[[jobs]]\nname = "j"\ncron = "0 9 * * *"\n'
+            'prompt_file = "/Users/alice/prompt.txt"\n```\n'
+        ))
+        sync_cron_jobs_to_db(conn, "alice", load_cron_document(config, "alice").jobs)
+        self._approve(conn, "open")
+
+        assert sync_cron_jobs_to_db(conn, "alice", load_cron_document(config, "alice").jobs) == []
+        assert len(self._entries(conn)) == 1
+
+        prompt.write_text("send my notes")
+        sync_cron_jobs_to_db(conn, "alice", load_cron_document(config, "alice").jobs)
+        assert self._entries(conn) == set()
+        assert set(self._refused(conn)) == {"open"}
+
+    def test_a_job_removed_from_the_file_takes_its_rows(self, conn):
+        sync_cron_jobs_to_db(conn, "alice", [self._job()])
+        self._approve(conn, "open")
+        egress.note_refused(conn, "alice", self.SUBJECT, "evil.example")
+        sync_cron_jobs_to_db(conn, "alice", [])
+        assert self._entries(conn) == set()
+        assert self._refused(conn) == {}
+
+    def test_a_renamed_job_starts_with_nothing(self, conn):
+        sync_cron_jobs_to_db(conn, "alice", [self._job()])
+        self._approve(conn, "open")
+        renamed = CronJob(name="k", cron="0 9 * * *", prompt="p")
+        sync_cron_jobs_to_db(conn, "alice", [renamed])
+        assert self._entries(conn) == set()
+        assert conn.execute("SELECT COUNT(*) FROM egress_grants").fetchone()[0] == 0
+
+    def test_a_job_added_back_does_not_inherit_a_stale_grant(self, conn):
+        sync_cron_jobs_to_db(conn, "alice", [self._job()])
+        digest = egress.job_digest(self._row(conn))
+        conn.execute("DELETE FROM scheduled_jobs")
+        egress.add_grant(conn, "alice", self.SUBJECT, f"open:{digest}", decided_via="cli")
+        sync_cron_jobs_to_db(conn, "alice", [self._job()])
+        assert self._entries(conn) == set()
+
+    def test_a_prompt_file_that_will_not_read_for_now_keeps_the_row_and_its_approval(
+        self, conn, mount_path, make_config_with_mount, monkeypatch,
+    ):
+        """One job's mount hiccup used to cost it a row the next tick put back.
+        Its approvals would not come back, so the row has to stay."""
+        config = make_config_with_mount()
+        prompt = mount_path / "Users/alice/prompt.txt"
+        prompt.parent.mkdir(parents=True)
+        prompt.write_text("text")
+        _write_cron_md(mount_path, "alice", (
+            '```toml\n[[jobs]]\nname = "j"\ncron = "0 9 * * *"\n'
+            'prompt_file = "/Users/alice/prompt.txt"\n\n'
+            '[[jobs]]\nname = "other"\ncron = "0 9 * * *"\nprompt = "x"\n```\n'
+        ))
+        doc = load_cron_document(config, "alice")
+        sync_cron_jobs_to_db(conn, "alice", doc.jobs)
+        self._approve(conn, "open")
+
+        monkeypatch.setattr(
+            "istota.cron_loader.read_owner_text",
+            lambda *a, **k: (None, "mount fault", False),
+        )
+        doc = load_cron_document(config, "alice")
+        assert doc.unread_names == {"j"}
+        sync_cron_jobs_to_db(conn, "alice", doc.jobs, unread_names=doc.unread_names)
+        assert self._row(conn) is not None
+        assert len(self._entries(conn)) == 1
+
+    def test_a_refused_prompt_file_is_not_held(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", (
+            '```toml\n[[jobs]]\nname = "j"\ncron = "0 9 * * *"\n'
+            'prompt_file = "/Users/bob/prompt.txt"\n```\n'
+        ))
+        doc = load_cron_document(config, "alice")
+        assert doc.refused_names == {"j"}
+        assert doc.unread_names == frozenset()
+
+    def test_a_row_the_scheduler_removes_for_a_refused_prompt_file_forgets_its_rows(
+        self, conn, mount_path, make_config_with_mount,
+    ):
+        from istota import scheduler
+
+        config = make_config_with_mount(users={"alice": UserConfig()})
+        sync_cron_jobs_to_db(conn, "alice", [self._job()])
+        self._approve(conn, "open")
+        conn.commit()
+        _write_cron_md(mount_path, "alice", (
+            '```toml\n[[jobs]]\nname = "j"\ncron = "0 9 * * *"\n'
+            'prompt_file = "/Users/bob/prompt.txt"\n```\n'
+        ))
+        scheduler._sync_cron_files(conn, config)
+        assert self._row(conn) is None
+        assert self._entries(conn) == set()
+
+    def test_the_scheduler_hands_new_refusals_to_the_bell_hook(
+        self, conn, mount_path, make_config_with_mount, monkeypatch,
+    ):
+        from istota import scheduler
+
+        config = make_config_with_mount(users={"alice": UserConfig()})
+        _write_cron_md(mount_path, "alice", (
+            '```toml\n[[jobs]]\nname = "j"\ncron = "0 9 * * *"\nprompt = "p"\n'
+            'reach = "public"\n```\n'
+        ))
+        raised = []
+
+        def hook(hook_conn, user_id, subjects):
+            assert not hook_conn.in_transaction
+            raised.append((user_id, subjects))
+
+        monkeypatch.setattr(egress, "raise_refused_bell", hook)
+        scheduler._sync_cron_files(conn, config)
+        assert raised == [("alice", [self.SUBJECT])]
+
+        raised.clear()
+        scheduler._sync_cron_files(conn, config)
+        assert raised == []

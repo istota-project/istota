@@ -5,6 +5,7 @@ description: Ask another user of this deployment an approved question and receiv
 cli: true
 companion_skills: [sensitive_actions, untrusted_input]
 env: [{"var":"ISTOTA_NEXTCLOUD_APP_PASSWORD","from":"config","config_path":"nextcloud.app_password","sensitive":true}]
+egress: external
 ---
 # Relay questions
 

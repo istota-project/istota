@@ -56,6 +56,7 @@ from pathlib import Path
 import pytest
 
 from istota.lib import toml_write
+from istota.rooms.egress import job_digest
 
 from ..support import upgrade
 from ..support.upgrade import Anchor
@@ -1200,6 +1201,49 @@ class TestAnOlderImageRefusesANewerSchema:
 
     def test_the_rollback_preflight_says_so_without_writing(self, rollback_boot):
         assert rollback_boot.check_exit == 3, rollback_boot.check_output
+
+
+class TestEgressSeedUpgrade:
+    def test_an_existing_job_comes_in_open_once_and_a_later_one_does_not(
+        self, volume_upgrade, istota_image, tmp_path,
+    ):
+        config_dir = tmp_path / "config"
+        shutil.copytree(volume_upgrade.config_dir, config_dir)
+        config_file = config_dir / "config.toml"
+        config = tomllib.loads(config_file.read_text())
+        config["workspace_path"] = "/data/db/workspace"
+        config.pop("nextcloud_mount_path", None)
+        config.pop("workspace_mount_path", None)
+        config["nextcloud"]["url"] = ""
+        config_file.write_text(toml_write.dumps(config))
+        db_dir = tmp_path / "db"
+        path = upgrade.build_anchor_db(REPO, volume_upgrade.anchor.commit, db_dir / "istota.db")
+        with sqlite3.connect(path) as conn:
+            assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='egress_grants'").fetchone()
+            conn.execute("INSERT INTO scheduled_jobs(user_id,name,cron_expression,prompt) "
+                         "VALUES ('upgradeuser','digest','0 6 * * *','read the news')")
+        conn.close()
+
+        def init():
+            migrated = _docker_run(istota_image, config_dir, db_dir, ["-c", _istota("init")])
+            assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+
+        init()
+        with sqlite3.connect(path) as conn:
+            conn.row_factory = sqlite3.Row
+            job = conn.execute("SELECT * FROM scheduled_jobs WHERE name='digest'").fetchone()
+            assert job["reach"] == "private"
+            grants = conn.execute("SELECT subject, entry, decided_via FROM egress_grants").fetchall()
+            assert [tuple(g) for g in grants] == [
+                ("cron:digest", f"open:{job_digest(job)}", "migration")]
+            conn.execute("INSERT INTO scheduled_jobs(user_id,name,cron_expression,prompt) "
+                         "VALUES ('upgradeuser','later','0 6 * * *','planted')")
+        conn.close()
+
+        init()
+        with sqlite3.connect(path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM egress_grants").fetchone()[0] == 1
+        conn.close()
 
 
 class TestGroupBriefingsUpgrade:

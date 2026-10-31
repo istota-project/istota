@@ -41,7 +41,7 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
 NEWEST_COLUMNS = [
     ("tasks", "model_namespace"),
     ("user_profiles", "external_turn_display"),
-    ("scheduled_jobs", "publish_shared_kv_trusted"),
+    ("scheduled_jobs", "reach"),
     ("messages", "reply_to_message_id"),
     ("rooms", "model_namespace"),
     ("web_chat_rooms", "listed"),

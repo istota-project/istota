@@ -6,6 +6,7 @@ cli: true
 companion_skills: [untrusted_input]
 requires_capability: [browser]
 source_types: [group_briefing_research, shared_block_research]
+egress: external
 ---
 # Web Browsing
 

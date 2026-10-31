@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from istota import db
 from istota.browser import owner
 from istota.browser.owner import (
     BROWSER_PROFILE_VAR,
@@ -133,9 +134,17 @@ class TestWhoGetsIt:
         task = make_task(user_id=owner.BRIEFINGS_IDENTITY, source_type="group_briefing_research")
         assert room_scopes.reach_for_task(None, task, skill_index=INDEX).isolated_browser
 
-    def test_an_own_turn_is_the_only_one_on_the_users_profile(self, make_task):
+    def test_an_own_turn_is_the_only_one_on_the_users_profile(self, tmp_path, make_task):
         task = make_task(user_id="alice", source_type="talk")
-        assert room_scopes.reach_for_task(None, task, skill_index=INDEX).isolated_browser is False
+        path = tmp_path / "istota.db"
+        db.init_db(path)
+        with db.get_db(path) as conn:
+            reach = room_scopes.reach_for_task(conn, task, skill_index=INDEX)
+        assert reach.isolated_browser is False
+
+    def test_with_no_database_there_is_no_attended_root_to_find(self, make_task):
+        task = make_task(user_id="alice", source_type="talk")
+        assert room_scopes.reach_for_task(None, task, skill_index=INDEX).isolated_browser is True
 
     def test_an_own_task_holding_nothing_private(self, make_task):
         """A subtask in a group chat that no member asked: every scope withheld."""
@@ -191,7 +200,10 @@ class TestTheProxySetsIt:
 
     def test_the_hosts_own_turn_sends_the_host(self, tmp_path, make_task, monkeypatch):
         task = make_task(id=9, user_id="alice", source_type="talk")
-        reach = room_scopes.reach_for_task(None, task, skill_index=INDEX)
+        path = tmp_path / "istota.db"
+        db.init_db(path)
+        with db.get_db(path) as conn:
+            reach = room_scopes.reach_for_task(conn, task, skill_index=INDEX)
         runtime = self._runtime(tmp_path, task, isolated_browser=reach.isolated_browser)
         assert self._header_from(runtime, monkeypatch) == "alice"
 

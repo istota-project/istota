@@ -82,7 +82,7 @@ def run_confined_command(
     )
     reach = _task_reach(config, None, task, skill_index)
     withheld = reach.withheld
-    temp_dir = task_temp_dir(config, task, restricted=bool(withheld))
+    temp_dir = task_temp_dir(config, task, restricted=reach.restricted)
     # Bound read-write under this name, so a planted link would decide what the
     # namespace sees. Checked before the mkdir, as `execute_task` does.
     if temp_dir.is_symlink():
@@ -107,6 +107,7 @@ def run_confined_command(
         user_config=config.get_user(task.user_id),
         discovered_calendars=discovered_calendars,
         withheld_scopes=withheld,
+        restricted=reach.restricted,
         isolated_browser=reach.isolated_browser,
         group_ids=group_ids,
     )

@@ -4,6 +4,7 @@ triggers: [room, rooms, this room, which room, channel, post to, which channels,
 description: The rooms you are in, and the target descriptor to deliver into one
 cli: true
 companion_skills: [untrusted_input]
+egress: local
 ---
 # Rooms
 

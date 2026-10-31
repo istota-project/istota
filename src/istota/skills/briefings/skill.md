@@ -5,6 +5,7 @@ description: Manage briefing content blocks and sources, and read and mark the b
 cli: true
 companion_skills: [untrusted_input]
 env: [{"var":"BRIEFINGS_USER","from":"user_id"}]
+egress: local
 ---
 # Briefings (content management)
 

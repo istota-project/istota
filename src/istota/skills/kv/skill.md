@@ -3,6 +3,7 @@ name: kv
 description: Key-value store for persistent runtime state
 always_include: true
 cli: true
+egress: local
 ---
 # KV Store
 

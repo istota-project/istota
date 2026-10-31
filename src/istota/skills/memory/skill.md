@@ -3,6 +3,7 @@ name: memory
 description: Persistent memory writes — USER.md (behavioral) and the knowledge graph (facts).
 always_include: true
 cli: true
+egress: local
 ---
 
 You have three persistent memory targets for each user:

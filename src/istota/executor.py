@@ -7664,9 +7664,13 @@ def build_prompt(
     # The room card (multiplayer D7). The persona below is the operator's on
     # every turn; reach, which the card describes, follows the principal.
     correspondent_line = _correspondent_line(task, reach)
+    # The card says why a room withholds. A limited job's skills are not that.
+    card_withheld = withheld_scopes
+    if withheld_scopes is not None and reach is not None:
+        card_withheld = frozenset(withheld_scopes) - reach.egress_withheld
     card = room_card(
         config, task, conn,
-        withheld_scopes=withheld_scopes,
+        withheld_scopes=card_withheld,
         room_cli_available=cli_skill_names is None or "room" in cli_skill_names,
         correspondent_line=correspondent_line,
     )
@@ -8599,7 +8603,7 @@ def execute_task(
 
     # Ensure the task's temp directory exists: the per-user one, or a
     # restricted task's own directory inside it.
-    user_temp_dir = task_temp_dir(config, task, restricted=bool(_withheld))
+    user_temp_dir = task_temp_dir(config, task, restricted=_reach.restricted)
     # Bound read-write into the sandbox under this name: a link planted here
     # would put wherever it points in front of the room. Checked before the
     # mkdir, which raises on a dangling one; failed by return, not by raise.
@@ -9282,7 +9286,7 @@ def execute_task(
         # cannot answer is worse than no line.
         shared_credentials=(
             config.security.skill_proxy_enabled
-            and not _withheld
+            and not _reach.restricted
             and secrets_vault.has_shared_credentials(config.db_path, task.user_id)
         ),
         assignment_prompt=wake_start.prompt if wake_start is not None else None,
@@ -9457,6 +9461,7 @@ def execute_task(
             user_config=user_config,
             discovered_calendars=discovered_calendars,
             withheld_scopes=_withheld,
+            restricted=_reach.restricted,
             turn_author=_reach.author,
             isolated_browser=_reach.isolated_browser,
             group_ids=task_group_ids,

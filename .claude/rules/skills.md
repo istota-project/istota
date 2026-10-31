@@ -7,7 +7,7 @@ paths:
 
 ## Skills Loader (`src/istota/skills/_loader.py`)
 
-`SkillMeta` (`_types.py`): `name`, `description`, `always_include`, `admin_only`, `keywords`, `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `requires_capability`, `env_specs`, `cli`, `experimental` (needs `skill_<name>` in `[experimental] features`), `exclude_memory`, `exclude_persona`, `exclude_resources`, `skill_dir`.
+`SkillMeta` (`_types.py`): `name`, `description`, `always_include`, `admin_only`, `keywords`, `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `requires_capability`, `env_specs`, `cli`, `experimental` (needs `skill_<name>` in `[experimental] features`), `exclude_memory`, `exclude_persona`, `exclude_resources`, `skill_dir`, `egress` (`local` or `external`, and anything else or nothing loads as `external`; every bundled manifest states one, `tests/test_egress_grants.py`; sandbox.md, "The egress decision"). An operator override of a bundled skill states its own: an override of `briefing` with no `egress` is withheld from a limited briefing, and its `exclude_memory` then does not apply.
 
 ### Functions
 - `load_skill_index(skills_dir, bundled_dir=None)`; `select_skills(prompt, source_type, user_resource_types, skill_index, is_admin=True, attachments=None, disabled_skills=None, sticky_skills=None, enabled_experimental_features=frozenset())` returns the sorted eager set.

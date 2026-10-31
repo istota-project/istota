@@ -6,6 +6,7 @@ cli: true
 file_types: [png, jpg, jpeg, gif, webp, bmp, tiff, tif, heic, heif]
 companion_skills: [notes, untrusted_input]
 dependencies: [pytesseract]
+egress: local
 ---
 # Image Transcription with OCR
 

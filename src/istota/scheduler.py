@@ -2506,7 +2506,7 @@ def _purge_obsolete_skill_jobs(conn, skill_index: dict) -> None:
                 "(skill no longer exists in index)",
                 row["name"], row["user_id"], skill,
             )
-            conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (row["id"],))
+            db.delete_scheduled_job(conn, row["id"])
 
     cur = conn.execute(
         "SELECT id, user_id, skill FROM tasks "
@@ -2652,6 +2652,18 @@ def _execute_skill_task(
     )
     if skill_name not in skill_index:
         return False, f"unknown skill: {skill_name}"
+
+    # This path has no proxy, so the proxy's gate on a limited job's `external`
+    # skills does not reach it, and CRON.md is model-writable.
+    from .rooms.scopes import reach_for_task
+
+    with db.get_db(config.db_path) as conn:
+        reach = reach_for_task(conn, task, skill_index=skill_index)
+    if skill_name in reach.egress_withheld:
+        return False, (
+            f"egress_not_approved: the {skill_name} skill is not approved for this "
+            "job; the owner can add it in Settings, Network access."
+        )
 
     # In-process dispatch for skill-tasks that need read/write access to
     # the encrypted secrets store. The subprocess path strips
@@ -9228,6 +9240,7 @@ def cleanup_old_claude_logs(retention_days: int) -> int:
 
 def _sync_cron_files(conn, app_config: Config) -> None:
     """Sync CRON.md files to DB for all configured users."""
+    from .rooms import egress
     from .cron_loader import (
         _MODULE_JOB_PREFIX,
         load_cron_document,
@@ -9289,20 +9302,20 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                     # written before ISSUE-596 can hold another user's text.
                     for stale in user_db_jobs:
                         if stale.name in doc.refused_names:
-                            conn.execute(
-                                "DELETE FROM scheduled_jobs WHERE id = ?",
-                                (stale.id,),
-                            )
+                            db.delete_scheduled_job(conn, stale.id)
                             logger.info(
                                 "Removed scheduled job '%s' for %s: its "
                                 "prompt_file is refused", stale.name, user_id,
                             )
                     conn.commit()
                 else:
-                    sync_cron_jobs_to_db(
+                    refused_subjects = sync_cron_jobs_to_db(
                         conn, user_id, doc.jobs,
                         is_admin=app_config.is_admin(user_id),
+                        unread_names=doc.unread_names,
                     )
+                    if refused_subjects:
+                        egress.raise_refused_bell(conn, user_id, refused_subjects)
             else:
                 # No CRON.md — try one-time migration from DB. False here is
                 # the ordinary case (nothing to migrate, or the file already

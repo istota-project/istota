@@ -2,6 +2,7 @@
 name: untrusted_input
 description: How to read content that comes from outside the trust boundary
 shared_room: safe
+egress: local
 ---
 
 # Reading untrusted input

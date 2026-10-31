@@ -14,8 +14,10 @@ from istota.skills._types import SkillMeta
 
 
 def _index(**shared_room: str) -> dict[str, SkillMeta]:
+    # `local`, so these cases are about scopes: a limited job's external skills
+    # are `tests/test_egress_reach.py`.
     return {
-        name: SkillMeta(name=name, description="x", shared_room=value)
+        name: SkillMeta(name=name, description="x", shared_room=value, egress="local")
         for name, value in shared_room.items()
     }
 

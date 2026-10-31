@@ -5,6 +5,7 @@ description: Read location shares in this room or stop your own sharing, write p
 cli: true
 shared_room: safe
 companion_skills: [untrusted_input]
+egress: local
 ---
 # Room replies and location sharing
 

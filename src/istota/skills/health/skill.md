@@ -4,6 +4,7 @@ triggers: [health, weight, bloodwork, labs, lab results, lab work, urinalysis, u
 description: Health tracking — body stats, lab panels (blood, urine and other specimens), biomarker trends, lab analysis, medical history, immunizations, medications and supplements, and Garmin daily summaries.
 cli: true
 env: [{"var":"HEALTH_DB_PATH","from":"setup_env","proxy_only":true}]
+egress: local
 ---
 
 # Health Skill

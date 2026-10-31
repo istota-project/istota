@@ -6,6 +6,7 @@ cli: true
 shared_room: private
 requires_capability: [servarr]
 companion_skills: [untrusted_input]
+egress: external
 ---
 # Servarr
 

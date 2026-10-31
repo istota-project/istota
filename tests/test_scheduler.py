@@ -5993,9 +5993,22 @@ class TestExecuteSkillTask:
         proxy to inject the keys; the same copy `build_task_runtime` makes
         for the proxy has to be made here, or every run is
         `app_not_configured` and the job auto-disables."""
+        from istota.rooms import egress
+        from istota.skills._types import SkillMeta
+
         monkeypatch.setenv("ISTOTA_SERVARR_RADARR_API_KEY", "arr-key-cron")
         config = self._make_config(db_path, tmp_path)
-        env = self._captured_env(self._task(skill="servarr", skill_args='["apps"]'), config)
+        with db.get_db(db_path) as conn:
+            job_id = conn.execute(
+                "INSERT INTO scheduled_jobs (user_id, name, cron_expression, skill) "
+                "VALUES ('alice', 'arr', '0 9 * * *', 'servarr')"
+            ).lastrowid
+            egress.add_grant(
+                conn, "alice", "cron:arr", "skill:servarr", decided_via="cli",
+                skill_index={"servarr": SkillMeta(name="servarr", description="x")},
+            )
+        task = self._task(skill="servarr", skill_args='["apps"]', scheduled_job_id=job_id)
+        env = self._captured_env(task, config)
         assert env["ISTOTA_SERVARR_RADARR_API_KEY"] == "arr-key-cron"
 
     def test_another_skill_job_does_not_get_them(self, db_path, tmp_path, monkeypatch):
