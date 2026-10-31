@@ -566,6 +566,8 @@ istota-skill markets quote AAPL
 
 Used by Claude Code inside the sandbox to invoke skill CLIs with credentials injected server-side.
 
+`calendar list` (alias `agenda`) takes one window: `--date today|tomorrow|YYYY-MM-DD` (the default is today), `--week` (seven days from today), or `--start DATE [--end DATE]`. `--start` and `--end` take the same values as `--date`; `--end` is inclusive, and `--start` alone is that one day. A range is limited to 400 days, and longer is refused as `range_too_long` rather than cut short. Pass `--tz` with any of them so day boundaries fall in the user's timezone. Recurring feed events are expanded up to 2,000 occurrences per request, on a range too; past that the answer says `"truncated": true`.
+
 ## istota-stack on the VM
 
 `host/provision.sh` installs `istota-stack`, the VM's one command for the stack. Run it as root. It works on `/srv/app/istota` and runs the compose file from the deployed checkout, `/srv/app/istota/src`.

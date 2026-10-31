@@ -47,6 +47,9 @@ istota-skill calendar calendars
 # List events for the next 7 days
 istota-skill calendar list --week --tz "America/Los_Angeles"
 
+# List events for a range of days (one call, whatever the length; --end is inclusive)
+istota-skill calendar list --start 2026-11-01 --end 2026-11-30 --tz "America/Los_Angeles"
+
 # Create an event (floating time — use when the time is local regardless of timezone)
 istota-skill calendar create \
   --calendar "https://..." \
@@ -105,11 +108,13 @@ istota-skill calendar create --calendar istota \
 
 **`--calendar` takes one of the user's own calendars**, as listed in the prompt or by `calendars`. A calendar another user shared with the bot, or another user's feed, is refused as `Calendar not found`, the same answer as one that does not exist.
 
-`list` without `--calendar` reads every CalDAV calendar, every feed, Istota's own calendar (whose events carry `"calendar": "istota"` and are shown in `--tz`, else UTC) and `feed:invitations`. A feed event carries `"read_only": true` and its `feed:<id>` in `calendar`. When a feed's last refresh failed, the answer has `feed_errors` naming it and the reason, and the events are from the last copy that was read. Recurring feed events are expanded up to 2,000 occurrences per request; past that the answer says `"truncated": true`.
+`list` without `--calendar` reads every CalDAV calendar, every feed, Istota's own calendar (whose events carry `"calendar": "istota"` and are shown in `--tz`, else UTC) and `feed:invitations`. A feed event carries `"read_only": true` and its `feed:<id>` in `calendar`. When a feed's last refresh failed, the answer has `feed_errors` naming it and the reason, and the events are from the last copy that was read. Recurring feed events are expanded up to 2,000 occurrences per request; past that the answer says `"truncated": true`, so check for it on a long range.
+
+`--start` and `--end` take `YYYY-MM-DD`, `today` or `tomorrow`, and cannot be combined with `--date` or `--week`. `--end` is inclusive: the query runs to midnight after it. `--start` alone is that one day. A range answers with `"date": "2026-11-01..2026-11-30"`. A range longer than 400 days is refused as `range_too_long` rather than cut short; `--end` without `--start` is `end_without_start` and an end before the start is `end_before_start`.
 
 The listed calendars are the ones the user has shared with the bot's account (`CALDAV_USERNAME`). To add another, or to give the bot write access to one listed as read-only, the user shares it from Settings > Connections or from their calendar app.
 
-**Always pass `--tz` with the user's timezone** (from prompt metadata) to ensure correct date boundaries.
+**Always pass `--tz` with the user's timezone** (from prompt metadata) to ensure correct date boundaries, on a range as well.
 
 **Always pass `--tz` when creating timed events with specific timezone semantics** (flights, meetings across timezones). Omit `--tz` for local timed events where the wall-clock time is what matters. All-day events are DATE values and never carry a timezone. Their end date is inclusive; create may omit it for a one-day event, while update requires both dates to keep the event boundaries the same type.
 

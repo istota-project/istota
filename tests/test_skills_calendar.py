@@ -1,7 +1,8 @@
 """Tests for calendar skill — all-day event timezone filtering + CLI."""
 
+import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from xml.etree import ElementTree as ET
@@ -212,17 +213,100 @@ class TestParseDatetime:
 
 class TestGetDateRange:
     def test_week_flag(self):
-        args = MagicMock(week=True, date="today", tz=None)
+        args = MagicMock(week=True, date="today", tz=None, start=None, end=None)
         start, end, label = _get_date_range(args)
         assert (end - start).days == 7
         assert label == "week"
 
     def test_date_flag(self):
-        args = MagicMock(week=False, date="2026-03-15", tz=None)
+        args = MagicMock(week=False, date="2026-03-15", tz=None, start=None, end=None)
         start, end, label = _get_date_range(args)
         assert start == datetime(2026, 3, 15)
         assert (end - start).days == 1
         assert label == "2026-03-15"
+
+    def test_a_range_runs_to_midnight_after_the_inclusive_end(self):
+        args = build_parser().parse_args(["list", "--start", "2026-11-01", "--end", "2026-11-30"])
+        start, end, label = _get_date_range(args)
+        assert start == datetime(2026, 11, 1)
+        assert end == datetime(2026, 12, 1)
+        assert label == "2026-11-01..2026-11-30"
+
+    def test_a_range_is_midnight_in_tz_across_a_clock_change(self):
+        la = ZoneInfo("America/Los_Angeles")
+        args = build_parser().parse_args(
+            ["list", "--start", "2026-10-31", "--end", "2026-11-01", "--tz", "America/Los_Angeles"]
+        )
+        start, end, _ = _get_date_range(args)
+        assert start == datetime(2026, 10, 31, tzinfo=la)
+        assert end == datetime(2026, 11, 2, tzinfo=la)
+        assert end.utcoffset() != start.utcoffset()
+
+    def test_start_alone_is_the_same_window_as_date(self):
+        parser = build_parser()
+        ranged = _get_date_range(parser.parse_args(["list", "--start", "2026-03-15"]))
+        dated = _get_date_range(parser.parse_args(["list", "--date", "2026-03-15"]))
+        assert ranged == dated
+
+    def test_a_range_takes_today_and_tomorrow(self):
+        args = build_parser().parse_args(["list", "--start", "today", "--end", "tomorrow"])
+        start, end, label = _get_date_range(args)
+        assert (end - start).days == 2
+        assert label == f"{start.date().isoformat()}..{(start + timedelta(days=1)).date().isoformat()}"
+
+    @pytest.mark.parametrize("flags", [["--date", "2026-03-15"], ["--week"]], ids=["date", "week"])
+    def test_start_with_date_or_week_is_rejected_by_the_parser(self, flags):
+        with pytest.raises(SystemExit) as exc:
+            build_parser().parse_args(["list", "--start", "2026-03-15", *flags])
+        assert exc.value.code == 2
+
+    def test_the_agenda_alias_takes_a_range(self):
+        args = build_parser().parse_args(["agenda", "--start", "2026-03-15", "--end", "2026-03-16"])
+        assert _get_date_range(args)[2] == "2026-03-15..2026-03-16"
+
+
+class TestCmdListRange:
+    @pytest.mark.parametrize("argv, reason", [
+        (["--end", "2026-11-30"], "end_without_start"),
+        (["--week", "--end", "2026-11-30"], "end_without_start"),
+        (["--date", "2026-11-01", "--end", "2026-11-30"], "end_without_start"),
+        (["--start", "2026-11-30", "--end", "2026-11-01"], "end_before_start"),
+        (["--start", "2026-01-01", "--end", "2027-02-05"], "range_too_long"),
+    ], ids=["end-alone", "end-with-week", "end-with-date", "end-before-start", "over-the-cap"])
+    def test_a_bad_range_is_refused_before_anything_is_read(self, as_alice, argv, reason):
+        result = cmd_list(build_parser().parse_args(["list", *argv]))
+        assert result["status"] == "error"
+        assert result["reason"] == reason
+        as_alice.principal.assert_not_called()
+
+    def test_the_cap_is_named_and_its_last_day_is_allowed(self, as_alice):
+        parser = build_parser()
+        at_cap = cmd_list(parser.parse_args(["list", "--start", "2026-01-01", "--end", "2027-02-04"]))
+        assert at_cap["status"] == "ok"
+        over = cmd_list(parser.parse_args(["list", "--start", "2026-01-01", "--end", "2027-02-05"]))
+        assert "400" in over["error"]
+
+    def test_a_refused_range_exits_nonzero_from_the_cli(self, as_alice, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["list", "--start", "2026-11-30", "--end", "2026-11-01"])
+        assert exc.value.code == 1
+        assert json.loads(capsys.readouterr().out)["reason"] == "end_before_start"
+
+    @pytest.mark.skipif(not _has_icalendar, reason="icalendar not installed")
+    def test_the_end_date_is_inclusive_through_the_caldav_path(self, as_alice):
+        as_alice.calendar.return_value.search.return_value = [
+            _mock_caldav_event(_make_ical_allday("in", "Last day", date(2026, 11, 30), date(2026, 12, 1))),
+            _mock_caldav_event(_make_ical_allday("out", "Day after", date(2026, 12, 1), date(2026, 12, 2))),
+        ]
+        result = cmd_list(build_parser().parse_args(
+            ["list", "--start", "2026-11-01", "--end", "2026-11-30", "--tz", "America/Los_Angeles"]
+        ))
+        la = ZoneInfo("America/Los_Angeles")
+        as_alice.calendar.return_value.search.assert_called_once_with(
+            start=datetime(2026, 11, 1, tzinfo=la), end=datetime(2026, 12, 1, tzinfo=la), expand=True,
+        )
+        assert result["date"] == "2026-11-01..2026-11-30"
+        assert [e["summary"] for e in result["events"]] == ["Last day"]
 
 
 class TestBuildParserUpdateSubcommand:
