@@ -299,6 +299,68 @@ class TestTheWholeTreeIsInTheTaskCgroup:
         assert (live_cgroup / "cgroup.procs").read_text().split() == []
 
 
+class TestABackgroundJobIsContained:
+    """A job leads its own session, so these are the claims that session could
+    have broken: that it stays in the task cgroup and ends with the namespace."""
+
+    def test_it_joins_the_task_cgroup_and_leaves_with_the_attempt(
+        self, layout, task, user_temp, live_cgroup,
+    ):
+        async def _go():
+            server = await start_tool_server(
+                _hello(user_temp),
+                sandbox_wrap=_wrap_for(layout, task, user_temp),
+                task_cgroup_path=live_cgroup,
+            )
+            try:
+                before = (live_cgroup / "cgroup.procs").read_text().split()
+                started = _text(await server.call(
+                    "Bash", "1", {"command": "sleep 60", "run_in_background": True}, None, None
+                ))
+                await asyncio.sleep(0.5)
+                after = (live_cgroup / "cgroup.procs").read_text().split()
+                return started, before, after
+            finally:
+                await server.aclose()
+
+        started, before, after = asyncio.run(_go())
+        assert "bg_1" in started, started
+        assert len(after) > len(before), (after, before)
+        for _ in range(50):
+            if not (live_cgroup / "cgroup.procs").read_text().split():
+                break
+            time.sleep(0.1)
+        assert (live_cgroup / "cgroup.procs").read_text().split() == []
+
+    @pytest.mark.parametrize("killed", [False, True], ids=["shutdown", "sigkill"])
+    def test_it_ends_with_the_namespace(self, layout, task, user_temp, killed):
+        """The SIGKILL arm is the one the server's own cleanup cannot serve:
+        only `--unshare-pid` is left to take the job with it."""
+        marker = user_temp / "job.txt"
+        loop = f'n=0; while true; do n=$((n+1)); echo "$n" > {_q(marker)}; sleep 0.2; done'
+
+        async def _go():
+            server = await start_tool_server(
+                _hello(user_temp), sandbox_wrap=_wrap_for(layout, task, user_temp)
+            )
+            try:
+                await server.call(
+                    "Bash", "1", {"command": loop, "run_in_background": True}, None, None
+                )
+                await asyncio.sleep(0.5)
+                if killed:
+                    server._proc.kill()
+                    await server._proc.wait()
+            finally:
+                await server.aclose()
+
+        asyncio.run(_go())
+        assert marker.exists(), "the job never ran, so nothing was proven"
+        first = marker.read_text()
+        time.sleep(1.5)
+        assert marker.read_text() == first, "the job is still writing after the attempt ended"
+
+
 class TestPersistenceAcrossToolCalls:
     def test_tmp_survives_between_two_calls(self, layout, task, user_temp):
         """`/tmp` is a `--tmpfs` inside the namespace. With one namespace per

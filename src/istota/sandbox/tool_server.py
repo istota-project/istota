@@ -17,8 +17,8 @@ Two front ends over the same tools, one per process:
   ends the process; in practice the CLI SIGINTs bwrap and
   ``--die-with-parent`` takes the server with it.
 
-Either way it builds one ``ToolEnv`` from the hello and binds the six core
-tools to it.
+Either way it builds one ``ToolEnv`` from the hello and binds the core tools to
+it.
 
 Every call runs through one ``ToolDispatcher`` (``session/tools/dispatch.py``),
 built from the hello by ``build_dispatcher``: the subset the hello's ``tools``
@@ -64,6 +64,7 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 import socket
 import stat
 import sys
@@ -121,7 +122,7 @@ def merge_proxy_env(
 
 
 def build_env(hello: dict[str, Any], process_env: dict[str, str] | None = None):
-    """The ``hello`` frame → the ``ToolEnv`` the six tools are bound to.
+    """The ``hello`` frame → the ``ToolEnv`` the core tools are bound to.
 
     Importable on its own, and tested that way: it is the whole translation
     between what the daemon knows about a task and what the tools enforce, and
@@ -163,7 +164,7 @@ def build_env(hello: dict[str, Any], process_env: dict[str, str] | None = None):
         # WebFetch stays in the daemon: it makes a network request with no
         # credentials and its whole hardening is about resolved IPs, none of
         # which a namespace helps with. `build_default_tools` omits it when
-        # this is None, which is what keeps the server at exactly six tools.
+        # this is None, which is what keeps it out of the server.
         web_fetch=None,
     )
 
@@ -171,7 +172,7 @@ def build_env(hello: dict[str, Any], process_env: dict[str, str] | None = None):
 def build_dispatcher(hello: dict[str, Any], process_env: dict[str, str] | None = None):
     """The ``hello`` frame → the ``ToolDispatcher`` every call runs through.
 
-    ``tools`` absent offers all six; a list offers those it names, so ``[]``
+    ``tools`` absent offers them all; a list offers those it names, so ``[]``
     offers none rather than widening to all. ``text_cap`` absent is no cap.
     A field of the wrong shape is a ``ProtocolError``: the hello is the
     daemon's, and guessing at what it meant could offer a tool it withheld.
@@ -631,8 +632,38 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+def _kill_background_jobs() -> None:
+    # Not imported: a server that never loaded the module started no job, and
+    # this also runs from a signal handler.
+    jobs = sys.modules.get("istota.session.tools.bash_jobs")
+    if jobs is not None:
+        jobs.kill_all_jobs()
+
+
+def _die_by_signal(signum: int, frame: Any) -> None:
+    """Kill the jobs, then die of ``signum`` as if nothing had caught it.
+
+    A job leads its own session, so a signal to this process does not reach it.
+    The death stays a signal's because the daemon classifies on that: a deploy
+    restart that read as an exit would fail the task rather than requeue it
+    (`remote._TERMINATED_PREFIX`).
+    """
+    _kill_background_jobs()
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
+    signal.signal(signal.SIGTERM, _die_by_signal)
+    signal.signal(signal.SIGHUP, _die_by_signal)
+    try:
+        return _serve(args)
+    finally:
+        _kill_background_jobs()
+
+
+def _serve(args: argparse.Namespace) -> int:
     if args.mcp:
         return _main_mcp(args.hello)
     try:

@@ -2897,7 +2897,7 @@ class NativeBrain:
     def _build_tools(self, req: BrainRequest, server=None):
         """The tool surface for one request, filtered by ``allowed_tools``.
 
-        The six core tools are proxies onto ``server``; ``WebFetch`` is built
+        The core tools are proxies onto ``server``; ``WebFetch`` is built
         here and runs in the daemon, unchanged — it makes a credential-free
         network request whose whole hardening is about the IPs it resolves, and
         a namespace helps with none of that.
@@ -2905,7 +2905,7 @@ class NativeBrain:
         ``server=None`` yields no core tools. That is the text-only case (empty
         ``allowed_tools``) and it is also what a caller that skipped
         ``_start_tool_server`` gets, which is honest rather than convenient: the
-        six live in the server now, so with no server there are none.
+        core tools live in the server now, so with no server there are none.
         """
         if not req.allowed_tools:
             return []
