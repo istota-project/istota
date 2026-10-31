@@ -123,6 +123,8 @@ RISKY_KEYS: frozenset[tuple[str, ...]] = frozenset({
     ("sharing", "ocm", "enabled"),
     # Lifts the private-address refusal for daemon-side fetches.
     ("sharing", "private_hosts"),
+    # Lifts it for Chrome, which runs pages somebody else wrote.
+    ("browser", "private_hosts"),
 })
 
 

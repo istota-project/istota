@@ -15,8 +15,9 @@ reach directly, since Chrome sends loopback past a proxy unless told otherwise
 (`chrome_args`). WebRTC's UDP is the one route a proxy does not see, and the
 managed policy in `chrome-policy.json` turns it off.
 
-`BROWSER_PRIVATE_HOSTS` is the operator's grant: exact names that may resolve to
-a private address. No grant reaches loopback. A granted name that resolves to the
+`BROWSER_PRIVATE_HOSTS` is the operator's grant, `[browser] private_hosts` in
+istota's config: exact names that may resolve to a private address. No grant
+reaches loopback. A granted name that resolves to the
 container's own network address would reach the API, which is why a grant is
 exact names chosen by the operator.
 
