@@ -35,6 +35,7 @@ import secrets
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -123,6 +124,22 @@ def probe(sentinel: str, canary: str, sock: Path, sentinel_path: Path, python: s
         'echo "SERVER_STDOUT=$(readlink /proc/$PPID/fd/1)"',
         'echo "SERVER_STDERR=$(readlink /proc/$PPID/fd/2)"',
     ])
+
+
+def _comm_once_execed(pid: int, expected: str = "bwrap", deadline_seconds: float = 10.0) -> str:
+    """The launcher reports its pid before it execs, so a read on arrival can
+    still see `python`. The same pid must become ``expected``."""
+    comm = "?"
+    deadline = time.monotonic() + deadline_seconds
+    while time.monotonic() < deadline:
+        try:
+            comm = Path(f"/proc/{pid}/comm").read_text().strip()
+        except OSError:
+            return comm
+        if comm == expected:
+            return comm
+        time.sleep(0.01)
+    return comm
 
 
 def _section(text: str, start: str, end: str | None = None) -> dict[str, str]:
@@ -225,10 +242,7 @@ def _attempt(tmp_path, layout, monkeypatch, *, leaky: bool = False) -> tuple:
         if pid:
             # What `_record_worker_pid` does with it: the proxies authorize it.
             proxy.authorize_pid(pid)
-            try:
-                comms.append(Path(f"/proc/{pid}/comm").read_text().strip())
-            except OSError:
-                comms.append("?")
+            comms.append(_comm_once_execed(pid))
 
     path = os.environ.get("PATH", "/usr/bin:/bin")
     req = BrainRequest(
