@@ -2087,6 +2087,64 @@ def _source(fx: Fixture, script: str, **extra_env: str) -> subprocess.CompletedP
     )
 
 
+class TestTheBrowsersPrivateHostsComeFromTheConfig:
+    """`[browser] private_hosts` is the one place a grant lives (#884): the
+    container mounts no config, so compose() hands it this list alone."""
+
+    def _hosts(self, fx, config: str | None) -> subprocess.CompletedProcess:
+        path = fx.stack / "config" / "config.toml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if config is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(config)
+        return _source(fx, 'docker() { echo "hosts=${BROWSER_PRIVATE_HOSTS-unset}"; }; compose ps')
+
+    def test_the_configs_list_reaches_compose(self, fx):
+        result = self._hosts(fx, '[browser]\nprivate_hosts = ["wiki.example.internal", "10.0.0.5"]\n')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "hosts=wiki.example.internal,10.0.0.5"
+
+    @pytest.mark.parametrize("config", [
+        None, "", "[browser]\nenabled = true\n", "this is not toml [", '[browser]\nprivate_hosts = "a.example"\n',
+    ])
+    def test_no_list_grants_nothing(self, fx, config):
+        result = self._hosts(fx, config)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "hosts="
+
+    def test_a_malformed_entry_does_not_cross(self, fx):
+        result = self._hosts(fx, (
+            '[browser]\nprivate_hosts = ["ok.example", "https://a.example", "b.example:80", '
+            '"*.example", "c.example,d.example", "e.example\\nX=1", 7]\n'
+        ))
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "hosts=ok.example"
+
+    def test_a_link_at_the_config_is_not_followed(self, fx, tmp_path):
+        """Root reads this, and uid 10001 owns the directory."""
+        target = tmp_path / "elsewhere.toml"
+        target.write_text('[browser]\nprivate_hosts = ["planted.example"]\n')
+        path = fx.stack / "config" / "config.toml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.unlink(missing_ok=True)
+        path.symlink_to(target)
+        result = _source(fx, 'docker() { echo "hosts=${BROWSER_PRIVATE_HOSTS-unset}"; }; compose ps')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "hosts="
+
+    def test_a_grant_in_dot_env_is_never_reached(self, fx):
+        """compose reads .env too; the environment outranks it only when set."""
+        (fx.stack / ".env").write_text(fx.env_text() + "BROWSER_PRIVATE_HOSTS=internal.example\n")
+        result = self._hosts(fx, "")
+        assert result.stdout.strip() == "hosts="
+
+    def test_its_pattern_is_the_configs(self):
+        from istota.config import PRIVATE_HOST_PATTERN
+
+        assert f'PATTERN = r"{PRIVATE_HOST_PATTERN}"' in SCRIPT.read_text()
+
+
 class TestContainerLogsReachTheJournal:
     """On the VM container output goes to the journal, which is what a host's
     log shipping reads; json-file kept it out of it (#712). Docker Desktop has

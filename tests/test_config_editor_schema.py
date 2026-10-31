@@ -56,6 +56,9 @@ class TestRiskyAndTables:
         for path in schema.RISKY_KEYS:
             _resolve(path)
 
+    def test_letting_the_browser_reach_a_private_address_is_risky(self):
+        assert ("browser", "private_hosts") in schema.RISKY_KEYS
+
     def test_granting_a_devbox_the_forge_tokens_is_risky(self):
         assert ("devbox", "forge_users") in schema.RISKY_KEYS
 

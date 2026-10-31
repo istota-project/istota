@@ -1348,6 +1348,9 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # vnc_url = ""                    # external noVNC URL, if you expose the live view.
 #                                 #   The console no longer binds all interfaces;
 #                                 #   put it behind the reverse proxy, not on 0.0.0.0.
+# private_hosts = []              # exact host names Chrome may reach on a private
+#                                 #   address. Every other address must be public,
+#                                 #   and loopback is refused whatever is listed.
 
 # ============================================================================
 # WordPress skill (docs/features/wordpress.md)
