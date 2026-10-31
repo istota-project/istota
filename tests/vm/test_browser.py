@@ -15,6 +15,14 @@ service, is not in this stack: the wizard refuses its profile without Talk.
 
 Control `browser-on-default-network`: the browser container is connected to
 the default network.
+
+The firewall outside Chrome (#884): a raw socket from the browser container is
+what a compromised renderer has, past the egress proxy, and the VM's DOCKER-USER
+rules drop it. The daemon shares that network and takes its default route through
+it, so it is asked too.
+
+Control `no-browser-firewall`: the rules are removed, as on a VM that never ran
+the unit.
 """
 
 from __future__ import annotations
@@ -68,12 +76,30 @@ def stack(local_stack):
         lambda: vm.out(f"docker inspect -f '{{{{.State.Health.Status}}}}' {cid}", check=False) == "healthy",
         timeout=900, interval=10, what="the browser container to become healthy",
     )
+    # web waits on the daemon's health, so on a session that just deployed it comes
+    # up after the browser, and the in-session controls below ask it to answer.
+    web = f"{_default_network_address(vm, 'web')}:8766"
+    lima.wait_for(
+        lambda: _connect(vm, lima.container(vm, "daemon"), [web], user="10001") == {web: "reached"},
+        timeout=120, interval=3, what="web to listen",
+    )
     if lima.control() == "browser-on-default-network":
         vm.run(f"docker network connect istota_default {cid}")
         try:
             yield vm
         finally:
             vm.run(f"docker network disconnect istota_default {cid}")
+        return
+    if lima.control() == "no-browser-firewall":
+        vm.run("""
+iptables -w 5 -S DOCKER-USER | { grep -F 'istota-browser:' || true; } | sed 's/^-A /-D /' | while read -r rule; do
+    eval "iptables -w 5 ${rule}"
+done
+""")
+        try:
+            yield vm
+        finally:
+            vm.run("systemctl restart istota-devbox-egress.service")
         return
     yield vm
 
@@ -108,3 +134,39 @@ class TestTheBrowserReachesNoPublishedPort:
         from_browser = _connect(stack, lima.container(stack, "browser"), targets)
         reached = sorted(t for t, outcome in from_browser.items() if outcome == "reached")
         assert reached == [], f"row 17: the browser reached {reached}: {from_browser}"
+
+
+@parity.witness(17)
+class TestTheFirewallOutsideChrome:
+    TARGETS = [f"{lima.METADATA_ADDR}:80", f"{lima.PRIVATE_ADDR}:80"]
+
+    def test_the_browser_has_its_fixed_address(self, stack):
+        cid = lima.container(stack, "browser")
+        address = stack.out(
+            "docker inspect -f '{{(index .NetworkSettings.Networks \"istota_browser\").IPAddress}}' " + cid)
+        assert address == "172.29.0.2"
+
+    def test_a_raw_socket_reaches_no_private_range_and_does_reach_the_internet(self, stack):
+        for target in self.TARGETS:
+            assert stack.ok(f"curl -s -m 5 -o /dev/null http://{target}/"), f"{target} does not answer the VM"
+        outcome = _connect(stack, lima.container(stack, "browser"), self.TARGETS + ["deb.debian.org:80"])
+        assert outcome["deb.debian.org:80"] == "reached", outcome
+        reached = sorted(t for t in self.TARGETS if outcome[t] == "reached")
+        assert reached == [], f"the browser reached {reached}: {outcome}"
+
+    def test_the_daemon_on_the_same_network_keeps_its_reach(self, stack):
+        outcome = _connect(stack, lima.container(stack, "daemon"), self.TARGETS, user="10001")
+        assert set(outcome.values()) == {"reached"}, outcome
+
+    def test_an_operators_grant_opens_one_address(self, stack):
+        env_file = "/srv/app/istota/host.env"
+        stack.run(f"cp {env_file} {lima.SCRATCH}/host.env.browser-grant")
+        try:
+            stack.run(f"istota-stack host-env ISTOTA_BROWSER_EGRESS_ALLOW={lima.PRIVATE_ADDR} && "
+                      "systemctl restart istota-devbox-egress.service")
+            outcome = _connect(stack, lima.container(stack, "browser"), self.TARGETS)
+            assert outcome[f"{lima.PRIVATE_ADDR}:80"] == "reached", outcome
+            assert outcome[f"{lima.METADATA_ADDR}:80"] != "reached", outcome
+        finally:
+            stack.run(f"cp {lima.SCRATCH}/host.env.browser-grant {env_file} && "
+                      "systemctl restart istota-devbox-egress.service")

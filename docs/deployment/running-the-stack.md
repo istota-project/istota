@@ -234,6 +234,14 @@ private_hosts = ["wiki.example.internal", "git.example.internal"]
 
 A listed name still cannot reach the browser container's own loopback, where its API and debugging ports are.
 
+On a VM there is a second check outside the container, a firewall that drops the browser's traffic to every private range. It cannot read names, so also list the addresses those names resolve to in `/srv/app/istota/host.env`, then run `systemctl restart istota-devbox-egress`:
+
+```
+ISTOTA_BROWSER_EGRESS_ALLOW=192.0.2.10 192.0.2.128/25
+```
+
+`istota-stack up` warns when `private_hosts` names a host and this list is empty. If a name's address changes, the firewall drops it until you update the list. The firewall identifies the browser by a fixed address, `172.29.0.2`. If `172.29.0.0/24` is taken on your host, set `ISTOTA_BROWSER_SUBNET` in `host.env` to another `x.y.z.0/24`, restart that unit and run `istota-stack up`.
+
 ### Talk over the signaling server
 
 The `signaling` profile replaces polling Nextcloud for Talk messages with a WebSocket that Nextcloud pushes to. It cuts inbound latency to a single round trip and removes a request per room per cycle, which is what makes it worth the extra container on a deployment with more than a handful of rooms.

@@ -76,8 +76,11 @@ class TestTheEgressRules:
         assert result.returncode == 0, result.stderr
         return [line.split() for line in calls.read_text().splitlines()]
 
+    def _devbox_inserts(self, tmp_path: Path, env: dict | None = None) -> list[list[str]]:
+        return [c for c in self._run(tmp_path, env) if "-I" in c and "istota-devbox:" in c]
+
     def test_every_destination_is_dropped_from_the_default_subnet(self, tmp_path):
-        inserts = [c for c in self._run(tmp_path) if "-I" in c]
+        inserts = self._devbox_inserts(tmp_path)
         dests = {c[c.index("-d") + 1] for c in inserts}
         sources = {c[c.index("-s") + 1] for c in inserts}
         assert dests == WANTED
@@ -85,8 +88,7 @@ class TestTheEgressRules:
         assert all(c[-2:] == ["-j", "DROP"] for c in inserts)
 
     def test_the_subnet_comes_from_the_environment(self, tmp_path):
-        inserts = [c for c in self._run(tmp_path, {"ISTOTA_DEVBOX_SUBNET": "172.31.0.0/24"})
-                   if "-I" in c]
+        inserts = self._devbox_inserts(tmp_path, {"ISTOTA_DEVBOX_SUBNET": "172.31.0.0/24"})
         assert {c[c.index("-s") + 1] for c in inserts} == {"172.31.0.0/24"}
 
     def test_every_rule_goes_to_the_front_and_waits_for_the_lock(self, tmp_path):
@@ -317,7 +319,7 @@ def _first_verdict(chain: list[list[str]], src: str, dst: str, proto: str, dport
     import ipaddress
 
     for rule in chain:
-        if "--ctorigdst" in rule:
+        if "--ctorigdst" in rule or "--ctstate" in rule:
             continue
         matched = True
         negate = False
@@ -350,6 +352,106 @@ def _first_verdict(chain: list[list[str]], src: str, dst: str, proto: str, dport
     return None
 
 
+BROWSER = "172.29.0.2"
+#: The daemon's address on the same network, which also holds its default route.
+BROWSER_NETWORK_PEER = "172.29.0.129"
+BROWSER_COMMENT_PREFIX = "istota-browser:"
+
+
+class TestTheBrowserFirewall:
+    """The rules outside Chrome (#884): the egress proxy depends on Chrome honouring
+    its flags, and a compromised renderer can open its own sockets. Scoped to the
+    browser's one address, since the daemon's traffic leaves through this network."""
+
+    @pytest.fixture
+    def rig(self):
+        return TestTheHostLoopbackBlock()
+
+    def _browser_rules(self, rig, tmp_path: Path) -> list[list[str]]:
+        return [r for r in rig._chain(tmp_path)
+                if any(t.startswith(BROWSER_COMMENT_PREFIX) for t in r)]
+
+    @pytest.mark.parametrize("dest", [
+        "169.254.169.254", "168.63.129.16", "10.0.0.1", "172.18.0.3", "192.168.1.1", "100.64.0.1",
+    ])
+    def test_the_browser_reaches_no_private_range(self, rig, tmp_path, dest):
+        rig._run(tmp_path, {})
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 80, dst=dest) == "DROP"
+
+    def test_it_drops_what_a_devbox_drops(self, rig, tmp_path):
+        rig._run(tmp_path, {})
+        drops = {r[r.index("-d") + 1] for r in self._browser_rules(rig, tmp_path) if "DROP" in r}
+        assert drops == WANTED
+
+    def test_the_browser_still_reaches_the_internet(self, rig, tmp_path):
+        rig._run(tmp_path, {})
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="1.1.1.1") != "DROP"
+
+    def test_the_daemon_on_the_same_network_is_not_filtered(self, rig, tmp_path):
+        rig._run(tmp_path, {})
+        assert rig._verdict(tmp_path, BROWSER_NETWORK_PEER, "tcp", 443, dst="10.0.0.1") != "DROP"
+        assert rig._verdict(tmp_path, BROWSER_NETWORK_PEER, "tcp", 9223, dst=BROWSER) != "DROP"
+
+    def test_replies_pass_before_any_drop(self, rig, tmp_path):
+        """DOCKER-USER runs ahead of Docker's own conntrack accept, so without this
+        the API's answers to the daemon and a published port's are dropped."""
+        rig._run(tmp_path, {})
+        rules = self._browser_rules(rig, tmp_path)
+        first = rules[0]
+        assert first[first.index("-s") + 1] == BROWSER
+        assert first[first.index("--ctstate") + 1] == "ESTABLISHED,RELATED"
+        assert first[first.index("-j") + 1] == "RETURN"
+        assert all(r[r.index("-s") + 1] == BROWSER for r in rules)
+        chain = rig._chain(tmp_path)
+        assert chain.index(first) < min(chain.index(r) for r in rules if r[r.index("-j") + 1] == "DROP")
+
+    def test_the_host_loopback_returns_do_not_let_it_through(self, rig, tmp_path):
+        """A RETURN leaves the chain, so these must land in front of that block's."""
+        rig._run(tmp_path, {"HOST_LOOPBACK_BLOCK": "1", "HOST_GATEWAY_ADDR": GATEWAY,
+                            "HOST_LOOPBACK_ALLOW": "11434"})
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 11434) == "DROP"
+        assert rig._verdict(tmp_path, BROWSER, "udp", 53) == "DROP"
+        assert rig._verdict(tmp_path, CONTAINER, "tcp", 11434) == "RETURN"
+
+    @pytest.mark.parametrize("allow", ["10.0.0.5 192.168.8.0/24", "10.0.0.5,192.168.8.0/24"])
+    def test_an_operators_grant_opens_that_destination_only(self, rig, tmp_path, allow):
+        rig._run(tmp_path, {"ISTOTA_BROWSER_EGRESS_ALLOW": allow})
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="10.0.0.5") == "RETURN"
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="192.168.8.77") == "RETURN"
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="10.0.0.6") == "DROP"
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="192.168.9.1") == "DROP"
+
+    @pytest.mark.parametrize("bad", [
+        "wiki.example.internal", "10.0.0.5 nonsense", "10.0.0.256", "10.0.0.0/33", "10.0.0.5/", "0.0.0.0/0", "10.0.0.5;id",
+    ])
+    def test_an_unreadable_grant_allows_nothing_and_fails_the_unit(self, rig, tmp_path, bad):
+        result = rig._run(tmp_path, {"ISTOTA_BROWSER_EGRESS_ALLOW": bad}, ok=False)
+        assert result.returncode == 1
+        assert "ISTOTA_BROWSER_EGRESS_ALLOW" in result.stderr
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="10.0.0.5") == "DROP"
+        assert not [r for r in self._browser_rules(rig, tmp_path) if "RETURN" in r and "-d" in r]
+
+    def test_a_removed_grant_is_closed_again_and_a_rerun_converges(self, rig, tmp_path):
+        rig._run(tmp_path, {"ISTOTA_BROWSER_EGRESS_ALLOW": "10.0.0.5"})
+        rig._run(tmp_path, {})
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="10.0.0.5") == "DROP"
+        first = rig._chain(tmp_path)
+        rig._run(tmp_path, {})
+        assert rig._chain(tmp_path) == first
+
+    def test_the_subnet_setting_moves_the_address(self, rig, tmp_path):
+        rig._run(tmp_path, {"ISTOTA_BROWSER_SUBNET": "10.77.3.0/24"})
+        assert rig._verdict(tmp_path, "10.77.3.2", "tcp", 80, dst="192.168.1.1") == "DROP"
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 80, dst="192.168.1.1") != "DROP"
+
+    @pytest.mark.parametrize("bad", ["172.29.0.0/16", "172.29.0.1/24", "not-a-subnet", "300.29.0.0/24"])
+    def test_a_malformed_subnet_keeps_the_default_and_fails_the_unit(self, rig, tmp_path, bad):
+        """istota-stack falls back the same way, so the two name one address."""
+        result = rig._run(tmp_path, {"ISTOTA_BROWSER_SUBNET": bad}, ok=False)
+        assert result.returncode == 1
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 80, dst="10.0.0.1") == "DROP"
+
+
 class TestTheHostLoopbackBlock:
     """HOST_LOOPBACK_BLOCK=1: no container reaches the host gateway (on the local
     VM, Lima's address for the Mac's loopback) but on its DNS port and the TCP
@@ -364,7 +466,7 @@ class TestTheHostLoopbackBlock:
         stub.chmod(0o755)
         run_env = {
             key: value for key, value in os.environ.items()
-            if not key.startswith(("HOST_", "INGRESS", "ISTOTA_DEVBOX_SUBNET"))
+            if not key.startswith(("HOST_", "INGRESS", "ISTOTA_DEVBOX_SUBNET", "ISTOTA_BROWSER_"))
         }
         run_env.update(PATH=f"{bindir}:{os.environ['PATH']}",
                        IPT_STATE=str(tmp_path / "chain.json"), IPT_CALLS=str(tmp_path / "calls"))

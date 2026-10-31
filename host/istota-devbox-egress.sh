@@ -1,8 +1,9 @@
 #!/bin/bash
 # Re-apply the devbox egress rules in DOCKER-USER: no devbox reaches link-local
 # and cloud metadata, the Azure host agent, RFC 1918 or CGNAT addresses. The
-# host-loopback block and the proxied listener's rule, further down, are the
-# stack's other DOCKER-USER rules, kept here so one script owns the chain.
+# host-loopback block, the browser's rules and the proxied listener's rule,
+# further down, are the stack's other DOCKER-USER rules, kept here so one script
+# owns the chain.
 #
 # Ported from the Ansible role's istota-devbox-iptables.sh.j2, with the same
 # rules and the same three properties, each found on a live host:
@@ -119,6 +120,60 @@ if [ "$loopback_block" != "0" ] && [ -n "$loopback_block" ]; then
     fi
 fi
 
+# --- The browser (#884) ---
+#
+# The egress proxy in the browser container depends on Chrome honouring its flags,
+# and a renderer running --no-sandbox could open its own sockets. These hold
+# without Chrome's help. Scoped to the browser's one address, never the network:
+# the daemon is on that network too and can take its default route through it.
+# The replies' RETURN comes first because DOCKER-USER runs ahead of Docker's own
+# conntrack accept, and the API answers the daemon and its published ports.
+# After the loopback block, so these land in front of its RETURNs.
+#
+# ISTOTA_BROWSER_EGRESS_ALLOW (IPv4 addresses or CIDRs) is the firewall's half of
+# `[browser] private_hosts`: this cannot read names. As above, what it cannot read
+# fails the unit after applying the rest, and allows nothing. IPv4 only.
+BROWSER_SUBNET_DEFAULT="172.29.0.0/24"
+BROWSER_COMMENT="istota-browser: the browser reaches no private range but its grants"
+browser_failed=0
+
+iptables -w 5 -S DOCKER-USER | { grep -F -- "--comment \"${BROWSER_COMMENT}\"" || true; } \
+    | sed 's/^-A /-D /' | while read -r rule; do
+        eval "iptables -w 5 ${rule}"
+    done
+
+browser_subnet="${ISTOTA_BROWSER_SUBNET:-$BROWSER_SUBNET_DEFAULT}"
+if ! [[ "$browser_subnet" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\.0/24$ ]] \
+        || ! is_ipv4 "${browser_subnet%/24}"; then
+    echo "ISTOTA_BROWSER_SUBNET is a x.y.z.0/24, not '${browser_subnet}'; using ${BROWSER_SUBNET_DEFAULT}" >&2
+    browser_failed=1
+    browser_subnet="$BROWSER_SUBNET_DEFAULT"
+fi
+browser_addr="${browser_subnet%.0/24}.2"
+
+browser_allowed=""
+for entry in $(printf '%s' "${ISTOTA_BROWSER_EGRESS_ALLOW:-}" | tr ',' ' '); do
+    if ! [[ "$entry" =~ ^[0-9.]+(/([89]|[12][0-9]|3[0-2]))?$ ]] || ! is_ipv4 "${entry%/*}"; then
+        echo "ISTOTA_BROWSER_EGRESS_ALLOW: '${entry}' is not an IPv4 address or a /8 to /32 range; allowing none" >&2
+        browser_failed=1
+        browser_allowed=""
+        break
+    fi
+    browser_allowed="${browser_allowed} ${entry}"
+done
+
+browser_rule() {
+    iptables -w 5 -I DOCKER-USER 1 -s "$browser_addr" "$@" -m comment --comment "$BROWSER_COMMENT"
+}
+for dest in 169.254.0.0/16 168.63.129.16/32 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10; do
+    browser_rule -d "$dest" -j DROP
+done
+for entry in $browser_allowed; do
+    browser_rule -d "$entry" -j RETURN
+done
+iptables -w 5 -I DOCKER-USER 1 -s "$browser_addr" -m conntrack --ctstate ESTABLISHED,RELATED \
+    -m comment --comment "$BROWSER_COMMENT" -j RETURN
+
 # --- The proxied listener (INGRESS=proxied) ---
 #
 # Only the upstream proxy may reach the published nginx port: with
@@ -154,4 +209,4 @@ if [ "${INGRESS:-}" = "proxied" ]; then
     done
 fi
 
-[ "$loopback_failed" = 0 ] || exit 1
+[ "$loopback_failed" = 0 ] && [ "$browser_failed" = 0 ] || exit 1
