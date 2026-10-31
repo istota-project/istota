@@ -119,7 +119,8 @@ _UNSET = object()
 # module's own call sites and its tests use them. The bundle's cache policy and
 # mount are there too, shared with the first-run setup server.
 from .request_guards import (
-    BodyError, cross_site_refusal, host_refusal, origin_authority_refusal, origin_refusal, read_bounded_body,
+    BodyError, cross_site_refusal, host_refusal, origin_authority_refusal, origin_refusal, published_authority,
+    read_bounded_body,
 )
 from .static_dir import (  # noqa: F401 - re-export, see above
     cache_header_statics,
@@ -605,7 +606,15 @@ def _verify_origin(request: Request) -> None:
         raise _ForbiddenException("missing origin")
     if not _config or not _config.site.hostname:
         raise _ForbiddenException("site.hostname not configured")
-    refusal = origin_refusal(request.headers, _config.site.hostname)
+    hostname, scheme = _get_external_origin()
+    expected_scheme: str | None = scheme
+    if scheme == "http" or not _https_only:
+        hostname = published_authority(hostname, request.headers.get("host") or "")
+        if scheme == "https":
+            # Insecure cookies on a public name say the front may be plain
+            # http, not that it is, so the scheme is left open there.
+            expected_scheme = None
+    refusal = origin_refusal(request.headers, hostname, expected_scheme)
     if refusal:
         raise _ForbiddenException(refusal)
 

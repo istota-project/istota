@@ -1079,6 +1079,65 @@ class TestCsrfOriginCheck:
         )
         assert resp.status_code != 403
 
+    @pytest.mark.parametrize("origin", [
+        "http://example.com",
+        "https://example.com:8088",
+        "http://example.com:8088",
+    ])
+    async def test_a_sibling_origin_on_the_hostname_is_refused(self, client, app, origin):
+        cookies = await self._login(client, app)
+        resp = await client.put(
+            "/istota/api/feeds/entries/batch",
+            json={"entry_ids": [1], "status": "read"},
+            cookies=cookies,
+            headers={"origin": origin},
+        )
+        assert resp.status_code == 403
+
+    @pytest.mark.parametrize("hostname, host, origin, allowed", [
+        # `local` ingress publishes on 8080 when the hostname names no port.
+        ("localhost", "localhost:8080", "http://localhost:8080", True),
+        ("localhost", "localhost:8080", "http://localhost:9999", False),
+        ("localhost", "localhost:8080", "https://localhost:8080", False),
+        ("localhost:8181", "localhost:8181", "http://localhost:8181", True),
+        ("localhost:8181", "localhost:9999", "http://localhost:9999", False),
+    ])
+    async def test_a_loopback_install_answers_only_its_own_port(
+        self, client, app, monkeypatch, hostname, host, origin, allowed,
+    ):
+        import istota.webui.app as mod
+        cookies = await self._login(client, app)
+        monkeypatch.setattr(mod._config.site, "hostname", hostname)
+        resp = await client.put(
+            "/istota/api/feeds/entries/batch",
+            json={"entry_ids": [1], "status": "read"},
+            cookies=cookies,
+            headers={"origin": origin, "host": host},
+        )
+        assert (resp.status_code != 403) is allowed
+
+    @pytest.mark.parametrize("origin, host, allowed", [
+        ("http://istota.test:8080", "istota.test:8080", True),
+        ("https://istota.test", "istota.test", True),
+        ("http://istota.test", "127.0.0.1:8080", True),
+        ("http://istota.test:9999", "istota.test:8080", False),
+        ("https://attacker.example", "istota.test", False),
+    ])
+    async def test_plain_http_cookies_widen_the_scheme_not_the_port(
+        self, client, app, monkeypatch, origin, host, allowed,
+    ):
+        import istota.webui.app as mod
+        cookies = await self._login(client, app)
+        monkeypatch.setattr(mod, "_https_only", False)
+        monkeypatch.setattr(mod._config.site, "hostname", "istota.test")
+        resp = await client.put(
+            "/istota/api/feeds/entries/batch",
+            json={"entry_ids": [1], "status": "read"},
+            cookies=cookies,
+            headers={"origin": origin, "host": host},
+        )
+        assert (resp.status_code != 403) is allowed
+
     async def test_empty_hostname_returns_403(self, client, app):
         """When site.hostname is empty and Host header is missing, CSRF check must reject."""
         import istota.webui.app as mod

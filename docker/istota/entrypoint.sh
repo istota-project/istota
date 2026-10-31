@@ -115,7 +115,8 @@ elif config.workspace_path is not None and (expected or config.nextcloud_enabled
             "this install was set up with, which was renamed, moved, deleted or is on a volume that "
             "is not connected. Put the folder back; nothing is written into the stand-in.")
 ingress, domain = os.environ.get("INGRESS", ""), os.environ.get("DOMAIN", "")
-if ingress in ("direct", "proxied") and config.site.hostname != domain:
+# The hostname may name a public port; DOMAIN is the bare name a certificate covers.
+if ingress in ("direct", "proxied") and urlsplit(f"//{config.site.hostname}").hostname != urlsplit(f"//{domain}").hostname:
     refusals.append(
         f"[site] hostname is {config.site.hostname!r} and the stack's DOMAIN is {domain!r}; "
         "behind TLS they must be the same name, or every login fails its origin check.")

@@ -3,8 +3,9 @@
 ``web_app`` and the first-run setup server both need them, and the setup
 server must run with no config, so it cannot import ``web_app`` (which loads
 config at import). Each app keeps its own policy around these: ``web_app``
-compares the origin with ``[site] hostname``, or in no-auth mode with the
-loopback names; the setup server compares it with the request's own ``Host``.
+compares the origin with the external origin ``[site] hostname`` gives, or in
+no-auth mode with the loopback names; the setup server compares it with the
+request's own ``Host``.
 The ``Host`` check is ``web_app``'s alone, on an install with local login
 codes or no-auth.
 
@@ -26,22 +27,51 @@ class BodyError(Exception):
         self.message = message
 
 
-def _hostname(authority: str) -> str | None:
-    # urlsplit takes the brackets off an IPv6 literal and lowercases the name,
-    # which is what the Origin side gets too.
-    return urlsplit(f"//{authority}").hostname
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
-def origin_refusal(headers, hostname: str) -> str | None:
-    """Why the request's ``Origin`` (or ``Referer``) does not name ``hostname``.
+def origin_key(url: str) -> tuple[str, str, int] | None:
+    """A web URL's scheme, lowercased hostname and effective port, or None."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    default = _DEFAULT_PORTS.get(parts.scheme)
+    if default is None or not parts.hostname:
+        return None
+    return parts.scheme, parts.hostname, default if port is None else port
 
-    None when it does. The port is not compared: a published port and the
-    port the app listens on differ on every deployment shape.
+
+def published_authority(hostname: str, request_host: str) -> str:
+    """The authority a plain-http stack answers at: ``hostname``, with a port.
+
+    A portless hostname does not say where `local` ingress published (8080 by
+    default), and a page cannot forge ``Host``, so a ``Host`` with the same name
+    supplies the port. A page on a sibling port still sends its own in Origin.
+    """
+    try:
+        configured = urlsplit(f"//{hostname}")
+        if configured.port is not None or not configured.hostname:
+            return hostname
+    except ValueError:
+        return hostname
+    seen = origin_key(f"http://{request_host}")
+    return request_host if seen is not None and seen[1] == configured.hostname else hostname
+
+
+def origin_refusal(headers, authority: str, scheme: str | None = None) -> str | None:
+    """Why the request's ``Origin`` (or ``Referer``) is not ``authority``.
+
+    None when it is. Scheme, name and effective port are all compared, because
+    a browser's origin is all three. With no ``scheme`` the request's own is
+    taken, which still fixes the default port when ``authority`` names none.
     """
     origin = headers.get("origin") or headers.get("referer")
     if not origin:
         return "missing origin"
-    if urlsplit(origin).hostname != _hostname(hostname):
+    seen = origin_key(origin)
+    if seen is None or seen != origin_key(f"{scheme or seen[0]}://{authority}"):
         return "origin mismatch"
     return None
 
