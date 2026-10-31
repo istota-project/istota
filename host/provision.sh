@@ -41,10 +41,6 @@
 #                        by spaces or commas
 #   ISTOTA_BROWSER_SUBNET  a x.y.z.0/24 for the browser's network, when the default
 #                        172.29.0.0/24 is taken here; the browser is its .2
-#   ISTOTA_BROWSER_EGRESS_ALLOW  IPv4 addresses or ranges the browser container may
-#                        reach though they are private, separated by spaces or
-#                        commas: the addresses of [browser] private_hosts. The
-#                        egress unit
 #   LOCAL_FORWARD_PORT   the Mac port Lima forwards to this VM, written by the
 #                        Mac's istota-stack and empty on a server; setup
 #                        publishes nginx and its setup page on it
@@ -569,6 +565,7 @@ install -m 0755 "${HERE}/istota-browser-watchdog.sh" /usr/local/sbin/istota-brow
 install -m 0755 "${HERE}/istota-certbot" /usr/local/sbin/istota-certbot
 mount_unit_changed=""
 for unit in istota-stack.service istota-devbox-egress.service \
+        istota-browser-grants.service istota-browser-grants.timer \
         istota-browser-watchdog.service istota-browser-watchdog.timer \
         istota-certbot.service istota-certbot.timer mount-nextcloud.service \
         istota-config-apply.service istota-config-apply.path istota-config-apply.timer \
@@ -660,6 +657,7 @@ fi
 # --- Firewall: devbox egress, the proxied listener, the host's loopback ------
 systemctl enable istota-devbox-egress.service >/dev/null
 systemctl restart istota-devbox-egress.service
+systemctl enable --now istota-browser-grants.timer >/dev/null
 
 # --- The web config editor's applier -----------------------------------------
 # The path unit runs istota-stack config-apply when the web writes a request;
