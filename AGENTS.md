@@ -143,6 +143,7 @@ src/istota/
 │   ├── network_proxy.py  # CONNECT proxy for network isolation
 │   ├── kv_namespaces.py  # Which `istota_kv` namespaces the model may not touch → sandbox.md
 │   ├── git_hardening.py  # The `-c` overrides that stop a repository's own config running a program → sandbox.md
+│   ├── git_namespace.py  # Daemon-side git in a namespace holding one user's repositories: the code review, the reaper, the repos migrator → sandbox.md
 │   ├── git_remote_scrub.py  # Strips credentials out of the git configs under `developer.repos_dir` → sandbox.md
 │   ├── user_scope.py     # Scoping a user id under a root, in one place → sandbox.md
 │   ├── attachment_source.py  # Where the daemon may read an inbound attachment from, opened with no link followed → sandbox.md

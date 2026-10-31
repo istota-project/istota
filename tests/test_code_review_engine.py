@@ -40,6 +40,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from istota.sandbox.git_namespace import namespaced
 from istota.skills.code_review import engine
 from istota.skills.code_review.engine import (
     Finding,
@@ -1580,7 +1581,7 @@ class TestTheGitNamespace:
         root.mkdir(parents=True)
         worktree = root / "project"
 
-        argv = engine._namespaced(["git", "status"], root, worktree)
+        argv = namespaced(["git", "status"], root, worktree)
 
         assert argv[0] == "/daemon/bwrap" and "--unshare-user" in argv
         assert "--unshare-net" in argv and "--proc" not in argv
@@ -1598,7 +1599,7 @@ class TestTheGitNamespace:
         (tmp_path / "link").symlink_to(tmp_path / "real")
         root = tmp_path / "link" / "alice"
 
-        argv = engine._namespaced(["git", "status"], root, root / "project")
+        argv = namespaced(["git", "status"], root, root / "project")
 
         pairs = list(zip(argv, argv[1:], argv[2:]))
         assert ("--ro-bind", str(root), str(root)) in pairs
@@ -1607,4 +1608,4 @@ class TestTheGitNamespace:
     def test_without_bwrap_git_runs_as_it_was(self, monkeypatch, tmp_path):
         monkeypatch.setattr("istota.executor._bwrap_available", lambda: False)
 
-        assert engine._namespaced(["git", "status"], tmp_path, tmp_path) is None
+        assert namespaced(["git", "status"], tmp_path, tmp_path) is None

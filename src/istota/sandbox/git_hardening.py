@@ -48,7 +48,8 @@ list — `worktree_reaper`, which runs `git status` inside exactly those
 model-writable checkouts — cannot reach for it there. Same reason
 `forge_bin.py` exists.
 
-stdlib-only leaf: `os`, `subprocess` and `pathlib`, nothing from the package.
+stdlib-only leaf: `os`, `subprocess` and `pathlib`. The one package import is
+`git_namespace`, at function scope and only for a call that names a `scope`.
 """
 
 from __future__ import annotations
@@ -140,6 +141,8 @@ GIT_HARDENING = (
 #: configured forge (`worktree_reaper._origin_is_a_forge`); it still reads `http.*`
 #: config such as `http.cookieFile`, whose URL-scoped spelling would outrank a `-c`
 #: override, and what that sends goes to the forge.
+#: In the reaper's namespace (`run_git`'s `scope`) such a file can only be one
+#: in the same user's subtree.
 #:
 #: Half the policy: what is *set*. The other half is `GIT_SUBPROCESS_ENV_UNSET`
 #: below, and `git_env` is what applies both — reach for that rather than for
@@ -208,8 +211,9 @@ GIT_SUBPROCESS_ENV: Mapping[str, str] = MappingProxyType(
 #:   and they are that operator's way of debugging a failing sweep.
 #: - `GIT_ASKPASS` names a program, but it comes from the daemon's environment
 #:   rather than the repository, and it is a deployment's legitimate way to
-#:   give the reaper's fetch an identity. `GIT_SSH_COMMAND` is unreachable now
-#:   that `GIT_ALLOW_PROTOCOL` refuses ssh.
+#:   give the reaper's fetch an identity, from a program under `/usr` since the
+#:   fetch runs in a namespace. `GIT_SSH_COMMAND` is unreachable now that
+#:   `GIT_ALLOW_PROTOCOL` refuses ssh.
 GIT_SUBPROCESS_ENV_UNSET: tuple[str, ...] = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -245,6 +249,8 @@ def run_git(
     timeout: float = 30.0,
     merge_stderr: bool = False,
     on_error: str | None = "",
+    scope: Path | None = None,
+    network: bool = False,
 ) -> tuple[int, str]:
     """``(exit_status, output)`` from ``git`` in ``cwd``. Never raises.
 
@@ -268,15 +274,27 @@ def run_git(
     all — a missing binary, a timeout. ``None`` means the exception's own
     message, which is what a caller that surfaces the output wants; the default
     ``""`` is for a caller that parses it and must not be handed prose.
+
+    ``scope`` runs git in :mod:`istota.sandbox.git_namespace`, with that one
+    directory bound read-write, because nothing here stops a git directory
+    pointing at another repository. ``network`` keeps the network there, for the
+    one call that fetches. A bwrap that fails to start reads as a non-zero exit,
+    which every caller already treats as unanswered.
     """
+    argv = ["git", *GIT_HARDENING, "-C", str(cwd), *args]
     try:
+        wrapped = None
+        if scope is not None:
+            from istota.sandbox.git_namespace import namespaced
+
+            wrapped = namespaced(argv, scope, cwd, writable=True, network=network)
         proc = subprocess.run(
-            ["git", *GIT_HARDENING, "-C", str(cwd), *args],
+            wrapped or argv,
             capture_output=True,
             timeout=timeout,
             env=git_env(),
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         return 1, str(exc) if on_error is None else on_error
     out = proc.stdout + proc.stderr if merge_stderr else proc.stdout
     return proc.returncode, out.decode("utf-8", "surrogateescape")
