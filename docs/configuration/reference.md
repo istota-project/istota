@@ -844,7 +844,7 @@ The rules for writing the table:
 - To add a consumer to a host already in the table, add it to that host's list. A second line for the same host is a TOML error, which `istota apply` and Admin > Configuration refuse.
 - A host with `[]` grants nothing. A consumer not in the table above is discarded while the others on that line still apply, and `istota apply` and Admin > Configuration refuse the change.
 
-Admin > Configuration shows the table as `private_hosts` under General, written as TOML. Any edit to it needs the typed confirmation.
+Admin > Configuration shows the table as `private_hosts` under General, written as TOML. The field's text must include the `[private_hosts]` line, so a first grant in an empty field needs that line above it. Any edit to it needs the typed confirmation.
 
 This table does not touch `[security.network] extra_hosts` or the hosts of the forge and Nextcloud URLs. Those are the sandbox's own allowlist, a different permission.
 
