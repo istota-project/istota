@@ -258,6 +258,22 @@ def test_browser_url_spelling_and_upgrade(navigation, requested, landed):
     assert navigate.call_count == 1
 
 
+@pytest.mark.parametrize(("requested", "landed"), [
+    ("https://ja.wikipedia.org/wiki/日本語", "https://ja.wikipedia.org/wiki/%E6%97%A5%E6%9C%AC%E8%AA%9E"),
+    ("ja.wikipedia.org/wiki/日本語", "https://ja.wikipedia.org/wiki/%E6%97%A5%E6%9C%AC%E8%AA%9E"),
+    ("https://news.example/?q=zażółć", "https://news.example/?q=za%C5%BC%C3%B3%C5%82%C4%87"),
+    ("https://bücher.example/", "https://xn--bcher-kva.example/"),
+])
+def test_the_typed_ascii_form_still_matches_where_chrome_lands(navigation, requested, landed):
+    """Every endpoint hands `_navigate_and_wait` what `literal_url` returned."""
+    page, navigate = navigation
+    typed = browse_api.xdotool.literal_url(requested)
+    assert typed.isascii()
+    navigate.side_effect = lambda *a, **kw: page.commit(landed)
+    assert browse_api._navigate_and_wait(page, typed) is None
+    assert navigate.call_count == 1
+
+
 def test_stale_matching_url_without_a_commit_is_not_success(navigation):
     page, navigate = navigation
     page.url = REQUESTED

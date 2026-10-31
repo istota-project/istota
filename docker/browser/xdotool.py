@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import time
+from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
@@ -150,11 +151,52 @@ _SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 #: something other than fetch a web page.
 _ALLOWED_SCHEMES = ("http:", "https:")
 
+#: A URL split around its authority. Chrome reads a backslash as a slash in an
+#: http URL, so one ends the authority here too.
+_AUTHORITY_RE = re.compile(
+    r"^((?:[A-Za-z][A-Za-z0-9+.-]*:)?[/\\]*)([^/\\?#]*)(.*)$", re.DOTALL,
+)
+
+_NON_ASCII_RE = re.compile(r"[^\x00-\x7f]+")
+
+_ASCII_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+#: Characters Python's IDNA 2003 codec maps away and Chrome's UTS 46 keeps, so
+#: `faß.example` would be typed as `fass.example`, a different domain.
+_IDNA_DEVIATIONS = frozenset("ßς‌‍")
+
+
+def _ascii_url(url):
+    """Return `url` with every non-ASCII character written in ASCII.
+
+    What xdotool delivers to the omnibox of a character with no key on the
+    keymap depends on load. Measured on one container with its CPUs saturated:
+    `/wiki/日本語` arrived as `/wiki/日本` or with the path gone, 12 of 12, and
+    idle it arrived whole. A host becomes its xn-- form and everything else is
+    percent-encoded as UTF-8, which is what Chrome would send.
+    `_document_url` in browse_api compares the landing with the same IDNA
+    codec, which is why a host is converted rather than percent-encoded.
+    """
+    prefix, authority, rest = _AUTHORITY_RE.match(url).groups()
+    userinfo, at, hostport = authority.rpartition("@")
+    host, colon, port = hostport.partition(":")
+    if not host.isascii():
+        if _IDNA_DEVIATIONS.intersection(host.lower()):
+            raise UnsafeUrl(
+                "url host has a character this browser cannot convert "
+                "faithfully: give the host in its xn-- form"
+            )
+        host = host.encode("idna").decode("ascii")
+        if not _ASCII_HOST_RE.match(host):
+            raise UnsafeUrl("url host is not a valid hostname")
+    rebuilt = f"{prefix}{userinfo}{at}{host}{colon}{port}{rest}"
+    return _NON_ASCII_RE.sub(lambda m: quote(m.group(0), safe=""), rebuilt)
+
 
 def literal_url(url):
     """Return `url` for navigate() to type, or refuse it.
 
-    Three rules, and they are three because each closes something the others
+    Four rules, and they are four because each closes something the others
     do not.
 
     The **option shape** is `literal_arg`'s, reused rather than restated:
@@ -179,7 +221,14 @@ def literal_url(url):
     the remedy, and the alternative is admitting every scheme that does not
     look like a host, which is the hole rather than the cost.
 
-    Returns the stripped value, which is what the caller should go on to use.
+    **Non-ASCII** is written in ASCII (see `_ascii_url`), and that happens
+    before the scheme is read, because the scheme has to be judged on what
+    will be typed. `語file:///etc/passwd` is not scheme-shaped, and with the 語
+    dropped on the way to the omnibox it is a file read; fullwidth letters
+    fold to `file:` in the host conversion.
+
+    Returns the stripped ASCII value, which is what the caller should go on to
+    use. A second pass over it changes nothing.
     """
     url = literal_arg(url, "url", strip=True)
     if not url:
@@ -190,6 +239,10 @@ def literal_url(url):
             "which would submit the part before it and type the rest into "
             "the page that loads"
         )
+    try:
+        url = _ascii_url(url)
+    except UnicodeError:
+        raise UnsafeUrl("url cannot be written in ASCII") from None
     scheme = _SCHEME_RE.match(url)
     if scheme and scheme.group(0).lower() not in _ALLOWED_SCHEMES:
         raise UnsafeUrl(
