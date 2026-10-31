@@ -353,6 +353,15 @@ print(lean_image_tag())
         "row 2: the task reached a host without the proxy" \
         "$network_node"
 
+    docker build -q -f docker/test/Dockerfile.no-hello-check \
+        --build-arg "BASE=$lean_tag" -t "istota-test/no-hello-check:$suffix" docker/test >/dev/null
+    require_smoke_failures \
+        "no-hello-check" \
+        "$(image_overlay "istota-test/no-hello-check:$suffix" no-hello-check)" \
+        "row 2: the proxy bridges a raw tunnel without reading a ClientHello" \
+        "row 2: the proxy did not close a tunnel carrying no TLS" \
+        "$network_node"
+
     docker build -q -f docker/test/Dockerfile.every-pid-a-root \
         --build-arg "BASE=$lean_tag" -t "istota-test/every-pid-a-root:$suffix" docker/test >/dev/null
     require_smoke_failures \

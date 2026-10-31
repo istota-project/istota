@@ -4648,7 +4648,7 @@ def build_allowed_tools(
     `build_prompt`'s Tools section names `WebFetch` under the same condition, or
     a non-admin native task is told to reach for a tool that is not registered.
     """
-    tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+    tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "BashOutput", "KillShell"]
     if emissary:
         # A guest's turn takes no outbound action beyond its reply (multiplayer
         # D2), and a query or a URL is one: the host's notes about the room may be in

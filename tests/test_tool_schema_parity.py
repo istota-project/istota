@@ -31,26 +31,29 @@ def proxy():
     return {t.schema.name: t for t in build_remote_tools(None)}
 
 
-def test_the_same_six_tools_are_offered(real, proxy):
+_CORE = ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "BashOutput", "KillShell"]
+
+
+def test_the_same_core_tools_are_offered(real, proxy):
     assert set(proxy) == set(real)
-    assert set(proxy) == {"Read", "Write", "Edit", "Grep", "Glob", "Bash"}
+    assert set(proxy) == set(_CORE)
 
 
-def test_a_server_env_carries_no_web_fetch_so_the_six_are_all_of_them(tmp_path):
+def test_a_server_env_carries_no_web_fetch_so_the_core_tools_are_all_of_them(tmp_path):
     """`build_default_tools` appends WebFetch when `env.web_fetch` is set, and
     the server's env never sets it: that tool stays in the daemon, where its
     SSRF hardening and its credential-free client already are."""
     env = ToolEnv(cwd=tmp_path)
     assert env.web_fetch is None
-    assert len(build_default_tools(env)) == 6
+    assert len(build_default_tools(env)) == len(_CORE)
 
 
-@pytest.mark.parametrize("name", ["Read", "Write", "Edit", "Grep", "Glob", "Bash"])
+@pytest.mark.parametrize("name", _CORE)
 def test_the_schema_is_the_same_object_on_both_sides(real, proxy, name):
     assert proxy[name].schema is real[name].schema
 
 
-@pytest.mark.parametrize("name", ["Read", "Write", "Edit", "Grep", "Glob", "Bash"])
+@pytest.mark.parametrize("name", _CORE)
 def test_the_execution_mode_matches(real, proxy, name):
     """Not cosmetic: the loop serializes any batch containing a `sequential`
     tool, so a proxy that called Read `sequential` would silently undo parallel
@@ -59,7 +62,7 @@ def test_the_execution_mode_matches(real, proxy, name):
     assert proxy[name].execution_mode == real[name].execution_mode
 
 
-@pytest.mark.parametrize("name", ["Read", "Write", "Edit", "Grep", "Glob", "Bash"])
+@pytest.mark.parametrize("name", _CORE)
 def test_the_argument_coercion_hook_matches(real, proxy, name):
     """The half a schema constant does not cover. `prepare_arguments` decides
     what the model's arguments *mean* — Edit's turns a legacy
@@ -107,13 +110,11 @@ def test_the_proxy_table_is_the_only_place_a_tool_could_be_dropped(proxy, real):
 #
 # The OpenAI-compatible provider sends `parameters` and the MCP codec lists
 # `inputSchema`; both come from `llm/tool_json_schema.py`. These hold the two
-# renderings of the six equal, so the CLI's model and native's model are
-# shown the same arguments.
-
-_SIX = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+# renderings equal, so the CLI's model and native's model are shown the same
+# arguments.
 
 
-@pytest.mark.parametrize("name", _SIX)
+@pytest.mark.parametrize("name", _CORE)
 def test_the_provider_wire_uses_the_shared_renderer(proxy, name):
     from istota.llm.openai_compat import OpenAICompatibleProvider
     from istota.llm.tool_json_schema import tool_parameters
@@ -123,7 +124,7 @@ def test_the_provider_wire_uses_the_shared_renderer(proxy, name):
     assert wire == tool_parameters(schema)
 
 
-@pytest.mark.parametrize("name", _SIX)
+@pytest.mark.parametrize("name", _CORE)
 def test_the_mcp_input_schema_is_the_provider_rendering(proxy, name):
     """Bash is the one difference, and it is deliberate: the CLI is not shown
     `exclude_from_context`, whose stub claims the output reached the user,

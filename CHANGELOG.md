@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tasks can run long commands in the background, on both brains.** A task can start a build or a dev server, carry on working, read its output as it goes, wait for it to finish and stop it. Background commands end when the task attempt does.
 - Tasks can read a calendar over a range of dates in one call, with `--start` and `--end` on `calendar list`. A window that was not today, tomorrow or the next seven days used to take one call per day. A range over the limit is refused rather than cut short.
 - **The Taxes page shows income it has not projected yet.** Self-employment income already posted in the current month appears on its own line, marked as not yet in the projection, so it no longer looks missing from the estimate.
 - **See what the SE account patterns match.** Settings > Taxes lists the accounts each pattern list matches and their totals for the tax year, and follows your edits before you save. A list that matches nothing says so.
@@ -56,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A firewall outside the browser container.** On a VM, the browser can no longer reach private addresses or cloud metadata even if a compromised page gets past Chrome's own proxy settings. An install that lets the browser reach internal sites by name must also list their addresses in `host.env`, or those sites stop loading; the stack warns when the list is missing. The browser's network gets a fixed subnet, so the next update recreates it.
 - **Federated share offers reveal less about your users.** Another server no longer receives a user's display name, and refusals that depend on the recipient are limited per day; past the limit, an offer to an unknown address looks accepted and is dropped. The offer card, accept dialog and bell now say whether the sending server signed the offer.
 - **A task can no longer push unbounded work onto the daemon through its proxies.** Requests, skill output, open connections and concurrent skills all have limits, and a call past one gets a prompt refusal. Proxied skills now run under the task's memory, process and CPU limits, so one that needs more than `task_memory_max_mb` can be killed where it used to run, and anything still running stops when the task ends.
 - **The web app now checks the whole origin of a change, not only its hostname.** A page on another port or over http on the same hostname could pass the check that guards signed-in changes. The scheme and port must now match `[site] hostname` too. **Upgrade note:** if browsers reach a public install on a port other than 443, run `istota-stack setup --force --hostname <name>:<port>`, or every change there is refused. `DOMAIN` stays the bare name.

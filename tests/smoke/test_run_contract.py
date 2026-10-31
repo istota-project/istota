@@ -353,9 +353,10 @@ NETWORK_PROBE = r"""
 echo NETWORK_PROBE_BEGIN
 echo "dbdir=$(stat -f -c %T /data/db 2>&1)"
 code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@" 2>/dev/null; echo " rc=$?"; }
-echo "allowed=$(code --proxytunnel http://__ALLOWED__/)"
-echo "denied=$(code --proxytunnel http://__DENIED__/)"
-echo "direct=$(code --noproxy '*' http://__ALLOWED__/)"
+echo "allowed=$(code --proxytunnel -k https://__ALLOWED__/through-the-tunnel)"
+echo "no_tls=$(code --proxytunnel http://__NO_TLS__/raw-tunnel)"
+echo "denied=$(code --proxytunnel -k https://__DENIED__/)"
+echo "direct=$(code --noproxy '*' -k https://__ALLOWED__/around-the-proxy)"
 echo "skill=$(istota-skill kv namespaces 2>&1 | head -c 200 | tr '\n' ' ')"
 sleep 30
 echo NETWORK_PROBE_END
@@ -403,10 +404,12 @@ class TestATasksNetworkAndItsProxies:
     """Rows 2 and 3, on the shipped compose file with the network sandbox on.
 
     Row 2: inside the task's namespace there is no route out but the CONNECT
-    proxy, and the proxy tunnels only to an allowlisted host. The forge stub is
-    allowlisted, as any configured forge is; the scripted model endpoint, on
-    the same host, is not. `direct` is the `--unshare-net` half: without the
-    proxy the allowlisted host is unreachable too.
+    proxy, and the proxy tunnels only TLS to an allowlisted host. The TLS stub
+    is allowlisted and answers through the tunnel. The forge stub is allowlisted,
+    as any configured forge is, and speaks no TLS, so its tunnel closes before a
+    byte reaches it. The scripted model endpoint, on the same host, is not
+    allowlisted. `direct` is the `--unshare-net` half: without the proxy the
+    allowlisted host is unreachable too.
 
     Row 3: both proxy sockets refuse a process that is not descended from the
     task's registered roots, while the task's own skill call is served. A
@@ -415,9 +418,16 @@ class TestATasksNetworkAndItsProxies:
     """
 
     def test_the_proxies_answer_the_task_and_refuse_everyone_else(self, stack):
-        allowed = _hostport(stack.service("gitlab").container_url)
+        target = stack.service("tls")
+        forge = stack.service("gitlab")
+        allowed = _hostport(target.container_url)
+        no_tls = _hostport(forge.container_url)
         denied = _hostport(stack.endpoint.container_url)
-        command = NETWORK_PROBE.replace("__ALLOWED__", allowed).replace("__DENIED__", denied)
+        command = (
+            NETWORK_PROBE.replace("__ALLOWED__", allowed)
+            .replace("__NO_TLS__", no_tls)
+            .replace("__DENIED__", denied)
+        )
         stack.script([
             {"tool_calls": [{"id": "call-1", "name": "Bash", "arguments": {"command": command}}]},
             {"text": "I probed the network"},
@@ -437,13 +447,25 @@ class TestATasksNetworkAndItsProxies:
         observed = _marked(stack, "NETWORK_PROBE_BEGIN", "NETWORK_PROBE_END")
 
         assert "dbdir=tmpfs" in observed, f"the probe did not run in the sandbox:\n{observed}"
-        # Row 2. Any HTTP status from the stub means the tunnel was made; a
-        # refused CONNECT is curl's 56 with no status at all.
-        assert re.search(r"allowed=[1-5]\d\d rc=0", observed), (
+        # Row 2. The stub's status over TLS means the tunnel carried the request;
+        # a refused CONNECT is curl's 56 with no status at all.
+        assert "allowed=204 rc=0" in observed, (
             f"row 2: no tunnel to the allowlisted host:\n{observed}")
+        assert target.calls_matching(method="GET", contains="/through-the-tunnel"), (
+            f"row 2: the stub never saw the tunnelled request:\n{observed}")
+        # The tunnel opens, then closes on the first bytes: curl's 52, empty reply.
+        assert re.search(r"no_tls=000 rc=52", observed), (
+            f"row 2: the proxy did not close a tunnel carrying no TLS:\n{observed}")
+        assert f"network_proxy_rejected target={no_tls} reason=sni" in stack.logs(400), (
+            f"row 2: the raw tunnel ended without the proxy refusing it:\n{observed}")
+        # A path outside /api/ is answered as git, so it is recorded in `git_calls`.
+        assert not [call for call in forge.git_calls if "/raw-tunnel" in call.path], (
+            f"row 2: plain HTTP crossed a raw tunnel:\n{observed}")
         assert re.search(r"denied=000 rc=56", observed), (
             f"row 2: the proxy tunnelled to a host off the allowlist:\n{observed}")
         assert re.search(r"direct=000 rc=(6|7|28)", observed), (
+            f"row 2: the task reached a host without the proxy:\n{observed}")
+        assert not target.calls_matching(contains="/around-the-proxy"), (
             f"row 2: the task reached a host without the proxy:\n{observed}")
         # Row 3: the task's own call is served, the outsider's two are not.
         assert "refused the connection" not in observed, (

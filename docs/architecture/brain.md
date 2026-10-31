@@ -75,7 +75,7 @@ The dataclass the executor populates per task. The brain treats it as immutable 
 | Field | Notes |
 |---|---|
 | `prompt` | The user half — task material only (memory + knowledge facts + playbooks + conversation and confirmation context + request + attachments). Native compaction may summarize it. |
-| `allowed_tools` | From `executor.build_allowed_tools()` — `["Read","Write","Edit","Grep","Glob","Bash","WebSearch","WebFetch"]`. Both brains offer only the granted tools: NativeBrain filters its tool set by them, and ClaudeCodeBrain's tool harness offers the granted ones from the tool server (WebSearch, which runs on Anthropic's side, stays a CLI built-in). A non-empty list is also the signal that distinguishes a tool-bearing task from a text-only one (empty = no tools, no harness, no skip-permissions, e.g. the sleep cycle). |
+| `allowed_tools` | From `executor.build_allowed_tools()` — `["Read","Write","Edit","Grep","Glob","Bash","BashOutput","KillShell","WebSearch","WebFetch"]`. Both brains offer only the granted tools: NativeBrain filters its tool set by them, and ClaudeCodeBrain's tool harness offers the granted ones from the tool server (WebSearch, which runs on Anthropic's side, stays a CLI built-in). A non-empty list is also the signal that distinguishes a tool-bearing task from a text-only one (empty = no tools, no harness, no skip-permissions, e.g. the sleep cycle). |
 | `cwd` | Subprocess working directory (`config.temp_dir`) |
 | `env` | Per-task env (already credential-stripped if the skill proxy is enabled). It never carries the `claude` CLI's credential: on the harness the CLI gets its own env from `HarnessSpec.cli_env`, and this one goes to the tool server |
 | `timeout_seconds` | `config.scheduler.task_timeout_minutes * 60` |

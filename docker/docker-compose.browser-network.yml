@@ -1,0 +1,20 @@
+# The browser's fixed address, which the VM's firewall names
+# (host/istota-devbox-egress.sh). Added by istota-stack's compose(), which sets
+# the four variables. The base file's network stays unpinned: the testbed runs
+# several stacks on one machine, and they could not share a subnet.
+#
+# The subnet's upper half is what Docker hands out, so nothing else on the network
+# (the daemon, here) can take the address the browser's rules are written against.
+services:
+  browser:
+    networks:
+      browser:
+        ipv4_address: ${ISTOTA_BROWSER_ADDR:?}
+
+networks:
+  browser:
+    ipam:
+      config:
+        - subnet: ${ISTOTA_BROWSER_SUBNET:?}
+          gateway: ${ISTOTA_BROWSER_GATEWAY:?}
+          ip_range: ${ISTOTA_BROWSER_IP_RANGE:?}

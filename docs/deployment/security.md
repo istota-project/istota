@@ -42,7 +42,7 @@ Heartbeat and cron shell commands run in the task sandbox with the same environm
 
 ## Filesystem sandbox (bubblewrap)
 
-When `sandbox_enabled = true` (default), each task's tools run inside a `bwrap` mount namespace with PID isolation: one tool server per task attempt, which runs every Read, Write, Edit, Grep, Glob and Bash call on either brain.
+When `sandbox_enabled = true` (default), each task's tools run inside a `bwrap` mount namespace with PID isolation: one tool server per task attempt, which runs every Read, Write, Edit, Grep, Glob, Bash, BashOutput and KillShell call on either brain. A background job started with Bash is in the same namespace and cgroup, and it ends with the attempt.
 
 **Every task sees**:
 
@@ -248,6 +248,8 @@ Additional hosts added automatically:
 The forge wrapper sets `GH_TELEMETRY=0` and `DO_NOT_TRACK=1`, so no telemetry host needs allowlisting and no command spends a rejected CONNECT on one. GitHub Enterprise Server needs no extra entry: its API is a path on the same host (`<host>/api/v3`), already added as the git remote.
 
 TLS is end-to-end except for hosts bound to a credential in the task's grant snapshot, which the credential broker intercepts (below). Every other connection is a raw tunnel.
+
+**The browser container has a firewall outside it.** Chrome's proxy flags hold only while Chrome honours them, and it runs with `--no-sandbox`, so a compromised renderer could open its own sockets. On a VM, `DOCKER-USER` rules drop the browser's traffic to link-local and cloud metadata addresses, RFC 1918 and carrier-grade NAT ranges, and leave public addresses open. The addresses in `ISTOTA_BROWSER_EGRESS_ALLOW` are the operator's exceptions. The rules match the browser's own address, so the daemon on the same network is not filtered. They cover forwarded traffic only: the VM's own addresses are not filtered, as for a devbox. A stack started without `istota-stack` (Docker Desktop, the testbed) has no such rules.
 
 ## Credential broker
 

@@ -22,7 +22,7 @@ import pytest
 from testbed import profiles, services
 from testbed import stack as stack_support
 from testbed.httpstub import LOOPBACK, HttpStub
-from testbed.services import REGISTRY, ServiceCall, feeds, gitlab, mail, signaling
+from testbed.services import REGISTRY, ServiceCall, feeds, gitlab, mail, signaling, tls_target
 from testbed.services.model_endpoint import serve_script
 
 REPO = Path(__file__).resolve().parents[1]
@@ -168,6 +168,7 @@ _MINIMAL_ARGS = {
     "gitlab": lambda tmp_path: ((tmp_path / "repos",), {}),
     "ntfy": lambda tmp_path: ((), {}),
     "feeds": lambda tmp_path: ((), {}),
+    "tls": lambda tmp_path: ((tmp_path / "tls",), {}),
 }
 
 
@@ -327,6 +328,7 @@ class TestServiceConfigNamesOnlyRealKeys:
         post = mail.serve(tmp_path / "mail")
         hpb = signaling.serve()
         documents = feeds.serve()
+        target = tls_target.serve(tmp_path / "tls")
         try:
             yield {
                 endpoint.name: endpoint,
@@ -334,8 +336,10 @@ class TestServiceConfigNamesOnlyRealKeys:
                 post.name: post,
                 hpb.name: hpb,
                 documents.name: documents,
+                target.name: target,
             }
         finally:
+            target.close()
             documents.close()
             hpb.close()
             post.close()
