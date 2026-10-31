@@ -440,7 +440,6 @@ def launch_chrome(inst):
         f"--disk-cache-size={os.environ.get('BROWSER_DISK_CACHE_BYTES', '104857600')}",
         "--no-first-run",
         "--no-default-browser-check",
-        "--no-sandbox",
         "--disable-blink-features=AutomationControlled",
         "--lang=en-US,en",
         f"--window-size={screen_w},{screen_h}",

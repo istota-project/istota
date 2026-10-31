@@ -21,8 +21,8 @@ reaches loopback. A granted name that resolves to the
 container's own network address would reach the API, which is why a grant is
 exact names chosen by the operator.
 
-This is not a sandbox. A compromised renderer (Chrome runs `--no-sandbox` here)
-could open its own sockets; only a firewall outside the container stops that.
+This is not a sandbox. Code that escapes Chrome's sandbox could open its own
+sockets; only a firewall outside the container stops that.
 TLS is tunnelled untouched, so a site sees Chrome's own fingerprint.
 
 stdlib and the vendored guard only, one process, started by `entrypoint.sh`. If

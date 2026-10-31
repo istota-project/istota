@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from pathlib import Path
 
 import pytest
 
@@ -193,3 +194,79 @@ python3 {script} {config} {name}""")
     def test_the_refresh_timer_runs(self, stack):
         assert stack.out("systemctl is-enabled istota-browser-grants.timer") == "enabled"
         assert stack.out("systemctl is-active istota-browser-grants.timer") == "active"
+
+
+class TestWhatChromesUserCanReach:
+    """#902: the sandbox under the VM's AppArmor and shipped compose lines, and the
+    token in its real 0400 file, which only this tier has.
+
+    Control `browser-uid-unhardened`: the changes taken back in the running
+    container's own files, then a restart. The probe's own stand-in reads are the
+    in-session control: the same read succeeds on a token holder without the change.
+    """
+
+    @pytest.fixture(scope="class")
+    def report(self, stack):
+        cid = lima.container(stack, "browser")
+        if lima.control() == "browser-uid-unhardened":
+            stack.run(
+                f"docker exec {cid} sh -c "
+                + shlex.quote(
+                    "sed -i 's|^    _close_this_process_to_its_own_uid()$|    pass|' /app/browse_api.py && "
+                    "sed -i 's|\"--no-default-browser-check\",|\"--no-default-browser-check\", \"--no-sandbox\",|' /app/chrome.py && "
+                    "sed -i 's|^as_browser websockify|websockify|' /app/entrypoint.sh && "
+                    "chown -R browser:browser /app")
+                + f" && docker restart {cid}")
+            lima.wait_for(
+                lambda: stack.ok(f"docker exec {cid} curl -sf http://localhost:9224/live"),
+                timeout=120, interval=3, what="the browser to come back",
+            )
+        lima.stack_exec(stack, "python3 -c " + shlex.quote(
+            "import json, os, urllib.request\n"
+            "req = urllib.request.Request('http://browser:9223/browse', method='POST',\n"
+            "    data=json.dumps({'url': 'http://localhost:9224/live', 'timeout': 60}).encode(),\n"
+            "    headers={'Content-Type': 'application/json', 'X-Istota-User': 'vm-witness',\n"
+            "             'Authorization': 'Bearer ' + os.environ['ISTOTA_BROWSER_API_TOKEN']})\n"
+            "print(urllib.request.urlopen(req, timeout=200).status)\n"), timeout=240)
+        probe = lima.SCRATCH + "/browser_uid_probe.py"
+        stack.write(probe, (Path(__file__).parent.parent / "image" / "browser_uid_probe.py").read_text())
+        out = stack.out(f"docker exec -i -u browser {cid} python - < {probe}", timeout=180)
+        try:
+            yield json.loads(out.splitlines()[-1])
+        finally:
+            if lima.control() == "browser-uid-unhardened":
+                stack.run(f"docker rm -f {cid} && istota-stack up")
+
+    def test_the_container_has_the_shipped_grant_under_apparmor(self, stack):
+        cid = lima.container(stack, "browser")
+        assert stack.out("docker inspect -f '{{.AppArmorProfile}}' " + cid) == "docker-default"
+        options = stack.out("docker inspect -f '{{json .HostConfig.SecurityOpt}}' " + cid)
+        assert "seccomp" in options and "no-new-privileges" in options, options
+
+    def test_every_renderer_is_in_chromes_sandbox(self, report):
+        page = report["chrome_sandbox_page"]
+        assert "Layer 1 Sandbox\tNamespace" in page, report
+        assert "Seccomp-BPF sandbox\tYes" in page, report
+        assert "You are adequately sandboxed." in page, report
+        assert report["renderer_pid_namespaces"] and min(report["renderer_pid_namespaces"]) >= 2, report
+
+    def test_the_read_works_on_a_stand_in_holding_a_token(self, report):
+        assert report["control_as_shipped_before"] == {"environ": "holds the token", "mem": "holds the token"}, report
+        assert report["control_non_dumpable"] == {"environ": "PermissionError", "mem": "PermissionError"}, report
+        assert report["chrome_environ_readable"] is True, report
+
+    def test_chromes_user_cannot_read_the_api_process(self, report):
+        assert report["api_environ"] == "PermissionError", report
+        assert report["api_mem"] == "PermissionError", report
+        assert report["holders"] == [], report
+
+    def test_websockify_serves_chromes_user_no_link_out_of_its_web_root(self, report):
+        assert report["websockify"]["plain_file"] == 200, report
+        assert report["websockify"]["link"] != 200, report
+
+    def test_chromes_user_cannot_edit_what_the_api_runs(self, report):
+        assert report["api_source"] == "PermissionError", report
+
+    def test_chromes_user_cannot_read_the_secret_file(self, report):
+        """The real 0400 file, uid 10001's, which the other tiers can only imitate."""
+        assert report["secret_file"] == "PermissionError", report
