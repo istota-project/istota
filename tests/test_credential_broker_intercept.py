@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives import serialization
 from istota import db
 from istota.credentials import store as secrets_store
 from istota.config import Config
-from istota.credentials.broker import ca, grants
+from istota.credentials.broker import ca, grants, intercept
 from istota.credentials.broker.bindings import parse_binding
 from istota.sandbox.network_proxy import NetworkProxy
 
@@ -97,11 +97,13 @@ def broker(tmp_path, monkeypatch, request, broker_responder, broker_scheme):
                             response_headers.append((b"x-echo-" + VALUE, b"yes"))
                         if broker_responder is not None:
                             status, response_headers, response = broker_responder(request, body)
+                        # A responder may name its own chunk boundaries with a list.
+                        chunks = response if isinstance(response, list) else [response[:16], response[16:]]
                         if request.target != b"/chunked":
-                            response_headers.append((b"content-length", str(len(response)).encode()))
+                            response_headers.append((b"content-length", str(sum(map(len, chunks))).encode()))
                         tls.sendall(parser.send(h11.Response(status_code=status, headers=response_headers)))
                         if request.method != b"HEAD" and status not in (204, 304):
-                            for chunk in (response[:16], response[16:]):
+                            for chunk in chunks:
                                 tls.sendall(parser.send(h11.Data(data=chunk)))
                         tls.sendall(parser.send(h11.EndOfMessage()))
                         parser.start_next_cycle()
@@ -233,14 +235,127 @@ def test_grants_allow_every_method_on_the_bound_host(broker, method, legacy):
     assert dict(broker[6][0][0].headers)[b"authorization"] == VALUE
 
 
-def test_body_after_cap_is_literal_and_large_response_is_unscrubbed(broker):
+def test_body_after_cap_is_literal_and_large_response_is_scrubbed(broker):
     body = b"x" * 128 + PLACEHOLDER
     with connect(broker) as tls:
         response, payload = exchange(tls, broker[5], body=body, target=b"/large")
     assert broker[6][0][1] == body
     assert response.status_code == 200
-    assert VALUE in payload
+    assert payload == b'{"echo":"' + PLACEHOLDER + b'"}' + b"x" * 256
     assert dict(response.headers)[b"x-echo"] == PLACEHOLDER
+
+
+def _echo_past_the_cap(request, body):
+    """Past the 128-byte test cap, an echo split at the byte the target names."""
+    split = int(request.target.rsplit(b"/", 1)[1])
+    return 200, [], [b"y" * 200, b"before-" + VALUE[:split], VALUE[split:] + b"-after", b"z" * 200]
+
+
+@pytest.mark.parametrize("broker_responder", [_echo_past_the_cap])
+def test_large_response_scrubs_an_echo_across_every_chunk_boundary(broker):
+    expected = b"y" * 200 + b"before-" + PLACEHOLDER + b"-after" + b"z" * 200
+    with connect(broker) as tls:
+        for split in range(len(VALUE) + 1):
+            response, payload = exchange(tls, broker[5], target=b"/split/%d" % split)
+            assert response.status_code == 200
+            assert payload == expected
+
+
+def _echo_across_the_cap(request, body):
+    """The buffered prefix ends part-way through the echo."""
+    split = int(request.target.rsplit(b"/", 1)[1])
+    return 200, [], [b"y" * 130 + VALUE[:split], VALUE[split:] + b"-after", b"z" * 200]
+
+
+@pytest.mark.parametrize("broker_responder", [_echo_across_the_cap])
+def test_large_response_scrubs_an_echo_across_the_end_of_the_prefix(broker):
+    expected = b"y" * 130 + PLACEHOLDER + b"-after" + b"z" * 200
+    with connect(broker) as tls:
+        for split in range(1, len(VALUE)):
+            response, payload = exchange(tls, broker[5], target=b"/split/%d" % split)
+            assert response.status_code == 200
+            assert payload == expected
+
+
+def test_a_stream_that_goes_quiet_still_gets_what_is_decided():
+    class Stalled:
+        def next_event(self):
+            raise socket.timeout
+
+    downstream = h11.Connection(h11.SERVER)
+    downstream.receive_data(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    downstream.next_event()
+    downstream.next_event()
+    client, proxy = socket.socketpair()
+    with client, proxy:
+        proxy.sendall(downstream.send(h11.Response(status_code=200, headers=[(b"transfer-encoding", b"chunked")])))
+        with pytest.raises(socket.timeout):
+            intercept._relay_scrubbed(Stalled(), None, downstream, proxy, b"secret" + b"p" * 2000, {b"secret": b"<s>"})
+        received = client.recv(65536)
+    assert b"<s>" + b"p" * 1995 in received
+    assert b"secret" not in received
+
+
+def _echo_named_encoding(request, body):
+    forms = {
+        b"/base64": base64.b64encode(VALUE),
+        b"/urlsafe": base64.urlsafe_b64encode(VALUE).rstrip(b"="),
+        b"/hex": VALUE.hex().encode(),
+        b"/basic": base64.b64encode(b"user:" + VALUE),
+    }
+    return 200, [], [b"y" * 200, b"[", forms[request.target], b"]"]
+
+
+@pytest.mark.parametrize("broker_responder", [_echo_named_encoding])
+@pytest.mark.parametrize("target", [b"/base64", b"/urlsafe", b"/hex", b"/basic"])
+def test_large_response_scrubs_an_encoded_echo(broker, target):
+    basic = target == b"/basic"
+    value = b"Basic " + base64.b64encode(b"user:" + PLACEHOLDER) if basic else PLACEHOLDER
+    with connect(broker) as tls:
+        response, payload = exchange(tls, broker[5], target=target, value=value)
+    assert response.status_code == 200
+    scrubbed = base64.b64encode(b"user:" + PLACEHOLDER) if basic else PLACEHOLDER
+    assert payload == b"y" * 200 + b"[" + scrubbed + b"]"
+
+
+def test_echo_forms_cover_the_spellings_a_service_uses():
+    value = b'a/b c+"d!>>~~~/'
+    forms = intercept._echo_forms(value)
+    for form in (
+        value,
+        base64.b64encode(value),
+        base64.b64encode(value).replace(b"/", b"\\/"),
+        b"a%2Fb%20c%2B%22d%21%3E%3E~~~%2F",
+        b"a%2fb%20c%2b%22d%21%3e%3e~~~%2f",
+        b"a%2Fb%20c%2B%22d!%3E%3E~~~%2F",
+        b"a%2Fb+c%2B%22d%21%3E%3E~~~%2F",
+        value.hex().encode(),
+        value.hex().upper().encode(),
+        b'a/b c+\\"d!>>~~~/',
+        b'a\\/b c+\\"d!>>~~~\\/',
+        b"a/b c+&quot;d!&gt;&gt;~~~/",
+    ):
+        assert form in forms
+
+
+def test_a_shorter_value_waits_for_the_longer_one_it_begins():
+    replacements = {b"abc": b"<short>", b"abcdef": b"<long>"}
+    pattern = intercept._scrub_pattern(replacements)
+    hold = 5
+    out, pending = intercept._scrub_decided(b"xabc", pattern, replacements, 4 - hold)
+    assert (out, pending) == (b"", b"xabc")
+    pending += b"defyyyyy"
+    out, pending = intercept._scrub_decided(pending, pattern, replacements, len(pending) - hold)
+    rest, left = intercept._scrub_decided(pending, pattern, replacements, len(pending))
+    assert out + rest == b"x<long>yyyyy"
+    assert left == b""
+
+
+def test_large_response_with_no_credential_passes_unchanged(broker):
+    with connect(broker) as tls:
+        response, payload = exchange(tls, broker[5], target=b"/large", value=b"none")
+    assert response.status_code == 200
+    assert payload == b'{"echo":"' + VALUE + b'"}' + b"x" * 256
 
 
 def test_host_mismatch_and_passthrough(broker):
