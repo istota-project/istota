@@ -122,9 +122,10 @@ Folder shares use Open Cloud Mesh, served on `[site] hostname`. Federated addres
 
 `istota doctor --only sharing.ocm` checks the host name rules, then fetches `https://<site hostname>/ocm-provider/` the way a remote server would and fails unless the answer is Istota's.
 
-Two things you may notice afterwards:
+Three things you may notice afterwards:
 
 - When Istota refuses an offer, Nextcloud tries again on its older sharing endpoint, so the access log shows 404s for `/ocs-provider/` and `/ocs/v2.php/cloud/shares`. That is expected; Istota does not serve those paths.
+- Istota never sends a user's display name to another server, and limits how far offers can be used to test which addresses exist. A server gets 5 refusals a day that depend on the recipient, counted per sending host and per client address, with 50 a day across all senders. After that, an offer to an unknown address looks accepted to the sender and is dropped, and the log says `ocm offer dropped`. Offers to real users keep arriving, unless that user already has too many waiting; then Istota tells the user in the bell, and the sender is not told. Someone who mistypes an address past that point sees no error on their server.
 - Nextcloud remembers what it learned about a server: for 24 hours after a successful check and 5 minutes after a failed one. A fix on Istota's side is seen by a Nextcloud only once that time has passed.
 
 Turning `[sharing.ocm] enabled` off later stops new offers. Accepted folders keep working, but Istota no longer hears when one is unshared; such a share is removed the next time a task tries it. The card says so.

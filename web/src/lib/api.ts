@@ -6370,6 +6370,8 @@ export interface SharedFolderOffer extends SharedFolderPeople {
   host: string;
   /** True for a new offer of a folder that is already shared. */
   reoffer: boolean;
+  /** Whether the sending server signed the offer; null on one stored before this was recorded. */
+  signed?: boolean | null;
   created_at: string | null;
 }
 
