@@ -204,6 +204,7 @@ def _repo_local_modules() -> frozenset[str]:
 RUNS_IN_AN_IMAGE = {
     "tests/image/browser_checkout.py": "docker/browser/requirements.txt",
     "tests/image/document_render_run.py": "docker/browser/requirements.txt",
+    "tests/image/egress_guard_run.py": "docker/browser/requirements.txt",
     "tests/image/pdf_text_run.py": "docker/browser/requirements.txt",
 }
 

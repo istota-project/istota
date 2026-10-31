@@ -3694,6 +3694,11 @@ def health():
                        "last_used": inst.last_used,
                        **_process_diagnostics(inst, process_rows)} for inst in instances],
     }
+    # Open to any peer, for the capability flags, so without the token it names
+    # nobody. The key is the dispatcher's (browser_server.TOKEN_MATCHED).
+    if not request.environ.get("istota.browser_api_token_matched"):
+        del data["instances"], data["cdp_last_error"]
+        return jsonify(data)
     if request.args.get("v") == "1":
         data["instances"] = [
             {"user": inst.user_id, "slot": inst.slot, "last_used": inst.last_used,
@@ -4360,6 +4365,10 @@ def _exit_on_sigterm(_signum, _frame):
 atexit.register(pool.cleanup)
 
 if __name__ == "__main__":
+    # Popped before anything starts, so Chrome, Xvfb and x11vnc do not inherit it.
+    api_token = os.environ.pop("ISTOTA_BROWSER_API_TOKEN", "").strip()
+    if not api_token:
+        log.error("no ISTOTA_BROWSER_API_TOKEN: every request but /health is refused")
     signal.signal(signal.SIGTERM, _exit_on_sigterm)
     chrome.migrate_legacy_profile(chrome.PROFILE_ROOT)
     mon = threading.Thread(target=_resource_monitor, daemon=True)
@@ -4369,5 +4378,5 @@ if __name__ == "__main__":
     from browser_server import make_browser_server, serve_browser_requests
     # Patchright operations and shutdown stay on the main thread. Only the
     # instance list can respond while a browser operation is in progress.
-    server, pending = make_browser_server(app)
+    server, pending = make_browser_server(app, token=api_token)
     serve_browser_requests(server, pending)

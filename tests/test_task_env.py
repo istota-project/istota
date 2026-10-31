@@ -153,6 +153,12 @@ class TestTheServarrKeys:
         assert executor.SKILL_DAEMON_CREDENTIAL_VARS["servarr"] == names
         assert names <= executor._PROXY_LOOKUP_BLOCKED
 
+    @pytest.mark.parametrize("skill", ["browse", "markets"])
+    def test_the_browser_token_goes_to_the_skills_that_call_the_api(self, skill):
+        """#884: the daemon's copy, for a CLI the model runs but cannot read."""
+        assert executor.SKILL_DAEMON_CREDENTIAL_VARS[skill] == {"ISTOTA_BROWSER_API_TOKEN"}
+        assert "ISTOTA_BROWSER_API_TOKEN" in executor._PROXY_LOOKUP_BLOCKED
+
     def test_a_lookup_over_the_socket_is_refused(self, tmp_path):
         """Through a real proxy, with the allowlist the task runtime builds:
         even a skill that declared the key `sensitive` in its manifest would

@@ -139,7 +139,8 @@ def test_boot_parks_before_starting_any_service(runtime, fails, monkeypatch):
                  "signal": mock.Mock(), "_exit_on_sigterm": mock.Mock(),
                  "threading": calls.threading, "_resource_monitor": mock.Mock(),
                  "_start_liveness_server": calls.liveness,
-                 "_start_browse_watchdog": calls.watchdog, "app": calls.app}
+                 "_start_browse_watchdog": calls.watchdog, "app": calls.app,
+                 "os": mock.Mock(environ={}), "log": mock.Mock()}
     code = compile(ast.Module(body=[startup], type_ignores=[]), "startup", "exec")
     if fails:
         with pytest.raises(OSError, match="park failed"):
@@ -148,5 +149,5 @@ def test_boot_parks_before_starting_any_service(runtime, fails, monkeypatch):
     else:
         exec(code, namespace)
         assert calls.mock_calls[0] == mock.call.chrome.migrate_legacy_profile(chrome.PROFILE_ROOT)
-        calls.make_server.assert_called_once_with(calls.app)
+        calls.make_server.assert_called_once_with(calls.app, token="")
         calls.serve.assert_called_once_with("server", "pending")
