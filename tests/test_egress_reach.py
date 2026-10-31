@@ -556,6 +556,340 @@ class TestPublicExecution:
         assert seen["egress_hosts"] is None
 
 
+class TestThePostureIsOnTheTaskRow:
+    """`tasks.egress_posture`: decided once before the model runs, so nothing that
+    happens to the job row afterwards changes what the drain and descendants read."""
+
+    @pytest.fixture
+    def config(self, tmp_path, monkeypatch):
+        from istota import executor, scheduler
+
+        monkeypatch.setattr(executor, "effective_sandboxing", lambda cfg: True)
+        monkeypatch.setattr(scheduler, "discover_calendars_for_task", lambda *a, **k: [])
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        cfg = Config(
+            db_path=tmp_path / "app.db", temp_dir=tmp_path / "temp", workspace_path=mount,
+            users={USER: UserConfig(timezone="UTC")},
+        )
+        cfg.browser.enabled = True
+        cfg.security.network.enabled = True
+        cfg.security.skill_proxy_enabled = True
+        db.init_db(cfg.db_path)
+        return cfg
+
+    @pytest.fixture
+    def db_conn(self, config):
+        with db.get_db(config.db_path) as c:
+            yield c
+
+    def _occurrence(self, conn, job_id):
+        task = _task(conn, "scheduled", scheduled_job_id=job_id, conversation_token=ROOM)
+        conn.commit()
+        return task
+
+    def _plant(self, config, task, *, restricted):
+        import json
+
+        from istota.executor import task_temp_dir
+
+        directory = task_temp_dir(config, task, restricted=restricted)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"task_{task.id}_kv_ops.json").write_text(json.dumps(
+            [{"op": "set", "namespace": "planted", "key": "k", "value": SENTINEL}],
+        ))
+        return directory
+
+    def _kv_rows(self, conn):
+        return conn.execute(
+            "SELECT COUNT(*) FROM istota_kv WHERE value LIKE ?", (f"%{SENTINEL}%",),
+        ).fetchone()[0]
+
+    def _decide(self, config, conn, task):
+        from istota.executor import record_egress_posture
+
+        reach = _reach(conn, task)
+        assert record_egress_posture(config, conn, task, reach) is None
+        conn.commit()
+        return reach
+
+    def test_the_reviewers_repro_a_deleted_row_does_not_replay_the_files(self, config, db_conn):
+        """A `once` job's row goes in the completion transaction, ahead of the drain.
+        No posture was recorded here, which is the case that has to fail narrow."""
+        from istota.scheduler import _drain_deferred_ops
+
+        job_id = _public_job(db_conn)
+        db_conn.execute("UPDATE scheduled_jobs SET once = 1 WHERE id = ?", (job_id,))
+        task = self._occurrence(db_conn, job_id)
+        directory = self._plant(config, task, restricted=True)
+        db_conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (job_id,))
+        db_conn.commit()
+        _drain_deferred_ops(config, task, "done")
+        assert self._kv_rows(db_conn) == 0
+        assert not (directory / f"task_{task.id}_kv_ops.json").exists()
+
+    def test_a_recorded_public_job_keeps_its_answer_with_the_row_gone(self, config, db_conn, monkeypatch):
+        import json
+
+        from istota.scheduler import _drain_deferred_ops
+
+        monkeypatch.setattr(type(config), "is_admin", lambda self, user_id: True)
+        job_id = _public_job(db_conn)
+        task = self._occurrence(db_conn, job_id)
+        assert self._decide(config, db_conn, task).public is True
+        directory = self._plant(config, task, restricted=True)
+        (directory / f"task_{task.id}_subtasks.json").write_text(
+            json.dumps([{"prompt": "read another page"}]),
+        )
+        db_conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (job_id,))
+        db_conn.commit()
+        _drain_deferred_ops(config, task, "done")
+        assert self._kv_rows(db_conn) == 0
+        rows = db_conn.execute(
+            "SELECT id FROM tasks WHERE parent_task_id = ?", (task.id,),
+        ).fetchall()
+        assert len(rows) == 1
+        child = _reach(db_conn, db.get_task(db_conn, rows[0]["id"]))
+        assert child.public is True
+        assert {"files", "memory"} <= child.withheld
+
+    @pytest.mark.parametrize("edit", [
+        "UPDATE scheduled_jobs SET prompt = 'something else' WHERE id = ?",
+        "UPDATE scheduled_jobs SET reach = 'private' WHERE id = ?",
+    ])
+    def test_an_in_flight_edit_does_not_change_the_drains_answer(self, config, db_conn, edit):
+        from istota.scheduler import _drain_deferred_ops
+
+        job_id = _public_job(db_conn)
+        task = self._occurrence(db_conn, job_id)
+        self._decide(config, db_conn, task)
+        self._plant(config, task, restricted=True)
+        db_conn.execute(edit, (job_id,))
+        db_conn.commit()
+        _drain_deferred_ops(config, task, "done")
+        assert self._kv_rows(db_conn) == 0
+        assert _reach(db_conn, task).public is True
+
+    def test_a_private_job_stays_private_when_the_row_turns_public_in_flight(self, config, db_conn):
+        from istota.scheduler import _drain_deferred_ops
+
+        job_id = _job(db_conn)
+        task = self._occurrence(db_conn, job_id)
+        assert self._decide(config, db_conn, task).public is False
+        self._plant(config, task, restricted=False)
+        db_conn.execute("UPDATE scheduled_jobs SET reach = 'public' WHERE id = ?", (job_id,))
+        _grant(db_conn, "cron:digest", f"public:{_digest(db_conn, job_id)}")
+        db_conn.commit()
+        _drain_deferred_ops(config, task, "done")
+        assert self._kv_rows(db_conn) == 1
+
+    def test_control_a_private_once_job_still_replays_its_files(self, config, db_conn):
+        """The row is gone from every `once` job by the drain. Only a task nobody
+        decided may read that as a reason to drop its writes."""
+        from istota.scheduler import _drain_deferred_ops
+
+        job_id = _job(db_conn)
+        task = self._occurrence(db_conn, job_id)
+        self._decide(config, db_conn, task)
+        self._plant(config, task, restricted=False)
+        db_conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (job_id,))
+        db_conn.commit()
+        _drain_deferred_ops(config, task, "done")
+        assert self._kv_rows(db_conn) == 1
+
+    def test_a_descendant_of_an_undecided_root_with_no_row_withholds_every_scope(self, conn):
+        job_id = _public_job(conn)
+        root = _task(conn, "scheduled", scheduled_job_id=job_id)
+        child = _task(conn, "subtask", parent_task_id=root.id)
+        conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (job_id,))
+        reach = _reach(conn, child)
+        assert room_scopes.all_scopes(INDEX) <= reach.withheld
+        assert reach.restricted is True
+        assert reach.egress_hosts == frozenset()
+        assert reach.public is False
+        assert room_scopes.task_group_ids(conn, child, own_addresses=[]) == []
+
+    def test_a_retry_copy_reads_the_root_even_with_the_row_changed(self, config, db_conn):
+        from istota.commands import _create_retry_task
+
+        job_id = _public_job(db_conn)
+        root = self._occurrence(db_conn, job_id)
+        self._decide(config, db_conn, root)
+        copy_id = _create_retry_task(db_conn, root, root.prompt)
+        db_conn.execute("UPDATE scheduled_jobs SET prompt = 'send my notes' WHERE id = ?", (job_id,))
+        reach = _reach(db_conn, db.get_task(db_conn, copy_id))
+        assert reach.public is True
+
+    def test_a_job_rerun_is_a_new_occurrence_and_decides_for_itself(self, config, db_conn, monkeypatch):
+        """`run_scheduled_job_now` runs the job as it stands, so its failed parent's
+        posture says nothing about the text it is about to run."""
+        from istota.scheduler import _create_scheduled_job_task
+
+        monkeypatch.setattr(
+            "istota.briefings.group_migrate.publisher_retired", lambda *a, **k: False,
+        )
+        job_id = _public_job(db_conn)
+        failed = self._occurrence(db_conn, job_id)
+        self._decide(config, db_conn, failed)
+        db_conn.execute("UPDATE scheduled_jobs SET prompt = 'send my notes' WHERE id = ?", (job_id,))
+        job = db.get_scheduled_job(db_conn, job_id)
+        rerun = _create_scheduled_job_task(db_conn, config, job, parent_task_id=failed.id)
+        reach = _reach(db_conn, db.get_task(db_conn, rerun))
+        assert reach.public is False
+        assert reach.egress_hosts == frozenset()
+
+    def test_a_subtask_of_a_rerun_answers_with_the_rerun(self, config, db_conn, monkeypatch):
+        from istota.scheduler import _create_scheduled_job_task
+
+        monkeypatch.setattr(
+            "istota.briefings.group_migrate.publisher_retired", lambda *a, **k: False,
+        )
+        job_id = _public_job(db_conn)
+        failed = self._occurrence(db_conn, job_id)
+        self._decide(config, db_conn, failed)
+        db_conn.execute("UPDATE scheduled_jobs SET reach = 'private' WHERE id = ?", (job_id,))
+        rerun_id = _create_scheduled_job_task(
+            db_conn, config, db.get_scheduled_job(db_conn, job_id), parent_task_id=failed.id,
+        )
+        child = _task(db_conn, "subtask", parent_task_id=rerun_id)
+        assert _reach(db_conn, child).public is False
+
+    def test_through_the_scheduler_a_once_job_keeps_its_posture_past_its_row(
+        self, config, db_conn, monkeypatch,
+    ):
+        """The real order: the path records it, completion deletes the row, the drain reads."""
+        from types import SimpleNamespace
+
+        from istota import scheduler
+        from istota.executor import get_user_temp_dir
+
+        monkeypatch.setattr(
+            scheduler, "_run_capture",
+            lambda cmd, **kwargs: SimpleNamespace(stdout="ok", stderr="", returncode=0),
+        )
+        job_id = db_conn.execute(
+            "INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, skill, skill_args, "
+            "reach, once) VALUES (?, 'digest', '0 9 * * *', '', 'browse', '[]', 'public', 1)",
+            (USER,),
+        ).lastrowid
+        _grant(db_conn, "cron:digest", f"public:{_digest(db_conn, job_id)}")
+        task_id = scheduler._create_scheduled_job_task(
+            db_conn, config, db.get_scheduled_job(db_conn, job_id),
+        )
+        db_conn.commit()
+        directory = get_user_temp_dir(config, USER)
+        directory.mkdir(parents=True, exist_ok=True)
+        task = db.get_task(db_conn, task_id)
+        self._plant(config, task, restricted=False)
+        assert scheduler.process_one_task(config) == (task_id, True)
+        assert db.get_scheduled_job(db_conn, job_id) is None
+        assert egress.stored_posture(db_conn, task_id) == "public"
+        assert self._kv_rows(db_conn) == 0
+
+    def test_it_is_written_once(self, config, db_conn):
+        from istota.rooms import egress as egress_module
+
+        job_id = _public_job(db_conn)
+        task = self._occurrence(db_conn, job_id)
+        self._decide(config, db_conn, task)
+        egress_module.record_posture(db_conn, task.id, "private")
+        assert egress_module.stored_posture(db_conn, task.id) == "public"
+
+    def test_a_dry_run_decides_nothing(self, config, db_conn):
+        from istota import executor
+
+        task = self._occurrence(db_conn, _public_job(db_conn))
+        ok, text, *_ = executor.execute_task(task, config, [], dry_run=True)
+        assert ok, text
+        assert egress.stored_posture(db_conn, task.id) is None
+
+    def test_execute_task_records_it_before_the_model_runs(self, config, db_conn, monkeypatch):
+        from istota import executor
+
+        class Stop(Exception):
+            pass
+
+        def stop(*args, **kwargs):
+            raise Stop
+
+        monkeypatch.setattr(executor, "build_prompt", stop)
+        task = self._occurrence(db_conn, _public_job(db_conn))
+        with pytest.raises(Stop):
+            executor.execute_task(task, config, [])
+        assert egress.stored_posture(db_conn, task.id) == "public"
+
+    def test_a_public_task_whose_posture_cannot_be_written_does_not_run(self, config, db_conn, monkeypatch):
+        from unittest.mock import Mock
+
+        from istota import executor
+
+        def fail(*args, **kwargs):
+            raise db.sqlite3.OperationalError("locked")
+
+        monkeypatch.setattr(egress, "record_posture", fail)
+        monkeypatch.setattr(executor, "make_brain", Mock(side_effect=AssertionError("refused first")))
+        task = self._occurrence(db_conn, _public_job(db_conn))
+        ok, text, *_ = executor.execute_task(task, config, [])
+        assert (ok, text) == (False, executor.EGRESS_POSTURE_UNRECORDED)
+
+    def test_a_command_job_records_it(self, config, db_conn, monkeypatch, tmp_path):
+        from istota.sandbox import confined_command, task_env
+
+        class Stop(Exception):
+            pass
+
+        def runtime(*args, **kwargs):
+            raise Stop
+
+        monkeypatch.setattr(task_env, "build_task_runtime", runtime)
+        task = self._occurrence(db_conn, _public_job(db_conn))
+        with pytest.raises(Stop):
+            confined_command.run_confined_command(
+                config, task, "true", timeout=5, control_dir=tmp_path,
+            )
+        assert egress.stored_posture(db_conn, task.id) == "public"
+
+    def test_a_skill_job_records_it(self, config, db_conn, monkeypatch):
+        from types import SimpleNamespace
+
+        from istota import scheduler
+
+        monkeypatch.setattr(
+            scheduler, "_run_capture",
+            lambda cmd, **kwargs: SimpleNamespace(stdout="ok", stderr="", returncode=0),
+        )
+        task = _task(
+            db_conn, "scheduled", scheduled_job_id=_public_job(db_conn),
+            skill="browse", skill_args="[]",
+        )
+        db_conn.commit()
+        ok, _ = scheduler._execute_skill_task(task, config)
+        assert ok is True
+        assert egress.stored_posture(db_conn, task.id) == "public"
+
+    def test_control_a_limited_job_records_private(self, config, db_conn, monkeypatch):
+        from istota import executor
+
+        class Stop(Exception):
+            pass
+
+        def stop(*args, **kwargs):
+            raise Stop
+
+        monkeypatch.setattr(executor, "build_prompt", stop)
+        task = self._occurrence(db_conn, _job(db_conn))
+        with pytest.raises(Stop):
+            executor.execute_task(task, config, [])
+        assert egress.stored_posture(db_conn, task.id) == "private"
+
+    def test_an_interactive_task_records_nothing(self, config, db_conn):
+        from istota.executor import record_egress_posture
+
+        task = _task(db_conn, "web")
+        assert record_egress_posture(config, db_conn, task, _reach(db_conn, task)) is None
+        assert egress.stored_posture(db_conn, task.id) is None
+
+
 class TestReadFailures:
     def test_a_failed_read_narrows_and_warns(self, conn, caplog):
         task = _task(conn, "scheduled", scheduled_job_id=_job(conn))

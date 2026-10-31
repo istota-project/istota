@@ -459,3 +459,41 @@ class TestSkillManifests:
         (skill / "skill.md").write_text("---\nname: custom\negress: local\n---\nbody\n")
         index = load_skill_index(tmp_path / "ops", bundled_dir=tmp_path / "none")
         assert index["custom"].egress == "local"
+
+
+class TestThePostureColumn:
+    def test_no_skill_and_no_deferred_handler_names_the_column(self):
+        """A task that could set it could read as public, or stop reading as public."""
+        import istota.scheduler_deferred
+        import istota.skills
+
+        root = Path(istota.skills.__file__).parent
+        for path in root.rglob("*"):
+            if path.suffix in (".py", ".md"):
+                assert "egress_posture" not in path.read_text(), path
+        assert "egress_posture" not in Path(istota.scheduler_deferred.__file__).read_text()
+
+    def test_the_writer_is_called_only_by_the_daemon_seam(self):
+        import istota
+
+        root = Path(istota.__file__).parent
+        writers = [
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*.py")
+            if "record_posture(" in path.read_text()
+        ]
+        assert sorted(writers) == ["executor.py", "rooms/egress.py"]
+
+    def test_a_fresh_database_and_a_migrated_one_have_it(self, tmp_path):
+        from istota import db as db_module
+
+        path = tmp_path / "fresh.db"
+        db_module.init_db(path)
+        with db_module.get_db(path) as conn:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+            assert "egress_posture" in columns
+            conn.execute("ALTER TABLE tasks DROP COLUMN egress_posture")
+        db_module.init_db(path)
+        with db_module.get_db(path) as conn:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+        assert "egress_posture" in columns

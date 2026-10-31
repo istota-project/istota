@@ -102,7 +102,8 @@ class Reach:
     egress_withheld: frozenset[str] = frozenset()
     #: An approved public job, or a subtask or `!retry` copy of one: the research
     #: posture on the job's own identity and room. It holds nothing private, which
-    #: is why `egress_hosts` is None.
+    #: is why `egress_hosts` is None. Decided once per occurrence and kept on its
+    #: row (`job_posture`).
     public: bool = False
 
     @property
@@ -274,10 +275,13 @@ def reach_for_task(
     if author == "correspondent":
         allowance = correspondent_scopes(conn, task.user_id, skill_index=skill_index)
         return Reach(all_scopes(skill_index) - allowance.scopes, author, allowance)
-    if _public_job_approved(conn, task):
+    posture = _job_posture_narrowing(conn, task)
+    if posture == "public":
         return Reach(
             _public_withheld(skill_index) | {ROOM_NOTES_WITHHELD}, "own", public=True,
         )
+    if posture == "unknown" and _is_descendant(conn, task):
+        return Reach(all_scopes(skill_index), "own", egress_hosts=frozenset())
     withheld = _withheld_from_own_task(conn, task, skill_index)
     egress_hosts, granted_skills = _egress_for(conn, task)
     if egress_hosts is None:
@@ -293,22 +297,50 @@ def _public_withheld(skill_index: Mapping[str, object]) -> frozenset[str]:
     return frozenset(set(skill_index) - PUBLIC_KEPT_SKILLS) | frozenset(SYNTHETIC_SCOPES)
 
 
+JobPosture = Literal["public", "private", "unknown"]
+
+
+def job_posture(conn: sqlite3.Connection, task: "db.Task") -> JobPosture:
+    """What this task's occurrence was decided as, from its row, never asking the
+    job again once it has answered: the row can change or go while the task runs,
+    and a `once` job's goes ahead of the drain.
+
+    `private` is what makes a missing job row mean something. A `once` job that ran
+    as itself recorded `private`, and keeps its writes. `unknown` is an occurrence
+    nobody decided whose job has gone, so no one can say what it held or read, and
+    each reader narrows. Raises what the reads raise; each caller chooses its
+    failure direction.
+    """
+    root = _decision_root(conn, task)
+    stored = egress.stored_posture(conn, root.id)
+    if stored == egress.POSTURE_PUBLIC:
+        return "public"
+    if stored == egress.POSTURE_PRIVATE:
+        return "private"
+    if is_occurrence(root) and egress.job_row(conn, root) is None:
+        return "unknown"
+    return "public" if egress.public_job_approved(conn, root) else "private"
+
+
 def is_public_job(conn: sqlite3.Connection, task: "db.Task") -> bool:
-    """Whether this task's root is an approved public job. Raises what the reads
-    raise; each caller chooses its failure direction."""
-    return egress.public_job_approved(conn, _root_of(conn, task))
+    """Whether this task's occurrence is a public job. Raises what the reads raise."""
+    return job_posture(conn, task) == "public"
 
 
-def _public_job_approved(conn: sqlite3.Connection | None, task: "db.Task") -> bool:
-    """`is_public_job`, where a failure narrows: the task falls through to
+def _job_posture_narrowing(conn: sqlite3.Connection | None, task: "db.Task") -> JobPosture:
+    """`job_posture`, where a failure narrows: the task falls through to
     `_egress_for`, which limits it."""
     if conn is None:
-        return False
+        return "private"
     try:
-        return is_public_job(conn, task)
+        return job_posture(conn, task)
     except Exception as exc:  # noqa: BLE001 — a read failure narrows
         logger.warning("egress_decide_failed task=%s: %s", task.id, type(exc).__name__)
-        return False
+        return "private"
+
+
+def _is_descendant(conn: sqlite3.Connection, task: "db.Task") -> bool:
+    return _decision_root(conn, task).id != task.id
 
 
 def _external_skills(skill_index: Mapping[str, object]) -> frozenset[str]:
@@ -341,7 +373,7 @@ def _egress_for(
     if conn is None:
         return frozenset(), frozenset()
     try:
-        root = _root_of(conn, task)
+        root = _decision_root(conn, task)
         if is_briefing_research(root) or _root_is_attended(root):
             return None, frozenset()
         if egress.job_approved(conn, root, "open"):
@@ -358,17 +390,30 @@ def _egress_for(
 
 def egress_subject(conn: sqlite3.Connection, task: "db.Task") -> str | None:
     """What this task's refusals and grants hang on: its root's subject."""
-    return egress.subject_for(conn, _root_of(conn, task))
+    return egress.subject_for(conn, _decision_root(conn, task))
 
 
-def _root_of(conn: sqlite3.Connection, task: "db.Task") -> "db.Task":
-    """The task at the end of the `parent_task_id` walk. `turn_author` has just
-    read this chain as whole, so a break here is a race, and raises."""
+def is_occurrence(task: "db.Task") -> bool:
+    """Whether this task is one run of a job, made from the job's row."""
+    return task.source_type == "scheduled" and task.scheduled_job_id is not None
+
+
+def _decision_root(conn: sqlite3.Connection, task: "db.Task") -> "db.Task":
+    """The task whose answer this one takes: the nearest job occurrence up the
+    `parent_task_id` walk, else the task at its end.
+
+    A job re-run links to the failed occurrence it replaces and runs the job as it
+    stands now, so it decides for itself. A subtask or a `!retry` copy, which has
+    no job of its own, takes the answer of what it descends from. `turn_author` has
+    just read this chain as whole, so a break here is a race, and raises.
+    """
     root = task
     for link in _turn_chain(conn, task):
         if link is None:
             raise LookupError("broken task chain")
         root = link
+        if is_occurrence(link):
+            break
     return root
 
 
@@ -765,7 +810,7 @@ def task_group_ids(
         return []
     if turn_author(conn, task, own_addresses=own_addresses) != "own":
         return []
-    if is_public_job(conn, task):
+    if job_posture(conn, task) != "private":
         return []
     groups = db.list_user_groups(conn, task.user_id)
     automatic = {g for g in groups if db.get_group(conn, g)["system_key"] == "all_users"}

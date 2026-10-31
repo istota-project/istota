@@ -81,6 +81,7 @@ def run_confined_command(
         _task_reach,
         build_bwrap_cmd,
         public_posture_refusal,
+        record_egress_posture,
         record_egress_refusals,
         task_temp_dir,
     )
@@ -100,6 +101,9 @@ def run_confined_command(
         if refusal is not None:
             raise RuntimeError(refusal)
         discovered_calendars = []
+    refusal = record_egress_posture(config, None, task, reach)
+    if refusal is not None:
+        raise RuntimeError(refusal)
     from_reach = egress_hosts is FROM_TASK_REACH
     limit = reach.egress_hosts if from_reach else egress_hosts
     egress_log = control_dir / REFUSED_LOG_NAME if from_reach else None

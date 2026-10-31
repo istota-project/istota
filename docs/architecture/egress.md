@@ -72,7 +72,8 @@ A public job is the research posture applied to one approved job. It keeps its u
 - It has no memory, no files, no vault and no conversation context.
 - It has no notes of its own in its room. `Channels/<token>` is not bound and `CHANNEL.md` is not loaded, because in a private room that file is the user's notes.
 - Its deferred files are purged except `subtasks`, because the directory is writable by a model reading strangers' pages.
-- A subtask of a public job is public too.
+- A subtask of a public job is public too, and so is a `!retry` copy.
+- The posture is on the task row. `tasks.egress_posture` is written once by the daemon before the model runs, as `public` or `private`, and the drain and descendants read that rather than the job row, which a `once` job has lost by then and an edit can change in flight. An occurrence nobody decided whose job has gone drops its deferred files, and its descendants withhold every scope. A job re-run is a new occurrence and decides from the job as it stands.
 - It needs the sandbox, the network proxy, the skill proxy and the browser. A missing one fails the job with the same reason research gives, so a job's last error can read `briefing_research_network_proxy_unavailable`.
 
 ## Deliberate open paths

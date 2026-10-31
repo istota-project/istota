@@ -8454,6 +8454,38 @@ def public_posture_refusal(config: Config) -> str | None:
     return None
 
 
+#: Failed by return: a public job whose posture is not on its row would have its
+#: deferred files read as a private job's if the row moved under it.
+EGRESS_POSTURE_UNRECORDED = "egress_posture_unrecorded"
+
+
+def record_egress_posture(
+    config: Config,
+    conn: "db.sqlite3.Connection | None",
+    task: db.Task,
+    reach: "Reach",
+) -> str | None:
+    """Put what this job occurrence was decided as on its row, before the model
+    runs, on each of the three paths. Returns why it may not run, or None.
+
+    Only a public answer needs the write to have happened. A failed `private` is a
+    WARNING: the drain and descendants then read the job row, or narrow if it is gone.
+    """
+    from istota.rooms import egress, scopes as room_scopes
+
+    if not room_scopes.is_occurrence(task):
+        return None
+    posture = egress.POSTURE_PUBLIC if reach.public else egress.POSTURE_PRIVATE
+    try:
+        with db.get_db_if_present(config.db_path, conn) as c:
+            if c is not None:
+                egress.record_posture(c, task.id, posture)
+    except Exception as exc:  # noqa: BLE001 — the answer depends on the posture
+        logger.warning("egress_posture_unrecorded task=%s: %s", task.id, type(exc).__name__)
+        return EGRESS_POSTURE_UNRECORDED if reach.public else None
+    return None
+
+
 def _task_reach(
     config: Config,
     conn: "db.sqlite3.Connection | None",
@@ -8693,6 +8725,10 @@ def execute_task(
             return False, refusal, None, None
         use_context = False
         user_resources = []
+    if not dry_run:
+        refusal = record_egress_posture(config, conn, task, _reach)
+        if refusal is not None:
+            return False, refusal, None, None
 
     # Ensure the task's temp directory exists: the per-user one, or a
     # restricted task's own directory inside it.

@@ -2627,6 +2627,7 @@ def _execute_skill_task(
         build_clean_env,
         get_user_temp_dir,
         public_posture_refusal,
+        record_egress_posture,
         skill_model_credentials,
     )
     from .llm.providers import (
@@ -2669,6 +2670,9 @@ def _execute_skill_task(
         refusal = public_posture_refusal(config)
         if refusal is not None:
             return False, refusal
+    refusal = record_egress_posture(config, None, task, reach)
+    if refusal is not None:
+        return False, refusal
     if skill_name in reach.egress_withheld:
         from .executor import file_egress_refusals
 
@@ -2958,13 +2962,20 @@ PUBLIC_JOB_KEPT_SUFFIXES = frozenset({"subtasks"})
 
 
 def _public_job_kept_suffixes(config: Config, task: db.Task) -> frozenset[str] | None:
-    """`PUBLIC_JOB_KEPT_SUFFIXES` for a public job, else None. A read failure keeps
-    nothing, as it does on a correspondent's turn."""
+    """`PUBLIC_JOB_KEPT_SUFFIXES` for a public job, else None for all of them.
+
+    From the occurrence's own row (`scopes.job_posture`), since a `once` job's row
+    is gone by now. An occurrence nobody decided whose job has gone keeps nothing,
+    and so does a read failure, as on a correspondent's turn."""
     from .rooms import scopes
 
     try:
         with db.get_db(config.db_path) as conn:
-            return PUBLIC_JOB_KEPT_SUFFIXES if scopes.is_public_job(conn, task) else None
+            posture = scopes.job_posture(conn, task)
+        if posture == "unknown":
+            logger.warning("Task %d: no posture and no job row, its deferred writes are dropped", task.id)
+            return frozenset()
+        return PUBLIC_JOB_KEPT_SUFFIXES if posture == "public" else None
     except Exception as exc:
         logger.warning(
             "Task %d: could not read whether its job is public, its deferred writes "

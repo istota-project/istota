@@ -509,6 +509,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         "assignment_id": "INTEGER",
         # ISSUE-892. No backfill: no room was incognito before this column.
         "incognito": "INTEGER NOT NULL DEFAULT 0",
+        # `rooms.egress.record_posture`. No backfill: NULL is "not decided", and a
+        # task from before this column is decided when it next runs.
+        "egress_posture": "TEXT",
     })
     # The same for a wake's spend, so the ledger outlives the task row.
     _add_columns(conn, "task_usage", {"assignment_id": "INTEGER"})

@@ -1233,6 +1233,8 @@ class TestEgressSeedUpgrade:
             conn.row_factory = sqlite3.Row
             job = conn.execute("SELECT * FROM scheduled_jobs WHERE name='digest'").fetchone()
             assert job["reach"] == "private"
+            task_columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+            assert "egress_posture" in task_columns
             grants = conn.execute("SELECT subject, entry, decided_via FROM egress_grants").fetchall()
             assert [tuple(g) for g in grants] == [
                 ("cron:digest", f"open:{job_digest(job)}", "migration")]

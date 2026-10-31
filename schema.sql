@@ -172,6 +172,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- `source_type = 'assignment'` task. NULL on every other task.
     assignment_id INTEGER,
 
+    -- A scheduled occurrence's posture, written once by the daemon before the
+    -- model runs (`rooms.egress.record_posture`): 'public' or 'private', NULL until
+    -- decided. A job row can change or go while the task runs; this cannot.
+    egress_posture TEXT,
     -- 1 for a task in an incognito room (ISSUE-892), frozen at creation by
     -- db.create_task from the room or the parent task.
     incognito INTEGER NOT NULL DEFAULT 0,

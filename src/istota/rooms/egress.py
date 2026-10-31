@@ -39,6 +39,8 @@ _ASSIGNMENT_SOURCE_TYPE = "assignment"
 TASKS_FILE_SUBJECT = "tasks-file"
 DIGEST_COLUMNS = ("prompt", "command", "skill", "skill_args")
 DECIDERS = frozenset({"web", "cli", "migration"})
+POSTURE_PUBLIC = "public"
+POSTURE_PRIVATE = "private"
 #: Refusal entries that ask for a decision about a job, rather than name a host.
 JOB_REQUESTS = ("open", "public")
 MAX_REFUSED_PER_SUBJECT = 20
@@ -140,7 +142,7 @@ def cron_subject(job_name: str) -> str:
     return f"cron:{job_name}"
 
 
-def _job_row(conn: sqlite3.Connection, task: "db.Task") -> sqlite3.Row | None:
+def job_row(conn: sqlite3.Connection, task: "db.Task") -> sqlite3.Row | None:
     """The user's own job row behind a scheduled task, or None."""
     if task.source_type != "scheduled" or task.scheduled_job_id is None:
         return None
@@ -154,7 +156,7 @@ def _job_row(conn: sqlite3.Connection, task: "db.Task") -> sqlite3.Row | None:
 def subject_for(conn: sqlite3.Connection, root: "db.Task") -> str | None:
     """What grants hang on for this root task, or None where nothing can."""
     if root.source_type == "scheduled":
-        row = _job_row(conn, root)
+        row = job_row(conn, root)
         return cron_subject(row["name"]) if row is not None else None
     if root.source_type == "briefing":
         return f"briefing:{root.briefing_name}" if root.briefing_name else None
@@ -213,14 +215,14 @@ def job_approved(conn: sqlite3.Connection, root: "db.Task", kind: str) -> bool:
     """Whether this scheduled root's job, as its row reads now, has an approved
     `open:` or `public:` for that exact text. A digest that moved answers False,
     so a race with the sync cannot widen anything."""
-    return _row_approved(conn, root, _job_row(conn, root), kind)
+    return _row_approved(conn, root, job_row(conn, root), kind)
 
 
 def public_job_approved(conn: sqlite3.Connection, root: "db.Task") -> bool:
     """Whether this root's job runs public: its row asks for it now and its exact
     text is approved. Turning the job back to `private` takes effect without the
     owner removing the grant."""
-    row = _job_row(conn, root)
+    row = job_row(conn, root)
     if row is None or row["reach"] != "public":
         return False
     return _row_approved(conn, root, row, "public")
@@ -233,6 +235,25 @@ def _row_approved(
         return False
     grants = grants_for(conn, root.user_id, cron_subject(row["name"]))
     return f"{kind}:{job_digest(row)}" in grants
+
+
+def stored_posture(conn: sqlite3.Connection, task_id: int) -> str | None:
+    """A task row's `egress_posture`, read from the table: the `Task` a caller holds
+    may have been loaded before the row was decided."""
+    row = conn.execute("SELECT egress_posture FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return row[0] if row is not None else None
+
+
+def record_posture(conn: sqlite3.Connection, task_id: int, posture: str) -> None:
+    """What this occurrence was decided as, once, on the caller's transaction.
+
+    Daemon only, before the model runs. `tests/test_egress_grants.py` holds its one
+    caller, and nothing a task writes reaches it: not a deferred file, not a skill.
+    """
+    conn.execute(
+        "UPDATE tasks SET egress_posture = ? WHERE id = ? AND egress_posture IS NULL",
+        (posture, task_id),
+    )
 
 
 def add_grant(
