@@ -46,6 +46,7 @@ from .llm.providers import (
     process_cli_auth,
 )
 from .config import (
+    BROWSER_API_TOKEN_VAR,
     SERVARR_APPS,
     Config,
     servarr_key_variable,
@@ -3940,6 +3941,8 @@ SKILL_MODEL_CALLERS = frozenset({"code_review"})
 #: `llm.providers.model_caller_env`'s copy, built from config.
 SKILL_DAEMON_CREDENTIAL_VARS: dict[str, frozenset[str]] = {
     "servarr": frozenset(servarr_key_variable(app) for app in SERVARR_APPS),
+    "browse": frozenset({BROWSER_API_TOKEN_VAR}),
+    "markets": frozenset({BROWSER_API_TOKEN_VAR}),
 }
 
 

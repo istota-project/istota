@@ -246,8 +246,8 @@ class TestTheSecretFilesMatchCompose:
         )
         assert sorted(mounted) == sorted(expected)
 
-    def test_only_the_model_listing_key_is_daemon_only(self):
-        assert DAEMON_ONLY_SECRETS == {"istota_anthropic_listing_key"}
+    def test_web_is_denied_only_the_listing_key_and_the_browser_token(self):
+        assert DAEMON_ONLY_SECRETS == {"istota_anthropic_listing_key", "istota_browser_api_token"}
 
     def test_each_secret_file_is_read_from_the_stack_secrets_dir(self):
         for name, spec in self._compose()["secrets"].items():
