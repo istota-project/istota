@@ -66,13 +66,15 @@ def _attachment(item: object, path: object) -> dict | None:
 def received_mail_meta(
     email, *, sender_check: str, trusted: bool,
     stored_paths: "dict[str, str] | None" = None,
+    sender_authenticated: bool = False,
 ) -> dict:
     """The card's metadata, built from the parsed mail at intake.
 
     So the card never renders a raw header at read time. Addresses are stored
     as written. The parsed mail carries no Bcc, so none is stored.
     ``stored_paths`` maps an attachment's leaf name to the inbox copy written
-    for it.
+    for it. ``sender_authenticated`` is for the drain, which no longer has the
+    headers (`stored_sender_authenticated`); it is not part of the card.
     """
     from istota.skills.email import attachment_leaf_name  # noqa: PLC0415
 
@@ -100,6 +102,7 @@ def received_mail_meta(
         "attachments": attachments,
         "sender_check": sender_check if sender_check in SENDER_CHECKS else "none",
         "trusted": bool(trusted),
+        "sender_authenticated": sender_authenticated is True,
     }
 
 
@@ -119,21 +122,37 @@ def _stored_people(values: object) -> list[dict]:
     return [p for p in people if p is not None]
 
 
-def stored_received_mail(raw: object) -> dict | None:
-    """The card's metadata read back out of its column, or None.
-
-    None for anything that is not a JSON object. Otherwise every field is
-    coerced to the shape `received_mail_meta` writes, with the same caps, so
-    the builder's own output reads back unchanged. An attachment's ``path`` is
-    returned as stored: whether a viewer may follow it is the reader's call.
-    """
+def _stored_object(raw: object) -> dict | None:
     if not raw:
         return None
     try:
         stored = json.loads(raw)
     except (TypeError, ValueError):
         return None
-    if not isinstance(stored, dict):
+    return stored if isinstance(stored, dict) else None
+
+
+def stored_sender_authenticated(raw: object) -> bool:
+    """Whether intake found this mail's sender proven by the strict DMARC rule.
+
+    True only for a literal ``True``, so a row written before the field existed
+    reads false.
+    """
+    stored = _stored_object(raw)
+    return stored is not None and stored.get("sender_authenticated") is True
+
+
+def stored_received_mail(raw: object) -> dict | None:
+    """The card's metadata read back out of its column, or None.
+
+    None for anything that is not a JSON object. Otherwise every field is
+    coerced to the shape `received_mail_meta` writes, with the same caps, so
+    the builder's own output reads back unchanged, less
+    ``sender_authenticated``, which is not the card's. An attachment's ``path``
+    is returned as stored: whether a viewer may follow it is the reader's call.
+    """
+    stored = _stored_object(raw)
+    if stored is None:
         return None
     attachments: list[dict] = []
     items = stored.get("attachments")

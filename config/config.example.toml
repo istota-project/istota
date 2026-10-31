@@ -695,6 +695,12 @@ email_poll_batch_size = 50
 email_rate_limit_messages = 60          # email tasks per user per window
 email_sender_rate_limit_messages = 20   # …and per sender, so one loud correspondent throttles alone
 email_rate_limit_window_seconds = 3600
+# Mail flagged as a suspected prompt injection, per user and address. At the
+# threshold the address's mail is held for the user's approval before any model
+# sees it. 0 or less turns holding off; flags are still recorded.
+email_sender_flag_hold_threshold = 3
+# Age past which a flag stops counting and is pruned. 0 or less means flags never age.
+email_sender_flag_window_days = 90
 # Untrusted-sender confirmation prompts per user and sender per window before
 # they collapse into one summary notice. 0 = never collapse.
 email_confirmation_prompts_per_window = 3

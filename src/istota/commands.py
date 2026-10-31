@@ -4435,6 +4435,65 @@ async def cmd_untrust(ctx: CommandContext):
     return f"`{email}` is not in your trusted senders list. Note: senders in config files must be removed from the config."
 
 
+def _flagged_address_span(address: str) -> str:
+    # The address was chosen by a stranger: one line, and a backtick in it must
+    # not close the code span around it.
+    from istota.mail.support import flatten_prompt_header
+
+    return "`" + flatten_prompt_header(address).replace("`", "'") + "`"
+
+
+@command(
+    "flagged",
+    "List email senders flagged for suspected prompt injection, and which are held: `!flagged`",
+)
+async def cmd_flagged(ctx: CommandContext):
+    from istota.mail import sender_flags
+
+    refusal = _private_only(ctx, "your flagged senders")
+    if refusal is not None:
+        return refusal
+
+    summaries = sender_flags.list_flags(ctx.conn, ctx.config, ctx.user_id)
+    if not summaries:
+        return "No flagged senders."
+
+    lines = ["**Flagged senders** (suspected prompt injection):", ""]
+    for summary in summaries:
+        noun = "flag" if summary.count == 1 else "flags"
+        held = "held now" if summary.holding else "not held"
+        lines.append(
+            f"- {_flagged_address_span(summary.address)}: {summary.count} {noun}, "
+            f"last {summary.last_flagged_at[:10]}, {', '.join(summary.reasons)}; {held}"
+        )
+    lines.append("")
+    lines.append("`!unflag sender@example.com` clears an address's flags.")
+    return "\n".join(lines)
+
+
+@command(
+    "unflag",
+    "Clear the suspected-injection flags on an email sender: `!unflag sender@example.com`",
+)
+async def cmd_unflag(ctx: CommandContext):
+    from istota.mail import sender_flags
+
+    refusal = _private_only(ctx, "your flagged senders")
+    if refusal is not None:
+        return refusal
+
+    address = sender_flags.address_key(ctx.args.strip())
+    if address is None or "@" not in address:
+        return "Usage: `!unflag sender@example.com`"
+
+    removed = sender_flags.clear(ctx.conn, ctx.user_id, address)
+    span = _flagged_address_span(address)
+    if not removed:
+        return f"{span} has no flags."
+    noun = "flag" if removed == 1 else "flags"
+    return f"Cleared {removed} {noun} on {span}. Mail already held still waits for your answer."
+
+
 def _relay_reply_in_room(ctx: CommandContext, origin: dict) -> str:
     """`!relay reply RELAY_ID <answer>` from the room a question was delivered to.
 

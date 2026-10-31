@@ -1062,6 +1062,7 @@ def _one_file_of_every_kind(config, task) -> Path:
         "health_ops": [],
         "garmin_import": {"days_back": 1},
         "istota_events": [events.upsert_op("planted@bot.example.com", create=True, fields=fields)],
+        "sender_flags": [{"reason": "instruction_override"}],
         "user_alerts": [{"message": "This mail reads like phishing", "type": "security"}],
         "email_output": {"subject": "", "body": REPLY_BODY, "format": "plain"},
     }
@@ -1224,7 +1225,9 @@ class TestACorrespondentsDrain:
 
         _drain(mail_config, task)
 
-        assert _left(directory, task) == {"email_output"}
+        # The flag's own read of the author raises into the handler guard, so its
+        # file stays for the retry purge and no row is written.
+        assert _left(directory, task) == {"email_output", "sender_flags"}
         assert _written(mail_config)["kv"] is None
         assert _written(mail_config)["subtasks"] == 0
         assert len(_alerts(mail_config)) == 1
@@ -1247,7 +1250,8 @@ class TestACorrespondentsDrain:
 
         assert set(CORRESPONDENT_KEPT_SUFFIXES) <= set(_KNOWN_DEFERRED_SUFFIXES)
         assert CORRESPONDENT_KEPT_SUFFIXES == {
-            "email_output": None, "user_alerts": None, "istota_events": "calendar",
+            "email_output": None, "user_alerts": None, "sender_flags": None,
+            "istota_events": "calendar",
         }
 
 
