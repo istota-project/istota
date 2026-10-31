@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tasks can run long commands in the background, on both brains.** A task can start a build or a dev server, carry on working, read its output as it goes, wait for it to finish and stop it. Background commands end when the task attempt does.
 - Tasks can read a calendar over a range of dates in one call, with `--start` and `--end` on `calendar list`. A window that was not today, tomorrow or the next seven days used to take one call per day. A range over the limit is refused rather than cut short.
 - **The Taxes page shows income it has not projected yet.** Self-employment income already posted in the current month appears on its own line, marked as not yet in the projection, so it no longer looks missing from the estimate.
 - **See what the SE account patterns match.** Settings > Taxes lists the accounts each pattern list matches and their totals for the tax year, and follows your edits before you save. A list that matches nothing says so.

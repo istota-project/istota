@@ -70,7 +70,11 @@ BASH_SCHEMA = ToolSchema(
         "rather than the last command — note that a non-final `grep` with "
         "no match fails the pipeline. Output (stdout+stderr) is captured "
         "and capped. Provide a short `description` for progress display. "
-        "Optional `timeout` in milliseconds."
+        "Optional `timeout` in milliseconds. Set `run_in_background` for a long "
+        "build or a server: the call returns a job id at once, BashOutput reads "
+        "the job and KillShell stops it, and it is killed when this task attempt "
+        "ends, so it cannot serve a later task. A background job has no timeout "
+        "unless you pass one."
     ),
     parameters=[
         ToolParameter(name="command", type="string", description="The command to run."),
@@ -86,11 +90,56 @@ BASH_SCHEMA = ToolSchema(
             ),
             required=False,
         ),
+        ToolParameter(
+            name="run_in_background",
+            type="boolean",
+            description="Start the command as a background job and return its id at once.",
+            required=False,
+        ),
     ],
 )
 
 
-def make_bash_tool(env: ToolEnv) -> AgentTool:
+async def spawn_shell(env: ToolEnv, command: str, *, stdin=None):
+    """Start ``command`` the way every Bash call does, foreground or background."""
+    # `pipefail` on, because the result this tool returns ends in
+    # `[exit code: N]` and the model reads that as whether the command
+    # worked. Without it a pipeline reported its last stage, so
+    # `pytest … | tail -3` came back clean on a suite that failed. The bare
+    # name rather than a probed absolute path: this process runs *inside*
+    # the namespace, where bubblewrap binds `/usr` and need not reproduce
+    # the host's `/bin` symlink, so PATH resolution in here is what has
+    # always worked.
+    cmd = shell_argv(command, bash="bash")
+
+    # No sandbox wrap and no cgroup placement, and both absences are the
+    # point of this seam rather than an omission (ISSUE-389). The process
+    # running this code is `istota.sandbox.tool_server`, already inside the one
+    # bwrap namespace the attempt gets and already a member of the task
+    # cgroup — and membership is inherited at fork, so every command below
+    # is contained by being forked from here. Re-wrapping would nest
+    # bubblewrap inside a namespace built with `--unshare-user
+    # --disable-userns`, which fails every Bash call rather than confining
+    # anything; re-placing would open `cgroup.procs`, a path no sandbox
+    # binds. `tests/linux/test_tool_server_lifecycle.py` is where the
+    # inheritance is asserted against the kernel rather than assumed.
+    return await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=stdin,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        cwd=str(env.cwd),
+        env=env.subprocess_env,
+        # Own process group so a timeout/abort/cancel can SIGKILL the
+        # whole tree — a command that backgrounds children otherwise
+        # survives a bare child kill (NB-7).
+        start_new_session=True,
+    )
+
+
+def make_bash_tool(env: ToolEnv, jobs=None) -> AgentTool:
+    """``jobs`` is the attempt's ``bash_jobs.BackgroundJobs``. Untyped because that
+    module imports this one; with none, ``run_in_background`` is refused."""
     schema = BASH_SCHEMA
 
     async def _execute(call_id, args, on_update, abort):
@@ -99,39 +148,16 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
         timeout_ms = args.get("timeout")
         timeout_s = (int(timeout_ms) / 1000.0) if timeout_ms else float(env.bash_timeout_seconds)
 
-        # `pipefail` on, because the result this tool returns ends in
-        # `[exit code: N]` and the model reads that as whether the command
-        # worked. Without it a pipeline reported its last stage, so
-        # `pytest … | tail -3` came back clean on a suite that failed. The bare
-        # name rather than a probed absolute path: this process runs *inside*
-        # the namespace, where bubblewrap binds `/usr` and need not reproduce
-        # the host's `/bin` symlink, so PATH resolution in here is what has
-        # always worked.
-        cmd = shell_argv(command, bash="bash")
+        if args.get("run_in_background"):
+            if jobs is None:
+                return ToolResult(
+                    content=[TextContent(text="Background jobs are not available here.")],
+                    is_error=True,
+                )
+            return await jobs.start(command, timeout_ms)
 
-        # No sandbox wrap and no cgroup placement, and both absences are the
-        # point of this seam rather than an omission (ISSUE-389). The process
-        # running this code is `istota.sandbox.tool_server`, already inside the one
-        # bwrap namespace the attempt gets and already a member of the task
-        # cgroup — and membership is inherited at fork, so every command below
-        # is contained by being forked from here. Re-wrapping would nest
-        # bubblewrap inside a namespace built with `--unshare-user
-        # --disable-userns`, which fails every Bash call rather than confining
-        # anything; re-placing would open `cgroup.procs`, a path no sandbox
-        # binds. `tests/linux/test_tool_server_lifecycle.py` is where the
-        # inheritance is asserted against the kernel rather than assumed.
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=str(env.cwd),
-                env=env.subprocess_env,
-                # Own process group so a timeout/abort/cancel can SIGKILL the
-                # whole tree — a command that backgrounds children otherwise
-                # survives a bare child kill (NB-7).
-                start_new_session=True,
-            )
+            proc = await spawn_shell(env, command)
         except (OSError, ValueError) as exc:
             return ToolResult(content=[TextContent(text=f"{_START_FAILED_PREFIX}{exc}")])
 
@@ -268,7 +294,7 @@ class _SpillWriter:
         try:
             self._base.mkdir(parents=True, exist_ok=True)
             fd, name = tempfile.mkstemp(prefix="bash_output_", suffix=".txt", dir=str(self._base))
-            self._fh = os.fdopen(fd, "wb")
+            self._fh = os.fdopen(fd, "w+b")
             self.path = Path(name)
             self._fh.write(head)
         except OSError:
@@ -281,6 +307,16 @@ class _SpillWriter:
             self._fh.write(data)
         except OSError:
             self._fail()
+
+    def read_at(self, offset: int, size: int) -> bytes:
+        """From the open descriptor, so a swapped name changes nothing."""
+        if self._fh is None:
+            return b""
+        try:
+            self._fh.flush()
+            return os.pread(self._fh.fileno(), size, offset)
+        except OSError:
+            return b""
 
     def _fail(self) -> None:
         if self._fh is not None:

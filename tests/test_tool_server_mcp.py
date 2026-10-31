@@ -197,12 +197,31 @@ class TestHandshake:
         mcp = server()
         mcp.initialize()
         listed = {t["name"]: t for t in mcp.request(1, "tools/list")["result"]["tools"]}
-        assert set(listed) == {"Bash", "Edit", "Glob", "Grep", "Read", "Write"}
+        assert set(listed) == {
+            "Bash", "BashOutput", "Edit", "Glob", "Grep", "KillShell", "Read", "Write",
+        }
         read_only = {name for name, t in listed.items() if t["annotations"]["readOnlyHint"]}
-        assert read_only == {"Read", "Grep", "Glob"}
+        assert read_only == {"Read", "Grep", "Glob", "BashOutput"}
         assert "exclude_from_context" not in listed["Bash"]["inputSchema"]["properties"]
+        assert "run_in_background" in listed["Bash"]["inputSchema"]["properties"]
         assert "command" in listed["Bash"]["inputSchema"]["properties"]
         assert listed["Read"]["description"]
+
+    def test_a_background_job_answers_over_mcp_and_ends_with_stdin(self, server, tmp_path):
+        marker = tmp_path / "beat"
+        mcp = server()
+        mcp.initialize()
+        started = mcp.call(1, "Bash", {
+            "command": f"echo hi; while :; do date +%s%N >> {marker}; sleep 0.05; done",
+            "run_in_background": True,
+        })
+        assert "bg_1" in _text(started)
+        read = mcp.call(2, "BashOutput", {"job_id": "bg_1", "wait_seconds": 1})
+        assert "hi" in _text(read) and "running" in _text(read)
+        assert mcp.close_stdin_and_wait() == 0
+        size = marker.stat().st_size
+        time.sleep(0.4)
+        assert marker.stat().st_size == size
 
     def test_the_hellos_subset_is_what_is_listed_and_callable(self, server, tmp_path):
         mcp = server(tools=["Read"])

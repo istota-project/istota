@@ -42,7 +42,7 @@ Heartbeat and cron shell commands run in the task sandbox with the same environm
 
 ## Filesystem sandbox (bubblewrap)
 
-When `sandbox_enabled = true` (default), each task's tools run inside a `bwrap` mount namespace with PID isolation: one tool server per task attempt, which runs every Read, Write, Edit, Grep, Glob and Bash call on either brain.
+When `sandbox_enabled = true` (default), each task's tools run inside a `bwrap` mount namespace with PID isolation: one tool server per task attempt, which runs every Read, Write, Edit, Grep, Glob, Bash, BashOutput and KillShell call on either brain. A background job started with Bash is in the same namespace and cgroup, and it ends with the attempt.
 
 **Every task sees**:
 

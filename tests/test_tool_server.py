@@ -96,9 +96,11 @@ async def _open_fifo_writer(path, *, timeout):
 
 
 class TestHandshake:
-    async def test_it_reports_exactly_the_six_core_tools(self, tmp_path):
+    async def test_it_reports_exactly_the_core_tools(self, tmp_path):
         async with server_for(tmp_path) as server:
-            assert server.tools == ["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+            assert server.tools == [
+                "Bash", "BashOutput", "Edit", "Glob", "Grep", "KillShell", "Read", "Write",
+            ]
             assert server.failure is None
 
     async def test_the_recorded_pid_is_the_live_server(self, tmp_path):
@@ -758,6 +760,72 @@ class TestPersistenceAcrossCalls:
         b = _text(second).split("PPID=")[1].split()[0]
         assert a == b, (a, b)
         assert int(a) == server.pid, (a, server.pid)
+
+
+async def _beating_job(server, marker):
+    started = await _call(server, "Bash", {
+        "command": f"while :; do date +%s%N >> {marker}; sleep 0.05; done",
+        "run_in_background": True,
+    })
+    assert "bg_1" in _text(started), _text(started)
+    for _ in range(200):
+        if marker.exists():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("the job never started")
+
+
+async def _assert_stopped(marker):
+    # Polled: the group's death arrives a moment after the server's.
+    for _ in range(100):
+        before = marker.stat().st_size
+        await asyncio.sleep(0.2)
+        if marker.stat().st_size == before:
+            return
+    raise AssertionError("the job is still writing")
+
+
+class TestBackgroundJobsEndWithTheAttempt:
+    """Nothing here wraps the server, so no namespace teardown is doing the
+    work: these are the unsandboxed shapes, where the server's own cleanup is
+    the only thing that ends a job. `start_new_session` puts a job outside the
+    server's group, so `aclose`'s group kill does not reach one either."""
+
+    async def test_a_job_runs_across_calls_and_answers_over_the_socket(self, tmp_path):
+        async with server_for(tmp_path) as server:
+            await _call(server, "Bash", {"command": "echo hi", "run_in_background": True})
+            read = await _call(server, "BashOutput", {"job_id": "bg_1", "wait_seconds": 10})
+            assert "hi" in _text(read)
+            ended = await _call(server, "KillShell", {"job_id": "bg_1"})
+            assert "exit code: 0" in _text(ended)
+
+    async def test_shutdown_kills_a_running_job(self, tmp_path):
+        marker = tmp_path / "beat"
+        async with server_for(tmp_path) as server:
+            await _beating_job(server, marker)
+        await _assert_stopped(marker)
+
+    @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP, signal.SIGINT])
+    async def test_a_signal_to_the_server_kills_a_running_job(self, tmp_path, sig):
+        marker = tmp_path / "beat"
+        async with server_for(tmp_path) as server:
+            await _beating_job(server, marker)
+            os.kill(server.pid, sig)
+            await _assert_stopped(marker)
+
+    async def test_a_term_is_still_reported_as_a_signal_death(self, tmp_path):
+        """`scheduler._is_shutdown_collateral` requeues on this prefix, so the
+        handler that kills the jobs has to leave the exit status a signal's."""
+        marker = tmp_path / "beat"
+        async with server_for(tmp_path) as server:
+            await _beating_job(server, marker)
+            os.kill(server.pid, signal.SIGTERM)
+            await asyncio.wait_for(server._proc.wait(), timeout=10)
+            for _ in range(100):
+                if server.failure:
+                    break
+                await asyncio.sleep(0.02)
+        assert server.failure.startswith(remote_mod._TERMINATED_PREFIX), server.failure
 
 
 class TestEncodeGuardsTheCallPath:
