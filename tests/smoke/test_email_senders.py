@@ -36,6 +36,23 @@ _ALERT_DESTINATIONS = (
 )
 
 
+#: Seeds three flags for argv[2] under user argv[3] in the database at argv[1].
+#: Rows rather than three mails, since earning them is covered through the drain
+#: in `tests/test_email_sender_flags.py` and `reset_framework_state` clears them.
+_SEED_FLAGS = (
+    "import sys\n"
+    "from pathlib import Path\n"
+    "from istota import db\n"
+    "with db.get_db(Path(sys.argv[1])) as conn:\n"
+    "    for task_id in (-1, -2, -3):\n"
+    "        conn.execute(\n"
+    "            'INSERT INTO email_sender_flags (user_id, sender, task_id, reason)'\n"
+    "            ' VALUES (?, ?, ?, ?)',\n"
+    "            (sys.argv[3], sys.argv[2], task_id, 'instruction_override'),\n"
+    "        )\n"
+)
+
+
 def _dmarc_push(stack, task: dict, sent: flow.Sent, verdict: str) -> str:
     """The DMARC canary's push: its alert message through `flatten_body`
     (`inbound._deliver_dmarc_alerts`), read back off the `dmarc:<verdict>` row,
@@ -357,3 +374,68 @@ class TestCorrespondents:
             marker=nonce,
         )
         _held_at_the_plus_address(stack, email_people, sent)
+
+
+@EMAIL
+class TestAFlaggedSender:
+    def test_a_pattern_trusted_sender_with_three_flags_is_held_before_any_model(
+        self, stack, email_people,
+    ):
+        """`*@trusted.test` would run this mail and answer it unheld, as
+        `test_a_trusted_sender_mints_a_thread_and_is_answered` shows, and a
+        pattern does not outrank the flags
+        (`sender_flags.holding_count`). No route is scripted, so a request for
+        this mail fails the autouse unmatched check as well as the read below.
+
+        The stored prompt is the neutral one, since it reaches the model on an
+        approved re-run; the push is the user's copy, with the way out.
+        """
+        nonce = flow.new_nonce()
+        sender = flow.person("trusted", nonce)
+        address = sender.address.lower()
+        seeded = stack.exec(
+            ["uv", "run", "python", "-c", _SEED_FLAGS,
+             stack.probe.db_path, address, email_people.host_id],
+            timeout=120,
+        )
+        assert seeded.returncode == 0, seeded.stderr
+
+        sent = flow.send(
+            stack, sender, to=[mail.tagged(email_people.host_id)],
+            subject=f"again {nonce}", text=f"another try {nonce}",
+            marker=nonce,
+        )
+
+        task = flow.held_task(stack, sent)
+        stored = task["confirmation_prompt"] or ""
+        assert stored.startswith(f"Email from held sender {sender.address}\n"), stored
+        assert "flagged" not in stored
+        assert "unflag" not in stored
+
+        head, _, rest = stored.partition("\n\n")
+        answer_line = rest.rsplit("\n", 1)[-1]
+        push = flatten_body(
+            head.replace("Email from held sender", "Email from flagged sender")
+            + "\n\nHeld because 3 earlier mails from this address were flagged as "
+            "suspected prompt injection. Reply 'yes' to process it, or 'no' to "
+            "discard. Approving runs a turn on it, which can answer the sender and "
+            "anyone on its thread, and does not clear the flags, so the next mail "
+            f"is asked about too. Send !unflag {sender.address} to clear them.\n"
+            + answer_line
+        )
+        flow.assert_outcome(stack, sent, flow.Expected(
+            processed=flow.Processed(
+                routing_method="plus_address", user_id=email_people.host_id,
+                host_asked=False, sender_check="verified",
+            ),
+            task=flow.TaskState(status="pending_confirmation", host_absent=False),
+            room="none", participants=None,
+            transcript=flow.Transcript(incoming=None, bot=None),
+            reply=None, note=None,
+            notices=flow.Notices(
+                rows=frozenset({("confirmation", "task:{task}")}),
+                pushes=(push,),
+                alert_mails=1,
+            ),
+        ))
+        assert flow.marker_text(nonce) not in stack.endpoint.transcript()

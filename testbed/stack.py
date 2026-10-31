@@ -151,10 +151,14 @@ READY_SERVICES: dict[str, tuple[str, ...]] = {
 # `catchall@ext.test` does not add a row a later test can filter past; it
 # changes what every later scenario *means*, silently converting each
 # untrusted-sender case into a trusted one.
+#
+# **Sender flags** are cleared for the same reason. A flagged address is held
+# on its next mail, whichever test sends it.
 _RESET_FRAMEWORK_STATE = """
 import sys
 from istota import db
-released = retries = trusted = 0
+from istota.mail import sender_flags
+released = retries = trusted = flags = 0
 with db.get_db(sys.argv[1]) as conn:
     for (task_id,) in conn.execute(
         "SELECT id FROM tasks WHERE status = 'pending_confirmation'"
@@ -171,7 +175,11 @@ with db.get_db(sys.argv[1]) as conn:
     ).fetchall():
         db.remove_trusted_sender(conn, user_id, sender)
         trusted += 1
-print(released, retries, trusted)
+    for user_id, sender in conn.execute(
+        "SELECT DISTINCT user_id, sender FROM email_sender_flags"
+    ).fetchall():
+        flags += sender_flags.clear(conn, user_id, sender)
+print(released, retries, trusted, flags)
 """
 
 # What decides whether the write above is worth an exec at all. `uv run python
@@ -182,7 +190,8 @@ _DIRTY_STATE_SQL = """
 SELECT
   (SELECT COUNT(*) FROM tasks WHERE status = 'pending_confirmation') AS parked,
   (SELECT COUNT(*) FROM tasks WHERE status = 'pending' AND attempt_count > 0) AS retries,
-  (SELECT COUNT(*) FROM trusted_email_senders) AS trusted
+  (SELECT COUNT(*) FROM trusted_email_senders) AS trusted,
+  (SELECT COUNT(*) FROM email_sender_flags) AS flags
 """
 
 # Emptying a container-side scratch directory without removing it — the ones in
@@ -1732,10 +1741,11 @@ class Stack:
                     f"{[(t.get('id'), t.get('status')) for t in busy]})"
                 )
 
-    def reset_framework_state(self) -> tuple[int, int, int]:
-        """Clear the three things a reset has to *write*, and say what it cleared.
+    def reset_framework_state(self) -> tuple[int, int, int, int]:
+        """Clear the four things a reset has to *write*, and say what it cleared.
 
-        Returns `(confirmations released, retries cancelled, senders untrusted)`.
+        Returns `(confirmations released, retries cancelled, senders untrusted,
+        flags cleared)`.
         Each is explained where `_RESET_FRAMEWORK_STATE` is defined; between
         them they are the whole of what this harness writes to a live database,
         and every one is done through the daemon's own function.
@@ -1749,8 +1759,8 @@ class Stack:
         """
         counts = self.probe.query(_DIRTY_STATE_SQL)
         dirty = counts[0] if counts else {}
-        if not any(dirty.get(key) for key in ("parked", "retries", "trusted")):
-            return (0, 0, 0)
+        if not any(dirty.get(key) for key in ("parked", "retries", "trusted", "flags")):
+            return (0, 0, 0, 0)
         result = self.exec(
             ["uv", "run", "python", "-c", _RESET_FRAMEWORK_STATE, self.probe.db_path],
             timeout=120,
