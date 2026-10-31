@@ -22,8 +22,7 @@ remember to extend:
 
 1. **`ISTOTA_`** — the whole framework namespace goes.
 2. **The credential shape** — any name containing `PASSWORD`, `SECRET`,
-   `TOKEN`, `API_KEY` or `PRIVATE_KEY`. The same patterns `build_stripped_env`
-   strips, copied rather than imported (see `CREDENTIAL_PATTERNS`).
+   `TOKEN`, `API_KEY` or `PRIVATE_KEY` (see `CREDENTIAL_PATTERNS`).
 3. **Whatever a skill manifest declares** — scraped from the `env:` frontmatter
    of every `src/istota/skills/*/skill.md`. This is the rule that matters. The
    obvious fix for ISSUE-301 was a hand-written list of the dozen names that
@@ -59,13 +58,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILLS_ROOT = REPO_ROOT / "src" / "istota" / "skills"
 
-# `executor._CREDENTIAL_ENV_PATTERNS`, copied. Importing it would be the
-# obvious thing and costs 666ms on top of what `conftest.py` already imports —
-# paid at collection, once per xdist worker, on every `uv run pytest`. So the
-# names are duplicated here and
-# `test_env_isolation.py::TestTheCredentialPatternsHaveNotDrifted` does the
-# import inside a test body, where it is paid once and only when the suite runs
-# far enough to check it.
 CREDENTIAL_PATTERNS = frozenset({
     "PASSWORD", "SECRET", "TOKEN", "API_KEY",
     "APP_PASSWORD", "NC_PASS", "PRIVATE_KEY",
@@ -124,8 +116,7 @@ _KEEP_NAMES = frozenset({
     # Contains TOKEN and so matches the credential rule, and is not one: it
     # silences the huggingface fork warning, and the `ml` tier is where it gets
     # set. The rule is a substring match by design, so an exception belongs
-    # here rather than in `CREDENTIAL_PATTERNS`, which is pinned equal to
-    # `executor`'s copy.
+    # here rather than in `CREDENTIAL_PATTERNS`.
     "TOKENIZERS_PARALLELISM",
 })
 
@@ -139,7 +130,7 @@ _SCRUB_NAMES = frozenset({
     "FEEDS_WORKSPACE",
     "WHISPER_MAX_MODEL",
     "RAM_HEADROOM_MB",
-    # `build_stripped_env` sets this for unattended shells (ISSUE-291). An
+    # `confined_command` sets this for unattended shells (ISSUE-291). An
     # ambient one would make the pre-commit hook tests read the operator's
     # choice rather than the case under test.
     "PRECOMMIT_SCANS_REQUIRED",

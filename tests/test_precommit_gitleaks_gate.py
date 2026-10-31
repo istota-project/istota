@@ -258,22 +258,33 @@ class TestTheOtherHalfOfTheGateFailsClosedToo:
         assert "check-private-data.sh" in result.stdout
 
 
-class TestTheDaemonMarksItsOwnUnattendedShells:
-    """`build_stripped_env` is the daemon's own environment: neither per-task
-    marker is in it, so a `git commit` from one used to read as a human at a
-    terminal. Cron and heartbeat commands now set this in `confined_command`."""
+class TestACommandJobMarksItsOwnShell:
+    """`sandbox.confined_command` sets this on a cron or heartbeat shell, so a
+    `git commit` from one does not read as a human at a terminal."""
 
-    def test_the_stripped_env_demands_the_scans(self):
-        from istota.executor import build_stripped_env
-
-        assert build_stripped_env().get("PRECOMMIT_SCANS_REQUIRED") == "1"
-
-    def test_the_hook_honours_what_the_daemon_sets(self, repo):
+    def test_the_hook_honours_what_a_job_sets(self, repo, db_path, tmp_path):
         """The two halves have to agree on the spelling, or the marker is a
         variable nothing reads."""
-        from istota.executor import build_stripped_env
+        from istota.config import Config
+        from istota.db import Task
+        from istota.scheduler import _execute_command_task
 
-        value = build_stripped_env()["PRECOMMIT_SCANS_REQUIRED"]
+        (tmp_path / "mount" / "Users" / "alice").mkdir(parents=True)
+        config = Config(
+            db_path=db_path,
+            workspace_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+        )
+        success, value = _execute_command_task(
+            Task(
+                id=7, status="running", source_type="scheduled", user_id="alice",
+                prompt="", conversation_token="",
+                command="echo $PRECOMMIT_SCANS_REQUIRED",
+            ),
+            config,
+        )
+        assert success, value
+        assert value == "1"
         assert run_hook(repo, PRECOMMIT_SCANS_REQUIRED=value).returncode == 1
 
 
