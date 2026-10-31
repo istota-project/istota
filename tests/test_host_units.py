@@ -357,6 +357,7 @@ BROWSER = "172.29.0.2"
 BROWSER_NETWORK_PEER = "172.29.0.129"
 BROWSER_COMMENT_PREFIX = "istota-browser:"
 BROWSER_GRANT_PREFIX = "istota-browser-grant:"
+BROWSER_GRANT_COMMENT = "istota-browser-grant: an address of a name in [browser] private_hosts"
 
 
 class TestTheBrowserFirewall:
@@ -426,6 +427,14 @@ class TestTheBrowserFirewall:
 
     def _grants(self, rig, tmp_path: Path) -> list[list[str]]:
         return [r for r in rig._chain(tmp_path) if any(t.startswith(BROWSER_GRANT_PREFIX) for t in r)]
+
+    def test_the_grant_rules_keep_the_comment_open_rules_already_carry(self, rig, tmp_path):
+        """The comment is how the script finds its own rules. A new value would leave
+        every open rule behind on an upgrade, and a RETURN above the DROPs for good."""
+        rig._run(tmp_path, {"ISTOTA_STACK_BIN": self._stack_bin(tmp_path, "10.0.0.5\n")})
+        grants = self._grants(rig, tmp_path)
+        assert len(grants) == 1
+        assert BROWSER_GRANT_COMMENT in grants[0]
 
     def test_a_granted_name_opens_its_addresses_only(self, rig, tmp_path):
         rig._run(tmp_path, {"ISTOTA_STACK_BIN": self._stack_bin(tmp_path, "10.0.0.5\n192.168.8.7\n")})

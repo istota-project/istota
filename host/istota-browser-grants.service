@@ -1,5 +1,5 @@
 [Unit]
-Description=Open the firewall for what [browser] private_hosts resolves to
+Description=Open the firewall for what the browser's private hosts resolve to
 After=docker.service istota-devbox-egress.service
 Requires=docker.service
 
