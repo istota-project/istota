@@ -207,6 +207,7 @@ With the bubblewrap sandbox, no database is reachable inside the subprocess at a
 | `task_{id}_kv_ops.json` | `_process_deferred_kv_ops` | KV store set/delete operations |
 | `task_{id}_kg_ops.json` | `_process_deferred_kg_ops` | Knowledge-graph fact add/invalidate/delete (per-op commit) |
 | `task_{id}_user_alerts.json` | `_process_deferred_user_alerts` | Model-raised notices, one row per `(task, grade)`. `security` and `action_needed` are pushed; `note` is written to the panel and never delivered |
+| `task_{id}_sender_flags.json` | `_process_deferred_sender_flags` | The model's flag that the mail it answered looks like an injection attempt. Only the first entry's `reason` is read; the sender and user come from the task and its `processed_emails` row, and `sender_flags.record_flag` decides whether it counts. Kept on a correspondent's turn, recorded for nobody else |
 | `task_{id}_health_ops.json` | `_process_deferred_health_ops` | Health module inserts/updates replayed against the per-user `health.db` |
 | `task_{id}_email_output.json` | `_deliver_deferred_email_output` | Structured email reply (preferred over the legacy stdout-JSON parser) |
 | `task_{id}_garmin_import.json` | `_process_deferred_garmin_import` | Garmin Connect sync requested from inside the sandbox |
