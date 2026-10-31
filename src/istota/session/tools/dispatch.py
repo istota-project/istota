@@ -14,8 +14,8 @@ either brain (#862). This module imports only from
 **Why a lock and not native's batch rule.** The native loop sees a whole batch
 and serialises it when any call mutates. The CLI sends calls one at a time as
 each block finishes streaming, so only a per-call rule can apply the same
-policy: ``sequential`` tools (Write, Edit, Bash) run alone, ``parallel`` ones
-(Read, Grep, Glob) run together. Serialising every mutation against
+policy: ``sequential`` tools (Write, Edit, Bash, KillShell) run alone,
+``parallel`` ones (Read, Grep, Glob, BashOutput) run together. Serialising every mutation against
 everything also covers native's path-overlap check, since an overlap only
 matters when one side mutates.
 

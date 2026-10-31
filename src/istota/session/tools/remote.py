@@ -80,6 +80,7 @@ from istota.sandbox.process_group import kill_group_if_live
 from istota.sandbox.shell_exec import on_daemon_path
 
 from .bash import BASH_SCHEMA
+from .bash_jobs import BASH_OUTPUT_SCHEMA, KILL_SHELL_SCHEMA
 from .files import (
     EDIT_SCHEMA,
     GLOB_SCHEMA,
@@ -91,8 +92,8 @@ from .files import (
 
 logger = logging.getLogger(__name__)
 
-# The six, in `build_default_tools` order, each paired with the execution mode
-# the real tool declares. `tests/test_tool_schema_parity.py` compares this
+# The core tools, in `build_default_tools` order, each paired with the execution
+# mode the real tool declares. `tests/test_tool_schema_parity.py` compares this
 # table against the factories field for field, so a mode changed on one side
 # and not the other is a failure rather than a silently serialized batch.
 _PROXIED: tuple[tuple[ToolSchema, str], ...] = (
@@ -102,6 +103,8 @@ _PROXIED: tuple[tuple[ToolSchema, str], ...] = (
     (GREP_SCHEMA, "parallel"),
     (GLOB_SCHEMA, "parallel"),
     (BASH_SCHEMA, "sequential"),
+    (BASH_OUTPUT_SCHEMA, "parallel"),
+    (KILL_SHELL_SCHEMA, "sequential"),
 )
 
 #: The names the tool server can run, which a ``hello`` may narrow with ``tools``.
@@ -223,7 +226,7 @@ def hello_payload(
     tools without standing up a subprocess.
 
     ``tools`` and ``text_cap`` are left out of the frame when ``None``: absent
-    means all six and no cap. An empty ``tools`` is sent, and offers nothing.
+    means all of them and no cap. An empty ``tools`` is sent, and offers nothing.
     """
     hello: dict[str, Any] = {
         "type": proto.MSG_HELLO,
@@ -833,7 +836,7 @@ async def _abandon(server: RemoteToolServer) -> str:
 
 
 def build_remote_tools(server: RemoteToolServer) -> list[AgentTool]:
-    """The six core tools as proxies onto ``server``.
+    """The core tools as proxies onto ``server``.
 
     Same schemas and same execution modes as the real ones — the *same
     objects*, so there is no second definition to drift — which is what keeps
