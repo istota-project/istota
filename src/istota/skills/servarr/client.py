@@ -14,8 +14,8 @@ this client's own. Every request passes, in order:
    Ids from argv are validated by `library_id` and `mbid` before use.
 2. **Scheme and address.** HTTPS to a host whose addresses are all public
    (`sandbox.net_guard.ip_is_public`); plain HTTP, or a non-public address,
-   only for a host the operator listed in ``[servarr] private_hosts``, matched
-   exactly. The connection goes to the checked address with the Host header
+   only for a host the operator granted to ``servarr`` in ``[private_hosts]``,
+   matched exactly. The connection goes to the checked address with the Host header
    (and SNI) on the name, so DNS cannot change its answer in between.
 3. **No redirects.** ``follow_redirects=False``; a 3xx is refused naming its
    target, so the key is never replayed elsewhere.
@@ -150,7 +150,7 @@ def mbid(value) -> str:
 
 
 def private_set(hosts) -> frozenset:
-    """``[servarr] private_hosts`` as the exact, lowercased names guard 2 matches."""
+    """The hosts granted to ``servarr`` as the exact, lowercased names guard 2 matches."""
     return net_guard.host_set(hosts)
 
 
@@ -171,7 +171,7 @@ def url_problem(base_url: str) -> str:
 
 
 def plain_http_refused(scheme: str, host: str, private: frozenset) -> bool:
-    """Plain HTTP goes only to a host the operator listed in `private_hosts`."""
+    """Plain HTTP goes only to a host the operator granted to ``servarr``."""
     return scheme == "http" and net_guard.normal_host(host) not in private
 
 
@@ -187,16 +187,16 @@ def config_problem(app: str, base_url: str, private_hosts) -> str:
     parts = urlsplit(base_url)
     private = private_set(private_hosts)
     if plain_http_refused(parts.scheme.lower(), parts.hostname, private):
-        return (f"[servarr.apps.{app}] url is plain HTTP to {parts.hostname}, which is not "
-                f"in [servarr] private_hosts")
+        return (f"[servarr.apps.{app}] url is plain HTTP to {parts.hostname}, which needs "
+                f"[private_hosts] \"{parts.hostname}\" = [\"servarr\"]")
     host = net_guard.normal_host(parts.hostname)
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:
         literal = None
     if literal is not None and host not in private and not ip_is_public(literal):
-        return (f"[servarr.apps.{app}] url is {host}, a private address, which is not in "
-                f"[servarr] private_hosts")
+        return (f"[servarr.apps.{app}] url is {host}, a private address, which needs "
+                f"[private_hosts] \"{host}\" = [\"servarr\"]")
     return ""
 
 
@@ -258,8 +258,8 @@ class ArrClient:
         name = net_guard.normal_host(host)
         if plain_http_refused(scheme, name, self._private):
             raise self._error(
-                f"{self.app} is configured over plain HTTP to {name}, which is not in "
-                f"[servarr] private_hosts. Plain HTTP is allowed only to a listed host; "
+                f"{self.app} is configured over plain HTTP to {name}. Plain HTTP is "
+                f"allowed only to a granted host, [private_hosts] \"{name}\" = [\"servarr\"]; "
                 f"nothing was sent.",
                 "host_refused",
             )
@@ -268,9 +268,9 @@ class ArrClient:
         )
         if refused is not None:
             raise self._error(
-                f"{name} resolves to a private or reserved address ({refused}). Only "
-                f"a host the operator lists in [servarr] private_hosts may; nothing "
-                f"was sent.",
+                f"{name} resolves to a private or reserved address ({refused}). It "
+                f"needs a grant from the operator, "
+                f"[private_hosts] \"{name}\" = [\"servarr\"]; nothing was sent.",
                 "host_refused",
             )
         if not addresses:

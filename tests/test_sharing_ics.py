@@ -4,7 +4,7 @@ A feed's address is a bearer secret the daemon alone reads. Adding one fetches
 it once through the guard and stores the row, the secret and the cache in one
 transaction; the poller keeps the cache fresh with conditional GETs; tasks read
 the cache, never the network. The remote ends are stdlib HTTP servers on
-loopback, named in `[sharing] private_hosts`, so every refusal here is one a
+loopback, granted to `sharing` in `[private_hosts]`, so every refusal here is one a
 real connection could have contradicted.
 """
 

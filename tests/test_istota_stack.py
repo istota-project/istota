@@ -2241,12 +2241,14 @@ class TestTheBrowsersFixedAddress:
 
 
 class TestTheBrowsersGrantReachesTheFirewall:
-    """`[browser] private_hosts` is the one setting (#884): this verb turns its names
-    into the addresses the firewall opens, since a firewall cannot read a name."""
+    """A host granted to the browser is the one setting (#884): this verb turns its
+    names into the addresses the firewall opens, since a firewall cannot read a name."""
 
-    def _lookup(self, fx, tmp_path, hosts: str, answers: dict[str, str]) -> subprocess.CompletedProcess:
+    def _lookup(
+        self, fx, tmp_path, hosts: str, answers: dict[str, str], config: str | None = None,
+    ) -> subprocess.CompletedProcess:
         (fx.stack / "config").mkdir(parents=True, exist_ok=True)
-        (fx.stack / "config" / "config.toml").write_text(f"[browser]\nprivate_hosts = {hosts}\n")
+        (fx.stack / "config" / "config.toml").write_text(config or f"[browser]\nprivate_hosts = {hosts}\n")
         bindir = tmp_path / "getent-bin"
         bindir.mkdir()
         cases = "".join(f"  {name}) printf '{answer}' ;;\n" for name, answer in answers.items())
@@ -2264,6 +2266,17 @@ class TestTheBrowsersGrantReachesTheFirewall:
         })
         assert result.returncode == 0, result.stderr
         assert result.stdout.split() == ["10.0.0.5", "192.168.8.7"]
+
+    def test_a_name_granted_in_the_table_gives_its_addresses(self, fx, tmp_path):
+        result = self._lookup(fx, tmp_path, "[]", {
+            "wiki.example.internal": "10.0.0.5 STREAM\\n",
+            "arr.example.internal": "10.0.0.6 STREAM\\n",
+        }, config=(
+            '[private_hosts]\n"wiki.example.internal" = ["browser", "feeds"]\n'
+            '"arr.example.internal" = ["servarr"]\n'
+        ))
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["10.0.0.5"]
 
     def test_a_public_or_loopback_answer_needs_no_rule(self, fx, tmp_path):
         result = self._lookup(fx, tmp_path, '["a.example"]', {
@@ -2402,8 +2415,8 @@ class TestLeavingThePinnedBrowserNetwork:
 
 
 class TestTheBrowsersPrivateHostsComeFromTheConfig:
-    """`[browser] private_hosts` is the one place a grant lives (#884): the
-    container mounts no config, so compose() hands it this list alone."""
+    """The config is the one place a grant lives (#884): the container mounts no
+    config, so compose() hands it the hosts granted to the browser and nothing else."""
 
     def _hosts(self, fx, config: str | None) -> subprocess.CompletedProcess:
         path = fx.stack / "config" / "config.toml"
@@ -2452,6 +2465,128 @@ class TestTheBrowsersPrivateHostsComeFromTheConfig:
         (fx.stack / ".env").write_text(fx.env_text() + "BROWSER_PRIVATE_HOSTS=internal.example\n")
         result = self._hosts(fx, "")
         assert result.stdout.strip() == "hosts="
+
+    def test_the_tables_grant_reaches_compose(self, fx):
+        result = self._hosts(fx, (
+            '[private_hosts]\n"wiki.example.internal" = ["browser"]\n'
+            '"rss.example.internal" = ["feeds", "browser"]\n'
+        ))
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "hosts=wiki.example.internal,rss.example.internal"
+
+    def test_a_host_for_another_consumer_stays_out(self, fx):
+        result = self._hosts(fx, '[private_hosts]\n"10.0.0.5" = ["servarr", "feeds"]\n')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "hosts="
+
+    def test_both_spellings_are_a_union_in_order_without_duplicates(self, fx):
+        result = self._hosts(fx, (
+            '[browser]\nprivate_hosts = ["old.example", "both.example", " old.example "]\n'
+            '[private_hosts]\n"new.example" = ["browser"]\n"both.example" = ["browser"]\n'
+        ))
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "hosts=new.example,both.example,old.example"
+
+    def test_a_bad_browser_section_does_not_lose_the_tables_grants(self, fx):
+        result = self._hosts(fx, 'browser = 3\n[private_hosts]\n"a.example" = ["browser"]\n')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "hosts=a.example"
+
+    def test_a_bad_table_does_not_lose_the_old_keys_grants(self, fx):
+        result = self._hosts(fx, 'private_hosts = ["shared.example"]\n[browser]\nprivate_hosts = ["a.example"]\n')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "hosts=a.example"
+
+    @pytest.mark.parametrize("config", [
+        'private_hosts = ["shared.example"]\n',
+        "private_hosts = 3\n",
+        '[[private_hosts]]\nhost = "a.example"\n',
+        '[private_hosts]\n"a.example" = "browser"\n',
+        '[private_hosts]\nwiki.example = ["browser"]\n',
+        '[private_hosts]\n"a.example" = []\n',
+        '[private_hosts]\n"a.example" = ["Browser", "browsr", "browser "]\n',
+        '[private_hosts]\n"a.example" = [1, {browser = true}, ["browser"]]\n',
+    ])
+    def test_a_table_of_any_other_shape_grants_nothing(self, fx, config):
+        result = self._hosts(fx, config)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "hosts="
+
+    def test_a_malformed_table_key_does_not_cross(self, fx):
+        result = self._hosts(fx, (
+            '[private_hosts]\n"ok.example" = ["browser"]\n"https://a.example" = ["browser"]\n'
+            '"b.example:80" = ["browser"]\n"*.example" = ["browser"]\n'
+            '"c.example,d.example" = ["browser"]\n"e.example\\nX=1" = ["browser"]\n'
+        ))
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "hosts=ok.example"
+
+    # Each with the grant both readers must reach, so that two readers granting
+    # nothing cannot pass as agreement.
+    PARITY_DOCUMENTS = {
+        "empty": ("", set()),
+        "table": ('[private_hosts]\n"wiki.example" = ["browser"]\n"10.0.0.5" = ["servarr"]\n', {"wiki.example"}),
+        "old-key": ('[browser]\nprivate_hosts = ["wiki.example", "10.0.0.5"]\n', {"wiki.example", "10.0.0.5"}),
+        "union": (
+            '[browser]\nprivate_hosts = ["old.example", "both.example"]\n'
+            '[private_hosts]\n"new.example" = ["browser"]\n"both.example" = ["browser"]\n',
+            {"old.example", "both.example", "new.example"},
+        ),
+        "empty-old-key": ('[browser]\nprivate_hosts = []\n[private_hosts]\n"a.example" = ["browser"]\n', {"a.example"}),
+        "browser-not-a-table": ('browser = 3\n[private_hosts]\n"a.example" = ["browser"]\n', {"a.example"}),
+        "top-level-list": ('private_hosts = ["shared.example"]\n', set()),
+        "top-level-list-and-old-key": (
+            'private_hosts = ["shared.example"]\n[browser]\nprivate_hosts = ["a.example"]\n', {"a.example"},
+        ),
+        "top-level-number": ("private_hosts = 3\n", set()),
+        "array-of-tables": ('[[private_hosts]]\nhost = "a.example"\n', set()),
+        "host-not-a-list": ('[private_hosts]\n"a.example" = "browser"\n', set()),
+        "host-not-a-list-and-old-key": (
+            '[browser]\nprivate_hosts = ["a.example"]\n[private_hosts]\n"a.example" = "browser"\n', {"a.example"},
+        ),
+        "unquoted-dotted-key": ('[private_hosts]\nwiki.example = ["browser"]\n', set()),
+        "another-consumer-only": ('[private_hosts]\n"a.example" = ["feeds", "servarr"]\n', set()),
+        "unknown-consumer": ('[private_hosts]\n"a.example" = ["browsr"]\n', set()),
+        "unknown-consumer-beside-browser": ('[private_hosts]\n"a.example" = ["browsr", "browser"]\n', {"a.example"}),
+        "duplicate-consumer": ('[private_hosts]\n"a.example" = ["browser", "browser"]\n', {"a.example"}),
+        "consumer-not-a-string": ('[private_hosts]\n"a.example" = [1, {browser = true}, ["browser"]]\n', set()),
+        "no-consumers": ('[private_hosts]\n"a.example" = []\n', set()),
+        "old-key-not-a-list": (
+            '[browser]\nprivate_hosts = "a.example"\n[private_hosts]\n"b.example" = ["browser"]\n', {"b.example"},
+        ),
+        "old-entry-not-a-string": (
+            '[browser]\nprivate_hosts = ["a.example", 1, {b = 1}, ["c.example"], true]\n', {"a.example"},
+        ),
+        "malformed-hosts": (
+            '[browser]\nprivate_hosts = ["https://old.example"]\n'
+            '[private_hosts]\n"ok.example" = ["browser"]\n"b.example:80" = ["browser"]\n',
+            {"ok.example"},
+        ),
+        "whitespace": (
+            '[browser]\nprivate_hosts = [" a.example "]\n[private_hosts]\n" b.example " = ["browser"]\n',
+            {"a.example", "b.example"},
+        ),
+        "two-spellings-of-one-name": (
+            '[private_hosts]\n"wiki.example" = ["browser"]\n"WIKI.EXAMPLE." = ["browser"]\n',
+            {"wiki.example", "WIKI.EXAMPLE."},
+        ),
+    }
+
+    @pytest.mark.parametrize("document,expected", PARITY_DOCUMENTS.values(), ids=PARITY_DOCUMENTS.keys())
+    def test_the_script_and_the_loader_grant_the_same_hosts(self, fx, document, expected):
+        """Root reads the TOML here with no istota to import, so this is what holds
+        the two readers in step."""
+        from istota.config import PRIVATE_HOST_PATTERN, load_config
+
+        result = self._hosts(fx, document)
+        assert result.returncode == 0, result.stderr
+        from_script = {h for h in result.stdout.strip().removeprefix("hosts=").split(",") if h}
+
+        loaded = load_config(fx.stack / "config" / "config.toml", apply_db_overlays=False)
+        from_loader = {h for h in loaded.browser.private_hosts if re.fullmatch(PRIVATE_HOST_PATTERN, h)}
+
+        assert from_script == from_loader
+        assert from_script == expected
 
     def test_its_pattern_is_the_configs(self):
         from istota.config import PRIVATE_HOST_PATTERN

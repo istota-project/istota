@@ -11,8 +11,8 @@ back off by doubling ``poll_interval_minutes`` up to ``backoff_max_minutes``.
 
 An RSS fetch goes through ``sandbox.guarded_http.guarded_send`` (#838): the
 URL is the user's and the request leaves from the daemon's own network, so a
-non-public address is reached only for a ``[feeds] private_hosts`` host, every
-redirect is checked again, and the body and the whole call are bounded. Plain
+non-public address is reached only for a host granted to ``feeds`` in
+``[private_hosts]``, every redirect is checked again, and the body and the whole call are bounded. Plain
 http stays allowed: the user chose the scheme, and the request carries nothing
 the daemon adds. Tumblr and Are.na call fixed API hosts and are not guarded.
 

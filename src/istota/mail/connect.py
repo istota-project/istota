@@ -14,8 +14,8 @@ Three rules, each held in one place so no caller can drift from them:
   993 and 465 being implicit TLS, as the code always inferred.
 - **Resolve, check, connect to the checked address**, for a host a user typed
   (``check_public=True``). The name is resolved, the connection is refused if
-  any address fails `net_guard.ip_is_public` unless the operator listed the
-  exact host in ``[mail_accounts] private_hosts``, and the socket is connected
+  any address fails `net_guard.ip_is_public` unless the operator granted the
+  exact host to ``mail_accounts`` in ``[private_hosts]``, and the socket is connected
   to the address that was checked while TLS still verifies the typed name. So
   DNS cannot change its answer between the check and the connect. The bot box
   is operator-configured and is not checked.
@@ -69,8 +69,9 @@ class ConnectRefused(Exception):
         self.host = host
         if reason == "address_not_public":
             message = (
-                f"{host} resolves to a private or reserved address. Only a host the "
-                f"operator lists in [mail_accounts] private_hosts may; nothing was sent."
+                f"{host} resolves to a private or reserved address. It needs a grant "
+                f"from the operator, [private_hosts] \"{host}\" = [\"mail_accounts\"]; "
+                f"nothing was sent."
             )
         else:
             message = f"Could not resolve {host}; nothing was sent."

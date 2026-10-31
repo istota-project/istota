@@ -2557,7 +2557,8 @@ class TestTheExampleDocumentsEveryLiveSection:
 
         missing = [
             f.name for f in dataclasses.fields(target)
-            if not re.search(rf"^#\s*{f.name}\s*=", block, re.M)
+            if f"{header}.{f.name}" not in config_module._NOT_CONFIGURATION
+            and not re.search(rf"^#\s*{f.name}\s*=", block, re.M)
         ]
         assert not missing, (
             f"[{header}] documents no {missing}. They are settable and there is "

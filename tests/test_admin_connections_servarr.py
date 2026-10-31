@@ -174,7 +174,7 @@ async def test_a_config_problem_the_doctor_reports_is_incomplete(config, index):
     config.servarr.apps["radarr"] = ServarrApp(url="http://arr.example.com:7878", api_key=KEY)
     entry = servarr_entry(await index())
     assert entry["status"] == "incomplete"
-    assert "private_hosts" in _apps(entry)["radarr"]["problem"]
+    assert '[private_hosts] "arr.example.com" = ["servarr"]' in _apps(entry)["radarr"]["problem"]
     assert _apps(entry)["sonarr"]["problem"] is None
 
 

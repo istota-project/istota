@@ -419,3 +419,64 @@ class TestTheClaudeReviewerIsConfinedByItsNamespace:
         assert result.returncode == 0, result.stderr
         for sentinel in (WORKSPACE_SENTINEL, DB_SENTINEL, TEMP_SENTINEL):
             assert sentinel in result.stdout, result.stdout
+
+
+# -- What the engine's own git can read --------------------------------------
+
+OUTSIDE_SENTINEL = "review-witness-outside-7e19"
+PLANTED_REPO = "review-witness-planted"
+OUTSIDE_REPO = "/data/tmp/review-witness-outside"
+
+
+def planted_repository_command() -> str:
+    """A repo under the root whose `objects` and `refs` link to one outside it."""
+    repo = f"/data/repos/testuser/{PLANTED_REPO}"
+    git = "git -c user.email=smoke@example.com -c user.name=Smoke"
+    head, tail = OUTSIDE_SENTINEL.rsplit("-", 1)
+    return f"""
+set -eu
+rm -rf {repo} {OUTSIDE_REPO}
+mkdir -p /data/repos/testuser
+for dir in {repo} {OUTSIDE_REPO}; do
+    git init -q -b main "$dir"
+    cd "$dir"
+    echo base > f.txt
+    {git} add f.txt
+    {git} commit -q -m base
+    git checkout -q -b feature
+done
+cd {OUTSIDE_REPO}
+printf "%s-%s\\n" {head} {tail} > f.txt
+{git} commit -q -am change
+rm -rf {repo}/.git/objects {repo}/.git/refs
+ln -s {OUTSIDE_REPO}/.git/objects {repo}/.git/objects
+ln -s {OUTSIDE_REPO}/.git/refs {repo}/.git/refs
+cd /app
+env ISTOTA_USER_ID=testuser DEVELOPER_REPOS_DIR=/data/repos/testuser \\
+    uv run python -m istota.skills.code_review run --worktree {repo} --base main || true
+"""
+
+
+@pytest.mark.profile(profiles.FORGE.name)
+class TestTheEnginesGitSeesOnlyTheRoot:
+    """`tests/test_host_path_races_linux.py` holds this as root in the Linux
+    runner; here it runs as the daemon's uid under the shipped seccomp profile.
+    `TestTheReviewerReadsOnlyItsSnapshot` is the control: an ordinary repository
+    reviews through the same namespace on the same stack."""
+
+    def test_a_planted_repository_cannot_read_outside(self, stack):
+        try:
+            result = stack.exec(["sh", "-c", planted_repository_command()], timeout=120)
+
+            assert OUTSIDE_SENTINEL not in result.stdout, result.stdout
+            answers = [
+                json.loads(line) for line in result.stdout.splitlines()
+                if line.startswith("{") and '"status"' in line
+            ]
+            assert answers and answers[-1]["status"] == "error", (
+                f"{result.stdout}\n--- stderr ---\n{result.stderr[-4000:]}"
+            )
+        finally:
+            stack.exec([
+                "sh", "-c", f"rm -rf /data/repos/testuser/{PLANTED_REPO} {OUTSIDE_REPO}",
+            ])

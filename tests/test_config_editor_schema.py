@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from istota import apply as apply_module
-from istota.config import Config, UserConfig
+from istota.config import PRIVATE_HOST_CONSUMERS, Config, UserConfig
 from istota.config_editor import check, schema
 
 
@@ -46,6 +46,18 @@ class TestReadOnly:
         assert schema.editor_kind(("users", "alex", "briefings"), list, []) == "readonly"
         assert schema.read_only_reason(("users", "alex", "timezone")) is None
 
+    @pytest.mark.parametrize("consumer", PRIVATE_HOST_CONSUMERS)
+    def test_an_old_private_hosts_key_may_be_removed_and_never_written(self, consumer):
+        path = (consumer, "private_hosts")
+        assert path in schema.RETIRED
+        reason = schema.read_only_reason(path)
+        assert "[private_hosts]" in reason and "history entry" in reason
+        assert schema.editor_kind(path, list[str], []) == "readonly"
+
+    def test_the_table_itself_stays_editable(self):
+        assert schema.read_only_reason(("private_hosts",)) is None
+        assert ("private_hosts",) not in schema.RETIRED
+
     def test_each_host_reason_names_where_it_is_changed(self):
         for path in [("site", "hostname"), ("db_path",), ("browser", "enabled"), ("web", "port")]:
             assert "istota-stack" in schema.READ_ONLY[path]
@@ -56,8 +68,10 @@ class TestRiskyAndTables:
         for path in schema.RISKY_KEYS:
             _resolve(path)
 
-    def test_letting_the_browser_reach_a_private_address_is_risky(self):
-        assert ("browser", "private_hosts") in schema.RISKY_KEYS
+    def test_any_private_address_grant_is_risky(self):
+        assert ("private_hosts",) in schema.RISKY_KEYS
+        for consumer in PRIVATE_HOST_CONSUMERS:
+            assert (consumer, "private_hosts") not in schema.RISKY_KEYS
 
     def test_granting_a_devbox_the_forge_tokens_is_risky(self):
         assert ("devbox", "forge_users") in schema.RISKY_KEYS

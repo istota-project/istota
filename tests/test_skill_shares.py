@@ -2,8 +2,8 @@
 
 The remote end is `tests/support/ocm_dav.Dav`, a stdlib WebDAV double on
 loopback that serves one share root at Nextcloud's public WebDAV base and answers only Basic auth whose user
-is the share secret, with an empty password. `[sharing] private_hosts` names
-`127.0.0.1`, as every sharing test does.
+is the share secret, with an empty password. `127.0.0.1` is a `sharing` grant,
+as in every sharing test.
 
 The secret reaches the CLI the way it does in a task: a real `SkillProxy`
 holds the user's credential snapshot and serves the per-invocation private

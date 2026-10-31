@@ -4589,6 +4589,7 @@ function mockAdminConfigBase() {
           f('effort', '', 'str'),
           f('model', 'claude-opus-4-8', 'str'),
           f('namespace', 'istota', 'str'),
+          f('private_hosts', MOCK_CONNECTIONS_EMPTY ? {} : { '10.0.0.5': ['servarr'] }, 'dict'),
           f('users', 2, 'count'),
         ],
       },
@@ -4698,7 +4699,6 @@ function mockAdminConfigBase() {
         fields: [
           f('apps', {}, 'table'),
           f('requesters', MOCK_CONNECTIONS_EMPTY ? [] : ['alice', 'bob'], 'list'),
-          f('private_hosts', MOCK_CONNECTIONS_EMPTY ? [] : ['10.0.0.5'], 'list'),
           f('defaults', {}, 'table'),
           f('lookup_timeout_seconds', 30, 'int'),
           f('release_search_timeout_seconds', 120, 'int'),
@@ -4721,6 +4721,7 @@ function mockAdminConfigBase() {
  */
 const MOCK_SEED_DOCUMENT = '[brain]\nkind = "claude_code"\n\n[logging]\nlevel = "INFO"\n';
 const MOCK_UNKNOWN_KEY = JSON.stringify(['web', 'old_flag']);
+const MOCK_PRIVATE_HOSTS_KEY = JSON.stringify(['private_hosts']);
 const mockConfigEditor = {
   digest: 'mock-digest-1',
   hasComments: true,
@@ -4733,7 +4734,12 @@ const mockConfigEditor = {
   restartedAt: '',
   admins: ['carol', 'alice'],
   values: new Map<string, unknown>(),
-  inFile: new Set<string>(['["logging","level"]', '["web","port"]', '["brain","kind"]']),
+  inFile: new Set<string>([
+    '["logging","level"]',
+    '["web","port"]',
+    '["brain","kind"]',
+    ...(MOCK_CONNECTIONS_EMPTY ? [] : [MOCK_PRIVATE_HOSTS_KEY]),
+  ]),
   secretsSet: new Map<string, boolean>(),
   nextId: 2,
   requests: new Map<number, { row: Record<string, any>; polls: number; ops: any[]; body: any }>([
@@ -4849,7 +4855,7 @@ function mockConfigCatalogue() {
     pattern_counts: { 'anthropic/*': 3, 'openrouter/moonshotai/*': 1 },
   };
 }
-const MOCK_RISKY = new Set(['web.auth', 'brain.kind', 'brain.fallback']);
+const MOCK_RISKY = new Set(['web.auth', 'brain.kind', 'brain.fallback', 'private_hosts']);
 const MOCK_FILE_CREDENTIALS: Record<string, string> = {
   'sms.twilio.auth_token': 'istota_twilio_auth_token',
   'sms.twilio.api_key_sid': 'istota_twilio_api_key_sid',
@@ -4864,6 +4870,8 @@ const MOCK_DOCS: Record<string, string> = {
   'logging.level': 'Minimum level written to the log.',
   'brain.native.base_url': 'An OpenAI-compatible endpoint the native brain talks to.',
   bot_name: 'The name the bot answers to and signs with.',
+  private_hosts:
+    'Hosts at a private address, each with the consumers it is granted to, such as "10.0.0.5" = ["servarr"].',
   db_path: 'Where the framework SQLite database lives.',
   'sms.enabled': 'Turns the SMS surface on.',
   'sms.provider': 'Which SMS provider sends and receives messages.',
@@ -4886,6 +4894,24 @@ const MOCK_DOCS: Record<string, string> = {
 
 function mockIso(ms = Date.now()): string {
   return new Date(ms).toISOString().replace(/\.\d+Z$/, 'Z');
+}
+
+/** The grants a `[private_hosts]` snippet writes, so an applied edit reads back. */
+function mockPrivateHostsFromToml(toml: string): Record<string, string[]> {
+  const table: Record<string, string[]> = {};
+  for (const line of toml.split('\n')) {
+    const entry = line.match(/^\s*"([^"]+)"\s*=\s*\[(.*)\]\s*$/);
+    if (!entry) continue;
+    table[entry[1]] = [...entry[2].matchAll(/"([^"]+)"/g)].map((consumer) => consumer[1]);
+  }
+  return table;
+}
+
+function mockPrivateHostsToml(table: Record<string, string[]>): string {
+  const lines = Object.entries(table).map(
+    ([host, consumers]) => `${JSON.stringify(host)} = ${JSON.stringify(consumers)}`,
+  );
+  return ['[private_hosts]', ...lines, ''].join('\n');
 }
 
 function mockAdminConfig() {
@@ -4934,6 +4960,9 @@ function mockAdminConfig() {
         read_only_reason: readOnly,
         risky: MOCK_RISKY.has(key),
         ...(MOCK_MODEL_FIELDS[key] ? { model_field: MOCK_MODEL_FIELDS[key] } : {}),
+        ...(key === 'private_hosts'
+          ? { toml: mockPrivateHostsToml(value as Record<string, string[]>) }
+          : {}),
       };
     }),
   }));
@@ -5204,7 +5233,8 @@ function mockConfigApply(entry: { ops: any[]; body: any }) {
       state.values.delete(key);
       state.inFile.delete(key);
     } else {
-      state.values.set(key, op.value);
+      const isGrants = op.op === 'set_toml' && key === MOCK_PRIVATE_HOSTS_KEY;
+      state.values.set(key, isGrants ? mockPrivateHostsFromToml(op.toml) : op.value);
       state.inFile.add(key);
     }
   }

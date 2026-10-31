@@ -1,6 +1,5 @@
 <script lang="ts">
-  import type { ServarrApp } from '$lib/api';
-  import { Button, Field, Input, Checkbox } from '@minot/ui';
+  import { Field, Input, Checkbox } from '@minot/ui';
   import ConfigSecretField from './ConfigSecretField.svelte';
   import FieldRow from './FieldRow.svelte';
   import { credentialStatus } from './credentialStatus';
@@ -16,12 +15,12 @@
     form: ServarrAppsForm;
     /** From `appProblems`, keyed by `<app>.url` and `<app>.key`. */
     problems: Record<string, string>;
-    /** `[servarr] private_hosts` as it will be after this change. */
-    privateHosts: string[];
+    /** The hosts `[private_hosts]` grants to servarr after this change, or null
+     *  while a pending edit of that table cannot be read (`hostsGrantedTo`). */
+    privateHosts: string[] | null;
     /** False when nothing on the page can be changed, or `[servarr.apps]` is read-only. */
     editable: boolean;
     readOnlyReason?: string | null;
-    onAllowHost: (app: ServarrApp, host: string) => void;
   }
 
   let {
@@ -30,7 +29,6 @@
     privateHosts,
     editable,
     readOnlyReason = null,
-    onAllowHost,
   }: Props = $props();
 </script>
 
@@ -71,13 +69,6 @@
               invalid={!!problems[`${name}.url`]}
             />
           </Field>
-          {#if need}
-            <div class="row-actions">
-              <Button variant="secondary" size="sm" onclick={() => onAllowHost(name, need.host)}
-                >Add {need.host} to private hosts</Button
-              >
-            </div>
-          {/if}
         {:else}
           <Field label="URL" layout="inline">
             <span class="config-value">{app.url || '—'}</span>
@@ -141,12 +132,6 @@
 
   .problem {
     color: var(--status-danger-fg);
-  }
-
-  .row-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-2);
   }
 
   .config-value {

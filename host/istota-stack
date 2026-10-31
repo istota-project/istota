@@ -25,7 +25,7 @@
 #                               print the fingerprint of KEY, one line of an SSH public
 #                               key, and make it the one key releases are verified against
 #   istota-stack latest-tag     print the name update --unsigned latest would install; changes nothing
-#   istota-stack browser-grant-addresses   print what [browser] private_hosts resolves to, for the firewall
+#   istota-stack browser-grant-addresses   print what the browser's private hosts resolve to, for the firewall
 #   istota-stack rollback       back to the previous tag, if its image can run the database;
 #                               reprovisions the host as update does
 #   istota-stack setup [args]   run `istota setup` for this VM (first install, or --force;
@@ -598,11 +598,13 @@ print(1 if kinds & {"claude_code", "tmux_claude"} else 0)
 PY
 }
 
-# `[browser] private_hosts`, comma-separated, for the browser's egress proxy. The
+# The hosts granted to the browser, comma-separated, for its egress proxy. The
 # container mounts no config, since it runs hostile pages, so this list is all of
-# it that crosses. A config that cannot be read grants nothing, and an entry that
-# is not a bare name grants nothing either; the loader warns about it.
-# The pattern is config.PRIVATE_HOST_PATTERN, held equal by a test.
+# it that crosses. Those are the `[private_hosts]` hosts naming `browser`, then the
+# old `[browser] private_hosts`, each guarded alone so one bad shape keeps the
+# other's grants. A config that cannot be read grants nothing, and an entry that is
+# not a bare name grants nothing either; the loader warns about it.
+# The pattern is config.PRIVATE_HOST_PATTERN, and a test holds this to load_config.
 browser_private_hosts() {
     local path="${CONFIG_DIR}/config.toml"
     [ -f "$path" ] || return 0
@@ -614,10 +616,25 @@ fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
 if not stat.S_ISREG(os.fstat(fd).st_mode):
     sys.exit(0)
 with os.fdopen(fd, "rb") as f:
-    hosts = tomllib.loads(f.read(1 << 20).decode()).get("browser", {}).get("private_hosts")
-if not isinstance(hosts, list):
-    hosts = []
-print(",".join(h.strip() for h in hosts if isinstance(h, str) and re.fullmatch(PATTERN, h.strip())))
+    document = tomllib.loads(f.read(1 << 20).decode())
+names = []
+table = document.get("private_hosts")
+if isinstance(table, dict):
+    for host, consumers in table.items():
+        if isinstance(consumers, list) and "browser" in consumers:
+            names.append(host)
+section = document.get("browser")
+old_key = section.get("private_hosts") if isinstance(section, dict) else None
+if isinstance(old_key, list):
+    for host in old_key:
+        if isinstance(host, str):
+            names.append(host)
+hosts = []
+for name in names:
+    name = name.strip()
+    if re.fullmatch(PATTERN, name) and name not in hosts:
+        hosts.append(name)
+print(",".join(hosts))
 PY
 }
 
@@ -646,7 +663,7 @@ browser_subnet() {
     echo "$subnet"
 }
 
-# What the firewall opens for `[browser] private_hosts`, one IPv4 address a line:
+# What the firewall opens for the hosts granted to the browser, one IPv4 address a line:
 # the addresses those names resolve to now, as far as the firewall drops them (a
 # public one passes anyway). A name that will not resolve grants nothing.
 cmd_browser_grant_addresses() {
@@ -667,7 +684,7 @@ for name in sys.argv[1].split(","):
         output = ""
     addresses = [line.split()[0] for line in output.splitlines() if line.strip()]
     if not addresses:
-        print(f"[istota-stack] [browser] private_hosts: {name} has no IPv4 address now; the firewall opens nothing for it", file=sys.stderr)
+        print(f"[istota-stack] private_hosts: {name} has no IPv4 address now; the firewall opens nothing for it", file=sys.stderr)
     for address in addresses:
         try:
             ip = ipaddress.ip_address(address)
@@ -725,7 +742,7 @@ stack_up() {
         render_devbox_compose "$tag" \
             || die "the devbox compose file could not be rendered; the stack was not started."
     fi
-    # A changed [browser] private_hosts need not wait for the timer. Not a child of
+    # A changed browser grant need not wait for the timer. Not a child of
     # this: that unit asks this script for the addresses, and takes no lock to do it.
     systemctl start --no-block istota-browser-grants.service 2>/dev/null || true
     active="$(compose config --services)"

@@ -50,12 +50,17 @@ class TestTheLoader:
 
     def test_a_malformed_private_host_is_warned_about_and_kept(self, tmp_path, caplog):
         caplog.set_level(logging.WARNING, logger="istota.config")
-        config = _load(tmp_path, '[sharing]\nprivate_hosts = ["https://cloud.example"]\n')
+        config = _load(tmp_path, '[private_hosts]\n"https://cloud.example" = ["sharing"]\n')
         messages = [r.getMessage() for r in caplog.records if "private_hosts" in r.getMessage()]
-        assert len(messages) == 1 and "[sharing]" in messages[0]
+        assert len(messages) == 1 and "'https://cloud.example'" in messages[0]
         assert config.sharing.private_hosts == ["https://cloud.example"]
 
 
 def test_both_security_switches_need_a_typed_confirmation():
     assert ("sharing", "ocm", "enabled") in schema.RISKY_KEYS
-    assert ("sharing", "private_hosts") in schema.RISKY_KEYS
+    assert ("private_hosts",) in schema.RISKY_KEYS
+
+
+def test_the_old_private_hosts_key_may_only_be_removed():
+    assert ("sharing", "private_hosts") in schema.RETIRED
+    assert ("sharing", "private_hosts") not in schema.RISKY_KEYS

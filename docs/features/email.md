@@ -354,10 +354,12 @@ The operator settings are in `[mail_accounts]`:
 enabled = true          # false: accounts are kept but unreachable, and the card is hidden
 allow_send = true       # false: every account behaves as read-only
 max_per_user = 10
-private_hosts = []      # hostnames an account may reach on a private address
+
+[private_hosts]
+"mail.example.internal" = ["mail_accounts"]  # a server an account may reach on a private address
 ```
 
-An account's servers are reached from the daemon, and an address that is not public (a LAN address, loopback, the stack's own network) is refused unless the hostname is listed in `private_hosts`. The address is checked when the connection is made and the connection goes to the address that was checked. Certificates are verified as for the bot's mailbox (see below), with no way to turn that off. On a multi-user install with no working sandbox, the web UI refuses to store account passwords, as it refuses vault credentials, and `istota doctor` warns.
+An account's servers are reached from the daemon, and an address that is not public (a LAN address, loopback, the stack's own network) is refused unless [`[private_hosts]`](../configuration/reference.md#private_hosts) grants the hostname to `mail_accounts`. If the host is already in the table for another consumer, add `"mail_accounts"` to its existing list: a second line for the same host is a TOML error. The address is checked when the connection is made and the connection goes to the address that was checked. Certificates are verified as for the bot's mailbox (see below), with no way to turn that off. On a multi-user install with no working sandbox, the web UI refuses to store account passwords, as it refuses vault credentials, and `istota doctor` warns.
 
 ## Configuration
 

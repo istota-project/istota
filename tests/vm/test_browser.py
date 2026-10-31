@@ -170,11 +170,11 @@ class TestTheFirewallOutsideChrome:
 import re, sys
 path, name = sys.argv[1:]
 text = open(path).read()
-line = f'private_hosts = ["{{name}}"]'
-if re.search(r"^\\[browser\\]$", text, flags=re.M):
-    text = re.sub(r"^\\[browser\\]$", "[browser]\\n" + line, text, count=1, flags=re.M)
+line = f'"{{name}}" = ["browser"]'
+if re.search(r"^\\[private_hosts\\]$", text, flags=re.M):
+    text = re.sub(r"^\\[private_hosts\\]$", "[private_hosts]\\n" + line, text, count=1, flags=re.M)
 else:
-    text += "\\n[browser]\\n" + line + "\\n"
+    text += "\\n[private_hosts]\\n" + line + "\\n"
 open(path, "w").write(text)
 PY
 python3 {script} {config} {name}""")

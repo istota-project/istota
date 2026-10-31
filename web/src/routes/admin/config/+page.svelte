@@ -15,7 +15,6 @@
     type ConfigProblem,
     type ConfigRequest,
     type ConfigResource,
-    type ServarrApp,
   } from '$lib/api';
   import { Button, Card, EmptyState, Input, Alert, Disclosure, LoadState } from '@minot/ui';
   import { getCurrentUser } from '$lib/userContext';
@@ -34,10 +33,10 @@
   import { aliasesDraft, aliasesForm, type AliasesForm } from '$lib/admin/config/modelAliases';
   import {
     appProblems,
+    hostsGrantedTo,
     rebaseApps,
     servarrAppsDraft,
     servarrAppsForm,
-    withPrivateHost,
     type ServarrAppsForm,
   } from '$lib/admin/config/servarrApps';
   import { credentialStatus, secretsByConfigKey } from '$lib/admin/config/credentialStatus';
@@ -112,13 +111,11 @@
       ? servarrAppsDraft(appsForm, appsInitial)
       : emptyDraft(),
   );
-  /** `[servarr] private_hosts` as it will be once the pending change lands. */
+  /** What `[private_hosts]` grants to servarr once the pending change lands. */
   let servarrPrivateHosts = $derived.by(() => {
-    const field = servarrFields.find((f) => f.key === 'servarr.private_hosts');
-    if (!field) return [];
-    const op = draft.ops[pathKey(field.path)];
-    const value = op?.op === 'set' ? op.value : op?.op === 'unset' ? [] : field.value;
-    return Array.isArray(value) ? value.map(String) : [];
+    const generalFields = view?.sections.find((s) => s.key === 'general')?.fields;
+    const field = generalFields?.find((f) => f.key === 'private_hosts');
+    return hostsGrantedTo('servarr', field, field && draft.ops[pathKey(field.path)]);
   });
 
   let catalogue = $derived(view?.model_catalogue ?? null);
@@ -372,19 +369,6 @@
       return;
     }
     reviewing = true;
-  }
-
-  function allowHost(app: ServarrApp, host: string) {
-    setOp(
-      {
-        op: 'set',
-        path: ['servarr', 'private_hosts'],
-        value: withPrivateHost(servarrPrivateHosts, host),
-      },
-      ['servarr', 'private_hosts'],
-    );
-    const { [`${app}.url`]: _answered, ...rest } = appsProblems;
-    appsProblems = rest;
   }
 
   /** The history, and the request still open in it: a change submitted from
@@ -694,7 +678,6 @@
                 privateHosts={servarrPrivateHosts}
                 editable={appsEditable}
                 readOnlyReason={field.read_only_reason}
-                onAllowHost={allowHost}
               />
             {:else if field.key === 'models.aliases' && aliasesEdit && catalogue}
               <ModelAliasesEditor

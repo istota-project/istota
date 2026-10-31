@@ -42,9 +42,11 @@ def _messages(problems, *path):
 class TestParsing:
     def test_apps_become_servarr_app_instances(self, tmp_path):
         config, problems = _load(tmp_path, f"""
+            [private_hosts]
+            "10.0.0.5" = ["servarr"]
+
             [servarr]
             requesters = ["bob"]
-            private_hosts = ["10.0.0.5"]
 
             [servarr.apps.radarr]
             url = "http://10.0.0.5:7878"
@@ -371,8 +373,10 @@ class TestValidation:
 
     @pytest.mark.parametrize("entry", ["http://10.0.0.5", "10.0.0.5:7878", "*.lan"])
     def test_a_malformed_private_host_warns(self, tmp_path, entry):
-        config, problems = _load(tmp_path, f'[servarr]\nprivate_hosts = ["10.0.0.5", "{entry}"]\n')
-        [message] = _messages(problems, "servarr", "private_hosts")
+        config, problems = _load(
+            tmp_path, f'[private_hosts]\n"10.0.0.5" = ["servarr"]\n"{entry}" = ["servarr"]\n',
+        )
+        [message] = _messages(problems, "private_hosts")
         assert repr(entry) in message
         assert entry in config.servarr.private_hosts
 

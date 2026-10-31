@@ -8,7 +8,8 @@ no `FeedError` carries any part of it.
 
 Every fetch goes through `sandbox.guarded_http.guarded_send`: up to three
 redirects, each re-checked, the body capped at `[sharing] ics_max_bytes`, plain
-http and private addresses only for a `[sharing] private_hosts` host. The poll
+http and private addresses only for a host granted to `sharing` in
+`[private_hosts]`. The poll
 (`poll_due_feeds`, the `sharing-ics-poll` gate) sends conditional GETs and
 backs off with the feeds poller's own schedule; the last good body sits in
 `shared_feed_cache`, and a task reads that, never the network.
