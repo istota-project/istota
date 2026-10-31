@@ -123,6 +123,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A page could fail with `navigation_mismatch` when an earlier visit had used the same address in a different case, such as `gl=US` after `gl=us`, and retrying never helped. The browser now reaches the address you asked for. A different document still fails.
 - `istota doctor` no longer skips the model credential, master key and servarr key checks because `PRECOMMIT_SCANS_REQUIRED` is set. A missing credential on a daemon with that override now reports as a failure.
 
 - The tax estimate now labels self-employment income as net income through a specific date and explains the span used for its annual projection. It no longer reads zero when income patterns are set and no expense pattern is.
