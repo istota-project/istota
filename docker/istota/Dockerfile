@@ -207,11 +207,14 @@ RUN set -eux; \
 
 # Project files
 WORKDIR /app
-COPY pyproject.toml uv.lock schema.sql README.md ./
+# Install all deps (core + all optional extras) from the manifests alone: at
+# 1.7 GB this layer is the image's largest, and a source change must reuse it.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --extra all --no-install-project
+
+COPY schema.sql README.md ./
 COPY src/ src/
 COPY config/ config/
-
-# Install all deps (core + all optional extras)
 RUN uv sync --frozen --no-dev --extra all
 
 # Put the venv bin dir on the default PATH so the console scripts (istota,

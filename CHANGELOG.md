@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A source change no longer rebuilds the image's dependencies.** The 1.7 GB of Python dependencies now install in their own layer before the source is copied in, so a build that changes only source reuses that layer. Updates are faster, and the previous image kept for rollback takes far less extra disk. A change to `pyproject.toml` or `uv.lock`, which includes every version bump, still rebuilds it.
+
 ### Added
 
 - **`istota-stack reclaim` shows what the stack left on your disk.** It lists leftovers such as an old state volume and the old shared browser profile, both of which hold private data, with their sizes. `reclaim --apply` removes the ones you name. See docs/deployment/running-the-stack.md.
