@@ -3552,8 +3552,9 @@ reclaim_remove() {
     esac
 }
 
-# Layers in Docker's store that no image, container or BuildKit record holds. No
-# Docker command removes them, so they are reported rather than offered. Written
+# Layers in Docker's store that no image, container or BuildKit record holds.
+# `docker system prune -a` left most of them when tried, and removing them by
+# hand edits Docker's own files, so they are reported rather than offered. Written
 # for overlay2, the one driver that keeps these files.
 reclaim_unheld_layers() {
     local root db snapshots held bytes=0 count=0 chain_dir chain dir size id
@@ -3579,7 +3580,7 @@ reclaim_unheld_layers() {
     done
     [ "$count" -gt 0 ] || return 0
     log "Docker's layer store holds ${count} layers ($(( bytes / 1000000 )) MB) with no image, container or build record behind them."
-    log "  No Docker command removes these, and reclaim does not touch them."
+    log "  A docker prune may not clear these, and reclaim does not touch them."
 }
 
 reclaim_hint() {

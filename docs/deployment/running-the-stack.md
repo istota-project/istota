@@ -166,7 +166,7 @@ Stack builds use Docker's default builder explicitly. Its cache is shared with o
 | `containerd-images` | Images in containerd left from before Docker moved to overlay2. Listed only on overlay2, since on the containerd image store these are Docker's own images | |
 | `root-caches` | Root's `uv` and `npm` caches, which nothing in the stack reads | |
 
-`reclaim` also reports layers in Docker's layer store that no image, container or build record holds. No Docker command removes these, so `reclaim` reports them and leaves them.
+`reclaim` also reports layers in Docker's layer store that no image, container or build record holds. `reclaim` reports them and leaves them. A prune may not clear them either: on one install `docker system prune -a` removed 8 of 39 such layers and left about 6.8 GB. That prune also removes the previous release's images, which `rollback` needs.
 
 ### The daemon service is called `daemon`
 
