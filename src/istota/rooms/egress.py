@@ -767,9 +767,11 @@ def list_subject_names(conn: sqlite3.Connection, user_id: str) -> list[str]:
     """Every subject this user can see on the page, sorted.
 
     Their jobs and briefings, their assignments still running, and whatever else
-    has a row. A `_module.*` job is the module's and shows only with a row, so a
-    refusal filed under one has somewhere to be answered.
+    has a row. A `_module.*` job is the module's and shows only with an open refusal,
+    which needs somewhere to be answered. The upgrade seed gave those rows a grant that
+    does nothing, since a module's skills are `local`, so a grant does not show one.
     """
+    module_subject = cron_subject(MODULE_JOB_PREFIX)
     names = set()
     for row in conn.execute(
         "SELECT name FROM scheduled_jobs WHERE user_id = ? AND substr(name, 1, 8) != '_module.'",
@@ -785,6 +787,8 @@ def list_subject_names(conn: sqlite3.Connection, user_id: str) -> list[str]:
         names.add(f"assignment:{row[0]}")
     for table in ("egress_grants", "egress_refused"):
         for row in conn.execute(f"SELECT DISTINCT subject FROM {table} WHERE user_id = ?", (user_id,)):
+            if row[0].startswith(module_subject) and not has_open_refusal(conn, user_id, row[0]):
+                continue
             if subject_exists(conn, user_id, row[0]):
                 names.add(row[0])
     return sorted(names)

@@ -137,6 +137,26 @@ class TestTheListing:
         data = await _listing(signed_client)
         assert any("_module" in item["subject"] for item in data["subjects"])
 
+    async def test_a_module_job_is_hidden_with_only_a_seeded_grant(self, signed_client, config):  # noqa: F811
+        digest = _job(config, name="_module.feeds.prune")
+        subject = "cron:_module.feeds.prune"
+        with db.get_db(config.db_path) as conn:
+            egress.add_grant(conn, "alice", subject, f"open:{digest}", decided_via="migration")
+            egress.add_grant(conn, "alice", subject, HOST, decided_via="web")
+            conn.commit()
+        data = await _listing(signed_client)
+        assert all(item["subject"] != subject for item in data["subjects"])
+
+    async def test_a_module_job_goes_again_once_its_refusal_is_dismissed(self, signed_client, config):  # noqa: F811
+        _job(config, name="_module.feeds.prune")
+        subject = "cron:_module.feeds.prune"
+        _refused(config, subject=subject)
+        with db.get_db(config.db_path) as conn:
+            egress.dismiss_refused(conn, "alice", subject, HOST)
+            conn.commit()
+        data = await _listing(signed_client)
+        assert all(item["subject"] != subject for item in data["subjects"])
+
     async def test_the_skills_on_offer_are_external_ones(self, signed_client, config):  # noqa: F811
         data = await _listing(signed_client)
         assert "feeds" not in data["external_skills"]
