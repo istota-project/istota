@@ -678,6 +678,10 @@ if [ "$(host_env INGRESS)" = "direct" ] && [ "$(host_env TLS_CERT_SOURCE)" = "ac
 else
     systemctl disable --now istota-certbot.timer >/dev/null 2>&1 || true
 fi
+# --- apt's package cache ------------------------------------------------------
+# Downloaded .debs, kept by nothing that needs them. The package lists stay, so
+# the offline rule above is unaffected.
+apt-get clean >/dev/null 2>&1 || log "WARNING: apt-get clean failed; its cache stays."
 
 # --- The stack ---------------------------------------------------------------
 # Enabled only once there is something to start: without a config the
