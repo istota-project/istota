@@ -640,6 +640,9 @@
     const prev = $messages[i - 1];
     const cur = $messages[i];
     if (!prev || prev.role !== cur.role || cur.role === 'system') return false;
+    // Each task's answer reads as its own message: a scheduled result can land
+    // beside a live turn, and the task line that tells them apart is hover-only.
+    if (cur.role === 'assistant' && prev.taskId !== cur.taskId) return false;
     // Same role is not the same author: a user row can be an email mirrored
     // into the room, and collapsing its header would hide the one thing that
     // says it wasn't the viewer.
