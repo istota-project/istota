@@ -72,6 +72,15 @@ def _task(conn, source_type, *, user_id=USER, **columns):
     return db.get_task(conn, task_id)
 
 
+def _stale_grant(conn, subject, entry):
+    """A row from before the subject was retired. `add_grant` no longer writes one."""
+    conn.execute(
+        "INSERT INTO egress_grants (user_id, subject, entry, decided_via) "
+        "VALUES (?, ?, ?, 'web')",
+        (USER, subject, entry),
+    )
+
+
 def _grant(conn, subject, entry, *, skill_index=INDEX):
     egress.add_grant(conn, USER, subject, entry, decided_via="cli", skill_index=skill_index)
 
@@ -164,11 +173,21 @@ class TestUnattended:
     def test_a_scheduled_task_with_no_job_row_is_the_empty_set(self, conn):
         assert _reach(conn, _task(conn, "scheduled")).egress_hosts == frozenset()
 
-    def test_tasks_md_is_not_attended_because_a_limited_task_can_write_it(self, conn):
+    def test_tasks_md_is_limited_with_nothing_granted(self, conn):
+        """A limited task can write a line, so a line is not attended, and it has no
+        subject: a grant left over from before is not read."""
         task = _task(conn, "istota_file")
-        assert _reach(conn, task).egress_hosts == frozenset()
-        _grant(conn, "tasks-file", HOST)
-        assert _reach(conn, task).egress_hosts == {HOST}
+        _stale_grant(conn, "tasks-file", HOST)
+        _stale_grant(conn, "tasks-file", "skill:browse")
+        reach = _reach(conn, task)
+        assert reach.egress_hosts == frozenset()
+        assert "browse" in reach.withheld
+
+    def test_a_subtask_of_a_tasks_md_line_has_nothing_granted(self, conn):
+        root = _task(conn, "istota_file")
+        _stale_grant(conn, "tasks-file", HOST)
+        child = _task(conn, "subtask", parent_task_id=root.id)
+        assert _reach(conn, child).egress_hosts == frozenset()
 
     def test_a_new_job_runs_limited_with_nothing_approved(self, conn):
         task = _task(conn, "scheduled", scheduled_job_id=_job(conn))
@@ -202,9 +221,11 @@ class TestUnattended:
             (USER,),
         )
         task = _task(conn, "briefing", briefing_name="morning")
-        assert _reach(conn, task).egress_hosts == frozenset()
-        _grant(conn, "briefing:morning", HOST)
-        assert _reach(conn, task).egress_hosts == {HOST}
+        _stale_grant(conn, "briefing:morning", HOST)
+        _stale_grant(conn, "briefing:morning", "skill:browse")
+        reach = _reach(conn, task)
+        assert reach.egress_hosts == frozenset()
+        assert "browse" in reach.withheld
 
     def test_an_assignment_wake(self, conn):
         task = _task(conn, ASSIGNMENT_SOURCE_TYPE, assignment_id=12)

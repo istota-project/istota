@@ -178,13 +178,15 @@ class TestGrants:
         with pytest.raises(egress.EntryRefused):
             egress.add_grant(conn, USER, "cron:j", "skill:browse", decided_via="web")
 
-    @pytest.mark.parametrize("subject", ["briefing:b", "assignment:3", "tasks-file"])
+    @pytest.mark.parametrize("subject", ["assignment:3"])
     def test_only_a_cron_job_carries_a_digest(self, conn, subject):
         for kind in ("open", "public"):
             with pytest.raises(egress.EntryRefused):
                 egress.add_grant(conn, USER, subject, f"{kind}:{DIGEST}", decided_via="web")
 
-    @pytest.mark.parametrize("subject", ["", "cron:", "other:x", "assignment:abc", "briefing:", None])
+    @pytest.mark.parametrize("subject", [
+        "", "cron:", "other:x", "assignment:abc", "briefing:", "briefing:b", "tasks-file", None,
+    ])
     def test_an_unknown_subject_is_refused(self, conn, subject):
         with pytest.raises(egress.EntryRefused):
             egress.add_grant(conn, USER, subject, "example.com", decided_via="web")

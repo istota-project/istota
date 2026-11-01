@@ -309,6 +309,34 @@ async def _choose(http, access, digest, subject=SUBJECT):
     )
 
 
+class TestRetiredSubjects:
+    """A personal briefing and TASKS.md hold nothing a person can grant, so the page
+    treats them as any other subject that does not exist."""
+
+    @pytest.fixture(autouse=True)
+    def _briefing(self, config):  # noqa: F811
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO briefing_configs "
+                "(user_id, name, cron_expression, conversation_token, output, components) "
+                "VALUES ('alice', 'morning', '0 7 * * *', '', 'email', '{}')",
+            )
+            conn.commit()
+
+    async def test_the_page_does_not_list_a_briefing(self, signed_client, config):  # noqa: F811
+        _job(config)
+        response = await signed_client.get(BASE)
+        assert [item["subject"] for item in response.json()["subjects"]] == [SUBJECT]
+
+    @pytest.mark.parametrize("subject", ["briefing:morning", "tasks-file"])
+    async def test_a_grant_is_the_same_404(self, signed_client, config, subject):  # noqa: F811
+        response = await signed_client.post(
+            BASE + "/grants", json={"subject": subject, "entry": HOST}, headers=ORIGIN,
+        )
+        assert response.status_code == 404
+        assert _grants(config, subject=subject) == frozenset()
+
+
 class TestChoosingAccess:
     """The file authors `reach`, so a choice that did not reach CRON.md would be undone
     by the next sync. Each case therefore syncs before it reads the state back."""
@@ -474,7 +502,13 @@ class TestChoosingAccess:
         assert _grants(config, subject="cron:_module.money") == frozenset()
 
     async def test_only_a_job_has_access_to_choose(self, signed_client, config):  # noqa: F811
-        response = await _choose(signed_client, "open", "0" * 64, subject=egress.TASKS_FILE_SUBJECT)
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO assignments (id, user_id, slug, title, goal, budget, dir_relpath, state) "
+                "VALUES (7, 'alice', 's', 't', 'g', '{}', 'assignments/s', 'active')",
+            )
+            conn.commit()
+        response = await _choose(signed_client, "open", "0" * 64, subject="assignment:7")
         assert response.status_code == 404
 
     async def test_someone_elses_job_reads_as_absent(self, signed_client, config):  # noqa: F811
@@ -609,6 +643,12 @@ class TestTheOperatorCli:
     def test_an_unknown_subject_is_refused(self, config):  # noqa: F811
         with pytest.raises(SystemExit):
             cmd_egress(self._args(config, "grant", subject="cron:nothing"))
+
+    @pytest.mark.parametrize("subject", ["briefing:morning", "tasks-file"])
+    def test_a_retired_subject_is_refused(self, config, subject):  # noqa: F811
+        with pytest.raises(SystemExit):
+            cmd_egress(self._args(config, "grant", subject=subject))
+        assert _grants(config, subject=subject) == frozenset()
 
 
 class TestRunState:

@@ -1,10 +1,10 @@
 """What an owner approved for a task's network reach, and what it tried and could not do.
 
 `rooms.scopes.reach_for_task` reads this once per task to fill `Reach.egress_hosts`.
-A subject is what a grant hangs on: a cron job, a personal briefing, an assignment
-or TASKS.md. A row in `egress_grants` means approved, and there is no pending or
-denied state. `egress_refused` is a list of things the owner may want to add, and
-grants nothing.
+A subject is what a grant hangs on: a cron job or an assignment. A personal briefing
+and a TASKS.md line have none, so they get nothing granted and record no refusal. A
+row in `egress_grants` means approved, and there is no pending or denied state.
+`egress_refused` is a list of things the owner may want to add, and grants nothing.
 
 **Only an authenticated person writes a grant.** `add_grant`'s callers are the web
 route, the operator CLI and the one-time seed; no skill CLI and no deferred handler
@@ -37,7 +37,6 @@ logger = logging.getLogger(__name__)
 #: sits below. `tests/test_egress_reach.py` uses the real name.
 _ASSIGNMENT_SOURCE_TYPE = "assignment"
 
-TASKS_FILE_SUBJECT = "tasks-file"
 #: What a job occurrence copies from its row, and so what it can be compared on.
 TASK_TEXT_COLUMNS = ("prompt", "command", "skill", "skill_args")
 #: The publish target sends a job's answer into other users' briefings, so an
@@ -188,24 +187,18 @@ def subject_for(conn: sqlite3.Connection, root: "db.Task") -> str | None:
     if root.source_type == "scheduled":
         row = job_row(conn, root)
         return cron_subject(row["name"]) if row is not None else None
-    if root.source_type == "briefing":
-        return f"briefing:{root.briefing_name}" if root.briefing_name else None
     if root.source_type == _ASSIGNMENT_SOURCE_TYPE:
         return f"assignment:{root.assignment_id}" if root.assignment_id is not None else None
-    if root.source_type == "istota_file":
-        return TASKS_FILE_SUBJECT
     return None
 
 
 def _valid_subject(subject: object) -> bool:
     if not isinstance(subject, str):
         return False
-    if subject == TASKS_FILE_SUBJECT:
-        return True
     kind, _, rest = subject.partition(":")
     if kind == "assignment":
         return rest.isascii() and rest.isdigit()
-    return kind in ("cron", "briefing") and bool(rest)
+    return kind == "cron" and bool(rest)
 
 
 def grants_for(conn: sqlite3.Connection, user_id: str, subject: str | None) -> frozenset[str]:
@@ -714,31 +707,22 @@ def subject_exists(conn: sqlite3.Connection, user_id: str, subject: object) -> b
     will not wake again, so nothing is left to decide about it."""
     if not _valid_subject(subject):
         return False
-    if subject == TASKS_FILE_SUBJECT:
-        return True
     kind, _, rest = str(subject).partition(":")
     if kind == "cron":
         return job_row_by_subject(conn, user_id, str(subject)) is not None
-    if kind == "briefing":
-        query = "SELECT 1 FROM briefing_configs WHERE user_id = ? AND name = ?"
-    else:
-        query = (
-            "SELECT 1 FROM assignments WHERE user_id = ? AND id = ? "
-            "AND state NOT IN ('completed', 'abandoned')"
-        )
-    return conn.execute(query, (user_id, rest)).fetchone() is not None
+    return conn.execute(
+        "SELECT 1 FROM assignments WHERE user_id = ? AND id = ? "
+        "AND state NOT IN ('completed', 'abandoned')",
+        (user_id, rest),
+    ).fetchone() is not None
 
 
 def subject_label(subject: str) -> str:
-    """A subject in words. A job or briefing name is the owner's, or a limited
-    task's, so whoever draws this treats it as text."""
-    if subject == TASKS_FILE_SUBJECT:
-        return "TASKS.md"
+    """A subject in words. A job name is the owner's, or a limited task's, so whoever
+    draws this treats it as text."""
     kind, _, rest = subject.partition(":")
     if kind == "cron":
         return f"Scheduled job: {rest}"
-    if kind == "briefing":
-        return f"Briefing: {rest}"
     return f"Assignment {rest}"
 
 
@@ -766,8 +750,7 @@ def job_run_state(row: "Mapping | sqlite3.Row") -> str:
 def list_subject_names(conn: sqlite3.Connection, user_id: str) -> list[str]:
     """Every subject this user can see on the page, sorted.
 
-    Their jobs and briefings, their assignments still running, and whatever else
-    has a row. A `_module.*` job is the module's and shows only with an open refusal,
+    Their jobs, their assignments still running, and whatever else has a row. A `_module.*` job is the module's and shows only with an open refusal,
     which needs somewhere to be answered. The upgrade seed gave those rows a grant that
     does nothing, since a module's skills are `local`, so a grant does not show one.
     """
@@ -778,8 +761,6 @@ def list_subject_names(conn: sqlite3.Connection, user_id: str) -> list[str]:
         (user_id,),
     ):
         names.add(cron_subject(row[0]))
-    for row in conn.execute("SELECT name FROM briefing_configs WHERE user_id = ?", (user_id,)):
-        names.add(f"briefing:{row[0]}")
     for row in conn.execute(
         "SELECT id FROM assignments WHERE user_id = ? AND state NOT IN ('completed', 'abandoned')",
         (user_id,),

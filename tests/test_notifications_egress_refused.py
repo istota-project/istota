@@ -228,19 +228,9 @@ class TestItCloses:
             conn.commit()
         assert _open(config) == []
 
-    def test_tasks_md_is_a_subject_that_never_goes(self, config, sends):
-        with db.get_db(config.db_path) as conn:
-            egress.note_refused(conn, USER, egress.TASKS_FILE_SUBJECT, HOSTILE_HOST)
-            conn.commit()
-            egress.raise_refused_bell(config, conn, USER, [egress.TASKS_FILE_SUBJECT])
-        [row] = _open(config)
-        assert "TASKS.md" in row.body
-
-
-class TestRemovingABriefingForgetsIt:
-    def test_its_grants_and_refusals_go(self, config):
-        from istota import user_briefings
-
+    @pytest.mark.parametrize("subject", ["tasks-file", "briefing:morning"])
+    def test_a_stored_row_on_a_retired_subject_closes(self, config, sends, subject):
+        """The briefing itself is still there: its subject is what went."""
         with db.get_db(config.db_path) as conn:
             conn.execute(
                 "INSERT INTO briefing_configs "
@@ -248,14 +238,10 @@ class TestRemovingABriefingForgetsIt:
                 "VALUES (?, 'morning', '0 7 * * *', '', 'email', '{}')",
                 (USER,),
             )
-            briefing_id = conn.execute("SELECT id FROM briefing_configs").fetchone()[0]
-            egress.add_grant(conn, USER, "briefing:morning", "news.example.com", decided_via="cli")
-            egress.note_refused(conn, USER, "briefing:morning", HOSTILE_HOST)
+            egress.note_refused(conn, USER, subject, HOSTILE_HOST)
+            egress_refused.write(conn, USER, subject)
             conn.commit()
-        assert user_briefings.delete_briefing_by_id(config.db_path, USER, briefing_id)
-        with db.get_db(config.db_path) as conn:
-            assert egress.grants_for(conn, USER, "briefing:morning") == frozenset()
-            assert egress.list_refused(conn, USER, "briefing:morning") == []
+        assert _open(config) == []
 
 
 class TestAFailureNeverDecides:

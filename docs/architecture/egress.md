@@ -20,14 +20,15 @@ A task that can read private data and also fetch an arbitrary URL can be made to
 | A job with an approved `open:` for its current text | None |
 | An occurrence `[security] scheduled_job_max_unapproved` gave `full`, and any subtask of it | None |
 | A job with an approved `public:` for its current text, whose row asks for `public`, or an occurrence the setting gave `public` | None. It holds nothing private |
-| Any other scheduled job, personal briefing, assignment wake or TASKS.md line | The hosts in its grants |
+| Any other scheduled job or assignment wake | The hosts in its grants |
+| A personal briefing, or a TASKS.md line, its subtasks and `!retry` copies | The empty set, with no skills |
 | Any other unattended source type, a read failure, no database | The empty set |
 
-TASKS.md counts as unattended because a limited task can write a line into it.
+TASKS.md counts as unattended because a limited task can write a line into it, so a line cannot be reviewed as a job's text can. A line that needs the web fails with an ordinary refusal in its result. A personal briefing's model has no tools, since the daemon gathers its sources before the model starts ([Briefings](../features/briefings.md)).
 
 ## Grants and subjects
 
-A row in `egress_grants` means approved, and there is no pending or denied state. A grant hangs on a subject: `cron:<job name>`, `briefing:<name>`, `assignment:<id>` or `tasks-file`.
+A row in `egress_grants` means approved, and there is no pending or denied state. A grant hangs on a subject: `cron:<job name>` or `assignment:<id>`. A personal briefing and a TASKS.md line have no subject, so nothing can be granted to them and their refusals are not recorded. `db._migrate_egress_retire_subjects` deletes the rows the earlier `briefing:<name>` and `tasks-file` subjects held and closes their open bell rows.
 
 | Entry | Meaning |
 | --- | --- |

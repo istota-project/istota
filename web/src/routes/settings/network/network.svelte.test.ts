@@ -322,8 +322,8 @@ it('a module job has no access to choose', async () => {
 });
 
 it('a subject with no job has no access to choose', async () => {
-  show(subject({ subject: 'tasks-file', kind: 'tasks-file', label: 'TASKS.md', job: null }));
-  const view = await card('TASKS.md');
+  show(subject({ subject: 'assignment:7', kind: 'assignment', label: 'Assignment 7', job: null }));
+  const view = await card('Assignment 7');
   expect(view.queryByRole('radio', { name: 'Full access', hidden: true })).toBeNull();
   expect(view.getByLabelText('Add a host')).toBeInTheDocument();
 });
