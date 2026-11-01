@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from istota import db
+from istota import cron_loader, db, storage
 from istota.cli import cmd_egress
 from istota.notifications import store
 from istota.notifications.resolvers import egress_refused
@@ -250,60 +250,233 @@ class TestAddingAndRemoving:
         assert len(_open_rows(config)) == 1
 
 
-class TestApprovingAJob:
-    async def test_open_needs_the_digest_the_page_showed(self, signed_client, config):  # noqa: F811
-        digest = _job(config)
-        _refused(config, entry="open")
-        response = await signed_client.post(
-            BASE + "/approvals", json={"subject": SUBJECT, "kind": "open", "digest": digest},
-            headers=ORIGIN,
+def _sync(config):  # noqa: F811
+    with db.get_db(config.db_path) as conn:
+        cron_loader.sync_cron_jobs_to_db(
+            conn, "alice", cron_loader.load_cron_jobs(config, "alice"),
+            ceiling=config.security.scheduled_job_max_unapproved,
         )
+        conn.commit()
+
+
+def _cron_file(config, body, *, around=("", "")):  # noqa: F811
+    """A real CRON.md and the row its sync writes, so the file is what is tested."""
+    directory = storage.resolve_user_config_dir(config, "alice")
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "CRON.md"
+    path.write_text(f"{around[0]}```toml\n{body}```\n{around[1]}")
+    _sync(config)
+    return path
+
+
+def _row(config, name="digest"):  # noqa: F811
+    with db.get_db(config.db_path) as conn:
+        return egress.job_row_by_subject(conn, "alice", egress.cron_subject(name))
+
+
+def _digest(config):  # noqa: F811
+    return egress.job_digest(_row(config))
+
+
+JOB = 'name = "digest"\ncron = "0 9 * * *"\nprompt = "read the news"\n'
+
+
+async def _choose(http, access, digest, subject=SUBJECT):
+    return await http.post(
+        BASE + "/access",
+        json={"subject": subject, "access": access, "digest": digest},
+        headers=ORIGIN,
+    )
+
+
+class TestChoosingAccess:
+    """The file authors `reach`, so a choice that did not reach CRON.md would be undone
+    by the next sync. Each case therefore syncs before it reads the state back."""
+
+    @pytest.fixture(autouse=True)
+    def _ceiling(self, config):  # noqa: F811
+        config.security.scheduled_job_max_unapproved = "limited"
+
+    async def test_full_writes_the_file_and_approves_the_text(self, signed_client, config):  # noqa: F811
+        path = _cron_file(config, f"[[jobs]]\n{JOB}")
+        digest = _digest(config)
+        response = await _choose(signed_client, "open", digest)
         assert response.status_code == 200, response.text
+        assert 'reach = "full"' in path.read_text()
+        _sync(config)
         assert _grants(config) == {f"open:{digest}"}
+        assert _subject(await _listing(signed_client))["state"] == "open"
+
+    async def test_public_needs_nothing_stated_in_the_file_first(self, signed_client, config):  # noqa: F811
+        path = _cron_file(config, f"[[jobs]]\n{JOB}")
+        digest = _digest(config)
+        response = await _choose(signed_client, "public", digest)
+        assert response.status_code == 200, response.text
+        assert 'reach = "public"' in path.read_text()
+        _sync(config)
+        assert _grants(config) == {f"public:{digest}"}
+        assert _subject(await _listing(signed_client))["state"] == "public"
+
+    async def test_a_setting_that_covers_it_writes_no_approval(self, signed_client, config):  # noqa: F811
+        config.security.scheduled_job_max_unapproved = "public"
+        _cron_file(config, f"[[jobs]]\n{JOB}")
+        response = await _choose(signed_client, "public", _digest(config))
+        assert response.status_code == 200, response.text
+        _sync(config)
+        assert _grants(config) == frozenset()
         item = _subject(await _listing(signed_client))
-        assert item["state"] == "open"
+        assert (item["state"], item["by_default"]) == ("limited", "public")
         assert item["refused"] == []
+
+    async def test_public_replaces_full(self, signed_client, config):  # noqa: F811
+        _cron_file(config, f'[[jobs]]\n{JOB}reach = "full"\n')
+        digest = _digest(config)
+        await _choose(signed_client, "open", digest)
+        await _choose(signed_client, "public", digest)
+        _sync(config)
+        assert _grants(config) == {f"public:{digest}"}
+        assert _subject(await _listing(signed_client))["state"] == "public"
+
+    async def test_full_replaces_public(self, signed_client, config):  # noqa: F811
+        path = _cron_file(config, f"[[jobs]]\n{JOB}")
+        digest = _digest(config)
+        await _choose(signed_client, "public", digest)
+        await _choose(signed_client, "open", digest)
+        assert 'reach = "full"' in path.read_text()
+        _sync(config)
+        assert _grants(config) == {f"open:{digest}"}
+        assert _subject(await _listing(signed_client))["state"] == "open"
+
+    async def test_limited_takes_the_approval_and_the_ask_off(self, signed_client, config):  # noqa: F811
+        path = _cron_file(config, f'[[jobs]]\n{JOB}reach = "full"\n')
+        digest = _digest(config)
+        await _choose(signed_client, "open", digest)
+        response = await _choose(signed_client, "limited", digest)
+        assert response.status_code == 200, response.text
+        assert 'reach = "limited"' in path.read_text()
+        _sync(config)
+        assert _grants(config) == frozenset()
+        item = _subject(await _listing(signed_client))
+        assert (item["state"], item["by_default"], item["refused"]) == ("limited", None, [])
         assert _open_rows(config) == []
 
-    async def test_a_stale_digest_is_refused_with_a_message_to_reload(self, signed_client, config):  # noqa: F811
-        digest = _job(config)
+    async def test_limited_holds_under_a_setting_that_needs_no_approval(self, signed_client, config):  # noqa: F811
+        config.security.scheduled_job_max_unapproved = "full"
+        path = _cron_file(config, f"[[jobs]]\n{JOB}")
+        assert _subject(await _listing(signed_client))["by_default"] == "open"
+        await _choose(signed_client, "limited", _digest(config))
+        assert 'reach = "limited"' in path.read_text()
+        _sync(config)
+        assert _subject(await _listing(signed_client))["by_default"] is None
+
+    async def test_limited_leaves_a_file_that_already_says_so(self, signed_client, config):  # noqa: F811
+        path = _cron_file(config, f"[[jobs]]\n# keep this\n{JOB}")
+        digest = _digest(config)
+        with db.get_db(config.db_path) as conn:
+            egress.add_grant(conn, "alice", SUBJECT, f"open:{digest}", decided_via="web")
+            conn.commit()
+        before = path.read_text()
+        response = await _choose(signed_client, "limited", digest)
+        assert response.status_code == 200, response.text
+        assert path.read_text() == before
+        assert _grants(config) == frozenset()
+
+    async def test_a_multiline_prompt_keeps_its_approval_through_the_rewrite(self, signed_client, config):  # noqa: F811
+        body = (
+            '[[jobs]]\nname = "digest"\ncron = "0 9 * * *"\n'
+            'prompt = """\nfirst line\n\nsecond line\n"""\n'
+        )
+        _cron_file(config, body)
+        digest = _digest(config)
+        response = await _choose(signed_client, "open", digest)
+        assert response.status_code == 200, response.text
+        _sync(config)
+        _sync(config)
+        assert _digest(config) == digest
+        assert _subject(await _listing(signed_client))["state"] == "open"
+
+    async def test_notes_around_the_block_survive(self, signed_client, config):  # noqa: F811
+        path = _cron_file(config, f"[[jobs]]\n{JOB}", around=("# Mine\n\n", "\nAfter.\n"))
+        await _choose(signed_client, "open", _digest(config))
+        text = path.read_text()
+        assert text.startswith("# Mine\n\n```toml")
+        assert text.endswith("\nAfter.\n")
+
+    async def test_a_stale_digest_changes_nothing(self, signed_client, config):  # noqa: F811
+        path = _cron_file(config, f"[[jobs]]\n{JOB}")
+        digest = _digest(config)
+        before = path.read_text()
         with db.get_db(config.db_path) as conn:
             conn.execute("UPDATE scheduled_jobs SET prompt = 'fetch something else'")
             conn.commit()
-        response = await signed_client.post(
-            BASE + "/approvals", json={"subject": SUBJECT, "kind": "open", "digest": digest},
-            headers=ORIGIN,
-        )
+        response = await _choose(signed_client, "open", digest)
         assert response.status_code == 409
         assert response.json()["error"] == "stale_job"
         assert "Reload" in response.json()["detail"]
+        assert path.read_text() == before
         assert _grants(config) == frozenset()
 
-    async def test_public_needs_the_job_to_ask(self, signed_client, config):  # noqa: F811
-        digest = _job(config)
-        response = await signed_client.post(
-            BASE + "/approvals", json={"subject": SUBJECT, "kind": "public", "digest": digest},
-            headers=ORIGIN,
-        )
+    async def test_widening_is_refused_outright_when_the_file_cannot_change(self, signed_client, config):  # noqa: F811
+        path = _cron_file(config, f"[[jobs]]\n{JOB}")
+        digest = _digest(config)
+        path.unlink()
+        response = await _choose(signed_client, "open", digest)
+        assert response.status_code == 409
+        assert response.json()["error"] == "file_unwritten"
+        assert _grants(config) == frozenset()
+        assert _row(config)["reach"] == egress.REACH_UNSTATED
+
+    async def test_narrowing_still_removes_the_approval_when_the_file_cannot_change(self, signed_client, config):  # noqa: F811
+        path = _cron_file(config, f'[[jobs]]\n{JOB}reach = "full"\n')
+        digest = _digest(config)
+        await _choose(signed_client, "open", digest)
+        path.unlink()
+        response = await _choose(signed_client, "limited", digest)
+        assert response.status_code == 409
+        assert response.json()["error"] == "file_unwritten"
+        assert _grants(config) == frozenset()
+        assert _row(config)["reach"] == "full"
+        assert _subject(await _listing(signed_client))["state"] == "limited"
+
+    async def test_a_file_with_an_entry_it_could_not_read_is_not_rewritten(self, signed_client, config):  # noqa: F811
+        path = _cron_file(config, f'[[jobs]]\n{JOB}\n[[jobs]]\nname = "typo"\n')
+        digest = _digest(config)
+        before = path.read_text()
+        response = await _choose(signed_client, "open", digest)
+        assert response.status_code == 409
+        assert path.read_text() == before
+        assert _grants(config) == frozenset()
+
+    async def test_a_module_job_is_in_nobodys_file(self, signed_client, config):  # noqa: F811
+        digest = _job(config, name="_module.money")
+        response = await _choose(signed_client, "open", digest, subject="cron:_module.money")
         assert response.status_code == 400
-        assert _grants(config) == frozenset()
+        assert _grants(config, subject="cron:_module.money") == frozenset()
 
-    async def test_public_is_approved_for_a_job_that_asks(self, signed_client, config):  # noqa: F811
-        digest = _job(config, reach="public")
-        response = await signed_client.post(
-            BASE + "/approvals", json={"subject": SUBJECT, "kind": "public", "digest": digest},
-            headers=ORIGIN,
-        )
-        assert response.status_code == 200, response.text
-        assert _subject(await _listing(signed_client))["state"] == "public"
-
-    async def test_an_assignment_has_no_text_to_approve(self, signed_client, config):  # noqa: F811
-        response = await signed_client.post(
-            BASE + "/approvals",
-            json={"subject": egress.TASKS_FILE_SUBJECT, "kind": "open", "digest": "0" * 64},
-            headers=ORIGIN,
-        )
+    async def test_only_a_job_has_access_to_choose(self, signed_client, config):  # noqa: F811
+        response = await _choose(signed_client, "open", "0" * 64, subject=egress.TASKS_FILE_SUBJECT)
         assert response.status_code == 404
+
+    async def test_someone_elses_job_reads_as_absent(self, signed_client, config):  # noqa: F811
+        digest = _job(config, user="bob")
+        response = await _choose(signed_client, "open", digest)
+        assert response.status_code == 404
+        assert _grants(config, user="bob") == frozenset()
+
+    async def test_an_unknown_choice_echoes_nothing(self, signed_client, config):  # noqa: F811
+        _cron_file(config, f"[[jobs]]\n{JOB}")
+        response = await _choose(signed_client, CANARY, _digest(config))
+        assert response.status_code == 400
+        assert CANARY not in response.text
+
+    async def test_the_listing_says_what_a_choice_needs(self, signed_client, config):  # noqa: F811
+        _cron_file(config, f"[[jobs]]\n{JOB}")
+        job = _subject(await _listing(signed_client))["job"]
+        assert job["settable"] is True
+        assert job["needs_approval"] == {"public": True, "open": True}
+        config.security.scheduled_job_max_unapproved = "public"
+        job = _subject(await _listing(signed_client))["job"]
+        assert job["needs_approval"] == {"public": False, "open": True}
 
 
 class TestTheBoundaries:
@@ -311,7 +484,7 @@ class TestTheBoundaries:
         ("/grants", {"subject": SUBJECT, "entry": HOST}),
         ("/grants/remove", {"subject": SUBJECT, "entry": HOST}),
         ("/refused/dismiss", {"subject": SUBJECT, "entry": HOST}),
-        ("/approvals", {"subject": SUBJECT, "kind": "open", "digest": "0" * 64}),
+        ("/access", {"subject": SUBJECT, "access": "open", "digest": "0" * 64}),
     ])
     async def test_every_write_needs_an_origin(self, signed_client, config, path, body):  # noqa: F811
         _job(config)
@@ -342,8 +515,8 @@ class TestTheBoundaries:
         await login(client, "alice")
         digest = _job(config, user="bob")
         response = await client.post(
-            BASE + "/approvals",
-            json={"subject": SUBJECT, "kind": "open", "digest": digest, "user": "bob"},
+            BASE + "/access",
+            json={"subject": SUBJECT, "access": "open", "digest": digest, "user": "bob"},
             headers=ORIGIN,
         )
         assert response.status_code == 400

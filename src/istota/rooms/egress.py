@@ -57,9 +57,12 @@ REACH_FULL = "full"
 REACH_UNSTATED = "private"
 #: The request a `reach` makes of its owner, as an `egress_refused` entry.
 REACH_REQUESTS = {POSTURE_PUBLIC: "public", REACH_FULL: "open"}
+#: What each of a job's states is written as in CRON.md.
+ACCESS_REACH = {REACH_LIMITED: REACH_LIMITED, POSTURE_PUBLIC: POSTURE_PUBLIC, "open": REACH_FULL}
 POSTURE_PRIVATE = "private"
 #: Refusal entries that ask for a decision about a job, rather than name a host.
 JOB_REQUESTS = ("open", "public")
+MODULE_JOB_PREFIX = "_module."
 MAX_REFUSED_PER_SUBJECT = 20
 #: What a job's `egress` may list. Room is left for both job requests: at the table's
 #: cap, a declared row and a `public` row would evict each other on every sync.
@@ -470,13 +473,71 @@ def approve_job(
     if row is None:
         raise EntryRefused("There is no such job.")
     current = job_digest(row)
-    if digest is not None and digest != current:
-        raise StaleJob("This job's text has changed. Reload the page and read it again.")
+    if digest is not None:
+        check_job_text(row, digest)
     if kind == "public" and row["reach"] != "public":
         raise EntryRefused('This job does not ask for public access: its reach is not "public".')
     parsed = add_grant(conn, user_id, subject, f"{kind}:{current}", decided_via=decided_via)
     clear_refused(conn, user_id, subject, kind)
     return parsed
+
+
+def check_job_text(row: "Mapping | sqlite3.Row", digest: str) -> None:
+    """`StaleJob` unless this row's text is the text the person was shown."""
+    if digest != job_digest(row):
+        raise StaleJob("This job's text has changed. Reload the page and read it again.")
+
+
+def access_writes_file(row: "Mapping | sqlite3.Row", access: str, ceiling: str) -> bool:
+    """Whether choosing this access has to change the job's `reach` in CRON.md. Limited
+    leaves a file alone unless what it says, under this ceiling, would run as more or
+    keep asking."""
+    if access == REACH_LIMITED:
+        return row["reach"] in REACH_REQUESTS or unapproved_reach(row["reach"], ceiling) != REACH_LIMITED
+    return row["reach"] != ACCESS_REACH[access]
+
+
+def set_job_access(
+    conn: sqlite3.Connection,
+    user_id: str,
+    subject: str,
+    access: str,
+    digest: str,
+    *,
+    reach: str | None,
+    ceiling: str,
+    decided_via: str,
+) -> None:
+    """What a job's owner chose, on the caller's transaction: the approvals, and the
+    row's `reach` where the caller has just written it to the file (`None` if not).
+
+    A writer, held to the same short list as `add_grant`. Any other approval goes, so
+    the job holds one answer. Limited reads no text, so a stale digest cannot stand in
+    the way of narrowing. A choice the ceiling covers needs no approval and stores none.
+    """
+    row = job_row_by_subject(conn, user_id, subject)
+    if row is None:
+        raise EntryRefused("There is no such job.")
+    if access != REACH_LIMITED:
+        check_job_text(row, digest)
+    for kind in JOB_REQUESTS:
+        if kind != access:
+            for entry in grants_for(conn, user_id, subject):
+                if entry.startswith(f"{kind}:"):
+                    remove_grant(conn, user_id, subject, entry)
+            dismiss_refused(conn, user_id, subject, kind)
+    if reach is not None:
+        conn.execute(
+            "UPDATE scheduled_jobs SET reach = ? WHERE user_id = ? AND name = ?",
+            (reach, user_id, row["name"]),
+        )
+    if access == REACH_LIMITED:
+        return
+    wanted = ACCESS_REACH[access]
+    if unapproved_reach(wanted, ceiling) == wanted:
+        clear_refused(conn, user_id, subject, access)
+    else:
+        approve_job(conn, user_id, subject, access, digest, decided_via=decided_via)
 
 
 def remove_grant(conn: sqlite3.Connection, user_id: str, subject: str, entry: str) -> None:
@@ -763,6 +824,12 @@ def describe_subject(
             "waiting": waiting,
             "digest": job_digest(row),
             "reach": row["reach"],
+            # A module's row is in nobody's CRON.md, so it has no `reach` to choose.
+            "settable": not row["name"].startswith(MODULE_JOB_PREFIX),
+            "needs_approval": {
+                kind: unapproved_reach(ACCESS_REACH[kind], ceiling) != ACCESS_REACH[kind]
+                for kind in JOB_REQUESTS
+            },
             "prompt": row["prompt"] or "",
             "command": row["command"] or "",
             "skill": row["skill"] or "",

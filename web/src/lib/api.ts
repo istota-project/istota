@@ -6200,6 +6200,8 @@ export interface NetworkJob {
   once: boolean;
   waiting: boolean;
   reach: 'private' | 'limited' | 'public' | 'full';
+  settable: boolean;
+  needs_approval: { public: boolean; open: boolean };
   prompt: string;
   command: string;
   skill: string;
@@ -6237,12 +6239,12 @@ function postNetwork(path: string, body: Record<string, string>): Promise<{ ok: 
 export function addNetworkGrant(subject: string, entry: string): Promise<{ ok: boolean }> {
   return postNetwork('/grants', { subject, entry });
 }
-export function approveNetworkJob(
+export function setNetworkJobAccess(
   subject: string,
-  kind: 'open' | 'public',
+  access: 'limited' | 'public' | 'open',
   digest: string,
 ): Promise<{ ok: boolean }> {
-  return postNetwork('/approvals', { subject, kind, digest });
+  return postNetwork('/access', { subject, access, digest });
 }
 export function removeNetworkGrant(subject: string, entry: string): Promise<{ ok: boolean }> {
   return postNetwork('/grants/remove', { subject, entry });
