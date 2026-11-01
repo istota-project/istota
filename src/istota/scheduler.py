@@ -9495,10 +9495,12 @@ def _sync_module_jobs(
 
         if not app_config.is_module_enabled(user_id, module_name, conn=conn):
             # Drop any stale module rows
-            conn.execute(
-                "DELETE FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
-                (user_id, f"{module_prefix}%"),
-            )
+            stale_rows = conn.execute(
+                "SELECT id FROM scheduled_jobs WHERE user_id = ? AND substr(name, 1, ?) = ?",
+                (user_id, len(module_prefix), module_prefix),
+            ).fetchall()
+            for stale_row in stale_rows:
+                db.delete_scheduled_job(conn, stale_row["id"])
             continue
 
         try:
@@ -9534,10 +9536,10 @@ def _sync_module_jobs(
             "UPDATE scheduled_jobs "
             "SET auto_disabled_at = NULL, consecutive_failures = 0, "
             "    last_error = NULL "
-            "WHERE user_id = ? AND name LIKE ? "
+            "WHERE user_id = ? AND substr(name, 1, ?) = ? "
             "AND auto_disabled_at IS NOT NULL "
             "AND auto_disabled_at < datetime('now', '-1 hour')",
-            (user_id, f"{module_prefix}%"),
+            (user_id, len(module_prefix), module_prefix),
         ).rowcount
         if rescued:
             logger.info(
@@ -9587,13 +9589,13 @@ def _sync_module_jobs(
         legacy = conn.execute(
             "UPDATE scheduled_jobs "
             "SET enabled = 1, consecutive_failures = 0, last_error = NULL "
-            "WHERE user_id = ? AND name LIKE ? "
+            "WHERE user_id = ? AND substr(name, 1, ?) = ? "
             "AND enabled = 0 AND auto_disabled_at IS NULL "
             "AND disabled_at IS NULL "
             "AND consecutive_failures > 0 "
             "AND (last_run_at IS NULL "
             "     OR last_run_at < datetime('now', '-1 hour'))",
-            (user_id, f"{module_prefix}%"),
+            (user_id, len(module_prefix), module_prefix),
         ).rowcount
         if legacy:
             logger.info(
@@ -9610,8 +9612,8 @@ def _sync_module_jobs(
         existing_rows = list(conn.execute(
             "SELECT id, name, cron_expression, command, skill, skill_args, "
             "skip_log_channel, disabled_at "
-            "FROM scheduled_jobs WHERE user_id = ? AND name LIKE ?",
-            (user_id, f"{module_prefix}%"),
+            "FROM scheduled_jobs WHERE user_id = ? AND substr(name, 1, ?) = ?",
+            (user_id, len(module_prefix), module_prefix),
         ))
         existing_by_name = {row["name"]: row for row in existing_rows}
 
@@ -9688,7 +9690,7 @@ def _sync_module_jobs(
 
         for name, row in existing_by_name.items():
             if name not in wanted_by_name:
-                conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (row["id"],))
+                db.delete_scheduled_job(conn, row["id"])
                 logger.info(
                     "Removed obsolete module job '%s' for user %s",
                     name, user_id,

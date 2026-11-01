@@ -1058,6 +1058,10 @@ def delete_profile(db_path: Path, user_id: str) -> bool:
         # quick note idempotency keys name that user's files.
         conn.execute("DELETE FROM egress_grants WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM egress_refused WHERE user_id = ?", (user_id,))
+        conn.execute(
+            "DELETE FROM notifications WHERE user_id = ? AND source = 'egress_refused'",
+            (user_id,),
+        )
         conn.execute("DELETE FROM device_tokens WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM quick_note_keys WHERE user_id = ?", (user_id,))
         # The same holds for location ingest tokens, per-device and the legacy

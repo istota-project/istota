@@ -574,13 +574,16 @@ def drop_job_approvals(
 
 
 def forget_subject(conn: sqlite3.Connection, user_id: str, subject: str) -> None:
-    """The subject is gone: its grants and refusals go with it."""
+    """The subject is gone: its grants, refusals and bell row go with it."""
+    from istota.notifications.resolvers import egress_refused
+
     conn.execute(
         "DELETE FROM egress_grants WHERE user_id = ? AND subject = ?", (user_id, subject),
     )
     conn.execute(
         "DELETE FROM egress_refused WHERE user_id = ? AND subject = ?", (user_id, subject),
     )
+    egress_refused.close(conn, user_id, subject, by="subject_deleted")
 
 
 def note_refused(
@@ -888,16 +891,22 @@ def open_job_counts(conn: sqlite3.Connection) -> tuple[int, int]:
 def raise_refused_bell(
     config, conn: sqlite3.Connection, user_id: str, subjects: list[str],
 ) -> None:
-    """Open or bump one bell row per subject, then push what is new.
+    """Open or bump one bell row per subject that still exists, then push what is new.
 
     Called by the CRON.md sync and at task end, both in the daemon, with no
-    transaction open. Never raises and logs no name: a job name is model-writable.
+    transaction open. A task can end after its briefing was deleted or its assignment
+    closed, and nothing would close a row raised then. Never raises and logs no name:
+    a job name is model-writable.
     """
     from istota.notifications import store
     from istota.notifications.resolvers import egress_refused
 
     try:
-        results = [egress_refused.write(conn, user_id, subject) for subject in subjects]
+        results = [
+            egress_refused.write(conn, user_id, subject)
+            for subject in subjects
+            if subject_exists(conn, user_id, subject)
+        ]
         conn.commit()
         store.deliver_pending(config, results)
     except Exception as exc:  # noqa: BLE001 — logging never decides
