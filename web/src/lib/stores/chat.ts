@@ -100,6 +100,7 @@ import {
   isStranded,
   isQueued,
   isRetryableTurn,
+  isAwaitingAnswer,
   isClientOnly,
   answerGate,
   locationShareCard,
@@ -661,24 +662,39 @@ function createSession(): ChatSession {
    * below the conversation it came before, until a reload sorted it. Only
    * server-stamped rows are compared (`_iso_utc` writes second-precision
    * `…Z`), so a client clock never decides an order.
+   *
+   * The tail walk also passes turns still waiting for their answer (#911). That
+   * answer is stored when the turn finishes, so anything arriving now was stored
+   * first, and once the turn is over a reload sorts it above the answer. A
+   * scheduled job runs on the background queue, outside the room's foreground
+   * gate, so its result can land during any live turn. The turn's own answer
+   * never reaches here: it merges into the placeholder in `appendStreamedRow`.
+   *
+   * It walks from the tail rather than searching for the first live turn, so
+   * a turn with finished rows under it (one approved after a park) cannot draw a
+   * new row above those older ones.
    */
   function insertStreamedRow(arr: ChatMessage[], row: ChatMessage): ChatMessage[] {
     const ts = row.createdAt;
     if (ts && SERVER_STAMP.test(ts)) {
-      const at = arr.findIndex(
+      const older = arr.findIndex(
         (m) =>
           m.msgId != null &&
           !!m.createdAt &&
           SERVER_STAMP.test(m.createdAt) &&
           (m.createdAt > ts || (m.createdAt === ts && row.msgId != null && m.msgId > row.msgId)),
       );
-      if (at !== -1) {
+      if (older !== -1) {
         const next = arr.slice();
-        next.splice(at, 0, row);
+        next.splice(older, 0, row);
         return next;
       }
     }
-    return appendAboveClientOnly(arr, row);
+    let at = arr.length;
+    while (at > 0 && (isClientOnly(arr[at - 1]) || isAwaitingAnswer(arr[at - 1]))) at--;
+    const next = arr.slice();
+    next.splice(at, 0, row);
+    return next;
   }
 
   /** Move whatever client-only rows are on screen into the holding map. */
@@ -2955,7 +2971,13 @@ function createSession(): ChatSession {
       }
       return cm;
     });
-    messages.set(roomToken ? carryClientOnlyRows(prev, msgs, roomToken) : msgs);
+    // The server sorts an in-flight turn at its question's stamp, but its answer
+    // will be the newest row, so it goes where `insertStreamedRow` keeps a live turn.
+    const ordered = [
+      ...msgs.filter((m) => !isAwaitingAnswer(m)),
+      ...msgs.filter((m) => isAwaitingAnswer(m)),
+    ];
+    messages.set(roomToken ? carryClientOnlyRows(prev, ordered, roomToken) : ordered);
     // A queued entry restored from storage has no row anywhere — the queue
     // outlived every transcript that ever rendered it — so the carry above
     // finds nothing to bring back and the bubble has to be rebuilt from the

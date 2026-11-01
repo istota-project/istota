@@ -134,6 +134,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A scheduled result that lands in web chat while the bot is answering no longer merges with that answer or pushes it out of order. The result now appears above the answer in progress with its own header, and the answer finishes at the bottom, the same order a reload shows.
 - Updates no longer keep up to 2 GB of build cache from older builds. A successful update now drops all cache that build did not use, and the next update stays fast. Downloaded package files are also cleared when the host is provisioned.
 - `istota doctor` now warns when the disk holding the databases runs low, including on Nextcloud installs, where the workspace disk check does not apply. On a VM this disk also holds Docker's images and volumes.
 - A skill refused for want of network approval now answers with the JSON error a skill's caller reads (`status: error`, `reason: egress_not_approved`), rather than plain text that broke anything parsing `status`.
