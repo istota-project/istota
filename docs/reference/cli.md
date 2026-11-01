@@ -50,7 +50,7 @@ istota egress grant USER SUBJECT open|public [--digest D]   # Approve the job's 
 istota egress revoke USER SUBJECT ENTRY                # Remove a stored entry
 ```
 
-The operator's side of Settings, Network access, and the one place another user's approvals can be changed. `SUBJECT` is `cron:<job>` or `assignment:<id>`. `open` and `public` approve the job's text as it is now and print the job's row; `--digest` refuses unless that text still has the digest you read, and `public` is refused for a job whose `reach` is not `"public"`. Granting an entry clears its refused row. `revoke` takes the entry as `list --json` prints it, `open:<digest>` included, and leaves a dismissed row so the job does not ask again. Exit 1 when the user has no such subject or the entry is refused. See [Network access](../features/scheduling.md#network-access) and [Where a task may send bytes](../architecture/egress.md).
+The operator's side of the Network access card on a job's or an assignment's page, and the one place another user's approvals can be changed. `SUBJECT` is `cron:<job>` or `assignment:<id>`. `open` and `public` approve the job's text as it is now and print the job's row; `--digest` refuses unless that text still has the digest you read, and `public` is refused for a job whose `reach` is not `"public"`. Granting an entry clears its refused row. `revoke` takes the entry as `list --json` prints it, `open:<digest>` included, and leaves a dismissed row so the job does not ask again. Exit 1 when the user has no such subject or the entry is refused. See [Network access](../features/scheduling.md#network-access) and [Where a task may send bytes](../architecture/egress.md).
 
 ### Usage and cost
 

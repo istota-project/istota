@@ -1,7 +1,7 @@
 <script lang="ts">
   import { setCurrentUser } from '$lib/userContext';
   import type { User } from '$lib/api';
-  import Network from './+page.svelte';
+  import Jobs from './+page.svelte';
   let { expireSession = () => {} }: { expireSession?: () => void } = $props();
   setCurrentUser({
     user: { username: 'alice', features: {} } as unknown as User,
@@ -11,4 +11,4 @@
   });
 </script>
 
-<Network />
+<Jobs />

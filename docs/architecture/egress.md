@@ -28,7 +28,7 @@ TASKS.md counts as unattended because a limited task can write a line into it, s
 
 ## Grants and subjects
 
-A row in `egress_grants` means approved, and there is no pending or denied state. A grant hangs on a subject: `cron:<job name>` or `assignment:<id>`. A personal briefing and a TASKS.md line have no subject, so nothing can be granted to them and their refusals are not recorded. `db._migrate_egress_retire_subjects` deletes the rows the earlier `briefing:<name>` and `tasks-file` subjects held and closes their open bell rows.
+A row in `egress_grants` means approved, and there is no pending or denied state. A grant hangs on a subject: `cron:<job name>` or `assignment:<id>`. A personal briefing and a TASKS.md line have no subject, so nothing can be granted to them and their refusals are not recorded. Settings, Scheduled jobs and Settings, Assignments are where an owner decides; the routes for it stay under `/settings/network`, with no listing of their own, since each page reads a subject from its own listing. `db._migrate_egress_retire_subjects` deletes the rows the earlier `briefing:<name>` and `tasks-file` subjects held and closes their open bell rows.
 
 | Entry | Meaning |
 | --- | --- |
@@ -57,7 +57,7 @@ A job's `reach` says what it runs as: `limited`, `public` or `full`. `private` i
 | `public` | Limited | Public | Limited, asks |
 | `full` | Full, or limited if it says `limited` | Public | Full |
 
-The page's Access control is one route, `POST /settings/network/access`, over `egress.set_job_access` and `cron_loader.update_job_reach_in_cron_md`. The file is written with no database transaction open. A wider choice writes it first and refuses if it cannot, and a crash or a moved text after that leaves a `reach` with no approval, which grants nothing the file could not already ask for. Limited takes the approvals off first and leaves a file alone unless what it says would run as more or keep asking, so an unwritable file cannot hold a job on full access. The writer refuses a document with an entry it could not read, since the rewrite is built from the jobs that parsed and would delete the rest. A choice the setting covers stores no approval, so editing its text raises nothing to answer.
+The job page's Access control is one route, `POST /settings/network/access`, over `egress.set_job_access` and `cron_loader.update_job_reach_in_cron_md`. The file is written with no database transaction open. A wider choice writes it first and refuses if it cannot, and a crash or a moved text after that leaves a `reach` with no approval, which grants nothing the file could not already ask for. Limited takes the approvals off first and leaves a file alone unless what it says would run as more or keep asking, so an unwritable file cannot hold a job on full access. The writer refuses a document with an entry it could not read, since the rewrite is built from the jobs that parsed and would delete the rest. A choice the setting covers stores no approval, so editing its text raises nothing to answer.
 
 `egress.unapproved_reach` holds that table. Asking for less is never worse off. A job stating nothing stays limited under `public` so that one needing memory does not run without it and give a worse answer with no error. It runs on `full` under `full` because that is what the operator asked for.
 
@@ -85,7 +85,7 @@ A heartbeat `shell-command` has no task row and no subject. It reaches operator 
 
 ## Refusals and the bell
 
-Each seam appends `{"channel", "entry"}` to `egress-refused.jsonl` in the task's control directory, and the executor reads it when the task ends. A refused hostname can carry data, so it stays in the framework database, only its owner reads it, no log line names it, and it is never pushed. The channel decides what a line may become, so `https://open/` cannot read as a request for full access.
+Each seam appends `{"channel", "entry"}` to `egress-refused.jsonl` in the task's control directory, and the executor reads it when the task ends. A refused task is told where it can be answered, by `lib/egress_log.refusal_advice`: the page of its subject's kind, or that nothing can be approved for a task with no subject. A refused hostname can carry data, so it stays in the framework database, only its owner reads it, no log line names it, and it is never pushed. The channel decides what a line may become, so `https://open/` cannot read as a request for full access.
 
 The bell has one row per subject with fixed text. Its detail names the subject and no host, and its one action opens the job's or the assignment's own page, through a redirect whose path carries only the row's integer. There is no Allow in the bell, because a hostile page chooses the hostname.
 
@@ -115,7 +115,7 @@ Each of these is known and left open.
 - **What an `open` job reads.** The digest does not cover a workspace file the job follows or a script it runs. Anyone who can edit that file can steer a job with full access, a limited task included.
 - **WebSearch.** The query reaches the search provider. That is a deliberate disclosure: the provider is not a recipient an attacker can read.
 - **Fixed-provider lookups.** `markets` and yfinance lookups carry what the model puts in a symbol to a fixed provider, the same standing as WebSearch.
-- **Shared platforms.** Granting `github.com` or `pypi.org` grants a host that also serves attacker accounts. Grants are per host, not per tenant, and the page says so.
+- **Shared platforms.** Granting `github.com` or `pypi.org` grants a host that also serves attacker accounts. Grants are per host, not per tenant, and the job's page says so.
 - **The browser and the devbox once granted.** `skill:browse` and `skill:devbox` are unbounded for that job. A leak cannot be stopped per URL in a browser, since redirects, clicks and forms all send data.
 - **No sandbox or network proxy.** WebFetch and the skill gates still apply, and shell egress is then unbounded. With `skill_proxy_enabled = false` nothing sets `ISTOTA_EGRESS_LIMITED`, so the verb rules do not apply.
 - **Skill CLIs run host-side.** The CONNECT list does not bound them. A `local` skill is local because the model cannot pick its destination beyond the verb rules, and that survey is not a proof.
@@ -137,7 +137,7 @@ Each of these is known and left open.
 - **An operator's skill override.** An override of a bundled skill with no `egress` loads as `external`. For a skill with `exclude_memory` that withholds it on a limited task and its exclusion no longer applies, so an override of `briefing` with no field loads dated memories into a limited briefing's prompt.
 - **No database.** `reach_for_task` with no database answers the empty set, even for an attended task.
 - **A renamed job starts from nothing.** The old name's rows go and the new name has no approvals.
-- **A module job's stale rows.** The seed covers `_module.*` rows too, where they do nothing, and the module sync's prefix delete leaves them behind. Doctor does not count them and the page hides them.
+- **A module job's stale rows.** The seed covers `_module.*` rows too, where they do nothing, and the module sync's prefix delete leaves them behind. Doctor does not count them and Settings, Scheduled jobs hides them.
 - **Skill jobs.** A cron `skill:` job has no proxy, so its reach is read with no `own_addresses`, and a public `skill:` job's environment holds the index's declared credentials, as every skill job's does. It can run only `browse`, `skills` or `untrusted_input`, with arguments its owner approved by digest.
 
 ## What verifies this

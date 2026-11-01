@@ -1,4 +1,4 @@
-"""Settings > Network access: what a user's scheduled work may reach.
+"""A subject's network access: the writes behind the job and assignment pages.
 
 Own subjects only, taken from the session: no parameter names a user, so an admin
 cannot approve another user's entries here. Bodies are read bounded and parsed by
@@ -37,30 +37,6 @@ _MAX_BODY_BYTES = 8 * 1024
 
 class _FileUnwritten(Exception):
     """CRON.md does not say what the person chose."""
-
-
-def _listing(config, user_id: str) -> dict:
-    ceiling = config.security.scheduled_job_max_unapproved
-    with db.get_db(Path(config.db_path)) as conn:
-        subjects = [
-            egress.describe_subject(conn, user_id, subject, ceiling=ceiling)
-            for subject in egress.list_subject_names(conn, user_id)
-        ]
-    return {
-        "subjects": subjects,
-        "external_skills": sorted(usable_external_skills(config, user_id)),
-    }
-
-
-@router.get("/settings/network")
-async def settings_network(request: Request, user: dict = Depends(require_auth)):
-    config = request_config(request)
-    try:
-        listing = await asyncio.to_thread(_listing, config, user["username"])
-    except sqlite3.Error as exc:
-        logger.error("egress listing failed: %s", type(exc).__name__)
-        return refusal(500, "error", "Network access could not be loaded.")
-    return JSONResponse(listing, headers=NO_STORE)
 
 
 async def _read_body(request: Request, fields: set[str]) -> dict | JSONResponse:

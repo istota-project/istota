@@ -5,7 +5,7 @@ import {
   KeyRound,
   Plug,
   Wallet,
-  Globe,
+  CalendarClock,
   Bell,
   Smartphone,
 } from '@lucide/svelte';
@@ -33,7 +33,7 @@ export const USER_SETTINGS_SECTIONS: UserSettingsSection[] = [
   { href: '/delivery', label: 'Delivery', icon: Send },
   { href: '/credentials', label: 'Credentials', icon: KeyRound },
   { href: '/wallet', label: 'Wallet', icon: Wallet },
-  { href: '/network', label: 'Network access', icon: Globe },
+  { href: '/jobs', label: 'Scheduled jobs', icon: CalendarClock },
   { href: '/connections', label: 'Connections', icon: Plug },
   { href: '/devices', label: 'Devices', icon: Smartphone },
 ];

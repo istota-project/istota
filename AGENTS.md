@@ -195,7 +195,7 @@ src/istota/
 │   ├── map_basemap.py    # Where the map's background tiles come from → leaf-modules.md
 │   ├── admin_logs.py     # Read-only log sources for the admin UI: the rotating app log (+ rotation chain, paged reader, live tail) and `task_logs`
 │   ├── admin_config_view.py  # Redacted, sectioned rendering of the loaded Config for the admin UI (credentials never leave the process)
-│   ├── egress_routes.py  # Settings, Network access: a user's own approvals and refusals → sandbox.md
+│   ├── egress_routes.py  # A subject's network access for the job and assignment pages: a user's own approvals and refusals → sandbox.md
 │   ├── job_routes.py     # Settings, Scheduled jobs: a user's own jobs, the file merged with the table, and the writes → sandbox.md
 │   ├── settings_http.py  # What the per-user settings routers share: the refusal shape, the id parser, the config off the app → sandbox.md
 │   ├── chat_files.py     # Which paths `/chat/files` will serve, and the stored-answer check that rewrites links it would refuse

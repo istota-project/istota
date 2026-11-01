@@ -6230,12 +6230,70 @@ export interface NetworkSubject {
   waiting_on: string[];
   refused: NetworkRefusal[];
 }
-export interface NetworkAccess {
-  subjects: NetworkSubject[];
-  external_skills: string[];
+export interface ScheduledJobDefinition {
+  kind: 'prompt' | 'command';
+  prompt: string;
+  prompt_file: string;
+  command: string;
+  target: string;
+  room: string;
+  silent_unless_action: boolean;
+  skip_log_channel: boolean;
+  model: string;
+  effort: string;
+  brain: string;
+  provider: string;
+  publish_shared_kv: string;
+  publish_shared_kv_trusted: boolean;
+  egress: string[];
+  egress_kept: string[];
 }
-export function getNetworkAccess(): Promise<NetworkAccess> {
-  return apiFetch('/settings/network');
+export interface ScheduledJob {
+  /** Null while the job is in CRON.md and not yet in the table. */
+  id: number | null;
+  pending: boolean;
+  name: string;
+  cron: string;
+  enabled: boolean;
+  once: boolean;
+  state: 'running' | 'disabled' | 'suspended';
+  last_run_at: string | null;
+  last_success_at: string | null;
+  consecutive_failures: number;
+  last_error: string | null;
+  definition: ScheduledJobDefinition;
+  revision: string | null;
+  editable: boolean;
+  network: NetworkSubject | null;
+  /** Why the sync drops this job: in the file, and never to be a row. */
+  file_error?: string;
+}
+export interface ScheduledJobs {
+  jobs: ScheduledJob[];
+  file: { readable: boolean; errors: string[] };
+  options: {
+    outputs: string[];
+    rooms: { talk: unknown[]; web: unknown[] };
+    selectable_brains: string[];
+    can_publish: boolean;
+  };
+  external_skills: string[];
+  timezone: string;
+}
+export function getScheduledJobs(): Promise<ScheduledJobs> {
+  return apiFetch('/settings/jobs');
+}
+export function setScheduledJobEnabled(
+  id: number,
+  enabled: boolean,
+): Promise<{ outcome: AdminJobOutcome }> {
+  return apiFetch(`/settings/jobs/${id}/${enabled ? 'enable' : 'disable'}`, { method: 'POST' });
+}
+export function runScheduledJob(id: number): Promise<{ task_id: number }> {
+  return apiFetch(`/settings/jobs/${id}/run`, { method: 'POST' });
+}
+export function deleteScheduledJob(id: number): Promise<{ deleted: boolean; id: number }> {
+  return apiFetch(`/settings/jobs/${id}`, { method: 'DELETE' });
 }
 function postNetwork(path: string, body: Record<string, string>): Promise<{ ok: boolean }> {
   return apiFetch(`/settings/network${path}`, {

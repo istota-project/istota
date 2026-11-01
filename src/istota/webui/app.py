@@ -19556,7 +19556,7 @@ app.include_router(_garmin_router, prefix="/istota/api/garmin", tags=["garmin"])
 app.dependency_overrides[_garmin_require_auth] = _require_api_auth
 app.dependency_overrides[_garmin_verify_origin] = _verify_origin
 
-# Settings > Network access. The stubs are the shared objects, overridden above.
+# A subject's network access, for the job and assignment pages. The stubs are the shared objects, overridden above.
 from istota.webui.egress_routes import router as _egress_router
 
 app.include_router(_egress_router, prefix="/istota/api", tags=["egress"])

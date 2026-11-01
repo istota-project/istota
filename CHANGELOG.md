@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Settings has a Scheduled jobs page in place of Network access.** You can see every job's schedule, state, last run and last error, run it now, disable, enable or delete it, and decide what it may reach on its own page. The bell and old links land there. A task refused a host now names the right page, and a TASKS.md line is told plainly that nothing can be approved for it.
 - **Personal briefings and TASKS.md lines have no network access settings.** A TASKS.md line now always runs limited, with no approved hosts or skills, and fails with an ordinary refusal if it needs the web. Hosts and skills you approved for a briefing or for TASKS.md are removed on upgrade, and neither appears on Network access or in the bell.
 - **A personal briefing's model no longer has tools.** Istota gathers a briefing's sources before the model starts, so the model only formats what it was given and cannot fetch a page, run a command or read a file. Group briefing research and agent shared blocks keep theirs.
 - **Network access no longer lists module jobs.** Upgraded installs showed cards such as `_module.feeds.prune` with a Full access badge and controls that changed nothing. They are hidden unless one was actually refused something you need to answer.
