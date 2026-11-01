@@ -475,6 +475,33 @@ def approve_job(
     return parsed
 
 
+def approve_saved_text(
+    conn: sqlite3.Connection,
+    user_id: str,
+    subject: str,
+    kind: str,
+    digest: str,
+    *,
+    decided_via: str,
+) -> Entry:
+    """Keep a job's approval for the text its owner just saved on the page, on the
+    caller's transaction.
+
+    A writer, held to the same short list as `add_grant`. `approve_job` compares with
+    the row, and here the row is behind by design until the next sync. So `digest` must
+    come from `cron_loader.job_text_digest` on the server, never from the client. Until
+    the sync moves the row the grant names text no row holds, and `_row_approved`
+    compares digests, so it grants nothing early.
+    """
+    if kind not in JOB_REQUESTS:
+        raise EntryRefused("Unknown kind of approval.")
+    if job_row_by_subject(conn, user_id, subject) is None:
+        raise EntryRefused("There is no such job.")
+    parsed = add_grant(conn, user_id, subject, f"{kind}:{digest}", decided_via=decided_via)
+    clear_refused(conn, user_id, subject, kind)
+    return parsed
+
+
 def check_job_text(row: "Mapping | sqlite3.Row", digest: str) -> None:
     """`StaleJob` unless this row's text is the text the person was shown."""
     if digest != job_digest(row):
