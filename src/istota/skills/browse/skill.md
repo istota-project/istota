@@ -339,7 +339,7 @@ Report a confirmed outcome with `wallet complete ID --order-ref REFERENCE --amou
 
 **Failures**: If a site returns an error, empty content, captcha, or no `session_id` — try once more. If it fails twice, skip that site and use an alternative source.
 
-**Private addresses**: The browser cannot reach internal or private-network addresses unless the operator granted the name. A page reading `Refused: this is a private address` is final; say the address is not reachable from the browser. On https a refusal reads as `ERR_TUNNEL_CONNECTION_FAILED`, the same as a host that cannot be reached, so the one retry above applies.
+**Private addresses**: The browser cannot reach internal or private-network addresses unless the operator granted the name. `status: "error"` with `error: "private_address_refused"` and the refused `url` is final, including after a redirect: do not retry, and say the address is not reachable from the browser. On https Chrome does not report why the connection failed, so a refusal there is `navigation_mismatch`, the same as a host that cannot be reached, and the one retry above applies. A click in `interact` that lands on a refused address is not reported this way: the page text reads `Refused: this is a private address`, which is just as final.
 
 **No debugging**: Never read the browse skill source code, inspect docker containers, curl the browser API directly, test session internals, or debug the browser infrastructure. If the CLI fails, move on.
 

@@ -119,9 +119,22 @@ class Page:
     def commit(self, url):
         self.pending.append(("framenavigated", url))
 
+    def response(self, url, status=200, headers=None, frame=None):
+        req = types.SimpleNamespace(
+            url=url, frame=frame or self.main_frame, is_navigation_request=lambda: True,
+        )
+        self.pending.append(("response", types.SimpleNamespace(
+            url=url, status=status, headers=headers or {}, request=req,
+        )))
+
+
+MARKER = {"x-istota-refused": "per-start-mark"}
+METADATA = "http://169.254.169.254/latest/meta-data/"
+
 
 @pytest.fixture
 def navigation(monkeypatch):
+    monkeypatch.setenv("BROWSER_REFUSAL_MARK", "per-start-mark")
     page = Page()
     monkeypatch.setattr(chrome, "connect_cdp", lambda inst: None)
     monkeypatch.setattr(chrome, "get_context", lambda inst: types.SimpleNamespace(pages=[page]))
@@ -163,6 +176,120 @@ def test_wrong_document_is_an_error_at_each_endpoint(navigation, monkeypatch, en
     extract.assert_not_called()
     close.assert_called_once_with("session")
     assert not any(page.listeners.values())
+
+
+@pytest.mark.parametrize("endpoint", ["browse", "render_page", "screenshot", "extract"])
+def test_a_proxy_refusal_is_an_error_at_each_endpoint(navigation, monkeypatch, endpoint):
+    page, navigate = navigation
+
+    def refused(*a, **kw):
+        page.response(METADATA, status=403, headers=MARKER)
+        page.commit(METADATA)
+
+    navigate.side_effect = refused
+    monkeypatch.setattr(browse_api, "request", types.SimpleNamespace(
+        get_json=lambda: {"url": METADATA, "skip_behavior": True},
+    ))
+    monkeypatch.setattr(browse_api, "jsonify", lambda value: value)
+    monkeypatch.setattr(browse_api, "_cleanup_expired", lambda **kwargs: None)
+    monkeypatch.setattr(browse_api, "_create_session", lambda **kwargs: ("session", page))
+    monkeypatch.setattr(browse_api, "_page_is_gone", lambda p: False)
+    close = mock.Mock()
+    monkeypatch.setattr(browse_api, "_close_session", close)
+    extract = mock.Mock(return_value={"url": METADATA, "text": "Refused"})
+    monkeypatch.setattr(browse_api.browsing, "extract_page_content", extract)
+
+    result = getattr(browse_api, endpoint)()
+
+    assert result == ({
+        "status": "error", "error": "private_address_refused", "url": METADATA,
+    }, 403)
+    assert navigate.call_count == 1
+    extract.assert_not_called()
+    close.assert_called_once_with("session")
+    assert not any(page.listeners.values())
+
+
+def test_a_refusal_names_the_address_chrome_asked_for(navigation):
+    """Chrome rewrites a decimal host before the request; a redirect moves it too."""
+    page, navigate = navigation
+    landed = "http://127.0.0.1:9222/"
+
+    def refused(*a, **kw):
+        page.response(landed, status=403, headers=MARKER)
+        page.commit(landed)
+
+    navigate.side_effect = refused
+    with pytest.raises(browse_api.PrivateAddressRefused) as raised:
+        browse_api._navigate_and_wait(page, "http://2130706433:9222")
+    assert raised.value.url == landed
+    assert navigate.call_count == 1
+
+
+def test_an_upstream_403_is_a_page(navigation):
+    page, navigate = navigation
+
+    def forbidden(*a, **kw):
+        page.response(REQUESTED, status=403)
+        page.commit(REQUESTED)
+
+    navigate.side_effect = forbidden
+    assert browse_api._navigate_and_wait(page, REQUESTED) is None
+
+
+@pytest.mark.parametrize("response", [
+    {"url": "http://public.example/", "status": 200, "headers": MARKER},
+    {"url": "http://public.example/", "status": 403,
+     "headers": {"x-istota-refused": "private_address"}},
+    {"url": REQUESTED, "status": 403,
+     "headers": {"x-istota-refused": "private_address"}},
+])
+def test_only_the_proxys_own_refusal_counts(navigation, response):
+    page, navigate = navigation
+
+    def served(*a, **kw):
+        page.response(**response)
+        page.commit(response["url"])
+
+    navigate.side_effect = served
+    assert browse_api._navigate_and_wait(page, response["url"]) is None
+
+
+def test_with_no_mark_nothing_counts_as_a_refusal(navigation, monkeypatch):
+    monkeypatch.delenv("BROWSER_REFUSAL_MARK")
+    page, navigate = navigation
+
+    def served(*a, **kw):
+        page.response(REQUESTED, status=403, headers={"x-istota-refused": ""})
+        page.commit(REQUESTED)
+
+    navigate.side_effect = served
+    assert browse_api._navigate_and_wait(page, REQUESTED) is None
+
+
+def test_a_refused_iframe_does_not_refuse_the_page(navigation):
+    page, navigate = navigation
+
+    def served(*a, **kw):
+        page.response(METADATA, status=403, headers=MARKER, frame=object())
+        page.commit(REQUESTED)
+
+    navigate.side_effect = served
+    assert browse_api._navigate_and_wait(page, REQUESTED) is None
+
+
+def test_a_refusal_the_page_moved_on_from_is_not_the_answer(navigation):
+    page, navigate = navigation
+
+    def served(*a, **kw):
+        page.commit(REQUESTED)
+        page.response(METADATA, status=403, headers=MARKER)
+        page.commit(METADATA)
+        page.commit(REQUESTED + "?next")
+
+    navigate.side_effect = served
+    assert browse_api._navigate_and_wait(page, REQUESTED) is None
+    assert page.url == REQUESTED + "?next"
 
 
 def test_retry_can_recover(navigation):

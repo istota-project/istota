@@ -875,6 +875,12 @@ class NavigationMismatch(RuntimeError):
         self.landed = landed
 
 
+class PrivateAddressRefused(RuntimeError):
+    def __init__(self, url):
+        super().__init__("private_address_refused")
+        self.url = url
+
+
 def _challenge_settle_pause():
     """The humanized wait after a challenge window, before the page is read
     again. One function so both call sites share it and a test can skip it
@@ -947,7 +953,21 @@ def _navigation_error_response(error, secrets=(), mask_secrets=False):
             "status": "error", "error": "navigation_mismatch",
             "requested": error.requested, "landed": error.landed,
         }, secrets, mask_secrets)), 502
+    if isinstance(error, PrivateAddressRefused):
+        return jsonify(_scrub_extracted({
+            "status": "error", "error": "private_address_refused", "url": error.url,
+        }, secrets, mask_secrets)), 403
     return jsonify(_scrub_extracted({"status": "error", "error": str(error)}, secrets, mask_secrets)), 500
+
+
+def _is_proxy_refusal(response):
+    """Whether a response is egress_proxy refusing an address, not a site's 403."""
+    mark = egress_proxy.refusal_mark()
+    return (
+        bool(mark)
+        and response.status == 403
+        and response.headers.get(egress_proxy.REFUSED_HEADER.lower()) == mark
+    )
 
 
 def _navigate_and_wait(page, url, timeout_ms=30000):
@@ -963,7 +983,8 @@ def _navigate_and_wait(page, url, timeout_ms=30000):
     3. Wait for Cloudflare/security challenges to resolve
     4. Passive wait for page to settle
     5. Require a committed navigation; retry a mismatch once, outside the
-       omnibox when it landed on another spelling of the requested address
+       omnibox when it landed on another spelling of the requested address.
+       A document the egress proxy refused raises PrivateAddressRefused, unretried
 
     Returns the challenge phrase still showing when step 3 ran out of time,
     and None when the page is clear. Every caller has to branch on it: the
@@ -987,6 +1008,7 @@ def _navigate_and_wait(page, url, timeout_ms=30000):
             targets.add(("http", *requested[1:]))
         committed = set()
         arrivals = []
+        refused = set()
         deadline = time.monotonic() + timeout_ms / 1000
 
         def on_request(req):
@@ -995,6 +1017,13 @@ def _navigate_and_wait(page, url, timeout_ms=30000):
             previous = req.redirected_from
             if previous is not None and _document_url(previous.url) in targets:
                 targets.add(_document_url(req.url))
+
+        def on_response(response):
+            req = response.request
+            if not req.is_navigation_request() or req.frame != page.main_frame:
+                return
+            if _is_proxy_refusal(response):
+                refused.add(_document_url(response.url))
 
         def on_commit(frame):
             if frame != page.main_frame:
@@ -1007,6 +1036,7 @@ def _navigate_and_wait(page, url, timeout_ms=30000):
                 committed.add(address)
 
         page.on("request", on_request)
+        page.on("response", on_response)
         page.on("framenavigated", on_commit)
         try:
             page.bring_to_front()
@@ -1026,6 +1056,8 @@ def _navigate_and_wait(page, url, timeout_ms=30000):
             while not arrivals and time.monotonic() < deadline:
                 page.wait_for_timeout(100)
             landed = page.url
+            if _document_url(landed) in refused:
+                raise PrivateAddressRefused(landed)
             if _document_url(landed) in committed:
                 return None
             log.warning(
@@ -1034,6 +1066,7 @@ def _navigate_and_wait(page, url, timeout_ms=30000):
             )
         finally:
             page.remove_listener("request", on_request)
+            page.remove_listener("response", on_response)
             page.remove_listener("framenavigated", on_commit)
 
     raise NavigationMismatch(url, landed)

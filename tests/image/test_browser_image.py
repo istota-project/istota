@@ -548,7 +548,30 @@ def test_the_browser_service_starts_on_the_layer(browser_chrome_layer, tmp_path)
              "-d", json.dumps({"url": "http://localhost:9224/live", "timeout": 60})],
             capture_output=True, text=True, timeout=240,
         )
-        assert "Refused: this is a private address" in browsed.stdout, browsed.stdout[-2000:]
+        answer = json.loads(browsed.stdout)
+        assert answer["status"] == "error", browsed.stdout[-2000:]
+        assert answer["error"] == "private_address_refused", browsed.stdout[-2000:]
+        assert "text" not in answer, browsed.stdout[-2000:]
+
+        def browse(url):
+            done = subprocess.run(
+                ["docker", "exec", container, "curl", "-s", "-X", "POST", "http://localhost:9223/browse",
+                 "-H", "Content-Type: application/json", "-H", "X-Istota-User: egress-witness",
+                 "-H", API_AUTH,
+                 "-d", json.dumps({"url": url, "timeout": 10})],
+                capture_output=True, text=True, timeout=240,
+            )
+            return json.loads(done.stdout)
+
+        # Chrome rewrites this spelling to 127.0.0.1 before the request leaves it.
+        decimal = browse("http://2130706433:9224/live")
+        assert decimal["error"] == "private_address_refused", decimal
+        assert decimal["url"].startswith("http://127.0.0.1:9224/"), decimal
+
+        # Chrome keeps a refused CONNECT's response to itself, so on https the
+        # API cannot tell this from a host that is down; skill.md says so.
+        tunnelled = browse("https://localhost:9224/live")
+        assert tunnelled["error"] == "navigation_mismatch", tunnelled
 
         # The closure test's forged header (#884), from a second container on
         # the service's own network: a peer, as the audit described.
