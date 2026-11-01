@@ -11227,6 +11227,70 @@ async def chat_config(user: dict = Depends(_require_api_auth)):
     }
 
 
+def _model_catalogue(username: str, brain_config, provider: str | None) -> dict:
+    """What a model picker offers this viewer on ``brain_config``'s brain and
+    ``provider``: the aliases, the models, and what no model of its own runs (None
+    when the backend picks). One source for the room picker and the job form, so the
+    two cannot disagree. Each half degrades on its own, and never raises.
+    """
+    from istota.brain._resolve import effective_provider
+
+    aliases: list[dict] = []
+    default_model: str | None = None
+    try:
+        model_brain = make_brain(brain_config)
+        bind = getattr(model_brain, "bound_to", None)
+        if callable(bind):
+            model_brain = bind(effective_provider(_config, brain_config.kind, provider))
+        aliases = [
+            {
+                "alias": alias, "target": model, "effort": effort,
+                "efforts": _alias_efforts(brain_config, alias),
+            }
+            for alias, model, effort in model_brain.list_aliases()
+        ]
+        default_model = model_brain.effective_default_model() or None
+    except Exception as e:  # noqa: BLE001 — aliases degrade independently
+        logger.warning("model_catalogue: model aliases unavailable: %s", e)
+    models: list[dict] = []
+    try:
+        models = _chat_model_choices(brain_config, username, provider)
+    except Exception as e:  # noqa: BLE001 — the model list degrades independently
+        logger.warning("model_catalogue: model list unavailable: %s", e)
+    return {"model_aliases": aliases, "models": models, "default_model": default_model}
+
+
+@api_router.get("/settings/jobs/model-choices")
+async def settings_job_model_choices(
+    brain: str | None = None,
+    provider: str | None = None,
+    user: dict = Depends(_require_api_auth),
+):
+    """The model picker's choices for a job, on the `scheduled` lane: the one
+    `cron_loader._validate_model` judges a job's model on and the job runs on.
+    `/chat/commands` answers for the web lane and a room, which can differ under
+    `[brain.source_type_overrides]`.
+
+    A brain or provider from a non-admin is ignored, since writing either is
+    admin-only, and `resolve_brain_kind` ignores a brain off the allowlist.
+    """
+    from istota.brain import resolve_brain_kind
+
+    username = user["username"]
+    is_admin = _config.is_admin(username)
+    brain_config = resolve_brain_kind(
+        "scheduled", _config.brain, override=(brain or None) if is_admin else None,
+    )
+    await asyncio.to_thread(_install_model_caches)
+    catalogue = await asyncio.to_thread(
+        _model_catalogue, username, brain_config, (provider or None) if is_admin else None,
+    )
+    return JSONResponse(
+        {**catalogue, "providers": _native_provider_choices(username, brain_config)},
+        headers=_NO_STORE,
+    )
+
+
 @api_router.get("/chat/commands")
 async def chat_commands(
     room_id: int | None = None,
@@ -11326,41 +11390,13 @@ async def chat_commands(
         else:
             logger.debug("chat_commands: ignoring brain=%r", brain)
     await asyncio.to_thread(_install_model_caches)
-    aliases: list[dict] = []
-    # What an unpinned room runs, resolved the way the admin Models card
-    # resolves it, so the room picker can name it instead of the bare "Default
-    # model" that hid #548. None = the backend's own default.
-    default_model: str | None = None
-    try:
-        from istota.brain._resolve import effective_provider
-
-        model_brain = make_brain(brain_config)
-        bind = getattr(model_brain, "bound_to", None)
-        if callable(bind):
-            model_brain = bind(effective_provider(_config, brain_config.kind, room_provider))
-        aliases = [
-            {
-                "alias": alias, "target": model, "effort": effort,
-                "efforts": _alias_efforts(brain_config, alias),
-            }
-            for alias, model, effort in model_brain.list_aliases()
-        ]
-        default_model = model_brain.effective_default_model() or None
-    except Exception as e:  # noqa: BLE001 — aliases degrade independently
-        logger.warning("chat_commands: model aliases unavailable: %s", e)
-    models: list[dict] = []
-    try:
-        models = await asyncio.to_thread(
-            _chat_model_choices, brain_config, user["username"], room_provider,
-        )
-    except Exception as e:  # noqa: BLE001 — the model list degrades independently
-        logger.warning("chat_commands: model list unavailable: %s", e)
+    catalogue = await asyncio.to_thread(
+        _model_catalogue, user["username"], brain_config, room_provider,
+    )
     payload = {
         "commands": cmds,
         "command_aliases": cmd_aliases,
-        "model_aliases": aliases,
-        "models": models,
-        "default_model": default_model,
+        **catalogue,
         # A native room's provider (D22): the stored value (null is native's
         # default) and, for an admin, the providers it may be moved to.
         "room_provider": room_provider,

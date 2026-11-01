@@ -5,15 +5,19 @@ origin, a refusal echoes nothing it was sent, the file stays the authority and a
 cannot lose a job, and whoever may not set a restricted field is told so at save time.
 """
 
+import dataclasses
 import sqlite3
 from unittest.mock import AsyncMock
 
 import pytest
 
 from istota import cron_loader, db, storage
+from istota.brain.claude_code import OPUS
+from istota.config import BrainConfig
 from istota.notifications.resolvers import egress_refused
 from istota.rooms import egress
 from tests.test_web_app import app, client, config  # noqa: F401 -- shared fixtures
+from tests.test_web_chat_commands import _provider_config
 
 BASE = "/istota/api/settings/jobs"
 ORIGIN = {"Origin": "https://example.com"}
@@ -424,6 +428,186 @@ class TestRestrictedFields:
         response = await _edit(signed_client, config, publish_shared_kv="")
         assert response.status_code == 200, response.text
         assert "publish_shared_kv" not in held.read_text()
+
+    STORED = [
+        ("brain", 'brain = "native"\n', "native", "claude_code"),
+        ("provider", 'provider = "openrouter"\n', "openrouter", "anthropic"),
+        ("publish_shared_kv_trusted",
+         'publish_shared_kv = "news/today"\npublish_shared_kv_trusted = true\n', True, None),
+    ]
+
+    @pytest.mark.parametrize("field,line,value,_other", STORED)
+    async def test_a_field_left_out_stays_as_the_file_has_it(
+        self, signed_client, config, field, line, value, _other,  # noqa: F811
+    ):
+        path = _cron_file(config, body=DIGEST_JOB + line)
+        response = await _edit(signed_client, config, prompt="read other news")
+        assert response.status_code == 200, response.text
+        assert line in path.read_text()
+
+    @pytest.mark.parametrize("field,line,value,_other", STORED)
+    async def test_the_same_value_sent_saves(
+        self, signed_client, config, field, line, value, _other,  # noqa: F811
+    ):
+        path = _cron_file(config, body=DIGEST_JOB + line)
+        response = await _edit(signed_client, config, **{field: value})
+        assert response.status_code == 200, response.text
+        assert line in path.read_text()
+
+    @pytest.mark.parametrize("field,line,value,other", [row for row in STORED if row[3]])
+    async def test_another_value_is_refused(
+        self, signed_client, config, field, line, value, other,  # noqa: F811
+    ):
+        _cron_file(config, body=DIGEST_JOB + line)
+        response = await _edit(signed_client, config, **{field: other})
+        assert response.status_code == 400
+        assert response.json()["field"] == field
+
+    @pytest.mark.parametrize("field,line,value,_other", [row for row in STORED if row[3]])
+    async def test_a_stored_pin_can_be_cleared(
+        self, signed_client, config, field, line, value, _other,  # noqa: F811
+    ):
+        path = _cron_file(config, body=DIGEST_JOB + line)
+        response = await _edit(signed_client, config, **{field: ""})
+        assert response.status_code == 200, response.text
+        assert field not in path.read_text()
+
+    async def test_trust_can_be_cleared_without_the_right(self, signed_client, config):  # noqa: F811
+        path = _cron_file(
+            config,
+            body=DIGEST_JOB + 'publish_shared_kv = "news/today"\npublish_shared_kv_trusted = true\n',
+        )
+        response = await _edit(signed_client, config, publish_shared_kv_trusted=False)
+        assert response.status_code == 200, response.text
+        assert "publish_shared_kv_trusted" not in path.read_text()
+        assert 'publish_shared_kv = "news/today"' in path.read_text()
+
+
+class TestModelChoices:
+    """What the job form's model picker offers: the `scheduled` lane the sync judges a
+    job's model on and the job runs on, which `/chat/commands` does not answer for."""
+
+    ROUTE = f"{BASE}/model-choices"
+
+    @pytest.fixture
+    def native_lane(self, config):  # noqa: F811
+        """A deployment whose web lane runs claude_code and whose jobs run native."""
+        source = _provider_config(config.db_path.parent, admins=set())
+        config.brain = dataclasses.replace(
+            source.brain, kind="claude_code", source_type_overrides={"scheduled": "native"},
+        )
+        config.providers = source.providers
+
+    @pytest.fixture
+    def pinnable(self, config):  # noqa: F811
+        config.brain = BrainConfig(kind="claude_code", room_selectable=["native"])
+
+    @pytest.fixture
+    def asked_provider(self, monkeypatch):
+        import istota.webui.app as mod
+
+        seen = []
+        real = mod._model_catalogue
+
+        def spy(username, brain_config, provider):
+            seen.append(provider)
+            return real(username, brain_config, provider)
+
+        monkeypatch.setattr(mod, "_model_catalogue", spy)
+        return seen
+
+    async def test_it_needs_a_session(self, client):  # noqa: F811
+        assert (await client.get(self.ROUTE)).status_code == 401
+
+    async def test_it_answers_with_what_a_picker_needs_and_is_not_cached(self, signed_client):
+        response = await signed_client.get(self.ROUTE)
+        assert response.status_code == 200, response.text
+        assert response.headers["cache-control"] == "no-store"
+        assert set(response.json()) == {"model_aliases", "models", "default_model", "providers"}
+
+    async def test_it_agrees_with_the_room_picker(self, signed_client):
+        ours = (await signed_client.get(self.ROUTE)).json()
+        theirs = (await signed_client.get("/istota/api/chat/commands")).json()
+        assert ours["model_aliases"]
+        for field in ("model_aliases", "models", "default_model"):
+            assert ours[field] == theirs[field]
+
+    async def test_it_reads_the_scheduled_lane_and_not_the_web_one(self, admin_client, native_lane):
+        ours = (await admin_client.get(self.ROUTE)).json()
+        theirs = (await admin_client.get("/istota/api/chat/commands")).json()
+        assert {provider["id"] for provider in ours["providers"]} == {"anthropic", "openrouter"}
+        assert theirs["providers"] == []
+
+    async def test_an_admins_brain_is_read(self, admin_client, pinnable):
+        pinned = (await admin_client.get(self.ROUTE, params={"brain": "native"})).json()
+        plain = (await admin_client.get(self.ROUTE)).json()
+        assert OPUS in {alias["target"] for alias in plain["model_aliases"]}
+        assert OPUS not in {alias["target"] for alias in pinned["model_aliases"]}
+
+    async def test_a_non_admins_brain_is_ignored(self, signed_client, pinnable):
+        asked = (await signed_client.get(self.ROUTE, params={"brain": "native"})).json()
+        plain = (await signed_client.get(self.ROUTE)).json()
+        assert OPUS in {alias["target"] for alias in plain["model_aliases"]}
+        assert asked == plain
+
+    async def test_a_brain_off_the_allowlist_is_ignored(self, admin_client, config):  # noqa: F811
+        config.brain = BrainConfig(kind="claude_code", room_selectable=[])
+        asked = (await admin_client.get(self.ROUTE, params={"brain": "native"})).json()
+        assert OPUS in {alias["target"] for alias in asked["model_aliases"]}
+
+    async def test_a_non_admin_is_offered_no_providers(self, signed_client, native_lane):
+        assert (await signed_client.get(self.ROUTE)).json()["providers"] == []
+
+    async def test_a_non_admins_provider_is_ignored(self, signed_client, native_lane, asked_provider):
+        await signed_client.get(self.ROUTE, params={"provider": "openrouter"})
+        assert asked_provider == [None]
+
+    async def test_an_admins_provider_is_read(self, admin_client, native_lane, asked_provider):
+        await admin_client.get(self.ROUTE, params={"provider": "openrouter"})
+        assert asked_provider == ["openrouter"]
+
+    async def test_a_brain_that_will_not_build_degrades_to_nothing(self, signed_client, monkeypatch):
+        import istota.webui.app as mod
+
+        def refuse(_config):
+            raise RuntimeError("no brain")
+
+        monkeypatch.setattr(mod, "make_brain", refuse)
+        response = await signed_client.get(self.ROUTE)
+        assert response.status_code == 200
+        assert response.json()["model_aliases"] == []
+        assert response.json()["default_model"] is None
+
+
+class TestRequests:
+    async def test_an_entry_is_written_and_normalized(self, signed_client, config):  # noqa: F811
+        path = _cron_file(config)
+        response = await _edit(signed_client, config, egress=["News.Example.COM"])
+        assert response.status_code == 200, response.text
+        assert 'egress = ["news.example.com"]' in path.read_text()
+
+    async def test_a_refused_entry_is_beside_the_field_and_changes_nothing(
+        self, signed_client, config,  # noqa: F811
+    ):
+        path = _cron_file(config)
+        before = path.read_text()
+        response = await _edit(signed_client, config, egress=[f"skill:{CANARY}"])
+        assert response.status_code == 400
+        assert response.json()["field"] == "egress"
+        assert CANARY not in response.text
+        assert path.read_text() == before
+
+    async def test_a_kept_entry_is_listed_and_survives_an_edit(self, signed_client, config):  # noqa: F811
+        path = _cron_file(
+            config, body=DIGEST_JOB + 'egress = ["skill:nosuchskill", "a.example.com"]\n',
+        )
+        before = _named(await _listing(signed_client))
+        assert before["definition"]["egress_kept"] == ["skill:nosuchskill"]
+        assert before["definition"]["egress"] == ["a.example.com"]
+        response = await _edit(signed_client, config, egress=[])
+        assert response.status_code == 200, response.text
+        assert "skill:nosuchskill" in path.read_text()
+        assert "a.example.com" not in path.read_text()
 
 
 class TestEdit:
