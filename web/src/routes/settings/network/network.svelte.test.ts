@@ -18,6 +18,8 @@ const job = {
   once: false,
   waiting: false,
   reach: 'private',
+  settable: true,
+  needs_approval: { public: true, open: true },
   prompt: 'Read the news and summarise it.',
   command: '',
   skill: '',
@@ -51,7 +53,7 @@ const expireSession = vi.fn();
 
 beforeEach(() => {
   api.addNetworkGrant.mockResolvedValue({ ok: true });
-  api.approveNetworkJob.mockResolvedValue({ ok: true });
+  api.setNetworkJobAccess.mockResolvedValue({ ok: true });
   api.removeNetworkGrant.mockResolvedValue({ ok: true });
   api.dismissNetworkRefusal.mockResolvedValue({ ok: true });
 });
@@ -73,7 +75,7 @@ function show(...subjects: object[]) {
 
 it('shows each state in words', async () => {
   show(
-    subject({ state: 'open', approvals: ['open:' + 'a'.repeat(64)] }),
+    subject({ state: 'open', approvals: ['open:' + 'a'.repeat(64)], job: null }),
     subject({ subject: 'cron:pub', label: 'Scheduled job: pub', state: 'public', job: null }),
     subject({
       subject: 'cron:lim',
@@ -168,15 +170,6 @@ it('removes an entry, and a failed removal is a notice', async () => {
   );
 });
 
-it('removing full access narrows the job with no dialog, and offers it again', async () => {
-  const entry = 'open:' + 'a'.repeat(64);
-  show(subject({ state: 'open', approvals: [entry] }));
-  const view = await card();
-  await fireEvent.click(view.getByRole('button', { name: 'Remove full access' }));
-  expect(screen.queryByRole('dialog')).toBeNull();
-  await waitFor(() => expect(api.removeNetworkGrant).toHaveBeenCalledWith('cron:digest', entry));
-});
-
 it.each([
   ['browse', /unbounded/i],
   ['devbox', /unbounded/i],
@@ -211,69 +204,127 @@ it('a skill already granted is not offered', async () => {
   expect(view.getByRole('button', { name: 'Add skill browse', hidden: true })).toBeInTheDocument();
 });
 
+function accessOption(view: ReturnType<typeof within>, name: string) {
+  return view.getByRole('radio', { name, hidden: true });
+}
+
+function checked(view: ReturnType<typeof within>, name: string) {
+  return accessOption(view, name).getAttribute('aria-checked') === 'true';
+}
+
 it('full access shows the whole text and sends the digest the page rendered', async () => {
   show(subject());
   const view = await card();
-  await fireEvent.click(view.getByRole('button', { name: 'Approve full access' }));
+  await fireEvent.click(accessOption(view, 'Full access'));
   const dialog = within(await screen.findByRole('dialog'));
   expect(dialog.getByText(/unbounded/i)).toBeInTheDocument();
   expect(dialog.getByText(job.prompt)).toBeInTheDocument();
-  expect(api.approveNetworkJob).not.toHaveBeenCalled();
+  expect(api.setNetworkJobAccess).not.toHaveBeenCalled();
   await fireEvent.click(dialog.getByRole('button', { name: 'Approve' }));
   await waitFor(() =>
-    expect(api.approveNetworkJob).toHaveBeenCalledWith('cron:digest', 'open', job.digest),
+    expect(api.setNetworkJobAccess).toHaveBeenCalledWith('cron:digest', 'open', job.digest),
   );
 });
 
-it('public is offered only to a job that asks, and shows its text', async () => {
-  show(
-    subject(),
-    subject({
-      subject: 'cron:asks',
-      label: 'Scheduled job: asks',
-      job: { ...job, reach: 'public', prompt: 'Read public pages.' },
-      refused: [{ entry: 'public', hits: 1, last_seen: '2026-10-30' }],
-    }),
-  );
-  expect((await card()).queryByRole('button', { name: 'Approve public access' })).toBeNull();
-  const view = await card('Scheduled job: asks');
-  expect(view.getByText('This job asks for public access.')).toBeInTheDocument();
-  await fireEvent.click(view.getByRole('button', { name: 'Approve public access' }));
+it('public is offered to a job that did not ask, and says what it loses', async () => {
+  show(subject());
+  const view = await card();
+  await fireEvent.click(accessOption(view, 'Public'));
   const dialog = within(await screen.findByRole('dialog'));
-  expect(dialog.getByText('Read public pages.')).toBeInTheDocument();
+  expect(dialog.getByText(/no memory, no files/)).toBeInTheDocument();
+  expect(dialog.getByText(job.prompt)).toBeInTheDocument();
   await fireEvent.click(dialog.getByRole('button', { name: 'Approve' }));
   await waitFor(() =>
-    expect(api.approveNetworkJob).toHaveBeenCalledWith('cron:asks', 'public', job.digest),
+    expect(api.setNetworkJobAccess).toHaveBeenCalledWith('cron:digest', 'public', job.digest),
   );
 });
 
-it('a refused approval stays in the dialog and the page reloads the text', async () => {
-  api.approveNetworkJob.mockRejectedValueOnce(
+it('a choice the operator covers says no approval is involved', async () => {
+  show(subject({ job: { ...job, needs_approval: { public: false, open: true } } }));
+  const view = await card();
+  await fireEvent.click(accessOption(view, 'Public'));
+  const dialog = within(await screen.findByRole('dialog'));
+  expect(dialog.getByText(/without approval/)).toBeInTheDocument();
+  await fireEvent.click(dialog.getByRole('button', { name: 'Change access' }));
+  await waitFor(() =>
+    expect(api.setNetworkJobAccess).toHaveBeenCalledWith('cron:digest', 'public', job.digest),
+  );
+});
+
+it('the control shows what the job runs as, including by default', async () => {
+  show(subject({ by_default: 'public' }));
+  const view = await card();
+  expect(checked(view, 'Public')).toBe(true);
+  expect(checked(view, 'Limited')).toBe(false);
+});
+
+it('cancelling leaves the control on what the job runs as', async () => {
+  show(subject());
+  const view = await card();
+  await fireEvent.click(accessOption(view, 'Full access'));
+  const dialog = within(await screen.findByRole('dialog'));
+  await fireEvent.click(dialog.getByRole('button', { name: 'Cancel' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(checked(view, 'Limited')).toBe(true);
+  expect(checked(view, 'Full access')).toBe(false);
+  expect(api.setNetworkJobAccess).not.toHaveBeenCalled();
+});
+
+it('limited needs no dialog, since it reaches less', async () => {
+  show(subject({ state: 'open', approvals: ['open:' + job.digest] }));
+  const view = await card();
+  await fireEvent.click(accessOption(view, 'Limited'));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  await waitFor(() =>
+    expect(api.setNetworkJobAccess).toHaveBeenCalledWith('cron:digest', 'limited', job.digest),
+  );
+  await waitFor(() => expect(api.getNetworkAccess).toHaveBeenCalledTimes(2));
+});
+
+it('limited refused over the file still reloads, since the approval can be gone', async () => {
+  api.setNetworkJobAccess.mockRejectedValueOnce(new Error('CRON.md could not be changed.'));
+  show(subject({ state: 'open' }));
+  const view = await card();
+  await fireEvent.click(accessOption(view, 'Limited'));
+  await waitFor(() =>
+    expect(notices.notifyError).toHaveBeenCalledWith('CRON.md could not be changed.'),
+  );
+  expect(api.getNetworkAccess).toHaveBeenCalledTimes(2);
+});
+
+it('a refused choice stays in the dialog and the page reloads the text', async () => {
+  api.setNetworkJobAccess.mockRejectedValueOnce(
     new Error("This job's text has changed. Reload the page and read it again."),
   );
   show(subject());
   const view = await card();
-  await fireEvent.click(view.getByRole('button', { name: 'Approve full access' }));
+  await fireEvent.click(accessOption(view, 'Full access'));
   const dialog = within(await screen.findByRole('dialog'));
   await fireEvent.click(dialog.getByRole('button', { name: 'Approve' }));
   expect(await dialog.findByText(/text has changed/)).toBeInTheDocument();
   await waitFor(() => expect(api.getNetworkAccess).toHaveBeenCalledTimes(2));
 });
 
-it('a request from a credential verb is offered as full access', async () => {
-  show(subject({ refused: [{ entry: 'open', hits: 1, last_seen: '2026-10-30' }] }));
+it('a request from the job can still be dismissed', async () => {
+  show(subject({ refused: [{ entry: 'public', hits: 1, last_seen: '2026-10-30' }] }));
   const view = await card();
-  expect(view.getByText('This job asked for full access.')).toBeInTheDocument();
-  await fireEvent.click(view.getByRole('button', { name: 'Dismiss open' }));
+  expect(view.getByText('This job asks for public access.')).toBeInTheDocument();
+  await fireEvent.click(view.getByRole('button', { name: 'Dismiss public' }));
   await waitFor(() =>
-    expect(api.dismissNetworkRefusal).toHaveBeenCalledWith('cron:digest', 'open'),
+    expect(api.dismissNetworkRefusal).toHaveBeenCalledWith('cron:digest', 'public'),
   );
 });
 
-it('a subject with no job offers neither approval', async () => {
+it('a module job has no access to choose', async () => {
+  show(subject({ job: { ...job, settable: false } }));
+  const view = await card();
+  expect(view.queryByRole('radio', { name: 'Public', hidden: true })).toBeNull();
+});
+
+it('a subject with no job has no access to choose', async () => {
   show(subject({ subject: 'tasks-file', kind: 'tasks-file', label: 'TASKS.md', job: null }));
   const view = await card('TASKS.md');
-  expect(view.queryByRole('button', { name: 'Approve full access' })).toBeNull();
+  expect(view.queryByRole('radio', { name: 'Full access', hidden: true })).toBeNull();
   expect(view.getByLabelText('Add a host')).toBeInTheDocument();
 });
 

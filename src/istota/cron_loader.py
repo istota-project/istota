@@ -40,7 +40,7 @@ logger = logging.getLogger("istota.cron_loader")
 # are not subject to CRON.md orphan deletion. Imported by `scheduler` and by
 # `commands` (the `!cron` verbs), which have to answer for such a row without
 # reaching for the file it is by definition absent from.
-_MODULE_JOB_PREFIX = "_module."
+_MODULE_JOB_PREFIX = egress.MODULE_JOB_PREFIX
 
 # Effort levels accepted by Claude Code's --effort flag. Loose check — warn,
 # don't reject — so a future addition doesn't silently break user CRON.md.
@@ -1968,6 +1968,32 @@ def _update_job_enabled_locked(config, user_id: str, job_name: str, enabled: boo
         "Enabled" if enabled else "Disabled", job_name, user_id,
     )
     return True
+
+
+def update_job_reach_in_cron_md(config, user_id: str, job_name: str, reach: str) -> bool:
+    """Set a job's `reach` in CRON.md. True only if the file now says so.
+
+    False, with the file untouched, when an entry could not be read: the rewrite is
+    built from the jobs that parsed, so it would delete a job with a typo or one whose
+    `prompt_file` a mount fault hid, and this is a settings page, not an edit of the file.
+    """
+    if not config.has_workspace:
+        return False
+    return _with_cron_md_lock(
+        config, user_id,
+        lambda: _update_job_reach_locked(config, user_id, job_name, reach),
+    )
+
+
+def _update_job_reach_locked(config, user_id: str, job_name: str, reach: str) -> bool:
+    doc = load_cron_document(config, user_id)
+    if doc is None or doc.skipped_entries or doc.refused_names or doc.unread_names:
+        return False
+    for job in doc.jobs:
+        if job.name == job_name:
+            job.reach = reach
+            return _write_cron_md(config, user_id, doc.jobs, doc)
+    return False
 
 
 def remove_job_from_cron_md(config, user_id: str, job_name: str) -> bool:

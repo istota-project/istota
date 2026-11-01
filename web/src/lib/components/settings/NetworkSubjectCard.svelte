@@ -1,14 +1,24 @@
 <script lang="ts">
   import {
     addNetworkGrant,
-    approveNetworkJob,
     AuthError,
     dismissNetworkRefusal,
     removeNetworkGrant,
+    setNetworkJobAccess,
     type NetworkSubject,
   } from '$lib/api';
   import { getCurrentUser } from '$lib/userContext';
-  import { Alert, Badge, Button, Card, ConfirmDialog, Disclosure, Field, Input } from '@minot/ui';
+  import {
+    Alert,
+    Badge,
+    Button,
+    Card,
+    ConfirmDialog,
+    Disclosure,
+    Field,
+    Input,
+    ToggleGroup,
+  } from '@minot/ui';
   import { notifyError } from '@minot/ui/stores/notices';
   import { createConfirm } from '@minot/ui/ui/confirm.svelte';
 
@@ -33,6 +43,12 @@
     limited: { label: 'Limited', variant: 'neutral' },
   } as const;
   const JOB_REQUESTS = new Set(['open', 'public']);
+  type Access = 'limited' | 'public' | 'open';
+  const ACCESS_OPTIONS = [
+    { value: 'limited', label: 'Limited' },
+    { value: 'public', label: 'Public' },
+    { value: 'open', label: 'Full access' },
+  ];
 
   const job = $derived(subject.job);
   const BY_DEFAULT = {
@@ -46,19 +62,17 @@
   const asksOpen = $derived(subject.refused.some((row) => row.entry === 'open'));
   const asksPublic = $derived(subject.refused.some((row) => row.entry === 'public'));
   const offeredSkills = $derived(externalSkills.filter((name) => !subject.skills.includes(name)));
-  const canApprovePublic = $derived(
-    job !== null && job.reach === 'public' && subject.state !== 'public',
-  );
-  const canApproveOpen = $derived(job !== null && subject.state !== 'open');
-  const openEntry = $derived(subject.approvals.find((entry) => entry.startsWith('open:')));
-  const publicEntry = $derived(subject.approvals.find((entry) => entry.startsWith('public:')));
+  const access = $derived<Access>(subject.by_default ?? subject.state);
 
   let host = $state('');
   let hostError = $state('');
   let busy = $state(false);
 
   const grantSkill = createConfirm<string>();
-  const approve = createConfirm<'open' | 'public'>();
+  const approve = createConfirm<Exclude<Access, 'limited'>>();
+  const needsApproval = $derived(
+    Boolean(approve.target && job && job.needs_approval[approve.target]),
+  );
 
   function failed(e: unknown) {
     if (e instanceof AuthError) identity.expireSession();
@@ -117,11 +131,29 @@
     await onChanged();
   }
 
-  async function confirmApproval() {
+  function choose(next: Access) {
+    if (!job) return;
+    if (next !== 'limited') {
+      approve.ask(next);
+      return;
+    }
+    const digest = job.digest;
+    void run(async () => {
+      try {
+        await setNetworkJobAccess(subject.subject, 'limited', digest);
+      } catch (e) {
+        // An approval can be gone even though the file could not change.
+        await onChanged();
+        throw e;
+      }
+    });
+  }
+
+  async function confirmAccess() {
     const kind = approve.target;
     if (!kind || !job) return;
     try {
-      await approveNetworkJob(subject.subject, kind, job.digest);
+      await setNetworkJobAccess(subject.subject, kind, job.digest);
     } catch (e) {
       // The text may have moved. Show what it says now under the refusal.
       await onChanged();
@@ -212,34 +244,22 @@
   {#if asksOpen}<p>This job asked for full access.</p>{/if}
   {#if asksPublic}<p>This job asks for public access.</p>{/if}
 
-  {#if asksOpen || asksPublic || canApproveOpen || canApprovePublic || openEntry || publicEntry}
+  {#if job?.settable}
+    <Field
+      label="Access"
+      description="Saved as this job's reach in CRON.md. Limited leaves any hosts below in place."
+    >
+      <ToggleGroup
+        label="Access"
+        options={ACCESS_OPTIONS.map((option) => ({ ...option, disabled: busy }))}
+        bind:value={() => access, () => {}}
+        onValueChange={(next) => choose(next as Access)}
+      />
+    </Field>
+  {/if}
+
+  {#if asksOpen || asksPublic}
     <div class="hstack wrap">
-      {#if openEntry}
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={busy}
-          onclick={() => run(() => removeNetworkGrant(subject.subject, openEntry))}
-          >Remove full access</Button
-        >
-      {:else if canApproveOpen}
-        <Button variant="secondary" size="sm" onclick={() => approve.ask('open')}
-          >Approve full access</Button
-        >
-      {/if}
-      {#if publicEntry}
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={busy}
-          onclick={() => run(() => removeNetworkGrant(subject.subject, publicEntry))}
-          >Remove public access</Button
-        >
-      {:else if canApprovePublic}
-        <Button variant="secondary" size="sm" onclick={() => approve.ask('public')}
-          >Approve public access</Button
-        >
-      {/if}
       {#each subject.refused.filter((row) => JOB_REQUESTS.has(row.entry)) as row (row.entry)}
         <Button
           variant="secondary"
@@ -361,24 +381,29 @@
 
 <ConfirmDialog
   bind:open={approve.open}
-  title={approve.target === 'public' ? 'Approve public access' : 'Approve full access'}
-  confirmLabel="Approve"
-  busyLabel="Approving…"
+  title={approve.target === 'public' ? 'Give this job public access' : 'Give this job full access'}
+  confirmLabel={needsApproval ? 'Approve' : 'Change access'}
+  busyLabel="Saving…"
   confirmVariant="danger"
-  onConfirm={confirmApproval}
+  onConfirm={confirmAccess}
 >
   {#snippet body()}
     <div class="vstack">
       {#if approve.target === 'public'}
         <p>
-          This exact text runs with open web and nothing private: no memory, no files and no room
-          notes. Editing the text drops this approval.
+          This text runs with open web and nothing private: no memory, no files, no credentials and
+          no room notes. A job that relies on any of those will stop working.
         </p>
       {:else}
         <p>
-          Full access is unbounded. This exact text runs with your browser profile and every skill,
-          and can send what it reads to any public host. Editing the text drops this approval.
+          Full access is unbounded. This text runs with your browser profile and every skill, and
+          can send what it reads to any public host.
         </p>
+      {/if}
+      {#if needsApproval}
+        <p>You are approving this exact text. Editing it drops the approval.</p>
+      {:else}
+        <p>Your operator lets this run without approval, so its text is not reviewed.</p>
       {/if}
       {@render jobText()}
     </div>

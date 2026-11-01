@@ -204,7 +204,7 @@ class TestTheWriterHasOneSetOfCallers:
     CLI and the one-time seed. A skill CLI or a deferred handler never."""
 
     ALLOWED = {"rooms/egress.py", "db.py", "webui/egress_routes.py", "cli.py"}
-    WRITERS = re.compile(r"\badd_grant\b|\bapprove_job\b|INSERT[^\"']*\begress_grants\b", re.DOTALL)
+    WRITERS = re.compile(r"\badd_grant\b|\bapprove_job\b|\bset_job_access\b|INSERT[^\"']*\begress_grants\b", re.DOTALL)
 
     def test_only_the_listed_modules_name_the_writer(self):
         found = {
