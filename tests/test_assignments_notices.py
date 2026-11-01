@@ -19,6 +19,7 @@ from istota.config import UserConfig
 from istota.notifications import sources
 from istota.notifications import store as bell
 from istota.notifications.resolvers import assignment as notices
+from istota.rooms import egress
 from istota.usage.telemetry import BrainUsage
 from tests.test_assignments_wakes import (
     BUDGET,
@@ -527,3 +528,58 @@ class TestAbandon:
         with db.get_db(config.db_path) as conn:
             lifecycle.abandon(conn, a, user_id="alice")
         assert {r["state"] for r in _rows(config)} == {"resolved"}
+
+
+class TestItsNetworkRequestBell:
+    """A closed assignment will not wake again, so its egress row has nothing to ask."""
+
+    def _refused(self, config, assignment_id):
+        subject = f"assignment:{assignment_id}"
+        with db.get_db(config.db_path) as conn:
+            egress.note_refused(conn, "alice", subject, "news.example.com")
+            conn.commit()
+            egress.raise_refused_bell(config, conn, "alice", [subject])
+        assert self._badge(config) == 1
+
+    def _badge(self, config):
+        with db.get_db(config.db_path) as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM notifications "
+                "WHERE source = 'egress_refused' AND state = 'open'",
+            ).fetchone()[0]
+
+    def test_abandoning_closes_it(self, config, notify):
+        a = _live(config)
+        self._refused(config, a)
+        with db.get_db(config.db_path) as conn:
+            lifecycle.abandon(conn, a, user_id="alice")
+        assert self._badge(config) == 0
+
+    def test_a_confirmed_close_closes_it(self, config, notify):
+        a = _live(config, items=(("Picked an installer", "confirmed", None),))
+        made = _start(config, a)
+        _complete(config, made)
+        _end(config, made)
+        self._refused(config, a)
+        with db.get_db(config.db_path) as conn:
+            lifecycle.close(conn, config, a, user_id="alice", completed=True)
+        assert self._badge(config) == 0
+
+    def test_an_auto_completion_closes_it(self, config, notify):
+        a = _live(config, items=(("Three quotes", "mechanical", {
+            "check": "csv_columns", "file": "quotes.csv", "columns": ["source", "price"], "min_rows": 2,
+        }),), auto_complete=True)
+        made = _start(config, a)
+        self._refused(config, a)
+        _file(config, a, "quotes.csv").write_text(GOOD_CSV)
+        _complete(config, made)
+        _end(config, made)
+        assert self._badge(config) == 0
+
+    def test_a_live_assignment_keeps_it(self, config, notify):
+        a = _live(config)
+        self._refused(config, a)
+        with db.get_db(config.db_path) as conn:
+            notices.settle(conn, a)
+            conn.commit()
+        assert self._badge(config) == 1

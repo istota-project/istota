@@ -1755,6 +1755,8 @@ def _sync_job_approvals(
     a row, so a dismissed request stays dismissed. A row just inserted starts from
     nothing, whatever an earlier job of that name left behind.
     """
+    from istota.notifications.resolvers import egress_refused
+
     subject = egress.cron_subject(fj.name)
     digest = egress.job_digest(file_values)
     if existing is None:
@@ -1794,6 +1796,7 @@ def _sync_job_approvals(
         existing.egress_request if existing is not None else None,
         ask=runs_as == egress.REACH_LIMITED,
     )
+    egress_refused.resolve_if_settled(conn, user_id, subject, by="system")
     return bool(ask) or declared_new
 
 
