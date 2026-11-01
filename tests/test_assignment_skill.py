@@ -582,6 +582,82 @@ class TestReadVerbs:
             assert budget.totals(conn, b).cost_usd == 3.0
 
 
+class TestTheJsonIsUnchanged:
+    """The shape the CLI answered before the board moved to `assignments.view`, keys in
+    order, so a model reading it sees the same bytes."""
+
+    SUMMARY = [
+        "id", "slug", "title", "state", "state_reason", "waiting_on", "deadline", "next_wake_at",
+        "cadence_minutes", "budget", "auto_complete", "model", "effort", "directory",
+        "created_at", "activated_at", "closed_at",
+    ]
+
+    def test_show(self, config, turn):
+        a = _create()["assignment"]["id"]
+        _run("item", "add", str(a), "--text", "Signed", "--kind", "confirmed")
+        _run("frozen", "add", str(a), "--name", "area", "--value", "the house")
+        _state(config, a, "sleeping")
+        with db.get_db(config.db_path) as conn:
+            wake = store.insert_wake(conn, a, fired_by="time")
+            store.update_wake(
+                conn, wake, ended_at="2026-10-26T00:00:00Z", outcome="next", summary="s" * 2500,
+            )
+            store.insert_action(conn, a, text="Call Acme", report_spec="the date")
+        code, out = _run("show", str(a))
+        assert code == 0, out
+        assert list(out) == [
+            "status", "assignment", "wake_due", "charter", "ledger", "items", "frozen",
+            "open_handoffs", "wakes", "notice",
+        ]
+        assert out["status"] == "ok"
+        assert list(out["assignment"]) == self.SUMMARY
+        assert list(out["ledger"]) == [
+            "cost_usd", "wakes", "unmeasured_wakes", "billed_input_tokens", "output_tokens",
+            "remaining", "cheapest_wake_usd",
+        ]
+        assert list(out["items"][0]) == ["id", "position", "kind", "text", "status", "detail", "checked_at"]
+        assert list(out["frozen"][0]) == ["id", "name", "value"]
+        assert list(out["open_handoffs"][0]) == ["id", "text", "report", "due_at", "created_at"]
+        assert list(out["wakes"][0]) == [
+            "seq", "fired_by", "started_at", "ended_at", "outcome", "cost_usd", "progress_signals",
+            "summary", "summary_truncated",
+        ]
+        assert out["wakes"][0]["summary"] == "s" * 2000
+        assert out["wakes"][0]["summary_truncated"] is True
+
+    def test_the_wake_count_is_bounded(self, config, turn):
+        a = _create()["assignment"]["id"]
+        with db.get_db(config.db_path) as conn:
+            for _ in range(25):
+                store.update_wake(
+                    conn, store.insert_wake(conn, a, fired_by="time"), ended_at="2026-10-26T00:00:00Z",
+                )
+        assert len(_run("show", str(a))[1]["wakes"]) == 3
+        assert len(_run("show", str(a), "--wakes", "99")[1]["wakes"]) == 20
+        assert _run("show", str(a), "--wakes", "0")[1]["wakes"] == []
+
+    def test_list(self, config, turn):
+        _create()
+        code, out = _run("list")
+        assert code == 0, out
+        assert list(out) == ["status", "state", "assignments"]
+        assert list(out["assignments"][0]) == self.SUMMARY
+
+    def test_topup(self, config, turn):
+        a = _create()["assignment"]["id"]
+        code, out = _run("topup", str(a), "--usd", "5")
+        assert code == 0, out
+        assert list(out) == ["status", "assignment", "wake_due", "charter"]
+        assert list(out["assignment"]) == self.SUMMARY
+
+    def test_a_state_verb(self, config, turn):
+        a = _create()["assignment"]["id"]
+        _state(config, a, "sleeping")
+        code, out = _run("pause", str(a))
+        assert code == 0, out
+        assert list(out) == ["status", "assignment", "wake_due"]
+
+
 class TestLifecycleConcurrency:
     def test_a_stale_writer_sees_the_first_writers_state(self, config, turn):
         a = _create()["assignment"]["id"]
