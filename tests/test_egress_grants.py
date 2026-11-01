@@ -205,7 +205,9 @@ class TestTheWriterHasOneSetOfCallers:
     """Only an authenticated person can approve anything: the web route, the operator
     CLI and the one-time seed. A skill CLI or a deferred handler never."""
 
-    ALLOWED = {"rooms/egress.py", "db.py", "webui/egress_routes.py", "cli.py"}
+    ALLOWED = {
+        "rooms/egress.py", "db.py", "webui/egress_routes.py", "webui/job_routes.py", "cli.py",
+    }
     WRITERS = re.compile(
         r"\badd_grant\b|\bapprove_job\b|\bapprove_saved_text\b|\bset_job_access\b"
         r"|INSERT[^\"']*\begress_grants\b",

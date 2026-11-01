@@ -2476,20 +2476,24 @@ def save_job_definition(
     return outcome if outcome is not None else JobSaveOutcome("locked")
 
 
+def job_file_writable(config, user_id: str, doc: "CronDocument | None") -> bool:
+    """Whether a whole job may be written over ``doc``, this user's CRON.md as just read.
+    No document is fine only where there is no file."""
+    from .storage import resolve_user_config_dir  # noqa: PLC0415 - import cycle
+
+    if doc is None:
+        config_dir = resolve_user_config_dir(config, user_id)
+        return config_dir is not None and not os.path.lexists(config_dir / "CRON.md")
+    # The rewrite is built from the jobs that parsed, so a typo elsewhere would delete a job.
+    return not (doc.skipped_entries or doc.refused_names or doc.unread_names or doc.block is None)
+
+
 def _save_job_locked(
     config, user_id: str, job: CronJob,
     original_name: str | None, expected_revision: str | None,
 ) -> JobSaveOutcome:
-    from .storage import resolve_user_config_dir  # noqa: PLC0415 - import cycle
-
     doc = load_cron_document(config, user_id)
-    if doc is None:
-        config_dir = resolve_user_config_dir(config, user_id)
-        if config_dir is None or os.path.lexists(config_dir / "CRON.md"):
-            return JobSaveOutcome("unreadable")
-    elif doc.skipped_entries or doc.refused_names or doc.unread_names or doc.block is None:
-        # The rewrite is built from the jobs that parsed, so a typo elsewhere would
-        # delete a job.
+    if not job_file_writable(config, user_id, doc):
         return JobSaveOutcome("unreadable")
     jobs = list(doc.jobs) if doc is not None else []
 

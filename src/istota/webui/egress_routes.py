@@ -18,7 +18,7 @@ import logging
 import sqlite3
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from istota import cron_loader, db
@@ -26,45 +26,17 @@ from istota.notifications.resolvers import egress_refused
 from istota.rooms import egress
 from istota.webui.request_guards import BodyError, read_bounded_body
 from istota.webui.router_stubs import require_auth, verify_origin
+from istota.webui.settings_http import NO_STORE, not_found, refusal, request_config, usable_external_skills
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_NO_STORE = {"Cache-Control": "no-store"}
 _MAX_BODY_BYTES = 8 * 1024
 
 
 class _FileUnwritten(Exception):
     """CRON.md does not say what the person chose."""
-
-
-def _refusal(status: int, error: str, detail: str, field: str | None = None) -> JSONResponse:
-    return JSONResponse(
-        {"error": error, "detail": detail, "field": field}, status_code=status, headers=_NO_STORE,
-    )
-
-
-def _not_found() -> JSONResponse:
-    return _refusal(404, "not_found", "There is no such item.")
-
-
-def _config(request: Request):
-    config = getattr(request.app.state, "istota_config", None)
-    if config is None or not getattr(config, "db_path", None):
-        raise HTTPException(503, "Config not loaded")
-    return config
-
-
-def _usable_external_skills(config, user_id: str) -> dict:
-    """The `external` skills this user could use at all, name to metadata."""
-    from istota.skills._loader import usable_external_skills
-
-    try:
-        return usable_external_skills(config, user_id)
-    except Exception as exc:  # noqa: BLE001 — a page with no skills to offer still works
-        logger.warning("egress_skills_unavailable: %s", type(exc).__name__)
-        return {}
 
 
 def _listing(config, user_id: str) -> dict:
@@ -76,19 +48,19 @@ def _listing(config, user_id: str) -> dict:
         ]
     return {
         "subjects": subjects,
-        "external_skills": sorted(_usable_external_skills(config, user_id)),
+        "external_skills": sorted(usable_external_skills(config, user_id)),
     }
 
 
 @router.get("/settings/network")
 async def settings_network(request: Request, user: dict = Depends(require_auth)):
-    config = _config(request)
+    config = request_config(request)
     try:
         listing = await asyncio.to_thread(_listing, config, user["username"])
     except sqlite3.Error as exc:
         logger.error("egress listing failed: %s", type(exc).__name__)
-        return _refusal(500, "error", "Network access could not be loaded.")
-    return JSONResponse(listing, headers=_NO_STORE)
+        return refusal(500, "error", "Network access could not be loaded.")
+    return JSONResponse(listing, headers=NO_STORE)
 
 
 async def _read_body(request: Request, fields: set[str]) -> dict | JSONResponse:
@@ -97,13 +69,13 @@ async def _read_body(request: Request, fields: set[str]) -> dict | JSONResponse:
         raw = await read_bounded_body(request, _MAX_BODY_BYTES)
         body = json.loads(raw)
     except BodyError as exc:
-        return _refusal(exc.status, "invalid_body", "That request is too large.")
+        return refusal(exc.status, "invalid_body", "That request is too large.")
     except (ValueError, UnicodeDecodeError, RecursionError):
-        return _refusal(400, "invalid_body", "The request body is not JSON.")
+        return refusal(400, "invalid_body", "The request body is not JSON.")
     if not isinstance(body, dict) or set(body) != fields:
-        return _refusal(400, "invalid_body", "The request does not have the expected fields.")
+        return refusal(400, "invalid_body", "The request does not have the expected fields.")
     if not all(isinstance(value, str) for value in body.values()):
-        return _refusal(400, "invalid_body", "The request does not have the expected fields.")
+        return refusal(400, "invalid_body", "The request does not have the expected fields.")
     return body
 
 
@@ -128,30 +100,30 @@ async def _run(work, user_id: str, operation: str) -> JSONResponse:
     try:
         await asyncio.to_thread(work)
     except LookupError:
-        return _not_found()
+        return not_found()
     except _FileUnwritten as exc:
-        return _refusal(409, "file_unwritten", str(exc))
+        return refusal(409, "file_unwritten", str(exc))
     except egress.StaleJob as exc:
-        return _refusal(409, "stale_job", str(exc))
+        return refusal(409, "stale_job", str(exc))
     except egress.EntryRefused as exc:
-        return _refusal(400, "invalid_entry", str(exc), "entry")
+        return refusal(400, "invalid_entry", str(exc), "entry")
     except sqlite3.Error as exc:
         logger.error("egress write failed: %s", type(exc).__name__)
-        return _refusal(500, "error", "That could not be saved.")
+        return refusal(500, "error", "That could not be saved.")
     logger.info("egress_web operation=%s user=%s", operation, user_id)
-    return JSONResponse({"ok": True}, headers=_NO_STORE)
+    return JSONResponse({"ok": True}, headers=NO_STORE)
 
 
 @router.post("/settings/network/grants")
 async def settings_network_grant(
     request: Request, user: dict = Depends(require_auth), _csrf: None = Depends(verify_origin),
 ):
-    config = _config(request)
+    config = request_config(request)
     user_id = user["username"]
     body = await _read_body(request, {"subject", "entry"})
     if isinstance(body, JSONResponse):
         return body
-    skills = await asyncio.to_thread(_usable_external_skills, config, user_id)
+    skills = await asyncio.to_thread(usable_external_skills, config, user_id)
 
     def change(conn):
         parsed = egress.parse_entry(body["entry"])
@@ -213,15 +185,15 @@ def _set_access(config, user_id: str, subject: str, access: str, digest: str) ->
 async def settings_network_access(
     request: Request, user: dict = Depends(require_auth), _csrf: None = Depends(verify_origin),
 ):
-    config = _config(request)
+    config = request_config(request)
     user_id = user["username"]
     body = await _read_body(request, {"subject", "access", "digest"})
     if isinstance(body, JSONResponse):
         return body
     if not body["subject"].startswith("cron:"):
-        return _not_found()
+        return not_found()
     if body["access"] not in egress.ACCESS_REACH:
-        return _refusal(400, "invalid_body", "That is not a kind of access.")
+        return refusal(400, "invalid_body", "That is not a kind of access.")
     return await _run(
         lambda: _set_access(config, user_id, body["subject"], body["access"], body["digest"]),
         user_id, "access",
@@ -232,7 +204,7 @@ async def settings_network_access(
 async def settings_network_revoke(
     request: Request, user: dict = Depends(require_auth), _csrf: None = Depends(verify_origin),
 ):
-    config = _config(request)
+    config = request_config(request)
     user_id = user["username"]
     body = await _read_body(request, {"subject", "entry"})
     if isinstance(body, JSONResponse):
@@ -248,7 +220,7 @@ async def settings_network_revoke(
 async def settings_network_dismiss(
     request: Request, user: dict = Depends(require_auth), _csrf: None = Depends(verify_origin),
 ):
-    config = _config(request)
+    config = request_config(request)
     user_id = user["username"]
     body = await _read_body(request, {"subject", "entry"})
     if isinstance(body, JSONResponse):

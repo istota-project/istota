@@ -13655,6 +13655,32 @@ async def files_assignment_folder(request: Request, assignment_id: str):
     return RedirectResponse(url=target, status_code=302)
 
 
+def _job_page_target(username: str, job_id: str) -> str:
+    """The job's page for its owner, else the bare page, as a missing job reads."""
+    from istota.webui.settings_http import parse_id
+
+    bare = "/istota/settings/jobs"
+    parsed = parse_id(job_id)
+    if parsed is None:
+        return bare
+    with _db.get_db(_config.db_path) as conn:
+        job = _db.get_scheduled_job(conn, parsed)
+    if job is None or job.user_id != username:
+        return bare
+    return f"{bare}?job={job.id}"
+
+
+# The bell's link for a job, a redirect for the reason the two above are one.
+@auth_router.get("/settings/jobs/open/{job_id}")
+async def settings_job_open(request: Request, job_id: str):
+    try:
+        user = await asyncio.to_thread(_require_api_auth, request)
+    except _UnauthorizedException:
+        return RedirectResponse(url="/istota/settings/jobs", status_code=302)
+    target = await asyncio.to_thread(_job_page_target, user["username"], job_id)
+    return RedirectResponse(url=target, status_code=302)
+
+
 @auth_router.get("/files/shares")
 async def files_share_index():
     """The bell's link for a waiting folder offer: the Files page's index of shares (#849).
@@ -19534,6 +19560,11 @@ app.dependency_overrides[_garmin_verify_origin] = _verify_origin
 from istota.webui.egress_routes import router as _egress_router
 
 app.include_router(_egress_router, prefix="/istota/api", tags=["egress"])
+
+# Settings > Scheduled jobs, on the same shared stubs.
+from istota.webui.job_routes import router as _job_router
+
+app.include_router(_job_router, prefix="/istota/api", tags=["jobs"])
 
 # Workspace is a core page, independent of per-user module switches.
 from istota.webui.workspace_routes import require_auth as _workspace_require_auth
