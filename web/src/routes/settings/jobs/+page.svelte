@@ -10,7 +10,12 @@
     type ScheduledJob,
     type ScheduledJobs,
   } from '$lib/api';
-  import { NetworkAccessCard, SettingsLayout } from '$lib/components/settings';
+  import {
+    JobForm,
+    NetworkAccessCard,
+    SettingsLayout,
+    type JobSaved,
+  } from '$lib/components/settings';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import { accessBadge, STATE_LABEL, STATE_VARIANT } from '$lib/settings/jobState';
   import { getCurrentUser } from '$lib/userContext';
@@ -36,6 +41,8 @@
   const JOB_GONE = 'This job no longer exists.';
   const FALLBACK_LOAD_ERROR = 'Scheduled jobs could not be loaded.';
   const MODULE_PREFIX = '_module.';
+  const SYNC_READ_MS = 5_000;
+  const SYNC_WAIT_MS = 120_000;
 
   const identity = getCurrentUser();
 
@@ -43,27 +50,37 @@
   let loadError = $state('');
   let loading = $state(true);
   let busy = $state(false);
-  let selectedId = $state<number | null>(null);
+  let selectedId = $state<number | 'new' | null>(null);
+  let syncIsSlow = $state(false);
   const deleting = createConfirm<ScheduledJob>();
   const loads = latest();
-  onDestroy(() => loads.dispose());
+  const syncWaits = latest();
+  let syncTimer: ReturnType<typeof setTimeout> | undefined;
+  onDestroy(() => {
+    loads.dispose();
+    syncWaits.dispose();
+    clearTimeout(syncTimer);
+  });
 
   // A pending row has a null id too, so nothing selected must not match it.
   const selected = $derived(
     selectedId === null ? null : (data?.jobs.find((job) => job.id === selectedId) ?? null),
   );
+  const creating = $derived(selectedId === 'new' && Boolean(data?.file.readable));
+  const anyPending = $derived(data?.jobs.some((job) => job.pending) ?? false);
   const file = $derived(data?.file ?? { readable: true, errors: [] });
   // With no workspace there is no file to fix and nothing to list.
   const fileAlert = $derived(
     file.errors.length > 0 || (!file.readable && (data?.jobs.length ?? 0) > 0),
   );
 
-  const selection = createUrlSelection<{ job: number | null }>({
+  const selection = createUrlSelection<{ job: number | 'new' | null }>({
     key: 'settingsJob',
     params: ['job'],
     encode: ({ job }): Record<string, string> => (job === null ? {} : { job: String(job) }),
     decode: (params) => {
       const text = params.job ?? '';
+      if (text === 'new') return { job: 'new' };
       return { job: /^\d+$/.test(text) ? Number(text) : null };
     },
     read: () => (data ? { job: selectedId } : null),
@@ -76,13 +93,15 @@
 
   /** A one-time job deletes itself once it fires, so the job on screen can go. */
   function leaveIfGone() {
-    if (!data || selectedId === null || selected) return;
+    if (!data || selectedId === null || selected || creating) return;
+    const wasNew = selectedId === 'new';
     selection.replace({ job: null });
     selectedId = null;
-    notifyWarning(JOB_GONE);
+    if (!wasNew) notifyWarning(JOB_GONE);
   }
 
-  async function refresh() {
+  /** `quiet` is a read nobody asked for, which says nothing when it fails. */
+  async function refresh({ quiet = false } = {}) {
     const current = loads.next();
     try {
       const result = await getScheduledJobs();
@@ -95,6 +114,7 @@
     } catch (e) {
       if (!current()) return;
       if (e instanceof AuthError) identity.expireSession();
+      else if (quiet) return;
       else if (data) notifyError((e as Error).message || FALLBACK_LOAD_ERROR);
       else loadError = (e as Error).message || FALLBACK_LOAD_ERROR;
     } finally {
@@ -109,6 +129,33 @@
   }
 
   onMount(refresh);
+
+  /** A save leaves the row to the daemon's next sync, about a minute away, so read until
+   *  no row is pending, each read awaited before the next is timed. */
+  async function waitForSync() {
+    const current = syncWaits.next();
+    clearTimeout(syncTimer);
+    syncIsSlow = false;
+    const deadline = Date.now() + SYNC_WAIT_MS;
+    await refresh();
+    while (current() && anyPending) {
+      if (Date.now() >= deadline) {
+        syncIsSlow = true;
+        return;
+      }
+      await new Promise((resolve) => {
+        syncTimer = setTimeout(resolve, SYNC_READ_MS);
+      });
+      if (current()) await refresh({ quiet: true });
+    }
+  }
+
+  async function saved({ accessLost }: JobSaved) {
+    selection.push({ job: null });
+    if (accessLost)
+      notifyWarning('The job is saved, and it will ask for approval again before its next run.');
+    await waitForSync();
+  }
 
   function statusOf(e: unknown): number | undefined {
     return (e as { status?: number }).status;
@@ -177,7 +224,9 @@
   }
 
   function rowActions(job: ScheduledJob): KebabItem[] {
-    const items: KebabItem[] = [{ label: 'View', onSelect: () => selection.push({ job: job.id }) }];
+    const items: KebabItem[] = [
+      { label: job.editable ? 'Edit' : 'View', onSelect: () => selection.push({ job: job.id }) },
+    ];
     if (isModuleJob(job)) return items;
     items.push({ label: 'Run now', disabled: busy, onSelect: () => run(job) });
     items.push(
@@ -201,17 +250,34 @@
   <a href={CONFIG_EDITOR_HREF}>Fix it in CRON.md, under Files, Configuration.</a>
 {/snippet}
 
+{#snippet newJob()}
+  {#if data?.file.readable && data.jobs.length > 0}
+    <Button size="sm" variant="secondary" onclick={() => selection.push({ job: 'new' })}
+      >New job</Button
+    >
+  {/if}
+{/snippet}
+
 <SettingsLayout
-  description={selected
+  description={selected || creating
     ? undefined
     : 'Your scheduled jobs and what each may reach. Work you start yourself is not limited here.'}
+  headerActions={selected || creating ? undefined : newJob}
   {loading}
   {loadError}
   onRetry={retry}
 >
-  {#if data && selected}
+  {#if data && creating}
+    <PageHeader title="New job" back={{ href: LIST_HREF, label: 'Scheduled jobs' }} align="start" />
+    <JobForm
+      job={null}
+      options={data.options}
+      timezone={data.timezone}
+      onSaved={saved}
+      onReload={refresh}
+    />
+  {:else if data && selected}
     {@const job = selected}
-    {@const definition = job.definition}
     <PageHeader title={job.name} back={{ href: LIST_HREF, label: 'Scheduled jobs' }} align="start">
       {#snippet badge()}
         <Badge size="sm" variant={STATE_VARIANT[job.state]}>{STATE_LABEL[job.state]}</Badge>
@@ -280,61 +346,15 @@
       {/if}
     </Card>
 
-    <Card title="Definition" description="Read only here. To change this job, edit CRON.md.">
-      <dl class="kv">
-        <dt>Kind</dt>
-        <dd>{definition.kind === 'command' ? 'Command' : 'Prompt'}</dd>
-        {#if definition.prompt_file}
-          <dt>Prompt file</dt>
-          <dd class="mono">{definition.prompt_file}</dd>
-        {/if}
-        {#if definition.target}
-          <dt>Delivers to</dt>
-          <dd class="mono">{definition.target}</dd>
-        {/if}
-        {#if definition.model}
-          <dt>Model</dt>
-          <dd class="mono">{definition.model}</dd>
-        {/if}
-        {#if definition.effort}
-          <dt>Effort</dt>
-          <dd>{definition.effort}</dd>
-        {/if}
-        {#if definition.brain}
-          <dt>Brain</dt>
-          <dd class="mono">{definition.brain}</dd>
-        {/if}
-        {#if definition.provider}
-          <dt>Provider</dt>
-          <dd class="mono">{definition.provider}</dd>
-        {/if}
-        {#if definition.silent_unless_action}
-          <dt>Quiet</dt>
-          <dd>Stays quiet unless there is something to act on</dd>
-        {/if}
-        {#if definition.skip_log_channel}
-          <dt>Log channel</dt>
-          <dd>Left out of the log channel</dd>
-        {/if}
-        {#if definition.publish_shared_kv}
-          <dt>Publishes to</dt>
-          <dd>
-            <code>{definition.publish_shared_kv}</code>{definition.publish_shared_kv_trusted
-              ? ', marked trusted'
-              : ''}
-          </dd>
-        {/if}
-        {#if definition.egress.length > 0}
-          <dt>Asks for</dt>
-          <dd class="mono">{definition.egress.join(', ')}</dd>
-        {/if}
-      </dl>
-      {#if definition.prompt}<pre class="job-text">{definition.prompt}</pre>{/if}
-      {#if definition.command}<pre class="job-text">{definition.command}</pre>{/if}
-      <p class="caption">
-        <a href={CONFIG_EDITOR_HREF}>Open CRON.md under Files, Configuration.</a>
-      </p>
-    </Card>
+    {#key job.id}
+      <JobForm
+        {job}
+        options={data.options}
+        timezone={data.timezone}
+        onSaved={saved}
+        onReload={refresh}
+      />
+    {/key}
 
     {#if job.network}
       <NetworkAccessCard
@@ -360,13 +380,19 @@
       </Alert>
     {/if}
 
+    {#if syncIsSlow && anyPending}
+      <p class="caption">This is taking longer than usual.</p>
+    {/if}
+
     {#if data.jobs.length === 0}
       <EmptyState
-        >You have no scheduled jobs yet. Ask for one in chat, or add it to CRON.md.</EmptyState
+        actionLabel={data.file.readable ? 'New job' : undefined}
+        onaction={() => selection.push({ job: 'new' })}
+        >You have no scheduled jobs yet. Ask for one in chat, or add one here.</EmptyState
       >
     {:else}
       <Card>
-        <div class="table-scroll">
+        <div class="table-scroll table--cards">
           <table class="table table--fixed jobs-grid" aria-label="Scheduled jobs">
             <thead>
               <tr>
@@ -382,7 +408,7 @@
             <tbody>
               {#each data.jobs as job (job.name)}
                 <tr>
-                  <td class="col-job">
+                  <td class="col-job cell-primary">
                     <div class="hstack wrap job-name">
                       {#if job.id !== null}
                         <a class="link-quiet" href="{LIST_HREF}?job={job.id}">{job.name}</a>
@@ -395,8 +421,8 @@
                       <p class="caption">{job.file_error} {@render cronFix()}</p>
                     {/if}
                   </td>
-                  <td class="col-schedule"><code>{job.cron}</code></td>
-                  <td class="col-state">
+                  <td class="col-schedule" data-label="Schedule"><code>{job.cron}</code></td>
+                  <td class="col-state" data-label="State">
                     {#if job.pending}
                       <span class="caption">Waiting for the next sync</span>
                     {:else if job.file_error}
@@ -407,18 +433,27 @@
                       >
                     {/if}
                   </td>
-                  <td class="col-access">
+                  <td class="col-access" class:card-hidden={!job.network} data-label="Access">
                     {#if job.network}
                       {@const access = accessBadge(job.network)}
                       <Badge size="sm" variant={access.variant}>{access.label}</Badge>
                     {/if}
                   </td>
-                  <td class="col-last truncate">
+                  <td
+                    class="col-last truncate"
+                    class:card-hidden={job.id === null}
+                    data-label="Last run"
+                  >
                     {#if job.id !== null}
                       <Timestamp value={job.last_run_at} format="relative" empty="Never" />
                     {/if}
                   </td>
-                  <td class="num col-failures" class:failing={job.consecutive_failures > 0}>
+                  <td
+                    class="num col-failures"
+                    class:failing={job.consecutive_failures > 0}
+                    class:card-hidden={job.consecutive_failures === 0}
+                    data-label="Failures"
+                  >
                     {job.consecutive_failures}
                   </td>
                   <td class="col-actions">
@@ -481,5 +516,16 @@
   }
   .col-failures {
     width: 5rem;
+  }
+  @container (max-width: 40rem) {
+    .jobs-grid {
+      min-width: 0;
+    }
+    .jobs-grid td {
+      width: auto;
+    }
+    .jobs-grid td.num {
+      text-align: left;
+    }
   }
 </style>

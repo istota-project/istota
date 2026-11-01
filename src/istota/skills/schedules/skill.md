@@ -10,7 +10,7 @@ CRON.md is for running tasks and commands on a schedule. For monitoring conditio
 
 **A scheduled job is not a way to get an answer back.** Jobs fire on minute boundaries and deliver to a room, an inbox or shared content — never to the task that registered them. If you need a result *now*, use a skill CLI: `istota-skill` runs with credentials and network access the task itself does not have, and returns the value synchronously. Registering a `once = true` job and then waiting for it costs at least a minute of a held worker slot before the job can even start. When you genuinely have to check on a job's run afterwards, `istota-skill tasks recent --source-type scheduled --since 10m` and `istota-skill tasks status <id>` are the read surface (admin-only).
 
-You can manage recurring scheduled jobs by editing the user's `{BOT_DIR}/config/CRON.md` file. The scheduler reads this file automatically — changes take effect within ~60 seconds.
+You can manage recurring scheduled jobs by editing the user's `{BOT_DIR}/config/CRON.md` file. The scheduler reads this file automatically — changes take effect within ~60 seconds. The user can also create and edit their jobs under Settings, Scheduled jobs in the web UI.
 
 **File location:** `$NEXTCLOUD_MOUNT_PATH/Users/$ISTOTA_USER_ID/{BOT_DIR}/config/CRON.md`
 

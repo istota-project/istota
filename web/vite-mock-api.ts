@@ -6394,6 +6394,23 @@ const mockWallet = {
   ],
 };
 let nextWalletCard = 2;
+function mockJobText(digest: string, prompt: string) {
+  return {
+    run_state: 'running',
+    digest: digest.repeat(64),
+    once: false,
+    waiting: false,
+    reach: 'private',
+    settable: true,
+    needs_approval: { public: false, open: true },
+    prompt,
+    command: '',
+    skill: '',
+    skill_args: '',
+    publish_shared_kv: '',
+    publish_shared_kv_trusted: false,
+  };
+}
 const mockNetwork = {
   external_skills: ['browse', 'devbox', 'nextcloud', 'wordpress'],
   subjects: [
@@ -6402,17 +6419,12 @@ const mockNetwork = {
       kind: 'cron',
       label: 'Scheduled job: hackernews-digest',
       state: 'limited',
+      by_default: null,
       hosts: ['lobste.rs'],
       skills: [] as string[],
       approvals: [] as string[],
-      job: {
-        digest: 'a'.repeat(64),
-        reach: 'private',
-        prompt: 'Read the front page and summarise the five most interesting stories.',
-        command: '',
-        skill: '',
-        skill_args: '',
-      },
+      job: mockJobText('a', 'Read the front page and summarise the five most interesting stories.'),
+      waiting_on: [] as string[],
       refused: [
         { entry: 'news.ycombinator.com', hits: 3, last_seen: '2026-10-30 07:00:00' },
         { entry: 'open', hits: 1, last_seen: '2026-10-30 07:00:00' },
@@ -6423,24 +6435,18 @@ const mockNetwork = {
       kind: 'cron',
       label: 'Scheduled job: apartment-search',
       state: 'open',
+      by_default: null,
       hosts: [] as string[],
       skills: [] as string[],
       approvals: ['open:' + 'b'.repeat(64)],
-      job: {
-        digest: 'b'.repeat(64),
-        reach: 'private',
-        prompt: 'Check the listings site and tell me about anything new.',
-        command: '',
-        skill: '',
-        skill_args: '',
-      },
+      job: mockJobText('b', 'Check the listings site and tell me about anything new.'),
+      waiting_on: [] as string[],
       refused: [] as { entry: string; hits: number; last_seen: string }[],
     },
   ],
 };
 function mockNetworkRoutes(url: string, method: string, body: any): unknown | undefined {
   const root = '/istota/api/settings/network';
-  if (url === root && method === 'GET') return mockNetwork;
   if (!url.startsWith(root + '/') || method !== 'POST') return undefined;
   const item = mockNetwork.subjects.find((s) => s.subject === body?.subject);
   if (!item) return { __status: 404, error: 'not_found', detail: 'There is no such item.' };
@@ -6467,11 +6473,263 @@ function mockNetworkRoutes(url: string, method: string, body: any): unknown | un
     drop();
     return { ok: true };
   }
-  if (url === root + '/approvals') {
-    item.approvals.push(`${body.kind}:${body.digest}`);
-    item.state = body.kind;
-    item.refused = item.refused.filter((row) => row.entry !== body.kind);
+  if (url === root + '/access') {
+    item.approvals = body.access === 'limited' ? [] : [`${body.access}:${body.digest}`];
+    item.state = body.access;
+    item.refused = item.refused.filter((row) => row.entry !== body.access);
     return { ok: true };
+  }
+  return undefined;
+}
+
+// A new job waits for the daemon's next sync, so the page's bounded wait can be seen.
+const MOCK_JOB_SYNC_MS = 12_000;
+type MockJob = {
+  id: number | null;
+  pending: boolean;
+  syncs_at?: number;
+  name: string;
+  cron: string;
+  enabled: boolean;
+  once: boolean;
+  state: string;
+  last_run_at: string | null;
+  last_success_at: string | null;
+  consecutive_failures: number;
+  last_error: string | null;
+  definition: Record<string, unknown>;
+  revision: string | null;
+  editable: boolean;
+  network: (typeof mockNetwork.subjects)[number] | null;
+  file_error?: string;
+};
+function mockJobDefinition(fields: Record<string, unknown>) {
+  return {
+    kind: 'prompt',
+    prompt: '',
+    prompt_file: '',
+    command: '',
+    target: 'web',
+    room: '',
+    silent_unless_action: false,
+    skip_log_channel: false,
+    model: '',
+    effort: '',
+    brain: '',
+    provider: '',
+    publish_shared_kv: '',
+    publish_shared_kv_trusted: false,
+    egress: [] as string[],
+    egress_kept: [] as string[],
+    ...fields,
+  };
+}
+let mockJobRevision = 10;
+let nextMockJobId = 40;
+const mockJobs: MockJob[] = [
+  {
+    id: 31,
+    pending: false,
+    name: 'apartment-search',
+    cron: '0 8 * * 1-5',
+    enabled: true,
+    once: false,
+    state: 'running',
+    last_run_at: '2026-10-31T08:00:02Z',
+    last_success_at: '2026-10-31T08:00:02Z',
+    consecutive_failures: 0,
+    last_error: null,
+    definition: mockJobDefinition({
+      prompt: 'Check the listings site and tell me about anything new.',
+      target: 'web:web-carol-general',
+      room: 'web-carol-general',
+    }),
+    revision: 'rev-1',
+    editable: true,
+    network: mockNetwork.subjects[1],
+  },
+  {
+    id: 32,
+    pending: false,
+    name: 'hackernews-digest',
+    cron: '30 7 * * *',
+    enabled: true,
+    once: false,
+    state: 'suspended',
+    last_run_at: '2026-10-30T07:30:04Z',
+    last_success_at: '2026-10-25T07:30:03Z',
+    consecutive_failures: 5,
+    last_error: "Refused: news.ycombinator.com is not on this job's list.",
+    definition: mockJobDefinition({
+      prompt: 'Read the front page and summarise the five most interesting stories.',
+      target: 'email',
+      silent_unless_action: true,
+      model: 'general',
+      egress: ['news.ycombinator.com'],
+    }),
+    revision: 'rev-2',
+    editable: true,
+    network: mockNetwork.subjects[0],
+  },
+  {
+    id: null,
+    pending: false,
+    name: 'nightly-script',
+    cron: '0 3 * * *',
+    enabled: true,
+    once: false,
+    state: 'running',
+    last_run_at: null,
+    last_success_at: null,
+    consecutive_failures: 0,
+    last_error: null,
+    definition: mockJobDefinition({ kind: 'command', command: './backup.sh', target: '' }),
+    revision: null,
+    editable: false,
+    network: null,
+    file_error:
+      'Command jobs are admin-only, so this job does not run. Use a prompt, or remove it.',
+  },
+];
+function mockJobRefusal(job: Record<string, unknown>, current: MockJob | null) {
+  const name = job.name ?? current?.name;
+  if (!String(name ?? '').trim())
+    return { __status: 400, error: 'invalid_field', field: 'name', detail: 'A job needs a name.' };
+  if (mockJobs.some((other) => other !== current && other.name === name))
+    return {
+      __status: 409,
+      error: 'name_taken',
+      field: 'name',
+      detail: 'Another job has that name.',
+    };
+  if (
+    String(job.cron ?? current?.cron ?? '')
+      .trim()
+      .split(/\s+/).length !== 5
+  )
+    return {
+      __status: 400,
+      error: 'invalid_field',
+      field: 'cron',
+      detail: 'That is not a cron schedule.',
+    };
+  if (job.kind === 'prompt' && !String(job.prompt ?? '').trim())
+    return {
+      __status: 400,
+      error: 'invalid_field',
+      field: 'prompt',
+      detail: 'A prompt job needs a prompt.',
+    };
+  return null;
+}
+function mockJobRoutes(url: string, method: string, body: any): unknown | undefined {
+  const root = '/istota/api/settings/jobs';
+  if (url === root && method === 'GET') {
+    for (const job of mockJobs) {
+      if (job.pending && Date.now() >= (job.syncs_at ?? 0)) {
+        job.pending = false;
+        job.id = nextMockJobId++;
+        job.network = {
+          ...mockNetwork.subjects[0],
+          subject: `cron:${job.name}`,
+          label: `Scheduled job: ${job.name}`,
+          hosts: [],
+          refused: [],
+        };
+      }
+    }
+    return {
+      jobs: [...mockJobs].sort((a, b) => a.name.localeCompare(b.name)),
+      file: { readable: true, errors: [] },
+      options: {
+        outputs: ['email', 'ntfy', 'talk', 'web'],
+        rooms: {
+          talk: [
+            { token: 'tk-team', name: 'Team', channel: false, shared: true },
+            { token: 'tk-alerts', name: 'Alerts', channel: true, shared: false },
+          ],
+          web: [
+            {
+              token: 'web-carol-general',
+              name: 'General',
+              default: true,
+              shared: false,
+              channel: false,
+            },
+            {
+              token: 'web-carol-plans',
+              name: 'Plans',
+              default: false,
+              shared: false,
+              channel: false,
+            },
+          ],
+        },
+        selectable_brains: [],
+        can_publish: false,
+      },
+      external_skills: mockNetwork.external_skills,
+      timezone: 'Europe/Lisbon',
+    };
+  }
+  if (url === root && method === 'POST') {
+    const refusal = mockJobRefusal(body, null);
+    if (refusal) return refusal;
+    mockJobs.push({
+      id: null,
+      pending: true,
+      syncs_at: Date.now() + MOCK_JOB_SYNC_MS,
+      name: body.name,
+      cron: body.cron,
+      enabled: body.enabled,
+      once: body.once,
+      state: body.enabled ? 'running' : 'disabled',
+      last_run_at: null,
+      last_success_at: null,
+      consecutive_failures: 0,
+      last_error: null,
+      definition: mockJobDefinition(body),
+      revision: `rev-${mockJobRevision++}`,
+      editable: true,
+      network: null,
+    });
+    return { __status: 201, applies: 'next_sync' };
+  }
+  const match = url.match(/^\/istota\/api\/settings\/jobs\/(\d+)(?:\/(enable|disable|run))?$/);
+  if (!match) return undefined;
+  const job = mockJobs.find((row) => row.id === Number(match[1]));
+  if (!job) return { __status: 404, error: 'not_found', detail: 'There is no such item.' };
+  if (method === 'POST' && match[2] === 'run') return { task_id: 901 };
+  if (method === 'POST' && match[2]) {
+    job.enabled = match[2] === 'enable';
+    job.state = job.enabled ? 'running' : 'disabled';
+    job.revision = `rev-${mockJobRevision++}`;
+    return { outcome: 'file' };
+  }
+  if (method === 'DELETE') {
+    mockJobs.splice(mockJobs.indexOf(job), 1);
+    return { deleted: true, id: job.id };
+  }
+  if (method === 'PUT') {
+    if (body.revision !== job.revision)
+      return {
+        __status: 409,
+        error: 'job_changed',
+        detail: 'This job changed since the page read it.',
+      };
+    const refusal = mockJobRefusal(body, job);
+    if (refusal) return refusal;
+    const { revision: _revision, keep_access: keep, name, cron, enabled, once, ...rest } = body;
+    if (name !== undefined) job.name = name;
+    if (cron !== undefined) job.cron = cron;
+    if (once !== undefined) job.once = once;
+    if (enabled !== undefined) {
+      job.enabled = enabled;
+      job.state = enabled ? 'running' : 'disabled';
+    }
+    job.definition = { ...job.definition, ...rest };
+    job.revision = `rev-${mockJobRevision++}`;
+    return { applies: 'next_sync', access_kept: keep ? true : null };
   }
   return undefined;
 }
@@ -8713,6 +8971,7 @@ const handlers: MockHandler[] = [
   searchHandler,
   ({ url, method, body }) => mockWalletRoutes(url, method, body),
   ({ url, method, body }) => mockNetworkRoutes(url, method, body),
+  ({ url, method, body }) => mockJobRoutes(url, method, body),
   ({ url, method, body }) => mockMailAccountRoutes(url, method, body),
   ({ url }) => (url === '/istota/api/me' ? user : undefined),
   ({ url }) =>
