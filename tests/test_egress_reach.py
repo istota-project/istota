@@ -11,6 +11,7 @@ import pytest
 from istota import db
 from istota.assignments.wakes import SOURCE_TYPE as ASSIGNMENT_SOURCE_TYPE
 from istota.config import Config, UserConfig
+from istota.lib.egress_log import refusal_advice
 from istota.rooms import egress
 from istota.rooms import scopes as room_scopes
 from istota.skills._loader import load_skill_index
@@ -1214,6 +1215,14 @@ class TestASkillJobWithNoProxy:
         _ok, message = self._run(task, tmp_path, make_config)
         assert not message.startswith("egress_not_approved")
 
+    def test_the_refusal_names_the_jobs_page(self, conn, tmp_path, make_config):
+        task = _task(conn, "scheduled", scheduled_job_id=_job(conn), skill="browse",
+                     skill_args='["--help"]')
+        conn.commit()
+        _ok, message = self._run(task, tmp_path, make_config)
+        assert "Settings, Scheduled jobs" in message
+        assert "Network access" not in message
+
 
 class TestAPublicSkillJob:
     """A public grant on a `skill:` job has no proxy either, so the withheld set is
@@ -1314,6 +1323,39 @@ class TestAPublicSkillJob:
         assert ok is True
         assert env_of_the_run[BROWSER_PROFILE_VAR] == USER
         assert WITHHELD_SCOPES_VAR not in env_of_the_run
+
+
+class TestWhereARefusalSendsTheOwner:
+    """A TASKS.md line has nothing to grant on, so it must not be told otherwise."""
+
+    def test_a_job_and_its_subtask_name_the_jobs_page(self, conn):
+        root = _task(conn, "scheduled", scheduled_job_id=_job(conn))
+        child = _task(conn, "subtask", parent_task_id=root.id)
+        for task in (root, child):
+            reach = _reach(conn, task)
+            assert reach.egress_subject == "cron:digest"
+            assert refusal_advice(reach.egress_subject) == (
+                "the owner can add it in Settings, Scheduled jobs."
+            )
+
+    def test_an_assignment_wake_names_its_page(self, conn):
+        task = _task(conn, "assignment", assignment_id=7)
+        reach = _reach(conn, task)
+        assert reach.egress_subject == "assignment:7"
+        assert refusal_advice(reach.egress_subject) == (
+            "the owner can add it in Settings, Assignments."
+        )
+
+    @pytest.mark.parametrize("source_type", ["istota_file", "briefing"])
+    def test_a_task_with_no_subject_is_told_nothing_can_be_approved(self, conn, source_type):
+        reach = _reach(conn, _task(conn, source_type))
+        assert reach.egress_subject is None
+        advice = refusal_advice(reach.egress_subject)
+        assert advice == "nothing can be approved for this task."
+        assert "Settings" not in advice
+
+    def test_an_open_task_has_no_subject_to_name(self, conn):
+        assert _reach(conn, _task(conn, "web")).egress_subject is None
 
 
 class TestTheSubjectOfATask:

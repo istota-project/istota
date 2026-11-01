@@ -190,6 +190,7 @@ def build_task_runtime(
     conn: "db.sqlite3.Connection | None" = None,
     egress_hosts: frozenset[str] | None = None,
     egress_withheld: frozenset[str] = frozenset(),
+    egress_subject: str | None = None,
     egress_log: Path | None = None,
 ) -> TaskRuntime:
     """Build the model's environment and the per-task proxies for one attempt.
@@ -606,6 +607,7 @@ def build_task_runtime(
             allowed_skills=cli_skills,
             authorized_skills=frozenset(authorized_skills),
             egress_withheld=egress_withheld,
+            egress_subject=egress_subject,
             task_id=task.id,
             vault_credentials=vault_credentials,
             vault_fetch_limit=config.security.vault_fetch_limit_per_task,

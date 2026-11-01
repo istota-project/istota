@@ -30,7 +30,7 @@ from istota.mail import support as email_support
 from istota.credentials import names as secrets_vault
 from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox import task_env
-from istota.lib.egress_log import REFUSED_LOG_NAME
+from istota.lib.egress_log import REFUSED_LOG_NAME, refusal_advice
 from istota.rooms import speech_gate
 from istota.rooms.scopes import CHANNEL_NOTES_LABEL as CHANNEL_MEMORY_LABEL
 from istota.sandbox.claude_runtime_env import (
@@ -4156,6 +4156,7 @@ def harness_web_fetch_policy(
     *,
     egress_hosts: frozenset[str] | None = None,
     refusal_log: Path | None = None,
+    subject: str | None = None,
 ):
     """`HarnessSpec.web_fetch`: the daemon-side WebFetch's policy, or None.
 
@@ -4171,7 +4172,7 @@ def harness_web_fetch_policy(
     from .session.tools import web_fetch_policy_for_task
 
     return web_fetch_policy_for_task(
-        config.brain.native.web_fetch, egress_hosts, refusal_log=refusal_log,
+        config.brain.native.web_fetch, egress_hosts, refusal_log=refusal_log, subject=subject,
     )
 
 
@@ -8038,11 +8039,12 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
         web_tools += (
             f"\n- Network: this task runs unattended and reaches only the hosts its owner approved: {approved}."
             if approved else
-            "\n- Network: this task runs unattended, and no hosts are approved for this task yet."
+            "\n- Network: this task runs unattended, and no hosts are approved for this task"
+            + (" yet." if reach.egress_subject else ".")
         )
         web_tools += (
             " WebFetch and shell network calls to anything else are refused. Do not "
-            "retry a refused host; the owner can add it in Settings, Network access."
+            f"retry a refused host; {refusal_advice(reach.egress_subject)}"
         )
 
     # Bash runs with `pipefail` on (ISSUE-321), which the model has to be told
@@ -9617,6 +9619,7 @@ def execute_task(
             conn=conn,
             egress_hosts=_reach.egress_hosts,
             egress_withheld=_reach.egress_withheld,
+            egress_subject=_reach.egress_subject,
             egress_log=_egress_log,
         )
         env = _runtime.env
@@ -9763,6 +9766,7 @@ def execute_task(
             allowed_tools=allowed,
             egress_hosts=_reach.egress_hosts,
             egress_log=_egress_log,
+            egress_subject=_reach.egress_subject,
             # Non-sandbox path (Mac/dev/Docker): the REPL points the brain's
             # working directory at the launch dir directly. No blocklist here —
             # without bwrap the process already runs with the user's own FS
@@ -9913,6 +9917,7 @@ def execute_task(
                 web_fetch=harness_web_fetch_policy(
                     config, allowed,
                     egress_hosts=_reach.egress_hosts, refusal_log=_egress_log,
+                    subject=_reach.egress_subject,
                 ),
                 # Bound read-only by `_tool_server_wrap` above: where the
                 # harness hands the CLI-spawned tool server its hello and gate.

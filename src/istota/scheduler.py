@@ -196,6 +196,7 @@ from .transport.registry import (
     result_event_payload,
 )
 from .lib.audio_sniff import VOICE_TRANSCRIPT_LABEL
+from .lib.egress_log import refusal_advice
 from .transport.ingest import describe_attachment_only_message
 from .transport.routing import private_phone_room
 from .storage import BOT_USER_BASE, ensure_user_directories_v2, ensure_workspace_roots
@@ -2680,7 +2681,7 @@ def _execute_skill_task(
         file_egress_refusals(config, task, [("skill", f"skill:{skill_name}")])
         return False, (
             f"egress_not_approved: the {skill_name} skill is not approved for this "
-            "job; the owner can add it in Settings, Network access."
+            f"job; {refusal_advice(reach.egress_subject)}"
         )
 
     # In-process dispatch for skill-tasks that need read/write access to

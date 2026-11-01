@@ -100,6 +100,9 @@ class Reach:
     #: The part of `withheld` that is there only because this task is limited to
     #: those hosts: each `external` skill with no `skill:` grant.
     egress_withheld: frozenset[str] = frozenset()
+    #: What a limited task's refusals hang on, for naming the page that answers them.
+    #: None where nothing can be granted, or on any task that is not limited.
+    egress_subject: str | None = None
     #: An approved public job, or a subtask or `!retry` copy of one: the research
     #: posture on the job's own identity and room. It holds nothing private, which
     #: is why `egress_hosts` is None. Decided once per occurrence and kept on its
@@ -283,13 +286,13 @@ def reach_for_task(
     if posture == "unknown" and _is_descendant(conn, task):
         return Reach(all_scopes(skill_index), "own", egress_hosts=frozenset())
     withheld = _withheld_from_own_task(conn, task, skill_index)
-    egress_hosts, granted_skills = _egress_for(conn, task)
+    egress_hosts, granted_skills, subject = _egress_for(conn, task)
     if egress_hosts is None:
         return Reach(withheld, "own", isolated_browser=bool(withheld))
     egress_withheld = _external_skills(skill_index) - granted_skills - withheld
     return Reach(
         withheld | egress_withheld, "own", isolated_browser=True,
-        egress_hosts=egress_hosts, egress_withheld=egress_withheld,
+        egress_hosts=egress_hosts, egress_withheld=egress_withheld, egress_subject=subject,
     )
 
 
@@ -366,32 +369,33 @@ def _root_is_attended(root: "db.Task") -> bool:
 
 def _egress_for(
     conn: sqlite3.Connection | None, task: "db.Task",
-) -> tuple[frozenset[str] | None, frozenset[str]]:
-    """Where an own task may send bytes: ``(hosts, granted skills)``, with None
+) -> tuple[frozenset[str] | None, frozenset[str], str | None]:
+    """Where an own task may send bytes: ``(hosts, granted skills, subject)``, with None
     hosts for any public host. A subtask or `!retry` copy has its root's answer.
 
     `reach_for_task` has already asked about a public job, whose posture is more
     than an answer here. Reading the grants can fail only toward the empty set.
     """
     if conn is None:
-        return frozenset(), frozenset()
+        return frozenset(), frozenset(), None
     try:
         root = _decision_root(conn, task)
         if is_briefing_research(root) or _root_is_attended(root):
-            return None, frozenset()
+            return None, frozenset(), None
         if (
             egress.job_approved(conn, root, "open")
             or egress.stored_unapproved(conn, root.id) == egress.REACH_FULL
         ):
-            return None, frozenset()
+            return None, frozenset(), None
         subject = egress.subject_for(conn, root)
         return (
             egress.approved_hosts(conn, task.user_id, subject),
             egress.approved_skills(conn, task.user_id, subject),
+            subject,
         )
     except Exception as exc:  # noqa: BLE001 — a read failure narrows
         logger.warning("egress_decide_failed task=%s: %s", task.id, type(exc).__name__)
-        return frozenset(), frozenset()
+        return frozenset(), frozenset(), None
 
 
 def egress_subject(conn: sqlite3.Connection, task: "db.Task") -> str | None:
