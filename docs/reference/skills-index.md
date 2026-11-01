@@ -29,8 +29,9 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 
 | Skill | Keywords | CLI |
 |---|---|---|
-| `calendar` | calendar, event, meeting, schedule, appointment | yes -- list (alias `agenda`), create, update, delete |
+| `calendar` | calendar, event, meeting, schedule, appointment | yes -- calendars, list (alias `agenda`), create, update, delete. Reads CalDAV calendars, the ICS feeds the user shared (`feed:<id>`) and received invitations (`feed:invitations`); writes to Istota's own `istota` calendar are applied when the task finishes. See [sharing](../features/sharing.md) |
 | `contacts` | contact, contacts, address book, phone number, email address, carddav, vcard | yes -- books, search, show, create, update, delete. Searches Nextcloud address books shared with the bot and Google Contacts together. See [contacts](../features/contacts.md) |
+| `shares` | shared folder, federated share, ocm, folder share | yes -- list, ls, get, put, mkdir, move, delete. Reads and writes the folders users shared with Istota over Open Cloud Mesh, as `share:<id>`. See [sharing](../features/sharing.md) |
 | `todos` | todo, task, checklist, reminder, done, complete | doc-only |
 | `reminders` | remind, reminder, alert me, notify me | doc-only |
 | `rooms` | room, rooms, this room, which room, channel, post to | yes -- list (every room you are in, with the `target` descriptor that delivers into it) |
@@ -44,8 +45,8 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 | Skill | Keywords | CLI |
 |---|---|---|
 | `briefing` | (auto-selected for briefing source type) | doc-only -- output formatting for a generated briefing |
-| `briefings` | briefing, block, digest, briefing source | yes -- list (every briefing name this user has, with block counts and the latest archived generation), blocks list/add/set/reorder/remove, sources list/add/remove, archive list/show |
-| `briefings_config` | briefing config, briefing schedule | doc-only -- user-editable briefing schedule in `{bot_dir}/config/` |
+| `briefings` | briefing, block, digest, briefing source | yes -- list (every briefing name this user has, with block counts and the latest archived generation), kinds, options, blocks list/add/save/set/reorder/remove, sources list/add/set/reorder/remove, archive list/show/read/mark-read/delete |
+| `briefings_config` | briefing config, briefing schedule, shared block, group briefing | yes -- schedule list/set/remove, shared-block list/show/set/set-prompt/run/remove (admins), group list/show/save/set/run/runs/edition/audience/delivery/approvals/revoke-approval/delete (from the user's private chat only). See [briefings](../features/briefings.md) |
 | `markets` | market, stock, ticker, index, futures | yes -- quote, summary, finviz |
 | `feeds` | feed, rss, subscribe, unsubscribe, opml | yes -- list, categories, entries, add, remove, refresh, poll, prune, run-scheduled, import-opml, export-opml |
 | `browse` | browse, website, scrape, screenshot, url | yes -- get, render, screenshot, extract, interact, links, close |
