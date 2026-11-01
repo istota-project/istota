@@ -6195,6 +6195,7 @@ export interface NetworkRefusal {
   last_seen: string;
 }
 export interface NetworkJob {
+  run_state: 'running' | 'disabled' | 'suspended';
   digest: string;
   once: boolean;
   waiting: boolean;

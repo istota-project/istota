@@ -418,6 +418,38 @@ class TestTheOperatorCli:
             cmd_egress(self._args(config, "grant", subject="cron:nothing"))
 
 
+class TestRunState:
+    @pytest.mark.parametrize("enabled,suspended,expected", [
+        (1, None, "running"),
+        (0, None, "disabled"),
+        (1, "2026-10-30 12:00:00", "suspended"),
+        (0, "2026-10-30 12:00:00", "disabled"),
+    ], ids=["running", "disabled", "suspended", "both-reads-disabled"])
+    def test_describe_subject_says_whether_the_job_fires(self, tmp_path, enabled, suspended, expected):
+        path = tmp_path / "t.db"
+        db.init_db(path)
+        with db.get_db(path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, enabled, "
+                "auto_disabled_at) VALUES ('alice', 'digest', '0 9 * * *', 'p', ?, ?)",
+                (enabled, suspended),
+            )
+            job = egress.describe_subject(conn, "alice", "cron:digest")["job"]
+        assert job["run_state"] == expected
+
+    def test_a_disabled_one_time_job_waits_on_nothing(self, tmp_path):
+        path = tmp_path / "t.db"
+        db.init_db(path)
+        with db.get_db(path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, once, "
+                "reach, enabled) VALUES ('alice', 'once', '0 9 * * *', 'p', 1, 'full', 1)",
+            )
+            assert egress.describe_subject(conn, "alice", "cron:once")["job"]["waiting"] is True
+            conn.execute("UPDATE scheduled_jobs SET enabled = 0")
+            assert egress.describe_subject(conn, "alice", "cron:once")["job"]["waiting"] is False
+
+
 class TestThePublishTargetIsShown:
     def test_describe_subject_names_it(self, tmp_path):
         path = tmp_path / "t.db"

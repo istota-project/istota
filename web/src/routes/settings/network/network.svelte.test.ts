@@ -13,6 +13,7 @@ import { AuthError } from '$lib/api';
 import Harness from './networkHarness.test.svelte';
 
 const job = {
+  run_state: 'running',
   digest: 'a'.repeat(64),
   once: false,
   waiting: false,
@@ -331,6 +332,56 @@ it('says a public job runs with no approval and its text was not reviewed', asyn
   render(Harness);
   expect(await screen.findByText('Public by default')).toBeTruthy();
   expect(screen.getByText(/Its text is not reviewed/)).toBeTruthy();
+});
+
+function disabledSubject(overrides = {}) {
+  return subject({
+    subject: 'cron:off',
+    label: 'Scheduled job: off',
+    job: { ...job, run_state: 'disabled' },
+    ...overrides,
+  });
+}
+
+function disabledGroup() {
+  return screen.getByText('Disabled jobs').closest('details') as HTMLDetailsElement;
+}
+
+it('moves disabled jobs under a closed group with a count, and leaves others out', async () => {
+  show(subject(), disabledSubject());
+  const running = await card();
+  expect(running.queryByText('Disabled')).toBeNull();
+  expect(disabledGroup().open).toBe(false);
+  expect(within(disabledGroup()).getByText('1')).toBeInTheDocument();
+  expect(
+    within(disabledGroup()).queryByRole('heading', { name: 'Scheduled job: digest' }),
+  ).toBeNull();
+  const off = within(disabledGroup());
+  expect(off.getByRole('heading', { name: 'Scheduled job: off' })).toBeInTheDocument();
+  expect(off.getByText('Disabled')).toBeInTheDocument();
+  expect(off.getByText(/does not run/)).toBeInTheDocument();
+});
+
+it('has no disabled group when no job is disabled', async () => {
+  show(subject());
+  await card();
+  expect(screen.queryByText('Disabled jobs')).toBeNull();
+});
+
+it('opens the group when a disabled job has a request to answer', async () => {
+  show(
+    disabledSubject({ refused: [{ entry: 'news.example.com', hits: 1, last_seen: '2026-10-30' }] }),
+  );
+  await screen.findByRole('heading', { name: 'Scheduled job: off' });
+  await waitFor(() => expect(disabledGroup().open).toBe(true));
+});
+
+it('keeps a suspended job in the main list and says how to start it', async () => {
+  show(subject({ job: { ...job, run_state: 'suspended' } }));
+  const view = await card();
+  expect(view.getByText('Suspended')).toBeInTheDocument();
+  expect(view.getByText('!cron enable')).toBeInTheDocument();
+  expect(screen.queryByText('Disabled jobs')).toBeNull();
 });
 
 it('names full access when a one-time job waits on it', async () => {

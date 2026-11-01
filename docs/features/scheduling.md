@@ -167,6 +167,8 @@ Under `public`, read a public job you did not write. It holds nothing private, b
 
 Renaming a job counts as removing it and adding a new one: the new name starts with nothing.
 
+Disabling a job does not remove what you approved. The page keeps disabled jobs under a closed Disabled jobs group at the bottom, which opens by itself when one of them has a request to answer. A job Istota suspended after repeated failures stays in the main list with a Suspended badge, since a refused host can be what made it fail.
+
 While limited, a job cannot add a feed or a bookmark, change a briefing's sources, a shared block or a group briefing, or push to another ntfy topic. Its mail to anyone but you waits as a draft. An operator can use `istota egress list|grant|revoke`. What stays open is in [Where a task may send bytes](../architecture/egress.md).
 
 ## Failure handling
