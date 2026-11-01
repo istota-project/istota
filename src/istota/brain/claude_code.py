@@ -956,11 +956,15 @@ def build_claude_cli_flags(
     without it.
     """
     flags: list[str] = []
-    # Empty allowed_tools means text-only invocation (e.g. sleep cycle): skip the
-    # tool flags entirely so claude's defaults stay out of the equation. The
-    # prompt itself, plus the absence of --dangerously-skip-permissions, is what
-    # keeps the call text-only.
-    if req.allowed_tools:
+    # Empty allowed_tools means text-only (sleep cycle, personal briefing): one
+    # rule for every such caller. With no `--tools` the CLI keeps its default
+    # built-ins, in its own process outside any sandbox, and these prompts carry
+    # other people's text. `--tools ""` empties the built-ins, and
+    # `--strict-mcp-config` with no `--mcp-config` drops the account's claude.ai
+    # connectors, which `--tools` leaves. Still no skip-permissions.
+    if not req.allowed_tools:
+        flags += ["--tools", "", "--strict-mcp-config"]
+    else:
         # The brain runs non-interactively with --dangerously-skip-permissions
         # (added by `_build_command`); an --allowedTools allowlist would only
         # restrict the toolset below what `--tools` already leaves. The
