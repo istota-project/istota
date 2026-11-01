@@ -209,7 +209,9 @@ Natural-language reminders are implemented as one-shot cron entries (`once = tru
 
 Settings, Scheduled jobs lists your jobs with each one's schedule, state, access, last run and failures in a row. New job adds one, and opening a job shows its form, its last error and its Network access card. Saving writes CRON.md, and the job shows as waiting for the next sync until the daemon reads it, within about a minute. From the list or the job's page you can run a job now, disable or enable it, and delete it, which takes it out of CRON.md too. Enabling a job Istota suspended after repeated failures starts it again.
 
-If you change what a job dispatches and it holds an approval, the page asks whether to keep that access for the new text or save and run limited. Renaming a job starts its network access over, since a new name is a new job, and the page says so first. While CRON.md has a job that does not load, every job is read only, because a rewrite would drop the one that failed.
+The form covers what CRON.md authors, for whoever may set it. Model and run holds the model and effort, with a brain and provider for an admin. Publish holds the shared target and trust, for someone who may publish. Asks ahead of its first run holds the `egress` entries. A model or brain you may no longer pick stays as the file has it until you change or remove it, and the form says the job does not use it.
+
+If you change what a job dispatches or where it publishes and it holds an approval, the page asks whether to keep that access for the new text or save and run limited. Renaming a job starts its network access over, since a new name is a new job, and the page says so first. While CRON.md has a job that does not load, every job is read only, because a rewrite would drop the one that failed.
 
 Some rows have fewer actions:
 

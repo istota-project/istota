@@ -6290,7 +6290,8 @@ export interface ScheduledJobs {
   options: {
     outputs: string[];
     rooms: { talk: TalkRoomOption[]; web: WebRoomOption[] };
-    selectable_brains: string[];
+    /** Empty for a non-admin, and where the operator listed no kinds. */
+    selectable_brains: SelectableBrain[];
     can_publish: boolean;
   };
   external_skills: string[];
@@ -6298,6 +6299,20 @@ export interface ScheduledJobs {
 }
 export function getScheduledJobs(): Promise<ScheduledJobs> {
   return apiFetch('/settings/jobs');
+}
+/** What the model picker offers a job, on the lane it runs on. */
+export type JobModelChoices = Pick<
+  ChatCommands,
+  'model_aliases' | 'models' | 'default_model' | 'providers'
+>;
+/** `brain` and `provider` are what the form holds now, which the file may not yet. The
+ *  server ignores either from a non-admin, and a brain off the operator's list. */
+export function getJobModelChoices(brain: string, provider: string): Promise<JobModelChoices> {
+  const params = new URLSearchParams();
+  if (brain) params.set('brain', brain);
+  if (provider) params.set('provider', provider);
+  const query = params.toString();
+  return apiFetch(`/settings/jobs/model-choices${query ? `?${query}` : ''}`);
 }
 /** What a job's form sends. On an edit, only what changed: what is absent stays as the file has it. */
 export interface ScheduledJobFields {
@@ -6314,6 +6329,13 @@ export interface ScheduledJobFields {
   skip_log_channel?: boolean;
   /** On create only: the Access control sets it afterwards. */
   reach?: 'limited' | 'public' | 'full';
+  model?: string;
+  effort?: string;
+  brain?: string;
+  provider?: string;
+  publish_shared_kv?: string;
+  publish_shared_kv_trusted?: boolean;
+  egress?: string[];
 }
 /** A refused save. `field` names the field it belongs beside, `errors` are the parser's sentences. */
 export class JobSaveError extends Error {

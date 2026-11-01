@@ -6624,6 +6624,19 @@ function mockJobRefusal(job: Record<string, unknown>, current: MockJob | null) {
 }
 function mockJobRoutes(url: string, method: string, body: any): unknown | undefined {
   const root = '/istota/api/settings/jobs';
+  if (url.split('?')[0] === `${root}/model-choices` && method === 'GET') {
+    return {
+      model_aliases: MOCK_ALIAS_NAMES.map((alias) => ({
+        alias,
+        target: 'claude-sonnet-5-5',
+        effort: null,
+        efforts: MOCK_BASE_EFFORTS,
+      })),
+      models: MOCK_PICKER_MODELS,
+      default_model: 'claude-sonnet-5-5',
+      providers: MOCK_PROVIDERS,
+    };
+  }
   if (url === root && method === 'GET') {
     for (const job of mockJobs) {
       if (job.pending && Date.now() >= (job.syncs_at ?? 0)) {
@@ -6665,8 +6678,11 @@ function mockJobRoutes(url: string, method: string, body: any): unknown | undefi
             },
           ],
         },
-        selectable_brains: [],
-        can_publish: false,
+        selectable_brains: [
+          { kind: 'native', label: 'Native', model_namespace: 'native' },
+          { kind: 'claude_code', label: 'Claude Code', model_namespace: 'claude_code' },
+        ],
+        can_publish: true,
       },
       external_skills: mockNetwork.external_skills,
       timezone: 'Europe/Lisbon',

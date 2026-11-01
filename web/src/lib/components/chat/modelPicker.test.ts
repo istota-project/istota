@@ -7,7 +7,10 @@ import {
   effortsFor,
   filterOptions,
   keepsOnProvider,
+  listsModel,
+  modelChoicesFrom,
   modelRefusalOf,
+  modelSurvivesProviderMove,
   pickerOptions,
   providerOptions,
   refusalMessage,
@@ -45,6 +48,63 @@ function choices(overrides: Partial<ModelChoices> = {}): ModelChoices {
     ...overrides,
   };
 }
+
+describe('modelChoicesFrom', () => {
+  it('reads a catalogue, and what an older server leaves out', () => {
+    expect(modelChoicesFrom({ model_aliases: [] })).toEqual({
+      aliases: [],
+      models: [],
+      defaultModel: null,
+      roomModel: null,
+      providers: [],
+      roomProvider: null,
+    });
+    const answer = modelChoicesFrom({
+      model_aliases: [],
+      models: [model('anthropic/a')],
+      default_model: 'a',
+      room_provider: 'anthropic',
+    });
+    expect(answer.models.map((m) => m.ref)).toEqual(['anthropic/a']);
+    expect(answer.defaultModel).toBe('a');
+    expect(answer.roomProvider).toBe('anthropic');
+  });
+});
+
+describe('listsModel', () => {
+  const options = pickerOptions(choices());
+
+  it('holds an alias, a ref, the bare id of a ref, and the default', () => {
+    expect(listsModel(options, 'smart')).toBe(true);
+    expect(listsModel(options, 'openrouter/vendor/x')).toBe(true);
+    expect(listsModel(options, 'claude-opus-5-5')).toBe(true);
+    expect(listsModel(options, '')).toBe(true);
+  });
+
+  it('does not hold anything else, or part of an id', () => {
+    expect(listsModel(options, 'old/retired')).toBe(false);
+    expect(listsModel(options, 'opus-5-5')).toBe(false);
+  });
+});
+
+describe('modelSurvivesProviderMove', () => {
+  const options = pickerOptions(choices());
+  const stored = { provider: 'anthropic', model: 'qwen3' };
+
+  it("goes by the new provider's list", () => {
+    const c = choices();
+    expect(modelSurvivesProviderMove(c, options, 'smart', 'openrouter', stored)).toBe(true);
+    expect(
+      modelSurvivesProviderMove(c, options, 'anthropic/claude-opus-5-5', 'openrouter', stored),
+    ).toBe(false);
+  });
+
+  it('a move back to the stored provider keeps the stored model', () => {
+    const c = choices();
+    expect(modelSurvivesProviderMove(c, options, 'qwen3', 'anthropic', stored)).toBe(true);
+    expect(modelSurvivesProviderMove(c, options, 'qwen3', 'openrouter', stored)).toBe(false);
+  });
+});
 
 describe('pickerOptions', () => {
   it('lists the aliases first, then the models in the order sent', () => {

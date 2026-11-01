@@ -134,6 +134,12 @@ async function kebabItem(name: string, label: string) {
 }
 
 beforeEach(() => {
+  api.getJobModelChoices.mockResolvedValue({
+    model_aliases: [],
+    models: [],
+    default_model: null,
+    providers: [],
+  });
   api.setScheduledJobEnabled.mockResolvedValue({ outcome: 'file' });
   api.runScheduledJob.mockResolvedValue({ task_id: 9 });
   api.deleteScheduledJob.mockResolvedValue({ deleted: true, id: 1 });

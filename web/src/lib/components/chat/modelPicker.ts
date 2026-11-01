@@ -5,7 +5,13 @@
 // enabled first in each), the enabled mark is part of the label, and a picked
 // label is mapped back to the value it stands for.
 
-import type { ChatModel, ChatModelAlias, ChatProvider, ChatRoomModel } from '$lib/api';
+import type {
+  ChatCommands,
+  ChatModel,
+  ChatModelAlias,
+  ChatProvider,
+  ChatRoomModel,
+} from '$lib/api';
 
 export interface ModelChoices {
   aliases: ChatModelAlias[];
@@ -33,6 +39,26 @@ export interface PickerOption {
 export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 
 const ENABLED_MARK = ' · enabled';
+
+/** A catalogue answer as the picker's choices, for the room's `/chat/commands` and the
+ *  job's `model-choices` alike. Defensive about the shape, since an older server sends
+ *  no `models`. */
+export function modelChoicesFrom(
+  catalogue: Pick<ChatCommands, 'model_aliases'> & Partial<ChatCommands>,
+): ModelChoices {
+  return {
+    aliases: Array.isArray(catalogue.model_aliases) ? catalogue.model_aliases : [],
+    models: Array.isArray(catalogue.models)
+      ? catalogue.models.filter((m) => typeof m?.ref === 'string')
+      : [],
+    defaultModel: catalogue.default_model ?? null,
+    roomModel: catalogue.room_model ?? null,
+    providers: Array.isArray(catalogue.providers)
+      ? catalogue.providers.filter((p) => typeof p?.id === 'string')
+      : [],
+    roomProvider: typeof catalogue.room_provider === 'string' ? catalogue.room_provider : null,
+  };
+}
 
 /** The picker's options: aliases first, then the models in the server's order.
  *  The enabled mark appears only on a list that mixes enabled and other models,
@@ -106,6 +132,27 @@ export function keepsOnProvider(
   const option = options.find((o) => o.value === value);
   if (option && !value.includes('/')) return true;
   return !!provider && value.startsWith(`${provider}/`);
+}
+
+/** Whether the field keeps its model as the provider select moves to ``next``. A model
+ *  of the provider being left cannot carry to the new one, and a move back to the stored
+ *  provider keeps the stored model. */
+export function modelSurvivesProviderMove(
+  choices: ModelChoices,
+  options: PickerOption[],
+  value: string,
+  next: string,
+  stored: { provider: string; model: string },
+): boolean {
+  if (next === stored.provider && value === stored.model) return true;
+  return keepsOnProvider(options, value, effectiveProvider(choices, next));
+}
+
+/** Whether the list holds a value: as an alias or ref, or as the bare id of a ref, which
+ *  a stored model may be. Empty is the default, which every list has. */
+export function listsModel(options: PickerOption[], value: string): boolean {
+  if (!value) return true;
+  return options.some((o) => o.value === value || o.value.endsWith(`/${value}`));
 }
 
 /** The value the field's text stands for: an option's value when the text is
