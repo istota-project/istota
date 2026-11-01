@@ -1706,7 +1706,7 @@ def cmd_egress(args):
             subjects = [
                 egress.describe_subject(
                     conn, args.user, subject,
-                    open_default=config.security.scheduled_job_egress == "open",
+                    ceiling=config.security.scheduled_job_max_unapproved,
                 )
                 for subject in egress.list_subject_names(conn, args.user)
             ]
@@ -1715,7 +1715,7 @@ def cmd_egress(args):
                 return
             for item in subjects:
                 entries = [*item["hosts"], *(f"skill:{name}" for name in item["skills"])]
-                state = "open-by-default" if item["open_by_default"] else item["state"]
+                state = f"{item['by_default']}-by-default" if item["by_default"] else item["state"]
                 print(f"{item['subject']} {state} {' '.join(entries)}".rstrip())
                 if item["job"] and item["job"]["waiting"]:
                     print(f"  waiting {' '.join(item['waiting_on']) or 'public'}")

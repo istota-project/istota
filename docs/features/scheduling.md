@@ -79,7 +79,7 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `model` | no | Model override for this job (e.g. `"general"` for the active brain's current general model) |
 | `effort` | no | Effort override: `low`, `medium`, `high`, `xhigh`, or `max` |
 | `brain` | no | Brain kind this job runs on: `claude_code` or `native`. Admin-only, and bounded by `[brain] room_selectable`. See below |
-| `reach` | no | `private` (default) or `public`. `public` asks to run with open web and nothing private, and grants nothing until you approve it. See "Network access" below |
+| `reach` | no | `limited` (the default if left out), `public` or `full`. Says what the job runs as, and asks you for what your operator's setting does not cover. See "Network access" below |
 | `egress` | no | The hosts and skills the job needs, such as `["news.example.com", "skill:browse"]`. Asks you ahead of the first run and grants nothing. See "Network access" below |
 | `publish_shared_kv` | no | On success, publish the result text to the shared KV store as `"<namespace>/<key>"` (a bare key means the `briefing_shared_blocks` namespace) |
 | `publish_shared_kv_trusted` | no | Mark the published value trusted, so consuming briefings splice it without the untrusted-content wrapper |
@@ -148,14 +148,22 @@ When a job is refused a host, the bell shows one row for that job. It names no h
 A job is in one of three states:
 
 - **Limited**: the hosts and skills you listed, and nothing else. A new job starts here.
-- **Public**: open web and nothing private: no memory, no files, no credentials and no notes in its room. Set `reach = "public"` in CRON.md to ask, then approve its text on the page. A job that needs to keep state should stay limited and use hosts.
-- **Full access**: it runs with your browser profile and every skill, and can reach any public host. Every job that existed when this feature arrived starts here. Remove Full access on the page to narrow it, and expect the next run to be refused the hosts it needs.
+- **Public**: open web and nothing private: no memory, no files, no credentials and no notes in its room. For research that only reads the web. Set `reach = "public"`. It needs no approval on a default install. A job that needs to keep state should stay limited and use hosts.
+- **Full access**: it runs with your browser profile and every skill, and can reach any public host. Set `reach = "full"` to ask for it, then approve its text on the page. Every job that existed when this feature arrived starts here. Remove Full access on the page to narrow it, and expect the next run to be refused the hosts it needs.
 
-Public and Full access are approved against the exact text of the job, which the page shows you. Editing `prompt`, a `prompt_file`, `command`, `skill`, `skill_args`, `publish_shared_kv` or `publish_shared_kv_trusted` drops the approval, and the job runs limited until you approve the new text. Changing the schedule, model or delivery does not. Host and skill entries stay through an edit.
+Where they need approval, Public and Full access are approved against the exact text of the job, which the page shows you. Editing `prompt`, a `prompt_file`, `command`, `skill`, `skill_args`, `publish_shared_kv` or `publish_shared_kv_trusted` drops the approval, and the job runs limited until you approve the new text. Changing the schedule, model or delivery does not. Host and skill entries stay through an edit.
 
-A job can ask ahead of its first run. `egress = ["news.example.com", "skill:browse"]` lists what it needs, and the page and the bell show the request as soon as the job is written. Nothing is granted until you add it, and a recurring job runs with what it has until then. A `once` job with `egress` or an unapproved `reach = "public"` does not fire until you approve, however long that takes, because it would otherwise run limited and delete itself along with the request. Dismissing a request does not release the job: add the entry or remove the job from CRON.md. A `once` job that asks for nothing still fires limited and is gone afterwards.
+A job can ask ahead of its first run. `egress = ["news.example.com", "skill:browse"]` lists what it needs, and the page and the bell show the request as soon as the job is written. Nothing is granted until you add it, and a recurring job runs with what it has until then. A `once` job with an unmet `egress`, or a `reach` your operator's setting does not cover, does not fire until you approve, however long that takes, because it would otherwise run limited and delete itself along with the request. Dismissing a request does not release the job: add the entry or remove the job from CRON.md. A `once` job that asks for nothing still fires limited and is gone afterwards.
 
-Your operator can turn the approval off for scheduled jobs with `[security] scheduled_job_egress = "open"`. Each job then runs as if it had Full access, with no grant: your browser profile, every skill, any public host and mail that is not held as a draft. The page says so, and `egress` asks for nothing. A job with `reach = "public"` still waits for your approval. Briefings, assignment wakes and TASKS.md lines stay limited, though a limited task can write a job into CRON.md, which then runs with all of this.
+Your operator sets how far a job gets with no approval, with `[security] scheduled_job_max_unapproved`. Past that it runs limited and asks you, and a `once` job waits.
+
+| Setting | With no approval | Needs your approval |
+| --- | --- | --- |
+| `limited` | Limited | Public and Full access |
+| `public` (default) | Limited, and Public for a job with `reach = "public"` | Full access |
+| `full` | Everything; a job with no `reach` runs on Full access | Nothing |
+
+Under `public`, read a public job you did not write. It holds nothing private, but a task can write a job into CRON.md and put what it knows in the job's text. Under `full`, a task can write a job that then has your browser profile, every skill, any public host and mail that is not held as a draft. A job with `reach = "limited"` stays limited under every setting.
 
 Renaming a job counts as removing it and adding a new one: the new name starts with nothing.
 

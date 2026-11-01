@@ -63,10 +63,10 @@ def _usable_external_skills(config, user_id: str) -> dict:
 
 
 def _listing(config, user_id: str) -> dict:
-    open_default = config.security.scheduled_job_egress == "open"
+    ceiling = config.security.scheduled_job_max_unapproved
     with db.get_db(Path(config.db_path)) as conn:
         subjects = [
-            egress.describe_subject(conn, user_id, subject, open_default=open_default)
+            egress.describe_subject(conn, user_id, subject, ceiling=ceiling)
             for subject in egress.list_subject_names(conn, user_id)
         ]
     return {

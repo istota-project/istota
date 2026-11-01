@@ -1880,7 +1880,7 @@ class CredentialBrokerConfig:
         return self.enabled and self.enforce_reveal
 
 
-SCHEDULED_JOB_EGRESS_MODES = ("approval", "open")
+JOB_REACH_LEVELS = ("limited", "public", "full")
 
 
 @dataclass
@@ -1940,9 +1940,9 @@ class SecurityConfig:
     # This is a capability gate: 0 disables model-requested vault writes.
     # Unlike the fetch limit above, it never means unlimited.
     vault_writes_per_task: int = 3
-    # What a scheduled job may reach with no approval: "approval" limits it to what
-    # its owner granted, "open" gives it any public host. A typo reads as "approval".
-    scheduled_job_egress: str = "approval"
+    # The widest `reach` a scheduled job gets with no approval: "limited", "public" or
+    # "full". Past it the job runs limited and asks its owner. A typo reads as "limited".
+    scheduled_job_max_unapproved: str = "public"
     wallet_requests_per_task: int = 3
     wallet_fills_per_purchase: int = 3
     wallet_authorization_minutes: int = 30
@@ -5767,7 +5767,7 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     "security.skill_proxy_max_output_mb": _positive_int,
     "security.network_proxy_max_connections": _positive_int,
     "security.vault_writes_per_task": _non_negative_int,
-    "security.scheduled_job_egress": _one_of(*SCHEDULED_JOB_EGRESS_MODES, fallback="approval"),
+    "security.scheduled_job_max_unapproved": _one_of(*JOB_REACH_LEVELS, fallback="limited"),
     "security.wallet_requests_per_task": _non_negative_int,
     "security.wallet_fills_per_purchase": _non_negative_int,
     "security.wallet_authorization_minutes": _wallet_authorization_minutes,
@@ -5801,7 +5801,7 @@ _CONFIG_HOOKS: dict[str, Hook] = {
 
 FIELD_CHOICES: dict[tuple[str, ...], tuple[str, ...]] = {
     ("web", "token_storage"): _CONFIG_HOOKS["web.token_storage"].choices,
-    ("security", "scheduled_job_egress"): SCHEDULED_JOB_EGRESS_MODES,
+    ("security", "scheduled_job_max_unapproved"): JOB_REACH_LEVELS,
     ("nextcloud", "sharing", "calendars"): _CONFIG_HOOKS["nextcloud.sharing.calendars"].choices,
     ("nextcloud", "sharing", "contacts"): _CONFIG_HOOKS["nextcloud.sharing.contacts"].choices,
     ("email", "outbound_approval_floor"): OUTBOUND_APPROVAL_POLICIES,

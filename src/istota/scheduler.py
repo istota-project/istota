@@ -9417,7 +9417,7 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                         conn, user_id, doc.jobs,
                         is_admin=app_config.is_admin(user_id),
                         unread_names=doc.unread_names,
-                        egress_requests=app_config.security.scheduled_job_egress != "open",
+                        ceiling=app_config.security.scheduled_job_max_unapproved,
                     )
                     if refused_subjects:
                         egress.raise_refused_bell(app_config, conn, user_id, refused_subjects)
@@ -10029,11 +10029,13 @@ def _create_scheduled_job_task(
             provider=job.provider or None,
             parent_task_id=parent_task_id,
         )
-    # A job asking for `public` asked for something narrower than open.
-    if app_config.security.scheduled_job_egress == "open" and job.reach != "public":
-        from .rooms import egress as rooms_egress
+    from .rooms import egress as rooms_egress
 
-        rooms_egress.record_open_by_default(conn, task_id)
+    unapproved = rooms_egress.unapproved_reach(
+        job.reach, app_config.security.scheduled_job_max_unapproved,
+    )
+    if unapproved != rooms_egress.REACH_LIMITED:
+        rooms_egress.record_unapproved(conn, task_id, unapproved)
     return task_id
 
 
@@ -10228,10 +10230,12 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
 
             # Ahead of the staleness check, and exempt from it: an approval can take
             # days, and a fire skipped as stale would spend this job's only slot.
-            asks_first = job.once and (job.egress_request or job.reach == "public")
+            asks_first = job.once and (
+                job.egress_request or job.reach in rooms_egress.REACH_REQUESTS
+            )
             if should_run and asks_first and rooms_egress.once_job_waiting(
                 conn, job.user_id, job.name,
-                open_default=app_config.security.scheduled_job_egress == "open",
+                ceiling=app_config.security.scheduled_job_max_unapproved,
             ):
                 logger.debug("Once job '%s' (user: %s) waits for approval", job.name, job.user_id)
                 continue

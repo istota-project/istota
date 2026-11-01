@@ -46,6 +46,12 @@ DIGEST_COLUMNS = (*TASK_TEXT_COLUMNS, "publish_shared_kv", "publish_shared_kv_tr
 _JOB_ROW_COLUMNS = "name, reach, once, egress_request, " + ", ".join(DIGEST_COLUMNS)
 DECIDERS = frozenset({"web", "cli", "migration"})
 POSTURE_PUBLIC = "public"
+REACH_LIMITED = "limited"
+REACH_FULL = "full"
+#: What the `reach` column holds for a job whose file states none.
+REACH_UNSTATED = "private"
+#: The request a `reach` makes of its owner, as an `egress_refused` entry.
+REACH_REQUESTS = {POSTURE_PUBLIC: "public", REACH_FULL: "open"}
 POSTURE_PRIVATE = "private"
 #: Refusal entries that ask for a decision about a job, rather than name a host.
 JOB_REQUESTS = ("open", "public")
@@ -285,17 +291,32 @@ def record_posture(conn: sqlite3.Connection, task_id: int, posture: str) -> None
     )
 
 
-def record_open_by_default(conn: sqlite3.Connection, task_id: int) -> None:
-    """This occurrence was created where jobs need no approval, on the caller's
-    transaction. Daemon only, and held to its one caller like `record_posture`."""
-    conn.execute("UPDATE tasks SET egress_open_by_default = 1 WHERE id = ?", (task_id,))
+def unapproved_reach(reach: str | None, ceiling: str) -> str:
+    """What a job gets with no approval, under `[security] scheduled_job_max_unapproved`.
+
+    It gets what it asks for up to the ceiling, and limited past it. A job that states
+    nothing is limited, except under `full`, where an operator has said jobs need no
+    approval. Under `public` it stays limited so that a job needing memory does not
+    run without it. `public` is below `full`, so asking for less is never worse off.
+    """
+    if reach in (None, "", REACH_UNSTATED):
+        return REACH_FULL if ceiling == REACH_FULL else REACH_LIMITED
+    if reach == POSTURE_PUBLIC and ceiling in (POSTURE_PUBLIC, REACH_FULL):
+        return POSTURE_PUBLIC
+    if reach == REACH_FULL and ceiling == REACH_FULL:
+        return REACH_FULL
+    return REACH_LIMITED
 
 
-def open_by_default(conn: sqlite3.Connection, task_id: int) -> bool:
-    row = conn.execute(
-        "SELECT egress_open_by_default FROM tasks WHERE id = ?", (task_id,),
-    ).fetchone()
-    return row is not None and bool(row[0])
+def record_unapproved(conn: sqlite3.Connection, task_id: int, reach: str) -> None:
+    """What this occurrence gets with no approval, on the caller's transaction.
+    Daemon only, and it widens, so `tests/test_egress_grants.py` holds its one caller."""
+    conn.execute("UPDATE tasks SET egress_unapproved = ? WHERE id = ?", (reach, task_id))
+
+
+def stored_unapproved(conn: sqlite3.Connection, task_id: int) -> str | None:
+    row = conn.execute("SELECT egress_unapproved FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return row[0] if row is not None else None
 
 
 def declared_entries(raw: str | None) -> tuple[str, ...]:
@@ -349,14 +370,13 @@ def sync_declared(
 
 
 def once_job_waiting(
-    conn: sqlite3.Connection, user_id: str, job_name: str, *, open_default: bool,
+    conn: sqlite3.Connection, user_id: str, job_name: str, *, ceiling: str,
 ) -> bool:
     """Whether a due `once` job holds its fire for its owner.
 
     It would run limited and delete itself, taking the request with it, so there
-    would be no moment to approve it. An approved `public` or `open` needs nothing
-    further. An unapproved `reach = "public"` waits under either default: it asked
-    for something narrower than open.
+    would be no moment to approve it. An approval, or a `reach` the ceiling covers,
+    needs nothing further.
     """
     row = job_row_by_subject(conn, user_id, cron_subject(job_name))
     if row is None or not row["once"]:
@@ -364,9 +384,14 @@ def once_job_waiting(
     grants = grants_for(conn, user_id, cron_subject(job_name))
     if job_state(grants, row) != "limited":
         return False
-    if row["reach"] == POSTURE_PUBLIC:
-        return True
-    return not open_default and bool(unmet_entries(row["egress_request"], grants))
+    return _waits_on_reach(row, ceiling) or (
+        unapproved_reach(row["reach"], ceiling) == REACH_LIMITED
+        and bool(unmet_entries(row["egress_request"], grants))
+    )
+
+
+def _waits_on_reach(row: "Mapping | sqlite3.Row", ceiling: str) -> bool:
+    return row["reach"] in REACH_REQUESTS and unapproved_reach(row["reach"], ceiling) != row["reach"]
 
 
 def add_grant(
@@ -670,26 +695,28 @@ def list_subject_names(conn: sqlite3.Connection, user_id: str) -> list[str]:
 
 
 def describe_subject(
-    conn: sqlite3.Connection, user_id: str, subject: str, *, open_default: bool = False,
+    conn: sqlite3.Connection, user_id: str, subject: str, *, ceiling: str = REACH_LIMITED,
 ) -> dict:
     """One subject as the page and `istota egress list` show it. Hostnames and job
     text are for the owner's own session or the operator's terminal, and are data.
 
     `waiting_on` lists a `once` job's declared entries while it holds its fire, a
-    dismissed one included, since the job waits on it all the same.
+    dismissed one included, since the job waits on it all the same. `by_default` is
+    the state a limited job runs in anyway, because the ceiling covers it.
     """
     grants = grants_for(conn, user_id, subject)
     row = job_row_by_subject(conn, user_id, subject)
     job = None
     waiting_on: list[str] = []
-    by_default = (
-        open_default and row is not None and row["reach"] != POSTURE_PUBLIC
-        and job_state(grants, row) == "limited"
-    )
+    by_default = None
+    if row is not None and job_state(grants, row) == "limited":
+        by_default = {POSTURE_PUBLIC: "public", REACH_FULL: "open"}.get(
+            unapproved_reach(row["reach"], ceiling),
+        )
     if row is not None:
-        waiting = once_job_waiting(conn, user_id, row["name"], open_default=open_default)
-        # An unapproved `public` waits on that approval whatever its hosts say.
-        if waiting and row["reach"] != POSTURE_PUBLIC:
+        waiting = once_job_waiting(conn, user_id, row["name"], ceiling=ceiling)
+        # A job waiting on its `reach` waits on that approval whatever its hosts say.
+        if waiting and not _waits_on_reach(row, ceiling):
             waiting_on = unmet_entries(row["egress_request"], grants)
         job = {
             "once": bool(row["once"]),
@@ -708,7 +735,7 @@ def describe_subject(
         "kind": subject.partition(":")[0],
         "label": subject_label(subject),
         "state": job_state(grants, row),
-        "open_by_default": by_default,
+        "by_default": by_default,
         "hosts": sorted(_entries_of_kind(grants, "host")),
         "skills": sorted(_entries_of_kind(grants, "skill")),
         "approvals": sorted(

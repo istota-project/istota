@@ -850,6 +850,8 @@ class TestThePostureIsOnTheTaskRow:
         monkeypatch.setattr(
             "istota.briefings.group_migrate.publisher_retired", lambda *a, **k: False,
         )
+        # Where public jobs need approving, which is what an edit drops.
+        config.security.scheduled_job_max_unapproved = "limited"
         job_id = _public_job(db_conn)
         failed = self._occurrence(db_conn, job_id)
         self._decide(config, db_conn, failed)

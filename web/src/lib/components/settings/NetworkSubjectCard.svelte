@@ -35,10 +35,12 @@
   const JOB_REQUESTS = new Set(['open', 'public']);
 
   const job = $derived(subject.job);
+  const BY_DEFAULT = {
+    open: { label: 'Full access by default', variant: 'warn' },
+    public: { label: 'Public by default', variant: 'info' },
+  } as const;
   const stateBadge = $derived(
-    subject.open_by_default
-      ? ({ label: 'Full access by default', variant: 'warn' } as const)
-      : STATES[subject.state],
+    subject.by_default ? BY_DEFAULT[subject.by_default] : STATES[subject.state],
   );
   const hostRefusals = $derived(subject.refused.filter((row) => !JOB_REQUESTS.has(row.entry)));
   const asksOpen = $derived(subject.refused.some((row) => row.entry === 'open'));
@@ -148,7 +150,12 @@
   {#snippet status()}<Badge size="sm" variant={stateBadge.variant}>{stateBadge.label}</Badge
     >{/snippet}
 
-  {#if subject.open_by_default}
+  {#if subject.by_default === 'public'}
+    <p class="caption">
+      Your operator lets a job asking for public access run without approval. It has open web and
+      holds nothing private. Its text is not reviewed, so read it if you did not write it.
+    </p>
+  {:else if subject.by_default === 'open'}
     <p class="caption">
       Your operator lets scheduled jobs run with no approval: your browser profile, every skill, any
       public host, and mail to anyone. What you list here applies only if that changes.
@@ -175,6 +182,8 @@
       This one-time job will not run until you approve
       {#if subject.waiting_on.length > 0}
         <span class="mono">{subject.waiting_on.join(', ')}</span>.
+      {:else if job.reach === 'full'}
+        full access.
       {:else}
         public access.
       {/if}

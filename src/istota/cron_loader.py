@@ -469,10 +469,11 @@ class CronJob:
     # no publish. Gated on is_shared_kv_writer at write time (admin-only).
     publish_shared_kv: str = ""
     publish_shared_kv_trusted: bool = False
-    # "public" asks for this job's exact text to run with no private data and
-    # open web. A request and never a grant: the file is model-writable, so the
-    # job runs limited until its owner approves (`rooms.egress`).
-    reach: str = "private"
+    # "limited", "public" or "full", empty where the file states none. A request and
+    # never a grant: the file is model-writable, so past what
+    # `[security] scheduled_job_max_unapproved` allows the job runs limited until its
+    # owner approves its exact text (`rooms.egress`).
+    reach: str = ""
     # Hosts and `skill:` entries this job asks its owner for, in normal form. A
     # request and never a grant, like `reach`: it runs with what it has been given.
     egress: tuple[str, ...] = ()
@@ -612,19 +613,24 @@ def _str_field(
 
 
 def _validate_reach(name: str, user_id: str, value, errors: list[str] | None = None) -> str:
-    """``"public"`` or ``"private"``, and anything else is private with a warning.
-    The narrow answer: a typo must not read as a request for open web."""
+    """What a job's `reach` says, empty where it says nothing. `private` is the earlier
+    spelling of `limited`. Anything else is limited with a warning: a typo must not
+    read as a request for more."""
+    if value is None:
+        return ""
     if not isinstance(value, str):
-        value = _str_field(name, user_id, "reach", value, errors)
-    if value in ("private", "public"):
+        _str_field(name, user_id, "reach", value, errors)
+        return "limited"
+    if value in ("", "limited", "public", "full"):
         return value
-    if value:
-        shown = repr(value[:80])
-        logger.warning("Job '%s' (user %s): reach %s is not private or public; using private",
-                       name, user_id, shown)
-        if errors is not None:
-            errors.append(f"Job '{name}': reach must be \"private\" or \"public\", got {shown}")
-    return "private"
+    if value == "private":
+        return "limited"
+    shown = repr(value[:80])
+    logger.warning("Job '%s' (user %s): reach %s is not limited, public or full; using limited",
+                   name, user_id, shown)
+    if errors is not None:
+        errors.append(f"Job '{name}': reach must be \"limited\", \"public\" or \"full\", got {shown}")
+    return "limited"
 
 
 def _validate_egress(
@@ -1001,7 +1007,7 @@ def _parse_jobs(
             publish_shared_kv_trusted=_coerce_bool(
                 name, user_id, "publish_shared_kv_trusted",
                 j.get("publish_shared_kv_trusted", False), False, errors),
-            reach=_validate_reach(name, user_id, j.get("reach", "private"), errors),
+            reach=_validate_reach(name, user_id, j.get("reach"), errors),
             egress=declared,
             egress_kept=egress_kept,
             model_refused=model_refused,
@@ -1151,7 +1157,7 @@ def render_jobs_block(jobs: list[CronJob]) -> str:
             lines.append(_toml_string("publish_shared_kv", job.publish_shared_kv))
         if job.publish_shared_kv_trusted:
             lines.append("publish_shared_kv_trusted = true")
-        if job.reach != "private":
+        if job.reach:
             lines.append(_toml_string("reach", job.reach))
         if job.egress or job.egress_kept:
             # `parse_entry`'s normal form holds nothing a basic string has to escape.
@@ -1511,7 +1517,7 @@ def _file_owned_values(
         "provider": None if fj.model_refused else _stored_model(fj, provider_val)[1],
         "publish_shared_kv": fj.publish_shared_kv or None,
         "publish_shared_kv_trusted": 1 if fj.publish_shared_kv_trusted else 0,
-        "reach": fj.reach,
+        "reach": fj.reach or egress.REACH_UNSTATED,
         "egress_request": json.dumps(list(fj.egress)) if fj.egress else None,
     }
 
@@ -1533,7 +1539,7 @@ def sync_cron_jobs_to_db(
     *,
     is_admin: bool = True,
     unread_names: frozenset[str] = frozenset(),
-    egress_requests: bool = True,
+    ceiling: str = "limited",
 ) -> list[str]:
     """
     Sync CRON.md job definitions into the scheduled_jobs DB table.
@@ -1552,9 +1558,9 @@ def sync_cron_jobs_to_db(
       shell-command tasks must remain admin-only)
     - a new job has no egress grants; an edit to what it dispatches drops its
       `open:` and `public:` approvals; a removed job takes its rows with it; and
-      `reach = "public"` and `egress` ask the owner and grant nothing
-      (`_sync_job_approvals`); ``egress_requests`` is False where the deployment
-      needs no approval, so `egress` has nothing to ask
+      `reach` and `egress` ask the owner for what ``ceiling``, the deployment's
+      `scheduled_job_max_unapproved`, does not cover, and grant nothing
+      (`_sync_job_approvals`)
     - ``unread_names`` are jobs whose `prompt_file` could not be read this tick:
       kept, not orphaned
 
@@ -1611,7 +1617,7 @@ def sync_cron_jobs_to_db(
         if publisher_retired(conn, user_id, fj.name):
             file_values["enabled"] = 0
         existing = db_by_name.get(fj.name)
-        if _sync_job_approvals(conn, user_id, fj, existing, file_values, egress_requests):
+        if _sync_job_approvals(conn, user_id, fj, existing, file_values, ceiling):
             refused_subjects.append(egress.cron_subject(fj.name))
         if existing:
             # Update definition fields, preserve state
@@ -1738,15 +1744,16 @@ def sync_cron_jobs_to_db(
 
 def _sync_job_approvals(
     conn, user_id: str, fj: "CronJob", existing, file_values: dict[str, object],
-    egress_requests: bool = True,
+    ceiling: str = "limited",
 ) -> bool:
     """What this tick's edit does to a job's egress grants. True if it asked the
     owner something new.
 
     Compared against the row before the sync's own write, so an edit is seen on
-    the one tick it is visible. Not repeated on later ticks, so a dismissed
-    request stays dismissed. A row just inserted starts from nothing, whatever an
-    earlier job of that name left behind.
+    the one tick it is visible. A `reach` the ceiling does not cover is asked whenever
+    no row holds it, so the request returns if the ceiling narrows; a dismissed row is
+    a row, so a dismissed request stays dismissed. A row just inserted starts from
+    nothing, whatever an earlier job of that name left behind.
     """
     subject = egress.cron_subject(fj.name)
     digest = egress.job_digest(file_values)
@@ -1754,27 +1761,37 @@ def _sync_job_approvals(
         egress.forget_subject(conn, user_id, subject)
         dropped: list[str] = []
         text_changed = True
-        was_public = False
+        old_request = None
     else:
-        was_public = existing.reach == "public"
+        old_request = egress.REACH_REQUESTS.get(existing.reach)
         old = {column: getattr(existing, column) for column in egress.DIGEST_COLUMNS}
         text_changed = egress.job_digest(old) != digest
         dropped = (
             egress.drop_job_approvals(conn, user_id, subject, keep_digest=digest)
             if text_changed else []
         )
-    if was_public and fj.reach != "public":
-        egress.clear_refused(conn, user_id, subject, "public")
+    request = egress.REACH_REQUESTS.get(fj.reach)
+    runs_as = egress.unapproved_reach(fj.reach, ceiling)
+    if old_request and old_request != request and old_request not in dropped:
+        egress.clear_refused(conn, user_id, subject, old_request)
     ask = list(dropped)
-    if fj.reach == "public" and "public" not in ask and (text_changed or not was_public):
-        if f"public:{digest}" not in egress.grants_for(conn, user_id, subject):
-            ask.append("public")
+    if request and runs_as == fj.reach:
+        # The deployment covers it: nothing is left to ask, whatever an earlier tick did.
+        if request not in dropped:
+            egress.clear_refused(conn, user_id, subject, request)
+    elif request and request not in ask:
+        rows = {row["entry"] for row in egress.list_refused(conn, user_id, subject)}
+        if (
+            f"{request}:{digest}" not in egress.grants_for(conn, user_id, subject)
+            and (text_changed or request not in rows)
+        ):
+            ask.append(request)
     for entry in ask:
         egress.note_refused(conn, user_id, subject, entry, reopen=True)
     declared_new = egress.sync_declared(
         conn, user_id, subject, file_values["egress_request"],
         existing.egress_request if existing is not None else None,
-        ask=egress_requests,
+        ask=runs_as == egress.REACH_LIMITED,
     )
     return bool(ask) or declared_new
 
@@ -1866,7 +1883,7 @@ def _migrate_db_jobs_locked(conn, config, user_id: str, config_dir, overwrite: b
             provider=j.provider or "",
             publish_shared_kv=j.publish_shared_kv or "",
             publish_shared_kv_trusted=bool(j.publish_shared_kv_trusted),
-            reach=j.reach,
+            reach="" if j.reach == egress.REACH_UNSTATED else j.reach,
             egress=egress.declared_entries(j.egress_request),
         ))
 

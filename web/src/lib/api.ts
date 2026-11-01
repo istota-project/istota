@@ -6198,7 +6198,7 @@ export interface NetworkJob {
   digest: string;
   once: boolean;
   waiting: boolean;
-  reach: 'private' | 'public';
+  reach: 'private' | 'limited' | 'public' | 'full';
   prompt: string;
   command: string;
   skill: string;
@@ -6211,7 +6211,7 @@ export interface NetworkSubject {
   kind: string;
   label: string;
   state: 'open' | 'public' | 'limited';
-  open_by_default: boolean;
+  by_default: 'open' | 'public' | null;
   hosts: string[];
   skills: string[];
   approvals: string[];

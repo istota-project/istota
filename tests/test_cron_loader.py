@@ -4183,19 +4183,24 @@ class TestReachField:
         ))
         return load_cron_document(make_config_with_mount(), "alice")
 
-    def test_defaults_to_private(self, mount_path, make_config_with_mount):
-        assert self._load(mount_path, make_config_with_mount, "").jobs[0].reach == "private"
+    def test_states_nothing_by_default(self, mount_path, make_config_with_mount):
+        assert self._load(mount_path, make_config_with_mount, "").jobs[0].reach == ""
 
-    @pytest.mark.parametrize("value", ["private", "public"])
-    def test_reads_either_value(self, mount_path, make_config_with_mount, value):
+    @pytest.mark.parametrize("value", ["limited", "public", "full"])
+    def test_reads_each_value(self, mount_path, make_config_with_mount, value):
         doc = self._load(mount_path, make_config_with_mount, f'reach = "{value}"')
         assert doc.jobs[0].reach == value
         assert doc.errors == ()
 
+    def test_private_is_the_earlier_spelling_of_limited(self, mount_path, make_config_with_mount):
+        doc = self._load(mount_path, make_config_with_mount, 'reach = "private"')
+        assert doc.jobs[0].reach == "limited"
+        assert doc.errors == ()
+
     @pytest.mark.parametrize("raw", ['"open"', '"PUBLIC"', "5", "true", '["public"]'])
-    def test_anything_else_is_private_and_says_so(self, mount_path, make_config_with_mount, raw):
+    def test_anything_else_is_limited_and_says_so(self, mount_path, make_config_with_mount, raw):
         doc = self._load(mount_path, make_config_with_mount, f"reach = {raw}")
-        assert doc.jobs[0].reach == "private"
+        assert doc.jobs[0].reach == "limited"
         assert any("reach" in e for e in doc.errors)
 
     def test_a_rewrite_keeps_a_public_request(self):
@@ -4481,7 +4486,7 @@ class TestEgressLifecycle:
         config = make_config_with_mount(users={"alice": UserConfig()})
         _write_cron_md(mount_path, "alice", (
             '```toml\n[[jobs]]\nname = "j"\ncron = "0 9 * * *"\nprompt = "p"\n'
-            'reach = "public"\n```\n'
+            'reach = "full"\n```\n'
         ))
         raised = []
 
