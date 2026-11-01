@@ -17,10 +17,13 @@ NO_STORE = {"Cache-Control": "no-store"}
 _MAX_ID_DIGITS = 18
 
 
-def refusal(status: int, error: str, detail: str, field: str | None = None) -> JSONResponse:
-    return JSONResponse(
-        {"error": error, "detail": detail, "field": field}, status_code=status, headers=NO_STORE,
-    )
+def refusal(
+    status: int, error: str, detail: str, field: str | None = None, *, state: str | None = None,
+) -> JSONResponse:
+    body = {"error": error, "detail": detail, "field": field}
+    if state is not None:
+        body["state"] = state
+    return JSONResponse(body, status_code=status, headers=NO_STORE)
 
 
 def not_found() -> JSONResponse:

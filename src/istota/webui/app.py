@@ -2444,8 +2444,12 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         "admin": is_admin,
         "sharing": False,
         "sharing_ocm": False,
+        "assignments": False,
     }
     if _config:
+        from istota.webui.assignment_routes import can_use as _can_use_assignments
+
+        features["assignments"] = await asyncio.to_thread(_can_use_assignments, _config, username)
         # Calendar feeds have no switch of their own; the card needs the database.
         features["sharing"] = bool(_config.db_path)
         features["sharing_ocm"] = bool(_config.db_path) and bool(_config.sharing.ocm.enabled)
@@ -13717,6 +13721,33 @@ async def settings_job_open(request: Request, job_id: str):
     return RedirectResponse(url=target, status_code=302)
 
 
+def _assignment_page_target(username: str, assignment_id: str) -> str:
+    """The assignment's page for its owner, else the bare page, as a missing one reads."""
+    from istota.assignments import store
+    from istota.webui.settings_http import parse_id
+
+    bare = "/istota/settings/assignments"
+    parsed = parse_id(assignment_id)
+    if parsed is None:
+        return bare
+    with _db.get_db(_config.db_path) as conn:
+        assignment = store.get_assignment(conn, parsed, user_id=username)
+    if assignment is None:
+        return bare
+    return f"{bare}?assignment={assignment.id}"
+
+
+# The bell's link for an assignment, a redirect for the same reason as a job's.
+@auth_router.get("/settings/assignments/open/{assignment_id}")
+async def settings_assignment_open(request: Request, assignment_id: str):
+    try:
+        user = await asyncio.to_thread(_require_api_auth, request)
+    except _UnauthorizedException:
+        return RedirectResponse(url="/istota/settings/assignments", status_code=302)
+    target = await asyncio.to_thread(_assignment_page_target, user["username"], assignment_id)
+    return RedirectResponse(url=target, status_code=302)
+
+
 @auth_router.get("/files/shares")
 async def files_share_index():
     """The bell's link for a waiting folder offer: the Files page's index of shares (#849).
@@ -19601,6 +19632,11 @@ app.include_router(_egress_router, prefix="/istota/api", tags=["egress"])
 from istota.webui.job_routes import router as _job_router
 
 app.include_router(_job_router, prefix="/istota/api", tags=["jobs"])
+
+# Settings > Assignments, on the same shared stubs.
+from istota.webui.assignment_routes import router as _assignment_router
+
+app.include_router(_assignment_router, prefix="/istota/api", tags=["assignments"])
 
 # Workspace is a core page, independent of per-user module switches.
 from istota.webui.workspace_routes import require_auth as _workspace_require_auth
