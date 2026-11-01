@@ -40,6 +40,18 @@ istota job run <user> <name> [--briefing]    # Queue a scheduled job (or briefin
 
 `istota job run` queues the job as it is defined now and leaves its schedule alone; the daemon runs it. It exits 1 while another run of that job is queued or running, within five minutes of the last run, and for a `_module.*` job.
 
+### Network access for scheduled work
+
+```bash
+istota egress list USER [--json]                       # Each subject's state, entries, requests and refusals
+istota egress grant USER SUBJECT HOST                  # Approve one exact host
+istota egress grant USER SUBJECT skill:NAME            # Approve one external skill
+istota egress grant USER SUBJECT open|public [--digest D]   # Approve the job's current text
+istota egress revoke USER SUBJECT ENTRY                # Remove a stored entry
+```
+
+The operator's side of Settings, Network access, and the one place another user's approvals can be changed. `SUBJECT` is `cron:<job>`, `briefing:<name>`, `assignment:<id>` or `tasks-file`. `open` and `public` approve the job's text as it is now and print the job's row; `--digest` refuses unless that text still has the digest you read, and `public` is refused for a job whose `reach` is not `"public"`. Granting an entry clears its refused row. `revoke` takes the entry as `list --json` prints it, `open:<digest>` included, and leaves a dismissed row so the job does not ask again. Exit 1 when the user has no such subject or the entry is refused. See [Network access](../features/scheduling.md#network-access) and [Where a task may send bytes](../architecture/egress.md).
+
 ### Usage and cost
 
 ```bash
@@ -503,6 +515,22 @@ istota doctor --deep                         # Include checks that start a sandb
 ```
 
 Each result is `ok`, `warn`, `fail` or `skip`, with a remedy on everything that is not `ok`. It exits 1 on any failure and 0 otherwise.
+
+### Claude CLI credentials
+
+```bash
+istota cli-auth sync-credentials-file        # Make ~/.claude/.credentials.json agree with [brain.claude_code] auth
+```
+
+The one writer of the `claude` CLI's credentials file, which the container's entrypoint runs at start. It resolves the mode as the daemon does: under `"subscription"` with a token it writes the file `0600`, otherwise it removes it. It prints what it did and the mode, never the token, and exits 1 when the file cannot be written. See `auth` under [`[brain.claude_code]`](../configuration/reference.md#brainclaude_code).
+
+### Push notifications
+
+```bash
+istota push test --user USER [--message TEXT]   # A test alert to each of the user's registered iOS devices
+```
+
+Exits 1 when `[push]` is disabled, the user has no registered device, or a send fails. See [push notifications](../features/notifications.md#push-notifications).
 
 ### Config plans
 
