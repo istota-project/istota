@@ -503,7 +503,7 @@ class TestThePostureColumn:
         ]
         assert sorted(writers) == ["executor.py", "rooms/egress.py"]
 
-    def test_the_open_default_is_written_only_by_the_occurrence_seam(self):
+    def test_the_unapproved_reach_is_written_only_by_the_occurrence_seam(self):
         """This writer widens: a task reaching it would open its own next run."""
         import istota
 

@@ -36,7 +36,7 @@ A row in `egress_grants` means approved, and there is no pending or denied state
 | `public:<digest>` | This exact job text runs with no private data and open web |
 | `open:<digest>` | This exact job text runs as it did before, with the user's browser profile and every skill |
 
-The digest covers a job's `prompt`, `command`, `skill`, `skill_args`, `publish_shared_kv` and `publish_shared_kv_trusted`. The last two are there because a job's answer goes where they say, into other users' briefings. The sync resolves `prompt_file` into `prompt`, so the file's content is covered. Editing any of them drops the job's `open:` and `public:` approvals and asks again. A schedule, model or delivery edit does not.
+The digest covers a job's `prompt`, `command`, `skill`, `skill_args`, `publish_shared_kv` and `publish_shared_kv_trusted`. The last two are there because a job's answer goes where they say, into other users' briefings. The sync resolves `prompt_file` into `prompt`, so the file's content is covered. Editing any of them drops the job's `open:` and `public:` approvals and asks again, unless the setting below covers the job. A schedule, model or delivery edit does not.
 
 Only an authenticated person writes a grant: the web route for the signed-in user's own subjects, the operator's `istota egress`, and the one-time seed. `tests/test_egress_grants.py` holds that list, and no skill CLI or deferred handler imports the module. An approval over the web carries the digest of the text the page showed, and a row that has moved since is refused. An approval also binds the task: an occurrence whose `prompt`, `command`, `skill` or `skill_args` differ from its job row runs limited, so a task queued before an edit does not run on the edited row's approval.
 
@@ -58,7 +58,7 @@ A job's `reach` says what it runs as: `limited`, `public` or `full`. `private` i
 
 `egress.unapproved_reach` holds that table. Asking for less is never worse off. A job stating nothing stays limited under `public` so that one needing memory does not run without it and give a worse answer with no error. It runs on `full` under `full` because that is what the operator asked for.
 
-The answer is on the occurrence. `_create_scheduled_job_task` writes `tasks.egress_unapproved`, so a config change moves nothing already queued, and it covers no other source type. An approval still counts under every setting.
+The answer is on the occurrence. `_create_scheduled_job_task` writes `tasks.egress_unapproved`, so a config change moves nothing already queued, and it covers no other source type. An approval still counts under every setting, so a job with `open:` approved and `reach = "public"` runs on Full access, as the page says. An occurrence the setting let run publishes its answer untrusted, whatever `publish_shared_kv_trusted` says: nobody read the flag, and a page can write the answer. Removing an approval leaves a dismissed request, so a job whose file still asks does not ask again.
 
 `public` is the default because a page a public job reads has nothing private to steal. Its residual is the job's own text, which no person reads under this setting: a limited task can put what it holds into a job's prompt, and the job can send that anywhere. `full` reopens H-2 for scheduled jobs: each occurrence runs as an approved `open:` does, with the user's browser profile, every skill, no verb rules and unheld mail, so instructions a job reads can send what it holds to any public host. `istota doctor` warns under `security.egress_open_jobs` while it is `full`.
 

@@ -6449,6 +6449,21 @@ def _parse_shared_kv_target(target: str) -> tuple[str, str]:
     return SHARED_BLOCK_NAMESPACE, target
 
 
+def _publish_is_trusted(conn, task, job) -> bool:
+    """Whether a job's published answer goes out marked trusted. Not from an occurrence
+    the ceiling let run: nobody read the flag, and with open web a page can write the
+    answer. Agent blocks refuse trust for the same reason. A failed read narrows."""
+    from .rooms import egress as rooms_egress
+
+    if not job.publish_shared_kv_trusted:
+        return False
+    try:
+        return rooms_egress.stored_unapproved(conn, task.id) is None
+    except Exception as exc:  # noqa: BLE001 - a read failure narrows
+        logger.warning("publish_trust_unread job=%s: %s", job.name, type(exc).__name__)
+        return False
+
+
 def _publish_result_to_shared_kv(
     conn, config: Config, task, job, result_text: str,
     *, notifications: list[RaiseResult | None] | None = None,
@@ -6511,15 +6526,16 @@ def _publish_result_to_shared_kv(
         )
         return True
 
+    trusted = _publish_is_trusted(conn, task, job)
     value = json.dumps({
         "text": result_text,
-        "trusted": bool(job.publish_shared_kv_trusted),
+        "trusted": trusted,
     })
     try:
         db.shared_kv_set(conn, ns, key, value, task.user_id)
         logger.info(
             "publish_shared_kv job=%s wrote %s/%s (%d bytes, trusted=%s)",
-            job.name, ns, key, len(result_text), bool(job.publish_shared_kv_trusted),
+            job.name, ns, key, len(result_text), trusted,
         )
         return True
     except Exception as e:  # noqa: BLE001
@@ -10031,8 +10047,9 @@ def _create_scheduled_job_task(
         )
     from .rooms import egress as rooms_egress
 
-    unapproved = rooms_egress.unapproved_reach(
-        job.reach, app_config.security.scheduled_job_max_unapproved,
+    unapproved = rooms_egress.occurrence_unapproved(
+        conn, job.user_id, job.name, job.reach,
+        app_config.security.scheduled_job_max_unapproved,
     )
     if unapproved != rooms_egress.REACH_LIMITED:
         rooms_egress.record_unapproved(conn, task_id, unapproved)

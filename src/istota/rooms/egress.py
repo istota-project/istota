@@ -308,6 +308,19 @@ def unapproved_reach(reach: str | None, ceiling: str) -> str:
     return REACH_LIMITED
 
 
+def occurrence_unapproved(
+    conn: sqlite3.Connection, user_id: str, job_name: str, reach: str | None, ceiling: str,
+) -> str:
+    """What an occurrence of this job gets from the ceiling. Limited if the job's state
+    is already something else: an approval counts under every setting, and the page
+    reads `job_state`, so the run must not answer differently."""
+    subject = cron_subject(job_name)
+    row = job_row_by_subject(conn, user_id, subject)
+    if row is not None and job_state(grants_for(conn, user_id, subject), row) != REACH_LIMITED:
+        return REACH_LIMITED
+    return unapproved_reach(reach, ceiling)
+
+
 def record_unapproved(conn: sqlite3.Connection, task_id: int, reach: str) -> None:
     """What this occurrence gets with no approval, on the caller's transaction.
     Daemon only, and it widens, so `tests/test_egress_grants.py` holds its one caller."""
@@ -462,10 +475,19 @@ def approve_job(
 
 
 def remove_grant(conn: sqlite3.Connection, user_id: str, subject: str, entry: str) -> None:
+    """Take an approval off. It leaves a dismissed row: a job whose file still asks for
+    this would otherwise ask again on the next tick, against the owner's own decision."""
     conn.execute(
         "DELETE FROM egress_grants WHERE user_id = ? AND subject = ? AND entry = ?",
         (user_id, subject, entry),
     )
+    try:
+        parsed = parse_entry(entry)
+    except EntryRefused:
+        return
+    row_entry = parsed.kind if parsed.kind in JOB_REQUESTS else parsed.text
+    note_refused(conn, user_id, subject, row_entry)
+    dismiss_refused(conn, user_id, subject, row_entry)
 
 
 def drop_job_approvals(

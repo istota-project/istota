@@ -411,7 +411,84 @@ class TestWhatAnOccurrenceRunsAs:
         assert reach_for_task(conn, task, skill_index=INDEX).public
 
 
+class TestAnApprovalBeatsTheSetting:
+    def test_an_approved_full_job_asking_for_public_runs_as_the_page_says(
+        self, conn, path, tmp_path,
+    ):
+        cfg = _config_at(path, tmp_path, "public")
+        _sync(conn, _job(reach="public"), ceiling="public")
+        row = egress.job_row_by_subject(conn, USER, SUBJECT)
+        egress.approve_job(conn, USER, SUBJECT, "open", egress.job_digest(row), decided_via="web")
+        conn.commit()
+        task = _occurrence(conn, cfg, reach="public")
+        view = egress.describe_subject(conn, USER, SUBJECT, ceiling="public")
+        reach = reach_for_task(conn, task, skill_index=INDEX)
+        assert view["state"] == "open" and view["by_default"] is None
+        assert not reach.public and reach.egress_hosts is None
+
+    def test_a_stale_approval_does_not_count(self, conn, path, tmp_path):
+        cfg = _config_at(path, tmp_path, "public")
+        _sync(conn, _job(reach="public"), ceiling="public")
+        row = egress.job_row_by_subject(conn, USER, SUBJECT)
+        egress.approve_job(conn, USER, SUBJECT, "open", egress.job_digest(row), decided_via="web")
+        conn.commit()
+        task = _occurrence(conn, cfg, reach="public", prompt="different text")
+        assert reach_for_task(conn, task, skill_index=INDEX).public
+
+
+class TestPublishingUnreviewed:
+    def _trusted(self, conn, task, flag=True):
+        job = db.get_user_scheduled_jobs(conn, USER)[0]
+        job.publish_shared_kv_trusted = flag
+        return scheduler._publish_is_trusted(conn, task, job)
+
+    def test_an_occurrence_the_setting_let_run_is_not_trusted(self, conn, path, tmp_path):
+        task = _occurrence(conn, _config_at(path, tmp_path, "public"), reach="public")
+        assert not self._trusted(conn, task)
+
+    def test_an_approved_one_keeps_its_flag(self, conn, path, tmp_path):
+        task = _occurrence(conn, _config_at(path, tmp_path, "limited"), reach="public")
+        assert self._trusted(conn, task)
+        assert not self._trusted(conn, task, flag=False)
+
+
 class TestAskingUnderEachSetting:
+    def test_editing_an_approved_job_the_setting_covers_asks_nothing(self, conn):
+        _sync(conn, _job(reach="public"), ceiling="limited")
+        row = egress.job_row_by_subject(conn, USER, SUBJECT)
+        egress.approve_job(conn, USER, SUBJECT, "public", egress.job_digest(row), decided_via="web")
+        conn.commit()
+        assert _sync(conn, _job(reach="public", prompt="edited"), ceiling="public") == []
+        assert _asked(conn) == set()
+
+    def test_editing_an_approved_job_with_no_reach_under_full_asks_nothing(self, conn):
+        _sync(conn, _job(), ceiling="full")
+        row = egress.job_row_by_subject(conn, USER, SUBJECT)
+        egress.approve_job(conn, USER, SUBJECT, "open", egress.job_digest(row), decided_via="web")
+        conn.commit()
+        assert _sync(conn, _job(prompt="edited"), ceiling="full") == []
+        assert _asked(conn) == set()
+
+    def test_editing_an_approved_full_job_past_the_setting_asks_again(self, conn):
+        _sync(conn, _job(reach="full"), ceiling="public")
+        row = egress.job_row_by_subject(conn, USER, SUBJECT)
+        egress.approve_job(conn, USER, SUBJECT, "open", egress.job_digest(row), decided_via="web")
+        conn.commit()
+        assert _sync(conn, _job(reach="full", prompt="edited"), ceiling="public") == [SUBJECT]
+        assert _asked(conn) == {"open"}
+
+    def test_removing_an_approval_does_not_ask_again(self, conn):
+        _sync(conn, _job(reach="full", egress=("example.com",)), ceiling="public")
+        row = egress.job_row_by_subject(conn, USER, SUBJECT)
+        digest = egress.job_digest(row)
+        egress.approve_job(conn, USER, SUBJECT, "open", digest, decided_via="web")
+        egress.remove_grant(conn, USER, SUBJECT, f"open:{digest}")
+        conn.commit()
+        job = _job(reach="full", egress=("example.com",))
+        assert _sync(conn, job, ceiling="public") == []
+        rows = {row["entry"]: row["dismissed"] for row in egress.list_refused(conn, USER, SUBJECT)}
+        assert rows == {"open": 1, "example.com": 0}
+
     @pytest.mark.parametrize("reach,ceiling,asked", [
         ("public", "limited", {"public"}), ("public", "public", set()), ("public", "full", set()),
         ("full", "limited", {"open"}), ("full", "public", {"open"}), ("full", "full", set()),

@@ -1718,7 +1718,7 @@ def cmd_egress(args):
                 state = f"{item['by_default']}-by-default" if item["by_default"] else item["state"]
                 print(f"{item['subject']} {state} {' '.join(entries)}".rstrip())
                 if item["job"] and item["job"]["waiting"]:
-                    print(f"  waiting {' '.join(item['waiting_on']) or 'public'}")
+                    print(f"  waiting {' '.join(item['waiting_on']) or item['job']['reach']}")
                 for refused in item["refused"]:
                     print(f"  refused {refused['entry']} hits={refused['hits']}")
             return

@@ -60,6 +60,7 @@ class TestPublish:
 
         class _T:
             user_id = "alice"
+            id = 0
         with db.get_db(cfg.db_path) as conn:
             job = _make_job(conn, "alice", publish="markets", trusted=True)
             scheduler._publish_result_to_shared_kv(conn, cfg, _T(), job, "table")

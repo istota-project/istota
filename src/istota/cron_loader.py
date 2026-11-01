@@ -1774,12 +1774,13 @@ def _sync_job_approvals(
     runs_as = egress.unapproved_reach(fj.reach, ceiling)
     if old_request and old_request != request and old_request not in dropped:
         egress.clear_refused(conn, user_id, subject, old_request)
-    ask = list(dropped)
-    if request and runs_as == fj.reach:
-        # The deployment covers it: nothing is left to ask, whatever an earlier tick did.
-        if request not in dropped:
-            egress.clear_refused(conn, user_id, subject, request)
-    elif request and request not in ask:
+    # The deployment covers it: nothing is left to ask, whatever an edit or an earlier
+    # tick did.
+    covered = egress.REACH_REQUESTS.get(runs_as)
+    ask = [entry for entry in dropped if entry != covered]
+    if covered:
+        egress.clear_refused(conn, user_id, subject, covered)
+    if request and request != covered and request not in ask:
         rows = {row["entry"] for row in egress.list_refused(conn, user_id, subject)}
         if (
             f"{request}:{digest}" not in egress.grants_for(conn, user_id, subject)
