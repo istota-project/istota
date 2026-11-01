@@ -177,6 +177,7 @@ case "$args" in
     if [ -n "${STUB_COMPOSE_CONFIG:-}" ]; then printf '%s\n' "$STUB_COMPOSE_CONFIG"
     else echo '{"volumes": {"data": {"name": "istota_data"}}}'; fi ;;
   *" info --format {{.Driver}} ") echo "${STUB_DRIVER:-overlay2}" ;;
+  *" system df "*) printf '%b' "${STUB_SYSTEM_DF:-}" ;;
   *" info --format {{.DockerRootDir}} ") echo "${STUB_DOCKER_ROOT:-/nonexistent}" ;;
   *" devbox compose-file"*)
     if [ -n "${STUB_DEVBOX_COMPOSE:-}" ]; then printf '%s\n' "$STUB_DEVBOX_COMPOSE"
@@ -489,19 +490,30 @@ class TestUpdateBuildCleanup:
         calls = fx.docker_calls()
         build = next(i for i, c in enumerate(calls) if " build " in f"{c} ")
         up = next(i for i, c in enumerate(calls) if " up -d " in f"{c} ")
-        assert calls.count(self.cache_prune) == 1
+        assert calls.count(self.cache_prune) == 2
         assert calls.count(self.image_prune) == 2
         assert calls.index(self.image_prune) < calls.index(self.cache_prune) < build
-        assert up < calls.index("image rm istota:old") < len(calls) - 2
-        assert calls[-2] == self.image_prune
-        assert self.age_prune.fullmatch(calls[-1]), calls[-1]
+        assert up < calls.index("image rm istota:old") < len(calls) - 3
+        assert calls[-3] == self.image_prune
+        assert self.age_prune.fullmatch(calls[-2]), calls[-2]
+        assert calls[-1] == self.cache_prune
         assert "Total reclaimed space: 1.5GB" in result.stdout
 
     def test_the_age_covers_the_build_and_no_more(self, fx):
         result = _source(fx, 'ENV_FILE=/dev/null; prune_build_artifacts "$(( $(date +%s) - 300 ))"')
         assert result.returncode == 0, result.stderr
-        age = int(re.search(r"until=(\d+)s", fx.docker_calls()[-1]).group(1))
+        age_call = next(c for c in fx.docker_calls() if self.age_prune.fullmatch(c))
+        age = int(re.search(r"until=(\d+)s", age_call).group(1))
         assert 300 <= age <= 330, age
+
+    def test_after_a_good_build_what_it_used_is_held_to_the_bound_too(self, fx):
+        """The age filter keeps all a build used, on one install 4.9 GB beyond what
+        images hold, so the bound follows it."""
+        result = _source(fx, 'ENV_FILE=/dev/null; prune_build_artifacts "$(date +%s)"')
+        assert result.returncode == 0, result.stderr
+        calls = fx.docker_calls()
+        assert self.age_prune.fullmatch(calls[-2]), calls
+        assert calls[-1] == self.cache_prune
 
     def test_a_failed_build_keeps_the_cache_its_retry_wants(self, fx):
         fx.commit("v1")
@@ -555,8 +567,8 @@ class TestUpdateBuildCleanup:
             for ref in images.splitlines():
                 assert (f"image rm {ref}" in calls) == (ref.split(":")[1] not in {tag, previous})
             assert "image rm unrelated:old" not in calls
-            assert calls.count(self.cache_prune) == 1
-            assert self.age_prune.fullmatch(calls[-1]), calls[-1]
+            assert calls.count(self.cache_prune) == 2
+            assert self.age_prune.fullmatch(calls[-2]), calls[-2]
             assert f"ISTOTA_PREVIOUS_TAG={previous}\n" in fx.env_text()
         fx.calls.unlink()
         result = fx.run("rollback")
@@ -2342,6 +2354,63 @@ class TestReclaim:
         assert result.returncode == 0, result.stderr
         assert "holds 1 layers (3 MB)" in result.stdout
         assert (root / "overlay2" / "lostdir").is_dir()
+
+    # As the real command prints them, from a healthy install on this store.
+    SYSTEM_DF = (
+        "Images|1MB|0B (0%)\\nContainers|500kB|0B (0%)\\n"
+        "Local Volumes|3.075GB|0B (0%)\\nBuild Cache|9GB|1MB\\n"
+    )
+
+    def _store(self, tmp_path, mb):
+        store = tmp_path / "containerd"
+        store.mkdir()
+        (store / "blob").write_bytes(b"x" * (mb * 1024 * 1024))
+        return str(store)
+
+    def test_a_store_holding_more_than_docker_accounts_for_is_reported_and_left(self, fx, tmp_path):
+        store = self._store(tmp_path, 9)
+        result = _source(
+            fx, 'RECLAIM_UNCLAIMED_WARN_MB=2; reclaim_unclaimed_store',
+            STUB_DRIVER="overlayfs", STUB_SYSTEM_DF=self.SYSTEM_DF, ISTOTA_CONTAINERD_ROOT=store,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "containerd holds 9 MB, and Docker's images, containers and build cache account for 2 MB" in result.stdout
+        assert (tmp_path / "containerd" / "blob").is_file()
+
+    def test_a_store_docker_accounts_for_says_nothing(self, fx, tmp_path):
+        store = self._store(tmp_path, 3)
+        result = _source(
+            fx, 'RECLAIM_UNCLAIMED_WARN_MB=2; reclaim_unclaimed_store',
+            STUB_DRIVER="overlayfs", STUB_SYSTEM_DF=self.SYSTEM_DF, ISTOTA_CONTAINERD_ROOT=store,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == ""
+
+    @pytest.mark.parametrize("env", [
+        {"STUB_DRIVER": "overlay2"},
+        {"STUB_DRIVER": "overlayfs", "STUB_SYSTEM_DF": ""},
+    ], ids=["other driver", "no figures"])
+    def test_with_nothing_to_compare_it_says_nothing(self, fx, tmp_path, env):
+        env = {"STUB_SYSTEM_DF": self.SYSTEM_DF, **env}
+        result = _source(
+            fx, 'RECLAIM_UNCLAIMED_WARN_MB=2; reclaim_unclaimed_store',
+            ISTOTA_CONTAINERD_ROOT=self._store(tmp_path, 9), **env,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == ""
+
+    def test_both_the_listing_and_an_update_run_the_check(self, fx, leftovers, tmp_path):
+        store = self._store(tmp_path, 9)
+        env = {**leftovers["env"], "STUB_DRIVER": "overlayfs", "STUB_SYSTEM_DF": self.SYSTEM_DF,
+               "ISTOTA_CONTAINERD_ROOT": store, "ISTOTA_RECLAIM_UNCLAIMED_MB": "2"}
+        listing = fx.run("reclaim", **env)
+        assert listing.returncode == 0, listing.stderr
+        assert "containerd holds 9 MB" in listing.stdout
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        update = fx.run("update", "v1", **env)
+        assert update.returncode == 0, update.stdout + update.stderr
+        assert "containerd holds 9 MB" in update.stdout
 
     def test_an_update_says_what_is_left_and_removes_none_of_it(self, fx, leftovers):
         fx.commit("v1")

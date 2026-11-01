@@ -152,7 +152,7 @@ The image records the tag and commit it was built from. The daemon's start-up lo
 
 Every command that writes (`update`, `rollback`, `setup`, `apply`, `up`, `down` and the rest) holds `/srv/app/istota/.stack.lock`. A second one waits up to ten minutes, then gives up and names the command holding it. `setup --web` never waits: it refuses at once while another command runs. `istota-stack.service` allows its stop eleven minutes, so a `systemctl stop` behind a running update reaches that message rather than being killed.
 
-Updates keep the current and previous deployment images for rollback and remove older Istota image tags. `istota-stack update` removes dangling images labeled for the Istota Compose project before building and after each attempt. It also prunes the build cache. Before building and after a failed build, it trims cache toward a 2 GB target, so a retry stays warm. After a successful build, it drops all cache that build did not use, so the next update stays warm and nothing stale is kept. Tagged images, containers and volumes are preserved. Unlabeled dangling images are left alone because their owner is unknown.
+Updates keep the current and previous deployment images for rollback and remove older Istota image tags. `istota-stack update` removes dangling images labeled for the Istota Compose project before building and after each attempt. It also prunes the build cache. Before building and after a failed build, it trims cache toward a 2 GB target, so a retry stays warm. After a successful build, it drops all cache that build did not use, then trims what remains to the same 2 GB target, so the next update reuses most of its layers without the cache growing. Tagged images, containers and volumes are preserved. Unlabeled dangling images are left alone because their owner is unknown.
 
 Stack builds use Docker's default builder explicitly. Its cache is shared with other builds on that Docker daemon, so cleanup can make those builds slower too. Layers needed by retained images and active builds cannot be reclaimed. Each prune prints the space it reclaimed, and each build cache prune adds a line to `/srv/app/istota/reclaimed.log`; a cleanup failure prints a warning without changing the update's exit status.
 
@@ -167,6 +167,8 @@ Stack builds use Docker's default builder explicitly. Its cache is shared with o
 | `root-caches` | Root's `uv` and `npm` caches, which nothing in the stack reads | |
 
 `reclaim` also reports layers in Docker's layer store that no image, container or build record holds. `reclaim` reports them and leaves them. A prune may not clear them either: on one install `docker system prune -a` removed 8 of 39 such layers and left about 6.8 GB. That prune also removes the previous release's images, which `rollback` needs.
+
+That report reads files only overlay2 keeps. On the containerd image store, `reclaim` and each update instead compare the disk `/var/lib/containerd` takes with what `docker system df` says images, containers and build cache hold, and warn when the difference passes 5 GB. A healthy install has some difference, about 2 GB on the one measured, so what matters is a difference that keeps growing. The warning removes nothing.
 
 ### The daemon service is called `daemon`
 
