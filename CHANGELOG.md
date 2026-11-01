@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A personal briefing's model no longer has tools.** Istota gathers a briefing's sources before the model starts, so the model only formats what it was given and cannot fetch a page, run a command or read a file. Group briefing research and agent shared blocks keep theirs.
 - **Network access no longer lists module jobs.** Upgraded installs showed cards such as `_module.feeds.prune` with a Full access badge and controls that changed nothing. They are hidden unless one was actually refused something you need to answer.
 - **Set a job's access from Network access.** Each job now has one Limited, Public or Full access control, replacing the separate approve and remove buttons, and Public no longer needs `reach = "public"` in CRON.md first. Your choice is saved to the file, and Public warns that the job loses memory and files. If the file cannot be written, a wider choice is refused and Limited still removes any approval.
 - **Network access separates disabled jobs from the ones that run.** Disabled jobs move to a closed group at the bottom of the page, which opens when one has a request to answer, and a suspended job carries a badge. `istota doctor` now warns only about jobs on full access that actually run, and notes the rest.

@@ -301,6 +301,8 @@ Personal briefings are archived on delivery and pruned by `[briefings] archive_r
 
 Generation makes one source gather and one model call for the edition. Before the call, the worker saves a protected manifest with the edition title, ordered numeric block IDs, block titles, render modes, presentation widths and source status. Duplicate titles remain distinct. Blocks with no gathered content are omitted from the request; failed sources keep their provenance outside the reader-facing document.
 
+The model has no tools. Istota gathers every source before the call and the prompt holds all of it, so the model can only format what it was given. It cannot fetch a page, run a command or read a file, and its prompt has no tools section. Group briefing research and agent shared blocks are separate tasks and keep their tools.
+
 The model returns `{"version": 2, "blocks": [{"block_id": 42, "body_md": "..."}]}`. Each requested ID must appear exactly once. An empty string explicitly omits a block whose gathered content produced nothing useful. The model supplies only block bodies; titles, order, presentation and source status come from the manifest. The edition title uses the configured title (blank derives it from the briefing name) and the task's creation date in the user's timezone.
 
 Before marking the task completed, indexing its answer or delivering it, the scheduler validates the response against that manifest. Missing, duplicate or unknown IDs, wrong types and unsupported versions fail through the normal quiet briefing retry path. An edition with no useful blocks fails with `briefing_no_content` rather than publishing an empty edition. Useful blocks with failed sources retain a partial-source status.
