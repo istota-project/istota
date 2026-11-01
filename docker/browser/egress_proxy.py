@@ -59,6 +59,10 @@ TUNNEL_IDLE_S = 600
 _dns_pool = ThreadPoolExecutor(max_workers=32, thread_name_prefix="egress-dns")
 
 REFUSED_BODY = b"Refused: this is a private address, which the browser may not reach.\n"
+# How browse_api tells this refusal from a site's own 403. A site can send any
+# header, and this relay does not read a head as Chrome does (1xx heads, bare LF),
+# so what proves it is a value entrypoint.sh makes per start, not removing a name.
+REFUSED_HEADER = "X-Istota-Refused"
 
 
 def chrome_args():
@@ -67,6 +71,10 @@ def chrome_args():
         f"--proxy-server=http://127.0.0.1:{PROXY_PORT}",
         "--proxy-bypass-list=<-loopback>",
     ]
+
+
+def refusal_mark():
+    return os.environ.get("BROWSER_REFUSAL_MARK", "")
 
 
 def private_hosts_from(value):
@@ -145,9 +153,9 @@ def _parse_head(head):
     return method, host, port, ("\r\n".join(kept) + "\r\n\r\n").encode("latin-1")
 
 
-async def _answer(writer, status, reason, body=b""):
+async def _answer(writer, status, reason, body=b"", extra_headers=""):
     writer.write(
-        f"HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain\r\n"
+        f"HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain\r\n{extra_headers}"
         f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body
     )
     await writer.drain()
@@ -269,7 +277,7 @@ async def _handle(reader, writer, *, private_hosts, resolve, connect, slots):
                 addresses = []
             if refused is not None:
                 log.info("refused %s %s:%s, which resolves to %s", method, host, port, refused)
-                await _answer(writer, 403, "Forbidden", REFUSED_BODY)
+                await _answer(writer, 403, "Forbidden", REFUSED_BODY, f"{REFUSED_HEADER}: {refusal_mark()}\r\n")
                 return
             opened = await _open_checked(addresses, port, connect) if addresses else None
             if opened is None:

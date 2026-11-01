@@ -284,12 +284,15 @@ class TestWhatChromesUserCanReach:
                 timeout=120, interval=3, what="the browser to come back",
             )
         lima.stack_exec(stack, "python3 -c " + shlex.quote(
-            "import json, os, urllib.request\n"
+            "import json, os, urllib.error, urllib.request\n"
             "req = urllib.request.Request('http://browser:9223/browse', method='POST',\n"
             "    data=json.dumps({'url': 'http://localhost:9224/live', 'timeout': 60}).encode(),\n"
             "    headers={'Content-Type': 'application/json', 'X-Istota-User': 'vm-witness',\n"
             "             'Authorization': 'Bearer ' + os.environ['ISTOTA_BROWSER_API_TOKEN']})\n"
-            "print(urllib.request.urlopen(req, timeout=200).status)\n"), timeout=240)
+            "try:\n"
+            "    raise SystemExit(urllib.request.urlopen(req, timeout=200).read()[:500])\n"
+            "except urllib.error.HTTPError as answer:\n"
+            "    assert json.load(answer)['error'] == 'private_address_refused'\n"), timeout=240)
         probe = lima.SCRATCH + "/browser_uid_probe.py"
         stack.write(probe, (Path(__file__).parent.parent / "image" / "browser_uid_probe.py").read_text())
         out = stack.out(f"docker exec -i -u browser {cid} python - < {probe}", timeout=180)
