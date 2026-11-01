@@ -53,6 +53,8 @@
 #                               on stdin, onto a stack never set up
 #   istota-stack retire-bare-metal --namespace NS [--dry-run]
 #                               remove what the old Ansible role installed, once the stack runs
+#   istota-stack reclaim [--apply NAME...]
+#                               list what the stack left behind on this disk, or remove the named items
 #   istota-stack localize-workspace [--copy-only] [--resume] [--dry-run] [--no-note] [--accept-skipped]
 #                               move a mounted workspace into the state directory, offline
 #   istota-stack put-files [--dry-run]
@@ -161,6 +163,11 @@ LEGACY_DEVBOX_COMPOSE="${CONFIG_DIR}/compose.devbox.yml"
 STAGING_DIR="${STACK}/staging"
 ISTOTA_UID=10001
 PROJECT=istota
+RECLAIM_LOG="${STACK}/reclaimed.log"
+RECLAIM_HOME="${ISTOTA_RECLAIM_HOME:-/root}"
+# Slack on the age filter, so a layer a build touched as it began is not older
+# than the build by a rounding.
+BUILD_CACHE_MARGIN_SECONDS=10
 # The daemon, web and webhooks image. Releases before the service was renamed
 # to `daemon` built it as istota-istota.
 IMAGE=istota
@@ -893,27 +900,60 @@ prune_images() {
     done
 }
 
+# One line per cleanup that reclaimed something, for reading later: nothing else
+# keeps a prune's output, and a disk that filled slowly is noticed long after.
+record_reclaimed() {
+    local what="$1" amount
+    amount="$(printf '%s\n' "$2" | sed -n 's/^Total[^:]*:[[:space:]]*//p' | tail -n 1)"
+    [ -n "$amount" ] || return 0
+    printf '%s %s reclaimed %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$what" "$amount" >> "$RECLAIM_LOG" 2>/dev/null || return 0
+    if [ "$(wc -l < "$RECLAIM_LOG")" -gt 1000 ]; then
+        tail -n 500 "$RECLAIM_LOG" > "${RECLAIM_LOG}.tmp" 2>/dev/null \
+            && mv "${RECLAIM_LOG}.tmp" "$RECLAIM_LOG" 2>/dev/null || rm -f "${RECLAIM_LOG}.tmp"
+    fi
+}
+
+# The VM's default builder is also used explicitly by build_images and
+# build_devbox_images. Cache is shared; tagged images and volumes are not cache.
+prune_build_cache() {
+    local output rc=0
+    output="$(BUILDX_BUILDER=default docker builder prune --all --force "$@" 2>&1)" || rc=$?
+    printf '%s\n' "$output"
+    record_reclaimed "build cache" "$output"
+    return "$rc"
+}
+
 # Compose labels its built images even after a rebuild leaves them untagged.
 # No --all here: a tagged rollback image must survive without a container.
+#
+# Given when a build that succeeded began, it drops all cache that build did not
+# use: the next update stays warm and nothing stale is kept. `--keep-storage`
+# counts records no image holds and stops at 2 GB of them, which is the rule when
+# no finished build says what is still wanted: before a build, and after a failed
+# one, whose retry wants the cache it had.
 prune_build_artifacts() {
+    local began="${1:-}" age
     log "pruning dangling Istota images"
     docker image prune --force --filter "label=com.docker.compose.project=${PROJECT}" \
         || log "WARNING: could not prune dangling Istota images"
-    # The VM's default builder is also used explicitly by build_images and
-    # build_devbox_images. Cache is shared; tagged images and volumes are not cache.
-    log "pruning unused build cache (keep 2GB)"
-    BUILDX_BUILDER=default docker builder prune --all --force --keep-storage 2GB \
-        || log "WARNING: could not prune build cache"
+    if [ -n "$began" ]; then
+        age=$(( $(date +%s) - began + BUILD_CACHE_MARGIN_SECONDS ))
+        log "pruning build cache the build did not use"
+        prune_build_cache --filter "until=${age}s" || log "WARNING: could not prune build cache"
+    else
+        log "pruning unused build cache (keep 2GB)"
+        prune_build_cache --keep-storage 2GB || log "WARNING: could not prune build cache"
+    fi
 }
 
 # Read the retained pair at cleanup time: before a failed build it is still
 # the old pair; after the switch it is the new one. Never remove volumes.
 cleanup_update() {
-    local current previous
+    local began="${1:-}" current previous
     current="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     previous="$(env_get "$ENV_FILE" ISTOTA_PREVIOUS_TAG)"
     prune_images "$current" "$previous" || log "WARNING: could not prune older Istota images"
-    prune_build_artifacts
+    prune_build_artifacts "$began"
 }
 
 render_devbox_compose() {
@@ -1448,7 +1488,8 @@ cmd_update_from_checkout() {
 }
 
 update_from_checkout() {
-    local tag="$1" unsigned="$2" before="$3" current current_unsigned previous previous_unsigned up_rc=0
+    local tag="$1" unsigned="$2" before="$3" current current_unsigned previous previous_unsigned up_rc=0 began
+    began="$(date +%s)"
     current="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     current_unsigned="$(env_get "$ENV_FILE" ISTOTA_TAG_UNSIGNED)"
     if [ -n "$images_loaded" ]; then
@@ -1492,7 +1533,8 @@ update_from_checkout() {
         run_local_layers "$tag" || log "WARNING: a local layer did not build (\`istota-stack local-layers --status\`); the stack runs ${tag}'s own images."
     fi
     copy_stack_env_out
-    cleanup_update
+    reclaim_hint
+    cleanup_update "$began"
     # A successful update may exec provision.sh, which does not run EXIT traps.
     trap - EXIT
     if [ "$up_rc" -ne 0 ]; then
@@ -3367,6 +3409,233 @@ cmd_retire_bare_metal() {
     log "${ns} retired${RETIRE_DRY:+ (dry run: nothing was removed)}"
 }
 
+# What the stack left on this disk that no update removes. Listing reads only.
+# Removing is by name, because these do not come back: `update` never removes a
+# volume and never deletes this on its own.
+RECLAIM_ITEMS="old-state-volume test-cache-volume legacy-browser-profile containerd-images root-caches"
+
+reclaim_docker_driver() { docker info --format '{{.Driver}}' 2>/dev/null || true; }
+
+reclaim_legacy_profile() {
+    local mount
+    mount="$(docker volume inspect -f '{{.Mountpoint}}' "${PROJECT}_browser_profile" 2>/dev/null || true)"
+    [ -n "$mount" ] || return 0
+    echo "${mount}/legacy-profile"
+}
+
+# Docker's own image store on this driver is /var/lib/docker: anything in
+# containerd's moby namespace is left from before the driver changed. On the
+# containerd image store those are Docker's live images, so they are never listed.
+reclaim_containerd_images() {
+    command -v ctr >/dev/null 2>&1 || return 0
+    [ "$(reclaim_docker_driver)" = overlay2 ] || return 0
+    ctr -n moby images ls -q 2>/dev/null || true
+}
+
+reclaim_present() {
+    case "$1" in
+        old-state-volume) docker volume inspect "${PROJECT}_istota_data" >/dev/null 2>&1 ;;
+        test-cache-volume) docker volume inspect istota-test-cache >/dev/null 2>&1 ;;
+        legacy-browser-profile)
+            local path
+            path="$(reclaim_legacy_profile)"
+            [ -n "$path" ] && { [ -e "$path" ] || [ -L "$path" ]; } ;;
+        containerd-images) [ -n "$(reclaim_containerd_images)" ] ;;
+        root-caches) [ -e "${RECLAIM_HOME}/.cache/uv" ] || [ -e "${RECLAIM_HOME}/.npm" ] ;;
+    esac
+}
+
+reclaim_describe() {
+    case "$1" in
+        old-state-volume) echo "volume ${PROJECT}_istota_data, the state as it was before it moved to ${DATA_DIR}" ;;
+        test-cache-volume) echo "volume istota-test-cache, from a test run on this host" ;;
+        legacy-browser-profile) echo "the old shared browser profile, which no user inherits" ;;
+        containerd-images) echo "containerd images Docker does not use: $(reclaim_containerd_images | tr '\n' ' ')(the size is all of /var/lib/containerd)" ;;
+        root-caches) echo "root's uv and npm caches, which nothing in the stack reads" ;;
+    esac
+}
+
+reclaim_size() {
+    local path=""
+    case "$1" in
+        old-state-volume) path="$(docker volume inspect -f '{{.Mountpoint}}' "${PROJECT}_istota_data" 2>/dev/null || true)" ;;
+        test-cache-volume) path="$(docker volume inspect -f '{{.Mountpoint}}' istota-test-cache 2>/dev/null || true)" ;;
+        legacy-browser-profile) path="$(reclaim_legacy_profile)" ;;
+        containerd-images) path=/var/lib/containerd ;;
+        root-caches)
+            du -sch "${RECLAIM_HOME}/.cache/uv" "${RECLAIM_HOME}/.npm" 2>/dev/null | tail -n 1 | cut -f1 || true
+            return 0 ;;
+    esac
+    [ -n "$path" ] && [ -e "$path" ] || { echo "?"; return 0; }
+    du -sh "$path" 2>/dev/null | cut -f1 || echo "?"
+}
+
+# The volume names the compose files declare, every profile's included.
+reclaim_compose_volumes() {
+    COMPOSE_PROFILES='*' compose config --format json 2>/dev/null \
+        | python3 -c 'import json, sys
+for volume in json.load(sys.stdin).get("volumes", {}).values():
+    print(volume.get("name", ""))'
+}
+
+# Why a volume must stay, or nothing. Failing to find out is a reason.
+reclaim_volume_refusal() {
+    local volume="$1" users declared
+    if ! users="$(docker ps -aq --filter "volume=${volume}" 2>/dev/null)"; then
+        echo "could not ask Docker which containers use it"
+        return 0
+    fi
+    if [ -n "$users" ]; then
+        echo "a container uses it"
+        return 0
+    fi
+    if ! declared="$(reclaim_compose_volumes)"; then
+        echo "could not read the compose files"
+        return 0
+    fi
+    if printf '%s\n' "$declared" | grep -qxF "$volume"; then
+        echo "a compose file names it"
+    fi
+}
+
+# Whether two master key files hold one key. uid 10001 can write both, so nothing
+# is followed, and only the answer leaves python.
+reclaim_same_key() {
+    python3 -I -c 'import os, stat, sys
+def read(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("not a regular file")
+        return os.read(fd, 4096)
+    finally:
+        os.close(fd)
+try:
+    first = read(sys.argv[1])
+    sys.exit(0 if first and first == read(sys.argv[2]) else 1)
+except OSError:
+    sys.exit(1)' "$1" "$2"
+}
+
+reclaim_refusal() {
+    local path mount
+    case "$1" in
+        old-state-volume)
+            # An update onto an empty state directory starts a stack and mints a
+            # new key, which leaves this volume the only copy of the state. A
+            # copied state kept its key, so the same key is what says it moved.
+            mount="$(docker volume inspect -f '{{.Mountpoint}}' "${PROJECT}_istota_data" 2>/dev/null || true)"
+            if ! reclaim_same_key "${mount}/.secret_key" "${DATA_DIR}/.secret_key"; then
+                echo "${DATA_DIR} does not hold this volume's master key, so it may be the only copy of the state"
+                return 0
+            fi
+            reclaim_volume_refusal "${PROJECT}_istota_data" ;;
+        test-cache-volume) reclaim_volume_refusal istota-test-cache ;;
+        legacy-browser-profile)
+            path="$(reclaim_legacy_profile)"
+            if [ -L "$path" ] || [ ! -d "$path" ]; then echo "${path} is not a plain directory"; fi ;;
+    esac
+}
+
+reclaim_remove() {
+    local ref failed=0
+    case "$1" in
+        old-state-volume) docker volume rm "${PROJECT}_istota_data" >/dev/null ;;
+        test-cache-volume) docker volume rm istota-test-cache >/dev/null ;;
+        legacy-browser-profile) rm -rf -- "$(reclaim_legacy_profile)" ;;
+        containerd-images)
+            for ref in $(reclaim_containerd_images); do
+                ctr -n moby images rm --sync "$ref" >/dev/null || failed=1
+            done
+            return "$failed" ;;
+        root-caches) rm -rf -- "${RECLAIM_HOME}/.cache/uv" "${RECLAIM_HOME}/.npm" ;;
+    esac
+}
+
+# Layers in Docker's store that no image, container or BuildKit record holds. No
+# Docker command removes them, so they are reported rather than offered. Written
+# for overlay2, the one driver that keeps these files.
+reclaim_unheld_layers() {
+    local root db snapshots held bytes=0 count=0 chain_dir chain dir size id
+    [ "$(reclaim_docker_driver)" = overlay2 ] || return 0
+    root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+    db="${root}/image/overlay2/layerdb/sha256"
+    snapshots="${root}/buildkit/snapshots.db"
+    [ -d "$db" ] && [ -r "$snapshots" ] || return 0
+    held="$(for id in $(docker image ls -aq 2>/dev/null) $(docker ps -aq 2>/dev/null); do
+        docker inspect -f '{{.GraphDriver.Data.UpperDir}}:{{.GraphDriver.Data.LowerDir}}' "$id" 2>/dev/null || true
+    done | tr ':' '\n' | sed -n 's#.*/overlay2/\([^/]*\)/diff#\1#p' | sort -u)"
+    for chain_dir in "$db"/*/; do
+        [ -f "${chain_dir}cache-id" ] || continue
+        chain="$(basename "$chain_dir")"
+        dir="$(cat "${chain_dir}cache-id")"
+        # A here-string, not a pipe: grep -q exiting early would SIGPIPE printf,
+        # and pipefail would then read a held layer as unheld.
+        if grep -qxF "$dir" <<< "$held"; then continue; fi
+        if grep -aqF -e "$chain" -e "$dir" "$snapshots"; then continue; fi
+        size="$(cat "${chain_dir}size" 2>/dev/null || echo 0)"
+        bytes=$(( bytes + size ))
+        count=$(( count + 1 ))
+    done
+    [ "$count" -gt 0 ] || return 0
+    log "Docker's layer store holds ${count} layers ($(( bytes / 1000000 )) MB) with no image, container or build record behind them."
+    log "  No Docker command removes these, and reclaim does not touch them."
+}
+
+reclaim_hint() {
+    local item found=""
+    for item in $RECLAIM_ITEMS; do
+        if reclaim_present "$item"; then found="${found} ${item}"; fi
+    done
+    [ -z "$found" ] || log "left behind on this disk:${found}. \`istota-stack reclaim\` says how much."
+}
+
+cmd_reclaim() {
+    local item refusal rc=0 before
+    # Every probe reads a failure as "not there", so a stopped Docker would read
+    # as a clean disk.
+    docker info >/dev/null 2>&1 || die "cannot reach Docker, so reclaim cannot say what is on this disk."
+    if [ "$#" -eq 0 ]; then
+        for item in $RECLAIM_ITEMS; do
+            reclaim_present "$item" || continue
+            refusal="$(reclaim_refusal "$item")"
+            log "${item}  $(reclaim_size "$item")  $(reclaim_describe "$item")${refusal:+  (stays: ${refusal})}"
+        done
+        reclaim_unheld_layers
+        log "\`istota-stack reclaim --apply NAME...\` removes what is listed. It cannot be undone."
+        return 0
+    fi
+    [ "$1" = --apply ] && [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+    shift
+    for item in "$@"; do
+        case " $RECLAIM_ITEMS " in
+            *" $item "*) ;;
+            *) echo "[istota-stack] ${item} is not something reclaim removes: ${RECLAIM_ITEMS}" >&2; exit 64 ;;
+        esac
+    done
+    for item in "$@"; do
+        if ! reclaim_present "$item"; then
+            log "${item}: nothing to remove"
+            continue
+        fi
+        refusal="$(reclaim_refusal "$item")"
+        if [ -n "$refusal" ]; then
+            log "${item} stays: ${refusal}"
+            rc=1
+            continue
+        fi
+        before="$(reclaim_size "$item")"
+        if ! reclaim_remove "$item"; then
+            log "${item}: could not remove it"
+            rc=1
+            continue
+        fi
+        record_reclaimed "$item" "Total: ${before}"
+        log "${item}: removed ${before}"
+    done
+    return "$rc"
+}
+
 main() {
     local command="${1:-}"
     [ "$#" -gt 0 ] && shift
@@ -3393,6 +3662,9 @@ main() {
         # Reading the layers' status is a read.
         local-layers)
             [ "${1:-}" = --status ] || take_stack_lock local-layers ;;
+        # So is listing what reclaim would remove.
+        reclaim)
+            [ "$#" -eq 0 ] || take_stack_lock reclaim ;;
         # Setting a key writes host.env, which setup and restore write too;
         # reading one is a read. stage and unstage take none: each makes or
         # removes a directory of its own, which only the verb it is handed
@@ -3414,6 +3686,7 @@ main() {
         restore) cmd_restore "$@" ;;
         import-standalone) cmd_import_standalone "$@" ;;
         retire-bare-metal) cmd_retire_bare_metal "$@" ;;
+        reclaim) cmd_reclaim "$@" ;;
         localize-workspace) cmd_localize_workspace "$@" ;;
         put-files) cmd_put_files "$@" ;;
         config-apply) cmd_config_apply "$@" ;;

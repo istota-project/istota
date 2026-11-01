@@ -161,6 +161,23 @@ case "$args" in
   *" builder prune "*|*" image prune "*)
     echo 'Total reclaimed space: 1.5GB'
     exit "${STUB_PRUNE_RC:-0}" ;;
+  *" volume inspect "*)
+    # STUB_VOLUMES holds name=mountpoint pairs; a volume not named does not exist.
+    volume="${!#}"
+    for pair in ${STUB_VOLUMES:-}; do
+      if [ "${pair%%=*}" = "$volume" ]; then echo "${pair#*=}"; exit 0; fi
+    done
+    exit 1 ;;
+  *" ps -aq --filter volume="*)
+    for volume in ${STUB_VOLUME_USERS:-}; do
+      case "$args" in *"volume=$volume "*) echo user-container ;; esac
+    done ;;
+  *" config --format json "*)
+    [ -z "${STUB_COMPOSE_CONFIG_FAILS:-}" ] || exit 1
+    if [ -n "${STUB_COMPOSE_CONFIG:-}" ]; then printf '%s\n' "$STUB_COMPOSE_CONFIG"
+    else echo '{"volumes": {"data": {"name": "istota_data"}}}'; fi ;;
+  *" info --format {{.Driver}} ") echo "${STUB_DRIVER:-overlay2}" ;;
+  *" info --format {{.DockerRootDir}} ") echo "${STUB_DOCKER_ROOT:-/nonexistent}" ;;
   *" devbox compose-file"*)
     if [ -n "${STUB_DEVBOX_COMPOSE:-}" ]; then printf '%s\n' "$STUB_DEVBOX_COMPOSE"
     else echo '{"services": {}}'; fi ;;
@@ -461,6 +478,7 @@ class TestUpdateToTheNewestRelease:
 
 class TestUpdateBuildCleanup:
     cache_prune = "builder prune --all --force --keep-storage 2GB"
+    age_prune = re.compile(r"builder prune --all --force --filter until=\d+s$")
     image_prune = "image prune --force --filter label=com.docker.compose.project=istota"
 
     def test_cleanup_runs_before_build_and_after_old_tags_are_removed(self, fx):
@@ -471,28 +489,48 @@ class TestUpdateBuildCleanup:
         calls = fx.docker_calls()
         build = next(i for i, c in enumerate(calls) if " build " in f"{c} ")
         up = next(i for i, c in enumerate(calls) if " up -d " in f"{c} ")
-        assert calls.count(self.cache_prune) == 2
+        assert calls.count(self.cache_prune) == 1
         assert calls.count(self.image_prune) == 2
         assert calls.index(self.image_prune) < calls.index(self.cache_prune) < build
         assert up < calls.index("image rm istota:old") < len(calls) - 2
-        assert calls[-2:] == [self.image_prune, self.cache_prune]
+        assert calls[-2] == self.image_prune
+        assert self.age_prune.fullmatch(calls[-1]), calls[-1]
         assert "Total reclaimed space: 1.5GB" in result.stdout
 
-    @pytest.mark.parametrize("failure", ["STUB_BUILD_RC", "STUB_UP_RC"])
-    @pytest.mark.parametrize("prune_rc", ["0", "1"])
-    def test_a_failed_attempt_still_cleans_and_keeps_its_exit_status(self, fx, failure, prune_rc):
+    def test_the_age_covers_the_build_and_no_more(self, fx):
+        result = _source(fx, 'ENV_FILE=/dev/null; prune_build_artifacts "$(( $(date +%s) - 300 ))"')
+        assert result.returncode == 0, result.stderr
+        age = int(re.search(r"until=(\d+)s", fx.docker_calls()[-1]).group(1))
+        assert 300 <= age <= 330, age
+
+    def test_a_failed_build_keeps_the_cache_its_retry_wants(self, fx):
         fx.commit("v1")
         fx.tag("v1", key=fx.release_key)
         before = fx.env_text(), fx.head()
-        result = fx.run("update", "v1", STUB_PRUNE_RC=prune_rc, **{failure: "1"})
+        result = fx.run("update", "v1", STUB_BUILD_RC="1")
         assert result.returncode == 1, result.stderr
         calls = fx.docker_calls()
         assert calls.count(self.cache_prune) == 2
+        assert not any(self.age_prune.fullmatch(c) for c in calls)
         assert calls[-2:] == [self.image_prune, self.cache_prune]
         assert "image rm istota:v0" not in calls
-        if failure == "STUB_BUILD_RC":
-            assert (fx.env_text(), fx.head()) == before
-            assert "image rm istota:v1" in calls  # discard an incomplete candidate
+        assert (fx.env_text(), fx.head()) == before
+        assert "image rm istota:v1" in calls  # discard an incomplete candidate
+
+    @pytest.mark.parametrize("failure", ["STUB_BUILD_RC", "STUB_UP_RC"])
+    def test_a_failed_prune_keeps_a_failed_attempts_exit_status(self, fx, failure):
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        result = fx.run("update", "v1", STUB_PRUNE_RC="1", **{failure: "1"})
+        assert result.returncode == 1, result.stderr
+        assert "image rm istota:v0" not in fx.docker_calls()
+
+    def test_what_a_prune_reclaimed_can_be_read_later(self, fx):
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        assert fx.run("update", "v1").returncode == 0
+        lines = (fx.stack / "reclaimed.log").read_text().splitlines()
+        assert lines and all(line.endswith("build cache reclaimed 1.5GB") for line in lines)
 
     def test_cleanup_errors_warn_without_failing_a_successful_update(self, fx):
         fx.commit("v1")
@@ -517,7 +555,8 @@ class TestUpdateBuildCleanup:
             for ref in images.splitlines():
                 assert (f"image rm {ref}" in calls) == (ref.split(":")[1] not in {tag, previous})
             assert "image rm unrelated:old" not in calls
-            assert calls.count(self.cache_prune) == 2
+            assert calls.count(self.cache_prune) == 1
+            assert self.age_prune.fullmatch(calls[-1]), calls[-1]
             assert f"ISTOTA_PREVIOUS_TAG={previous}\n" in fx.env_text()
         fx.calls.unlink()
         result = fx.run("rollback")
@@ -2119,6 +2158,199 @@ class TestTheStackFilesAreCopiedOut:
         day = mount / "Backups" / "config" / _utc_today()
         assert (day / "host.env").read_text() == "STORAGE=host-folder\nINGRESS=local\n"
         assert (day / "stack.env").read_text() == web.env_text()
+
+
+class TestReclaim:
+    """`reclaim` lists by default and removes only what it is told to, by name."""
+
+    @pytest.fixture
+    def leftovers(self, fx, tmp_path):
+        (fx.stack / "data").mkdir(exist_ok=True)
+        (fx.stack / "data" / ".secret_key").write_text("the-key")
+        old_state = tmp_path / "old-state-volume"
+        old_state.mkdir()
+        (old_state / ".secret_key").write_text("the-key")
+        browser = tmp_path / "browser-volume"
+        (browser / "legacy-profile" / "Default").mkdir(parents=True)
+        (browser / "users" / "alice").mkdir(parents=True)
+        home = tmp_path / "root-home"
+        (home / ".cache" / "uv").mkdir(parents=True)
+        (home / ".npm").mkdir()
+        (home / ".local" / "bin").mkdir(parents=True)
+        return {
+            "browser": browser,
+            "home": home,
+            "old_state": old_state,
+            "env": {
+                "STUB_VOLUMES": f"istota_istota_data={old_state} istota-test-cache=/nonexistent "
+                                f"istota_browser_profile={browser}",
+                "ISTOTA_RECLAIM_HOME": str(home),
+            },
+        }
+
+    def _removed(self, fx):
+        return [c for c in fx.docker_calls() if c.startswith("volume rm ")]
+
+    def test_listing_names_each_item_and_removes_nothing(self, fx, leftovers):
+        result = fx.run("reclaim", **leftovers["env"])
+        assert result.returncode == 0, result.stderr
+        for item in ["old-state-volume", "test-cache-volume", "legacy-browser-profile", "root-caches"]:
+            assert item in result.stdout
+        assert not self._removed(fx)
+        assert (leftovers["browser"] / "legacy-profile").is_dir()
+        assert (leftovers["home"] / ".npm").is_dir()
+
+    def test_listing_takes_no_lock_and_applying_does(self, fx, leftovers):
+        lock = fx.stack / ".stack.lock"
+        lock.unlink(missing_ok=True)
+        assert fx.run("reclaim", **leftovers["env"]).returncode == 0
+        assert not lock.exists()
+        assert fx.run("reclaim", "--apply", "root-caches", **leftovers["env"]).returncode == 0
+        assert lock.exists()
+
+    def test_apply_removes_only_what_it_names(self, fx, leftovers):
+        result = fx.run("reclaim", "--apply", "legacy-browser-profile", "root-caches", **leftovers["env"])
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not (leftovers["browser"] / "legacy-profile").exists()
+        assert (leftovers["browser"] / "users" / "alice").is_dir()
+        assert not (leftovers["home"] / ".cache" / "uv").exists()
+        assert not (leftovers["home"] / ".npm").exists()
+        assert (leftovers["home"] / ".local" / "bin").is_dir()
+        assert not self._removed(fx)
+        log = (fx.stack / "reclaimed.log").read_text()
+        assert "legacy-browser-profile reclaimed" in log and "root-caches reclaimed" in log
+
+    def test_a_volume_nothing_uses_goes(self, fx, leftovers):
+        result = fx.run("reclaim", "--apply", "old-state-volume", "test-cache-volume", **leftovers["env"])
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._removed(fx) == ["volume rm istota_istota_data", "volume rm istota-test-cache"]
+
+    @pytest.mark.parametrize("why, env, says", [
+        ("a container", {"STUB_VOLUME_USERS": "istota_istota_data"}, "a container uses it"),
+        ("compose", {"STUB_COMPOSE_CONFIG": '{"volumes": {"old": {"name": "istota_istota_data"}}}'},
+         "a compose file names it"),
+        ("unreadable compose", {"STUB_COMPOSE_CONFIG_FAILS": "1"}, "could not read the compose files"),
+    ])
+    def test_a_volume_something_names_stays(self, fx, leftovers, why, env, says):
+        result = fx.run("reclaim", "--apply", "old-state-volume", **{**leftovers["env"], **env})
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert says in result.stdout
+        assert not self._removed(fx)
+
+    def test_the_old_state_stays_when_the_stack_started_fresh_beside_it(self, fx, leftovers):
+        """An update onto an empty state directory mints a new key and leaves the
+        volume the only copy of the state, with the stack up and nothing using it."""
+        (fx.stack / "data" / ".ownership-10001").write_text("")
+        (fx.stack / "data" / ".secret_key").write_text("a-new-key")
+        result = fx.run("reclaim", "--apply", "old-state-volume", **leftovers["env"])
+        assert result.returncode == 1
+        assert "may be the only copy" in result.stdout
+        assert not self._removed(fx)
+
+    @pytest.mark.parametrize("missing", ["old_state", "data"])
+    def test_the_old_state_stays_when_a_key_cannot_be_compared(self, fx, leftovers, missing):
+        holder = leftovers["old_state"] if missing == "old_state" else fx.stack / "data"
+        (holder / ".secret_key").unlink()
+        assert fx.run("reclaim", "--apply", "old-state-volume", **leftovers["env"]).returncode == 1
+        assert not self._removed(fx)
+
+    def test_a_link_at_a_key_does_not_count_as_the_same_key(self, fx, leftovers):
+        key = fx.stack / "data" / ".secret_key"
+        key.unlink()
+        key.symlink_to(leftovers["old_state"] / ".secret_key")
+        assert fx.run("reclaim", "--apply", "old-state-volume", **leftovers["env"]).returncode == 1
+        assert not self._removed(fx)
+
+    def test_a_stopped_docker_does_not_read_as_a_clean_disk(self, fx, leftovers):
+        stub = Path(fx.env["PATH"].split(":")[0]) / "docker"
+        stub.write_text("#!/bin/bash\nexit 1\n")
+        assert fx.run("reclaim", **leftovers["env"]).returncode == 1
+        assert fx.run("reclaim", "--apply", "old-state-volume", **leftovers["env"]).returncode == 1
+
+    def test_a_failed_containerd_removal_is_not_reported_as_removed(self, fx, leftovers, tmp_path):
+        stub = Path(fx.env["PATH"].split(":")[0]) / "ctr"
+        stub.write_text(
+            '#!/bin/bash\ncase " $* " in\n'
+            '  *" images ls "*) printf "first:1\\nlast:1\\n" ;;\n'
+            '  *" first:1 "*) exit 1 ;;\nesac\n'
+        )
+        stub.chmod(0o755)
+        result = fx.run("reclaim", "--apply", "containerd-images", **leftovers["env"])
+        assert result.returncode == 1
+        assert "could not remove" in result.stdout
+
+    def test_a_link_at_the_legacy_profile_removes_nothing_behind_it(self, fx, leftovers, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "keep").write_text("kept")
+        parked = leftovers["browser"] / "legacy-profile"
+        shutil.rmtree(parked)
+        parked.symlink_to(outside, target_is_directory=True)
+        result = fx.run("reclaim", "--apply", "legacy-browser-profile", **leftovers["env"])
+        assert result.returncode == 1
+        assert parked.is_symlink()
+        assert (outside / "keep").read_text() == "kept"
+
+    def test_a_second_run_finds_nothing_and_succeeds(self, fx, leftovers):
+        assert fx.run("reclaim", "--apply", "root-caches", **leftovers["env"]).returncode == 0
+        result = fx.run("reclaim", "--apply", "root-caches", **leftovers["env"])
+        assert result.returncode == 0
+        assert "nothing to remove" in result.stdout
+
+    def test_an_unknown_name_removes_nothing_at_all(self, fx, leftovers):
+        result = fx.run("reclaim", "--apply", "root-caches", "everything", **leftovers["env"])
+        assert result.returncode == 64
+        assert (leftovers["home"] / ".npm").is_dir()
+
+    def test_apply_needs_a_name(self, fx, leftovers):
+        assert fx.run("reclaim", "--apply", **leftovers["env"]).returncode == 64
+
+    def _ctr(self, fx, tmp_path, images="docker.io/library/old-browser:latest"):
+        log = tmp_path / "ctr-calls"
+        stub = Path(fx.env["PATH"].split(":")[0]) / "ctr"
+        stub.write_text(
+            f'#!/bin/bash\nprintf "%s\\n" "$*" >> {log}\n'
+            f'case " $* " in *" images ls "*) printf "%s\\n" {images} ;; esac\n'
+        )
+        stub.chmod(0o755)
+        return log
+
+    def test_containerd_images_go_where_docker_does_not_use_containerd(self, fx, leftovers, tmp_path):
+        log = self._ctr(fx, tmp_path)
+        result = fx.run("reclaim", "--apply", "containerd-images", **leftovers["env"])
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "-n moby images rm --sync docker.io/library/old-browser:latest" in log.read_text()
+
+    def test_containerd_images_are_docker_s_own_on_its_image_store(self, fx, leftovers, tmp_path):
+        log = self._ctr(fx, tmp_path)
+        result = fx.run("reclaim", "--apply", "containerd-images", STUB_DRIVER="overlayfs", **leftovers["env"])
+        assert result.returncode == 0
+        assert "nothing to remove" in result.stdout
+        assert not log.exists() or "images rm" not in log.read_text()
+
+    def test_layers_nothing_holds_are_reported_and_left(self, fx, leftovers, tmp_path):
+        root = tmp_path / "docker-root"
+        db = root / "image" / "overlay2" / "layerdb" / "sha256"
+        for chain, directory, size in [("heldchain", "recordsdir", 500), ("lostchain", "lostdir", 3_000_000)]:
+            (db / chain).mkdir(parents=True)
+            (db / chain / "cache-id").write_text(directory)
+            (db / chain / "size").write_text(str(size))
+        (root / "buildkit").mkdir()
+        (root / "buildkit" / "snapshots.db").write_bytes(b"\x00\x01heldchain\x00")
+        (root / "overlay2" / "lostdir").mkdir(parents=True)
+        result = fx.run("reclaim", STUB_DOCKER_ROOT=str(root), **leftovers["env"])
+        assert result.returncode == 0, result.stderr
+        assert "holds 1 layers (3 MB)" in result.stdout
+        assert (root / "overlay2" / "lostdir").is_dir()
+
+    def test_an_update_says_what_is_left_and_removes_none_of_it(self, fx, leftovers):
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        result = fx.run("update", "v1", **leftovers["env"])
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "left behind on this disk: old-state-volume" in result.stdout
+        assert not self._removed(fx)
+        assert (leftovers["browser"] / "legacy-profile").is_dir()
 
 
 class TestExec:

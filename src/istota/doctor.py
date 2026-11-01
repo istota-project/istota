@@ -1713,23 +1713,50 @@ def check_workspace_disk(config: "Config", probe: bool) -> CheckResult:
         return CheckResult(name, SKIP, "no workspace configured")
     if config.storage_is_nextcloud:
         return CheckResult(name, SKIP, "the workspace is the Nextcloud mount; its quota is Nextcloud's")
+    return _disk_room(
+        name,
+        config.workspace_path,
+        remedy=(
+            "Free space on that volume or grow it. On the Docker stack it also holds "
+            "the databases and their snapshots (/srv/app/istota/data)."
+        ),
+    )
+
+
+def check_data_disk(config: "Config", probe: bool) -> CheckResult:
+    """The disk holding the databases has room left.
+
+    The check `runtime.workspace_disk` cannot be under the Nextcloud mount. On the
+    VM the state directory shares a disk with Docker's images, layers and volumes,
+    which a container cannot see, so this is how their growth gets noticed.
+    """
+    name = "runtime.data_disk"
+    if config.db_path is None:
+        return CheckResult(name, SKIP, "no database configured")
+    return _disk_room(
+        name,
+        config.db_path.parent,
+        remedy=(
+            "Free space on that disk or grow it. On a VM `istota-stack reclaim` lists "
+            "what the stack left behind there, and `docker system df` what Docker holds."
+        ),
+    )
+
+
+def _disk_room(name: str, path: Path, remedy: str) -> CheckResult:
     try:
-        st = os.statvfs(config.workspace_path)
+        st = os.statvfs(path)
     except OSError as e:
-        return CheckResult(name, WARN, f"cannot stat {config.workspace_path}: {e.strerror}",
-                           remedy="Check that the workspace directory exists and is readable.")
+        return CheckResult(name, WARN, f"cannot stat {path}: {e.strerror}",
+                           remedy="Check that the directory exists and is readable.")
     total = st.f_blocks * st.f_frsize
     free = st.f_bavail * st.f_frsize
     if total <= 0:
-        return CheckResult(name, SKIP, f"{config.workspace_path} reports no size")
+        return CheckResult(name, SKIP, f"{path} reports no size")
     fraction = free / total
     detail = (
         f"{free / 1024**3:.1f} GiB free of {total / 1024**3:.1f} GiB "
-        f"({fraction:.0%}) on the volume holding {config.workspace_path}"
-    )
-    remedy = (
-        "Free space on that volume or grow it. On the Docker stack it also holds "
-        "the databases and their snapshots (/srv/app/istota/data)."
+        f"({fraction:.0%}) on the volume holding {path}"
     )
     if fraction < _DISK_FAIL_FRACTION:
         return CheckResult(name, FAIL, detail, remedy=remedy)
@@ -10996,6 +11023,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.workspace_xattr", check_workspace_xattr),
     ("runtime.workspace_mode", check_workspace_mode),
     ("runtime.workspace_disk", check_workspace_disk),
+    ("runtime.data_disk", check_data_disk),
     ("backups.off_volume", check_backups_off_volume),
     ("runtime.session_log_dir", check_session_log_dir),
     ("runtime.task_control_dir", check_task_control_dir),
@@ -11114,6 +11142,7 @@ CHECK_SCOPES: dict[str, str] = {
     "runtime.workspace_xattr": DEPLOYMENT,
     "runtime.workspace_mode": DEPLOYMENT,
     "runtime.workspace_disk": DEPLOYMENT,
+    "runtime.data_disk": DEPLOYMENT,
     "backups.off_volume": DEPLOYMENT,
     # Deployment, not image: it walks a directory on the install's own disk and
     # reads the last sweep's row out of the framework database, neither of which

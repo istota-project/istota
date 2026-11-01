@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`istota-stack reclaim` shows what the stack left on your disk.** It lists leftovers such as an old state volume and the old shared browser profile, both of which hold private data, with their sizes. `reclaim --apply` removes the ones you name. See docs/deployment/running-the-stack.md.
 - **Jobs that run with nobody watching ask before they reach out.** A new scheduled job or a personal briefing can no longer fetch a page, reach a host from its shell, or use the browser, the devbox or another skill that reaches outside Istota until you approve it in Settings, Network access. A refusal raises one bell row per job, and the page lists what was refused with Add and Dismiss. Services your operator configured stay reachable.
 - **TASKS.md and assignment wakes become limited on upgrade.** They have no fixed text to approve, so they lose open web until you add the hosts they need, and a personal briefing keeps gathering its sources while its own web use is limited. Existing scheduled jobs keep running as they did, on Full access, until you narrow them on the same page, and `istota doctor` counts the ones left.
 - **While limited, a job cannot choose where things go.** It cannot add a feed or a bookmark, change a briefing's sources, a shared block or a group briefing, or push to another ntfy topic, and its mail to anyone but you waits as a draft.
@@ -125,6 +126,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Updates no longer keep up to 2 GB of build cache from older builds. A successful update now drops all cache that build did not use, and the next update stays fast. Downloaded package files are also cleared when the host is provisioned.
+- `istota doctor` now warns when the disk holding the databases runs low, including on Nextcloud installs, where the workspace disk check does not apply. On a VM this disk also holds Docker's images and volumes.
 - A skill refused for want of network approval now answers with the JSON error a skill's caller reads (`status: error`, `reason: egress_not_approved`), rather than plain text that broke anything parsing `status`.
 - **Scheduled jobs targeting a Talk room reach Talk again.** `rooms list` and the prompt header handed out a room token that names no Talk conversation, so the post failed while the answer still reached web chat. They now name the conversation, and jobs already written with the token are repaired at delivery. When the answer is in the room, the failed-post alert says so instead of repeating it.
 - The browser no longer loses Japanese, Chinese or other non-Latin characters from a web address on a busy machine, which could land it on the wrong page. A host name with a character the browser cannot convert faithfully is now refused and asks for its `xn--` form, and an address that hides a blocked scheme behind such characters is refused too.

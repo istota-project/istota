@@ -2339,6 +2339,48 @@ class TestBackupsOffVolume:
         assert doctor._device_of(tmp_path / "a" / "b") == os.stat(tmp_path).st_dev
 
 
+class TestDataDisk:
+    """`runtime.data_disk`: free space on the disk holding the databases."""
+
+    NAME = "runtime.data_disk"
+    GIB = 1024**3
+
+    def _run(self, make_config, monkeypatch, *, total_gib, free_gib, **config):
+        class _St:
+            f_frsize = 4096
+            f_blocks = int(total_gib * self.GIB / 4096)
+            f_bavail = int(free_gib * self.GIB / 4096)
+
+        monkeypatch.setattr(doctor.os, "statvfs", lambda path: _St())
+        return run_checks(make_config(**config), only=(self.NAME,))[0]
+
+    def test_plenty_of_room_is_ok(self, make_config, monkeypatch):
+        r = self._run(make_config, monkeypatch, total_gib=59, free_gib=16)
+        assert r.status == OK
+        assert "16.0 GiB free" in r.detail
+
+    def test_low_room_warns_and_names_what_to_run(self, make_config, monkeypatch):
+        r = self._run(make_config, monkeypatch, total_gib=59, free_gib=5)
+        assert r.status == WARN
+        assert "istota-stack reclaim" in r.remedy
+
+    def test_almost_no_room_fails(self, make_config, monkeypatch):
+        assert self._run(make_config, monkeypatch, total_gib=59, free_gib=1).status == FAIL
+
+    def test_it_reports_under_the_nextcloud_mount(self, make_config, monkeypatch):
+        """The mode the workspace check skips in, which is what prod runs."""
+        from istota.config import NextcloudConfig
+
+        r = self._run(make_config, monkeypatch, total_gib=59, free_gib=5,
+                      nextcloud=NextcloudConfig(url="https://cloud.example.test"))
+        assert r.status == WARN
+
+    def test_the_real_disk_is_measured(self, make_config):
+        r = run_checks(make_config(), only=(self.NAME,))[0]
+        assert r.status in (OK, WARN, FAIL)
+        assert "GiB free" in r.detail
+
+
 class TestWorkspaceDisk:
     """`runtime.workspace_disk`: free space on the local workspace's volume."""
 

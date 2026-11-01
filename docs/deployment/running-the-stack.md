@@ -152,9 +152,21 @@ The image records the tag and commit it was built from. The daemon's start-up lo
 
 Every command that writes (`update`, `rollback`, `setup`, `apply`, `up`, `down` and the rest) holds `/srv/app/istota/.stack.lock`. A second one waits up to ten minutes, then gives up and names the command holding it. `setup --web` never waits: it refuses at once while another command runs. `istota-stack.service` allows its stop eleven minutes, so a `systemctl stop` behind a running update reaches that message rather than being killed.
 
-Updates keep the current and previous deployment images for rollback and remove older Istota image tags. Before building and after each update attempt, including a failed build or start, `istota-stack update` removes dangling images labeled for the Istota Compose project and trims unused build cache toward a 2 GB target. Tagged images, containers and volumes are preserved by this cache cleanup. Unlabeled dangling images are left alone because their owner is unknown.
+Updates keep the current and previous deployment images for rollback and remove older Istota image tags. `istota-stack update` removes dangling images labeled for the Istota Compose project before building and after each attempt. It also prunes the build cache. Before building and after a failed build, it trims cache toward a 2 GB target, so a retry stays warm. After a successful build, it drops all cache that build did not use, so the next update stays warm and nothing stale is kept. Tagged images, containers and volumes are preserved. Unlabeled dangling images are left alone because their owner is unknown.
 
-Stack builds use Docker's default builder explicitly. Its cache is shared with other builds on that Docker daemon, so cleanup can make those builds slower too. The target bounds reclaimable cache, not total Docker storage: layers needed by retained images and active builds cannot be reclaimed. Each prune prints the space it reclaimed; a cleanup failure prints a warning without changing the update's exit status.
+Stack builds use Docker's default builder explicitly. Its cache is shared with other builds on that Docker daemon, so cleanup can make those builds slower too. Layers needed by retained images and active builds cannot be reclaimed. Each prune prints the space it reclaimed, and each build cache prune adds a line to `/srv/app/istota/reclaimed.log`; a cleanup failure prints a warning without changing the update's exit status.
+
+**What updates do not remove.** `istota-stack reclaim` lists what the stack left behind on the disk, with sizes, and removes nothing. `istota-stack reclaim --apply NAME...` removes the items you name, and cannot be undone. An update names what it finds but never removes it.
+
+| Name | What it is | When it stays |
+|---|---|---|
+| `old-state-volume` | The state volume from before the state moved to `/srv/app/istota/data`, with its database | A container uses it, a compose file names it, or the state directory does not hold the same master key, in which case the volume may be the only copy of the state |
+| `test-cache-volume` | A cache volume from a test run on this host | A container uses it or a compose file names it |
+| `legacy-browser-profile` | The old shared browser profile, with its signed-in state, which no user inherits | It is not a plain directory |
+| `containerd-images` | Images in containerd left from before Docker moved to overlay2. Listed only on overlay2, since on the containerd image store these are Docker's own images | |
+| `root-caches` | Root's `uv` and `npm` caches, which nothing in the stack reads | |
+
+`reclaim` also reports layers in Docker's layer store that no image, container or build record holds. No Docker command removes these, so `reclaim` reports them and leaves them.
 
 ### The daemon service is called `daemon`
 
