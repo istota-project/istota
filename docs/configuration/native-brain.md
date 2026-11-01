@@ -50,6 +50,18 @@ model = "qwen3-32b"
 
 The provider's `kind` decides what the endpoint is sent: caching breakpoints by default for `anthropic`, the reported-cost request and the attribution headers for `openrouter`, neither for `openai_compat`. Each of `prompt_caching`, `prompt_cache_key`, `prompt_cache_ttl`, `strict_tool_schemas` and `reasoning_replay` can be set on the provider's table and wins over the kind's default.
 
+Four more request details sit in the provider's `[providers.<id>.compat]` table, each unset by default so the kind decides:
+
+```toml
+[providers.local.compat]
+cost_accounting = false         # send usage.include so the endpoint reports the cost; on for openrouter
+attribution_headers = false     # OpenRouter's HTTP-Referer / X-Title; on for openrouter
+max_completion_tokens = false   # send max_completion_tokens instead of max_tokens, for every model
+reasoning_effort = true         # send reasoning_effort at all; false for an endpoint that rejects it
+```
+
+An `openai_compat` provider on `api.openai.com` gets `prompt_cache_key` and sends `max_completion_tokens` for the `o1`, `o3`, `o4` and `gpt-5` families without any of these set.
+
 ### From the old `[brain.native]` endpoint
 
 Before providers, native's endpoint and key lived in `[brain.native]` (`base_url`, `api_key`, `extra_headers`, the wire settings, `model_catalog_*`) and in `ISTOTA_BRAIN_NATIVE_API_KEY` / `ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS`. For one release these are still read, as the fields of a provider the base URL implies: `api.anthropic.com` is `anthropic` (its trailing `/v1` dropped), `openrouter.ai` is `openrouter`, anything else an own provider called `native`. A current table or variable wins over the old one. `istota doctor` and `istota apply --check` name each old source still in use and what to write instead; a re-run of `istota setup` writes the current shape and keeps the old config as `config.toml.pre-providers`. A config with neither an old `base_url` nor a `provider`, which used to mean Anthropic, is now unconfigured: set `provider = "anthropic"`.
