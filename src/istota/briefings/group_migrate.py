@@ -478,7 +478,7 @@ def publisher_report(conn, config, user_id, name, *, actor_id):
 
 
 def import_publisher(conn, config, user_id, name, document, *, actor_id):
-    from istota.scheduler import _parse_shared_kv_target
+    from istota.briefings.sources.kv import parse_shared_kv_target
     from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
     if not isinstance(document, dict) or not isinstance(document.get("group_id"), str):
         raise ValueError("Publishing import requires a group_id and a definition")
@@ -490,10 +490,10 @@ def import_publisher(conn, config, user_id, name, document, *, actor_id):
         targets = document.get("outputs", [job.publish_shared_kv] if job.publish_shared_kv else [])
         if not isinstance(targets, list) or not targets or any(not isinstance(value, str) for value in targets):
             _error("publisher_outputs_required")
-        outputs = sorted({"/".join(_parse_shared_kv_target(value)) for value in targets})
+        outputs = sorted({"/".join(parse_shared_kv_target(value)) for value in targets})
         if any(not value.startswith(SHARED_BLOCK_NAMESPACE + "/") or not value.split("/", 1)[1] for value in outputs):
             _error("publisher_output_unsupported")
-        if job.publish_shared_kv and "/".join(_parse_shared_kv_target(job.publish_shared_kv)) not in outputs:
+        if job.publish_shared_kv and "/".join(parse_shared_kv_target(job.publish_shared_kv)) not in outputs:
             _error("publisher_output_missing")
         dependents = document.get("dependent_jobs")
         if not isinstance(dependents, list) or any(type(value) is not int or value == job.id for value in dependents):
@@ -515,7 +515,7 @@ def import_publisher(conn, config, user_id, name, document, *, actor_id):
 
 
 def cutover_publisher(conn, config, user_id, name, *, actor_id, expected_revision, replacements, confirmed=False, now=None):
-    from istota.scheduler import _parse_shared_kv_target
+    from istota.briefings.sources.kv import parse_shared_kv_target
     if not isinstance(replacements, dict):
         raise ValueError("Replacement producers must be a map of consumer ids to job ids")
     with ExitStack() as locks, _transaction(conn):
@@ -547,7 +547,7 @@ def cutover_publisher(conn, config, user_id, name, *, actor_id, expected_revisio
             if (not replacement or replacement.id == job.id or not replacement.enabled or replacement.auto_disabled_at
                     or not operator_is_admin(conn, config, replacement.user_id)
                     or publisher_retired(conn, replacement.user_id, replacement.name)
-                    or consumer["outputs"] != ["/".join(_parse_shared_kv_target(replacement.publish_shared_kv))]):
+                    or consumer["outputs"] != ["/".join(parse_shared_kv_target(replacement.publish_shared_kv))]):
                 _error("publisher_consumer_unresolved")
         tasks = conn.execute("SELECT id,status FROM tasks WHERE scheduled_job_id=?", (job.id,)).fetchall()
         if any(task["status"] not in ("pending", "failed", "completed", "cancelled") for task in tasks):

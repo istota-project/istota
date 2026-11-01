@@ -6433,22 +6433,6 @@ def poll_mail_account_test_requests(config: Config, inflight: dict) -> None:
         )
 
 
-def _parse_shared_kv_target(target: str) -> tuple[str, str]:
-    """Parse a ``publish_shared_kv`` target into ``(namespace, key)``.
-
-    ``"<ns>/<key>"`` → split on the first slash; a bare ``"<key>"`` →
-    (``briefing_shared_blocks``, key) so a publish job populates a shared block
-    by name with no ceremony.
-    """
-    from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
-
-    target = (target or "").strip()
-    if "/" in target:
-        ns, _, key = target.partition("/")
-        return ns.strip(), key.strip()
-    return SHARED_BLOCK_NAMESPACE, target
-
-
 def _publish_is_trusted(conn, task, job) -> bool:
     """Whether a job's published answer goes out marked trusted. Not from an occurrence
     the ceiling let run: nobody read the flag, and with open web a page can write the
@@ -6484,7 +6468,9 @@ def _publish_result_to_shared_kv(
     * Empty/whitespace result → skip (preserve last-known-good), INFO → ``True``.
     * Never raises out of ``process_one_task``.
     """
-    ns, key = _parse_shared_kv_target(job.publish_shared_kv)
+    from istota.briefings.sources.kv import parse_shared_kv_target
+
+    ns, key = parse_shared_kv_target(job.publish_shared_kv)
     if not key:
         logger.error(
             "publish_shared_kv job=%s has no key in target %r; skipping",
