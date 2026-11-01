@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from istota import cron_loader, db
+from istota.lib.date_parse import iso_utc
 from istota.notifications.resolvers import cron_job as cron_job_source
 from istota.notifications.resolvers import egress_refused
 from istota.rooms import egress
@@ -163,6 +164,8 @@ def _job_view(config, conn, user_id: str, row, file_job, *, readable: bool, ceil
         state = _row_state(row)
     else:
         state = egress.JOB_RUNNING if file_job.enabled else egress.JOB_DISABLED
+    # No route can save a row with no id, so a dropped job is fixed in CRON.md.
+    editable = in_file and readable and not dropped
     view = {
         "id": row.id if row is not None else None,
         "pending": row is None and not dropped,
@@ -171,13 +174,13 @@ def _job_view(config, conn, user_id: str, row, file_job, *, readable: bool, ceil
         "enabled": file_job.enabled if in_file else bool(row.enabled),
         "once": file_job.once if in_file else bool(row.once),
         "state": state,
-        "last_run_at": row.last_run_at if row is not None else None,
-        "last_success_at": row.last_success_at if row is not None else None,
+        "last_run_at": iso_utc(row.last_run_at) if row is not None else None,
+        "last_success_at": iso_utc(row.last_success_at) if row is not None else None,
         "consecutive_failures": row.consecutive_failures if row is not None else 0,
         "last_error": row.last_error if row is not None else None,
         "definition": _definition_from_file(file_job) if in_file else _definition_from_row(row),
-        "revision": cron_loader.job_revision(file_job) if in_file and readable else None,
-        "editable": in_file and readable,
+        "revision": cron_loader.job_revision(file_job) if editable else None,
+        "editable": editable,
         "network": (
             egress.describe_subject(conn, user_id, egress.cron_subject(row.name), ceiling=ceiling)
             if row is not None else None

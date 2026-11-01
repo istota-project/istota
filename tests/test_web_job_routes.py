@@ -184,7 +184,8 @@ class TestTheListing:
         assert job["pending"] is False
         assert job["state"] == "running"
         assert (job["consecutive_failures"], job["last_error"]) == (2, "boom")
-        assert job["last_run_at"] == "2026-10-01 09:00:00"
+        # UTC, and said so: a browser reads a bare SQLite timestamp as local time.
+        assert job["last_run_at"] == "2026-10-01T09:00:00Z"
         assert job["definition"]["kind"] == "prompt"
         assert job["definition"]["prompt"] == "read the news"
         assert job["editable"] is True
@@ -251,7 +252,9 @@ class TestTheListing:
         job = _named(await _listing(signed_client), "shell")
         assert job["id"] is None
         assert job["pending"] is False
-        assert job["editable"] is True
+        # No route can save a row with no id, so CRON.md is the only way to fix it.
+        assert job["editable"] is False
+        assert job["revision"] is None
         assert "admin" in job["file_error"]
 
     async def test_no_workspace_means_no_writer(self, signed_client, config):  # noqa: F811
