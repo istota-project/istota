@@ -5817,9 +5817,17 @@ export function isSafeActionPath(path: string | null | undefined): path is strin
 /** Whether an action path is answered by the server rather than by a page.
  *  `/chat/r/<room>[/t/<task>]` is the deep-link redirect (#624) and
  *  `/files/assignments/<id>` an assignment's folder (#848), `/files/shares` the
- *  index of shares from other servers (#849): the frontend is prerendered with
- *  no route there, so their links must make the client do a full navigation. */
-const SERVER_ACTION_PREFIXES = ['/chat/r/', '/files/assignments/', '/files/shares'];
+ *  index of shares from other servers (#849), `/settings/jobs/open/<id>` and
+ *  `/settings/assignments/open/<id>` a job's or an assignment's page: the frontend
+ *  is prerendered with no route there, so their links must make the client do a
+ *  full navigation. */
+const SERVER_ACTION_PREFIXES = [
+  '/chat/r/',
+  '/files/assignments/',
+  '/files/shares',
+  '/settings/jobs/open/',
+  '/settings/assignments/open/',
+];
 
 export function isServerActionPath(path: string | null | undefined): boolean {
   return isSafeActionPath(path) && SERVER_ACTION_PREFIXES.some((prefix) => path.startsWith(prefix));

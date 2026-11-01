@@ -87,7 +87,7 @@ A heartbeat `shell-command` has no task row and no subject. It reaches operator 
 
 Each seam appends `{"channel", "entry"}` to `egress-refused.jsonl` in the task's control directory, and the executor reads it when the task ends. A refused hostname can carry data, so it stays in the framework database, only its owner reads it, no log line names it, and it is never pushed. The channel decides what a line may become, so `https://open/` cannot read as a request for full access.
 
-The bell has one row per subject with fixed text. Its detail names the subject and no host, and its one action opens Settings, Network access. There is no Allow in the bell, because a hostile page chooses the hostname.
+The bell has one row per subject with fixed text. Its detail names the subject and no host, and its one action opens the job's or the assignment's own page, through a redirect whose path carries only the row's integer. There is no Allow in the bell, because a hostile page chooses the hostname.
 
 A verb refusal logs nothing, since no grant could allow a verb.
 
