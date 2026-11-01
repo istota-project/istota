@@ -1717,6 +1717,8 @@ def cmd_egress(args):
                 entries = [*item["hosts"], *(f"skill:{name}" for name in item["skills"])]
                 state = f"{item['by_default']}-by-default" if item["by_default"] else item["state"]
                 print(f"{item['subject']} {state} {' '.join(entries)}".rstrip())
+                if item["job"] and item["job"]["run_state"] != egress.JOB_RUNNING:
+                    print(f"  {item['job']['run_state']}")
                 if item["job"] and item["job"]["waiting"]:
                     print(f"  waiting {' '.join(item['waiting_on']) or item['job']['reach']}")
                 for refused in item["refused"]:

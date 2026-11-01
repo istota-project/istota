@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Network access separates disabled jobs from the ones that run.** Disabled jobs move to a closed group at the bottom of the page, which opens when one has a request to answer, and a suspended job carries a badge. `istota doctor` now warns only about jobs on full access that actually run, and notes the rest.
 - **A source change no longer rebuilds the image's dependencies.** The 1.7 GB of Python dependencies now install in their own layer before the source is copied in, so a build that changes only source reuses that layer. Updates are faster, and the previous image kept for rollback takes far less extra disk. A change to `pyproject.toml` or `uv.lock`, which includes every version bump, still rebuilds it.
 - **Updates keep less build cache, and the stack can tell you about space Docker doesn't show.** Build cache beyond what your images hold is now held to 2 GB after each update, so the next build may redo a little more work. On Docker's containerd image store, `istota-stack reclaim` and each update warn when containerd takes much more disk than Docker accounts for.
 

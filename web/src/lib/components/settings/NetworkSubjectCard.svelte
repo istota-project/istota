@@ -147,8 +147,26 @@
 {/snippet}
 
 <Card title={subject.label}>
-  {#snippet status()}<Badge size="sm" variant={stateBadge.variant}>{stateBadge.label}</Badge
-    >{/snippet}
+  {#snippet status()}
+    {#if job?.run_state === 'disabled'}
+      <Badge size="sm" variant="neutral">Disabled</Badge>
+    {:else if job?.run_state === 'suspended'}
+      <Badge size="sm" variant="warn">Suspended</Badge>
+    {/if}
+    <Badge size="sm" variant={stateBadge.variant}>{stateBadge.label}</Badge>
+  {/snippet}
+
+  {#if job?.run_state === 'disabled'}
+    <p class="caption">
+      This job is disabled, so it does not run. What is approved here applies if it is enabled
+      again.
+    </p>
+  {:else if job?.run_state === 'suspended'}
+    <p class="caption">
+      Istota stopped running this job after repeated failures, which a refused host can cause. Use
+      <code>!cron enable</code> to start it again.
+    </p>
+  {/if}
 
   {#if subject.by_default === 'public'}
     <p class="caption">

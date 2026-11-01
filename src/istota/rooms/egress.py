@@ -43,7 +43,12 @@ TASK_TEXT_COLUMNS = ("prompt", "command", "skill", "skill_args")
 #: The publish target sends a job's answer into other users' briefings, so an
 #: approval covers it, and a limited task can write it into CRON.md.
 DIGEST_COLUMNS = (*TASK_TEXT_COLUMNS, "publish_shared_kv", "publish_shared_kv_trusted")
-_JOB_ROW_COLUMNS = "name, reach, once, egress_request, " + ", ".join(DIGEST_COLUMNS)
+_JOB_ROW_COLUMNS = (
+    "name, reach, once, egress_request, enabled, auto_disabled_at, " + ", ".join(DIGEST_COLUMNS)
+)
+JOB_RUNNING = "running"
+JOB_DISABLED = "disabled"
+JOB_SUSPENDED = "suspended"
 DECIDERS = frozenset({"web", "cli", "migration"})
 POSTURE_PUBLIC = "public"
 REACH_LIMITED = "limited"
@@ -689,6 +694,14 @@ def job_state(grants: frozenset[str], row: "sqlite3.Row | None") -> str:
     return "limited"
 
 
+def job_run_state(row: "Mapping | sqlite3.Row") -> str:
+    """Whether the scheduler fires this job, by `db.get_enabled_scheduled_jobs`'s rule.
+    A job both disabled and suspended reads as disabled, the state someone chose."""
+    if not row["enabled"]:
+        return JOB_DISABLED
+    return JOB_SUSPENDED if row["auto_disabled_at"] else JOB_RUNNING
+
+
 def list_subject_names(conn: sqlite3.Connection, user_id: str) -> list[str]:
     """Every subject this user can see on the page, sorted.
 
@@ -723,8 +736,9 @@ def describe_subject(
     text are for the owner's own session or the operator's terminal, and are data.
 
     `waiting_on` lists a `once` job's declared entries while it holds its fire, a
-    dismissed one included, since the job waits on it all the same. `by_default` is
-    the state a limited job runs in anyway, because the ceiling covers it.
+    dismissed one included, since the job waits on it all the same. A job the scheduler
+    is not firing is waiting on nothing here. `by_default` is the state a limited job
+    runs in anyway, because the ceiling covers it.
     """
     grants = grants_for(conn, user_id, subject)
     row = job_row_by_subject(conn, user_id, subject)
@@ -736,11 +750,15 @@ def describe_subject(
             unapproved_reach(row["reach"], ceiling),
         )
     if row is not None:
-        waiting = once_job_waiting(conn, user_id, row["name"], ceiling=ceiling)
+        run_state = job_run_state(row)
+        waiting = run_state == JOB_RUNNING and once_job_waiting(
+            conn, user_id, row["name"], ceiling=ceiling,
+        )
         # A job waiting on its `reach` waits on that approval whatever its hosts say.
         if waiting and not _waits_on_reach(row, ceiling):
             waiting_on = unmet_entries(row["egress_request"], grants)
         job = {
+            "run_state": run_state,
             "once": bool(row["once"]),
             "waiting": waiting,
             "digest": job_digest(row),
@@ -773,22 +791,27 @@ def describe_subject(
     }
 
 
-def open_job_count(conn: sqlite3.Connection) -> int:
-    """How many live jobs run with full access, for `doctor`. A digest is computed
-    here, so a stale grant does not count, nor does a module's own row, whose grant
-    from the seed does nothing, nor a job whose approved `public` comes first."""
+def open_job_counts(conn: sqlite3.Connection) -> tuple[int, int]:
+    """How many jobs hold full access, for `doctor`: those the scheduler fires, then
+    those it does not, whose approval applies again once they are started. A digest is
+    computed here, so a stale grant does not count, nor does a module's own row, whose
+    grant from the seed does nothing, nor a job whose approved `public` comes first."""
     grants: dict[tuple[str, str], set[str]] = {}
     for row in conn.execute("SELECT user_id, subject, entry FROM egress_grants"):
         grants.setdefault((row[0], row[1]), set()).add(row[2])
-    count = 0
+    running = stopped = 0
     for job in conn.execute(
         f"SELECT user_id, {_JOB_ROW_COLUMNS} FROM scheduled_jobs "
         "WHERE substr(name, 1, 8) != '_module.'"
     ):
         entries = frozenset(grants.get((job["user_id"], cron_subject(job["name"])), ()))
-        if job_state(entries, job) == "open":
-            count += 1
-    return count
+        if job_state(entries, job) != "open":
+            continue
+        if job_run_state(job) == JOB_RUNNING:
+            running += 1
+        else:
+            stopped += 1
+    return running, stopped
 
 
 def raise_refused_bell(

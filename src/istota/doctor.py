@@ -10573,7 +10573,8 @@ def check_egress_open_jobs(config: "Config", probe: bool) -> CheckResult:
     """How many scheduled jobs still run with full access.
 
     The migration brings every existing job in on `open`, and such a job keeps H-2
-    open until its owner narrows it. A count: a job name is the user's and is
+    open until its owner narrows it. A disabled or suspended job runs nothing, so it
+    is a note and not a warning. Counts: a job name is the user's and is
     model-writable, and this report reaches an admin page.
     """
     import sqlite3
@@ -10599,7 +10600,7 @@ def check_egress_open_jobs(config: "Config", probe: bool) -> CheckResult:
         conn = sqlite_util.connect_read_only(db_path)
         try:
             conn.row_factory = sqlite3.Row
-            count = egress.open_job_count(conn)
+            count, stopped = egress.open_job_counts(conn)
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 - a check never raises
@@ -10610,12 +10611,16 @@ def check_egress_open_jobs(config: "Config", probe: bool) -> CheckResult:
                 "database has not been migrated, which `istota init` does."
             ),
         )
+    stopped_note = (
+        f"; {stopped} disabled or suspended job(s) hold full access for when they run again"
+        if stopped else ""
+    )
     if not count:
-        return CheckResult(name, OK, "no scheduled job runs with full access")
+        return CheckResult(name, OK, f"no scheduled job runs with full access{stopped_note}")
     return CheckResult(
         name, WARN,
         f"{count} scheduled job(s) run with full access, so instructions a job reads "
-        "can send private data to any public host",
+        f"can send private data to any public host{stopped_note}",
         remedy=(
             "Each job's owner can narrow it in Settings, Network access, by removing "
             "Full access and adding the hosts it needs."

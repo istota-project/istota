@@ -73,6 +73,33 @@ def test_these_do_not_count(config, name, kwargs):
     assert doctor.check_egress_open_jobs(config, False).status == doctor.OK
 
 
+@pytest.mark.parametrize("column,value", [
+    ("enabled", 0),
+    ("auto_disabled_at", "2026-10-30 12:00:00"),
+], ids=["disabled", "suspended"])
+def test_a_job_that_does_not_run_is_a_note_and_not_a_warning(config, column, value):
+    _job(config, "stopped-canary", grant=["open"])
+    with db.get_db(config.db_path) as conn:
+        conn.execute(f"UPDATE scheduled_jobs SET {column} = ?", (value,))
+        conn.commit()
+    result = doctor.check_egress_open_jobs(config, False)
+    assert result.status == doctor.OK
+    assert "1 disabled or suspended" in result.detail
+    assert "canary" not in result.detail
+
+
+def test_a_warning_counts_only_the_running_job_and_notes_the_other(config):
+    _job(config, "runs", grant=["open"])
+    _job(config, "off", grant=["open"])
+    with db.get_db(config.db_path) as conn:
+        conn.execute("UPDATE scheduled_jobs SET enabled = 0 WHERE name = 'off'")
+        conn.commit()
+    result = doctor.check_egress_open_jobs(config, False)
+    assert result.status == doctor.WARN
+    assert result.detail.startswith("1 scheduled job(s) run with full access")
+    assert "1 disabled or suspended" in result.detail
+
+
 def test_a_stale_grant_or_a_removed_job_does_not_count(config):
     _job(config, "edited", grant=["open"])
     with db.get_db(config.db_path) as conn:
