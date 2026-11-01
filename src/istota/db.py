@@ -309,9 +309,12 @@ class ScheduledJob:
     # ("<ns>/<key>" or bare "<key>") + trusted flag.
     publish_shared_kv: str | None = None
     publish_shared_kv_trusted: bool = False
-    #: CRON.md's `reach`: 'private' or 'public'. A request, never a grant
+    #: CRON.md's `reach`: 'limited', 'public', 'full', or 'private' where the file
+    #: states none. A request, never a grant
     #: (`rooms.egress`).
     reach: str = "private"
+    #: CRON.md's `egress`, a JSON list; what the job asks its owner for.
+    egress_request: str | None = None
 
 
 @dataclass
@@ -512,6 +515,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # `rooms.egress.record_posture`. No backfill: NULL is "not decided", and a
         # task from before this column is decided when it next runs.
         "egress_posture": "TEXT",
+        # `rooms.egress.record_unapproved`. No backfill: an older occurrence was
+        # created needing approval.
+        "egress_unapproved": "TEXT",
     })
     # The same for a wake's spend, so the ledger outlives the task row.
     _add_columns(conn, "task_usage", {"assignment_id": "INTEGER"})
@@ -562,6 +568,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         "publish_shared_kv_trusted": "INTEGER NOT NULL DEFAULT 0",
         # Unified egress policy: CRON.md's `reach`, a request and never a grant.
         "reach": "TEXT NOT NULL DEFAULT 'private'",
+        # CRON.md's `egress`: what a job asks its owner for. A request, never a grant.
+        "egress_request": "TEXT",
     })
 
     # Places table: drop source column (moved to config)
@@ -7100,6 +7108,17 @@ def clear_room_external_ids(
     return changed
 
 
+def task_has_assistant_row(
+    conn: sqlite3.Connection, room_token: str, task_id: int,
+) -> bool:
+    """True when a room's transcript holds this task's answer."""
+    return conn.execute(
+        "SELECT 1 FROM messages "
+        "WHERE room_token = ? AND task_id = ? AND role = 'assistant' LIMIT 1",
+        (room_token, task_id),
+    ).fetchone() is not None
+
+
 def user_turn_has_external_id(
     conn: sqlite3.Connection, task_id: int, surface: str,
 ) -> bool:
@@ -12629,7 +12648,7 @@ def get_enabled_scheduled_jobs(conn: sqlite3.Connection) -> list[ScheduledJob]:
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
                once, model, effort, brain, provider, skill, skill_args,
-               publish_shared_kv, publish_shared_kv_trusted, reach
+               publish_shared_kv, publish_shared_kv_trusted, reach, egress_request
         FROM scheduled_jobs
         WHERE enabled = 1 AND auto_disabled_at IS NULL
         """
@@ -12647,7 +12666,7 @@ def get_user_scheduled_jobs(conn: sqlite3.Connection, user_id: str) -> list[Sche
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
                once, model, effort, brain, provider, skill, skill_args,
-               publish_shared_kv, publish_shared_kv_trusted, reach
+               publish_shared_kv, publish_shared_kv_trusted, reach, egress_request
         FROM scheduled_jobs
         WHERE user_id = ?
         ORDER BY name
@@ -12694,6 +12713,7 @@ def _row_to_scheduled_job(row: sqlite3.Row) -> ScheduledJob:
             else False
         ),
         reach=row["reach"] if "reach" in row.keys() else "private",
+        egress_request=row["egress_request"] if "egress_request" in row.keys() else None,
     )
 
 
@@ -12800,7 +12820,7 @@ def get_scheduled_job(conn: sqlite3.Connection, job_id: int) -> ScheduledJob | N
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
                once, model, effort, brain, provider, skill, skill_args,
-               publish_shared_kv, publish_shared_kv_trusted, reach
+               publish_shared_kv, publish_shared_kv_trusted, reach, egress_request
         FROM scheduled_jobs
         WHERE id = ?
         """,
@@ -12867,7 +12887,7 @@ def get_scheduled_job_by_name(
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
                once, model, effort, brain, provider, skill, skill_args,
-               publish_shared_kv, publish_shared_kv_trusted, reach
+               publish_shared_kv, publish_shared_kv_trusted, reach, egress_request
         FROM scheduled_jobs
         WHERE user_id = ? AND name = ?
         """,

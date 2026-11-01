@@ -176,6 +176,11 @@ UNDELIVERED_POINTER = (
     "A copy is kept with this notice in your notifications in the web app."
 )
 
+# A Talk post that failed while the room's stored row holds the answer (#909).
+TALK_LEG_FAILED_DETAIL = (
+    "The Talk post failed. The answer is in the room in web chat."
+)
+
 # Rows that are the user's only copy of what their push left out, so neither
 # being seen nor the alert clock closes them; Dismiss does.
 KEPT_UNTIL_DISMISSED = ("undelivered:", "private-note:")
@@ -308,6 +313,14 @@ def dmarc_key(verdict: str) -> str:
 
 def undelivered_key(task_id: int | str) -> str:
     return f"undelivered:{_slug(task_id, limit=24, fallback='0')}"
+
+
+def talk_leg_failed_key(task_id: int | str) -> str:
+    return f"talk-leg:{_slug(task_id, limit=24, fallback='0')}"
+
+
+def talk_leg_failed_push(title: str) -> str:
+    return f"⚠️ **{title}**\n\n{TALK_LEG_FAILED_DETAIL}"
 
 
 def undelivered_push(title: str, detail: str = "") -> str:

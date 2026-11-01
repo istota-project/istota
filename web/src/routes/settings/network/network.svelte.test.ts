@@ -14,6 +14,8 @@ import Harness from './networkHarness.test.svelte';
 
 const job = {
   digest: 'a'.repeat(64),
+  once: false,
+  waiting: false,
   reach: 'private',
   prompt: 'Read the news and summarise it.',
   command: '',
@@ -29,10 +31,12 @@ function subject(overrides = {}) {
     kind: 'cron',
     label: 'Scheduled job: digest',
     state: 'limited',
+    by_default: null,
     hosts: [],
     skills: [],
     approvals: [],
     job,
+    waiting_on: [],
     refused: [],
     ...overrides,
   };
@@ -107,7 +111,7 @@ it('warns above a refused host, and Add goes through the route', async () => {
     subject({ refused: [{ entry: 'evil.example', hits: 2, last_seen: '2026-10-30 12:00:00' }] }),
   );
   const view = await card();
-  expect(view.getByText(/a page the job reads can make it ask/i)).toBeInTheDocument();
+  expect(view.getByText(/a page it reads can make it ask/i)).toBeInTheDocument();
   expect(view.getByText('evil.example')).toBeInTheDocument();
   await fireEvent.click(view.getByRole('button', { name: 'Add evil.example' }));
   await waitFor(() =>
@@ -297,4 +301,42 @@ it('a failed load offers a retry', async () => {
   expect(await screen.findByText('Network access could not be loaded.')).toBeInTheDocument();
   await fireEvent.click(screen.getByRole('button', { name: /retry/i }));
   expect(await screen.findByRole('heading', { name: 'Scheduled job: digest' })).toBeInTheDocument();
+});
+
+it('says what a waiting one-time job needs, a dismissed request included', async () => {
+  api.getNetworkAccess.mockResolvedValue(
+    listing(
+      subject({
+        job: { ...job, once: true, waiting: true },
+        waiting_on: ['news.example.com'],
+      }),
+    ),
+  );
+  render(Harness);
+  expect(await screen.findByText(/will not run until you approve/)).toBeTruthy();
+  expect(screen.getByText('news.example.com')).toBeTruthy();
+});
+
+it('says a job runs on full access where the deployment needs no approval', async () => {
+  api.getNetworkAccess.mockResolvedValue(listing(subject({ by_default: 'open' })));
+  render(Harness);
+  expect(await screen.findByText('Full access by default')).toBeTruthy();
+  expect(screen.getByText(/your browser profile, every skill/)).toBeTruthy();
+});
+
+it('says a public job runs with no approval and its text was not reviewed', async () => {
+  api.getNetworkAccess.mockResolvedValue(
+    listing(subject({ by_default: 'public', job: { ...job, reach: 'public' } })),
+  );
+  render(Harness);
+  expect(await screen.findByText('Public by default')).toBeTruthy();
+  expect(screen.getByText(/Its text is not reviewed/)).toBeTruthy();
+});
+
+it('names full access when a one-time job waits on it', async () => {
+  api.getNetworkAccess.mockResolvedValue(
+    listing(subject({ job: { ...job, reach: 'full', once: true, waiting: true } })),
+  );
+  render(Harness);
+  expect(await screen.findByText(/full access\./)).toBeTruthy();
 });

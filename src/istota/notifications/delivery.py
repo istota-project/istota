@@ -791,8 +791,9 @@ def _dispatch(
     """
     from dataclasses import replace
 
+    from istota import db
     from istota.async_runtime import run_coro
-    from istota.transport.routing import refuse_shared_rooms
+    from istota.transport.routing import minted_room_talk_leaf, refuse_shared_rooms
 
     dests = refuse_shared_rooms(
         config, user_id,
@@ -834,6 +835,11 @@ def _dispatch(
                 dest.channel or conversation_token
                 or resolve_conversation_token(config, user_id)
             )
+            # HEARTBEAT.md is hand-written and can name a room's token (ISSUE-909).
+            if db.is_canonical_room_token(token):
+                leaf = minted_room_talk_leaf(config, user_id, token)
+                if leaf.surface == "talk":
+                    token = leaf.channel
             msg_id = run_coro(_send_talk(config, user_id, message, token))
             if msg_id:
                 sent = True

@@ -58,7 +58,8 @@ These are TOML basic strings: a backslash or a double quote inside one must be e
 - `room`: The conversation the job runs in. See "Delivering into a room" — it is a *room* token and not always a Talk one
 - `enabled`: Set to `false` to pause the job (default: true). Use `!cron disable/enable` for runtime control
 - `once`: When `true`, the job auto-deletes from both the DB and CRON.md after successful execution. Failed jobs are kept for retry. Used by the reminders skill for one-shot fire-and-forget entries
-- `reach`: `"private"` (default) or `"public"`. A job fetches only hosts its owner approved in Settings, Network access. `"public"` asks to run with open web and nothing private: no memory, files or credentials. It grants nothing until the owner approves the job's exact text, and editing that text drops the approval. Tell the user when you set it
+- `reach`: `"limited"` (the default if you leave it out), `"public"` or `"full"`. `"limited"` runs as the user, with memory and files, and fetches only hosts its owner approved in Settings, Network access. `"public"` is for research: open web and nothing private, no memory, files or credentials. `"full"` runs as the user with their browser profile, every skill and any public host. Choose the narrowest that does the job, and use `"public"` when a job only needs to read the web. The deployment decides how far a job gets with no approval; past that it runs limited until the owner approves its exact text, and editing the text drops the approval. Tell the user when you set it
+- `egress`: The hosts and skills this job needs, as a list: `egress = ["news.example.com", "skill:browse"]`. It asks the owner in Settings, Network access as soon as the job is written, and grants nothing: the job runs with what it already has until they approve. A `once` job that declares `egress` waits and does not fire until every entry is approved. A `once` job whose `reach` needs approval waits for that instead, whatever it declares. So set it on any one-shot job that needs the network. A `once` job with no `egress` and a plain `reach` runs limited and deletes itself, leaving nothing for the owner to approve. Tell the user when you set it
 - `silent_unless_action`: When `true`, only posts output if response starts with `ACTION:`. Useful for monitoring jobs
 - `skip_log_channel`: When `true`, this job's run is not mirrored to the verbose execution log channel. Useful for noisy, frequent jobs
 - `model`: Per-job model override (canonical id, provider alias like `opus-high`, or a role alias like `fast`/`general`/`smart`). Empty = the instance default
@@ -82,7 +83,7 @@ Both hand back a ready-made `target`:
 
 | the room | `target` |
 |---|---|
-| created in Talk | `talk:<token>` |
+| created in Talk | `talk:<talk_token>` |
 | created in web chat | `web:<token>` |
 | web chat, also open in Talk | `web:<token>,talk:<talk_token>` |
 
@@ -90,7 +91,7 @@ The third row is two legs on purpose. The web leg writes the room's own
 transcript and pushes nothing to Talk, so naming only the web half leaves the
 room's Talk members seeing nothing.
 
-**Set `room` to the same canonical token.** `target` is where the result goes;
+**Set `room` to the room's canonical `token`, never its `talk_token`.** `target` is where the result goes;
 `room` is which conversation the job runs in, and it is what makes the result
 render as a reply in the room rather than as a standalone system note. It also
 gives the job the room's conversation history as context.

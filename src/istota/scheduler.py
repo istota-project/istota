@@ -5621,17 +5621,26 @@ def _process_one_task(
     # Flipping it would leave those records disagreeing about whether the task
     # ran, and would offer a re-run — another model call — for a failure that
     # was never in the model. The inbox row is what makes the loss durable.
+    #
+    # When the user can read the stored row, that row is the copy (ISSUE-909):
+    # the alert names the failed leg and closes on being seen like any alert.
+    undelivered_key = None
     if talk_undelivered and held_notification is None \
             and not _talk_is_mirror and failure_alert is None:
-        # "message", not "reply": on the permanent-failure path this body is the
-        # apology for a task that failed, not an answer to anything.
-        failure_alert = (
-            f"⚠️ **Could not post to Talk** (task #{task.id})\n\n"
-            "The message is below so it is not lost:\n\n"
-            f"{post_talk_message}"
-        )
         failure_alert_title = f"Could not post to Talk — task #{task.id}"
-        failure_alert_push = task_alert_source.undelivered_push(failure_alert_title)
+        if _answer_readable_in_room(config, task, transcript_token):
+            failure_alert = task_alert_source.TALK_LEG_FAILED_DETAIL
+            failure_alert_push = task_alert_source.talk_leg_failed_push(failure_alert_title)
+            undelivered_key = task_alert_source.talk_leg_failed_key(task.id)
+        else:
+            # "message", not "reply": on the permanent-failure path this body is
+            # the apology for a task that failed, not an answer to anything.
+            failure_alert = (
+                f"⚠️ **Could not post to Talk** (task #{task.id})\n\n"
+                "The message is below so it is not lost:\n\n"
+                f"{post_talk_message}"
+            )
+            failure_alert_push = task_alert_source.undelivered_push(failure_alert_title)
 
     if failure_alert:
         # Last, and after every DB transaction above has closed. Best-effort by
@@ -5648,6 +5657,7 @@ def _process_one_task(
         # the row, because the alert route can be a room (#638).
         notification_id = _write_undelivered_row(
             config, task, failure_alert_title, failure_alert,
+            dedup_key=undelivered_key,
         )
         try:
             delivered = send_notification(
@@ -6439,6 +6449,21 @@ def _parse_shared_kv_target(target: str) -> tuple[str, str]:
     return SHARED_BLOCK_NAMESPACE, target
 
 
+def _publish_is_trusted(conn, task, job) -> bool:
+    """Whether a job's published answer goes out marked trusted. Not from an occurrence
+    the ceiling let run: nobody read the flag, and with open web a page can write the
+    answer. Agent blocks refuse trust for the same reason. A failed read narrows."""
+    from .rooms import egress as rooms_egress
+
+    if not job.publish_shared_kv_trusted:
+        return False
+    try:
+        return rooms_egress.stored_unapproved(conn, task.id) is None
+    except Exception as exc:  # noqa: BLE001 - a read failure narrows
+        logger.warning("publish_trust_unread job=%s: %s", job.name, type(exc).__name__)
+        return False
+
+
 def _publish_result_to_shared_kv(
     conn, config: Config, task, job, result_text: str,
     *, notifications: list[RaiseResult | None] | None = None,
@@ -6501,15 +6526,16 @@ def _publish_result_to_shared_kv(
         )
         return True
 
+    trusted = _publish_is_trusted(conn, task, job)
     value = json.dumps({
         "text": result_text,
-        "trusted": bool(job.publish_shared_kv_trusted),
+        "trusted": trusted,
     })
     try:
         db.shared_kv_set(conn, ns, key, value, task.user_id)
         logger.info(
             "publish_shared_kv job=%s wrote %s/%s (%d bytes, trusted=%s)",
-            job.name, ns, key, len(result_text), bool(job.publish_shared_kv_trusted),
+            job.name, ns, key, len(result_text), trusted,
         )
         return True
     except Exception as e:  # noqa: BLE001
@@ -8615,8 +8641,32 @@ def _confirmation_notice_token(task_info: dict, conn=None) -> str | None:
     return token
 
 
+def _answer_readable_in_room(
+    config: Config, task: db.Task, room_token: str | None,
+) -> bool:
+    """Whether this user can read this task's answer in the room's web view.
+
+    An unreadable database answers False, so the alert keeps its own copy.
+    """
+    if not room_token or not config.web.enabled:
+        return False
+    try:
+        with db.get_db(config.db_path) as conn:
+            return (
+                db.is_room_member(conn, room_token, task.user_id)
+                and db.visible_room(conn, task.user_id, room_token) is not None
+                and db.task_has_assistant_row(conn, room_token, task.id)
+            )
+    except Exception:
+        logger.warning(
+            "could not read the room row for task %s", task.id, exc_info=True,
+        )
+        return False
+
+
 def _write_undelivered_row(
     config: Config, task: db.Task, title: str | None, message: str,
+    *, dedup_key: str | None = None,
 ) -> int | None:
     """Record a task result that reached nobody, on a connection of its own.
 
@@ -8626,13 +8676,14 @@ def _write_undelivered_row(
 
     Nothing will ever change to close this row, and its push carries only a
     pointer to it, so it is the user's copy: an `undelivered:` row is kept
-    until dismissed rather than closed on being seen (#638).
+    until dismissed rather than closed on being seen (#638). ``dedup_key`` names
+    any other kind of row, for a notice that holds no copy.
     """
     try:
         with db.get_db(config.db_path) as conn:
             result = task_alert_source.write(
                 conn, task.user_id,
-                dedup_key=task_alert_source.undelivered_key(task.id),
+                dedup_key=dedup_key or task_alert_source.undelivered_key(task.id),
                 title=title or f"A task result could not be delivered — task #{task.id}",
                 body=message,
                 severity="warning",
@@ -9382,6 +9433,7 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                         conn, user_id, doc.jobs,
                         is_admin=app_config.is_admin(user_id),
                         unread_names=doc.unread_names,
+                        ceiling=app_config.security.scheduled_job_max_unapproved,
                     )
                     if refused_subjects:
                         egress.raise_refused_bell(app_config, conn, user_id, refused_subjects)
@@ -9970,7 +10022,7 @@ def _create_scheduled_job_task(
         if pinned_brain in room_selectable_kinds(app_config.brain)
         else ""
     )
-    return db.create_task(
+    task_id = db.create_task(
             conn,
             prompt=job.prompt,
             user_id=job.user_id,
@@ -9993,6 +10045,15 @@ def _create_scheduled_job_task(
             provider=job.provider or None,
             parent_task_id=parent_task_id,
         )
+    from .rooms import egress as rooms_egress
+
+    unapproved = rooms_egress.occurrence_unapproved(
+        conn, job.user_id, job.name, job.reach,
+        app_config.security.scheduled_job_max_unapproved,
+    )
+    if unapproved != rooms_egress.REACH_LIMITED:
+        rooms_egress.record_unapproved(conn, task_id, unapproved)
+    return task_id
 
 
 # A manual run of the same job inside this window is refused, so a double click
@@ -10116,6 +10177,8 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
     Returns:
         List of created task IDs.
     """
+    from .rooms import egress as rooms_egress
+
     created_tasks = []
 
     # Sync file-based definitions to DB before evaluating
@@ -10182,7 +10245,19 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                     job.name, base, next_run, now_naive, should_run,
                 )
 
-            if should_run and _is_stale_fire(
+            # Ahead of the staleness check, and exempt from it: an approval can take
+            # days, and a fire skipped as stale would spend this job's only slot.
+            asks_first = job.once and (
+                job.egress_request or job.reach in rooms_egress.REACH_REQUESTS
+            )
+            if should_run and asks_first and rooms_egress.once_job_waiting(
+                conn, job.user_id, job.name,
+                ceiling=app_config.security.scheduled_job_max_unapproved,
+            ):
+                logger.debug("Once job '%s' (user: %s) waits for approval", job.name, job.user_id)
+                continue
+
+            if should_run and not asks_first and _is_stale_fire(
                 f"job {job.user_id}/{job.name}",
                 next_run, now_naive,
                 app_config.scheduler.cron_max_staleness_minutes,

@@ -488,6 +488,10 @@ class TestProxyInformativeRejections:
             unknown = self._send_request(sock_path, {"skill": "evil_skill", "args": []})
         assert resp["reason"] == "egress_not_approved"
         assert resp["stderr"].startswith("egress_not_approved: the browse skill is not approved")
+        body = json.loads(resp["stdout"])
+        assert body["status"] == "error"
+        assert body["reason"] == "egress_not_approved"
+        assert body["error"] == resp["stderr"]
         assert json.loads(log.read_text()) == {"channel": "skill", "entry": "skill:browse"}
         assert unknown["reason"] == "unknown_skill"
 

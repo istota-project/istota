@@ -308,6 +308,14 @@ features = []
 # credential_audit_days = 365
 # credential_backup_retention = 30
 # credential_exports_per_day = 3
+# scheduled_job_max_unapproved = "public" # the widest `reach` a scheduled job gets with no
+#                                  # approval; past it the job runs limited and asks its owner.
+#                                  # "limited": all of public and full need approving.
+#                                  # "public": research jobs with no private data run unreviewed,
+#                                  # so a limited task can send what it holds in a job's text.
+#                                  # "full": no approval; a job with no reach runs as the user with
+#                                  # their browser profile, every skill, any public host and unheld
+#                                  # mail, and a limited task can plant one. Doctor warns.
 # wallet_requests_per_task = 3    # purchase requests, including refusals
 # wallet_fills_per_purchase = 3   # card fills within one authorization
 # wallet_authorization_minutes = 30 # clamped to 5..240 minutes

@@ -87,7 +87,7 @@ class TestTheRow:
         _refuse(config, _job_task(config), HOSTILE_HOST)
         [row] = _rows(config)
         assert (row["title"], row["body"]) == (egress_refused.TITLE, egress_refused.BODY)
-        assert row["title"] == "A scheduled task was refused network access"
+        assert row["title"] == "A scheduled task needs network access"
         assert row["body"] == "Review it in Istota"
         assert len(sends) == 1
         assert sends[0]["user_id"] == USER

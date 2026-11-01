@@ -312,6 +312,9 @@ Handlers and the shared envelope helper (`_load_deferred_json`) live in `schedul
 
 ```toml
 [security]
+scheduled_job_max_unapproved = "public"  # the widest reach a scheduled job gets with no
+                                         # approval: limited, public or full. See
+                                         # docs/architecture/egress.md
 sandbox_enabled = true
 skill_proxy_enabled = true   # needed wherever sandbox_enabled is true; turning it
                              # off with the sandbox on warns at startup, leaves every

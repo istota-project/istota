@@ -317,6 +317,9 @@ def job_posture(conn: sqlite3.Connection, task: "db.Task") -> JobPosture:
         return "public"
     if stored == egress.POSTURE_PRIVATE:
         return "private"
+    unapproved = egress.stored_unapproved(conn, root.id)
+    if unapproved is not None:
+        return "public" if unapproved == egress.POSTURE_PUBLIC else "private"
     if is_occurrence(root) and egress.job_row(conn, root) is None:
         return "unknown"
     return "public" if egress.public_job_approved(conn, root) else "private"
@@ -376,7 +379,10 @@ def _egress_for(
         root = _decision_root(conn, task)
         if is_briefing_research(root) or _root_is_attended(root):
             return None, frozenset()
-        if egress.job_approved(conn, root, "open"):
+        if (
+            egress.job_approved(conn, root, "open")
+            or egress.stored_unapproved(conn, root.id) == egress.REACH_FULL
+        ):
             return None, frozenset()
         subject = egress.subject_for(conn, root)
         return (

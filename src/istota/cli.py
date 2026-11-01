@@ -1704,7 +1704,10 @@ def cmd_egress(args):
     with db.get_db(config.db_path) as conn:
         if args.egress_action == "list":
             subjects = [
-                egress.describe_subject(conn, args.user, subject)
+                egress.describe_subject(
+                    conn, args.user, subject,
+                    ceiling=config.security.scheduled_job_max_unapproved,
+                )
                 for subject in egress.list_subject_names(conn, args.user)
             ]
             if args.json:
@@ -1712,7 +1715,10 @@ def cmd_egress(args):
                 return
             for item in subjects:
                 entries = [*item["hosts"], *(f"skill:{name}" for name in item["skills"])]
-                print(f"{item['subject']} {item['state']} {' '.join(entries)}".rstrip())
+                state = f"{item['by_default']}-by-default" if item["by_default"] else item["state"]
+                print(f"{item['subject']} {state} {' '.join(entries)}".rstrip())
+                if item["job"] and item["job"]["waiting"]:
+                    print(f"  waiting {' '.join(item['waiting_on']) or item['job']['reach']}")
                 for refused in item["refused"]:
                     print(f"  refused {refused['entry']} hits={refused['hits']}")
             return

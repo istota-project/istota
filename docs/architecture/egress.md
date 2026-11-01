@@ -18,7 +18,8 @@ A task that can read private data and also fetch an arbitrary URL can be made to
 | An attended own turn (Talk, web, email, SMS, WhatsApp, REPL, CLI) | None |
 | Briefing or shared block research | None. It holds nothing private |
 | A job with an approved `open:` for its current text | None |
-| A job with an approved `public:` for its current text, whose row asks for `public` | None. It holds nothing private |
+| An occurrence `[security] scheduled_job_max_unapproved` gave `full`, and any subtask of it | None |
+| A job with an approved `public:` for its current text, whose row asks for `public`, or an occurrence the setting gave `public` | None. It holds nothing private |
 | Any other scheduled job, personal briefing, assignment wake or TASKS.md line | The hosts in its grants |
 | Any other unattended source type, a read failure, no database | The empty set |
 
@@ -35,9 +36,31 @@ A row in `egress_grants` means approved, and there is no pending or denied state
 | `public:<digest>` | This exact job text runs with no private data and open web |
 | `open:<digest>` | This exact job text runs as it did before, with the user's browser profile and every skill |
 
-The digest covers a job's `prompt`, `command`, `skill`, `skill_args`, `publish_shared_kv` and `publish_shared_kv_trusted`. The last two are there because a job's answer goes where they say, into other users' briefings. The sync resolves `prompt_file` into `prompt`, so the file's content is covered. Editing any of them drops the job's `open:` and `public:` approvals and asks again. A schedule, model or delivery edit does not.
+The digest covers a job's `prompt`, `command`, `skill`, `skill_args`, `publish_shared_kv` and `publish_shared_kv_trusted`. The last two are there because a job's answer goes where they say, into other users' briefings. The sync resolves `prompt_file` into `prompt`, so the file's content is covered. Editing any of them drops the job's `open:` and `public:` approvals and asks again, unless the setting below covers the job. A schedule, model or delivery edit does not.
 
 Only an authenticated person writes a grant: the web route for the signed-in user's own subjects, the operator's `istota egress`, and the one-time seed. `tests/test_egress_grants.py` holds that list, and no skill CLI or deferred handler imports the module. An approval over the web carries the digest of the text the page showed, and a row that has moved since is refused. An approval also binds the task: an occurrence whose `prompt`, `command`, `skill` or `skill_args` differ from its job row runs limited, so a task queued before an edit does not run on the edited row's approval.
+
+## Asking ahead
+
+A job's `egress` in CRON.md lists hosts and `skill:` entries. The sync stores it in `scheduled_jobs.egress_request` and files each entry with no grant and no row in `egress_refused`, which is the one list the owner answers and the bell reads. So a declaration is the same kind of thing as a refusal: it grants nothing, and the file is model-writable. It is outside the digest, because it widens nothing. A skill the owner could not approve is dropped at parse, along with `open:` and `public:`, and no log line names an entry.
+
+A `once` job with an unmet declaration, or a `reach` the setting does not cover, holds its fire in `check_scheduled_jobs`. The hold comes ahead of the staleness check and such a job is exempt from that check, since an approval can take days and a fire skipped as stale would spend its only slot. A manual run does not wait. The hold is read from the grants and not from the rows, so a dismissal does not release the job and the page keeps naming what it waits for. A `once` job that declared nothing still fires limited and takes its refusal rows with it when it deletes itself.
+
+## The deployment default
+
+A job's `reach` says what it runs as: `limited`, `public` or `full`. `private` is the earlier spelling of `limited`, and a job that states nothing is limited. `[security] scheduled_job_max_unapproved` is the widest a job gets with no approval, `public` by default. A typo reads as `limited`, and the config editor asks for a typed confirmation.
+
+| Setting | A job stating nothing or `limited` | `public` | `full` |
+| --- | --- | --- | --- |
+| `limited` | Limited | Limited, asks | Limited, asks |
+| `public` | Limited | Public | Limited, asks |
+| `full` | Full, or limited if it says `limited` | Public | Full |
+
+`egress.unapproved_reach` holds that table. Asking for less is never worse off. A job stating nothing stays limited under `public` so that one needing memory does not run without it and give a worse answer with no error. It runs on `full` under `full` because that is what the operator asked for.
+
+The answer is on the occurrence. `_create_scheduled_job_task` writes `tasks.egress_unapproved`, so a config change moves nothing already queued, and it covers no other source type. An approval still counts under every setting, so a job with `open:` approved and `reach = "public"` runs on Full access, as the page says. An occurrence the setting let run publishes its answer untrusted, whatever `publish_shared_kv_trusted` says: nobody read the flag, and a page can write the answer. Removing an approval leaves a dismissed request, so a job whose file still asks does not ask again.
+
+`public` is the default because a page a public job reads has nothing private to steal. Its residual is the job's own text, which no person reads under this setting: a limited task can put what it holds into a job's prompt, and the job can send that anywhere. `full` reopens H-2 for scheduled jobs: each occurrence runs as an approved `open:` does, with the user's browser profile, every skill, no verb rules and unheld mail, so instructions a job reads can send what it holds to any public host. `istota doctor` warns under `security.egress_open_jobs` while it is `full`.
 
 ## What enforces it
 
@@ -67,7 +90,7 @@ A verb refusal logs nothing, since no grant could allow a verb.
 
 ## Public jobs
 
-A public job is the research posture applied to one approved job. It keeps its user identity, its room and its delivery target. It has `browse`, `skills` and `untrusted_input`, and loses everything else.
+A public job is the research posture applied to one job, approved or allowed by the setting. It keeps its user identity, its room and its delivery target. It has `browse`, `skills` and `untrusted_input`, and loses everything else.
 
 - It has no memory, no files, no vault and no conversation context, and its prompt names none of the user's email addresses. Its prompt keeps the user id and the user's timezone.
 - It has no notes of its own in its room. `Channels/<token>` is not bound and `CHANNEL.md` is not loaded, because in a private room that file is the user's notes.
@@ -84,6 +107,7 @@ Each of these is known and left open.
 - **The worktree reaper's fetch.** The daemon runs `git fetch origin` only when the origin is a configured forge, read through the repository's own `insteadOf` and refused with a proxy in its config. A limited admin task can still point it at a path on that forge, and the repository's `http.*` config still applies; what that sends goes to the forge.
 - **HEARTBEAT.md `url-health`.** HEARTBEAT.md is writable by a task, so a limited admin task can plant a check, and it runs from the daemon's network on the next sweep. The check and every redirect hop reach only a host with a `heartbeat` grant in `[private_hosts]`. What remains: the task can read a status code from a granted host and send it a path and query, a grant covers every port and scheme on the host, and a granted shared platform also serves other people's accounts.
 - **Delayed egress.** A limited task can write text into memory or a file, and a later attended turn can read it and act on it. A public job's answer is delivered, and may be indexed where a job's output is.
+- **`scheduled_job_max_unapproved`.** Under the default `public`, a limited task can write a public job and put what it holds into its text, which then goes to any host with no person reading it. Attended turns gain nothing from this, since they have open web already. Under `full` a limited task can write a job that has everything an approved `open:` gives on its next run, an escalation out of limited, and `istota doctor` warns. `limited` closes both.
 - **Jobs on `open`.** Every job that existed at upgrade starts on `open` and keeps this risk until its owner narrows it. `istota doctor` counts them under `security.egress_open_jobs`.
 - **What an `open` job reads.** The digest does not cover a workspace file the job follows or a script it runs. Anyone who can edit that file can steer a job with full access, a limited task included.
 - **WebSearch.** The query reaches the search provider. That is a deliberate disclosure: the provider is not a recipient an attacker can read.

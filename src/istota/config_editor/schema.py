@@ -121,6 +121,8 @@ RISKY_KEYS: frozenset[tuple[str, ...]] = frozenset({
     ("email", "outbound_approval_floor"),
     ("email", "confirm_sender_match"),
     ("security", "sandbox_enabled"),
+    # Past "limited", a planted job can send what it was written with, or holds, anywhere.
+    ("security", "scheduled_job_max_unapproved"),
     ("security", "skill_proxy_enabled"),
     ("security", "credential_broker", "enabled"),
     ("brain", "kind"),

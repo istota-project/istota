@@ -485,7 +485,10 @@ def room_target_descriptor(
 
     So the descriptor names the surfaces explicitly:
 
-    - a Talk-origin room is ``talk:<token>`` — its token *is* the conversation.
+    - a Talk-origin room is ``talk:<talk_ref>``, the conversation its binding
+      names. A minted room's token is not a conversation (ISSUE-909), so one
+      with no binding gets the web form below. A legacy room's token is its
+      conversation, bound or not.
     - a web room is ``web:<token>``, which ``_resolve_one`` sends down the
       foreign-push branch (a scheduled task's origin surface is ``talk``, so the
       web destination is never short-circuited to a stream no-op).
@@ -503,10 +506,15 @@ def room_target_descriptor(
 
     Pure — the caller supplies the binding it already read.
     """
+    from ..db import is_canonical_room_token
+
     if phone_surface:
         return phone_surface
     if origin == "talk":
-        return f"talk:{token}"
+        if talk_ref:
+            return f"talk:{talk_ref}"
+        if not is_canonical_room_token(token):
+            return f"talk:{token}"
     descriptor = f"web:{token}"
     if talk_ref:
         descriptor += f",talk:{talk_ref}"
@@ -1121,6 +1129,40 @@ def _resolve_talk_channel(config: "Config", task: "db.Task") -> str | None:
     return talk_channel_for_task(config, task)
 
 
+def minted_room_talk_leaf(
+    config: "Config", user_id: str, token: str,
+) -> Destination:
+    """Where a ``talk:`` leaf naming a minted room token delivers (ISSUE-909).
+
+    Talk issues no such token, so the leaf can only mean a room. The user's own
+    room resolves to its Talk binding, or with none to its web leg, whose row
+    is the room's delivery. Anything else stays as written: the post fails and
+    the undelivered alert keeps the answer, where dropping the leaf would empty
+    the plan and lose it. Never raises, like the plan that calls it.
+    """
+    from .. import db
+
+    member = False
+    binding = None
+    if config.db_path:
+        try:
+            with db.get_db(config.db_path) as conn:
+                member = db.is_room_member(conn, token, user_id)
+                if member:
+                    binding = db.get_room_binding(conn, token, "talk")
+        except Exception as e:  # pragma: no cover - never abort delivery
+            logger.warning("room lookup failed for talk leaf %s: %s", token, e)
+    if binding is not None:
+        return Destination("talk", binding.surface_ref, "push")
+    if member:
+        return Destination("web", token, "push")
+    logger.warning(
+        "talk leaf %s for user %s names none of their rooms; the post will fail",
+        token, user_id,
+    )
+    return Destination("talk", token, "push")
+
+
 def _resolve_one(
     config: "Config", task: "db.Task",
     registry: "TransportRegistry | None", dest: Destination,
@@ -1147,7 +1189,11 @@ def _resolve_one(
         return Destination(surface, channel, "push")
 
     if surface == "talk":
+        from ..db import is_canonical_room_token
+
         channel = dest.channel or _resolve_talk_channel(config, task)
+        if is_canonical_room_token(channel):
+            return minted_room_talk_leaf(config, task.user_id, channel)
         if not channel:
             logger.warning(
                 "Dropping talk destination for task %s: no resolvable Talk channel",

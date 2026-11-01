@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 SOURCE = "egress_refused"
 OBJECT_TYPE = "egress_subject"
-TITLE = "A scheduled task was refused network access"
+TITLE = "A scheduled task needs network access"
 BODY = "Review it in Istota"
 LINK = "/settings/network"
 _MAX_LABEL_CHARS = 120
