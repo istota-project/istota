@@ -486,11 +486,11 @@ class TestThePostureColumn:
         for path in root.rglob("*"):
             if path.suffix in (".py", ".md"):
                 assert "egress_posture" not in path.read_text(), path
-                assert "egress_open_by_default" not in path.read_text(), path
+                assert "egress_unapproved" not in path.read_text(), path
                 assert "egress_request" not in path.read_text(), path
         deferred = Path(istota.scheduler_deferred.__file__).read_text()
         assert "egress_posture" not in deferred
-        assert "egress_open_by_default" not in deferred
+        assert "egress_unapproved" not in deferred
 
     def test_the_writer_is_called_only_by_the_daemon_seam(self):
         import istota
@@ -503,7 +503,7 @@ class TestThePostureColumn:
         ]
         assert sorted(writers) == ["executor.py", "rooms/egress.py"]
 
-    def test_the_open_default_is_written_only_by_the_occurrence_seam(self):
+    def test_the_unapproved_reach_is_written_only_by_the_occurrence_seam(self):
         """This writer widens: a task reaching it would open its own next run."""
         import istota
 
@@ -511,7 +511,7 @@ class TestThePostureColumn:
         writers = [
             path.relative_to(root).as_posix()
             for path in root.rglob("*.py")
-            if "record_open_by_default(" in path.read_text()
+            if "record_unapproved(" in path.read_text()
         ]
         assert sorted(writers) == ["rooms/egress.py", "scheduler.py"]
 

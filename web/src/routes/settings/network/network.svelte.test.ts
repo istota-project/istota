@@ -31,7 +31,7 @@ function subject(overrides = {}) {
     kind: 'cron',
     label: 'Scheduled job: digest',
     state: 'limited',
-    open_by_default: false,
+    by_default: null,
     hosts: [],
     skills: [],
     approvals: [],
@@ -318,8 +318,25 @@ it('says what a waiting one-time job needs, a dismissed request included', async
 });
 
 it('says a job runs on full access where the deployment needs no approval', async () => {
-  api.getNetworkAccess.mockResolvedValue(listing(subject({ open_by_default: true })));
+  api.getNetworkAccess.mockResolvedValue(listing(subject({ by_default: 'open' })));
   render(Harness);
   expect(await screen.findByText('Full access by default')).toBeTruthy();
   expect(screen.getByText(/your browser profile, every skill/)).toBeTruthy();
+});
+
+it('says a public job runs with no approval and its text was not reviewed', async () => {
+  api.getNetworkAccess.mockResolvedValue(
+    listing(subject({ by_default: 'public', job: { ...job, reach: 'public' } })),
+  );
+  render(Harness);
+  expect(await screen.findByText('Public by default')).toBeTruthy();
+  expect(screen.getByText(/Its text is not reviewed/)).toBeTruthy();
+});
+
+it('names full access when a one-time job waits on it', async () => {
+  api.getNetworkAccess.mockResolvedValue(
+    listing(subject({ job: { ...job, reach: 'full', once: true, waiting: true } })),
+  );
+  render(Harness);
+  expect(await screen.findByText(/full access\./)).toBeTruthy();
 });

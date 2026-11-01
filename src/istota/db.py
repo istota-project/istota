@@ -309,7 +309,8 @@ class ScheduledJob:
     # ("<ns>/<key>" or bare "<key>") + trusted flag.
     publish_shared_kv: str | None = None
     publish_shared_kv_trusted: bool = False
-    #: CRON.md's `reach`: 'private' or 'public'. A request, never a grant
+    #: CRON.md's `reach`: 'limited', 'public', 'full', or 'private' where the file
+    #: states none. A request, never a grant
     #: (`rooms.egress`).
     reach: str = "private"
     #: CRON.md's `egress`, a JSON list; what the job asks its owner for.
@@ -514,9 +515,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # `rooms.egress.record_posture`. No backfill: NULL is "not decided", and a
         # task from before this column is decided when it next runs.
         "egress_posture": "TEXT",
-        # `rooms.egress.record_open_by_default`. No backfill: an older occurrence
-        # was created under approval.
-        "egress_open_by_default": "INTEGER NOT NULL DEFAULT 0",
+        # `rooms.egress.record_unapproved`. No backfill: an older occurrence was
+        # created needing approval.
+        "egress_unapproved": "TEXT",
     })
     # The same for a wake's spend, so the ledger outlives the task row.
     _add_columns(conn, "task_usage", {"assignment_id": "INTEGER"})

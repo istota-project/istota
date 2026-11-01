@@ -10554,14 +10554,15 @@ def check_egress_open_jobs(config: "Config", probe: bool) -> CheckResult:
     from istota.rooms import egress
 
     name = "security.egress_open_jobs"
-    if config.security.scheduled_job_egress == "open":
+    if config.security.scheduled_job_max_unapproved == "full":
         return CheckResult(
             name, WARN,
-            "[security] scheduled_job_egress is open, so every scheduled job runs with full "
-            "access and instructions it reads can send private data to any public host",
+            "[security] scheduled_job_max_unapproved is full, so every scheduled job runs "
+            "with full access and instructions it reads can send private data to any "
+            "public host",
             remedy=(
-                'Set scheduled_job_egress = "approval" to limit each job to what its '
-                "owner approved in Settings, Network access."
+                'Set scheduled_job_max_unapproved = "public" to keep a job that holds private '
+                "data to what its owner approved in Settings, Network access."
             ),
         )
     db_path = Path(config.db_path)

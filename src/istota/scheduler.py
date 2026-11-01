@@ -6449,6 +6449,21 @@ def _parse_shared_kv_target(target: str) -> tuple[str, str]:
     return SHARED_BLOCK_NAMESPACE, target
 
 
+def _publish_is_trusted(conn, task, job) -> bool:
+    """Whether a job's published answer goes out marked trusted. Not from an occurrence
+    the ceiling let run: nobody read the flag, and with open web a page can write the
+    answer. Agent blocks refuse trust for the same reason. A failed read narrows."""
+    from .rooms import egress as rooms_egress
+
+    if not job.publish_shared_kv_trusted:
+        return False
+    try:
+        return rooms_egress.stored_unapproved(conn, task.id) is None
+    except Exception as exc:  # noqa: BLE001 - a read failure narrows
+        logger.warning("publish_trust_unread job=%s: %s", job.name, type(exc).__name__)
+        return False
+
+
 def _publish_result_to_shared_kv(
     conn, config: Config, task, job, result_text: str,
     *, notifications: list[RaiseResult | None] | None = None,
@@ -6511,15 +6526,16 @@ def _publish_result_to_shared_kv(
         )
         return True
 
+    trusted = _publish_is_trusted(conn, task, job)
     value = json.dumps({
         "text": result_text,
-        "trusted": bool(job.publish_shared_kv_trusted),
+        "trusted": trusted,
     })
     try:
         db.shared_kv_set(conn, ns, key, value, task.user_id)
         logger.info(
             "publish_shared_kv job=%s wrote %s/%s (%d bytes, trusted=%s)",
-            job.name, ns, key, len(result_text), bool(job.publish_shared_kv_trusted),
+            job.name, ns, key, len(result_text), trusted,
         )
         return True
     except Exception as e:  # noqa: BLE001
@@ -9417,7 +9433,7 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                         conn, user_id, doc.jobs,
                         is_admin=app_config.is_admin(user_id),
                         unread_names=doc.unread_names,
-                        egress_requests=app_config.security.scheduled_job_egress != "open",
+                        ceiling=app_config.security.scheduled_job_max_unapproved,
                     )
                     if refused_subjects:
                         egress.raise_refused_bell(app_config, conn, user_id, refused_subjects)
@@ -10029,11 +10045,14 @@ def _create_scheduled_job_task(
             provider=job.provider or None,
             parent_task_id=parent_task_id,
         )
-    # A job asking for `public` asked for something narrower than open.
-    if app_config.security.scheduled_job_egress == "open" and job.reach != "public":
-        from .rooms import egress as rooms_egress
+    from .rooms import egress as rooms_egress
 
-        rooms_egress.record_open_by_default(conn, task_id)
+    unapproved = rooms_egress.occurrence_unapproved(
+        conn, job.user_id, job.name, job.reach,
+        app_config.security.scheduled_job_max_unapproved,
+    )
+    if unapproved != rooms_egress.REACH_LIMITED:
+        rooms_egress.record_unapproved(conn, task_id, unapproved)
     return task_id
 
 
@@ -10228,10 +10247,12 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
 
             # Ahead of the staleness check, and exempt from it: an approval can take
             # days, and a fire skipped as stale would spend this job's only slot.
-            asks_first = job.once and (job.egress_request or job.reach == "public")
+            asks_first = job.once and (
+                job.egress_request or job.reach in rooms_egress.REACH_REQUESTS
+            )
             if should_run and asks_first and rooms_egress.once_job_waiting(
                 conn, job.user_id, job.name,
-                open_default=app_config.security.scheduled_job_egress == "open",
+                ceiling=app_config.security.scheduled_job_max_unapproved,
             ):
                 logger.debug("Once job '%s' (user: %s) waits for approval", job.name, job.user_id)
                 continue

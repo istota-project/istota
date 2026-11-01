@@ -67,12 +67,12 @@ def test_a_migrated_database_gets_both_columns(tmp_path):
     p = tmp_path / "old.db"
     db.init_db(p)
     with db.get_db(p) as c:
-        c.execute("ALTER TABLE tasks DROP COLUMN egress_open_by_default")
+        c.execute("ALTER TABLE tasks DROP COLUMN egress_unapproved")
         c.execute("ALTER TABLE scheduled_jobs DROP COLUMN egress_request")
         c.commit()
     db.init_db(p)
     with db.get_db(p) as c:
-        assert "egress_open_by_default" in {r["name"] for r in c.execute("PRAGMA table_info(tasks)")}
+        assert "egress_unapproved" in {r["name"] for r in c.execute("PRAGMA table_info(tasks)")}
         assert "egress_request" in {
             r["name"] for r in c.execute("PRAGMA table_info(scheduled_jobs)")
         }
@@ -181,7 +181,7 @@ class TestTheSyncAsks:
         assert not egress.has_open_refusal(conn, USER, SUBJECT)
 
     def test_nothing_is_asked_where_the_deployment_needs_no_approval(self, conn):
-        assert _sync(conn, _job(egress=("example.com",)), egress_requests=False) == []
+        assert _sync(conn, _job(egress=("example.com",)), ceiling="full") == []
         assert _asked(conn) == set()
 
 
@@ -225,9 +225,9 @@ class TestAOnceJobWaits:
         conn.commit()
         assert len(_tick(conn, config)) == 1
 
-    def test_an_unapproved_public_once_job_waits_too(self, conn, config):
+    def test_an_unapproved_public_once_job_waits_too(self, conn, path, tmp_path):
         _due_once_job(conn, reach="public")
-        assert _tick(conn, config) == []
+        assert _tick(conn, _config_at(path, tmp_path, "limited")) == []
 
     def test_a_public_once_job_waits_on_that_approval_and_not_on_its_hosts(self, conn):
         _due_once_job(conn, reach="public", egress=("example.com",))
@@ -263,57 +263,134 @@ class TestAOnceJobWaits:
         assert reach_for_task(conn, task, skill_index=INDEX).egress_hosts == frozenset()
 
 
-class TestTheDeploymentDefault:
-    @pytest.fixture
-    def open_config(self, path, tmp_path):
-        return Config(
-            db_path=path, temp_dir=tmp_path / "temp",
-            security=SecurityConfig(scheduled_job_egress="open"),
-        )
+def _config_at(path, tmp_path, ceiling):
+    return Config(
+        db_path=path, temp_dir=tmp_path / "temp",
+        security=SecurityConfig(scheduled_job_max_unapproved=ceiling),
+    )
 
-    def test_the_default_requires_approval(self):
-        assert SecurityConfig().scheduled_job_egress == "approval"
 
-    def test_an_unknown_value_reads_as_approval(self, tmp_path):
+def _occurrence(conn, cfg, **fields):
+    _sync(conn, _job(**fields), ceiling=cfg.security.scheduled_job_max_unapproved)
+    conn.execute(
+        "UPDATE scheduled_jobs SET cron_expression = '* * * * *', "
+        "created_at = datetime('now', '-5 minutes')"
+    )
+    conn.commit()
+    created = _tick(conn, cfg)
+    assert len(created) == 1
+    return db.get_task(conn, created[0])
+
+
+class TestTheReachField:
+    @pytest.mark.parametrize("value,stored", [
+        ("limited", "limited"), ("public", "public"), ("full", "full"),
+        # The earlier spelling of limited.
+        ("private", "limited"),
+        # A typo must not read as a request for more.
+        ("everything", "limited"),
+    ])
+    def test_a_written_value(self, config, value, stored):
+        doc = parse_cron_document(_document(f'reach = "{value}"'), config, USER)
+        assert doc.jobs[0].reach == stored
+
+    def test_no_value_is_no_value(self, config):
+        doc = parse_cron_document(_document(""), config, USER)
+        assert doc.jobs[0].reach == ""
+        assert "reach" not in render_jobs_block(doc.jobs)
+
+    def test_a_typo_is_reported(self, config):
+        assert parse_cron_document(_document('reach = "everything"'), config, USER).errors
+
+    def test_full_survives_a_rewrite(self, config):
+        doc = parse_cron_document(_document('reach = "full"'), config, USER)
+        assert 'reach = "full"' in render_jobs_block(doc.jobs)
+
+
+class TestTheSetting:
+    def test_the_default_is_public(self):
+        assert SecurityConfig().scheduled_job_max_unapproved == "public"
+
+    def test_a_typo_reads_as_the_narrowest(self, tmp_path):
         p = tmp_path / "config.toml"
-        p.write_text('[security]\nscheduled_job_egress = "yes please"\n')
-        assert load_config(p).security.scheduled_job_egress == "approval"
+        p.write_text('[security]\nscheduled_job_max_unapproved = "yes please"\n')
+        assert load_config(p).security.scheduled_job_max_unapproved == "limited"
 
-    def test_open_reads_from_the_file(self, tmp_path):
+    @pytest.mark.parametrize("value", ["limited", "public", "full"])
+    def test_it_reads_from_the_file(self, tmp_path, value):
         p = tmp_path / "config.toml"
-        p.write_text('[security]\nscheduled_job_egress = "open"\n')
-        assert load_config(p).security.scheduled_job_egress == "open"
+        p.write_text(f'[security]\nscheduled_job_max_unapproved = "{value}"\n')
+        assert load_config(p).security.scheduled_job_max_unapproved == value
 
-    def _occurrence(self, conn, cfg, **fields):
-        _sync(conn, _job(**fields))
-        conn.execute(
-            "UPDATE scheduled_jobs SET cron_expression = '* * * * *', "
-            "created_at = datetime('now', '-5 minutes')"
-        )
-        conn.commit()
-        created = _tick(conn, cfg)
-        assert len(created) == 1
-        return db.get_task(conn, created[0])
+    def test_the_key_is_a_choice_and_takes_a_typed_confirmation(self):
+        from istota.config_editor import schema
 
-    def test_open_runs_a_job_unlimited_with_no_grant(self, conn, open_config):
-        task = self._occurrence(conn, open_config)
-        reach = reach_for_task(conn, task, skill_index=INDEX)
+        path = ("security", "scheduled_job_max_unapproved")
+        assert schema.choices_for(path) == ("limited", "public", "full")
+        assert path in schema.RISKY_KEYS
+
+    @pytest.mark.parametrize("reach,ceiling,expected", [
+        ("private", "limited", "limited"), ("private", "public", "limited"),
+        ("private", "full", "full"),
+        ("limited", "limited", "limited"), ("limited", "public", "limited"),
+        ("limited", "full", "limited"),
+        ("public", "limited", "limited"), ("public", "public", "public"),
+        ("public", "full", "public"),
+        ("full", "limited", "limited"), ("full", "public", "limited"),
+        ("full", "full", "full"),
+    ])
+    def test_what_a_job_gets_with_no_approval(self, reach, ceiling, expected):
+        assert egress.unapproved_reach(reach, ceiling) == expected
+
+
+class TestWhatAnOccurrenceRunsAs:
+    def test_public_under_public_needs_no_approval(self, conn, path, tmp_path):
+        cfg = _config_at(path, tmp_path, "public")
+        reach = reach_for_task(conn, _occurrence(conn, cfg, reach="public"), skill_index=INDEX)
+        assert reach.public and reach.egress_hosts is None
+
+    def test_a_subtask_of_a_public_occurrence_is_public(self, conn, path, tmp_path):
+        task = _occurrence(conn, _config_at(path, tmp_path, "public"), reach="public")
+        child = db.get_task(conn, db.create_task(
+            conn, prompt="c", user_id=USER, source_type="subtask", parent_task_id=task.id,
+        ))
+        assert reach_for_task(conn, child, skill_index=INDEX).public
+
+    def test_public_under_limited_stays_limited(self, conn, path, tmp_path):
+        cfg = _config_at(path, tmp_path, "limited")
+        reach = reach_for_task(conn, _occurrence(conn, cfg, reach="public"), skill_index=INDEX)
+        assert not reach.public and reach.egress_hosts == frozenset()
+
+    @pytest.mark.parametrize("fields", [{}, {"reach": "limited"}, {"reach": "full"}])
+    def test_public_widens_nothing_else(self, conn, path, tmp_path, fields):
+        cfg = _config_at(path, tmp_path, "public")
+        reach = reach_for_task(conn, _occurrence(conn, cfg, **fields), skill_index=INDEX)
+        assert not reach.public and reach.egress_hosts == frozenset()
+
+    @pytest.mark.parametrize("fields", [{}, {"reach": "full"}])
+    def test_full_runs_unlimited_with_no_grant(self, conn, path, tmp_path, fields):
+        cfg = _config_at(path, tmp_path, "full")
+        reach = reach_for_task(conn, _occurrence(conn, cfg, **fields), skill_index=INDEX)
         assert reach.egress_hosts is None
         assert reach.egress_withheld == frozenset()
         assert not reach.public
         # Deliberately what an approved `open:` gets, and what the docs tell the operator.
         assert not reach.isolated_browser
 
-    def test_a_subtask_takes_its_root_answer(self, conn, open_config):
-        task = self._occurrence(conn, open_config)
+    def test_a_subtask_of_a_full_occurrence_is_unlimited(self, conn, path, tmp_path):
+        task = _occurrence(conn, _config_at(path, tmp_path, "full"))
         child = db.get_task(conn, db.create_task(
             conn, prompt="c", user_id=USER, source_type="subtask", parent_task_id=task.id,
         ))
         assert reach_for_task(conn, child, skill_index=INDEX).egress_hosts is None
 
-    def test_a_job_asking_for_public_stays_narrow_until_approved(self, conn, open_config):
-        task = self._occurrence(conn, open_config, reach="public")
-        reach = reach_for_task(conn, task, skill_index=INDEX)
+    def test_a_job_saying_public_is_never_worse_off_under_full(self, conn, path, tmp_path):
+        cfg = _config_at(path, tmp_path, "full")
+        assert reach_for_task(conn, _occurrence(conn, cfg, reach="public"), skill_index=INDEX).public
+
+    def test_a_job_saying_limited_stays_limited_under_full(self, conn, path, tmp_path):
+        cfg = _config_at(path, tmp_path, "full")
+        reach = reach_for_task(conn, _occurrence(conn, cfg, reach="limited"), skill_index=INDEX)
         assert reach.egress_hosts == frozenset()
 
     def test_it_covers_jobs_and_nothing_else(self, conn):
@@ -322,38 +399,186 @@ class TestTheDeploymentDefault:
         ))
         assert reach_for_task(conn, task, skill_index=INDEX).egress_hosts == frozenset()
 
-    def test_a_task_queued_under_approval_keeps_that_answer(self, conn, config):
-        """The decision is the occurrence's: a config change moves nothing in flight."""
-        task = self._occurrence(conn, config)
-        assert reach_for_task(conn, task, skill_index=INDEX).egress_hosts == frozenset()
+    def test_the_answer_is_the_occurrences_not_the_configs(self, conn, path, tmp_path):
+        """A config change moves nothing already queued."""
+        task = _occurrence(conn, _config_at(path, tmp_path, "limited"), reach="public")
+        assert not reach_for_task(conn, task, skill_index=INDEX).public
 
-    def test_a_once_job_with_a_request_does_not_wait(self, conn, open_config):
-        _due_once_job(conn, egress=("example.com",))
-        assert len(_tick(conn, open_config)) == 1
+    def test_the_posture_survives_the_once_row_going(self, conn, path, tmp_path):
+        task = _occurrence(conn, _config_at(path, tmp_path, "public"), reach="public", once=True)
+        conn.execute("DELETE FROM scheduled_jobs")
+        conn.commit()
+        assert reach_for_task(conn, task, skill_index=INDEX).public
 
-    def test_a_public_once_job_still_waits(self, conn, open_config):
-        _due_once_job(conn, reach="public")
-        assert _tick(conn, open_config) == []
 
-    def test_doctor_says_so(self, open_config):
+class TestAnApprovalBeatsTheSetting:
+    def test_an_approved_full_job_asking_for_public_runs_as_the_page_says(
+        self, conn, path, tmp_path,
+    ):
+        cfg = _config_at(path, tmp_path, "public")
+        _sync(conn, _job(reach="public"), ceiling="public")
+        row = egress.job_row_by_subject(conn, USER, SUBJECT)
+        egress.approve_job(conn, USER, SUBJECT, "open", egress.job_digest(row), decided_via="web")
+        conn.commit()
+        task = _occurrence(conn, cfg, reach="public")
+        view = egress.describe_subject(conn, USER, SUBJECT, ceiling="public")
+        reach = reach_for_task(conn, task, skill_index=INDEX)
+        assert view["state"] == "open" and view["by_default"] is None
+        assert not reach.public and reach.egress_hosts is None
+
+    def test_a_stale_approval_does_not_count(self, conn, path, tmp_path):
+        cfg = _config_at(path, tmp_path, "public")
+        _sync(conn, _job(reach="public"), ceiling="public")
+        row = egress.job_row_by_subject(conn, USER, SUBJECT)
+        egress.approve_job(conn, USER, SUBJECT, "open", egress.job_digest(row), decided_via="web")
+        conn.commit()
+        task = _occurrence(conn, cfg, reach="public", prompt="different text")
+        assert reach_for_task(conn, task, skill_index=INDEX).public
+
+
+class TestPublishingUnreviewed:
+    def _trusted(self, conn, task, flag=True):
+        job = db.get_user_scheduled_jobs(conn, USER)[0]
+        job.publish_shared_kv_trusted = flag
+        return scheduler._publish_is_trusted(conn, task, job)
+
+    def test_an_occurrence_the_setting_let_run_is_not_trusted(self, conn, path, tmp_path):
+        task = _occurrence(conn, _config_at(path, tmp_path, "public"), reach="public")
+        assert not self._trusted(conn, task)
+
+    def test_an_approved_one_keeps_its_flag(self, conn, path, tmp_path):
+        task = _occurrence(conn, _config_at(path, tmp_path, "limited"), reach="public")
+        assert self._trusted(conn, task)
+        assert not self._trusted(conn, task, flag=False)
+
+
+class TestAskingUnderEachSetting:
+    def test_editing_an_approved_job_the_setting_covers_asks_nothing(self, conn):
+        _sync(conn, _job(reach="public"), ceiling="limited")
+        row = egress.job_row_by_subject(conn, USER, SUBJECT)
+        egress.approve_job(conn, USER, SUBJECT, "public", egress.job_digest(row), decided_via="web")
+        conn.commit()
+        assert _sync(conn, _job(reach="public", prompt="edited"), ceiling="public") == []
+        assert _asked(conn) == set()
+
+    def test_editing_an_approved_job_with_no_reach_under_full_asks_nothing(self, conn):
+        _sync(conn, _job(), ceiling="full")
+        row = egress.job_row_by_subject(conn, USER, SUBJECT)
+        egress.approve_job(conn, USER, SUBJECT, "open", egress.job_digest(row), decided_via="web")
+        conn.commit()
+        assert _sync(conn, _job(prompt="edited"), ceiling="full") == []
+        assert _asked(conn) == set()
+
+    def test_editing_an_approved_full_job_past_the_setting_asks_again(self, conn):
+        _sync(conn, _job(reach="full"), ceiling="public")
+        row = egress.job_row_by_subject(conn, USER, SUBJECT)
+        egress.approve_job(conn, USER, SUBJECT, "open", egress.job_digest(row), decided_via="web")
+        conn.commit()
+        assert _sync(conn, _job(reach="full", prompt="edited"), ceiling="public") == [SUBJECT]
+        assert _asked(conn) == {"open"}
+
+    def test_removing_an_approval_does_not_ask_again(self, conn):
+        _sync(conn, _job(reach="full", egress=("example.com",)), ceiling="public")
+        row = egress.job_row_by_subject(conn, USER, SUBJECT)
+        digest = egress.job_digest(row)
+        egress.approve_job(conn, USER, SUBJECT, "open", digest, decided_via="web")
+        egress.remove_grant(conn, USER, SUBJECT, f"open:{digest}")
+        conn.commit()
+        job = _job(reach="full", egress=("example.com",))
+        assert _sync(conn, job, ceiling="public") == []
+        rows = {row["entry"]: row["dismissed"] for row in egress.list_refused(conn, USER, SUBJECT)}
+        assert rows == {"open": 1, "example.com": 0}
+
+    @pytest.mark.parametrize("reach,ceiling,asked", [
+        ("public", "limited", {"public"}), ("public", "public", set()), ("public", "full", set()),
+        ("full", "limited", {"open"}), ("full", "public", {"open"}), ("full", "full", set()),
+        ("", "limited", set()), ("limited", "full", set()),
+    ])
+    def test_a_job_asks_for_what_it_will_not_get(self, conn, reach, ceiling, asked):
+        _sync(conn, _job(reach=reach), ceiling=ceiling)
+        assert _asked(conn) == asked
+
+    def test_a_request_goes_once_the_setting_covers_it(self, conn):
+        _sync(conn, _job(reach="public"), ceiling="limited")
+        _sync(conn, _job(reach="public"), ceiling="public")
+        assert _asked(conn) == set()
+
+    def test_a_request_returns_if_the_setting_narrows(self, conn):
+        _sync(conn, _job(reach="public"), ceiling="public")
+        _sync(conn, _job(reach="public"), ceiling="limited")
+        assert _asked(conn) == {"public"}
+
+    def test_a_dismissed_request_does_not_ask_again(self, conn):
+        _sync(conn, _job(reach="full"), ceiling="public")
+        egress.dismiss_refused(conn, USER, SUBJECT, "open")
+        conn.commit()
+        assert _sync(conn, _job(reach="full"), ceiling="public") == []
+
+    def test_changing_reach_withdraws_the_request(self, conn):
+        _sync(conn, _job(reach="full"), ceiling="public")
+        _sync(conn, _job(reach="limited"), ceiling="public")
+        assert _asked(conn) == set()
+
+    def test_declared_entries_ask_only_where_the_job_runs_limited(self, conn):
+        _sync(conn, _job(egress=("example.com",), reach="public"), ceiling="public")
+        assert _asked(conn) == set()
+        _sync(conn, _job(egress=("example.com",)), ceiling="public")
+        assert _asked(conn) == {"example.com"}
+
+
+class TestOnceJobsUnderEachSetting:
+    @pytest.mark.parametrize("fields,ceiling,fires", [
+        ({"reach": "public"}, "limited", False), ({"reach": "public"}, "public", True),
+        ({"reach": "public"}, "full", True),
+        ({"reach": "full"}, "limited", False), ({"reach": "full"}, "public", False),
+        ({"reach": "full"}, "full", True),
+        ({"egress": ("example.com",)}, "public", False),
+        ({"egress": ("example.com",)}, "full", True),
+        # It runs public, which has open web, so the host is not what it waits on.
+        ({"egress": ("example.com",), "reach": "public"}, "public", True),
+    ])
+    def test_it_fires_or_waits(self, conn, path, tmp_path, fields, ceiling, fires):
+        cfg = _config_at(path, tmp_path, ceiling)
+        _due_once_job(conn, **fields)
+        assert bool(_tick(conn, cfg)) is fires
+
+    def test_a_full_once_job_fires_once_approved(self, conn, path, tmp_path):
+        cfg = _config_at(path, tmp_path, "public")
+        _due_once_job(conn, reach="full")
+        assert _tick(conn, cfg) == []
+        row = egress.job_row_by_subject(conn, USER, SUBJECT)
+        egress.approve_job(conn, USER, SUBJECT, "open", egress.job_digest(row), decided_via="web")
+        conn.commit()
+        assert len(_tick(conn, cfg)) == 1
+
+
+class TestTheOneView:
+    @pytest.mark.parametrize("reach,ceiling,by_default", [
+        ("", "public", None), ("public", "public", "public"), ("public", "limited", None),
+        ("", "full", "open"), ("full", "full", "open"), ("full", "public", None),
+    ])
+    def test_it_says_what_a_job_runs_as(self, conn, reach, ceiling, by_default):
+        _sync(conn, _job(reach=reach), ceiling=ceiling)
+        view = egress.describe_subject(conn, USER, SUBJECT, ceiling=ceiling)
+        assert view["by_default"] == by_default
+
+    def test_a_full_job_waits_on_full_access(self, conn):
+        _sync(conn, _job(reach="full", once=True), ceiling="public")
+        view = egress.describe_subject(conn, USER, SUBJECT, ceiling="public")
+        assert view["job"]["waiting"] and view["waiting_on"] == []
+
+
+class TestDoctor:
+    def test_full_warns(self, path, tmp_path):
         from istota.doctor import WARN, check_egress_open_jobs
 
-        result = check_egress_open_jobs(open_config, False)
+        result = check_egress_open_jobs(_config_at(path, tmp_path, "full"), False)
         assert result.status == WARN
-        assert "scheduled_job_egress" in (result.detail + (result.remedy or ""))
+        assert "scheduled_job_max_unapproved" in result.detail
 
-    def test_the_one_view_says_so_and_narrows_for_public(self, conn):
-        _sync(conn, _job())
-        assert egress.describe_subject(conn, USER, SUBJECT, open_default=True)["open_by_default"]
-        assert not egress.describe_subject(conn, USER, SUBJECT)["open_by_default"]
-        _sync(conn, _job(reach="public"))
-        view = egress.describe_subject(conn, USER, SUBJECT, open_default=True)
-        assert not view["open_by_default"]
+    def test_public_does_not(self, path, tmp_path):
+        from istota.doctor import OK, check_egress_open_jobs
 
-    def test_the_key_is_a_choice_and_takes_a_typed_confirmation(self):
-        from istota.config_editor import schema
+        assert check_egress_open_jobs(_config_at(path, tmp_path, "public"), False).status == OK
 
-        path = ("security", "scheduled_job_egress")
-        assert schema.choices_for(path) == ("approval", "open")
-        assert path in schema.RISKY_KEYS
 
