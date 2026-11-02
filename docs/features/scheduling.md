@@ -216,11 +216,9 @@ If you change what a job dispatches or where it publishes and it holds an approv
 Some rows have fewer actions:
 
 - A job you just added to CRON.md reads "Waiting for the next sync" until the daemon has read the file, about a minute.
-- If CRON.md holds an entry that does not load, the page says so and links to the file. Jobs are read only until it is fixed, because a rewrite would drop the entry that did not load. Enable and Disable still work, and warn you when the next sync will undo them because the file could not change.
+- If CRON.md holds an entry that does not load, the page says so and links to the file. Jobs are read only until it is fixed, because a rewrite would drop the entry that did not load. Delete is refused for the same reason. Enable and Disable change only the running job, and warn you that the next sync will undo them.
 - A `command` job you are not allowed to run is dropped by the sync, so it stays in the file and never gets a row. The page shows why and links to CRON.md, which is where to fix it.
 - A module's own job appears only when it was refused something, and can only be opened.
-
-To change a job's definition, edit CRON.md under Files, Configuration.
 
 In Talk, use `!cron` to list, enable, or disable scheduled jobs:
 

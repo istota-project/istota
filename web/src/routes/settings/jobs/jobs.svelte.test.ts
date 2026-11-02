@@ -240,6 +240,29 @@ it('warns that jobs are read only while CRON.md has a problem, naming each', asy
   );
 });
 
+it('says read only only when the file cannot take a write', async () => {
+  __history.reset(LIST);
+  page.url = new URL(LIST, 'http://localhost');
+  page.state = {};
+  api.getScheduledJobs.mockResolvedValue(
+    listing([job()], { readable: true, errors: ["Job 'digest' names a model you cannot pick."] }),
+  );
+  render(Harness, { expireSession });
+  expect(
+    await screen.findByText("Job 'digest' names a model you cannot pick."),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/read only/i)).toBeNull();
+});
+
+it('a one-time job holding for approval offers no Run now', async () => {
+  const holding = network('digest');
+  holding.job.once = true;
+  holding.job.waiting = true;
+  open(LIST, job({ once: true, network: holding }));
+  expect(await kebabItem('digest', 'Disable')).toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: 'Run now' })).toBeNull();
+});
+
 it('a read-only job can be disabled but not deleted', async () => {
   open(LIST, job({ editable: false, revision: null }));
   expect(await kebabItem('digest', 'Disable')).toBeInTheDocument();

@@ -10094,9 +10094,16 @@ def run_scheduled_job_now(
     """
     from istota.notifications.resolvers.cron_job import is_module_job
 
+    from .rooms import egress as rooms_egress
+
     label = f"Job '{job.name}'"
     if is_module_job(job.name):
         return None, f"{label} is managed by a module and can't be run by hand."
+    if job.once and rooms_egress.once_job_waiting(
+        conn, job.user_id, job.name,
+        ceiling=app_config.security.scheduled_job_max_unapproved,
+    ):
+        return None, f"{label} is waiting for you to approve what it asked for."
     refusal = _job_run_refusal(
         conn, "scheduled_job_id = ?", (job.id,), label,
         exclude_task_id=parent_task_id,

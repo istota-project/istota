@@ -223,12 +223,17 @@
     return job.name.startsWith(MODULE_PREFIX);
   }
 
+  // A one-time job waiting for an answer would run limited and delete itself with the request.
+  function isHolding(job: ScheduledJob): boolean {
+    return job.network?.job?.waiting ?? false;
+  }
+
   function rowActions(job: ScheduledJob): KebabItem[] {
     const items: KebabItem[] = [
       { label: job.editable ? 'Edit' : 'View', onSelect: () => selection.push({ job: job.id }) },
     ];
     if (isModuleJob(job)) return items;
-    items.push({ label: 'Run now', disabled: busy, onSelect: () => run(job) });
+    if (!isHolding(job)) items.push({ label: 'Run now', disabled: busy, onSelect: () => run(job) });
     items.push(
       job.state === 'running'
         ? { label: 'Disable', disabled: busy, onSelect: () => setEnabled(job, false) }
@@ -286,9 +291,11 @@
       {#snippet actions()}
         {#if !isModuleJob(job)}
           <div class="hstack wrap">
-            <Button size="sm" variant="secondary" disabled={busy} onclick={() => run(job)}
-              >Run now</Button
-            >
+            {#if !isHolding(job)}
+              <Button size="sm" variant="secondary" disabled={busy} onclick={() => run(job)}
+                >Run now</Button
+              >
+            {/if}
             {#if job.state === 'running'}
               <Button
                 size="sm"
@@ -369,7 +376,10 @@
     {#if fileAlert}
       <Alert title="CRON.md has a problem">
         <p>
-          Jobs are read only until it is fixed, because saving would drop any job that did not load.
+          {#if !file.readable}
+            Jobs are read only until it is fixed, because saving would drop any job that did not
+            load.
+          {/if}
           <a href={CONFIG_EDITOR_HREF}>Open it under Files, Configuration.</a>
         </p>
         {#if file.errors.length > 0}

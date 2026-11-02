@@ -2,8 +2,8 @@
 
 Own jobs only, taken from the session: no parameter names a user, and a job of somebody
 else's is the same 404 as one that does not exist. Bodies are read bounded and parsed by
-hand, because a framework validation error echoes its input. No log line names a job,
-which a limited task can name.
+hand, because a framework validation error echoes its input. No line this module logs names a
+job, which a limited task can name; the shared helpers it calls still do.
 
 CRON.md is the authority. A save writes the file with no transaction open, since that
 can be a slow mount, and leaves the row to the daemon's next sync. A rewrite is built
@@ -463,6 +463,9 @@ async def settings_job_run(
 
 def _delete(config, user_id: str, job_id: str) -> JSONResponse:
     row = _own_row(config, user_id, job_id)
+    doc = cron_loader.load_cron_document(config, user_id) if config.has_workspace else None
+    if doc is not None and cron_loader.document_hides_jobs(doc):
+        return refusal(409, "file_unreadable", _FILE_UNREADABLE)
     # The file first and outside any transaction (ISSUE-387); a row whose definition is
     # still in CRON.md would be re-inserted by the next sync.
     if not cron_loader.remove_job_definition(config, user_id, row.name):

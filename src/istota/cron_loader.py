@@ -1968,7 +1968,7 @@ def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: 
 
 def _update_job_enabled_locked(config, user_id: str, job_name: str, enabled: bool) -> bool:
     doc = load_cron_document(config, user_id)
-    if doc is None:
+    if doc is None or document_hides_jobs(doc):
         return False
     jobs = doc.jobs
 
@@ -2006,9 +2006,15 @@ def update_job_reach_in_cron_md(config, user_id: str, job_name: str, reach: str)
     )
 
 
+def document_hides_jobs(doc: "CronDocument") -> bool:
+    """Whether the file holds a job ``doc.jobs`` lacks. A rewrite is built from the jobs
+    that parsed, so writing this document would delete that job from the file."""
+    return bool(doc.skipped_entries or doc.refused_names or doc.unread_names)
+
+
 def _update_job_reach_locked(config, user_id: str, job_name: str, reach: str) -> bool:
     doc = load_cron_document(config, user_id)
-    if doc is None or doc.skipped_entries or doc.refused_names or doc.unread_names:
+    if doc is None or document_hides_jobs(doc):
         return False
     for job in doc.jobs:
         if job.name == job_name:
@@ -2487,8 +2493,7 @@ def job_file_writable(config, user_id: str, doc: "CronDocument | None") -> bool:
     if doc is None:
         config_dir = resolve_user_config_dir(config, user_id)
         return config_dir is not None and not os.path.lexists(config_dir / "CRON.md")
-    # The rewrite is built from the jobs that parsed, so a typo elsewhere would delete a job.
-    return not (doc.skipped_entries or doc.refused_names or doc.unread_names or doc.block is None)
+    return not (document_hides_jobs(doc) or doc.block is None)
 
 
 def _save_job_locked(

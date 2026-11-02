@@ -824,6 +824,18 @@ class TestEnableDisable:
         response = await signed_client.post(f"{BASE}/{job_id}/disable", headers=ORIGIN)
         assert response.json()["outcome"] == "db_only"
 
+    @pytest.mark.parametrize("verb", ["disable", "enable"])
+    async def test_a_typo_elsewhere_keeps_that_entry(self, signed_client, config, verb):  # noqa: F811
+        """The rewrite is built from the jobs that parsed, so it would delete the typo."""
+        _cron_file(config)
+        job_id = _row(config).id
+        path = _cron_file(config, body=DIGEST_JOB + '[[jobs]]\nname = "broken"\n', sync=False)
+        before = path.read_text()
+        response = await signed_client.post(f"{BASE}/{job_id}/{verb}", headers=ORIGIN)
+        assert response.status_code == 200, response.text
+        assert response.json()["outcome"] == "db_only"
+        assert path.read_text() == before
+
 
 class TestRun:
     async def test_it_queues_a_task(self, signed_client, config):  # noqa: F811
@@ -845,8 +857,32 @@ class TestRun:
         assert response.json()["error"] == "run_refused"
         assert response.json()["detail"]
 
+    async def test_a_once_job_holding_for_approval_is_refused(self, signed_client, config):  # noqa: F811
+        """It would run limited and delete itself, taking its own request with it."""
+        _cron_file(config, body=DIGEST_JOB + 'once = true\negress = ["news.example.com"]\n')
+        job_id = _row(config).id
+        response = await signed_client.post(f"{BASE}/{job_id}/run", headers=ORIGIN)
+        assert response.status_code == 409, response.text
+        assert response.json()["error"] == "run_refused"
+        assert "approv" in response.json()["detail"]
+        with db.get_db(config.db_path) as conn:
+            count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        assert count == 0
+        assert _row(config) is not None
+
 
 class TestDelete:
+    async def test_a_typo_elsewhere_refuses_and_leaves_the_file(self, signed_client, config):  # noqa: F811
+        _cron_file(config)
+        job_id = _row(config).id
+        path = _cron_file(config, body=DIGEST_JOB + '[[jobs]]\nname = "broken"\n', sync=False)
+        before = path.read_text()
+        response = await signed_client.delete(f"{BASE}/{job_id}", headers=ORIGIN)
+        assert response.status_code == 409
+        assert response.json()["error"] == "file_unreadable"
+        assert path.read_text() == before
+        assert _row(config) is not None
+
     async def test_the_file_goes_first_and_then_the_row(self, signed_client, config):  # noqa: F811
         path = _cron_file(config)
         job_id = _row(config).id
