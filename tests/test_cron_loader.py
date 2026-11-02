@@ -20,8 +20,10 @@ from istota.cron_loader import (
     load_cron_document,
     load_cron_jobs,
     migrate_db_jobs_to_file,
+    remove_job_definition,
     remove_job_from_cron_md,
     render_jobs_block,
+    set_job_enabled,
     sync_cron_jobs_to_db,
     update_job_enabled_in_cron_md,
 )
@@ -4501,3 +4503,153 @@ class TestEgressLifecycle:
         raised.clear()
         scheduler._sync_cron_files(conn, config)
         assert raised == []
+
+
+# ---------------------------------------------------------------------------
+# A file holding an entry that did not load (ISSUE-917)
+# ---------------------------------------------------------------------------
+
+
+class TestWritesKeepEntriesThatDidNotLoad:
+    TYPO = (
+        '[[jobs]]\nname = "typo"\ncron = "0 8 * * *"\n'
+        'prompt = "p"\ncommand = "echo c"\n'
+    )
+    GOOD = '[[jobs]]\nname = "good"\ncron = "0 9 * * *"\nprompt = "g"\n'
+    ONCE = '[[jobs]]\nname = "reminder"\ncron = "0 10 * * *"\nprompt = "r"\nonce = true\n'
+
+    def _text(self, mount_path):
+        path = mount_path / get_user_cron_path("alice", "istota").lstrip("/")
+        return path.read_text()
+
+    def _doc(self, mount_path, *entries):
+        content = "# Notes\n\n```toml\n" + "\n".join(entries) + "```\n\nAfter the fence.\n"
+        _write_cron_md(mount_path, "alice", content)
+        return content
+
+    def test_enable_refuses_and_leaves_the_file(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        content = self._doc(mount_path, self.GOOD, self.TYPO)
+        assert update_job_enabled_in_cron_md(config, "alice", "good", False) is False
+        assert self._text(mount_path) == content
+
+    def test_enable_refuses_on_an_unread_prompt_file(
+        self, mount_path, make_config_with_mount, monkeypatch,
+    ):
+        config = make_config_with_mount()
+        content = self._doc(
+            mount_path, self.GOOD,
+            '[[jobs]]\nname = "hidden"\ncron = "0 8 * * *"\n'
+            'prompt_file = "/Users/alice/prompt.txt"\n',
+        )
+        monkeypatch.setattr(
+            "istota.cron_loader.read_owner_text",
+            lambda *a, **k: (None, "mount fault", False),
+        )
+        assert update_job_enabled_in_cron_md(config, "alice", "good", False) is False
+        assert self._text(mount_path) == content
+
+    def test_set_job_enabled_reports_db_only(self, db_path, mount_path, make_config_with_mount):
+        config = make_config_with_mount(db_path=db_path)
+        content = self._doc(mount_path, self.GOOD, self.TYPO)
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", load_cron_document(config, "alice").jobs)
+            row = db.get_scheduled_job_by_name(conn, "alice", "good")
+            assert set_job_enabled(config, conn, row, False, by="test") == "db_only"
+        assert self._text(mount_path) == content
+
+    def test_remove_takes_only_the_named_entry(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        self._doc(mount_path, self.GOOD, self.TYPO, self.ONCE)
+        assert remove_job_from_cron_md(config, "alice", "reminder") is True
+        text = self._text(mount_path)
+        assert 'name = "reminder"' not in text
+        assert self.TYPO in text
+        assert self.GOOD in text
+        assert text.startswith("# Notes\n") and text.endswith("After the fence.\n")
+        doc = load_cron_document(config, "alice")
+        assert [j.name for j in doc.jobs] == ["good"]
+        assert doc.skipped_entries == 1
+
+    def test_remove_takes_an_entry_that_itself_did_not_load(
+        self, mount_path, make_config_with_mount,
+    ):
+        config = make_config_with_mount()
+        self._doc(mount_path, self.GOOD, self.TYPO)
+        assert remove_job_from_cron_md(config, "alice", "typo") is True
+        doc = load_cron_document(config, "alice")
+        assert [j.name for j in doc.jobs] == ["good"]
+        assert doc.skipped_entries == 0
+
+    def test_removing_the_sole_entry_under_comments_is_not_a_template(
+        self, mount_path, make_config_with_mount,
+    ):
+        config = make_config_with_mount()
+        self._doc(mount_path, '# [[jobs]]\n# name = "x"\n' + self.TYPO)
+        assert remove_job_from_cron_md(config, "alice", "typo") is True
+        doc = load_cron_document(config, "alice")
+        assert doc.block == ""
+        assert doc.is_template is False
+
+    def test_remove_keeps_a_comment_after_the_removed_entry(
+        self, mount_path, make_config_with_mount,
+    ):
+        config = make_config_with_mount()
+        self._doc(
+            mount_path,
+            self.ONCE + '\n# Paused until March\n# [[jobs]]\n# name = "paused"\n',
+            self.GOOD, self.TYPO,
+        )
+        assert remove_job_from_cron_md(config, "alice", "reminder") is True
+        text = self._text(mount_path)
+        assert "# Paused until March\n" in text
+        assert 'name = "reminder"' not in text
+
+    def test_remove_refuses_when_a_string_imitates_a_header(
+        self, mount_path, make_config_with_mount,
+    ):
+        """A `[[jobs]]` line in a multi-line string is not an entry, so the
+        split cannot be trusted and nothing is written."""
+        config = make_config_with_mount()
+        content = self._doc(
+            mount_path,
+            '[[jobs]]\nname = "tricky"\ncron = "0 7 * * *"\n'
+            'prompt = """before\n[[jobs]]\nafter"""\n',
+            self.TYPO, self.ONCE,
+        )
+        assert remove_job_from_cron_md(config, "alice", "reminder") is False
+        assert self._text(mount_path) == content
+
+    def test_finished_once_job_does_not_come_back(
+        self, db_path, mount_path, make_config_with_mount,
+    ):
+        """Through the scheduler's seam: the row is gone, the file no longer
+        names the job, and the next sync has nothing to re-insert."""
+        from istota import scheduler
+
+        config = make_config_with_mount(db_path=db_path)
+        self._doc(mount_path, self.GOOD, self.TYPO, self.ONCE)
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", load_cron_document(config, "alice").jobs)
+            row = db.get_scheduled_job_by_name(conn, "alice", "reminder")
+            db.delete_scheduled_job(conn, row.id)
+
+        scheduler._remove_once_job_from_cron_md(config, "alice", "reminder")
+
+        doc = load_cron_document(config, "alice")
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", doc.jobs, unread_names=doc.unread_names)
+            assert db.get_scheduled_job_by_name(conn, "alice", "reminder") is None
+            assert db.get_scheduled_job_by_name(conn, "alice", "good") is not None
+        assert self.TYPO in self._text(mount_path)
+
+    def test_definition_removal_says_false_while_the_file_names_the_job(
+        self, mount_path, make_config_with_mount, monkeypatch,
+    ):
+        config = make_config_with_mount()
+        self._doc(mount_path, self.GOOD, self.TYPO)
+        monkeypatch.setattr(
+            "istota.storage.write_regular_file", lambda *a, **k: False,
+        )
+        assert remove_job_definition(config, "alice", "typo") is False
+        assert remove_job_definition(config, "alice", "never-there") is True

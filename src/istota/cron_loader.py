@@ -34,6 +34,8 @@ from istota.lib.toml_fence import BACKTICK_RUN_RE as _BACKTICK_RUN_RE
 from istota.lib.toml_fence import FENCE_CLOSE_RE as _TOML_FENCE_CLOSE_RE
 from istota.lib.toml_fence import FENCE_OPEN_RE as _TOML_FENCE_OPEN_RE
 
+_JOBS_HEADER_RE = re.compile(r"[ \t]*\[\[[ \t]*jobs[ \t]*\]\][ \t]*(#.*)?\r?\n?$")
+
 logger = logging.getLogger("istota.cron_loader")
 
 # Names with this prefix are managed by module integrations (e.g. money) and
@@ -1105,13 +1107,12 @@ def render_jobs_block(jobs: list[CronJob]) -> str:
     empty otherwise, so that the closing fence lands on its own line either
     way.
 
-    What it cannot preserve is anything inside the fence that is not a job
-    the parser accepted: a comment, and a ``[[jobs]]`` table that was skipped
-    (a typo in a key, an unreadable ``prompt_file``). Both are gone after a
-    rewrite, because the jobs are rendered from the parsed ``CronJob`` list
-    and that list never held them. That is the boundary of the fix — outside
-    the fence is kept byte for byte, inside it is regenerated — and it is
-    unchanged from the whole-document rewrite this replaces.
+    What it cannot preserve is anything inside the fence the parsed ``CronJob``
+    list never held: a comment, a key the parser does not read, and a
+    ``[[jobs]]`` table that was skipped (a typo in a key, an unreadable
+    ``prompt_file``). The writers therefore do not render a document holding a
+    skipped table (``document_hides_jobs``). Outside the fence is kept byte for
+    byte, and inside it is regenerated.
 
     Two cosmetic limits of the splice, for the same reason: the rendered
     lines end in ``\\n``, so a CRLF document comes back with LF inside the
@@ -1274,8 +1275,12 @@ def _write_cron_md(
     doc: "CronDocument | None" = None,
     *,
     externalize_prompts: bool = True,
+    block: str | None = None,
 ) -> bool:
     """Write CRON.md, externalizing inline multiline prompts first.
+
+    ``block``, with a ``doc``, is spliced in as it stands instead of a rendering
+    of ``jobs``.
 
     **With a ``doc``, only the toml block is replaced.** Every other byte of
     the file the caller read is written back unchanged: the header, a
@@ -1285,9 +1290,9 @@ def _write_cron_md(
 
     A ``doc`` whose ``block_span`` is ``None`` (a file with no fence at all)
     also takes the whole-document path, since there is nothing to splice
-    into. Defensive rather than reached: both document-passing callers return
+    into. Defensive rather than reached: the document-passing callers return
     False before the write when the file has no fence, because a document
-    with no fence parses to no jobs and neither of them finds the job it was
+    with no fence parses to no jobs and none of them finds the job it was
     asked to change.
 
     Through the contained directory and the hardened writer, like every other
@@ -1356,7 +1361,8 @@ def _write_cron_md(
         return False
     if doc is not None and doc.block_span is not None:
         start, end = doc.block_span
-        content = doc.content[:start] + render_jobs_block(jobs) + doc.content[end:]
+        new_block = render_jobs_block(jobs) if block is None else block
+        content = doc.content[:start] + new_block + doc.content[end:]
     else:
         content = generate_cron_md(jobs)
     return write_regular_file(config_dir / "CRON.md", content)
@@ -1950,7 +1956,7 @@ def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: 
 
 def _update_job_enabled_locked(config, user_id: str, job_name: str, enabled: bool) -> bool:
     doc = load_cron_document(config, user_id)
-    if doc is None:
+    if doc is None or document_hides_jobs(doc):
         return False
     jobs = doc.jobs
 
@@ -1988,9 +1994,15 @@ def update_job_reach_in_cron_md(config, user_id: str, job_name: str, reach: str)
     )
 
 
+def document_hides_jobs(doc: "CronDocument") -> bool:
+    """Whether the file holds a job ``doc.jobs`` lacks. A rewrite is built from the jobs
+    that parsed, so writing this document would delete that job from the file."""
+    return bool(doc.skipped_entries or doc.refused_names or doc.unread_names)
+
+
 def _update_job_reach_locked(config, user_id: str, job_name: str, reach: str) -> bool:
     doc = load_cron_document(config, user_id)
-    if doc is None or doc.skipped_entries or doc.refused_names or doc.unread_names:
+    if doc is None or document_hides_jobs(doc):
         return False
     for job in doc.jobs:
         if job.name == job_name:
@@ -2007,6 +2019,12 @@ def remove_job_from_cron_md(config, user_id: str, job_name: str) -> bool:
     regenerated toml block back into it, leaving the rest of the file alone.
     Returns True if the job was found **and the file now says so**; a refused
     or failed write is False, like ``update_job_enabled_in_cron_md``.
+
+    A file holding an entry that did not load is not rewritten from the jobs that
+    parsed, which would delete that entry. Only the named job's table is cut out
+    of the block (``_cut_job_from_block``). Refusing instead would leave a finished
+    ``once`` job in the file, where the next sync re-creates its row and runs it
+    again (ISSUE-917).
 
     **False, never an exception**, on every path. ``_write_cron_md`` states
     that contract and explains why it matters; this is the name the scheduler
@@ -2025,10 +2043,95 @@ def remove_job_from_cron_md(config, user_id: str, job_name: str) -> bool:
     )
 
 
+def _entry_names_job(entry, job_name: str) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    name = entry.get("name")
+    return isinstance(name, str) and name.strip() == job_name
+
+
+def _is_blank_or_comment(line: str) -> bool:
+    stripped = line.strip()
+    return not stripped or stripped.startswith("#")
+
+
+def _cut_job_from_block(block: str, job_name: str) -> str | None:
+    """``block`` without the named job's tables, everything else kept.
+
+    None when the job is not there or the text cannot be split with certainty.
+    Tables are found by their header lines, which a multi-line string can imitate,
+    so the result is parsed back and must state exactly the same document minus
+    those entries.
+
+    A comment after a removed table stays. If the result states nothing it is
+    empty, comments included: a block of only comments reads as the seeded template
+    (``CronDocument.is_template``), and the sync would restore the file from the table.
+    """
+    data = tomli.loads(block)
+    raw_jobs = data.get("jobs")
+    if not isinstance(raw_jobs, list):
+        return None
+    if not any(_entry_names_job(entry, job_name) for entry in raw_jobs):
+        return None
+
+    lines = block.splitlines(keepends=True)
+    headers = [i for i, line in enumerate(lines) if _JOBS_HEADER_RE.match(line)]
+    if len(headers) != len(raw_jobs):
+        return None
+    ends = headers[1:] + [len(lines)]
+    kept = lines[:headers[0]]
+    for entry, start, end in zip(raw_jobs, headers, ends):
+        if not _entry_names_job(entry, job_name):
+            kept.extend(lines[start:end])
+            continue
+        table_end = end
+        while table_end > start + 1 and _is_blank_or_comment(lines[table_end - 1]):
+            table_end -= 1
+        trailing = lines[table_end:end]
+        if any(line.strip() for line in trailing):
+            kept.extend(trailing)
+    new_block = "".join(kept)
+
+    expected = dict(data)
+    expected["jobs"] = [e for e in raw_jobs if not _entry_names_job(e, job_name)]
+    try:
+        reparsed = tomli.loads(new_block)
+    except Exception:
+        return None
+    reparsed.setdefault("jobs", [])
+    if reparsed != expected:
+        return None
+    return new_block if reparsed != {"jobs": []} else ""
+
+
+def _document_names_job(doc: "CronDocument", job_name: str) -> bool:
+    """Whether the block states this job, loaded or not."""
+    if doc.block is None:
+        return False
+    raw_jobs = tomli.loads(doc.block).get("jobs")
+    return isinstance(raw_jobs, list) and any(
+        _entry_names_job(entry, job_name) for entry in raw_jobs
+    )
+
+
 def _remove_job_locked(config, user_id: str, job_name: str) -> bool:
     doc = load_cron_document(config, user_id)
     if doc is None:
         return False
+
+    if document_hides_jobs(doc):
+        block = _cut_job_from_block(doc.block or "", job_name)
+        if block is None:
+            if _document_names_job(doc, job_name):
+                logger.warning(
+                    "cron_md_write_refused user=%s reason=entry_not_separable job=%s",
+                    user_id, job_name,
+                )
+            return False
+        if not _write_cron_md(config, user_id, [], doc, block=block):
+            return False
+        logger.info("Removed job '%s' from CRON.md for user %s", job_name, user_id)
+        return True
 
     jobs = doc.jobs
     original_count = len(jobs)
@@ -2049,7 +2152,8 @@ def set_job_enabled(config, conn, job, enabled: bool, *, by: str) -> str:
     every tick. Returns ``"module"`` for a `_module.*` row, which is in nobody's
     CRON.md and whose table row is the only authority (ISSUE-392); ``"file"``
     when CRON.md now says so; ``"db_only"`` when it does not (no file, no such
-    job in it, or a refused write), where the next sync reverts the row.
+    job in it, an entry that did not load, or a refused write), where the next
+    sync reverts the row.
     """
     from istota.notifications.resolvers import cron_job as cron_job_source  # noqa: PLC0415
 
@@ -2082,7 +2186,7 @@ def remove_job_definition(config, user_id: str, job_name: str) -> bool:
         return True
     doc = load_cron_document(config, user_id)
     if doc is not None:
-        return all(job.name != job_name for job in doc.jobs)
+        return not _document_names_job(doc, job_name)
     from .storage import resolve_user_config_dir  # noqa: PLC0415 - import cycle
 
     config_dir = resolve_user_config_dir(config, user_id)
