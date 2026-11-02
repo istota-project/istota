@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { blockAfter, readCascade } from '$lib/styles/cascade';
 
 /**
- * The admin tables that leave one column unsized.
+ * The admin tables that leave one column unsized, and the Settings Scheduled
+ * jobs table built on the admin one.
  *
  * Each is `.table .table--fixed`, which table.css defines as `table-layout:
  * fixed; width: 100%`. Under fixed layout a declared column width is honoured and the
@@ -226,6 +227,22 @@ const TABLES: Table[] = [
       '.col-user',
       '.col-schedule',
       '.col-state',
+      '.col-last',
+      '.col-failures',
+      '.col-actions',
+    ],
+    floor: 12,
+  },
+  {
+    // The user's own Scheduled jobs page in Settings, which follows the admin
+    // table above and adds an Access column; same twelve rem for Job.
+    page: 'src/routes/settings/jobs/+page.svelte',
+    grid: '.jobs-grid',
+    unsized: '.col-job',
+    sized: [
+      '.col-schedule',
+      '.col-state',
+      '.col-access',
       '.col-last',
       '.col-failures',
       '.col-actions',

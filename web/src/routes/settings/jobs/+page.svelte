@@ -404,7 +404,7 @@
       >
     {:else}
       <Card>
-        <div class="table-scroll table--cards">
+        <div class="table-scroll">
           <table class="table table--fixed jobs-grid" aria-label="Scheduled jobs">
             <thead>
               <tr>
@@ -433,8 +433,8 @@
                       <p class="caption">{job.file_error} {@render cronFix()}</p>
                     {/if}
                   </td>
-                  <td class="col-schedule" data-label="Schedule"><code>{job.cron}</code></td>
-                  <td class="col-state" data-label="State">
+                  <td class="col-schedule"><code>{job.cron}</code></td>
+                  <td class="col-state">
                     {#if job.pending}
                       <span class="caption">Waiting for the next sync</span>
                     {:else if job.file_error}
@@ -445,27 +445,18 @@
                       >
                     {/if}
                   </td>
-                  <td class="col-access" class:card-hidden={!job.network} data-label="Access">
+                  <td class="col-access">
                     {#if job.network}
                       {@const access = accessBadge(job.network)}
                       <Badge size="sm" variant={access.variant}>{access.label}</Badge>
                     {/if}
                   </td>
-                  <td
-                    class="col-last truncate"
-                    class:card-hidden={job.id === null}
-                    data-label="Last run"
-                  >
+                  <td class="col-last truncate">
                     {#if job.id !== null}
                       <Timestamp value={job.last_run_at} format="relative" empty="Never" />
                     {/if}
                   </td>
-                  <td
-                    class="num col-failures"
-                    class:failing={job.consecutive_failures > 0}
-                    class:card-hidden={job.consecutive_failures === 0}
-                    data-label="Failures"
-                  >
+                  <td class="num col-failures" class:failing={job.consecutive_failures > 0}>
                     {job.consecutive_failures}
                   </td>
                   <td class="col-actions">
@@ -510,9 +501,10 @@
   .failing {
     color: var(--status-danger-fg);
   }
-  /* Job is the unsized column: the min-width reserves it 12rem past the sized ones. */
+  /* Job is the unsized column: the min-width reserves it 12rem past the sized
+     ones, and adminTables.test.ts holds the sum. */
   .jobs-grid {
-    min-width: 49rem;
+    min-width: 49.5rem;
   }
   .col-schedule {
     width: 8rem;
@@ -529,15 +521,14 @@
   .col-failures {
     width: 5rem;
   }
-  @container (max-width: 40rem) {
+  /* Narrow: keep every column and scroll sideways, as the admin jobs table
+     does; the min-width tightens with Schedule. */
+  @container settings (max-width: 40rem) {
     .jobs-grid {
-      min-width: 0;
+      min-width: 48.5rem;
     }
-    .jobs-grid td {
-      width: auto;
-    }
-    .jobs-grid td.num {
-      text-align: left;
+    .col-schedule {
+      width: 7rem;
     }
   }
 </style>
