@@ -26,6 +26,7 @@ await fillApiDouble(api, {});
 import { AuthError } from '$lib/api';
 import { USER_SETTINGS_SECTIONS } from '$lib/settings/sections';
 import Harness from './assignmentsHarness.test.svelte';
+import InShell from '../inShell.test.svelte';
 import SidebarHarness from './assignmentsSidebarHarness.test.svelte';
 
 const LIST = '/istota/settings/assignments';
@@ -285,6 +286,25 @@ describe('the detail', () => {
     expect(await screen.findByRole('heading', { name: 'Heat pump quotes' })).toBeInTheDocument();
     expect(api.getAssignment).toHaveBeenCalledWith(1);
     expect(screen.getByRole('link', { name: 'Assignments' })).toHaveAttribute('href', LIST);
+  });
+
+  it('opens an assignment at the top of the pane, and the list at the top again', async () => {
+    atUrl(LIST);
+    api.getAssignments.mockResolvedValue({ assignments: [row()] });
+    api.getAssignment.mockResolvedValue(detail());
+    render(InShell, { component: Harness, pageProps: { expireSession } });
+    await screen.findByRole('link', { name: 'Heat pump quotes' });
+    const pane = document.querySelector('.shell-main') as HTMLElement;
+
+    pane.scrollTop = 400;
+    atUrl(`${LIST}?assignment=1`);
+    await screen.findByRole('heading', { name: 'Heat pump quotes' });
+    expect(pane.scrollTop).toBe(0);
+
+    pane.scrollTop = 400;
+    atUrl(LIST);
+    await screen.findByRole('link', { name: 'Heat pump quotes' });
+    expect(pane.scrollTop).toBe(0);
   });
 
   it('falls back to the list with a notice when the assignment is not there', async () => {

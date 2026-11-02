@@ -466,7 +466,14 @@
   >
 {/snippet}
 
-<SettingsLayout {title} {description} {loading} {loadError} onRetry={() => void retryCore()}>
+<SettingsLayout
+  {title}
+  {description}
+  {loading}
+  {loadError}
+  onRetry={() => void retryCore()}
+  viewKey={page.url.search}
+>
   {#snippet headerActions()}
     {#if menu.length}<KebabMenu items={menu} ariaLabel="Briefing actions" />{/if}
   {/snippet}

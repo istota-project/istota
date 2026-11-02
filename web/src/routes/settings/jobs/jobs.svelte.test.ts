@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { tick } from 'svelte';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { __history } from '../../../../vitest-stubs/app-navigation';
 import { page } from '../../../../vitest-stubs/app-state.svelte';
@@ -19,6 +20,7 @@ await fillApiDouble(api, {});
 import { AuthError, JobSaveError } from '$lib/api';
 import { USER_SETTINGS_SECTIONS } from '$lib/settings/sections';
 import Harness from './jobsHarness.test.svelte';
+import InShell from '../inShell.test.svelte';
 
 const LIST = '/istota/settings/jobs';
 const CONFIG_EDITOR = '/istota/files?view=config';
@@ -400,6 +402,65 @@ it('Edit opens the job and a same-route link goes back to the list', async () =>
   page.url = new URL(LIST, 'http://localhost');
   page.state = {};
   expect(await screen.findByRole('table')).toBeInTheDocument();
+});
+
+describe('where the pane is scrolled to', () => {
+  async function openInScrolledShell() {
+    __history.reset(LIST);
+    page.url = new URL(LIST, 'http://localhost');
+    page.state = {};
+    api.getScheduledJobs.mockResolvedValue(listing([job()]));
+    render(InShell, { component: Harness, pageProps: { expireSession } });
+    await screen.findByRole('table');
+    const pane = document.querySelector('.shell-main') as HTMLElement;
+    pane.scrollTop = 400;
+    return pane;
+  }
+
+  it('opens a job from its list link at the top', async () => {
+    const pane = await openInScrolledShell();
+    __history.reset(`${LIST}?job=1`);
+    page.url = new URL(`${LIST}?job=1`, 'http://localhost');
+    await screen.findByRole('heading', { name: 'Network access' });
+    expect(pane.scrollTop).toBe(0);
+  });
+
+  it('opens a job from the row menu at the top', async () => {
+    const pane = await openInScrolledShell();
+    await fireEvent.click(await kebabItem('digest', 'Edit'));
+    await screen.findByRole('heading', { name: 'Network access' });
+    expect(pane.scrollTop).toBe(0);
+  });
+
+  it('stays where it is when the listing is read again', async () => {
+    const pane = await openInScrolledShell();
+    __history.reset(`${LIST}?job=1`);
+    page.url = new URL(`${LIST}?job=1`, 'http://localhost');
+    await screen.findByRole('heading', { name: 'Network access' });
+    pane.scrollTop = 250;
+    const reads = api.getScheduledJobs.mock.calls.length;
+    await fireEvent.click(screen.getByRole('button', { name: 'Run now' }));
+    await waitFor(() => expect(api.getScheduledJobs.mock.calls.length).toBeGreaterThan(reads));
+    await tick();
+    expect(pane.scrollTop).toBe(250);
+  });
+
+  it('starts a section at the top when the shell was already scrolled', async () => {
+    __history.reset(LIST);
+    page.url = new URL(LIST, 'http://localhost');
+    page.state = {};
+    api.getScheduledJobs.mockResolvedValue(listing([job()]));
+    const view = render(InShell, {
+      component: Harness,
+      pageProps: { expireSession },
+      show: false,
+    });
+    const pane = document.querySelector('.shell-main') as HTMLElement;
+    pane.scrollTop = 400;
+    await view.rerender({ component: Harness, pageProps: { expireSession }, show: true });
+    await screen.findByRole('table');
+    expect(pane.scrollTop).toBe(0);
+  });
 });
 
 it('Back returns to the list', async () => {

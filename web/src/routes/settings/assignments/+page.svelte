@@ -162,7 +162,12 @@
   </li>
 {/snippet}
 
-<SettingsLayout loading={loading || (waitingForDetail && !loadError)} {loadError} onRetry={retry}>
+<SettingsLayout
+  loading={loading || (waitingForDetail && !loadError)}
+  {loadError}
+  onRetry={retry}
+  viewKey={selectedId}
+>
   {#if unavailable}
     <EmptyState>Assignments are not available on your account.</EmptyState>
   {:else if shownDetail}
